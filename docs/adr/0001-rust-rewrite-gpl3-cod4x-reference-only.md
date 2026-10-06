@@ -6,6 +6,7 @@ Code from a source may be translated only if its license allows GPL-3.0-or-later
 
 - CoD4X (AGPL-3.0).
 - OpenAssetTools and gsc-tool (GPL-3.0-only: their README and file headers grant "GPLv3" with no "or later" option). We chose to keep "or later" over translating their struct tables, zone loader, IWI wavelet decoder, and GSC compiler.
+- KisakCOD (GPL-3.0-only by its LICENSE file, and apparently derived from decompiling `iw3mp.exe`). We treat it like our own decompilation: a guide to names, semantics, and order of operations, checked against `iw3mp.exe` where it matters. Its code is not translated, which also keeps any provenance claim against it out of this project.
 
 ## Consequences
 
