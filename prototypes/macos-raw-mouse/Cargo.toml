@@ -1,0 +1,18 @@
+[package]
+name = "macos-raw-mouse-proto"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+font8x8 = "0.3"
+crossbeam-queue = "0.3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-game-controller = "0.3.2"
+block2 = "0.6"
+dispatch2 = "0.3"
