@@ -75,3 +75,13 @@ The tool that runs the engine in a scripted scenario and records logs, video, an
 **Run bundle**:
 The zip a harness produces for one run. It is sent back from a remote tester.
 _Avoid_: report, artifact zip
+
+**Scenario**:
+A console command script, with timed waits, that the harness feeds to the engine.
+_Avoid_: test case, script (ambiguous with GSC)
+
+**Stage**:
+One step of a suite, such as asset load, headless server with bots, client flythrough, or client match. A stage is skipped while the engine cannot run it yet.
+
+**Suite**:
+An ordered list of stages that the harness runs. The default suite is what the remote tester runs.
