@@ -1,8 +1,13 @@
-# Rust rewrite under GPL-3.0-or-later; CoD4X is reference-only
+# Rust rewrite under GPL-3.0-or-later; non-compatible sources are reference-only
 
-The engine is a new Rust codebase (wgpu for rendering) and does not fork the C lineage (ioquake3, CoD4X). Reasons: one renderer covers Vulkan, Metal, DX12, and WebGPU; the browser path goes through WASM; and the server gets memory safety. The project is licensed GPL-3.0-or-later. Code under GPL-2.0-or-later or GPL-3.0-compatible licenses (for example ioquake3) may be translated. CoD4X is AGPL-3.0, so it may be read only to learn facts about the original engine; its code is not translated or copied.
+The engine is a new Rust codebase (wgpu for rendering) and does not fork the C lineage (ioquake3, CoD4X). Reasons: one renderer covers Vulkan, Metal, DX12, and WebGPU; the browser path goes through WASM; and the server gets memory safety. The project is licensed GPL-3.0-or-later, and every file stays under that license.
+
+Code from a source may be translated only if its license allows GPL-3.0-or-later distribution, for example GPL-2.0-or-later (ioquake3), LGPL-2.1-or-later, MIT, BSD, or zlib. All other sources may be read only to learn facts about the original engine (layouts, semantics, names, addresses). Their code is never copied or translated. These reference-only sources include:
+
+- CoD4X (AGPL-3.0).
+- OpenAssetTools and gsc-tool (GPL-3.0-only: their README and file headers grant "GPLv3" with no "or later" option). We chose to keep "or later" over translating their struct tables, zone loader, IWI wavelet decoder, and GSC compiler.
 
 ## Consequences
 
 - Every research note records the license of each source it uses, so provenance can be checked later.
-- Reverse engineering of `iw3mp.exe` fills gaps that compatible sources do not cover.
+- The IW3 asset structs, the zone loader, the wavelet IWI decoder, and the GSC parser are written from our own fact sheets and from reverse engineering of `iw3mp.exe`.
