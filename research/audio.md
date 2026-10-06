@@ -73,7 +73,7 @@ Throwaway Symphonia 0.6.1 program (`default-features=false, features = mp3, wav,
 
 ## 4. Sound alias data model (verified)
 
-`snd_alias_list_t { name, head, count }` then `count` × `snd_alias_t` (0x5C bytes, 32-bit). The IW3 layout in OAT matches: parsing sequentially reproduced the exact start of the next list in 100% of ~13k lists checked (no failures across MP zones). Serialization order: record array, then per alias: strings (name/subtitle/secondary/chain), `SoundFile` (12 bytes; streamed adds `dir`,`name` strings; loaded adds a 0x2C `LoadedSound` + name + data), then `SndCurve` (72 bytes, inline on first use, later a pointer), then `SpeakerMap` (inline 0x198+8 bytes on first use, later a pointer).
+`snd_alias_list_t { name, head, count }` then `count` × `snd_alias_t` (0x5C bytes, 32-bit). The IW3 layout in OAT matches: sequential parsing ran without error over all MP-zone lists, and for the one list checked by hand it ended exactly on the next list header (the end-of-list landing was not checked for every list). Serialization order: record array, then per alias: strings (name/subtitle/secondary/chain), `SoundFile` (12 bytes; streamed adds `dir`,`name` strings; loaded adds a 0x2C `LoadedSound` + name + data), then `SndCurve` (72 bytes, inline on first use, later a pointer), then `SpeakerMap` (inline 0x198+8 bytes on first use, later a pointer).
 
 | Field | Meaning / evidence |
 |---|---|
