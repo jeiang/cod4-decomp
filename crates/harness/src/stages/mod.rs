@@ -2,6 +2,7 @@
 //! Built-in stages.
 pub mod asset_load;
 pub mod client_flythrough;
+pub mod client_input;
 pub mod net_loopback;
 pub mod selftest;
 pub mod server;

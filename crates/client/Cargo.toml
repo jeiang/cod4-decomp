@@ -23,6 +23,15 @@ png = "0.18.1"
 serde_json = "1.0.151"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 winit = "0.30.13"
+gilrs = "0.11"
+
+# macOS raw mouse (GCMouse); see src/input/rawmouse.rs.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-game-controller = "0.3.2"
+block2 = "0.6"
+dispatch2 = "0.3"
+crossbeam-queue = "0.3"
 
 [dev-dependencies]
 pollster = "1.0.1"
