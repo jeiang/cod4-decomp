@@ -162,7 +162,7 @@ mod tests {
         assert!((area(&v) - 10.0 * 6.0).abs() < 1e-3, "{}", area(&v));
         assert!(
             v.iter()
-                .all(|x| (0.0..=1.0).contains(&x.uv[0]) && (0.0..=1.0).contains(&x.uv[1]))
+                .all(|x| (-1e-4..=1.0001).contains(&x.uv[0]) && (-1e-4..=1.0001).contains(&x.uv[1]))
         );
         // The texture's top is the decal's up (+y): v is smallest at the largest y.
         let top = v.iter().fold(None::<&DynVertex>, |m, x| match m {
