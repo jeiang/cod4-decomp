@@ -3,7 +3,7 @@
 //! with its push/pop stack, pointer kinds, and the offset-pointer registry.
 
 use super::error::{Result, ZoneError};
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
@@ -94,11 +94,36 @@ impl Ptr {
 pub struct Fields<'a> {
     b: &'a [u8],
     p: usize,
+    base: Option<Addr>,
 }
 
 impl<'a> Fields<'a> {
     pub fn new(b: &'a [u8]) -> Self {
-        Fields { b, p: 0 }
+        Fields {
+            b,
+            p: 0,
+            base: None,
+        }
+    }
+
+    /// A cursor over a struct image that sits at `at` in its block, so
+    /// [`slot`](Self::slot) can name its pointer fields.
+    pub fn at(b: &'a [u8], at: Addr) -> Self {
+        Fields {
+            b,
+            p: 0,
+            base: Some(at),
+        }
+    }
+
+    /// Address of the next field. A `-1` pointer to a header-in-TEMP asset
+    /// can later be referenced by an offset to this address; pass it as the
+    /// `slot` of [`Stream::temp_asset_at`].
+    pub fn slot(&self) -> Option<Addr> {
+        self.base.map(|a| Addr {
+            block: a.block,
+            offset: a.offset + self.p as u32,
+        })
     }
     pub fn skip(&mut self, n: usize) {
         self.p += n;
@@ -154,7 +179,7 @@ pub struct Stream<'a> {
     peak: [u32; BLOCK_COUNT],
     /// (block, offset at push time)
     stack: Vec<(Block, u32)>,
-    registry: HashMap<Addr, Box<dyn Any + Send + Sync>>,
+    registry: HashMap<(Addr, TypeId), Box<dyn Any + Send + Sync>>,
     keep_presentation: bool,
 }
 
@@ -334,12 +359,12 @@ impl<'a> Stream<'a> {
     // ---- registry ----
 
     pub fn register<V: Any + Send + Sync>(&mut self, at: Addr, v: V) {
-        self.registry.insert(at, Box::new(v));
+        self.registry.insert((at, TypeId::of::<V>()), Box::new(v));
     }
 
     pub fn lookup<V: Any + Clone>(&self, at: Addr) -> Result<V> {
         self.registry
-            .get(&at)
+            .get(&(at, TypeId::of::<V>()))
             .and_then(|b| b.downcast_ref::<V>())
             .cloned()
             .ok_or(ZoneError::BadOffset(at))
@@ -417,8 +442,12 @@ impl<'a> Stream<'a> {
                     .ok_or(ZoneError::Invalid("array too large"))?;
                 let (at, bytes) = self.load(align, len)?;
                 let mut v = Vec::with_capacity(count as usize);
-                for chunk in bytes.chunks_exact(elem_size as usize) {
-                    v.push(f(self, &mut Fields::new(chunk))?);
+                for (i, chunk) in bytes.chunks_exact(elem_size as usize).enumerate() {
+                    let el = Addr {
+                        block: at.block,
+                        offset: at.offset + (i as u32) * elem_size,
+                    };
+                    v.push(f(self, &mut Fields::at(chunk, el))?);
                 }
                 let v: Arc<[T]> = v.into();
                 self.register(at, v.clone());
@@ -452,6 +481,32 @@ impl<'a> Stream<'a> {
         push_virtual: bool,
         f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
     ) -> Result<Option<Arc<T>>> {
+        self.temp_ptr_at(None, p, align, size, push_virtual, f)
+    }
+
+    /// [`temp_asset`](Self::temp_asset) for a pointer field at `slot`
+    /// ([`Fields::slot`]): a `-1` pointer also registers the asset at the
+    /// field's own address, which later offset pointers may name.
+    pub fn temp_asset_at<T: Any + Send + Sync>(
+        &mut self,
+        slot: Option<Addr>,
+        p: Ptr,
+        align: u32,
+        size: u32,
+        f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
+    ) -> Result<Option<Arc<T>>> {
+        self.temp_ptr_at(slot, p, align, size, true, f)
+    }
+
+    pub fn temp_ptr_at<T: Any + Send + Sync>(
+        &mut self,
+        slot: Option<Addr>,
+        p: Ptr,
+        align: u32,
+        size: u32,
+        push_virtual: bool,
+        f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
+    ) -> Result<Option<Arc<T>>> {
         match p {
             Ptr::Null => Ok(None),
             Ptr::Offset(a) => self.lookup::<Arc<T>>(a).map(Some),
@@ -461,7 +516,7 @@ impl<'a> Stream<'a> {
                 let slot = if p == Ptr::Insert {
                     Some(self.insert_slot()?)
                 } else {
-                    None
+                    slot
                 };
                 if push_virtual {
                     self.push(Block::Virtual);
