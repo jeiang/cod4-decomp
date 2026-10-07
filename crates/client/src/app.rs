@@ -392,7 +392,7 @@ impl Viewer {
                 .as_deref()
                 .unwrap_or(Path::new("."))
                 .join("flythrough.mp4");
-            match Recorder::start(&path, st.rec_size, 960, 30) {
+            match Recorder::start(&path, st.rec_size, 720, 30) {
                 Ok(r) => st.recorder = Some(r),
                 Err(e) => st.notes.push(format!("video: {e}")),
             }
