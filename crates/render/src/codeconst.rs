@@ -108,6 +108,13 @@ pub const SUN_POSITION: u32 = 0x23;
 pub const SUN_DIFFUSE: u32 = 0x24;
 pub const SUN_SPECULAR: u32 = 0x25;
 pub const LIGHTING_LOOKUP_SCALE: u32 = 0x26;
+pub const LIGHT_POSITION: u32 = 0x00;
+pub const LIGHT_DIFFUSE: u32 = 0x01;
+pub const LIGHT_SPECULAR: u32 = 0x02;
+pub const LIGHT_SPOTDIR: u32 = 0x03;
+pub const LIGHT_SPOTFACTORS: u32 = 0x04;
+pub const LIGHT_FALLOFF_PLACEMENT: u32 = 0x0B;
+pub const SHADOWMAP_POLYGON_OFFSET: u32 = 0x09;
 pub const MATERIAL_COLOR: u32 = 0x28;
 pub const FOG: u32 = 0x29;
 pub const FOG_COLOR: u32 = 0x2A;
@@ -165,6 +172,7 @@ pub mod tex {
     pub const SKY: u32 = 14;
     pub const OUTDOOR: u32 = 17;
     pub const FLOATZ: u32 = 18;
+    pub const LIGHT_ATTENUATION: u32 = 15;
     pub const REFLECTION_PROBE: u32 = 26;
 }
 
@@ -227,28 +235,38 @@ impl Default for Object {
 }
 
 /// Everything a frame fixes: camera matrices and the vector constants.
+///
+/// Like the original, the frame is camera-relative: world matrices carry the model placement minus the eye, the view
+/// matrix is a pure rotation, and shaders that need the distance to the camera (fog, reflections) read the transformed
+/// position directly.
+#[derive(Clone)]
 pub struct FrameConsts {
+    /// Rotation only; the eye offset lives in the world matrices.
     pub view: Mat4,
     pub proj: Mat4,
+    pub eye: Vec3,
     pub vec: [[f32; 4]; FIRST_MATRIX as usize],
+    /// World position to `(u, v, depth, partition weight)` of the sun shadow map.
     pub shadow_lookup: Mat4,
     pub outdoor_lookup: Mat4,
 }
 
 impl FrameConsts {
-    pub fn new(view: Mat4, proj: Mat4) -> Self {
+    pub fn new(view: Mat4, proj: Mat4, eye: Vec3) -> Self {
         let mut vec = [[0.0; 4]; FIRST_MATRIX as usize];
         vec[MATERIAL_COLOR as usize] = [1.0; 4];
         vec[0x26] = [0.005_859_375, 1.0 / 256.0, 0.375, 0.0];
         vec[SHADOWMAP_SWITCH_PARTITION as usize] = [1.0e9, 0.0, 0.0, 0.0];
         vec[SHADOWMAP_SCALE as usize] = [0.0, 0.0, 1.0, 1.0];
-        // 30/ 0 colour matrix passthrough rows used by post shaders
+        vec[FOG as usize] = crate::art::Fog::OFF;
+        // Colour matrix passthrough rows used by post shaders.
         vec[0x1D] = [1.0, 0.0, 0.0, 0.0];
         vec[0x1E] = [0.0, 1.0, 0.0, 0.0];
         vec[0x1F] = [0.0, 0.0, 1.0, 0.0];
         FrameConsts {
             view,
             proj,
+            eye,
             vec,
             shadow_lookup: Mat4::IDENTITY,
             outdoor_lookup: Mat4::IDENTITY,
@@ -262,15 +280,45 @@ impl FrameConsts {
         self.vec[SUN_SPECULAR as usize] = [s.x, s.y, s.z, 1.0];
     }
 
+    pub fn set_fog(&mut self, fog: Option<&crate::art::Fog>) {
+        match fog {
+            Some(f) => {
+                self.vec[FOG as usize] = f.constant();
+                self.vec[FOG_COLOR as usize] = [f.color[0], f.color[1], f.color[2], 1.0];
+            }
+            None => self.vec[FOG as usize] = crate::art::Fog::OFF,
+        }
+    }
+
+    /// A primary spot or omni light for the surfaces lit by it.
+    pub fn set_light(&mut self, l: &LightConsts) {
+        self.vec[LIGHT_POSITION as usize] = [
+            l.origin.x - self.eye.x,
+            l.origin.y - self.eye.y,
+            l.origin.z - self.eye.z,
+            1.0 / l.radius,
+        ];
+        self.vec[LIGHT_DIFFUSE as usize] = [l.color.x, l.color.y, l.color.z, 1.0];
+        self.vec[LIGHT_SPECULAR as usize] = [l.color.x, l.color.y, l.color.z, 1.0];
+        self.vec[LIGHT_SPOTDIR as usize] = [l.dir.x, l.dir.y, l.dir.z, 0.0];
+        self.vec[LIGHT_SPOTFACTORS as usize] = l.spot_factors;
+        self.vec[LIGHT_FALLOFF_PLACEMENT as usize] = l.falloff_placement;
+    }
+
+    /// The model matrix with the eye offset applied.
+    fn relative(&self, obj: &Object) -> Mat4 {
+        Mat4::from_translation(-self.eye) * obj.world
+    }
+
     fn matrix(&self, kind: u32, obj: &Object) -> Mat4 {
         match kind {
-            0 => obj.world,
+            0 => self.relative(obj),
             1 => self.view,
             2 => self.proj,
-            3 => self.view * obj.world,
+            3 => self.view * self.relative(obj),
             4 => self.proj * self.view,
-            5 => self.proj * self.view * obj.world,
-            6 => self.shadow_lookup,
+            5 => self.proj * self.view * self.relative(obj),
+            6 => self.shadow_lookup * Mat4::from_translation(self.eye),
             _ => self.outdoor_lookup * obj.world,
         }
     }
@@ -297,6 +345,19 @@ impl FrameConsts {
         let m = if variant >= 2 { m.transpose() } else { m };
         m.col(row as usize & 3).to_array()
     }
+}
+
+/// The values of one primary light, as the lit spot and omni techniques read them.
+#[derive(Clone, Copy, Debug)]
+pub struct LightConsts {
+    pub origin: Vec3,
+    pub dir: Vec3,
+    pub color: Vec3,
+    pub radius: f32,
+    /// `(dot scale, dot bias, exponent, shadow fade)`.
+    pub spot_factors: [f32; 4],
+    /// `(attenuation image width scale, 0, lookup shift, 0)`.
+    pub falloff_placement: [f32; 4],
 }
 
 #[cfg(test)]
@@ -328,7 +389,7 @@ mod tests {
         let proj = Mat4::from_cols_array(&[
             1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.,
         ]);
-        let f = FrameConsts::new(Mat4::IDENTITY, proj);
+        let f = FrameConsts::new(Mat4::IDENTITY, proj, Vec3::ZERO);
         let o = Object::default();
         let plain = f.value(0x42, 0, &o);
         let tr = f.value(0x44, 0, &o);

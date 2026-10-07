@@ -133,6 +133,8 @@ struct State {
     keys: HashSet<KeyCode>,
     grabbed: bool,
     samples: Vec<[f64; 3]>,
+    /// GPU milliseconds per render call, once the timestamps come back (index = frame number - 1).
+    gpu_ms: Vec<Option<f64>>,
     rss: u64,
     recorder: Option<Recorder>,
     /// The recorder starts on the first frame, at the size the compositor really gave the window.
@@ -198,9 +200,10 @@ impl Viewer {
         let mut renderer = Renderer::new(
             gpu.clone(),
             scene,
-            &self.map.techsets,
+            &self.map,
             TextureCache::new(Some(vfs), 0),
         );
+        renderer.settings = self.cli.settings;
         renderer.warm(config.format);
         let w = &renderer.scene.world;
         let (mins, maxs) = (Vec3::from(w.mins), Vec3::from(w.maxs));
@@ -231,6 +234,7 @@ impl Viewer {
             keys: HashSet::new(),
             grabbed: false,
             samples: Vec::new(),
+            gpu_ms: Vec::new(),
             rss: 0,
             recorder: None,
             want_video,
@@ -364,6 +368,7 @@ impl Viewer {
             (st.config.width, st.config.height),
         );
         st.surfaces_drawn.push(stats.surfaces as f64);
+        record_gpu(&mut st.gpu_ms, st.renderer.take_gpu_times());
         if st.want_video && st.recorder.is_none() {
             st.want_video = false;
             st.rec_size = (frame.texture.width(), frame.texture.height());
@@ -437,9 +442,17 @@ impl Viewer {
             std::fs::File::create(out.join("frames.raw.csv")).map_err(|e| e.to_string())?,
         );
         writeln!(csv, "cpu_ms,gpu_ms,present_interval_ms,mem_bytes").map_err(|e| e.to_string())?;
+        record_gpu(&mut st.gpu_ms, st.renderer.flush_gpu_times());
         // The first interval is the time to the first frame, not a presentation interval.
-        for s in st.samples.iter().skip(1) {
-            writeln!(csv, "{:.4},,{:.4},{}", s[0], s[1], s[2] as u64).map_err(|e| e.to_string())?;
+        for (i, s) in st.samples.iter().enumerate().skip(1) {
+            let gpu = st
+                .gpu_ms
+                .get(i)
+                .copied()
+                .flatten()
+                .map_or_else(String::new, |g| format!("{g:.4}"));
+            writeln!(csv, "{:.4},{gpu},{:.4},{}", s[0], s[1], s[2] as u64)
+                .map_err(|e| e.to_string())?;
         }
         csv.flush().map_err(|e| e.to_string())?;
         let video = match st.recorder.take() {
@@ -462,6 +475,12 @@ impl Viewer {
         let report = json!({
             "status": "ok",
             "gpu": gpu_json(&st.gpu),
+            "settings": {
+                "shadows": format!("{:?}", self.cli.settings.shadows).to_lowercase(),
+                "fog": self.cli.settings.fog,
+                "primary_lights": self.cli.settings.primary_lights,
+            },
+            "gpu_timestamps": st.renderer.timer.is_some(),
             "mode": {
                 "width": st.config.width, "height": st.config.height,
                 "refresh_mhz": monitor_mhz,
@@ -480,6 +499,17 @@ impl Viewer {
             serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())
+    }
+}
+
+/// Store finished GPU times (`(frame number, ms)`, numbered from 1) by frame index.
+fn record_gpu(slots: &mut Vec<Option<f64>>, finished: Vec<(u64, f64)>) {
+    for (frame, ms) in finished {
+        let i = frame.saturating_sub(1) as usize;
+        if slots.len() <= i {
+            slots.resize(i + 1, None);
+        }
+        slots[i] = Some(ms);
     }
 }
 

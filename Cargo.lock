@@ -2181,6 +2181,7 @@ dependencies = [
  "glam",
  "png",
  "pollster 1.0.1",
+ "sim",
  "sm3",
  "wgpu",
 ]

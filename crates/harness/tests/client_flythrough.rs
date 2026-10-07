@@ -111,7 +111,7 @@ fn runs_every_planned_mode_and_aggregates() {
     let args = fs::read_to_string(dir.join("exclusive-2560x1440-30000mhz/args.txt")).unwrap();
     for want in [
         "--install /fake/install",
-        "--map mp_crash --flythrough --duration 3",
+        "--map mp_crash --present auto --flythrough --duration 3",
         "--video --screenshot --size 2560x1440 --refresh 30 --fullscreen exclusive",
     ] {
         assert!(args.contains(want), "{want} not in {args}");
@@ -120,7 +120,7 @@ fn runs_every_planned_mode_and_aggregates() {
     assert_eq!(env["gpu"]["name"], "Fake GPU");
     assert_eq!(env["display_modes"]["present_modes"][1], "mailbox");
     let runs = env["display_modes"]["runs"].as_array().unwrap();
-    assert_eq!(runs.len(), 4);
+    assert_eq!(runs.len(), 8);
     assert_eq!(runs[3]["fullscreen"], "exclusive");
     assert_eq!(runs[3]["refresh_mhz"], 30000);
 
@@ -155,7 +155,7 @@ fn error_and_hung_runs_fail_the_stage_but_not_the_other_runs() {
     let fake = Fake::new("error");
     let (r, _, _k) = run(&fake, true);
     assert_eq!(r.status, Status::Failed);
-    assert_eq!(r.notes.len(), 4);
+    assert_eq!(r.notes.len(), 8);
     assert!(
         r.notes.iter().all(|n| n.contains("no adapter")),
         "{:?}",
@@ -165,7 +165,7 @@ fn error_and_hung_runs_fail_the_stage_but_not_the_other_runs() {
     fake.behave("hang");
     let (r, dir, _k) = run(&fake, true);
     assert_eq!(r.status, Status::Failed);
-    assert_eq!(r.notes.len(), 4, "a hung run must not stop the others");
+    assert_eq!(r.notes.len(), 8, "a hung run must not stop the others");
     assert!(r.notes.iter().all(|n| n.contains("Hung")), "{:?}", r.notes);
     assert!(Path::new(&dir.join("native-borderless/client.log")).exists());
 }

@@ -73,7 +73,14 @@ pub struct RunPlan {
     pub slug: String,
     pub mode: Mode,
     pub fullscreen: Fullscreen,
+    pub map: &'static str,
+    /// `--present` mode; the capped runs use the default (vsync).
+    pub present: &'static str,
 }
+
+/// Stock maps besides mp_crash that get a run of their own, so shadows, fog and post effects show on more than one
+/// map (these have glow in their vision files).
+pub const EXTRA_MAPS: [&str; 2] = ["mp_bog", "mp_crash_snow"];
 
 /// The bounded, deterministic runs for one monitor: borderless at native,
 /// windowed 1080p at the highest refresh (when it fits), windowed 720p, and
@@ -84,6 +91,8 @@ pub fn plan_runs(m: &Monitor) -> Vec<RunPlan> {
         slug: "native-borderless".into(),
         mode: n,
         fullscreen: Fullscreen::Borderless,
+        map: "mp_crash",
+        present: "auto",
     }];
     let top = m
         .modes
@@ -105,6 +114,8 @@ pub fn plan_runs(m: &Monitor) -> Vec<RunPlan> {
                     refresh_mhz: refresh,
                 },
                 fullscreen: Fullscreen::Windowed,
+                map: "mp_crash",
+                present: "auto",
             });
         }
     }
@@ -122,6 +133,36 @@ pub fn plan_runs(m: &Monitor) -> Vec<RunPlan> {
                 ..n
             },
             fullscreen: Fullscreen::Exclusive,
+            map: "mp_crash",
+            present: "auto",
+        });
+    }
+    // Uncapped: how fast the frame really is at native size.
+    for present in ["immediate", "mailbox"] {
+        runs.push(RunPlan {
+            slug: format!("native-{present}"),
+            mode: n,
+            fullscreen: Fullscreen::Borderless,
+            map: "mp_crash",
+            present,
+        });
+    }
+    let (w, h) = if n.width >= 1920 && n.height >= 1080 {
+        (1920, 1080)
+    } else {
+        (1280, 720)
+    };
+    for map in EXTRA_MAPS {
+        runs.push(RunPlan {
+            slug: format!("{map}-{w}x{h}"),
+            mode: Mode {
+                width: w,
+                height: h,
+                refresh_mhz: n.refresh_mhz,
+            },
+            fullscreen: Fullscreen::Windowed,
+            map,
+            present: "auto",
         });
     }
     runs
@@ -217,6 +258,8 @@ pub fn run_with(ctx: &StageCtx, opts: &Options) -> io::Result<StageReport> {
             "height": plan.mode.height,
             "refresh_mhz": plan.mode.refresh_mhz,
             "fullscreen": plan.fullscreen.as_str(),
+            "map": plan.map,
+            "present": plan.present,
             "outcome": match &outcome { Ok(()) => "ok".to_owned(), Err(e) => e.clone() },
         }));
         match outcome {
@@ -296,7 +339,14 @@ fn run_one(
     let mut child = Command::new(&opts.client)
         .arg("--install")
         .arg(install)
-        .args(["--map", "mp_crash", "--flythrough", "--duration"])
+        .args([
+            "--map",
+            plan.map,
+            "--present",
+            plan.present,
+            "--flythrough",
+            "--duration",
+        ])
         .arg(opts.secs.to_string())
         .arg("--out")
         .arg(&out)
@@ -464,8 +514,26 @@ mod tests {
         }
     }
 
+    /// The capped mp_crash runs.
     fn slugs(m: &Monitor) -> Vec<String> {
-        plan_runs(m).into_iter().map(|r| r.slug).collect()
+        plan_runs(m)
+            .into_iter()
+            .filter(|r| r.map == "mp_crash" && r.present == "auto")
+            .map(|r| r.slug)
+            .collect()
+    }
+
+    #[test]
+    fn uncapped_and_other_map_runs_follow_the_capped_ones() {
+        let m = monitor(mode(2560, 1440, 60), &[]);
+        let runs = plan_runs(&m);
+        let by = |slug: &str| runs.iter().find(|r| r.slug == slug).unwrap();
+        assert_eq!(by("native-immediate").present, "immediate");
+        assert_eq!(by("native-mailbox").mode, mode(2560, 1440, 60));
+        for map in EXTRA_MAPS {
+            let r = by(&format!("{map}-1920x1080"));
+            assert_eq!((r.map, r.present), (map, "auto"));
+        }
     }
 
     #[test]
