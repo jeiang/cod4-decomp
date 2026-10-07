@@ -12,6 +12,9 @@ fn run(out: &Path, args: &[&str]) -> (i32, diff::Bundle) {
         .arg(out)
         .args(args)
         .env_remove("COD4_PATH")
+        // No Steam library of the machine running the test may be found.
+        .env("HOME", out)
+        .env("USERPROFILE", out)
         .current_dir(out)
         .status()
         .unwrap();
