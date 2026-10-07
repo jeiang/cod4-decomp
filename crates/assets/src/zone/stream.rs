@@ -435,6 +435,8 @@ impl<'a> Stream<'a> {
             Ptr::Insert => Err(ZoneError::BadPointer(0xFFFF_FFFE)),
             Ptr::Follow => {
                 if count == 0 {
+                    // An empty array still advances the allocation to its alignment.
+                    self.alloc(align, 0)?;
                     return Ok(Arc::from(Vec::new()));
                 }
                 let len = count
