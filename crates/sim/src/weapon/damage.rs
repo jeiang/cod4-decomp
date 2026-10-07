@@ -7,7 +7,9 @@
 //! `G_RadiusDamage`, `Weapon_Melee_internal`. Arithmetic follows the original's int/double mixes
 //! where they change a rounded damage value.
 
-use super::info::{HITLOC_COUNT, PenetrateType, SURFACE_TYPES, WeaponClass, WeaponInfo, WeaponType};
+use super::info::{
+    HITLOC_COUNT, PenetrateType, SURFACE_TYPES, WeaponClass, WeaponInfo, WeaponType,
+};
 use super::params::{WeaponParams, perk};
 use crate::Vec3;
 use crate::pm::math;
@@ -254,7 +256,13 @@ pub fn penetrate_multiplier(multiplier: f32, thickness: f32, max_depth: f32) -> 
 /// direction. Against the world the step is stretched by the angle of incidence; a grazing hit
 /// (cosine below 0.125) steps the fixed `dist / 0.125` and reports false. Entities restart
 /// exactly at the hit.
-pub fn advance_trace(hit: Vec3, dir: &Vec3, normal: &Vec3, dist: f32, hit_world: bool) -> (Vec3, bool) {
+pub fn advance_trace(
+    hit: Vec3,
+    dir: &Vec3,
+    normal: &Vec3,
+    dist: f32,
+    hit_world: bool,
+) -> (Vec3, bool) {
     if hit_world && dist > 0.0 {
         let dot = -math::dot(normal, dir);
         if dot < 0.125 {
@@ -366,13 +374,25 @@ mod tests {
         w.location_damage_multipliers[HITLOC_HEAD] = 4.0;
         let mut table = [1.0; HITLOC_COUNT];
         table[HITLOC_HEAD] = 2.5;
-        assert_eq!(weapon_hit_location_multiplier(Some(&w), HITLOC_HEAD, &table), 4.0);
+        assert_eq!(
+            weapon_hit_location_multiplier(Some(&w), HITLOC_HEAD, &table),
+            4.0
+        );
         w.weap_type = WeaponType::Projectile;
-        assert_eq!(weapon_hit_location_multiplier(Some(&w), HITLOC_HEAD, &table), 2.5);
-        assert_eq!(weapon_hit_location_multiplier(None, HITLOC_HEAD, &table), 2.5);
+        assert_eq!(
+            weapon_hit_location_multiplier(Some(&w), HITLOC_HEAD, &table),
+            2.5
+        );
+        assert_eq!(
+            weapon_hit_location_multiplier(None, HITLOC_HEAD, &table),
+            2.5
+        );
         w.weap_type = WeaponType::Bullet;
         w.weap_class = WeaponClass::Turret;
-        assert_eq!(weapon_hit_location_multiplier(Some(&w), HITLOC_HEAD, &table), 2.5);
+        assert_eq!(
+            weapon_hit_location_multiplier(Some(&w), HITLOC_HEAD, &table),
+            2.5
+        );
     }
 
     #[test]
@@ -380,20 +400,33 @@ mod tests {
         let t = PenetrationTable::parse(
             "BULLET_PEN_TABLE\\small_bark\\20\\small_brick\\6\\medium_wood\\28\\large_metal\\40\\bogus_wood\\9",
         );
-        let bark = SURFACE_TYPE_NAMES.iter().position(|n| *n == "bark").unwrap();
-        let wood = SURFACE_TYPE_NAMES.iter().position(|n| *n == "wood").unwrap();
+        let bark = SURFACE_TYPE_NAMES
+            .iter()
+            .position(|n| *n == "bark")
+            .unwrap();
+        let wood = SURFACE_TYPE_NAMES
+            .iter()
+            .position(|n| *n == "wood")
+            .unwrap();
         assert_eq!(t.depth(PenetrateType::Small, bark), 20.0);
         assert_eq!(t.depth(PenetrateType::Medium, wood), 28.0);
         assert_eq!(t.depth(PenetrateType::Small, wood), 0.0);
         assert_eq!(t.depth(PenetrateType::None, bark), 0.0);
-        assert_eq!(t.depth(PenetrateType::Small, 0), 0.0, "default surface never penetrates");
+        assert_eq!(
+            t.depth(PenetrateType::Small, 0),
+            0.0,
+            "default surface never penetrates"
+        );
         assert_eq!(t.depth(PenetrateType::Large, 99), 0.0);
     }
 
     #[test]
     fn penetration_perk_scales_depth() {
         let t = PenetrationTable::parse("X\\small_wood\\12");
-        let wood = SURFACE_TYPE_NAMES.iter().position(|n| *n == "wood").unwrap();
+        let wood = SURFACE_TYPE_NAMES
+            .iter()
+            .position(|n| *n == "wood")
+            .unwrap();
         let mut w = rifle("ak47_mp", "ar");
         w.penetrate_type = PenetrateType::Small;
         let p = WeaponParams::default();
@@ -404,7 +437,11 @@ mod tests {
     #[test]
     fn thickness_reduces_damage_by_its_share_of_the_depth() {
         assert_eq!(penetrate_multiplier(1.0, 6.0, 12.0), 0.5);
-        assert_eq!(penetrate_multiplier(1.0, 0.2, 10.0), 0.9, "thinner than 1 counts as 1");
+        assert_eq!(
+            penetrate_multiplier(1.0, 0.2, 10.0),
+            0.9,
+            "thinner than 1 counts as 1"
+        );
         assert!(penetrate_multiplier(0.5, 6.0, 12.0) <= 0.0);
     }
 
@@ -415,7 +452,11 @@ mod tests {
         assert!(ok);
         assert!((p[0] - 10.135).abs() < 1e-6);
         // 45 degrees: the step is stretched by 1/cos.
-        let n = [-std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0];
+        let n = [
+            -std::f32::consts::FRAC_1_SQRT_2,
+            std::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        ];
         let (p, ok) = advance_trace([0.0; 3], &dir, &n, 0.135, true);
         assert!(ok);
         assert!((p[0] - 0.135 * std::f32::consts::SQRT_2).abs() < 1e-5);
@@ -424,7 +465,10 @@ mod tests {
         assert!(!ok);
         assert!((p[0] - 0.135 / 0.125).abs() < 1e-6);
         // Entities restart at the hit.
-        assert_eq!(advance_trace([3.0, 4.0, 5.0], &dir, &n, 0.135, false), ([3.0, 4.0, 5.0], true));
+        assert_eq!(
+            advance_trace([3.0, 4.0, 5.0], &dir, &n, 0.135, false),
+            ([3.0, 4.0, 5.0], true)
+        );
     }
 
     #[test]

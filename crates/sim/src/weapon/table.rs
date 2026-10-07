@@ -301,7 +301,8 @@ mod tests {
 
     #[test]
     fn duplicate_names_count_once() {
-        let t = WeaponTable::from_infos(vec![rifle("ak47_mp", "ar"), rifle("AK47_MP", "ar")]).unwrap();
+        let t =
+            WeaponTable::from_infos(vec![rifle("ak47_mp", "ar"), rifle("AK47_MP", "ar")]).unwrap();
         assert_eq!(t.len(), 1);
     }
 

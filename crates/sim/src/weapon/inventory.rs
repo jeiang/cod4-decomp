@@ -184,7 +184,11 @@ impl PlayerWeapons {
 
     /// `getweaponammoclip`.
     pub fn get_clip(&self, table: &WeaponTable, index: u16) -> i32 {
-        if index == 0 { 0 } else { self.clip(table, index) }
+        if index == 0 {
+            0
+        } else {
+            self.clip(table, index)
+        }
     }
 
     /// `getweaponammostock`: a clip-only weapon reports its magazine.

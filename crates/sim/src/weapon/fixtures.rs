@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Hand-built weapons for tests.
 
-use super::info::{
-    InventoryType, OffhandClass, WeaponClass, WeaponInfo, WeaponType,
-};
+use super::info::{InventoryType, OffhandClass, WeaponClass, WeaponInfo, WeaponType};
 
 pub fn rifle(name: &str, ammo: &str) -> WeaponInfo {
     WeaponInfo {

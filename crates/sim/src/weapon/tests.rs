@@ -115,9 +115,20 @@ fn alt_weapons_are_owned_and_taken_together() {
     let mut s = Setup::new(vec![m4, gl]);
     assert!(s.give("m4_gl_mp"));
     let (m4i, gli) = (s.idx("m4_gl_mp"), s.idx("gl_mp"));
-    assert!(s.inv.has(gli), "the alternate fire mode comes with the weapon");
-    assert_eq!((s.clip("gl_mp"), s.stock("gl_mp")), (1, 2), "alt ammunition is initialised too");
-    assert_eq!(s.inv.list_primaries(&s.table).count(), 1, "the alt is not a primary");
+    assert!(
+        s.inv.has(gli),
+        "the alternate fire mode comes with the weapon"
+    );
+    assert_eq!(
+        (s.clip("gl_mp"), s.stock("gl_mp")),
+        (1, 2),
+        "alt ammunition is initialised too"
+    );
+    assert_eq!(
+        s.inv.list_primaries(&s.table).count(),
+        1,
+        "the alt is not a primary"
+    );
     assert!(s.inv.any_ammo_for_weapon_modes(&s.table, m4i));
 
     s.ps.weapon = u32::from(m4i);
@@ -127,7 +138,10 @@ fn alt_weapons_are_owned_and_taken_together() {
     assert_eq!(s.clip("m4_gl_mp"), 0);
     assert_eq!(s.clip("gl_mp"), 0);
     assert_eq!(s.stock("gl_mp"), 0);
-    assert!(!s.inv.take(&s.table, &mut s.ps, m4i, true), "second take is a no-op");
+    assert!(
+        !s.inv.take(&s.table, &mut s.ps, m4i, true),
+        "second take is a no-op"
+    );
 }
 
 #[test]
@@ -166,7 +180,11 @@ fn set_clip_and_stock_clamp() {
     s.inv.set_clip(&s.table, ak, -4);
     assert_eq!(s.inv.get_clip(&s.table, ak), 0);
     s.inv.set_stock(&s.table, ak, 9999);
-    assert_eq!(s.inv.get_stock(&s.table, ak), 120, "capped at the player maximum");
+    assert_eq!(
+        s.inv.get_stock(&s.table, ak),
+        120,
+        "capped at the player maximum"
+    );
     s.inv.set_stock(&s.table, ak, -1);
     assert_eq!(s.inv.get_stock(&s.table, ak), 0);
     s.inv.set_clip(&s.table, 0, 5);
@@ -179,7 +197,11 @@ fn clip_only_weapons_report_the_clip_as_stock() {
     assert!(s.give("frag_grenade_mp"));
     let g = s.idx("frag_grenade_mp");
     assert_eq!(s.inv.get_stock(&s.table, g), 1);
-    assert_eq!(s.stock("frag_grenade_mp"), 0, "no separate stock behind a clip-only weapon");
+    assert_eq!(
+        s.stock("frag_grenade_mp"),
+        0,
+        "no separate stock behind a clip-only weapon"
+    );
     s.inv.set_stock(&s.table, g, 5);
     assert_eq!(s.inv.get_clip(&s.table, g), 1, "limited to the clip size");
 }
@@ -204,7 +226,10 @@ fn ammo_fractions() {
     let ak = s.idx("ak47_mp");
     assert_eq!(s.inv.fraction_start_ammo(&s.table, ak), 1.0, "not owned");
     s.give("ak47_mp");
-    assert_eq!(s.inv.fraction_start_ammo(&s.table, ak), (60.0f64 / 90.0) as f32);
+    assert_eq!(
+        s.inv.fraction_start_ammo(&s.table, ak),
+        (60.0f64 / 90.0) as f32
+    );
     assert_eq!(s.inv.fraction_max_ammo(&s.table, ak), 0.5);
     s.inv.set_stock(&s.table, ak, 0);
     assert_eq!(s.inv.fraction_max_ammo(&s.table, ak), 0.0);
@@ -250,12 +275,21 @@ fn the_first_offhand_weapon_is_equipped_and_not_replaced_while_it_has_ammo() {
     assert_eq!(s.ps.offhand_index, s.idx("frag_grenade_mp"));
     let smoke = s.idx("smoke_grenade_mp");
     assert_eq!(
-        s.inv.first_available_offhand(&s.table, &s.ps, OffhandClass::Smoke),
+        s.inv
+            .first_available_offhand(&s.table, &s.ps, OffhandClass::Smoke),
         smoke
     );
-    assert_eq!(s.inv.first_available_offhand(&s.table, &s.ps, OffhandClass::Flash), 0);
+    assert_eq!(
+        s.inv
+            .first_available_offhand(&s.table, &s.ps, OffhandClass::Flash),
+        0
+    );
     s.inv.set_clip(&s.table, smoke, 0);
-    assert_eq!(s.inv.first_available_offhand(&s.table, &s.ps, OffhandClass::Smoke), 0);
+    assert_eq!(
+        s.inv
+            .first_available_offhand(&s.table, &s.ps, OffhandClass::Smoke),
+        0
+    );
     assert_eq!(
         s.inv.first_equipped_offhand(&s.table, OffhandClass::Smoke),
         smoke,

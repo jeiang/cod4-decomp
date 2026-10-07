@@ -41,8 +41,8 @@ pub fn good_random_float(seed: &mut i32) -> f32 {
     state = lcg_step(state);
     *seed = state;
     let pick = (table[0] / 0x400_0000) as usize;
-    let value = table[pick & 31] as f32 * 4.656_612_9e-10_f32;
-    value.min(0.999_999_9)
+    let value = table[pick & 31] as f32 * (1.0 / 2_147_483_648.0);
+    value.min(1.0 - f32::EPSILON)
 }
 
 /// `Bullet_RandomDir`: the unit-disc direction offset for a seed: an angle and a radius, both
@@ -135,23 +135,23 @@ pub fn bullet_shots<'a>(
 
 /// `BG_GetSpreadForWeapon`: the least and greatest hip spread (degrees) for the player's stance
 /// blend, honouring a script override and the spread perk.
-pub fn spread_range(
-    info: &WeaponInfo,
-    ps: &PlayerState,
-    params: &WeaponParams,
-) -> (f32, f32) {
+pub fn spread_range(info: &WeaponInfo, ps: &PlayerState, params: &WeaponParams) -> (f32, f32) {
     let (mut min, mut max);
     if ps.spread_override_state == SpreadOverrideState::Enabled {
         min = ps.spread_override as f32;
         max = min;
     } else if ps.view_height_current <= 40.0 {
         let frac = (ps.view_height_current - 11.0) / 29.0;
-        min = (info.hip_spread_ducked_min - info.hip_spread_prone_min) * frac + info.hip_spread_prone_min;
-        max = (info.hip_spread_ducked_max - info.hip_spread_prone_max) * frac + info.hip_spread_prone_max;
+        min = (info.hip_spread_ducked_min - info.hip_spread_prone_min) * frac
+            + info.hip_spread_prone_min;
+        max = (info.hip_spread_ducked_max - info.hip_spread_prone_max) * frac
+            + info.hip_spread_prone_max;
     } else {
         let frac = (ps.view_height_current - 40.0) / 20.0;
-        min = (info.hip_spread_stand_min - info.hip_spread_ducked_min) * frac + info.hip_spread_ducked_min;
-        max = (info.hip_spread_stand_max - info.hip_spread_ducked_max) * frac + info.hip_spread_ducked_max;
+        min = (info.hip_spread_stand_min - info.hip_spread_ducked_min) * frac
+            + info.hip_spread_ducked_min;
+        max = (info.hip_spread_stand_max - info.hip_spread_ducked_max) * frac
+            + info.hip_spread_ducked_max;
     }
     if ps.spread_override_state == SpreadOverrideState::Resetting {
         max = ps.spread_override as f32;
@@ -185,11 +185,7 @@ pub struct Recoil {
     pub gun_kick: [f32; 2],
 }
 
-pub fn fire_recoil(
-    info: &WeaponInfo,
-    ps: &PlayerState,
-    mut random: impl FnMut() -> f32,
-) -> Recoil {
+pub fn fire_recoil(info: &WeaponInfo, ps: &PlayerState, mut random: impl FnMut() -> f32) -> Recoil {
     let pos = ps.weapon_pos_frac;
     let mut reduce = 1.0;
     if ps.weapon_restrict_kick_time > 0 {
@@ -230,7 +226,10 @@ mod tests {
         assert_ne!(a, bullet_random_dir(1235));
         for seed in [-5, 0, 1, 99_999, 123_456_789, i32::MAX] {
             let [x, y] = bullet_random_dir(seed);
-            assert!(x * x + y * y <= 1.0 + 1e-6, "seed {seed}: ({x}, {y}) outside the unit disc");
+            assert!(
+                x * x + y * y <= 1.0 + 1e-6,
+                "seed {seed}: ({x}, {y}) outside the unit disc"
+            );
         }
     }
 
@@ -304,8 +303,10 @@ mod tests {
     fn spread_blends_by_view_height() {
         let w = sample_weapon();
         let p = WeaponParams::default();
-        let mut ps = PlayerState::default();
-        ps.view_height_current = 60.0;
+        let mut ps = PlayerState {
+            view_height_current: 60.0,
+            ..PlayerState::default()
+        };
         assert_eq!(spread_range(&w, &ps, &p), (4.0, 8.0));
         ps.view_height_current = 40.0;
         assert_eq!(spread_range(&w, &ps, &p), (2.0, 6.0));
@@ -319,9 +320,11 @@ mod tests {
     fn aim_spread_interpolates_and_ads_uses_the_ads_spread() {
         let w = sample_weapon();
         let p = WeaponParams::default();
-        let mut ps = PlayerState::default();
-        ps.view_height_current = 60.0;
-        ps.aim_spread_scale = 0.0;
+        let mut ps = PlayerState {
+            view_height_current: 60.0,
+            aim_spread_scale: 0.0,
+            ..PlayerState::default()
+        };
         assert_eq!(aim_spread_degrees(&w, &ps, &p), 4.0);
         ps.aim_spread_scale = 255.0;
         assert_eq!(aim_spread_degrees(&w, &ps, &p), 8.0);
@@ -335,9 +338,11 @@ mod tests {
     fn spread_perk_and_override_apply() {
         let w = sample_weapon();
         let p = WeaponParams::default();
-        let mut ps = PlayerState::default();
-        ps.view_height_current = 60.0;
-        ps.perks = perk::BULLET_ACCURACY;
+        let mut ps = PlayerState {
+            view_height_current: 60.0,
+            perks: perk::BULLET_ACCURACY,
+            ..PlayerState::default()
+        };
         let (min, max) = spread_range(&w, &ps, &p);
         assert!((min - 2.6).abs() < 1e-6 && (max - 5.2).abs() < 1e-6);
         ps.perks = 0;

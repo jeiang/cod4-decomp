@@ -74,8 +74,13 @@ pub enum WeaponEvent {
     /// The melee swing connects now (`EV_FIRE_MELEE`).
     Melee { weapon: u16 },
     /// A grenade is thrown from the off-hand (`EV_USE_OFFHAND`). `fuse_left` is the fuse
-    /// remaining in ms (`ps.grenade_time_left`), shorter than the full fuse when cooked.
-    OffhandThrow { weapon: u16, fuse_left: i32 },
+    /// remaining in ms (`ps.grenade_time_left`) and `cooked` the time it was held primed (the
+    /// weapon's fuse time less `fuse_left`; 0 for grenades that do not cook).
+    OffhandThrow {
+        weapon: u16,
+        fuse_left: i32,
+        cooked: i32,
+    },
     /// The fuse of a held grenade ran out in the player's hand (`EV_GRENADE_SUICIDE`).
     GrenadeSuicide { weapon: u16 },
     /// A detonator weapon was triggered (`EV_DETONATE`).

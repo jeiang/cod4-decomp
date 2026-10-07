@@ -480,7 +480,7 @@ impl Default for WeaponInfo {
 /// `BG_CheckWeaponDamageRanges`: an unset (non-positive) max range becomes this.
 pub const DAMAGE_RANGE_UNLIMITED: f32 = 999_999.0;
 /// `BG_CheckWeaponDamageRanges`: an unset min range becomes this (just past the max).
-pub const DAMAGE_RANGE_UNLIMITED_MIN: f32 = 999_999.12;
+pub const DAMAGE_RANGE_UNLIMITED_MIN: f32 = 999_999.1;
 
 impl WeaponInfo {
     /// Copies what simulation needs out of a decoded definition. The table assigns `index`,
@@ -498,13 +498,14 @@ impl WeaponInfo {
             .anims
             .get(ANIM_MELEE_CHARGE)
             .is_some_and(|n| n.as_deref().is_some_and(|s| !s.is_empty()));
-        let oo_pos_anim_length = if def.oo_pos_anim_length[0] > 0.0 && def.oo_pos_anim_length[1] > 0.0
-        {
-            def.oo_pos_anim_length
-        } else {
-            transition_rates(def.ads_trans_in_time, def.ads_trans_out_time)
-        };
-        let [max_damage_range, min_damage_range] = damage_ranges(def.max_damage_range, def.min_damage_range);
+        let oo_pos_anim_length =
+            if def.oo_pos_anim_length[0] > 0.0 && def.oo_pos_anim_length[1] > 0.0 {
+                def.oo_pos_anim_length
+            } else {
+                transition_rates(def.ads_trans_in_time, def.ads_trans_out_time)
+            };
+        let [max_damage_range, min_damage_range] =
+            damage_ranges(def.max_damage_range, def.min_damage_range);
         let pair = |a: f32, b: f32| [a, b];
         Self {
             index: 0,
@@ -712,8 +713,16 @@ fn transition_rates(trans_in: i32, trans_out: i32) -> [f32; 2] {
 /// `BG_CheckWeaponDamageRanges`.
 fn damage_ranges(max: f32, min: f32) -> [f32; 2] {
     [
-        if max <= 0.0 { DAMAGE_RANGE_UNLIMITED } else { max },
-        if min <= 0.0 { DAMAGE_RANGE_UNLIMITED_MIN } else { min },
+        if max <= 0.0 {
+            DAMAGE_RANGE_UNLIMITED
+        } else {
+            max
+        },
+        if min <= 0.0 {
+            DAMAGE_RANGE_UNLIMITED_MIN
+        } else {
+            min
+        },
     ]
 }
 

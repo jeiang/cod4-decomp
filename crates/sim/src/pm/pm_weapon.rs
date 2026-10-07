@@ -18,11 +18,12 @@
 //! Fact source: `iw3mp.exe` 1.7 `PM_Weapon` and its callees.
 
 use super::ads;
-use super::math;
 use super::mantle::weapon_inactive;
+use super::math;
 use super::single::melee_charge_clear;
 use super::state::{
-    PlayerState, PmType, SpreadOverrideState, UserCmd, button, ef, ev, pmf, weapon_state as ws, wf,
+    ANGLE_UNIT, PlayerState, PmType, SpreadOverrideState, UserCmd, button, ef, ev, pmf,
+    weapon_state as ws, wf,
 };
 use super::{Pml, Pmove};
 use crate::cm::ENTITYNUM_NONE;
@@ -174,7 +175,8 @@ pub(super) fn adjust_aim_spread(pm: &mut Pmove<'_>, pml: &Pml) {
     } else {
         let over = f64::from(ps.spread_override);
         override_scale = ((over - f64::from(w.hip_spread_stand_min))
-            / f64::from(w.hip_spread_stand_max - w.hip_spread_stand_min)) as f32;
+            / f64::from(w.hip_spread_stand_max - w.hip_spread_stand_min))
+            as f32;
         if ps.ground_entity_num != ENTITYNUM_NONE || ps.pm_type == PmType::NormalLinked {
             if ps.e_flags & ef::PRONE != 0 {
                 decay *= w.hip_spread_prone_decay;
@@ -201,16 +203,17 @@ pub(super) fn adjust_aim_spread(pm: &mut Pmove<'_>, pml: &Pml) {
                 let mut view_change = 0.0f32;
                 if w.hip_spread_turn_add != 0.0 {
                     for axis in 0..2 {
-                        let a = f64::from(old.angles[axis]) * 0.005_493_164_062_5;
-                        let b = f64::from(cmd.angles[axis]) * 0.005_493_164_062_5;
+                        let a = f64::from(old.angles[axis]) * f64::from(ANGLE_UNIT);
+                        let b = f64::from(cmd.angles[axis]) * f64::from(ANGLE_UNIT);
                         let delta = math::angle_delta(b as f32, a as f32);
-                        view_change = delta.abs() * 0.009_999_999_8 * w.hip_spread_turn_add
+                        view_change = delta.abs() * 0.01_f32 * w.hip_spread_turn_add
                             / pml.frametime
                             + view_change;
                     }
                 }
                 if w.hip_spread_move_add != 0.0 && (cmd.forwardmove != 0 || cmd.rightmove != 0) {
-                    let speed_sq = ps.velocity[1] * ps.velocity[1] + ps.velocity[0] * ps.velocity[0];
+                    let speed_sq =
+                        ps.velocity[1] * ps.velocity[1] + ps.velocity[0] * ps.velocity[0];
                     if move_threshold * move_threshold < speed_sq {
                         view_change = (f64::from(w.hip_spread_move_add)
                             * f64::from(speed_sq.sqrt())
@@ -220,7 +223,7 @@ pub(super) fn adjust_aim_spread(pm: &mut Pmove<'_>, pml: &Pml) {
                 }
                 if ps.ground_entity_num == ENTITYNUM_NONE && ps.pm_type != PmType::NormalLinked {
                     for _ in 0..2 {
-                        view_change = (f64::from(0.009_999_999_8f32) * 128.0 + f64::from(view_change)) as f32;
+                        view_change = (f64::from(0.01_f32) * 128.0 + f64::from(view_change)) as f32;
                     }
                 }
                 increase = view_change * pml.frametime;
@@ -419,7 +422,8 @@ fn weapon_time_adjust(cx: &mut Cx<'_>, ps: &mut PlayerState) -> bool {
                 ps.weapon_state = ws::READY;
                 return false;
             }
-            let limit_held = ps.weapon_flags & wf::PENDING_TRIGGER == 0 && shot_limit_reached(ps, w);
+            let limit_held =
+                ps.weapon_flags & wf::PENDING_TRIGGER == 0 && shot_limit_reached(ps, w);
             let hold_throw = w.weap_type == WeaponType::Grenade && w.hold_button_to_throw;
             if !offhand_state(state)
                 && (limit_held || hold_throw)
@@ -433,13 +437,12 @@ fn weapon_time_adjust(cx: &mut Cx<'_>, ps: &mut PlayerState) -> bool {
                 if reload_state(state) {
                     ps.weapon_time = 0;
                     ps.weapon_shot_count = 0;
-                } else if state == ws::RECHAMBERING {
-                    ps.weapon_state = ws::READY;
-                } else if state == ws::FIRING || melee_state(state) {
+                } else if matches!(state, ws::RECHAMBERING | ws::FIRING) || melee_state(state) {
                     ps.weapon_state = ws::READY;
                 }
             } else {
-                if (cx.cmd.buttons & button::ATTACK == 0 || ps.weapon_flags & wf::PENDING_TRIGGER != 0)
+                if (cx.cmd.buttons & button::ATTACK == 0
+                    || ps.weapon_flags & wf::PENDING_TRIGGER != 0)
                     && !burst_fire_pending(cx, ps)
                 {
                     ps.weapon_shot_count = 0;
@@ -546,7 +549,9 @@ fn finish_weapon_change(cx: &mut Cx<'_>, ps: &mut PlayerState, quick: bool) {
     let want = u16::from(cx.cmd.weapon);
     let mut new = if cx.mantle_inactive || ps.pm_flags & pmf::LADDER != 0 {
         0
-    } else if cx.inv.has(want) && ps.weapon_flags & wf::DISABLED == 0 && usize::from(want) <= cx.table.len()
+    } else if cx.inv.has(want)
+        && ps.weapon_flags & wf::DISABLED == 0
+        && usize::from(want) <= cx.table.len()
     {
         want
     } else {
@@ -581,7 +586,14 @@ fn finish_weapon_change(cx: &mut Cx<'_>, ps: &mut PlayerState, quick: bool) {
             w.raise_time
         };
         if old != 0 {
-            ps.add_event(if first_equip { ev::FIRST_RAISE_WEAPON } else { ev::RAISE_WEAPON }, 0);
+            ps.add_event(
+                if first_equip {
+                    ev::FIRST_RAISE_WEAPON
+                } else {
+                    ev::RAISE_WEAPON
+                },
+                0,
+            );
         }
         (time, 255.0)
     };
@@ -724,7 +736,14 @@ fn fire_weapon(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
         ps.weapon_time = w.fire_time;
     }
     let last_round = cx.clip_available(ps) == 0;
-    ps.add_event(if last_round { ev::FIRE_WEAPON_LASTSHOT } else { ev::FIRE_WEAPON }, 0);
+    ps.add_event(
+        if last_round {
+            ev::FIRE_WEAPON_LASTSHOT
+        } else {
+            ev::FIRE_WEAPON
+        },
+        0,
+    );
     cx.event(WeaponEvent::Fire {
         weapon: ps.weapon as u16,
         shot: ps.weapon_shot_count as u8,
@@ -734,7 +753,8 @@ fn fire_weapon(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
         last_round,
     });
     if ps.weapon_pos_frac != 1.0 {
-        ps.aim_spread_scale = (f64::from(w.hip_spread_fire_add) * 255.0 + f64::from(ps.aim_spread_scale)) as f32;
+        ps.aim_spread_scale =
+            (f64::from(w.hip_spread_fire_add) * 255.0 + f64::from(ps.aim_spread_scale)) as f32;
         ps.aim_spread_scale = ps.aim_spread_scale.min(255.0);
     }
     if last_round && cx.stock(ps.weapon) == 0 && !w.has_detonator {
@@ -774,11 +794,12 @@ fn check_for_rechamber(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) -> 
         } else if s == ws::READY {
             ps.weapon_state = ws::RECHAMBERING;
             ps.weapon_time = w.rechamber_time;
-            ps.weapon_delay = if w.rechamber_bolt_time != 0 && w.rechamber_bolt_time < w.rechamber_time {
-                w.rechamber_bolt_time
-            } else {
-                1
-            };
+            ps.weapon_delay =
+                if w.rechamber_bolt_time != 0 && w.rechamber_bolt_time < w.rechamber_time {
+                    w.rechamber_bolt_time
+                } else {
+                    1
+                };
             ps.add_event(ev::RECHAMBER_WEAPON, 0);
         }
     }
@@ -822,7 +843,8 @@ fn check_for_reload(cx: &mut Cx<'_>, ps: &mut PlayerState) {
         && cx.old.buttons & button::ATTACK == 0
     {
         if s == ws::RELOAD_START && w.reload_start_time != 0 {
-            let frac = (f64::from(w.reload_start_time - ps.weapon_time) / f64::from(w.reload_start_time)) as f32;
+            let frac = (f64::from(w.reload_start_time - ps.weapon_time)
+                / f64::from(w.reload_start_time)) as f32;
             if f64::from(RELOAD_START_INTERRUPT_IGNORE_FRAC) < f64::from(frac) {
                 ps.weapon_state = ws::RELOAD_START_INTERUPT;
             }
@@ -835,10 +857,7 @@ fn check_for_reload(cx: &mut Cx<'_>, ps: &mut PlayerState) {
         return;
     }
     let mut reload = requested && allow_reload(cx, ps);
-    if cx.clip_available(ps) == 0
-        && cx.stock(ps.weapon) != 0
-        && s != ws::FIRING
-        && !sprint_state(s)
+    if cx.clip_available(ps) == 0 && cx.stock(ps.weapon) != 0 && s != ws::FIRING && !sprint_state(s)
     {
         reload = true;
     }
@@ -916,7 +935,10 @@ fn reload_start_time_to_add(w: &WeaponInfo) -> i32 {
 /// `PM_SetWeaponReloadAddAmmoDelay`.
 fn set_reload_add_ammo_delay(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     let w = cx.info(ps.weapon);
-    let mut t = if matches!(ps.weapon_state, ws::RELOAD_START | ws::RELOAD_START_INTERUPT) {
+    let mut t = if matches!(
+        ps.weapon_state,
+        ws::RELOAD_START | ws::RELOAD_START_INTERUPT
+    ) {
         reload_start_time_to_add(w)
     } else {
         reload_time_to_add(cx, ps)
@@ -940,7 +962,10 @@ fn set_reload_add_ammo_delay(cx: &mut Cx<'_>, ps: &mut PlayerState) {
 /// `PM_ReloadClip`: moves stock rounds into the magazine.
 fn reload_clip(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     let w = cx.info(ps.weapon);
-    let start = matches!(ps.weapon_state, ws::RELOAD_START | ws::RELOAD_START_INTERUPT);
+    let start = matches!(
+        ps.weapon_state,
+        ws::RELOAD_START | ws::RELOAD_START_INTERUPT
+    );
     if start && w.reload_start_add == 0 {
         return;
     }
@@ -957,7 +982,10 @@ fn reload_clip(cx: &mut Cx<'_>, ps: &mut PlayerState) {
         *cx.inv.stock_mut(cx.table, weapon) -= add;
         *cx.inv.clip_mut(cx.table, weapon) += add;
         ps.add_event(ev::RELOAD_ADDAMMO, 0);
-        cx.event(WeaponEvent::ReloadAmmoAdded { weapon, amount: add });
+        cx.event(WeaponEvent::ReloadAmmoAdded {
+            weapon,
+            amount: add,
+        });
     }
 }
 
@@ -972,7 +1000,10 @@ fn reload_delayed_action(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     }
     cx.inv.set_rechamber(weapon, false);
     ps.add_event(ev::EJECT_BRASS, 0);
-    let start = matches!(ps.weapon_state, ws::RELOAD_START | ws::RELOAD_START_INTERUPT);
+    let start = matches!(
+        ps.weapon_state,
+        ws::RELOAD_START | ws::RELOAD_START_INTERUPT
+    );
     if start && w.reload_start_add_time == 0 {
         return;
     }
@@ -1104,7 +1135,8 @@ fn melee_charge_start(cx: &Cx<'_>, ps: &mut PlayerState) {
 /// `PM_Weapon_MeleeInit`.
 fn melee_init(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     let w = cx.info(ps.weapon);
-    let charge = ps.pm_flags & pmf::MELEE_CHARGE != 0 && w.has_melee_charge_anim && w.melee_charge_time > 0;
+    let charge =
+        ps.pm_flags & pmf::MELEE_CHARGE != 0 && w.has_melee_charge_anim && w.melee_charge_time > 0;
     if charge {
         ps.weapon_time = w.melee_charge_time;
         ps.weapon_delay = w.melee_charge_delay;
@@ -1161,7 +1193,8 @@ fn check_for_offhand(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     let (class, found) = if cx.cmd.buttons & button::FRAG != 0 {
         (
             OffhandClass::Frag,
-            cx.inv.first_available_offhand(cx.table, ps, OffhandClass::Frag),
+            cx.inv
+                .first_available_offhand(cx.table, ps, OffhandClass::Frag),
         )
     } else if cx.cmd.buttons & button::SMOKE != 0 {
         let class = if ps.offhand_secondary != 0 {
@@ -1261,9 +1294,11 @@ fn offhand_start(cx: &mut Cx<'_>, ps: &mut PlayerState) {
 fn offhand_use(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     let weapon = u32::from(ps.offhand_index);
     ps.add_event(ev::USE_OFFHAND, weapon);
+    let fuse_left = ps.grenade_time_left;
     cx.event(WeaponEvent::OffhandThrow {
         weapon: weapon as u16,
-        fuse_left: ps.grenade_time_left,
+        fuse_left,
+        cooked: (cx.info(weapon).fuse_time - fuse_left).max(0),
     });
     if !throwing_back(ps) {
         if cx.weapon_ammo(weapon) != 0 {
@@ -1359,7 +1394,10 @@ fn check_for_detonation(cx: &mut Cx<'_>, ps: &mut PlayerState) {
         && !reload_state(s)
         && !matches!(s, ws::FIRING | ws::RECHAMBERING)
         && !melee_state(s)
-        && !matches!(s, ws::RAISING | ws::RAISING_ALTSWITCH | ws::DROPPING | ws::DROPPING_QUICK)
+        && !matches!(
+            s,
+            ws::RAISING | ws::RAISING_ALTSWITCH | ws::DROPPING | ws::DROPPING_QUICK
+        )
         && !offhand_state(s)
         && !night_vision_state(s)
         && cx.cmd.buttons & button::ATTACK != 0
@@ -1388,7 +1426,14 @@ fn check_for_night_vision(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     if cx.old.buttons & button::NIGHTVISION == 0 && cx.cmd.buttons & button::NIGHTVISION != 0 {
         let on = ps.weapon_flags & wf::NIGHTVISION == 0;
         ps.weapon_flags ^= wf::NIGHTVISION;
-        ps.add_event(if on { ev::NIGHTVISION_WEAR } else { ev::NIGHTVISION_REMOVE }, 0);
+        ps.add_event(
+            if on {
+                ev::NIGHTVISION_WEAR
+            } else {
+                ev::NIGHTVISION_REMOVE
+            },
+            0,
+        );
         cx.event(WeaponEvent::NightVision { on });
     }
 }
