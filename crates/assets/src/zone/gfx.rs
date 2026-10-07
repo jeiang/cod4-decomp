@@ -3,7 +3,7 @@
 //! (passes, vertex declarations, shader blobs), image header, and raw file.
 
 use super::error::{Result, ZoneError};
-use super::stream::{Fields, Ptr, Stream};
+use super::stream::{Addr, Fields, Ptr, Stream};
 use std::sync::Arc;
 
 pub type Name = Option<Arc<str>>;
@@ -30,7 +30,7 @@ pub(super) fn raw_file(s: &mut Stream, h: &[u8]) -> Result<RawFile> {
     Ok(RawFile { name, data })
 }
 
-fn raw_of(p: Ptr) -> u32 {
+pub(super) fn raw_of(p: Ptr) -> u32 {
     match p {
         Ptr::Null => 0,
         Ptr::Follow => 0xFFFF_FFFF,
@@ -118,8 +118,42 @@ pub(super) fn image(s: &mut Stream, h: &[u8]) -> Result<GfxImage> {
     })
 }
 
-fn image_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<GfxImage>>> {
-    s.temp_asset(p, 4, IMAGE_SIZE, image)
+pub(super) fn image_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<GfxImage>>> {
+    image_ptr_at(s, None, p)
+}
+
+pub(super) fn material_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<Material>>> {
+    material_ptr_at(s, None, p)
+}
+
+pub(super) fn techset_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<TechniqueSet>>> {
+    techset_ptr_at(s, None, p)
+}
+
+/// The `_at` forms take the address of the pointer field ([`Fields::slot`]);
+/// use them whenever the field sits in a loaded array or struct.
+pub(super) fn image_ptr_at(
+    s: &mut Stream,
+    slot: Option<Addr>,
+    p: Ptr,
+) -> Result<Option<Arc<GfxImage>>> {
+    s.temp_asset_at(slot, p, 4, IMAGE_SIZE, image)
+}
+
+pub(super) fn material_ptr_at(
+    s: &mut Stream,
+    slot: Option<Addr>,
+    p: Ptr,
+) -> Result<Option<Arc<Material>>> {
+    s.temp_asset_at(slot, p, 4, MATERIAL_SIZE, material)
+}
+
+pub(super) fn techset_ptr_at(
+    s: &mut Stream,
+    slot: Option<Addr>,
+    p: Ptr,
+) -> Result<Option<Arc<TechniqueSet>>> {
+    s.temp_asset_at(slot, p, 4, TECHSET_SIZE, techset)
 }
 
 #[derive(Debug)]
@@ -238,11 +272,12 @@ pub(super) fn material(s: &mut Stream, h: &[u8]) -> Result<Material> {
     let textures = s.array(tex, tex_n.into(), 4, 12, |s, f| {
         let name_hash = f.u32();
         let (name_start, name_end, sampler_state, semantic) = (f.u8(), f.u8(), f.u8(), f.u8());
+        let slot = f.slot();
         let u = f.ptr()?;
         let source = if semantic == TS_WATER_MAP {
             TextureSource::Water(s.shared(u, 4, 68, water)?)
         } else {
-            TextureSource::Image(image_ptr(s, u)?)
+            TextureSource::Image(image_ptr_at(s, slot, u)?)
         };
         Ok(TextureDef {
             name_hash,

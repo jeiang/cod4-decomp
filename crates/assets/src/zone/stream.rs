@@ -3,7 +3,7 @@
 //! with its push/pop stack, pointer kinds, and the offset-pointer registry.
 
 use super::error::{Result, ZoneError};
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
@@ -94,11 +94,36 @@ impl Ptr {
 pub struct Fields<'a> {
     b: &'a [u8],
     p: usize,
+    base: Option<Addr>,
 }
 
 impl<'a> Fields<'a> {
     pub fn new(b: &'a [u8]) -> Self {
-        Fields { b, p: 0 }
+        Fields {
+            b,
+            p: 0,
+            base: None,
+        }
+    }
+
+    /// A cursor over a struct image that sits at `at` in its block, so
+    /// [`slot`](Self::slot) can name its pointer fields.
+    pub fn at(b: &'a [u8], at: Addr) -> Self {
+        Fields {
+            b,
+            p: 0,
+            base: Some(at),
+        }
+    }
+
+    /// Address of the next field. A `-1` pointer to a header-in-TEMP asset
+    /// can later be referenced by an offset to this address; pass it as the
+    /// `slot` of [`Stream::temp_asset_at`].
+    pub fn slot(&self) -> Option<Addr> {
+        self.base.map(|a| Addr {
+            block: a.block,
+            offset: a.offset + self.p as u32,
+        })
     }
     pub fn skip(&mut self, n: usize) {
         self.p += n;
@@ -154,7 +179,8 @@ pub struct Stream<'a> {
     peak: [u32; BLOCK_COUNT],
     /// (block, offset at push time)
     stack: Vec<(Block, u32)>,
-    registry: HashMap<Addr, Box<dyn Any + Send + Sync>>,
+    registry: HashMap<(Addr, TypeId), Box<dyn Any + Send + Sync>>,
+    keep_presentation: bool,
 }
 
 impl<'a> Stream<'a> {
@@ -170,11 +196,21 @@ impl<'a> Stream<'a> {
             peak: [0; BLOCK_COUNT],
             stack: Vec::new(),
             registry: HashMap::new(),
+            keep_presentation: true,
         }
     }
 
     pub(super) fn set_block_sizes(&mut self, sizes: [u32; BLOCK_COUNT]) {
         self.declared = sizes;
+    }
+
+    pub(super) fn set_keep_presentation(&mut self, keep: bool) {
+        self.keep_presentation = keep;
+    }
+
+    /// Whether the current asset's presentation payload is retained.
+    pub fn keep_presentation(&self) -> bool {
+        self.keep_presentation
     }
 
     /// Bytes taken from the inflated stream so far.
@@ -287,20 +323,48 @@ impl<'a> Stream<'a> {
         Ok((a, v))
     }
 
+    /// Like [`load`](Self::load) for presentation-only payload (render vertex/index/texel data, sound samples): with the consumer
+    /// not keeping render data, the bytes are consumed and block usage is
+    /// accounted without buffering them, and the returned vector is empty.
+    pub fn load_presentation(&mut self, align: u32, len: u32) -> Result<(Addr, Vec<u8>)> {
+        if self.keep_presentation {
+            return self.load(align, len);
+        }
+        let a = self.alloc(align, len)?;
+        if a.block.in_stream() {
+            self.skip_raw(len as u64)?;
+        }
+        Ok((a, Vec::new()))
+    }
+
+    fn skip_raw(&mut self, mut n: u64) -> Result<()> {
+        let total = n;
+        while n > 0 {
+            if self.pos == self.end && !self.fill()? {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            let k = n.min((self.end - self.pos) as u64);
+            self.pos += k as usize;
+            n -= k;
+        }
+        self.consumed += total;
+        Ok(())
+    }
+
     /// Reserve the 4-byte alias slot used by `-2` pointers.
-    fn insert_slot(&mut self) -> Result<Addr> {
+    pub fn insert_slot(&mut self) -> Result<Addr> {
         self.alloc_in(Block::Virtual, 4, 4)
     }
 
     // ---- registry ----
 
     pub fn register<V: Any + Send + Sync>(&mut self, at: Addr, v: V) {
-        self.registry.insert(at, Box::new(v));
+        self.registry.insert((at, TypeId::of::<V>()), Box::new(v));
     }
 
     pub fn lookup<V: Any + Clone>(&self, at: Addr) -> Result<V> {
         self.registry
-            .get(&at)
+            .get(&(at, TypeId::of::<V>()))
             .and_then(|b| b.downcast_ref::<V>())
             .cloned()
             .ok_or(ZoneError::BadOffset(at))
@@ -371,6 +435,8 @@ impl<'a> Stream<'a> {
             Ptr::Insert => Err(ZoneError::BadPointer(0xFFFF_FFFE)),
             Ptr::Follow => {
                 if count == 0 {
+                    // An empty array still advances the allocation to its alignment.
+                    self.alloc(align, 0)?;
                     return Ok(Arc::from(Vec::new()));
                 }
                 let len = count
@@ -378,8 +444,12 @@ impl<'a> Stream<'a> {
                     .ok_or(ZoneError::Invalid("array too large"))?;
                 let (at, bytes) = self.load(align, len)?;
                 let mut v = Vec::with_capacity(count as usize);
-                for chunk in bytes.chunks_exact(elem_size as usize) {
-                    v.push(f(self, &mut Fields::new(chunk))?);
+                for (i, chunk) in bytes.chunks_exact(elem_size as usize).enumerate() {
+                    let el = Addr {
+                        block: at.block,
+                        offset: at.offset + (i as u32) * elem_size,
+                    };
+                    v.push(f(self, &mut Fields::at(chunk, el))?);
                 }
                 let v: Arc<[T]> = v.into();
                 self.register(at, v.clone());
@@ -413,6 +483,32 @@ impl<'a> Stream<'a> {
         push_virtual: bool,
         f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
     ) -> Result<Option<Arc<T>>> {
+        self.temp_ptr_at(None, p, align, size, push_virtual, f)
+    }
+
+    /// [`temp_asset`](Self::temp_asset) for a pointer field at `slot`
+    /// ([`Fields::slot`]): a `-1` pointer also registers the asset at the
+    /// field's own address, which later offset pointers may name.
+    pub fn temp_asset_at<T: Any + Send + Sync>(
+        &mut self,
+        slot: Option<Addr>,
+        p: Ptr,
+        align: u32,
+        size: u32,
+        f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
+    ) -> Result<Option<Arc<T>>> {
+        self.temp_ptr_at(slot, p, align, size, true, f)
+    }
+
+    pub fn temp_ptr_at<T: Any + Send + Sync>(
+        &mut self,
+        slot: Option<Addr>,
+        p: Ptr,
+        align: u32,
+        size: u32,
+        push_virtual: bool,
+        f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
+    ) -> Result<Option<Arc<T>>> {
         match p {
             Ptr::Null => Ok(None),
             Ptr::Offset(a) => self.lookup::<Arc<T>>(a).map(Some),
@@ -422,7 +518,7 @@ impl<'a> Stream<'a> {
                 let slot = if p == Ptr::Insert {
                     Some(self.insert_slot()?)
                 } else {
-                    None
+                    slot
                 };
                 if push_virtual {
                     self.push(Block::Virtual);
