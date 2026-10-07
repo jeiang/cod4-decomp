@@ -356,6 +356,11 @@ fn brush(f: &mut Fields, sides: (Option<Addr>, u32), edges: (Option<Addr>, u32))
     let edge_ptr = f.ptr()?;
     let first_adjacent_side_offsets = [i16s(f), i16s(f)];
     let edge_count = [f.bytes(), f.bytes()];
+    // A brush without edges may carry a stale pointer that lands outside the array.
+    let base_adjacent_side = match index_in(edges.0, edge_ptr, 1, edges.1) {
+        Err(_) if edge_count == [[0; 3]; 2] => None,
+        r => r?,
+    };
     Ok(Brush {
         mins,
         contents,
@@ -363,7 +368,7 @@ fn brush(f: &mut Fields, sides: (Option<Addr>, u32), edges: (Option<Addr>, u32))
         num_sides,
         sides: index_in(sides.0, side_ptr, 12, sides.1)?,
         axial_material_num,
-        base_adjacent_side: index_in(edges.0, edge_ptr, 1, edges.1)?,
+        base_adjacent_side,
         first_adjacent_side_offsets,
         edge_count,
     })
@@ -406,17 +411,19 @@ fn dyn_entity_def(s: &mut Stream, f: &mut Fields) -> Result<DynEntityDef> {
     let model = model_ref(s, f)?;
     let brush_model = f.u16();
     let physics_brush_model = f.u16();
+    let fx_slot = f.slot();
     let destroy_fx = f.ptr()?;
     let destroy_pieces = f.ptr()?;
+    let preset_slot = f.slot();
     let phys_preset = f.ptr()?;
     let health = f.i32();
     let center_of_mass = v3(f);
     let moments_of_inertia = v3(f);
     let products_of_inertia = v3(f);
     let contents = f.i32();
-    let destroy_fx = super::fx::load(s, destroy_fx)?;
+    let destroy_fx = super::fx::load_at(s, fx_slot, destroy_fx)?;
     let destroy_pieces = model_pieces(s, destroy_pieces)?;
-    let phys_preset = super::phys::load(s, phys_preset)?;
+    let phys_preset = super::phys::load_at(s, preset_slot, phys_preset)?;
     Ok(DynEntityDef {
         kind,
         pose,
