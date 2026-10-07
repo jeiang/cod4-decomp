@@ -17,6 +17,7 @@ pub mod mem;
 pub mod missile;
 pub mod mover;
 pub mod nav;
+pub mod netsv;
 pub mod playeranim;
 pub mod script;
 pub mod server;

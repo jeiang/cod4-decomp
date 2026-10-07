@@ -8,18 +8,21 @@
 //! start callback), then three settle frames 100 ms apart. Frames run `G_RunFrame` with the
 //! original's drain points.
 
-use std::net::UdpSocket;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, compile};
 
 use crate::bot::{BotShared, Brain};
+use crate::client::Conn;
 use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
 use crate::cvar::{self, Cvars};
 use crate::game::{self, Game};
+use crate::netsv::{Inbound, NetSv};
 use crate::script::{Dispatch, ScriptHost};
+use net::Transport;
 
 /// Original loop time limit while scripts run (`LOOP_TIMEOUT` of the VM) applies unchanged.
 const SETTLE_FRAMES: i32 = 3;
@@ -38,16 +41,24 @@ pub struct TickSample {
     pub bot_ms: f64,
     /// Client commands: movement, weapons, hits and what they raise.
     pub client_ms: f64,
+    /// Building and sending every client's snapshot.
+    pub net_ms: f64,
     /// Everything else in the frame (entity think, console, bookkeeping).
     pub game_ms: f64,
 }
 
 /// Names of the per-subsystem tick columns, in [`TickSample::subsystems`] order.
-pub const TICK_SUBSYSTEMS: [&str; 4] = ["gsc", "bot", "client", "game"];
+pub const TICK_SUBSYSTEMS: [&str; 5] = ["gsc", "bot", "client", "net", "game"];
 
 impl TickSample {
-    pub fn subsystems(&self) -> [f64; 4] {
-        [self.gsc_ms, self.bot_ms, self.client_ms, self.game_ms]
+    pub fn subsystems(&self) -> [f64; 5] {
+        [
+            self.gsc_ms,
+            self.bot_ms,
+            self.client_ms,
+            self.net_ms,
+            self.game_ms,
+        ]
     }
 }
 
@@ -117,7 +128,7 @@ pub struct Server {
     pub log: Vec<String>,
     pub echo_stdout: bool,
     pub on_tick: Option<TickHook>,
-    socket: Option<UdpSocket>,
+    net: Option<NetSv>,
     pub map_load_ms: f64,
     pub boot_ms: f64,
     pub ticks: u64,
@@ -204,7 +215,7 @@ impl Server {
             log: Vec::new(),
             echo_stdout: echo,
             on_tick: None,
-            socket: None,
+            net: None,
             map_load_ms: 0.0,
             boot_ms: 0.0,
             ticks: 0,
@@ -252,12 +263,176 @@ impl Server {
 
     fn bind_socket(&mut self) {
         let port = self.game.cvars.int("net_port");
-        match UdpSocket::bind(("0.0.0.0", u16::try_from(port).unwrap_or(28960))) {
-            Ok(s) => {
-                self.say(&format!("listening on udp port {port}\n"));
-                self.socket = Some(s);
+        let addr = SocketAddr::from(([0, 0, 0, 0], u16::try_from(port).unwrap_or(28960)));
+        match net::UdpTransport::bind(addr) {
+            Ok(t) => {
+                let max = usize::try_from(self.game.cvars.int("sv_maxclients")).unwrap_or(32);
+                let n = NetSv::new(t, max.clamp(1, 64));
+                self.say(&format!(
+                    "listening on udp port {}\n",
+                    n.local_addr().port()
+                ));
+                self.net = Some(n);
             }
             Err(e) => self.say(&format!("WARNING: cannot bind udp port {port}: {e}\n")),
+        }
+    }
+
+    /// Where clients connect (the port is the real one when `net_port` was 0).
+    pub fn net_addr(&self) -> Option<SocketAddr> {
+        self.net.as_ref().map(NetSv::local_addr)
+    }
+
+    /// Network traffic counters since boot.
+    pub fn net_stats(&self) -> Option<crate::netsv::NetStats> {
+        self.net.as_ref().map(|n| n.stats)
+    }
+
+    /// Clients connected over the network.
+    pub fn net_clients(&self) -> usize {
+        self.net.as_ref().map_or(0, NetSv::peer_count)
+    }
+
+    /// Reads the network for up to `wait`: joins, leaves, client console commands.
+    fn net_service(&mut self, wait: Duration) {
+        let Some(mut net) = self.net.take() else {
+            std::thread::sleep(wait);
+            return;
+        };
+        let info = self.server_info();
+        for i in net.poll(wait, &|| info.clone()) {
+            match i {
+                Inbound::Connect(req) => self.net_accept(&mut net, &req),
+                Inbound::Left(addr) => {
+                    if let Some(slot) = net.slot_of(addr) {
+                        self.net_drop(&mut net, slot);
+                    }
+                }
+            }
+        }
+        for (slot, line) in std::mem::take(&mut net.inbox) {
+            self.net_client_command(&mut net, slot, &line);
+        }
+        for slot in net.timed_out() {
+            self.net_drop(&mut net, slot);
+        }
+        self.net = Some(net);
+    }
+
+    fn server_info(&self) -> Vec<(String, String)> {
+        let c = &self.game.cvars;
+        vec![
+            ("hostname".into(), c.string("sv_hostname").to_owned()),
+            ("mapname".into(), self.map_name().unwrap_or("").to_owned()),
+            ("gametype".into(), c.string("g_gametype").to_owned()),
+            (
+                "clients".into(),
+                self.game.connected_clients().count().to_string(),
+            ),
+            ("sv_maxclients".into(), c.string("sv_maxclients").to_owned()),
+            ("protocol".into(), net::oob::PROTOCOL.to_string()),
+        ]
+    }
+
+    /// A `connect` that passed the challenge: gives the sender a slot like a bot gets one, and
+    /// tells the scripts.
+    fn net_accept(&mut self, net: &mut NetSv, req: &net::connect::ConnectRequest) {
+        let refuse = |net: &mut NetSv, why: &str| {
+            net.t
+                .send_to(req.from, &net::Oob::Error(why.into()).encode());
+        };
+        if net.slot_of(req.from).is_some() {
+            // The response was lost: say it again.
+            net.t.send_to(req.from, &net::Oob::ConnectResponse.encode());
+            return;
+        }
+        let pw = self.game.cvars.string("g_password");
+        if !pw.is_empty() && pw != req.password {
+            return refuse(net, "Invalid password.");
+        }
+        let name: String = req
+            .name
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(31)
+            .collect();
+        let slot = match self.join_human(&name) {
+            Ok(n) => n,
+            Err(why) => return refuse(net, why),
+        };
+        net.add_peer(slot, req, &name);
+        let map = self.map_name().unwrap_or("").to_owned();
+        net.command(slot, &format!("map {map}"));
+        self.say(&format!(
+            "{name} connected as client {slot} from {}\n",
+            req.from
+        ));
+    }
+
+    /// Gives a person a client slot like a bot gets one: the scripts see a connect, a begin and
+    /// a team pick.
+    fn join_human(&mut self, name: &str) -> Result<u16, &'static str> {
+        let Some(run) = self.run.as_mut() else {
+            return Err("No map is loaded.");
+        };
+        let mut host = ScriptHost {
+            game: &mut self.game,
+            dispatch: &run.dispatch,
+        };
+        let Some(slot) = host.game.connect_client(&mut run.vm, false, name) else {
+            return Err("Server is full.");
+        };
+        // The stock scripts kick a client whose profile stats are zero (the original's stand-in
+        // for a checksum); a person here has no profile, so it starts with the nonzero defaults.
+        if let Some(c) = host.game.client_mut(slot) {
+            for i in 0..5 {
+                c.stats.insert(205 + i * 10, 1);
+            }
+        }
+        host.run_calls(&mut run.vm);
+        host.game.client_begin(&mut run.vm, slot);
+        let obj = run.vm.entity(slot, gsc::EntClass::Entity);
+        let mut errors = Vec::new();
+        if let Err(e) = run.vm.call(
+            &mut host,
+            run.test_client,
+            Some(obj),
+            &[Value::str("autoassign")],
+        ) {
+            errors.push(e);
+        }
+        host.run_calls(&mut run.vm);
+        self.record_errors(errors);
+        Ok(slot)
+    }
+
+    fn net_drop(&mut self, net: &mut NetSv, slot: u16) {
+        if let Some(run) = self.run.as_mut() {
+            let mut host = ScriptHost {
+                game: &mut self.game,
+                dispatch: &run.dispatch,
+            };
+            host.game.disconnect_client(&mut run.vm, slot);
+            host.run_calls(&mut run.vm);
+        }
+        net.remove_peer(slot);
+    }
+
+    /// What a connected client may ask of the server.
+    fn net_client_command(&mut self, net: &mut NetSv, slot: u16, line: &str) {
+        let argv = crate::cmd::tokenize(line);
+        match argv.first().map(String::as_str) {
+            Some("disconnect") => self.net_drop(net, slot),
+            Some("menuresponse") if argv.len() >= 3 => {
+                if let Some(run) = self.run.as_mut() {
+                    run.vm.notify_entity(
+                        slot,
+                        "menuresponse",
+                        &[Value::str(&argv[1]), Value::str(&argv[2])],
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -537,6 +712,8 @@ impl Server {
 
     fn start_game(&mut self, map: &str, game_var: Option<Value>) -> Result<(), String> {
         let t0 = Instant::now();
+        // People stay connected across a map change; the level they were in is gone.
+        let humans = self.net.as_mut().map_or_else(Vec::new, NetSv::take_peers);
         self.run = None;
         self.script_errors.clear();
         self.say("------ Server Initialization ------\n");
@@ -561,6 +738,16 @@ impl Server {
             self.run_frame();
         }
         self.flush_game_output();
+        for (mut peer, name) in humans {
+            let j = self.join_human(&name);
+            if let Ok(slot) = j {
+                let map = map.to_owned();
+                let _ = peer.link.command(format!("map {map}"));
+                if let Some(net) = self.net.as_mut() {
+                    net.put_peer(slot, peer);
+                }
+            }
+        }
         if self.bot_target > 0 {
             self.add_bots(self.bot_target)?;
         }
@@ -723,6 +910,13 @@ impl Server {
                 }
                 let t = Instant::now();
                 let Some(mut b) = host.game.clients[usize::from(n)].bot_brain.take() else {
+                    // A person: the usercmds that arrived since the last frame.
+                    let t = Instant::now();
+                    for cmd in self.net.as_mut().map_or_else(Vec::new, |s| s.take_cmds(n)) {
+                        host.game.client_think(&mut run.vm, n, cmd);
+                        host.run_calls(&mut run.vm);
+                    }
+                    client += t.elapsed();
                     continue;
                 };
                 let cmd = b.usercmd(host.game, &mut self.bot_shared, n, self.svs_time);
@@ -763,6 +957,16 @@ impl Server {
             }
             host.game.finish_disconnects(&mut run.vm);
         }
+        let t = Instant::now();
+        if let Some(net) = self.net.as_mut() {
+            for (n, c) in self.game.clients.iter().enumerate() {
+                if c.conn == Conn::Free && net.peers.get(n).is_some_and(Option::is_some) {
+                    net.remove_peer(n as u16);
+                }
+            }
+            net.send_snapshots(&self.game, self.svs_time);
+        }
+        let net_t = t.elapsed();
         self.record_errors(errors);
         if self.game.level.exit_requested {
             self.game.level.exit_requested = false;
@@ -782,7 +986,8 @@ impl Server {
             gsc_ms: gsc.as_secs_f64() * 1000.0,
             bot_ms: bot.as_secs_f64() * 1000.0,
             client_ms: client.as_secs_f64() * 1000.0,
-            game_ms: (total - gsc - bot - client).as_secs_f64() * 1000.0,
+            net_ms: net_t.as_secs_f64() * 1000.0,
+            game_ms: (total - gsc - bot - client - net_t).as_secs_f64() * 1000.0,
         };
         self.ticks += 1;
         s
@@ -858,7 +1063,6 @@ impl Server {
     fn run_until(&mut self, end: Option<Instant>) {
         let frame = Duration::from_millis(self.frame_ms.max(1) as u64);
         let mut next = Instant::now();
-        let mut buf = [0u8; 2048];
         while !self.quit {
             let now = Instant::now();
             if end.is_some_and(|e| now >= e) {
@@ -904,13 +1108,7 @@ impl Server {
             if wait.is_zero() {
                 continue;
             }
-            match &self.socket {
-                Some(s) if s.set_read_timeout(Some(wait)).is_ok() => {
-                    // Packets are dropped until the netcode lands.
-                    let _ = s.recv_from(&mut buf);
-                }
-                _ => std::thread::sleep(wait),
-            }
+            self.net_service(wait);
         }
         self.flush_game_output();
     }
