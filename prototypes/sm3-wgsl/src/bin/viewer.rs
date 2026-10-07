@@ -450,7 +450,7 @@ fn main() {
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let has = |k: &str| args.iter().any(|a| a == k);
     let work = PathBuf::from(get("--work").unwrap_or("/tmp/sm3wgsl-work".into()));
-    let cod4 = PathBuf::from(get("--cod4").unwrap_or("/Users/aidanp/Projects/cod4-decomp/COD4".into()));
+    let cod4 = PathBuf::from(get("--cod4").unwrap_or("./COD4".into()));
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("no adapter");
     let bc = adapter.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC);

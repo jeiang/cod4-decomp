@@ -2,7 +2,7 @@
 # THROWAWAY: end-to-end reproduction. usage: ./run.sh [COD4_DIR]   (default ../../COD4 relative to the main checkout)
 # Everything derived from the original install goes to $WORK (outside the repo).
 set -e
-COD4=${1:-/Users/aidanp/Projects/cod4-decomp/COD4}; WORK=${WORK:-/tmp/sm3wgsl-work}; HERE=$(cd "$(dirname "$0")" && pwd)
+COD4=${1:-./COD4}; WORK=${WORK:-/tmp/sm3wgsl-work}; HERE=$(cd "$(dirname "$0")" && pwd)
 CARGO="nix shell nixpkgs#cargo nixpkgs#rustc -c cargo"
 python3 $HERE/tools/extract.py $COD4/zone/english $WORK            # 1. shader blobs + techset context -> $WORK/{shaders,index.json}
 python3 $HERE/tools/world_extract.py $COD4/zone/english/mp_crash.ff $WORK/world   # 1b. mp_crash world geometry/materials
