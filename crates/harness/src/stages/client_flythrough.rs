@@ -183,7 +183,7 @@ fn env_u64(key: &str) -> Option<u64> {
     std::env::var(key).ok()?.trim().parse().ok()
 }
 
-pub(crate) fn locate_client() -> Option<PathBuf> {
+fn locate_client() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("COD4E_CLIENT") {
         let p = PathBuf::from(p);
         return p.is_file().then_some(p);

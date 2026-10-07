@@ -7,7 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-sim = { path = "../sim" }
 
 [lints]
 workspace = true

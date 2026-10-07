@@ -5,13 +5,16 @@
 //! runs the 30 Hz loop for that long, commands the server lacks are
 //! reported as skipped. Every tick feeds `ticks.csv`; RSS is sampled once a second. Script
 //! runtime errors fail the stage.
-use crate::perf::{Percentiles, TickRecorder, process_rss};
+use crate::perf::{Percentiles, TickRecorder, cgroup_peak, peak_rss, process_rss};
 use crate::script::{Command, Console};
 use crate::stage::{self, StageCtx, StageReport, Status};
 use server::server::{COMMANDS, Server, TICK_SUBSYSTEMS, TickSample};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+/// The dedicated server's memory budget (ticket: 32 players in 512 MB).
+const RSS_BUDGET: u64 = 512 << 20;
 
 struct ServerConsole {
     server: Rc<RefCell<Server>>,
@@ -54,11 +57,22 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
         Ok(r) => Rc::new(RefCell::new(Some(r))),
         Err(e) => return StageReport::new(name, Status::Failed).with_reason(e.to_string()),
     };
+    let rss = Rc::new(RefCell::new(Vec::<f64>::new()));
     {
         let rec = recorder.clone();
+        let rss = rss.clone();
+        let mut ticks = 0u32;
+        let mut last = 0u64;
         server.borrow_mut().on_tick = Some(Box::new(move |t: &TickSample| {
+            if ticks.is_multiple_of(30)
+                && let Some(r) = process_rss()
+            {
+                last = r;
+                rss.borrow_mut().push(r as f64);
+            }
+            ticks += 1;
             if let Some(r) = rec.borrow_mut().as_mut() {
-                let _ = r.push(t.total_ms, &t.subsystems());
+                let _ = r.push(t.total_ms, &t.subsystems(), last);
             }
         }));
     }
@@ -67,26 +81,9 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
         server: server.clone(),
         map_loads: map_loads.clone(),
     };
-    let rss = Rc::new(RefCell::new(Vec::<f64>::new()));
     let sleep = {
         let server = server.clone();
-        let rss = rss.clone();
-        move |d: Duration| {
-            // Run in one-second slices so memory is sampled while waiting.
-            let end = Instant::now() + d;
-            loop {
-                let left = end.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    break;
-                }
-                server
-                    .borrow_mut()
-                    .run_for(left.min(Duration::from_secs(1)));
-                if let Some(r) = process_rss() {
-                    rss.borrow_mut().push(r as f64);
-                }
-            }
-        }
+        move |d: Duration| server.borrow_mut().run_for(d)
     };
     let mut report = stage::run_script_on(name, src, &mut console, sleep);
     drop(console);
@@ -115,10 +112,44 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
             .metrics
             .insert(format!("nav_nodes.{m}"), f64::from(*nodes));
     }
+    // Peak is the kernel's high-water mark, which includes the map-load spike the 1 Hz
+    // samples can miss; steady is the median of the second half of the samples.
     let rss = rss.borrow();
-    if let Some(p) = Percentiles::from_samples(&rss) {
-        report.metrics.insert("rss.peak_bytes".into(), p.max);
-        report.metrics.insert("rss.median_bytes".into(), p.p50);
+    if let Some(p) = peak_rss() {
+        report.metrics.insert("rss.peak_bytes".into(), p as f64);
+        // The server budget is 512 MB; memory use does not depend on runner speed.
+        if p > RSS_BUDGET {
+            report.status = Status::Failed;
+            report
+                .notes
+                .push(format!("rss: peak {p} B is over the {RSS_BUDGET} B budget"));
+        }
+    }
+    if let Some(p) = cgroup_peak() {
+        report
+            .metrics
+            .insert("rss.cgroup_peak_bytes".into(), p as f64);
+    }
+    match Percentiles::from_samples(&rss[rss.len() / 2..]) {
+        Some(p) => {
+            report.metrics.insert("rss.steady_bytes".into(), p.p50);
+            if let Some(peak) = peak_rss()
+                && (peak as f64) < p.p50
+            {
+                report.status = Status::Failed;
+                report.notes.push(format!(
+                    "rss: kernel peak {peak} B is below the steady sample {} B",
+                    p.p50
+                ));
+            }
+        }
+        None if s.ticks > 0 => {
+            report.status = Status::Failed;
+            report
+                .notes
+                .push("rss: no samples over a running server".into());
+        }
+        None => {}
     }
     if let Some(r) = process_rss() {
         report.metrics.insert("rss.final_bytes".into(), r as f64);
