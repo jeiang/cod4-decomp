@@ -42,7 +42,7 @@ impl Props {
             .iter()
             .filter_map(|s| {
                 let m = s.model.clone()?;
-                (m.contents != 0 && m.coll_lod >= 0).then(|| Prop {
+                (m.contents != 0 && m.coll_lod >= 0).then_some(Prop {
                     model: m,
                     origin: s.origin,
                     rows: s.inv_scaled_axis,
