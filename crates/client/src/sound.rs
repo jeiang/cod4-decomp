@@ -574,13 +574,19 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         format!("{} aliases", s.bank.stats.aliases),
     );
     m.insert("aliases".into(), s.bank.stats.aliases.into());
-    // The front end's click and hover sounds exist on the menu channel.
-    for name in ["mouse_click", "mouse_over"] {
-        let on_menu = menus
-            .aliases_of(name)
-            .first()
-            .is_some_and(|a| menus.channels[usize::from(a.channel)].name == "menu");
-        check(on_menu, format!("no menu sound {name}"));
+    // The front end's click and hover sounds sit in the SP code zone, which MP-only installs lack.
+    let has_sp = Install::open(install)
+        .map(|i| i.zone_path("code_post_gfx").is_some())
+        .unwrap_or(false);
+    m.insert("menu_sounds_available".into(), u8::from(has_sp).into());
+    if has_sp {
+        for name in ["mouse_click", "mouse_over"] {
+            let on_menu = menus
+                .aliases_of(name)
+                .first()
+                .is_some_and(|a| menus.channels[usize::from(a.channel)].name == "menu");
+            check(on_menu, format!("no menu sound {name}"));
+        }
     }
 
     // Direction and falloff of a weapon shot: the listener faces +x, its left is +y.
