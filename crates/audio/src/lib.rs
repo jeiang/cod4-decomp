@@ -6,7 +6,9 @@ pub mod curve;
 pub mod decode;
 pub mod device;
 pub mod engine;
+pub mod eq;
 pub mod mixer;
+pub mod reverb;
 pub mod ring;
 
 pub use engine::{Cue, Sound};

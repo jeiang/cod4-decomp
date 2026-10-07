@@ -52,6 +52,8 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("playsoundasmaster", r(super::sound::play_sound)),
     ("playsoundtoteam", r(super::sound::play_sound_to_team)),
     ("playsoundtoplayer", r(super::sound::play_sound_to_player)),
+    ("setreverb", r(super::sound::set_reverb)),
+    ("deactivatereverb", r(super::sound::deactivate_reverb)),
     ("logstring", r(|_, _, _, _| Ok(Value::Undefined))),
     ("fireweapon", Later("M8 vehicles")),
     // hud elements

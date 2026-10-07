@@ -8,6 +8,7 @@
 //! - the server's sound commands (`script::sound` in the server crate): script `playsound`, local sounds,
 //!   loops, the map's ambience and the music.
 
+use crate::events::ClientEvent;
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::weapon::WeaponDef;
 use audio::bank::Bank;
@@ -38,6 +39,8 @@ pub struct ClientSound {
     dropped: u64,
     /// Server commands that arrived while the tables loaded (the map's ambience is sent on connect).
     pending: Vec<String>,
+    /// Where the listener is, for sounds that depend on it (bullet whiz-bys).
+    eye: [f32; 3],
 }
 
 /// Who an event belongs to.
@@ -70,6 +73,7 @@ impl ClientSound {
             own_seq: None,
             dropped: 0,
             pending: Vec::new(),
+            eye: [0.0; 3],
         }
     }
 
@@ -90,6 +94,7 @@ impl ClientSound {
 
     /// Once a frame: the listener (the eye, `yaw` in radians counter-clockwise from +x) and the mixer's upkeep.
     pub fn frame(&mut self, eye: [f32; 3], yaw: f32, dt: f32) {
+        self.eye = eye;
         let Some(s) = self.ready() else { return };
         s.set_listener(eye, yaw);
         s.tick(Duration::from_secs_f32(dt.clamp(0.0, 0.25)));
@@ -115,6 +120,97 @@ impl ClientSound {
         };
         if let Some(n) = names.iter().find(|n| s.bank.has(n)) {
             s.play(n, cue);
+        }
+    }
+
+    /// Plays `alias` at a world position (effect sounds, impacts).
+    pub fn play_world(&mut self, alias: &str, origin: [f32; 3]) {
+        self.play(
+            alias,
+            Cue {
+                origin: Some(origin),
+                ..Cue::default()
+            },
+        );
+    }
+
+    /// The sounds of the world events (see [`crate::events`]): bullet impacts and whiz-bys, explosions and
+    /// bounces. `weapon` finds a weapon by index; `muzzle` where a shooter's bullets start.
+    pub fn world_events(
+        &mut self,
+        events: &[ClientEvent],
+        weapon: &dyn Fn(u16) -> Option<Arc<WeaponDef>>,
+        muzzle: &dyn Fn(u16) -> Option<[f32; 3]>,
+    ) {
+        for e in events {
+            match e {
+                ClientEvent::BulletImpact {
+                    origin,
+                    surface,
+                    weapon: w,
+                    shooter,
+                    ..
+                } => {
+                    let def = weapon(*w);
+                    let prefix = match def.as_ref().map(|d| d.impact_type) {
+                        Some(IMPACT_BULLET_SMALL) => "bullet_small",
+                        Some(IMPACT_BULLET_LARGE) => "bullet_large",
+                        Some(IMPACT_BULLET_AP) => "bullet_ap",
+                        Some(IMPACT_SHOTGUN) => "bulletspray_small",
+                        _ => continue,
+                    };
+                    self.surface_sound(prefix, *surface, *origin);
+                    if let Some(start) = muzzle(*shooter) {
+                        self.whizby(start, *origin);
+                    }
+                }
+                ClientEvent::Explosion {
+                    origin, weapon: w, ..
+                } => {
+                    let prefix = match weapon(*w).map(|d| d.impact_type) {
+                        Some(IMPACT_GRENADE_EXPLODE) => "grenade_explode",
+                        Some(IMPACT_ROCKET_EXPLODE) => "rocket_explode",
+                        _ => continue,
+                    };
+                    // The server does not say what the blast sat on.
+                    self.surface_sound(prefix, 0, *origin);
+                }
+                ClientEvent::MissileBounce {
+                    origin,
+                    surface,
+                    weapon: w,
+                    ..
+                } => {
+                    let name = weapon(*w)
+                        .and_then(|d| d.bounce_sound.as_ref()?.get(usize::from(*surface))?.clone());
+                    if let Some(name) = name.filter(|n| !n.is_empty()) {
+                        self.play_world(&name, *origin);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `<prefix>_<surface>`, else `<prefix>_default`.
+    fn surface_sound(&mut self, prefix: &str, surface: u8, at: [f32; 3]) {
+        let mut names: Vec<String> = surface_names(surface)
+            .into_iter()
+            .map(|s| format!("{prefix}_{s}"))
+            .collect();
+        names.dedup();
+        self.play_first(
+            &names,
+            Cue {
+                origin: Some(at),
+                ..Cue::default()
+            },
+        );
+    }
+
+    fn whizby(&mut self, start: [f32; 3], end: [f32; 3]) {
+        if let Some(at) = whizby_at(self.eye, start, end) {
+            self.play_world("whizby", at);
         }
     }
 
@@ -149,18 +245,7 @@ impl ClientSound {
             self.play(&name, cue);
             return;
         }
-        let surf = |s: u8| -> Vec<String> {
-            let name = SURFACE_TYPE_NAMES
-                .get(usize::from(s))
-                .copied()
-                .unwrap_or("default");
-            let mut v = vec![name.to_owned()];
-            if name == "asphalt" {
-                v.push("asphault".into());
-            }
-            v.push("default".into());
-            v
-        };
+        let surf = surface_names;
         let step = |kind: &str, parm: u8| -> Vec<String> {
             surf(parm)
                 .into_iter()
@@ -199,6 +284,8 @@ impl ClientSound {
                     | "ambientstop"
                     | "music"
                     | "musicstop"
+                    | "reverb"
+                    | "reverboff"
             )
         )
     }
@@ -277,6 +364,21 @@ impl ClientSound {
                     s.music_stop(fade.parse().unwrap_or(0));
                 }
             }
+            ("reverb", [prio, room, wet, fade]) => {
+                if let (Some(s), Ok(p)) = (self.ready(), prio.parse::<usize>()) {
+                    s.set_reverb(
+                        p,
+                        room,
+                        wet.parse().unwrap_or(0.0),
+                        fade.parse().unwrap_or(0),
+                    );
+                }
+            }
+            ("reverboff", [prio, fade]) => {
+                if let (Some(s), Ok(p)) = (self.ready(), prio.parse::<usize>()) {
+                    s.deactivate_reverb(p, fade.parse().unwrap_or(0));
+                }
+            }
             _ => {}
         }
     }
@@ -319,6 +421,64 @@ impl ClientSound {
             }
         }
     }
+}
+
+const IMPACT_BULLET_SMALL: i32 = 1;
+const IMPACT_BULLET_LARGE: i32 = 2;
+const IMPACT_BULLET_AP: i32 = 3;
+const IMPACT_SHOTGUN: i32 = 4;
+const IMPACT_GRENADE_EXPLODE: i32 = 6;
+const IMPACT_ROCKET_EXPLODE: i32 = 7;
+
+/// The surface name an alias may use, then the stock alias's spelling of it, then `default`.
+fn surface_names(s: u8) -> Vec<String> {
+    let name = SURFACE_TYPE_NAMES
+        .get(usize::from(s))
+        .copied()
+        .unwrap_or("default");
+    let mut v = vec![name.to_owned()];
+    if name == "asphalt" {
+        v.push("asphault".into());
+    }
+    v.push("default".into());
+    v
+}
+
+/// `WhizbySound`: a bullet passing within 140 units of the listener, at least 64 past its start, makes
+/// the `whizby` sound at the nearest point of its path, 16 units back.
+fn whizby_at(eye: [f32; 3], start: [f32; 3], end: [f32; 3]) -> Option<[f32; 3]> {
+    let d = sub(end, start);
+    let len = dot(d, d).sqrt();
+    if len < 1.0 {
+        return None;
+    }
+    let dir = [d[0] / len, d[1] / len, d[2] / len];
+    let along = dot(sub(eye, start), dir);
+    if along < 64.0 || len < along {
+        return None;
+    }
+    let at = [
+        start[0] + dir[0] * (along - 16.0),
+        start[1] + dir[1] * (along - 16.0),
+        start[2] + dir[2] * (along - 16.0),
+    ];
+    let off = sub(
+        [
+            at[0] + dir[0] * 16.0,
+            at[1] + dir[1] * 16.0,
+            at[2] + dir[2] * 16.0,
+        ],
+        eye,
+    );
+    (dot(off, off) <= 140.0 * 140.0).then_some(at)
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 fn load(install: &Path, map: &str) -> Result<Bank, String> {
@@ -487,6 +647,114 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             active as usize <= cap,
             format!("{active} impact voices, cap {cap}"),
         );
+    }
+
+    // A bullet passing the listener whizzes by on the side it passes; one far away or starting too close does not.
+    let near_miss = whizby_at([0.0; 3], [-500.0, 60.0, 0.0], [500.0, 60.0, 0.0]);
+    check(
+        near_miss.is_some_and(|p| p[1] > 0.0),
+        format!("no whizby for a near miss: {near_miss:?}"),
+    );
+    check(
+        whizby_at([0.0; 3], [-500.0, 400.0, 0.0], [500.0, 400.0, 0.0]).is_none(),
+        "a far miss whizzed".into(),
+    );
+    check(
+        whizby_at([0.0; 3], [-20.0, 60.0, 0.0], [500.0, 60.0, 0.0]).is_none(),
+        "a bullet starting beside the listener whizzed".into(),
+    );
+    if let Some(p) = near_miss {
+        let w = s.play(
+            "whizby",
+            Cue {
+                origin: Some(p),
+                ..Cue::default()
+            },
+        );
+        check(w.is_some(), "whizby did not play".into());
+        let e = energy(&mut s, 24_000);
+        check(
+            e[0] > e[1],
+            format!("a whizby on the left is not left: {e:?}"),
+        );
+    }
+    // Impact, explosion and bounce sounds exist for the surfaces.
+    for prefix in [
+        "bullet_small",
+        "bullet_large",
+        "bullet_ap",
+        "bulletspray_small",
+        "grenade_explode",
+        "rocket_explode",
+    ] {
+        check(
+            surface_names(5)
+                .iter()
+                .any(|n| s.bank.has(&format!("{prefix}_{n}"))),
+            format!("no {prefix} sound for concrete"),
+        );
+    }
+
+    // Room reverb: a shot leaves a tail in a hangar that a dry room does not, and the effect falls back when
+    // deactivated. Then an EQ: a 300 Hz low-pass takes the crack out of the shot's channel.
+    let shot_energy = |s: &mut Sound| {
+        let at = Cue {
+            origin: Some([300.0, 0.0, 0.0]),
+            ..Cue::default()
+        };
+        s.play(shot, at);
+        let body = energy(s, 24_000);
+        let tail = energy(s, 96_000);
+        (body[0] + body[1], tail[0] + tail[1])
+    };
+    let (_, dry_tail) = shot_energy(&mut s);
+    check(
+        s.set_reverb(1, "hangar", 1.0, 0),
+        "hangar is not a room".into(),
+    );
+    let (_, wet_tail) = shot_energy(&mut s);
+    s.deactivate_reverb(1, 0);
+    let (_, off_tail) = shot_energy(&mut s);
+    check(
+        wet_tail > 4.0 * dry_tail.max(1e-9),
+        format!("no reverb tail: dry {dry_tail} wet {wet_tail}"),
+    );
+    check(
+        off_tail < 2.0 * dry_tail.max(1e-9) + 1e-6,
+        format!("the reverb stayed on: {off_tail} vs {dry_tail}"),
+    );
+    check(
+        !s.set_reverb(1, "nowhere", 1.0, 0),
+        "an unknown room was accepted".into(),
+    );
+    m.insert(
+        "reverb_tail_ratio".into(),
+        (wet_tail / dry_tail.max(1e-9)).into(),
+    );
+    let channel = s
+        .bank
+        .aliases_of(shot)
+        .first()
+        .map(|a| s.bank.channels[usize::from(a.channel)].name.clone());
+    if let Some(channel) = channel {
+        let (open, _) = shot_energy(&mut s);
+        let band = audio::eq::Band {
+            kind: audio::eq::EqType::LowPass,
+            gain_db: 0.0,
+            freq: 300.0,
+            q: 0.707,
+        };
+        check(
+            s.set_eq(&channel, 0, 0, Some(band)),
+            format!("no channel {channel}"),
+        );
+        let (filtered, _) = shot_energy(&mut s);
+        s.set_eq(&channel, 0, 0, None);
+        check(
+            filtered < 0.5 * open,
+            format!("the EQ did not take the shot down: {open} -> {filtered}"),
+        );
+        m.insert("eq_ratio".into(), (filtered / open.max(1e-9)).into());
     }
 
     // Streamed ambience and music play out of the IWDs.

@@ -56,8 +56,6 @@ pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
 pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("setstablemissile", m(set_stable_missile)),
     ("sendleaderboards", Later(M5)),
-    ("setreverb", Later(M7)),
-    ("deactivatereverb", Later(M7)),
     ("setchannelvolumes", Later(M7)),
     ("deactivatechannelvolumes", Later(M7)),
     ("playrumbleonentity", Later(M7)),

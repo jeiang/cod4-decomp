@@ -9,6 +9,7 @@
 //! | `loop <ent> <x> <y> <z> <alias>` / `stoploop <ent> <alias>` | a looping sound on an entity |
 //! | `ambient <fade ms> <alias>` / `ambientstop <fade ms>` | the map's ambience |
 //! | `music <alias>` / `musicstop <fade ms>` | the music, its own stream beside the ambience |
+//! | `reverb <priority> <room> <wet> <fade ms>` / `reverboff <priority> <fade ms>` | `setReverb`: the room effect |
 
 use gsc::{EntRef, Value, Vm};
 
@@ -103,5 +104,41 @@ pub fn music_play(g: &mut Game, _: &mut Vm, a: Args) -> R {
 pub fn music_stop(g: &mut Game, _: &mut Vm, a: Args) -> R {
     g.sound_out
         .push((SoundTo::All, format!("musicstop {}", fade_ms(&a, 0))));
+    Ok(Value::Undefined)
+}
+
+/// `snd_enveffectsprio_level` is 1 and `snd_enveffectsprio_shellshock` 2.
+fn env_priority(a: &Args) -> Result<u8, String> {
+    match a.string(0)?.to_ascii_lowercase().as_str() {
+        "snd_enveffectsprio_level" => Ok(1),
+        "snd_enveffectsprio_shellshock" => Ok(2),
+        _ => Err(
+            "priority must be 'snd_enveffectsprio_level' or 'snd_enveffectsprio_shellshock'".into(),
+        ),
+    }
+}
+
+/// `player setReverb(priority, roomtype, drylevel = 1, wetlevel = 0.5, fadetime = 0)`. The dry level is
+/// accepted but not sent: the original's mixer ignores it (`MSS_GetDryLevel` returns 1).
+pub fn set_reverb(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    if !g.is_client(e.num) {
+        return Err(format!("entity {} is not a player", e.num));
+    }
+    let prio = env_priority(&a)?;
+    let room = a.string(1)?;
+    let wet = a.float(3).unwrap_or(0.5).clamp(0.0, 1.0);
+    let line = format!("reverb {prio} {room} {wet} {}", fade_ms(&a, 4));
+    g.sound_out.push((SoundTo::Client(e.num), line));
+    Ok(Value::Undefined)
+}
+
+/// `player deactivateReverb(priority, fadetime = 0)`.
+pub fn deactivate_reverb(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    if !g.is_client(e.num) {
+        return Err(format!("entity {} is not a player", e.num));
+    }
+    let prio = env_priority(&a)?;
+    let line = format!("reverboff {prio} {}", fade_ms(&a, 1));
+    g.sound_out.push((SoundTo::Client(e.num), line));
     Ok(Value::Undefined)
 }

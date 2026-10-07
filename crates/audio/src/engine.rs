@@ -8,13 +8,18 @@
 use crate::bank::{Alias, Bank, Clip};
 use crate::decode::{self, StreamJob};
 use crate::device::{Config, Output};
+use crate::eq::Band;
 use crate::mixer::{
     Duck, Emitter, Handle, Listener, Mixer, NO_ENTITY, Play, Source, VoiceId, mixer,
 };
+use crate::reverb::room_index;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
+
+/// Environment effect priorities: none, level, shellshock.
+pub const ENV_PRIORITIES: usize = 3;
 
 /// Secondary aliases chain at most this deep (the original stops at 10).
 const MAX_CHAIN: u32 = 10;
@@ -73,6 +78,8 @@ pub struct Sound {
     pub device_note: Option<String>,
     scratch: Vec<f32>,
     owed: f64,
+    /// `setReverb` by priority (`snd_enveffectsprio_level`, `_shellshock`): room and wet level.
+    effects: [Option<(u8, f32)>; ENV_PRIORITIES],
 }
 
 fn stream_thread(rx: Receiver<StreamJob>) {
@@ -142,6 +149,7 @@ impl Sound {
             device_note: note,
             scratch: vec![0.0; 4096],
             owed: 0.0,
+            effects: [None; ENV_PRIORITIES],
         }
     }
 
@@ -289,6 +297,7 @@ impl Sound {
             Duck::None
         };
         p.speaker = alias.speaker[usize::from(stereo)];
+        p.wet = !alias.no_wet;
         self.handle.play(p);
         if alias.looping && cue.entity != NO_ENTITY {
             self.loops.insert(key, id);
@@ -352,5 +361,55 @@ impl Sound {
         if let Some(old) = self.music.take() {
             self.handle.fade_out(old, fade_ms);
         }
+    }
+
+    /// `snd_setEnvironmentEffects`: the room and wet level of one priority, faded in over `fade_ms`. The
+    /// highest active priority is the one heard. The original's dry level is fixed at 1 and is not used.
+    /// Returns false for an unknown room or priority.
+    pub fn set_reverb(&mut self, priority: usize, room: &str, wet: f32, fade_ms: u32) -> bool {
+        let (Some(room), true) = (room_index(room), (1..ENV_PRIORITIES).contains(&priority)) else {
+            return false;
+        };
+        self.effects[priority] = Some((room, wet.clamp(0.0, 1.0)));
+        self.send_reverb(fade_ms);
+        true
+    }
+
+    /// `snd_deactivateEnvironmentEffects`: falls back to the next lower active priority, or to no reverb.
+    pub fn deactivate_reverb(&mut self, priority: usize, fade_ms: u32) {
+        if let Some(e) = self.effects.get_mut(priority) {
+            *e = None;
+        }
+        self.send_reverb(fade_ms);
+    }
+
+    fn send_reverb(&mut self, fade_ms: u32) {
+        let (room, wet) = self
+            .effects
+            .iter()
+            .rev()
+            .flatten()
+            .next()
+            .copied()
+            .unwrap_or((0, 0.0));
+        self.handle.set_reverb(room, wet, fade_ms);
+    }
+
+    /// `snd_setEq`: sets one band of an entity channel's EQ (`eq` 0 or 1, `band` 0 to 2). Returns false for an
+    /// unknown channel or an index out of range.
+    pub fn set_eq(&mut self, channel: &str, eq: u8, band: u8, set: Option<Band>) -> bool {
+        let Some(row) = self
+            .bank
+            .channels
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(channel))
+        else {
+            return false;
+        };
+        if usize::from(eq) >= crate::eq::EQS || usize::from(band) >= crate::eq::BANDS {
+            return false;
+        }
+        self.handle.set_eq(row as u8, eq, band, set);
+        true
     }
 }

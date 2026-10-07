@@ -41,6 +41,8 @@ pub struct Alias {
     pub looping: bool,
     pub random_looping: bool,
     pub master: bool,
+    /// The alias keeps out of the room reverb.
+    pub no_wet: bool,
     pub slave: bool,
     pub slave_percentage: f32,
     pub delay_ms: u32,
@@ -243,6 +245,7 @@ impl Bank {
             looping: a.looping(),
             random_looping: a.random_looping(),
             master: a.master(),
+            no_wet: a.no_wet_level(),
             slave: a.slave(),
             slave_percentage: a.slave_percentage,
             delay_ms: u32::try_from(a.start_delay).unwrap_or(0),
