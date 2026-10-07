@@ -47,7 +47,7 @@
           in
           pkgs.mkShell {
             packages = [ (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml) ];
-            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux (pkgs.lib.makeLibraryPath windowLibs);
+            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath windowLibs);
           };
       });
       formatter = forAll (pkgs: pkgs.nixfmt);
