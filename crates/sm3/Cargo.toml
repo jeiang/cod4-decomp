@@ -8,5 +8,9 @@ publish = false
 
 [dependencies]
 
+[dev-dependencies]
+flate2 = "1"
+naga = { version = "30.0.1", features = ["wgsl-in", "wgsl-out"] }
+
 [lints]
 workspace = true
