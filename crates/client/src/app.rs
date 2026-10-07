@@ -162,11 +162,10 @@ impl Viewer {
         let gpu =
             Arc::new(Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?);
         let caps = surface.get_capabilities(&gpu.adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| !f.is_srgb())
+        // The shaders write display-referred values: an 8-bit linear (non-sRGB) target, not an HDR one.
+        let format = [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm]
+            .into_iter()
+            .find(|f| caps.formats.contains(f))
             .unwrap_or(caps.formats[0]);
         let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
         let copy_src = caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
