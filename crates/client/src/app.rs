@@ -494,15 +494,8 @@ impl ApplicationHandler for Viewer {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !self.cli.timed() && !captured && st.renderer.is_some() => {
-                st.grabbed = st
-                    .window
-                    .set_cursor_grab(CursorGrabMode::Locked)
-                    .or_else(|_| st.window.set_cursor_grab(CursorGrabMode::Confined))
-                    .is_ok();
-                st.window.set_cursor_visible(!st.grabbed);
-                st.input.set_captured(st.grabbed);
-            }
+            } if !self.cli.timed() && !captured && st.renderer.is_some() => grab_pointer(st),
+            WindowEvent::Focused(false) => release_pointer(st),
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.frame(el) {
                     self.error = Some(e);
@@ -531,6 +524,10 @@ impl Viewer {
         st.last_t = t;
 
         let menu_open = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
+        if menu_open {
+            // A locked cursor never moves, so the menu could not be clicked.
+            release_pointer(st);
+        }
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
             (st.pos, st.yaw, st.pitch) = (p, y, pi);
@@ -544,19 +541,16 @@ impl Viewer {
                 let f = st.input.frame(dt);
                 if menu_open { InputFrame::default() } else { f }
             };
-            for c in &f.pending_commands {
-                match c.as_str() {
-                    "quit" => el.exit(),
-                    "togglemenu" => {
-                        if let Some(sh) = st.shell.as_mut() {
-                            let menu = st.input.cvar("g_scriptMainMenu").unwrap_or("").to_owned();
-                            sh.open(&mut st.input, &menu);
-                        }
-                    }
-                    _ => {}
-                }
+            if f.quit() {
+                el.exit();
             }
-            if self.cli.autoplay && f.pending_commands.iter().any(|c| c == "togglemenu") {
+            if f.toggle_menu()
+                && let Some(sh) = st.shell.as_mut()
+            {
+                let menu = st.input.cvar("g_scriptMainMenu").unwrap_or("").to_owned();
+                sh.open(&mut st.input, &menu);
+            }
+            if self.cli.autoplay && f.toggle_menu() {
                 el.exit();
             }
             if let Some(why) = net.refused() {
@@ -577,6 +571,9 @@ impl Viewer {
                     }
                 }
             }
+            if f.toggle_menu() {
+                release_pointer(st);
+            }
             if let Some(nf) = frame_out {
                 (st.pos, st.yaw, st.pitch) = (nf.origin, nf.yaw, nf.pitch);
                 if let Some(r) = st.renderer.as_mut() {
@@ -590,8 +587,11 @@ impl Viewer {
             }
         } else {
             let f = st.input.frame(dt);
-            if f.pending_commands.iter().any(|c| c == "quit") {
+            if f.quit() {
                 el.exit();
+            }
+            if f.toggle_menu() {
+                release_pointer(st);
             }
             if st.renderer.is_some() && st.shell.is_none() {
                 fly(st, &f, dt);
@@ -1117,17 +1117,34 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
     st.listen = None;
     st.renderer = None;
     *map_slot = None;
-    if st.grabbed {
-        let _ = st.window.set_cursor_grab(CursorGrabMode::None);
-        st.window.set_cursor_visible(true);
-        st.input.set_captured(false);
-        st.grabbed = false;
-    }
+    release_pointer(st);
     if let Some(sh) = st.shell.as_mut() {
         sh.st.in_game = false;
         sh.close_all(&mut st.input);
         sh.open(&mut st.input, "main");
     }
+}
+
+/// Lock the cursor to the window (a click). `captured` follows what the OS actually granted.
+fn grab_pointer(st: &mut State) {
+    st.grabbed = st
+        .window
+        .set_cursor_grab(CursorGrabMode::Locked)
+        .or_else(|_| st.window.set_cursor_grab(CursorGrabMode::Confined))
+        .is_ok();
+    st.window.set_cursor_visible(!st.grabbed);
+    st.input.set_captured(st.grabbed);
+}
+
+/// Give the cursor back: Escape (`togglemenu`), the menu, or the window losing focus (winit leaves a macOS lock on
+/// across focus changes, which freezes the cursor over other apps). A click takes it again. Never quits.
+fn release_pointer(st: &mut State) {
+    if st.grabbed {
+        let _ = st.window.set_cursor_grab(CursorGrabMode::None);
+        st.window.set_cursor_visible(true);
+        st.grabbed = false;
+    }
+    st.input.set_captured(false);
 }
 
 /// Free-fly camera driven by the player input. Fly-cam pitch is positive up; input pitch is positive down.

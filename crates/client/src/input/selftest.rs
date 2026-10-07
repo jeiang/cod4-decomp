@@ -3,7 +3,7 @@
 //! and mouse events (no window, GPU, install or timing involved) and checks what comes out. Prints one line per check;
 //! returns the failures.
 
-use super::{Input, buttons};
+use super::{Input, RawMouse, buttons};
 
 fn check(out: &mut Vec<String>, name: &str, ok: bool) {
     println!("{} {name}", if ok { "pass" } else { "FAIL" });
@@ -74,6 +74,48 @@ pub fn run() -> Vec<String> {
         o,
         "mouse look scaled by sensitivity, m_yaw, m_pitch",
         (f.look_delta_yaw, f.look_delta_pitch) == (-10.0, 2.0),
+    );
+
+    // Escape opens the menu (and releases the pointer); it never quits. Only `quit` does.
+    i.key("escape", true);
+    let esc = i.frame(0.01);
+    i.key("escape", false);
+    check(
+        o,
+        "escape -> togglemenu, not quit",
+        esc.toggle_menu() && !esc.quit(),
+    );
+    i.exec_line("quit");
+    check(o, "quit command -> quit", i.frame(0.01).quit());
+
+    // Mouse look is gated on focus and on the pointer being locked; motion made meanwhile is not replayed.
+    i.set_captured(false);
+    i.mouse.winit_motion((10.0, 4.0));
+    let free = i.frame(0.01);
+    i.set_captured(true);
+    check(
+        o,
+        "free pointer: no mouse look, and none replayed on recapture",
+        free.look_delta_yaw == 0.0 && i.frame(0.01).look_delta_yaw == 0.0,
+    );
+
+    // GCMouse listed but silent (a trackpad beside a mouse, a dropped handler): winit must take over.
+    let mut m = RawMouse::detached();
+    let mut got = (0.0, 0.0);
+    for _ in 0..10 {
+        let (d, _) = m.select(Some(((0.0, 0.0), 0)), (3.0, 0.0), 1);
+        got.0 += d.0;
+    }
+    check(
+        o,
+        "silent GCMouse: winit motion reaches the view after the stall window",
+        m.gc_silent() && got.0 == 3.0 * 5.0,
+    );
+    let (d, _) = m.select(Some(((7.0, 0.0), 1)), (3.0, 0.0), 1);
+    check(
+        o,
+        "GCMouse reporting again takes over from winit",
+        d.0 == 7.0 && !m.gc_silent(),
     );
 
     // Config write-back and reload through a real file.
