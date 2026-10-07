@@ -20,7 +20,7 @@ pub mod parser;
 pub mod value;
 pub mod vm;
 
-pub use builtins::Builtins;
+pub use builtins::{Builtins, MethodClass};
 pub use bytecode::{Function, Op, Program};
 pub use compiler::{Options, compile};
 pub use error::{CompileError, ErrorKind};
