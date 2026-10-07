@@ -9,7 +9,10 @@ use super::Impl::{self, Later, Real};
 use super::args::{Args, display};
 use super::{FuncFn, hud};
 use crate::cvar;
-use crate::game::{ENTITYNUM_WORLD, Ent, EntKind, Game};
+use crate::game::{Ent, EntKind, Game};
+use sim::Vec3;
+use sim::cm::{Collide, ENTITYNUM_NONE, ENTITYNUM_WORLD};
+use sim::contents;
 
 type R = Result<Value, String>;
 
@@ -30,6 +33,9 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
         r(|_, _, a| Ok(bool_v(matches!(a.get(0)?, Value::Str(_))))),
     ),
     ("isalive", r(is_alive)),
+    ("getanimlength", r(get_anim_length)),
+    ("animhasnotetrack", r(anim_has_notetrack)),
+    ("getnotetracktimes", r(get_notetrack_times)),
     ("isplayer", r(is_player)),
     (
         "isplayernumber",
@@ -306,11 +312,11 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("playrumblelooponposition", Later(M7)),
     ("stopallrumbles", Later(M7)),
     // collision, weapons, bots
-    ("bullettrace", Later(M3)),
-    ("bullettracepassed", Later(M3)),
-    ("sighttracepassed", Later(M3)),
-    ("physicstrace", Later(M3)),
-    ("playerphysicstrace", Later(M3)),
+    ("bullettrace", r(bullet_trace)),
+    ("bullettracepassed", r(bullet_trace_passed)),
+    ("sighttracepassed", r(sight_trace_passed)),
+    ("physicstrace", r(physics_trace)),
+    ("playerphysicstrace", r(player_physics_trace)),
     ("positionwouldtelefrag", Later(M3)),
     ("radiusdamage", Later(M3)),
     ("setplayerignoreradiusdamage", Later(M3)),
@@ -326,8 +332,186 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("getteamplayersalive", Later(M3)),
 ];
 
+/// `Com_SurfaceTypeToName`: the surface type (bits 20..24 of the surface flags) as the scripts
+/// see it. Index 0 and anything past the table is `default`.
+fn surface_type_name(flags: i32) -> &'static str {
+    const NAMES: [&str; 28] = [
+        "bark",
+        "brick",
+        "carpet",
+        "cloth",
+        "concrete",
+        "dirt",
+        "flesh",
+        "foliage",
+        "glass",
+        "grass",
+        "gravel",
+        "ice",
+        "metal",
+        "mud",
+        "paper",
+        "plaster",
+        "rock",
+        "sand",
+        "snow",
+        "water",
+        "wood",
+        "asphalt",
+        "ceramic",
+        "plastic",
+        "rubber",
+        "cushion",
+        "fruit",
+        "paintedmetal",
+    ];
+    let i = ((flags & 0x01F0_0000) >> 20) as usize;
+    i.checked_sub(1)
+        .and_then(|i| NAMES.get(i))
+        .copied()
+        .unwrap_or("default")
+}
+
+/// The `(start, end, hitCharacters, ignoreEntity)` arguments of the shot traces.
+fn shot_args(a: &Args, mask: i32) -> Result<(Vec3, Vec3, u16, i32), String> {
+    let (start, end) = (a.vector(0)?, a.vector(1)?);
+    let mask = if a.int(2)? == 0 {
+        mask & !contents::PLAYER
+    } else {
+        mask
+    };
+    let ignore = match a.opt(3) {
+        Some(Value::Object(o)) => o.entity().map_or(ENTITYNUM_NONE, |e| e.num),
+        _ => ENTITYNUM_NONE,
+    };
+    Ok((start, end, ignore, mask))
+}
+
+fn world(g: &Game) -> Result<&sim::world::World, String> {
+    g.world
+        .as_ref()
+        .ok_or_else(|| "no map is loaded".to_owned())
+}
+
+fn bullet_trace(g: &mut Game, vm: &mut Vm, a: Args) -> R {
+    let (start, end, ignore, mask) = shot_args(&a, contents::MASK_SHOT)?;
+    let t = world(g)?.bullet_trace(start, end, ignore, mask);
+    let mut out = Array::new();
+    let at = |k: &str, v: Value, out: &mut Array| out.set(Key::Str(k.into()), v);
+    at("fraction", Value::Float(t.fraction), &mut out);
+    let pos = std::array::from_fn(|i| start[i] + (end[i] - start[i]) * t.fraction);
+    at("position", Value::Vector(pos), &mut out);
+    let hit = match t.hit_id {
+        ENTITYNUM_NONE | ENTITYNUM_WORLD => Value::Undefined,
+        n => Value::Object(vm.entity(n, EntClass::Entity)),
+    };
+    at("entity", hit, &mut out);
+    if t.fraction >= 1.0 {
+        let d = sub(end, start);
+        let l = len2(d).sqrt();
+        let n = if l == 0.0 {
+            [0.0; 3]
+        } else {
+            [d[0] / l, d[1] / l, d[2] / l]
+        };
+        at("normal", Value::Vector(n), &mut out);
+        at("surfacetype", Value::str("none"), &mut out);
+    } else {
+        at("normal", Value::Vector(t.normal), &mut out);
+        at(
+            "surfacetype",
+            Value::str(surface_type_name(t.surface_flags)),
+            &mut out,
+        );
+    }
+    Ok(Value::Array(Rc::new(out)))
+}
+
+fn bullet_trace_passed(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let (start, end, ignore, mask) = shot_args(&a, contents::MASK_SHOT)?;
+    let ok = world(g)?.trace_passed(start, end, [0.0; 3], [0.0; 3], ignore, ENTITYNUM_NONE, mask);
+    Ok(bool_v(ok))
+}
+
+/// Contents `sighttracepassed` collides with: solid, foliage, sky, no-sight, clip-shot,
+/// vehicles, players (bit-exact from the original).
+const SIGHT_MASK: i32 = 0x0280_1803;
+
+fn sight_trace_passed(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let (start, end, ignore, mask) = shot_args(&a, SIGHT_MASK)?;
+    let blocked = world(g)?.sight_trace(
+        0,
+        start,
+        end,
+        [0.0; 3],
+        [0.0; 3],
+        ignore,
+        ENTITYNUM_NONE,
+        mask,
+    );
+    Ok(bool_v(blocked == 0))
+}
+
+/// Mask of the physics traces: solid, clipshot-less world, player-clip, vehicle (0x820011).
+const PHYSICS_MASK: i32 = 0x0082_0011;
+
+fn physics_at(g: &Game, a: &Args, mins: Vec3, maxs: Vec3) -> R {
+    let (start, end) = (a.vector(0)?, a.vector(1)?);
+    let t = world(g)?.trace(start, end, mins, maxs, ENTITYNUM_NONE, PHYSICS_MASK);
+    Ok(Value::Vector(std::array::from_fn(|i| {
+        start[i] + (end[i] - start[i]) * t.fraction
+    })))
+}
+
+fn physics_trace(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    physics_at(g, &a, [0.0; 3], [0.0; 3])
+}
+
+fn player_physics_trace(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    physics_at(g, &a, [-15.0, -15.0, 0.0], [15.0, 15.0, 70.0])
+}
+
 fn bool_v(b: bool) -> Value {
     Value::Int(i32::from(b))
+}
+
+/// The animation a `%name` value refers to.
+fn anim_arg<'a>(
+    g: &'a Game,
+    a: &Args,
+) -> Result<&'a std::sync::Arc<crate::content::AnimInfo>, String> {
+    match a.get(0)? {
+        Value::Anim(n) => g
+            .content
+            .anim(n)
+            .ok_or_else(|| format!("animation '{n}' is not loaded")),
+        o => Err(format!("type {} is not an anim", o.type_name())),
+    }
+}
+
+fn get_anim_length(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    Ok(Value::Float(anim_arg(g, &a)?.length))
+}
+
+fn anim_has_notetrack(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let name = a.string(1)?;
+    Ok(bool_v(
+        anim_arg(g, &a)?.notes.iter().any(|(n, _)| &**n == name),
+    ))
+}
+
+fn get_notetrack_times(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let name = a.string(1)?;
+    let mut out = Array::new();
+    for (i, (_, t)) in anim_arg(g, &a)?
+        .notes
+        .iter()
+        .filter(|(n, _)| &**n == name)
+        .enumerate()
+    {
+        out.set(Key::Int(i as i32), Value::Float(*t));
+    }
+    Ok(Value::Array(Rc::new(out)))
 }
 
 fn is_defined(_: &mut Game, _: &mut Vm, a: Args) -> R {
@@ -772,6 +956,10 @@ fn spawn(g: &mut Game, vm: &mut Vm, a: Args) -> R {
     e.origin = origin;
     e.spawnflags = flags;
     let n = g.spawn(e)?;
+    let extent = (class == "trigger_radius" && a.len() > 4)
+        .then(|| Ok::<_, String>((a.float(3)?, a.float(4)?)))
+        .transpose()?;
+    g.init_clip(n, extent);
     let obj = vm.entity(n, EntClass::Entity);
     if class == "trigger_radius" {
         for (i, f) in ["radius", "height"].into_iter().enumerate() {
@@ -831,4 +1019,18 @@ fn get_team_flag(g: &mut Game, a: Args, key: &str) -> R {
     let t = team_index(a)?;
     let v = g.configstrings.get(&config_key(&format!("{key}{t}")));
     Ok(Value::Int(v.map_or(0, |s| cvar::parse_int(s))))
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::surface_type_name;
+
+    #[test]
+    fn surface_types_map_to_script_names() {
+        assert_eq!(surface_type_name(0), "default");
+        assert_eq!(surface_type_name(0x0010_0000), "bark");
+        assert_eq!(surface_type_name(0x0150_0000 | 0x2), "wood");
+        assert_eq!(surface_type_name(0x01C0_0000), "paintedmetal");
+        assert_eq!(surface_type_name(0x01D0_0000), "default");
+    }
 }

@@ -10,9 +10,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gsc::{EntClass, Value, Vm};
+use sim::Vec3;
+use sim::cm::ENTITYNUM_NONE;
+use sim::contents;
+use sim::traj::Trajectory;
+use sim::world::{ClipEnt, World};
 
+use crate::anim::AnimTree;
 use crate::content::Content;
 use crate::cvar::{self, Cvars};
+use crate::mover::Mover;
 
 pub const MAX_GENTITIES: usize = 1024;
 pub const ENTITYNUM_WORLD: u16 = 1022;
@@ -142,6 +149,15 @@ pub struct Ent {
     pub dmg: i32,
     pub hidden: bool,
     pub contents: i32,
+    /// Local collision bounds (`r.mins`, `r.maxs`).
+    pub mins: Vec3,
+    pub maxs: Vec3,
+    /// The inline model `*N` this entity clips as (`r.bmodel`).
+    pub brush_model: Option<u16>,
+    /// Script-driven motion of `script_model`, `script_origin` and `script_brushmodel`.
+    pub mv: Mover,
+    /// Animations playing on the entity, if any.
+    pub anim: Option<AnimTree>,
     /// Level time when the slot was freed, in ms.
     pub free_time: i32,
 }
@@ -162,6 +178,11 @@ impl Ent {
             dmg: 0,
             hidden: false,
             contents: 0,
+            mins: [0.0; 3],
+            maxs: [0.0; 3],
+            brush_model: None,
+            mv: Mover::default(),
+            anim: None,
             free_time: 0,
         }
     }
@@ -218,6 +239,8 @@ pub struct Game {
     pub content: Content,
     pub level: Level,
     pub ents: Vec<Option<Ent>>,
+    /// Collision world of the loaded map with every solid entity linked into it.
+    pub world: Option<World>,
     pub hudelems: Vec<HudElem>,
     pub field_types: HashMap<String, FieldTy>,
     pub models: Precache,
@@ -246,6 +269,7 @@ impl Game {
             content,
             level: Level::default(),
             ents: Vec::new(),
+            world: None,
             hudelems: Vec::new(),
             field_types: HashMap::new(),
             models: Precache::default(),
@@ -308,6 +332,9 @@ impl Game {
             && let Some(e) = slot.take()
         {
             let _ = e;
+            if let Some(w) = self.world.as_mut() {
+                w.unlink(num);
+            }
             vm.free_entity(num);
         }
     }
@@ -316,6 +343,7 @@ impl Game {
     pub fn reset_level(&mut self, max_clients: usize) {
         self.level = Level::default();
         self.ents.clear();
+        self.world = None;
         self.hudelems.clear();
         self.models = Precache::default();
         self.shaders = Precache::default();
@@ -347,6 +375,61 @@ impl Game {
         self.rng ^= self.rng << 25;
         self.rng ^= self.rng >> 27;
         (self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u32
+    }
+
+    /// `SV_LinkEntity`: publishes entity `num`'s origin, angles, bounds and contents to the
+    /// collision world. Call after any of them changes.
+    pub fn relink(&mut self, num: u16) {
+        let (Some(w), Some(Some(e))) = (self.world.as_mut(), self.ents.get(usize::from(num)))
+        else {
+            return;
+        };
+        w.link(
+            num,
+            &ClipEnt {
+                contents: e.contents,
+                origin: e.origin,
+                angles: e.angles,
+                mins: e.mins,
+                maxs: e.maxs,
+                brush_model: e.brush_model,
+                owner: ENTITYNUM_NONE,
+            },
+        );
+    }
+
+    /// The collision setup of the entity classes that clip (`SP_script_model`,
+    /// `SP_script_brushmodel`, `SP_script_origin`, inline-model triggers), then links it.
+    pub fn init_clip(&mut self, num: u16, radius_height: Option<(f32, f32)>) {
+        let Some(w) = self.world.as_ref() else { return };
+        let Some(e) = self.ents.get_mut(usize::from(num)).and_then(Option::as_mut) else {
+            return;
+        };
+        let inline = e
+            .model
+            .strip_prefix('*')
+            .and_then(|n| n.parse::<u16>().ok());
+        if let Some((mins, maxs)) = inline.and_then(|n| w.collision().model_bounds(n)) {
+            let n = inline.unwrap_or_default();
+            e.mins = mins;
+            e.maxs = maxs;
+            e.brush_model = Some(n);
+            e.contents = w.collision().model_contents(n);
+        }
+        match &*e.classname {
+            "script_model" => e.contents = contents::MISSILECLIP | contents::CLIPSHOT,
+            "trigger_hurt" => e.contents = TRIGGER_HURT_CONTENTS,
+            "trigger_radius" | "trigger_disk" => {
+                if let Some((r, h)) = radius_height {
+                    e.mins = [-r, -r, 0.0];
+                    e.maxs = [r, r, h];
+                }
+                e.contents = sentient_trigger(e.spawnflags);
+            }
+            "trigger_multiple" | "trigger_once" => e.contents = sentient_trigger(e.spawnflags),
+            _ => {}
+        }
+        self.relink(num);
     }
 
     /// `G_SpawnEntitiesFromString` for the map's entity string: the worldspawn first, then
@@ -381,6 +464,9 @@ impl Game {
             },
         );
         self.level.north_yaw = cvar::parse_float(north);
+        if let Some(clip) = self.content.clipmap() {
+            self.world = Some(World::new(clip.clone()));
+        }
         let mut w = Ent::new(EntKind::World, "worldspawn");
         w.spawnflags = cvar::parse_int(get(world, "spawnflags").unwrap_or("0"));
         if self.ents.len() <= usize::from(ENTITYNUM_WORLD) {
@@ -404,6 +490,9 @@ impl Game {
             let mut e = Ent::new(kind, class);
             apply_spawn_vars(&mut e, vars);
             let num = self.spawn(e)?;
+            let radius = get(vars, "radius").map(cvar::parse_float);
+            let height = get(vars, "height").map(cvar::parse_float);
+            self.init_clip(num, radius.zip(height));
             let obj = vm.entity(num, EntClass::Entity);
             for (k, v) in vars {
                 if let Some(ty) = self.field_types.get(&k.to_ascii_lowercase()) {
@@ -413,6 +502,27 @@ impl Game {
         }
         Ok(())
     }
+}
+
+/// `trigger_hurt` contents: every trigger type (`CONTENTS_ANY_TRIGGER`).
+const TRIGGER_HURT_CONTENTS: i32 = 0x405C_0008;
+
+/// `InitSentientTrigger`: which kinds of player set the trigger off.
+fn sentient_trigger(spawnflags: i32) -> i32 {
+    let mut c = 0;
+    if spawnflags & 8 == 0 {
+        c |= contents::PLAYERTRIGGER;
+    }
+    if spawnflags & 1 != 0 {
+        c |= contents::AXISTRIGGER;
+    }
+    if spawnflags & 2 != 0 {
+        c |= contents::ALLIESTRIGGER;
+    }
+    if spawnflags & 4 != 0 {
+        c |= contents::NEUTRALTRIGGER;
+    }
+    c
 }
 
 /// Configstring indices the game fills at spawn (`CS_*` of the original).
@@ -493,8 +603,14 @@ pub fn set_ent_field(e: &mut Ent, name: &str, v: &Value) -> Result<bool, String>
         "classname" | "model" | "spawnflags" => {
             return Err(format!("field '{name}' is read-only"));
         }
-        "origin" => e.origin = vec(v)?,
-        "angles" => e.angles = vec(v)?,
+        "origin" => {
+            e.origin = vec(v)?;
+            e.mv.pos.tr = Trajectory::stationary(e.origin);
+        }
+        "angles" => {
+            e.angles = vec(v)?;
+            e.mv.ang.tr = Trajectory::stationary(e.angles);
+        }
         "target" => e.target = string(v)?,
         "targetname" => e.targetname = string(v)?,
         "count" => e.count = int(v)?,

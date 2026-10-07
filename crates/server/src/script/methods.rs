@@ -7,6 +7,8 @@ use gsc::{EntClass, EntRef, Value, Vm};
 use super::Impl::{self, Later, Real};
 use super::{Args, MethFn, hud};
 use crate::game::{EntKind, Game};
+use crate::mover;
+use sim::contents;
 
 type R = Result<Value, String>;
 
@@ -34,6 +36,22 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("notsolid", r(|g, _, e, _| set_solid(g, e, false))),
     ("setcontents", r(set_contents)),
     ("setcandamage", Later(M3)),
+    ("moveto", r(|g, _, e, a| mover::move_to(g, e, a))),
+    ("movex", r(|g, _, e, a| mover::move_axis(g, e, a, 0))),
+    ("movey", r(|g, _, e, a| mover::move_axis(g, e, a, 1))),
+    ("movez", r(|g, _, e, a| mover::move_axis(g, e, a, 2))),
+    ("movegravity", r(|g, _, e, a| mover::move_gravity(g, e, a))),
+    ("rotateto", r(|g, _, e, a| mover::rotate_to(g, e, a))),
+    (
+        "rotatepitch",
+        r(|g, _, e, a| mover::rotate_axis(g, e, a, 0)),
+    ),
+    ("rotateyaw", r(|g, _, e, a| mover::rotate_axis(g, e, a, 1))),
+    ("rotateroll", r(|g, _, e, a| mover::rotate_axis(g, e, a, 2))),
+    (
+        "rotatevelocity",
+        r(|g, _, e, a| mover::rotate_velocity(g, e, a)),
+    ),
     ("istouching", r(|_, _, _, _| Ok(Value::Int(0)))),
     ("linkto", Later(M3)),
     ("unlink", Later(M3)),
@@ -105,10 +123,34 @@ fn set_hidden(g: &mut Game, e: EntRef, hidden: bool) -> R {
     Ok(Value::Undefined)
 }
 
+/// `solid` / `notsolid`: scripted brush models are solid to everything, script models only to
+/// weapon clips; `script_origin` has no extent and ignores both.
 fn set_solid(g: &mut Game, e: EntRef, solid: bool) -> R {
     live(g, e)?;
-    if let Some(ent) = g.ent_mut(e.num) {
-        ent.contents = if solid { 1 } else { 0 };
+    let Some(ent) = g.ent_mut(e.num) else {
+        return Ok(Value::Undefined);
+    };
+    match &*ent.classname {
+        "script_brushmodel" | "script_model" | "light" => {
+            ent.contents = match (solid, &*ent.classname) {
+                (false, _) => 0,
+                (true, "script_model") => contents::MISSILECLIP | contents::CLIPSHOT,
+                (true, _) => contents::SOLID,
+            };
+            g.relink(e.num);
+        }
+        "script_origin" => {
+            g.print(format!(
+                "cannot use the solid/notsolid commands on a script_origin entity( number {} )\n",
+                e.num
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "entity {} is not a script_brushmodel, script_model, script_origin, or light",
+                e.num
+            ));
+        }
     }
     Ok(Value::Undefined)
 }
@@ -119,6 +161,7 @@ fn set_contents(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     if let Some(ent) = g.ent_mut(e.num) {
         ent.contents = c;
     }
+    g.relink(e.num);
     Ok(Value::Undefined)
 }
 
