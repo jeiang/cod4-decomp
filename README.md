@@ -27,7 +27,7 @@ nix develop -c cargo run --release -p harness -- stages              # list stag
 nix develop -c cargo run --release -p harness -- diff a.zip b.zip    # compare two bundles
 ```
 
-Stages that need engine commands read console scripts (`scenarios/*.cfg`, or `--script file`); commands the engine lacks yet are reported as skipped. Double-clicking the program runs the suite with the zip next to it. The CI `windows` job uploads that portable folder and smoke-tests it with no install. `scripts/artemis.sh <ref> -- <run options>` runs it on artemis and copies `bundles/` back.
+Stage 3 (`client-flythrough`) needs a GPU and a display: it runs the `cod4e` client (`$COD4E_CLIENT`, else next to the harness) on mp_crash once per display mode (native borderless, windowed 1080p and 720p, plus an exclusive run at another native-size refresh when the monitor has one), 12 s each (`COD4E_FLYTHROUGH_SECS`), and records one short video (a few MB), a screenshot and per-frame timings per mode. Without the client, an install or a display it is skipped. Stages that need engine commands read console scripts (`scenarios/*.cfg`, or `--script file`); commands the engine lacks yet are reported as skipped. Double-clicking the program runs the suite with the zip next to it. The CI `windows` job uploads that portable folder and smoke-tests it with no install. `scripts/artemis.sh <ref> -- <run options>` runs it on artemis and copies `bundles/` back.
 
 ## Layout
 

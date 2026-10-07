@@ -6,6 +6,11 @@
 # `cod4e-harness run --out bundles <run-options>` (a bare `--` runs the default
 # suite). The harness writes cod4e-run-<date>.zip into bundles/ on artemis; that
 # directory is copied back to ./bundles/ and the bundles are listed.
+# The client is built in release next to the harness so stage 3 can drive it.
+# Stage 3 needs a window: set ARTEMIS_WAYLAND_DISPLAY (e.g. wayland-1) and
+# ARTEMIS_XDG_RUNTIME_DIR (e.g. /run/user/1000) to use artemis's Hyprland
+# session; they are exported as WAYLAND_DISPLAY / XDG_RUNTIME_DIR for the run.
+# Without them the stage reports `no display` and is skipped.
 set -euo pipefail
 ref=HEAD
 if [ $# -gt 0 ] && [ "$1" != -- ]; then ref=$1; shift; fi
@@ -14,7 +19,10 @@ if [ "${1:-}" = -- ]; then run=1; shift; fi
 host=artemis.jeiang.vpn
 dir='~/cod4e-run'
 harness=""
-[ $run = 1 ] && harness="COD4E_NO_PROMPT=1 cargo run --release -p harness -- run --out bundles $(printf '%q ' "$@")"
+display=""
+[ -n "${ARTEMIS_WAYLAND_DISPLAY:-}" ] && display="WAYLAND_DISPLAY=$(printf '%q' "$ARTEMIS_WAYLAND_DISPLAY") "
+[ -n "${ARTEMIS_XDG_RUNTIME_DIR:-}" ] && display="${display}XDG_RUNTIME_DIR=$(printf '%q' "$ARTEMIS_XDG_RUNTIME_DIR") "
+[ $run = 1 ] && harness="cargo build --release -p harness -p client && ${display}COD4E_NO_PROMPT=1 cargo run --release -p harness -- run --out bundles $(printf '%q ' "$@")"
 
 git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -C $dir'"
 status=0
