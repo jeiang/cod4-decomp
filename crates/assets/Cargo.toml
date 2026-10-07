@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 miniz_oxide = "0.9.1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [lints]
 workspace = true
