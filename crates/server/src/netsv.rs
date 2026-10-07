@@ -4,15 +4,18 @@
 //! lives in [`crate::game::Game`]; joining and leaving go through the same slot calls the bots
 //! use, so scripts cannot tell a person from a bot.
 
+use crate::archive::{ArchPlayer, Archive, Frame};
 use crate::client::{Conn, Session, Team};
 use crate::game::{EntKind, Game, SoundTo};
 use crate::ui::Dest;
 use net::connect::{ConnectRequest, Gate, serve};
 use net::entity::{EntityState, etype};
 use net::oob::{Challenger, Oob};
+use net::snapshot::Follow;
 use net::transport::{Transport, UdpTransport};
+use net::ui::HudElem;
 use net::ui::ServerCmd;
-use net::{ServerLink, Snapshot, field, ps};
+use net::{ServerLink, Snapshot};
 use sim::pm::{PmType, UserCmd};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -65,6 +68,8 @@ pub struct NetSv {
     pub stats: NetStats,
     /// Server time of the newest snapshot sent (what pings are measured against).
     now: i32,
+    /// The last [`crate::archive::KEEP_MS`] of the world, for killcams.
+    archive: Archive,
     buf: Vec<u8>,
 }
 
@@ -78,6 +83,7 @@ impl NetSv {
             inbox: Vec::new(),
             stats: NetStats::default(),
             now: 0,
+            archive: Archive::default(),
             buf: vec![0; 2048],
         }
     }
@@ -355,30 +361,118 @@ impl NetSv {
     pub fn send_snapshots(&mut self, game: &Game, server_time: i32) {
         self.now = server_time;
         let entities = world_entities(game);
-        for slot in 0..self.peers.len() {
-            let Some(peer) = self.peers[slot].as_mut() else {
-                continue;
-            };
-            let Some(c) = game.client(slot as u16) else {
-                continue;
-            };
-            let mut ps = c.ps.clone();
-            field::canonicalize(ps::fields(), &mut ps);
-            let snap = Snapshot {
-                num: 0,
-                server_time,
-                ps,
-                inv: Box::new(c.inv.to_words()),
+        if game.archive_enabled {
+            self.archive.record(Frame {
+                time: server_time,
                 entities: entities.clone(),
-                hud: game.visible_hud(slot as u16),
-                objectives: game.visible_objectives(slot as u16),
+                players: (0..game.max_clients as u16)
+                    .map(|n| archived_player(game, n))
+                    .collect(),
+            });
+        } else if !self.archive.is_empty() {
+            self.archive.clear();
+        }
+        for slot in 0..self.peers.len() {
+            if self.peers[slot].is_none() {
+                continue;
             }
-            .canonical();
-            let bytes = peer.link.send(&mut self.t, Some(snap));
+            let Some(snap) = self.snapshot_for(game, slot as u16, server_time, &entities) else {
+                continue;
+            };
+            let peer = self.peers[slot].as_mut().expect("peer");
+            let bytes = peer.link.send(&mut self.t, Some(snap.canonical()));
             self.stats.snapshots_out += 1;
             self.stats.bytes_out += bytes as u64;
         }
     }
+
+    /// How far back, in milliseconds, history reaches at `now`.
+    pub fn archive_span(&self, now: i32) -> i32 {
+        self.archive.span(now)
+    }
+
+    /// What client `slot` sees: its own view, another player's live view while it spectates, or
+    /// a replay of the past while `archivetime` is set (a killcam).
+    fn snapshot_for(
+        &self,
+        game: &Game,
+        slot: u16,
+        server_time: i32,
+        entities: &[EntityState],
+    ) -> Option<Snapshot> {
+        let c = game.client(slot)?;
+        let mut snap = Snapshot {
+            num: 0,
+            server_time,
+            ps: c.ps.clone(),
+            inv: Box::new(c.inv.to_words()),
+            entities: entities.to_vec(),
+            hud: game.visible_hud(slot),
+            objectives: game.visible_objectives(slot),
+            follow: None,
+        };
+        let followed = u16::try_from(c.spectator_client)
+            .ok()
+            .filter(|t| *t != slot && c.session == Session::Spectator);
+        let Some(target) = followed else {
+            return Some(snap);
+        };
+        let archive_ms = (c.archive_time * 1000.0) as i32;
+        let past = (archive_ms > 0)
+            .then(|| self.archive.at(server_time - archive_ms))
+            .flatten();
+        let mut follow = Follow {
+            own: slot,
+            followed: target,
+            archive_ms: 0,
+            ps_offset_ms: c.ps_offset_time,
+            entity: u16::try_from(c.kill_cam_entity).ok(),
+        };
+        if let Some(f) = past {
+            follow.archive_ms = (server_time - f.time).max(1) as u32;
+            snap.entities.clone_from(&f.entities);
+            if let Some(Some(p)) = f.players.get(usize::from(target)) {
+                snap.ps = p.ps.clone();
+                snap.inv = p.inv.clone();
+                snap.objectives = p.objectives;
+                // The target's archived elements as they were, then this client's own live
+                // ones that are not archived (the killcam's skip text and timer).
+                snap.hud = p.hud.clone();
+                snap.hud
+                    .extend(game.visible_hud(slot).into_iter().filter(|h| !h.archived()));
+                snap.hud.sort_by_key(|h| h.id);
+                snap.hud.dedup_by_key(|h| h.id);
+            } else {
+                return Some(snap);
+            }
+        } else if let Some(t) = game.client(target).filter(|t| t.connected()) {
+            snap.ps = t.ps.clone();
+            snap.inv = Box::new(t.inv.to_words());
+            snap.objectives = game.visible_objectives(target);
+        } else {
+            return Some(snap);
+        }
+        snap.follow = Some(follow);
+        Some(snap)
+    }
+}
+
+/// One player's screen for the archive, `None` when they are not in the match.
+fn archived_player(game: &Game, n: u16) -> Option<ArchPlayer> {
+    let c = game.client(n).filter(|c| c.connected())?;
+    if !matches!(c.session, Session::Playing | Session::Dead) {
+        return None;
+    }
+    Some(ArchPlayer {
+        ps: c.ps.clone(),
+        inv: Box::new(c.inv.to_words()),
+        hud: game
+            .visible_hud(n)
+            .into_iter()
+            .filter(HudElem::archived)
+            .collect(),
+        objectives: game.visible_objectives(n),
+    })
 }
 
 /// Configstring updates as reliable commands, a few hundred bytes each.

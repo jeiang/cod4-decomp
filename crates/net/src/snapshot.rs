@@ -13,6 +13,30 @@ use sim::weapon::PlayerWeapons;
 /// Snapshots a sender keeps per client to delta against; an ack older than this forces a full one.
 pub const BACKUP: u32 = 32;
 
+/// Set when the snapshot is not the receiving client's own view: a spectator following another
+/// player, or a killcam replaying the past.
+///
+/// What the client must do: `ps` (and `inv`) belong to `followed`, not to the client, so it must
+/// not predict or send movement from them and must identify itself with [`Snapshot::own`], not
+/// `ps.client_num`. The world in `entities` is the state `archive_ms` milliseconds before
+/// `server_time`: draw it at `server_time` as usual (the history is replayed in real time) but
+/// evaluate hud element times (`HudElem::time` and the `*_start` fields, which are in the
+/// archived frame's own clock) at `server_time - archive_ms`. `ps_offset_ms` is how far behind
+/// the world the followed player's own view was (their latency); a killcam shows others
+/// `INTERP_DELAY_MS + ps_offset_ms` behind. `entity` is the entity the scripts asked the camera
+/// to track (`killcamentity`, for example the grenade or helicopter that killed), if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Follow {
+    /// The receiving client's own slot.
+    pub own: u16,
+    /// The client whose view `ps` is.
+    pub followed: u16,
+    /// 0 for live spectating, else this is a killcam replay of the past.
+    pub archive_ms: u32,
+    pub ps_offset_ms: i32,
+    pub entity: Option<u16>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     /// Sender's sequence number for this snapshot; the receiver acknowledges it.
@@ -27,9 +51,21 @@ pub struct Snapshot {
     pub hud: Vec<HudElem>,
     /// The compass objectives this client sees.
     pub objectives: [Objective; MAX_OBJECTIVES],
+    /// `None`: the snapshot is the client's own view.
+    pub follow: Option<Follow>,
 }
 
 impl Snapshot {
+    /// The receiving client's own slot, whoever `ps` shows.
+    pub fn own(&self) -> u16 {
+        self.follow.map_or(self.ps.client_num, |f| f.own)
+    }
+
+    /// True during a killcam replay.
+    pub fn killcam(&self) -> bool {
+        self.follow.is_some_and(|f| f.archive_ms > 0)
+    }
+
     pub fn empty() -> Self {
         Self {
             num: 0,
@@ -39,6 +75,7 @@ impl Snapshot {
             entities: Vec::new(),
             hud: Vec::new(),
             objectives: [Objective::default(); MAX_OBJECTIVES],
+            follow: None,
         }
     }
 
@@ -83,6 +120,17 @@ pub fn write_snapshot(w: &mut BitWriter, base: Option<&Snapshot>, snap: &Snapsho
         base.map_or(&zero_obj, |b| &b.objectives),
         &snap.objectives,
     );
+    match snap.follow {
+        None => w.write_bool(false),
+        Some(f) => {
+            w.write_bool(true);
+            w.write_uvar(u32::from(f.own));
+            w.write_uvar(u32::from(f.followed));
+            w.write_uvar(f.archive_ms);
+            w.write_ivar(f.ps_offset_ms);
+            w.write_uvar(f.entity.map_or(0, |e| u32::from(e) + 1));
+        }
+    }
 }
 
 /// The snapshot `num` just read says which base it needs: `lookup(num - delta)` supplies it.
@@ -112,6 +160,21 @@ pub fn read_snapshot<'a>(
     snap.entities = read_entities(r, &snap.entities)?;
     snap.hud = ui::read_hud(r, &snap.hud)?;
     ui::read_objectives(r, &mut snap.objectives)?;
+    snap.follow = if r.read_bool()? {
+        let small = |v: u32| u16::try_from(v).map_err(|_| Overflow);
+        Some(Follow {
+            own: small(r.read_uvar()?)?,
+            followed: small(r.read_uvar()?)?,
+            archive_ms: r.read_uvar()?,
+            ps_offset_ms: r.read_ivar()?,
+            entity: match r.read_uvar()? {
+                0 => None,
+                n => Some(small(n - 1)?),
+            },
+        })
+    } else {
+        None
+    };
     Ok(snap)
 }
 
@@ -281,6 +344,35 @@ mod tests {
         let got2 = read_snapshot(&mut BitReader::new(&delta), |n| (n == 1).then_some(&a)).unwrap();
         assert_eq!(got2, b);
         assert!(delta.len() < full.len());
+    }
+
+    #[test]
+    fn a_follow_view_round_trips_and_leaves_with_the_next_own_view() {
+        let mut a = world(40, 1000);
+        a.num = 1;
+        a.follow = Some(Follow {
+            own: 3,
+            followed: 9,
+            archive_ms: 4500,
+            ps_offset_ms: -80,
+            entity: Some(700),
+        });
+        assert_eq!(
+            (a.own(), a.ps.client_num != 3, a.killcam()),
+            (3, true, true)
+        );
+        let full = encode(None, &a);
+        assert_eq!(
+            read_snapshot(&mut BitReader::new(&full), |_| None).unwrap(),
+            a
+        );
+        let mut b = world(40, 1033);
+        b.num = 2;
+        assert_eq!(b.own(), b.ps.client_num);
+        assert!(!b.killcam());
+        let delta = encode(Some(&a), &b);
+        let got = read_snapshot(&mut BitReader::new(&delta), |n| (n == 1).then_some(&a)).unwrap();
+        assert_eq!(got.follow, None);
     }
 
     #[test]

@@ -579,6 +579,26 @@ impl Server {
                 self.bot_target = self.bot_target.max(n);
                 self.add_bots(n)?;
             }
+            // Test hook: `devkill <victim> <attacker>` has the attacker's rifle kill the victim.
+            "devkill" => {
+                let (Some(v), Some(a)) = (arg(1), arg(2)) else {
+                    return Err("usage: devkill <victim> <attacker>".into());
+                };
+                let (v, a) = (cvar::parse_int(v) as u16, cvar::parse_int(a) as u16);
+                let Some(run) = self.run.as_mut() else {
+                    return Err("Server is not running.".into());
+                };
+                let mut host = ScriptHost {
+                    game: &mut self.game,
+                    dispatch: &run.dispatch,
+                };
+                let mut d = crate::combat::Damage::new(1000, crate::combat::MOD_RIFLE_BULLET);
+                d.attacker = Some(a);
+                d.inflictor = Some(a);
+                d.weapon = host.game.weapon_index("ak47_mp");
+                host.game.g_damage(&mut run.vm, v, d);
+                host.run_calls(&mut run.vm);
+            }
             "serverinfo" => {
                 let s = self.game.cvars.info_string(cvar::SERVERINFO);
                 self.say(&format!("Server info settings:\n{s}\n"));
@@ -903,6 +923,14 @@ impl Server {
         self.game.level.frametime = self.frame_ms;
         self.game.level.time = self.svs_time;
         let mut errors = Vec::new();
+        // A killcam cannot start before the history does; the script sees the trimmed
+        // `archivetime` and gives up when too little is left.
+        if let Some(net) = &self.net {
+            let span = net.archive_span(self.svs_time) as f32 * 0.001;
+            for c in &mut self.game.clients {
+                c.archive_time = c.archive_time.min(span);
+            }
+        }
         if let Some(run) = self.run.as_mut() {
             let mut host = ScriptHost {
                 game: &mut self.game,

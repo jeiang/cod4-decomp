@@ -149,6 +149,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_ui::run),
     },
     StageDef {
+        name: "net-killcam",
+        description: "a real UDP client is killed by a bot and watches the stock killcam replayed from the server's state ring, then respawns",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_killcam::run),
+    },
+    StageDef {
         name: "headless-bots-sd",
         description: "headless server, 20 bots play Search and Destroy",
         needs_install: false,

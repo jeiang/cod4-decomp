@@ -19,6 +19,25 @@ use crate::bot::Brain;
 use crate::game::{Ent, EntKind, Game, ScriptCall, TRIGGER_HURT_CONTENTS};
 use crate::playeranim::{PlayerPoseInput, PlayerPoseState};
 
+/// [`Client::spec_allow`] bits (`allowspectateteam`).
+pub mod spec {
+    pub const ALLIES: u8 = 1;
+    pub const AXIS: u8 = 2;
+    /// Players on no team (free for all).
+    pub const NONE: u8 = 4;
+    pub const FREELOOK: u8 = 8;
+
+    pub fn from_name(s: &str) -> Option<u8> {
+        Some(match s {
+            "allies" => ALLIES,
+            "axis" => AXIS,
+            "none" => NONE,
+            "freelook" => FREELOOK,
+            _ => return None,
+        })
+    }
+}
+
 /// `team_t` as the scripts see it (`sessionteam`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Team {
@@ -118,6 +137,8 @@ pub struct Client {
     pub head_icon: String,
     pub head_icon_team: String,
     pub spectator_client: i32,
+    /// `allowspectateteam`: which sides this spectator may follow ([`spec`] bits).
+    pub spec_allow: u8,
     pub kill_cam_entity: i32,
     pub archive_time: f32,
     pub ps_offset_time: i32,
@@ -176,6 +197,7 @@ impl Client {
             head_icon: String::new(),
             head_icon_team: "none".into(),
             spectator_client: -1,
+            spec_allow: 0,
             kill_cam_entity: -1,
             archive_time: 0.0,
             ps_offset_time: 0,
@@ -263,6 +285,34 @@ impl Game {
             });
         }
         Some(n)
+    }
+
+    /// Spectator `n` follows the next player after the one it follows whom it may watch, or
+    /// nobody (`spectatorclient` -1) when there is none.
+    pub fn spectate_next(&mut self, n: u16) {
+        let Some(me) = self.client(n) else { return };
+        let allow = me.spec_allow;
+        let from = me.spectator_client;
+        let count = self.clients.len() as i32;
+        let pick = (1..=count)
+            .map(|i| (from + i).rem_euclid(count) as u16)
+            .find(|&t| {
+                t != n
+                    && self.client(t).is_some_and(|c| {
+                        c.connected()
+                            && c.session == Session::Playing
+                            && allow
+                                & match c.team {
+                                    Team::Allies => spec::ALLIES,
+                                    Team::Axis => spec::AXIS,
+                                    _ => spec::NONE,
+                                }
+                                != 0
+                    })
+            });
+        if let Some(c) = self.client_mut(n) {
+            c.spectator_client = pick.map_or(-1, i32::from);
+        }
     }
 
     /// `ClientBegin`: the connect callback waits for this.
@@ -399,6 +449,17 @@ impl Game {
         match c.session {
             Session::Intermission | Session::Spectator => {
                 c.ps.command_time = cmd.server_time;
+                c.old_buttons = c.buttons;
+                c.buttons = cmd.buttons;
+                c.latched_buttons = c.buttons & !c.old_buttons;
+                // Attack steps to the next player a spectator may follow; a killcam
+                // (`archivetime` set) is not the player's to steer.
+                if c.session == Session::Spectator
+                    && c.archive_time <= 0.0
+                    && c.latched_buttons & pm::button::ATTACK != 0
+                {
+                    self.spectate_next(n);
+                }
                 return;
             }
             _ => {}
@@ -676,4 +737,60 @@ impl Game {
 /// `Key` for an integer index, for building arrays.
 pub fn int_key(i: usize) -> Key {
     Key::Int(i as i32)
+}
+
+#[cfg(test)]
+mod spectate_tests {
+    use super::*;
+    use crate::content::Content;
+    use crate::cvar::Cvars;
+
+    fn game() -> Game {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.clients = (0..5)
+            .map(|n| Client::new(n, false, format!("p{n}")))
+            .collect();
+        for (n, team) in [
+            (1, Team::Allies),
+            (2, Team::Axis),
+            (3, Team::Allies),
+            (4, Team::Axis),
+        ] {
+            let c = &mut g.clients[n];
+            c.conn = Conn::Connected;
+            c.team = team;
+            c.session = Session::Playing;
+        }
+        g.clients[0].conn = Conn::Connected;
+        g
+    }
+
+    #[test]
+    fn attack_steps_through_the_players_a_spectator_may_watch_and_wraps() {
+        let mut g = game();
+        g.clients[0].spec_allow = spec::ALLIES;
+        g.spectate_next(0);
+        assert_eq!(g.clients[0].spectator_client, 1);
+        g.spectate_next(0);
+        assert_eq!(g.clients[0].spectator_client, 3);
+        g.spectate_next(0);
+        assert_eq!(g.clients[0].spectator_client, 1, "wraps");
+        // Both sides, and the dead and the spectators are skipped.
+        g.clients[0].spec_allow = spec::ALLIES | spec::AXIS;
+        g.clients[2].session = Session::Dead;
+        g.spectate_next(0);
+        assert_eq!(g.clients[0].spectator_client, 3);
+        g.spectate_next(0);
+        assert_eq!(g.clients[0].spectator_client, 4);
+        // Nothing allowed: nobody.
+        g.clients[0].spec_allow = 0;
+        g.spectate_next(0);
+        assert_eq!(g.clients[0].spectator_client, -1);
+    }
+
+    #[test]
+    fn spectate_names_map_to_bits() {
+        assert_eq!(spec::from_name("freelook"), Some(spec::FREELOOK));
+        assert_eq!(spec::from_name("both"), None);
+    }
 }

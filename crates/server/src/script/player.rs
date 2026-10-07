@@ -71,7 +71,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
         "allowsprint",
         r(|g, _, e, a| allow(g, e, a, AllowKind::Sprint)),
     ),
-    ("allowspectateteam", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("allowspectateteam", r(allow_spectate_team)),
     ("setmovespeedscale", r(set_move_speed_scale)),
     (
         "attackbuttonpressed",
@@ -338,6 +338,21 @@ fn set_stat(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
             crate::ui::Dest::Client(n),
             net::ui::ServerCmd::Stat { index: i, value: v },
         );
+    }
+    Ok(Value::Undefined)
+}
+
+fn allow_spectate_team(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client_of(g, e)?;
+    let name = a.string(0)?;
+    let bit = crate::client::spec::from_name(name)
+        .ok_or_else(|| format!("Unknown team '{name}'. Must be allies, axis, none or freelook."))?;
+    let on = a.int(1)? != 0;
+    let c = g.client_mut(n).expect("client");
+    if on {
+        c.spec_allow |= bit;
+    } else {
+        c.spec_allow &= !bit;
     }
     Ok(Value::Undefined)
 }
