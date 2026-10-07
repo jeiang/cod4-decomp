@@ -7,6 +7,7 @@ use crate::oob::Oob;
 use crate::session::{ClientLink, Stats};
 use crate::snapshot::Snapshot;
 use crate::transport::Transport;
+use crate::ui::ClientUiState;
 use crate::view::SnapshotBuffer;
 use sim::pm::UserCmd;
 use std::net::SocketAddr;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 
 enum Phase {
     Connecting(Connector),
-    Playing(ClientLink),
+    Playing(Box<ClientLink>),
     Refused(String),
 }
 
@@ -58,6 +59,14 @@ impl<T: Transport> NetClient<T> {
         }
     }
 
+    /// What the server told the user interface, once connected (see [`crate::ui`]).
+    pub fn ui(&mut self) -> Option<&mut ClientUiState> {
+        match &mut self.phase {
+            Phase::Playing(l) => Some(&mut l.ui),
+            _ => None,
+        }
+    }
+
     pub fn stats(&self) -> Option<&Stats> {
         match &self.phase {
             Phase::Playing(l) => Some(&l.stats),
@@ -90,7 +99,8 @@ impl<T: Transport> NetClient<T> {
                     c.handle(from, o);
                     match c.state() {
                         ConnectState::Connected => {
-                            self.phase = Phase::Playing(ClientLink::new(self.server, c.qport));
+                            self.phase =
+                                Phase::Playing(Box::new(ClientLink::new(self.server, c.qport)));
                         }
                         ConnectState::Refused(r) => self.phase = Phase::Refused(r.clone()),
                         _ => {}
@@ -106,6 +116,11 @@ impl<T: Transport> NetClient<T> {
                 }
             }
         }
+    }
+
+    /// Sends what a click in the script menu `menu` answers (see [`crate::ui::menu_response`]).
+    pub fn menu_response(&mut self, menu: &str, response: &str) {
+        self.command(&crate::ui::menu_response(menu, response));
     }
 
     /// Queues a console command for the server (reliable, in order).

@@ -6,6 +6,7 @@ use crate::bits::{BitReader, BitWriter, Overflow};
 use crate::entity::{self, EntityState, MAX_ENTITIES};
 use crate::field::{self, changed_count, read_delta, read_sparse, write_delta, write_sparse};
 use crate::ps;
+use crate::ui::{self, HudElem, MAX_OBJECTIVES, Objective};
 use sim::pm::PlayerState;
 use sim::weapon::PlayerWeapons;
 
@@ -22,6 +23,10 @@ pub struct Snapshot {
     pub inv: Box<[i32; PlayerWeapons::WORDS]>,
     /// Sorted by entity number.
     pub entities: Vec<EntityState>,
+    /// The script hud elements this client sees, ascending by id.
+    pub hud: Vec<HudElem>,
+    /// The compass objectives this client sees.
+    pub objectives: [Objective; MAX_OBJECTIVES],
 }
 
 impl Snapshot {
@@ -32,6 +37,8 @@ impl Snapshot {
             ps: PlayerState::default(),
             inv: Box::new([0; PlayerWeapons::WORDS]),
             entities: Vec::new(),
+            hud: Vec::new(),
+            objectives: [Objective::default(); MAX_OBJECTIVES],
         }
     }
 
@@ -50,6 +57,7 @@ impl Snapshot {
             .into_iter()
             .map(EntityState::canonical)
             .collect();
+        self.objectives = ui::canonical_objectives(self.objectives);
         self
     }
 }
@@ -68,6 +76,13 @@ pub fn write_snapshot(w: &mut BitWriter, base: Option<&Snapshot>, snap: &Snapsho
     let zero_inv = [0i32; PlayerWeapons::WORDS];
     write_sparse(w, base.map_or(&zero_inv[..], |b| &b.inv[..]), &snap.inv[..]);
     write_entities(w, base.map_or(&[], |b| &b.entities), &snap.entities);
+    ui::write_hud(w, base.map_or(&[], |b| &b.hud), &snap.hud);
+    let zero_obj = [Objective::default(); MAX_OBJECTIVES];
+    ui::write_objectives(
+        w,
+        base.map_or(&zero_obj, |b| &b.objectives),
+        &snap.objectives,
+    );
 }
 
 /// The snapshot `num` just read says which base it needs: `lookup(num - delta)` supplies it.
@@ -95,6 +110,8 @@ pub fn read_snapshot<'a>(
     read_delta(r, ps::fields(), &mut snap.ps)?;
     read_sparse(r, &mut snap.inv[..])?;
     snap.entities = read_entities(r, &snap.entities)?;
+    snap.hud = ui::read_hud(r, &snap.hud)?;
+    ui::read_objectives(r, &mut snap.objectives)?;
     Ok(snap)
 }
 

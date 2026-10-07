@@ -299,6 +299,7 @@ impl Game {
     /// Frees the slots whose disconnect callback has run.
     pub fn finish_disconnects(&mut self, vm: &mut Vm) {
         for n in std::mem::take(&mut self.pending_free) {
+            crate::script::free_client_hud_elems(self, vm, n);
             self.free_entity(vm, n);
             self.clients[usize::from(n)] = Client::new(n, false, String::new());
             self.clients[usize::from(n)].conn = Conn::Free;

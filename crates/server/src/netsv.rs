@@ -6,10 +6,12 @@
 
 use crate::client::{Conn, Session, Team};
 use crate::game::{EntKind, Game};
+use crate::ui::Dest;
 use net::connect::{ConnectRequest, Gate, serve};
 use net::entity::{EntityState, etype};
 use net::oob::{Challenger, Oob};
 use net::transport::{Transport, UdpTransport};
+use net::ui::ServerCmd;
 use net::{ServerLink, Snapshot, field, ps};
 use sim::pm::{PmType, UserCmd};
 use std::collections::VecDeque;
@@ -206,6 +208,61 @@ impl NetSv {
         }
     }
 
+    /// The commands that bring a client into `map`: the level change, then every configstring.
+    pub fn world_commands(game: &mut Game, map: &str) -> Vec<String> {
+        game.refresh_client_info();
+        let mut all: Vec<(u16, String)> = game
+            .configstrings
+            .iter()
+            .map(|(i, s)| (*i as u16, s.clone()))
+            .collect();
+        all.sort_by_key(|(i, _)| *i);
+        let mut out = vec![
+            ServerCmd::Map {
+                name: map.to_owned(),
+            }
+            .encode(),
+        ];
+        out.extend(config_commands(all));
+        out
+    }
+
+    /// Delivers what scripts queued since the last frame: configstring changes to everybody,
+    /// then the one-shot commands to their destinations, in order.
+    pub fn flush_ui(&mut self, game: &mut Game) {
+        game.refresh_client_info();
+        let dirty = std::mem::take(&mut game.ui.dirty_cs);
+        let out = std::mem::take(&mut game.ui.out);
+        if !dirty.is_empty() {
+            let entries = dirty
+                .into_iter()
+                .map(|i| {
+                    let s = game.configstrings.get(&u32::from(i)).cloned();
+                    (i, s.unwrap_or_default())
+                })
+                .collect();
+            for line in config_commands(entries) {
+                for p in self.peers.iter_mut().flatten() {
+                    let _ = p.link.command(line.clone());
+                }
+            }
+        }
+        for o in out {
+            let line = o.cmd.encode();
+            for (slot, p) in self.peers.iter_mut().enumerate() {
+                let Some(p) = p else { continue };
+                let wanted = match o.to {
+                    Dest::All => true,
+                    Dest::Client(c) => usize::from(c) == slot,
+                    Dest::Team(t) => game.client(slot as u16).is_some_and(|c| c.team == t),
+                };
+                if wanted {
+                    let _ = p.link.command(line.clone());
+                }
+            }
+        }
+    }
+
     /// Builds and sends every client's snapshot for the frame at `server_time`.
     pub fn send_snapshots(&mut self, game: &Game, server_time: i32) {
         let entities = world_entities(game);
@@ -224,12 +281,35 @@ impl NetSv {
                 ps,
                 inv: Box::new(c.inv.to_words()),
                 entities: entities.clone(),
-            };
+                hud: game.visible_hud(slot as u16),
+                objectives: game.visible_objectives(slot as u16),
+            }
+            .canonical();
             let bytes = peer.link.send(&mut self.t, Some(snap));
             self.stats.snapshots_out += 1;
             self.stats.bytes_out += bytes as u64;
         }
     }
+}
+
+/// Configstring updates as reliable commands, a few hundred bytes each.
+fn config_commands(entries: Vec<(u16, String)>) -> Vec<String> {
+    const CHUNK: usize = 600;
+    let mut out = Vec::new();
+    let (mut cur, mut size) = (Vec::new(), 0);
+    for (i, s) in entries {
+        let s = crate::ui::clip(&s);
+        size += s.len() + 12;
+        cur.push((i, s));
+        if size >= CHUNK {
+            out.push(ServerCmd::ConfigStrings(std::mem::take(&mut cur)).encode());
+            size = 0;
+        }
+    }
+    if !cur.is_empty() {
+        out.push(ServerCmd::ConfigStrings(cur).encode());
+    }
+    out
 }
 
 /// Everything a client can see, in entity-number order, already rounded as the wire rounds it.

@@ -24,6 +24,7 @@ use crate::cvar::{self, Cvars};
 use crate::missile::{Attractors, Missile};
 use crate::mover::Mover;
 use crate::playeranim::PlayerAnims;
+use net::ui::cs;
 
 pub const MAX_GENTITIES: usize = 1024;
 pub const ENTITYNUM_WORLD: u16 = 1022;
@@ -207,11 +208,6 @@ impl Ent {
     }
 }
 
-#[derive(Default, Debug, Clone)]
-pub struct HudElem {
-    pub inuse: bool,
-}
-
 /// A name the scripts precached (`precachemodel`, `precacheshader`, ...) with its index.
 #[derive(Default)]
 pub struct Precache {
@@ -228,6 +224,30 @@ impl Precache {
                 self.names.len()
             }
         }
+    }
+
+    /// As [`Self::index`] but names differing in case are different names.
+    pub fn index_exact(&mut self, name: &str) -> usize {
+        match self.names.iter().position(|n| &**n == name) {
+            Some(i) => i + 1,
+            None => {
+                self.names.push(name.into());
+                self.names.len()
+            }
+        }
+    }
+
+    /// Index of `name` if it was registered, else 0.
+    pub fn find(&self, name: &str) -> usize {
+        self.names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(name))
+            .map_or(0, |i| i + 1)
+    }
+
+    /// Forgets every name after the first `len`.
+    pub fn truncate(&mut self, len: usize) {
+        self.names.truncate(len);
     }
 
     pub fn len(&self) -> usize {
@@ -304,7 +324,7 @@ pub struct Game {
     pub ents: Vec<Option<Ent>>,
     /// Collision world of the loaded map with every solid entity linked into it.
     pub world: Option<World>,
-    pub hudelems: Vec<HudElem>,
+    pub ui: crate::ui::ServerUi,
     pub field_types: HashMap<String, FieldTy>,
     pub models: Precache,
     pub shaders: Precache,
@@ -360,7 +380,7 @@ impl Game {
             level: Level::default(),
             ents: Vec::new(),
             world: None,
-            hudelems: Vec::new(),
+            ui: crate::ui::ServerUi::default(),
             field_types: HashMap::new(),
             models: Precache::default(),
             shaders: Precache::default(),
@@ -453,7 +473,7 @@ impl Game {
         self.level = Level::default();
         self.ents.clear();
         self.world = None;
-        self.hudelems.clear();
+        self.ui = crate::ui::ServerUi::default();
         self.models = Precache::default();
         self.shaders = Precache::default();
         self.strings = Precache::default();
@@ -598,29 +618,19 @@ impl Game {
         if !get(world, "classname").is_some_and(|c| c.eq_ignore_ascii_case("worldspawn")) {
             return Err("SP_worldspawn: The first entity isn't worldspawn".into());
         }
-        self.configstrings.insert(
-            CS_AMBIENT,
-            get(world, "ambienttrack").map_or(String::new(), |s| {
-                if s.is_empty() {
-                    String::new()
-                } else {
-                    format!("n\\{s}")
-                }
-            }),
-        );
-        self.configstrings
-            .insert(CS_MESSAGE, get(world, "message").unwrap_or("").to_owned());
+        let ambient = get(world, "ambienttrack").map_or(String::new(), |s| {
+            if s.is_empty() {
+                String::new()
+            } else {
+                format!("n\\{s}")
+            }
+        });
+        self.set_configstring(cs::AMBIENT, &ambient);
+        self.set_configstring(cs::MESSAGE, get(world, "message").unwrap_or(""));
         self.cvars
             .force("g_gravity", get(world, "gravity").unwrap_or("800"));
         let north = get(world, "northyaw").unwrap_or("");
-        self.configstrings.insert(
-            CS_NORTHYAW,
-            if north.is_empty() {
-                "0".into()
-            } else {
-                north.to_owned()
-            },
-        );
+        self.set_configstring(cs::NORTHYAW, if north.is_empty() { "0" } else { north });
         self.level.north_yaw = cvar::parse_float(north);
         if let Some(clip) = self.content.clipmap() {
             self.world = Some(World::new(clip.clone()));
@@ -682,11 +692,6 @@ fn sentient_trigger(spawnflags: i32) -> i32 {
     }
     c
 }
-
-/// Configstring indices the game fills at spawn (`CS_*` of the original).
-pub const CS_MESSAGE: u32 = 2;
-pub const CS_AMBIENT: u32 = 3;
-pub const CS_NORTHYAW: u32 = 4;
 
 fn spawn_kind(class: &str) -> EntKind {
     match class {

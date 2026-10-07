@@ -363,15 +363,16 @@ impl Server {
         };
         net.add_peer(slot, req, &name);
         let map = self.map_name().unwrap_or("").to_owned();
-        net.command(slot, &format!("map {map}"));
+        for line in NetSv::world_commands(&mut self.game, &map) {
+            net.command(slot, &line);
+        }
         self.say(&format!(
             "{name} connected as client {slot} from {}\n",
             req.from
         ));
     }
 
-    /// Gives a person a client slot like a bot gets one: the scripts see a connect, a begin and
-    /// a team pick.
+    /// Gives a person a client slot like a bot gets one: the scripts see a connect and a begin.
     fn join_human(&mut self, name: &str) -> Result<u16, &'static str> {
         let Some(run) = self.run.as_mut() else {
             return Err("No map is loaded.");
@@ -392,18 +393,8 @@ impl Server {
         }
         host.run_calls(&mut run.vm);
         host.game.client_begin(&mut run.vm, slot);
-        let obj = run.vm.entity(slot, gsc::EntClass::Entity);
-        let mut errors = Vec::new();
-        if let Err(e) = run.vm.call(
-            &mut host,
-            run.test_client,
-            Some(obj),
-            &[Value::str("autoassign")],
-        ) {
-            errors.push(e);
-        }
-        host.run_calls(&mut run.vm);
-        self.record_errors(errors);
+        // No team is chosen for a person: the scripts open the team menu themselves and the
+        // client answers with `menuresponse`, as at the original's menus.
         Ok(slot)
     }
 
@@ -742,8 +733,9 @@ impl Server {
         for (mut peer, name) in humans {
             let j = self.join_human(&name);
             if let Ok(slot) = j {
-                let map = map.to_owned();
-                let _ = peer.link.command(format!("map {map}"));
+                for line in NetSv::world_commands(&mut self.game, map) {
+                    let _ = peer.link.command(line);
+                }
                 if let Some(net) = self.net.as_mut() {
                     net.put_peer(slot, peer);
                 }
@@ -966,7 +958,11 @@ impl Server {
                     net.remove_peer(n as u16);
                 }
             }
+            net.flush_ui(&mut self.game);
             net.send_snapshots(&self.game, self.svs_time);
+        } else {
+            self.game.ui.out.clear();
+            self.game.ui.dirty_cs.clear();
         }
         let net_t = t.elapsed();
         self.record_errors(errors);

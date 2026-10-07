@@ -55,9 +55,6 @@ pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
 
 pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("setstablemissile", m(set_stable_missile)),
-    // hud elements: setclock, settenthstimerup, reset, ... are drawn by clients
-    ("sayall", Later(M5)),
-    ("sayteam", Later(M5)),
     ("sendleaderboards", Later(M5)),
     ("setreverb", Later(M7)),
     ("deactivatereverb", Later(M7)),
@@ -77,12 +74,6 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("devaddyaw", Later(M5)),
     ("devaddroll", Later(M5)),
     ("buttonpressed", m(|_, _, _, _| Ok(Value::Int(0)))),
-    ("setclock", Later(M6)),
-    ("setclockup", Later(M6)),
-    ("settenthstimerup", Later(M6)),
-    ("setgametypestring", Later(M6)),
-    ("setmapnamestring", Later(M6)),
-    ("reset", Later(M6)),
     ("freehelicopter", Later(VEH)),
     ("setdamagestage", Later(VEH)),
     ("getspeedmph", Later(VEH)),

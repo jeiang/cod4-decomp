@@ -141,6 +141,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_match::run),
     },
     StageDef {
+        name: "net-ui",
+        description: "a real UDP client answers the menus the stock scripts open and checks the hud elements, objectives, configstrings, client dvars and print lines it is sent",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_ui::run),
+    },
+    StageDef {
         name: "headless-bots-sd",
         description: "headless server, 20 bots play Search and Destroy",
         needs_install: false,

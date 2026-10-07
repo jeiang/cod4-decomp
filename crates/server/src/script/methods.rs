@@ -16,7 +16,6 @@ const fn r(f: MethFn) -> Impl<MethFn> {
     Real(f)
 }
 
-const M6: &str = "M6 HUD, menus, killcam";
 const M7: &str = "M7 audio";
 
 pub const TABLE: &[(&str, Impl<MethFn>)] = &[
@@ -59,19 +58,27 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("fireweapon", Later("M8 vehicles")),
     // hud elements
     ("destroy", r(hud::destroy)),
-    ("settext", Later(M6)),
-    ("setshader", Later(M6)),
-    ("settimer", Later(M6)),
-    ("settimerup", Later(M6)),
-    ("settenthstimer", Later(M6)),
-    ("setvalue", Later(M6)),
-    ("setwaypoint", Later(M6)),
-    ("setplayernamestring", Later(M6)),
-    ("fadeovertime", Later(M6)),
-    ("moveovertime", Later(M6)),
-    ("scaleovertime", Later(M6)),
-    ("setpulsefx", Later(M6)),
-    ("clearalltextafterhudelem", Later(M6)),
+    ("settext", r(hud::set_text)),
+    ("clearalltextafterhudelem", r(hud::clear_all_text_after)),
+    ("setshader", r(hud::set_shader)),
+    ("settargetent", r(hud::set_target_ent)),
+    ("cleartargetent", r(hud::clear_target_ent)),
+    ("settimer", r(hud::set_timer)),
+    ("settimerup", r(hud::set_timer_up)),
+    ("settenthstimer", r(hud::set_tenths_timer)),
+    ("settenthstimerup", r(hud::set_tenths_timer_up)),
+    ("setclock", r(hud::set_clock)),
+    ("setclockup", r(hud::set_clock_up)),
+    ("setvalue", r(hud::set_value)),
+    ("setwaypoint", r(hud::set_waypoint)),
+    ("setplayernamestring", r(hud::set_player_name_string)),
+    ("setgametypestring", r(hud::set_game_type_string)),
+    ("setmapnamestring", r(hud::set_map_name_string)),
+    ("fadeovertime", r(hud::fade_over_time)),
+    ("moveovertime", r(hud::move_over_time)),
+    ("scaleovertime", r(hud::scale_over_time)),
+    ("setpulsefx", r(hud::set_pulse_fx)),
+    ("reset", r(hud::reset)),
 ];
 
 pub(super) fn live(g: &Game, e: EntRef) -> Result<(), String> {

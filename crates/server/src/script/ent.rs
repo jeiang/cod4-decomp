@@ -14,6 +14,7 @@ use crate::delta;
 use crate::game::{Ent, EntKind, Game};
 use crate::link::MAX_ATTACH;
 use crate::tags;
+use net::ui::cs;
 
 type R = Result<Value, String>;
 
@@ -628,8 +629,6 @@ const HINTS: [&str; 4] = [
     "HINT_HEALTH",
     "HINT_FRIENDLY",
 ];
-/// `CS_USE_TRIG_STRINGS` and how many there are.
-const CS_USE_TRIG_STRINGS: u32 = 277;
 const MAX_HINT_STRINGS: u32 = 32;
 
 fn set_cursor_hint(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
@@ -681,7 +680,7 @@ fn set_hint_string(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
         }
         let slot = (0..MAX_HINT_STRINGS).find(|i| {
             g.configstrings
-                .get(&(CS_USE_TRIG_STRINGS + i))
+                .get(&(u32::from(cs::USE_TRIG_STRINGS) + i))
                 .is_none_or(|s| s.is_empty() || *s == text)
         });
         let Some(i) = slot else {
@@ -689,7 +688,7 @@ fn set_hint_string(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
                 "Too many different hintstring values. Max allowed is {MAX_HINT_STRINGS} different strings"
             ));
         };
-        g.configstrings.insert(CS_USE_TRIG_STRINGS + i, text);
+        g.set_configstring(cs::USE_TRIG_STRINGS + i as u16, &text);
         Some(i as usize)
     };
     if let Some(ent) = g.ent_mut(e.num) {

@@ -18,9 +18,12 @@ mod methods;
 mod misc;
 mod missile;
 mod player;
+mod uicmd;
 mod weapons;
 
 pub use args::Args;
+
+pub use hud::free_client_elems as free_client_hud_elems;
 
 pub type FuncFn = fn(&mut Game, &mut Vm, Args) -> Result<Value, String>;
 pub type MethFn = fn(&mut Game, &mut Vm, EntRef, Args) -> Result<Value, String>;
@@ -196,6 +199,7 @@ impl Host for ScriptHost<'_> {
                 }
                 game::get_ent_field(self.game.ent(ent.num)?, name)
             }
+            EntClass::HudElem => hud::get_field(self.game, ent.num, name),
             _ => None,
         }
     }
@@ -219,6 +223,7 @@ impl Host for ScriptHost<'_> {
                     None => Ok(false),
                 }
             }
+            EntClass::HudElem => hud::set_field(self.game, ent.num, name, value),
             _ => Ok(false),
         }
     }

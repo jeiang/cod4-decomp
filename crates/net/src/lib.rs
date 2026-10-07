@@ -19,6 +19,7 @@ pub mod reliable;
 pub mod session;
 pub mod snapshot;
 pub mod transport;
+pub mod ui;
 pub mod usercmd;
 pub mod view;
 
