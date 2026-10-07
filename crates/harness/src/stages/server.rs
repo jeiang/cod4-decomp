@@ -2,7 +2,7 @@
 //! Stage 2: the headless server driven by a console scenario.
 //!
 //! The harness runs the server in this process through its console: `map` boots a map, `wait`
-//! runs the 30 Hz loop for that long, commands the server lacks (`bots` until M3) are
+//! runs the 30 Hz loop for that long, commands the server lacks are
 //! reported as skipped. Every tick feeds `ticks.csv`; RSS is sampled once a second. Script
 //! runtime errors fail the stage.
 use crate::perf::{Percentiles, TickRecorder, process_rss};
@@ -97,6 +97,24 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
     for (m, ms) in map_loads.borrow().iter() {
         report.metrics.insert(format!("map_load_ms.{m}"), *ms);
     }
+    let st = s.game.stats;
+    for (k, v) in [
+        ("match.kills", st.kills),
+        ("match.deaths", st.deaths),
+        ("match.spawns", st.spawns),
+        ("match.respawns", st.respawns),
+        ("match.shots", st.shots),
+        ("match.hits", st.hits),
+        ("match.rounds_ended", st.matches_ended),
+    ] {
+        report.metrics.insert(k.into(), v as f64);
+    }
+    for (m, ms, nodes) in &s.game.nav_loads {
+        report.metrics.insert(format!("nav_ms.{m}"), f64::from(*ms));
+        report
+            .metrics
+            .insert(format!("nav_nodes.{m}"), f64::from(*nodes));
+    }
     let rss = rss.borrow();
     if let Some(p) = Percentiles::from_samples(&rss) {
         report.metrics.insert("rss.peak_bytes".into(), p.max);
@@ -107,7 +125,16 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
     }
     if let Some(r) = recorder.borrow_mut().take() {
         match r.finish() {
-            Ok(series) => report.series.extend(series),
+            Ok(series) => {
+                if let (Some(bot), Some(all)) = (series.get("tick.bot_ms"), series.get("tick.ms"))
+                    && all.mean > 0.0
+                {
+                    report
+                        .metrics
+                        .insert("tick.bot_share".into(), bot.mean / all.mean);
+                }
+                report.series.extend(series);
+            }
             Err(e) => report.notes.push(format!("ticks.csv: {e}")),
         }
         report.files.push("ticks.csv".into());

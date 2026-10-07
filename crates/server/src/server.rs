@@ -71,6 +71,7 @@ pub const COMMANDS: &[&str] = &[
     "wait",
     "killserver",
     "bots",
+    "expect",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -366,6 +367,26 @@ impl Server {
             }
             "map_rotate" => self.map_rotate()?,
             "status" => self.status(),
+            "expect" => {
+                let (Some(what), Some(min)) = (arg(1), arg(2)) else {
+                    return Err("usage: expect <kills|deaths|spawns|respawns|shots|hits|rounds> <minimum>".into());
+                };
+                let st = self.game.stats;
+                let have = match what {
+                    "kills" => st.kills,
+                    "deaths" => st.deaths,
+                    "spawns" => st.spawns,
+                    "respawns" => st.respawns,
+                    "shots" => st.shots,
+                    "hits" => st.hits,
+                    "rounds" => st.matches_ended,
+                    w => return Err(format!("expect: unknown statistic {w:?}")),
+                };
+                let min = u64::try_from(cvar::parse_int(min)).unwrap_or(0);
+                if have < min {
+                    return Err(format!("expect {what} {min}: only {have}"));
+                }
+            }
             "bots" => {
                 let n = arg(1)
                     .map(cvar::parse_int)

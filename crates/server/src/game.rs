@@ -328,6 +328,8 @@ pub struct Game {
     /// Bot navigation of the current map, built when the first bot joins.
     pub nav: Option<Arc<crate::nav::NavMesh>>,
     pub nav_goals: Vec<Vec3>,
+    /// Navigation generation per map load: (map, ms, nodes).
+    pub nav_loads: Vec<(String, f32, u32)>,
     pub weapons: sim::weapon::WeaponTable,
     /// `g_fHitLocDamageMult`: the gametype's hit-location scale for non-bullet damage.
     pub hitloc_table: [f32; 19],
@@ -365,6 +367,7 @@ impl Game {
             stats: MatchStats::default(),
             nav: None,
             nav_goals: Vec::new(),
+            nav_loads: Vec::new(),
             hitloc_table: default_hitloc_table(),
             weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),
         }
@@ -551,6 +554,8 @@ impl Game {
                 st.bytes >> 10,
                 st.generation_ms
             ));
+            let map = self.content.map_name.clone().unwrap_or_default();
+            self.nav_loads.push((map, st.generation_ms, st.nodes));
             self.nav_goals = seeds;
             self.nav = Some(Arc::new(mesh));
         }
