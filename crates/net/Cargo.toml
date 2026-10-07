@@ -7,7 +7,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
+assets = { path = "../assets" }
 sim = { path = "../sim" }
+
+[dev-dependencies]
+sim = { path = "../sim", features = ["test-support"] }
 
 [lints]
 workspace = true

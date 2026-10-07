@@ -154,6 +154,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("net_port", "28960", LATCH),
         ("g_password", "", 0),
         ("g_speed", "190", 0),
+        ("g_lagcomp", "1", 0),
         ("g_gravity", "800", 0),
         ("g_knockback", "1000", 0),
         ("g_minGrenadeDamageSpeed", "400", CHEAT),
@@ -955,6 +956,7 @@ impl Server {
             for n in 0..host.game.clients.len() as u16 {
                 host.game.client_end_frame(&mut run.vm, n);
             }
+            host.game.lag_record();
             host.game.finish_disconnects(&mut run.vm);
         }
         let t = Instant::now();

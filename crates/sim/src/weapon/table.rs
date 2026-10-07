@@ -43,7 +43,7 @@ impl fmt::Display for TableError {
 
 impl std::error::Error for TableError {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WeaponTable {
     none: WeaponInfo,
     /// `weapons[i]` has index `i + 1`.

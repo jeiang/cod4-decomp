@@ -9,8 +9,10 @@ use crate::stage::{StageCtx, StageReport, Status};
 use net::UdpTransport;
 use net::client::NetClient;
 use net::entity::etype;
+use net::predict::{Env, PlayerBoxes, Predictor};
 use server::server::Server;
-use sim::pm::{ANGLE_UNIT, UserCmd};
+use sim::pm::{ANGLE_UNIT, Params, UserCmd};
+use sim::weapon::WeaponTable;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
@@ -31,8 +33,20 @@ const SMOOTH_STEP: f32 = 40.0;
 /// limit only stops a hung run.
 const SPAWN_LIMIT: Duration = Duration::from_secs(180);
 
+/// What a client needs to predict its own movement: the map's collision and the movement rules.
+#[derive(Clone)]
+struct Rules {
+    clipmap: Arc<assets::zone::clipmap::Clipmap>,
+    weapons: WeaponTable,
+    params: Params,
+    speed: i32,
+}
+
 #[derive(Default)]
 struct Result {
+    predictions: u64,
+    corrections: u64,
+    max_ahead: usize,
     connected: bool,
     refused: Option<String>,
     spawned: bool,
@@ -49,8 +63,16 @@ struct Result {
     unusable: u64,
 }
 
-fn client(addr: SocketAddr, id: usize, stop: &AtomicBool, ready: &AtomicUsize) -> Result {
+fn client(
+    addr: SocketAddr,
+    id: usize,
+    rules: &Rules,
+    stop: &AtomicBool,
+    ready: &AtomicUsize,
+) -> Result {
     let mut r = Result::default();
+    let mut boxes = PlayerBoxes::new(rules.clipmap.clone());
+    let mut pred = Predictor::default();
     let Ok(t) = UdpTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0))) else {
         return r;
     };
@@ -99,12 +121,27 @@ fn client(addr: SocketAddr, id: usize, stop: &AtomicBool, ready: &AtomicUsize) -
         // Walk forward, turning a quarter every second so walls do not stop the run.
         let yaw = (frame / 30) as f32 * 90.0
             + 13.0 * c.latest().map_or(0, |s| s.ps.client_num as i32) as f32;
-        c.send_cmd(UserCmd {
+        let cmd = UserCmd {
             server_time: cmd_time,
             forwardmove: 127,
             angles: [0, (yaw / ANGLE_UNIT) as i32 & 0xffff, 0],
             ..UserCmd::default()
-        });
+        };
+        pred.push(cmd);
+        c.send_cmd(cmd);
+        if let Some(s) = c.latest() {
+            boxes.sync(s);
+            let env = Env {
+                world: boxes.world(),
+                weapons: &rules.weapons,
+                params: &rules.params,
+                speed: rules.speed,
+            };
+            let p = pred.predict(s, &env);
+            r.predictions += 1;
+            r.max_ahead = r.max_ahead.max(p.replayed);
+            r.end = p.ps.origin;
+        }
         let ents = c
             .snaps
             .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
@@ -124,9 +161,6 @@ fn client(addr: SocketAddr, id: usize, stop: &AtomicBool, ready: &AtomicUsize) -
                 }
             }
         }
-        if let Some(s) = c.latest() {
-            r.end = s.ps.origin;
-        }
     }
     r.secs = began.elapsed().as_secs_f64();
     if let Some(s) = c.stats() {
@@ -135,6 +169,7 @@ fn client(addr: SocketAddr, id: usize, stop: &AtomicBool, ready: &AtomicUsize) -
         r.bytes_out = s.bytes_out;
     }
     r.unusable = c.unusable();
+    r.corrections = pred.corrections;
     c.disconnect();
     r
 }
@@ -179,12 +214,23 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         return Ok(StageReport::new(NAME, Status::Failed).with_reason(e));
     }
 
+    let Some(clipmap) = server.game.content.clipmap().cloned() else {
+        return Ok(
+            StageReport::new(NAME, Status::Failed).with_reason("the map has no collision data")
+        );
+    };
+    let rules = Rules {
+        clipmap,
+        weapons: server.game.weapons.clone(),
+        params: server.game.pm_params.clone(),
+        speed: server.game.cvars.int("g_speed"),
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicUsize::new(0));
     let handles: Vec<_> = (0..CLIENTS)
         .map(|i| {
-            let (stop, ready) = (stop.clone(), ready.clone());
-            std::thread::spawn(move || client(addr, i, &stop, &ready))
+            let (stop, ready, rules) = (stop.clone(), ready.clone(), rules.clone());
+            std::thread::spawn(move || client(addr, i, &rules, &stop, &ready))
         })
         .collect();
     // The server runs in this thread until every client thread has finished.
@@ -219,6 +265,20 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 failures.push(format!(
                     "client {i} saw at most {} other players of {BOTS} bots",
                     r.seen_max
+                ));
+            }
+            // Prediction runs ahead of the snapshot and the server seldom disagrees with it.
+            if r.max_ahead == 0 {
+                failures.push(format!(
+                    "client {i}: prediction never ran ahead of the server"
+                ));
+            }
+            // Players push on each other and the server moves the others between a client's
+            // commands, so some passes disagree; walking alone they would not.
+            if r.corrections * 7 > r.predictions {
+                failures.push(format!(
+                    "client {i}: the server corrected {} of {} predictions",
+                    r.corrections, r.predictions
                 ));
             }
             if r.steps == 0 || r.snaps * 100 > r.steps {
@@ -262,6 +322,22 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "client.unusable_snapshots".into(),
             live.iter().map(|r| r.unusable as f64).sum(),
         );
+        for (k, v) in [
+            (
+                "client.prediction_passes",
+                live.iter().map(|r| r.predictions as f64).sum(),
+            ),
+            (
+                "client.prediction_corrections",
+                live.iter().map(|r| r.corrections as f64).sum(),
+            ),
+            (
+                "client.prediction_max_ahead",
+                live.iter().map(|r| r.max_ahead as f64).fold(0.0, f64::max),
+            ),
+        ] {
+            report.metrics.insert(k.into(), v);
+        }
     }
     // Server cost per client: ticks while every client was connected.
     let all = CLIENTS;

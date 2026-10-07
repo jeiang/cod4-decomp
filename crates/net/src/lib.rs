@@ -13,6 +13,7 @@ pub mod entity;
 pub mod field;
 pub mod netchan;
 pub mod oob;
+pub mod predict;
 pub mod ps;
 pub mod reliable;
 pub mod session;

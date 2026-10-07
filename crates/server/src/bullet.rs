@@ -24,7 +24,7 @@ use sim::weapon::{PenetrateType, WeaponInfo, WeaponParams};
 
 use crate::client::Team;
 use crate::combat::{MOD_PISTOL_BULLET, MOD_RIFLE_BULLET, dflags};
-use crate::game::{Ent, Game};
+use crate::game::Game;
 
 pub(crate) fn sub(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -172,12 +172,22 @@ impl Game {
             if e.contents & contents::PLAYER == 0 {
                 continue;
             }
-            let lo = [0, 1, 2].map(|i| e.origin[i] + e.mins[i] - 1.0);
-            let hi = [0, 1, 2].map(|i| e.origin[i] + e.maxs[i] + 1.0);
+            // A person's shot is judged against the bodies as they were when the shooter saw them.
+            let rewound = self
+                .lag_time
+                .and_then(|t| self.lag.at(n, t, self.level.time));
+            let body = rewound
+                .as_ref()
+                .map_or((&e.origin, &e.mins, &e.maxs, &c.pose), |r| {
+                    (&r.origin, &r.mins, &r.maxs, &r.pose)
+                });
+            let lo = [0, 1, 2].map(|i| body.0[i] + body.1[i] - 1.0);
+            let hi = [0, 1, 2].map(|i| body.0[i] + body.2[i] + 1.0);
             if segment_box(start, end, lo, hi).is_none_or(|f| f >= best.fraction) {
                 continue;
             }
-            let Some(hit) = self.locate_hit(n, c.ps.pm_type, e, start, end, rifle, best.fraction)
+            let Some(hit) =
+                self.locate_hit(c.ps.viewangles[1], body, start, end, rifle, best.fraction)
             else {
                 continue;
             };
@@ -197,32 +207,27 @@ impl Game {
 
     /// Where the segment meets player `n`'s body, if it does: the pose skeleton when the
     /// server has one, otherwise the stance box.
-    #[allow(clippy::too_many_arguments)]
     fn locate_hit(
         &self,
-        n: u16,
-        _pm_type: PmType,
-        e: &Ent,
+        yaw: f32,
+        body: (&Vec3, &Vec3, &Vec3, &crate::playeranim::PlayerPoseState),
         start: Vec3,
         end: Vec3,
         rifle: bool,
         max_fraction: f32,
     ) -> Option<LocHit> {
-        let c = self.client(n)?;
+        let (origin, _, maxs, pose) = body;
         if let Some(anims) = self.player_anims.as_ref() {
-            return c
-                .pose
-                .trace(anims, &e.origin, &start, &end, rifle, max_fraction);
+            return pose.trace(anims, origin, &start, &end, rifle, max_fraction);
         }
-        let stance = if e.maxs[2] < 40.0 {
+        let stance = if maxs[2] < 40.0 {
             Stance::Prone
-        } else if e.maxs[2] < 60.0 {
+        } else if maxs[2] < 60.0 {
             Stance::Crouch
         } else {
             Stance::Stand
         };
-        let (fraction, loc) =
-            box_hit_location(&start, &end, &e.origin, c.ps.viewangles[1], stance)?;
+        let (fraction, loc) = box_hit_location(&start, &end, origin, yaw, stance)?;
         (fraction < max_fraction).then(|| {
             let d = normalized(sub(end, start));
             LocHit {

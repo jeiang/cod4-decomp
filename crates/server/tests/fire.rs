@@ -270,6 +270,54 @@ fn a_shot_into_the_legs_is_not_a_headshot_and_a_miss_hurts_nobody() {
 }
 
 #[test]
+fn a_shot_is_judged_against_the_bodies_as_the_shooter_saw_them() {
+    use server::lagcomp::Sample;
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [40.0, 300.0, 0.0], 180.0, Team::Axis);
+    g.client_mut(shooter).unwrap().ps.view_height_current = 66.0;
+    // The victim stood in the line of fire 100 ms ago and has since stepped out of it.
+    for (time, y) in [(900, 0.0), (1000, 0.0), (1100, 300.0)] {
+        g.lag.record(
+            victim,
+            Sample {
+                time,
+                origin: [40.0, y, 0.0],
+                mins: PLAYER_MINS,
+                maxs: PLAYER_MAXS,
+                pose: Default::default(),
+            },
+        );
+    }
+    g.level.time = 1100;
+    // Judged live, the shot misses.
+    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    assert!(damage_calls(&g, victim).is_empty());
+    // Judged where the shooter saw the victim, it hits.
+    g.lag_time = Some(1000);
+    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    g.lag_time = None;
+    assert_eq!(damage_calls(&g, victim).len(), 1);
+    // A shooter cannot reach further back than the cap: 1100 - 250 is long after he stood there.
+    g.calls.clear();
+    g.level.time = 1500;
+    g.lag_time = Some(900);
+    g.lag.record(
+        victim,
+        Sample {
+            time: 1500,
+            origin: [40.0, 300.0, 0.0],
+            mins: PLAYER_MINS,
+            maxs: PLAYER_MAXS,
+            pose: Default::default(),
+        },
+    );
+    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    g.lag_time = None;
+    assert!(damage_calls(&g, victim).is_empty());
+}
+
+#[test]
 fn bullets_pass_thin_walls_at_a_cost_and_stop_at_thick_ones() {
     let table = PenetrationTable::parse("BULLET_PEN_TABLE\\small_wood\\8\\medium_wood\\16");
     assert_eq!(table.depth(PenetrateType::Small, 21), 8.0);

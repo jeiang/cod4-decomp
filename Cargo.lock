@@ -1403,6 +1403,7 @@ dependencies = [
 name = "net"
 version = "0.0.0"
 dependencies = [
+ "assets",
  "sim",
 ]
 
