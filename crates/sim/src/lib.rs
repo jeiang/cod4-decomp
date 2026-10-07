@@ -7,5 +7,6 @@
 pub mod cm;
 pub mod contents;
 pub mod pm;
+pub mod world;
 
 pub type Vec3 = [f32; 3];

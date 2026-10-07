@@ -3,6 +3,19 @@
 
 use crate::Vec3;
 
+mod brushes;
+mod capsule;
+mod map;
+mod mesh;
+mod query;
+mod sight;
+mod transform;
+mod tw;
+mod vec;
+
+pub(crate) use tw::Tw;
+pub use map::{ClipModel, CollisionWorld};
+
 pub const ENTITYNUM_NONE: u16 = 1023;
 pub const ENTITYNUM_WORLD: u16 = 1022;
 
