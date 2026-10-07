@@ -137,6 +137,20 @@ impl TextureCache {
         tex
     }
 
+    /// A loose image by name (`images/<name>.iwi`), for 2D art that has no material; `None` when it cannot be loaded.
+    pub fn named(&mut self, gpu: &Gpu, name: &str) -> Option<Arc<Tex>> {
+        let name = name.trim_start_matches(',');
+        if let Some(t) = self.cache.get(name) {
+            return t.clone();
+        }
+        let tex = self.load_iwi(gpu, name).map(Arc::new);
+        if tex.is_none() {
+            self.failed.push(name.to_owned());
+        }
+        self.cache.insert(name.to_owned(), tex.clone());
+        tex
+    }
+
     fn load_iwi(&self, gpu: &Gpu, name: &str) -> Option<Tex> {
         let vfs = self.vfs.as_ref()?;
         let image = iwi::load_picmip(vfs, name, self.picmip).ok()?;

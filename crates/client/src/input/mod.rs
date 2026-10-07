@@ -8,7 +8,7 @@
 //!
 //! Angle convention (the original's): positive yaw turns left, positive pitch looks down. `look_delta_*` are degrees.
 
-mod config;
+pub mod config;
 mod cvar;
 mod keys;
 mod pad;
@@ -358,6 +358,15 @@ impl Input {
         std::fs::write(&path, self.config_text())?;
         self.dirty = false;
         Ok(())
+    }
+
+    /// Keys bound to `command`, in name order.
+    pub fn binding_keys(&self, command: &str) -> Vec<&str> {
+        self.binds
+            .iter()
+            .filter(|(_, c)| c.eq_ignore_ascii_case(command))
+            .map(|(k, _)| k.as_str())
+            .collect()
     }
 
     pub fn bound(&self, key: &str) -> Option<&str> {

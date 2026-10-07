@@ -189,6 +189,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::audio::run),
     },
     StageDef {
+        name: "client-ui",
+        description: "client --ui-tour: the stock menus (main menu, server setup, options, team/class, scoreboard) open with no world and draw: fonts, strings and images resolve",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_ui::run),
+    },
+    StageDef {
         name: "client-input",
         description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
         needs_install: false,

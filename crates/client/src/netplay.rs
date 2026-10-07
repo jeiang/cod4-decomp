@@ -132,6 +132,16 @@ impl NetPlay {
         self.net.refused()
     }
 
+    /// The server has put the player in the world (alive at least once).
+    pub fn spawned(&self) -> bool {
+        self.c.spawned
+    }
+
+    /// Sends a client command line to the server (`menuresponse <menu> <response>`).
+    pub fn send_command(&mut self, cmd: &str) {
+        self.net.command(cmd);
+    }
+
     pub fn disconnect(&mut self) {
         self.net.disconnect();
     }

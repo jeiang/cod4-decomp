@@ -11,7 +11,9 @@ use crate::input::{Input, InputFrame, buttons};
 use crate::listen::{self, Listen};
 use crate::models::Library;
 use crate::netplay::NetPlay;
+use crate::shell::{Action, Shell};
 use crate::showcase::Showcase;
+use crate::ui::UiKey;
 use crate::video::Recorder;
 use assets::vfs::Vfs;
 use glam::Vec3;
@@ -38,8 +40,14 @@ pub fn run(cli: Cli) -> Result<(), String> {
         return l.error.map_or(Ok(()), Err);
     }
     let t = Instant::now();
-    let map = MapData::load(&cli.install, &cli.map)
-        .map_err(|e| format!("cannot load {}: {e}", cli.map))?;
+    let map = if cli.menu_mode() {
+        None
+    } else {
+        Some(
+            MapData::load(&cli.install, &cli.map)
+                .map_err(|e| format!("cannot load {}: {e}", cli.map))?,
+        )
+    };
     let load_ms = t.elapsed().as_secs_f64() * 1000.0;
     let mut v = Viewer {
         cli,
@@ -142,7 +150,8 @@ struct State {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     gpu: Arc<Gpu>,
-    renderer: Renderer,
+    renderer: Option<Renderer>,
+    shell: Option<Shell>,
     started: Instant,
     last_frame: Instant,
     last_t: f32,
@@ -170,12 +179,51 @@ struct State {
     showcase: Option<Showcase>,
     net: Option<NetPlay>,
     listen: Option<Listen>,
-    tour: flythrough::Tour,
+    tour: Option<flythrough::Tour>,
+    ui_tour: Option<UiTour>,
+    script: Option<UiScript>,
+    /// A screenshot to take after the next paint (name without extension).
+    shot_request: Option<String>,
+}
+
+/// The `--ui-tour` script: which menu is open and how many frames it has been shown.
+struct UiTour {
+    menus: Vec<&'static str>,
+    index: usize,
+    frames: u32,
+    results: Vec<Value>,
+}
+
+/// Menus the tour opens: the front end, then the script menus a match opens.
+const TOUR_MENUS: &[&str] = &[
+    "main",
+    "pc_join_unranked",
+    "createserver",
+    "main_options",
+    "options_graphics",
+    "main_controls",
+    "team_marinesopfor",
+    "class",
+    "scoreboard",
+    "popup_leavegame",
+    "endofgame",
+];
+
+/// Frames a tour menu is shown before its screenshot (fades and expressions settle).
+const TOUR_FRAMES: u32 = 6;
+
+/// `--ui-script`: steps that drive the menus like a player.
+struct UiScript {
+    steps: Vec<String>,
+    index: usize,
+    /// When the current step began and, for waits, how long it may take.
+    began: Instant,
+    results: Vec<Value>,
 }
 
 struct Viewer {
     cli: Cli,
-    map: MapData,
+    map: Option<MapData>,
     load_ms: f64,
     st: Option<State>,
     error: Option<String>,
@@ -219,23 +267,32 @@ impl Viewer {
             color_space: Default::default(),
         };
         surface.configure(&gpu.device, &config);
-        let scene = Scene::new(&gpu, &self.map);
         let vfs = Vfs::open_stock(&self.cli.install, 0)
             .map_err(|e| format!("cannot open the install: {e}"))?;
-        let mut renderer = Renderer::new(
-            gpu.clone(),
-            scene,
-            &self.map,
-            TextureCache::new(Some(vfs), 0),
+        let renderer = match &self.map {
+            Some(map) => {
+                let scene = Scene::new(&gpu, map);
+                let mut r = Renderer::new(gpu.clone(), scene, map, TextureCache::new(Some(vfs), 0));
+                r.settings = self.cli.settings;
+                r.warm(config.format);
+                Some(r)
+            }
+            None => None,
+        };
+        let tour = match (&renderer, &self.map) {
+            (Some(r), Some(map)) => {
+                let w = &r.scene.world;
+                Some(flythrough::Tour::new(
+                    &map.spawn_points(),
+                    (Vec3::from(w.mins), Vec3::from(w.maxs)),
+                ))
+            }
+            _ => None,
+        };
+        let start = tour.as_ref().map_or_else(
+            || flythrough::Tour::new(&[], (Vec3::splat(-1000.0), Vec3::splat(1000.0))).pose(0.0),
+            |t| t.pose(0.0),
         );
-        renderer.settings = self.cli.settings;
-        renderer.warm(config.format);
-        let w = &renderer.scene.world;
-        let tour = flythrough::Tour::new(
-            &self.map.spawn_points(),
-            (Vec3::from(w.mins), Vec3::from(w.maxs)),
-        );
-        let start = tour.pose(0.0);
         if let Some(out) = &self.cli.out {
             std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
         }
@@ -244,8 +301,9 @@ impl Viewer {
             Some(n) => {
                 let t = Instant::now();
                 let mut lib = Library::load(&self.cli.install, &self.cli.map)?;
-                let w = &renderer.scene.world;
-                let collision = renderer
+                let r = renderer.as_ref().ok_or("no map")?;
+                let w = &r.scene.world;
+                let collision = r
                     .scene
                     .collision
                     .clone()
@@ -257,7 +315,14 @@ impl Viewer {
                         .iter()
                         .any(Option::is_some)
                 };
-                let s = Showcase::new(&mut lib, &*collision, &tour, "m4_mp", n, &lit)?;
+                let s = Showcase::new(
+                    &mut lib,
+                    &*collision,
+                    tour.as_ref().ok_or("no map")?,
+                    "m4_mp",
+                    n,
+                    &lit,
+                )?;
                 notes.push(format!(
                     "showcase: {n} players, models loaded in {:.0} ms",
                     t.elapsed().as_secs_f64() * 1000.0
@@ -273,7 +338,7 @@ impl Viewer {
             let addr = match &self.cli.connect {
                 Some(a) => resolve(a)?,
                 None => {
-                    let l = listen::start(&self.cli.install, &self.cli.map, self.cli.bots)?;
+                    let l = listen::start(&self.cli.install, &self.cli.map, self.cli.bots, None)?;
                     let a = l.addr;
                     notes.push(format!(
                         "listen server with {} bots up in {:.0} ms",
@@ -286,6 +351,8 @@ impl Viewer {
             };
             let clipmap = self
                 .map
+                .as_ref()
+                .ok_or("no map")?
                 .clipmap
                 .clone()
                 .ok_or("the map has no collision data")?;
@@ -305,6 +372,25 @@ impl Viewer {
                 ),
             )?);
         }
+        let mut input = Input::new(self.cli.config.clone());
+        let mut shell = if self.cli.flythrough || self.cli.show_models.is_some() {
+            None
+        } else {
+            let install = server::content::Install::open(&self.cli.install)
+                .map_err(|e| format!("cannot open the install: {e}"))?;
+            Some(Shell::new(
+                gpu.clone(),
+                config.format,
+                (config.width, config.height),
+                &install,
+                &mut input,
+            )?)
+        };
+        if self.cli.menu_mode()
+            && let Some(sh) = shell.as_mut()
+        {
+            sh.open(&mut input, "main");
+        }
         let want_video = self.cli.video && self.cli.flythrough;
         if want_video && !copy_src {
             notes.push("surface cannot be copied from; no video".into());
@@ -319,13 +405,14 @@ impl Viewer {
             config,
             gpu,
             renderer,
+            shell,
             started: now,
             last_frame: now,
             last_t: 0.0,
             pos: start.origin,
             yaw: start.yaw,
             pitch: start.pitch,
-            input: Input::new(self.cli.config.clone()),
+            input,
             grabbed: false,
             samples: Vec::new(),
             gpu_ms: Vec::new(),
@@ -343,6 +430,23 @@ impl Viewer {
             showcase,
             net,
             listen,
+            script: self.cli.ui_script.as_ref().map(|s| UiScript {
+                steps: s
+                    .split(',')
+                    .map(|x| x.trim().to_owned())
+                    .filter(|x| !x.is_empty())
+                    .collect(),
+                index: 0,
+                began: Instant::now(),
+                results: Vec::new(),
+            }),
+            shot_request: None,
+            ui_tour: self.cli.ui_tour.as_ref().map(|_| UiTour {
+                menus: TOUR_MENUS.to_vec(),
+                index: 0,
+                frames: 0,
+                results: Vec::new(),
+            }),
         })
     }
 }
@@ -366,7 +470,12 @@ impl ApplicationHandler for Viewer {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
         let Some(st) = self.st.as_mut() else { return };
-        st.input.window_event(&ev);
+        let captured = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
+        if captured {
+            ui_event(st, &ev);
+        } else {
+            st.input.window_event(&ev);
+        }
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
@@ -374,12 +483,15 @@ impl ApplicationHandler for Viewer {
                 st.config.height = s.height;
                 st.surface.configure(&st.gpu.device, &st.config);
                 st.fov_x = hor_plus(self.cli.fov, s.width as f32 / s.height as f32);
+                if let Some(sh) = st.shell.as_mut() {
+                    sh.resize(s.width, s.height);
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !self.cli.timed() => {
+            } if !self.cli.timed() && !captured && st.renderer.is_some() => {
                 st.grabbed = st
                     .window
                     .set_cursor_grab(CursorGrabMode::Locked)
@@ -415,20 +527,33 @@ impl Viewer {
         let dt = (t - st.last_t).min(0.1);
         st.last_t = t;
 
+        let menu_open = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
             (st.pos, st.yaw, st.pitch) = (p, y, pi);
-            st.renderer.dynamic_models = sc.update(dt);
+            if let Some(r) = st.renderer.as_mut() {
+                r.dynamic_models = sc.update(dt);
+            }
         } else if let Some(net) = st.net.as_mut() {
             let f = if self.cli.autoplay {
                 InputFrame::default()
             } else {
-                st.input.frame(dt)
+                let f = st.input.frame(dt);
+                if menu_open { InputFrame::default() } else { f }
             };
-            if f.pending_commands
-                .iter()
-                .any(|c| matches!(c.as_str(), "togglemenu" | "quit"))
-            {
+            for c in &f.pending_commands {
+                match c.as_str() {
+                    "quit" => el.exit(),
+                    "togglemenu" => {
+                        if let Some(sh) = st.shell.as_mut() {
+                            let menu = st.input.cvar("g_scriptMainMenu").unwrap_or("").to_owned();
+                            sh.open(&mut st.input, &menu);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if self.cli.autoplay && f.pending_commands.iter().any(|c| c == "togglemenu") {
                 el.exit();
             }
             if let Some(why) = net.refused() {
@@ -436,20 +561,23 @@ impl Viewer {
             }
             if let Some(nf) = net.frame(dt, &f) {
                 (st.pos, st.yaw, st.pitch) = (nf.origin, nf.yaw, nf.pitch);
-                st.renderer.dynamic_models = nf.models;
+                if let Some(r) = st.renderer.as_mut() {
+                    r.dynamic_models = nf.models;
+                }
             }
         } else if self.cli.flythrough {
-            let p = st.tour.pose(t);
-            (st.pos, st.yaw, st.pitch) = (p.origin, p.yaw, p.pitch);
+            if let Some(tour) = st.tour.as_ref() {
+                let p = tour.pose(t);
+                (st.pos, st.yaw, st.pitch) = (p.origin, p.yaw, p.pitch);
+            }
         } else {
             let f = st.input.frame(dt);
-            if f.pending_commands
-                .iter()
-                .any(|c| matches!(c.as_str(), "togglemenu" | "quit"))
-            {
+            if f.pending_commands.iter().any(|c| c == "quit") {
                 el.exit();
             }
-            fly(st, &f, dt);
+            if st.renderer.is_some() && st.shell.is_none() {
+                fly(st, &f, dt);
+            }
         }
         let frame = match st.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
@@ -469,14 +597,16 @@ impl Viewer {
             time: t,
         };
         let target = frame.texture.create_view(&Default::default());
-        let stats = st.renderer.render(
-            &view,
-            &target,
-            st.config.format,
-            (st.config.width, st.config.height),
-        );
-        st.surfaces_drawn.push(stats.surfaces as f64);
-        record_gpu(&mut st.gpu_ms, st.renderer.take_gpu_times());
+        let size = (st.config.width, st.config.height);
+        if let Some(r) = st.renderer.as_mut() {
+            let stats = r.render(&view, &target, st.config.format, size);
+            st.surfaces_drawn.push(stats.surfaces as f64);
+            record_gpu(&mut st.gpu_ms, r.take_gpu_times());
+        }
+        if let Some(sh) = st.shell.as_mut() {
+            let clear = st.renderer.is_none().then_some(wgpu::Color::BLACK);
+            sh.paint(&mut st.input, &target, size, clear);
+        }
         if st.want_video && st.recorder.is_none() {
             let size = (frame.texture.width(), frame.texture.height());
             if size == st.rec_size {
@@ -528,11 +658,76 @@ impl Viewer {
                 st.config.format,
                 &out.join("screenshot.png"),
             ) {
-                Ok(()) => st.shot_ok = true,
+                Ok(_) => st.shot_ok = true,
                 Err(e) => st.notes.push(format!("screenshot failed: {e}")),
             }
         }
+        if let Some(t) = st.ui_tour.as_mut() {
+            let dir = self.cli.ui_tour.clone().unwrap_or_default();
+            let done = tour_step(
+                st.shell.as_mut(),
+                &mut st.input,
+                t,
+                &st.gpu,
+                &frame.texture,
+                st.config.format,
+                &dir,
+            );
+            if done {
+                let missing: Vec<String> = st
+                    .shell
+                    .as_ref()
+                    .map(|s| s.missing().to_vec())
+                    .unwrap_or_default();
+                let report = json!({"status": "ok", "menus": t.results, "missing_images": missing});
+                let _ = std::fs::write(
+                    dir.join("ui.json"),
+                    serde_json::to_vec_pretty(&report).unwrap_or_default(),
+                );
+                el.exit();
+            }
+        }
+        if let Some(name) = st.shot_request.take() {
+            let out = self.cli.out.clone().unwrap_or_default();
+            let _ = std::fs::create_dir_all(&out);
+            let ok = save_png(
+                &st.gpu,
+                &frame.texture,
+                st.config.format,
+                &out.join(format!("{name}.png")),
+            )
+            .is_ok();
+            if let Some(sc) = st.script.as_mut() {
+                sc.results
+                    .push(json!({"step": format!("shot={name}"), "ok": ok}));
+                sc.index += 1;
+                sc.began = Instant::now();
+            }
+        }
+        if st.script.is_some() && script_step(st) {
+            let out = self.cli.out.clone().unwrap_or_default();
+            let sc = st.script.take().unwrap_or_else(|| unreachable!());
+            let ok = sc.results.iter().all(|r| r["ok"] == Value::Bool(true));
+            let report = json!({
+                "status": if ok { "ok" } else { "failed" },
+                "steps": sc.results,
+                "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
+                "net": st.net.as_mut().map(NetPlay::report),
+            });
+            let _ = std::fs::write(
+                out.join("ui-script.json"),
+                serde_json::to_vec_pretty(&report).unwrap_or_default(),
+            );
+            el.exit();
+        }
         st.gpu.queue.present(frame);
+        let actions = st
+            .shell
+            .as_mut()
+            .map(Shell::drain_actions)
+            .unwrap_or_default();
+        self.apply_actions(el, actions)?;
+        let st = self.st.as_mut().ok_or("no window")?;
         let cpu_ms = cpu_start.elapsed().as_secs_f64() * 1000.0;
         if st.samples.len() % 30 == 0 {
             st.rss = rss();
@@ -547,6 +742,40 @@ impl Viewer {
         Ok(())
     }
 
+    fn apply_actions(&mut self, el: &ActiveEventLoop, actions: Vec<Action>) -> Result<(), String> {
+        for a in actions {
+            let st = self.st.as_mut().ok_or("no window")?;
+            match a {
+                Action::Quit => el.exit(),
+                Action::StartServer { map, gametype } => {
+                    if let Err(e) =
+                        start_session(&self.cli, &mut self.map, st, &map, &gametype, None)
+                    {
+                        eprintln!("cannot start the server: {e}");
+                        end_session(&mut self.map, st);
+                    }
+                }
+                Action::Join(addr) => {
+                    let map = self.cli.map.clone();
+                    if let Err(e) =
+                        start_session(&self.cli, &mut self.map, st, &map, "war", Some(&addr))
+                    {
+                        eprintln!("cannot join {addr}: {e}");
+                        end_session(&mut self.map, st);
+                    }
+                }
+                Action::Disconnect => end_session(&mut self.map, st),
+                Action::MenuResponse { menu, response } => {
+                    if let Some(n) = st.net.as_mut() {
+                        n.send_command(&format!("menuresponse {menu} {response}"));
+                    }
+                }
+                Action::Console(_) => {}
+            }
+        }
+        Ok(())
+    }
+
     fn finish(&mut self, _: &ActiveEventLoop) -> Result<(), String> {
         let st = self.st.as_mut().ok_or("no window")?;
         let out = self.cli.out.clone().unwrap_or_default();
@@ -555,7 +784,9 @@ impl Viewer {
             std::fs::File::create(out.join("frames.raw.csv")).map_err(|e| e.to_string())?,
         );
         writeln!(csv, "cpu_ms,gpu_ms,present_interval_ms,mem_bytes").map_err(|e| e.to_string())?;
-        record_gpu(&mut st.gpu_ms, st.renderer.flush_gpu_times());
+        if let Some(r) = st.renderer.as_mut() {
+            record_gpu(&mut st.gpu_ms, r.flush_gpu_times());
+        }
         // The first interval is the time to the first frame, not a presentation interval.
         for (i, s) in st.samples.iter().enumerate().skip(1) {
             let gpu = st
@@ -601,7 +832,7 @@ impl Viewer {
                 "fog": self.cli.settings.fog,
                 "primary_lights": self.cli.settings.primary_lights,
             },
-            "gpu_timestamps": st.renderer.timer.is_some(),
+            "gpu_timestamps": st.renderer.as_ref().is_some_and(|r| r.timer.is_some()),
             "mode": {
                 "width": st.config.width, "height": st.config.height,
                 "refresh_mhz": monitor_mhz,
@@ -631,6 +862,253 @@ fn record_gpu(slots: &mut Vec<Option<f64>>, finished: Vec<(u64, f64)>) {
             slots.resize(i + 1, None);
         }
         slots[i] = Some(ms);
+    }
+}
+
+/// One frame of the `--ui-script`; `true` once every step has run.
+fn script_step(st: &mut State) -> bool {
+    let Some(sc) = st.script.as_mut() else {
+        return true;
+    };
+    let Some(step) = sc.steps.get(sc.index).cloned() else {
+        return true;
+    };
+    let (key, arg) = step
+        .split_once('=')
+        .map_or((step.as_str(), ""), |(k, v)| (k, v));
+    let waited = sc.began.elapsed().as_secs_f32();
+    let done = |ok: bool, sc: &mut UiScript, note: String| {
+        sc.results
+            .push(json!({"step": step, "ok": ok, "note": note, "secs": waited}));
+        sc.index += 1;
+        sc.began = Instant::now();
+    };
+    match key {
+        "click" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            let ok = sh.click(&mut st.input, arg);
+            let open = sh.ui.open_menus().join(",");
+            done(ok, sc, format!("open: {open}"));
+        }
+        "wait" => {
+            if waited >= arg.parse::<f32>().unwrap_or(1.0) {
+                done(true, sc, String::new());
+            }
+        }
+        "menu" => {
+            let (name, secs) = arg
+                .split_once(':')
+                .map_or((arg, 60.0), |(n, s)| (n, s.parse().unwrap_or(60.0)));
+            let open = st.shell.as_ref().is_some_and(|s| s.ui.is_open(name));
+            if open {
+                done(true, sc, String::new());
+            } else if waited > secs {
+                let have = st
+                    .shell
+                    .as_ref()
+                    .map(|s| s.ui.open_menus().join(","))
+                    .unwrap_or_default();
+                done(false, sc, format!("timed out; open: {have}"));
+            }
+        }
+        "ingame" => {
+            let secs: f32 = arg.parse().unwrap_or(120.0);
+            if st.net.as_ref().is_some_and(NetPlay::spawned) {
+                done(true, sc, String::new());
+            } else if waited > secs {
+                done(false, sc, "timed out".into());
+            }
+        }
+        "shot" => {
+            if st.shot_request.is_none() {
+                st.shot_request = Some(arg.to_owned());
+            } else if waited > 5.0 {
+                done(false, sc, "no screenshot".into());
+            }
+        }
+        other => done(false, sc, format!("unknown step {other}")),
+    }
+    sc.index >= sc.steps.len()
+}
+
+/// One frame of the tour; `true` when every menu has been shown.
+fn tour_step(
+    shell: Option<&mut Shell>,
+    input: &mut Input,
+    t: &mut UiTour,
+    gpu: &Gpu,
+    tex: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    dir: &Path,
+) -> bool {
+    let Some(sh) = shell else { return true };
+    if t.frames == 0 {
+        sh.close_all(input);
+        match t.menus.get(t.index) {
+            Some(m) => sh.open(input, m),
+            None => return true,
+        }
+    }
+    t.frames += 1;
+    if t.frames < TOUR_FRAMES {
+        return false;
+    }
+    let name = t.menus[t.index];
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join(format!("{name}.png"));
+    let lit = match save_png(gpu, tex, format, &path) {
+        Ok(f) => f,
+        Err(e) => {
+            t.results.push(json!({"menu": name, "error": e}));
+            -1.0
+        }
+    };
+    if lit >= 0.0 {
+        t.results.push(json!({"menu": name, "open": sh.ui.is_open(name), "lit_fraction": lit, "screenshot": format!("{name}.png")}));
+    }
+    t.index += 1;
+    t.frames = 0;
+    t.index >= t.menus.len()
+}
+
+/// Routes a window event to the menus (a menu is open and owns the keyboard and mouse).
+fn ui_event(st: &mut State, ev: &WindowEvent) {
+    use winit::keyboard::{Key, NamedKey};
+    let Some(sh) = st.shell.as_mut() else { return };
+    match ev {
+        WindowEvent::CursorMoved { position, .. } => {
+            sh.mouse_move(&mut st.input, position.x as f32, position.y as f32);
+        }
+        WindowEvent::MouseInput {
+            state: ElementState::Pressed,
+            button,
+            ..
+        } => {
+            let key = match button {
+                MouseButton::Left => UiKey::Mouse1,
+                MouseButton::Right => UiKey::Mouse2,
+                _ => return,
+            };
+            sh.key(&mut st.input, key);
+        }
+        WindowEvent::MouseWheel { delta, .. } => {
+            let y = match delta {
+                winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
+                winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            if y != 0.0 {
+                sh.key(
+                    &mut st.input,
+                    if y > 0.0 {
+                        UiKey::WheelUp
+                    } else {
+                        UiKey::WheelDown
+                    },
+                );
+            }
+        }
+        WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+            let named = match &event.logical_key {
+                Key::Named(NamedKey::ArrowUp) => Some(UiKey::Up),
+                Key::Named(NamedKey::ArrowDown) => Some(UiKey::Down),
+                Key::Named(NamedKey::ArrowLeft) => Some(UiKey::Left),
+                Key::Named(NamedKey::ArrowRight) => Some(UiKey::Right),
+                Key::Named(NamedKey::Enter) => Some(UiKey::Enter),
+                Key::Named(NamedKey::Escape) => Some(UiKey::Escape),
+                Key::Named(NamedKey::Tab) => Some(UiKey::Tab),
+                Key::Named(NamedKey::Backspace) => Some(UiKey::Backspace),
+                Key::Named(NamedKey::Delete) => Some(UiKey::Delete),
+                Key::Named(NamedKey::Home) => Some(UiKey::Home),
+                Key::Named(NamedKey::End) => Some(UiKey::End),
+                Key::Named(NamedKey::PageUp) => Some(UiKey::PageUp),
+                Key::Named(NamedKey::PageDown) => Some(UiKey::PageDown),
+                _ => None,
+            };
+            if let Some(k) = named {
+                sh.key(&mut st.input, k);
+            } else if let Some(t) = &event.text {
+                for c in t.chars() {
+                    sh.key(&mut st.input, UiKey::Char(c));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Starts (`join` of `None`) or joins a match from the menus: loads the map, builds the renderer and connects.
+fn start_session(
+    cli: &Cli,
+    map_slot: &mut Option<MapData>,
+    st: &mut State,
+    map: &str,
+    gametype: &str,
+    join: Option<&str>,
+) -> Result<(), String> {
+    end_session(map_slot, st);
+    let data = MapData::load(&cli.install, map).map_err(|e| format!("cannot load {map}: {e}"))?;
+    let vfs =
+        Vfs::open_stock(&cli.install, 0).map_err(|e| format!("cannot open the install: {e}"))?;
+    let scene = Scene::new(&st.gpu, &data);
+    let mut r = Renderer::new(
+        st.gpu.clone(),
+        scene,
+        &data,
+        TextureCache::new(Some(vfs), 0),
+    );
+    r.settings = cli.settings;
+    r.warm(st.config.format);
+    let (addr, listen) = match join {
+        Some(a) => (resolve(a)?, None),
+        None => {
+            let l = listen::start(&cli.install, map, cli.bots, Some(gametype))?;
+            (l.addr, Some(l))
+        }
+    };
+    let clipmap = data
+        .clipmap
+        .clone()
+        .ok_or("the map has no collision data")?;
+    let lib = Library::load(&cli.install, map)?;
+    let limits = st.input.pitch_limits();
+    let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
+    st.net = Some(NetPlay::connect(
+        lib, clipmap, addr, &cli.name, limits, false, sound,
+    )?);
+    st.listen = listen;
+    st.renderer = Some(r);
+    *map_slot = Some(data);
+    if let Some(sh) = st.shell.as_mut() {
+        sh.st.in_game = true;
+        sh.close_all(&mut st.input);
+    }
+    Ok(())
+}
+
+/// Back to the main menu: drops the connection, the server and the world.
+fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
+    if let Some(n) = st.net.as_mut() {
+        n.disconnect();
+    }
+    st.net = None;
+    if let Some(l) = st.listen.as_mut() {
+        l.finish();
+    }
+    st.listen = None;
+    st.renderer = None;
+    *map_slot = None;
+    if st.grabbed {
+        let _ = st.window.set_cursor_grab(CursorGrabMode::None);
+        st.window.set_cursor_visible(true);
+        st.input.set_captured(false);
+        st.grabbed = false;
+    }
+    if let Some(sh) = st.shell.as_mut() {
+        sh.st.in_game = false;
+        sh.close_all(&mut st.input);
+        sh.open(&mut st.input, "main");
     }
 }
 
@@ -677,7 +1155,7 @@ fn save_png(
     tex: &wgpu::Texture,
     format: wgpu::TextureFormat,
     path: &Path,
-) -> Result<(), String> {
+) -> Result<f64, String> {
     let (w, h) = (tex.width(), tex.height());
     let bpr = (w * 4).next_multiple_of(256);
     let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -717,9 +1195,11 @@ fn save_png(
         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
     );
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    let mut lit = 0u64;
     for y in 0..h {
         let row = &data[(y * bpr) as usize..(y * bpr + w * 4) as usize];
         for p in row.as_chunks::<4>().0 {
+            lit += u64::from(u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2]) > 24);
             rgba.extend_from_slice(&if bgra {
                 [p[2], p[1], p[0], 255]
             } else {
@@ -733,5 +1213,6 @@ fn save_png(
     e.set_depth(png::BitDepth::Eight);
     e.write_header()
         .and_then(|mut w| w.write_image_data(&rgba))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(lit as f64 / f64::from(w * h))
 }
