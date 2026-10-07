@@ -27,7 +27,7 @@ nix develop -c cargo run --release -p harness -- stages              # list stag
 nix develop -c cargo run --release -p harness -- diff a.zip b.zip    # compare two bundles
 ```
 
-Stages that need engine commands read console scripts (`scenarios/*.cfg`, or `--script file`); commands the engine lacks yet are reported as skipped. Double-clicking the program runs the suite with the zip next to it. The CI `windows` job uploads that portable folder and smoke-tests it with no install. `scripts/artemis.sh <ref> -- <run options>` runs it on artemis and copies `bundles/` back.
+Stages that need engine commands read console scripts (`scenarios/*.cfg`, or `--script file`); commands the engine lacks yet are reported as skipped. Double-clicking the program runs the suite with the zip next to it. The CI `windows` job uploads that portable folder and smoke-tests it with no install. `scripts/remote-linux.sh <ref> -- <run options>` runs it on the Linux test host (`COD4E_LINUX_HOST`) and copies `bundles/` back.
 
 ## Headless server
 
