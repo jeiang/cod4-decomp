@@ -826,7 +826,7 @@ struct SunHeader {
     has_valid_data: bool,
     sprite_material: Ptr,
     flare_material: Ptr,
-    scalars: [u32; 19],
+    scalars: [u32; 18],
     sun_fx_position: V3,
 }
 
@@ -836,7 +836,7 @@ impl SunHeader {
         f.skip(3);
         let sprite_material = f.ptr()?;
         let flare_material = f.ptr()?;
-        let mut scalars = [0; 19];
+        let mut scalars = [0; 18];
         for v in &mut scalars {
             *v = f.u32();
         }
