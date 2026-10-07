@@ -166,10 +166,13 @@ impl Viewer {
             Arc::new(Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?);
         let caps = surface.get_capabilities(&gpu.adapter);
         // The shaders write display-referred values: an 8-bit linear (non-sRGB) target, not an HDR one.
-        let format = [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm]
-            .into_iter()
-            .find(|f| caps.formats.contains(f))
-            .unwrap_or(caps.formats[0]);
+        let format = [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ]
+        .into_iter()
+        .find(|f| caps.formats.contains(f))
+        .unwrap_or(caps.formats[0]);
         let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
         let copy_src = caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
         if copy_src {
@@ -361,13 +364,38 @@ impl Viewer {
             (st.config.width, st.config.height),
         );
         st.surfaces_drawn.push(stats.surfaces as f64);
+        if st.want_video && st.recorder.is_none() {
+            st.want_video = false;
+            st.rec_size = (frame.texture.width(), frame.texture.height());
+            let path = self
+                .cli
+                .out
+                .as_deref()
+                .unwrap_or(Path::new("."))
+                .join("flythrough.mp4");
+            match Recorder::start(&path, st.rec_size, 960, 30) {
+                Ok(r) => st.recorder = Some(r),
+                Err(e) => st.notes.push(format!("video: {e}")),
+            }
+        }
         if let Some(r) = st.recorder.as_mut() {
-            r.capture(
-                &st.gpu.device,
-                &st.gpu.queue,
-                &frame.texture,
-                Duration::from_secs_f32(t),
-            );
+            if (frame.texture.width(), frame.texture.height()) == st.rec_size {
+                r.capture(
+                    &st.gpu.device,
+                    &st.gpu.queue,
+                    &frame.texture,
+                    Duration::from_secs_f32(t),
+                );
+            } else if !st
+                .notes
+                .iter()
+                .any(|n| n.starts_with("window resized during"))
+            {
+                st.notes.push(
+                    "window resized during the recording; frames at the new size are not recorded"
+                        .into(),
+                );
+            }
         }
         if self.cli.screenshot
             && self.cli.flythrough
