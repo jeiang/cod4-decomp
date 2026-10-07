@@ -133,6 +133,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_loopback::run),
     },
     StageDef {
+        name: "net-match",
+        description: "headless server with bots, real UDP clients connect, spawn, walk and watch: smooth interpolation, bandwidth and per-client tick cost",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_match::run),
+    },
+    StageDef {
         name: "client-flythrough",
         description: "client flythrough per display mode, with video",
         needs_install: false,
