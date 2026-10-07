@@ -6,7 +6,10 @@ mod app;
 mod display;
 mod flythrough;
 mod input;
+mod models;
+mod showcase;
 mod video;
+mod viewmodel;
 
 use display::{FullscreenKind, Request};
 use std::path::PathBuf;
@@ -28,6 +31,8 @@ usage: cod4e [options]
   --flythrough           fly the scripted path, then exit
   --duration <secs>      flythrough length (default 12)
   --out <dir>            flythrough output: frames.raw.csv, client.json, flythrough.mp4, screenshot.png
+  --show-models          smoke scene: stock player models in different poses and the first-person weapon in
+                         front of a fixed camera (--model-count N sets the number of players, default 7)
   --video / --screenshot record a video / save a screenshot during the flythrough
   --config <path>        key binds and settings file (default: <config dir>/cod4e/config_mp.cfg)
   --input-selftest       check key binds, mouse look and the config file without a window, then exit (harness stage)
@@ -51,6 +56,8 @@ pub struct Cli {
     pub list: bool,
     pub config: Option<PathBuf>,
     pub input_selftest: bool,
+    /// Number of showcase players, when the scene is on.
+    pub show_models: Option<usize>,
 }
 
 fn parse(args: &[String]) -> Result<Cli, String> {
@@ -69,6 +76,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         list: false,
         config: None,
         input_selftest: false,
+        show_models: None,
     };
     let mut it = args.iter();
     let mut size_given = false;
@@ -111,6 +119,10 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--screenshot" => c.screenshot = true,
             "--input-selftest" => c.input_selftest = true,
             "--config" => c.config = Some(val(a)?.into()),
+            "--show-models" => c.show_models = Some(7),
+            "--model-count" => {
+                c.show_models = Some(val(a)?.parse().map_err(|_| "bad model count")?)
+            }
             "--list-display-modes" => c.list = true,
             "--json" => {}
             "-h" | "--help" => return Err(String::new()),

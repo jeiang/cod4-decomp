@@ -157,6 +157,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_flythrough::run),
     },
     StageDef {
+        name: "client-models",
+        description: "client --show-models twice from one camera, with and without players: the skinned player models must change the picture",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_models::run),
+    },
+    StageDef {
         name: "client-input",
         description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
         needs_install: false,

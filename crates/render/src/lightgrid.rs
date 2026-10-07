@@ -628,6 +628,23 @@ impl ModelLighting {
         TexelFormat::Bgra8
     }
 
+    /// Texel rows `[y0, y1)` of slice `z` of the volume covering the dynamic entries in use, if any.
+    pub fn dynamic_rows(&self) -> Option<(u32, u32)> {
+        (self.next_dynamic > self.static_count).then(|| {
+            (
+                4 * (self.static_count >> 6),
+                4 * (((self.next_dynamic - 1) >> 6) + 1),
+            )
+        })
+    }
+
+    /// The texels of rows `[y0, y1)` of slice `z`.
+    pub fn rows(&self, z: u32, y0: u32, y1: u32) -> &[u8] {
+        let a = ((z * self.height + y0) * WIDTH * 4) as usize;
+        let b = ((z * self.height + y1) * WIDTH * 4) as usize;
+        &self.texels[a..b]
+    }
+
     /// `BASE_LIGHTING_COORDS` for a handle: the centre of its block.
     pub fn base_coords(&self, handle: u16) -> [f32; 4] {
         let e = self.entry_of(handle);

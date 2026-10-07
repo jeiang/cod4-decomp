@@ -3,6 +3,7 @@
 pub mod asset_load;
 pub mod client_flythrough;
 pub mod client_input;
+pub mod client_models;
 pub mod net_loopback;
 pub mod net_match;
 pub mod selftest;
