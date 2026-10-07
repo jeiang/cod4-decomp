@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! AST to bytecode. All files are compiled together so cross-file calls bind to function ids.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::builtins::Builtins;
@@ -68,10 +68,24 @@ pub fn compile(
             range: start..next_id,
         });
     }
+    // The original copies each included file's own functions into the includer (not the
+    // functions that file includes in turn), and a name that is already taken is an error.
     for (i, script) in scripts.iter().enumerate() {
+        let mut taken: HashSet<Name> = symbols[i].funcs.keys().cloned().collect();
         for inc in &script.includes {
             match names.iter().position(|n| *n == *inc.file) {
-                Some(j) => symbols[i].includes.push(j),
+                Some(j) => {
+                    symbols[i].includes.push(j);
+                    for f in symbols[j].funcs.keys() {
+                        if !taken.insert(f.clone()) {
+                            errors.push(file_error(
+                                &names[i],
+                                inc.line,
+                                format!("function `{f}` already defined"),
+                            ));
+                        }
+                    }
+                }
                 None => errors.push(CompileError {
                     kind: ErrorKind::UnknownFile,
                     ..file_error(
@@ -283,22 +297,13 @@ impl FnCompiler<'_> {
         Ok(())
     }
 
-    /// Own file, then `#include`d files (depth first), by lowercase name.
+    /// Unqualified call: the file's own functions, then those of its direct `#include`s.
     fn lookup(&self, file: usize, name: &str) -> Option<u32> {
-        fn go(files: &[FileSyms], file: usize, name: &str, seen: &mut Vec<usize>) -> Option<u32> {
-            if seen.contains(&file) {
-                return None;
-            }
-            seen.push(file);
-            if let Some(&id) = files[file].funcs.get(name) {
-                return Some(id);
-            }
-            files[file]
-                .includes
-                .iter()
-                .find_map(|&i| go(files, i, name, seen))
-        }
-        go(self.files, file, name, &mut Vec::new())
+        let f = &self.files[file];
+        f.funcs
+            .get(name)
+            .or_else(|| f.includes.iter().find_map(|&i| self.files[i].funcs.get(name)))
+            .copied()
     }
 
     /// A full canonical name, or a bare last path segment (`_utility::f`).
@@ -319,7 +324,12 @@ impl FnCompiler<'_> {
                 }
             },
         };
-        match self.lookup(fi, name) {
+        // `file::name` sees only what `file` defines itself.
+        let found = match shown {
+            Some(_) => self.files[fi].funcs.get(name).copied(),
+            None => self.lookup(fi, name),
+        };
+        match found {
             Some(id) => Ok(id),
             None => match shown {
                 Some(f) => self.err(
