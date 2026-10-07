@@ -9,7 +9,7 @@ use super::gfx::{
 };
 use super::stream::{Addr, Block, Fields, Ptr, Stream};
 use super::world::{LightDef, load_light_def};
-use super::xmodel::{XModel, load as load_xmodel};
+use super::xmodel::{XModel, load_at as load_xmodel_at};
 use std::sync::Arc;
 
 type V3 = [f32; 3];
@@ -82,7 +82,7 @@ pub struct AabbTree {
     pub start_surf_index: u16,
     pub surface_count_no_decal: u16,
     pub start_surf_index_no_decal: u16,
-    pub smodel_indexes: Arc<[u16]>,
+    pub smodel_indexes: Vec<u16>,
     pub children_offset: i32,
 }
 
@@ -545,6 +545,16 @@ fn world(s: &mut Stream, h: &[u8]) -> Result<GfxWorld> {
             surface_count_no_decal: f.u16(),
         })
     })?;
+    let material_memory = vec(s, material_memory, material_memory_count, 4, 8, |s, f| {
+        let slot = f.slot();
+        let material = material_ptr_at(s, slot, f.ptr()?)?;
+        Ok(MaterialMemory {
+            material,
+            memory: f.i32(),
+        })
+    })?;
+    let vertices = bulk(s, vertices, 4, mul(vertex_count, 44)?)?;
+    let vertex_layer_data = bulk(s, layer_data, 1, vertex_layer_data_size)?;
     let sun = sun.load(s)?;
     let outdoor_image = image_ptr(s, outdoor_image)?;
     let cell_caster_words = mul(cell_count, cell_count.div_ceil(32))?;
@@ -609,17 +619,6 @@ fn world(s: &mut Stream, h: &[u8]) -> Result<GfxWorld> {
             runtime(s, p, 16, mul(dyn_ent_client_word_count[i], 32)?)?;
         }
     }
-    let material_memory = vec(s, material_memory, material_memory_count, 4, 8, |s, f| {
-        let slot = f.slot();
-        let material = material_ptr_at(s, slot, f.ptr()?)?;
-        Ok(MaterialMemory {
-            material,
-            memory: f.i32(),
-        })
-    })?;
-    let vertices = bulk(s, vertices, 4, mul(vertex_count, 44)?)?;
-    let vertex_layer_data = bulk(s, layer_data, 1, vertex_layer_data_size)?;
-
     Ok(GfxWorld {
         name,
         base_name,
@@ -670,12 +669,54 @@ fn bulk_indices(s: &mut Stream, p: Ptr, n: u32) -> Result<Vec<u16>> {
         .collect())
 }
 
+/// A `u16` array that later pointers may re-enter anywhere inside (the
+/// stream's reusable-data rule applied to a sub-range).
+fn shared_u16s(
+    s: &mut Stream,
+    seen: &mut Vec<(Addr, Vec<u16>)>,
+    p: Ptr,
+    n: u32,
+) -> Result<Vec<u16>> {
+    match p {
+        Ptr::Null => Ok(Vec::new()),
+        Ptr::Follow if n == 0 => Ok(Vec::new()),
+        Ptr::Follow => {
+            let (at, bytes) = s.load(2, mul(n, 2)?)?;
+            let v: Vec<u16> = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
+                .collect();
+            seen.push((at, v.clone()));
+            Ok(v)
+        }
+        Ptr::Offset(a) => {
+            let (start, v) = seen
+                .iter()
+                .rev()
+                .find(|(at, v)| {
+                    at.block == a.block
+                        && a.offset >= at.offset
+                        && a.offset <= at.offset + 2 * v.len() as u32
+                })
+                .ok_or(ZoneError::BadOffset(a))?;
+            let from = ((a.offset - start.offset) / 2) as usize;
+            v.get(from..from + n as usize)
+                .map(<[u16]>::to_vec)
+                .ok_or(ZoneError::BadOffset(a))
+        }
+        p => Err(ZoneError::BadPointer(raw_of(p))),
+    }
+}
+
 fn load_cells(s: &mut Stream, p: Ptr, n: u32) -> Result<Vec<Cell>> {
     let (base, bytes) = match p {
         Ptr::Null => return Ok(Vec::new()),
         Ptr::Follow => s.load(4, mul(n, 56)?)?,
         p => return Err(ZoneError::BadPointer(raw_of(p))),
     };
+    let mut index_arrays: Vec<(Addr, Vec<u16>)> = Vec::new();
     elements(s, base, &bytes, 56, |s, f| {
         let mins = v3(f);
         let maxs = v3(f);
@@ -697,7 +738,7 @@ fn load_cells(s: &mut Stream, p: Ptr, n: u32) -> Result<Vec<Cell>> {
             let surface_count_no_decal = f.u16();
             let start_surf_index_no_decal = f.u16();
             let smodel_count = u32::from(f.u16());
-            let smodel_indexes = u16s(s, f.ptr()?, smodel_count)?;
+            let smodel_indexes = shared_u16s(s, &mut index_arrays, f.ptr()?, smodel_count)?;
             Ok(AabbTree {
                 mins,
                 maxs,
@@ -996,7 +1037,8 @@ impl DpvsHeader {
                 let origin = v3(f);
                 let axis = [v3(f), v3(f), v3(f)];
                 let scale = f.f32();
-                let model = load_xmodel(s, f.ptr()?)?;
+                let slot = f.slot();
+                let model = load_xmodel_at(s, slot, f.ptr()?)?;
                 Ok(StaticModel {
                     cull_dist,
                     origin,

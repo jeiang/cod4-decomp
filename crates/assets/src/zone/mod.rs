@@ -280,6 +280,7 @@ impl<'a> Zone<'a> {
     ) -> Result<ZoneStats> {
         let s = &mut self.stream;
         for (i, &ty) in self.assets.iter().enumerate() {
+            eprintln!("DBG {i} {ty:?} consumed={}", s.consumed());
             // Later offset pointers alias the header field of this array entry.
             let field = Addr {
                 block: Block::Virtual,
