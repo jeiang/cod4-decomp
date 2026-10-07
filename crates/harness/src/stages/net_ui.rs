@@ -42,6 +42,12 @@ struct Seen {
     objectives: BTreeSet<String>,
     unresolved_icons: usize,
     clients: usize,
+    obituaries: usize,
+    bad_obituaries: usize,
+    scoreboard_rows: usize,
+    named_rows: usize,
+    best_score_first: bool,
+    stat: i32,
     bytes_in: u64,
     secs: f64,
 }
@@ -57,7 +63,9 @@ fn client(addr: SocketAddr, stop: &std::sync::atomic::AtomicBool) -> Seen {
     let mut frames = 0;
     let mut began = None;
     let mut base = 0;
-    while frames < FRAMES
+    let mut asked = false;
+    // The match decides when the first kill happens, not the runner.
+    while (frames < FRAMES || s.obituaries == 0)
         && Instant::now() < deadline
         && !stop.load(std::sync::atomic::Ordering::Relaxed)
     {
@@ -121,6 +129,29 @@ fn client(addr: SocketAddr, stop: &std::sync::atomic::AtomicBool) -> Seen {
             frames += 1;
             s.bytes_in = bytes - base;
         }
+        if s.spawned && frames % 30 == 0 {
+            asked = true;
+        }
+        let sb = ui.scoreboard();
+        s.scoreboard_rows = s.scoreboard_rows.max(sb.rows.len());
+        s.best_score_first = sb.rows.windows(2).all(|w| w[0].score >= w[1].score);
+        s.named_rows = sb
+            .rows
+            .iter()
+            .filter(|r| ui.client(r.client).is_some_and(|c| !c.name.is_empty()))
+            .count();
+        s.stat = ui.stat(205);
+        for e in &events {
+            if let UiEvent::Obituary(o) = e {
+                s.obituaries += 1;
+                if ui.client(o.victim).is_none()
+                    || o.weapon.is_empty()
+                    || !o.mean.starts_with("MOD_")
+                {
+                    s.bad_obituaries += 1;
+                }
+            }
+        }
         let mut answers = Vec::new();
         for ev in &events {
             answers.extend(join.step(ev));
@@ -128,6 +159,9 @@ fn client(addr: SocketAddr, stop: &std::sync::atomic::AtomicBool) -> Seen {
         s.events.extend(events);
         for a in answers {
             c.command(&a);
+        }
+        if std::mem::take(&mut asked) {
+            c.request_scores();
         }
     }
     s.secs = began.map_or(0.0, |b| b.elapsed().as_secs_f64());
@@ -236,6 +270,27 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             failures.push(format!(
                 "{} objective icons had no material name",
                 seen.unresolved_icons
+            ));
+        }
+        if seen.obituaries == 0 || seen.bad_obituaries > 0 {
+            failures.push(format!(
+                "{} obituaries arrived, {} without a known victim, weapon or means of death",
+                seen.obituaries, seen.bad_obituaries
+            ));
+        }
+        if seen.scoreboard_rows <= BOTS {
+            failures.push(format!(
+                "the scoreboard listed {} rows for {} players",
+                seen.scoreboard_rows,
+                BOTS + 1
+            ));
+        } else if seen.named_rows < seen.scoreboard_rows - 1 || !seen.best_score_first {
+            failures.push("scoreboard rows unnamed or not sorted best first".to_owned());
+        }
+        if seen.stat != 1 {
+            failures.push(format!(
+                "stat 205 is {}, the profile default is 1",
+                seen.stat
             ));
         }
         if seen.clients < BOTS {

@@ -405,6 +405,21 @@ impl Game {
         if d.attacker.is_some_and(|a| a != n && self.is_client(a)) {
             self.stats.kills += 1;
         }
+        let killer = d
+            .attacker
+            .filter(|a| self.is_client(*a))
+            .unwrap_or(net::ui::NO_ENTITY);
+        let mean = MODS[usize::from(d.mean)];
+        self.send(
+            crate::ui::Dest::All,
+            net::ui::ServerCmd::Obituary(net::ui::Obituary {
+                killer,
+                victim: n,
+                weapon: self.weapon_name(d.weapon).to_owned(),
+                mean: mean.to_owned(),
+                headshot: d.mean == MOD_HEAD_SHOT || d.hitloc == HITLOC_HEAD,
+            }),
+        );
         let attacker = self.ent_obj(vm, d.attacker);
         vm.notify_entity(n, "death", std::slice::from_ref(&attacker));
         // Death animation length: the original asks the animation script; the server's

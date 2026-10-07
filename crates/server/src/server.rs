@@ -391,6 +391,15 @@ impl Server {
                 c.stats.insert(205 + i * 10, 1);
             }
         }
+        for i in 0..5 {
+            host.game.send(
+                crate::ui::Dest::Client(slot),
+                net::ui::ServerCmd::Stat {
+                    index: 205 + i * 10,
+                    value: 1,
+                },
+            );
+        }
         host.run_calls(&mut run.vm);
         host.game.client_begin(&mut run.vm, slot);
         // No team is chosen for a person: the scripts open the team menu themselves and the
@@ -415,6 +424,7 @@ impl Server {
         let argv = crate::cmd::tokenize(line);
         match argv.first().map(String::as_str) {
             Some("disconnect") => self.net_drop(net, slot),
+            Some(net::ui::SCORES_REQUEST) => net.send_scoreboard(slot, &self.game),
             Some("menuresponse") if argv.len() >= 3 => {
                 if let Some(run) = self.run.as_mut() {
                     run.vm.notify_entity(

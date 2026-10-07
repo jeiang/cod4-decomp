@@ -63,6 +63,8 @@ pub struct NetSv {
     /// Console commands from clients, in arrival order: `(client, line)`.
     pub inbox: Vec<(u16, String)>,
     pub stats: NetStats,
+    /// Server time of the newest snapshot sent (what pings are measured against).
+    now: i32,
     buf: Vec<u8>,
 }
 
@@ -75,6 +77,7 @@ impl NetSv {
             peers: (0..max_clients).map(|_| None).collect(),
             inbox: Vec::new(),
             stats: NetStats::default(),
+            now: 0,
             buf: vec![0; 2048],
         }
     }
@@ -227,10 +230,79 @@ impl NetSv {
         out
     }
 
+    /// The scoreboard as reliable commands for `slot` (rows with their pings).
+    pub fn scoreboard_commands(&self, game: &Game) -> Vec<String> {
+        const PER_COMMAND: usize = 18;
+        let mut rows = game.score_rows();
+        for r in &mut rows {
+            if r.ping == 0 {
+                r.ping = self
+                    .peers
+                    .get(usize::from(r.client))
+                    .and_then(Option::as_ref)
+                    .and_then(|p| p.link.ping(self.now))
+                    .unwrap_or(0);
+            }
+        }
+        let total = rows.len() as u16;
+        let (limit, axis, allies) = (game.score_limit(), game.team_score[1], game.team_score[2]);
+        let mut out = Vec::new();
+        let mut start = 0;
+        for chunk in rows.chunks(PER_COMMAND) {
+            out.push(
+                ServerCmd::Scores {
+                    axis,
+                    allies,
+                    limit,
+                    start,
+                    total,
+                    rows: chunk.to_vec(),
+                }
+                .encode(),
+            );
+            start += chunk.len() as u16;
+        }
+        if out.is_empty() {
+            out.push(
+                ServerCmd::Scores {
+                    axis,
+                    allies,
+                    limit,
+                    start: 0,
+                    total: 0,
+                    rows: Vec::new(),
+                }
+                .encode(),
+            );
+        }
+        out
+    }
+
+    /// Sends `slot` the scoreboard.
+    pub fn send_scoreboard(&mut self, slot: u16, game: &Game) {
+        let lines = self.scoreboard_commands(game);
+        self.command_lines(slot, &lines);
+    }
+
+    fn command_lines(&mut self, slot: u16, lines: &[String]) {
+        if let Some(p) = self
+            .peers
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
+            for l in lines {
+                let _ = p.link.command(l.clone());
+            }
+        }
+    }
+
     /// Delivers what scripts queued since the last frame: configstring changes to everybody,
     /// then the one-shot commands to their destinations, in order.
     pub fn flush_ui(&mut self, game: &mut Game) {
         game.refresh_client_info();
+        for c in std::mem::take(&mut game.ui.score_requests) {
+            self.send_scoreboard(c, game);
+        }
         let dirty = std::mem::take(&mut game.ui.dirty_cs);
         let out = std::mem::take(&mut game.ui.out);
         if !dirty.is_empty() {
@@ -265,6 +337,7 @@ impl NetSv {
 
     /// Builds and sends every client's snapshot for the frame at `server_time`.
     pub fn send_snapshots(&mut self, game: &Game, server_time: i32) {
+        self.now = server_time;
         let entities = world_entities(game);
         for slot in 0..self.peers.len() {
             let Some(peer) = self.peers[slot].as_mut() else {
