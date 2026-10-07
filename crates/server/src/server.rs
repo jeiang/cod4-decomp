@@ -437,12 +437,21 @@ impl Server {
         let host = self.game.cvars.string("sv_hostname").to_owned();
         let mut s =
             format!("hostname: {host}\nmap: {map}\nnum score ping name\n--- ----- ---- ----\n");
+        for (n, c) in self.game.connected_clients() {
+            let ping = if c.bot { "BOT" } else { "0" };
+            s.push_str(&format!("{n:3} {:5} {ping:>4} {}\n", c.score, c.name));
+        }
         s.push_str(&format!(
             "tick: {}  level time: {} ms  entities: {}  script threads: {}\n",
             self.ticks,
             self.game.level.time,
             self.game.in_use().count(),
             self.run.as_ref().map_or(0, |r| r.vm.thread_count())
+        ));
+        let st = self.game.stats;
+        s.push_str(&format!(
+            "match: {} kills, {} deaths, {} spawns ({} respawns), {} shots, {} hits, {} rounds ended\n",
+            st.kills, st.deaths, st.spawns, st.respawns, st.shots, st.hits, st.matches_ended
         ));
         if let Some(r) = rss_line() {
             s.push_str(&r);
@@ -727,6 +736,7 @@ impl Server {
         self.record_errors(errors);
         if self.game.level.exit_requested {
             self.game.level.exit_requested = false;
+            self.game.stats.matches_ended += 1;
             self.cbuf.add_text("map_rotate");
         }
         if self.game.level.map_restart_requested {

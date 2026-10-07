@@ -330,6 +330,10 @@ impl Game {
         c.cmd.server_time = time;
         c.ps.command_time = time - 100;
         let _ = max_clients;
+        self.stats.spawns += 1;
+        if spawn_count > 1 {
+            self.stats.respawns += 1;
+        }
         if let Some(e) = self.ent_mut(n) {
             e.origin = origin;
             e.mins = PLAYER_MINS;

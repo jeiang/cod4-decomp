@@ -261,6 +261,24 @@ pub struct Level {
     pub num_entities: usize,
 }
 
+/// What happened in play since boot, for harness reports.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct MatchStats {
+    /// Players killed by another player.
+    pub kills: u64,
+    /// Every player death, including suicides, falls and damage volumes.
+    pub deaths: u64,
+    /// Spawns after a player's first on the map.
+    pub respawns: u64,
+    pub spawns: u64,
+    /// Bullets fired and grenades or rockets launched.
+    pub shots: u64,
+    /// Shots that hurt a player.
+    pub hits: u64,
+    /// Rounds ended (`exitlevel`): the match reached its score or time limit.
+    pub matches_ended: u64,
+}
+
 pub struct Game {
     pub cvars: Cvars,
     pub content: Content,
@@ -296,6 +314,7 @@ pub struct Game {
     /// Clients whose disconnect callback is queued; their slots free afterwards.
     pub pending_free: Vec<u16>,
     pub pm_params: sim::pm::Params,
+    pub stats: MatchStats,
 }
 
 impl Game {
@@ -327,6 +346,7 @@ impl Game {
             nested_errors: Vec::new(),
             pending_free: Vec::new(),
             pm_params: sim::pm::Params::default(),
+            stats: MatchStats::default(),
         }
     }
 

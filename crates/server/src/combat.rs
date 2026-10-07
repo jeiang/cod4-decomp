@@ -379,6 +379,10 @@ impl Game {
         }
         c.ps.pm_type = PmType::Dead;
         c.ps.weapon_state = 0;
+        self.stats.deaths += 1;
+        if d.attacker.is_some_and(|a| a != n && self.is_client(a)) {
+            self.stats.kills += 1;
+        }
         let attacker = self.ent_obj(vm, d.attacker);
         vm.notify_entity(n, "death", std::slice::from_ref(&attacker));
         // Death animation length: the original asks the animation script; the server's
