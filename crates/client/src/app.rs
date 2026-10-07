@@ -7,19 +7,20 @@
 use crate::Cli;
 use crate::display::{self, hor_plus};
 use crate::flythrough;
-use crate::input::{Input, InputFrame, buttons};
 use crate::video::Recorder;
 use assets::vfs::Vfs;
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, TextureCache, View};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Frames the surface size must hold before the recorder starts.
@@ -45,11 +46,6 @@ pub fn run(cli: Cli) -> Result<(), String> {
         error: None,
     };
     el.run_app(&mut v).map_err(|e| e.to_string())?;
-    if let Some(st) = v.st.as_mut()
-        && let Err(e) = st.input.save()
-    {
-        eprintln!("cannot save the config: {e}");
-    }
     let out = v.cli.out.clone();
     if let (Some(e), Some(out)) = (&v.error, out) {
         let _ = std::fs::create_dir_all(&out);
@@ -137,7 +133,7 @@ struct State {
     pos: Vec3,
     yaw: f32,
     pitch: f32,
-    input: Input,
+    keys: HashSet<KeyCode>,
     grabbed: bool,
     samples: Vec<[f64; 3]>,
     /// GPU milliseconds per render call, once the timestamps come back (index = frame number - 1).
@@ -240,7 +236,7 @@ impl Viewer {
             pos: start.origin,
             yaw: start.yaw,
             pitch: start.pitch,
-            input: Input::new(self.cli.config.clone()),
+            keys: HashSet::new(),
             grabbed: false,
             samples: Vec::new(),
             gpu_ms: Vec::new(),
@@ -278,7 +274,6 @@ impl ApplicationHandler for Viewer {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
         let Some(st) = self.st.as_mut() else { return };
-        st.input.window_event(&ev);
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
@@ -286,6 +281,24 @@ impl ApplicationHandler for Viewer {
                 st.config.height = s.height;
                 st.surface.configure(&st.gpu.device, &st.config);
                 st.fov_x = hor_plus(self.cli.fov, s.width as f32 / s.height as f32);
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(k),
+                        state,
+                        ..
+                    },
+                ..
+            } => {
+                if state == ElementState::Pressed {
+                    if k == KeyCode::Escape {
+                        el.exit();
+                    }
+                    st.keys.insert(k);
+                } else {
+                    st.keys.remove(&k);
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -298,7 +311,6 @@ impl ApplicationHandler for Viewer {
                     .or_else(|_| st.window.set_cursor_grab(CursorGrabMode::Confined))
                     .is_ok();
                 st.window.set_cursor_visible(!st.grabbed);
-                st.input.set_captured(st.grabbed);
             }
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.frame(el) {
@@ -311,8 +323,11 @@ impl ApplicationHandler for Viewer {
     }
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, ev: DeviceEvent) {
-        if let Some(st) = self.st.as_mut() {
-            st.input.device_event(&ev);
+        if let (Some(st), DeviceEvent::MouseMotion { delta }) = (self.st.as_mut(), ev)
+            && st.grabbed
+        {
+            st.yaw -= delta.0 as f32 * 0.0022;
+            st.pitch = (st.pitch - delta.1 as f32 * 0.0022).clamp(-1.5, 1.5);
         }
     }
 }
@@ -332,14 +347,7 @@ impl Viewer {
             let p = flythrough::pose(t, Vec3::from(w.mins), Vec3::from(w.maxs));
             (st.pos, st.yaw, st.pitch) = (p.origin, p.yaw, p.pitch);
         } else {
-            let f = st.input.frame(dt);
-            if f.pending_commands
-                .iter()
-                .any(|c| matches!(c.as_str(), "togglemenu" | "quit"))
-            {
-                el.exit();
-            }
-            fly(st, &f, dt);
+            fly(st, dt);
         }
         let frame = match st.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
@@ -519,19 +527,29 @@ fn record_gpu(slots: &mut Vec<Option<f64>>, finished: Vec<(u64, f64)>) {
     }
 }
 
-/// Free-fly camera driven by the player input. Fly-cam pitch is positive up; input pitch is positive down.
-fn fly(st: &mut State, f: &InputFrame, dt: f32) {
-    let speed = if f.buttons & buttons::SPRINT != 0 {
+fn fly(st: &mut State, dt: f32) {
+    let speed = if st.keys.contains(&KeyCode::ShiftLeft) {
         1800.0
     } else {
         450.0
     } * dt;
     let fwd = Vec3::new(st.yaw.cos(), st.yaw.sin(), 0.0);
     let left = Vec3::new(-st.yaw.sin(), st.yaw.cos(), 0.0);
-    st.pos += (fwd * f.move_forward - left * f.move_right) * speed;
-    st.pos.z += f.up * speed;
-    st.yaw += f.look_delta_yaw.to_radians();
-    st.pitch = (st.pitch - f.look_delta_pitch.to_radians()).clamp(-1.5, 1.5);
+    for k in &st.keys {
+        match k {
+            KeyCode::KeyW => st.pos += fwd * speed,
+            KeyCode::KeyS => st.pos -= fwd * speed,
+            KeyCode::KeyA => st.pos += left * speed,
+            KeyCode::KeyD => st.pos -= left * speed,
+            KeyCode::Space => st.pos.z += speed,
+            KeyCode::ControlLeft => st.pos.z -= speed,
+            KeyCode::ArrowLeft => st.yaw += dt * 1.8,
+            KeyCode::ArrowRight => st.yaw -= dt * 1.8,
+            KeyCode::ArrowUp => st.pitch = (st.pitch + dt * 1.2).min(1.5),
+            KeyCode::ArrowDown => st.pitch = (st.pitch - dt * 1.2).max(-1.5),
+            _ => {}
+        }
+    }
 }
 
 fn rss() -> u64 {

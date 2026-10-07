@@ -125,20 +125,12 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Server(include_str!("../scenarios/headless-bots.cfg")),
     },
     StageDef {
-        name: "net-loopback",
-        description: "eight clients over real UDP with loss, duplicates and reordering: handshake, reliable commands, snapshot convergence",
+        name: "headless-bots-sd",
+        description: "headless server, 20 bots play Search and Destroy",
         needs_install: false,
         timeout: Duration::from_secs(5 * MINUTES),
         default: true,
-        kind: Kind::Builtin(crate::stages::net_loopback::run),
-    },
-    StageDef {
-        name: "net-match",
-        description: "headless server with bots, real UDP clients connect, spawn, walk and watch: smooth interpolation, bandwidth and per-client tick cost",
-        needs_install: false,
-        timeout: Duration::from_secs(10 * MINUTES),
-        default: true,
-        kind: Kind::Builtin(crate::stages::net_match::run),
+        kind: Kind::Server(include_str!("../scenarios/headless-bots-sd.cfg")),
     },
     StageDef {
         name: "client-flythrough",
@@ -147,14 +139,6 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(20 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::client_flythrough::run),
-    },
-    StageDef {
-        name: "client-input",
-        description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
-        needs_install: false,
-        timeout: Duration::from_secs(2 * MINUTES),
-        default: true,
-        kind: Kind::Builtin(crate::stages::client_input::run),
     },
     StageDef {
         name: "client-bots-match",

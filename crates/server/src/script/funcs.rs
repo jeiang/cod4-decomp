@@ -511,8 +511,13 @@ fn is_defined(_: &mut Game, _: &mut Vm, a: Args) -> R {
 }
 
 fn is_alive(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    let e = a.entity(0)?;
-    Ok(bool_v(g.ent(e.num).is_some_and(|e| e.health > 0)))
+    // `GScr_IsAlive`: anything that is not an entity (undefined, say) is not alive.
+    Ok(bool_v(match a.get(0)? {
+        Value::Object(o) => o
+            .entity()
+            .is_some_and(|e| g.ent(e.num).is_some_and(|e| e.health > 0)),
+        _ => false,
+    }))
 }
 
 fn is_player(g: &mut Game, _: &mut Vm, a: Args) -> R {

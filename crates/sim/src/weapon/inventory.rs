@@ -78,57 +78,6 @@ impl PlayerWeapons {
         Self::default()
     }
 
-    // ---- wire form ----------------------------------------------------------------------------
-
-    /// Words in the flattened form of [`to_words`](Self::to_words).
-    pub const WORDS: usize = 3 * 8 + MAX_AMMO + MAX_CLIPS + (MAX_WEAPONS + 1).div_ceil(4) + 1;
-
-    /// The whole inventory as fixed-position 32-bit words (for snapshots: a delta against the
-    /// previous words is a few changed entries).
-    pub fn to_words(&self) -> [i32; Self::WORDS] {
-        let mut w = [0i32; Self::WORDS];
-        let mut i = 0;
-        for set in [&self.owned, &self.old, &self.rechamber] {
-            for q in set.0 {
-                w[i] = q as u32 as i32;
-                w[i + 1] = (q >> 32) as u32 as i32;
-                i += 2;
-            }
-        }
-        for &a in self.ammo.iter().chain(self.clip.iter()) {
-            w[i] = a;
-            i += 1;
-        }
-        for c in self.models.chunks(4) {
-            w[i] = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
-            i += 1;
-        }
-        w[i] = i32::from(self.selected);
-        w
-    }
-
-    /// The inverse of [`to_words`](Self::to_words).
-    pub fn from_words(w: &[i32; Self::WORDS]) -> Self {
-        let mut s = Self::default();
-        let mut i = 0;
-        for set in [&mut s.owned, &mut s.old, &mut s.rechamber] {
-            for q in &mut set.0 {
-                *q = u64::from(w[i] as u32) | u64::from(w[i + 1] as u32) << 32;
-                i += 2;
-            }
-        }
-        for a in s.ammo.iter_mut().chain(s.clip.iter_mut()) {
-            *a = w[i];
-            i += 1;
-        }
-        for c in s.models.chunks_mut(4) {
-            c.copy_from_slice(&w[i].to_le_bytes());
-            i += 1;
-        }
-        s.selected = w[i] as u16;
-        s
-    }
-
     // ---- ownership -------------------------------------------------------------------------
 
     /// `Com_BitCheck(ps->weapons, index)` / `hasweapon`.

@@ -49,13 +49,8 @@
             packages = [
               (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
               pkgs.nasm # rav1e x86_64 asm
-            ]
-            # gilrs (gamepads) links libudev on Linux.
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-              pkgs.pkg-config
-              pkgs.udev
             ];
-            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath (windowLibs ++ [ pkgs.udev ]));
+            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath windowLibs);
           };
       });
       formatter = forAll (pkgs: pkgs.nixfmt);

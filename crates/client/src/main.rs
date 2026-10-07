@@ -5,7 +5,6 @@
 mod app;
 mod display;
 mod flythrough;
-mod input;
 mod video;
 
 use display::{FullscreenKind, Request};
@@ -29,12 +28,9 @@ usage: cod4e [options]
   --duration <secs>      flythrough length (default 12)
   --out <dir>            flythrough output: frames.raw.csv, client.json, flythrough.mp4, screenshot.png
   --video / --screenshot record a video / save a screenshot during the flythrough
-  --config <path>        key binds and settings file (default: <config dir>/cod4e/config_mp.cfg)
-  --input-selftest       check key binds, mouse look and the config file without a window, then exit (harness stage)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
 
-Interactive: WASD move, Space/Ctrl up/down, Shift fast, arrows look, click to capture the mouse, Esc quits.
-Keys are the config file's binds, e.g. bind w +forward.";
+Interactive: WASD move, Space/Ctrl up/down, Shift fast, click to capture the mouse, Esc quits.";
 
 pub struct Cli {
     pub install: PathBuf,
@@ -49,8 +45,6 @@ pub struct Cli {
     pub video: bool,
     pub screenshot: bool,
     pub list: bool,
-    pub config: Option<PathBuf>,
-    pub input_selftest: bool,
 }
 
 fn parse(args: &[String]) -> Result<Cli, String> {
@@ -67,8 +61,6 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         video: false,
         screenshot: false,
         list: false,
-        config: None,
-        input_selftest: false,
     };
     let mut it = args.iter();
     let mut size_given = false;
@@ -109,8 +101,6 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--flythrough" => c.flythrough = true,
             "--video" => c.video = true,
             "--screenshot" => c.screenshot = true,
-            "--input-selftest" => c.input_selftest = true,
-            "--config" => c.config = Some(val(a)?.into()),
             "--list-display-modes" => c.list = true,
             "--json" => {}
             "-h" | "--help" => return Err(String::new()),
@@ -139,15 +129,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if cli.input_selftest {
-        let bad = input::selftest::run();
-        return if bad.is_empty() {
-            ExitCode::SUCCESS
-        } else {
-            eprintln!("input selftest failed: {}", bad.join("; "));
-            ExitCode::from(1)
-        };
-    }
     match app::run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

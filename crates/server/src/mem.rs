@@ -7,7 +7,9 @@ pub fn rss() -> Option<u64> {
     {
         let s = std::fs::read_to_string("/proc/self/statm").ok()?;
         let pages: u64 = s.split_whitespace().nth(1)?.parse().ok()?;
-        Some(pages * 4096)
+        // SAFETY: sysconf has no preconditions.
+        let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+        Some(pages * page)
     }
     #[cfg(not(target_os = "linux"))]
     {

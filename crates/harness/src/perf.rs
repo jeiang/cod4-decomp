@@ -100,7 +100,8 @@ impl FrameRecorder {
     }
 }
 
-/// Writes `ticks.csv`: total tick time plus one column per server subsystem.
+/// Writes `ticks.csv`: total tick time, one column per server subsystem and the process
+/// resident size when it was last sampled.
 pub struct TickRecorder {
     out: BufWriter<File>,
     names: Vec<String>,
@@ -115,7 +116,7 @@ impl TickRecorder {
         for s in subsystems {
             write!(out, ",{s}_ms")?;
         }
-        writeln!(out)?;
+        writeln!(out, ",rss_bytes")?;
         Ok(Self {
             out,
             names: subsystems.iter().map(|s| (*s).to_owned()).collect(),
@@ -125,14 +126,14 @@ impl TickRecorder {
     }
 
     /// `subsystem_ms` is in the order given to [`TickRecorder::create`].
-    pub fn push(&mut self, tick_ms: f64, subsystem_ms: &[f64]) -> io::Result<()> {
+    pub fn push(&mut self, tick_ms: f64, subsystem_ms: &[f64], rss: u64) -> io::Result<()> {
         assert_eq!(subsystem_ms.len(), self.names.len(), "subsystem count");
         write!(self.out, "{},{tick_ms:.4}", self.total.len())?;
         for (col, ms) in self.per.iter_mut().zip(subsystem_ms) {
             write!(self.out, ",{ms:.4}")?;
             col.push(*ms);
         }
-        writeln!(self.out)?;
+        writeln!(self.out, ",{rss}")?;
         self.total.push(tick_ms);
         Ok(())
     }
@@ -156,6 +157,24 @@ fn series<const N: usize>(items: [(&str, &Vec<f64>); N]) -> BTreeMap<String, Per
 
 /// Resident memory of this process in bytes.
 pub fn process_rss() -> Option<u64> {
+    server::mem::rss().or_else(sysinfo_rss)
+}
+
+/// Highest resident size this process has reached, from the kernel's own high-water mark.
+pub fn peak_rss() -> Option<u64> {
+    server::mem::peak_rss()
+}
+
+/// Highest memory this process's cgroup has used (page cache included), which is what
+/// `MemoryMax` limits. `None` outside a cgroup-v2 Linux with `memory.peak`.
+pub fn cgroup_peak() -> Option<u64> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let path = own.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let file = format!("/sys/fs/cgroup{path}/memory.peak");
+    std::fs::read_to_string(file).ok()?.trim().parse().ok()
+}
+
+fn sysinfo_rss() -> Option<u64> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     let pid = sysinfo::get_current_pid().ok()?;
     let mut sys = System::new();
@@ -210,10 +229,14 @@ mod tests {
         );
 
         let mut t = TickRecorder::create(&dir.path().join("ticks.csv"), &["gsc", "pmove"]).unwrap();
-        t.push(2.0, &[1.0, 0.5]).unwrap();
+        t.push(2.0, &[1.0, 0.5], 4096).unwrap();
         let s = t.finish().unwrap();
         assert_eq!(s["tick.pmove_ms"].p50, 0.5);
         let csv = std::fs::read_to_string(dir.path().join("ticks.csv")).unwrap();
-        assert_eq!(csv.lines().next().unwrap(), "tick,tick_ms,gsc_ms,pmove_ms");
+        assert_eq!(
+            csv.lines().next().unwrap(),
+            "tick,tick_ms,gsc_ms,pmove_ms,rss_bytes"
+        );
+        assert_eq!(csv.lines().nth(1).unwrap(), "0,2.0000,1.0000,0.5000,4096");
     }
 }
