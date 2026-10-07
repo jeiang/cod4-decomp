@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, compile};
 
-use crate::bot::Brain;
+use crate::bot::{BotShared, Brain};
 use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
 use crate::cvar::{self, Cvars};
@@ -123,6 +123,7 @@ pub struct Server {
     /// Bots wanted on every map (`bots N`); they join again after a map change.
     bot_target: usize,
     bot_serial: u32,
+    bot_shared: BotShared,
 }
 
 fn register_core_dvars(c: &mut Cvars) {
@@ -207,6 +208,7 @@ impl Server {
             ticks: 0,
             bot_target: 0,
             bot_serial: 0,
+            bot_shared: BotShared::default(),
         };
         s.say("CoD4 MP headless server (cod4e)\n");
         s.say(&format!(
@@ -698,7 +700,7 @@ impl Server {
                 let Some(mut b) = host.game.clients[usize::from(n)].bot_brain.take() else {
                     continue;
                 };
-                let cmd = b.usercmd(host.game, n, self.svs_time);
+                let cmd = b.usercmd(host.game, &mut self.bot_shared, n, self.svs_time);
                 host.game.clients[usize::from(n)].bot_brain = Some(b);
                 bot += t.elapsed();
                 let t = Instant::now();
@@ -771,6 +773,10 @@ impl Server {
             game: &mut self.game,
             dispatch: &run.dispatch,
         };
+        if host.game.nav.is_none() {
+            self.bot_shared.scratch = None;
+        }
+        host.game.ensure_nav();
         for _ in 0..n {
             let name = format!("bot{}", self.bot_serial);
             let Some(num) = host.game.connect_client(&mut run.vm, true, &name) else {

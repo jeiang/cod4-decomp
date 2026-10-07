@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gsc::{EntClass, Value, Vm};
 use sim::Vec3;
@@ -324,6 +325,9 @@ pub struct Game {
     pub pending_free: Vec<u16>,
     pub pm_params: sim::pm::Params,
     pub stats: MatchStats,
+    /// Bot navigation of the current map, built when the first bot joins.
+    pub nav: Option<Arc<crate::nav::NavMesh>>,
+    pub nav_goals: Vec<Vec3>,
     pub weapons: sim::weapon::WeaponTable,
     /// `g_fHitLocDamageMult`: the gametype's hit-location scale for non-bullet damage.
     pub hitloc_table: [f32; 19],
@@ -359,6 +363,8 @@ impl Game {
             pending_free: Vec::new(),
             pm_params: sim::pm::Params::default(),
             stats: MatchStats::default(),
+            nav: None,
+            nav_goals: Vec::new(),
             hitloc_table: default_hitloc_table(),
             weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),
         }
@@ -430,6 +436,8 @@ impl Game {
         self.menus = Precache::default();
         self.configstrings.clear();
         self.team_score = [0; 3];
+        self.nav = None;
+        self.nav_goals.clear();
         self.max_clients = max_clients;
         self.clients = (0..max_clients)
             .map(|n| {
@@ -524,6 +532,29 @@ impl Game {
             _ => {}
         }
         self.relink(num);
+    }
+
+    /// Builds the bot navigation mesh of the loaded map (once per map load) from the static
+    /// collision world: nothing linked, so players and movers do not shape it.
+    pub fn ensure_nav(&mut self) -> Option<Arc<crate::nav::NavMesh>> {
+        if self.nav.is_none() {
+            let clip = self.content.clipmap()?.clone();
+            let ents = clip.map_ents.as_ref()?;
+            let spawns = crate::nav::spawn_points(&ents.entity_string);
+            let seeds: Vec<Vec3> = spawns.iter().map(|s| s.origin).collect();
+            let mesh = crate::nav::NavMesh::generate(&World::new(clip), &seeds);
+            let st = mesh.stats();
+            self.print(format!(
+                "navigation: {} nodes, {} edges, {} KiB, generated in {:.0} ms\n",
+                st.nodes,
+                st.edges,
+                st.bytes >> 10,
+                st.generation_ms
+            ));
+            self.nav_goals = seeds;
+            self.nav = Some(Arc::new(mesh));
+        }
+        self.nav.clone()
     }
 
     /// `G_SpawnEntitiesFromString` for the map's entity string: the worldspawn first, then
