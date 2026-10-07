@@ -2,8 +2,8 @@
 //! MenuList, menuDef, itemDef and expressions.
 
 use super::error::{Result, ZoneError};
-use super::gfx::{material_ptr_at, raw_of, Material, Name};
-use super::sound::{load_alias_list, SoundAliasList};
+use super::gfx::{Material, Name, material_ptr_at, raw_of};
+use super::sound::{SoundAliasList, load_alias_list};
 use super::stream::{Addr, Fields, Ptr, Stream};
 use std::sync::Arc;
 
@@ -217,8 +217,9 @@ fn pointer_array<T>(
         p => return Err(ZoneError::BadPointer(raw_of(p))),
     };
     let mut out = Vec::with_capacity(count as usize);
-    for c in ptrs.chunks_exact(4) {
-        let p = Ptr::from_raw(u32::from_le_bytes(c.try_into().unwrap()))?;
+    let mut pf = Fields::new(&ptrs);
+    for _ in 0..count {
+        let p = pf.ptr()?;
         if p != Ptr::Null {
             out.push(f(s, p)?);
         }
