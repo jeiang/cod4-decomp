@@ -11,6 +11,7 @@ use assets::zone::clipmap::Clipmap;
 
 use crate::Vec3;
 use crate::cm::{self, ClipModel, Collide, CollisionWorld, ENTITYNUM_NONE, ENTITYNUM_WORLD, Trace};
+use crate::props::Props;
 
 /// Entity slots (`MAX_GENTITIES`); valid numbers are `0..ENTITYNUM_WORLD`.
 pub const MAX_ENTS: usize = 1024;
@@ -108,6 +109,7 @@ struct Sector {
 
 pub struct World {
     cm: CollisionWorld,
+    props: Props,
     ents: Box<[Slot]>,
     sectors: Box<[Sector]>,
     free_head: u16,
@@ -136,9 +138,11 @@ impl World {
             .cmodels
             .first()
             .map_or(([0.0; 3], [0.0; 3]), |m| (m.mins, m.maxs));
+        let props = Props::new(&clipmap);
         let cm = CollisionWorld::new(clipmap);
         let mut w = Self {
             cm,
+            props,
             ents: vec![
                 Slot {
                     data: None,
@@ -645,6 +649,41 @@ impl World {
             trace.fraction,
         ];
         self.clip_move_r(clip, HEAD, p, q, trace);
+    }
+
+    /// A thin line traced the way bullets are (`SV_Trace` with static models): the map, then
+    /// the props baked into it, then entities. Hulls with extent never see props; use
+    /// [`Collide::trace`] for those.
+    pub fn bullet_trace(&self, start: Vec3, end: Vec3, pass_ent: u16, mask: i32) -> Trace {
+        let mut trace = self
+            .cm
+            .box_trace(start, end, [0.0; 3], [0.0; 3], &ClipModel::World, mask);
+        trace.hit_id = if trace.fraction == 1.0 {
+            ENTITYNUM_NONE
+        } else {
+            ENTITYNUM_WORLD
+        };
+        if trace.fraction == 0.0 {
+            return trace;
+        }
+        self.props.trace(&mut trace, start, end, mask);
+        if trace.fraction == 0.0 {
+            return trace;
+        }
+        let clip = self.clip(start, end, [0.0; 3], [0.0; 3], pass_ent, mask);
+        self.clip_to_entities(&clip, &mut trace);
+        trace
+    }
+
+    #[cfg(test)]
+    pub(crate) fn props_trace_for_test(&self, trace: &mut Trace, a: Vec3, b: Vec3) {
+        self.props.trace(trace, a, b, crate::contents::MASK_SHOT);
+    }
+
+    /// Whether a static model blocks the line (`CM_PointTraceStaticModelsComplete`); sight checks
+    /// that care about props add this to [`trace_passed`](Self::trace_passed).
+    pub fn props_block(&self, start: Vec3, end: Vec3, mask: i32) -> bool {
+        self.props.blocks(start, end, mask)
     }
 
     /// Whether anything stands in the way of a sight line (`SV_TracePassed`): the map first,
