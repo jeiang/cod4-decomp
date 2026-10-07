@@ -2,9 +2,9 @@
 //! MenuList, menuDef, itemDef and expressions.
 
 use super::error::{Result, ZoneError};
-use super::gfx::{material_ptr, raw_of, Material, Name};
+use super::gfx::{material_ptr_at, raw_of, Material, Name};
 use super::sound::{load_alias_list, SoundAliasList};
-use super::stream::{Fields, Ptr, Stream};
+use super::stream::{Addr, Fields, Ptr, Stream};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -78,8 +78,9 @@ fn window(s: &mut Stream, f: &mut Fields) -> Result<WindowDef> {
     let back_color = color(f);
     let border_color = color(f);
     let outline_color = color(f);
+    let slot = f.slot();
     let background = f.ptr()?;
-    let background = material_ptr(s, background)?;
+    let background = material_ptr_at(s, slot, background)?;
     Ok(WindowDef {
         name,
         rect: rect_,
@@ -122,6 +123,20 @@ fn key_handlers(s: &mut Stream, mut p: Ptr) -> Result<Vec<KeyHandler>> {
         });
     }
     Ok(out)
+}
+
+/// Loads an optional struct that can only be stored inline.
+fn inline<T>(
+    s: &mut Stream,
+    p: Ptr,
+    size: u32,
+    f: impl FnOnce(&mut Stream, Fields) -> Result<T>,
+) -> Result<Option<Arc<T>>> {
+    if p == Ptr::Null {
+        return Ok(None);
+    }
+    let (at, b) = follow(s, p, size)?;
+    Ok(Some(Arc::new(f(s, Fields::at(&b, at))?)))
 }
 
 /// Loads a struct that can only be stored inline.
@@ -238,8 +253,7 @@ pub struct ListBoxDef {
     pub select_icon: Option<Arc<Material>>,
 }
 
-fn list_box(s: &mut Stream, b: &[u8]) -> Result<ListBoxDef> {
-    let mut f = Fields::new(b);
+fn list_box(s: &mut Stream, mut f: Fields) -> Result<ListBoxDef> {
     let mouse_pos = f.i32();
     let start_pos = f.i32();
     let end_pos = f.i32();
@@ -266,9 +280,10 @@ fn list_box(s: &mut Stream, b: &[u8]) -> Result<ListBoxDef> {
     let use_paging = f.i32();
     let select_border = color(&mut f);
     let disable_color = color(&mut f);
+    let slot = f.slot();
     let select_icon = f.ptr()?;
     let on_double_click = s.string(on_double_click)?;
-    let select_icon = material_ptr(s, select_icon)?;
+    let select_icon = material_ptr_at(s, slot, select_icon)?;
     Ok(ListBoxDef {
         mouse_pos,
         start_pos,
@@ -300,8 +315,7 @@ pub struct EditFieldDef {
     pub paint_offset: i32,
 }
 
-fn edit_field(_: &mut Stream, b: &[u8]) -> Result<EditFieldDef> {
-    let mut f = Fields::new(b);
+fn edit_field(_: &mut Stream, mut f: Fields) -> Result<EditFieldDef> {
     Ok(EditFieldDef {
         min_val: f.f32(),
         max_val: f.f32(),
@@ -323,8 +337,7 @@ pub struct MultiDef {
     pub str_def: i32,
 }
 
-fn multi(s: &mut Stream, b: &[u8]) -> Result<MultiDef> {
-    let mut f = Fields::new(b);
+fn multi(s: &mut Stream, mut f: Fields) -> Result<MultiDef> {
     let list: Vec<Ptr> = (0..32).map(|_| f.ptr()).collect::<Result<_>>()?;
     let strs: Vec<Ptr> = (0..32).map(|_| f.ptr()).collect::<Result<_>>()?;
     let dvar_value = (0..32).map(|_| f.f32()).collect();
@@ -403,8 +416,8 @@ pub struct ItemDef {
 
 const ITEM_SIZE: u32 = 372;
 
-fn item(s: &mut Stream, b: &[u8]) -> Result<ItemDef> {
-    let mut f = Fields::new(b);
+fn item(s: &mut Stream, base: Addr, b: &[u8]) -> Result<ItemDef> {
+    let mut f = Fields::at(b, base);
     let window = window(s, &mut f)?;
     let text_rect = rect(&mut f);
     let ty = f.i32();
@@ -441,11 +454,11 @@ fn item(s: &mut Stream, b: &[u8]) -> Result<ItemDef> {
     f.skip(4); // cursorPos
     let type_data = f.ptr()?;
     let data = match ty {
-        6 => ItemData::ListBox(s.shared(type_data, 4, 340, list_box)?),
+        6 => ItemData::ListBox(inline(s, type_data, 340, list_box)?),
         0 | 4 | 9 | 10 | 11 | 14 | 16 | 17 | 18 => {
-            ItemData::EditField(s.shared(type_data, 4, 32, edit_field)?)
+            ItemData::EditField(inline(s, type_data, 32, edit_field)?)
         }
-        12 => ItemData::Multi(s.shared(type_data, 4, 392, multi)?),
+        12 => ItemData::Multi(inline(s, type_data, 392, multi)?),
         13 => ItemData::EnumDvarName(s.string(type_data)?),
         _ => ItemData::None,
     };
@@ -556,8 +569,8 @@ fn menu_def(s: &mut Stream, b: &[u8]) -> Result<MenuDef> {
     let rect_y_exp = statement(s, &mut f)?;
     let items = f.ptr()?;
     let items = pointer_array(s, items, item_count, |s, p| {
-        let (_, b) = follow(s, p, ITEM_SIZE)?;
-        item(s, &b)
+        let (base, b) = follow(s, p, ITEM_SIZE)?;
+        item(s, base, &b)
     })?;
     Ok(MenuDef {
         window,
@@ -596,14 +609,16 @@ pub(super) fn load(s: &mut Stream, p: Ptr) -> Result<Option<Arc<MenuList>>> {
             if menus == Ptr::Null {
                 Vec::new()
             } else {
-                let ptrs = match menus {
-                    Ptr::Follow => s.load(4, count * 4)?.1,
+                let (base, ptrs) = match menus {
+                    Ptr::Follow => s.load(4, count * 4)?,
                     p => return Err(ZoneError::BadPointer(raw_of(p))),
                 };
                 let mut out = Vec::new();
-                for c in ptrs.chunks_exact(4) {
-                    let p = Ptr::from_raw(u32::from_le_bytes(c.try_into().unwrap()))?;
-                    out.push(s.temp_ptr(p, 4, MENU_SIZE, false, menu_def)?);
+                let mut f = Fields::at(&ptrs, base);
+                for _ in 0..count {
+                    let slot = f.slot();
+                    let p = f.ptr()?;
+                    out.push(s.temp_ptr_at(slot, p, 4, MENU_SIZE, true, menu_def)?);
                 }
                 out
             }
