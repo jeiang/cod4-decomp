@@ -15,7 +15,7 @@ kira covers tracks, reverb, EQ and tweens, but its spatial model is a pan plus a
 - Alias choice: weighted by probability with a per-alias anti-repeat sequence, as the original's picker. A secondary alias plays together with its parent (chain of up to 10).
 - The 348 "zero-info" loaded sounds are `,null.wav` placeholders: deliberately silent.
 - Occlusion: none in the original (distance and curve are the only world inputs).
-- Reverb room table: the 26 `setReverb` room names (`generic`, `paddedcell`, `room`, ..., `psychotic`) index Miles EAX room types. Reverb itself is not implemented: `msseax.flt` is closed source and stock MP rooms rarely differ from `generic`. Stereo output only; 4 and 5.1 speaker maps are read but unused.
+- Reverb room table: the 26 `setReverb` room names (`generic`, `paddedcell`, `room`, ..., `psychotic`) index Miles EAX room types. Reverb itself is not implemented: `msseax.flt` is closed source. Stereo output only; 4 and 5.1 speaker maps are read but unused.
 
 ## Consequences
 
