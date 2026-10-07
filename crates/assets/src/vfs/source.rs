@@ -59,6 +59,11 @@ impl ReadAt for FileSource {
             }
             Ok(())
         }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (&self.file, offset, buf);
+            Err(io::ErrorKind::Unsupported.into())
+        }
     }
 }
 
