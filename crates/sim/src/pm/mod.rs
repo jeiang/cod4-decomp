@@ -31,6 +31,8 @@ mod view;
 mod walk;
 
 #[cfg(test)]
+mod install_tests;
+#[cfg(test)]
 mod test_world;
 #[cfg(test)]
 mod tests;
