@@ -3,7 +3,7 @@
 
 use super::error::Result;
 use super::gfx::Name;
-use super::stream::{Fields, Ptr, Stream};
+use super::stream::{Addr, Fields, Ptr, Stream};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -49,4 +49,13 @@ fn preset(s: &mut Stream, h: &[u8]) -> Result<PhysPreset> {
 
 pub(super) fn load(s: &mut Stream, p: Ptr) -> Result<Option<Arc<PhysPreset>>> {
     s.temp_asset(p, 4, PRESET_SIZE, preset)
+}
+
+/// As [`load`], for a pointer stored in a persistent field at `slot`.
+pub(super) fn load_at(
+    s: &mut Stream,
+    slot: Option<Addr>,
+    p: Ptr,
+) -> Result<Option<Arc<PhysPreset>>> {
+    s.temp_asset_at(slot, p, 4, PRESET_SIZE, preset)
 }
