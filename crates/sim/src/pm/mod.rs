@@ -10,9 +10,10 @@
 //! multiply-add, and trigonometry from [`math`] (not the platform libm), so x86-64, ARM64 and
 //! wasm32 produce identical states for identical inputs.
 //!
-//! Not covered here (other subsystems of the original's `Pmove`): the weapon state machine
-//! (`PM_Weapon`), animation script events and aim-spread decay. Their inputs reach movement
-//! through [`WeaponMove`] and the weapon fields of [`PlayerState`].
+//! The weapon state machine (`PM_Weapon`) and the aim-spread update run inside `pmove` when
+//! [`Pmove::weapons`] carries a [`WeaponCtx`]; without it movement sees the weapon only through
+//! [`Pmove::weapon`] and the weapon fields of [`PlayerState`], as before. Animation script
+//! events are not modelled.
 
 // Arithmetic keeps the original's operand order (`a = b * a`, `x * -1`) so results match bit for
 // bit, and the per-axis loops index parallel arrays.
@@ -28,8 +29,9 @@ mod footsteps;
 mod jump;
 mod ladder;
 mod mantle;
-mod math;
+pub mod math;
 mod params;
+mod pm_weapon;
 mod prone;
 mod single;
 mod slide;
@@ -44,6 +46,10 @@ mod install_tests;
 mod test_world;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod weapon_install_tests;
+#[cfg(test)]
+mod weapon_tests;
 
 pub use mantle::{
     MANTLE_ANIM_COUNT, MANTLE_ANIM_NAMES, MantleAnim, MantleAnims, MantleTransition, TRANSITIONS,
@@ -55,6 +61,7 @@ pub use state::*;
 use crate::Vec3;
 use crate::cm::{Collide, ENTITYNUM_NONE, ENTITYNUM_WORLD, Trace};
 use crate::contents::{MASK_CHARACTER, MASK_PLAYERSOLID};
+use crate::weapon::{WeaponCtx, WeaponOut};
 
 /// Most entities one `pmove` call reports as touched.
 pub const MAX_TOUCH: usize = 32;
@@ -64,7 +71,7 @@ pub const PLAYER_MINS: Vec3 = [-15.0, -15.0, 0.0];
 pub const PLAYER_MAXS: Vec3 = [15.0, 15.0, 70.0];
 
 /// Input and output of one movement call (`pmove_t`).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Pmove<'a> {
     pub ps: PlayerState,
     pub cmd: UserCmd,
@@ -83,7 +90,14 @@ pub struct Pmove<'a> {
     /// Smoothed stair-step view offset: set when a step moves the player vertically.
     pub view_change_time: i32,
     pub view_change: f32,
+    /// What movement reads about the weapon on show. With [`weapons`](Self::weapons) set,
+    /// `pmove` keeps it in step with the player's weapon; otherwise the caller sets it.
     pub weapon: WeaponMove,
+    /// The weapon table and inventory: set to run the weapon state machine. The caller sets
+    /// `cmd.weapon` (and `cmd.offhand_index`) to the weapons the player asks for.
+    pub weapons: Option<WeaponCtx<'a>>,
+    /// What the weapon state machine did during this `pmove` call; cleared at its start.
+    pub weapon_out: WeaponOut,
     /// The active shellshock slows movement (`shellshock.movement.affect`).
     pub shellshock_slows: bool,
     pub params: &'a Params,
@@ -108,6 +122,8 @@ impl<'a> Pmove<'a> {
             view_change_time: 0,
             view_change: 0.0,
             weapon: WeaponMove::default(),
+            weapons: None,
+            weapon_out: WeaponOut::default(),
             shellshock_slows: false,
             params,
         }

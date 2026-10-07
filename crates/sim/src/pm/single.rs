@@ -7,6 +7,7 @@ use super::footsteps::{foliage_sounds, footsteps};
 use super::ladder;
 use super::mantle;
 use super::math::{self, EQUAL_EPSILON};
+use super::pm_weapon;
 use super::sprint;
 use super::state::{PmType, Stance, button, ef, ev, pmf, weapon_state as ws};
 use super::view::{update_prone_pitch, update_view_angles};
@@ -20,6 +21,21 @@ const MAX_STEP_MSEC: i32 = 66;
 
 /// `Pmove`: advances the player to the command's `server_time` in steps of at most 66 ms.
 pub(super) fn pmove(pm: &mut Pmove<'_>, world: &dyn Collide) {
+    pm.weapon_out.clear();
+    let script_weapon = pm.weapons.as_ref().map_or(0, |w| w.inv.selected());
+    if script_weapon != 0 {
+        pm.cmd.weapon = script_weapon as u8;
+    }
+    run_steps(pm, world);
+    if script_weapon != 0
+        && let Some(w) = pm.weapons.as_mut()
+        && (pm.ps.weapon == u32::from(script_weapon) || !w.inv.has(script_weapon))
+    {
+        w.inv.clear_selected();
+    }
+}
+
+fn run_steps(pm: &mut Pmove<'_>, world: &dyn Collide) {
     let final_time = pm.cmd.server_time;
     if final_time < pm.ps.command_time {
         return;
@@ -70,7 +86,7 @@ fn drop_timers(pm: &mut Pmove<'_>, pml: &Pml) {
 }
 
 /// `PM_MeleeChargeClear`.
-fn melee_charge_clear(ps: &mut super::PlayerState) {
+pub(super) fn melee_charge_clear(ps: &mut super::PlayerState) {
     ps.pm_flags &= !pmf::MELEE_CHARGE;
     ps.melee_charge_yaw = 0.0;
     ps.melee_charge_dist = 0;
@@ -118,6 +134,7 @@ fn turret_nvg_trigger(pm: &mut Pmove<'_>) {
 /// `PmoveSingle`: one command step of at most 66 ms.
 fn pmove_single(pm: &mut Pmove<'_>, world: &dyn Collide) {
     const KEEP_STANCE: i32 = button::PRONE | button::CROUCH | button::TEMP_STANCE;
+    pm_weapon::sync_weapon_move(pm);
     if pm.ps.pm_flags & pmf::MELEE_CHARGE != 0 {
         pm.cmd.forwardmove = 127;
     }
@@ -200,6 +217,7 @@ fn pmove_single(pm: &mut Pmove<'_>, world: &dyn Collide) {
     let msec = (pm.cmd.server_time - pm.ps.command_time).clamp(1, 200);
     let mut pml = pml_new(msec, &pm.ps);
     pm.ps.command_time = pm.cmd.server_time;
+    pm_weapon::adjust_aim_spread(pm, &pml);
     update_view_angles(pm, world, msec as f32);
     let (forward, right, up) = math::angle_vectors(&pm.ps.viewangles);
     pml.forward = forward;
@@ -237,6 +255,7 @@ fn pmove_single(pm: &mut Pmove<'_>, world: &dyn Collide) {
             drop_timers(pm, pml);
             check_duck(pm, world, pml);
             footsteps(pm, world, pml);
+            pm_weapon::pm_weapon(pm, pml);
         }
         PmType::Noclip => {
             ladder::clear_flag(&mut pm.ps);
@@ -302,6 +321,9 @@ fn turret_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml) {
     check_duck(pm, world, pml);
     ads::update_lerp(pm, pml);
     footsteps(pm, world, pml);
+    if pm.weapons.is_some() {
+        pm_weapon::reset_weapon_state(&mut pm.ps);
+    }
 }
 
 /// The ordinary on-foot branch of `PmoveSingle`.
@@ -324,6 +346,7 @@ fn walking_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml) {
         ads::update_walking_flag(pm);
         check_duck(pm, world, pml);
         mantle::advance(pm, pml);
+        pm_weapon::pm_weapon(pm, pml);
         return;
     }
     update_prone_pitch(pm, world, pml);
@@ -341,6 +364,7 @@ fn walking_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml) {
     }
     ground_trace(pm, world, pml);
     footsteps(pm, world, pml);
+    pm_weapon::pm_weapon(pm, pml);
     foliage_sounds(pm, world);
 
     // If the move got much less far than the velocity says, trust the position.

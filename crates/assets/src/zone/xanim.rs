@@ -40,14 +40,14 @@ pub struct Notify {
 }
 
 /// Frame indices: bytes while the animation has fewer than 256 frames, else shorts.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Indices {
     None,
     Byte(Vec<u8>),
     Short(Vec<u16>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DeltaPart {
     pub trans: Option<Trans>,
     pub quat: Option<Quat>,
@@ -55,7 +55,7 @@ pub struct DeltaPart {
 
 /// Translation track. With `size == 0` only `frame0` is set; otherwise
 /// `size + 1` frames are stored at `indices`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Trans {
     pub size: u16,
     pub small: bool,
@@ -67,7 +67,7 @@ pub struct Trans {
     pub frames: TransFrames,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TransFrames {
     None,
     Byte(Vec<[u8; 3]>),
@@ -75,7 +75,7 @@ pub enum TransFrames {
 }
 
 /// Rotation track (two quantised components per frame).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Quat {
     pub size: u16,
     pub frame0: [i16; 2],

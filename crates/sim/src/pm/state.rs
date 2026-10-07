@@ -88,12 +88,40 @@ pub mod button {
 pub mod ev {
     pub const NONE: u8 = 0x00;
     pub const FOLIAGE_SOUND: u8 = 0x01;
+    /// Raised on a weapon change away from a reload; the parm is the old weapon state.
+    pub const STOP_WEAPON_SOUND: u8 = 0x02;
     pub const STANCE_FORCE_STAND: u8 = 0x06;
     pub const STANCE_FORCE_CROUCH: u8 = 0x07;
     pub const STANCE_FORCE_PRONE: u8 = 0x08;
+    pub const NOAMMO: u8 = 0x0B;
+    pub const EMPTY_OFFHAND: u8 = 0x0D;
     pub const RESET_ADS: u8 = 0x0E;
+    pub const RELOAD: u8 = 0x0F;
+    pub const RELOAD_FROM_EMPTY: u8 = 0x10;
+    pub const RELOAD_START: u8 = 0x11;
+    pub const RELOAD_END: u8 = 0x12;
+    pub const RELOAD_START_NOTIFY: u8 = 0x13;
+    pub const RELOAD_ADDAMMO: u8 = 0x14;
+    pub const RAISE_WEAPON: u8 = 0x15;
+    pub const FIRST_RAISE_WEAPON: u8 = 0x16;
+    pub const PUTAWAY_WEAPON: u8 = 0x17;
+    pub const WEAPON_ALT: u8 = 0x18;
+    pub const PULLBACK_WEAPON: u8 = 0x19;
+    pub const FIRE_WEAPON: u8 = 0x1A;
+    pub const FIRE_WEAPON_LASTSHOT: u8 = 0x1B;
+    pub const RECHAMBER_WEAPON: u8 = 0x1C;
+    pub const EJECT_BRASS: u8 = 0x1D;
+    pub const MELEE_SWIPE: u8 = 0x1E;
+    pub const FIRE_MELEE: u8 = 0x1F;
+    pub const PREP_OFFHAND: u8 = 0x20;
+    pub const USE_OFFHAND: u8 = 0x21;
+    pub const SWITCH_OFFHAND: u8 = 0x22;
+    pub const GRENADE_SUICIDE: u8 = 0x3E;
+    pub const DETONATE: u8 = 0x3F;
     pub const NIGHTVISION_WEAR: u8 = 0x40;
     pub const NIGHTVISION_REMOVE: u8 = 0x41;
+    pub const NO_FRAG_GRENADE_HINT: u8 = 0x43;
+    pub const NO_SPECIAL_GRENADE_HINT: u8 = 0x44;
     pub const FOOTSTEP_SPRINT: u8 = 0x48;
     pub const FOOTSTEP_RUN: u8 = 0x49;
     pub const FOOTSTEP_WALK: u8 = 0x4A;
@@ -123,9 +151,33 @@ pub mod weapon_state {
     pub const MELEE_FIRE: u8 = 13;
     pub const MELEE_END: u8 = 14;
     pub const OFFHAND_INIT: u8 = 15;
+    pub const OFFHAND_PREPARE: u8 = 16;
+    pub const OFFHAND_HOLD: u8 = 17;
+    pub const OFFHAND_START: u8 = 18;
+    pub const OFFHAND: u8 = 19;
     pub const OFFHAND_END: u8 = 20;
+    pub const DETONATING: u8 = 21;
+    pub const SPRINT_RAISE: u8 = 22;
+    pub const SPRINT_LOOP: u8 = 23;
+    pub const SPRINT_DROP: u8 = 24;
     pub const NIGHTVISION_WEAR: u8 = 25;
     pub const NIGHTVISION_REMOVE: u8 = 26;
+}
+
+/// `playerState_t.weapFlags` bits.
+pub mod wf {
+    /// A reload was requested by the script or the server (`weapFlags & 1`).
+    pub const RELOAD_REQUESTED: u32 = 0x1;
+    /// The viewmodel is an offhand weapon (`PWF_USING_OFFHAND`).
+    pub const USING_OFFHAND: u32 = 0x2;
+    pub const HOLD_BREATH: u32 = 0x4;
+    /// Aiming down sights is blocked.
+    pub const NO_ADS: u32 = 0x20;
+    pub const NIGHTVISION: u32 = 0x40;
+    /// `disableweapon()`: no weapon may be raised or used.
+    pub const DISABLED: u32 = 0x80;
+    /// The trigger was pulled during a burst's cooldown; the next burst fires when it ends.
+    pub const PENDING_TRIGGER: u32 = 0x100;
 }
 
 /// View heights (`viewHeightTarget` values); the original keys the stance off these integers.
@@ -250,6 +302,32 @@ pub struct PlayerState {
     pub melee_charge_time: i32,
     pub perks: u32,
     pub aim_spread_scale: f32,
+    /// Rounds fired in the current trigger pull or burst (`weaponShotCount`, at most 4).
+    pub weapon_shot_count: i32,
+    /// The weapon whose off-hand slot is used by the grenade buttons (`offHandIndex`).
+    pub offhand_index: u16,
+    /// `offhandSecondary`: 0 selects smoke, 1 flash for the second grenade button.
+    pub offhand_secondary: u8,
+    /// Milliseconds of fuse left on a primed grenade (`grenadeTimeLeft`; -1 once it went off).
+    pub grenade_time_left: i32,
+    pub throw_back_grenade_owner: u16,
+    pub throw_back_grenade_time_left: i32,
+    /// Remaining time during which kick is reduced after the first shot (`weaponRestrictKickTime`).
+    pub weapon_restrict_kick_time: i32,
+    /// `spreadOverride` and its state: scripts pin the spread.
+    pub spread_override: i32,
+    pub spread_override_state: SpreadOverrideState,
+    /// Entity the use-hint cursor points at; off-hand weapons cannot start while one shows.
+    pub cursor_hint_ent_index: u16,
+}
+
+/// `spreadOverrideState_t`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpreadOverrideState {
+    #[default]
+    Disabled,
+    Enabled,
+    Resetting,
 }
 
 impl Default for PlayerState {
@@ -309,6 +387,16 @@ impl Default for PlayerState {
             melee_charge_time: 0,
             perks: 0,
             aim_spread_scale: 0.0,
+            weapon_shot_count: 0,
+            offhand_index: 0,
+            offhand_secondary: 0,
+            grenade_time_left: 0,
+            throw_back_grenade_owner: ENTITYNUM_NONE,
+            throw_back_grenade_time_left: 0,
+            weapon_restrict_kick_time: 0,
+            spread_override: 0,
+            spread_override_state: SpreadOverrideState::Disabled,
+            cursor_hint_ent_index: ENTITYNUM_NONE,
         }
     }
 }

@@ -16,8 +16,6 @@ const fn r(f: MethFn) -> Impl<MethFn> {
     Real(f)
 }
 
-const M3: &str = "M3 bots, pmove, traces, weapons";
-const M5: &str = "M5 connect and play";
 const M6: &str = "M6 HUD, menus, killcam";
 const M7: &str = "M7 audio";
 
@@ -35,7 +33,6 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("solid", r(|g, _, e, _| set_solid(g, e, true))),
     ("notsolid", r(|g, _, e, _| set_solid(g, e, false))),
     ("setcontents", r(set_contents)),
-    ("setcandamage", Later(M3)),
     ("moveto", r(|g, _, e, a| mover::move_to(g, e, a))),
     ("movex", r(|g, _, e, a| mover::move_axis(g, e, a, 0))),
     ("movey", r(|g, _, e, a| mover::move_axis(g, e, a, 1))),
@@ -52,24 +49,14 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
         "rotatevelocity",
         r(|g, _, e, a| mover::rotate_velocity(g, e, a)),
     ),
-    ("istouching", r(|_, _, _, _| Ok(Value::Int(0)))),
-    ("linkto", Later(M3)),
-    ("unlink", Later(M3)),
-    ("usetriggerrequirelookat", Later(M5)),
-    ("sethintstring", Later(M5)),
-    ("setcursorhint", Later(M5)),
-    ("setteamfortrigger", Later(M5)),
     ("playsound", Later(M7)),
     ("playloopsound", Later(M7)),
     ("stoploopsound", Later(M7)),
     ("playsoundasmaster", Later(M7)),
     ("playsoundtoteam", Later(M7)),
     ("playsoundtoplayer", Later(M7)),
-    ("placespawnpoint", Later(M3)),
-    ("hidepart", Later(M5)),
-    ("showpart", Later(M5)),
-    ("showallparts", Later(M5)),
     ("logstring", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("fireweapon", Later("M8 vehicles")),
     // hud elements
     ("destroy", r(hud::destroy)),
     ("settext", Later(M6)),
@@ -87,7 +74,7 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("clearalltextafterhudelem", Later(M6)),
 ];
 
-fn live(g: &Game, e: EntRef) -> Result<(), String> {
+pub(super) fn live(g: &Game, e: EntRef) -> Result<(), String> {
     match e.class {
         EntClass::Entity if g.ent(e.num).is_some() => Ok(()),
         _ => Err("not an entity".into()),

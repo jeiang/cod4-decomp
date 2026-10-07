@@ -15,7 +15,7 @@ struct Install {
     mantle: MantleAnims,
 }
 
-fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(super) fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
         .flatten()
@@ -23,7 +23,7 @@ fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
-fn decode(root: &Path, zone: &str, mut f: impl FnMut(Asset)) -> Option<()> {
+pub(super) fn decode(root: &Path, zone: &str, mut f: impl FnMut(Asset)) -> Option<()> {
     let dir = find_ci(&find_ci(root, "zone")?, "english")?;
     let file = std::fs::File::open(find_ci(&dir, &format!("{zone}.ff"))?).ok()?;
     Zone::open(std::io::BufReader::new(file))

@@ -10,10 +10,10 @@ use assets::zone::{Asset, Consumer, Zone};
 use super::CollisionWorld;
 use crate::Vec3;
 
-pub(crate) const SOLID_TEST_MATERIAL: u16 = 0;
+pub const SOLID_TEST_MATERIAL: u16 = 0;
 
 /// One brush: its bounds, contents and any extra (non-axial) side planes `(normal, dist)`.
-pub(crate) struct BrushSpec {
+pub struct BrushSpec {
     pub mins: Vec3,
     pub maxs: Vec3,
     pub contents: i32,
@@ -34,12 +34,14 @@ impl BrushSpec {
 /// A map made of one BSP leaf holding `world` brushes and terrain triangles, plus brush models
 /// `*1..` that each hold the brushes of one entry of `models`.
 #[derive(Default)]
-pub(crate) struct MapSpec {
+pub struct MapSpec {
     pub world: Vec<BrushSpec>,
     pub models: Vec<Vec<BrushSpec>>,
     /// Terrain triangles `[a, b, c]`, one collision tree each, all of `terrain_contents`.
     pub triangles: Vec<[Vec3; 3]>,
     pub terrain_contents: i32,
+    /// Surface flags of the one material every brush uses; `None` keeps the default (`0x1234`).
+    pub surface_flags: Option<i32>,
 }
 
 impl MapSpec {
@@ -194,7 +196,7 @@ impl MapSpec {
             static_models: Arc::from(Vec::new()),
             materials: Arc::from(vec![CollisionMaterial {
                 name: "test".into(),
-                surface_flags: 0x1234,
+                surface_flags: self.surface_flags.unwrap_or(0x1234),
                 content_flags: 1 | self.terrain_contents,
             }]),
             brush_sides: sides.into(),
@@ -273,7 +275,7 @@ fn load_install_map(map: &str) -> Option<Arc<Clipmap>> {
 }
 
 /// The decoded mp_crash clipmap, or `None` (the test then skips) without `COD4_PATH`.
-pub(crate) fn crash_map() -> Option<Arc<Clipmap>> {
+pub fn crash_map() -> Option<Arc<Clipmap>> {
     static CRASH: LazyLock<Option<Arc<Clipmap>>> = LazyLock::new(|| load_install_map("mp_crash"));
     CRASH.clone()
 }

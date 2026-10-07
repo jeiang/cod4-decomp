@@ -276,8 +276,6 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
         "isvalidgametype",
         r(|g, _, a| Ok(bool_v(g.valid_gametype(a.string(0)?)))),
     ),
-    ("kick", Later(M5)),
-    ("ban", Later(M5)),
     ("addtestclient", Later("M3 bots")),
     // objectives are recorded; replication to clients is M5
     ("objective_add", Later(M5)),
@@ -317,19 +315,9 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("sighttracepassed", r(sight_trace_passed)),
     ("physicstrace", r(physics_trace)),
     ("playerphysicstrace", r(player_physics_trace)),
-    ("positionwouldtelefrag", Later(M3)),
-    ("radiusdamage", Later(M3)),
-    ("setplayerignoreradiusdamage", Later(M3)),
-    ("obituary", Later(M3)),
-    ("missile_createattractorent", Later(M3)),
-    ("missile_createattractororigin", Later(M3)),
-    ("missile_createrepulsorent", Later(M3)),
-    ("missile_createrepulsororigin", Later(M3)),
-    ("missile_deleteattractor", Later(M3)),
     ("spawnhelicopter", Later("M8 vehicles")),
     ("spawnplane", Later("M8 vehicles")),
     ("spawnturret", Later(M3)),
-    ("getteamplayersalive", Later(M3)),
 ];
 
 /// `Com_SurfaceTypeToName`: the surface type (bits 20..24 of the surface flags) as the scripts

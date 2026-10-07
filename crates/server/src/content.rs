@@ -23,6 +23,9 @@ use assets::zone::xanim::XAnimParts;
 use assets::zone::xmodel::XModel;
 use assets::zone::{Asset, Consumer, Zone};
 
+use crate::delta::RootMotion;
+use crate::tags::Skeleton;
+
 /// Zone load order and tags of a dedicated server (`code_post_gfx_mp` first).
 pub const BOOT_ZONES: [(&str, u8); 4] = [
     ("code_post_gfx_mp", 2),
@@ -107,6 +110,47 @@ impl AnimInfo {
     }
 }
 
+/// One resolved name per bone of a model.
+pub type BoneNames = Arc<[Arc<str>]>;
+
+/// A player-body animation kept whole for the server skeleton (`pb_*`: the full-body stand,
+/// crouch, prone, run and death animations), with its part names resolved to text.
+///
+/// Script strings are indices into the zone that defined the asset, so the names are
+/// resolved here while that zone's table is at hand; a model from another zone is bound to
+/// the animation by comparing text (`sim::skel::Rig::bind`).
+#[derive(Debug)]
+pub struct PlayerAnim {
+    pub parts: Arc<XAnimParts>,
+    pub part_names: Box<[Arc<str>]>,
+}
+
+impl PlayerAnim {
+    /// Heap bytes the decoded keyframe data holds (the name table excluded).
+    pub fn data_bytes(&self) -> usize {
+        use assets::zone::xanim::Indices;
+        let a = &*self.parts;
+        let idx = |i: &Indices| match i {
+            Indices::None => 0,
+            Indices::Byte(v) => v.len(),
+            Indices::Short(v) => v.len() * 2,
+        };
+        a.data_byte.len()
+            + a.data_short.len() * 2
+            + a.data_int.len() * 4
+            + a.random_data_byte.len()
+            + a.random_data_short.len() * 2
+            + a.random_data_int.len() * 4
+            + a.names.len() * 2
+            + idx(&a.indices)
+    }
+}
+
+/// True for the animations the server skeleton samples.
+fn is_player_anim(name: &str) -> bool {
+    name.len() > 3 && name[..3].eq_ignore_ascii_case("pb_")
+}
+
 #[derive(Default)]
 struct Layer {
     /// Lowercase name to (tag, asset).
@@ -114,9 +158,22 @@ struct Layer {
     tables: HashMap<String, (u8, Arc<StringTable>)>,
     weapons: HashMap<String, (u8, Arc<WeaponDef>)>,
     models: HashMap<String, (u8, Arc<XModel>)>,
+    skeletons: HashMap<String, (u8, Arc<Skeleton>)>,
     anims: HashMap<String, (u8, Arc<AnimInfo>)>,
+    player_anims: HashMap<String, (u8, Arc<PlayerAnim>)>,
+    /// Bone names of every model, as text.
+    model_bones: HashMap<String, (u8, BoneNames)>,
+    motions: HashMap<String, (u8, Arc<RootMotion>)>,
     localize: HashMap<String, (u8, Arc<str>)>,
     clipmap: Option<(u8, Arc<Clipmap>)>,
+}
+
+fn resolve(strings: &[Option<Arc<str>>], i: u16) -> Arc<str> {
+    strings
+        .get(usize::from(i))
+        .cloned()
+        .flatten()
+        .unwrap_or_else(|| Arc::from(""))
 }
 
 fn put<T>(m: &mut HashMap<String, (u8, T)>, tag: u8, name: &str, v: T) {
@@ -176,17 +233,37 @@ impl Content {
             }
             Asset::XModel(m) => {
                 if let Some(n) = m.name.clone() {
+                    let bones: Arc<[Arc<str>]> =
+                        m.bone_names.iter().map(|b| resolve(&strings, *b)).collect();
+                    put(&mut layer.model_bones, tag, &n, bones);
+                    let skel = Arc::new(Skeleton::new(&m, &strings));
+                    put(&mut layer.skeletons, tag, &n, skel);
                     put(&mut layer.models, tag, &n, m);
                 }
             }
             Asset::XAnimParts(x) => {
                 if let Some(n) = x.name.clone() {
+                    if let Some(m) = RootMotion::new(&x) {
+                        put(&mut layer.motions, tag, &n, Arc::new(m));
+                    }
                     put(
                         &mut layer.anims,
                         tag,
                         &n,
                         Arc::new(AnimInfo::new(&x, &strings)),
                     );
+                    if is_player_anim(&n) {
+                        let part_names = x.names.iter().map(|p| resolve(&strings, *p)).collect();
+                        put(
+                            &mut layer.player_anims,
+                            tag,
+                            &n,
+                            Arc::new(PlayerAnim {
+                                parts: x,
+                                part_names,
+                            }),
+                        );
+                    }
                 }
             }
             Asset::Localize(l) => {
@@ -249,12 +326,75 @@ impl Content {
         get(&self.map.weapons, name).or_else(|| get(&self.base.weapons, name))
     }
 
+    /// Every weapon definition the loaded zones define, each name once (the map's copy wins).
+    pub fn weapons(&self) -> Vec<Arc<WeaponDef>> {
+        let base = self
+            .base
+            .weapons
+            .iter()
+            .filter(|(k, _)| !self.map.weapons.contains_key(*k));
+        self.map
+            .weapons
+            .iter()
+            .chain(base)
+            .map(|(_, (_, w))| w.clone())
+            .collect()
+    }
+
     pub fn model(&self, name: &str) -> Option<&Arc<XModel>> {
         get(&self.map.models, name).or_else(|| get(&self.base.models, name))
     }
 
+    pub fn skeleton(&self, name: &str) -> Option<&Arc<Skeleton>> {
+        get(&self.map.skeletons, name).or_else(|| get(&self.base.skeletons, name))
+    }
+
+    /// Names of the loaded animations that start with `prefix`, sorted.
+    pub fn anim_names(&self, prefix: &str) -> Vec<&str> {
+        let mut v: Vec<&str> = self
+            .base
+            .anims
+            .keys()
+            .chain(self.map.anims.keys())
+            .map(String::as_str)
+            .filter(|n| n.starts_with(prefix))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// The root-motion track of an animation, when it has one.
+    pub fn root_motion(&self, name: &str) -> Option<&Arc<RootMotion>> {
+        get(&self.map.motions, name).or_else(|| get(&self.base.motions, name))
+    }
+
     pub fn anim(&self, name: &str) -> Option<&Arc<AnimInfo>> {
         get(&self.map.anims, name).or_else(|| get(&self.base.anims, name))
+    }
+
+    /// A retained `pb_*` player-body animation.
+    pub fn player_anim(&self, name: &str) -> Option<&Arc<PlayerAnim>> {
+        get(&self.map.player_anims, name).or_else(|| get(&self.base.player_anims, name))
+    }
+
+    /// Every retained player-body animation, each name once.
+    pub fn player_anims(&self) -> impl Iterator<Item = &Arc<PlayerAnim>> {
+        let base = self
+            .base
+            .player_anims
+            .iter()
+            .filter(|(k, _)| !self.map.player_anims.contains_key(*k));
+        self.map
+            .player_anims
+            .values()
+            .chain(base.map(|(_, v)| v))
+            .map(|(_, a)| a)
+    }
+
+    /// One bone name per bone of the model, resolved from the zone that defined it.
+    pub fn model_bone_names(&self, name: &str) -> Option<&BoneNames> {
+        get(&self.map.model_bones, name).or_else(|| get(&self.base.model_bones, name))
     }
 
     pub fn localize(&self, name: &str) -> Option<&Arc<str>> {

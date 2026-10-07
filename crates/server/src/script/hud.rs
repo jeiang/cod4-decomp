@@ -42,6 +42,8 @@ pub fn destroy(g: &mut Game, vm: &mut Vm, e: EntRef, _: Args) -> Result<Value, S
     if let Some(h) = g.hudelems.get_mut(idx) {
         h.inuse = false;
     }
+    // `Scr_FreeHudElem` tells the element's threads (`endon("death")`) before it goes.
+    vm.notify_entity(e.num, "death", &[]);
     vm.free_entity(e.num);
     Ok(Value::Undefined)
 }

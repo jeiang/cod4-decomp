@@ -101,4 +101,81 @@ impl Trajectory {
             }
         }
     }
+
+    /// `BG_EvaluateTrajectoryDelta`: the velocity in units per second at level time `at` (ms).
+    pub fn evaluate_delta(&self, at: i32) -> Vec3 {
+        let t = |at: i32| (at - self.time) as f32 * 0.001;
+        let end = self.time + self.duration;
+        match self.kind {
+            TrType::Stationary | TrType::Interpolate => [0.0; 3],
+            TrType::Linear => self.delta,
+            TrType::LinearStop => {
+                if at >= end {
+                    [0.0; 3]
+                } else {
+                    self.delta
+                }
+            }
+            TrType::Sine => {
+                let phase = (at - self.time) as f32 / self.duration as f32;
+                let rate = std::f32::consts::PI * 2.0 / (self.duration as f32 * 0.001);
+                let k = (phase * std::f32::consts::PI * 2.0).cos() * rate;
+                [self.delta[0] * k, self.delta[1] * k, self.delta[2] * k]
+            }
+            TrType::Gravity => {
+                let mut v = self.delta;
+                v[2] -= t(at) * TRAJECTORY_GRAVITY * 2.0;
+                v
+            }
+            TrType::Accelerate => {
+                let dt = t(at.min(end));
+                let accel = length(self.delta) / (self.duration as f32 * 0.001);
+                let dir = normalized(self.delta);
+                let s = accel * dt;
+                [dir[0] * s, dir[1] * s, dir[2] * s]
+            }
+            TrType::Decelerate => {
+                let dt = t(at.min(end));
+                let accel = length(self.delta) / (self.duration as f32 * 0.001);
+                let dir = normalized(self.delta);
+                let s = -accel * dt;
+                mad(self.delta, 1.0, [dir[0] * s, dir[1] * s, dir[2] * s])
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gravity_velocity_is_the_derivative_of_the_position() {
+        let tr = Trajectory {
+            kind: TrType::Gravity,
+            time: 1000,
+            base: [0.0; 3],
+            delta: [100.0, 0.0, 50.0],
+            ..Trajectory::default()
+        };
+        let (a, b) = (tr.evaluate(1500), tr.evaluate(1501));
+        let v = tr.evaluate_delta(1500);
+        assert!((v[0] - 100.0).abs() < 1e-3);
+        assert!((v[2] - (50.0 - 800.0 * 0.5)).abs() < 1e-3);
+        let numeric = (b[2] - a[2]) * 1000.0;
+        assert!((numeric - v[2]).abs() < 1.5, "{numeric} vs {}", v[2]);
+    }
+
+    #[test]
+    fn a_stopped_move_has_no_velocity() {
+        let tr = Trajectory {
+            kind: TrType::LinearStop,
+            time: 0,
+            duration: 500,
+            delta: [10.0, 0.0, 0.0],
+            ..Trajectory::default()
+        };
+        assert_eq!(tr.evaluate_delta(499), [10.0, 0.0, 0.0]);
+        assert_eq!(tr.evaluate_delta(500), [0.0; 3]);
+    }
 }

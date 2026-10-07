@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gsc::{EntClass, Value, Vm};
 use sim::Vec3;
@@ -17,9 +18,12 @@ use sim::traj::Trajectory;
 use sim::world::{ClipEnt, World};
 
 use crate::anim::AnimTree;
+use crate::client::Client;
 use crate::content::Content;
 use crate::cvar::{self, Cvars};
+use crate::missile::{Attractors, Missile};
 use crate::mover::Mover;
+use crate::playeranim::PlayerAnims;
 
 pub const MAX_GENTITIES: usize = 1024;
 pub const ENTITYNUM_WORLD: u16 = 1022;
@@ -160,6 +164,16 @@ pub struct Ent {
     pub anim: Option<AnimTree>,
     /// Level time when the slot was freed, in ms.
     pub free_time: i32,
+    /// `takedamage`: damage reaches the entity's scripts (`setcandamage`, living players).
+    pub takedamage: bool,
+    /// `ent->flags`: 1 invulnerable, 2 cannot die, 8 takes no knockback.
+    pub flags: i32,
+    /// Link, attachment, trigger and corpse state of the entity builtins.
+    pub x: crate::link::EntExtra,
+    /// Flight state of a grenade or rocket (`ET_MISSILE`).
+    pub missile: Option<Box<Missile>>,
+    /// `r.ownerNum`: traces made by the owner pass through this entity.
+    pub owner: Option<u16>,
 }
 
 impl Ent {
@@ -184,6 +198,11 @@ impl Ent {
             mv: Mover::default(),
             anim: None,
             free_time: 0,
+            takedamage: false,
+            flags: 0,
+            x: crate::link::EntExtra::default(),
+            missile: None,
+            owner: None,
         }
     }
 }
@@ -220,6 +239,26 @@ impl Precache {
     }
 }
 
+/// Script entry points the engine calls (`Scr_ExecEntThread` targets).
+#[derive(Default, Clone, Copy)]
+pub struct Callbacks {
+    pub start_game_type: Option<u32>,
+    pub player_connect: Option<u32>,
+    pub player_disconnect: Option<u32>,
+    pub player_damage: Option<u32>,
+    pub player_killed: Option<u32>,
+    pub player_last_stand: Option<u32>,
+}
+
+/// A script function the engine wants run: queued by game code, run by the script host as soon
+/// as the running builtin or frame step returns (`Scr_ExecEntThread` runs it to its first wait).
+pub struct ScriptCall {
+    pub func: u32,
+    /// The entity the callback runs on (`self`); `level` when `None`.
+    pub this: Option<u16>,
+    pub args: Vec<Value>,
+}
+
 #[derive(Default)]
 pub struct Level {
     /// Milliseconds since the map started (`level.time`, `gettime()`).
@@ -232,6 +271,30 @@ pub struct Level {
     pub exit_requested: bool,
     pub map_restart_requested: bool,
     pub num_entities: usize,
+    /// `setplayerignoreradiusdamage`.
+    pub ignore_radius_damage: bool,
+    /// Next slot of the player corpse ring (`level.currentPlayerClone`).
+    pub next_corpse: usize,
+    /// `map(name)` was called: the server changes to this map after the frame.
+    pub map_requested: Option<String>,
+}
+
+/// What happened in play since boot, for harness reports.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct MatchStats {
+    /// Players killed by another player.
+    pub kills: u64,
+    /// Every player death, including suicides, falls and damage volumes.
+    pub deaths: u64,
+    /// Spawns after a player's first on the map.
+    pub respawns: u64,
+    pub spawns: u64,
+    /// Bullets fired and grenades or rockets launched.
+    pub shots: u64,
+    /// Shots that hurt a player.
+    pub hits: u64,
+    /// Rounds ended (`exitlevel`): the match reached its score or time limit.
+    pub matches_ended: u64,
 }
 
 pub struct Game {
@@ -260,6 +323,29 @@ pub struct Game {
     pub printed: Vec<String>,
     /// Builtins that were called but belong to a later milestone, with call counts.
     pub stub_calls: HashMap<String, u64>,
+    pub clients: Vec<Client>,
+    pub callbacks: Callbacks,
+    /// Script calls waiting for the host (see [`ScriptCall`]).
+    pub calls: Vec<ScriptCall>,
+    /// Errors of script calls that ran nested inside a builtin.
+    pub nested_errors: Vec<gsc::VmError>,
+    /// Clients whose disconnect callback is queued; their slots free afterwards.
+    pub pending_free: Vec<u16>,
+    pub pm_params: sim::pm::Params,
+    pub stats: MatchStats,
+    /// Bot navigation of the current map, built when the first bot joins.
+    pub nav: Option<Arc<crate::nav::NavMesh>>,
+    pub nav_goals: Vec<Vec3>,
+    /// Navigation generation per map load: (map, ms, nodes).
+    pub nav_loads: Vec<(String, f32, u32)>,
+    pub weapons: sim::weapon::WeaponTable,
+    /// `g_fHitLocDamageMult`: the gametype's hit-location scale for non-bullet damage.
+    pub hitloc_table: [f32; 19],
+    /// `info/bullet_penetration_mp`, parsed on the first shot of a map.
+    pub penetration: Option<Arc<sim::weapon::damage::PenetrationTable>>,
+    /// The skeleton locational hits are tested against, built on the first shot of a map.
+    pub player_anims: Option<Arc<PlayerAnims>>,
+    pub attractors: Attractors,
 }
 
 impl Game {
@@ -285,6 +371,21 @@ impl Game {
             rng: 0x9E37_79B9_7F4A_7C15,
             printed: Vec::new(),
             stub_calls: HashMap::new(),
+            clients: Vec::new(),
+            callbacks: Callbacks::default(),
+            calls: Vec::new(),
+            nested_errors: Vec::new(),
+            pending_free: Vec::new(),
+            pm_params: sim::pm::Params::default(),
+            stats: MatchStats::default(),
+            nav: None,
+            nav_goals: Vec::new(),
+            nav_loads: Vec::new(),
+            hitloc_table: default_hitloc_table(),
+            weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),
+            penetration: None,
+            player_anims: None,
+            attractors: Attractors::default(),
         }
     }
 
@@ -328,10 +429,12 @@ impl Game {
 
     /// `G_FreeEntity`: the script object dies at the next `Scr_IncTime`.
     pub fn free_entity(&mut self, vm: &mut Vm, num: u16) {
+        self.unlink_all(num);
         if let Some(slot) = self.ents.get_mut(usize::from(num))
             && let Some(e) = slot.take()
         {
             let _ = e;
+            self.attractors.free_entity(num);
             if let Some(w) = self.world.as_mut() {
                 w.unlink(num);
             }
@@ -352,8 +455,24 @@ impl Game {
         self.items = Precache::default();
         self.menus = Precache::default();
         self.configstrings.clear();
+        self.penetration = None;
+        self.player_anims = None;
+        self.attractors = Attractors::default();
         self.team_score = [0; 3];
+        self.nav = None;
+        self.nav_goals.clear();
         self.max_clients = max_clients;
+        self.clients = (0..max_clients)
+            .map(|n| {
+                let mut c = Client::new(n as u16, false, String::new());
+                c.conn = crate::client::Conn::Free;
+                c
+            })
+            .collect();
+        self.ents.resize(max_clients, None);
+        self.calls.clear();
+        self.nested_errors.clear();
+        self.pending_free.clear();
     }
 
     pub fn map_exists(&self, map: &str) -> bool {
@@ -393,7 +512,7 @@ impl Game {
                 mins: e.mins,
                 maxs: e.maxs,
                 brush_model: e.brush_model,
-                owner: ENTITYNUM_NONE,
+                owner: e.owner.unwrap_or(ENTITYNUM_NONE),
             },
         );
     }
@@ -416,6 +535,12 @@ impl Game {
             e.brush_model = Some(n);
             e.contents = w.collision().model_contents(n);
         }
+        if matches!(
+            &*e.classname,
+            "script_model" | "script_origin" | "script_brushmodel"
+        ) {
+            e.flags |= crate::link::FL_SUPPORTS_LINKTO;
+        }
         match &*e.classname {
             "script_model" => e.contents = contents::MISSILECLIP | contents::CLIPSHOT,
             "trigger_hurt" => e.contents = TRIGGER_HURT_CONTENTS,
@@ -430,6 +555,31 @@ impl Game {
             _ => {}
         }
         self.relink(num);
+    }
+
+    /// Builds the bot navigation mesh of the loaded map (once per map load) from the static
+    /// collision world: nothing linked, so players and movers do not shape it.
+    pub fn ensure_nav(&mut self) -> Option<Arc<crate::nav::NavMesh>> {
+        if self.nav.is_none() {
+            let clip = self.content.clipmap()?.clone();
+            let ents = clip.map_ents.as_ref()?;
+            let spawns = crate::nav::spawn_points(&ents.entity_string);
+            let seeds: Vec<Vec3> = spawns.iter().map(|s| s.origin).collect();
+            let mesh = crate::nav::NavMesh::generate(&World::new(clip), &seeds);
+            let st = mesh.stats();
+            self.print(format!(
+                "navigation: {} nodes, {} edges, {} KiB, generated in {:.0} ms\n",
+                st.nodes,
+                st.edges,
+                st.bytes >> 10,
+                st.generation_ms
+            ));
+            let map = self.content.map_name.clone().unwrap_or_default();
+            self.nav_loads.push((map, st.generation_ms, st.nodes));
+            self.nav_goals = seeds;
+            self.nav = Some(Arc::new(mesh));
+        }
+        self.nav.clone()
     }
 
     /// `G_SpawnEntitiesFromString` for the map's entity string: the worldspawn first, then
@@ -505,7 +655,7 @@ impl Game {
 }
 
 /// `trigger_hurt` contents: every trigger type (`CONTENTS_ANY_TRIGGER`).
-const TRIGGER_HURT_CONTENTS: i32 = 0x405C_0008;
+pub const TRIGGER_HURT_CONTENTS: i32 = 0x405C_0008;
 
 /// `InitSentientTrigger`: which kinds of player set the trigger off.
 fn sentient_trigger(spawnflags: i32) -> i32 {
@@ -619,6 +769,12 @@ pub fn set_ent_field(e: &mut Ent, name: &str, v: &Value) -> Result<bool, String>
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn default_hitloc_table() -> [f32; 19] {
+    let mut t = [1.0; 19];
+    t[18] = 0.0;
+    t
 }
 
 #[cfg(test)]

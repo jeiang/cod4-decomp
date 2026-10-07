@@ -10,9 +10,15 @@ use gsc::{EntClass, EntRef, Host, Program, Value, Vm};
 use crate::game::{self, Game};
 
 mod args;
+mod combat;
+mod ent;
 mod funcs;
 mod hud;
 mod methods;
+mod misc;
+mod missile;
+mod player;
+mod weapons;
 
 pub use args::Args;
 
@@ -34,15 +40,15 @@ pub struct Dispatch {
 
 fn resolve<F: Copy>(
     names: &[Box<str>],
-    table: &[(&str, Impl<F>)],
+    tables: &[&[(&str, Impl<F>)]],
 ) -> Vec<(Box<str>, Option<Impl<F>>)> {
     names
         .iter()
         .map(|n| {
-            (
-                n.clone(),
-                table.iter().find(|(t, _)| *t == &**n).map(|(_, i)| *i),
-            )
+            let imp = tables
+                .iter()
+                .find_map(|t| t.iter().find(|(t, _)| *t == &**n).map(|(_, i)| *i));
+            (n.clone(), imp)
         })
         .collect()
 }
@@ -50,8 +56,29 @@ fn resolve<F: Copy>(
 impl Dispatch {
     pub fn new(prog: &Program) -> Self {
         Self {
-            funcs: resolve(prog.builtins.function_names(), funcs::TABLE),
-            methods: resolve(prog.builtins.method_names(), methods::TABLE),
+            funcs: resolve(
+                prog.builtins.function_names(),
+                &[
+                    funcs::TABLE,
+                    ent::FUNCS,
+                    misc::FUNCS,
+                    weapons::FUNCS,
+                    combat::FUNCS,
+                    missile::FUNCS,
+                ],
+            ),
+            methods: resolve(
+                prog.builtins.method_names(),
+                &[
+                    methods::TABLE,
+                    player::METHODS,
+                    ent::METHODS,
+                    misc::METHODS,
+                    missile::METHODS,
+                    weapons::METHODS,
+                    combat::METHODS,
+                ],
+            ),
         }
     }
 
@@ -96,6 +123,19 @@ pub struct ScriptHost<'a> {
 }
 
 impl ScriptHost<'_> {
+    /// Runs the script calls the game queued (`Scr_ExecEntThread`): each runs to its first
+    /// wait before this returns, and may queue more. Errors are kept for the server's report.
+    pub fn run_calls(&mut self, vm: &mut Vm) {
+        while !self.game.calls.is_empty() {
+            for c in std::mem::take(&mut self.game.calls) {
+                let this = c.this.map(|n| vm.entity(n, EntClass::Entity));
+                if let Err(e) = vm.call(&mut *self, c.func, this, &c.args) {
+                    self.game.nested_errors.push(e);
+                }
+            }
+        }
+    }
+
     fn stub(&mut self, name: &str, milestone: &str) {
         let n = self.game.stub_calls.entry(name.to_owned()).or_insert(0);
         *n += 1;
@@ -111,7 +151,11 @@ impl Host for ScriptHost<'_> {
     fn call_function(&mut self, vm: &mut Vm, index: u16, args: &[Value]) -> Result<Value, String> {
         let (name, imp) = &self.dispatch.funcs[usize::from(index)];
         match imp {
-            Some(Impl::Real(f)) => f(self.game, vm, Args::new(name, args)),
+            Some(Impl::Real(f)) => {
+                let r = f(self.game, vm, Args::new(name, args));
+                self.run_calls(vm);
+                r
+            }
             Some(Impl::Later(m)) => {
                 self.stub(name, m);
                 Ok(Value::Undefined)
@@ -129,7 +173,11 @@ impl Host for ScriptHost<'_> {
     ) -> Result<Value, String> {
         let (name, imp) = &self.dispatch.methods[usize::from(index)];
         match imp {
-            Some(Impl::Real(f)) => f(self.game, vm, ent, Args::new(name, args)),
+            Some(Impl::Real(f)) => {
+                let r = f(self.game, vm, ent, Args::new(name, args));
+                self.run_calls(vm);
+                r
+            }
             Some(Impl::Later(m)) => {
                 self.stub(name, m);
                 Ok(Value::Undefined)
@@ -140,23 +188,37 @@ impl Host for ScriptHost<'_> {
 
     fn get_field(&mut self, ent: EntRef, name: &str) -> Option<Value> {
         match ent.class {
-            EntClass::Entity => game::get_ent_field(self.game.ent(ent.num)?, name),
+            EntClass::Entity => {
+                if self.game.is_client(ent.num)
+                    && let Some(v) = player::get_client_field(self.game, ent.num, name)
+                {
+                    return Some(v);
+                }
+                game::get_ent_field(self.game.ent(ent.num)?, name)
+            }
             _ => None,
         }
     }
 
     fn set_field(&mut self, ent: EntRef, name: &str, value: &Value) -> Result<bool, String> {
         match ent.class {
-            EntClass::Entity => match self.game.ent_mut(ent.num) {
-                Some(e) => {
-                    let set = game::set_ent_field(e, name, value)?;
-                    if set && matches!(name, "origin" | "angles") {
-                        self.game.relink(ent.num);
-                    }
-                    Ok(set)
+            EntClass::Entity => {
+                if self.game.is_client(ent.num)
+                    && let Some(r) = player::set_client_field(self.game, ent.num, name, value)
+                {
+                    return r.map(|()| true);
                 }
-                None => Ok(false),
-            },
+                match self.game.ent_mut(ent.num) {
+                    Some(e) => {
+                        let set = game::set_ent_field(e, name, value)?;
+                        if set && matches!(name, "origin" | "angles") {
+                            self.game.relink(ent.num);
+                        }
+                        Ok(set)
+                    }
+                    None => Ok(false),
+                }
+            }
             _ => Ok(false),
         }
     }
