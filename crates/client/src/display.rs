@@ -91,7 +91,8 @@ pub fn monitors_json(el: &ActiveEventLoop) -> Value {
 }
 
 fn monitor(el: &ActiveEventLoop) -> Option<MonitorHandle> {
-    el.primary_monitor().or_else(|| el.available_monitors().next())
+    el.primary_monitor()
+        .or_else(|| el.available_monitors().next())
 }
 
 /// The video mode closest to the request on `m`: the size asked for (else native), then the refresh nearest to the
@@ -113,7 +114,10 @@ fn pick_mode(m: &MonitorHandle, r: &Request) -> Option<VideoModeHandle> {
 }
 
 /// Create the window for `req`. Returns it with a note about any fallback taken.
-pub fn create_window(el: &ActiveEventLoop, req: &Request) -> Result<(Window, Option<String>), String> {
+pub fn create_window(
+    el: &ActiveEventLoop,
+    req: &Request,
+) -> Result<(Window, Option<String>), String> {
     let mut attrs: WindowAttributes = Window::default_attributes().with_title("cod4e");
     let mon = monitor(el);
     let mut note = None;
@@ -122,7 +126,9 @@ pub fn create_window(el: &ActiveEventLoop, req: &Request) -> Result<(Window, Opt
             let (w, h) = req.size.unwrap_or((1280, 720));
             attrs = attrs.with_inner_size(Size::Physical(PhysicalSize::new(w, h)));
         }
-        FullscreenKind::Borderless => attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(mon))),
+        FullscreenKind::Borderless => {
+            attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(mon)))
+        }
         FullscreenKind::Exclusive => {
             let mode = mon.as_ref().and_then(|m| pick_mode(m, req));
             attrs = match mode {
@@ -152,7 +158,11 @@ mod tests {
 
     #[test]
     fn fullscreen_names_round_trip() {
-        for k in [FullscreenKind::Windowed, FullscreenKind::Borderless, FullscreenKind::Exclusive] {
+        for k in [
+            FullscreenKind::Windowed,
+            FullscreenKind::Borderless,
+            FullscreenKind::Exclusive,
+        ] {
             assert_eq!(FullscreenKind::parse(k.name()), Some(k));
         }
         assert_eq!(FullscreenKind::parse("nope"), None);

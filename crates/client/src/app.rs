@@ -4,10 +4,10 @@
 //! The render loop runs as fast as the present mode allows and is independent of any simulation tick: the camera is a
 //! function of wall-clock time.
 
+use crate::Cli;
 use crate::display::{self, hor_plus};
 use crate::flythrough;
 use crate::video::Recorder;
-use crate::Cli;
 use assets::vfs::Vfs;
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, TextureCache, View};
@@ -32,7 +32,8 @@ pub fn run(cli: Cli) -> Result<(), String> {
         return l.error.map_or(Ok(()), Err);
     }
     let t = Instant::now();
-    let map = MapData::load(&cli.install, &cli.map).map_err(|e| format!("cannot load {}: {e}", cli.map))?;
+    let map = MapData::load(&cli.install, &cli.map)
+        .map_err(|e| format!("cannot load {}: {e}", cli.map))?;
     let load_ms = t.elapsed().as_secs_f64() * 1000.0;
     let mut v = Viewer {
         cli,
@@ -45,12 +46,18 @@ pub fn run(cli: Cli) -> Result<(), String> {
     let out = v.cli.out.clone();
     if let (Some(e), Some(out)) = (&v.error, out) {
         let _ = std::fs::create_dir_all(&out);
-        let _ = std::fs::write(out.join("client.json"), json!({"status": "error", "error": e}).to_string());
+        let _ = std::fs::write(
+            out.join("client.json"),
+            json!({"status": "error", "error": e}).to_string(),
+        );
     }
     v.error.map_or(Ok(()), Err)
 }
 
-fn pick_present(requested: &str, caps: &[wgpu::PresentMode]) -> (wgpu::PresentMode, Option<String>) {
+fn pick_present(
+    requested: &str,
+    caps: &[wgpu::PresentMode],
+) -> (wgpu::PresentMode, Option<String>) {
     let want = match requested {
         "mailbox" => wgpu::PresentMode::Mailbox,
         "immediate" => wgpu::PresentMode::Immediate,
@@ -67,7 +74,9 @@ fn pick_present(requested: &str, caps: &[wgpu::PresentMode]) -> (wgpu::PresentMo
 }
 
 fn present_names(caps: &[wgpu::PresentMode]) -> Vec<String> {
-    caps.iter().map(|p| format!("{p:?}").to_lowercase()).collect()
+    caps.iter()
+        .map(|p| format!("{p:?}").to_lowercase())
+        .collect()
 }
 
 fn gpu_json(g: &Gpu) -> Value {
@@ -88,7 +97,8 @@ impl ApplicationHandler for Lister {
         let result = (|| -> Result<Value, String> {
             let attrs = Window::default_attributes().with_visible(false);
             let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
-            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let instance =
+                wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
             let surface = instance.create_surface(window).map_err(|e| e.to_string())?;
             let gpu = Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?;
             let caps = surface.get_capabilities(&gpu.adapter);
@@ -146,8 +156,11 @@ impl Viewer {
         let (window, note) = display::create_window(el, &self.cli.request)?;
         let window = Arc::new(window);
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance.create_surface(window.clone()).map_err(|e| e.to_string())?;
-        let gpu = Arc::new(Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?);
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|e| e.to_string())?;
+        let gpu =
+            Arc::new(Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?);
         let caps = surface.get_capabilities(&gpu.adapter);
         let format = caps
             .formats
@@ -175,8 +188,14 @@ impl Viewer {
         };
         surface.configure(&gpu.device, &config);
         let scene = Scene::new(&gpu, &self.map);
-        let vfs = Vfs::open_stock(&self.cli.install, 0).map_err(|e| format!("cannot open the install: {e}"))?;
-        let mut renderer = Renderer::new(gpu.clone(), scene, &self.map.techsets, TextureCache::new(Some(vfs), 0));
+        let vfs = Vfs::open_stock(&self.cli.install, 0)
+            .map_err(|e| format!("cannot open the install: {e}"))?;
+        let mut renderer = Renderer::new(
+            gpu.clone(),
+            scene,
+            &self.map.techsets,
+            TextureCache::new(Some(vfs), 0),
+        );
         renderer.warm(config.format);
         let w = &renderer.scene.world;
         let (mins, maxs) = (Vec3::from(w.mins), Vec3::from(w.maxs));
@@ -187,9 +206,18 @@ impl Viewer {
         let mut notes: Vec<String> = [note, present_note].into_iter().flatten().collect();
         let recorder = if self.cli.video && self.cli.flythrough {
             if copy_src {
-                let path = self.cli.out.as_deref().unwrap_or(Path::new(".")).join("flythrough.mp4");
-                std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
-                Some(Recorder::start(&path, (config.width, config.height), 960, 30).map_err(|e| e.to_string())?)
+                let path = self
+                    .cli
+                    .out
+                    .as_deref()
+                    .unwrap_or(Path::new("."))
+                    .join("flythrough.mp4");
+                std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))
+                    .map_err(|e| e.to_string())?;
+                Some(
+                    Recorder::start(&path, (config.width, config.height), 960, 30)
+                        .map_err(|e| e.to_string())?,
+                )
             } else {
                 notes.push("surface cannot be copied from; no video".into());
                 None
@@ -254,11 +282,12 @@ impl ApplicationHandler for Viewer {
                 st.fov_x = hor_plus(self.cli.fov, s.width as f32 / s.height as f32);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(k),
-                    state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(k),
+                        state,
+                        ..
+                    },
                 ..
             } => {
                 if state == ElementState::Pressed {
@@ -320,7 +349,8 @@ impl Viewer {
             fly(st, dt);
         }
         let frame = match st.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             _ => {
                 st.surface.configure(&st.gpu.device, &st.config);
                 st.window.request_redraw();
@@ -336,17 +366,34 @@ impl Viewer {
             time: t,
         };
         let target = frame.texture.create_view(&Default::default());
-        let stats = st
-            .renderer
-            .render(&view, &target, st.config.format, (st.config.width, st.config.height));
+        let stats = st.renderer.render(
+            &view,
+            &target,
+            st.config.format,
+            (st.config.width, st.config.height),
+        );
         st.surfaces_drawn.push(stats.surfaces as f64);
         if let Some(r) = st.recorder.as_mut() {
-            r.capture(&st.gpu.device, &st.gpu.queue, &frame.texture, Duration::from_secs_f32(t));
+            r.capture(
+                &st.gpu.device,
+                &st.gpu.queue,
+                &frame.texture,
+                Duration::from_secs_f32(t),
+            );
         }
-        if self.cli.screenshot && self.cli.flythrough && !st.shot_taken && t >= self.cli.duration * 0.5 {
+        if self.cli.screenshot
+            && self.cli.flythrough
+            && !st.shot_taken
+            && t >= self.cli.duration * 0.5
+        {
             st.shot_taken = true;
             let out = self.cli.out.clone().unwrap_or_default();
-            match save_png(&st.gpu, &frame.texture, st.config.format, &out.join("screenshot.png")) {
+            match save_png(
+                &st.gpu,
+                &frame.texture,
+                st.config.format,
+                &out.join("screenshot.png"),
+            ) {
                 Ok(()) => st.shot_ok = true,
                 Err(e) => st.notes.push(format!("screenshot failed: {e}")),
             }
@@ -370,7 +417,9 @@ impl Viewer {
         let st = self.st.as_mut().ok_or("no window")?;
         let out = self.cli.out.clone().unwrap_or_default();
         std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-        let mut csv = std::io::BufWriter::new(std::fs::File::create(out.join("frames.raw.csv")).map_err(|e| e.to_string())?);
+        let mut csv = std::io::BufWriter::new(
+            std::fs::File::create(out.join("frames.raw.csv")).map_err(|e| e.to_string())?,
+        );
         writeln!(csv, "cpu_ms,gpu_ms,present_interval_ms,mem_bytes").map_err(|e| e.to_string())?;
         // The first interval is the time to the first frame, not a presentation interval.
         for s in st.samples.iter().skip(1) {
@@ -390,7 +439,10 @@ impl Viewer {
         };
         let mut drawn = st.surfaces_drawn.clone();
         drawn.sort_by(f64::total_cmp);
-        let monitor_mhz = st.window.current_monitor().and_then(|m| m.refresh_rate_millihertz());
+        let monitor_mhz = st
+            .window
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz());
         let report = json!({
             "status": "ok",
             "gpu": gpu_json(&st.gpu),
@@ -407,13 +459,20 @@ impl Viewer {
             "world": {"surfaces_drawn_p50": drawn.get(drawn.len() / 2)},
             "notes": st.notes,
         });
-        std::fs::write(out.join("client.json"), serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())
+        std::fs::write(
+            out.join("client.json"),
+            serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
 fn fly(st: &mut State, dt: f32) {
-    let speed = if st.keys.contains(&KeyCode::ShiftLeft) { 1800.0 } else { 450.0 } * dt;
+    let speed = if st.keys.contains(&KeyCode::ShiftLeft) {
+        1800.0
+    } else {
+        450.0
+    } * dt;
     let fwd = Vec3::new(st.yaw.cos(), st.yaw.sin(), 0.0);
     let left = Vec3::new(-st.yaw.sin(), st.yaw.cos(), 0.0);
     for k in &st.keys {
@@ -435,14 +494,25 @@ fn fly(st: &mut State, dt: f32) {
 
 fn rss() -> u64 {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    let Ok(pid) = sysinfo::get_current_pid() else { return 0 };
+    let Ok(pid) = sysinfo::get_current_pid() else {
+        return 0;
+    };
     let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_memory());
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
     sys.process(pid).map_or(0, |p| p.memory())
 }
 
 /// Copy `tex` to the CPU and write it as an opaque PNG.
-fn save_png(gpu: &Gpu, tex: &wgpu::Texture, format: wgpu::TextureFormat, path: &Path) -> Result<(), String> {
+fn save_png(
+    gpu: &Gpu,
+    tex: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+    path: &Path,
+) -> Result<(), String> {
     let (w, h) = (tex.width(), tex.height());
     let bpr = (w * 4).next_multiple_of(256);
     let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -470,14 +540,26 @@ fn save_png(gpu: &Gpu, tex: &wgpu::Texture, format: wgpu::TextureFormat, path: &
     );
     gpu.queue.submit([enc.finish()]);
     buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    gpu.device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| e.to_string())?;
-    let data = buf.slice(..).get_mapped_range().map_err(|e| e.to_string())?;
-    let bgra = matches!(format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| e.to_string())?;
+    let data = buf
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|e| e.to_string())?;
+    let bgra = matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         let row = &data[(y * bpr) as usize..(y * bpr + w * 4) as usize];
         for p in row.as_chunks::<4>().0 {
-            rgba.extend_from_slice(&if bgra { [p[2], p[1], p[0], 255] } else { [p[0], p[1], p[2], 255] });
+            rgba.extend_from_slice(&if bgra {
+                [p[2], p[1], p[0], 255]
+            } else {
+                [p[0], p[1], p[2], 255]
+            });
         }
     }
     let file = std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?);

@@ -38,7 +38,10 @@ mod tests {
 
     #[test]
     fn the_path_is_deterministic_closed_and_inside_the_bounds() {
-        let (mins, maxs) = (Vec3::new(-100.0, -200.0, 0.0), Vec3::new(300.0, 400.0, 500.0));
+        let (mins, maxs) = (
+            Vec3::new(-100.0, -200.0, 0.0),
+            Vec3::new(300.0, 400.0, 500.0),
+        );
         let p0 = pose(0.0, mins, maxs);
         let p1 = pose(LAP, mins, maxs);
         assert!((p0.origin - p1.origin).length() < 1e-2);

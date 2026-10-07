@@ -77,7 +77,8 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--refresh" => c.request.refresh = Some(val(a)?.parse().map_err(|_| "bad refresh")?),
             "--fullscreen" => {
                 let v = val(a)?;
-                c.request.kind = FullscreenKind::parse(&v).ok_or(format!("unknown fullscreen kind {v}"))?;
+                c.request.kind =
+                    FullscreenKind::parse(&v).ok_or(format!("unknown fullscreen kind {v}"))?;
             }
             "--present" => c.present = val(a)?,
             "--fov" => c.fov = val(a)?.parse().map_err(|_| "bad fov")?,
@@ -133,12 +134,21 @@ mod tests {
 
     #[test]
     fn options_parse_and_borderless_defaults_to_native_size() {
-        let c = parse(&args("--flythrough --size 1920x1080 --refresh 144 --fullscreen exclusive --present mailbox")).unwrap();
+        let c = parse(&args(
+            "--flythrough --size 1920x1080 --refresh 144 --fullscreen exclusive --present mailbox",
+        ))
+        .unwrap();
         assert_eq!(c.request.size, Some((1920, 1080)));
         assert_eq!(c.request.refresh, Some(144.0));
         assert_eq!(c.request.kind, FullscreenKind::Exclusive);
         assert!(c.flythrough && c.out.is_some());
-        assert_eq!(parse(&args("--fullscreen borderless")).unwrap().request.size, None);
+        assert_eq!(
+            parse(&args("--fullscreen borderless"))
+                .unwrap()
+                .request
+                .size,
+            None
+        );
         assert!(parse(&args("--size 12")).is_err());
         assert!(parse(&args("--bogus")).is_err());
     }
