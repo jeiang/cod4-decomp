@@ -129,6 +129,9 @@ pub struct Client {
     pub last_cmd_time: i32,
     pub last_spawn_time: i32,
     pub spawn_count: i32,
+    /// Shots fired and shots that hurt an enemy, for the match report.
+    pub shots: u32,
+    pub hits: u32,
     pub buttons: i32,
     pub old_buttons: i32,
     pub latched_buttons: i32,
@@ -184,6 +187,8 @@ impl Client {
             last_cmd_time: 0,
             last_spawn_time: 0,
             spawn_count: 0,
+            shots: 0,
+            hits: 0,
             buttons: 0,
             old_buttons: 0,
             latched_buttons: 0,

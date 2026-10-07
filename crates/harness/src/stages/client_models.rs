@@ -88,6 +88,29 @@ fn shoot(
         .ok_or_else(|| "client wrote no screenshot".to_owned())
 }
 
+/// `Some(report)` when the client cannot open a window here: skipped without a display, failed when it breaks.
+pub fn no_display(client: &Path, name: &str) -> io::Result<Option<StageReport>> {
+    let listing = Command::new(client)
+        .args(["--list-display-modes", "--json"])
+        .stdin(Stdio::null())
+        .output()?;
+    if listing.status.success() {
+        return Ok(None);
+    }
+    let err = String::from_utf8_lossy(&listing.stderr);
+    let line = err
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    Ok(Some(if line.starts_with("no display") {
+        StageReport::new(name, Status::Skipped).with_reason(line.to_owned())
+    } else {
+        StageReport::new(name, Status::Failed)
+            .with_reason(format!("cod4e --list-display-modes failed: {line}"))
+    }))
+}
+
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
         return Ok(StageReport::new(NAME, Status::Skipped)
@@ -96,23 +119,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(install) = &ctx.install else {
         return Ok(StageReport::new(NAME, Status::Skipped).with_reason("no install"));
     };
-    let listing = Command::new(&client)
-        .args(["--list-display-modes", "--json"])
-        .stdin(Stdio::null())
-        .output()?;
-    if !listing.status.success() {
-        let err = String::from_utf8_lossy(&listing.stderr);
-        let line = err
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim();
-        return Ok(if line.starts_with("no display") {
-            StageReport::new(NAME, Status::Skipped).with_reason(line.to_owned())
-        } else {
-            StageReport::new(NAME, Status::Failed)
-                .with_reason(format!("cod4e --list-display-modes failed: {line}"))
-        });
+    if let Some(r) = no_display(&client, NAME)? {
+        return Ok(r);
     }
     let shots = shoot(&client, install, &ctx.dir.join("players"), PLAYERS)
         .and_then(|a| Ok((a, shoot(&client, install, &ctx.dir.join("empty"), 0)?)));

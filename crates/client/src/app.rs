@@ -8,7 +8,9 @@ use crate::Cli;
 use crate::display::{self, hor_plus};
 use crate::flythrough;
 use crate::input::{Input, InputFrame, buttons};
+use crate::listen::{self, Listen};
 use crate::models::Library;
+use crate::netplay::NetPlay;
 use crate::showcase::Showcase;
 use crate::video::Recorder;
 use assets::vfs::Vfs;
@@ -51,6 +53,14 @@ pub fn run(cli: Cli) -> Result<(), String> {
         && let Err(e) = st.input.save()
     {
         eprintln!("cannot save the config: {e}");
+    }
+    if let Some(st) = v.st.as_mut() {
+        if let Some(n) = st.net.as_mut() {
+            n.disconnect();
+        }
+        if let Some(l) = st.listen.as_mut() {
+            l.finish();
+        }
     }
     let out = v.cli.out.clone();
     if let (Some(e), Some(out)) = (&v.error, out) {
@@ -158,6 +168,8 @@ struct State {
     fov_x: f32,
     surfaces_drawn: Vec<f64>,
     showcase: Option<Showcase>,
+    net: Option<NetPlay>,
+    listen: Option<Listen>,
 }
 
 struct Viewer {
@@ -252,6 +264,39 @@ impl Viewer {
             }
             None => None,
         };
+        let (mut net, mut listen) = (None, None);
+        if self.cli.netplay() {
+            let t = Instant::now();
+            let addr = match &self.cli.connect {
+                Some(a) => resolve(a)?,
+                None => {
+                    let l = listen::start(&self.cli.install, &self.cli.map, self.cli.bots)?;
+                    let a = l.addr;
+                    notes.push(format!(
+                        "listen server with {} bots up in {:.0} ms",
+                        self.cli.bots,
+                        t.elapsed().as_secs_f64() * 1000.0
+                    ));
+                    listen = Some(l);
+                    a
+                }
+            };
+            let clipmap = self
+                .map
+                .clipmap
+                .clone()
+                .ok_or("the map has no collision data")?;
+            let lib = Library::load(&self.cli.install, &self.cli.map)?;
+            let limits = Input::detached().pitch_limits();
+            net = Some(NetPlay::connect(
+                lib,
+                clipmap,
+                addr,
+                &self.cli.name,
+                limits,
+                self.cli.autoplay,
+            )?);
+        }
         let want_video = self.cli.video && self.cli.flythrough;
         if want_video && !copy_src {
             notes.push("surface cannot be copied from; no video".into());
@@ -287,6 +332,8 @@ impl Viewer {
             fov_x: hor_plus(self.cli.fov, aspect),
             surfaces_drawn: Vec::new(),
             showcase,
+            net,
+            listen,
         })
     }
 }
@@ -323,7 +370,7 @@ impl ApplicationHandler for Viewer {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !self.cli.flythrough => {
+            } if !self.cli.timed() => {
                 st.grabbed = st
                     .window
                     .set_cursor_grab(CursorGrabMode::Locked)
@@ -363,6 +410,25 @@ impl Viewer {
             let (p, y, pi) = sc.camera();
             (st.pos, st.yaw, st.pitch) = (p, y, pi);
             st.renderer.dynamic_models = sc.update(dt);
+        } else if let Some(net) = st.net.as_mut() {
+            let f = if self.cli.autoplay {
+                InputFrame::default()
+            } else {
+                st.input.frame(dt)
+            };
+            if f.pending_commands
+                .iter()
+                .any(|c| matches!(c.as_str(), "togglemenu" | "quit"))
+            {
+                el.exit();
+            }
+            if let Some(why) = net.refused() {
+                return Err(format!("the server refused the connection: {why}"));
+            }
+            if let Some(nf) = net.frame(dt, &f) {
+                (st.pos, st.yaw, st.pitch) = (nf.origin, nf.yaw, nf.pitch);
+                st.renderer.dynamic_models = nf.models;
+            }
         } else if self.cli.flythrough {
             let w = &st.renderer.scene.world;
             let p = flythrough::pose(t, Vec3::from(w.mins), Vec3::from(w.maxs));
@@ -444,10 +510,7 @@ impl Viewer {
                 );
             }
         }
-        if self.cli.screenshot
-            && self.cli.flythrough
-            && !st.shot_taken
-            && t >= self.cli.duration * 0.5
+        if self.cli.screenshot && self.cli.timed() && !st.shot_taken && t >= self.cli.duration * 0.5
         {
             st.shot_taken = true;
             let out = self.cli.out.clone().unwrap_or_default();
@@ -467,7 +530,7 @@ impl Viewer {
             st.rss = rss();
         }
         st.samples.push([cpu_ms, interval, st.rss as f64]);
-        if self.cli.flythrough && t >= self.cli.duration {
+        if self.cli.timed() && t >= self.cli.duration {
             self.finish(el)?;
             el.exit();
         } else {
@@ -514,8 +577,16 @@ impl Viewer {
             .window
             .current_monitor()
             .and_then(|m| m.refresh_rate_millihertz());
+        let net = st.net.as_mut().map(|n| {
+            let r = n.report();
+            n.disconnect();
+            r
+        });
+        let server = st.listen.as_mut().map(Listen::finish);
         let report = json!({
             "status": "ok",
+            "net": net,
+            "server": server,
             "gpu": gpu_json(&st.gpu),
             "settings": {
                 "shadows": format!("{:?}", self.cli.settings.shadows).to_lowercase(),
@@ -568,6 +639,14 @@ fn fly(st: &mut State, f: &InputFrame, dt: f32) {
     st.pos.z += f.up * speed;
     st.yaw += f.look_delta_yaw.to_radians();
     st.pitch = (st.pitch - f.look_delta_pitch.to_radians()).clamp(-1.5, 1.5);
+}
+
+fn resolve(addr: &str) -> Result<std::net::SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    addr.to_socket_addrs()
+        .map_err(|e| format!("cannot resolve {addr}: {e}"))?
+        .find(|a| a.is_ipv4())
+        .ok_or_else(|| format!("{addr} has no IPv4 address"))
 }
 
 fn rss() -> u64 {

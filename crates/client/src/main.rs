@@ -6,7 +6,9 @@ mod app;
 mod display;
 mod flythrough;
 mod input;
+mod listen;
 mod models;
+mod netplay;
 mod showcase;
 mod video;
 mod viewmodel;
@@ -36,6 +38,11 @@ usage: cod4e [options]
   --video / --screenshot record a video / save a screenshot during the flythrough
   --config <path>        key binds and settings file (default: <config dir>/cod4e/config_mp.cfg)
   --input-selftest       check key binds, mouse look and the config file without a window, then exit (harness stage)
+  --listen               play a team deathmatch against bots on a server started inside this process
+  --bots <n>             bots on the listen server (default 9)
+  --connect <host:port>  play on a server (see cod4e-server)
+  --name <name>          player name on the server
+  --autoplay             a scripted player instead of the keyboard, for --duration seconds (harness stage 4)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
 
 Interactive: WASD move, Space/Ctrl up/down, Shift fast, arrows look, click to capture the mouse, Esc quits.
@@ -58,6 +65,25 @@ pub struct Cli {
     pub input_selftest: bool,
     /// Number of showcase players, when the scene is on.
     pub show_models: Option<usize>,
+    /// Server to play on, `host:port`.
+    pub connect: Option<String>,
+    /// Play on a server started inside this process.
+    pub listen: bool,
+    pub bots: usize,
+    pub name: String,
+    /// A scripted player instead of the keyboard (harness): walks, aims at and shoots enemies for `--duration`.
+    pub autoplay: bool,
+}
+
+impl Cli {
+    /// Runs for `--duration` seconds, then writes the report and exits.
+    pub fn timed(&self) -> bool {
+        self.flythrough || self.autoplay
+    }
+
+    pub fn netplay(&self) -> bool {
+        self.connect.is_some() || self.listen
+    }
 }
 
 fn parse(args: &[String]) -> Result<Cli, String> {
@@ -77,6 +103,11 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         config: None,
         input_selftest: false,
         show_models: None,
+        connect: None,
+        listen: false,
+        bots: 9,
+        name: "player".into(),
+        autoplay: false,
     };
     let mut it = args.iter();
     let mut size_given = false;
@@ -123,6 +154,11 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--model-count" => {
                 c.show_models = Some(val(a)?.parse().map_err(|_| "bad model count")?)
             }
+            "--connect" => c.connect = Some(val(a)?),
+            "--listen" => c.listen = true,
+            "--bots" => c.bots = val(a)?.parse().map_err(|_| "bad bot count")?,
+            "--name" => c.name = val(a)?,
+            "--autoplay" => c.autoplay = true,
             "--list-display-modes" => c.list = true,
             "--json" => {}
             "-h" | "--help" => return Err(String::new()),
@@ -132,7 +168,13 @@ fn parse(args: &[String]) -> Result<Cli, String> {
     if c.request.kind == FullscreenKind::Borderless && !size_given {
         c.request.size = None;
     }
-    if (c.video || c.screenshot || c.flythrough) && c.out.is_none() {
+    if c.connect.is_some() && c.listen {
+        return Err("--connect and --listen are alternatives".into());
+    }
+    if c.autoplay && !c.netplay() {
+        return Err("--autoplay needs --connect or --listen".into());
+    }
+    if (c.video || c.screenshot || c.timed()) && c.out.is_none() {
         c.out = Some(".".into());
     }
     Ok(c)
