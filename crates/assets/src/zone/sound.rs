@@ -3,7 +3,7 @@
 
 use super::error::{Result, ZoneError};
 use super::gfx::Name;
-use super::stream::{Block, Fields, Ptr, Stream};
+use super::stream::{Addr, Block, Fields, Ptr, Stream};
 use std::sync::Arc;
 
 /// A named group of alternative sounds.
@@ -52,7 +52,10 @@ pub enum SoundSource {
     /// Type 0 or any value without data in the stream.
     Unknown,
     Loaded(Option<Arc<LoadedSound>>),
-    Streamed { dir: Name, name: Name },
+    Streamed {
+        dir: Name,
+        name: Name,
+    },
 }
 
 #[derive(Debug)]
@@ -88,7 +91,7 @@ pub(super) fn load_alias_list(s: &mut Stream, p: Ptr) -> Result<Option<Arc<Sound
         let (name, head, count) = (f.ptr()?, f.ptr()?, f.i32());
         let count =
             u32::try_from(count).map_err(|_| ZoneError::Invalid("negative sound alias count"))?;
-        
+
         let name = s.string(name)?;
         let aliases = s.array(head, count, 4, SOUND_ALIAS_SIZE, alias)?;
         Ok(SoundAliasList { name, aliases })
@@ -101,21 +104,25 @@ fn alias(s: &mut Stream, f: &mut Fields) -> Result<SoundAlias> {
     let sequence = f.i32();
     let [vol_min, vol_max, pitch_min, pitch_max, dist_min, dist_max] = [(); 6].map(|_| f.f32());
     let flags = f.i32();
-    let [slave_percentage, probability, lfe_percentage, center_percentage] =
-        [(); 4].map(|_| f.f32());
+    let [
+        slave_percentage,
+        probability,
+        lfe_percentage,
+        center_percentage,
+    ] = [(); 4].map(|_| f.f32());
     let start_delay = f.i32();
+    let curve_slot = f.slot();
     let curve = f.ptr()?;
     let [envelop_min, envelop_max, envelop_percentage] = [(); 3].map(|_| f.f32());
     let speaker_map = f.ptr()?;
 
-    
     let [name, subtitle, secondary_alias_name, chain_alias_name] = strings;
     let name = s.string(name)?;
     let subtitle = s.string(subtitle)?;
     let secondary_alias_name = s.string(secondary_alias_name)?;
     let chain_alias_name = s.string(chain_alias_name)?;
-    let sound_file = s.shared(sound_file, 4, SOUND_FILE_SIZE, sound_file_body)?;
-    let volume_falloff_curve = load_curve(s, curve)?;
+    let sound_file = load_sound_file(s, sound_file)?;
+    let volume_falloff_curve = curve_at(s, curve_slot, curve)?;
     let speaker_map = s.shared(speaker_map, 4, SPEAKER_MAP_SIZE, speaker_map_body)?;
     Ok(SoundAlias {
         name,
@@ -144,13 +151,29 @@ fn alias(s: &mut Stream, f: &mut Fields) -> Result<SoundAlias> {
     })
 }
 
-fn sound_file_body(s: &mut Stream, h: &[u8]) -> Result<SoundFile> {
-    let mut f = Fields::new(h);
+fn load_sound_file(s: &mut Stream, p: Ptr) -> Result<Option<Arc<SoundFile>>> {
+    match p {
+        Ptr::Follow => {
+            let (at, bytes) = s.load(4, SOUND_FILE_SIZE)?;
+            let v = Arc::new(sound_file_body(s, &mut Fields::at(&bytes, at))?);
+            s.register(at, v.clone());
+            Ok(Some(v))
+        }
+        p => s.shared(p, 4, SOUND_FILE_SIZE, |_, _| {
+            Err(ZoneError::Invalid("sound file"))
+        }),
+    }
+}
+
+fn sound_file_body(s: &mut Stream, f: &mut Fields) -> Result<SoundFile> {
     let kind = f.u8();
     let exists = f.u8() != 0;
     f.skip(2);
     let source = match kind {
-        SAT_LOADED => SoundSource::Loaded(load_loaded(s, f.ptr()?)?),
+        SAT_LOADED => {
+            let slot = f.slot();
+            SoundSource::Loaded(loaded_at(s, slot, f.ptr()?)?)
+        }
         SAT_STREAMED => {
             let (dir, name) = (f.ptr()?, f.ptr()?);
             SoundSource::Streamed {
@@ -180,7 +203,7 @@ fn speaker_map_body(s: &mut Stream, h: &[u8]) -> Result<SpeakerMap> {
     let mut f = Fields::new(h);
     let is_default = f.u8() != 0;
     f.skip(3);
-    let name = f.ptr()?; 
+    let name = f.ptr()?;
     let channel_maps = [(); 2].map(|_| [(); 2].map(|_| channel_map(&mut f)));
     Ok(SpeakerMap {
         is_default,
@@ -198,9 +221,13 @@ pub struct SndCurve {
 }
 
 pub(super) fn load_curve(s: &mut Stream, p: Ptr) -> Result<Option<Arc<SndCurve>>> {
-    s.temp_asset(p, 4, 72, |s, h| {
+    curve_at(s, None, p)
+}
+
+fn curve_at(s: &mut Stream, slot: Option<Addr>, p: Ptr) -> Result<Option<Arc<SndCurve>>> {
+    s.temp_asset_at(slot, p, 4, 72, |s, h| {
         let mut f = Fields::new(h);
-        let name = f.ptr()?; 
+        let name = f.ptr()?;
         let knot_count = f.i32();
         let knots = [(); 8].map(|_| [f.f32(), f.f32()]);
         Ok(SndCurve {
@@ -226,7 +253,11 @@ pub struct LoadedSound {
 }
 
 pub(super) fn load_loaded(s: &mut Stream, p: Ptr) -> Result<Option<Arc<LoadedSound>>> {
-    s.temp_asset(p, 4, 44, |s, h| {
+    loaded_at(s, None, p)
+}
+
+fn loaded_at(s: &mut Stream, slot: Option<Addr>, p: Ptr) -> Result<Option<Arc<LoadedSound>>> {
+    s.temp_asset_at(slot, p, 4, 44, |s, h| {
         let mut f = Fields::new(h);
         let name = f.ptr()?;
         let format = f.i32();
@@ -238,7 +269,7 @@ pub(super) fn load_loaded(s: &mut Stream, p: Ptr) -> Result<Option<Arc<LoadedSou
         let samples = f.u32();
         let block_size = f.u32();
         f.skip(4); // initial pointer (runtime)
-        let data = f.ptr()?; 
+        let data = f.ptr()?;
         let name = s.string(name)?;
         let data = match data {
             Ptr::Follow | Ptr::Insert => {
@@ -271,6 +302,7 @@ pub(super) fn load_loaded(s: &mut Stream, p: Ptr) -> Result<Option<Arc<LoadedSou
     })
 }
 
+/// The asset-list entry carries no stream data, so there is nothing to decode.
 #[derive(Debug)]
 pub struct SndDriverGlobals {
     pub name: Name,

@@ -86,8 +86,8 @@ pub(super) fn load_font(s: &mut Stream, p: Ptr) -> Result<Option<Arc<Font>>> {
         let mut f = Fields::new(h);
         let name = f.ptr()?;
         let pixel_height = f.i32();
-        let count = u32::try_from(f.i32())
-            .map_err(|_| ZoneError::Invalid("negative glyph count"))?;
+        let count =
+            u32::try_from(f.i32()).map_err(|_| ZoneError::Invalid("negative glyph count"))?;
         let (material, glow, glyphs) = (f.ptr()?, f.ptr()?, f.ptr()?);
         let name = s.string(name)?;
         let material = material_ptr(s, material)?;
