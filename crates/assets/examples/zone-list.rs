@@ -1,26 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Print per-type top-level asset counts of fastfiles.
 //!
-//! `cargo run -p assets --example zone-list -- [--inflate] [--decode] <zone.ff | zone-name>...`
+//! `cargo run -p assets --example zone-list -- [--inflate] [--decode | --server] <zone.ff | zone-name>...`
 //! A bare name resolves against `$COD4_PATH/zone/english` (default `./COD4`).
 
-use assets::zone::{KeepAll, XAssetType, Zone};
+use assets::zone::{Consumer, KeepAll, XAssetType, Zone};
 use std::fs::File;
 use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() {
-    let (mut inflate, mut decode) = (false, false);
+    let (mut inflate, mut decode, mut server) = (false, false, false);
     let mut targets = Vec::new();
     for a in std::env::args().skip(1) {
         match a.as_str() {
             "--inflate" => inflate = true,
             "--decode" => decode = true,
+            "--server" => {
+                decode = true;
+                server = true;
+            }
             _ => targets.push(a),
         }
     }
     if targets.is_empty() {
-        eprintln!("usage: zone-list [--inflate] [--decode] <zone.ff | zone-name>...");
+        eprintln!("usage: zone-list [--inflate] [--decode | --server] <zone.ff | zone-name>...");
         std::process::exit(2);
     }
     let root = PathBuf::from(std::env::var_os("COD4_PATH").unwrap_or("COD4".into()));
@@ -58,7 +62,12 @@ fn main() {
         let start = Instant::now();
         if decode {
             let mut n = 0usize;
-            match zone.decode(&KeepAll, |_| n += 1) {
+            let r = if server {
+                zone.decode(&Consumer::Server, |_| n += 1)
+            } else {
+                zone.decode(&KeepAll, |_| n += 1)
+            };
+            match r {
                 Ok(st) => println!("  decoded, {} bytes, {:?}", st.consumed, start.elapsed()),
                 Err(e) => println!("  decode stopped after {n} assets: {e}"),
             }

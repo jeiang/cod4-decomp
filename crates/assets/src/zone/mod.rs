@@ -5,8 +5,10 @@
 //! [`Zone::open`] reads only the header and the asset list, inflating just the
 //! stream prefix it needs. [`Zone::decode`] then walks the asset bodies in
 //! order, handing each asset the consumer's [`DecodeFilter`] accepts to a sink.
-//! Asset types without a decoder yet stop the walk with
-//! [`ZoneError::Unsupported`]; later tickets add their types to [`Asset`].
+//! Every multiplayer asset type decodes into an owned type in [`Asset`]; the
+//! singleplayer-only types (game world, `UiMap`, ...) stop the walk with
+//! [`ZoneError::Unsupported`]. Presentation payload (render, sound, UI bulk)
+//! is dropped without buffering when the consumer does not keep it.
 
 mod asset_type;
 pub mod clipmap;
