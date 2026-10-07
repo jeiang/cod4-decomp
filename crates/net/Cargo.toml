@@ -1,0 +1,12 @@
+[package]
+name = "net"
+description = "Netchan, snapshot delta codec, and transport trait."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

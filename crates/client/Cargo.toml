@@ -1,0 +1,21 @@
+[package]
+name = "client"
+description = "Player-facing client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "cod4e"
+path = "src/main.rs"
+
+[dependencies]
+assets = { path = "../assets" }
+sim = { path = "../sim" }
+net = { path = "../net" }
+render = { path = "../render" }
+server = { path = "../server" }
+
+[lints]
+workspace = true

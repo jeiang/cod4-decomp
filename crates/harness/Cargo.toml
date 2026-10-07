@@ -1,0 +1,16 @@
+[package]
+name = "harness"
+description = "Runs scenarios and writes run bundles."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "cod4e-harness"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

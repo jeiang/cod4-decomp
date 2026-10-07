@@ -1,0 +1,12 @@
+[package]
+name = "sm3"
+description = "D3D9 SM3 bytecode to WGSL translation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
