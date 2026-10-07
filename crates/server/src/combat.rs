@@ -304,7 +304,10 @@ impl Game {
             return Ok(());
         }
         if c.ps.pm_type == PmType::Dead {
-            return Err("Trying to do damage to a client that is already dead".into());
+            // The original runs each damage callback to completion before the next hit, so
+            // a dead target cannot be reached; here pellets and blasts queue several
+            // callbacks first, and the ones after the killing blow have nothing to do.
+            return Ok(());
         }
         let dir = d.dir.map_or([0.0; 3], normalize);
         let god = self.ent(target).is_some_and(|e| e.flags & 8 != 0);
