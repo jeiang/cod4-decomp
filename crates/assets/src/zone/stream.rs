@@ -327,7 +327,7 @@ impl<'a> Stream<'a> {
     }
 
     /// Reserve the 4-byte alias slot used by `-2` pointers.
-    fn insert_slot(&mut self) -> Result<Addr> {
+    pub fn insert_slot(&mut self) -> Result<Addr> {
         self.alloc_in(Block::Virtual, 4, 4)
     }
 
