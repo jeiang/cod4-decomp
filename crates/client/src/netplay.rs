@@ -206,11 +206,14 @@ impl NetPlay {
             self.last_eye = Some(eye);
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.view_model(dt, &ps, ps.origin, &snap));
+            let (events, commands) = self.take_events(&snap);
             return Some(NetFrame {
                 origin: eye,
                 yaw: ps.viewangles[1].to_radians(),
                 pitch: -ps.viewangles[0].to_radians(),
                 models,
+                events,
+                commands,
             });
         }
         self.boxes.sync(&snap);
@@ -245,11 +248,7 @@ impl NetPlay {
         self.last_eye = Some(eye);
         self.hear(dt, eye, &ps, &snap);
 
-        let commands = self.events.take_commands(&mut self.net.commands);
-        let events = self.events.scan(&snap);
-        for e in &events {
-            *self.c.events.entry(e.kind()).or_default() += 1;
-        }
+        let (events, commands) = self.take_events(&snap);
         let mut models = self.remote_players(dt, st, own);
         if !dead {
             models.extend(self.view_model(dt, &ps, feet, &snap));
@@ -268,6 +267,16 @@ impl NetPlay {
             events,
             commands,
         })
+    }
+
+    /// The events new in `snap` and the server commands nothing here consumed.
+    fn take_events(&mut self, snap: &net::Snapshot) -> (Vec<ClientEvent>, Vec<String>) {
+        let commands = self.events.take_commands(&mut self.net.commands);
+        let events = self.events.scan(snap);
+        for e in &events {
+            *self.c.events.entry(e.kind()).or_default() += 1;
+        }
+        (events, commands)
     }
 
     /// Feeds the sound system: the listener, the server's sound commands, and the own player's events.
