@@ -325,6 +325,8 @@ pub struct Game {
     /// Collision world of the loaded map with every solid entity linked into it.
     pub world: Option<World>,
     pub ui: crate::ui::ServerUi,
+    /// `setarchive(true)`: the network layer keeps the history killcams replay.
+    pub archive_enabled: bool,
     pub field_types: HashMap<String, FieldTy>,
     pub models: Precache,
     pub shaders: Precache,
@@ -393,6 +395,7 @@ impl Game {
             ents: Vec::new(),
             world: None,
             ui: crate::ui::ServerUi::default(),
+            archive_enabled: false,
             field_types: HashMap::new(),
             models: Precache::default(),
             shaders: Precache::default(),
@@ -490,6 +493,7 @@ impl Game {
         self.ents.clear();
         self.world = None;
         self.ui = crate::ui::ServerUi::default();
+        self.archive_enabled = false;
         self.models = Precache::default();
         self.shaders = Precache::default();
         self.strings = Precache::default();

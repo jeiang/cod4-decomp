@@ -42,3 +42,15 @@ mp_creek S&D ran alone (max 23.9 ms).
 
 Known gap: bot navigation ignores doors and movers, so mp_cargoship's stern is unreachable and
 its numbers understate bot movement there.
+
+## Killcam state ring (ticket #66)
+
+`setarchive(true)` (the stock killcam init) makes the server keep the last 15 s of the world
+(`server::archive`): per frame the visible entities and, per player in the match, the player state
+(300 B), weapon inventory (1.4 KB), the archived hud elements and the objectives that player's
+screen had. At 30 Hz that is 451 frames, about 4 KB per player per frame, so at most
+about 60 MB with 32 players (the worst case; less with fewer hud elements). Measured with
+`headless-bots-32` (32 bots, TDM on mp_crash, 90 s, x86-64 Linux, release): peak RSS 107 MiB,
+steady RSS 107 MiB (it was 102 and 83 MiB before the ring), against the 512 MiB budget; the tick
+p99 of the 4-client `net-match` stage with the ring recording is 1.6 ms. The ring fills in the first
+15 s, after which memory is flat. A map restart or a clock that goes backwards empties it.

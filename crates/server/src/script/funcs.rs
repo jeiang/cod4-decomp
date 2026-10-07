@@ -238,7 +238,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ),
     ("setclientnamemode", r(|_, _, _| Ok(Value::Undefined))),
     ("updateclientnames", r(|_, _, _| Ok(Value::Undefined))),
-    ("setarchive", r(|_, _, _| Ok(Value::Undefined))),
+    ("setarchive", r(set_archive)),
     ("matchend", r(|_, _, _| Ok(Value::Undefined))),
     ("setplayerteamrank", r(|_, _, _| Ok(Value::Undefined))),
     ("sendranks", r(|_, _, _| Ok(Value::Undefined))),
@@ -592,6 +592,11 @@ fn log_print(_: &mut Game, _: &mut Vm, _: Args) -> R {
 }
 
 /// Chat-area prints reach clients; the server console shows them too.
+fn set_archive(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    g.archive_enabled = a.int(0)? != 0;
+    Ok(Value::Undefined)
+}
+
 fn get_dvar(g: &mut Game, _: &mut Vm, a: Args) -> R {
     let n = a.string(0)?;
     match g.cvars.get(n) {

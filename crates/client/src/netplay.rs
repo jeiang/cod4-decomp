@@ -142,7 +142,7 @@ impl NetPlay {
         self.answer_menus();
         let now_ms = self.net.now_ms();
         let st = self.net.snaps.server_time(now_ms);
-        let own = self.net.latest().map(|s| s.ps.client_num);
+        let own = self.net.latest().map(|s| s.own());
         let (Some(st), Some(own)) = (st, own) else {
             self.net.send();
             return None;
@@ -170,6 +170,25 @@ impl NetPlay {
         }
 
         let snap = self.net.latest()?.clone();
+        if snap.follow.is_some() {
+            // Watching another player (a killcam or a followed spectator): the snapshot's
+            // player state is theirs, so nothing is predicted; draw their view as it came.
+            let ps = snap.ps.clone();
+            let eye = Vec3::new(
+                ps.origin[0],
+                ps.origin[1],
+                ps.origin[2] + ps.view_height_current,
+            );
+            self.last_eye = Some(eye);
+            let mut models = self.remote_players(dt, st, ps.client_num);
+            models.extend(self.view_model(dt, &ps, ps.origin, &snap));
+            return Some(NetFrame {
+                origin: eye,
+                yaw: ps.viewangles[1].to_radians(),
+                pitch: -ps.viewangles[0].to_radians(),
+                models,
+            });
+        }
         self.boxes.sync(&snap);
         let env = Env {
             world: self.boxes.world(),

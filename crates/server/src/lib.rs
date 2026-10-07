@@ -2,6 +2,7 @@
 //! Authoritative match simulation; no GPU, window, or audio dependencies.
 
 pub mod anim;
+pub mod archive;
 pub mod bot;
 pub mod bullet;
 pub mod client;
