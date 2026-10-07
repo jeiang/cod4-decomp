@@ -276,8 +276,6 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
         "isvalidgametype",
         r(|g, _, a| Ok(bool_v(g.valid_gametype(a.string(0)?)))),
     ),
-    ("kick", Later(M5)),
-    ("ban", Later(M5)),
     ("addtestclient", Later("M3 bots")),
     // objectives are recorded; replication to clients is M5
     ("objective_add", Later(M5)),

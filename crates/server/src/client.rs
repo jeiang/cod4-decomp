@@ -512,6 +512,7 @@ impl Game {
         }
         c.ps.move_speed_scale_multiplier = c.move_speed_scale;
         let health = self.ents[usize::from(n)].as_ref().map_or(0, |e| e.health);
+        let linked = self.is_linked(n);
         let c = &mut self.clients[usize::from(n)];
         c.ps.pm_type = match c.session {
             Session::Intermission => PmType::Intermission,
@@ -523,6 +524,13 @@ impl Game {
             Session::Playing if c.last_stand => PmType::LastStand,
             Session::Playing => PmType::Normal,
         };
+        if linked {
+            c.ps.pm_type = match c.ps.pm_type {
+                PmType::Normal => PmType::NormalLinked,
+                PmType::Dead => PmType::DeadLinked,
+                t => t,
+            };
+        }
         self.set_client_contents(n);
     }
 

@@ -23,6 +23,9 @@ use assets::zone::xanim::XAnimParts;
 use assets::zone::xmodel::XModel;
 use assets::zone::{Asset, Consumer, Zone};
 
+use crate::delta::RootMotion;
+use crate::tags::Skeleton;
+
 /// Zone load order and tags of a dedicated server (`code_post_gfx_mp` first).
 pub const BOOT_ZONES: [(&str, u8); 4] = [
     ("code_post_gfx_mp", 2),
@@ -114,7 +117,9 @@ struct Layer {
     tables: HashMap<String, (u8, Arc<StringTable>)>,
     weapons: HashMap<String, (u8, Arc<WeaponDef>)>,
     models: HashMap<String, (u8, Arc<XModel>)>,
+    skeletons: HashMap<String, (u8, Arc<Skeleton>)>,
     anims: HashMap<String, (u8, Arc<AnimInfo>)>,
+    motions: HashMap<String, (u8, Arc<RootMotion>)>,
     localize: HashMap<String, (u8, Arc<str>)>,
     clipmap: Option<(u8, Arc<Clipmap>)>,
 }
@@ -176,11 +181,16 @@ impl Content {
             }
             Asset::XModel(m) => {
                 if let Some(n) = m.name.clone() {
+                    let skel = Arc::new(Skeleton::new(&m, &strings));
+                    put(&mut layer.skeletons, tag, &n, skel);
                     put(&mut layer.models, tag, &n, m);
                 }
             }
             Asset::XAnimParts(x) => {
                 if let Some(n) = x.name.clone() {
+                    if let Some(m) = RootMotion::new(&x) {
+                        put(&mut layer.motions, tag, &n, Arc::new(m));
+                    }
                     put(
                         &mut layer.anims,
                         tag,
@@ -251,6 +261,30 @@ impl Content {
 
     pub fn model(&self, name: &str) -> Option<&Arc<XModel>> {
         get(&self.map.models, name).or_else(|| get(&self.base.models, name))
+    }
+
+    pub fn skeleton(&self, name: &str) -> Option<&Arc<Skeleton>> {
+        get(&self.map.skeletons, name).or_else(|| get(&self.base.skeletons, name))
+    }
+
+    /// Names of the loaded animations that start with `prefix`, sorted.
+    pub fn anim_names(&self, prefix: &str) -> Vec<&str> {
+        let mut v: Vec<&str> = self
+            .base
+            .anims
+            .keys()
+            .chain(self.map.anims.keys())
+            .map(String::as_str)
+            .filter(|n| n.starts_with(prefix))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// The root-motion track of an animation, when it has one.
+    pub fn root_motion(&self, name: &str) -> Option<&Arc<RootMotion>> {
+        get(&self.map.motions, name).or_else(|| get(&self.base.motions, name))
     }
 
     pub fn anim(&self, name: &str) -> Option<&Arc<AnimInfo>> {

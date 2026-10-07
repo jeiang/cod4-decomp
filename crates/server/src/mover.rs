@@ -391,6 +391,14 @@ impl Game {
     /// `G_RunMover` for a script mover whose trajectory ran out or is still running: advance
     /// origin and angles to the level time and fire `movedone` / `rotatedone`.
     pub fn run_mover(&mut self, vm: &mut Vm, n: u16) {
+        if self.is_linked(n) {
+            self.follow_link(vm, n);
+            return;
+        }
+        if self.ent(n).is_some_and(|e| e.x.corpse.is_some()) {
+            self.run_corpse(n);
+            return;
+        }
         let now = self.level.time;
         let Some(ent) = self.ent_mut(n) else { return };
         if ent.mv.pos.tr.kind == TrType::Stationary && ent.mv.ang.tr.kind == TrType::Stationary {
