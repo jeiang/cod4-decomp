@@ -155,7 +155,7 @@ pub struct Stream<'a> {
     /// (block, offset at push time)
     stack: Vec<(Block, u32)>,
     registry: HashMap<Addr, Box<dyn Any + Send + Sync>>,
-    keep_render: bool,
+    keep_presentation: bool,
 }
 
 impl<'a> Stream<'a> {
@@ -171,7 +171,7 @@ impl<'a> Stream<'a> {
             peak: [0; BLOCK_COUNT],
             stack: Vec::new(),
             registry: HashMap::new(),
-            keep_render: true,
+            keep_presentation: true,
         }
     }
 
@@ -179,13 +179,13 @@ impl<'a> Stream<'a> {
         self.declared = sizes;
     }
 
-    pub(super) fn set_keep_render(&mut self, keep: bool) {
-        self.keep_render = keep;
+    pub(super) fn set_keep_presentation(&mut self, keep: bool) {
+        self.keep_presentation = keep;
     }
 
-    /// Whether the consumer wants render-only payload retained.
-    pub fn keep_render(&self) -> bool {
-        self.keep_render
+    /// Whether the current asset's presentation payload is retained.
+    pub fn keep_presentation(&self) -> bool {
+        self.keep_presentation
     }
 
     /// Bytes taken from the inflated stream so far.
@@ -298,11 +298,11 @@ impl<'a> Stream<'a> {
         Ok((a, v))
     }
 
-    /// Like [`load`](Self::load) for render-only payload: with the consumer
+    /// Like [`load`](Self::load) for presentation-only payload (render vertex/index/texel data, sound samples): with the consumer
     /// not keeping render data, the bytes are consumed and block usage is
     /// accounted without buffering them, and the returned vector is empty.
-    pub fn load_render(&mut self, align: u32, len: u32) -> Result<(Addr, Vec<u8>)> {
-        if self.keep_render {
+    pub fn load_presentation(&mut self, align: u32, len: u32) -> Result<(Addr, Vec<u8>)> {
+        if self.keep_presentation {
             return self.load(align, len);
         }
         let a = self.alloc(align, len)?;

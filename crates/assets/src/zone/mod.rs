@@ -83,10 +83,12 @@ pub enum Asset {
 pub trait DecodeFilter {
     fn keep(&self, ty: XAssetType) -> bool;
 
-    /// Whether render-only payload inside kept assets (XModel surface
-    /// vertices/indices, ...) is retained. When `false` it is still read from
-    /// the stream but dropped without allocating; see [`Stream::keep_render`].
-    fn keep_render(&self) -> bool {
+    /// Whether presentation-only payload (render vertex/index/texel data,
+    /// sound samples, UI) inside kept assets is retained. When `false` it is
+    /// still read from the stream but dropped without allocating; see
+    /// [`Stream::load_presentation`]. Payload of dropped asset types is always
+    /// dropped this way.
+    fn keep_presentation(&self) -> bool {
         true
     }
 }
@@ -123,7 +125,7 @@ impl DecodeFilter for Consumer {
         }
     }
 
-    fn keep_render(&self) -> bool {
+    fn keep_presentation(&self) -> bool {
         matches!(self, Consumer::Client)
     }
 }
@@ -277,13 +279,14 @@ impl<'a> Zone<'a> {
         mut sink: impl FnMut(Asset),
     ) -> Result<ZoneStats> {
         let s = &mut self.stream;
-        s.set_keep_render(filter.keep_render());
         for (i, &ty) in self.assets.iter().enumerate() {
             // Later offset pointers alias the header field of this array entry.
             let field = Addr {
                 block: Block::Virtual,
                 offset: self.assets_off + 8 * i as u32 + 4,
             };
+            // Types the consumer drops are decoded without buffering their bulk.
+            s.set_keep_presentation(filter.keep(ty) && filter.keep_presentation());
             macro_rules! top {
                 ($load:expr, $variant:ident) => {
                     $load?
