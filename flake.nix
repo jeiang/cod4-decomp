@@ -46,7 +46,10 @@
             ];
           in
           pkgs.mkShell {
-            packages = [ (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml) ];
+            packages = [
+              (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
+              pkgs.nasm # rav1e x86_64 asm
+            ];
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath windowLibs);
           };
       });

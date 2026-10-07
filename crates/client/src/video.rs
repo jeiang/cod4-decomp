@@ -80,29 +80,7 @@ impl Recorder {
         let path = path.with_extension("mp4");
         let stride = (src.0 * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
 
-        let mut enc = EncoderConfig::with_speed_preset(10);
-        enc.width = ow as usize;
-        enc.height = oh as usize;
-        enc.bit_depth = 8;
-        enc.chroma_sampling = ChromaSampling::Cs420;
-        enc.pixel_range = PixelRange::Limited;
-        enc.color_description = Some(ColorDescription {
-            color_primaries: ColorPrimaries::BT709,
-            transfer_characteristics: TransferCharacteristics::BT709,
-            matrix_coefficients: MatrixCoefficients::BT709,
-        });
-        enc.time_base = Rational::new(1, fps as u64);
-        enc.low_latency = true;
-        enc.speed_settings.rdo_lookahead_frames = 1;
-        enc.speed_settings.cdef = false; // ~25% faster; rav1e has no asm here
-        enc.quantizer = 110;
-        enc.min_quantizer = 110;
-        enc.tile_cols = 4;
-        enc.tile_rows = 4;
-        enc.max_key_frame_interval = fps as u64 * 4;
-        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-        let cfg = Config::new().with_encoder_config(enc).with_threads(threads);
-        let ctx: Context<u8> = cfg.new_context().map_err(other)?;
+        let ctx = new_context(ow, oh, fps)?;
         let seq_header = ctx.container_sequence_header();
 
         let mut file = BufWriter::new(File::create(&path)?);
@@ -290,6 +268,34 @@ impl Recorder {
     }
 }
 
+/// rav1e context for the recording: low-latency, constant-quantizer, tiled.
+fn new_context(ow: u32, oh: u32, fps: u32) -> io::Result<Context<u8>> {
+    let mut enc = EncoderConfig::with_speed_preset(10);
+    enc.width = ow as usize;
+    enc.height = oh as usize;
+    enc.bit_depth = 8;
+    enc.chroma_sampling = ChromaSampling::Cs420;
+    enc.pixel_range = PixelRange::Limited;
+    enc.color_description = Some(ColorDescription {
+        color_primaries: ColorPrimaries::BT709,
+        transfer_characteristics: TransferCharacteristics::BT709,
+        matrix_coefficients: MatrixCoefficients::BT709,
+    });
+    enc.time_base = Rational::new(1, fps as u64);
+    enc.low_latency = true;
+    enc.speed_settings.rdo_lookahead_frames = 1;
+    enc.speed_settings.cdef = false; // ~25% faster
+    enc.quantizer = 110;
+    enc.min_quantizer = 110;
+    // Tile count is what spreads rav1e across cores; 8x4 sustains > 30 fps on 8-11 cores.
+    enc.tile_cols = 8;
+    enc.tile_rows = 4;
+    enc.max_key_frame_interval = fps as u64 * 4;
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let cfg = Config::new().with_encoder_config(enc).with_threads(threads);
+    cfg.new_context().map_err(other)
+}
+
 struct EncodeJob {
     ctx: Context<u8>,
     file: BufWriter<File>,
@@ -301,27 +307,43 @@ struct EncodeJob {
 }
 
 impl EncodeJob {
+    /// Two stages so conversion overlaps encoding: a converter thread (scale + RGB->YUV,
+    /// itself banded across cores) feeds this thread, which owns rav1e and the muxer.
     fn run(mut self) -> io::Result<(u64, u64)> {
         let (ow, oh) = (self.out.0 as usize, self.out.1 as usize);
-        let rgb_order = |bgra| Scaler::new(self.src, self.out, bgra);
-        let (rgba_scaler, bgra_scaler) = (rgb_order(false), rgb_order(true));
-        let mut rgb = vec![0u8; ow * oh * 3];
+        let conv = Converter::new(self.src, self.out, self.stride);
+        let rx = std::mem::replace(&mut self.rx, mpsc::sync_channel(0).1);
+        let (ctx_tx, ctx_rx) = mpsc::sync_channel::<(u64, [Vec<u8>; 3])>(2);
+        let converter = std::thread::Builder::new()
+            .name("video-convert".into())
+            .spawn(move || {
+                while let Ok(f) = rx.recv() {
+                    let planes = conv.convert(&f.data, f.bgra, ow, oh);
+                    if ctx_tx.send((f.slot, planes)).is_err() {
+                        break;
+                    }
+                }
+            })?;
         let mut slots: Vec<u64> = Vec::new();
-        while let Ok(f) = self.rx.recv() {
-            (if f.bgra { &bgra_scaler } else { &rgba_scaler }).scale(
-                &f.data,
-                self.stride,
-                &mut rgb,
-            );
+        let mut result = Ok(());
+        while let Ok((slot, [y, u, v])) = ctx_rx.recv() {
             let mut frame = self.ctx.new_frame();
-            let [y, u, v] = yuv420(&rgb, ow, oh);
             frame.planes[0].copy_from_raw_u8(&y, ow, 1);
             frame.planes[1].copy_from_raw_u8(&u, ow / 2, 1);
             frame.planes[2].copy_from_raw_u8(&v, ow / 2, 1);
-            slots.push(f.slot);
-            self.ctx.send_frame(frame).map_err(other)?;
-            self.pump(&slots)?;
+            slots.push(slot);
+            result = self
+                .ctx
+                .send_frame(frame)
+                .map_err(other)
+                .and_then(|()| self.pump(&slots));
+            if result.is_err() {
+                break;
+            }
         }
+        drop(ctx_rx);
+        let _ = converter.join();
+        result?;
         self.ctx.flush();
         self.pump(&slots)?;
         let frames = self.mux.finish(&mut self.file)?;
@@ -354,7 +376,6 @@ impl EncodeJob {
 struct Scaler {
     sw: usize,
     ow: usize,
-    oh: usize,
     /// per output column: (x0*4, x1*4, weight of x1 in 0..=256)
     xs: Vec<(usize, usize, u32)>,
     /// per output row: (y0, y1, weight of y1)
@@ -383,15 +404,16 @@ impl Scaler {
         Scaler {
             sw: src.0 as usize,
             ow: out.0 as usize,
-            oh: out.1 as usize,
             xs,
             ys: axis(src.1, out.1),
             rgb: if bgra { [2, 1, 0] } else { [0, 1, 2] },
         }
     }
 
-    fn scale(&self, data: &[u8], stride: usize, rgb: &mut [u8]) {
-        for (oy, &(y0, y1, wy)) in self.ys.iter().enumerate().take(self.oh) {
+    /// Scale output rows `row0..row0 + rgb.len() / (ow * 3)` into `rgb`.
+    fn scale(&self, data: &[u8], stride: usize, row0: usize, rgb: &mut [u8]) {
+        let rows = rgb.len() / (self.ow * 3);
+        for (oy, &(y0, y1, wy)) in self.ys[row0..row0 + rows].iter().enumerate() {
             let r0 = &data[y0 * stride..y0 * stride + self.sw * 4];
             let r1 = &data[y1 * stride..y1 * stride + self.sw * 4];
             let dst = &mut rgb[oy * self.ow * 3..(oy + 1) * self.ow * 3];
@@ -406,11 +428,53 @@ impl Scaler {
     }
 }
 
+/// Source RGBA/BGRA frame -> planar YUV 4:2:0, split into horizontal bands of output rows
+/// converted on scoped threads.
+struct Converter {
+    rgba: Scaler,
+    bgra: Scaler,
+    stride: usize,
+    bands: usize,
+}
+
+impl Converter {
+    fn new(src: (u32, u32), out: (u32, u32), stride: usize) -> Converter {
+        let bands = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(1, 4));
+        Converter {
+            rgba: Scaler::new(src, out, false),
+            bgra: Scaler::new(src, out, true),
+            stride,
+            bands,
+        }
+    }
+
+    fn convert(&self, data: &[u8], bgra: bool, w: usize, h: usize) -> [Vec<u8>; 3] {
+        let sc = if bgra { &self.bgra } else { &self.rgba };
+        let mut y = vec![0u8; w * h];
+        let mut u = vec![0u8; w * h / 4];
+        let mut v = vec![0u8; w * h / 4];
+        // Bands are whole chroma rows (two luma rows each).
+        let per = (h / 2).div_ceil(self.bands).max(1);
+        std::thread::scope(|s| {
+            let ys = y.chunks_mut(per * 2 * w);
+            let us = u.chunks_mut(per * w / 2);
+            let vs = v.chunks_mut(per * w / 2);
+            for (i, ((y, u), v)) in ys.zip(us).zip(vs).enumerate() {
+                let row0 = i * per * 2;
+                s.spawn(move || {
+                    let rows = y.len() / w;
+                    let mut rgb = vec![0u8; w * rows * 3];
+                    sc.scale(data, self.stride, row0, &mut rgb);
+                    yuv420(&rgb, w, rows, y, u, v);
+                });
+            }
+        });
+        [y, u, v]
+    }
+}
+
 /// Packed RGB -> planar Y, U, V (4:2:0, BT.709 limited range). `w`,`h` even.
-fn yuv420(rgb: &[u8], w: usize, h: usize) -> [Vec<u8>; 3] {
-    let mut y = vec![0u8; w * h];
-    let mut u = vec![0u8; w * h / 4];
-    let mut v = vec![0u8; w * h / 4];
+fn yuv420(rgb: &[u8], w: usize, h: usize, y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
     for (row, yrow) in y.chunks_exact_mut(w).enumerate() {
         for (yo, p) in yrow
             .iter_mut()
@@ -442,7 +506,6 @@ fn yuv420(rgb: &[u8], w: usize, h: usize) -> [Vec<u8>; 3] {
             *vo = (((112 * r - 102 * g - 10 * b + 128) >> 8) + 128) as u8;
         }
     }
-    [y, u, v]
 }
 
 // ---------------------------------------------------------------------------------------
@@ -692,6 +755,32 @@ mod tests {
     fn mp4_samples(b: &[u8]) -> Option<u32> {
         let i = b.windows(4).rposition(|w| w == b"stsz")?;
         Some(u32::from_be_bytes(b[i + 12..i + 16].try_into().ok()?))
+    }
+
+    /// Banded multithreaded conversion equals the single-band scalar reference.
+    #[test]
+    fn banded_convert_matches_scalar() {
+        let (sw, sh, ow, oh) = (301usize, 203usize, 150usize, 100usize);
+        let stride = sw * 4 + 12;
+        let mut data = vec![0u8; stride * sh];
+        let mut x = 12345u32;
+        for b in data.iter_mut() {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            *b = (x >> 24) as u8;
+        }
+        for bgra in [false, true] {
+            let mut c = Converter::new((sw as u32, sh as u32), (ow as u32, oh as u32), stride);
+            let got = c.convert(&data, bgra, ow, oh);
+            let sc = Scaler::new((sw as u32, sh as u32), (ow as u32, oh as u32), bgra);
+            let mut rgb = vec![0u8; ow * oh * 3];
+            sc.scale(&data, stride, 0, &mut rgb);
+            let (mut y, mut u, mut v) =
+                (vec![0; ow * oh], vec![0; ow * oh / 4], vec![0; ow * oh / 4]);
+            yuv420(&rgb, ow, oh, &mut y, &mut u, &mut v);
+            assert_eq!(got, [y.clone(), u.clone(), v.clone()]);
+            c.bands = 3;
+            assert_eq!(c.convert(&data, bgra, ow, oh), [y, u, v]);
+        }
     }
 
     #[test]
