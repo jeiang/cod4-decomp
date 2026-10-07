@@ -89,13 +89,12 @@ fn ground(world: &dyn SightTrace, p: Vec3, up: f32, down: f32) -> Option<f32> {
 /// A camera on the flythrough path with a clear stage ahead: ground under the whole row and a free line of sight.
 fn find_camera(
     world: &dyn SightTrace,
-    mins: Vec3,
-    maxs: Vec3,
+    tour: &flythrough::Tour,
     reach: f32,
     lit: &dyn Fn(Vec3) -> bool,
 ) -> Option<(Vec3, f32, f32)> {
-    for step in 0..96 {
-        let p = flythrough::pose(step as f32 * 0.5, mins, maxs);
+    for step in 0..192 {
+        let p = tour.pose(step as f32 * tour.period() / 192.0);
         let eye = p.origin;
         let (fx, fy) = (p.yaw.cos(), p.yaw.sin());
         let Some(gz) = ground(world, eye, 40.0, 400.0) else {
@@ -126,13 +125,13 @@ impl Showcase {
     pub fn new(
         lib: &mut Library,
         world: &dyn SightTrace,
-        bounds: (Vec3, Vec3),
+        tour: &flythrough::Tour,
         weapon: &str,
         count: usize,
         lit: &dyn Fn(Vec3) -> bool,
     ) -> Result<Showcase, String> {
         let reach = 190.0 + 40.0 * (count.div_ceil(7).saturating_sub(1)) as f32;
-        let (eye, yaw, pitch) = find_camera(world, bounds.0, bounds.1, reach, lit)
+        let (eye, yaw, pitch) = find_camera(world, tour, reach, lit)
             .ok_or("no clear spot for the stage on the flythrough path")?;
         let allies = lib
             .team_models(Team::Allies)

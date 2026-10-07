@@ -41,6 +41,44 @@ pub struct MapData {
     pub art: MapArt,
 }
 
+impl MapData {
+    /// The spawn points of the entity string (`mp_*spawn*`): where players stand. A world's own bounds also span the
+    /// backdrop buildings and terrain that only exist to be seen from afar, and its geometry has gaps behind walls and
+    /// under floors, so tours and cameras that must show the map as players see it follow these.
+    pub fn spawn_points(&self) -> Vec<[f32; 3]> {
+        let Some(ents) = self.clipmap.as_ref().and_then(|c| c.map_ents.as_ref()) else {
+            return Vec::new();
+        };
+        let text = String::from_utf8_lossy(&ents.entity_string);
+        let mut out = Vec::new();
+        for block in text.split('}') {
+            let mut class = "";
+            let mut origin = None;
+            let mut q = block.split('"').skip(1).step_by(2);
+            while let (Some(k), Some(v)) = (q.next(), q.next()) {
+                match k.to_ascii_lowercase().as_str() {
+                    "classname" => class = v,
+                    "origin" => {
+                        let n: Vec<f32> = v
+                            .split_whitespace()
+                            .filter_map(|x| x.parse().ok())
+                            .collect();
+                        origin = (n.len() == 3).then(|| [n[0], n[1], n[2]]);
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(o) = origin
+                && class.to_ascii_lowercase().starts_with("mp_")
+                && class.contains("spawn")
+            {
+                out.push(o);
+            }
+        }
+        out
+    }
+}
+
 #[derive(Debug)]
 pub enum LoadError {
     Zone(assets::zone::ZoneError),

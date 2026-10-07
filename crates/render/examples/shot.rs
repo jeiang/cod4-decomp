@@ -8,6 +8,7 @@
 //! Post effects, each overriding the map's own values: `DOF=near_start,near_end,far_start,far_end,near_blur,far_blur`,
 //! `GLOW=radius,intensity,cutoff,desaturation` (`GLOW=0` turns it off), `FILM=0|1|contrast,brightness,desaturation[,1 for no tint]`,
 //! `BLUR=radius` (virtual 640x480 pixels) and `SHELLSHOCK=1` (a second frame draws the overlays over the first).
+//! `TOUR=<n>` also renders n views from spawn points as `<out>-<i>.png`.
 //! `TIMING=<frames>` renders that many frames and prints the mean GPU time of every pass.
 
 use assets::vfs::Vfs;
@@ -120,6 +121,35 @@ fn main() {
         }
         eprintln!("gpu {:>16}: {:.3} ms", "frame", total / f64::from(n));
     }
+    save(&gpu, &tex, w, h, &a[8]);
+    if let Some(n) = std::env::var("TOUR")
+        .ok()
+        .and_then(|n| n.parse::<usize>().ok())
+    {
+        // `TOUR=n`: n more frames from evenly spread spawn points at eye height, as <out>-<i>.png.
+        let spawns = data.spawn_points();
+        for i in 0..n.min(spawns.len()) {
+            let p = spawns[i * spawns.len() / n.min(spawns.len())];
+            let v = View {
+                origin: glam::Vec3::from(p) + glam::Vec3::Z * 56.0,
+                yaw: i as f32 * 1.3,
+                pitch: -0.05,
+                fov_x: 90f32.to_radians(),
+                time: 0.0,
+            };
+            r.render(&v, &tv, format, (w, h));
+            save(
+                &gpu,
+                &tex,
+                w,
+                h,
+                &a[8].replace(".png", &format!("-{i}.png")),
+            );
+        }
+    }
+}
+
+fn save(gpu: &Gpu, tex: &wgpu::Texture, w: u32, h: u32, path: &str) {
     let bpr = (w * 4).next_multiple_of(256);
     let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
@@ -159,7 +189,7 @@ fn main() {
         .0
         .iter_mut()
         .for_each(|p| p[3] = 255);
-    let file = std::io::BufWriter::new(std::fs::File::create(&a[8]).unwrap());
+    let file = std::io::BufWriter::new(std::fs::File::create(path).unwrap());
     let mut e = png::Encoder::new(file, w, h);
     e.set_color(png::ColorType::Rgba);
     e.set_depth(png::BitDepth::Eight);
