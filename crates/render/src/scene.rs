@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! One map's GPU data: world mesh, model meshes, the model-lighting volume, and the sun.
 
+use crate::art::MapArt;
 use crate::gpu::Gpu;
 use crate::lightgrid::{LightingEnv, ModelLighting, SightTrace};
 use crate::texture::{self, Tex};
-use crate::art::MapArt;
 use assets::zone::gfx::{Material, TechniqueSet};
-use assets::zone::world::{ComPrimaryLight, LightDef};
 use assets::zone::gfxworld::GfxWorld;
+use assets::zone::world::{ComPrimaryLight, LightDef};
 use assets::zone::xmodel::XModel;
 use assets::zone::{Asset, DecodeFilter, XAssetType, Zone};
 use glam::{Mat4, Vec3};
@@ -107,7 +107,9 @@ impl MapData {
         Ok(MapData {
             world: world.ok_or(LoadError::NoWorld)?,
             techsets,
-            com_lights: com_world.map(|c| c.primary_lights.clone()).unwrap_or_else(|| Arc::from([])),
+            com_lights: com_world
+                .map(|c| c.primary_lights.clone())
+                .unwrap_or_else(|| Arc::from([])),
             light_defs,
             clipmap,
             post_materials,
@@ -163,7 +165,10 @@ impl Scene {
                 usage: wgpu::BufferUsages::INDEX,
             }),
         });
-        let collision = data.clipmap.clone().map(|c| Arc::new(CollisionWorld::new(c)));
+        let collision = data
+            .clipmap
+            .clone()
+            .map(|c| Arc::new(CollisionWorld::new(c)));
         let env = LightingEnv {
             sight: collision.as_deref().map(|c| c as &dyn SightTrace),
             lights: &data.com_lights,

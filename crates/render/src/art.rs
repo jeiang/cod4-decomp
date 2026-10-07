@@ -142,8 +142,13 @@ impl MapArt {
             let (Some(name), Some(first)) = (it.next(), it.next()) else {
                 continue;
             };
-            let value = line[line.find(first).unwrap_or(0)..].trim().trim_matches('"');
-            let floats: Vec<f32> = value.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+            let value = line[line.find(first).unwrap_or(0)..]
+                .trim()
+                .trim_matches('"');
+            let floats: Vec<f32> = value
+                .split_whitespace()
+                .filter_map(|v| v.parse().ok())
+                .collect();
             let one = floats.first().copied();
             let vec3 = (floats.len() >= 3).then(|| [floats[0], floats[1], floats[2]]);
             match (name.to_ascii_lowercase().as_str(), one, vec3) {

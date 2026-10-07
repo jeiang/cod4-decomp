@@ -124,7 +124,10 @@ impl SunShadow {
 
         // The snapped anchor is shared: a multiple of the far texel.
         let grid = SAMPLE_NEAR * RATIO;
-        let snap = ((eye_xy.0 / grid).floor() * grid, (eye_xy.1 / grid).floor() * grid);
+        let snap = (
+            (eye_xy.0 / grid).floor() * grid,
+            (eye_xy.1 / grid).floor() * grid,
+        );
         let mut parts = [None; 2];
         let mut org = [(0.0f32, 0.0f32); 2];
         for k in 0..2 {

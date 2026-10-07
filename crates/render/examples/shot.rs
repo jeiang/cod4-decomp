@@ -23,12 +23,7 @@ fn main() {
     let data = MapData::load(install, &a[2]).unwrap();
     let scene = Scene::new(&gpu, &data);
     let vfs = Vfs::open_stock(install, 0).unwrap();
-    let mut r = Renderer::new(
-        gpu.clone(),
-        scene,
-        &data,
-        TextureCache::new(Some(vfs), 0),
-    );
+    let mut r = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
     match std::env::var("SHADOWS").as_deref() {
         Ok("off") => r.settings.shadows = render::ShadowMode::Off,
         Ok("color") => r.settings.shadows = render::ShadowMode::Color,

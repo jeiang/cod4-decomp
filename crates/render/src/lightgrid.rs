@@ -34,7 +34,15 @@ pub trait SightTrace {
 impl SightTrace for sim::cm::CollisionWorld {
     /// `SOLID | CLIPSHOT`, the mask the original's grid-sample test passes.
     fn blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
-        self.sight_trace(0, from, to, [0.0; 3], [0.0; 3], &sim::cm::ClipModel::World, 0x2001) != 0
+        self.sight_trace(
+            0,
+            from,
+            to,
+            [0.0; 3],
+            [0.0; 3],
+            &sim::cm::ClipModel::World,
+            0x2001,
+        ) != 0
     }
 }
 
@@ -333,7 +341,11 @@ pub fn light_grid_lookup(
 fn trace_corners(grid: &LightGrid, raw: u8) -> u8 {
     const BY_ROW_X: [u8; 8] = [0, 4, 2, 6, 1, 5, 3, 7];
     const BY_ROW_Y: [u8; 8] = [0, 2, 4, 6, 1, 3, 5, 7];
-    let map = if grid.row_axis == 0 { BY_ROW_X } else { BY_ROW_Y };
+    let map = if grid.row_axis == 0 {
+        BY_ROW_X
+    } else {
+        BY_ROW_Y
+    };
     (0..8).fold(0u8, |m, c| {
         if raw & (1 << c) != 0 {
             m | 1 << map[c]
@@ -775,13 +787,25 @@ mod tests {
         assert_eq!(l.entries, [0, 1, 2, 3, 4, 5, 6, 7].map(Some));
         assert!(l.weights.iter().all(|&w| (w - 0.125).abs() < 1e-6));
 
-        let (patch, _) = lighting_at_point(&g, [16.0, 16.0, 32.0], 0, Extrapolate::Default, &LightingEnv::none());
+        let (patch, _) = lighting_at_point(
+            &g,
+            [16.0, 16.0, 32.0],
+            0,
+            Extrapolate::Default,
+            &LightingEnv::none(),
+        );
         assert_eq!(patch.count, 8);
         assert_eq!(
             patch.weights.iter().map(|&w| u32::from(w)).sum::<u32>(),
             256
         );
-        let (patch, _) = lighting_at_point(&g, [0.0, 0.0, 0.0], 0, Extrapolate::Default, &LightingEnv::none());
+        let (patch, _) = lighting_at_point(
+            &g,
+            [0.0, 0.0, 0.0],
+            0,
+            Extrapolate::Default,
+            &LightingEnv::none(),
+        );
         assert_eq!((patch.count, patch.colors[0]), (1, 0));
     }
 
@@ -865,8 +889,13 @@ mod tests {
         }
         let at = [16.0, 16.0, 32.0];
         let weight = |lights: &[ComPrimaryLight]| {
-            let env = LightingEnv { sight: None, lights };
-            lighting_at_point(&g, at, 0, Extrapolate::Default, &env).0.primary_weight
+            let env = LightingEnv {
+                sight: None,
+                lights,
+            };
+            lighting_at_point(&g, at, 0, Extrapolate::Default, &env)
+                .0
+                .primary_weight
         };
         // No light data: the unlit corners count against the light.
         assert_eq!(weight(&[]), 128);
@@ -903,19 +932,25 @@ mod tests {
             next_dynamic: 0,
             primary: vec![0; 64],
         };
-        let h = ml.alloc_point(&g, [16.0, 16.0, 32.0], 0, &LightingEnv::none()).unwrap();
+        let h = ml
+            .alloc_point(&g, [16.0, 16.0, 32.0], 0, &LightingEnv::none())
+            .unwrap();
         let o = ml.texel_offset(u32::from(h) - 1, 5);
         // mean of 0,10,..,70 = 35 in every channel; alpha 0 (no primary light).
         assert_eq!(&ml.texels[o..o + 4], &[35, 35, 35, 0]);
         // Entry 1 lands at x=4..8, centre coords use the block centre.
-        let h2 = ml.alloc_point(&g, [0.0, 0.0, 0.0], 0, &LightingEnv::none()).unwrap();
+        let h2 = ml
+            .alloc_point(&g, [0.0, 0.0, 0.0], 0, &LightingEnv::none())
+            .unwrap();
         assert_eq!(h2, 2);
         assert_eq!(ml.base_coords(h2), [6.0 / 256.0, 2.0 / 4.0, 0.5, 1.0]);
 
         // Far outside: no corners, default entry 1 (colour 1 = 10s), no panic.
         let l = light_grid_lookup(&g, [1.0e9, -1.0e9, f32::MAX], None);
         assert!(l.entries.iter().all(Option::is_none));
-        let h3 = ml.alloc_point(&g, [1.0e9, -1.0e9, f32::NAN], 0, &LightingEnv::none()).unwrap();
+        let h3 = ml
+            .alloc_point(&g, [1.0e9, -1.0e9, f32::NAN], 0, &LightingEnv::none())
+            .unwrap();
         let o = ml.texel_offset(u32::from(h3) - 1, 0);
         assert_eq!(&ml.texels[o..o + 3], &[10, 10, 10]);
     }
@@ -931,11 +966,20 @@ mod tests {
             next_dynamic: 62,
             primary: vec![0; 64],
         };
-        assert_eq!(ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()), Some(63));
-        assert_eq!(ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()), Some(64));
+        assert_eq!(
+            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()),
+            Some(63)
+        );
+        assert_eq!(
+            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()),
+            Some(64)
+        );
         assert_eq!(ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()), None);
         ml.reset_dynamic();
-        assert_eq!(ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()), Some(63));
+        assert_eq!(
+            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()),
+            Some(63)
+        );
     }
 
     mod mp_crash {
@@ -1076,7 +1120,10 @@ mod tests {
             ] {
                 let l = light_grid_lookup(&w.light_grid, p, None);
                 assert!(l.entries.iter().all(Option::is_none), "{p:?}");
-                assert!(ml.alloc_point(&w.light_grid, p, 0, &LightingEnv::none()).is_some());
+                assert!(
+                    ml.alloc_point(&w.light_grid, p, 0, &LightingEnv::none())
+                        .is_some()
+                );
             }
         }
 
@@ -1100,7 +1147,9 @@ mod tests {
                 .unwrap();
             let c = [0, 1, 2].map(|k| (inst.mins[k] + inst.maxs[k]) * 0.5);
             let sun = u32::from(w.dpvs.smodel_draw_insts[i].primary_light_index);
-            let h = ml.alloc_point(&w.light_grid, c, sun, &LightingEnv::none()).unwrap();
+            let h = ml
+                .alloc_point(&w.light_grid, c, sun, &LightingEnv::none())
+                .unwrap();
             assert!(usize::from(h) > w.dpvs.smodel_draw_insts.len());
             for s in 0..64 {
                 let (o1, o2) = (

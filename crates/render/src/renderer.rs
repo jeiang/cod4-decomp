@@ -207,6 +207,9 @@ struct Items<'a> {
     smodels: &'a [u32],
 }
 
+/// Object-independent banks by (prepared pass, light): the vertex and the pixel bank offsets.
+type SharedBanks = HashMap<(u32, u8), (Option<u32>, Option<u32>)>;
+
 #[derive(Default)]
 struct BuildCounts {
     models: usize,
@@ -262,10 +265,11 @@ impl Renderer {
                 if l.kind != LIGHT_KIND_OMNI && l.kind != LIGHT_KIND_SPOT || l.radius <= 0.0 {
                     return None;
                 }
-                let def = l
-                    .def_name
-                    .as_deref()
-                    .and_then(|n| data.light_defs.iter().find(|d| d.name.as_deref() == Some(n)));
+                let def = l.def_name.as_deref().and_then(|n| {
+                    data.light_defs
+                        .iter()
+                        .find(|d| d.name.as_deref() == Some(n))
+                });
                 let attenuation = def.and_then(|d| {
                     let img = d.attenuation_image.as_ref()?;
                     let tex = textures.image(&gpu, img)?;
@@ -327,7 +331,9 @@ impl Renderer {
     /// GPU times of frames that finished since the last call: `(FrameStats::frame, milliseconds)`. Results trail the
     /// frame by a few frames.
     pub fn take_gpu_times(&mut self) -> Vec<(u64, f64)> {
-        self.timer.as_mut().map_or_else(Vec::new, GpuTimer::take_finished)
+        self.timer
+            .as_mut()
+            .map_or_else(Vec::new, GpuTimer::take_finished)
     }
 
     /// Wait for the frames in flight and return their GPU times, as [`Renderer::take_gpu_times`].
@@ -350,7 +356,13 @@ impl Renderer {
         let hsm = self.hsm();
         for m in self.scene.materials() {
             for kind in [VertexKind::World, VertexKind::Model] {
-                for techs in [&SUN_SHADOW_TECHS[..], &SUN_TECHS, &LIT, &SPOT_TECHS, &OMNI_TECHS] {
+                for techs in [
+                    &SUN_SHADOW_TECHS[..],
+                    &SUN_TECHS,
+                    &LIT,
+                    &SPOT_TECHS,
+                    &OMNI_TECHS,
+                ] {
                     self.prepare(&m, techs, kind, hsm);
                 }
                 self.prepare(&m, &[self.shadow_tech()], kind, hsm);
@@ -376,7 +388,13 @@ impl Renderer {
         let mut n = 0;
         for m in self.scene.materials() {
             for kind in [VertexKind::World, VertexKind::Model] {
-                for techs in [&SUN_SHADOW_TECHS[..], &SUN_TECHS, &LIT, &SPOT_TECHS, &OMNI_TECHS] {
+                for techs in [
+                    &SUN_SHADOW_TECHS[..],
+                    &SUN_TECHS,
+                    &LIT,
+                    &SPOT_TECHS,
+                    &OMNI_TECHS,
+                ] {
                     if let Some(p) = self.prepare(&m, techs, kind, hsm) {
                         self.materials.pipeline(&self.gpu, &p, scene);
                         n += 1;
@@ -493,7 +511,13 @@ impl Renderer {
 
     /// Code textures `p` samples, resolved for a surface with lightmap `lm`, reflection probe `probe` and primary
     /// light `light`.
-    fn tex_group(&mut self, p: &Rc<Prepared>, lm: u8, probe: u8, light: u8) -> Arc<wgpu::BindGroup> {
+    fn tex_group(
+        &mut self,
+        p: &Rc<Prepared>,
+        lm: u8,
+        probe: u8,
+        light: u8,
+    ) -> Arc<wgpu::BindGroup> {
         let key = TexKey {
             prep: p.id(),
             lightmap: lm,
@@ -532,10 +556,9 @@ impl Renderer {
                         matches!(s.source, crate::material::TexSource::Code(c) if c == id)
                             && s.fetch == crate::material::Fetch::Compare
                     });
-                    let real = self
-                        .shadow
-                        .as_ref()
-                        .filter(|s| id == ctex::SHADOWMAP_SUN && (s.mode == ShadowMode::Depth) == compare);
+                    let real = self.shadow.as_ref().filter(|s| {
+                        id == ctex::SHADOWMAP_SUN && (s.mode == ShadowMode::Depth) == compare
+                    });
                     Some(match real {
                         Some(s) => (s.tex.clone(), shadow_sampler(compare)),
                         None => {
@@ -632,7 +655,7 @@ impl Renderer {
         let shadow_tech = [self.shadow_tech()];
         let mut draws: Vec<Draw> = Vec::new();
         // Banks that do not depend on the object are shared by every draw with the same pass and light.
-        let mut shared: HashMap<(u32, u8), (Option<u32>, Option<u32>)> = HashMap::new();
+        let mut shared = SharedBanks::new();
         let world = self.scene.world.clone();
 
         for &si in items.surfaces {
@@ -658,7 +681,12 @@ impl Renderer {
             let fc = light_frames.get(&light).unwrap_or(frame);
             let (vs, ps) = self.banks(&prep, fc, &Object::default(), &mut shared, light);
             let pipeline = self.materials.pipeline(&self.gpu, &prep, target);
-            let tex_bg = self.tex_group(&prep, surf.lightmap_index, surf.reflection_probe_index, light);
+            let tex_bg = self.tex_group(
+                &prep,
+                surf.lightmap_index,
+                surf.reflection_probe_index,
+                light,
+            );
             draws.push(Draw {
                 sky: kind == PassKind::Scene && is_sky(mat),
                 order: (false, mat.sort_key, si),
@@ -748,7 +776,7 @@ impl Renderer {
         prep: &Rc<Prepared>,
         frame: &FrameConsts,
         obj: &Object,
-        shared: &mut HashMap<(u32, u8), (Option<u32>, Option<u32>)>,
+        shared: &mut SharedBanks,
         light: u8,
     ) -> (u32, u32) {
         let key = (prep.id(), light);
@@ -853,9 +881,13 @@ impl Renderer {
                     Mat4::IDENTITY,
                     view.origin,
                 );
-                pf.vec[codeconst::SHADOWMAP_POLYGON_OFFSET as usize] =
-                    if color { part.offset_color } else { part.offset_depth };
-                let (surfaces, smodels) = shadow_casters(&world, &Frustum::from_clip(&part.view_proj));
+                pf.vec[codeconst::SHADOWMAP_POLYGON_OFFSET as usize] = if color {
+                    part.offset_color
+                } else {
+                    part.offset_depth
+                };
+                let (surfaces, smodels) =
+                    shadow_casters(&world, &Frustum::from_clip(&part.view_proj));
                 let items = Items {
                     surfaces: &surfaces,
                     smodels: &smodels,
@@ -1070,11 +1102,15 @@ fn shadow_casters(world: &assets::zone::gfxworld::GfxWorld, f: &Frustum) -> (Vec
         .unwrap_or_default()
         .iter()
         .filter(|&&i| {
-            world.dpvs.smodel_draw_insts.get(usize::from(i)).is_some_and(|m| {
-                let r = m.model.as_ref().map_or(0.0, |m| m.radius) * m.scale;
-                let o = Vec3::from(m.origin);
-                !f.culls(o - Vec3::splat(r), o + Vec3::splat(r))
-            })
+            world
+                .dpvs
+                .smodel_draw_insts
+                .get(usize::from(i))
+                .is_some_and(|m| {
+                    let r = m.model.as_ref().map_or(0.0, |m| m.radius) * m.scale;
+                    let o = Vec3::from(m.origin);
+                    !f.culls(o - Vec3::splat(r), o + Vec3::splat(r))
+                })
         })
         .map(|&i| u32::from(i))
         .collect();

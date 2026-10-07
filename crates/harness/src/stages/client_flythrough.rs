@@ -147,11 +147,19 @@ pub fn plan_runs(m: &Monitor) -> Vec<RunPlan> {
             present,
         });
     }
-    let (w, h) = if n.width >= 1920 && n.height >= 1080 { (1920, 1080) } else { (1280, 720) };
+    let (w, h) = if n.width >= 1920 && n.height >= 1080 {
+        (1920, 1080)
+    } else {
+        (1280, 720)
+    };
     for map in EXTRA_MAPS {
         runs.push(RunPlan {
             slug: format!("{map}-{w}x{h}"),
-            mode: Mode { width: w, height: h, refresh_mhz: n.refresh_mhz },
+            mode: Mode {
+                width: w,
+                height: h,
+                refresh_mhz: n.refresh_mhz,
+            },
             fullscreen: Fullscreen::Windowed,
             map,
             present: "auto",
@@ -331,7 +339,14 @@ fn run_one(
     let mut child = Command::new(&opts.client)
         .arg("--install")
         .arg(install)
-        .args(["--map", plan.map, "--present", plan.present, "--flythrough", "--duration"])
+        .args([
+            "--map",
+            plan.map,
+            "--present",
+            plan.present,
+            "--flythrough",
+            "--duration",
+        ])
         .arg(opts.secs.to_string())
         .arg("--out")
         .arg(&out)
