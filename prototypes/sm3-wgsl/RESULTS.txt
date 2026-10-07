@@ -1,0 +1,136 @@
+== report (naga validation + WGSL round trip) ==
+(a) MojoShader->SPIR-V                       VS 114/114 (100.0%)   PS   7/548 (  1.3%)
+      VS   0 PS 541  [spv-parse] invalid id %#
+      pairs (VS+PS both ok): 9/794
+(a) MojoShader->SPIR-V + sampler split       VS 114/114 (100.0%)   PS 548/548 (100.0%)
+      pairs (VS+PS both ok): 794/794
+(b) vkd3d18 ->SPIR-V                         VS   0/114 (  0.0%)   PS  67/548 ( 12.2%)
+      VS   7 PS 481  [vkd3d] tool rejected shader (see vkd#d_log)
+      VS 107 PS   0  [wgsl-out] Unsupported builtin value: PointSize
+(b) vkd3d18 ->SPIR-V + sampler split + PointSize fixup VS 107/114 ( 93.9%)   PS  67/548 ( 12.2%)
+      VS   7 PS 481  [vkd3d] tool rejected shader (see vkd#d_log)
+   vkd3d-shader own rejection reasons:
+      VS   5 PS 252  E2007: Unhandled instruction "nrm" (0xe0).
+      VS   2 PS  81  E2007: Unhandled instruction "lrp" (0xcb).
+      VS   0 PS  82  E2007: Unhandled instruction "pow" (0xe5).
+      VS   0 PS  66  E2007: Unhandled instruction "dp2add" (0x60).
+(b) vkd3d21 ->SPIR-V                         VS   0/114 (  0.0%)   PS 548/548 (100.0%)
+      VS 114 PS   0  [wgsl-out] Unsupported builtin value: PointSize
+(b) vkd3d21 ->SPIR-V + sampler split + PointSize fixup VS 114/114 (100.0%)   PS 548/548 (100.0%)
+   vkd3d-shader own rejection reasons:
+(b) dxbcspv ->SPIR-V                         VS   0/114 (  0.0%)   PS   0/548 (  0.0%)
+      VS   0 PS 548  [spv-parse] unsupported instruction DemoteToHelperInvocation at Function
+      VS 114 PS   0  [naga-validate] Global variable [#] '' is invalid <- Alignment requirements for address space Uniform are not met by [#] <- Th
+(b) dxbcspv ->SPIR-V + sampler split + PointSize fixup VS   0/114 (  0.0%)   PS   0/548 (  0.0%)
+      VS   0 PS 548  [spv-parse] unsupported instruction DemoteToHelperInvocation at Function
+      VS 114 PS   0  [naga-validate] Global variable [#] '' is invalid <- Alignment requirements for address space Uniform are not met by [#] <- Th
+   vkd3d-shader own rejection reasons:
+(c) custom SM3 token stream -> WGSL          VS 114/114 (100.0%)   PS 548/548 (100.0%)
+
+== real wgpu/Metal create_shader_module ==
+adapter: AdapterInfo { name: "Apple M3 Pro", vendor: 0, device: 0, device_type: IntegratedGpu, device_pci_bus_id: "", driver: "", driver_info: "", backend: Metal, subgroup_min_size: 4, subgroup_max_size: 64, transient_saves_memory: Some(true), limit_bucket: None }
+wgpu create_shader_module: a mojoshader+split VS 114/114 (100.0%)   PS 548/548 (100.0%)
+wgpu create_shader_module: b vkd3d-shader 2.1 VS 114/114 (100.0%)   PS 548/548 (100.0%)
+wgpu create_shader_module: c custom          VS 114/114 (100.0%)   PS 548/548 (100.0%)
+
+== opcode/feature histogram of the 662 SM3 shaders ==
+== Vertex shaders: 114
+-- opcodes (instances / shaders using)
+  dp4                894   114
+  mad                795   112
+  mul                570    86
+  dp3                364    77
+  mov                312   102
+  add                203    76
+  exp                183    77
+  frc                 88    61
+  rcp                 70    67
+  rsq                 64    63
+  sincos              42    14
+  slt                  6     6
+  nrm                  5     5
+  lrp                  3     3
+  max                  1     1
+-- features (instances / shaders using)
+  dcl usage 0 (Input)                          114   114
+  dcl usage 0 (Output)                         114   114
+  dcl usage 10 (Input)                          86    86
+  dcl usage 10 (Output)                         87    86
+  dcl usage 3 (Input)                           63    63
+  dcl usage 5 (Input)                          150   104
+  dcl usage 5 (Output)                         366   110
+  def float const                              397   112
+  dst _sat                                      81    68
+  dst reg Output                              1089   114
+  dst reg Temp                                2511   114
+  src modifier neg                             264    83
+  src reg Const                               2638   114
+  src reg Input                                635   114
+  src reg Temp                                3961   114
+== Pixel shaders: 548
+-- opcodes (instances / shaders using)
+  mul               6066   529
+  mad               5771   526
+  add               3461   499
+  mov               3446   518
+  texld             2390   538
+  dp3               1500   469
+  texldl            1250   260
+  cmp               1173   395
+  texldp             805   209
+  nrm                688   469
+  rsq                621   395
+  lrp                562   322
+  max                531   264
+  rcp                529   396
+  dp4                461   287
+  dp2add             410   210
+  exp                396   198
+  pow                388   321
+  endif              300    86
+  ifc                300    86
+  else               214    86
+  abs                  7     7
+  min                  6     3
+  endrep               3     1
+  rep                  3     1
+  texkill              3     3
+  dsx?                 2     2
+  op92                 2     2
+  frc                  1     1
+-- features (instances / shaders using)
+  dcl sampler type 2d                         2021   540
+  dcl sampler type cube                        221   221
+  dcl sampler type volume                      217   217
+  dcl usage 10 (Input)                         508   507
+  dcl usage 5 (Input)                         2452   544
+  def float const                             1559   514
+  defi int const                                 1     1
+  dst _pp                                    15881   512
+  dst _sat                                    1547   477
+  dst reg ColorOut                             831   548
+  dst reg Temp                               29635   541
+  loop/rep                                       6     1
+  src modifier abs                             865   307
+  src modifier abs+neg                         384   296
+  src modifier neg                            3005   506
+  src reg Const                              14124   540
+  src reg ConstInt                               3     1
+  src reg Input                               7543   545
+  src reg Sampler                             4445   541
+  src reg Temp                               37647   541
+  static/dynamic branching                     814    86
+
+== viewer: world materials building a Metal render pipeline ==
+adapter "Apple M3 Pro", BC textures: true
+path c: custom SM3->WGSL: 134/134 world materials build a valid wgpu render pipeline
+path a: MojoShader->SPIR-V->naga: 134/134 world materials build a valid wgpu render pipeline
+path b: vkd3d-shader 2.1->SPIR-V->naga: 134/134 world materials build a valid wgpu render pipeline
+
+== viewer: same frame through the 3 paths, pixel diff ==
+path c-custom: drew 5558, skipped 0
+path a-mojo: drew 5558, skipped 0
+path b-vkd3d: drew 5558, skipped 0
+diff c-custom vs a-mojo: mean abs channel diff 0.0000/255, max channel diff 2, pixels differing at all 0.00%, by >8: 0.000%
+diff c-custom vs b-vkd3d: mean abs channel diff 0.0000/255, max channel diff 2, pixels differing at all 0.00%, by >8: 0.000%
+diff a-mojo vs b-vkd3d: mean abs channel diff 0.0000/255, max channel diff 1, pixels differing at all 0.00%, by >8: 0.000%
