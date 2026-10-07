@@ -9,6 +9,7 @@ pub mod contents;
 pub mod pm;
 mod props;
 pub mod traj;
+pub mod weapon;
 pub mod world;
 
 pub type Vec3 = [f32; 3];
