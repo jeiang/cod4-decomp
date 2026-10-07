@@ -12,8 +12,8 @@ use gsc::{Array, EntClass, Key, Value, Vm};
 use sim::Vec3;
 use sim::cm::ENTITYNUM_NONE;
 use sim::contents;
-use sim::weapon::{PlayerWeapons, WeaponCtx, WeaponOut};
 use sim::pm::{self, PLAYER_MAXS, PLAYER_MINS, PlayerState, PmType, Pmove, UserCmd, ev, pmf};
+use sim::weapon::{PlayerWeapons, WeaponCtx, WeaponOut};
 
 use crate::bot::Brain;
 use crate::game::{Ent, EntKind, Game, ScriptCall, TRIGGER_HURT_CONTENTS};
@@ -566,11 +566,15 @@ impl Game {
         let weapon = c.ps.weapon;
         let changed = weapon != c.last_weapon;
         c.last_weapon = weapon;
-        let firing =
-            c.ps.weapon_state == pm::weapon_state::FIRING && c.ps.pm_type < PmType::Dead;
+        let firing = c.ps.weapon_state == pm::weapon_state::FIRING && c.ps.pm_type < PmType::Dead;
         let sprinting = c.ps.pm_flags & pmf::SPRINTING != 0;
         let edges = [
-            (firing, std::mem::replace(&mut c.prev_firing, firing), "begin_firing", "end_firing"),
+            (
+                firing,
+                std::mem::replace(&mut c.prev_firing, firing),
+                "begin_firing",
+                "end_firing",
+            ),
             (
                 sprinting,
                 std::mem::replace(&mut c.prev_sprinting, sprinting),

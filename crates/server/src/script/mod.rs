@@ -16,6 +16,7 @@ mod hud;
 mod methods;
 mod misc;
 mod player;
+mod weapons;
 
 pub use args::Args;
 
@@ -55,11 +56,17 @@ impl Dispatch {
         Self {
             funcs: resolve(
                 prog.builtins.function_names(),
-                &[funcs::TABLE, ent::FUNCS, misc::FUNCS],
+                &[funcs::TABLE, ent::FUNCS, misc::FUNCS, weapons::FUNCS],
             ),
             methods: resolve(
                 prog.builtins.method_names(),
-                &[methods::TABLE, player::METHODS, ent::METHODS, misc::METHODS],
+                &[
+                    methods::TABLE,
+                    player::METHODS,
+                    ent::METHODS,
+                    misc::METHODS,
+                    weapons::METHODS,
+                ],
             ),
         }
     }
