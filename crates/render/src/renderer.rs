@@ -167,6 +167,22 @@ impl Renderer {
         }
     }
 
+    /// Build the pipelines for rendering into `format`, again to keep them off the frame path. Returns how many.
+    pub fn warm(&mut self, format: wgpu::TextureFormat) -> usize {
+        let mut n = 0;
+        for m in self.scene.materials() {
+            for kind in [VertexKind::World, VertexKind::Model] {
+                for techs in [&LIT_SUN[..], &LIT[..]] {
+                    if let Some(p) = self.prepare(&m, techs, kind) {
+                        self.materials.pipeline(&self.gpu, &p, format, DEPTH_FORMAT);
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
     /// The prepared pass for `techs` of `m`, for debugging tools.
     pub fn inspect(
         &mut self,
