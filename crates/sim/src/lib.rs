@@ -8,6 +8,7 @@ pub mod cm;
 pub mod contents;
 pub mod pm;
 mod props;
+pub mod skel;
 pub mod traj;
 pub mod world;
 
