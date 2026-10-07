@@ -40,6 +40,45 @@ pub struct SoundAlias {
     pub speaker_map: Option<Arc<SpeakerMap>>,
 }
 
+/// `SoundAlias::flags`, verified against every alias of the MP zones (type bits agree with the
+/// sound file's kind in all of them; channel indices match `soundaliases/channels.def` rows).
+///
+/// Bit 0 loops, 1 master, 2 slave, 3 full dry level, 4 no wet level, 5 random looping (needs
+/// bit 0), 6-7 the file kind (1 loaded, 2 streamed), 8-13 the entity channel.
+impl SoundAlias {
+    pub fn looping(&self) -> bool {
+        self.flags & 0x01 != 0
+    }
+
+    /// Ducks the slaves while it plays.
+    pub fn master(&self) -> bool {
+        self.flags & 0x02 != 0
+    }
+
+    /// Ducked by masters, by `slave_percentage`.
+    pub fn slave(&self) -> bool {
+        self.flags & 0x04 != 0
+    }
+
+    pub fn full_dry_level(&self) -> bool {
+        self.flags & 0x08 != 0
+    }
+
+    pub fn no_wet_level(&self) -> bool {
+        self.flags & 0x10 != 0
+    }
+
+    /// A looping alias that starts at a random point.
+    pub fn random_looping(&self) -> bool {
+        self.flags & 0x20 != 0
+    }
+
+    /// Index into the rows of `soundaliases/channels.def`.
+    pub fn channel(&self) -> usize {
+        ((self.flags >> 8) & 0x3f) as usize
+    }
+}
+
 #[derive(Debug)]
 pub struct SoundFile {
     /// Whether the sound file is present (`exists`).

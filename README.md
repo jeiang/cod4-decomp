@@ -61,5 +61,6 @@ Stage 4 (`client-match`) is the real client with `--listen --autoplay`: a script
 | `server` | match simulation and `cod4e-server`; no GPU, window, or audio dependencies |
 | `sm3` | D3D9 SM3 bytecode to WGSL |
 | `render` | wgpu renderer |
+| `audio` | sound alias tables, realtime-safe mixer (`Mixer::fill`, AudioWorklet-ready), WAV/MP3 decoding, cpal output |
 | `client` | `cod4e`, the player-facing client |
 | `harness` | `cod4e-harness`, scenario runner and run bundles |
