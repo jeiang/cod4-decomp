@@ -17,7 +17,7 @@ if [ $# -gt 0 ] && [ "$1" != -- ]; then ref=$1; shift; fi
 run=0
 if [ "${1:-}" = -- ]; then run=1; shift; fi
 host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test machine}
-dir='~/cod4e-run'
+dir="~/cod4e-run-$(hostname -s)-$$"  # per invocation: parallel runs must not wipe each other
 harness=""
 display=""
 [ -n "${COD4E_LINUX_WAYLAND_DISPLAY:-}" ] && display="WAYLAND_DISPLAY=$(printf '%q' "$COD4E_LINUX_WAYLAND_DISPLAY") "
@@ -33,5 +33,6 @@ $harness
 \"'" || status=$?
 mkdir -p bundles
 ssh "$host" "bash -c 'cd $dir && [ -d bundles ] && tar c bundles || true'" | tar x -C . 2>/dev/null || true
+ssh "$host" "bash -c 'rm -rf $dir'" || true
 ls -l bundles/*.zip 2>/dev/null || true
 exit $status
