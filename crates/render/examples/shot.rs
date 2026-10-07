@@ -2,7 +2,8 @@
 //! `shot <install> <map> <x> <y> <z> <yaw deg> <pitch deg> <out.png> [WxH]`: render one frame headless.
 //!
 //! `DUMP=<material substring>` also prints the translated binding table of the matching materials
-//! (`TECH=<n>` picks the technique, default 8 = lit sun; `MODEL=1` prepares them for static-model vertices).
+//! (`TECH=<n>` picks the technique, default 8 = lit sun; `MODEL=1` prepares them for static-model vertices;
+//! `WGSL=1` adds the translated shaders). `SHADOWS=off|color`, `NOFOG=1` and `NOLIGHTS=1` switch features off.
 
 use assets::vfs::Vfs;
 use render::material::VertexKind;
@@ -25,9 +26,16 @@ fn main() {
     let mut r = Renderer::new(
         gpu.clone(),
         scene,
-        &data.techsets,
+        &data,
         TextureCache::new(Some(vfs), 0),
     );
+    match std::env::var("SHADOWS").as_deref() {
+        Ok("off") => r.settings.shadows = render::ShadowMode::Off,
+        Ok("color") => r.settings.shadows = render::ShadowMode::Color,
+        _ => {}
+    }
+    r.settings.fog &= std::env::var_os("NOFOG").is_none();
+    r.settings.primary_lights &= std::env::var_os("NOLIGHTS").is_none();
     eprintln!(
         "loaded in {:?}; failures: {:?}",
         t.elapsed(),
@@ -48,6 +56,9 @@ fn main() {
                 && let Some(p) = r.inspect(&m, &[tech], kind)
             {
                 eprintln!("{}", p.describe());
+                if std::env::var_os("WGSL").is_some() {
+                    eprintln!("// ---- vs\n{}\n// ---- ps\n{}", p.vs_wgsl(), p.ps_wgsl());
+                }
             }
         }
     }

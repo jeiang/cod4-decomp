@@ -4,7 +4,9 @@
 use crate::gpu::Gpu;
 use crate::lightgrid::ModelLighting;
 use crate::texture::{self, Tex};
+use crate::art::MapArt;
 use assets::zone::gfx::{Material, TechniqueSet};
+use assets::zone::world::{ComPrimaryLight, LightDef};
 use assets::zone::gfxworld::GfxWorld;
 use assets::zone::xmodel::XModel;
 use assets::zone::{Asset, DecodeFilter, XAssetType, Zone};
@@ -20,11 +22,20 @@ pub struct Mesh {
     pub ib: wgpu::Buffer,
 }
 
-/// A decoded map zone: the world and the sun, ready for [`Scene::new`].
+/// A decoded map zone: the world, its primary lights, and the post-process materials, ready for [`Scene::new`].
 pub struct MapData {
     pub world: Arc<GfxWorld>,
-    /// Technique sets of the map zone and `common_mp`; materials reference sets of other zones by name.
+    /// Technique sets of the map zone, `common_mp` and `code_post_gfx_mp`; materials reference sets of other zones by
+    /// name.
     pub techsets: Vec<Arc<TechniqueSet>>,
+    /// The map's primary lights (`ComWorld`), indexed like `primary_light_index` of surfaces and models.
+    pub com_lights: Arc<[ComPrimaryLight]>,
+    /// The light definitions the primary lights name (attenuation ramps).
+    pub light_defs: Vec<Arc<LightDef>>,
+    /// The full-screen materials of `code_post_gfx_mp` (glow, depth of field, film, shell shock, and the filters).
+    pub post_materials: Vec<Arc<Material>>,
+    /// Art settings of the map: its fog and the vision file with the glow and film values.
+    pub art: MapArt,
 }
 
 #[derive(Debug)]
@@ -47,35 +58,69 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 impl MapData {
-    /// Decode `zone/english/<map>.ff` and `common_mp.ff` under the install root.
+    /// Decode `zone/english/<map>.ff`, `common_mp.ff` and `code_post_gfx_mp.ff` under the install root.
     pub fn load(install: &Path, map: &str) -> Result<MapData, LoadError> {
         let mut world = None;
+        let mut com_world = None;
         let mut techsets = Vec::new();
-        for zone in ["common_mp", map] {
+        let mut light_defs = Vec::new();
+        let mut post_materials = Vec::new();
+        let mut art_script = None;
+        let mut vision_files: HashMap<String, String> = HashMap::new();
+        let vision_name = format!("vision/{map}.vision");
+        let art_name = format!("maps/createart/{map}_art.gsc");
+        for zone in ["code_post_gfx_mp", "common_mp", map] {
             let path = install.join("zone/english").join(format!("{zone}.ff"));
             let file = std::fs::File::open(path).map_err(LoadError::Io)?;
             let z = Zone::open(std::io::BufReader::new(file)).map_err(LoadError::Zone)?;
-            let keep = Keep(zone == map);
+            let keep = Keep(zone);
             z.decode(&keep, |a| match a {
                 Asset::GfxWorld(w) => world = Some(w),
+                Asset::ComWorld(c) => com_world = Some(c),
+                Asset::LightDef(l) => light_defs.push(l),
                 Asset::TechniqueSet(t) => techsets.push(t),
+                Asset::Material(m) if zone == "code_post_gfx_mp" => post_materials.push(m),
+                Asset::RawFile(r) => {
+                    let name = r.name.as_deref().unwrap_or_default();
+                    let text = || {
+                        let end = r.data.iter().position(|&b| b == 0).unwrap_or(r.data.len());
+                        String::from_utf8_lossy(&r.data[..end]).into_owned()
+                    };
+                    if name == art_name {
+                        art_script = Some(text());
+                    } else if name == vision_name || name == "vision/default.vision" {
+                        vision_files.insert(name.to_owned(), text());
+                    }
+                }
                 _ => {}
             })
             .map_err(LoadError::Zone)?;
         }
+        let vision = vision_files
+            .remove(&vision_name)
+            .or_else(|| vision_files.remove("vision/default.vision"));
         Ok(MapData {
             world: world.ok_or(LoadError::NoWorld)?,
             techsets,
+            com_lights: com_world.map(|c| c.primary_lights.clone()).unwrap_or_else(|| Arc::from([])),
+            light_defs,
+            post_materials,
+            art: MapArt::parse(art_script.as_deref(), vision.as_deref()),
         })
     }
 }
 
-/// Decode filter: technique sets always, the rest only for the map zone.
-struct Keep(bool);
+/// Decode filter: technique sets from every zone, post-process materials from `code_post_gfx_mp`, the vision and art
+/// raw files from `common_mp`, everything the renderer draws from the map zone.
+struct Keep<'a>(&'a str);
 
-impl DecodeFilter for Keep {
+impl DecodeFilter for Keep<'_> {
     fn keep(&self, ty: XAssetType) -> bool {
-        self.0 || ty == XAssetType::TechniqueSet
+        match self.0 {
+            "code_post_gfx_mp" => matches!(ty, XAssetType::TechniqueSet | XAssetType::Material),
+            "common_mp" => matches!(ty, XAssetType::TechniqueSet | XAssetType::RawFile),
+            _ => true,
+        }
     }
     fn keep_presentation(&self) -> bool {
         true

@@ -17,9 +17,36 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Which sampler object a texture binding uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SamplerKey {
+    /// A material sampler-state byte (filter, mip and clamp bits).
+    State(u8),
+    /// Depth-texture comparison with bilinear filtering: hardware shadow-map lookups (`hsm` techniques).
+    ShadowCompare,
+    /// Nearest, clamped, unfiltered: the colour-encoded shadow map of the `sm` techniques.
+    ShadowRaw,
+}
+
+impl From<u8> for SamplerKey {
+    fn from(s: u8) -> Self {
+        SamplerKey::State(s)
+    }
+}
+
+/// How a pixel shader reads a texture binding, which fixes the bind group layout entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Fetch {
+    /// Filtered float texture.
+    Filtered,
+    /// A depth texture sampled with a comparison sampler.
+    Compare,
+    /// An unfilterable float texture with a non-filtering sampler.
+    Raw,
+}
+
 /// Bytes of one constant bank slice (256 `vec4`s).
 pub const BANK_BYTES: u64 = 4096;
-pub type Bank = [[f32; 4]; 256];
 
 /// Which vertex buffer layout a draw uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -89,7 +116,7 @@ pub struct Compiled {
     pub tr: Translation,
 }
 
-enum TexSource {
+pub(crate) enum TexSource {
     Image(Arc<Tex>, u8),
     Code(u32),
     Missing(u8),
@@ -99,8 +126,16 @@ enum TexSource {
 pub struct SamplerSlot {
     pub register: u32,
     pub dim: SamplerDim,
-    source: TexSource,
+    pub fetch: Fetch,
+    pub(crate) source: TexSource,
     fallback: [u8; 4],
+}
+
+/// Attachment formats a pipeline renders into; `color` is `None` for depth-only passes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Target {
+    pub color: Option<wgpu::TextureFormat>,
+    pub depth: wgpu::TextureFormat,
 }
 
 pub struct Prepared {
@@ -118,7 +153,7 @@ pub struct Prepared {
     ps_static: Vec<(u32, [f32; 4])>,
     vs_code: Vec<(u32, u32, u32)>,
     ps_code: Vec<(u32, u32, u32)>,
-    pipelines: RefCell<HashMap<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>>,
+    pipelines: RefCell<HashMap<Target, Arc<wgpu::RenderPipeline>>>,
     id: u32,
 }
 
@@ -127,19 +162,39 @@ impl Prepared {
         self.id
     }
 
-    pub fn fill_vs(&self, out: &mut Bank, frame: &FrameConsts, obj: &Object) {
+    /// Fill a vertex bank of [`Prepared::vs_regs`] registers.
+    pub fn fill_vs(&self, out: &mut [[f32; 4]], frame: &FrameConsts, obj: &Object) {
         fill(out, &self.vs_static, &self.vs_code, frame, obj);
     }
 
-    pub fn fill_ps(&self, out: &mut Bank, frame: &FrameConsts, obj: &Object) {
+    /// Fill a pixel bank of [`Prepared::ps_regs`] registers.
+    pub fn fill_ps(&self, out: &mut [[f32; 4]], frame: &FrameConsts, obj: &Object) {
         fill(out, &self.ps_static, &self.ps_code, frame, obj);
     }
 
-    /// Whether any vertex-stage constant depends on the object.
-    pub fn per_object(&self) -> bool {
-        self.vs_code.iter().chain(&self.ps_code).any(|&(_, id, _)| {
+    /// Registers the vertex bank needs, rounded up to whole 256-byte steps.
+    pub fn vs_regs(&self) -> usize {
+        regs(&self.vs_static, &self.vs_code)
+    }
+
+    pub fn ps_regs(&self) -> usize {
+        regs(&self.ps_static, &self.ps_code)
+    }
+
+    fn object_dependent(code: &[(u32, u32, u32)]) -> bool {
+        code.iter().any(|&(_, id, _)| {
             id >= codeconst::FIRST_MATRIX || id == codeconst::BASE_LIGHTING_COORDS
         })
+    }
+
+    /// Whether any vertex-stage constant depends on the object.
+    pub fn vs_per_object(&self) -> bool {
+        Self::object_dependent(&self.vs_code)
+    }
+
+    /// Whether any pixel-stage constant depends on the object.
+    pub fn ps_per_object(&self) -> bool {
+        Self::object_dependent(&self.ps_code)
     }
 
     pub fn ps_wgsl(&self) -> &str {
@@ -210,8 +265,19 @@ impl Prepared {
     }
 }
 
+/// Registers a bank must hold: one past the highest written, in 16-register (256-byte) steps, at least one step.
+fn regs(statics: &[(u32, [f32; 4])], code: &[(u32, u32, u32)]) -> usize {
+    let top = statics
+        .iter()
+        .map(|&(r, _)| r)
+        .chain(code.iter().map(|&(r, _, _)| r))
+        .max()
+        .map_or(0, |r| r as usize + 1);
+    top.next_multiple_of(16).max(16)
+}
+
 fn fill(
-    out: &mut Bank,
+    out: &mut [[f32; 4]],
     statics: &[(u32, [f32; 4])],
     code: &[(u32, u32, u32)],
     frame: &FrameConsts,
@@ -226,14 +292,14 @@ fn fill(
 }
 
 /// Program address, alpha test, vertex layout (vertex shaders only).
-type ShaderKey = (usize, Option<[u32; 2]>, Option<VertexKind>);
+type ShaderKey = (usize, Option<[u32; 2]>, Option<VertexKind>, bool);
 
 /// Caches shared by all prepared passes.
 pub struct Materials {
     shaders: HashMap<ShaderKey, Option<Arc<Compiled>>>,
-    layouts: HashMap<Vec<(u32, SamplerDim)>, Arc<wgpu::BindGroupLayout>>,
-    prepared: HashMap<(usize, usize, VertexKind), Option<Rc<Prepared>>>,
-    samplers: HashMap<u8, Arc<wgpu::Sampler>>,
+    layouts: HashMap<Vec<(u32, SamplerDim, Fetch)>, Arc<wgpu::BindGroupLayout>>,
+    prepared: HashMap<(usize, usize, VertexKind, bool), Option<Rc<Prepared>>>,
+    samplers: HashMap<SamplerKey, Arc<wgpu::Sampler>>,
     pub vs_layout: wgpu::BindGroupLayout,
     pub ps_layout: wgpu::BindGroupLayout,
     techsets: HashMap<String, Arc<TechniqueSet>>,
@@ -296,11 +362,13 @@ impl Materials {
         program: &[u32],
         alpha: Option<sm3::AlphaTest>,
         vertex: Option<VertexKind>,
+        hsm: bool,
     ) -> Option<Arc<Compiled>> {
         let key = (
             program.as_ptr() as usize,
             alpha.map(|a| [a.func as u32, a.reference.to_bits()]),
             vertex,
+            hsm,
         );
         if let Some(c) = self.shaders.get(&key) {
             return c.clone();
@@ -311,7 +379,32 @@ impl Materials {
             alpha_test: alpha,
             ..Options::default()
         };
-        let compiled = sm3::translate(&bytes, &opts).ok().map(|tr| {
+        let mut translated = sm3::translate(&bytes, &opts).ok();
+        if hsm
+            && vertex.is_none()
+            && let Some(tr) = &translated
+        {
+            // Hardware shadow maps: the shadow-map samplers become depth textures with comparison.
+            let cmp: std::collections::BTreeSet<u32> = tr
+                .reflection
+                .samplers
+                .keys()
+                .copied()
+                .filter(|&r| {
+                    tr.reflection
+                        .sampler_name(r)
+                        .is_some_and(|n| n.to_ascii_lowercase().starts_with("shadowmapsampler"))
+                })
+                .collect();
+            if !cmp.is_empty() {
+                let opts = Options {
+                    comparison_samplers: cmp,
+                    ..opts
+                };
+                translated = sm3::translate(&bytes, &opts).ok();
+            }
+        }
+        let compiled = translated.map(|tr| {
             let module = gpu
                 .device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -324,10 +417,32 @@ impl Materials {
         compiled
     }
 
-    pub fn sampler(&mut self, gpu: &Gpu, state: u8) -> Arc<wgpu::Sampler> {
+    pub fn sampler(&mut self, gpu: &Gpu, key: SamplerKey) -> Arc<wgpu::Sampler> {
         self.samplers
-            .entry(state)
+            .entry(key)
             .or_insert_with(|| {
+                let state = match key {
+                    SamplerKey::State(s) => s,
+                    SamplerKey::ShadowCompare => {
+                        return Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                            label: Some("shadow compare"),
+                            address_mode_u: wgpu::AddressMode::ClampToEdge,
+                            address_mode_v: wgpu::AddressMode::ClampToEdge,
+                            mag_filter: wgpu::FilterMode::Linear,
+                            min_filter: wgpu::FilterMode::Linear,
+                            compare: Some(wgpu::CompareFunction::LessEqual),
+                            ..Default::default()
+                        }));
+                    }
+                    SamplerKey::ShadowRaw => {
+                        return Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                            label: Some("shadow raw"),
+                            address_mode_u: wgpu::AddressMode::ClampToEdge,
+                            address_mode_v: wgpu::AddressMode::ClampToEdge,
+                            ..Default::default()
+                        }));
+                    }
+                };
                 let s = u32::from(state);
                 let addr = |bit: u32| {
                     if s & bit != 0 {
@@ -371,17 +486,31 @@ impl Materials {
             .clone()
     }
 
-    fn tex_layout(&mut self, gpu: &Gpu, sig: Vec<(u32, SamplerDim)>) -> Arc<wgpu::BindGroupLayout> {
+    fn tex_layout(
+        &mut self,
+        gpu: &Gpu,
+        sig: Vec<(u32, SamplerDim, Fetch)>,
+    ) -> Arc<wgpu::BindGroupLayout> {
         self.layouts
             .entry(sig.clone())
             .or_insert_with(|| {
                 let mut entries = Vec::new();
-                for &(reg, dim) in &sig {
+                for &(reg, dim, fetch) in &sig {
+                    let sample_type = match fetch {
+                        Fetch::Filtered => wgpu::TextureSampleType::Float { filterable: true },
+                        Fetch::Compare => wgpu::TextureSampleType::Depth,
+                        Fetch::Raw => wgpu::TextureSampleType::Float { filterable: false },
+                    };
+                    let sampler = match fetch {
+                        Fetch::Filtered => wgpu::SamplerBindingType::Filtering,
+                        Fetch::Compare => wgpu::SamplerBindingType::Comparison,
+                        Fetch::Raw => wgpu::SamplerBindingType::NonFiltering,
+                    };
                     entries.push(wgpu::BindGroupLayoutEntry {
                         binding: reg,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            sample_type,
                             view_dimension: match dim {
                                 SamplerDim::D2 => wgpu::TextureViewDimension::D2,
                                 SamplerDim::Cube => wgpu::TextureViewDimension::Cube,
@@ -394,7 +523,7 @@ impl Materials {
                     entries.push(wgpu::BindGroupLayoutEntry {
                         binding: reg + sm3::SAMPLER_BINDING_OFFSET,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        ty: wgpu::BindingType::Sampler(sampler),
                         count: None,
                     });
                 }
@@ -421,14 +550,23 @@ impl Materials {
         }
     }
 
-    fn techset(&self, mat: &Material) -> Option<Arc<TechniqueSet>> {
+    /// The material's technique set; `hsm` selects the hardware-shadow-map twin (`..._hsm_...`) of a `..._sm_...` set
+    /// when the loaded zones have it.
+    fn techset(&self, mat: &Material, hsm: bool) -> Option<Arc<TechniqueSet>> {
         let own = mat.technique_set.as_ref()?;
+        let name = own.name.as_deref()?.trim_start_matches(',');
+        if hsm
+            && let Some(twin) = name
+                .contains("_sm_")
+                .then(|| self.techsets.get(&name.replace("_sm_", "_hsm_")))
+                .flatten()
+        {
+            return Some(twin.clone());
+        }
         if own.techniques.iter().any(Option::is_some) {
             return Some(own.clone());
         }
-        self.techsets
-            .get(own.name.as_deref()?.trim_start_matches(','))
-            .cloned()
+        self.techsets.get(name).cloned()
     }
 
     /// The first technique of `techs` the material's techset has, as a drawable pass. Cached per material.
@@ -439,8 +577,9 @@ impl Materials {
         mat: &Arc<Material>,
         techs: &[usize],
         kind: VertexKind,
+        hsm: bool,
     ) -> Option<Rc<Prepared>> {
-        let set = self.techset(mat)?;
+        let set = self.techset(mat, hsm)?;
         let tech = techs.iter().copied().find(|&t| {
             set.techniques
                 .get(t)
@@ -459,12 +598,12 @@ impl Materials {
             );
             return None;
         };
-        let key = (Arc::as_ptr(mat) as usize, tech, kind);
+        let key = (Arc::as_ptr(mat) as usize, tech, kind, hsm);
         if let Some(p) = self.prepared.get(&key) {
             return p.clone();
         }
         let name = mat.name.as_deref().unwrap_or("?").to_owned();
-        let built = self.build(gpu, textures, mat, tech, kind);
+        let built = self.build(gpu, textures, mat, tech, kind, hsm);
         let p = match built {
             Ok(p) => Some(Rc::new(p)),
             Err(e) => {
@@ -483,8 +622,9 @@ impl Materials {
         mat: &Arc<Material>,
         tech: usize,
         kind: VertexKind,
+        hsm: bool,
     ) -> Result<Prepared, String> {
-        let set = self.techset(mat).ok_or("no techset")?;
+        let set = self.techset(mat, hsm).ok_or("no techset")?;
         let technique = set.techniques[tech].as_ref().ok_or("no technique")?;
         let pass: &Pass = &technique.passes[0];
         let state = mat
@@ -497,10 +637,10 @@ impl Materials {
         let vsh = pass.vertex_shader.as_ref().ok_or("no vertex shader")?;
         let psh = pass.pixel_shader.as_ref().ok_or("no pixel shader")?;
         let vs = self
-            .compile(gpu, &vsh.program, None, Some(kind))
+            .compile(gpu, &vsh.program, None, Some(kind), hsm)
             .ok_or("vertex shader does not translate")?;
         let ps = self
-            .compile(gpu, &psh.program, state.alpha_test(), None)
+            .compile(gpu, &psh.program, state.alpha_test(), None, hsm)
             .ok_or("pixel shader does not translate")?;
         if vs.tr.stage != Stage::Vertex || ps.tr.stage != Stage::Pixel {
             return Err("shader stage mismatch".into());
@@ -581,14 +721,28 @@ impl Materials {
                     None => TexSource::Missing(0x72),
                 },
             };
+            let fetch = match &source {
+                _ if u.comparison => Fetch::Compare,
+                TexSource::Code(id)
+                    if *id == codeconst::tex::SHADOWMAP_SUN
+                        || *id == codeconst::tex::SHADOWMAP_SPOT =>
+                {
+                    Fetch::Raw
+                }
+                _ => Fetch::Filtered,
+            };
             slots.push(SamplerSlot {
                 register: reg,
                 dim: u.dim,
+                fetch,
                 source,
                 fallback,
             });
         }
-        let tex_layout = self.tex_layout(gpu, slots.iter().map(|s| (s.register, s.dim)).collect());
+        let tex_layout = self.tex_layout(
+            gpu,
+            slots.iter().map(|s| (s.register, s.dim, s.fetch)).collect(),
+        );
 
         // Vertex attributes: shader input semantic -> routing destination -> source stream -> buffer offset.
         let decl = pass.vertex_decl.as_ref().ok_or("no vertex declaration")?;
@@ -626,16 +780,10 @@ impl Materials {
         })
     }
 
-    /// The pipeline for `p` rendering into `color`/`depth`, built on first use.
-    pub fn pipeline(
-        &self,
-        gpu: &Gpu,
-        p: &Prepared,
-        color: wgpu::TextureFormat,
-        depth: wgpu::TextureFormat,
-    ) -> Arc<wgpu::RenderPipeline> {
+    /// The pipeline for `p` rendering into `target`, built on first use.
+    pub fn pipeline(&self, gpu: &Gpu, p: &Prepared, target: Target) -> Arc<wgpu::RenderPipeline> {
         let mut map = p.pipelines.borrow_mut();
-        map.entry(color)
+        map.entry(target)
             .or_insert_with(|| {
                 let layout = gpu
                     .device
@@ -668,8 +816,8 @@ impl Materials {
                                 module: &p.ps.module,
                                 entry_point: Some("main"),
                                 compilation_options: Default::default(),
-                                targets: &[Some(wgpu::ColorTargetState {
-                                    format: color,
+                                targets: &[target.color.map(|format| wgpu::ColorTargetState {
+                                    format,
                                     blend: s.blend(),
                                     write_mask: s.color_write(),
                                 })],
@@ -681,7 +829,7 @@ impl Materials {
                                 ..Default::default()
                             },
                             depth_stencil: Some(wgpu::DepthStencilState {
-                                format: depth,
+                                format: target.depth,
                                 depth_write_enabled: Some(s.depth_write()),
                                 depth_compare: Some(s.depth_compare()),
                                 stencil: s.stencil(),
@@ -702,17 +850,17 @@ impl Materials {
         gpu: &Gpu,
         textures: &mut TextureCache,
         p: &Prepared,
-        code: &dyn Fn(u32) -> Option<(Arc<Tex>, u8)>,
+        code: &dyn Fn(u32) -> Option<(Arc<Tex>, SamplerKey)>,
     ) -> wgpu::BindGroup {
         let mut views: Vec<(u32, Arc<Tex>, Arc<wgpu::Sampler>)> = Vec::new();
         for s in &p.slots {
             let (tex, state) = match &s.source {
-                TexSource::Image(t, st) => (Some(t.clone()), *st),
+                TexSource::Image(t, st) => (Some(t.clone()), SamplerKey::State(*st)),
                 TexSource::Code(id) => match code(*id) {
                     Some((t, st)) => (Some(t), st),
-                    None => (None, 0x72),
+                    None => (None, SamplerKey::State(0x72)),
                 },
-                TexSource::Missing(st) => (None, *st),
+                TexSource::Missing(st) => (None, SamplerKey::State(*st)),
             };
             let tex = tex
                 .filter(|t| t.dim == s.dim)

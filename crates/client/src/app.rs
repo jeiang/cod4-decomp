@@ -198,7 +198,7 @@ impl Viewer {
         let mut renderer = Renderer::new(
             gpu.clone(),
             scene,
-            &self.map.techsets,
+            &self.map,
             TextureCache::new(Some(vfs), 0),
         );
         renderer.warm(config.format);

@@ -13,6 +13,8 @@ use wgpu::util::DeviceExt;
 pub struct Tex {
     pub view: wgpu::TextureView,
     pub dim: SamplerDim,
+    /// Width of the base level, in texels.
+    pub width: u32,
 }
 
 const MAPTYPE_3D: u32 = 4;
@@ -73,6 +75,7 @@ pub fn upload(
             ..Default::default()
         }),
         dim,
+        width: size[0],
     }
 }
 

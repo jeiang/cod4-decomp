@@ -2,6 +2,7 @@
 //! wgpu renderer: draws a map's `GfxWorld` with the original techsets (translated from D3D9 SM3 at load), lightmaps,
 //! reflection probes, the model-lighting volume, sky, and static models.
 
+pub mod art;
 pub mod codeconst;
 pub mod cull;
 pub mod gpu;
@@ -10,9 +11,11 @@ pub mod material;
 mod renderer;
 pub mod scene;
 pub mod state;
+pub mod sunshadow;
 pub mod texture;
+pub mod timing;
 
 pub use gpu::{Gpu, GpuError, GpuInfo};
-pub use renderer::{FrameStats, Renderer, View};
+pub use renderer::{FrameStats, Renderer, Settings, ShadowMode, View};
 pub use scene::{MapData, Scene};
 pub use texture::TextureCache;
