@@ -193,7 +193,11 @@ mod tests {
 
     #[test]
     fn opaque_has_no_blend_and_alpha_op_copies_rgb() {
-        assert!(StateBits([0x800 | 0x8000 | 0x1800_0000, 0xD]).blend().is_none());
+        assert!(
+            StateBits([0x800 | 0x8000 | 0x1800_0000, 0xD])
+                .blend()
+                .is_none()
+        );
         // src alpha / inv src alpha, op add, no separate alpha op.
         let b = StateBits([5 | 6 << 4 | 1 << 8, 0]).blend().unwrap();
         assert_eq!(b.alpha.src_factor, wgpu::BlendFactor::SrcAlpha);
@@ -206,6 +210,9 @@ mod tests {
         assert_eq!(s.cull(), Some(wgpu::Face::Back));
         assert!(s.depth_write());
         assert_eq!(s.depth_compare(), wgpu::CompareFunction::LessEqual);
-        assert_eq!(StateBits([0, 0x2]).depth_compare(), wgpu::CompareFunction::Always);
+        assert_eq!(
+            StateBits([0, 0x2]).depth_compare(),
+            wgpu::CompareFunction::Always
+        );
     }
 }

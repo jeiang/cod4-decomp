@@ -12,8 +12,9 @@ use crate::state::StateBits;
 use crate::texture::{Tex, TextureCache};
 use assets::zone::gfx::{ArgValue, Material, Pass, TechniqueSet, TextureSource};
 use sm3::{Options, SamplerDim, Stage, Translation, VertexFix};
-use std::collections::{BTreeMap, HashMap};
 use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Bytes of one constant bank slice (256 `vec4`s).
@@ -118,9 +119,6 @@ pub struct Prepared {
     vs_code: Vec<(u32, u32, u32)>,
     ps_code: Vec<(u32, u32, u32)>,
     pipelines: RefCell<HashMap<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>>,
-    /// Draw sky surfaces at the far plane.
-    pub sky: bool,
-    pub sort_key: u8,
     id: u32,
 }
 
@@ -155,23 +153,51 @@ impl Prepared {
     /// Human-readable binding table, for debugging.
     pub fn describe(&self) -> String {
         use std::fmt::Write;
-        let mut o = format!("{} technique {} state {:?}\n", self.name, self.technique, self.state.0);
-        for (stage, c, st) in [("VS", &self.vs_code, &self.vs_static), ("PS", &self.ps_code, &self.ps_static)] {
-            let refl = if stage == "VS" { &self.vs.tr.reflection } else { &self.ps.tr.reflection };
+        let mut o = format!(
+            "{} technique {} state {:?}\n",
+            self.name, self.technique, self.state.0
+        );
+        for (stage, c, st) in [
+            ("VS", &self.vs_code, &self.vs_static),
+            ("PS", &self.ps_code, &self.ps_static),
+        ] {
+            let refl = if stage == "VS" {
+                &self.vs.tr.reflection
+            } else {
+                &self.ps.tr.reflection
+            };
             for &(r, id, row) in c {
-                let _ = writeln!(o, "  {stage} c{r} <- code {} row {row} (ctab {:?})", codeconst::NAMES.get(id as usize).unwrap_or(&"?"), refl.constant_name(r));
+                let _ = writeln!(
+                    o,
+                    "  {stage} c{r} <- code {} row {row} (ctab {:?})",
+                    codeconst::NAMES.get(id as usize).unwrap_or(&"?"),
+                    refl.constant_name(r)
+                );
             }
             for (r, v) in st {
-                let _ = writeln!(o, "  {stage} c{r} <- {v:?} (ctab {:?})", refl.constant_name(*r));
+                let _ = writeln!(
+                    o,
+                    "  {stage} c{r} <- {v:?} (ctab {:?})",
+                    refl.constant_name(*r)
+                );
             }
         }
         for s in &self.slots {
             let src = match &s.source {
                 TexSource::Image(..) => "material image".to_owned(),
-                TexSource::Code(id) => format!("code {}", codeconst::TEXTURE_NAMES.get(*id as usize).unwrap_or(&"?")),
+                TexSource::Code(id) => format!(
+                    "code {}",
+                    codeconst::TEXTURE_NAMES.get(*id as usize).unwrap_or(&"?")
+                ),
                 TexSource::Missing(_) => "missing".to_owned(),
             };
-            let _ = writeln!(o, "  s{} {:?} {:?} <- {src}", s.register, self.ps.tr.reflection.sampler_name(s.register), s.dim);
+            let _ = writeln!(
+                o,
+                "  s{} {:?} {:?} <- {src}",
+                s.register,
+                self.ps.tr.reflection.sampler_name(s.register),
+                s.dim
+            );
         }
         o
     }
@@ -199,11 +225,14 @@ fn fill(
     }
 }
 
+/// Program address, alpha test, vertex layout (vertex shaders only).
+type ShaderKey = (usize, Option<[u32; 2]>, Option<VertexKind>);
+
 /// Caches shared by all prepared passes.
 pub struct Materials {
-    shaders: HashMap<(usize, Option<[u32; 2]>, Option<VertexKind>), Option<Arc<Compiled>>>,
+    shaders: HashMap<ShaderKey, Option<Arc<Compiled>>>,
     layouts: HashMap<Vec<(u32, SamplerDim)>, Arc<wgpu::BindGroupLayout>>,
-    prepared: HashMap<(usize, usize, VertexKind), Option<Arc<Prepared>>>,
+    prepared: HashMap<(usize, usize, VertexKind), Option<Rc<Prepared>>>,
     samplers: HashMap<u8, Arc<wgpu::Sampler>>,
     pub vs_layout: wgpu::BindGroupLayout,
     pub ps_layout: wgpu::BindGroupLayout,
@@ -213,7 +242,12 @@ pub struct Materials {
     pub failures: BTreeMap<String, String>,
 }
 
-fn bank_entry(binding: u32, stage: wgpu::ShaderStages, dynamic: bool, size: u64) -> wgpu::BindGroupLayoutEntry {
+fn bank_entry(
+    binding: u32,
+    stage: wgpu::ShaderStages,
+    dynamic: bool,
+    size: u64,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: stage,
@@ -228,17 +262,21 @@ fn bank_entry(binding: u32, stage: wgpu::ShaderStages, dynamic: bool, size: u64)
 
 impl Materials {
     pub fn new(gpu: &Gpu) -> Self {
-        let vs_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vs constants"),
-            entries: &[bank_entry(0, wgpu::ShaderStages::VERTEX, true, BANK_BYTES)],
-        });
-        let ps_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ps constants"),
-            entries: &[
-                bank_entry(0, wgpu::ShaderStages::FRAGMENT, true, BANK_BYTES),
-                bank_entry(1, wgpu::ShaderStages::FRAGMENT, false, 32),
-            ],
-        });
+        let vs_layout = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("vs constants"),
+                entries: &[bank_entry(0, wgpu::ShaderStages::VERTEX, true, BANK_BYTES)],
+            });
+        let ps_layout = gpu
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ps constants"),
+                entries: &[
+                    bank_entry(0, wgpu::ShaderStages::FRAGMENT, true, BANK_BYTES),
+                    bank_entry(1, wgpu::ShaderStages::FRAGMENT, false, 32),
+                ],
+            });
         Materials {
             shaders: HashMap::new(),
             layouts: HashMap::new(),
@@ -274,10 +312,12 @@ impl Materials {
             ..Options::default()
         };
         let compiled = sm3::translate(&bytes, &opts).ok().map(|tr| {
-            let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: None,
-                source: wgpu::ShaderSource::Wgsl(tr.wgsl.as_str().into()),
-            });
+            let module = gpu
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: None,
+                    source: wgpu::ShaderSource::Wgsl(tr.wgsl.as_str().into()),
+                });
             Arc::new(Compiled { module, tr })
         });
         self.shaders.insert(key, compiled.clone());
@@ -297,7 +337,11 @@ impl Materials {
                     }
                 };
                 let nearest = s & 7 == 1;
-                let filter = if nearest { wgpu::FilterMode::Nearest } else { wgpu::FilterMode::Linear };
+                let filter = if nearest {
+                    wgpu::FilterMode::Nearest
+                } else {
+                    wgpu::FilterMode::Linear
+                };
                 let mip = match (s >> 3) & 3 {
                     0 => None,
                     1 => Some(wgpu::MipmapFilterMode::Nearest),
@@ -316,7 +360,11 @@ impl Materials {
                     min_filter: filter,
                     mipmap_filter: mip.unwrap_or(wgpu::MipmapFilterMode::Nearest),
                     lod_max_clamp: if mip.is_none() { 0.0 } else { 32.0 },
-                    anisotropy_clamp: if mip == Some(wgpu::MipmapFilterMode::Linear) && !nearest { aniso } else { 1 },
+                    anisotropy_clamp: if mip == Some(wgpu::MipmapFilterMode::Linear) && !nearest {
+                        aniso
+                    } else {
+                        1
+                    },
                     ..Default::default()
                 }))
             })
@@ -350,10 +398,13 @@ impl Materials {
                         count: None,
                     });
                 }
-                Arc::new(gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("textures"),
-                    entries: &entries,
-                }))
+                Arc::new(
+                    gpu.device
+                        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            label: Some("textures"),
+                            entries: &entries,
+                        }),
+                )
             })
             .clone()
     }
@@ -364,7 +415,8 @@ impl Materials {
             if let Some(n) = &t.name
                 && t.techniques.iter().any(Option::is_some)
             {
-                self.techsets.insert(n.trim_start_matches(',').to_owned(), t.clone());
+                self.techsets
+                    .insert(n.trim_start_matches(',').to_owned(), t.clone());
             }
         }
     }
@@ -374,7 +426,9 @@ impl Materials {
         if own.techniques.iter().any(Option::is_some) {
             return Some(own.clone());
         }
-        self.techsets.get(own.name.as_deref()?.trim_start_matches(',')).cloned()
+        self.techsets
+            .get(own.name.as_deref()?.trim_start_matches(','))
+            .cloned()
     }
 
     /// The first technique of `techs` the material's techset has, as a drawable pass. Cached per material.
@@ -385,17 +439,23 @@ impl Materials {
         mat: &Arc<Material>,
         techs: &[usize],
         kind: VertexKind,
-    ) -> Option<Arc<Prepared>> {
+    ) -> Option<Rc<Prepared>> {
         let set = self.techset(mat)?;
-        let tech = techs
-            .iter()
-            .copied()
-            .find(|&t| set.techniques.get(t).is_some_and(|x| x.as_ref().is_some_and(|x| !x.passes.is_empty())));
+        let tech = techs.iter().copied().find(|&t| {
+            set.techniques
+                .get(t)
+                .is_some_and(|x| x.as_ref().is_some_and(|x| !x.passes.is_empty()))
+        });
         let Some(tech) = tech else {
-            let have: Vec<usize> = (0..set.techniques.len()).filter(|&i| set.techniques[i].is_some()).collect();
+            let have: Vec<usize> = (0..set.techniques.len())
+                .filter(|&i| set.techniques[i].is_some())
+                .collect();
             self.failures.insert(
                 mat.name.as_deref().unwrap_or("?").to_owned(),
-                format!("techset {:?} has techniques {have:?}, wanted {techs:?}", set.name),
+                format!(
+                    "techset {:?} has techniques {have:?}, wanted {techs:?}",
+                    set.name
+                ),
             );
             return None;
         };
@@ -406,7 +466,7 @@ impl Materials {
         let name = mat.name.as_deref().unwrap_or("?").to_owned();
         let built = self.build(gpu, textures, mat, tech, kind);
         let p = match built {
-            Ok(p) => Some(Arc::new(p)),
+            Ok(p) => Some(Rc::new(p)),
             Err(e) => {
                 self.failures.insert(name, e);
                 None
@@ -431,10 +491,14 @@ impl Materials {
             .state_bits_entry
             .get(tech)
             .and_then(|&i| mat.state_bits.get(usize::from(i)))
-            .map_or(StateBits([0x800 | 0x8000 | 0x1800_0000, 0xD]), |&b| StateBits(b));
+            .map_or(StateBits([0x800 | 0x8000 | 0x1800_0000, 0xD]), |&b| {
+                StateBits(b)
+            });
         let vsh = pass.vertex_shader.as_ref().ok_or("no vertex shader")?;
         let psh = pass.pixel_shader.as_ref().ok_or("no pixel shader")?;
-        let vs = self.compile(gpu, &vsh.program, None, Some(kind)).ok_or("vertex shader does not translate")?;
+        let vs = self
+            .compile(gpu, &vsh.program, None, Some(kind))
+            .ok_or("vertex shader does not translate")?;
         let ps = self
             .compile(gpu, &psh.program, state.alpha_test(), None)
             .ok_or("pixel shader does not translate")?;
@@ -458,7 +522,14 @@ impl Materials {
                 (ArgValue::NameHash(h), 6) => ps_static.push((dest, literal_of(*h))),
                 (ArgValue::Literal(l), 1) => vs_static.push((dest, **l)),
                 (ArgValue::Literal(l), 7) => ps_static.push((dest, **l)),
-                (ArgValue::CodeConst { index, first_row, row_count }, k @ (3 | 5)) => {
+                (
+                    ArgValue::CodeConst {
+                        index,
+                        first_row,
+                        row_count,
+                    },
+                    k @ (3 | 5),
+                ) => {
                     let out = if k == 3 { &mut vs_code } else { &mut ps_code };
                     for r in 0..u32::from((*row_count).max(1)) {
                         out.push((dest + r, u32::from(*index), u32::from(*first_row) + r));
@@ -467,10 +538,12 @@ impl Materials {
                 (ArgValue::NameHash(h), 2) => {
                     let tex = mat.textures.iter().find(|t| t.name_hash == *h);
                     let src = match tex.map(|t| (&t.source, t.sampler_state)) {
-                        Some((TextureSource::Image(Some(img)), st)) => match textures.image(gpu, img) {
-                            Some(t) => TexSource::Image(t, st),
-                            None => TexSource::Missing(st),
-                        },
+                        Some((TextureSource::Image(Some(img)), st)) => {
+                            match textures.image(gpu, img) {
+                                Some(t) => TexSource::Image(t, st),
+                                None => TexSource::Missing(st),
+                            }
+                        }
                         Some((_, st)) => TexSource::Missing(st),
                         None => TexSource::Missing(0x72),
                     };
@@ -486,7 +559,12 @@ impl Materials {
         // Texture slots follow what the pixel shader actually samples.
         let mut slots = Vec::new();
         for (&reg, u) in &ps.tr.reflection.samplers {
-            let name = ps.tr.reflection.sampler_name(reg).unwrap_or("").to_ascii_lowercase();
+            let name = ps
+                .tr
+                .reflection
+                .sampler_name(reg)
+                .unwrap_or("")
+                .to_ascii_lowercase();
             let fallback = if name.contains("normal") {
                 [128, 128, 255, 255]
             } else if u.dim == SamplerDim::Cube {
@@ -544,8 +622,6 @@ impl Materials {
             vs_code,
             ps_code,
             pipelines: RefCell::new(HashMap::new()),
-            sky: mat.name.as_deref().is_some_and(|n| n.contains("sky")) && mat.sort_key == 1,
-            sort_key: mat.sort_key,
             id: self.next_id,
         })
     }
@@ -561,52 +637,61 @@ impl Materials {
         let mut map = p.pipelines.borrow_mut();
         map.entry(color)
             .or_insert_with(|| {
-                let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: None,
-                    bind_group_layouts: &[Some(&self.vs_layout), Some(&self.ps_layout), Some(&p.tex_layout)],
-                    immediate_size: 0,
-                });
+                let layout = gpu
+                    .device
+                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[
+                            Some(&self.vs_layout),
+                            Some(&self.ps_layout),
+                            Some(&p.tex_layout),
+                        ],
+                        immediate_size: 0,
+                    });
                 let s = p.state;
-                Arc::new(gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(&p.name),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &p.vs.module,
-                        entry_point: Some("main"),
-                        compilation_options: Default::default(),
-                        buffers: &[Some(wgpu::VertexBufferLayout {
-                            array_stride: p.kind.stride(),
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &p.attrs,
-                        })],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &p.ps.module,
-                        entry_point: Some("main"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: color,
-                            blend: s.blend(),
-                            write_mask: s.color_write(),
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        front_face: if std::env::var_os("CCW").is_some() { wgpu::FrontFace::Ccw } else { wgpu::FrontFace::Cw },
-                        cull_mode: if std::env::var_os("NOCULL").is_some() { None } else { s.cull() },
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: depth,
-                        depth_write_enabled: Some(s.depth_write()),
-                        depth_compare: Some(s.depth_compare()),
-                        stencil: s.stencil(),
-                        bias: s.depth_bias(),
-                    }),
-                    multisample: Default::default(),
-                    multiview_mask: None,
-                    cache: None,
-                }))
+                Arc::new(
+                    gpu.device
+                        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                            label: Some(&p.name),
+                            layout: Some(&layout),
+                            vertex: wgpu::VertexState {
+                                module: &p.vs.module,
+                                entry_point: Some("main"),
+                                compilation_options: Default::default(),
+                                buffers: &[Some(wgpu::VertexBufferLayout {
+                                    array_stride: p.kind.stride(),
+                                    step_mode: wgpu::VertexStepMode::Vertex,
+                                    attributes: &p.attrs,
+                                })],
+                            },
+                            fragment: Some(wgpu::FragmentState {
+                                module: &p.ps.module,
+                                entry_point: Some("main"),
+                                compilation_options: Default::default(),
+                                targets: &[Some(wgpu::ColorTargetState {
+                                    format: color,
+                                    blend: s.blend(),
+                                    write_mask: s.color_write(),
+                                })],
+                            }),
+                            primitive: wgpu::PrimitiveState {
+                                topology: wgpu::PrimitiveTopology::TriangleList,
+                                front_face: wgpu::FrontFace::Cw,
+                                cull_mode: s.cull(),
+                                ..Default::default()
+                            },
+                            depth_stencil: Some(wgpu::DepthStencilState {
+                                format: depth,
+                                depth_write_enabled: Some(s.depth_write()),
+                                depth_compare: Some(s.depth_compare()),
+                                stencil: s.stencil(),
+                                bias: s.depth_bias(),
+                            }),
+                            multisample: Default::default(),
+                            multiview_mask: None,
+                            cache: None,
+                        }),
+                )
             })
             .clone()
     }

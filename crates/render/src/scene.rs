@@ -85,7 +85,6 @@ impl DecodeFilter for Keep {
 pub struct Scene {
     pub world: Arc<GfxWorld>,
     pub world_mesh: Arc<Mesh>,
-    pub sky_surfaces: HashSet<u32>,
     pub lighting: ModelLighting,
     pub lighting_tex: Arc<Tex>,
     pub sun_dir: Vec3,
@@ -115,13 +114,14 @@ impl Scene {
         let lighting_tex = Arc::new(upload_lighting(gpu, &lighting));
         let (sun_dir, sun_color) = match &world.sun_light {
             Some(l) => (Vec3::from(l.dir), Vec3::from(l.color)),
-            None => (Vec3::new(0.3, 0.2, 0.9).normalize(), Vec3::from(world.sun_color_from_bsp)),
+            None => (
+                Vec3::new(0.3, 0.2, 0.9).normalize(),
+                Vec3::from(world.sun_color_from_bsp),
+            ),
         };
-        let sky_surfaces = world.sky_start_surfs.iter().map(|&s| s as u32).collect();
         Scene {
             world,
             world_mesh,
-            sky_surfaces,
             lighting,
             lighting_tex,
             sun_dir,
@@ -131,7 +131,12 @@ impl Scene {
     }
 
     /// GPU buffers of surface `index` of `model`, created on first use.
-    pub fn model_mesh(&mut self, gpu: &Gpu, model: &Arc<XModel>, index: usize) -> Option<Arc<Mesh>> {
+    pub fn model_mesh(
+        &mut self,
+        gpu: &Gpu,
+        model: &Arc<XModel>,
+        index: usize,
+    ) -> Option<Arc<Mesh>> {
         let key = (Arc::as_ptr(model) as usize, index);
         if let Some(m) = self.models.get(&key) {
             return Some(m.clone());
@@ -143,16 +148,20 @@ impl Scene {
         let mut idx: Vec<u16> = s.tri_indices.to_vec();
         idx.resize(idx.len().next_multiple_of(2), 0);
         let mesh = Arc::new(Mesh {
-            vb: gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: model.name.as_deref(),
-                contents: &s.verts,
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-            ib: gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: model.name.as_deref(),
-                contents: bytemuck::cast_slice(&idx),
-                usage: wgpu::BufferUsages::INDEX,
-            }),
+            vb: gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: model.name.as_deref(),
+                    contents: &s.verts,
+                    usage: wgpu::BufferUsages::VERTEX,
+                }),
+            ib: gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: model.name.as_deref(),
+                    contents: bytemuck::cast_slice(&idx),
+                    usage: wgpu::BufferUsages::INDEX,
+                }),
         });
         self.models.insert(key, mesh.clone());
         Some(mesh)

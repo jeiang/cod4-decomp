@@ -19,10 +19,17 @@ impl Frustum {
     /// The six planes of a D3D-style (depth 0..1) clip matrix.
     pub fn from_clip(m: &Mat4) -> Frustum {
         let r = |i| m.row(i);
-        let planes = [r(2), r(3) - r(2), r(3) + r(0), r(3) - r(0), r(3) + r(1), r(3) - r(1)]
-            .into_iter()
-            .map(normalize)
-            .collect();
+        let planes = [
+            r(2),
+            r(3) - r(2),
+            r(3) + r(0),
+            r(3) - r(0),
+            r(3) + r(1),
+            r(3) - r(1),
+        ]
+        .into_iter()
+        .map(normalize)
+        .collect();
         Frustum { planes }
     }
 
@@ -72,7 +79,11 @@ pub fn cell_for_point(world: &GfxWorld, p: Vec3) -> Option<usize> {
         };
         let pl = world.planes.get(plane)?;
         let d = v3(pl.normal).dot(p) - pl.dist;
-        at = if d >= 0.0 { at + 2 } else { at + usize::from(*world.nodes.get(at + 1)?) };
+        at = if d >= 0.0 {
+            at + 2
+        } else {
+            at + usize::from(*world.nodes.get(at + 1)?)
+        };
     }
 }
 
@@ -86,12 +97,7 @@ pub struct Visible {
 
 pub fn visible(world: &GfxWorld, eye: Vec3, frustum: &Frustum) -> Visible {
     let mut out = Visible::default();
-    if std::env::var_os("ALLSURF").is_some() {
-        out.surfaces = (0..world.dpvs.surfaces.len() as u32).collect();
-        out.smodels = (0..world.dpvs.smodel_draw_insts.len() as u32).collect();
-        return out;
-    }
-    match cell_for_point(world, eye).filter(|_| std::env::var_os("NOPORTAL").is_none()) {
+    match cell_for_point(world, eye) {
         Some(c) => {
             let mut path = vec![c];
             walk(world, eye, c, frustum, &mut path, &mut out);
@@ -109,7 +115,14 @@ pub fn visible(world: &GfxWorld, eye: Vec3, frustum: &Frustum) -> Visible {
     out
 }
 
-fn walk(world: &GfxWorld, eye: Vec3, cell: usize, frustum: &Frustum, path: &mut Vec<usize>, out: &mut Visible) {
+fn walk(
+    world: &GfxWorld,
+    eye: Vec3,
+    cell: usize,
+    frustum: &Frustum,
+    path: &mut Vec<usize>,
+    out: &mut Visible,
+) {
     add_cell(world, cell, frustum, out);
     if path.len() >= MAX_PORTAL_DEPTH {
         return;
@@ -120,9 +133,18 @@ fn walk(world: &GfxWorld, eye: Vec3, cell: usize, frustum: &Frustum, path: &mut 
             continue;
         }
         let poly: Vec<Vec3> = portal.vertices.iter().map(|&v| v3(v)).collect();
-        let Some(clipped) = clip_polygon(poly, frustum) else { continue };
+        let Some(clipped) = clip_polygon(poly, frustum) else {
+            continue;
+        };
         path.push(target);
-        walk(world, eye, target, &narrow(eye, &clipped, frustum), path, out);
+        walk(
+            world,
+            eye,
+            target,
+            &narrow(eye, &clipped, frustum),
+            path,
+            out,
+        );
         path.pop();
     }
 }
@@ -180,7 +202,14 @@ fn add_cell(world: &GfxWorld, cell: usize, frustum: &Frustum, out: &mut Visible)
     }
 }
 
-fn tree(world: &GfxWorld, trees: &[AabbTree], at: usize, frustum: &Frustum, inside: bool, out: &mut Visible) {
+fn tree(
+    world: &GfxWorld,
+    trees: &[AabbTree],
+    at: usize,
+    frustum: &Frustum,
+    inside: bool,
+    out: &mut Visible,
+) {
     let Some(t) = trees.get(at) else { return };
     let (mins, maxs) = (v3(t.mins), v3(t.maxs));
     let inside = inside || {
@@ -193,8 +222,10 @@ fn tree(world: &GfxWorld, trees: &[AabbTree], at: usize, frustum: &Frustum, insi
         let first = usize::from(t.start_surf_index);
         let sorted = &world.dpvs.sorted_surf_index;
         let end = (first + usize::from(t.surface_count)).min(sorted.len());
-        out.surfaces.extend(sorted[first.min(end)..end].iter().map(|&s| u32::from(s)));
-        out.smodels.extend(t.smodel_indexes.iter().map(|&m| u32::from(m)));
+        out.surfaces
+            .extend(sorted[first.min(end)..end].iter().map(|&s| u32::from(s)));
+        out.smodels
+            .extend(t.smodel_indexes.iter().map(|&m| u32::from(m)));
         return;
     }
     let first = at as i32 + t.children_offset / TREE_SIZE;

@@ -191,7 +191,10 @@ fn lookup(names: &[&str], key: &str, drop: &str, aliases: &[(&str, &str)]) -> Op
     if let Some((_, to)) = aliases.iter().find(|(from, _)| *from == k) {
         k = (*to).to_owned();
     }
-    names.iter().position(|n| norm(n, "") == k).map(|i| i as u32)
+    names
+        .iter()
+        .position(|n| norm(n, "") == k)
+        .map(|i| i as u32)
 }
 
 /// Code-constant id for a CTAB constant name (`worldViewProjectionMatrix`, `sunPosition`, ...). `filterTap` and other
@@ -308,14 +311,22 @@ mod tests {
         assert_eq!(from_ctab_name("filterTap"), Some(0x15));
         assert_eq!(from_ctab_name("featherParms"), Some(OUTDOOR_FEATHER_PARMS));
         assert_eq!(from_ctab_name("noSuchConstant"), None);
-        assert_eq!(texture_from_ctab_name("lightmapSamplerPrimary"), Some(tex::LIGHTMAP_PRIMARY));
+        assert_eq!(
+            texture_from_ctab_name("lightmapSamplerPrimary"),
+            Some(tex::LIGHTMAP_PRIMARY)
+        );
         assert_eq!(texture_from_ctab_name("skyMapSampler"), Some(tex::SKY));
-        assert_eq!(texture_from_ctab_name("modelLightingSampler"), Some(tex::MODEL_LIGHTING));
+        assert_eq!(
+            texture_from_ctab_name("modelLightingSampler"),
+            Some(tex::MODEL_LIGHTING)
+        );
     }
 
     #[test]
     fn transpose_rows_are_matrix_rows() {
-        let proj = Mat4::from_cols_array(&[1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.]);
+        let proj = Mat4::from_cols_array(&[
+            1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12., 13., 14., 15., 16.,
+        ]);
         let f = FrameConsts::new(Mat4::IDENTITY, proj);
         let o = Object::default();
         let plain = f.value(0x42, 0, &o);

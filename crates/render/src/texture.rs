@@ -47,7 +47,11 @@ pub fn upload(
             size: wgpu::Extent3d {
                 width: size[0],
                 height: size[1],
-                depth_or_array_layers: if dim == SamplerDim::D3 { size[2] } else { layers },
+                depth_or_array_layers: if dim == SamplerDim::D3 {
+                    size[2]
+                } else {
+                    layers
+                },
             },
             mip_level_count: mips,
             sample_count: 1,
@@ -99,7 +103,15 @@ impl TextureCache {
             .or_insert_with(|| {
                 let n = if dim == SamplerDim::Cube { 6 } else { 1 };
                 let data: Vec<u8> = rgba.repeat(n);
-                Arc::new(upload(gpu, "solid", dim, [1, 1, 1], 1, wgpu::TextureFormat::Rgba8Unorm, &data))
+                Arc::new(upload(
+                    gpu,
+                    "solid",
+                    dim,
+                    [1, 1, 1],
+                    1,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    &data,
+                ))
             })
             .clone()
     }
@@ -125,9 +137,16 @@ impl TextureCache {
     fn load_iwi(&self, gpu: &Gpu, name: &str) -> Option<Tex> {
         let vfs = self.vfs.as_ref()?;
         let image = iwi::load_picmip(vfs, name, self.picmip).ok()?;
-        let (w, h) = (image.level(0, 0).width as u32, image.level(0, 0).height as u32);
+        let (w, h) = (
+            image.level(0, 0).width as u32,
+            image.level(0, 0).height as u32,
+        );
         let cube = image.faces == 6;
-        let dim = if cube { SamplerDim::Cube } else { SamplerDim::D2 };
+        let dim = if cube {
+            SamplerDim::Cube
+        } else {
+            SamplerDim::D2
+        };
         let mips = image.mip_count();
         let block = !matches!(image.texels, Texels::Rgba8);
         let bc_ok = gpu.bc && block && w % 4 == 0 && h % 4 == 0;
@@ -148,7 +167,15 @@ impl TextureCache {
                 }
             }
         }
-        Some(upload(gpu, name, dim, [w, h, 1], mips as u32, format, &data))
+        Some(upload(
+            gpu,
+            name,
+            dim,
+            [w, h, 1],
+            mips as u32,
+            format,
+            &data,
+        ))
     }
 }
 
@@ -175,11 +202,20 @@ fn load_inline(gpu: &Gpu, img: &GfxImage) -> Option<Tex> {
             off += n * bytes_per;
             match def.format {
                 D3DFMT_L8 => out.extend(src.iter().flat_map(|&l| [l, l, l, 255])),
-                _ => out.extend(src.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]])),
+                _ => out.extend(
+                    src.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .flat_map(|p| [p[2], p[1], p[0], p[3]]),
+                ),
             }
         }
     }
-    let dim = if cube { SamplerDim::Cube } else { SamplerDim::D2 };
+    let dim = if cube {
+        SamplerDim::Cube
+    } else {
+        SamplerDim::D2
+    };
     Some(upload(
         gpu,
         img.name.as_deref().unwrap_or("inline"),

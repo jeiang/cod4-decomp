@@ -50,7 +50,8 @@ impl Gpu {
         }))
         .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
         let have = adapter.features();
-        let want = (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TIMESTAMP_QUERY) & have;
+        let want =
+            (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TIMESTAMP_QUERY) & have;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("cod4e"),
             required_features: want,

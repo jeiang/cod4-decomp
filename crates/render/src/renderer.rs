@@ -11,11 +11,14 @@ use assets::zone::gfx::Material;
 use glam::{Mat4, Vec3, Vec4};
 use sm3::SamplerDim;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const NEAR: f32 = 4.0;
-const FAR: f32 = 40000.0;
+/// The projection has no far plane worth the name: the sky shader drops the translation part of the matrix and so
+/// lands at `z / w = r`, which must stay below one to survive clipping.
+const DEPTH_SCALE: f32 = 0.99999;
 /// Linear filtering, linear mips, clamped.
 const CODE_SAMPLER: u8 = 0x72;
 const TECH_UNLIT: usize = 4;
@@ -66,7 +69,7 @@ impl View {
         );
         let w = 1.0 / (self.fov_x * 0.5).tan();
         let h = w * aspect;
-        let r = FAR / (FAR - NEAR);
+        let r = DEPTH_SCALE;
         let proj = Mat4::from_cols(
             Vec4::new(w, 0.0, 0.0, 0.0),
             Vec4::new(0.0, h, 0.0, 0.0),
@@ -88,7 +91,7 @@ pub struct FrameStats {
 }
 
 struct Draw {
-    prepared: Arc<Prepared>,
+    prepared: Rc<Prepared>,
     pipeline: Arc<wgpu::RenderPipeline>,
     tex_bg: Arc<wgpu::BindGroup>,
     mesh: Arc<Mesh>,
@@ -118,7 +121,12 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(gpu: Arc<Gpu>, scene: Scene, techsets: &[Arc<assets::zone::gfx::TechniqueSet>], textures: TextureCache) -> Renderer {
+    pub fn new(
+        gpu: Arc<Gpu>,
+        scene: Scene,
+        techsets: &[Arc<assets::zone::gfx::TechniqueSet>],
+        textures: TextureCache,
+    ) -> Renderer {
         let mut materials = Materials::new(&gpu);
         materials.add_techsets(techsets);
         let ring_cap = 1024;
@@ -143,7 +151,7 @@ impl Renderer {
             bools,
             depth: None,
             tex_bgs: HashMap::new(),
-            clear: [0.36, 0.45, 0.55],
+            clear: [0.45, 0.43, 0.38],
         };
         r.prewarm();
         r
@@ -159,12 +167,24 @@ impl Renderer {
         }
     }
 
-    pub fn prepare_for_debug(&mut self, m: &Arc<Material>, techs: &[usize], kind: VertexKind) -> Option<Arc<Prepared>> {
+    /// The prepared pass for `techs` of `m`, for debugging tools.
+    pub fn inspect(
+        &mut self,
+        m: &Arc<Material>,
+        techs: &[usize],
+        kind: VertexKind,
+    ) -> Option<Rc<Prepared>> {
         self.prepare(m, techs, kind)
     }
 
-    fn prepare(&mut self, m: &Arc<Material>, techs: &[usize], kind: VertexKind) -> Option<Arc<Prepared>> {
-        self.materials.prepare(&self.gpu, &mut self.textures, m, techs, kind)
+    fn prepare(
+        &mut self,
+        m: &Arc<Material>,
+        techs: &[usize],
+        kind: VertexKind,
+    ) -> Option<Rc<Prepared>> {
+        self.materials
+            .prepare(&self.gpu, &mut self.textures, m, techs, kind)
     }
 
     fn ensure_depth(&mut self, size: (u32, u32)) {
@@ -188,7 +208,7 @@ impl Renderer {
     }
 
     /// Code textures `p` samples, resolved for a surface with lightmap `lm` and reflection probe `probe`.
-    fn tex_group(&mut self, p: &Arc<Prepared>, lm: u8, probe: u8) -> Arc<wgpu::BindGroup> {
+    fn tex_group(&mut self, p: &Rc<Prepared>, lm: u8, probe: u8) -> Arc<wgpu::BindGroup> {
         let key = (p.id(), lm, probe);
         if let Some(g) = self.tex_bgs.get(&key) {
             return g.clone();
@@ -197,30 +217,58 @@ impl Renderer {
         let mut codes: HashMap<u32, (Arc<Tex>, u8)> = HashMap::new();
         for id in p.code_textures() {
             let image = match id {
-                ctex::LIGHTMAP_PRIMARY => world.lightmaps.get(usize::from(lm)).and_then(|l| l.primary.clone()),
-                ctex::LIGHTMAP_SECONDARY => world.lightmaps.get(usize::from(lm)).and_then(|l| l.secondary.clone()),
-                ctex::REFLECTION_PROBE => world.reflection_probes.get(usize::from(probe)).and_then(|r| r.image.clone()),
+                ctex::LIGHTMAP_PRIMARY => world
+                    .lightmaps
+                    .get(usize::from(lm))
+                    .and_then(|l| l.primary.clone()),
+                ctex::LIGHTMAP_SECONDARY => world
+                    .lightmaps
+                    .get(usize::from(lm))
+                    .and_then(|l| l.secondary.clone()),
+                ctex::REFLECTION_PROBE => world
+                    .reflection_probes
+                    .get(usize::from(probe))
+                    .and_then(|r| r.image.clone()),
                 ctex::SKY => world.sky_image.clone(),
                 ctex::OUTDOOR => world.outdoor_image.clone(),
                 _ => None,
             };
-            let image = if std::env::var_os("DBG_NOLM").is_some() && matches!(id, ctex::LIGHTMAP_PRIMARY | ctex::LIGHTMAP_SECONDARY) { None } else { image };
             let entry = match (id, image) {
                 (ctex::MODEL_LIGHTING, _) => Some((self.scene.lighting_tex.clone(), 0xE2)),
-                (ctex::WHITE, _) => Some((self.textures.solid(&self.gpu, SamplerDim::D2, [255; 4]), CODE_SAMPLER)),
-                (ctex::BLACK, _) => Some((self.textures.solid(&self.gpu, SamplerDim::D2, [0, 0, 0, 255]), CODE_SAMPLER)),
-                (ctex::IDENTITY_NORMAL_MAP, _) => {
-                    Some((self.textures.solid(&self.gpu, SamplerDim::D2, [128, 128, 255, 255]), CODE_SAMPLER))
-                }
-                (ctex::SKY, Some(i)) => self.textures.image(&self.gpu, &i).map(|t| (t, world.sky_sampler_state)),
-                (_, Some(i)) => self.textures.image(&self.gpu, &i).map(|t| (t, CODE_SAMPLER)),
+                (ctex::WHITE, _) => Some((
+                    self.textures.solid(&self.gpu, SamplerDim::D2, [255; 4]),
+                    CODE_SAMPLER,
+                )),
+                (ctex::BLACK, _) => Some((
+                    self.textures
+                        .solid(&self.gpu, SamplerDim::D2, [0, 0, 0, 255]),
+                    CODE_SAMPLER,
+                )),
+                (ctex::IDENTITY_NORMAL_MAP, _) => Some((
+                    self.textures
+                        .solid(&self.gpu, SamplerDim::D2, [128, 128, 255, 255]),
+                    CODE_SAMPLER,
+                )),
+                (ctex::SKY, Some(i)) => self
+                    .textures
+                    .image(&self.gpu, &i)
+                    .map(|t| (t, world.sky_sampler_state)),
+                (_, Some(i)) => self
+                    .textures
+                    .image(&self.gpu, &i)
+                    .map(|t| (t, CODE_SAMPLER)),
                 _ => None,
             };
             if let Some(e) = entry {
                 codes.insert(id, e);
             }
         }
-        let bg = Arc::new(self.materials.bind_textures(&self.gpu, &mut self.textures, p, &|id| codes.get(&id).cloned()));
+        let bg = Arc::new(
+            self.materials
+                .bind_textures(&self.gpu, &mut self.textures, p, &|id| {
+                    codes.get(&id).cloned()
+                }),
+        );
         self.tex_bgs.insert(key, bg.clone());
         bg
     }
@@ -232,7 +280,13 @@ impl Renderer {
     }
 
     /// Draw the world seen from `view` into `target`.
-    pub fn render(&mut self, view: &View, target: &wgpu::TextureView, format: wgpu::TextureFormat, size: (u32, u32)) -> FrameStats {
+    pub fn render(
+        &mut self,
+        view: &View,
+        target: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+    ) -> FrameStats {
         let t0 = std::time::Instant::now();
         self.ensure_depth(size);
         self.ring.clear();
@@ -241,16 +295,17 @@ impl Renderer {
         frame.set_sun(self.scene.sun_dir, self.scene.sun_color, 1.0);
         frame.vec[codeconst::GAMETIME as usize] = [view.time; 4];
         frame.vec[codeconst::ZNEAR as usize] = [NEAR * 0.984_375, 0.0, 0.0, 0.0];
-        frame.vec[codeconst::RENDER_TARGET_SIZE as usize] =
-            [size.0 as f32, size.1 as f32, 1.0 / size.0 as f32, 1.0 / size.1 as f32];
+        frame.vec[codeconst::RENDER_TARGET_SIZE as usize] = [
+            size.0 as f32,
+            size.1 as f32,
+            1.0 / size.0 as f32,
+            1.0 / size.1 as f32,
+        ];
         let lookup = self.scene.lighting.lookup_scale();
         frame.vec[codeconst::LIGHTING_LOOKUP_SCALE as usize] = lookup;
         frame.outdoor_lookup = Mat4::from_cols_array(&self.scene.world.outdoor_lookup_matrix);
 
-        let mut frustum = Frustum::from_clip(&(p * v));
-        if std::env::var_os("NOFRUSTUM").is_some() {
-            frustum.planes.clear();
-        }
+        let frustum = Frustum::from_clip(&(p * v));
         let vis = cull::visible(&self.scene.world, view.origin, &frustum);
         let mut stats = FrameStats {
             cells: vis.cells,
@@ -265,14 +320,15 @@ impl Renderer {
         let world = self.scene.world.clone();
         let sun_index = world.sun_primary_light_index as u8;
         for &si in &vis.surfaces {
-            let Some(surf) = world.dpvs.surfaces.get(si as usize) else { continue };
-            let Some(mat) = &surf.material else { continue };
-            if let Some(o) = std::env::var_os("ONLY")
-                && !mat.name.as_deref().unwrap_or("").contains(&*o.to_string_lossy())
-            {
+            let Some(surf) = world.dpvs.surfaces.get(si as usize) else {
                 continue;
-            }
-            let techs: &[usize] = if surf.primary_light_index == sun_index { &LIT_SUN } else { &LIT };
+            };
+            let Some(mat) = &surf.material else { continue };
+            let techs: &[usize] = if surf.primary_light_index == sun_index {
+                &LIT_SUN
+            } else {
+                &LIT
+            };
             let Some(prep) = self.prepare(mat, techs, VertexKind::World) else {
                 stats.pipelines_missing += 1;
                 continue;
@@ -285,7 +341,9 @@ impl Renderer {
                 prep.fill_ps(pb, &frame, &obj);
                 (vo, po)
             });
-            let pipeline = self.materials.pipeline(&self.gpu, &prep, format, DEPTH_FORMAT);
+            let pipeline = self
+                .materials
+                .pipeline(&self.gpu, &prep, format, DEPTH_FORMAT);
             let tex_bg = self.tex_group(&prep, surf.lightmap_index, surf.reflection_probe_index);
             draws.push(Draw {
                 sky: is_sky(mat),
@@ -303,9 +361,13 @@ impl Renderer {
         }
 
         // Static models.
-        for &mi in vis.smodels.iter().filter(|_| std::env::var_os("NOMODELS").is_none()) {
-            let Some(inst) = world.dpvs.smodel_draw_insts.get(mi as usize) else { continue };
-            let Some(model) = inst.model.clone() else { continue };
+        for &mi in &vis.smodels {
+            let Some(inst) = world.dpvs.smodel_draw_insts.get(mi as usize) else {
+                continue;
+            };
+            let Some(model) = inst.model.clone() else {
+                continue;
+            };
             let origin = Vec3::from(inst.origin);
             let dist = origin.distance(view.origin);
             if inst.cull_dist > 0.0 && dist > inst.cull_dist {
@@ -315,20 +377,35 @@ impl Renderer {
             let info = &model.lod_info[lod];
             let obj = Object {
                 world: model_matrix(inst),
-                base_lighting: self.scene.lighting.base_coords(self.scene.lighting.static_model_handle(mi as usize)),
+                base_lighting: self
+                    .scene
+                    .lighting
+                    .base_coords(self.scene.lighting.static_model_handle(mi as usize)),
             };
-            let techs: &[usize] = if inst.primary_light_index == sun_index { &LIT_SUN } else { &LIT };
+            let techs: &[usize] = if inst.primary_light_index == sun_index {
+                &LIT_SUN
+            } else {
+                &LIT
+            };
             let mut counted = false;
             for s in 0..usize::from(info.surf_count) {
                 let idx = usize::from(info.surf_index) + s;
-                let Some(Some(mat)) = model.materials.get(idx) else { continue };
-                let Some(prep) = self.prepare(mat, techs, VertexKind::Model) else { continue };
-                let Some(mesh) = self.scene.model_mesh(&self.gpu, &model, idx) else { continue };
+                let Some(Some(mat)) = model.materials.get(idx) else {
+                    continue;
+                };
+                let Some(prep) = self.prepare(mat, techs, VertexKind::Model) else {
+                    continue;
+                };
+                let Some(mesh) = self.scene.model_mesh(&self.gpu, &model, idx) else {
+                    continue;
+                };
                 let (vo, vb) = self.alloc();
                 prep.fill_vs(vb, &frame, &obj);
                 let (po, pb) = self.alloc();
                 prep.fill_ps(pb, &frame, &obj);
-                let pipeline = self.materials.pipeline(&self.gpu, &prep, format, DEPTH_FORMAT);
+                let pipeline = self
+                    .materials
+                    .pipeline(&self.gpu, &prep, format, DEPTH_FORMAT);
                 let tex_bg = self.tex_group(&prep, 0, inst.reflection_probe_index);
                 let tris = u32::from(model.surfs[idx].tri_count) * 3;
                 draws.push(Draw {
@@ -421,9 +498,12 @@ impl Renderer {
         if self.ring.len() > self.ring_cap {
             self.ring_cap = self.ring.len().next_power_of_two();
             self.ring_buf = new_ring(&self.gpu, self.ring_cap);
-            (self.vs_bg, self.ps_bg) = ring_groups(&self.gpu, &self.materials, &self.ring_buf, &self.bools);
+            (self.vs_bg, self.ps_bg) =
+                ring_groups(&self.gpu, &self.materials, &self.ring_buf, &self.bools);
         }
-        self.gpu.queue.write_buffer(&self.ring_buf, 0, bytemuck::cast_slice(&self.ring));
+        self.gpu
+            .queue
+            .write_buffer(&self.ring_buf, 0, bytemuck::cast_slice(&self.ring));
     }
 }
 
@@ -436,7 +516,12 @@ fn new_ring(gpu: &Gpu, banks: usize) -> wgpu::Buffer {
     })
 }
 
-fn ring_groups(gpu: &Gpu, m: &Materials, ring: &wgpu::Buffer, bools: &wgpu::Buffer) -> (wgpu::BindGroup, wgpu::BindGroup) {
+fn ring_groups(
+    gpu: &Gpu,
+    m: &Materials,
+    ring: &wgpu::Buffer,
+    bools: &wgpu::Buffer,
+) -> (wgpu::BindGroup, wgpu::BindGroup) {
     let bank = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
         buffer: ring,
         offset: 0,
@@ -445,14 +530,23 @@ fn ring_groups(gpu: &Gpu, m: &Materials, ring: &wgpu::Buffer, bools: &wgpu::Buff
     let vs = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("vs constants"),
         layout: &m.vs_layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: bank.clone() }],
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: bank.clone(),
+        }],
     });
     let ps = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("ps constants"),
         layout: &m.ps_layout,
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: bank },
-            wgpu::BindGroupEntry { binding: 1, resource: bools.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: bank,
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: bools.as_entire_binding(),
+            },
         ],
     });
     (vs, ps)
