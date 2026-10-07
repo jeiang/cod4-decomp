@@ -97,7 +97,10 @@ fn end_requested(pm: &Pmove<'_>) -> bool {
             != 0
         || ps.leanf != 0.0
         || melee_or_offhand(ps.weapon_state)
-        || matches!(ps.weapon_state, ws::NIGHTVISION_WEAR | ws::NIGHTVISION_REMOVE)
+        || matches!(
+            ps.weapon_state,
+            ws::NIGHTVISION_WEAR | ws::NIGHTVISION_REMOVE
+        )
 }
 
 /// `PM_CanStand`: standing up from a crouch or prone would not hit anything.
@@ -106,8 +109,15 @@ fn can_stand(pm: &Pmove<'_>, world: &dyn Collide) -> bool {
         return true;
     }
     let o = pm.ps.origin;
-    !pm.trace(world, o, PLAYER_MINS, PLAYER_MAXS, o, pm.tracemask & MASK_IGNORE_CHARACTERS)
-        .all_solid
+    !pm.trace(
+        world,
+        o,
+        PLAYER_MINS,
+        PLAYER_MAXS,
+        o,
+        pm.tracemask & MASK_IGNORE_CHARACTERS,
+    )
+    .all_solid
 }
 
 /// `PM_EndSprint`.
@@ -133,7 +143,8 @@ pub(super) fn update(pm: &mut Pmove<'_>, world: &dyn Collide) {
         return;
     }
     if pm.ps.pm_flags & pmf::SPRINTING != 0 {
-        if time - pm.ps.sprint_state.last_sprint_start >= pm.ps.sprint_state.sprint_start_max_length {
+        if time - pm.ps.sprint_state.last_sprint_start >= pm.ps.sprint_state.sprint_start_max_length
+        {
             end(pm);
             pm.ps.sprint_state.sprint_delay = true;
             return;

@@ -5,7 +5,7 @@
 use super::math::{dot, mad, normalize, scale};
 use super::state::{PlayerState, Stance, button, ev, pmf};
 use super::walk::ground_surface_type;
-use super::{Params, Pml, Pmove, PmType};
+use super::{Params, PmType, Pml, Pmove};
 use crate::cm::ENTITYNUM_NONE;
 
 /// `JUMP_LAND_SLOWDOWN_TIME`: `pm_time` while a jump's landing slowdown runs.

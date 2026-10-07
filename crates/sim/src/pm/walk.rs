@@ -6,7 +6,9 @@ use super::duck::view_height_lerp;
 use super::jump;
 use super::math::{self, add, cross, dot, length, mad, normalize, normalize_to, scale, sub};
 use super::slide::step_slide_move;
-use super::state::{PlayerState, PmType, Stance, VIEW_CROUCH, VIEW_PRONE, VIEW_STAND, button, ef, ev, pmf};
+use super::state::{
+    PlayerState, PmType, Stance, VIEW_CROUCH, VIEW_PRONE, VIEW_STAND, button, ef, ev, pmf,
+};
 use super::{Pml, Pmove};
 use crate::Vec3;
 use crate::cm::{Collide, ENTITYNUM_NONE};
@@ -75,7 +77,11 @@ pub(super) fn friction(pm: &mut Pmove<'_>, pml: &Pml) {
         && pml.ground_trace.surface_flags & SURF_SLICK == 0
         && ps.pm_flags & pmf::TIME_KNOCKBACK == 0
     {
-        let value = if params.stopspeed <= speed { speed } else { params.stopspeed };
+        let value = if params.stopspeed <= speed {
+            speed
+        } else {
+            params.stopspeed
+        };
         let mut control = value;
         if ps.pm_flags & pmf::TIME_HARDLANDING != 0 {
             control = value * 0.3;
@@ -93,7 +99,14 @@ pub(super) fn friction(pm: &mut Pmove<'_>, pml: &Pml) {
 }
 
 /// `PM_Accelerate`.
-pub(super) fn accelerate(ps: &mut PlayerState, params: &super::Params, pml: &Pml, wishdir: &Vec3, wishspeed: f32, accel: f32) {
+pub(super) fn accelerate(
+    ps: &mut PlayerState,
+    params: &super::Params,
+    pml: &Pml,
+    wishdir: &Vec3,
+    wishspeed: f32,
+    accel: f32,
+) {
     if ps.pm_flags & pmf::LADDER != 0 {
         let wish_velocity = scale(wishdir, wishspeed);
         let mut push = sub(&wish_velocity, &ps.velocity);
@@ -110,7 +123,11 @@ pub(super) fn accelerate(ps: &mut PlayerState, params: &super::Params, pml: &Pml
     if add_speed <= 0.0 {
         return;
     }
-    let control = if params.stopspeed <= wishspeed { wishspeed } else { params.stopspeed };
+    let control = if params.stopspeed <= wishspeed {
+        wishspeed
+    } else {
+        params.stopspeed
+    };
     let mut accel_speed = accel * pml.frametime * control;
     if accel_speed > add_speed {
         accel_speed = add_speed;
@@ -120,7 +137,12 @@ pub(super) fn accelerate(ps: &mut PlayerState, params: &super::Params, pml: &Pml
 }
 
 /// `PM_PlayerInertia`: acceleration is clamped when it would reverse the previous direction.
-fn player_inertia(ps: &PlayerState, params: &super::Params, accel_speed: f32, wishdir: &Vec3) -> f32 {
+fn player_inertia(
+    ps: &PlayerState,
+    params: &super::Params,
+    accel_speed: f32,
+    wishdir: &Vec3,
+) -> f32 {
     if ps.pm_type == PmType::Noclip || accel_speed <= params.inertia_max {
         return accel_speed;
     }
@@ -148,7 +170,11 @@ fn move_scale(ps: &PlayerState, params: &super::Params, fmove: f32, rmove: f32, 
     }
     let total = (umove * umove + rmove * rmove + fmove * fmove).sqrt();
     let mut s = ps.speed as f32 * max / (total * 127.0);
-    s = if ps.pm_flags & pmf::WALKING == 0 && ps.leanf == 0.0 { s * 1.0 } else { s * 0.4 };
+    s = if ps.pm_flags & pmf::WALKING == 0 && ps.leanf == 0.0 {
+        s * 1.0
+    } else {
+        s * 0.4
+    };
     match ps.pm_type {
         PmType::Noclip => s *= 3.0,
         PmType::Ufo => s *= 6.0,
@@ -169,7 +195,11 @@ pub(super) fn cmd_scale(pm: &Pmove<'_>) -> f32 {
     }
     let ps = &pm.ps;
     let mut s = ps.speed as f32 * max as f32 / (total * 127.0);
-    s = if ps.pm_flags & pmf::WALKING == 0 && ps.leanf == 0.0 { s * 1.0 } else { s * 0.4 };
+    s = if ps.pm_flags & pmf::WALKING == 0 && ps.leanf == 0.0 {
+        s * 1.0
+    } else {
+        s * 0.4
+    };
     match ps.pm_type {
         PmType::Noclip => s *= 3.0,
         PmType::Ufo => s *= 6.0,
@@ -204,14 +234,22 @@ fn cmd_scale_walk(pm: &Pmove<'_>) -> f32 {
     let f = i32::from(pm.cmd.forwardmove);
     let r = i32::from(pm.cmd.rightmove);
     let total = ((r * r + f * f) as f32).sqrt();
-    let fmove = if f >= 0 { (f as f32).abs() } else { (params.player_back_speed_scale * f as f32).abs() };
+    let fmove = if f >= 0 {
+        (f as f32).abs()
+    } else {
+        (params.player_back_speed_scale * f as f32).abs()
+    };
     let smove = (params.player_strafe_speed_scale * r as f32).abs();
     let biggest = if fmove - smove < 0.0 { smove } else { fmove };
     if biggest == 0.0 {
         return 0.0;
     }
     let mut s = ps.speed as f32 * biggest / (total * 127.0);
-    s = if ps.pm_flags & pmf::WALKING != 0 || ps.leanf != 0.0 || aiming_prone { s * 0.4 } else { s * 1.0 };
+    s = if ps.pm_flags & pmf::WALKING != 0 || ps.leanf != 0.0 || aiming_prone {
+        s * 0.4
+    } else {
+        s * 1.0
+    };
     if ps.pm_flags & pmf::SPRINTING != 0 {
         s *= params.player_sprint_speed_scale;
     }
@@ -221,7 +259,11 @@ fn cmd_scale_walk(pm: &Pmove<'_>) -> f32 {
         _ => cmd_scale_for_stance(pm) * s,
     };
     let w = &pm.weapon;
-    if ps.weapon == 0 || w.move_speed_scale <= 0.0 || ps.pm_flags & pmf::WALKING != 0 || aiming_prone {
+    if ps.weapon == 0
+        || w.move_speed_scale <= 0.0
+        || ps.pm_flags & pmf::WALKING != 0
+        || aiming_prone
+    {
         if ps.weapon != 0 && w.ads_move_speed_scale > 0.0 {
             s *= w.ads_move_speed_scale;
         }
@@ -277,7 +319,8 @@ pub(super) fn walk_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml) 
         jump::apply_slowdown(&mut pm.ps, pm.params);
     }
     if pm.ps.pm_flags & pmf::SPRINTING != 0 {
-        let strafe = f64::from(pm.cmd.rightmove) * f64::from(pm.params.player_sprint_strafe_speed_scale);
+        let strafe =
+            f64::from(pm.cmd.rightmove) * f64::from(pm.params.player_sprint_strafe_speed_scale);
         pm.cmd.rightmove = strafe as i8;
     }
     if jump::check(pm, pml) {
@@ -305,7 +348,8 @@ pub(super) fn walk_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml) 
     let (mut wishdir, mut wishspeed) = normalize_to(&wishvel);
     wishspeed *= s;
     wishdir = project_velocity(&wishdir, &pml.ground_trace.normal);
-    let slick = pml.ground_trace.surface_flags & SURF_SLICK != 0 || pm.ps.pm_flags & pmf::TIME_KNOCKBACK != 0;
+    let slick = pml.ground_trace.surface_flags & SURF_SLICK != 0
+        || pm.ps.pm_flags & pmf::TIME_KNOCKBACK != 0;
     let mut acceleration = if slick {
         1.0
     } else {
@@ -318,7 +362,14 @@ pub(super) fn walk_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml) 
     if pm.ps.pm_flags & pmf::TIME_HARDLANDING != 0 {
         acceleration *= 0.25;
     }
-    accelerate(&mut pm.ps, pm.params, pml, &wishdir, wishspeed, acceleration);
+    accelerate(
+        &mut pm.ps,
+        pm.params,
+        pml,
+        &wishdir,
+        wishspeed,
+        acceleration,
+    );
     if slick {
         pm.ps.velocity[2] -= pm.ps.gravity as f32 * pml.frametime;
     }
@@ -375,13 +426,27 @@ pub(super) fn dead_move(ps: &mut PlayerState, pml: &Pml) {
 }
 
 /// Shared by noclip and ufo: friction at 1.5x and vertical input from the lean buttons.
-fn free_fly_friction(pm: &mut Pmove<'_>, pml: &Pml, only_if_moving: bool, vertical: f32, moving: bool) {
+fn free_fly_friction(
+    pm: &mut Pmove<'_>,
+    pml: &Pml,
+    only_if_moving: bool,
+    vertical: f32,
+    moving: bool,
+) {
     let params = pm.params;
     let ps = &mut pm.ps;
-    let speed = if only_if_moving && !moving && vertical == 0.0 { 0.0 } else { length(&ps.velocity) };
+    let speed = if only_if_moving && !moving && vertical == 0.0 {
+        0.0
+    } else {
+        length(&ps.velocity)
+    };
     if speed >= 1.0 {
         let cur_friction = params.friction * 1.5;
-        let value = if params.stopspeed <= speed { speed } else { params.stopspeed };
+        let value = if params.stopspeed <= speed {
+            speed
+        } else {
+            params.stopspeed
+        };
         let drop = value * cur_friction * pml.frametime;
         let new_speed = (speed - drop).max(0.0);
         ps.velocity = scale(&ps.velocity, new_speed / speed);
@@ -615,7 +680,10 @@ fn crash_land(ps: &mut PlayerState, params: &super::Params, pml: &Pml) {
     let t = (-vel - den.sqrt()) / (a * 2.0);
     let land_vel = (t * acc + vel) * -1.0;
     let fall_height = land_vel * land_vel / (ps.gravity as f32 * 2.0);
-    let (min_h, max_h) = (params.bg_fall_damage_min_height, params.bg_fall_damage_max_height);
+    let (min_h, max_h) = (
+        params.bg_fall_damage_min_height,
+        params.bg_fall_damage_max_height,
+    );
     let damage = if min_h < max_h {
         if min_h >= fall_height
             || pml.ground_trace.surface_flags & SURF_NODAMAGE != 0
@@ -636,14 +704,24 @@ fn crash_land(ps: &mut PlayerState, params: &super::Params, pml: &Pml) {
         0
     };
     let surf = ground_surface_type(pml);
-    let event = |first: u8| if surf != 0 { first + surf as u8 } else { ev::NONE };
+    let event = |first: u8| {
+        if surf != 0 {
+            first + surf as u8
+        } else {
+            ev::NONE
+        }
+    };
     if damage != 0 {
         if damage >= 100 || pml.ground_trace.surface_flags & SURF_SLICK != 0 {
             ps.velocity = scale(&ps.velocity, 0.67);
         } else {
             let stun = (35 * damage + 500).min(2000);
             let speed_mult = if stun > 500 {
-                if stun < 1500 { 0.5 - (stun as f32 - 500.0) / 1000.0 * 0.3 } else { 0.2 }
+                if stun < 1500 {
+                    0.5 - (stun as f32 - 500.0) / 1000.0 * 0.3
+                } else {
+                    0.2
+                }
             } else {
                 0.5
             };

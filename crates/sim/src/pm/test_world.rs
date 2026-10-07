@@ -28,18 +28,37 @@ impl TestWorld {
     /// A large floor whose top is at z = 0.
     pub fn floor() -> Self {
         let mut w = Self { blocks: Vec::new() };
-        w.add([-4000.0, -4000.0, -100.0], [4000.0, 4000.0, 0.0], contents::SOLID, SURF_CONCRETE);
+        w.add(
+            [-4000.0, -4000.0, -100.0],
+            [4000.0, 4000.0, 0.0],
+            contents::SOLID,
+            SURF_CONCRETE,
+        );
         w
     }
 
     pub fn add(&mut self, mins: Vec3, maxs: Vec3, contents: i32, surface_flags: i32) -> &mut Self {
-        self.blocks.push(Block { mins, maxs, contents, surface_flags, entity: ENTITYNUM_WORLD });
+        self.blocks.push(Block {
+            mins,
+            maxs,
+            contents,
+            surface_flags,
+            entity: ENTITYNUM_WORLD,
+        });
         self
     }
 }
 
 impl Collide for TestWorld {
-    fn trace(&self, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3, _pass: u16, mask: i32) -> Trace {
+    fn trace(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        mins: Vec3,
+        maxs: Vec3,
+        _pass: u16,
+        mask: i32,
+    ) -> Trace {
         let mut best = Trace::MISS;
         let delta = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
         for b in &self.blocks {
@@ -71,9 +90,17 @@ impl Collide for TestWorld {
                     continue;
                 }
                 let (t0, t1, n) = if delta[i] > 0.0 {
-                    ((lo[i] - start[i]) / delta[i], (hi[i] - start[i]) / delta[i], -1.0)
+                    (
+                        (lo[i] - start[i]) / delta[i],
+                        (hi[i] - start[i]) / delta[i],
+                        -1.0,
+                    )
                 } else {
-                    ((hi[i] - start[i]) / delta[i], (lo[i] - start[i]) / delta[i], 1.0)
+                    (
+                        (hi[i] - start[i]) / delta[i],
+                        (lo[i] - start[i]) / delta[i],
+                        1.0,
+                    )
                 };
                 if t0 > enter {
                     enter = t0;

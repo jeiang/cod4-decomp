@@ -26,7 +26,11 @@ fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
 fn decode(root: &Path, zone: &str, mut f: impl FnMut(Asset)) -> Option<()> {
     let dir = find_ci(&find_ci(root, "zone")?, "english")?;
     let file = std::fs::File::open(find_ci(&dir, &format!("{zone}.ff"))?).ok()?;
-    Zone::open(std::io::BufReader::new(file)).ok()?.decode(&Consumer::Server, &mut f).ok().map(|_| ())
+    Zone::open(std::io::BufReader::new(file))
+        .ok()?
+        .decode(&Consumer::Server, &mut f)
+        .ok()
+        .map(|_| ())
 }
 
 fn install() -> Option<&'static Install> {
@@ -45,15 +49,22 @@ fn install() -> Option<&'static Install> {
         let mut anims: Vec<Arc<XAnimParts>> = Vec::new();
         for zone in ["common_mp", "mp_crash"] {
             decode(&root, zone, |a| {
-                if let Asset::XAnimParts(x) = a {
-                    if x.name.as_deref().is_some_and(|n| n.contains("mantle")) {
-                        anims.push(x);
-                    }
+                if let Asset::XAnimParts(x) = a
+                    && x.name.as_deref().is_some_and(|n| n.contains("mantle"))
+                {
+                    anims.push(x);
                 }
             })?;
         }
         let mantle = MantleAnims::from_xanims(|name| {
-            anims.iter().find(|a| a.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(name))).map(|a| &**a)
+            anims
+                .iter()
+                .find(|a| {
+                    a.name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+                })
+                .map(|a| &**a)
         })?;
         Some(Install { map: map?, mantle })
     });
@@ -70,9 +81,14 @@ fn spawns(map: &Clipmap) -> Vec<(Vec3, f32)> {
         while let (Some(k), Some(v)) = (q.next(), q.next()) {
             kv.insert(k.to_owned(), v.to_owned());
         }
-        let is_spawn = kv.get("classname").is_some_and(|c| c.ends_with("_spawn") || c == "info_player_start");
+        let is_spawn = kv
+            .get("classname")
+            .is_some_and(|c| c.ends_with("_spawn") || c == "info_player_start");
         if let (true, Some(o)) = (is_spawn, kv.get("origin")) {
-            let n: Vec<f32> = o.split_whitespace().filter_map(|s| s.parse().ok()).collect();
+            let n: Vec<f32> = o
+                .split_whitespace()
+                .filter_map(|s| s.parse().ok())
+                .collect();
             let yaw = kv
                 .get("angles")
                 .and_then(|a| a.split_whitespace().nth(1)?.parse().ok())
@@ -92,18 +108,27 @@ struct Player<'a> {
 
 impl<'a> Player<'a> {
     fn new(params: &'a Params, origin: Vec3, yaw: f32) -> Self {
-        let mut ps = PlayerState::default();
-        ps.origin = origin;
-        ps.command_time = 100_000;
-        ps.client_num = 0;
+        let mut ps = PlayerState {
+            origin,
+            command_time: 100_000,
+            ..PlayerState::default()
+        };
         ps.viewangles[1] = yaw;
         ps.delta_angles[1] = yaw;
-        Self { pm: Pmove::new(ps, params), sent: UserCmd::default() }
+        Self {
+            pm: Pmove::new(ps, params),
+            sent: UserCmd::default(),
+        }
     }
 
     fn step(&mut self, world: &World, buttons: i32, fwd: i8, right: i8, dt: i32) {
         let pm = &mut self.pm;
-        pm.cmd = UserCmd { buttons, forwardmove: fwd, rightmove: right, ..UserCmd::default() };
+        pm.cmd = UserCmd {
+            buttons,
+            forwardmove: fwd,
+            rightmove: right,
+            ..UserCmd::default()
+        };
         pm.cmd.server_time = pm.ps.command_time + dt;
         pm.oldcmd = self.sent;
         self.sent = pm.cmd;
@@ -141,7 +166,15 @@ fn open_yaw(world: &World, p: Vec3) -> f32 {
         let (f, _, _) = math::angle_vectors(&[0.0, yaw, 0.0]);
         let s = [p[0], p[1], p[2] + 8.0];
         let e = [s[0] + f[0] * 400.0, s[1] + f[1] * 400.0, s[2]];
-        let t = crate::cm::Collide::trace(world, s, e, PLAYER_MINS, PLAYER_MAXS, 1023, MASK_PLAYERSOLID);
+        let t = crate::cm::Collide::trace(
+            world,
+            s,
+            e,
+            PLAYER_MINS,
+            PLAYER_MAXS,
+            1023,
+            MASK_PLAYERSOLID,
+        );
         if t.fraction > best.1 {
             best = (yaw, t.fraction);
         }
@@ -172,7 +205,10 @@ fn locomotion(world: &World, params: &Params, spawn: Vec3, yaw: f32) -> u64 {
         let o = p.pm.ps.origin;
         assert!(o.iter().all(|c| c.is_finite()), "NaN origin {o:?}");
         for i in 0..3 {
-            assert!(o[i] > bounds.0[i] - 1.0 && o[i] < bounds.1[i] + 1.0, "left the world: {o:?}");
+            assert!(
+                o[i] > bounds.0[i] - 1.0 && o[i] < bounds.1[i] + 1.0,
+                "left the world: {o:?}"
+            );
         }
         fingerprint(&p.pm.ps, h);
     };
@@ -213,7 +249,11 @@ fn locomotion(world: &World, params: &Params, spawn: Vec3, yaw: f32) -> u64 {
         apex = apex.max(p.pm.ps.origin[2]);
         checkpoint(&p, &mut h);
     }
-    assert!(apex - floor > 25.0 && apex - floor < 45.0, "jump rose {}", apex - floor);
+    assert!(
+        apex - floor > 25.0 && apex - floor < 45.0,
+        "jump rose {}",
+        apex - floor
+    );
     assert!(p.grounded());
     h
 }
@@ -228,7 +268,15 @@ fn mantle_run(world: &World, params: &Params) -> Option<(Vec3, Vec3, PlayerState
             let y = lo[1] + (hi[1] - lo[1]) * (gy as f32 + 0.5) / 250.0;
             let top = [x, y, hi[2] + 8.0];
             let down = [x, y, lo[2] - 8.0];
-            let t = crate::cm::Collide::trace(world, top, down, PLAYER_MINS, PLAYER_MAXS, 1023, MASK_PLAYERSOLID);
+            let t = crate::cm::Collide::trace(
+                world,
+                top,
+                down,
+                PLAYER_MINS,
+                PLAYER_MAXS,
+                1023,
+                MASK_PLAYERSOLID,
+            );
             if t.start_solid || t.fraction >= 1.0 || !t.walkable {
                 continue;
             }
@@ -238,7 +286,15 @@ fn mantle_run(world: &World, params: &Params) -> Option<(Vec3, Vec3, PlayerState
                 let (f, _, _) = math::angle_vectors(&[0.0, yaw, 0.0]);
                 let a = [rest[0] - 14.9 * f[0], rest[1] - 14.9 * f[1], rest[2]];
                 let b = [rest[0] + 19.0 * f[0], rest[1] + 19.0 * f[1], rest[2]];
-                let m = crate::cm::Collide::trace(world, a, b, [-0.1, -0.1, 0.0], [0.1, 0.1, 70.0], 1023, contents::MANTLE);
+                let m = crate::cm::Collide::trace(
+                    world,
+                    a,
+                    b,
+                    [-0.1, -0.1, 0.0],
+                    [0.1, 0.1, 70.0],
+                    1023,
+                    contents::MANTLE,
+                );
                 if m.start_solid || m.fraction >= 1.0 || m.surface_flags & 0x0600_0000 == 0 {
                     continue;
                 }
@@ -269,11 +325,16 @@ fn mantle_run(world: &World, params: &Params) -> Option<(Vec3, Vec3, PlayerState
 fn walks_sprints_stances_and_jumps_from_a_stock_spawn() {
     let Some(inst) = install() else { return };
     let world = World::new(inst.map.clone());
-    let params = Params { mantle_anims: Some(inst.mantle.clone()), ..Params::default() };
+    let params = Params {
+        mantle_anims: Some(inst.mantle.clone()),
+        ..Params::default()
+    };
     let mut ran = 0;
     let mut prints = Vec::new();
     for (origin, _) in spawns(&inst.map).into_iter().take(40) {
-        let Some(rest) = settle(&world, origin) else { continue };
+        let Some(rest) = settle(&world, origin) else {
+            continue;
+        };
         if world_blocked(&world, rest) {
             continue;
         }
@@ -303,20 +364,77 @@ fn walks_sprints_stances_and_jumps_from_a_stock_spawn() {
 
 fn world_blocked(world: &World, p: Vec3) -> bool {
     // The hull must fit standing and have room to run in some direction.
-    crate::cm::Collide::trace(world, p, p, PLAYER_MINS, PLAYER_MAXS, 1023, MASK_PLAYERSOLID).start_solid
+    crate::cm::Collide::trace(
+        world,
+        p,
+        p,
+        PLAYER_MINS,
+        PLAYER_MAXS,
+        1023,
+        MASK_PLAYERSOLID,
+    )
+    .start_solid
 }
 
 #[test]
 fn mantles_over_a_real_ledge() {
     let Some(inst) = install() else { return };
     let world = World::new(inst.map.clone());
-    let params = Params { mantle_anims: Some(inst.mantle.clone()), ..Params::default() };
-    let (before, rest, end) = mantle_run(&world, &params).expect("no mantle ledge found on mp_crash");
+    let params = Params {
+        mantle_anims: Some(inst.mantle.clone()),
+        ..Params::default()
+    };
+    let (before, rest, end) =
+        mantle_run(&world, &params).expect("no mantle ledge found on mp_crash");
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     fingerprint(&end, &mut h);
     assert_eq!(h, 2469497806190789872, "{rest:?} -> {:?}", end.origin);
-    assert!(end.origin[2] > before[2] + 15.0, "did not climb: {before:?} -> {:?}", end.origin);
+    assert!(
+        end.origin[2] > before[2] + 15.0,
+        "did not climb: {before:?} -> {:?}",
+        end.origin
+    );
     assert_eq!(end.pm_flags & pmf::MANTLE, 0);
-    assert!(end.ground_entity_num != crate::cm::ENTITYNUM_NONE, "left floating");
+    assert!(
+        end.ground_entity_num != crate::cm::ENTITYNUM_NONE,
+        "left floating"
+    );
     assert_eq!(end.velocity[2], 0.0);
+}
+
+/// `cargo test -p sim --release -- --ignored --nocapture pmove_cost`
+#[test]
+#[ignore = "benchmark"]
+fn pmove_cost() {
+    let Some(inst) = install() else { return };
+    let world = World::new(inst.map.clone());
+    let params = Params {
+        mantle_anims: Some(inst.mantle.clone()),
+        ..Params::default()
+    };
+    let (origin, _) = spawns(&inst.map)
+        .into_iter()
+        .find_map(|(o, y)| settle(&world, o).map(|r| (r, y)))
+        .unwrap();
+    let yaw = open_yaw(&world, origin);
+    let mut p = Player::new(&params, origin, yaw);
+    let cmds = 200_000;
+    let t = std::time::Instant::now();
+    let mut keep = 0.0f32;
+    for i in 0..cmds {
+        let buttons = match i % 400 {
+            0..=20 => button::JUMP,
+            100..=180 => button::SPRINT,
+            250..=300 => button::CROUCH,
+            _ => 0,
+        };
+        p.step(&world, buttons, 127, ((i / 50 % 3) as i8 - 1) * 60, 25);
+        keep += p.pm.ps.origin[0];
+        if i % 1000 == 999 {
+            p.pm.ps.origin = origin;
+            p.pm.ps.velocity = [0.0; 3];
+        }
+    }
+    let ns = t.elapsed().as_nanos() as f64 / f64::from(cmds);
+    eprintln!("pmove: {ns:.0} ns per 25 ms usercmd on mp_crash ({keep})");
 }

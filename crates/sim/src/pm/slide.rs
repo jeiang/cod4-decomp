@@ -32,7 +32,12 @@ fn permute_planes(velocity: &Vec3, planes: &[Vec3], order: &mut [usize; MAX_CLIP
 }
 
 /// `PM_SlideMove`: returns whether the velocity was clipped.
-pub(super) fn slide_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml, gravity: bool) -> bool {
+pub(super) fn slide_move(
+    pm: &mut Pmove<'_>,
+    world: &dyn Collide,
+    pml: &mut Pml,
+    gravity: bool,
+) -> bool {
     const NUM_BUMPS: usize = 4;
     let mut primal_velocity = pm.ps.velocity;
     let mut end_velocity = pm.ps.velocity;
@@ -135,7 +140,12 @@ pub(super) fn slide_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml,
 
 /// `PM_StepSlideMove`: a slide move that also tries stepping up over low obstacles and snaps
 /// back down onto the ground.
-pub(super) fn step_slide_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml, gravity: bool) {
+pub(super) fn step_slide_move(
+    pm: &mut Pmove<'_>,
+    world: &dyn Collide,
+    pml: &mut Pml,
+    gravity: bool,
+) {
     let params = pm.params;
     let mut step_amount = 0.0f32;
     let mut jumping = false;
@@ -160,14 +170,15 @@ pub(super) fn step_slide_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut
         if ps_flag(pm, pmf::JUMPING) && pm.ps.pm_time != 0 {
             jump::clear_state(&mut pm.ps);
         }
-        if bumped && ps_flag(pm, pmf::JUMPING) {
-            if let Some(h) = jump::step_height(&pm.ps, params, &start_o) {
-                if h < 1.0 {
-                    return;
-                }
-                step_size = h;
-                jumping = true;
+        if bumped
+            && ps_flag(pm, pmf::JUMPING)
+            && let Some(h) = jump::step_height(&pm.ps, params, &start_o)
+        {
+            if h < 1.0 {
+                return;
             }
+            step_size = h;
+            jumping = true;
         }
         if !jumping && !(ps_flag(pm, pmf::LADDER) && pm.ps.velocity[2] > 0.0) {
             return;
@@ -218,7 +229,8 @@ pub(super) fn step_slide_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut
     let step_delta = [pm.ps.origin[0] - start_o[0], pm.ps.origin[1] - start_o[1]];
     let along_step = step_delta[0] * start_v[0] + step_delta[1] * start_v[1];
     let along_flat = start_v[1] * flat_delta[1] + start_v[0] * flat_delta[0];
-    if along_step <= along_flat + math::EQUAL_EPSILON || jumping && jump::above_max(&pm.ps, params) {
+    if along_step <= along_flat + math::EQUAL_EPSILON || jumping && jump::above_max(&pm.ps, params)
+    {
         // The step did not get further than sliding: take the slide.
         pm.ps.origin = down_o;
         pm.ps.velocity = down_v;
@@ -236,7 +248,8 @@ pub(super) fn step_slide_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut
     if jumping {
         jump::clamp_velocity(&mut pm.ps, params, &down_o);
     }
-    if had_ground && pm.ps.pm_type < PmType::Dead && verify_position(pm, world, &start_o, &start_v) {
+    if had_ground && pm.ps.pm_type < PmType::Dead && verify_position(pm, world, &start_o, &start_v)
+    {
         let dz = pm.ps.origin[2] - down_o[2];
         if dz.abs() > 0.5 {
             let delta = math::snap_to_int(dz);

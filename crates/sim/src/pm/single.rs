@@ -10,9 +10,7 @@ use super::math::{self, EQUAL_EPSILON};
 use super::sprint;
 use super::state::{PmType, Stance, button, ef, ev, pmf, weapon_state as ws};
 use super::view::{update_prone_pitch, update_view_angles};
-use super::walk::{
-    air_move, dead_move, fly_move, ground_trace, noclip_move, ufo_move, walk_move,
-};
+use super::walk::{air_move, dead_move, fly_move, ground_trace, noclip_move, ufo_move, walk_move};
 use super::{Pml, Pmove};
 use crate::cm::{Collide, ENTITYNUM_NONE, Trace};
 use crate::contents::PLAYER;
@@ -158,8 +156,10 @@ fn pmove_single(pm: &mut Pmove<'_>, world: &dyn Collide) {
         pm.ps.pm_flags &= !pmf::PRONEMOVE_OVERRIDDEN;
     } else {
         let f = |c: i8| f32::from(c).abs();
-        let more_forward = pm.cmd.forwardmove != pm.oldcmd.forwardmove && f(pm.oldcmd.forwardmove) < f(pm.cmd.forwardmove);
-        let more_right = pm.cmd.rightmove != pm.oldcmd.rightmove && f(pm.oldcmd.rightmove) < f(pm.cmd.rightmove);
+        let more_forward = pm.cmd.forwardmove != pm.oldcmd.forwardmove
+            && f(pm.oldcmd.forwardmove) < f(pm.cmd.forwardmove);
+        let more_right =
+            pm.cmd.rightmove != pm.oldcmd.rightmove && f(pm.oldcmd.rightmove) < f(pm.cmd.rightmove);
         if more_forward || more_right {
             if ads::interrupt_weapon_with_prone_move(&mut pm.ps) {
                 pm.ps.pm_flags &= !pmf::PRONEMOVE_OVERRIDDEN;
@@ -172,7 +172,10 @@ fn pmove_single(pm: &mut Pmove<'_>, world: &dyn Collide) {
         }
     }
     let stance = pm.ps.stance();
-    if pm.ps.pm_flags & pmf::SIGHT_AIMING != 0 && stance == Stance::Prone && !ads::using_sniper_scope(pm) {
+    if pm.ps.pm_flags & pmf::SIGHT_AIMING != 0
+        && stance == Stance::Prone
+        && !ads::using_sniper_scope(pm)
+    {
         pm.cmd.forwardmove = 0;
         pm.cmd.rightmove = 0;
     }
@@ -351,7 +354,11 @@ fn walking_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml) {
         pm.ps.velocity[0] - pm.ps.old_velocity[0],
         pm.ps.velocity[1] - pm.ps.old_velocity[1],
     ];
-    let blend = if 1.0 - pml.frametime < 0.0 { 1.0 } else { pml.frametime };
+    let blend = if 1.0 - pml.frametime < 0.0 {
+        1.0
+    } else {
+        pml.frametime
+    };
     pm.ps.old_velocity[0] += blend * change[0];
     pm.ps.old_velocity[1] += blend * change[1];
     math::snap_vector(&mut pm.ps.velocity);

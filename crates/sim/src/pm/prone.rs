@@ -2,8 +2,8 @@
 //! Prone placement checks (`BG_CheckProne` / `BG_CheckProneValid`): whether a prone body fits
 //! at a position and yaw, and the torso and waist pitch it settles into on uneven ground.
 
-use super::math::{self, mad, normalize, normalize_to, sub};
 use super::Pmove;
+use super::math::{self, mad, normalize, normalize_to, sub};
 use crate::Vec3;
 use crate::cm::{Collide, ENTITYNUM_NONE};
 use crate::contents::MASK_DEADSOLID;
@@ -183,7 +183,13 @@ pub(super) fn check_player_prone(
         feet_dist,
     };
     let mut p = [ps.torso_pitch, ps.waist_pitch];
-    let ok = check_prone(world, ps.client_num, &ps.origin, &c, want_pitches.then_some(&mut p));
+    let ok = check_prone(
+        world,
+        ps.client_num,
+        &ps.origin,
+        &c,
+        want_pitches.then_some(&mut p),
+    );
     if want_pitches {
         pm.ps.torso_pitch = p[0];
         pm.ps.waist_pitch = p[1];

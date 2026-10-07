@@ -10,7 +10,8 @@ use super::jump::activate_slowdown;
 use super::math::{angle_delta, lerp, pitch_for_yaw_on_normal};
 use super::prone::prone_allowed;
 use super::state::{
-    PmType, Stance, VIEW_CROUCH, VIEW_DEAD, VIEW_LASTSTAND, VIEW_PRONE, VIEW_STAND, button, ef, ev, pmf,
+    PmType, Stance, VIEW_CROUCH, VIEW_DEAD, VIEW_LASTSTAND, VIEW_PRONE, VIEW_STAND, button, ef, ev,
+    pmf,
 };
 use super::{Pml, Pmove};
 use crate::cm::{Collide, ENTITYNUM_NONE};
@@ -241,7 +242,10 @@ fn stance_request(pm: &mut Pmove<'_>, world: &dyn Collide) {
     let wants_prone = pm.cmd.buttons & button::PRONE != 0 && pm.ps.pm_flags & pmf::RESPAWNED == 0;
     if !wants_prone {
         let origin = pm.ps.origin;
-        let stuck = |pm: &Pmove<'_>| pm.trace(world, origin, pm.mins, pm.maxs, origin, mask).all_solid;
+        let stuck = |pm: &Pmove<'_>| {
+            pm.trace(world, origin, pm.mins, pm.maxs, origin, mask)
+                .all_solid
+        };
         if pm.cmd.buttons & button::CROUCH != 0 {
             if pm.ps.pm_flags & pmf::PRONE != 0 {
                 pm.maxs[2] = 50.0;
@@ -344,7 +348,8 @@ pub(super) fn view_height_adjust(pm: &mut Pmove<'_>, pml: &Pml) {
                     ps.view_height_current = ps.view_height_lerp_target as f32;
                     ps.view_height_lerp_time = 0;
                 } else {
-                    ps.view_height_current = curve(ps.view_height_lerp_target, ps.view_height_lerp_down, frac);
+                    ps.view_height_current =
+                        curve(ps.view_height_lerp_target, ps.view_height_lerp_down, frac);
                 }
             }
             if ps.view_height_lerp_time != 0 {
@@ -370,7 +375,8 @@ pub(super) fn view_height_adjust(pm: &mut Pmove<'_>, pml: &Pml) {
                         ps.view_height_lerp_time = 0;
                     } else {
                         let total = lerp_time(ps.view_height_lerp_target, ps.view_height_lerp_down);
-                        ps.view_height_lerp_time = time - (frac as f32 * 0.01 * total as f32) as i32;
+                        ps.view_height_lerp_time =
+                            time - (frac as f32 * 0.01 * total as f32) as i32;
                     }
                 }
             } else if ps.view_height_current != target as f32 {
@@ -378,8 +384,11 @@ pub(super) fn view_height_adjust(pm: &mut Pmove<'_>, pml: &Pml) {
                 match target {
                     VIEW_PRONE => {
                         ps.view_height_lerp_down = true;
-                        ps.view_height_lerp_target =
-                            if ps.view_height_current <= 40.0 { VIEW_PRONE } else { VIEW_CROUCH };
+                        ps.view_height_lerp_target = if ps.view_height_current <= 40.0 {
+                            VIEW_PRONE
+                        } else {
+                            VIEW_CROUCH
+                        };
                     }
                     VIEW_CROUCH => {
                         ps.view_height_lerp_down = ps.view_height_current > target as f32;
@@ -387,8 +396,11 @@ pub(super) fn view_height_adjust(pm: &mut Pmove<'_>, pml: &Pml) {
                     }
                     _ => {
                         ps.view_height_lerp_down = false;
-                        ps.view_height_lerp_target =
-                            if ps.view_height_current >= 40.0 { VIEW_STAND } else { VIEW_CROUCH };
+                        ps.view_height_lerp_target = if ps.view_height_current >= 40.0 {
+                            VIEW_STAND
+                        } else {
+                            VIEW_CROUCH
+                        };
                     }
                 }
             }

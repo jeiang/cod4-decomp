@@ -51,7 +51,14 @@ fn footstep_type(pm: &Pmove<'_>, pml: &Pml) -> u8 {
 }
 
 /// `PM_FootstepEvent`: raises a step when the bob cycle crosses a half period.
-fn footstep_event(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &Pml, old: u8, new: u8, step: bool) {
+fn footstep_event(
+    pm: &mut Pmove<'_>,
+    world: &dyn Collide,
+    pml: &Pml,
+    old: u8,
+    new: u8,
+    step: bool,
+) {
     if (new.wrapping_add(64) ^ old.wrapping_add(64)) & 0x80 == 0 {
         return;
     }
@@ -180,7 +187,11 @@ pub(super) fn footsteps(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &Pml) {
             Stance::Stand => 0,
             Stance::Prone => 1,
             Stance::Crouch => 2,
-        } + if pm.ps.pm_flags & pmf::BACKWARDS_RUN != 0 { 3 } else { 0 };
+        } + if pm.ps.pm_flags & pmf::BACKWARDS_RUN != 0 {
+            3
+        } else {
+            0
+        };
         let max = max_speed(pm, walking, sprinting);
         let factor = if row != 0 || !sprinting {
             BOB_FACTOR[row][usize::from(walking)]
@@ -232,4 +243,3 @@ pub(super) fn foliage_sounds(pm: &mut Pmove<'_>, world: &dyn Collide) {
         pm.ps.foliage_sound_time = 0;
     }
 }
-

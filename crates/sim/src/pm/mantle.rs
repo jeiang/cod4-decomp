@@ -9,7 +9,7 @@
 
 use super::math::{self, dot, mad, normalize, sub};
 use super::state::{PmType, ef, ev, pmf};
-use super::{Pml, Pmove, PLAYER_MAXS, PLAYER_MINS};
+use super::{PLAYER_MAXS, PLAYER_MINS, Pml, Pmove};
 use crate::Vec3;
 use crate::cm::Collide;
 use crate::contents;
@@ -45,13 +45,41 @@ pub struct MantleTransition {
 }
 
 pub const TRANSITIONS: [MantleTransition; 7] = [
-    MantleTransition { up_anim: 1, over_anim: 8, height: 57.0 },
-    MantleTransition { up_anim: 2, over_anim: 8, height: 51.0 },
-    MantleTransition { up_anim: 3, over_anim: 9, height: 45.0 },
-    MantleTransition { up_anim: 4, over_anim: 9, height: 39.0 },
-    MantleTransition { up_anim: 5, over_anim: 9, height: 33.0 },
-    MantleTransition { up_anim: 6, over_anim: 10, height: 27.0 },
-    MantleTransition { up_anim: 7, over_anim: 10, height: 21.0 },
+    MantleTransition {
+        up_anim: 1,
+        over_anim: 8,
+        height: 57.0,
+    },
+    MantleTransition {
+        up_anim: 2,
+        over_anim: 8,
+        height: 51.0,
+    },
+    MantleTransition {
+        up_anim: 3,
+        over_anim: 9,
+        height: 45.0,
+    },
+    MantleTransition {
+        up_anim: 4,
+        over_anim: 9,
+        height: 39.0,
+    },
+    MantleTransition {
+        up_anim: 5,
+        over_anim: 9,
+        height: 33.0,
+    },
+    MantleTransition {
+        up_anim: 6,
+        over_anim: 10,
+        height: 27.0,
+    },
+    MantleTransition {
+        up_anim: 7,
+        over_anim: 10,
+        height: 21.0,
+    },
 ];
 
 /// Root-motion track of one mantle animation: the accumulated translation at every frame.
@@ -86,10 +114,16 @@ impl MantleAnim {
         let length_msec = (f64::from(length) * 1000.0) as i32;
         let trans = parts.delta.as_ref().and_then(|d| d.trans.as_ref());
         let Some(t) = trans else {
-            return Self { length_msec, samples: vec![[0.0; 3]; frames + 1] };
+            return Self {
+                length_msec,
+                samples: vec![[0.0; 3]; frames + 1],
+            };
         };
         if t.size == 0 {
-            return Self { length_msec, samples: vec![t.frame0; frames + 1] };
+            return Self {
+                length_msec,
+                samples: vec![t.frame0; frames + 1],
+            };
         }
         let n = usize::from(t.size) + 1;
         let key_frame = |i: usize| -> f32 {
@@ -125,7 +159,10 @@ impl MantleAnim {
                 math::lerp(&key_value(k), &key_value(k + 1), (f - a) / (b - a))
             });
         }
-        Self { length_msec, samples }
+        Self {
+            length_msec,
+            samples,
+        }
     }
 }
 
@@ -168,7 +205,8 @@ impl MantleAnims {
 
     /// Total mantle duration for a transition (`Mantle_GetUpLength + Mantle_GetOverLength`).
     pub fn duration(&self, trans_index: i32, over: bool) -> i32 {
-        self.up_length(trans_index) + self.over_length(trans_index, if over { FLAG_OVER } else { 0 })
+        self.up_length(trans_index)
+            + self.over_length(trans_index, if over { FLAG_OVER } else { 0 })
     }
 
     /// Translation `time` ms into the mantle, in world orientation (`Mantle_GetAnimDelta`).
@@ -245,7 +283,11 @@ pub(super) fn check(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &Pml) {
         start_pos: pm.ps.origin,
         ledge_pos: [0.0; 3],
         end_pos: [0.0; 3],
-        flags: if surface_flags & SURF_MANTLEOVER != 0 { FLAG_OVER } else { 0 },
+        flags: if surface_flags & SURF_MANTLEOVER != 0 {
+            FLAG_OVER
+        } else {
+            0
+        },
     };
     let _ = check_ledge(pm, world, &mut found, 60.0)
         || check_ledge(pm, world, &mut found, 40.0)
@@ -301,7 +343,10 @@ fn check_ledge(pm: &mut Pmove<'_>, world: &dyn Collide, f: &mut Found, height: f
     }
     f.ledge_pos = [end[0], end[1], (end[2] - start[2]) * t.fraction + start[2]];
     maxs[2] = 50.0;
-    if pm.trace(world, f.ledge_pos, mins, maxs, f.ledge_pos, pm.tracemask).start_solid {
+    if pm
+        .trace(world, f.ledge_pos, mins, maxs, f.ledge_pos, pm.tracemask)
+        .start_solid
+    {
         return false;
     }
     pm.ps.mantle_state.flags |= FLAG_HINT;
@@ -309,11 +354,25 @@ fn check_ledge(pm: &mut Pmove<'_>, world: &dyn Collide, f: &mut Found, height: f
     if pm.cmd.buttons & super::button::JUMP != 0 {
         calc_end_pos(pm, world, f);
         if pm.ps.e_flags & ef::CROUCH == 0 {
-            let at_ledge = pm.trace(world, f.ledge_pos, PLAYER_MINS, PLAYER_MAXS, f.ledge_pos, pm.tracemask);
+            let at_ledge = pm.trace(
+                world,
+                f.ledge_pos,
+                PLAYER_MINS,
+                PLAYER_MAXS,
+                f.ledge_pos,
+                pm.tracemask,
+            );
             if at_ledge.start_solid {
                 f.flags |= FLAG_FORCE_CROUCH;
             }
-            let at_end = pm.trace(world, f.end_pos, PLAYER_MINS, PLAYER_MAXS, f.end_pos, pm.tracemask);
+            let at_end = pm.trace(
+                world,
+                f.end_pos,
+                PLAYER_MINS,
+                PLAYER_MAXS,
+                f.end_pos,
+                pm.tracemask,
+            );
             if !at_end.start_solid {
                 f.flags |= FLAG_STAND_AFTER;
             }

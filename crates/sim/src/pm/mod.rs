@@ -14,6 +14,14 @@
 //! (`PM_Weapon`), animation script events and aim-spread decay. Their inputs reach movement
 //! through [`WeaponMove`] and the weapon fields of [`PlayerState`].
 
+// Arithmetic keeps the original's operand order (`a = b * a`, `x * -1`) so results match bit for
+// bit, and the per-axis loops index parallel arrays.
+#![allow(
+    clippy::assign_op_pattern,
+    clippy::neg_multiply,
+    clippy::needless_range_loop
+)]
+
 mod ads;
 mod duck;
 mod footsteps;
@@ -38,7 +46,8 @@ mod test_world;
 mod tests;
 
 pub use mantle::{
-    MANTLE_ANIM_COUNT, MANTLE_ANIM_NAMES, MantleAnim, MantleAnims, MantleTransition, TRANSITIONS, weapon_inactive,
+    MANTLE_ANIM_COUNT, MANTLE_ANIM_NAMES, MantleAnim, MantleAnims, MantleTransition, TRANSITIONS,
+    weapon_inactive,
 };
 pub use params::{Params, WeaponMove};
 pub use state::*;
@@ -160,7 +169,12 @@ impl<'a> Pmove<'a> {
     }
 
     /// `PM_playerTrace` with the current bounds and mask.
-    pub(crate) fn player_trace_body(&mut self, world: &dyn Collide, start: Vec3, end: Vec3) -> Trace {
+    pub(crate) fn player_trace_body(
+        &mut self,
+        world: &dyn Collide,
+        start: Vec3,
+        end: Vec3,
+    ) -> Trace {
         self.player_trace(world, start, self.mins, self.maxs, end, self.tracemask)
     }
 }

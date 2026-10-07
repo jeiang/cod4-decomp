@@ -40,7 +40,10 @@ pub(super) fn update_view_angles(pm: &mut Pmove<'_>, world: &dyn Collide, msec: 
     if pm.ps.pm_flags & pmf::PRONE != 0 {
         update_prone(pm, world, msec, old_yaw);
     }
-    if !matches!(pm.ps.pm_type, PmType::Ufo | PmType::Noclip | PmType::Spectator) {
+    if !matches!(
+        pm.ps.pm_type,
+        PmType::Ufo | PmType::Noclip | PmType::Spectator
+    ) {
         update_lean(pm, world, msec);
     }
 }
@@ -80,7 +83,11 @@ fn range_limited(pm: &mut Pmove<'_>, old_yaw: f32) {
             angle_delta(base, pm.ps.viewangles[i])
         };
         if range < delta || delta < -range {
-            let excess = if range >= delta { delta + range } else { delta - range };
+            let excess = if range >= delta {
+                delta + range
+            } else {
+                delta - range
+            };
             pm.ps.delta_angles[i] += excess;
             pm.ps.viewangles[i] = if excess <= 0.0 {
                 angle_normalize_360(base + range)
@@ -97,7 +104,11 @@ fn ladder_clamp(pm: &mut Pmove<'_>) {
     let facing = math::vec_to_yaw(&pm.ps.ladder_vec) + 180.0;
     let delta = angle_delta(facing, pm.ps.viewangles[1]);
     if cap < delta || delta < -cap {
-        let excess = if cap >= delta { delta + cap } else { delta - cap };
+        let excess = if cap >= delta {
+            delta + cap
+        } else {
+            delta - cap
+        };
         pm.ps.delta_angles[1] += excess;
         pm.ps.viewangles[1] = if excess <= 0.0 {
             angle_normalize_360(facing + cap)
@@ -116,7 +127,8 @@ fn update_prone(pm: &mut Pmove<'_>, world: &dyn Collide, msec: f32, old_view_yaw
     let threshold = pm.params.bg_prone_yawcap - 5.0;
     let over_cap = !(-threshold..=threshold).contains(&delta);
     let moving_off_axis = (pm.cmd.forwardmove != 0 || pm.cmd.rightmove != 0) && delta != 0.0;
-    let fits = |pm: &mut Pmove<'_>, yaw: f32| check_player_prone(pm, world, yaw, true, true, 45.0, false);
+    let fits =
+        |pm: &mut Pmove<'_>, yaw: f32| check_player_prone(pm, world, yaw, true, true, 45.0, false);
 
     if over_cap || moving_off_axis {
         let max_delta_yaw = msec * 55.0 * math::EQUAL_EPSILON;
@@ -194,7 +206,11 @@ fn update_prone(pm: &mut Pmove<'_>, world: &dyn Collide, msec: f32, old_view_yaw
 fn yaw_clamp(pm: &mut Pmove<'_>, delta: f32, blocked: bool, old_view_yaw: f32, new_view_yaw: f32) {
     let cap = pm.params.bg_prone_yawcap;
     if cap < delta || delta < -cap {
-        let excess = if cap >= delta { delta + cap } else { delta - cap };
+        let excess = if cap >= delta {
+            delta + cap
+        } else {
+            delta - cap
+        };
         pm.ps.delta_angles[1] += excess;
         pm.ps.viewangles[1] = if excess <= 0.0 {
             angle_normalize_360(pm.ps.prone_direction + cap)
@@ -220,7 +236,11 @@ fn yaw_clamp(pm: &mut Pmove<'_>, delta: f32, blocked: bool, old_view_yaw: f32, n
 fn pitch_clamp(pm: &mut Pmove<'_>) {
     let delta = angle_delta(pm.ps.prone_torso_pitch, pm.ps.viewangles[0]);
     if delta > 45.0 || delta < -45.0 {
-        let excess = if delta <= 45.0 { delta + 45.0 } else { delta - 45.0 };
+        let excess = if delta <= 45.0 {
+            delta + 45.0
+        } else {
+            delta - 45.0
+        };
         pm.ps.delta_angles[0] += excess;
         let target = if excess <= 0.0 {
             pm.ps.prone_torso_pitch + 45.0
@@ -249,7 +269,11 @@ pub(super) fn update_lean(pm: &mut Pmove<'_>, world: &dyn Collide, msec: f32) {
     if pm.ps.e_flags & ef::TURRET_ACTIVE != 0 {
         leaning = 0;
     }
-    let lean_max = if pm.ps.stance() == Stance::Prone { 0.25 } else { 0.5 };
+    let lean_max = if pm.ps.stance() == Stance::Prone {
+        0.25
+    } else {
+        0.5
+    };
     let mut lean = pm.ps.leanf;
     if leaning != 0 {
         if leaning <= 0 {
@@ -305,7 +329,11 @@ pub(super) fn update_prone_pitch(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &
         return;
     }
     if pm.ps.ground_entity_num == ENTITYNUM_NONE {
-        let walkable = if pml.ground_plane { pml.ground_trace.walkable } else { true };
+        let walkable = if pml.ground_plane {
+            pml.ground_trace.walkable
+        } else {
+            true
+        };
         let yaw = pm.ps.prone_direction;
         if !check_player_prone(pm, world, yaw, true, walkable, 50.0, true) {
             pm.ps.add_event(ev::STANCE_FORCE_CROUCH, 0);

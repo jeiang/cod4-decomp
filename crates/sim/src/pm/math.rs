@@ -295,7 +295,13 @@ pub fn un_get_lean_fraction(f: f32) -> f32 {
 }
 
 /// Shifts a viewpoint sideways for a lean.
-pub fn add_lean_to_position(pos: &mut Vec3, view_yaw: f32, lean_frac: f32, view_roll: f32, lean_dist: f32) {
+pub fn add_lean_to_position(
+    pos: &mut Vec3,
+    view_yaw: f32,
+    lean_frac: f32,
+    view_roll: f32,
+    lean_dist: f32,
+) {
     if lean_frac != 0.0 {
         let lean = get_lean_fraction(lean_frac);
         let (_, right, _) = angle_vectors(&[0.0, view_yaw, view_roll * lean]);
@@ -312,7 +318,8 @@ mod tests {
         let (s, c) = sincos_deg(30.0);
         assert!((s - 0.5).abs() < 1e-7 && (c - 0.866_025_4).abs() < 1e-7);
         let (s, c) = sincos_deg(-135.0);
-        assert!((s + 0.707_106_8).abs() < 1e-7 && (c + 0.707_106_8).abs() < 1e-7);
+        assert!((s + core::f32::consts::FRAC_1_SQRT_2).abs() < 1e-7);
+        assert!((c + core::f32::consts::FRAC_1_SQRT_2).abs() < 1e-7);
         assert!((acos_deg(0.5) - 60.0).abs() < 1e-4);
         assert!((vec_to_yaw(&[-1.0, 0.0, 0.0]) - 180.0).abs() < 1e-4);
         assert!((vec_to_yaw(&[0.0, -1.0, 0.0]) - 270.0).abs() < 1e-4);

@@ -68,7 +68,9 @@ pub(super) fn update_flag(pm: &mut Pmove<'_>, pml: &Pml) {
     if requested && allowed {
         if pm.ps.pm_flags & pmf::PRONE == 0 || using_sniper_scope(pm) {
             pm.ps.pm_flags |= pmf::SIGHT_AIMING;
-        } else if pm.oldcmd.buttons & button::ADS == 0 || pm.cmd.forwardmove == 0 && pm.cmd.rightmove == 0 {
+        } else if pm.oldcmd.buttons & button::ADS == 0
+            || pm.cmd.forwardmove == 0 && pm.cmd.rightmove == 0
+        {
             pm.ps.pm_flags |= pmf::SIGHT_AIMING | pmf::PRONEMOVE_OVERRIDDEN;
         }
     }
@@ -84,7 +86,11 @@ pub(super) fn update_walking_flag(pm: &mut Pmove<'_>) {
         && ps.pm_flags & pmf::SIGHT_AIMING != 0
         && !matches!(
             ps.weapon_state,
-            ws::RELOADING | ws::RELOAD_START | ws::RELOAD_END | ws::RELOAD_START_INTERUPT | ws::RELOADING_INTERUPT
+            ws::RELOADING
+                | ws::RELOAD_START
+                | ws::RELOAD_END
+                | ws::RELOAD_START_INTERUPT
+                | ws::RELOADING_INTERUPT
         )
     {
         ps.pm_flags |= pmf::WALKING;
@@ -139,7 +145,11 @@ pub(super) fn update_lerp(pm: &mut Pmove<'_>, pml: &Pml) {
         }
     }
     if requested && ps.weapon_pos_frac != 1.0 || !requested && ps.weapon_pos_frac != 0.0 {
-        let rate = if requested { w.pos_blend_in_rate } else { -w.pos_blend_out_rate };
+        let rate = if requested {
+            w.pos_blend_in_rate
+        } else {
+            -w.pos_blend_out_rate
+        };
         let frac = ps.weapon_pos_frac + pml.msec as f32 * rate;
         ps.weapon_pos_frac = frac.clamp(0.0, 1.0);
     }
@@ -152,7 +162,12 @@ pub(super) fn interrupt_weapon_with_prone_move(ps: &mut PlayerState) -> bool {
     if s <= ws::DROPPING_QUICK
         || matches!(
             s,
-            ws::RELOADING | ws::RELOAD_START | ws::RELOAD_END | ws::RELOAD_START_INTERUPT | ws::RELOADING_INTERUPT | ws::RECHAMBERING
+            ws::RELOADING
+                | ws::RELOAD_START
+                | ws::RELOAD_END
+                | ws::RELOAD_START_INTERUPT
+                | ws::RELOADING_INTERUPT
+                | ws::RECHAMBERING
         )
     {
         return true;

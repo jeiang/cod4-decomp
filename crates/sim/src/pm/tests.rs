@@ -26,16 +26,27 @@ impl std::ops::DerefMut for Player<'_> {
 }
 
 fn spawn<'a>(params: &'a Params, origin: Vec3) -> Player<'a> {
-    let mut ps = PlayerState::default();
-    ps.origin = origin;
-    ps.command_time = 10_000;
-    Player { pm: Pmove::new(ps, params), sent: UserCmd::default() }
+    let ps = PlayerState {
+        origin,
+        command_time: 10_000,
+        ..PlayerState::default()
+    };
+    Player {
+        pm: Pmove::new(ps, params),
+        sent: UserCmd::default(),
+    }
 }
 
 /// Runs one command of `dt` ms.
 fn step(p: &mut Player<'_>, world: &TestWorld, buttons: i32, fwd: i8, right: i8, dt: i32) {
     let angles = p.pm.cmd.angles;
-    p.pm.cmd = UserCmd { buttons, forwardmove: fwd, rightmove: right, angles, ..UserCmd::default() };
+    p.pm.cmd = UserCmd {
+        buttons,
+        forwardmove: fwd,
+        rightmove: right,
+        angles,
+        ..UserCmd::default()
+    };
     p.pm.cmd.server_time = p.pm.ps.command_time + dt;
     p.pm.oldcmd = p.sent;
     p.sent = p.pm.cmd;
@@ -79,11 +90,21 @@ fn running_forward_reaches_the_g_speed() {
     let (w, params) = (TestWorld::floor(), Params::default());
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, 0, 127, 0, 1000);
-    assert!((pm.ps.velocity[0] - 190.0).abs() < 1.5, "vx = {}", pm.ps.velocity[0]);
+    assert!(
+        (pm.ps.velocity[0] - 190.0).abs() < 1.5,
+        "vx = {}",
+        pm.ps.velocity[0]
+    );
     assert!(pm.ps.velocity[1].abs() < 1e-3);
     assert!(pm.ps.origin[0] > 120.0, "ran {}", pm.ps.origin[0]);
     // Footsteps were raised while running on a stepped surface.
-    assert!(events(&pm).iter().all(|e| e.0 == ev::FOOTSTEP_RUN || e.0 == 0), "{:?}", events(&pm));
+    assert!(
+        events(&pm)
+            .iter()
+            .all(|e| e.0 == ev::FOOTSTEP_RUN || e.0 == 0),
+        "{:?}",
+        events(&pm)
+    );
 }
 
 #[test]
@@ -92,7 +113,11 @@ fn diagonal_input_is_not_faster_than_straight() {
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, 0, 127, 127, 1500);
     // Forward and strafe at full deflection: speed is normalised, strafe scaled by 0.8.
-    assert!(hspeed(&pm) < 190.0 && hspeed(&pm) > 150.0, "speed {}", hspeed(&pm));
+    assert!(
+        hspeed(&pm) < 190.0 && hspeed(&pm) > 150.0,
+        "speed {}",
+        hspeed(&pm)
+    );
 }
 
 #[test]
@@ -100,7 +125,11 @@ fn backpedalling_is_slower() {
     let (w, params) = (TestWorld::floor(), Params::default());
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, 0, -127, 0, 1000);
-    assert!((pm.ps.velocity[0] + 190.0 * 0.7).abs() < 1.5, "vx = {}", pm.ps.velocity[0]);
+    assert!(
+        (pm.ps.velocity[0] + 190.0 * 0.7).abs() < 1.5,
+        "vx = {}",
+        pm.ps.velocity[0]
+    );
 }
 
 #[test]
@@ -109,12 +138,20 @@ fn sprint_is_faster_and_runs_out() {
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, button::SPRINT, 127, 0, 1500);
     assert!(pm.ps.pm_flags & pmf::SPRINTING != 0);
-    assert!((pm.ps.velocity[0] - 190.0 * 1.5).abs() < 2.0, "vx = {}", pm.ps.velocity[0]);
+    assert!(
+        (pm.ps.velocity[0] - 190.0 * 1.5).abs() < 2.0,
+        "vx = {}",
+        pm.ps.velocity[0]
+    );
     // The 4 s budget is gone; the held button no longer sprints until released.
     run(&mut pm, &w, button::SPRINT, 127, 0, 3000);
     assert!(pm.ps.pm_flags & pmf::SPRINTING == 0);
     assert!(pm.ps.sprint_state.sprint_button_up_required);
-    assert!((pm.ps.velocity[0] - 190.0).abs() < 2.0, "vx = {}", pm.ps.velocity[0]);
+    assert!(
+        (pm.ps.velocity[0] - 190.0).abs() < 2.0,
+        "vx = {}",
+        pm.ps.velocity[0]
+    );
     // Released and pressed again with a refilled budget: sprint resumes.
     run(&mut pm, &w, 0, 127, 0, 6000);
     run(&mut pm, &w, button::SPRINT, 127, 0, 500);
@@ -142,7 +179,11 @@ fn crouch_lowers_eye_and_speed_then_stand_restores() {
     assert_eq!(pm.ps.view_height_current, 40.0);
     assert_eq!(pm.maxs[2], 50.0);
     assert_eq!(pm.ps.stance(), Stance::Crouch);
-    assert!((pm.ps.velocity[0] - 190.0 * 0.65).abs() < 2.0, "vx = {}", pm.ps.velocity[0]);
+    assert!(
+        (pm.ps.velocity[0] - 190.0 * 0.65).abs() < 2.0,
+        "vx = {}",
+        pm.ps.velocity[0]
+    );
     run(&mut pm, &w, 0, 127, 0, 800);
     assert_eq!(pm.ps.view_height_current, 60.0);
     assert_eq!(pm.maxs[2], 70.0);
@@ -158,7 +199,11 @@ fn prone_is_slow_and_low() {
     assert_eq!(pm.maxs[2], 30.0);
     assert!(pm.ps.pm_flags & pmf::PRONE != 0);
     run(&mut pm, &w, button::PRONE, 127, 0, 1500);
-    assert!((pm.ps.velocity[0] - 190.0 * 0.15).abs() < 2.0, "vx = {}", pm.ps.velocity[0]);
+    assert!(
+        (pm.ps.velocity[0] - 190.0 * 0.15).abs() < 2.0,
+        "vx = {}",
+        pm.ps.velocity[0]
+    );
     // Standing back up passes through crouch eye height on the way.
     run(&mut pm, &w, 0, 0, 0, 1500);
     assert_eq!(pm.ps.stance(), Stance::Stand);
@@ -168,7 +213,12 @@ fn prone_is_slow_and_low() {
 #[test]
 fn a_low_ceiling_keeps_the_player_crouched() {
     let mut w = TestWorld::floor();
-    w.add([-100.0, -100.0, 55.0], [100.0, 100.0, 80.0], contents::SOLID, 0);
+    w.add(
+        [-100.0, -100.0, 55.0],
+        [100.0, 100.0, 80.0],
+        contents::SOLID,
+        0,
+    );
     let params = Params::default();
     let mut pm = spawn(&params, [0.0; 3]);
     // Crouch first: a crouched hull (height 50) fits under the ceiling at 55.
@@ -231,7 +281,10 @@ fn falling_far_hurts_and_slows() {
     }
     assert_eq!(pm.ps.ground_entity_num, crate::cm::ENTITYNUM_WORLD);
     // 200 units fallen, min 128 / max 300: (200 - 128) / 172 of 100 = 41.
-    let (event, damage) = events(&pm).into_iter().find(|e| e.0 >= ev::LANDING_PAIN_FIRST).expect("pain landing");
+    let (event, damage) = events(&pm)
+        .into_iter()
+        .find(|e| e.0 >= ev::LANDING_PAIN_FIRST)
+        .expect("pain landing");
     assert_eq!(event, ev::LANDING_PAIN_FIRST + 5);
     assert!((38..=44).contains(&damage), "damage {damage}");
     assert!(pm.ps.pm_flags & pmf::TIME_HARDLANDING != 0);
@@ -253,25 +306,48 @@ fn falling_from_height_below_the_minimum_does_no_damage() {
 #[test]
 fn steps_up_low_ledges_but_not_walls() {
     let mut w = TestWorld::floor();
-    w.add([60.0, -100.0, 0.0], [120.0, 100.0, 10.0], contents::SOLID, SURF_CONCRETE);
-    w.add([200.0, -100.0, 0.0], [260.0, 100.0, 80.0], contents::SOLID, SURF_CONCRETE);
+    w.add(
+        [60.0, -100.0, 0.0],
+        [120.0, 100.0, 10.0],
+        contents::SOLID,
+        SURF_CONCRETE,
+    );
+    w.add(
+        [200.0, -100.0, 0.0],
+        [260.0, 100.0, 80.0],
+        contents::SOLID,
+        SURF_CONCRETE,
+    );
     let params = Params::default();
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, 0, 127, 0, 600);
     assert!(pm.ps.origin[0] > 90.0, "stuck at {}", pm.ps.origin[0]);
-    assert!((pm.ps.origin[2] - 10.0).abs() < 0.5, "z {}", pm.ps.origin[2]);
+    assert!(
+        (pm.ps.origin[2] - 10.0).abs() < 0.5,
+        "z {}",
+        pm.ps.origin[2]
+    );
     assert_eq!(pm.ps.ground_entity_num, crate::cm::ENTITYNUM_WORLD);
     run(&mut pm, &w, 0, 127, 0, 2000);
     // Blocked by the 80-unit wall at x = 200 (hull half-width 15).
     assert!(pm.ps.origin[0] < 186.0, "x = {}", pm.ps.origin[0]);
     assert!(pm.ps.origin[0] > 180.0);
-    assert!(pm.ps.origin[2] < 0.5, "walked off the ledge and onto the floor, z = {}", pm.ps.origin[2]);
+    assert!(
+        pm.ps.origin[2] < 0.5,
+        "walked off the ledge and onto the floor, z = {}",
+        pm.ps.origin[2]
+    );
 }
 
 #[test]
 fn slides_along_a_wall() {
     let mut w = TestWorld::floor();
-    w.add([100.0, -500.0, 0.0], [140.0, 500.0, 200.0], contents::SOLID, SURF_CONCRETE);
+    w.add(
+        [100.0, -500.0, 0.0],
+        [140.0, 500.0, 200.0],
+        contents::SOLID,
+        SURF_CONCRETE,
+    );
     let params = Params::default();
     let mut pm = spawn(&params, [0.0; 3]);
     // Forward plus strafe left (+Y when facing +X): +x is blocked, y keeps changing.
@@ -284,7 +360,12 @@ fn slides_along_a_wall() {
 #[test]
 fn entities_hit_are_reported_once() {
     let mut w = TestWorld::floor();
-    w.add([60.0, -100.0, 0.0], [90.0, 100.0, 100.0], contents::SOLID, 0);
+    w.add(
+        [60.0, -100.0, 0.0],
+        [90.0, 100.0, 100.0],
+        contents::SOLID,
+        0,
+    );
     w.blocks.last_mut().unwrap().entity = 7;
     let params = Params::default();
     let mut pm = spawn(&params, [0.0; 3]);
@@ -305,7 +386,11 @@ fn lean_ramps_and_returns() {
     let (w, params) = (TestWorld::floor(), Params::default());
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, button::LEAN_RIGHT, 0, 0, 100);
-    assert!(pm.ps.leanf > 0.1 && pm.ps.leanf < 0.2, "lean {}", pm.ps.leanf);
+    assert!(
+        pm.ps.leanf > 0.1 && pm.ps.leanf < 0.2,
+        "lean {}",
+        pm.ps.leanf
+    );
     run(&mut pm, &w, button::LEAN_RIGHT, 0, 0, 600);
     assert_eq!(pm.ps.leanf, 0.5);
     run(&mut pm, &w, 0, 0, 0, 400);
@@ -361,7 +446,12 @@ fn a_stale_command_is_ignored_and_a_huge_gap_is_clamped() {
 #[test]
 fn noclip_moves_through_walls_and_spectators_fly() {
     let mut w = TestWorld::floor();
-    w.add([60.0, -100.0, 0.0], [90.0, 100.0, 100.0], contents::SOLID, 0);
+    w.add(
+        [60.0, -100.0, 0.0],
+        [90.0, 100.0, 100.0],
+        contents::SOLID,
+        0,
+    );
     let params = Params::default();
     let mut pm = spawn(&params, [0.0, 0.0, 10.0]);
     pm.ps.pm_type = PmType::Noclip;
@@ -391,7 +481,12 @@ fn a_dead_body_skids_to_a_stop() {
 #[test]
 fn climbs_a_ladder_and_lets_go_when_jumping() {
     let mut w = TestWorld::floor();
-    w.add([16.5, -50.0, 0.0], [20.0, 50.0, 300.0], contents::SOLID, SURF_LADDER);
+    w.add(
+        [16.5, -50.0, 0.0],
+        [20.0, 50.0, 300.0],
+        contents::SOLID,
+        SURF_LADDER,
+    );
     let params = Params::default();
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, 0, 0, 0, 100);
@@ -410,7 +505,9 @@ fn climbs_a_ladder_and_lets_go_when_jumping() {
 fn mantle_anims() -> MantleAnims {
     let anim = |len: i32, delta: Vec3| MantleAnim {
         length_msec: len,
-        samples: (0..=10).map(|i| math_scale(&delta, i as f32 / 10.0)).collect(),
+        samples: (0..=10)
+            .map(|i| math_scale(&delta, i as f32 / 10.0))
+            .collect(),
     };
     let mut set: [MantleAnim; MANTLE_ANIM_COUNT] = Default::default();
     for t in TRANSITIONS {
@@ -433,7 +530,10 @@ fn mantles_onto_a_ledge() {
         contents::SOLID | contents::MANTLE,
         SURF_CONCRETE | SURF_MANTLEON,
     );
-    let params = Params { mantle_anims: Some(mantle_anims()), ..Params::default() };
+    let params = Params {
+        mantle_anims: Some(mantle_anims()),
+        ..Params::default()
+    };
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, 0, 0, 0, 100);
     // Facing the ledge near enough, the hint shows before jump is pressed.
@@ -441,7 +541,10 @@ fn mantles_onto_a_ledge() {
     assert!(pm.ps.mantle_state.flags & 8 != 0, "no mantle hint");
     step(&mut pm, &w, button::JUMP, 0, 0, 20);
     assert!(pm.ps.pm_flags & pmf::MANTLE != 0);
-    assert_eq!(pm.ps.mantle_state.trans_index, 1, "50 units is closest to the 51 animation");
+    assert_eq!(
+        pm.ps.mantle_state.trans_index, 1,
+        "50 units is closest to the 51 animation"
+    );
     let mut last_z = pm.ps.origin[2];
     for _ in 0..60 {
         step(&mut pm, &w, 0, 0, 0, 20);
@@ -454,8 +557,16 @@ fn mantles_onto_a_ledge() {
     assert!(pm.ps.pm_flags & pmf::MANTLE == 0, "mantle never finished");
     // The climb's last velocity carries the player a little above the ledge before gravity wins.
     run(&mut pm, &w, 0, 0, 0, 600);
-    assert!((pm.ps.origin[2] - 50.0).abs() < 0.5, "z = {}", pm.ps.origin[2]);
-    assert!(pm.ps.origin[0] > 18.0 && pm.ps.origin[0] < 120.0, "x = {}", pm.ps.origin[0]);
+    assert!(
+        (pm.ps.origin[2] - 50.0).abs() < 0.5,
+        "z = {}",
+        pm.ps.origin[2]
+    );
+    assert!(
+        pm.ps.origin[0] > 18.0 && pm.ps.origin[0] < 120.0,
+        "x = {}",
+        pm.ps.origin[0]
+    );
     assert_eq!(pm.ps.ground_entity_num, crate::cm::ENTITYNUM_WORLD);
 }
 
@@ -468,7 +579,10 @@ fn does_not_mantle_a_ledge_that_is_too_high() {
         contents::SOLID | contents::MANTLE,
         SURF_CONCRETE | SURF_MANTLEON,
     );
-    let params = Params { mantle_anims: Some(mantle_anims()), ..Params::default() };
+    let params = Params {
+        mantle_anims: Some(mantle_anims()),
+        ..Params::default()
+    };
     let mut pm = spawn(&params, [0.0; 3]);
     run(&mut pm, &w, button::JUMP, 127, 0, 600);
     assert!(pm.ps.pm_flags & pmf::MANTLE == 0);
@@ -479,7 +593,12 @@ fn does_not_mantle_a_ledge_that_is_too_high() {
 fn identical_commands_give_identical_states() {
     fn script() -> PlayerState {
         let mut w = TestWorld::floor();
-        w.add([100.0, -100.0, 0.0], [130.0, 100.0, 12.0], contents::SOLID, SURF_CONCRETE);
+        w.add(
+            [100.0, -100.0, 0.0],
+            [130.0, 100.0, 12.0],
+            contents::SOLID,
+            SURF_CONCRETE,
+        );
         let params = Params::default();
         let mut pm = spawn(&params, [0.0; 3]);
         for i in 0..300 {
@@ -490,7 +609,14 @@ fn identical_commands_give_identical_states() {
                 _ => 0,
             };
             pm.pm.cmd.angles = [0, (i * 37) % 65536, 0];
-            step(&mut pm, &w, buttons, 127, ((i % 7) as i8 - 3) * 20, 8 + (i % 5) as i32 * 4);
+            step(
+                &mut pm,
+                &w,
+                buttons,
+                127,
+                ((i % 7) as i8 - 3) * 20,
+                8 + (i % 5) * 4,
+            );
         }
         pm.pm.ps
     }
@@ -509,5 +635,3 @@ fn event_ring_keeps_the_last_four() {
     parms.sort_unstable();
     assert_eq!(parms, [3, 4, 5, 6]);
 }
-
-

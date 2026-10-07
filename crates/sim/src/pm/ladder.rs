@@ -4,7 +4,7 @@
 
 use super::footsteps::ladder_probe_bounds;
 use super::jump;
-use super::math::{self, mad, normalize, normalize2, normalize_to, project_point_on_plane};
+use super::math::{self, mad, normalize, normalize_to, normalize2, project_point_on_plane};
 use super::slide::step_slide_move;
 use super::state::{PlayerState, PmType, Stance, pmf};
 use super::walk::{SURF_LADDER, accelerate, cmd_scale};
@@ -101,7 +101,11 @@ pub(super) fn ladder_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml
         wishvel[2] = 0.5 * upscale * scale * f32::from(pm.cmd.forwardmove);
     }
     if pm.cmd.rightmove != 0 {
-        wishvel = mad(&wishvel, scale * 0.2 * f32::from(pm.cmd.rightmove), &pml.right);
+        wishvel = mad(
+            &wishvel,
+            scale * 0.2 * f32::from(pm.cmd.rightmove),
+            &pml.right,
+        );
     }
     let (wishdir, wishspeed) = normalize_to(&wishvel);
     accelerate(&mut pm.ps, pm.params, pml, &wishdir, wishspeed, 9.0);
@@ -146,9 +150,7 @@ pub(super) fn ladder_move(pm: &mut Pmove<'_>, world: &dyn Collide, pml: &mut Pml
         pm.ps.velocity[0] += -into * lv[0];
         pm.ps.velocity[1] += -into * lv[1];
         let v = pm.ps.velocity;
-        if (v[0] != 0.0 || v[1] != 0.0 || v[2] != 0.0)
-            && v[2] * v[2] >= v[0] * v[0] + v[1] * v[1]
-        {
+        if (v[0] != 0.0 || v[1] != 0.0 || v[2] != 0.0) && v[2] * v[2] >= v[0] * v[0] + v[1] * v[1] {
             pm.ps.velocity[0] += -50.0 * lv[0];
             pm.ps.velocity[1] += -50.0 * lv[1];
         }
