@@ -746,13 +746,14 @@ impl Game {
         }
         let origin = self.ent(n).map_or([0.0; 3], |e| e.origin);
         let (weapon, owner) = (m.weapon, m.parent.unwrap_or(1023));
-        self.tempev.add(now, crate::tempev::ev::MISSILE_BOUNCE, |s| {
-            s.origin = origin;
-            s.angles = crate::tempev::dir_to_angles(tr.normal);
-            s.event_parm = surf as u8;
-            s.weapon = weapon;
-            s.client = owner;
-        });
+        self.tempev
+            .add(now, crate::tempev::ev::MISSILE_BOUNCE, |s| {
+                s.origin = origin;
+                s.angles = crate::tempev::dir_to_angles(tr.normal);
+                s.event_parm = surf as u8;
+                s.weapon = weapon;
+                s.client = owner;
+            });
         if m.bounces {
             let speed = length(velocity);
             if speed > 0.0 && d <= 0.0 {

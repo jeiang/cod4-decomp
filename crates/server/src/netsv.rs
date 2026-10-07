@@ -137,7 +137,7 @@ impl NetSv {
                 && let Some(p) = peer.link.receive(packet)
             {
                 peer.last_heard = Instant::now();
-        peer.fx_sent = 0;
+                peer.fx_sent = 0;
                 for (_, c) in p.cmds {
                     if peer.cmds.len() < MAX_QUEUED_CMDS {
                         peer.cmds.push_back(c);

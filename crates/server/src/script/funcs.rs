@@ -885,7 +885,11 @@ fn precache_item(g: &mut Game, _: &mut Vm, a: Args) -> R {
 fn play_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
     let index = a.int(0)?;
     let origin = a.vector(1)?;
-    let forward = if a.len() > 2 { a.vector(2)? } else { [0.0, 0.0, 1.0] };
+    let forward = if a.len() > 2 {
+        a.vector(2)?
+    } else {
+        [0.0, 0.0, 1.0]
+    };
     emit_fx(g, index, origin, forward, 1023);
     Ok(Value::Undefined)
 }
@@ -920,11 +924,12 @@ fn physics_explosion_sphere(g: &mut Game, _: &mut Vm, a: Args) -> R {
     let radius = a.float(1)?;
     let strength = a.float(3)?;
     let now = g.level.time;
-    g.tempev.add(now, crate::tempev::ev::PHYSICS_EXPLOSION, |s| {
-        s.origin = origin;
-        s.velocity = [radius, 0.0, 0.0];
-        s.weapon = (strength * 10.0).clamp(0.0, 511.0) as u16;
-    });
+    g.tempev
+        .add(now, crate::tempev::ev::PHYSICS_EXPLOSION, |s| {
+            s.origin = origin;
+            s.velocity = [radius, 0.0, 0.0];
+            s.weapon = (strength * 10.0).clamp(0.0, 511.0) as u16;
+        });
     Ok(Value::Undefined)
 }
 

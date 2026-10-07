@@ -87,7 +87,11 @@ mod tests {
         let mut t = TempEvents::default();
         t.add(1000, ev::EXPLOSION, |s| s.origin = [1.0, 2.0, 3.0]);
         t.add(1100, ev::BULLET_IMPACT, |_| {});
-        let at = |now| t.live(now).map(|s| (s.event, s.event_seq)).collect::<Vec<_>>();
+        let at = |now| {
+            t.live(now)
+                .map(|s| (s.event, s.event_seq))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(at(1200), [(ev::EXPLOSION, 1), (ev::BULLET_IMPACT, 2)]);
         assert_eq!(at(1350), [(ev::BULLET_IMPACT, 2)]);
         assert!(at(1500).is_empty());

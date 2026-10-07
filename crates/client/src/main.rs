@@ -4,6 +4,7 @@
 
 mod app;
 mod display;
+mod events;
 mod flythrough;
 mod input;
 mod listen;

@@ -413,7 +413,9 @@ impl Game {
         out: &mut Vec<BulletHit>,
     ) {
         let target = br.hit_ent.unwrap_or(ENTITYNUM_WORLD);
-        let damageable = br.hit_ent.is_some_and(|t| self.ent(t).is_some_and(|e| e.takedamage));
+        let damageable = br
+            .hit_ent
+            .is_some_and(|t| self.ent(t).is_some_and(|e| e.takedamage));
         let dist = length(sub(br.hit_pos, bp.orig_start));
         let mut flags = dflag;
         if p.info.armor_piercing {

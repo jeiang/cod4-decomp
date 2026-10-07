@@ -308,7 +308,8 @@ impl Fx {
         }
         let delay = d.spawn_delay_msec.base as f32 + d.spawn_delay_msec.amplitude as f32 * r[17];
         let begin = time + delay.max(0.0) as i32;
-        let life = (d.life_span_msec.base as f32 + d.life_span_msec.amplitude as f32 * r[18]).max(1.0);
+        let life =
+            (d.life_span_msec.base as f32 + d.life_span_msec.amplitude as f32 * r[18]).max(1.0);
         // The spawn point.
         let off = Vec3::new(
             pick(r[6], &d.spawn_origin[0]),
@@ -463,7 +464,14 @@ impl Fx {
                 && !el.done
                 && let Some(def) = self.lib.get(name)
             {
-                spawned.push((def.clone(), Frame { origin: el.pos, ..*frame }, end));
+                spawned.push((
+                    def.clone(),
+                    Frame {
+                        origin: el.pos,
+                        ..*frame
+                    },
+                    end,
+                ));
             }
             el.done = true;
         }
@@ -531,7 +539,11 @@ impl Fx {
         {
             self.stats.impacts += 1;
             el.pos = from.lerp(to, frac);
-            let impact = d.effect_on_impact.as_deref().and_then(|n| self.lib.get(n)).cloned();
+            let impact = d
+                .effect_on_impact
+                .as_deref()
+                .and_then(|n| self.lib.get(n))
+                .cloned();
             let at = el.at + (ms as f32 * frac) as i32;
             if d.flags & flags::DIE_ON_TOUCH != 0 {
                 if let Some(def) = impact {
@@ -565,7 +577,11 @@ impl Fx {
             if el.emit_left <= 0.0
                 && let Some(def) = self.lib.get(name)
             {
-                spawned.push((def.clone(), Frame::facing(to, v.try_normalize().unwrap_or(Vec3::Z)), el.at + ms));
+                spawned.push((
+                    def.clone(),
+                    Frame::facing(to, v.try_normalize().unwrap_or(Vec3::Z)),
+                    el.at + ms,
+                ));
                 el.emit_left = d.emit_dist.base
                     + d.emit_dist.amplitude * self.rng.f()
                     + d.emit_dist_variance.base * self.rng.f();
@@ -587,7 +603,10 @@ impl Fx {
                 let vis = visual_state(d, el, t);
                 let sort_order = d.sort_order;
                 match (&d.visuals, d.elem_type) {
-                    (FxVisuals::Materials(mats), elem::SPRITE_BILLBOARD | elem::SPRITE_ORIENTED | elem::TAIL) => {
+                    (
+                        FxVisuals::Materials(mats),
+                        elem::SPRITE_BILLBOARD | elem::SPRITE_ORIENTED | elem::TAIL,
+                    ) => {
                         let Some(Some(material)) = mats.get(pick_index(el, mats.len())) else {
                             continue;
                         };
@@ -606,12 +625,18 @@ impl Fx {
                                 let tangent = vdir.cross(to_cam).try_normalize().unwrap_or(Vec3::X);
                                 let normal = tangent.cross(vdir);
                                 let pos = tail_start;
-                                let q = quad(material, pos, tangent, vdir, normal, &vis, d, el, cam, t, self.now, sort_order);
+                                let q = quad(
+                                    material, pos, tangent, vdir, normal, &vis, d, el, cam, t,
+                                    self.now, sort_order,
+                                );
                                 out.quads.push(q);
                                 continue;
                             }
                         };
-                        out.quads.push(quad(material, el.pos, tangent, up, normal, &vis, d, el, cam, t, self.now, sort_order));
+                        out.quads.push(quad(
+                            material, el.pos, tangent, up, normal, &vis, d, el, cam, t, self.now,
+                            sort_order,
+                        ));
                     }
                     (FxVisuals::Models(models), elem::MODEL) => {
                         let Some(Some(model)) = models.get(pick_index(el, models.len())) else {
@@ -749,7 +774,8 @@ fn visual_state(d: &FxElemDef, el: &Elem, t: f32) -> Vis {
     let rr = el.r[13];
     let w1 = l * l * 0.5;
     let w0 = l - w1;
-    let total = rr * p.amplitude.rotation_total + p.base.rotation_total
+    let total = rr * p.amplitude.rotation_total
+        + p.base.rotation_total
         + (rr * p.amplitude.rotation_delta + p.base.rotation_delta) * w0
         + (rr * q.amplitude.rotation_delta + q.base.rotation_delta) * w1;
     let rotation = pick(vl, &d.initial_rotation) + total * el.life;
@@ -840,5 +866,213 @@ fn atlas(d: &FxElemDef, el: &Elem, t: f32, elapsed_ms: f32) -> (f32, f32, f32, f
     let i = i & (count - 1);
     let ds = 1.0 / (1 << col_bits) as f32;
     let dt = 1.0 / (1 << row_bits) as f32;
-    ((i & ((1 << col_bits) - 1)) as f32 * ds, ds, (i >> col_bits) as f32 * dt, dt)
+    (
+        (i & ((1 << col_bits) - 1)) as f32 * ds,
+        ds,
+        (i >> col_bits) as f32 * dt,
+        dt,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assets::zone::fx::Range;
+
+    fn range<T: Copy>(base: T, amplitude: T) -> Range<T> {
+        Range { base, amplitude }
+    }
+
+    fn elem_def(elem_type: u8, visuals: FxVisuals) -> FxElemDef {
+        let zero = range(0.0, 0.0);
+        FxElemDef {
+            flags: 0,
+            spawn: [1, 0],
+            spawn_range: zero,
+            fade_in_range: zero,
+            fade_out_range: zero,
+            spawn_frustum_cull_radius: 0.0,
+            spawn_delay_msec: range(0, 0),
+            life_span_msec: range(100, 0),
+            spawn_origin: [zero; 3],
+            spawn_offset_radius: zero,
+            spawn_offset_height: zero,
+            spawn_angles: [zero; 3],
+            angular_velocity: [zero; 3],
+            initial_rotation: zero,
+            gravity: zero,
+            reflection_factor: zero,
+            atlas: [0; 6],
+            atlas_entry_count: 0,
+            elem_type,
+            vel_samples: Arc::from(Vec::new()),
+            vis_samples: Arc::from(Vec::new()),
+            visuals,
+            coll_mins: [0.0; 3],
+            coll_maxs: [0.0; 3],
+            effect_on_impact: None,
+            effect_on_death: None,
+            effect_emitted: None,
+            emit_dist: zero,
+            emit_dist_variance: zero,
+            trail: None,
+            sort_order: 0,
+            lighting_frac: 0,
+            use_item_clip: false,
+        }
+    }
+
+    fn effect(
+        name: &str,
+        looping: u32,
+        one_shot: u32,
+        life: i32,
+        elems: Vec<FxElemDef>,
+    ) -> Arc<FxEffectDef> {
+        Arc::new(FxEffectDef {
+            name: Some(name.into()),
+            flags: 0,
+            total_size: 0,
+            msec_looping_life: life,
+            looping_count: looping,
+            one_shot_count: one_shot,
+            emission_count: 0,
+            elems: elems.into(),
+        })
+    }
+
+    fn sound(alias: &str) -> FxElemDef {
+        elem_def(
+            elem::SOUND,
+            FxVisuals::Sounds(Arc::from(vec![Some(Arc::<str>::from(alias))])),
+        )
+    }
+
+    /// A floor at z = 0.
+    struct Floor;
+
+    impl World for Floor {
+        fn trace(&self, a: Vec3, b: Vec3, _: Vec3, _: Vec3) -> Option<(f32, Vec3)> {
+            (a.z >= 0.0 && b.z < 0.0).then(|| (a.z / (a.z - b.z), Vec3::Z))
+        }
+    }
+
+    fn lib(effects: Vec<Arc<FxEffectDef>>) -> Arc<Library> {
+        let mut l = Library::default();
+        for e in effects {
+            l.add(e);
+        }
+        Arc::new(l)
+    }
+
+    #[test]
+    fn one_shot_elements_spawn_together_and_die_after_their_lifespan() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [3, 0];
+        let def = effect("fx/test", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        assert_eq!(fx.stats.elems_spawned, 3);
+        fx.update(50, &Empty);
+        assert_eq!((fx.live_effects(), fx.live_elems()), (1, 3));
+        fx.update(200, &Empty);
+        assert_eq!((fx.live_effects(), fx.live_elems()), (0, 0));
+    }
+
+    #[test]
+    fn a_looping_element_spawns_on_its_interval_for_the_looping_life_only() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [100, 1];
+        let def = effect("fx/loop", 1, 0, 450, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(2000, &Empty);
+        // t = 0, 100, 200, 300 and 400.
+        assert_eq!(fx.stats.elems_spawned, 5);
+        assert_eq!(fx.live_effects(), 0);
+    }
+
+    #[test]
+    fn a_runner_starts_the_effect_it_names() {
+        let child = effect("fx/child", 0, 1, 0, vec![sound("child_sound")]);
+        let runner = elem_def(
+            elem::RUNNER,
+            FxVisuals::Effects(Arc::from(vec![Some(Arc::<str>::from("fx/child"))])),
+        );
+        let parent = effect("fx/parent", 0, 1, 0, vec![runner]);
+        let mut fx = Fx::new(lib(vec![child, parent.clone()]));
+        fx.play(&parent, Frame::facing(Vec3::new(1.0, 2.0, 3.0), Vec3::Z));
+        fx.update(10, &Empty);
+        let s = fx.take_sounds();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].alias, "child_sound");
+        assert_eq!(s[0].origin, Vec3::new(1.0, 2.0, 3.0));
+        assert!(fx.take_sounds().is_empty());
+    }
+
+    fn falling_particle() -> (Arc<FxEffectDef>, Arc<Library>) {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.flags = flags::USE_COLLISION | flags::DIE_ON_TOUCH;
+        e.gravity = range(1.0, 0.0);
+        e.life_span_msec = range(2000, 0);
+        e.effect_on_impact = Some("fx/landed".into());
+        let def = effect("fx/fall", 0, 1, 0, vec![e]);
+        let landed = effect("fx/landed", 0, 1, 0, vec![sound("thud")]);
+        (def.clone(), lib(vec![def, landed]))
+    }
+
+    #[test]
+    fn a_falling_particle_lands_and_plays_its_impact_effect_on_the_floor() {
+        let (def, lib) = falling_particle();
+        let mut fx = Fx::new(lib);
+        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 10.0), Vec3::Z));
+        // Free fall from 10 units takes sqrt(2 * 10 / 800) = 0.158 s.
+        fx.update(100, &Empty);
+        fx.update(100, &Floor);
+        assert!(fx.take_sounds().is_empty(), "not landed at 100 ms");
+        fx.update(300, &Floor);
+        assert_eq!(fx.stats.impacts, 1);
+        let s = fx.take_sounds();
+        assert_eq!(s.len(), 1, "one impact");
+        assert_eq!(s[0].alias, "thud");
+        assert!(s[0].origin.z.abs() < 0.5, "{:?}", s[0].origin);
+        assert_eq!(fx.live_elems(), 0);
+    }
+
+    #[test]
+    fn the_landing_point_does_not_depend_on_the_frame_rate() {
+        let land = |frame_ms: i32| {
+            let (def, lib) = falling_particle();
+            let mut fx = Fx::new(lib);
+            fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 10.0), Vec3::Z));
+            let mut t = 0;
+            while t < 400 {
+                t += frame_ms;
+                fx.update(t, &Floor);
+            }
+            fx.take_sounds()[0].origin
+        };
+        let (a, b) = (land(5), land(33));
+        assert!((a - b).length() < 1e-3, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn effects_beyond_the_cap_drop_the_oldest() {
+        let e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        let def = effect("fx/many", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        for _ in 0..MAX_EFFECTS + 5 {
+            fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        }
+        assert_eq!(fx.live_effects(), MAX_EFFECTS);
+        assert_eq!(fx.stats.dropped, 5);
+    }
+
+    #[test]
+    fn effect_names_match_without_regard_to_case() {
+        let def = effect("FX/Misc/Smoke", 0, 1, 0, vec![sound("a")]);
+        let mut fx = Fx::new(lib(vec![def]));
+        assert!(fx.play_named("fx/misc/smoke", Frame::facing(Vec3::ZERO, Vec3::Z)));
+        assert!(!fx.play_named("fx/misc/none", Frame::facing(Vec3::ZERO, Vec3::Z)));
+    }
 }
