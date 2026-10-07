@@ -29,6 +29,14 @@ nix develop -c cargo run --release -p harness -- diff a.zip b.zip    # compare t
 
 Stages that need engine commands read console scripts (`scenarios/*.cfg`, or `--script file`); commands the engine lacks yet are reported as skipped. Double-clicking the program runs the suite with the zip next to it. The CI `windows` job uploads that portable folder and smoke-tests it with no install. `scripts/artemis.sh <ref> -- <run options>` runs it on artemis and copies `bundles/` back.
 
+## Headless server
+
+```sh
+COD4_PATH=/path/to/install nix develop -c cargo run --release -p server -- +set g_gametype war +exec server.cfg +map mp_crash
+```
+
+`cod4e-server` boots like the original's dedicated server: command-line `set`s, `default_mp.cfg`, the dedicated zone set, then `+exec` and `+map`. It runs the stock gametype scripts at 30 Hz (`sv_fps`) on one thread. Harness stage 2 (`headless-bots`) drives it through its console and records `ticks.csv`, RSS and map-load time.
+
 ## Layout
 
 | crate | role |

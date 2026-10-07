@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 assets = { version = "0.0.0", path = "../assets" }
+server = { version = "0.0.0", path = "../server" }
 crash-handler = "0.8.1"
 minidumper = "0.11.0"
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }

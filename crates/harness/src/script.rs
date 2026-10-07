@@ -154,14 +154,15 @@ pub struct CommandReport {
 
 /// Run `cmds`. `sleep` performs waits (tests substitute a fake).
 ///
-/// Once a command has been skipped there is nothing real to wait for, so
-/// later waits are skipped as well instead of idling.
+/// Once a command has been skipped and no engine command has run, there is nothing real to
+/// wait for, so later waits are skipped as well instead of idling.
 pub fn run(
     cmds: &[Command],
     console: &mut dyn Console,
     mut sleep: impl FnMut(Duration),
 ) -> Vec<CommandReport> {
     let mut skipped_any = false;
+    let mut ran_engine = false;
     cmds.iter()
         .map(|c| {
             let outcome = match c.name.as_str() {
@@ -171,7 +172,9 @@ pub fn run(
                 }
                 "wait" => match c.args.as_slice() {
                     [d] => match parse_duration(d) {
-                        _ if skipped_any => Outcome::Skipped("nothing to wait for".into()),
+                        _ if skipped_any && !ran_engine => {
+                            Outcome::Skipped("nothing to wait for".into())
+                        }
                         Some(d) => {
                             sleep(d);
                             Outcome::Done
@@ -185,7 +188,10 @@ pub fn run(
                     Outcome::Skipped(format!("command not implemented: {name}"))
                 }
                 _ => match console.exec(c) {
-                    Ok(()) => Outcome::Done,
+                    Ok(()) => {
+                        ran_engine = true;
+                        Outcome::Done
+                    }
                     Err(e) => Outcome::Failed(e),
                 },
             };

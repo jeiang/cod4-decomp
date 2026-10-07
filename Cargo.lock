@@ -309,6 +309,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "server",
  "sysinfo",
  "tempfile",
  "tracing",
@@ -905,6 +906,7 @@ version = "0.0.0"
 dependencies = [
  "assets",
  "gsc",
+ "libc",
  "net",
  "sim",
 ]

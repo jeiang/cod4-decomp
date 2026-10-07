@@ -19,5 +19,8 @@ gsc = { path = "../gsc" }
 sim = { path = "../sim" }
 net = { path = "../net" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [lints]
 workspace = true
