@@ -41,7 +41,8 @@ use crate::Vec3;
 pub const MAX_BONES: usize = 128;
 
 /// The six bones the engine drives from view angles, in `controller_names` order.
-pub const CONTROLLER_BONES: [&str; 6] = ["back_low", "back_mid", "back_up", "neck", "head", "pelvis"];
+pub const CONTROLLER_BONES: [&str; 6] =
+    ["back_low", "back_mid", "back_up", "neck", "head", "pelvis"];
 
 /// One model of a rig.
 pub struct RigModel<'a> {
@@ -295,10 +296,7 @@ impl Rig {
         AnimBinding(
             part_names
                 .iter()
-                .map(|p| {
-                    self.bone_index(p.as_ref())
-                        .map_or(NO_BONE, |i| i as u8)
-                })
+                .map(|p| self.bone_index(p.as_ref()).map_or(NO_BONE, |i| i as u8))
                 .collect(),
         )
     }
@@ -315,12 +313,11 @@ impl Rig {
         }
         out.len = n;
         let root_q = quat::normalize(&quat::from_angles(&ctl.tag_origin_angles));
-        for i in 0..n {
-            let b = self.bones[i];
+        for (i, (&b, acc_i)) in self.bones.iter().zip(&acc).enumerate() {
             let mat = match b.kind {
                 Kind::Duplicate(src) => out.bones[usize::from(src)],
                 Kind::Root => {
-                    let (q, t) = acc[i].finish();
+                    let (q, t) = acc_i.finish();
                     let mut lq = q.unwrap_or(quat::IDENTITY);
                     let mut lt = t.unwrap_or([0.0; 3]);
                     if i == 0 {
@@ -340,7 +337,7 @@ impl Rig {
                 Kind::Child => {
                     let model = &self.models[usize::from(b.model)];
                     let local = usize::from(b.local) - usize::from(model.num_root_bones);
-                    let (aq, at) = acc[i].finish();
+                    let (aq, at) = acc_i.finish();
                     let control = self.control.iter().position(|c| usize::from(*c) == i);
                     let lq = if let Some(c) = control {
                         quat::normalize(&quat::from_angles(&ctl.angles[c]))
@@ -354,12 +351,19 @@ impl Rig {
                         model.trans[3 * local + 1],
                         model.trans[3 * local + 2],
                     ];
-                    let at = if control.is_some() { [0.0; 3] } else { at.unwrap_or([0.0; 3]) };
+                    let at = if control.is_some() {
+                        [0.0; 3]
+                    } else {
+                        at.unwrap_or([0.0; 3])
+                    };
                     let lt = [at[0] + rest[0], at[1] + rest[1], at[2] + rest[2]];
                     let p = out.bones[usize::from(b.parent)];
                     if control.is_some() {
                         let root = out.bones[0].quat;
-                        let q = quat::mul(&quat::mul(&root, &lq), &quat::mul(&quat::conj(&root), &p.quat));
+                        let q = quat::mul(
+                            &quat::mul(&root, &lq),
+                            &quat::mul(&quat::conj(&root), &p.quat),
+                        );
                         let t = quat::rotate(&p.quat, &lt);
                         BoneMat {
                             quat: q,

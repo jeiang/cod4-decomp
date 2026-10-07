@@ -53,7 +53,11 @@ pub fn compute(i: &ControllerInput) -> Controllers {
         let (s, c) = sincos_deg(torso_yaw);
         tag_offset[0] = (1.0 - c) * -24.0;
         tag_offset[1] = s * -12.0;
-        a[0][0] = if tilt { angle_delta(i.torso_pitch, i.waist_pitch) } else { 0.0 };
+        a[0][0] = if tilt {
+            angle_delta(i.torso_pitch, i.waist_pitch)
+        } else {
+            0.0
+        };
         a[1][1] = torso_yaw * 0.1;
         a[2] = [torso_pitch, torso_yaw * 0.8, 0.0];
     } else {

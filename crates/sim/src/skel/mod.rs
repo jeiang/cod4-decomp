@@ -19,7 +19,7 @@ pub mod trace;
 
 pub use hitloc::{HitLocation, Stance, box_hit_location};
 pub use rig::{AnimBinding, AnimLayer, BoneMat, Controllers, MAX_BONES, Pose, Rig, RigModel};
-pub use trace::{LocHit, locational_trace, trace_player};
+pub use trace::{LocHit, Placement, locational_trace, trace_player};
 
 #[cfg(test)]
 mod install_tests;

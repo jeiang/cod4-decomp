@@ -181,29 +181,46 @@ pub fn locational_trace(
     })
 }
 
-/// [`locational_trace`] for a world-space segment against an entity at `origin` with Euler
-/// `angles` (the entity's `currentAngles`; players only have yaw): the segment is moved into
-/// the entity frame, and the hit normal comes back in world space.
+/// Where an entity stands: `origin` and Euler `angles` (the entity's `currentAngles`; players
+/// only have yaw).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Placement {
+    pub origin: Vec3,
+    pub angles: Vec3,
+}
+
+/// [`locational_trace`] for a world-space segment against an entity at `place`: the segment is
+/// moved into the entity frame, and the hit normal comes back in world space.
 ///
 /// Use after a coarse clip against the player's box said the entity was hit, passing the
 /// clip's fraction as `max_fraction`.
 pub fn trace_player(
     rig: &Rig,
     pose: &Pose,
-    origin: &Vec3,
-    angles: &Vec3,
+    place: &Placement,
     start: &Vec3,
     end: &Vec3,
     priority: &PriorityMap,
     max_fraction: f32,
 ) -> Option<LocHit> {
-    let (fwd, right, up) = math::angle_vectors(angles);
+    let (fwd, right, up) = math::angle_vectors(&place.angles);
     let left = [-right[0], -right[1], -right[2]];
     let to_local = |p: &Vec3| {
-        let d = math::sub(p, origin);
-        [math::dot(&d, &fwd), math::dot(&d, &left), math::dot(&d, &up)]
+        let d = math::sub(p, &place.origin);
+        [
+            math::dot(&d, &fwd),
+            math::dot(&d, &left),
+            math::dot(&d, &up),
+        ]
     };
-    let mut hit = locational_trace(rig, pose, &to_local(start), &to_local(end), priority, max_fraction)?;
+    let mut hit = locational_trace(
+        rig,
+        pose,
+        &to_local(start),
+        &to_local(end),
+        priority,
+        max_fraction,
+    )?;
     let n = hit.normal;
     hit.normal = [
         n[0] * fwd[0] + n[1] * left[0] + n[2] * up[0],

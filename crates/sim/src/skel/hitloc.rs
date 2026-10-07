@@ -125,15 +125,13 @@ pub type PriorityMap = [u8; COUNT + 1];
 
 /// Handgun, SMG, shotgun and other non-rifle bullets: every body part ties, so the nearest
 /// bone wins.
-pub const BULLET_PRIORITY: PriorityMap = [
-    1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0,
-];
+pub const BULLET_PRIORITY: PriorityMap =
+    [1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0];
 
 /// Rifle bullets (`bRifleBullet`): a bullet that passes through several parts is credited to
 /// the most valuable one (helmet, head, neck, torso, ... feet).
-pub const RIFLE_PRIORITY: PriorityMap = [
-    1, 9, 9, 9, 8, 7, 6, 6, 6, 6, 5, 5, 4, 4, 4, 4, 3, 3, 0, 0,
-];
+pub const RIFLE_PRIORITY: PriorityMap =
+    [1, 9, 9, 9, 8, 7, 6, 6, 6, 6, 5, 5, 4, 4, 4, 4, 3, 3, 0, 0];
 
 /// Stance for [`box_hit_location`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +170,11 @@ pub fn box_hit_location(
     let half = 15.0f32;
     let (mins, maxs) = (
         [origin[0] - half, origin[1] - half, origin[2]],
-        [origin[0] + half, origin[1] + half, origin[2] + stance.height()],
+        [
+            origin[0] + half,
+            origin[1] + half,
+            origin[2] + stance.height(),
+        ],
     );
     let d = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
     let (mut t0, mut t1) = (0.0f32, 1.0f32);
@@ -193,7 +195,11 @@ pub fn box_hit_location(
             return None;
         }
     }
-    let p = [start[0] + d[0] * t0, start[1] + d[1] * t0, start[2] + d[2] * t0];
+    let p = [
+        start[0] + d[0] * t0,
+        start[1] + d[1] * t0,
+        start[2] + d[2] * t0,
+    ];
     let rel = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
     let (s, c) = crate::pm::math::sincos_deg(yaw_deg);
     // Facing is +x rotated by yaw; the player's left is +y of that frame.

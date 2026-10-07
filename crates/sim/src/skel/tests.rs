@@ -187,7 +187,10 @@ fn yaw_track_interpolates_between_keys() {
 
     let mut acc = [Accum::ZERO];
     anim::accumulate(&a, &[0], 1.0, 1.0, &mut acc);
-    assert!(near(yaw_of(&acc[0].finish().0.unwrap()), 90.0), "time 1.0 takes the last key");
+    assert!(
+        near(yaw_of(&acc[0].finish().0.unwrap()), 90.0),
+        "time 1.0 takes the last key"
+    );
 }
 
 #[test]
@@ -198,7 +201,10 @@ fn translation_tracks_scale_into_their_box() {
     a.bone_counts = [2, 0, 0, 0, 0, 1, 0, 1, 0, 2];
     a.names = vec![0, 1];
     // group 5: part index byte then tableSize word and key table in data_byte.
-    a.data_byte = vec![0, /* part */ 0, 4 /* keys 0 and 4 */, /* group 7 part */ 1];
+    a.data_byte = vec![
+        0, /* part */ 0, 4, /* keys 0 and 4 */
+        /* group 7 part */ 1,
+    ];
     a.data_short = vec![1];
     a.random_data_byte = vec![0, 0, 0, 200, 0, 0];
     a.data_int = vec![
@@ -243,13 +249,25 @@ fn long_tracks_skip_their_coarse_table() {
     let mut acc = [Accum::ZERO; 2];
     // Frame 150 lies in key 32 (150 * 64 / 300 = 32.0 exactly: keys[32] = 150).
     anim::accumulate(&a, &[0, 1], 150.0 / 300.0, 1.0, &mut acc);
-    assert!(near(yaw_of(&acc[0].finish().0.unwrap()), 32.0), "{:?}", acc[0]);
-    assert!(near(yaw_of(&acc[1].finish().0.unwrap()), 90.0), "{:?}", acc[1]);
+    assert!(
+        near(yaw_of(&acc[0].finish().0.unwrap()), 32.0),
+        "{:?}",
+        acc[0]
+    );
+    assert!(
+        near(yaw_of(&acc[1].finish().0.unwrap()), 90.0),
+        "{:?}",
+        acc[1]
+    );
     // Between keys 10 (frame 46) and 11 (frame 51): 3/5 of the way is frame 49.
     let mut acc = [Accum::ZERO; 2];
     anim::accumulate(&a, &[0, 1], 49.0 / 300.0, 1.0, &mut acc);
     // (The 16-bit quantisation of the key quaternions allows a few hundredths of a degree.)
-    assert!((yaw_of(&acc[0].finish().0.unwrap()) - 10.6).abs() < 0.05, "{:?}", acc[0]);
+    assert!(
+        (yaw_of(&acc[0].finish().0.unwrap()) - 10.6).abs() < 0.05,
+        "{:?}",
+        acc[0]
+    );
 }
 
 #[test]
@@ -273,7 +291,10 @@ fn layers_blend_by_weight_and_unmapped_parts_are_skipped() {
     anim::accumulate(&a, &[0, 1], 0.0, 0.5, &mut acc);
     anim::accumulate(&b, &[0, NO_BONE], 0.0, 0.5, &mut acc);
     assert!(near(yaw_of(&acc[0].finish().0.unwrap()), 20.0));
-    assert!(near(yaw_of(&acc[1].finish().0.unwrap()), 80.0), "bone 1 only had one layer");
+    assert!(
+        near(yaw_of(&acc[1].finish().0.unwrap()), 80.0),
+        "bone 1 only had one layer"
+    );
 }
 
 // --- skeleton --------------------------------------------------------------------------
@@ -315,9 +336,18 @@ fn animated_rotation_swings_children_about_the_parent() {
     a.data_short = vec![y[0], y[1]];
     let bind = rig.bind(&["A"]);
     assert_eq!(bind.matched(), 1, "bone names compare case-insensitively");
-    let layer = AnimLayer { anim: &a, bind: &bind, time: 0.0, weight: 1.0 };
+    let layer = AnimLayer {
+        anim: &a,
+        bind: &bind,
+        time: 0.0,
+        weight: 1.0,
+    };
     let p = pose_of(&rig, &[layer], &Controllers::NONE);
-    assert!(near3(p.bones[2].trans, [0.0, 5.0, 10.0]), "{:?}", p.bones[2].trans);
+    assert!(
+        near3(p.bones[2].trans, [0.0, 5.0, 10.0]),
+        "{:?}",
+        p.bones[2].trans
+    );
     assert!(near(yaw_of(&p.bones[1].quat), 90.0));
 }
 
@@ -332,7 +362,11 @@ fn root_controller_moves_and_turns_the_whole_body() {
     };
     let p = pose_of(&rig, &[], &ctl);
     // Rest offset (5, 0, 10) turned by 90 degrees of yaw, then shifted.
-    assert!(near3(p.bones[2].trans, [1.0, 7.0, 10.0]), "{:?}", p.bones[2].trans);
+    assert!(
+        near3(p.bones[2].trans, [1.0, 7.0, 10.0]),
+        "{:?}",
+        p.bones[2].trans
+    );
 }
 
 #[test]
@@ -354,12 +388,19 @@ fn controller_bones_rotate_in_the_root_frame() {
         ..Controllers::NONE
     };
     let p = pose_of(&rig, &[], &turned);
-    assert!(near(yaw_of(&p.bones[2].quat), 90.0), "parent's 90 degrees, not 180");
+    assert!(
+        near(yaw_of(&p.bones[2].quat), 90.0),
+        "parent's 90 degrees, not 180"
+    );
     // Pitching the control bone by 90 degrees (nose down) swings the tip from +x to -z.
     let mut ctl = Controllers::NONE;
     ctl.angles[0] = [90.0, 0.0, 0.0];
     let p = pose_of(&rig, &[], &ctl);
-    assert!(near3(p.bones[3].trans, [0.0, 0.0, 16.0]), "{:?}", p.bones[3].trans);
+    assert!(
+        near3(p.bones[3].trans, [0.0, 0.0, 16.0]),
+        "{:?}",
+        p.bones[3].trans
+    );
 }
 
 #[test]
@@ -387,8 +428,17 @@ fn melded_model_bones_copy_the_matching_body_bone() {
     let y = yaw_frame(0.0);
     a.data_short = vec![y[0], y[1]];
     let bind = rig.bind(&["spine"]);
-    assert_eq!(bind.as_slice(), &[1], "binds to the first bone of that name");
-    let layer = AnimLayer { anim: &a, bind: &bind, time: 0.0, weight: 1.0 };
+    assert_eq!(
+        bind.as_slice(),
+        &[1],
+        "binds to the first bone of that name"
+    );
+    let layer = AnimLayer {
+        anim: &a,
+        bind: &bind,
+        time: 0.0,
+        weight: 1.0,
+    };
     let p = pose_of(&rig, &[layer], &Controllers::NONE);
     assert_eq!(p.bones[2], p.bones[1]);
     assert!(near3(p.bones[3].trans, [0.0, 0.0, 17.0]));
@@ -407,7 +457,11 @@ fn attached_model_roots_hang_off_the_tag() {
     let rig = rig_of(&[(&body, &bn, None), (&gun, &gn, Some("hand"))]);
     let p = pose_of(&rig, &[], &Controllers::NONE);
     // A root has no rest translation of its own; it sits on the tag.
-    assert!(near3(p.bones[2].trans, [3.0, 0.0, 4.0]), "{:?}", p.bones[2].trans);
+    assert!(
+        near3(p.bones[2].trans, [3.0, 0.0, 4.0]),
+        "{:?}",
+        p.bones[2].trans
+    );
 }
 
 // --- hit volumes -----------------------------------------------------------------------
@@ -426,8 +480,20 @@ fn target() -> (Rig, Pose) {
         "t",
         &[
             bone("tag_origin", None, [0.0; 3]),
-            boxed("torso", 0, [0.0, 0.0, 10.0], HitLocation::TorsoLower as u8, 6.0),
-            boxed("helmet", 1, [0.0, 0.0, 10.0], HitLocation::Helmet as u8, 4.0),
+            boxed(
+                "torso",
+                0,
+                [0.0, 0.0, 10.0],
+                HitLocation::TorsoLower as u8,
+                6.0,
+            ),
+            boxed(
+                "helmet",
+                1,
+                [0.0, 0.0, 10.0],
+                HitLocation::Helmet as u8,
+                4.0,
+            ),
         ],
     );
     let rig = rig_of(&[(&m, &names, None)]);
@@ -438,22 +504,70 @@ fn target() -> (Rig, Pose) {
 #[test]
 fn horizontal_segment_enters_the_box_face() {
     let (rig, pose) = target();
-    let h = locational_trace(&rig, &pose, &[-30.0, 0.0, 10.0], &[30.0, 0.0, 10.0], &BULLET_PRIORITY, 1.0).unwrap();
+    let h = locational_trace(
+        &rig,
+        &pose,
+        &[-30.0, 0.0, 10.0],
+        &[30.0, 0.0, 10.0],
+        &BULLET_PRIORITY,
+        1.0,
+    )
+    .unwrap();
     assert_eq!(h.location(), HitLocation::TorsoLower);
     assert!(near(h.fraction, 24.0 / 60.0), "{}", h.fraction);
     assert!(near3(h.normal, [-1.0, 0.0, 0.0]), "{:?}", h.normal);
     assert_eq!(rig.bone_name(h.bone), "torso");
     // Beside the box and past the end of the segment: no hit.
-    assert!(locational_trace(&rig, &pose, &[-30.0, 9.0, 10.0], &[30.0, 9.0, 10.0], &BULLET_PRIORITY, 1.0).is_none());
-    assert!(locational_trace(&rig, &pose, &[-30.0, 0.0, 10.0], &[-10.0, 0.0, 10.0], &BULLET_PRIORITY, 1.0).is_none());
+    assert!(
+        locational_trace(
+            &rig,
+            &pose,
+            &[-30.0, 9.0, 10.0],
+            &[30.0, 9.0, 10.0],
+            &BULLET_PRIORITY,
+            1.0
+        )
+        .is_none()
+    );
+    assert!(
+        locational_trace(
+            &rig,
+            &pose,
+            &[-30.0, 0.0, 10.0],
+            &[-10.0, 0.0, 10.0],
+            &BULLET_PRIORITY,
+            1.0
+        )
+        .is_none()
+    );
     // A nearer obstruction (max_fraction) hides it.
-    assert!(locational_trace(&rig, &pose, &[-30.0, 0.0, 10.0], &[30.0, 0.0, 10.0], &BULLET_PRIORITY, 0.3).is_none());
+    assert!(
+        locational_trace(
+            &rig,
+            &pose,
+            &[-30.0, 0.0, 10.0],
+            &[30.0, 0.0, 10.0],
+            &BULLET_PRIORITY,
+            0.3
+        )
+        .is_none()
+    );
 }
 
 #[test]
 fn start_inside_a_box_is_not_a_hit_when_leaving() {
     let (rig, pose) = target();
-    assert!(locational_trace(&rig, &pose, &[0.0, 0.0, 10.0], &[30.0, 0.0, 10.0], &BULLET_PRIORITY, 1.0).is_none());
+    assert!(
+        locational_trace(
+            &rig,
+            &pose,
+            &[0.0, 0.0, 10.0],
+            &[30.0, 0.0, 10.0],
+            &BULLET_PRIORITY,
+            1.0
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -463,8 +577,16 @@ fn rifle_priority_credits_the_helmet_through_the_torso() {
     let (start, end) = ([10.0, 0.0, 8.0], [-10.0, 0.0, 22.0]);
     let bullet = locational_trace(&rig, &pose, &start, &end, &BULLET_PRIORITY, 1.0).unwrap();
     let rifle = locational_trace(&rig, &pose, &start, &end, &RIFLE_PRIORITY, 1.0).unwrap();
-    assert_eq!(bullet.location(), HitLocation::TorsoLower, "nearest part wins at equal priority");
-    assert_eq!(rifle.location(), HitLocation::Helmet, "rifle rounds prefer the head");
+    assert_eq!(
+        bullet.location(),
+        HitLocation::TorsoLower,
+        "nearest part wins at equal priority"
+    );
+    assert_eq!(
+        rifle.location(),
+        HitLocation::Helmet,
+        "rifle rounds prefer the head"
+    );
     assert!(rifle.fraction > bullet.fraction);
 }
 
@@ -474,13 +596,27 @@ fn unclassified_bone_takes_the_parents_location() {
         "inherit",
         &[
             bone("tag_origin", None, [0.0; 3]),
-            boxed("arm", 0, [0.0, 0.0, 10.0], HitLocation::LeftArmUpper as u8, 3.0),
+            boxed(
+                "arm",
+                0,
+                [0.0, 0.0, 10.0],
+                HitLocation::LeftArmUpper as u8,
+                3.0,
+            ),
             boxed("wrist", 1, [0.0, 10.0, 0.0], HitLocation::None as u8, 3.0),
         ],
     );
     let rig = rig_of(&[(&m, &names, None)]);
     let pose = pose_of(&rig, &[], &Controllers::NONE);
-    let h = locational_trace(&rig, &pose, &[-20.0, 10.0, 10.0], &[20.0, 10.0, 10.0], &BULLET_PRIORITY, 1.0).unwrap();
+    let h = locational_trace(
+        &rig,
+        &pose,
+        &[-20.0, 10.0, 10.0],
+        &[20.0, 10.0, 10.0],
+        &BULLET_PRIORITY,
+        1.0,
+    )
+    .unwrap();
     assert_eq!(rig.bone_name(h.bone), "wrist");
     assert_eq!(h.location(), HitLocation::LeftArmUpper);
 }
@@ -497,7 +633,17 @@ fn gun_and_volumeless_bones_are_never_hit() {
     );
     let rig = rig_of(&[(&m, &names, None)]);
     let pose = pose_of(&rig, &[], &Controllers::NONE);
-    assert!(locational_trace(&rig, &pose, &[-20.0, 0.0, 10.0], &[20.0, 0.0, 10.0], &BULLET_PRIORITY, 1.0).is_none());
+    assert!(
+        locational_trace(
+            &rig,
+            &pose,
+            &[-20.0, 0.0, 10.0],
+            &[20.0, 0.0, 10.0],
+            &BULLET_PRIORITY,
+            1.0
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -510,7 +656,16 @@ fn trace_player_rotates_into_the_entity_frame() {
     let start = Pose::to_world(&[-30.0, 0.0, 10.0], &origin, 90.0);
     let end = Pose::to_world(&[30.0, 0.0, 10.0], &origin, 90.0);
     assert!(near3(start, [100.0, 170.0, 10.0]), "{start:?}");
-    let h = trace_player(&rig, &pose, &origin, &angles, &start, &end, &BULLET_PRIORITY, 1.0).unwrap();
+    let h = trace_player(
+        &rig,
+        &pose,
+        &Placement { origin, angles },
+        &start,
+        &end,
+        &BULLET_PRIORITY,
+        1.0,
+    )
+    .unwrap();
     assert_eq!(h.location(), HitLocation::TorsoLower);
     assert!(near(h.fraction, 0.4));
     // Local -x face, world normal = local -x turned by 90 degrees = -y.
@@ -530,8 +685,15 @@ fn hit_location_names_round_trip() {
     }
     assert_eq!(HitLocation::from_index(19), None);
     assert_eq!(HitLocation::from_name("shin"), None);
-    assert_eq!(hitloc::NAMES[HitLocation::TorsoUpper as usize], "torso_upper");
-    assert!(HitLocation::Helmet.is_head() && HitLocation::Head.is_head() && !HitLocation::Neck.is_head());
+    assert_eq!(
+        hitloc::NAMES[HitLocation::TorsoUpper as usize],
+        "torso_upper"
+    );
+    assert!(
+        HitLocation::Helmet.is_head()
+            && HitLocation::Head.is_head()
+            && !HitLocation::Neck.is_head()
+    );
 }
 
 #[test]
@@ -548,11 +710,20 @@ fn box_fallback_classifies_by_height_and_side() {
     assert_eq!(shot(10.0, -5.0).unwrap().1, HitLocation::RightLegLower);
     assert_eq!(shot(2.0, 5.0).unwrap().1, HitLocation::LeftFoot);
     let (f, _) = shot(66.0, 0.0).unwrap();
-    assert!(near(f, 0.425), "enters the hull 15 units from the centre: {f}");
+    assert!(
+        near(f, 0.425),
+        "enters the hull 15 units from the centre: {f}"
+    );
     assert!(shot(80.0, 0.0).is_none(), "above the hull");
     assert!(shot(30.0, 20.0).is_none(), "beside the hull");
     // A crouching hull is 50 high: 45 is its head, not its chest.
-    let crouch = box_hit_location(&[100.0, 0.0, 45.0], &[-100.0, 0.0, 45.0], &origin, 0.0, Stance::Crouch);
+    let crouch = box_hit_location(
+        &[100.0, 0.0, 45.0],
+        &[-100.0, 0.0, 45.0],
+        &origin,
+        0.0,
+        Stance::Crouch,
+    );
     assert_eq!(crouch.unwrap().1, HitLocation::Head);
 }
 
@@ -560,9 +731,15 @@ fn box_fallback_classifies_by_height_and_side() {
 fn box_fallback_left_is_relative_to_facing() {
     // Facing +y (yaw 90) the player's left is world -x.
     let side = |x: f32| {
-        box_hit_location(&[x, 100.0, 25.0], &[x, -100.0, 25.0], &[0.0; 3], 90.0, Stance::Stand)
-            .unwrap()
-            .1
+        box_hit_location(
+            &[x, 100.0, 25.0],
+            &[x, -100.0, 25.0],
+            &[0.0; 3],
+            90.0,
+            Stance::Stand,
+        )
+        .unwrap()
+        .1
     };
     assert_eq!(side(-5.0), HitLocation::LeftLegUpper);
     assert_eq!(side(5.0), HitLocation::RightLegUpper);

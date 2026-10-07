@@ -8,5 +8,6 @@ pub mod cvar;
 pub mod game;
 pub mod mem;
 pub mod mover;
+pub mod playeranim;
 pub mod script;
 pub mod server;

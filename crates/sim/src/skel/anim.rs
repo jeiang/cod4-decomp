@@ -232,7 +232,8 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
             } else {
                 (w.rs(w.rs + f + 2), w.rs(w.rs + f + 3))
             };
-            let l = |p: i16, q: i16| (f32::from(p) + (f32::from(q) - f32::from(p)) * t.frac) * INV_I16;
+            let l =
+                |p: i16, q: i16| (f32::from(p) + (f32::from(q) - f32::from(p)) * t.frac) * INV_I16;
             add_rot(&mut out[b], weight, [0.0, 0.0, l(z0, z1), l(w0, w1)], end);
         }
         w.rs += 2 * size + 2;
@@ -286,7 +287,12 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
             if let Some(b) = slot(named, out) {
                 let sample = |w: &Walk, k: usize, i: usize| -> f32 {
                     if group == 5 {
-                        f32::from(w.a.random_data_byte.get(w.rb + 3 * k + i).copied().unwrap_or(0))
+                        f32::from(
+                            w.a.random_data_byte
+                                .get(w.rb + 3 * k + i)
+                                .copied()
+                                .unwrap_or(0),
+                        )
                     } else {
                         f32::from(w.rs(w.rs + 3 * k + i) as u16)
                     }

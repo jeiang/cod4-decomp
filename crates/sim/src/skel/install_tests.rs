@@ -146,8 +146,17 @@ fn every_player_anim_samples_cleanly() {
     let mut samples = 0u32;
     for (name, (a, names)) in &d.anims {
         let bind = rig.bind(names);
-        assert!(bind.matched() >= 40, "{name}: only {} parts matched the rig", bind.matched());
-        let layer = |time: f32| AnimLayer { anim: a, bind: &bind, time, weight: 1.0 };
+        assert!(
+            bind.matched() >= 40,
+            "{name}: only {} parts matched the rig",
+            bind.matched()
+        );
+        let layer = |time: f32| AnimLayer {
+            anim: a,
+            bind: &bind,
+            time,
+            weight: 1.0,
+        };
         for k in 0..=20 {
             let t = k as f32 / 20.0;
             let now = std::time::Instant::now();
@@ -158,7 +167,11 @@ fn every_player_anim_samples_cleanly() {
                 let finite = m.quat.iter().chain(&m.trans).all(|v| v.is_finite());
                 assert!(finite, "{name} t={t} bone {} not finite", rig.bone_name(i));
                 let len = m.quat.iter().map(|c| c * c).sum::<f32>().sqrt();
-                assert!((len - 1.0).abs() < 1e-3, "{name} bone {} quat len {len}", rig.bone_name(i));
+                assert!(
+                    (len - 1.0).abs() < 1e-3,
+                    "{name} bone {} quat len {len}",
+                    rig.bone_name(i)
+                );
                 let r = m.trans.iter().map(|c| c * c).sum::<f32>().sqrt();
                 // Weapon attach tags in the pistol/hold animations roam far from the body.
                 assert!(
@@ -215,7 +228,10 @@ fn profile(rig: &Rig, pose: &Pose, z: f32) -> std::collections::BTreeMap<&'stati
             let to = [-200.0 * c - yo * s, -200.0 * s + yo * c, z];
             if let Some(h) = locational_trace(rig, pose, &from, &to, &BULLET_PRIORITY, 1.0) {
                 let n = h.location().name();
-                let n = n.strip_prefix("left_").or_else(|| n.strip_prefix("right_")).unwrap_or(n);
+                let n = n
+                    .strip_prefix("left_")
+                    .or_else(|| n.strip_prefix("right_"))
+                    .unwrap_or(n);
                 *set.entry(n).or_insert(0) += 1;
             }
         }
@@ -244,7 +260,13 @@ fn standing_pose_has_locations_at_the_expected_heights() {
     let Some(d) = data() else { return };
     let rig = player_rig(d);
     for t in [0.0, 0.5] {
-        let pose = pose_anim(d, &rig, "pb_stand_alert", t, &controllers::compute(&ControllerInput::default()));
+        let pose = pose_anim(
+            d,
+            &rig,
+            "pb_stand_alert",
+            t,
+            &controllers::compute(&ControllerInput::default()),
+        );
         let head_top = top(&rig, &pose);
         assert!((60.0..=70.0).contains(&head_top), "standing top {head_top}");
         // The head bone itself sits in the 55-65 band (the helmet bone above it).
@@ -258,7 +280,12 @@ fn standing_pose_has_locations_at_the_expected_heights() {
             (10.0, "leg_lower"),
             (1.0, "foot"),
         ] {
-            assert_eq!(dominant(&rig, &pose, z), want, "t={t} z={z}: {:?}", profile(&rig, &pose, z));
+            assert_eq!(
+                dominant(&rig, &pose, z),
+                want,
+                "t={t} z={z}: {:?}",
+                profile(&rig, &pose, z)
+            );
         }
     }
 }
@@ -271,12 +298,22 @@ fn shots_at_the_head_from_the_front_are_head_or_helmet() {
     let head = pose.bones[rig.bone_index("j_head").unwrap()].trans;
     for dz in [0.0, 4.0, 8.0] {
         let z = head[2] + dz;
-        let h = locational_trace(&rig, &pose, &[head[0] + 150.0, head[1], z], &[head[0] - 150.0, head[1], z], &BULLET_PRIORITY, 1.0)
-            .unwrap_or_else(|| panic!("miss at head+{dz}"));
+        let h = locational_trace(
+            &rig,
+            &pose,
+            &[head[0] + 150.0, head[1], z],
+            &[head[0] - 150.0, head[1], z],
+            &BULLET_PRIORITY,
+            1.0,
+        )
+        .unwrap_or_else(|| panic!("miss at head+{dz}"));
         assert!(h.location().is_head(), "head+{dz}: {:?}", h.location());
         let n = h.normal;
         assert!(((n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) - 1.0).abs() < 1e-3);
-        assert!(n[0] > 0.0, "normal {n:?} faces away from a shot travelling in -x");
+        assert!(
+            n[0] > 0.0,
+            "normal {n:?} faces away from a shot travelling in -x"
+        );
     }
 }
 
@@ -284,13 +321,20 @@ fn shots_at_the_head_from_the_front_are_head_or_helmet() {
 fn stance_changes_the_height_of_the_hit_volumes() {
     let Some(d) = data() else { return };
     let rig = player_rig(d);
-    let tops: Vec<f32> = [("pb_stand_alert", false), ("pb_crouch_alert", false), ("pb_prone_aim", true)]
-        .into_iter()
-        .map(|(n, prone)| {
-            let ctl = controllers::compute(&ControllerInput { prone, ..Default::default() });
-            top(&rig, &pose_anim(d, &rig, n, 0.0, &ctl))
-        })
-        .collect();
+    let tops: Vec<f32> = [
+        ("pb_stand_alert", false),
+        ("pb_crouch_alert", false),
+        ("pb_prone_aim", true),
+    ]
+    .into_iter()
+    .map(|(n, prone)| {
+        let ctl = controllers::compute(&ControllerInput {
+            prone,
+            ..Default::default()
+        });
+        top(&rig, &pose_anim(d, &rig, n, 0.0, &ctl))
+    })
+    .collect();
     println!("stand/crouch/prone top: {tops:?}");
     assert!(tops[0] - tops[1] > 15.0, "{tops:?}");
     assert!((38.0..=50.0).contains(&tops[1]), "crouch {tops:?}");
@@ -312,32 +356,4 @@ fn running_and_aiming_poses_stay_on_the_body() {
         let t = top(&rig, &pose);
         assert!((50.0..=75.0).contains(&t), "pitch {pitch}: top {t}");
     }
-}
-
-#[test]
-fn rig_pose_and_trace_speed() {
-    let Some(d) = data() else { return };
-    let rig = player_rig(d);
-    let (a, names) = &d.anims["pb_combatrun_forward_loop"];
-    let bind = rig.bind(names);
-    let ctl = controllers::compute(&ControllerInput { view_pitch: 20.0, ..Default::default() });
-    let mut pose = Pose::default();
-    let n = 2000;
-    let t0 = std::time::Instant::now();
-    for i in 0..n {
-        let layer = AnimLayer { anim: a, bind: &bind, time: (i % 50) as f32 / 50.0, weight: 1.0 };
-        rig.pose(&[layer], &ctl, &mut pose);
-    }
-    let pose_us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(n);
-    let t0 = std::time::Instant::now();
-    let mut hits = 0u32;
-    for i in 0..n {
-        let z = (i % 70) as f32;
-        let y = ((i / 70) % 21) as f32 - 10.0;
-        hits += u32::from(
-            trace_player(&rig, &pose, &[0.0; 3], &[0.0; 3], &[200.0, y, z], &[-200.0, y, z], &BULLET_PRIORITY, 1.0).is_some(),
-        );
-    }
-    let trace_us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(n);
-    println!("pose {pose_us:.1} us, trace {trace_us:.2} us ({:.0}k/s), {hits}/{n} hits", 1e3 / trace_us);
 }
