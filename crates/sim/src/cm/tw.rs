@@ -13,6 +13,9 @@ use super::vec::sub;
 /// Extra clearance every contact keeps (the original's `0.125` trace epsilon).
 pub(super) const EPS: f32 = 0.125;
 
+/// Plane-distance span below which a segment counts as parallel to the plane (`2^-21`).
+pub(super) const PARALLEL_EPS: f32 = 1.0 / 2_097_152.0;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Tw {
     pub contents: i32,

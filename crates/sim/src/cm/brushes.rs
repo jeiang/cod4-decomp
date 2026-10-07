@@ -5,7 +5,7 @@ use assets::zone::clipmap::{Brush, Leaf};
 
 use super::Trace;
 use super::map::{CollisionWorld, LbNode};
-use super::tw::{EPS, Tw};
+use super::tw::{EPS, PARALLEL_EPS, Tw};
 use super::vec::{dot, lerp4, xyz};
 
 /// The plane that bounded the earliest entry into a brush.
@@ -32,7 +32,7 @@ struct Split {
 fn split(t1: f32, t2: f32, offset: f32) -> Split {
     let diff = t2 - t1;
     let abs = diff.abs();
-    let (side, near_end, far_start) = if abs <= 4.76837158203125e-7 {
+    let (side, near_end, far_start) = if abs <= PARALLEL_EPS {
         (0, 1.0, 0.0)
     } else {
         let v = if diff < 0.0 { t1 } else { -t1 };

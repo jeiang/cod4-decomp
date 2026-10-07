@@ -31,6 +31,7 @@ pub struct ClipEnt {
     /// `r.currentAngles`; only brush models rotate.
     pub angles: Vec3,
     /// `r.mins`/`r.maxs`: the hull of an entity without a brush model (clipped as a capsule).
+    /// Brush models take the bounds of the model instead.
     pub mins: Vec3,
     pub maxs: Vec3,
     /// `r.bmodel` with `s.index.brushmodel`: the inline model `*N` this entity is.
@@ -185,6 +186,10 @@ impl World {
             return;
         }
         let mut e = *ent;
+        if let Some(n) = e.brush_model {
+            // A brush model's hull is the model's own bounds (`SV_SetBrushModel`).
+            (e.mins, e.maxs) = self.cm.model_bounds(n).unwrap_or(([0.0; 3], [0.0; 3]));
+        }
         for a in &mut e.angles {
             let r = a.round();
             if (r - *a) * (r - *a) < 0.000001 {
@@ -876,4 +881,325 @@ fn radius(mins: &Vec3, maxs: &Vec3, axes: usize) -> f32 {
         })
         .sum::<f32>()
         .sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cm::test_support::{BrushSpec, MapSpec};
+    use crate::contents::{MASK_PLAYERSOLID, MASK_SHOT, PLAYER, SOLID};
+
+    const MINS: Vec3 = [-15.0, -15.0, 0.0];
+    const MAXS: Vec3 = [15.0, 15.0, 70.0];
+
+    fn near(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-4, "{a} != {b}");
+    }
+
+    /// A floor (top at z = 0) in a 8192-wide world, one door-like brush model `*1` and a wall.
+    fn world() -> World {
+        let map = MapSpec {
+            world: vec![
+                BrushSpec::aabb([-4000.0, -4000.0, -100.0], [4000.0, 4000.0, 0.0], SOLID),
+                BrushSpec::aabb([1000.0, -500.0, 0.0], [1100.0, 500.0, 300.0], SOLID),
+            ],
+            models: vec![vec![BrushSpec::aabb(
+                [-50.0, -10.0, -50.0],
+                [50.0, 10.0, 50.0],
+                SOLID,
+            )]],
+            ..Default::default()
+        };
+        World::new(map.build())
+    }
+
+    fn player(x: f32, y: f32) -> ClipEnt {
+        ClipEnt {
+            contents: PLAYER,
+            origin: [x, y, 0.0],
+            mins: MINS,
+            maxs: MAXS,
+            ..ClipEnt::EMPTY
+        }
+    }
+
+    fn door(origin: Vec3, angles: Vec3) -> ClipEnt {
+        ClipEnt {
+            contents: SOLID,
+            origin,
+            angles,
+            brush_model: Some(1),
+            ..ClipEnt::EMPTY
+        }
+    }
+
+    fn run(w: &World, a: Vec3, b: Vec3, pass: u16) -> Trace {
+        w.trace(a, b, MINS, MAXS, pass, MASK_PLAYERSOLID)
+    }
+
+    #[test]
+    fn entity_blocks_with_its_number_as_hit_id() {
+        let mut w = world();
+        w.link(5, &player(100.0, 0.0));
+        let t = run(&w, [0.0, 0.0, 1.0], [200.0, 0.0, 1.0], ENTITYNUM_NONE);
+        // Two radius-15 capsules 100 apart meet after 70 units (see the cm test).
+        near(t.fraction, 0.35 - 12.5 / 20000.0);
+        assert_eq!(t.hit_id, 5);
+        assert_eq!(t.contents, PLAYER);
+    }
+
+    #[test]
+    fn pass_entity_its_children_and_siblings_are_ignored() {
+        let mut w = world();
+        w.link(5, &player(100.0, 0.0));
+        let clear =
+            |w: &World, pass| run(w, [0.0, 0.0, 1.0], [200.0, 0.0, 1.0], pass).fraction == 1.0;
+        assert!(clear(&w, 5));
+        assert!(!clear(&w, 6));
+        // A missile owned by 5 is not blocked by it, nor is 5 blocked by it.
+        let mut rocket = player(100.0, 0.0);
+        rocket.owner = 7;
+        w.link(5, &rocket);
+        assert!(clear(&w, 7));
+        // 8 has the same owner as 5: siblings do not block each other.
+        let mut sibling = player(0.0, 0.0);
+        sibling.owner = 7;
+        w.link(8, &sibling);
+        assert!(clear(&w, 8));
+        assert!(!clear(&w, 9));
+    }
+
+    #[test]
+    fn world_in_front_of_an_entity_wins_and_entity_in_front_of_the_world_wins() {
+        let mut w = world();
+        w.link(5, &player(2000.0, 0.0));
+        let t = run(&w, [0.0, 0.0, 1.0], [3000.0, 0.0, 1.0], ENTITYNUM_NONE);
+        assert_eq!(t.hit_id, ENTITYNUM_WORLD);
+        near(t.fraction, (985.0 - 0.125) / 3000.0);
+        w.link(5, &player(500.0, 0.0));
+        let t = run(&w, [0.0, 0.0, 1.0], [3000.0, 0.0, 1.0], ENTITYNUM_NONE);
+        assert_eq!(t.hit_id, 5);
+        assert!(t.fraction < 0.2);
+    }
+
+    #[test]
+    fn brush_model_entities_move_and_turn() {
+        let mut w = world();
+        w.link(20, &door([300.0, 0.0, 0.0], [0.0; 3]));
+        let line = |w: &World| {
+            w.trace(
+                [0.0, 0.0, 1.0],
+                [600.0, 0.0, 1.0],
+                [0.0; 3],
+                [0.0; 3],
+                ENTITYNUM_NONE,
+                MASK_PLAYERSOLID,
+            )
+        };
+        let t = line(&w);
+        near(t.fraction, (250.0 - 0.125) / 600.0);
+        assert_eq!((t.hit_id, t.contents), (20, SOLID));
+        w.link(20, &door([300.0, 0.0, 0.0], [0.0, 90.0, 0.0]));
+        near(line(&w).fraction, (290.0 - 0.125) / 600.0);
+        near(line(&w).normal[0], -1.0);
+    }
+
+    #[test]
+    fn unlinking_and_relinking_changes_what_traces_see() {
+        let mut w = world();
+        w.link(5, &player(100.0, 0.0));
+        w.unlink(5);
+        assert_eq!(
+            run(&w, [0.0, 0.0, 1.0], [200.0, 0.0, 1.0], ENTITYNUM_NONE).fraction,
+            1.0
+        );
+        assert!(w.entity(5).is_some());
+        w.link(5, &player(100.0, 0.0));
+        w.link(5, &player(100.0, 0.0));
+        w.link(5, &player(100.0, 400.0));
+        assert_eq!(
+            run(&w, [0.0, 0.0, 1.0], [200.0, 0.0, 1.0], ENTITYNUM_NONE).fraction,
+            1.0
+        );
+        // Contents of zero is the same as unlinking.
+        let mut gone = player(100.0, 400.0);
+        gone.contents = 0;
+        w.link(5, &gone);
+        let mut seen = 0;
+        w.area_entities([-5000.0; 3], [5000.0; 3], -1, |_| {
+            seen += 1;
+            true
+        });
+        assert_eq!(seen, 0);
+    }
+
+    #[test]
+    fn out_of_range_entity_numbers_are_ignored() {
+        let mut w = world();
+        for n in [ENTITYNUM_WORLD, ENTITYNUM_NONE, 1024, 5000, u16::MAX] {
+            w.link(n, &player(0.0, 0.0));
+            w.unlink(n);
+            assert!(w.entity(n).is_none());
+            assert_eq!(w.test_entity_position(n, MASK_PLAYERSOLID), None);
+        }
+        assert_eq!(
+            run(&w, [0.0, 0.0, 1.0], [50.0, 0.0, 1.0], 4000).fraction,
+            1.0
+        );
+    }
+
+    #[test]
+    fn area_entities_filters_by_box_and_mask_and_can_stop_early() {
+        let mut w = world();
+        for (n, x) in [(3u16, 0.0f32), (4, 100.0), (5, 3000.0)] {
+            w.link(n, &player(x, 0.0));
+        }
+        w.link(6, &door([100.0, 100.0, 0.0], [0.0; 3]));
+        let collect = |mask, lo: Vec3, hi: Vec3| {
+            let mut v = Vec::new();
+            w.area_entities(lo, hi, mask, |n| {
+                v.push(n);
+                true
+            });
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(collect(-1, [-50.0; 3], [150.0, 150.0, 100.0]), [3, 4, 6]);
+        assert_eq!(collect(PLAYER, [-50.0; 3], [150.0, 150.0, 100.0]), [3, 4]);
+        assert_eq!(collect(-1, [2900.0, -50.0, 0.0], [3100.0, 50.0, 10.0]), [5]);
+        let mut first = None;
+        w.area_entities([-5000.0; 3], [5000.0; 3], -1, |n| {
+            first = Some(n);
+            false
+        });
+        assert!(first.is_some());
+    }
+
+    #[test]
+    fn many_entities_trace_like_a_brute_force_scan() {
+        let mut w = world();
+        let mut ents = Vec::new();
+        let mut s = 0x1234_5678_9abc_def0u64;
+        let mut rnd = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 40) as f32 / (1u64 << 24) as f32
+        };
+        for n in 0..300u16 {
+            let e = if n % 5 == 0 {
+                door(
+                    [rnd() * 6000.0 - 3000.0, rnd() * 6000.0 - 3000.0, 20.0],
+                    [0.0, rnd() * 360.0, 0.0],
+                )
+            } else {
+                player(rnd() * 6000.0 - 3000.0, rnd() * 6000.0 - 3000.0)
+            };
+            w.link(n, &e);
+            ents.push(e);
+        }
+        let mut hits = 0;
+        for _ in 0..400 {
+            let a = [rnd() * 6000.0 - 3000.0, rnd() * 6000.0 - 3000.0, 30.0];
+            let b = [
+                a[0] + rnd() * 2000.0 - 1000.0,
+                a[1] + rnd() * 2000.0 - 1000.0,
+                30.0,
+            ];
+            let got = w.trace(a, b, MINS, MAXS, ENTITYNUM_NONE, MASK_PLAYERSOLID);
+            let mut want =
+                w.cm.box_trace(a, b, MINS, MAXS, &ClipModel::World, MASK_PLAYERSOLID);
+            let mut id = if want.fraction < 1.0 {
+                ENTITYNUM_WORLD
+            } else {
+                ENTITYNUM_NONE
+            };
+            for (n, e) in ents.iter().enumerate() {
+                let old = want.fraction;
+                w.cm.transformed_trace(
+                    &mut want,
+                    a,
+                    b,
+                    MINS,
+                    MAXS,
+                    &e.model(),
+                    MASK_PLAYERSOLID,
+                    e.origin,
+                    e.clip_angles(),
+                );
+                if want.fraction < old {
+                    id = n as u16;
+                }
+            }
+            assert_eq!(got.fraction, want.fraction, "{a:?} -> {b:?}");
+            assert_eq!(got.hit_id, id);
+            hits += usize::from(id < ENTITYNUM_WORLD);
+        }
+        assert!(hits > 20, "{hits}");
+    }
+
+    #[test]
+    fn point_contents_includes_entities_except_the_pass_entity() {
+        let mut w = world();
+        w.link(5, &player(100.0, 0.0));
+        assert_eq!(
+            w.point_contents([100.0, 0.0, 30.0], ENTITYNUM_NONE, -1),
+            PLAYER
+        );
+        assert_eq!(w.point_contents([100.0, 0.0, 30.0], 5, -1), 0);
+        assert_eq!(
+            w.point_contents([100.0, 0.0, 30.0], ENTITYNUM_NONE, SOLID),
+            0
+        );
+        assert_eq!(
+            w.point_contents([0.0, 0.0, -5.0], ENTITYNUM_NONE, -1),
+            SOLID
+        );
+    }
+
+    #[test]
+    fn test_entity_position_reports_what_the_entity_is_stuck_in() {
+        let mut w = world();
+        let mut e = player(0.0, 0.0);
+        e.origin[2] = -20.0;
+        w.link(5, &e);
+        assert_eq!(
+            w.test_entity_position(5, MASK_PLAYERSOLID),
+            Some(ENTITYNUM_WORLD)
+        );
+        w.link(5, &player(0.0, 0.0));
+        assert_eq!(w.test_entity_position(5, MASK_PLAYERSOLID), None);
+        w.link(6, &player(10.0, 0.0));
+        assert_eq!(w.test_entity_position(5, MASK_PLAYERSOLID), Some(6));
+    }
+
+    #[test]
+    fn sight_lines_are_blocked_by_entities_unless_ignored() {
+        let mut w = world();
+        w.link(5, &door([300.0, 0.0, 40.0], [0.0; 3]));
+        let sight = |w: &World, p0, p1| {
+            w.sight_trace(
+                0,
+                [0.0, 0.0, 40.0],
+                [600.0, 0.0, 40.0],
+                [0.0; 3],
+                [0.0; 3],
+                p0,
+                p1,
+                MASK_SHOT | SOLID,
+            )
+        };
+        assert_ne!(sight(&w, ENTITYNUM_NONE, ENTITYNUM_NONE), 0);
+        assert_eq!(sight(&w, 5, ENTITYNUM_NONE), 0);
+        assert_eq!(sight(&w, ENTITYNUM_NONE, 5), 0);
+        assert!(!w.trace_passed(
+            [0.0, 0.0, 40.0],
+            [600.0, 0.0, 40.0],
+            [0.0; 3],
+            [0.0; 3],
+            ENTITYNUM_NONE,
+            ENTITYNUM_NONE,
+            SOLID
+        ));
+    }
 }

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Collision world, box/capsule traces, point contents.
 
+// The trace code indexes several parallel per-axis arrays; iterators would obscure it.
+#![allow(clippy::needless_range_loop)]
+
 use crate::Vec3;
 
 mod brushes;
@@ -12,6 +15,13 @@ mod sight;
 mod transform;
 mod tw;
 mod vec;
+
+#[cfg(test)]
+mod install_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod tests;
 
 pub use map::{ClipModel, CollisionWorld};
 pub(crate) use tw::Tw;

@@ -12,7 +12,7 @@ use super::Trace;
 use super::capsule::Cap;
 use super::map::{ClipModel, CollisionWorld};
 use super::transform::symmetric;
-use super::tw::{EPS, Tw};
+use super::tw::{EPS, PARALLEL_EPS, Tw};
 use super::vec::{angles_to_axis, dot, lerp3, rotate_in, sub};
 use crate::Vec3;
 
@@ -305,7 +305,7 @@ impl CollisionWorld {
 fn split3(t1: f32, t2: f32, offset: f32) -> (usize, f32, f32) {
     let diff = t2 - t1;
     let abs = diff.abs();
-    if abs <= 4.76837158203125e-7 {
+    if abs <= PARALLEL_EPS {
         return (0, 1.0, 0.0);
     }
     let v = if diff < 0.0 { t1 } else { -t1 };
