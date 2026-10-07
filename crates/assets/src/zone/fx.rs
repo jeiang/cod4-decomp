@@ -3,7 +3,7 @@
 
 use super::error::{Result, ZoneError};
 use super::gfx::{self, Material, Name};
-use super::stream::{Fields, Ptr, Stream};
+use super::stream::{Addr, Fields, Ptr, Stream};
 use super::xmodel::{self, XModel};
 use std::sync::Arc;
 
@@ -182,32 +182,38 @@ fn vis_state(f: &mut Fields) -> VisState {
 /// or less stores the visual in the pointer itself.
 fn visual_slots<T: std::any::Any + Send + Sync>(
     s: &mut Stream,
+    slot: Option<Addr>,
     p: Ptr,
     count: u32,
-    mut one: impl FnMut(&mut Stream, Ptr) -> Result<T>,
+    mut one: impl FnMut(&mut Stream, Option<Addr>, Ptr) -> Result<T>,
 ) -> Result<Arc<[T]>> {
     if count > 1 {
         s.array(p, count, 4, 4, |s, f| {
+            let slot = f.slot();
             let p = f.ptr()?;
-            one(s, p)
+            one(s, slot, p)
         })
     } else {
-        Ok(Arc::from(vec![one(s, p)?]))
+        Ok(Arc::from(vec![one(s, slot, p)?]))
     }
 }
 
-fn visuals(s: &mut Stream, kind: u8, count: u32, p: Ptr) -> Result<FxVisuals> {
+fn visuals(s: &mut Stream, kind: u8, count: u32, slot: Option<Addr>, p: Ptr) -> Result<FxVisuals> {
     Ok(match kind {
         elem::DECAL => FxVisuals::Decals(s.array(p, count, 4, 8, |s, f| {
-            let (a, b) = (f.ptr()?, f.ptr()?);
-            Ok([gfx::material_ptr(s, a)?, gfx::material_ptr(s, b)?])
+            let (sa, a) = (f.slot(), f.ptr()?);
+            let (sb, b) = (f.slot(), f.ptr()?);
+            Ok([
+                gfx::material_ptr_at(s, sa, a)?,
+                gfx::material_ptr_at(s, sb, b)?,
+            ])
         })?),
         elem::SPRITE_BILLBOARD | elem::SPRITE_ORIENTED | elem::TAIL | elem::TRAIL | elem::CLOUD => {
-            FxVisuals::Materials(visual_slots(s, p, count, gfx::material_ptr)?)
+            FxVisuals::Materials(visual_slots(s, slot, p, count, gfx::material_ptr_at)?)
         }
-        elem::MODEL => FxVisuals::Models(visual_slots(s, p, count, xmodel::load)?),
-        elem::SOUND => FxVisuals::Sounds(visual_slots(s, p, count, |s, p| s.string(p))?),
-        elem::RUNNER => FxVisuals::Effects(visual_slots(s, p, count, |s, p| s.string(p))?),
+        elem::MODEL => FxVisuals::Models(visual_slots(s, slot, p, count, xmodel::load_at)?),
+        elem::SOUND => FxVisuals::Sounds(visual_slots(s, slot, p, count, |s, _, p| s.string(p))?),
+        elem::RUNNER => FxVisuals::Effects(visual_slots(s, slot, p, count, |s, _, p| s.string(p))?),
         _ => FxVisuals::None,
     })
 }
@@ -255,7 +261,9 @@ fn elem_def(s: &mut Stream, f: &mut Fields) -> Result<FxElemDef> {
     let visual_count = u32::from(f.u8());
     let vel_intervals = u32::from(f.u8());
     let vis_intervals = u32::from(f.u8());
-    let (vel_p, vis_p, visuals_p) = (f.ptr()?, f.ptr()?, f.ptr()?);
+    let (vel_p, vis_p) = (f.ptr()?, f.ptr()?);
+    let visuals_slot = f.slot();
+    let visuals_p = f.ptr()?;
     let coll_mins = vec3(f);
     let coll_maxs = vec3(f);
     let (on_impact, on_death, emitted) = (f.ptr()?, f.ptr()?, f.ptr()?);
@@ -278,7 +286,7 @@ fn elem_def(s: &mut Stream, f: &mut Fields) -> Result<FxElemDef> {
             amplitude: vis_state(f),
         })
     })?;
-    let visuals = visuals(s, elem_type, visual_count, visuals_p)?;
+    let visuals = visuals(s, elem_type, visual_count, visuals_slot, visuals_p)?;
     let effect_on_impact = s.string(on_impact)?;
     let effect_on_death = s.string(on_death)?;
     let effect_emitted = s.string(emitted)?;
@@ -349,7 +357,11 @@ fn effect(s: &mut Stream, h: &[u8]) -> Result<FxEffectDef> {
 }
 
 pub(super) fn load(s: &mut Stream, p: Ptr) -> Result<Option<Arc<FxEffectDef>>> {
-    s.temp_asset(p, 4, EFFECT_SIZE, effect)
+    load_at(s, None, p)
+}
+
+fn load_at(s: &mut Stream, slot: Option<Addr>, p: Ptr) -> Result<Option<Arc<FxEffectDef>>> {
+    s.temp_asset_at(slot, p, 4, EFFECT_SIZE, effect)
 }
 
 /// Impact effects of one surface type: 29 non-flesh and 4 flesh surfaces.
@@ -371,13 +383,13 @@ fn impact(s: &mut Stream, h: &[u8]) -> Result<FxImpactTable> {
     let table = f.ptr()?;
     let name = s.string(name)?;
     let table = s.array(table, 12, 4, 132, |s, f| {
-        let mut ptrs = [Ptr::Null; 33];
+        let mut ptrs = [(None, Ptr::Null); 33];
         for p in &mut ptrs {
-            *p = f.ptr()?;
+            *p = (f.slot(), f.ptr()?);
         }
         let mut loaded = Vec::with_capacity(33);
-        for p in ptrs {
-            loaded.push(load(s, p)?);
+        for (slot, p) in ptrs {
+            loaded.push(load_at(s, slot, p)?);
         }
         let flesh = loaded.split_off(29);
         Ok(FxImpactEntry {
