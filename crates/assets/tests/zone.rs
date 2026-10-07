@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Install-gated fastfile tests; they skip when the original install is absent.
 
-use assets::zone::{Block, KeepAll, XAssetType, Zone};
+use assets::zone::{Block, Consumer, KeepAll, XAssetType, Zone};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -154,4 +154,48 @@ fn load_zones_decode_byte_exact() {
         n += 1;
     }
     assert!(n == 0 || n == 21, "expected 21 load zones, found {n}");
+}
+
+/// The 47 multiplayer zones: the two per-map zones, the shared zones and the
+/// UI and localized zones.
+fn mp_zones(dir: &PathBuf) -> Vec<(String, PathBuf)> {
+    zones(dir)
+        .into_iter()
+        .filter(|(n, _)| {
+            n.starts_with("mp_")
+                || matches!(
+                    n.as_str(),
+                    "common_mp"
+                        | "code_post_gfx_mp"
+                        | "localized_common_mp"
+                        | "localized_code_post_gfx_mp"
+                        | "ui_mp"
+                )
+        })
+        .collect()
+}
+
+#[test]
+fn every_mp_zone_consumes_its_whole_stream() {
+    let Some(dir) = zone_dir() else { return };
+    let all = mp_zones(&dir);
+    assert!(
+        all.is_empty() || all.len() == 47,
+        "expected 47 MP zones, found {}",
+        all.len()
+    );
+    for (name, p) in &all {
+        let zone = open(p);
+        let declared = zone.header().block_sizes;
+        let n = zone.asset_types().len();
+        // `decode` fails unless the stream is consumed exactly to its end.
+        let st = zone
+            .decode(&Consumer::Server, |_| {})
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(st.assets, n, "{name}");
+        for b in Block::all() {
+            let i = b as usize;
+            assert!(st.usage.peak[i] <= declared[i], "{name} {b:?}");
+        }
+    }
 }

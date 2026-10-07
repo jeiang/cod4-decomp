@@ -9,9 +9,20 @@
 //! [`ZoneError::Unsupported`]; later tickets add their types to [`Asset`].
 
 mod asset_type;
+pub mod clipmap;
 mod error;
+pub mod fx;
 pub mod gfx;
+pub mod gfxworld;
+pub mod menu;
+pub mod phys;
+pub mod sound;
 mod stream;
+pub mod text;
+pub mod weapon;
+pub mod world;
+pub mod xanim;
+pub mod xmodel;
 
 pub use asset_type::XAssetType;
 pub use error::{Result, ZoneError};
@@ -44,6 +55,26 @@ pub enum Asset {
     TechniqueSet(Arc<TechniqueSet>),
     Image(Arc<GfxImage>),
     RawFile(Arc<RawFile>),
+    PhysPreset(Arc<phys::PhysPreset>),
+    XAnimParts(Arc<xanim::XAnimParts>),
+    XModel(Arc<xmodel::XModel>),
+    Sound(Arc<sound::SoundAliasList>),
+    SoundCurve(Arc<sound::SndCurve>),
+    LoadedSound(Arc<sound::LoadedSound>),
+    SndDriverGlobals(Arc<sound::SndDriverGlobals>),
+    /// Both `Clipmap` (SP) and `ClipmapPvs` (MP) asset types.
+    Clipmap(Arc<clipmap::Clipmap>),
+    ComWorld(Arc<world::ComWorld>),
+    GameWorldMp(Arc<world::GameWorldMp>),
+    GfxWorld(Arc<gfxworld::GfxWorld>),
+    LightDef(Arc<world::LightDef>),
+    Font(Arc<text::Font>),
+    MenuList(Arc<menu::MenuList>),
+    Localize(Arc<text::LocalizeEntry>),
+    Weapon(Arc<weapon::WeaponDef>),
+    Fx(Arc<fx::FxEffectDef>),
+    ImpactFx(Arc<fx::FxImpactTable>),
+    StringTable(Arc<text::StringTable>),
 }
 
 /// Per-consumer choice of which assets to retain. Every asset is still
@@ -51,6 +82,13 @@ pub enum Asset {
 /// dropped instead of delivered.
 pub trait DecodeFilter {
     fn keep(&self, ty: XAssetType) -> bool;
+
+    /// Whether render-only payload inside kept assets (XModel surface
+    /// vertices/indices, ...) is retained. When `false` it is still read from
+    /// the stream but dropped without allocating; see [`Stream::keep_render`].
+    fn keep_render(&self) -> bool {
+        true
+    }
 }
 
 /// The two consumers of decoded zones.
@@ -66,8 +104,27 @@ impl DecodeFilter for Consumer {
         use XAssetType::*;
         match self {
             Consumer::Client => true,
-            Consumer::Server => !matches!(ty, Image | TechniqueSet | GfxWorld | LightDef | Font),
+            Consumer::Server => !matches!(
+                ty,
+                Image
+                    | TechniqueSet
+                    | GfxWorld
+                    | LightDef
+                    | Font
+                    | Sound
+                    | SoundCurve
+                    | LoadedSound
+                    | SndDriverGlobals
+                    | MenuList
+                    | Menu
+                    | Fx
+                    | ImpactFx
+            ),
         }
+    }
+
+    fn keep_render(&self) -> bool {
+        matches!(self, Consumer::Client)
     }
 }
 
@@ -220,30 +277,56 @@ impl<'a> Zone<'a> {
         mut sink: impl FnMut(Asset),
     ) -> Result<ZoneStats> {
         let s = &mut self.stream;
+        s.set_keep_render(filter.keep_render());
         for (i, &ty) in self.assets.iter().enumerate() {
             // Later offset pointers alias the header field of this array entry.
             let field = Addr {
                 block: Block::Virtual,
                 offset: self.assets_off + 8 * i as u32 + 4,
             };
+            macro_rules! top {
+                ($load:expr, $variant:ident) => {
+                    $load?
+                        .inspect(|a| s.register(field, a.clone()))
+                        .map(Asset::$variant)
+                };
+            }
             let asset = match ty {
-                XAssetType::Material => s
-                    .temp_asset(Ptr::Follow, 4, gfx::MATERIAL_SIZE, gfx::material)?
-                    .inspect(|a| s.register(field, a.clone()))
-                    .map(Asset::Material),
-                XAssetType::TechniqueSet => s
-                    .temp_asset(Ptr::Follow, 4, gfx::TECHSET_SIZE, gfx::techset)?
-                    .inspect(|a| s.register(field, a.clone()))
-                    .map(Asset::TechniqueSet),
-                XAssetType::Image => s
-                    .temp_asset(Ptr::Follow, 4, gfx::IMAGE_SIZE, gfx::image)?
-                    .inspect(|a| s.register(field, a.clone()))
-                    .map(Asset::Image),
-                XAssetType::RawFile => s
-                    .temp_asset(Ptr::Follow, 4, 12, gfx::raw_file)?
-                    .inspect(|a| s.register(field, a.clone()))
-                    .map(Asset::RawFile),
-                XAssetType::SndDriverGlobals => None,
+                XAssetType::Material => top!(gfx::material_ptr(s, Ptr::Follow), Material),
+                XAssetType::TechniqueSet => top!(gfx::techset_ptr(s, Ptr::Follow), TechniqueSet),
+                XAssetType::Image => top!(gfx::image_ptr(s, Ptr::Follow), Image),
+                XAssetType::RawFile => {
+                    top!(s.temp_asset(Ptr::Follow, 4, 12, gfx::raw_file), RawFile)
+                }
+                XAssetType::PhysPreset => top!(phys::load(s, Ptr::Follow), PhysPreset),
+                XAssetType::XAnimParts => top!(xanim::load(s, Ptr::Follow), XAnimParts),
+                XAssetType::XModel => top!(xmodel::load(s, Ptr::Follow), XModel),
+                XAssetType::Sound => top!(sound::load_alias_list(s, Ptr::Follow), Sound),
+                XAssetType::SoundCurve => top!(sound::load_curve(s, Ptr::Follow), SoundCurve),
+                XAssetType::LoadedSound => {
+                    top!(sound::load_loaded(s, Ptr::Follow), LoadedSound)
+                }
+                XAssetType::SndDriverGlobals => {
+                    sound::load_driver_globals(s)?.map(Asset::SndDriverGlobals)
+                }
+                XAssetType::Clipmap | XAssetType::ClipmapPvs => {
+                    top!(clipmap::load(s, Ptr::Follow), Clipmap)
+                }
+                XAssetType::ComWorld => top!(world::load_com_world(s, Ptr::Follow), ComWorld),
+                XAssetType::GameWorldMp => {
+                    top!(world::load_game_world_mp(s, Ptr::Follow), GameWorldMp)
+                }
+                XAssetType::GfxWorld => top!(gfxworld::load(s, Ptr::Follow), GfxWorld),
+                XAssetType::LightDef => top!(world::load_light_def(s, Ptr::Follow), LightDef),
+                XAssetType::Font => top!(text::load_font(s, Ptr::Follow), Font),
+                XAssetType::MenuList => top!(menu::load(s, Ptr::Follow), MenuList),
+                XAssetType::Localize => top!(text::load_localize(s, Ptr::Follow), Localize),
+                XAssetType::Weapon => top!(weapon::load(s, Ptr::Follow), Weapon),
+                XAssetType::Fx => top!(fx::load(s, Ptr::Follow), Fx),
+                XAssetType::ImpactFx => top!(fx::load_impact(s, Ptr::Follow), ImpactFx),
+                XAssetType::StringTable => {
+                    top!(text::load_string_table(s, Ptr::Follow), StringTable)
+                }
                 t => return Err(ZoneError::Unsupported(t)),
             };
             if let (true, Some(a)) = (filter.keep(ty), asset) {

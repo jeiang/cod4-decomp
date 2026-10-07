@@ -30,7 +30,7 @@ pub(super) fn raw_file(s: &mut Stream, h: &[u8]) -> Result<RawFile> {
     Ok(RawFile { name, data })
 }
 
-fn raw_of(p: Ptr) -> u32 {
+pub(super) fn raw_of(p: Ptr) -> u32 {
     match p {
         Ptr::Null => 0,
         Ptr::Follow => 0xFFFF_FFFF,
@@ -118,8 +118,16 @@ pub(super) fn image(s: &mut Stream, h: &[u8]) -> Result<GfxImage> {
     })
 }
 
-fn image_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<GfxImage>>> {
+pub(super) fn image_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<GfxImage>>> {
     s.temp_asset(p, 4, IMAGE_SIZE, image)
+}
+
+pub(super) fn material_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<Material>>> {
+    s.temp_asset(p, 4, MATERIAL_SIZE, material)
+}
+
+pub(super) fn techset_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<TechniqueSet>>> {
+    s.temp_asset(p, 4, TECHSET_SIZE, techset)
 }
 
 #[derive(Debug)]

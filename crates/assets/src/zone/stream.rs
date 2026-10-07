@@ -155,6 +155,7 @@ pub struct Stream<'a> {
     /// (block, offset at push time)
     stack: Vec<(Block, u32)>,
     registry: HashMap<Addr, Box<dyn Any + Send + Sync>>,
+    keep_render: bool,
 }
 
 impl<'a> Stream<'a> {
@@ -170,11 +171,21 @@ impl<'a> Stream<'a> {
             peak: [0; BLOCK_COUNT],
             stack: Vec::new(),
             registry: HashMap::new(),
+            keep_render: true,
         }
     }
 
     pub(super) fn set_block_sizes(&mut self, sizes: [u32; BLOCK_COUNT]) {
         self.declared = sizes;
+    }
+
+    pub(super) fn set_keep_render(&mut self, keep: bool) {
+        self.keep_render = keep;
+    }
+
+    /// Whether the consumer wants render-only payload retained.
+    pub fn keep_render(&self) -> bool {
+        self.keep_render
     }
 
     /// Bytes taken from the inflated stream so far.
@@ -285,6 +296,34 @@ impl<'a> Stream<'a> {
             self.read_raw(&mut v)?;
         }
         Ok((a, v))
+    }
+
+    /// Like [`load`](Self::load) for render-only payload: with the consumer
+    /// not keeping render data, the bytes are consumed and block usage is
+    /// accounted without buffering them, and the returned vector is empty.
+    pub fn load_render(&mut self, align: u32, len: u32) -> Result<(Addr, Vec<u8>)> {
+        if self.keep_render {
+            return self.load(align, len);
+        }
+        let a = self.alloc(align, len)?;
+        if a.block.in_stream() {
+            self.skip_raw(len as u64)?;
+        }
+        Ok((a, Vec::new()))
+    }
+
+    fn skip_raw(&mut self, mut n: u64) -> Result<()> {
+        let total = n;
+        while n > 0 {
+            if self.pos == self.end && !self.fill()? {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            let k = n.min((self.end - self.pos) as u64);
+            self.pos += k as usize;
+            n -= k;
+        }
+        self.consumed += total;
+        Ok(())
     }
 
     /// Reserve the 4-byte alias slot used by `-2` pointers.
