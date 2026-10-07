@@ -741,6 +741,9 @@ impl Server {
             self.game.stats.matches_ended += 1;
             self.cbuf.add_text("map_rotate");
         }
+        if let Some(m) = self.game.level.map_requested.take() {
+            self.cbuf.add_text(&format!("map {m}"));
+        }
         if self.game.level.map_restart_requested {
             self.game.level.map_restart_requested = false;
             self.cbuf.add_text("map_restart");

@@ -165,6 +165,8 @@ pub struct Ent {
     pub takedamage: bool,
     /// `ent->flags`: 1 invulnerable, 2 cannot die, 8 takes no knockback.
     pub flags: i32,
+    /// Link, attachment, trigger and corpse state of the entity builtins.
+    pub x: crate::link::EntExtra,
 }
 
 impl Ent {
@@ -191,6 +193,7 @@ impl Ent {
             free_time: 0,
             takedamage: false,
             flags: 0,
+            x: crate::link::EntExtra::default(),
         }
     }
 }
@@ -259,6 +262,10 @@ pub struct Level {
     pub exit_requested: bool,
     pub map_restart_requested: bool,
     pub num_entities: usize,
+    /// Next slot of the player corpse ring (`level.currentPlayerClone`).
+    pub next_corpse: usize,
+    /// `map(name)` was called: the server changes to this map after the frame.
+    pub map_requested: Option<String>,
 }
 
 /// What happened in play since boot, for harness reports.
@@ -395,6 +402,7 @@ impl Game {
 
     /// `G_FreeEntity`: the script object dies at the next `Scr_IncTime`.
     pub fn free_entity(&mut self, vm: &mut Vm, num: u16) {
+        self.unlink_all(num);
         if let Some(slot) = self.ents.get_mut(usize::from(num))
             && let Some(e) = slot.take()
         {
@@ -493,6 +501,12 @@ impl Game {
             e.maxs = maxs;
             e.brush_model = Some(n);
             e.contents = w.collision().model_contents(n);
+        }
+        if matches!(
+            &*e.classname,
+            "script_model" | "script_origin" | "script_brushmodel"
+        ) {
+            e.flags |= crate::link::FL_SUPPORTS_LINKTO;
         }
         match &*e.classname {
             "script_model" => e.contents = contents::MISSILECLIP | contents::CLIPSHOT,

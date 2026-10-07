@@ -10,9 +10,11 @@ use gsc::{EntClass, EntRef, Host, Program, Value, Vm};
 use crate::game::{self, Game};
 
 mod args;
+mod ent;
 mod funcs;
 mod hud;
 mod methods;
+mod misc;
 mod player;
 
 pub use args::Args;
@@ -51,10 +53,13 @@ fn resolve<F: Copy>(
 impl Dispatch {
     pub fn new(prog: &Program) -> Self {
         Self {
-            funcs: resolve(prog.builtins.function_names(), &[funcs::TABLE]),
+            funcs: resolve(
+                prog.builtins.function_names(),
+                &[funcs::TABLE, ent::FUNCS, misc::FUNCS],
+            ),
             methods: resolve(
                 prog.builtins.method_names(),
-                &[methods::TABLE, player::METHODS],
+                &[methods::TABLE, player::METHODS, ent::METHODS, misc::METHODS],
             ),
         }
     }
