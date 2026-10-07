@@ -16,7 +16,6 @@ const fn r(f: MethFn) -> Impl<MethFn> {
     Real(f)
 }
 
-
 pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     // entity
     ("delete", r(delete)),

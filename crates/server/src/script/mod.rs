@@ -18,8 +18,8 @@ mod methods;
 mod misc;
 mod missile;
 mod player;
-mod uicmd;
 mod sound;
+mod uicmd;
 mod weapons;
 
 pub use args::Args;
