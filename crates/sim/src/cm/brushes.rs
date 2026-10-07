@@ -37,7 +37,11 @@ fn split(t1: f32, t2: f32, offset: f32) -> Split {
     } else {
         let v = if diff < 0.0 { t1 } else { -t1 };
         let inv = 1.0 / abs;
-        (usize::from(diff >= 0.0), (v + offset) * inv, (v - offset) * inv)
+        (
+            usize::from(diff >= 0.0),
+            (v + offset) * inv,
+            (v - offset) * inv,
+        )
     };
     Split {
         side,
@@ -54,11 +58,22 @@ impl CollisionWorld {
         self.trace_tree_r(tw, 0, start, end, trace);
     }
 
-    fn trace_tree_r(&self, tw: &Tw, mut num: i32, mut p1: [f32; 4], p2: [f32; 4], trace: &mut Trace) {
+    fn trace_tree_r(
+        &self,
+        tw: &Tw,
+        mut num: i32,
+        mut p1: [f32; 4],
+        p2: [f32; 4],
+        trace: &mut Trace,
+    ) {
         while num >= 0 {
             let node = &self.nodes[num as usize];
             let (t1, t2, offset) = if node.kind >= 3 {
-                let off = if tw.is_point { EPS } else { tw.bounding_radius + EPS };
+                let off = if tw.is_point {
+                    EPS
+                } else {
+                    tw.bounding_radius + EPS
+                };
                 (
                     dot(node.normal, xyz(p1)) - node.dist,
                     dot(node.normal, xyz(p2)) - node.dist,
@@ -127,7 +142,14 @@ impl CollisionWorld {
         trace.fraction == 0.0
     }
 
-    fn trace_lb_r(&self, tw: &Tw, mut node: usize, mut p1: [f32; 4], p2: [f32; 4], trace: &mut Trace) {
+    fn trace_lb_r(
+        &self,
+        tw: &Tw,
+        mut node: usize,
+        mut p1: [f32; 4],
+        p2: [f32; 4],
+        trace: &mut Trace,
+    ) {
         loop {
             let n: &LbNode = &self.lb_nodes[node];
             if tw.contents & n.contents == 0 {
@@ -162,7 +184,13 @@ impl CollisionWorld {
                 }
                 let s = split(t1, t2, offset);
                 let mid = lerp4(p1, p2, s.near_end);
-                self.trace_lb_r(tw, node + usize::from(n.child_offset[s.side]), p1, mid, trace);
+                self.trace_lb_r(
+                    tw,
+                    node + usize::from(n.child_offset[s.side]),
+                    p1,
+                    mid,
+                    trace,
+                );
                 p1 = lerp4(p1, p2, s.far_start);
                 node += usize::from(n.child_offset[1 - s.side]);
             } else {

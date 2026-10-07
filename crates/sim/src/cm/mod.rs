@@ -13,8 +13,8 @@ mod transform;
 mod tw;
 mod vec;
 
-pub(crate) use tw::Tw;
 pub use map::{ClipModel, CollisionWorld};
+pub(crate) use tw::Tw;
 
 pub const ENTITYNUM_NONE: u16 = 1023;
 pub const ENTITYNUM_WORLD: u16 = 1022;
@@ -55,8 +55,15 @@ impl Trace {
 pub trait Collide {
     /// Swept `mins..maxs` from `start` to `end` against everything matching `mask`, ignoring
     /// entity `pass_ent` (and anything it owns).
-    fn trace(&self, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3, pass_ent: u16, mask: i32)
-    -> Trace;
+    fn trace(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        mins: Vec3,
+        maxs: Vec3,
+        pass_ent: u16,
+        mask: i32,
+    ) -> Trace;
     /// Union of the contents of everything at `p`.
     fn point_contents(&self, p: Vec3, pass_ent: u16, mask: i32) -> i32;
 }

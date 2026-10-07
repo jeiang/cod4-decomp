@@ -127,7 +127,11 @@ impl CollisionWorld {
         }
         let (normal, area2) = normalize(scaled_normal);
         let mut sphere_start = tw.start;
-        sphere_start[2] -= if normal[2] < 0.0 { -tw.offset_z } else { tw.offset_z };
+        sphere_start[2] -= if normal[2] < 0.0 {
+            -tw.offset_z
+        } else {
+            tw.offset_z
+        };
         let shifted = mad(sphere_start, -tw.radius, normal);
         let hit_dist = dot(sub(shifted, v0), normal);
         let (mut start_v0, hit_frac, start_solid);
@@ -409,7 +413,11 @@ fn trace_capsule_border(tw: &Tw, border: &CollisionBorder, trace: &mut Trace) {
 
     if s < 0.0 || border.length < s {
         // The wall plane is struck beyond an end of the segment: the end post is what counts.
-        let along = if s < 0.0 { border.start } else { border.start + border.length };
+        let along = if s < 0.0 {
+            border.start
+        } else {
+            border.start + border.length
+        };
         let post_x = eq[1] * along + eq[0] * eq[2];
         let post_y = eq[1] * eq[2] - eq[0] * along;
         let off = [tw.start[0] - post_x, tw.start[1] - post_y];

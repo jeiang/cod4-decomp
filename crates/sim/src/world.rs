@@ -282,7 +282,14 @@ impl World {
         }
     }
 
-    fn link_into_tree(&mut self, num: u16, contents: i32, link_contents: i32, abs_min: Vec3, abs_max: Vec3) {
+    fn link_into_tree(
+        &mut self,
+        num: u16,
+        contents: i32,
+        link_contents: i32,
+        abs_min: Vec3,
+        abs_max: Vec3,
+    ) {
         let (probe, _, _) = self.descend(abs_min, abs_max, 0, 0);
         let slot = self.ents[usize::from(num)];
         let (node, lo, hi);
@@ -302,7 +309,13 @@ impl World {
     /// Finds the deepest sector `abs_min..abs_max` fits in, OR-ing the contents into the path
     /// (a zero `contents` leaves the tree untouched). Returns the sector and the bounds of the
     /// region the descent ended in.
-    fn descend(&mut self, abs_min: Vec3, abs_max: Vec3, contents: i32, link: i32) -> (u16, [f32; 2], [f32; 2]) {
+    fn descend(
+        &mut self,
+        abs_min: Vec3,
+        abs_max: Vec3,
+        contents: i32,
+        link: i32,
+    ) -> (u16, [f32; 2], [f32; 2]) {
         let mut lo = self.mins;
         let mut hi = self.maxs;
         let mut idx = HEAD;
@@ -363,7 +376,11 @@ impl World {
             let slot = self.ents[usize::from(num)];
             let d = slot.data.expect("a listed entity has data");
             let side = if dist >= d.abs_min[axis] {
-                if dist > d.abs_max[axis] { Some(1) } else { None }
+                if dist > d.abs_max[axis] {
+                    Some(1)
+                } else {
+                    None
+                }
             } else {
                 Some(0)
             };
@@ -414,11 +431,24 @@ impl World {
 
     /// Calls `visit` with every linked entity whose absolute bounds meet `mins..maxs` and whose
     /// contents match `mask` (`CM_AreaEntities`). Stops when `visit` returns `false`.
-    pub fn area_entities(&self, mins: Vec3, maxs: Vec3, mask: i32, mut visit: impl FnMut(u16) -> bool) {
+    pub fn area_entities(
+        &self,
+        mins: Vec3,
+        maxs: Vec3,
+        mask: i32,
+        mut visit: impl FnMut(u16) -> bool,
+    ) {
         self.area_r(HEAD, mins, maxs, mask, &mut visit);
     }
 
-    fn area_r(&self, mut idx: u16, mins: Vec3, maxs: Vec3, mask: i32, visit: &mut impl FnMut(u16) -> bool) -> bool {
+    fn area_r(
+        &self,
+        mut idx: u16,
+        mins: Vec3,
+        maxs: Vec3,
+        mask: i32,
+        visit: &mut impl FnMut(u16) -> bool,
+    ) -> bool {
         loop {
             let s = &self.sectors[usize::from(idx)];
             if s.contents & mask == 0 {
@@ -495,10 +525,22 @@ impl World {
         if d.ent.contents & clip.mask == 0 || Self::ignored(clip, num, d.ent.owner) {
             return;
         }
-        let half_lo = [-(clip.maxs[0] - clip.mins[0]) * 0.5, -(clip.maxs[1] - clip.mins[1]) * 0.5, -(clip.maxs[2] - clip.mins[2]) * 0.5];
+        let half_lo = [
+            -(clip.maxs[0] - clip.mins[0]) * 0.5,
+            -(clip.maxs[1] - clip.mins[1]) * 0.5,
+            -(clip.maxs[2] - clip.mins[2]) * 0.5,
+        ];
         let half_hi = [-half_lo[0], -half_lo[1], -half_lo[2]];
-        let lo = [d.abs_min[0] + half_lo[0], d.abs_min[1] + half_lo[1], d.abs_min[2] + half_lo[2]];
-        let hi = [d.abs_max[0] + half_hi[0], d.abs_max[1] + half_hi[1], d.abs_max[2] + half_hi[2]];
+        let lo = [
+            d.abs_min[0] + half_lo[0],
+            d.abs_min[1] + half_lo[1],
+            d.abs_min[2] + half_lo[2],
+        ];
+        let hi = [
+            d.abs_max[0] + half_hi[0],
+            d.abs_max[1] + half_hi[1],
+            d.abs_max[2] + half_hi[2],
+        ];
         if clip.tw.misses_box(lo, hi, trace.fraction) {
             return;
         }
@@ -523,7 +565,14 @@ impl World {
         }
     }
 
-    fn clip_move_r(&self, clip: &Clip, mut idx: u16, mut p: [f32; 4], p2: [f32; 4], trace: &mut Trace) {
+    fn clip_move_r(
+        &self,
+        clip: &Clip,
+        mut idx: u16,
+        mut p: [f32; 4],
+        p2: [f32; 4],
+        trace: &mut Trace,
+    ) {
         loop {
             let s = &self.sectors[usize::from(idx)];
             if clip.mask & s.contents == 0 || clip.mask & s.link_contents == 0 {
@@ -556,7 +605,11 @@ impl World {
                 } else {
                     let v = if diff < 0.0 { t1 } else { -t1 };
                     let inv = 1.0 / diff.abs();
-                    (usize::from(diff >= 0.0), (v + offset) * inv, (v - offset) * inv)
+                    (
+                        usize::from(diff >= 0.0),
+                        (v + offset) * inv,
+                        (v - offset) * inv,
+                    )
                 };
                 let lerp = |t: f32| {
                     [
@@ -580,7 +633,12 @@ impl World {
 
     fn clip_to_entities(&self, clip: &Clip, trace: &mut Trace) {
         let p = [clip.tw.start[0], clip.tw.start[1], clip.tw.start[2], 0.0];
-        let q = [clip.tw.end[0], clip.tw.end[1], clip.tw.end[2], trace.fraction];
+        let q = [
+            clip.tw.end[0],
+            clip.tw.end[1],
+            clip.tw.end[2],
+            trace.fraction,
+        ];
         self.clip_move_r(clip, HEAD, p, q, trace);
     }
 
@@ -626,7 +684,15 @@ impl World {
         blocked
     }
 
-    fn sight_r(&self, clip: &Clip, pass1: u16, mut idx: u16, mut p: Vec3, p2: Vec3, blocked: &mut i32) {
+    fn sight_r(
+        &self,
+        clip: &Clip,
+        pass1: u16,
+        mut idx: u16,
+        mut p: Vec3,
+        p2: Vec3,
+        blocked: &mut i32,
+    ) {
         loop {
             if *blocked != 0 {
                 return;
@@ -674,7 +740,11 @@ impl World {
                 } else {
                     let v = if diff < 0.0 { t1 } else { -t1 };
                     let inv = 1.0 / diff.abs();
-                    (usize::from(diff >= 0.0), (v + offset) * inv, (v - offset) * inv)
+                    (
+                        usize::from(diff >= 0.0),
+                        (v + offset) * inv,
+                        (v - offset) * inv,
+                    )
                 };
                 let mid = [
                     (p2[0] - p[0]) * near.min(1.0) + p[0],
@@ -702,14 +772,29 @@ impl World {
 
     /// Whether the hull `mins..maxs` standing at `origin` starts inside something matching
     /// `mask` (other than `pass` and what it owns).
-    pub fn box_in_solid(&self, origin: Vec3, mins: Vec3, maxs: Vec3, pass: u16, mask: i32) -> Option<u16> {
+    pub fn box_in_solid(
+        &self,
+        origin: Vec3,
+        mins: Vec3,
+        maxs: Vec3,
+        pass: u16,
+        mask: i32,
+    ) -> Option<u16> {
         let t = self.trace(origin, origin, mins, maxs, pass, mask);
         (t.start_solid || t.all_solid).then_some(t.hit_id)
     }
 }
 
 impl Collide for World {
-    fn trace(&self, start: Vec3, end: Vec3, mins: Vec3, maxs: Vec3, pass_ent: u16, mask: i32) -> Trace {
+    fn trace(
+        &self,
+        start: Vec3,
+        end: Vec3,
+        mins: Vec3,
+        maxs: Vec3,
+        pass_ent: u16,
+        mask: i32,
+    ) -> Trace {
         let mut trace = self
             .cm
             .box_trace(start, end, mins, maxs, &ClipModel::World, mask);
@@ -732,7 +817,12 @@ impl Collide for World {
             if num != pass_ent
                 && let Some(d) = self.entity(num)
             {
-                contents |= self.cm.transformed_point_contents(p, &d.ent.model(), d.ent.origin, d.ent.angles);
+                contents |= self.cm.transformed_point_contents(
+                    p,
+                    &d.ent.model(),
+                    d.ent.origin,
+                    d.ent.angles,
+                );
             }
             true
         });
@@ -751,8 +841,16 @@ fn sight_ignored(pass0: u16, pass1: u16, num: u16, owner: u16) -> bool {
 fn abs_bounds(e: &ClipEnt) -> (Vec3, Vec3) {
     let (mut lo, mut hi);
     if e.brush_model.is_none() || e.angles == [0.0; 3] {
-        lo = [e.origin[0] + e.mins[0], e.origin[1] + e.mins[1], e.origin[2] + e.mins[2]];
-        hi = [e.origin[0] + e.maxs[0], e.origin[1] + e.maxs[1], e.origin[2] + e.maxs[2]];
+        lo = [
+            e.origin[0] + e.mins[0],
+            e.origin[1] + e.mins[1],
+            e.origin[2] + e.mins[2],
+        ];
+        hi = [
+            e.origin[0] + e.maxs[0],
+            e.origin[1] + e.maxs[1],
+            e.origin[2] + e.maxs[2],
+        ];
     } else if e.angles[0] == 0.0 && e.angles[2] == 0.0 {
         let r = radius(&e.mins, &e.maxs, 2);
         lo = [e.origin[0] - r, e.origin[1] - r, e.origin[2] + e.mins[2]];

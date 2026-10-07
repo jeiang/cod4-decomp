@@ -191,6 +191,9 @@ impl CollisionWorld {
 
     /// The visibility cluster of a leaf (`-1` for solid/outside leaves).
     pub fn leaf_cluster(&self, leaf: u16) -> i16 {
-        self.cm.leafs.get(usize::from(leaf)).map_or(-1, |l| l.cluster)
+        self.cm
+            .leafs
+            .get(usize::from(leaf))
+            .map_or(-1, |l| l.cluster)
     }
 }

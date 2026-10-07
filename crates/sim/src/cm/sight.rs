@@ -49,7 +49,11 @@ impl CollisionWorld {
                 Some(m) => self.sight_leaf(&tw, &m.leaf, &mut trace),
                 None => 0,
             },
-            ClipModel::Box { mins, maxs, contents } => {
+            ClipModel::Box {
+                mins,
+                maxs,
+                contents,
+            } => {
                 if mask & contents != 0 && Cap::new(mins, maxs, contents).blocks(&tw) {
                     -1
                 } else {
@@ -74,8 +78,18 @@ impl CollisionWorld {
         angles: Vec3,
     ) -> i32 {
         let (center, lo, hi) = symmetric(mins, maxs);
-        let mut s = sub([start[0] + center[0], start[1] + center[1], start[2] + center[2]], origin);
-        let mut e = sub([end[0] + center[0], end[1] + center[1], end[2] + center[2]], origin);
+        let mut s = sub(
+            [
+                start[0] + center[0],
+                start[1] + center[1],
+                start[2] + center[2],
+            ],
+            origin,
+        );
+        let mut e = sub(
+            [end[0] + center[0], end[1] + center[1], end[2] + center[2]],
+            origin,
+        );
         if angles != [0.0; 3] {
             let axis = angles_to_axis(angles);
             s = rotate_in(&axis, s);
@@ -91,8 +105,16 @@ impl CollisionWorld {
             }
             let node = &self.nodes[num as usize];
             let (t1, t2, offset) = if node.kind >= 3 {
-                let off = if tw.is_point { EPS } else { tw.bounding_radius + EPS };
-                (dot(node.normal, p1) - node.dist, dot(node.normal, p2) - node.dist, off)
+                let off = if tw.is_point {
+                    EPS
+                } else {
+                    tw.bounding_radius + EPS
+                };
+                (
+                    dot(node.normal, p1) - node.dist,
+                    dot(node.normal, p2) - node.dist,
+                    off,
+                )
             } else {
                 let a = usize::from(node.kind);
                 (p1[a] - node.dist, p2[a] - node.dist, tw.size[a] + EPS)
@@ -104,7 +126,13 @@ impl CollisionWorld {
                 num = i32::from(node.children[1]);
             } else {
                 let s = split3(t1, t2, offset);
-                let hit = self.sight_tree(tw, i32::from(node.children[s.0]), p1, lerp3(p1, p2, s.1), trace);
+                let hit = self.sight_tree(
+                    tw,
+                    i32::from(node.children[s.0]),
+                    p1,
+                    lerp3(p1, p2, s.1),
+                    trace,
+                );
                 if hit != 0 {
                     return hit;
                 }
@@ -125,7 +153,10 @@ impl CollisionWorld {
             let first = usize::from(leaf.first_coll_aabb_index);
             for k in 0..usize::from(leaf.coll_aabb_count) {
                 let tree = first + k;
-                let Some(m) = self.cm.materials.get(usize::from(self.cm.aabb_trees[tree].material_index))
+                let Some(m) = self
+                    .cm
+                    .materials
+                    .get(usize::from(self.cm.aabb_trees[tree].material_index))
                 else {
                     continue;
                 };

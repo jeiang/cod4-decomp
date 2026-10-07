@@ -8,6 +8,7 @@
 
 use crate::Vec3;
 
+use super::vec::sub;
 
 /// Extra clearance every contact keeps (the original's `0.125` trace epsilon).
 pub(super) const EPS: f32 = 0.125;

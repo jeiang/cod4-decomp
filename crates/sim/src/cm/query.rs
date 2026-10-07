@@ -55,7 +55,11 @@ impl CollisionWorld {
                         self.test_leaf(&tw, &m.leaf, trace);
                     }
                 }
-                ClipModel::Box { mins, maxs, contents } => {
+                ClipModel::Box {
+                    mins,
+                    maxs,
+                    contents,
+                } => {
                     if mask & contents != 0 {
                         Cap::new(mins, maxs, contents).test(&tw, trace);
                     }
@@ -69,7 +73,11 @@ impl CollisionWorld {
                         self.trace_leaf(&tw, &m.leaf, trace);
                     }
                 }
-                ClipModel::Box { mins, maxs, contents } => {
+                ClipModel::Box {
+                    mins,
+                    maxs,
+                    contents,
+                } => {
                     if mask & contents != 0 {
                         Cap::new(mins, maxs, contents).trace(&tw, trace);
                     }
@@ -175,7 +183,11 @@ impl CollisionWorld {
                 Some(m) => &m.leaf,
                 None => return 0,
             },
-            ClipModel::Box { mins, maxs, contents } => {
+            ClipModel::Box {
+                mins,
+                maxs,
+                contents,
+            } => {
                 return if (0..3).all(|i| mins[i] <= p[i] && p[i] <= maxs[i]) {
                     contents
                 } else {

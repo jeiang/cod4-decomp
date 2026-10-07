@@ -50,7 +50,8 @@ impl Cap {
 
     /// Whether the sweep's bounds reach this capsule's bounds (plus one unit).
     fn in_reach(&self, tw: &Tw) -> bool {
-        (0..3).all(|i| tw.bounds[0][i] <= self.maxs[i] + 1.0 && tw.bounds[1][i] >= self.mins[i] - 1.0)
+        (0..3)
+            .all(|i| tw.bounds[0][i] <= self.maxs[i] + 1.0 && tw.bounds[1][i] >= self.mins[i] - 1.0)
     }
 
     /// Stationary hull overlap test (`CM_TestCapsuleInCapsule`).

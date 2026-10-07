@@ -33,8 +33,18 @@ impl CollisionWorld {
         angles: Vec3,
     ) {
         let (center, lo, hi) = symmetric(mins, maxs);
-        let mut start_l = sub([start[0] + center[0], start[1] + center[1], start[2] + center[2]], origin);
-        let mut end_l = sub([end[0] + center[0], end[1] + center[1], end[2] + center[2]], origin);
+        let mut start_l = sub(
+            [
+                start[0] + center[0],
+                start[1] + center[1],
+                start[2] + center[2],
+            ],
+            origin,
+        );
+        let mut end_l = sub(
+            [end[0] + center[0], end[1] + center[1], end[2] + center[2]],
+            origin,
+        );
         if angles == [0.0; 3] {
             self.trace_model(trace, start_l, end_l, lo, hi, model, mask);
             return;
