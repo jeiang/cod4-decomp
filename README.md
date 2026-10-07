@@ -39,6 +39,17 @@ COD4_PATH=/path/to/install nix develop -c cargo run --release -p server -- +set 
 
 `cod4e-server` boots like the original's dedicated server: command-line `set`s, `default_mp.cfg`, the dedicated zone set, then `+exec` and `+map`. It runs the stock gametype scripts at 30 Hz (`sv_fps`) on one thread. Console commands include `bots N` (server-side test clients that pick a team and class and play: they roam a navigation mesh generated from the map's collision data, shoot enemies they see, and inject usercmds directly, with no netchan), `status` and `expect <stat> <min>`. Harness stage 2 (`headless-bots`, plus `headless-bots-sd` for Search and Destroy; every server stage fails over 512 MiB peak RSS) plays an 18-bot team deathmatch round on mp_crash to its time limit and the map rotation, and records `ticks.csv` (per-tick total and gsc/bot/client/game columns), RSS, map-load and navigation-generation time and match counters; `headless-bots-32` is the 32-player budget run.
 
+## Playing
+
+```sh
+COD4_PATH=/path/to/install nix develop -c cargo run --release -p client -- --listen --bots 9   # solo: a team deathmatch against bots
+COD4_PATH=/path/to/install nix develop -c cargo run --release -p client -- --connect host:28960 # a `cod4e-server` (set net_port; default 28960)
+```
+
+The client talks to the server over UDP (`net`: sequenced, fragmented netchan, delta-coded snapshots about 36 per second, up to 3 usercmds per packet with redundancy). `--listen` runs the same server inside the client process. The player's own movement is predicted with the very `sim::pm::run_usercmd` the server runs (other players are collision boxes from the snapshot; server corrections fade over 100 ms); other players are drawn 100 ms behind the server clock between two snapshots, and the server rewinds them to that moment when it judges a shot (`g_lagcomp`, at most 250 ms back). Keys, mouse, gamepad and the config file are the input layer's (`bind w +forward`). Esc quits.
+
+Stage 4 (`client-match`) is the real client with `--listen --autoplay`: a scripted player walks toward and shoots the bots for a minute. It asserts connected and spawned, walked, saw the bots, prediction rarely corrected, the view model drawn, no script errors, shots fired and hits registered; it reports bandwidth, snapshot rate, frame times and the server's tick cost. It needs a display and skips without one. `net-loopback` and `net-match` cover the protocol and 4 clients with 12 bots without a display.
+
 ## Layout
 
 | crate | role |
