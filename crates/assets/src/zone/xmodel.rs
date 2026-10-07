@@ -51,7 +51,9 @@ pub struct Surface {
     pub base_vert_index: u16,
     /// Vertices blended over 1, 2, 3 and 4 bones.
     pub blend_counts: [i16; 4],
+    /// Skinning weights; empty when the consumer drops presentation data.
     pub blends: Arc<[u16]>,
+    /// Collision trees are `None` when the consumer drops presentation data.
     pub vert_list: Arc<[RigidVertList]>,
     pub part_bits: [i32; 4],
     /// Packed 32-byte vertices. Empty when the consumer drops presentation data.
@@ -364,8 +366,9 @@ fn surface(s: &mut Stream, f: &mut Fields) -> Result<Surface> {
         .sum::<i32>();
     let blend_total =
         u32::try_from(blend_total).map_err(|_| ZoneError::Invalid("negative blend count"))?;
-    let blends = s.array(blends, blend_total, 2, 2, |_, f| Ok(f.u16()))?;
+    let mut blends = s.array(blends, blend_total, 2, 2, |_, f| Ok(f.u16()))?;
     let verts = presentation(s, verts, Block::Vertex, u32::from(vert_count) * VERTEX_SIZE)?;
+    let keep = s.keep_presentation();
     let vert_list = s.array(vert_list, vert_list_count, 4, 12, |s, f| {
         let bone_offset = f.u16();
         let vert_count = f.u16();
@@ -377,7 +380,8 @@ fn surface(s: &mut Stream, f: &mut Fields) -> Result<Surface> {
             vert_count,
             tri_offset,
             tri_count,
-            collision_tree: s.shared(tree, 4, 40, collision_tree)?,
+            // Triangle-in-AABB queries are client-only (decals, marks).
+            collision_tree: s.shared(tree, 4, 40, collision_tree)?.filter(|_| keep),
         })
     })?;
     let tri_bytes = presentation(s, tris, Block::Index, u32::from(tri_count) * TRI_SIZE)?;
@@ -387,6 +391,9 @@ fn surface(s: &mut Stream, f: &mut Fields) -> Result<Surface> {
         .iter()
         .map(|c| u16::from_le_bytes(*c))
         .collect();
+    if !keep {
+        blends = Arc::from([]);
+    }
     Ok(Surface {
         tile_mode,
         deformed,

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Install-gated fastfile tests; they skip when the original install is absent.
 
-use assets::zone::{Block, Consumer, KeepAll, XAssetType, Zone};
+use assets::zone::gfx::{Material, TextureSource};
+use assets::zone::{Asset, Block, Consumer, KeepAll, XAssetType, Zone};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -198,4 +199,74 @@ fn every_mp_zone_consumes_its_whole_stream() {
             assert!(st.usage.peak[i] <= declared[i], "{name} {b:?}");
         }
     }
+}
+
+fn assert_no_pixels(what: &str, m: &Material) {
+    let mut images = Vec::new();
+    for t in m.textures.iter() {
+        match &t.source {
+            TextureSource::Image(i) => images.extend(i.iter()),
+            TextureSource::Water(w) => {
+                if let Some(w) = w {
+                    images.extend(w.image.iter());
+                    assert!(w.h0.is_empty() && w.w_term.is_empty(), "{what}: water grid");
+                }
+            }
+        }
+    }
+    for i in images {
+        if let Some(def) = &i.load_def {
+            assert!(def.data.is_empty(), "{what}: image {:?} has texels", i.name);
+        }
+    }
+    assert!(m.technique_set.is_none(), "{what}: technique set kept");
+}
+
+#[test]
+fn server_decode_keeps_no_image_pixels_or_render_bulk() {
+    let Some(dir) = zone_dir() else { return };
+    let (mut materials, mut models) = (0, 0);
+    for (name, p) in mp_zones(&dir) {
+        open(&p)
+            .decode(&Consumer::Server, |a| match a {
+                Asset::Material(m) => {
+                    materials += 1;
+                    assert_no_pixels(&name, &m);
+                }
+                Asset::XModel(x) => {
+                    models += 1;
+                    for m in x.materials.iter().flatten() {
+                        assert_no_pixels(&name, m);
+                    }
+                    for s in x.surfs.iter() {
+                        assert!(s.verts.is_empty() && s.tri_indices.is_empty(), "{name}");
+                        assert!(s.blends.is_empty(), "{name}");
+                        for v in s.vert_list.iter() {
+                            assert!(v.collision_tree.is_none(), "{name}");
+                        }
+                    }
+                }
+                Asset::Weapon(w) => {
+                    for m in [
+                        &w.hud_icon,
+                        &w.ammo_counter_icon,
+                        &w.reticle_center,
+                        &w.reticle_side,
+                        &w.overlay_material,
+                        &w.overlay_material_low_res,
+                        &w.kill_icon,
+                        &w.dpad_icon,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        assert_no_pixels(&name, m);
+                    }
+                }
+                Asset::Image(_) | Asset::GfxWorld(_) => panic!("{name}: renderer asset kept"),
+                _ => {}
+            })
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+    eprintln!("checked {materials} materials, {models} models");
 }
