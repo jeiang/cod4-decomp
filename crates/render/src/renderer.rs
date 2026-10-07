@@ -8,6 +8,7 @@ use crate::gpu::Gpu;
 use crate::material::{BANK_BYTES, Materials, Prepared, SamplerKey, Target, VertexKind};
 use crate::post::{self, PostParams};
 use crate::scene::{MapData, Mesh, Scene, model_matrix};
+use crate::skin::{self, ModelInstance, ModelKind};
 use crate::sunshadow::{self, SunShadow};
 use crate::texture::{Tex, TextureCache};
 use crate::timing::GpuTimer;
@@ -24,6 +25,8 @@ const NEAR: f32 = 4.0;
 /// The projection has no far plane worth the name: the sky shader drops the translation part of the matrix and so
 /// lands at `z / w = r`, which must stay below one to survive clipping.
 const DEPTH_SCALE: f32 = 0.99999;
+/// The view model's share of the depth range, in front of everything the world draws.
+const VIEWMODEL_DEPTH: f32 = 0.05;
 /// Linear filtering, linear mips, clamped.
 const CODE_SAMPLER: u8 = 0x72;
 const TECH_BUILD_FLOATZ: usize = 1;
@@ -166,6 +169,8 @@ struct Draw {
     first_index: u32,
     count: u32,
     base_vertex: i32,
+    /// Byte range of the frame's skinned vertex buffer, for a dynamic model.
+    vb: Option<(u64, u64)>,
     sky: bool,
     order: (bool, u8, u32),
 }
@@ -211,6 +216,15 @@ struct Items<'a> {
     smodels: &'a [u32],
 }
 
+/// One skinned surface of a dynamic model, skinned into the frame's vertex buffer.
+struct DynSurf {
+    inst: usize,
+    surf: usize,
+    vb: (u64, u64),
+    light: u8,
+    obj: Object,
+}
+
 /// Object-independent banks by (prepared pass, light): the vertex and the pixel bank offsets.
 type SharedBanks = HashMap<(u32, u8), (Option<u32>, Option<u32>)>;
 
@@ -245,6 +259,13 @@ pub struct Renderer {
     /// What the post chain does this frame; starts as the map's own glow and film.
     pub post: PostParams,
     pub(crate) post_state: post::State,
+    /// Skinned models to draw in the next [`Renderer::render`]; the caller refills the list every frame.
+    pub dynamic_models: Vec<ModelInstance>,
+    /// Horizontal field of view of the view model; `None` uses the view's.
+    pub viewmodel_fov_x: Option<f32>,
+    dyn_vb: wgpu::Buffer,
+    dyn_cap: u64,
+    dyn_bytes: Vec<u8>,
 }
 
 impl Renderer {
@@ -308,6 +329,7 @@ impl Renderer {
                 })
             })
             .collect();
+        let gpu_for_dyn = gpu.clone();
         let shadow_dummy = dummy_shadow(&gpu);
         let timer = GpuTimer::new(&gpu);
         let post_state = post::State::new(&gpu, data);
@@ -333,6 +355,11 @@ impl Renderer {
             shadow: None,
             shadow_dummy,
             timer,
+            dynamic_models: Vec::new(),
+            viewmodel_fov_x: None,
+            dyn_vb: new_dyn_vb(&gpu_for_dyn, 1 << 20),
+            dyn_cap: 1 << 20,
+            dyn_bytes: Vec::new(),
         };
         r.prewarm();
         r
@@ -711,6 +738,7 @@ impl Renderer {
                 first_index: surf.base_index as u32,
                 count: u32::from(surf.tri_count) * 3,
                 base_vertex: surf.first_vertex,
+                vb: None,
             });
         }
 
@@ -774,12 +802,144 @@ impl Renderer {
                     first_index: 0,
                     count: tris,
                     base_vertex: 0,
+                    vb: None,
                 });
                 counted = true;
             }
             counts.models += usize::from(counted);
         }
         draws.sort_by_key(|d| (!d.sky, d.order, d.prepared.id()));
+        draws
+    }
+
+    /// The reflection probe closest to `p`: a model that moves has no baked probe index.
+    fn nearest_probe(&self, p: [f32; 3]) -> u8 {
+        let d = |o: &[f32; 3]| (0..3).map(|k| (o[k] - p[k]).powi(2)).sum::<f32>();
+        self.scene
+            .world
+            .reflection_probes
+            .iter()
+            .enumerate()
+            .min_by(|a, b| d(&a.1.origin).total_cmp(&d(&b.1.origin)))
+            .map_or(0, |(i, _)| i as u8)
+    }
+
+    /// Skins every dynamic model's surfaces into the frame's vertex buffer and lights the models.
+    fn prepare_dynamic(&mut self, insts: &[ModelInstance], eye: Vec3) -> Vec<DynSurf> {
+        self.scene.begin_dynamic_lighting();
+        self.dyn_bytes.clear();
+        let mut out = Vec::new();
+        for (ii, inst) in insts.iter().enumerate() {
+            let model = &inst.model;
+            let dist = Vec3::from(inst.origin).distance(eye);
+            let lod = inst.lod.unwrap_or_else(|| pick_lod(model, dist)).min(3);
+            let info = &model.lod_info[lod];
+            let mats = skin::skin_matrices(model, &inst.bones);
+            let (base_lighting, light) = match self.scene.light_point(inst.light_origin) {
+                Some((h, l)) => (self.scene.lighting.base_coords(h), l),
+                None => (
+                    Object::default().base_lighting,
+                    self.scene.world.sun_primary_light_index as u8,
+                ),
+            };
+            let obj = Object {
+                world: inst.world_matrix(),
+                base_lighting,
+            };
+            for s in 0..usize::from(info.surf_count) {
+                let idx = usize::from(info.surf_index) + s;
+                let Some(surf) = model.surfs.get(idx) else {
+                    continue;
+                };
+                if surf.verts.is_empty()
+                    || surf.tri_indices.is_empty()
+                    || skin::is_hidden(surf, &inst.hidden_parts)
+                {
+                    continue;
+                }
+                let at = self.dyn_bytes.len() as u64;
+                skin::skin_surface(surf, &mats, &mut self.dyn_bytes);
+                out.push(DynSurf {
+                    inst: ii,
+                    surf: idx,
+                    vb: (at, self.dyn_bytes.len() as u64 - at),
+                    light,
+                    obj,
+                });
+            }
+        }
+        self.scene.upload_dynamic_lighting(&self.gpu);
+        let need = self.dyn_bytes.len() as u64;
+        if need > self.dyn_cap {
+            self.dyn_cap = need.next_power_of_two();
+            self.dyn_vb = new_dyn_vb(&self.gpu, self.dyn_cap);
+        }
+        if need > 0 {
+            self.gpu
+                .queue
+                .write_buffer(&self.dyn_vb, 0, &self.dyn_bytes);
+        }
+        out
+    }
+
+    /// Draws of the dynamic models of `want` for one pass.
+    #[allow(clippy::too_many_arguments)]
+    fn build_dynamic(
+        &mut self,
+        kind: PassKind,
+        frame: &FrameConsts,
+        light_frames: &HashMap<u8, FrameConsts>,
+        insts: &[ModelInstance],
+        surfs: &[DynSurf],
+        want: ModelKind,
+        target: Target,
+        sun_shadows: bool,
+    ) -> Vec<Draw> {
+        let hsm = self.hsm();
+        let shadow_tech = [self.shadow_tech()];
+        let floatz_tech = [TECH_BUILD_FLOATZ];
+        let mut shared = SharedBanks::new();
+        let mut draws = Vec::new();
+        for (n, d) in surfs.iter().enumerate() {
+            let inst = &insts[d.inst];
+            if inst.kind != want {
+                continue;
+            }
+            let Some(Some(mat)) = inst.model.materials.get(d.surf) else {
+                continue;
+            };
+            let light = if kind == PassKind::Scene { d.light } else { 0 };
+            let techs: &[usize] = match kind {
+                PassKind::Scene => self.scene_techs(light, sun_shadows && want == ModelKind::World),
+                PassKind::SunShadow => &shadow_tech,
+                PassKind::FloatZ => &floatz_tech,
+            };
+            let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {
+                continue;
+            };
+            let Some(mesh) = self.scene.model_mesh(&self.gpu, &inst.model, d.surf) else {
+                continue;
+            };
+            let fc = light_frames.get(&light).unwrap_or(frame);
+            let (vs, ps) = self.banks(&prep, fc, &d.obj, &mut shared, light);
+            let pipeline = self.materials.pipeline(&self.gpu, &prep, target);
+            let probe = self.nearest_probe(inst.light_origin);
+            let tex_bg = self.tex_group(&prep, 0, probe, light);
+            draws.push(Draw {
+                sky: false,
+                order: (false, mat.sort_key, 1 << 30 | n as u32),
+                prepared: prep,
+                pipeline,
+                tex_bg,
+                mesh,
+                vs,
+                ps,
+                first_index: 0,
+                count: u32::from(inst.model.surfs[d.surf].tri_count) * 3,
+                base_vertex: 0,
+                vb: Some(d.vb),
+            });
+        }
         draws
     }
 
@@ -862,6 +1022,8 @@ impl Renderer {
             ..Default::default()
         };
         let mut counts = BuildCounts::default();
+        let insts = std::mem::take(&mut self.dynamic_models);
+        let dynsurfs = self.prepare_dynamic(&insts, view.origin);
 
         // The sun shadow map.
         let has_sun = world.sun_light.is_some() && self.shadow.is_some();
@@ -905,7 +1067,7 @@ impl Renderer {
                     surfaces: &surfaces,
                     smodels: &smodels,
                 };
-                let list = self.build_draws(
+                let mut list = self.build_draws(
                     PassKind::SunShadow,
                     &pf,
                     &HashMap::new(),
@@ -915,6 +1077,16 @@ impl Renderer {
                     &mut counts,
                     view.origin,
                 );
+                list.extend(self.build_dynamic(
+                    PassKind::SunShadow,
+                    &pf,
+                    &HashMap::new(),
+                    &insts,
+                    &dynsurfs,
+                    ModelKind::World,
+                    target,
+                    false,
+                ));
                 stats.shadow_draws += list.len();
                 shadow_lists.push(list);
             }
@@ -935,19 +1107,60 @@ impl Renderer {
             surfaces: &vis.surfaces,
             smodels: &vis.smodels,
         };
-        let draws = self.build_draws(
+        let scene_target = Target {
+            color: Some(format),
+            depth: Some(DEPTH_FORMAT),
+        };
+        let mut draws = self.build_draws(
             PassKind::Scene,
             &frame,
             &light_frames,
             &items,
-            Target {
-                color: Some(format),
-                depth: Some(DEPTH_FORMAT),
-            },
+            scene_target,
             sun.is_some(),
             &mut counts,
             view.origin,
         );
+        draws.extend(self.build_dynamic(
+            PassKind::Scene,
+            &frame,
+            &light_frames,
+            &insts,
+            &dynsurfs,
+            ModelKind::World,
+            scene_target,
+            sun.is_some(),
+        ));
+        draws.sort_by_key(|d| (!d.sky, d.order, d.prepared.id()));
+        // The view model has its own projection; its depth range is squeezed in front of the world's.
+        let vm_fov = self.viewmodel_fov_x.unwrap_or(view.fov_x);
+        let vm_proj = View {
+            fov_x: vm_fov,
+            ..*view
+        }
+        .matrices(aspect)
+        .1;
+        let with_proj = |f: &FrameConsts| {
+            let mut f = f.clone();
+            f.proj = vm_proj;
+            f
+        };
+        let vm_frame = with_proj(&frame);
+        let vm_lights: HashMap<u8, FrameConsts> = light_frames
+            .iter()
+            .map(|(k, f)| (*k, with_proj(f)))
+            .collect();
+        let vm_draws = self.build_dynamic(
+            PassKind::Scene,
+            &vm_frame,
+            &vm_lights,
+            &insts,
+            &dynsurfs,
+            ModelKind::ViewModel,
+            scene_target,
+            false,
+        );
+        stats.models += insts.len();
         stats.models = counts.models;
         stats.pipelines_missing = counts.missing;
         stats.draws = draws.len();
@@ -957,7 +1170,7 @@ impl Renderer {
             let mut zf = frame.clone();
             zf.vec[codeconst::DEPTH_FROM_CLIP as usize] = [0.0, 0.0, 0.0, 1.0];
             let zview = self.post_state.floatz_view(&self.gpu, size, format);
-            let list = self.build_draws(
+            let mut list = self.build_draws(
                 PassKind::FloatZ,
                 &zf,
                 &HashMap::new(),
@@ -970,6 +1183,19 @@ impl Renderer {
                 &mut counts,
                 view.origin,
             );
+            list.extend(self.build_dynamic(
+                PassKind::FloatZ,
+                &zf,
+                &HashMap::new(),
+                &insts,
+                &dynsurfs,
+                ModelKind::World,
+                Target {
+                    color: Some(post::FLOATZ_FORMAT),
+                    depth: Some(DEPTH_FORMAT),
+                },
+                false,
+            ));
             (zview, list)
         });
         let chain = post::build(self, size, format, target, NEAR);
@@ -1006,7 +1232,7 @@ impl Renderer {
             for (k, list) in shadow_lists.iter().enumerate() {
                 let vp = SunShadow::viewport(k);
                 rp.set_viewport(vp[0], vp[1], vp[2], vp[3], 0.0, 1.0);
-                record(&mut rp, list, &self.vs_bg, &self.ps_bg, None);
+                record(&mut rp, list, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
             }
         }
         if let Some((zview, list)) = &floatz {
@@ -1040,7 +1266,7 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            record(&mut rp, list, &self.vs_bg, &self.ps_bg, None);
+            record(&mut rp, list, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
         }
         {
             let depth = &self.depth.as_ref().expect("depth").0;
@@ -1079,7 +1305,19 @@ impl Renderer {
                 &self.vs_bg,
                 &self.ps_bg,
                 Some((size.0 as f32, size.1 as f32)),
+                &self.dyn_vb,
             );
+            if !vm_draws.is_empty() {
+                rp.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, VIEWMODEL_DEPTH);
+                record(
+                    &mut rp,
+                    &vm_draws,
+                    &self.vs_bg,
+                    &self.ps_bg,
+                    None,
+                    &self.dyn_vb,
+                );
+            }
         }
         post::record(
             &mut enc,
@@ -1098,6 +1336,7 @@ impl Renderer {
             stats.gpu_ms = t.last_total_ms;
             stats.frame = t.frame();
         }
+        self.dynamic_models = insts;
         stats.cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
         stats
     }
@@ -1125,6 +1364,7 @@ fn record(
     vs_bg: &wgpu::BindGroup,
     ps_bg: &wgpu::BindGroup,
     sky_view: Option<(f32, f32)>,
+    dyn_vb: &wgpu::Buffer,
 ) {
     let mut cur_pipe: Option<*const wgpu::RenderPipeline> = None;
     let mut cur_tex: Option<*const wgpu::BindGroup> = None;
@@ -1148,7 +1388,11 @@ fn record(
             rp.set_bind_group(2, &*d.tex_bg, &[]);
             cur_tex = Some(Arc::as_ptr(&d.tex_bg));
         }
-        if cur_mesh != Some(Arc::as_ptr(&d.mesh)) {
+        if let Some((at, len)) = d.vb {
+            rp.set_vertex_buffer(0, dyn_vb.slice(at..at + len));
+            rp.set_index_buffer(d.mesh.ib.slice(..), wgpu::IndexFormat::Uint16);
+            cur_mesh = None;
+        } else if cur_mesh != Some(Arc::as_ptr(&d.mesh)) {
             rp.set_vertex_buffer(0, d.mesh.vb.slice(..));
             rp.set_index_buffer(d.mesh.ib.slice(..), wgpu::IndexFormat::Uint16);
             cur_mesh = Some(Arc::as_ptr(&d.mesh));
@@ -1284,6 +1528,15 @@ fn dummy_shadow(gpu: &Gpu) -> (Arc<Tex>, Arc<Tex>) {
         }),
         colour,
     )
+}
+
+fn new_dyn_vb(gpu: &Gpu, size: u64) -> wgpu::Buffer {
+    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("skinned vertices"),
+        size,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn new_ring(gpu: &Gpu, regs: usize) -> wgpu::Buffer {

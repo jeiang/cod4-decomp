@@ -8,6 +8,8 @@ use crate::Cli;
 use crate::display::{self, hor_plus};
 use crate::flythrough;
 use crate::input::{Input, InputFrame, buttons};
+use crate::models::Library;
+use crate::showcase::Showcase;
 use crate::video::Recorder;
 use assets::vfs::Vfs;
 use glam::Vec3;
@@ -155,6 +157,7 @@ struct State {
     present_mode: wgpu::PresentMode,
     fov_x: f32,
     surfaces_drawn: Vec<f64>,
+    showcase: Option<Showcase>,
 }
 
 struct Viewer {
@@ -221,6 +224,34 @@ impl Viewer {
             std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
         }
         let mut notes: Vec<String> = [note, present_note].into_iter().flatten().collect();
+        let showcase = match self.cli.show_models {
+            Some(n) => {
+                let t = Instant::now();
+                let mut lib = Library::load(&self.cli.install, &self.cli.map)?;
+                let w = &renderer.scene.world;
+                let bounds = (Vec3::from(w.mins), Vec3::from(w.maxs));
+                let collision = renderer
+                    .scene
+                    .collision
+                    .clone()
+                    .ok_or("the map has no collision data")?;
+                let lit = |p: Vec3| {
+                    let sight = &*collision as &dyn render::lightgrid::SightTrace;
+                    render::lightgrid::light_grid_lookup(&w.light_grid, p.to_array(), Some(sight))
+                        .entries
+                        .iter()
+                        .any(Option::is_some)
+                };
+                let s = Showcase::new(&mut lib, &*collision, bounds, "m4_mp", n, &lit)?;
+                notes.push(format!(
+                    "showcase: {n} players, models loaded in {:.0} ms",
+                    t.elapsed().as_secs_f64() * 1000.0
+                ));
+                notes.extend(s.describe());
+                Some(s)
+            }
+            None => None,
+        };
         let want_video = self.cli.video && self.cli.flythrough;
         if want_video && !copy_src {
             notes.push("surface cannot be copied from; no video".into());
@@ -255,6 +286,7 @@ impl Viewer {
             present_mode,
             fov_x: hor_plus(self.cli.fov, aspect),
             surfaces_drawn: Vec::new(),
+            showcase,
         })
     }
 }
@@ -327,7 +359,11 @@ impl Viewer {
         let dt = (t - st.last_t).min(0.1);
         st.last_t = t;
 
-        if self.cli.flythrough {
+        if let Some(sc) = st.showcase.as_mut() {
+            let (p, y, pi) = sc.camera();
+            (st.pos, st.yaw, st.pitch) = (p, y, pi);
+            st.renderer.dynamic_models = sc.update(dt);
+        } else if self.cli.flythrough {
             let w = &st.renderer.scene.world;
             let p = flythrough::pose(t, Vec3::from(w.mins), Vec3::from(w.maxs));
             (st.pos, st.yaw, st.pitch) = (p.origin, p.yaw, p.pitch);

@@ -21,7 +21,7 @@ use assets::zone::text::StringTable;
 use assets::zone::weapon::WeaponDef;
 use assets::zone::xanim::XAnimParts;
 use assets::zone::xmodel::XModel;
-use assets::zone::{Asset, Consumer, Zone};
+use assets::zone::{Asset, Consumer, DecodeFilter, XAssetType, Zone};
 
 use crate::delta::RootMotion;
 use crate::tags::Skeleton;
@@ -146,9 +146,27 @@ impl PlayerAnim {
     }
 }
 
-/// True for the animations the server skeleton samples.
-fn is_player_anim(name: &str) -> bool {
-    name.len() > 3 && name[..3].eq_ignore_ascii_case("pb_")
+/// True for the animations the server skeleton samples (`pb_*`), and, for a client, the weapon
+/// view model animations (`viewmodel_*`).
+fn is_player_anim(name: &str, client: bool) -> bool {
+    let starts = |p: &str| name.len() > p.len() && name[..p.len()].eq_ignore_ascii_case(p);
+    starts("pb_") || (client && starts("viewmodel_"))
+}
+
+/// The server's asset selection, with the render payload (vertices, skin weights) kept when the
+/// content is for a client.
+struct ContentFilter {
+    presentation: bool,
+}
+
+impl DecodeFilter for ContentFilter {
+    fn keep(&self, ty: XAssetType) -> bool {
+        Consumer::Server.keep(ty)
+    }
+
+    fn keep_presentation(&self) -> bool {
+        self.presentation
+    }
 }
 
 #[derive(Default)]
@@ -189,6 +207,9 @@ fn get<'a, T>(m: &'a HashMap<String, (u8, T)>, name: &str) -> Option<&'a T> {
 
 #[derive(Default)]
 pub struct Content {
+    /// A client's content: models keep their vertices and skin weights, and the view model
+    /// animations are retained with the player animations.
+    pub client: bool,
     base: Layer,
     map: Layer,
     pub map_name: Option<String>,
@@ -197,6 +218,14 @@ pub struct Content {
 }
 
 impl Content {
+    /// Content for a client: as the server's, plus what drawing a model needs.
+    pub fn for_client() -> Self {
+        Self {
+            client: true,
+            ..Self::default()
+        }
+    }
+
     /// Decodes `<zone>.ff` into the base layer (`tag`) or, when `tag` is [`MAP_TAG`], into the
     /// map layer.
     pub fn load_zone(&mut self, install: &Install, zone: &str, tag: u8) -> Result<(), String> {
@@ -213,7 +242,11 @@ impl Content {
             &mut self.base
         };
         let strings = z.script_strings().to_vec();
-        z.decode(&Consumer::Server, |a| match a {
+        let client = self.client;
+        let filter = ContentFilter {
+            presentation: client,
+        };
+        z.decode(&filter, |a| match a {
             Asset::RawFile(r) => {
                 if let Some(n) = &r.name {
                     // Drop the trailing NUL stored after the text.
@@ -252,7 +285,7 @@ impl Content {
                         &n,
                         Arc::new(AnimInfo::new(&x, &strings)),
                     );
-                    if is_player_anim(&n) {
+                    if is_player_anim(&n, client) {
                         let part_names = x.names.iter().map(|p| resolve(&strings, *p)).collect();
                         put(
                             &mut layer.player_anims,
@@ -347,6 +380,21 @@ impl Content {
 
     pub fn skeleton(&self, name: &str) -> Option<&Arc<Skeleton>> {
         get(&self.map.skeletons, name).or_else(|| get(&self.base.skeletons, name))
+    }
+
+    /// Names of the loaded models that start with `prefix`, sorted.
+    pub fn model_names(&self, prefix: &str) -> Vec<&str> {
+        let mut v: Vec<&str> = self
+            .base
+            .models
+            .keys()
+            .chain(self.map.models.keys())
+            .map(String::as_str)
+            .filter(|n| n.starts_with(prefix))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     /// Names of the loaded animations that start with `prefix`, sorted.

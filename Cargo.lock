@@ -911,6 +911,7 @@ dependencies = [
  "crash-handler",
  "minidumper",
  "net",
+ "png",
  "rfd",
  "serde",
  "serde_json",

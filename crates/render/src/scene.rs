@@ -4,7 +4,7 @@
 use crate::art::MapArt;
 use crate::gpu::Gpu;
 use crate::lightgrid::{LightingEnv, ModelLighting, SightTrace};
-use crate::texture::{self, Tex};
+use crate::texture::Tex;
 use assets::zone::gfx::{Material, TechniqueSet};
 use assets::zone::gfxworld::GfxWorld;
 use assets::zone::world::{ComPrimaryLight, LightDef};
@@ -140,6 +140,8 @@ pub struct Scene {
     pub world_mesh: Arc<Mesh>,
     pub lighting: ModelLighting,
     pub lighting_tex: Arc<Tex>,
+    lighting_texture: wgpu::Texture,
+    com_lights: Arc<[ComPrimaryLight]>,
     /// The map's collision world, for sight traces.
     pub collision: Option<Arc<CollisionWorld>>,
     pub sun_dir: Vec3,
@@ -174,7 +176,8 @@ impl Scene {
             lights: &data.com_lights,
         };
         let lighting = ModelLighting::new(&world, 1024, &env);
-        let lighting_tex = Arc::new(upload_lighting(gpu, &lighting));
+        let (lighting_tex, lighting_texture) = upload_lighting(gpu, &lighting);
+        let lighting_tex = Arc::new(lighting_tex);
         let (sun_dir, sun_color) = match &world.sun_light {
             Some(l) => (Vec3::from(l.dir), Vec3::from(l.color)),
             None => (
@@ -187,11 +190,61 @@ impl Scene {
             world_mesh,
             lighting,
             lighting_tex,
+            lighting_texture,
+            com_lights: data.com_lights.clone(),
             collision,
             sun_dir,
             sun_color,
             models: HashMap::new(),
         }
+    }
+
+    /// Starts a frame of dynamic lighting: releases last frame's entries.
+    pub fn begin_dynamic_lighting(&mut self) {
+        self.lighting.reset_dynamic();
+    }
+
+    /// Lights a dynamic model at `origin`: the lighting handle and the effective primary light, or `None` when the
+    /// reserved entries are used up.
+    pub fn light_point(&mut self, origin: [f32; 3]) -> Option<(u16, u8)> {
+        let env = LightingEnv {
+            sight: self.collision.as_deref().map(|c| c as &dyn SightTrace),
+            lights: &self.com_lights,
+        };
+        let handle = self
+            .lighting
+            .alloc_point(&self.world.light_grid, origin, 0, &env)?;
+        Some((handle, self.lighting.primary_light(handle)))
+    }
+
+    /// Uploads the dynamic entries filled since [`Scene::begin_dynamic_lighting`] to the lighting volume.
+    pub fn upload_dynamic_lighting(&self, gpu: &Gpu) {
+        let Some((y0, y1)) = self.lighting.dynamic_rows() else {
+            return;
+        };
+        let (w, h, d) = self.lighting.size();
+        for z in 0..d {
+            gpu.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.lighting_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: y0, z },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                self.lighting.rows(z, y0, y1),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(y1 - y0),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: y1 - y0,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let _ = h;
     }
 
     /// GPU buffers of surface `index` of `model`, created on first use.
@@ -266,15 +319,34 @@ pub fn model_matrix(m: &assets::zone::gfxworld::StaticModel) -> Mat4 {
     )
 }
 
-fn upload_lighting(gpu: &Gpu, l: &ModelLighting) -> Tex {
+fn upload_lighting(gpu: &Gpu, l: &ModelLighting) -> (Tex, wgpu::Texture) {
     let (w, h, d) = l.size();
-    texture::upload(
-        gpu,
-        "model lighting",
-        SamplerDim::D3,
-        [w, h, d],
-        1,
-        wgpu::TextureFormat::Bgra8Unorm,
+    let texture = gpu.device.create_texture_with_data(
+        &gpu.queue,
+        &wgpu::TextureDescriptor {
+            label: Some("model lighting"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: d,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
         l.texels(),
-    )
+    );
+    let tex = Tex {
+        view: texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        }),
+        dim: SamplerDim::D3,
+        width: w,
+    };
+    (tex, texture)
 }
