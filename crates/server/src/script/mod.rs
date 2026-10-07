@@ -15,6 +15,7 @@ mod funcs;
 mod hud;
 mod methods;
 mod misc;
+mod missile;
 mod player;
 mod weapons;
 
@@ -56,7 +57,13 @@ impl Dispatch {
         Self {
             funcs: resolve(
                 prog.builtins.function_names(),
-                &[funcs::TABLE, ent::FUNCS, misc::FUNCS, weapons::FUNCS],
+                &[
+                    funcs::TABLE,
+                    ent::FUNCS,
+                    misc::FUNCS,
+                    missile::FUNCS,
+                    weapons::FUNCS,
+                ],
             ),
             methods: resolve(
                 prog.builtins.method_names(),
@@ -65,6 +72,7 @@ impl Dispatch {
                     player::METHODS,
                     ent::METHODS,
                     misc::METHODS,
+                    missile::METHODS,
                     weapons::METHODS,
                 ],
             ),

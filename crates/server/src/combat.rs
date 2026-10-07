@@ -90,6 +90,24 @@ pub fn hitloc_from_name(s: &str) -> Option<u8> {
     HITLOCS.iter().position(|m| *m == s).map(|i| i as u8)
 }
 
+/// One explosion (`G_RadiusDamage` arguments): damage falls linearly from `inner` at the centre
+/// to `outer` at `radius`.
+#[derive(Debug, Clone)]
+pub struct Blast {
+    pub origin: Vec3,
+    pub radius: f32,
+    pub inner: f32,
+    pub outer: f32,
+    pub attacker: Option<u16>,
+    pub inflictor: Option<u16>,
+    /// Only what lies inside the cone `(cosine of the half angle, axis)` is hurt.
+    pub cone: Option<(f32, Vec3)>,
+    /// An entity the blast skips, e.g. the one a rocket hit directly.
+    pub ignore: Option<u16>,
+    pub mean: u8,
+    pub weapon: u32,
+}
+
 /// One damage event (`G_Damage` arguments).
 #[derive(Debug, Clone)]
 pub struct Damage {
@@ -452,8 +470,8 @@ impl Game {
         None
     }
 
-    /// `G_RadiusDamage`: everything in range that the blast can see takes distance-scaled
-    /// damage. Returns whether any entity was hit.
+    /// `G_RadiusDamage` with no damage cone and nothing ignored. Returns whether any entity
+    /// was hit.
     #[allow(clippy::too_many_arguments)]
     pub fn radius_damage(
         &mut self,
@@ -467,6 +485,27 @@ impl Game {
         mean: u8,
         weapon: u32,
     ) -> bool {
+        self.blast(
+            vm,
+            &Blast {
+                origin,
+                radius,
+                inner: inner as f32,
+                outer: outer as f32,
+                attacker,
+                inflictor,
+                cone: None,
+                ignore: None,
+                mean,
+                weapon,
+            },
+        )
+    }
+
+    /// `G_RadiusDamage`: everything in range that the blast can see takes distance-scaled
+    /// damage. Returns whether any entity was hit.
+    pub fn blast(&mut self, vm: &mut Vm, b: &Blast) -> bool {
+        let (origin, radius) = (b.origin, b.radius);
         if radius < 1.0 {
             return false;
         }
@@ -474,7 +513,10 @@ impl Game {
         let targets: Vec<u16> = self
             .in_use()
             .filter(|(n, e)| {
-                (e.takedamage || e.kind == EntKind::Client) && Some(*n) != inflictor && *n < 1022
+                (e.takedamage || e.kind == EntKind::Client)
+                    && Some(*n) != b.inflictor
+                    && Some(*n) != b.ignore
+                    && *n < 1022
             })
             .map(|(n, _)| n)
             .collect();
@@ -502,21 +544,27 @@ impl Game {
             {
                 continue;
             }
-            let Some(p) = self.can_damage(t, origin, inflictor.unwrap_or(ENTITYNUM_NONE)) else {
+            let Some(p) = self.can_damage(t, origin, b.inflictor.unwrap_or(ENTITYNUM_NONE)) else {
                 continue;
             };
-            let frac = dist / radius;
-            let points = ((outer as f32 - inner as f32) * frac + inner as f32) as i32;
-            let points = points.max(1);
             let mut dir = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
+            if let Some((cos, axis)) = b.cone {
+                let d = normalize(dir);
+                if cos > d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2] {
+                    continue;
+                }
+            }
+            let frac = dist / radius;
+            let points = ((b.outer - b.inner) * frac + b.inner) as i32;
+            let points = points.max(1);
             dir[2] += 24.0;
-            let mut dmg = Damage::new(points, mean);
-            dmg.attacker = attacker;
-            dmg.inflictor = inflictor;
+            let mut dmg = Damage::new(points, b.mean);
+            dmg.attacker = b.attacker;
+            dmg.inflictor = b.inflictor;
             dmg.dir = Some(normalize(dir));
             dmg.point = Some(p);
-            dmg.flags = dflags::RADIUS;
-            dmg.weapon = weapon;
+            dmg.flags = dflags::RADIUS | dflags::NO_KNOCKBACK;
+            dmg.weapon = b.weapon;
             dmg.hitloc = HITLOC_NONE;
             self.g_damage(vm, t, dmg);
             hit = true;

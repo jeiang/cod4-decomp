@@ -29,7 +29,7 @@ mod footsteps;
 mod jump;
 mod ladder;
 mod mantle;
-pub(crate) mod math;
+pub mod math;
 mod params;
 mod pm_weapon;
 mod prone;
