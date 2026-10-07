@@ -198,8 +198,19 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             snd["by_channel"]
         ));
     }
+    // The events became effects on screen.
+    let fx = &net["fx"];
+    if impacts >= 1.0 && num(fx, &["played", "bullet_impact"]) < 1.0 {
+        failures.push("bullet impacts happened but none played an effect".into());
+    }
+    if num(fx, &["played", "bullet_impact"]) >= 1.0 && num(fx, &["quads_max"]) < 1.0 {
+        failures.push("impact effects played but no sprite was ever drawn".into());
+    }
     let m = &mut report.metrics;
     m.insert("sound.impacts_heard".into(), heard(&["bulletimpact"]));
+    m.insert("fx.quads_max".into(), num(fx, &["quads_max"]));
+    m.insert("fx.decals_max".into(), num(fx, &["decals_max"]));
+    m.insert("fx.live_elems_max".into(), num(fx, &["live_elems_max"]));
     m.insert("sound.started".into(), num(snd, &["started"]));
     m.insert("sound.refused".into(), num(snd, &["refused"]));
     m.insert("sound.replaced".into(), num(snd, &["replaced"]));

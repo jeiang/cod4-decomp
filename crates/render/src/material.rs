@@ -568,10 +568,23 @@ impl Materials {
         {
             return Some(twin.clone());
         }
-        if own.techniques.iter().any(Option::is_some) {
+        // A material of one zone may carry a stub of a techset another zone defines (no shader tokens).
+        let complete = own.techniques.iter().flatten().any(|t| {
+            t.passes.iter().any(|p| {
+                p.vertex_shader
+                    .as_ref()
+                    .is_some_and(|v| !v.program.is_empty())
+            })
+        });
+        if complete {
             return Some(own.clone());
         }
-        self.techsets.get(name).cloned()
+        self.techsets.get(name).cloned().or_else(|| {
+            own.techniques
+                .iter()
+                .any(Option::is_some)
+                .then(|| own.clone())
+        })
     }
 
     /// The first technique of `techs` the material's techset has, as a drawable pass. Cached per material.

@@ -5,6 +5,7 @@
 pub mod art;
 pub mod codeconst;
 pub mod cull;
+pub mod dynmesh;
 pub mod gpu;
 pub mod lightgrid;
 pub mod material;
@@ -18,6 +19,7 @@ pub mod texture;
 pub mod timing;
 pub mod ui2d;
 
+pub use dynmesh::{DynMesh, DynVertex};
 pub use gpu::{Gpu, GpuError, GpuInfo};
 pub use post::{Dof, PostParams, ShellShock};
 pub use renderer::{FrameStats, Renderer, Settings, ShadowMode, View};

@@ -4,7 +4,9 @@
 
 mod app;
 mod compass;
+mod decal;
 mod display;
+mod effects;
 mod events;
 mod flythrough;
 mod hud;
@@ -57,6 +59,7 @@ usage: cod4e [options]
                          scores=on|off, togglemenu, home[=secs], and waits for killcam|dead|intermission|feed[=secs];
                          writes ui-script.json (and shots) to --out, then exits (harness)
   --no-autojoin          do not answer the server's team and class menus by default (direct --listen/--connect)
+  --fx-demo <name>       play the named effect (fx/...) in front of the player every 1.5 s, for looking at effects
   --autoplay             a scripted player instead of the keyboard, for --duration seconds (harness stage 4)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
 
@@ -89,6 +92,7 @@ pub struct Cli {
     pub name: String,
     /// A scripted player instead of the keyboard (harness): walks, aims at and shoots enemies for `--duration`.
     pub autoplay: bool,
+    pub fx_demo: Option<String>,
     /// Never open a sound card (the harness: CI machines have none).
     pub no_sound: bool,
     /// Open the stock menus one after another with no world, save a screenshot of each and a report (harness stage).
@@ -143,6 +147,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         bots: 9,
         name: "player".into(),
         autoplay: false,
+        fx_demo: None,
         no_sound: false,
         ui_tour: None,
         ui_script: None,
@@ -199,6 +204,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--bots" => c.bots = val(a)?.parse().map_err(|_| "bad bot count")?,
             "--name" => c.name = val(a)?,
             "--autoplay" => c.autoplay = true,
+            "--fx-demo" => c.fx_demo = Some(val(a)?),
             "--no-sound" => c.no_sound = true,
             "--ui-tour" => c.ui_tour = Some(val(a)?.into()),
             "--ui-script" => c.ui_script = Some(val(a)?),

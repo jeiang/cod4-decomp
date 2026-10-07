@@ -15,6 +15,7 @@ assets = { path = "../assets" }
 sim = { path = "../sim" }
 net = { path = "../net" }
 audio = { path = "../audio" }
+fx = { path = "../fx" }
 render = { path = "../render" }
 server = { path = "../server" }
 rav1e = { version = "0.8", default-features = false, features = ["threading", "asm"] }

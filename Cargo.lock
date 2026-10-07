@@ -400,6 +400,7 @@ dependencies = [
  "block2 0.6.2",
  "crossbeam-queue",
  "dispatch2",
+ "fx",
  "gilrs",
  "glam",
  "net",

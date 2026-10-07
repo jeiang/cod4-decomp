@@ -4,6 +4,7 @@
 use crate::art::MapArt;
 use crate::codeconst::{self, FrameConsts, LightConsts, Object, tex as ctex};
 use crate::cull::{self, Frustum};
+use crate::dynmesh::{self, DynMesh};
 use crate::gpu::Gpu;
 use crate::material::{BANK_BYTES, Materials, Prepared, SamplerKey, Target, VertexKind};
 use crate::post::{self, PostParams};
@@ -18,6 +19,7 @@ use sm3::SamplerDim;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use wgpu::util::DeviceExt;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
@@ -225,6 +227,15 @@ struct DynSurf {
     obj: Object,
 }
 
+/// A run of a [`DynMesh`]'s vertices, written into the frame's dynamic vertex buffer.
+struct MeshDraw {
+    mesh: usize,
+    vb: (u64, u64),
+    count: u32,
+    light: u8,
+    obj: Object,
+}
+
 /// Object-independent banks by (prepared pass, light): the vertex and the pixel bank offsets.
 type SharedBanks = HashMap<(u32, u8), (Option<u32>, Option<u32>)>;
 
@@ -261,6 +272,10 @@ pub struct Renderer {
     pub(crate) post_state: post::State,
     /// Skinned models to draw in the next [`Renderer::render`]; the caller refills the list every frame.
     pub dynamic_models: Vec<ModelInstance>,
+    /// Sprites and decals to draw in the next [`Renderer::render`], in drawing order within a material.
+    pub dynamic_meshes: Vec<DynMesh>,
+    /// An index buffer that counts up from zero, for draws of unindexed dynamic triangles.
+    count_mesh: Arc<Mesh>,
     /// Horizontal field of view of the view model; `None` uses the view's.
     pub viewmodel_fov_x: Option<f32>,
     dyn_vb: wgpu::Buffer,
@@ -356,6 +371,8 @@ impl Renderer {
             shadow_dummy,
             timer,
             dynamic_models: Vec::new(),
+            dynamic_meshes: Vec::new(),
+            count_mesh: Arc::new(counting_mesh(&gpu_for_dyn)),
             viewmodel_fov_x: None,
             dyn_vb: new_dyn_vb(&gpu_for_dyn, 1 << 20),
             dyn_cap: 1 << 20,
@@ -825,7 +842,12 @@ impl Renderer {
     }
 
     /// Skins every dynamic model's surfaces into the frame's vertex buffer and lights the models.
-    fn prepare_dynamic(&mut self, insts: &[ModelInstance], eye: Vec3) -> Vec<DynSurf> {
+    fn prepare_dynamic(
+        &mut self,
+        insts: &[ModelInstance],
+        meshes: &[DynMesh],
+        eye: Vec3,
+    ) -> (Vec<DynSurf>, Vec<MeshDraw>) {
         self.scene.begin_dynamic_lighting();
         self.dyn_bytes.clear();
         let mut out = Vec::new();
@@ -868,6 +890,33 @@ impl Renderer {
                 });
             }
         }
+        let mut mesh_draws = Vec::new();
+        for (mi, m) in meshes.iter().enumerate() {
+            let (base_lighting, light) =
+                match m.light_origin.and_then(|o| self.scene.light_point(o)) {
+                    Some((h, l)) => (self.scene.lighting.base_coords(h), l),
+                    None => (
+                        Object::default().base_lighting,
+                        self.scene.world.sun_primary_light_index as u8,
+                    ),
+                };
+            for run in m.verts.chunks(dynmesh::MAX_DRAW_VERTS) {
+                let at = self.dyn_bytes.len() as u64;
+                for v in run {
+                    dynmesh::pack(v, &mut self.dyn_bytes);
+                }
+                mesh_draws.push(MeshDraw {
+                    mesh: mi,
+                    vb: (at, self.dyn_bytes.len() as u64 - at),
+                    count: run.len() as u32 / 3 * 3,
+                    light,
+                    obj: Object {
+                        world: Mat4::IDENTITY,
+                        base_lighting,
+                    },
+                });
+            }
+        }
         self.scene.upload_dynamic_lighting(&self.gpu);
         let need = self.dyn_bytes.len() as u64;
         if need > self.dyn_cap {
@@ -879,7 +928,51 @@ impl Renderer {
                 .queue
                 .write_buffer(&self.dyn_vb, 0, &self.dyn_bytes);
         }
-        out
+        (out, mesh_draws)
+    }
+
+    /// Draws of the dynamic meshes for the scene pass.
+    fn build_meshes(
+        &mut self,
+        frame: &FrameConsts,
+        light_frames: &HashMap<u8, FrameConsts>,
+        meshes: &[DynMesh],
+        runs: &[MeshDraw],
+        target: Target,
+        sun_shadows: bool,
+    ) -> Vec<Draw> {
+        let hsm = self.hsm();
+        let mut shared = SharedBanks::new();
+        let mut draws = Vec::new();
+        for (n, d) in runs.iter().enumerate() {
+            let mat = &meshes[d.mesh].material;
+            let techs = self.scene_techs(d.light, sun_shadows);
+            let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {
+                continue;
+            };
+            let fc = light_frames.get(&d.light).unwrap_or(frame);
+            let (vs, ps) = self.banks(&prep, fc, &d.obj, &mut shared, d.light);
+            let pipeline = self.materials.pipeline(&self.gpu, &prep, target);
+            let probe = meshes[d.mesh]
+                .light_origin
+                .map_or(0, |o| self.nearest_probe(o));
+            let tex_bg = self.tex_group(&prep, 0, probe, d.light);
+            draws.push(Draw {
+                sky: false,
+                order: (false, mat.sort_key, 1 << 30 | n as u32),
+                prepared: prep,
+                pipeline,
+                tex_bg,
+                mesh: self.count_mesh.clone(),
+                vs,
+                ps,
+                first_index: 0,
+                count: d.count,
+                base_vertex: 0,
+                vb: Some(d.vb),
+            });
+        }
+        draws
     }
 
     /// Draws of the dynamic models of `want` for one pass.
@@ -1023,7 +1116,8 @@ impl Renderer {
         };
         let mut counts = BuildCounts::default();
         let insts = std::mem::take(&mut self.dynamic_models);
-        let dynsurfs = self.prepare_dynamic(&insts, view.origin);
+        let meshes = std::mem::take(&mut self.dynamic_meshes);
+        let (dynsurfs, mesh_runs) = self.prepare_dynamic(&insts, &meshes, view.origin);
 
         // The sun shadow map.
         let has_sun = world.sun_light.is_some() && self.shadow.is_some();
@@ -1128,6 +1222,14 @@ impl Renderer {
             &insts,
             &dynsurfs,
             ModelKind::World,
+            scene_target,
+            sun.is_some(),
+        ));
+        draws.extend(self.build_meshes(
+            &frame,
+            &light_frames,
+            &meshes,
+            &mesh_runs,
             scene_target,
             sun.is_some(),
         ));
@@ -1337,6 +1439,7 @@ impl Renderer {
             stats.frame = t.frame();
         }
         self.dynamic_models = insts;
+        self.dynamic_meshes = meshes;
         stats.cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
         stats
     }
@@ -1528,6 +1631,26 @@ fn dummy_shadow(gpu: &Gpu) -> (Arc<Tex>, Arc<Tex>) {
         }),
         colour,
     )
+}
+
+/// A mesh whose index buffer is 0, 1, 2, ...; the vertices come from the dynamic buffer.
+fn counting_mesh(gpu: &Gpu) -> Mesh {
+    let idx: Vec<u16> = (0..=u16::MAX).collect();
+    Mesh {
+        vb: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("unused vertices"),
+            size: 16,
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        }),
+        ib: gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("counting indices"),
+                contents: bytemuck::cast_slice(&idx),
+                usage: wgpu::BufferUsages::INDEX,
+            }),
+    }
 }
 
 fn new_dyn_vb(gpu: &Gpu, size: u64) -> wgpu::Buffer {

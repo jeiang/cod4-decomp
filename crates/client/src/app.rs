@@ -173,6 +173,8 @@ struct State {
     rec_size: (u32, u32),
     rec_stable: u32,
     shot_taken: bool,
+    /// Effect meshes in the last frame played on a server; the screenshot waits for some.
+    fx_in_view: usize,
     shot_ok: bool,
     notes: Vec<String>,
     present_mode: wgpu::PresentMode,
@@ -354,18 +356,11 @@ impl Viewer {
                     a
                 }
             };
-            let clipmap = self
-                .map
-                .as_ref()
-                .ok_or("no map")?
-                .clipmap
-                .clone()
-                .ok_or("the map has no collision data")?;
             let lib = Library::load(&self.cli.install, &self.cli.map)?;
             let limits = Input::detached().pitch_limits();
             let mut n = NetPlay::connect(
                 lib,
-                clipmap,
+                self.map.as_ref().ok_or("no map")?,
                 addr,
                 &self.cli.name,
                 limits,
@@ -377,6 +372,9 @@ impl Viewer {
                 ),
             )?;
             n.set_autojoin(self.cli.autojoin || self.cli.autoplay);
+            if let Some(name) = &self.cli.fx_demo {
+                n.set_fx_demo(name.clone());
+            }
             net = Some(n);
         }
         let mut input = Input::new(self.cli.config.clone());
@@ -436,6 +434,7 @@ impl Viewer {
             rec_size: (0, 0),
             rec_stable: 0,
             shot_taken: false,
+            fx_in_view: 0,
             shot_ok: false,
             notes,
             present_mode,
@@ -598,8 +597,10 @@ impl Viewer {
             }
             if let Some(nf) = frame_out {
                 (st.pos, st.yaw, st.pitch) = (nf.origin, nf.yaw, nf.pitch);
+                st.fx_in_view = nf.meshes.len();
                 if let Some(r) = st.renderer.as_mut() {
                     r.dynamic_models = nf.models;
+                    r.dynamic_meshes = nf.meshes;
                 }
             }
         } else if self.cli.flythrough {
@@ -689,7 +690,11 @@ impl Viewer {
                 );
             }
         }
-        if self.cli.screenshot && self.cli.timed() && !st.shot_taken && t >= self.cli.duration * 0.5
+        if self.cli.screenshot
+            && self.cli.timed()
+            && !st.shot_taken
+            && t >= self.cli.duration * 0.5
+            && (st.net.is_none() || st.fx_in_view > 0 || t >= self.cli.duration * 0.8)
         {
             st.shot_taken = true;
             let out = self.cli.out.clone().unwrap_or_default();
@@ -1200,15 +1205,11 @@ fn start_session(
             (l.addr, Some(l))
         }
     };
-    let clipmap = data
-        .clipmap
-        .clone()
-        .ok_or("the map has no collision data")?;
     let lib = Library::load(&cli.install, map)?;
     let limits = st.input.pitch_limits();
     let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
     st.net = Some(NetPlay::connect(
-        lib, clipmap, addr, &cli.name, limits, false, sound,
+        lib, &data, addr, &cli.name, limits, false, sound,
     )?);
     st.listen = listen;
     st.renderer = Some(r);
