@@ -47,6 +47,7 @@ pub struct ImageLoadDef {
     pub dimensions: [u16; 3],
     /// D3D format code.
     pub format: i32,
+    /// Texels; empty when the consumer drops presentation data.
     pub data: Vec<u8>,
 }
 
@@ -92,7 +93,7 @@ pub(super) fn image(s: &mut Stream, h: &[u8]) -> Result<GfxImage> {
         let dimensions = [f.u16(), f.u16(), f.u16()];
         let format = f.i32();
         let size = f.u32();
-        let data = s.load(1, size)?.1;
+        let data = s.load_presentation(1, size)?.1;
         Ok(ImageLoadDef {
             level_count,
             flags,
@@ -168,6 +169,7 @@ pub struct Water {
     pub wind_direction: [f32; 2],
     pub amplitude: f32,
     pub code_constant: [f32; 4],
+    /// Wave spectrum; empty when the consumer drops presentation data.
     pub h0: Arc<[[f32; 2]]>,
     pub w_term: Arc<[f32]>,
     pub image: Option<Arc<GfxImage>>,
@@ -185,8 +187,12 @@ fn water(s: &mut Stream, h: &[u8]) -> Result<Water> {
     let image = f.ptr()?;
     let count = u32::try_from(i64::from(m) * i64::from(n))
         .map_err(|_| ZoneError::Invalid("bad water grid"))?;
-    let h0 = s.array(h0, count, 4, 8, |_, f| Ok([f.f32(), f.f32()]))?;
-    let w_term = s.array(w_term, count, 4, 4, |_, f| Ok(f.f32()))?;
+    let mut h0 = s.array(h0, count, 4, 8, |_, f| Ok([f.f32(), f.f32()]))?;
+    let mut w_term = s.array(w_term, count, 4, 4, |_, f| Ok(f.f32()))?;
+    if !s.keep_presentation() {
+        h0 = Arc::from([]);
+        w_term = Arc::from([]);
+    }
     let image = image_ptr(s, image)?;
     Ok(Water {
         float_time,
@@ -243,10 +249,13 @@ pub struct Material {
     pub state_bits_entry: [u8; 34],
     pub state_flags: u8,
     pub camera_region: u8,
+    /// `None` when the consumer drops presentation data.
     pub technique_set: Option<Arc<TechniqueSet>>,
+    /// Image references keep name/format metadata only under a server consumer.
     pub textures: Arc<[TextureDef]>,
+    /// Empty when the consumer drops presentation data.
     pub constants: Arc<[ConstantDef]>,
-    /// Packed GPU state words, two per entry.
+    /// Packed GPU state words, two per entry; empty when the consumer drops presentation data.
     pub state_bits: Arc<[[u32; 2]]>,
 }
 
@@ -268,7 +277,7 @@ pub(super) fn material(s: &mut Stream, h: &[u8]) -> Result<Material> {
     let (tech, tex, cons, bits) = (f.ptr()?, f.ptr()?, f.ptr()?, f.ptr()?);
 
     let name = s.string(name)?;
-    let technique_set = s.temp_asset(tech, 4, TECHSET_SIZE, techset)?;
+    let mut technique_set = s.temp_asset(tech, 4, TECHSET_SIZE, techset)?;
     let textures = s.array(tex, tex_n.into(), 4, 12, |s, f| {
         let name_hash = f.u32();
         let (name_start, name_end, sampler_state, semantic) = (f.u8(), f.u8(), f.u8(), f.u8());
@@ -296,6 +305,13 @@ pub(super) fn material(s: &mut Stream, h: &[u8]) -> Result<Material> {
         })
     })?;
     let state_bits = s.array(bits, bits_n.into(), 4, 8, |_, f| Ok([f.u32(), f.u32()]))?;
+    // Shaders, constants and GPU state are renderer-only: read, then released.
+    let (mut constants, mut state_bits) = (constants, state_bits);
+    if !s.keep_presentation() {
+        technique_set = None;
+        constants = Arc::from([]);
+        state_bits = Arc::from([]);
+    }
     Ok(Material {
         name,
         game_flags,
@@ -361,7 +377,7 @@ fn shader(s: &mut Stream, h: &[u8]) -> Result<Shader> {
     let name = s.string(name)?;
     let program = match program {
         Ptr::Follow => {
-            let (_, b) = s.load(4, u32::from(size) * 4)?;
+            let (_, b) = s.load_presentation(4, u32::from(size) * 4)?;
             b.as_chunks::<4>()
                 .0
                 .iter()
