@@ -1,0 +1,343 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Player state, user commands and the flag/event constants player movement shares with the
+//! rest of the game. Values are the original engine's (fact source: `iw3mp.exe` 1.7 `pmflags_t`,
+//! `entity_event_t`, `usercmd_t` bit assignments).
+
+use crate::Vec3;
+use crate::cm::ENTITYNUM_NONE;
+
+/// `playerState_t.pm_type`; the order matters, the original compares with `>=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[repr(u8)]
+pub enum PmType {
+    #[default]
+    Normal = 0,
+    NormalLinked,
+    Noclip,
+    Ufo,
+    Spectator,
+    Intermission,
+    LastStand,
+    Dead,
+    DeadLinked,
+}
+
+/// `pm_flags` bits.
+pub mod pmf {
+    pub const PRONE: u32 = 1 << 0;
+    pub const DUCKED: u32 = 1 << 1;
+    pub const MANTLE: u32 = 1 << 2;
+    pub const LADDER: u32 = 1 << 3;
+    pub const SIGHT_AIMING: u32 = 1 << 4;
+    pub const BACKWARDS_RUN: u32 = 1 << 5;
+    pub const WALKING: u32 = 1 << 6;
+    pub const TIME_HARDLANDING: u32 = 1 << 7;
+    pub const TIME_KNOCKBACK: u32 = 1 << 8;
+    pub const PRONEMOVE_OVERRIDDEN: u32 = 1 << 9;
+    pub const RESPAWNED: u32 = 1 << 10;
+    pub const FROZEN: u32 = 1 << 11;
+    pub const NO_PRONE: u32 = 1 << 12;
+    pub const LADDER_FALL: u32 = 1 << 13;
+    pub const JUMPING: u32 = 1 << 14;
+    pub const SPRINTING: u32 = 1 << 15;
+    pub const SHELLSHOCKED: u32 = 1 << 16;
+    pub const MELEE_CHARGE: u32 = 1 << 17;
+    pub const NO_SPRINT: u32 = 1 << 18;
+    pub const NO_JUMP: u32 = 1 << 19;
+    pub const VEHICLE_ATTACHED: u32 = 1 << 20;
+}
+
+/// `eFlags` bits player movement reads or writes.
+pub mod ef {
+    pub const CROUCH: u32 = 0x4;
+    pub const PRONE: u32 = 0x8;
+    pub const FIRING: u32 = 0x40;
+    pub const TURRET_PRONE: u32 = 0x100;
+    pub const TURRET_CROUCH: u32 = 0x200;
+    pub const TURRET_ACTIVE: u32 = 0x300;
+    pub const MANTLE: u32 = 0x8000;
+    pub const LOC_SELECTING: u32 = 0x20_0000;
+}
+
+/// `usercmd_t.buttons` bits.
+pub mod button {
+    pub const ATTACK: i32 = 1 << 0;
+    pub const SPRINT: i32 = 1 << 1;
+    pub const MELEE: i32 = 1 << 2;
+    pub const USE: i32 = 1 << 3;
+    pub const RELOAD: i32 = 1 << 4;
+    pub const USE_RELOAD: i32 = 1 << 5;
+    pub const LEAN_LEFT: i32 = 1 << 6;
+    pub const LEAN_RIGHT: i32 = 1 << 7;
+    pub const PRONE: i32 = 1 << 8;
+    pub const CROUCH: i32 = 1 << 9;
+    pub const JUMP: i32 = 1 << 10;
+    pub const ADS: i32 = 1 << 11;
+    pub const TEMP_STANCE: i32 = 1 << 12;
+    pub const BREATH: i32 = 1 << 13;
+    pub const FRAG: i32 = 1 << 14;
+    pub const SMOKE: i32 = 1 << 15;
+    pub const LOC_CONFIRM: i32 = 1 << 16;
+    pub const LOC_CANCEL: i32 = 1 << 17;
+    pub const NIGHTVISION: i32 = 1 << 18;
+    pub const THROW: i32 = 1 << 19;
+    pub const LOC_SELECTING: i32 = 1 << 20;
+}
+
+/// `entity_event_t` values player movement raises (`PM_AddEvent`).
+pub mod ev {
+    pub const NONE: u8 = 0x00;
+    pub const FOLIAGE_SOUND: u8 = 0x01;
+    pub const STANCE_FORCE_STAND: u8 = 0x06;
+    pub const STANCE_FORCE_CROUCH: u8 = 0x07;
+    pub const STANCE_FORCE_PRONE: u8 = 0x08;
+    pub const RESET_ADS: u8 = 0x0E;
+    pub const NIGHTVISION_WEAR: u8 = 0x40;
+    pub const NIGHTVISION_REMOVE: u8 = 0x41;
+    pub const FOOTSTEP_SPRINT: u8 = 0x48;
+    pub const FOOTSTEP_RUN: u8 = 0x49;
+    pub const FOOTSTEP_WALK: u8 = 0x4A;
+    pub const FOOTSTEP_PRONE: u8 = 0x4B;
+    pub const JUMP: u8 = 0x4C;
+    /// `LANDING_FIRST + surface type` (surface types 1..=28).
+    pub const LANDING_FIRST: u8 = 0x4D;
+    /// `LANDING_PAIN_FIRST + surface type`: a landing that hurt; the event parm is the damage.
+    pub const LANDING_PAIN_FIRST: u8 = 0x6A;
+}
+
+/// `weaponstate_t` values movement looks at.
+pub mod weapon_state {
+    pub const READY: u8 = 0;
+    pub const RAISING: u8 = 1;
+    pub const RAISING_ALTSWITCH: u8 = 2;
+    pub const DROPPING: u8 = 3;
+    pub const DROPPING_QUICK: u8 = 4;
+    pub const FIRING: u8 = 5;
+    pub const RECHAMBERING: u8 = 6;
+    pub const RELOADING: u8 = 7;
+    pub const RELOADING_INTERUPT: u8 = 8;
+    pub const RELOAD_START: u8 = 9;
+    pub const RELOAD_START_INTERUPT: u8 = 10;
+    pub const RELOAD_END: u8 = 11;
+    pub const MELEE_INIT: u8 = 12;
+    pub const MELEE_FIRE: u8 = 13;
+    pub const MELEE_END: u8 = 14;
+    pub const OFFHAND_INIT: u8 = 15;
+    pub const OFFHAND_END: u8 = 20;
+    pub const NIGHTVISION_WEAR: u8 = 25;
+    pub const NIGHTVISION_REMOVE: u8 = 26;
+}
+
+/// View heights (`viewHeightTarget` values); the original keys the stance off these integers.
+pub const VIEW_STAND: i32 = 60;
+pub const VIEW_CROUCH: i32 = 40;
+pub const VIEW_PRONE: i32 = 11;
+pub const VIEW_DEAD: i32 = 8;
+/// `LastStand` players sit at this height.
+pub const VIEW_LASTSTAND: i32 = 22;
+
+/// Perk bit that stretches sprint time (`perk_sprintMultiplier`).
+pub const PERK_SPRINT: u32 = 0x400;
+
+/// `STAT_DEAD_YAW` is initialised to this sentinel.
+pub const DEAD_YAW_UNSET: i32 = 999;
+
+/// Per-cmd input (`usercmd_t`, the parts movement reads).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct UserCmd {
+    pub server_time: i32,
+    pub buttons: i32,
+    /// View angles as the original packs them: 16-bit fixed point, `360 / 65536` degrees each.
+    pub angles: [i32; 3],
+    pub weapon: u8,
+    pub offhand_index: u8,
+    pub forwardmove: i8,
+    pub rightmove: i8,
+    pub upmove: i8,
+    pub pitchmove: i8,
+    pub yawmove: i8,
+    pub gun_pitch: f32,
+    pub gun_yaw: f32,
+    pub gun_offset: Vec3,
+    pub melee_charge_yaw: f32,
+    pub melee_charge_dist: u8,
+    pub selected_location: [i8; 2],
+}
+
+/// `0.0054931640625`: degrees per usercmd angle unit.
+pub const ANGLE_UNIT: f32 = 360.0 / 65536.0;
+
+/// `MantleState`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MantleState {
+    pub yaw: f32,
+    pub timer: i32,
+    pub trans_index: i32,
+    /// 1 = over (not just up), 2 = stance forced crouch, 4 = stand up after, 8 = hint, 0x10 = finished.
+    pub flags: u32,
+}
+
+/// `SprintState`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SprintState {
+    pub sprint_button_up_required: bool,
+    pub sprint_delay: bool,
+    pub last_sprint_start: i32,
+    pub last_sprint_end: i32,
+    pub sprint_start_max_length: i32,
+}
+
+/// The slice of `playerState_t` that movement reads and writes, plus what snapshots need.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerState {
+    pub command_time: i32,
+    pub pm_type: PmType,
+    pub bob_cycle: u8,
+    pub pm_flags: u32,
+    pub pm_time: i32,
+    pub origin: Vec3,
+    pub velocity: Vec3,
+    /// Smoothed horizontal velocity the inertia clamp compares against.
+    pub old_velocity: [f32; 2],
+    pub foliage_sound_time: i32,
+    pub gravity: i32,
+    pub leanf: f32,
+    /// `g_speed` (190 in stock multiplayer).
+    pub speed: i32,
+    pub delta_angles: Vec3,
+    pub ground_entity_num: u16,
+    /// Normal of the ladder surface being climbed.
+    pub ladder_vec: Vec3,
+    pub jump_time: i32,
+    pub jump_origin_z: f32,
+    pub damage_timer: i32,
+    pub damage_count: i32,
+    pub movement_dir: i8,
+    pub e_flags: u32,
+    pub client_num: u16,
+    /// Predictable event ring (`events[eventSequence & 3]`).
+    pub event_sequence: u8,
+    pub events: [u8; 4],
+    pub event_parms: [u8; 4],
+    pub weapon: u32,
+    pub weapon_state: u8,
+    pub weapon_time: i32,
+    pub weapon_delay: i32,
+    pub weapon_flags: u32,
+    /// 0 = hip, 1 = fully aimed down sights.
+    pub weapon_pos_frac: f32,
+    pub ads_delay_time: i32,
+    pub viewangles: Vec3,
+    pub view_height_target: i32,
+    pub view_height_current: f32,
+    pub view_height_lerp_time: i32,
+    pub view_height_lerp_target: i32,
+    pub view_height_lerp_down: bool,
+    pub view_angle_clamp_base: [f32; 2],
+    pub view_angle_clamp_range: [f32; 2],
+    /// `stats[STAT_DEAD_YAW]`.
+    pub dead_yaw: i32,
+    pub prone_direction: f32,
+    pub prone_direction_pitch: f32,
+    pub prone_torso_pitch: f32,
+    pub sprint_state: SprintState,
+    pub torso_pitch: f32,
+    pub waist_pitch: f32,
+    pub move_speed_scale_multiplier: f32,
+    pub mantle_state: MantleState,
+    pub melee_charge_yaw: f32,
+    pub melee_charge_dist: i32,
+    pub melee_charge_time: i32,
+    pub perks: u32,
+    pub aim_spread_scale: f32,
+}
+
+impl Default for PlayerState {
+    fn default() -> Self {
+        Self {
+            command_time: 0,
+            pm_type: PmType::Normal,
+            bob_cycle: 0,
+            pm_flags: 0,
+            pm_time: 0,
+            origin: [0.0; 3],
+            velocity: [0.0; 3],
+            old_velocity: [0.0; 2],
+            foliage_sound_time: 0,
+            gravity: 800,
+            leanf: 0.0,
+            speed: 190,
+            delta_angles: [0.0; 3],
+            ground_entity_num: ENTITYNUM_NONE,
+            ladder_vec: [0.0; 3],
+            jump_time: 0,
+            jump_origin_z: 0.0,
+            damage_timer: 0,
+            damage_count: 0,
+            movement_dir: 0,
+            e_flags: 0,
+            client_num: 0,
+            event_sequence: 0,
+            events: [0; 4],
+            event_parms: [0; 4],
+            weapon: 0,
+            weapon_state: weapon_state::READY,
+            weapon_time: 0,
+            weapon_delay: 0,
+            weapon_flags: 0,
+            weapon_pos_frac: 0.0,
+            ads_delay_time: 0,
+            viewangles: [0.0; 3],
+            view_height_target: VIEW_STAND,
+            view_height_current: VIEW_STAND as f32,
+            view_height_lerp_time: 0,
+            view_height_lerp_target: 0,
+            view_height_lerp_down: false,
+            view_angle_clamp_base: [0.0; 2],
+            view_angle_clamp_range: [180.0; 2],
+            dead_yaw: DEAD_YAW_UNSET,
+            prone_direction: 0.0,
+            prone_direction_pitch: 0.0,
+            prone_torso_pitch: 0.0,
+            sprint_state: SprintState::default(),
+            torso_pitch: 0.0,
+            waist_pitch: 0.0,
+            move_speed_scale_multiplier: 1.0,
+            mantle_state: MantleState::default(),
+            melee_charge_yaw: 0.0,
+            melee_charge_dist: 0,
+            melee_charge_time: 0,
+            perks: 0,
+            aim_spread_scale: 0.0,
+        }
+    }
+}
+
+impl PlayerState {
+    /// `BG_AddPredictableEventToPlayerstate`.
+    pub fn add_event(&mut self, event: u8, parm: u32) {
+        if event != ev::NONE {
+            let slot = (self.event_sequence & 3) as usize;
+            self.events[slot] = event;
+            self.event_parms[slot] = parm as u8;
+            self.event_sequence = self.event_sequence.wrapping_add(1);
+        }
+    }
+
+    /// The effective stance from the view height target (`PM_GetEffectiveStance`).
+    pub fn stance(&self) -> Stance {
+        match self.view_height_target {
+            VIEW_CROUCH | VIEW_LASTSTAND => Stance::Crouch,
+            VIEW_PRONE => Stance::Prone,
+            _ => Stance::Stand,
+        }
+    }
+}
+
+/// `PM_STANCE_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stance {
+    Stand,
+    Prone,
+    Crouch,
+}
