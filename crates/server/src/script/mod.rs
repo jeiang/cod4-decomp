@@ -16,6 +16,7 @@ mod funcs;
 mod hud;
 mod methods;
 mod misc;
+mod missile;
 mod player;
 mod weapons;
 
@@ -63,6 +64,7 @@ impl Dispatch {
                     misc::FUNCS,
                     weapons::FUNCS,
                     combat::FUNCS,
+                    missile::FUNCS,
                 ],
             ),
             methods: resolve(
@@ -72,6 +74,7 @@ impl Dispatch {
                     player::METHODS,
                     ent::METHODS,
                     misc::METHODS,
+                    missile::METHODS,
                     weapons::METHODS,
                     combat::METHODS,
                 ],

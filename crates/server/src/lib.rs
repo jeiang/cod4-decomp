@@ -3,6 +3,7 @@
 
 pub mod anim;
 pub mod bot;
+pub mod bullet;
 pub mod client;
 pub mod cmd;
 pub mod combat;
@@ -13,6 +14,7 @@ pub mod fire;
 pub mod game;
 pub mod link;
 pub mod mem;
+pub mod missile;
 pub mod mover;
 pub mod playeranim;
 pub mod nav;

@@ -21,7 +21,9 @@ use crate::anim::AnimTree;
 use crate::client::Client;
 use crate::content::Content;
 use crate::cvar::{self, Cvars};
+use crate::missile::{Attractors, Missile};
 use crate::mover::Mover;
+use crate::playeranim::PlayerAnims;
 
 pub const MAX_GENTITIES: usize = 1024;
 pub const ENTITYNUM_WORLD: u16 = 1022;
@@ -168,6 +170,10 @@ pub struct Ent {
     pub flags: i32,
     /// Link, attachment, trigger and corpse state of the entity builtins.
     pub x: crate::link::EntExtra,
+    /// Flight state of a grenade or rocket (`ET_MISSILE`).
+    pub missile: Option<Box<Missile>>,
+    /// `r.ownerNum`: traces made by the owner pass through this entity.
+    pub owner: Option<u16>,
 }
 
 impl Ent {
@@ -195,6 +201,8 @@ impl Ent {
             takedamage: false,
             flags: 0,
             x: crate::link::EntExtra::default(),
+            missile: None,
+            owner: None,
         }
     }
 }
@@ -333,6 +341,11 @@ pub struct Game {
     pub weapons: sim::weapon::WeaponTable,
     /// `g_fHitLocDamageMult`: the gametype's hit-location scale for non-bullet damage.
     pub hitloc_table: [f32; 19],
+    /// `info/bullet_penetration_mp`, parsed on the first shot of a map.
+    pub penetration: Option<Arc<sim::weapon::damage::PenetrationTable>>,
+    /// The skeleton locational hits are tested against, built on the first shot of a map.
+    pub player_anims: Option<Arc<PlayerAnims>>,
+    pub attractors: Attractors,
 }
 
 impl Game {
@@ -370,6 +383,9 @@ impl Game {
             nav_loads: Vec::new(),
             hitloc_table: default_hitloc_table(),
             weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),
+            penetration: None,
+            player_anims: None,
+            attractors: Attractors::default(),
         }
     }
 
@@ -418,6 +434,7 @@ impl Game {
             && let Some(e) = slot.take()
         {
             let _ = e;
+            self.attractors.free_entity(num);
             if let Some(w) = self.world.as_mut() {
                 w.unlink(num);
             }
@@ -438,6 +455,9 @@ impl Game {
         self.items = Precache::default();
         self.menus = Precache::default();
         self.configstrings.clear();
+        self.penetration = None;
+        self.player_anims = None;
+        self.attractors = Attractors::default();
         self.team_score = [0; 3];
         self.nav = None;
         self.nav_goals.clear();
@@ -492,7 +512,7 @@ impl Game {
                 mins: e.mins,
                 maxs: e.maxs,
                 brush_model: e.brush_model,
-                owner: ENTITYNUM_NONE,
+                owner: e.owner.unwrap_or(ENTITYNUM_NONE),
             },
         );
     }
@@ -751,6 +771,12 @@ pub fn set_ent_field(e: &mut Ent, name: &str, v: &Value) -> Result<bool, String>
     Ok(true)
 }
 
+fn default_hitloc_table() -> [f32; 19] {
+    let mut t = [1.0; 19];
+    t[18] = 0.0;
+    t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,10 +809,4 @@ mod tests {
         g.ents[72] = None;
         assert_eq!(g.spawn(Ent::new(EntKind::Plain, "c")).unwrap(), 72);
     }
-}
-
-fn default_hitloc_table() -> [f32; 19] {
-    let mut t = [1.0; 19];
-    t[18] = 0.0;
-    t
 }

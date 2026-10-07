@@ -18,8 +18,8 @@ mod vec;
 
 #[cfg(test)]
 mod install_tests;
-#[cfg(test)]
-pub(crate) mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;
 

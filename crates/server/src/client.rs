@@ -17,6 +17,7 @@ use sim::weapon::{PlayerWeapons, WeaponCtx, WeaponOut};
 
 use crate::bot::Brain;
 use crate::game::{Ent, EntKind, Game, ScriptCall, TRIGGER_HURT_CONTENTS};
+use crate::playeranim::{PlayerPoseInput, PlayerPoseState};
 
 /// `team_t` as the scripts see it (`sessionteam`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -142,6 +143,8 @@ pub struct Client {
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
+    /// The body animation clock locational hits are tested against.
+    pub pose: PlayerPoseState,
 }
 
 impl Client {
@@ -192,6 +195,7 @@ impl Client {
             prev_sprinting: false,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
+            pose: PlayerPoseState::default(),
         }
     }
 
@@ -359,6 +363,9 @@ impl Game {
             e.classname = "player".into();
             e.mv.pos.tr = sim::traj::Trajectory::stationary(origin);
         }
+        if let Some(e) = self.ent_mut(n) {
+            e.takedamage = true;
+        }
         self.set_client_contents(n);
         self.set_client_view_angle(n, angles);
         self.relink(n);
@@ -449,6 +456,14 @@ impl Game {
     }
 
     fn handle_client_event(&mut self, vm: &mut Vm, n: u16, event: u8, parm: u8) {
+        match event {
+            ev::RELOAD_START_NOTIFY => vm.notify_entity(n, "reload_start", &[]),
+            ev::PULLBACK_WEAPON | ev::PREP_OFFHAND => {
+                let name = Value::str(self.weapons.name(u16::from(parm)));
+                vm.notify_entity(n, "grenade_pullback", &[name]);
+            }
+            _ => {}
+        }
         if (ev::LANDING_PAIN_FIRST..ev::LANDING_PAIN_FIRST + 28).contains(&event) {
             let frac = if parm < 100 {
                 f32::from(parm) * 0.01
@@ -558,7 +573,18 @@ impl Game {
             };
         }
         self.set_client_contents(n);
+        self.update_pose(n);
         self.per_frame_notifies(_vm, n);
+    }
+
+    /// Advances the player's body animation by one server frame.
+    fn update_pose(&mut self, n: u16) {
+        let Some(c) = self.client(n) else { return };
+        let weapon = self.content.weapon(self.weapons.name(c.ps.weapon as u16));
+        let trying = c.cmd.forwardmove != 0 || c.cmd.rightmove != 0;
+        let input = PlayerPoseInput::from_ps(&c.ps, trying, weapon.map(|w| &**w));
+        let dt = self.level.frametime as f32 * 0.001;
+        self.clients[usize::from(n)].pose.update(dt, &input);
     }
 
     /// `G_ClientDoPerFrameNotifies`: weapon change, firing and sprint edges.

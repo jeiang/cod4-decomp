@@ -145,6 +145,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_speed", "190", 0),
         ("g_gravity", "800", 0),
         ("g_knockback", "1000", 0),
+        ("g_minGrenadeDamageSpeed", "400", CHEAT),
         ("g_inactivity", "0", 0),
         ("g_synchronousClients", "0", SYSTEMINFO),
         ("sv_cheats", "0", 0),
@@ -751,8 +752,9 @@ impl Server {
             gsc += t.elapsed();
             // G_RunFrameForEntity: script movers, then every client's end of frame.
             for n in 0..host.game.ents.len() {
-                host.game.run_mover(&mut run.vm, n as u16);
+                host.game.run_entity(&mut run.vm, n as u16);
             }
+            host.run_calls(&mut run.vm);
             for n in 0..host.game.clients.len() as u16 {
                 host.game.client_end_frame(&mut run.vm, n);
             }

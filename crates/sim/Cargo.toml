@@ -9,5 +9,9 @@ publish = false
 [dependencies]
 assets = { path = "../assets" }
 
+[features]
+# Hand-built clipmaps (`cm::test_support`) for other crates' tests.
+test-support = []
+
 [lints]
 workspace = true
