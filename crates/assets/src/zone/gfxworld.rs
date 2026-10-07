@@ -559,7 +559,7 @@ fn world(s: &mut Stream, h: &[u8]) -> Result<GfxWorld> {
     let outdoor_image = image_ptr(s, outdoor_image)?;
     let cell_caster_words = mul(cell_count, cell_count.div_ceil(32))?;
     runtime(s, cell_caster_bits, 4, mul(cell_caster_words, 4)?)?;
-    runtime(s, scene_dyn_model, 4, mul(dyn_ent_client_count[0], 8)?)?;
+    runtime(s, scene_dyn_model, 4, mul(dyn_ent_client_count[0], 6)?)?;
     runtime(s, scene_dyn_brush, 4, mul(dyn_ent_client_count[1], 4)?)?;
     let non_sun_lights = primary_light_count
         .checked_sub(sun_primary_light_index + 1)
