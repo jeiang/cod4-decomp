@@ -728,7 +728,8 @@ fn grenades_without_cook_keep_their_full_fuse() {
     r.run(0, 11);
     assert!(r.log.contains(&WeaponEvent::OffhandThrow {
         weapon: g,
-        fuse_left: 3500
+        fuse_left: 3500,
+        cooked: 0,
     }));
 }
 
