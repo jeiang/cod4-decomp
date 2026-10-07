@@ -135,6 +135,9 @@ struct State {
     samples: Vec<[f64; 3]>,
     rss: u64,
     recorder: Option<Recorder>,
+    /// The recorder starts on the first frame, at the size the compositor really gave the window.
+    want_video: bool,
+    rec_size: (u32, u32),
     shot_taken: bool,
     shot_ok: bool,
     notes: Vec<String>,
@@ -203,27 +206,11 @@ impl Viewer {
             std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
         }
         let mut notes: Vec<String> = [note, present_note].into_iter().flatten().collect();
-        let recorder = if self.cli.video && self.cli.flythrough {
-            if copy_src {
-                let path = self
-                    .cli
-                    .out
-                    .as_deref()
-                    .unwrap_or(Path::new("."))
-                    .join("flythrough.mp4");
-                std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))
-                    .map_err(|e| e.to_string())?;
-                Some(
-                    Recorder::start(&path, (config.width, config.height), 960, 30)
-                        .map_err(|e| e.to_string())?,
-                )
-            } else {
-                notes.push("surface cannot be copied from; no video".into());
-                None
-            }
-        } else {
-            None
-        };
+        let want_video = self.cli.video && self.cli.flythrough;
+        if want_video && !copy_src {
+            notes.push("surface cannot be copied from; no video".into());
+        }
+        let want_video = want_video && copy_src;
         let aspect = config.width as f32 / config.height as f32;
         let now = Instant::now();
         Ok(State {
@@ -242,7 +229,9 @@ impl Viewer {
             grabbed: false,
             samples: Vec::new(),
             rss: 0,
-            recorder,
+            recorder: None,
+            want_video,
+            rec_size: (0, 0),
             shot_taken: false,
             shot_ok: false,
             notes,
