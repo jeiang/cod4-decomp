@@ -53,13 +53,6 @@ impl Default for Request {
     }
 }
 
-/// Horizontal field of view for a display of `aspect` (width / height) when `fov_4_3` degrees is the horizontal
-/// field of view at 4:3: the vertical field is held, so wider displays see more to the sides (Hor+).
-pub fn hor_plus(fov_4_3: f32, aspect: f32) -> f32 {
-    let tan_x = (fov_4_3.to_radians() * 0.5).tan();
-    2.0 * (tan_x * 0.75 * aspect).atan()
-}
-
 fn mode_json(m: &VideoModeHandle) -> Value {
     json!({
         "width": m.size().width,
@@ -147,14 +140,6 @@ pub fn create_window(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hor_plus_keeps_the_four_three_field_and_widens_for_wide_displays() {
-        let f = |a| hor_plus(80.0, a).to_degrees();
-        assert!((f(4.0 / 3.0) - 80.0).abs() < 1e-3);
-        assert!(f(16.0 / 9.0) > 95.0 && f(16.0 / 9.0) < 105.0);
-        assert!(f(21.0 / 9.0) > f(16.0 / 9.0));
-    }
 
     #[test]
     fn fullscreen_names_round_trip() {

@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cod4e browser spike</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 1rem 2rem; background: #111; color: #ddd; }
+  h1 { font-size: 1.1rem; }
+  #drop { border: 2px dashed #666; padding: 1rem; margin: .5rem 0; border-radius: 6px; }
+  #drop.over { border-color: #8cf; }
+  canvas { width: 640px; max-width: 100%; aspect-ratio: 16 / 9; background: #000; display: block; margin: .5rem 0; }
+  table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td, th { padding: 1px 12px 1px 0; text-align: left; }
+  #err { color: #f88; white-space: pre-wrap; }
+  .note { color: #999; }
+</style>
+</head>
+<body>
+<h1>cod4e browser spike (#69): your install folder, read in place</h1>
+<p class="note">Files are read from your disk by this page only; nothing is uploaded. Needs the original install
+(<code>main/*.iwd</code>, <code>zone/english/*.ff</code>).</p>
+<div id="drop">
+  <button id="pick" hidden>Pick install folder…</button>
+  <label>or <input id="dir" type="file" webkitdirectory multiple></label>
+  <span>or drop the folder here.</span><br>
+  Map <input id="map" value="mp_crash" size="12">
+  Backend <select id="backend"><option>auto</option><option>webgpu</option><option>webgl</option></select>
+</div>
+<div id="stage"></div>
+<p><button id="shot">Capture a still (read back from the GPU)</button></p>
+<canvas id="still" width="1280" height="720" hidden></canvas>
+<div id="err"></div>
+<table id="stats"></table>
+<script type="module" src="main.js"></script>
+</body>
+</html>

@@ -5,11 +5,11 @@
 //! function of wall-clock time.
 
 use crate::Cli;
-use crate::display::{self, hor_plus};
-use crate::flythrough;
+use crate::display;
 use crate::video::Recorder;
 use assets::vfs::Vfs;
 use glam::Vec3;
+use render::flythrough::{self, hor_plus};
 use render::{Gpu, MapData, Renderer, Scene, TextureCache, View};
 use serde_json::{Value, json};
 use std::collections::HashSet;

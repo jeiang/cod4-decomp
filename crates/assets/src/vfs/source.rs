@@ -3,7 +3,7 @@
 //! `File`) can implement it later.
 
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 /// A fixed-length byte source supporting ranged reads.
@@ -80,5 +80,44 @@ impl ReadAt for Vec<u8> {
             .ok_or(io::ErrorKind::UnexpectedEof)?;
         buf.copy_from_slice(&self[start..end]);
         Ok(())
+    }
+}
+
+/// A sequential [`Read`] over a [`ReadAt`], for [`Zone::open`](crate::zone::Zone::open) on sources that are not
+/// `std::fs::File`s. Reads in `CHUNK`-sized ranges, so a source with an expensive call (a browser `File`) is
+/// asked for megabytes at a time.
+pub struct SourceReader<S> {
+    source: S,
+    pos: u64,
+    buf: Vec<u8>,
+    at: usize,
+}
+
+impl<S: std::ops::Deref<Target: ReadAt>> SourceReader<S> {
+    const CHUNK: usize = 1 << 20;
+
+    pub fn new(source: S) -> Self {
+        Self {
+            source,
+            pos: 0,
+            buf: Vec::new(),
+            at: 0,
+        }
+    }
+}
+
+impl<S: std::ops::Deref<Target: ReadAt>> Read for SourceReader<S> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.at == self.buf.len() {
+            let n = (self.source.len() - self.pos).min(Self::CHUNK as u64) as usize;
+            self.buf.resize(n, 0);
+            self.source.read_exact_at(self.pos, &mut self.buf)?;
+            self.pos += n as u64;
+            self.at = 0;
+        }
+        let n = out.len().min(self.buf.len() - self.at);
+        out[..n].copy_from_slice(&self.buf[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
     }
 }

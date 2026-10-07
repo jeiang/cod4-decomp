@@ -164,11 +164,15 @@ fn lit(n: usize, v: f32) -> String {
     }
 }
 
+/// `f32::MAX` as WGSL text. The shortest round-trip form, `3.4028235e38`, is above the maximum as a decimal number,
+/// which Tint (Chrome's WGSL compiler) rejects as unrepresentable; this one is just below it and rounds to it.
+const F32_MAX: &str = "3.4028234663852885e38";
+
 fn fmt_f(v: f32) -> String {
     if v.is_nan() {
         "0.0".into()
-    } else if v.is_infinite() {
-        format!("{}3.4028235e38", if v < 0.0 { "-" } else { "" })
+    } else if v.is_infinite() || v.abs() == f32::MAX {
+        format!("{}{F32_MAX}", if v < 0.0 { "-" } else { "" })
     } else {
         let s = format!("{v:?}");
         if s.contains(['e', '.']) {
@@ -493,12 +497,12 @@ impl Ctx<'_> {
                     5 => format!("({} * {})", s!(0), s!(1)),
                     6 => {
                         let a = self.scalar(&src[0]);
-                        splat(format!("select(1.0 / {a}, 3.4028235e38, {a} == 0.0)"), n)
+                        splat(format!("select(1.0 / {a}, {F32_MAX}, {a} == 0.0)"), n)
                     }
                     7 => {
                         let a = self.scalar(&src[0]);
                         splat(
-                            format!("select(inverseSqrt(abs({a})), 3.4028235e38, {a} == 0.0)"),
+                            format!("select(inverseSqrt(abs({a})), {F32_MAX}, {a} == 0.0)"),
                             n,
                         )
                     }

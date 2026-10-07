@@ -166,6 +166,8 @@ struct Draw {
     first_index: u32,
     count: u32,
     base_vertex: i32,
+    /// Byte offset into the mesh's vertex buffer, where the device cannot draw with a base vertex.
+    vb_offset: u64,
     sky: bool,
     order: (bool, u8, u32),
 }
@@ -710,7 +712,12 @@ impl Renderer {
                 ps,
                 first_index: surf.base_index as u32,
                 count: u32::from(surf.tri_count) * 3,
-                base_vertex: surf.first_vertex,
+                base_vertex: if self.gpu.base_vertex { surf.first_vertex } else { 0 },
+                vb_offset: if self.gpu.base_vertex {
+                    0
+                } else {
+                    surf.first_vertex as u64 * VertexKind::World.stride()
+                },
             });
         }
 
@@ -774,6 +781,7 @@ impl Renderer {
                     first_index: 0,
                     count: tris,
                     base_vertex: 0,
+                    vb_offset: 0,
                 });
                 counted = true;
             }
@@ -822,7 +830,7 @@ impl Renderer {
         format: wgpu::TextureFormat,
         size: (u32, u32),
     ) -> FrameStats {
-        let t0 = std::time::Instant::now();
+        let t0 = web_time::Instant::now();
         self.ensure_depth(size);
         self.ensure_shadow();
         self.ring.clear();
@@ -1128,7 +1136,7 @@ fn record(
 ) {
     let mut cur_pipe: Option<*const wgpu::RenderPipeline> = None;
     let mut cur_tex: Option<*const wgpu::BindGroup> = None;
-    let mut cur_mesh: Option<*const Mesh> = None;
+    let mut cur_mesh: Option<(*const Mesh, u64)> = None;
     let mut sky_range = false;
     for d in draws {
         if let Some((w, h)) = sky_view
@@ -1148,10 +1156,10 @@ fn record(
             rp.set_bind_group(2, &*d.tex_bg, &[]);
             cur_tex = Some(Arc::as_ptr(&d.tex_bg));
         }
-        if cur_mesh != Some(Arc::as_ptr(&d.mesh)) {
-            rp.set_vertex_buffer(0, d.mesh.vb.slice(..));
+        if cur_mesh != Some((Arc::as_ptr(&d.mesh), d.vb_offset)) {
+            rp.set_vertex_buffer(0, d.mesh.vb.slice(d.vb_offset..));
             rp.set_index_buffer(d.mesh.ib.slice(..), wgpu::IndexFormat::Uint16);
-            cur_mesh = Some(Arc::as_ptr(&d.mesh));
+            cur_mesh = Some((Arc::as_ptr(&d.mesh), d.vb_offset));
         }
         rp.draw_indexed(d.first_index..d.first_index + d.count, d.base_vertex, 0..1);
     }

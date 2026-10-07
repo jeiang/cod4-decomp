@@ -5,6 +5,7 @@
 pub mod art;
 pub mod codeconst;
 pub mod cull;
+pub mod flythrough;
 pub mod gpu;
 pub mod lightgrid;
 pub mod material;

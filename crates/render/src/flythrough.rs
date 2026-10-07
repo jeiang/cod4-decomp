@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The scripted camera path of the flythrough scenario: a loop over the map at street-to-roof height, a pure
-//! function of time so every machine and display mode sees the same tour.
 
 use glam::Vec3;
 use std::f32::consts::TAU;
@@ -13,6 +11,13 @@ pub struct Pose {
     pub origin: Vec3,
     pub yaw: f32,
     pub pitch: f32,
+}
+
+/// Horizontal field of view for a display of `aspect` (width / height) when `fov_4_3` degrees is the horizontal
+/// field of view at 4:3: the vertical field is held, so wider displays see more to the sides (Hor+).
+pub fn hor_plus(fov_4_3: f32, aspect: f32) -> f32 {
+    let tan_x = (fov_4_3.to_radians() * 0.5).tan();
+    2.0 * (tan_x * 0.75 * aspect).atan()
 }
 
 /// Pose at `t` seconds for a world with the given bounds.
@@ -50,5 +55,13 @@ mod tests {
             assert!(p.origin.cmpge(mins).all() && p.origin.cmple(maxs).all());
         }
         assert_eq!(pose(7.0, mins, maxs).origin, pose(7.0, mins, maxs).origin);
+    }
+
+    #[test]
+    fn hor_plus_keeps_the_four_three_field_and_widens_for_wide_displays() {
+        let f = |a| hor_plus(80.0, a).to_degrees();
+        assert!((f(4.0 / 3.0) - 80.0).abs() < 1e-3);
+        assert!(f(16.0 / 9.0) > 95.0 && f(16.0 / 9.0) < 105.0);
+        assert!(f(21.0 / 9.0) > f(16.0 / 9.0));
     }
 }

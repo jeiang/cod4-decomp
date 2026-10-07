@@ -10,8 +10,9 @@ mod iwd;
 mod source;
 
 pub use iwd::{Entry, Iwd};
-pub use source::{FileSource, ReadAt};
+pub use source::{FileSource, ReadAt, SourceReader};
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -210,41 +211,11 @@ impl Builder {
             language: subfolder_lang,
         });
 
-        let mut found: Vec<(String, Option<usize>)> = vec![];
+        let mut names = vec![];
         for e in std::fs::read_dir(&path)? {
-            let name = e?.file_name().to_string_lossy().into_owned();
-            if !name.to_ascii_lowercase().ends_with(".iwd") {
-                continue;
-            }
-            let lower = name.to_ascii_lowercase();
-            let language = match (subfolder_lang, lower.strip_prefix(LOCALIZED_PREFIX)) {
-                (Some(l), _) => Some(l),
-                (None, Some(rest)) => match language_index(rest.split('_').next().unwrap_or("")) {
-                    Some(l) => Some(l),
-                    None => continue, // invalid localized name: original warns and skips
-                },
-                (None, None) => None,
-            };
-            // Basepath `main` accepts only `iw_*` for non-localized IWDs.
-            if language.is_none()
-                && game_dir.eq_ignore_ascii_case("main")
-                && !lower.starts_with("iw_")
-            {
-                continue;
-            }
-            found.push((name, language));
+            names.push(e?.file_name().to_string_lossy().into_owned());
         }
-        if found.len() > MAX_IWDS {
-            found.sort_by_key(|(n, _)| n.to_ascii_lowercase());
-            found.truncate(MAX_IWDS);
-        }
-        if found.is_empty() && subfolder_lang.is_none() && game_dir.eq_ignore_ascii_case("main") {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "No IWD files found in /main",
-            ));
-        }
-        found.sort_by_cached_key(|(n, lang)| iwd_sort_key(n, *lang));
+        let found = select_iwds(game_dir, subfolder_lang, names)?;
         for (name, language) in found {
             let iwd_path = path.join(name);
             let iwd = Iwd::open(&iwd_path)?;
@@ -252,6 +223,29 @@ impl Builder {
                 kind: NodeKind::Iwd {
                     path: iwd_path,
                     iwd,
+                },
+                language,
+            });
+        }
+        Ok(())
+    }
+
+    /// Like [`Builder::add_game_dir`] for one directory whose IWDs are not on a file system (a browser's picked
+    /// folder): `iwds` are the `.iwd` members of `<game_dir>[/<language>]`, by file name. `Dir` nodes are not built.
+    pub fn add_iwds(
+        &mut self,
+        game_dir: &str,
+        subfolder_lang: Option<usize>,
+        iwds: Vec<(String, Box<dyn ReadAt>)>,
+    ) -> io::Result<()> {
+        let mut sources: HashMap<String, Box<dyn ReadAt>> = iwds.into_iter().collect();
+        let names = sources.keys().cloned().collect();
+        for (name, language) in select_iwds(game_dir, subfolder_lang, names)? {
+            let source = sources.remove(&name).expect("selected from the keys");
+            self.push(Node {
+                kind: NodeKind::Iwd {
+                    path: PathBuf::from(&name),
+                    iwd: Iwd::new(source)?,
                 },
                 language,
             });
@@ -268,6 +262,47 @@ impl Builder {
             language,
         })
     }
+}
+
+/// The IWDs the original engine loads from one directory listing, in load order (ascending priority).
+fn select_iwds(
+    game_dir: &str,
+    subfolder_lang: Option<usize>,
+    names: Vec<String>,
+) -> io::Result<Vec<(String, Option<usize>)>> {
+    let mut found: Vec<(String, Option<usize>)> = vec![];
+    for name in names {
+        if !name.to_ascii_lowercase().ends_with(".iwd") {
+            continue;
+        }
+        let lower = name.to_ascii_lowercase();
+        let language = match (subfolder_lang, lower.strip_prefix(LOCALIZED_PREFIX)) {
+            (Some(l), _) => Some(l),
+            (None, Some(rest)) => match language_index(rest.split('_').next().unwrap_or("")) {
+                Some(l) => Some(l),
+                None => continue, // invalid localized name: original warns and skips
+            },
+            (None, None) => None,
+        };
+        // Basepath `main` accepts only `iw_*` for non-localized IWDs.
+        if language.is_none() && game_dir.eq_ignore_ascii_case("main") && !lower.starts_with("iw_")
+        {
+            continue;
+        }
+        found.push((name, language));
+    }
+    if found.len() > MAX_IWDS {
+        found.sort_by_key(|(n, _)| n.to_ascii_lowercase());
+        found.truncate(MAX_IWDS);
+    }
+    if found.is_empty() && subfolder_lang.is_none() && game_dir.eq_ignore_ascii_case("main") {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No IWD files found in /main",
+        ));
+    }
+    found.sort_by_cached_key(|(n, lang)| iwd_sort_key(n, *lang));
+    Ok(found)
 }
 
 /// Original IWD order (ascending = lowest priority first): localized names

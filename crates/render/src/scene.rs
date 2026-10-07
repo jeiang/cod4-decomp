@@ -63,6 +63,23 @@ impl std::error::Error for LoadError {}
 impl MapData {
     /// Decode `zone/english/<map>.ff`, `common_mp.ff` and `code_post_gfx_mp.ff` under the install root.
     pub fn load(install: &Path, map: &str) -> Result<MapData, LoadError> {
+        Self::load_with(
+            map,
+            |zone| {
+                let path = install.join("zone/english").join(format!("{zone}.ff"));
+                Ok(std::io::BufReader::new(std::fs::File::open(path)?))
+            },
+            |_| {},
+        )
+    }
+
+    /// Decode the three zones from readers `open` returns by zone name; `done` is called with the name after each
+    /// zone is decoded.
+    pub fn load_with<R: std::io::Read>(
+        map: &str,
+        mut open: impl FnMut(&str) -> std::io::Result<R>,
+        mut done: impl FnMut(&str),
+    ) -> Result<MapData, LoadError> {
         let mut world = None;
         let mut com_world = None;
         let mut clipmap = None;
@@ -74,9 +91,8 @@ impl MapData {
         let vision_name = format!("vision/{map}.vision");
         let art_name = format!("maps/createart/{map}_art.gsc");
         for zone in ["code_post_gfx_mp", "common_mp", map] {
-            let path = install.join("zone/english").join(format!("{zone}.ff"));
-            let file = std::fs::File::open(path).map_err(LoadError::Io)?;
-            let z = Zone::open(std::io::BufReader::new(file)).map_err(LoadError::Zone)?;
+            let file = open(zone).map_err(LoadError::Io)?;
+            let z = Zone::open(file).map_err(LoadError::Zone)?;
             let keep = Keep(zone);
             z.decode(&keep, |a| match a {
                 Asset::GfxWorld(w) => world = Some(w),
@@ -100,6 +116,7 @@ impl MapData {
                 _ => {}
             })
             .map_err(LoadError::Zone)?;
+            done(zone);
         }
         let vision = vision_files
             .remove(&vision_name)

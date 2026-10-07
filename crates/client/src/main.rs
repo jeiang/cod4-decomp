@@ -4,7 +4,6 @@
 
 mod app;
 mod display;
-mod flythrough;
 mod video;
 
 use display::{FullscreenKind, Request};
