@@ -8,6 +8,7 @@ pub mod cmd;
 pub mod combat;
 pub mod content;
 pub mod cvar;
+pub mod fire;
 pub mod game;
 pub mod mem;
 pub mod mover;

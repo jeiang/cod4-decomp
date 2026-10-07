@@ -12,6 +12,7 @@ use gsc::{Array, EntClass, Key, Value, Vm};
 use sim::Vec3;
 use sim::cm::ENTITYNUM_NONE;
 use sim::contents;
+use sim::weapon::{PlayerWeapons, WeaponCtx, WeaponOut};
 use sim::pm::{self, PLAYER_MAXS, PLAYER_MINS, PlayerState, PmType, Pmove, UserCmd, ev, pmf};
 
 use crate::bot::Brain;
@@ -133,6 +134,11 @@ pub struct Client {
     /// Pitch/yaw/roll recoil kick applied to the view this frame (`viewkick` and weapon kick).
     pub damage_time: i32,
     pub allow_ads: bool,
+    pub inv: PlayerWeapons,
+    /// Per-frame notify state (`G_ClientDoPerFrameNotifies`).
+    pub last_weapon: u32,
+    pub prev_firing: bool,
+    pub prev_sprinting: bool,
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
@@ -180,6 +186,10 @@ impl Client {
             latched_buttons: 0,
             damage_time: 0,
             allow_ads: true,
+            inv: PlayerWeapons::new(),
+            last_weapon: 0,
+            prev_firing: false,
+            prev_sprinting: false,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
         }
@@ -320,6 +330,8 @@ impl Game {
         ps.pm_flags |= pmf::RESPAWNED;
         ps.speed = 190;
         c.ps = ps;
+        c.inv = PlayerWeapons::new();
+        c.last_weapon = 0;
         c.spawn_count = spawn_count;
         c.last_spawn_time = time;
         c.last_stand = false;
@@ -379,7 +391,9 @@ impl Game {
         let Some(world) = self.world.as_ref() else {
             return;
         };
+        cmd.weapon = u8::try_from(c.inv.selected()).unwrap_or(0);
         let mut pm = Pmove::new(std::mem::take(&mut c.ps), &self.pm_params);
+        pm.weapons = Some(WeaponCtx::new(&self.weapons, &mut c.inv));
         pm.cmd = cmd;
         pm.oldcmd = c.old_cmd;
         pm.tracemask = if pm.ps.pm_type < PmType::Dead {
@@ -391,6 +405,7 @@ impl Game {
         pm::pmove(&mut pm, world);
         let touched: Vec<u16> = pm.touched().to_vec();
         let (mins, maxs) = (pm.mins, pm.maxs);
+        let out: WeaponOut = pm.weapon_out;
         c.ps = pm.ps;
         let origin = c.ps.origin;
         let yaw = c.ps.viewangles[1];
@@ -402,6 +417,7 @@ impl Game {
         }
         self.relink(n);
         self.client_events(vm, n, old_events);
+        self.weapon_events(vm, n, &out);
         for t in touched {
             let (other, me) = (self.entity_value(vm, t), self.entity_value(vm, n));
             vm.notify_entity(n, "touch", &[other]);
@@ -528,6 +544,41 @@ impl Game {
             Session::Playing => PmType::Normal,
         };
         self.set_client_contents(n);
+        self.per_frame_notifies(_vm, n);
+    }
+
+    /// `G_ClientDoPerFrameNotifies`: weapon change, firing and sprint edges.
+    fn per_frame_notifies(&mut self, vm: &mut Vm, n: u16) {
+        let Some(c) = self.clients.get_mut(usize::from(n)) else {
+            return;
+        };
+        if c.conn != Conn::Connected {
+            return;
+        }
+        let weapon = c.ps.weapon;
+        let changed = weapon != c.last_weapon;
+        c.last_weapon = weapon;
+        let firing =
+            c.ps.weapon_state == pm::weapon_state::FIRING && c.ps.pm_type < PmType::Dead;
+        let sprinting = c.ps.pm_flags & pmf::SPRINTING != 0;
+        let edges = [
+            (firing, std::mem::replace(&mut c.prev_firing, firing), "begin_firing", "end_firing"),
+            (
+                sprinting,
+                std::mem::replace(&mut c.prev_sprinting, sprinting),
+                "sprint_begin",
+                "sprint_end",
+            ),
+        ];
+        if changed {
+            let name = Value::str(self.weapons.name(weapon as u16));
+            vm.notify_entity(n, "weapon_change", &[name]);
+        }
+        for (now, was, on, off) in edges {
+            if now != was {
+                vm.notify_entity(n, if now { on } else { off }, &[]);
+            }
+        }
     }
 
     /// Entities a script may use as the target of a client method: the client entity or an error.

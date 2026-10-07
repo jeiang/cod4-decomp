@@ -598,6 +598,8 @@ impl Server {
             player_last_stand: find(cbs, "CodeCallback_PlayerLastStand"),
         };
         self.game.callbacks = callbacks;
+        self.game.weapons = sim::weapon::WeaponTable::new(&self.game.content.weapons())
+            .map_err(|e| format!("weapon table: {e:?}"))?;
         let test_client = need(
             find("cod4e/testclient", "TestClient"),
             "TestClient in the bot script",

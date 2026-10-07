@@ -524,16 +524,20 @@ impl Game {
         hit
     }
 
-    /// Default hit-location multiplier for weapons without a table.
-    pub fn hitloc_multiplier(&self, _weapon: u32, _hitloc: u8) -> f32 {
-        1.0
+    /// `G_GetWeaponHitLocationMultiplier`.
+    pub fn hitloc_multiplier(&self, weapon: u32, hitloc: u8) -> f32 {
+        sim::weapon::damage::weapon_hit_location_multiplier(
+            self.weapons.get(weapon as u16),
+            usize::from(hitloc),
+            &self.hitloc_table,
+        )
     }
 
-    pub fn weapon_name(&self, _weapon: u32) -> &str {
-        "none"
+    pub fn weapon_name(&self, weapon: u32) -> &str {
+        self.weapons.name(weapon as u16)
     }
 
-    pub fn weapon_index(&self, _name: &str) -> u32 {
-        0
+    pub fn weapon_index(&self, name: &str) -> u32 {
+        u32::from(self.weapons.index(name))
     }
 }

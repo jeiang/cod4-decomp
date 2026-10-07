@@ -315,6 +315,9 @@ pub struct Game {
     pub pending_free: Vec<u16>,
     pub pm_params: sim::pm::Params,
     pub stats: MatchStats,
+    pub weapons: sim::weapon::WeaponTable,
+    /// `g_fHitLocDamageMult`: the gametype's hit-location scale for non-bullet damage.
+    pub hitloc_table: [f32; 19],
 }
 
 impl Game {
@@ -347,6 +350,8 @@ impl Game {
             pending_free: Vec::new(),
             pm_params: sim::pm::Params::default(),
             stats: MatchStats::default(),
+            hitloc_table: default_hitloc_table(),
+            weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),
         }
     }
 
@@ -726,4 +731,10 @@ mod tests {
         g.ents[72] = None;
         assert_eq!(g.spawn(Ent::new(EntKind::Plain, "c")).unwrap(), 72);
     }
+}
+
+fn default_hitloc_table() -> [f32; 19] {
+    let mut t = [1.0; 19];
+    t[18] = 0.0;
+    t
 }

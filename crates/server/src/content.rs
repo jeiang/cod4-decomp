@@ -316,6 +316,21 @@ impl Content {
         get(&self.map.weapons, name).or_else(|| get(&self.base.weapons, name))
     }
 
+    /// Every weapon definition the loaded zones define, each name once (the map's copy wins).
+    pub fn weapons(&self) -> Vec<Arc<WeaponDef>> {
+        let base = self
+            .base
+            .weapons
+            .iter()
+            .filter(|(k, _)| !self.map.weapons.contains_key(*k));
+        self.map
+            .weapons
+            .iter()
+            .chain(base)
+            .map(|(_, (_, w))| w.clone())
+            .collect()
+    }
+
     pub fn model(&self, name: &str) -> Option<&Arc<XModel>> {
         get(&self.map.models, name).or_else(|| get(&self.base.models, name))
     }
