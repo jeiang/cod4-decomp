@@ -15,6 +15,7 @@ pub mod link;
 pub mod mem;
 pub mod mover;
 pub mod playeranim;
+pub mod nav;
 pub mod script;
 pub mod server;
 pub mod tags;
