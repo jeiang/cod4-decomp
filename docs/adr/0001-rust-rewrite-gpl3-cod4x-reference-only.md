@@ -12,3 +12,4 @@ Code from a source may be translated only if its license allows GPL-3.0-or-later
 
 - Every research note records the license of each source it uses, so provenance can be checked later.
 - The IW3 asset structs, the zone loader, the wavelet IWI decoder, and the GSC parser are written from our own fact sheets and from reverse engineering of `iw3mp.exe`.
+- Functional format constants that are needed to read the original files (codec tables such as the wavelet IWI Huffman codes, enum values, struct layouts) may be committed, including values read from `iw3mp.exe`. Code from the binary, or from any reference-only source, is never copied.
