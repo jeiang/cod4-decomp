@@ -8,19 +8,67 @@
 /// One command: its words (quotes removed). `words[0]` is the command name.
 pub type Command = Vec<String>;
 
-/// Splits `src` into commands; empty commands (`; ;`) are dropped.
+/// How many words follow each command (`commandList` handlers read this many with `String_Parse`/`Float_Parse`).
+/// Commands not listed here take everything up to the next `;`.
+fn arity(name: &str) -> Option<usize> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "focusfirst" | "wait" | "getautoupdate" => 0,
+        "open" | "close" | "ingameopen" | "ingameclose" | "show" | "hide" | "showmenu" | "hidemenu" | "fadein"
+        | "fadeout" | "setfocus" | "setfocusbydvar" | "exec" | "execnow" | "play" | "scriptmenuresponse"
+        | "feedertop" | "feederbottom" | "openforgametype" | "closeforgametype" | "setbackground" => 1,
+        "setdvar" | "set" | "setlocalvarbool" | "setlocalvarint" | "setlocalvarfloat" | "setlocalvarstring" => 2,
+        "execondvarstringvalue" | "execondvarintvalue" | "execondvarfloatvalue" | "execnowondvarstringvalue"
+        | "execnowondvarintvalue" | "execnowondvarfloatvalue" | "scriptmenurespondondvarstringvalue"
+        | "scriptmenurespondondvarintvalue" | "scriptmenurespondondvarfloatvalue" => 3,
+        "setcolor" | "setitemcolor" => 6,
+        _ => return None,
+    })
+}
+
+/// Splits `src` into commands: `;` ends one, and a command with a fixed number of words ends after them (the menu
+/// compiler writes `"open" "class" "close" "self"` with no separator); empty commands are dropped.
 pub fn parse(src: &str) -> Vec<Command> {
+    let words = words(src);
     let mut cmds = Vec::new();
-    let mut cur: Command = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        if words[i] == Word::Semi {
+            i += 1;
+            continue;
+        }
+        let mut cmd: Command = Vec::new();
+        let limit = match &words[i] {
+            Word::Text(n) => arity(n).map(|a| a + 1),
+            Word::Semi => None,
+        };
+        while i < words.len() {
+            match &words[i] {
+                Word::Semi => break,
+                Word::Text(t) => cmd.push(t.clone()),
+            }
+            i += 1;
+            if limit.is_some_and(|l| cmd.len() >= l) {
+                break;
+            }
+        }
+        cmds.push(cmd);
+    }
+    cmds
+}
+
+#[derive(PartialEq)]
+enum Word {
+    Text(String),
+    Semi,
+}
+
+fn words(src: &str) -> Vec<Word> {
+    let mut out = Vec::new();
     let mut it = src.char_indices().peekable();
     while let Some((i, c)) = it.next() {
         match c {
             ' ' | '\t' | '\r' | '\n' => {}
-            ';' => {
-                if !cur.is_empty() {
-                    cmds.push(std::mem::take(&mut cur));
-                }
-            }
+            ';' => out.push(Word::Semi),
             '"' => {
                 let start = i + 1;
                 let mut end = src.len();
@@ -30,9 +78,9 @@ pub fn parse(src: &str) -> Vec<Command> {
                         break;
                     }
                 }
-                cur.push(src[start..end].to_owned());
+                out.push(Word::Text(src[start..end].to_owned()));
             }
-            '(' | ')' | ',' => cur.push(c.to_string()),
+            '(' | ')' | ',' => out.push(Word::Text(c.to_string())),
             _ => {
                 let start = i;
                 let mut end = src.len();
@@ -43,14 +91,11 @@ pub fn parse(src: &str) -> Vec<Command> {
                     }
                     it.next();
                 }
-                cur.push(src[start..end].to_owned());
+                out.push(Word::Text(src[start..end].to_owned()));
             }
         }
     }
-    if !cur.is_empty() {
-        cmds.push(cur);
-    }
-    cmds
+    out
 }
 
 #[cfg(test)]
@@ -66,6 +111,20 @@ mod tests {
                 vec!["open", "main_text"],
                 vec!["exec", "set a 1; set b 2"],
                 vec!["setdvar", "x", "2"]
+            ]
+        );
+    }
+
+    #[test]
+    fn fixed_arity_commands_need_no_separator() {
+        let c = parse(r#""setLocalVarString" "ui_team" "marines" "open" "class" "close" "self" "focusFirst" ;"#);
+        assert_eq!(
+            c,
+            vec![
+                vec!["setLocalVarString", "ui_team", "marines"],
+                vec!["open", "class"],
+                vec!["close", "self"],
+                vec!["focusFirst"]
             ]
         );
     }
