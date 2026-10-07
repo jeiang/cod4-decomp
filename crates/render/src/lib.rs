@@ -8,6 +8,7 @@ pub mod cull;
 pub mod gpu;
 pub mod lightgrid;
 pub mod material;
+pub mod post;
 mod renderer;
 pub mod scene;
 pub mod state;
@@ -16,6 +17,7 @@ pub mod texture;
 pub mod timing;
 
 pub use gpu::{Gpu, GpuError, GpuInfo};
+pub use post::{Dof, PostParams, ShellShock};
 pub use renderer::{FrameStats, Renderer, Settings, ShadowMode, View};
 pub use scene::{MapData, Scene};
 pub use texture::TextureCache;

@@ -55,6 +55,8 @@ pub enum VertexKind {
     World,
     /// 32-byte `GfxPackedVertex` (xmodel surfaces).
     Model,
+    /// 28-byte full-screen quad vertex: position at 0, colour at 16, texture coordinates at 20.
+    Screen,
 }
 
 impl VertexKind {
@@ -62,6 +64,7 @@ impl VertexKind {
         match self {
             VertexKind::World => 44,
             VertexKind::Model => 32,
+            VertexKind::Screen => 28,
         }
     }
 
@@ -94,6 +97,7 @@ impl VertexKind {
             (VertexKind::Model, 2) => (F::Unorm8x4, 20),
             (VertexKind::Model, 3) => (F::Unorm8x4, 24),
             (VertexKind::Model, 4) => (F::Unorm8x4, 28),
+            (VertexKind::Screen, 2) => (F::Float32x2, 20),
             _ => return None,
         })
     }
@@ -131,11 +135,12 @@ pub struct SamplerSlot {
     fallback: [u8; 4],
 }
 
-/// Attachment formats a pipeline renders into; `color` is `None` for depth-only passes.
+/// Attachment formats a pipeline renders into; `color` is `None` for depth-only passes, `depth` for the full-screen
+/// post passes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Target {
     pub color: Option<wgpu::TextureFormat>,
-    pub depth: wgpu::TextureFormat,
+    pub depth: Option<wgpu::TextureFormat>,
 }
 
 pub struct Prepared {
@@ -723,9 +728,11 @@ impl Materials {
             };
             let fetch = match &source {
                 _ if u.comparison => Fetch::Compare,
+                // The shadow map's colour encoding and the 32-bit float-Z are not filterable.
                 TexSource::Code(id)
                     if *id == codeconst::tex::SHADOWMAP_SUN
-                        || *id == codeconst::tex::SHADOWMAP_SPOT =>
+                        || *id == codeconst::tex::SHADOWMAP_SPOT
+                        || *id == codeconst::tex::FLOATZ =>
                 {
                     Fetch::Raw
                 }
@@ -828,8 +835,8 @@ impl Materials {
                                 cull_mode: s.cull(),
                                 ..Default::default()
                             },
-                            depth_stencil: Some(wgpu::DepthStencilState {
-                                format: target.depth,
+                            depth_stencil: target.depth.map(|format| wgpu::DepthStencilState {
+                                format,
                                 depth_write_enabled: Some(s.depth_write()),
                                 depth_compare: Some(s.depth_compare()),
                                 stencil: s.stencil(),
@@ -865,6 +872,12 @@ impl Materials {
             let tex = tex
                 .filter(|t| t.dim == s.dim)
                 .unwrap_or_else(|| textures.solid(gpu, s.dim, s.fallback));
+            // A raw slot's layout wants a non-filtering sampler, whatever the material asked for.
+            let state = if s.fetch == Fetch::Raw {
+                SamplerKey::ShadowRaw
+            } else {
+                state
+            };
             let sampler = self.sampler(gpu, state);
             views.push((s.register, tex, sampler));
         }

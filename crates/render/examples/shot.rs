@@ -4,6 +4,11 @@
 //! `DUMP=<material substring>` also prints the translated binding table of the matching materials
 //! (`TECH=<n>` picks the technique, default 8 = lit sun; `MODEL=1` prepares them for static-model vertices;
 //! `WGSL=1` adds the translated shaders). `SHADOWS=off|color`, `NOFOG=1` and `NOLIGHTS=1` switch features off.
+//!
+//! Post effects, each overriding the map's own values: `DOF=near_start,near_end,far_start,far_end,near_blur,far_blur`,
+//! `GLOW=radius,intensity,cutoff,desaturation` (`GLOW=0` turns it off), `FILM=0|1|contrast,brightness,desaturation[,1 for no tint]`,
+//! `BLUR=radius` (virtual 640x480 pixels) and `SHELLSHOCK=1` (a second frame draws the overlays over the first).
+//! `TIMING=<frames>` renders that many frames and prints the mean GPU time of every pass.
 
 use assets::vfs::Vfs;
 use render::material::VertexKind;
@@ -31,6 +36,7 @@ fn main() {
     }
     r.settings.fog &= std::env::var_os("NOFOG").is_none();
     r.settings.primary_lights &= std::env::var_os("NOLIGHTS").is_none();
+    set_post(&mut r);
     eprintln!(
         "loaded in {:?}; failures: {:?}",
         t.elapsed(),
@@ -80,8 +86,40 @@ fn main() {
         time: 0.0,
     };
     let tv = tex.create_view(&Default::default());
+    if std::env::var_os("SHELLSHOCK").is_some() {
+        r.post.save_screen = true;
+        r.render(&view, &tv, format, (w, h));
+        r.post.shell_shock = Some(render::ShellShock {
+            blur_alpha: 0.6,
+            flash_screengrab: 0.3,
+            flash_whiteout: 0.15,
+        });
+    }
     let stats = r.render(&view, &tv, format, (w, h));
     eprintln!("{stats:?}\nimage failures: {:?}", r.textures.failed);
+    if let Some(n) = std::env::var("TIMING")
+        .ok()
+        .and_then(|n| n.parse::<u32>().ok())
+    {
+        let mut sums: Vec<(&str, f64)> = Vec::new();
+        let mut total = 0.0;
+        for _ in 0..n {
+            r.render(&view, &tv, format, (w, h));
+            let t = r.timer.as_mut().expect("timestamps");
+            t.flush(&gpu);
+            total += t.last_total_ms.unwrap_or(0.0);
+            for &(name, ms) in &t.last {
+                match sums.iter_mut().find(|s| s.0 == name) {
+                    Some(s) => s.1 += ms,
+                    None => sums.push((name, ms)),
+                }
+            }
+        }
+        for (name, ms) in sums {
+            eprintln!("gpu {name:>16}: {:.3} ms", ms / f64::from(n));
+        }
+        eprintln!("gpu {:>16}: {:.3} ms", "frame", total / f64::from(n));
+    }
     let bpr = (w * 4).next_multiple_of(256);
     let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
@@ -126,4 +164,53 @@ fn main() {
     e.set_color(png::ColorType::Rgba);
     e.set_depth(png::BitDepth::Eight);
     e.write_header().unwrap().write_image_data(&rgba).unwrap();
+}
+
+/// The `DOF`, `GLOW`, `FILM` and `BLUR` overrides.
+fn set_post(r: &mut Renderer) {
+    let nums = |name: &str| -> Option<Vec<f32>> {
+        let v = std::env::var(name).ok()?;
+        Some(
+            v.split(',')
+                .map(|n| n.trim().parse().expect(name))
+                .collect(),
+        )
+    };
+    if let Some(n) = nums("DOF") {
+        r.post.dof = Some(render::Dof {
+            view_model_start: 0.0,
+            view_model_end: 0.0,
+            near_start: n[0],
+            near_end: n[1],
+            far_start: n[2],
+            far_end: n[3],
+            near_blur: n[4],
+            far_blur: n[5],
+        });
+    }
+    if let Some(n) = nums("GLOW") {
+        let g = &mut r.post.glow;
+        g.enabled = n[0] != 0.0;
+        if n.len() >= 4 {
+            (
+                g.radius,
+                g.bloom_intensity,
+                g.bloom_cutoff,
+                g.bloom_desaturation,
+            ) = (n[0], n[1], n[2], n[3]);
+        }
+    }
+    if let Some(n) = nums("FILM") {
+        let f = &mut r.post.film;
+        f.enabled = n[0] != 0.0;
+        if n.len() >= 3 {
+            (f.contrast, f.brightness, f.desaturation) = (n[0], n[1], n[2]);
+        }
+        if n.len() >= 4 && n[3] != 0.0 {
+            (f.tint_light, f.tint_dark) = ([1.0; 3], [1.0; 3]);
+        }
+    }
+    if let Some(n) = nums("BLUR") {
+        r.post.blur_radius = n[0];
+    }
 }

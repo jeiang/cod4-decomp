@@ -6,6 +6,7 @@ use crate::codeconst::{self, FrameConsts, LightConsts, Object, tex as ctex};
 use crate::cull::{self, Frustum};
 use crate::gpu::Gpu;
 use crate::material::{BANK_BYTES, Materials, Prepared, SamplerKey, Target, VertexKind};
+use crate::post::{self, PostParams};
 use crate::scene::{MapData, Mesh, Scene, model_matrix};
 use crate::sunshadow::{self, SunShadow};
 use crate::texture::{Tex, TextureCache};
@@ -25,6 +26,7 @@ const NEAR: f32 = 4.0;
 const DEPTH_SCALE: f32 = 0.99999;
 /// Linear filtering, linear mips, clamped.
 const CODE_SAMPLER: u8 = 0x72;
+const TECH_BUILD_FLOATZ: usize = 1;
 const TECH_BUILD_SHADOWMAP_DEPTH: usize = 2;
 const TECH_BUILD_SHADOWMAP_COLOR: usize = 3;
 const TECH_UNLIT: usize = 4;
@@ -199,6 +201,8 @@ struct TexKey {
 enum PassKind {
     Scene,
     SunShadow,
+    /// The scene's view-space depth for the post chain's depth of field.
+    FloatZ,
 }
 
 /// Visible geometry to draw.
@@ -238,6 +242,9 @@ pub struct Renderer {
     /// Stand-in shadow textures for passes that bind a shadow slot while the map is off.
     shadow_dummy: (Arc<Tex>, Arc<Tex>),
     pub timer: Option<GpuTimer>,
+    /// What the post chain does this frame; starts as the map's own glow and film.
+    pub post: PostParams,
+    pub(crate) post_state: post::State,
 }
 
 impl Renderer {
@@ -303,6 +310,7 @@ impl Renderer {
             .collect();
         let shadow_dummy = dummy_shadow(&gpu);
         let timer = GpuTimer::new(&gpu);
+        let post_state = post::State::new(&gpu, data);
         let mut r = Renderer {
             gpu,
             scene,
@@ -319,6 +327,8 @@ impl Renderer {
             clear: [0.45, 0.43, 0.38],
             settings: Settings::default(),
             art: data.art.clone(),
+            post: PostParams::from_art(&data.art),
+            post_state,
             lights,
             shadow: None,
             shadow_dummy,
@@ -383,7 +393,7 @@ impl Renderer {
         let hsm = self.hsm();
         let scene = Target {
             color: Some(format),
-            depth: DEPTH_FORMAT,
+            depth: Some(DEPTH_FORMAT),
         };
         let mut n = 0;
         for m in self.scene.materials() {
@@ -414,7 +424,7 @@ impl Renderer {
     fn shadow_target(&self) -> Target {
         Target {
             color: (self.settings.shadows == ShadowMode::Color).then_some(SHADOW_COLOR_FORMAT),
-            depth: DEPTH_FORMAT,
+            depth: Some(DEPTH_FORMAT),
         }
     }
 
@@ -616,7 +626,7 @@ impl Renderer {
     }
 
     /// Room for `regs` registers in the constant ring: the byte offset of the bank and the registers to fill.
-    fn alloc(&mut self, regs: usize) -> (u32, &mut [[f32; 4]]) {
+    pub(crate) fn alloc(&mut self, regs: usize) -> (u32, &mut [[f32; 4]]) {
         let at = self.ring.len();
         self.ring.resize(at + regs, [0.0; 4]);
         ((at * 16) as u32, &mut self.ring[at..])
@@ -653,6 +663,7 @@ impl Renderer {
     ) -> Vec<Draw> {
         let hsm = self.hsm();
         let shadow_tech = [self.shadow_tech()];
+        let floatz_tech = [TECH_BUILD_FLOATZ];
         let mut draws: Vec<Draw> = Vec::new();
         // Banks that do not depend on the object are shared by every draw with the same pass and light.
         let mut shared = SharedBanks::new();
@@ -671,6 +682,7 @@ impl Renderer {
             let techs: &[usize] = match kind {
                 PassKind::Scene => self.scene_techs(light, sun_shadows),
                 PassKind::SunShadow => &shadow_tech,
+                PassKind::FloatZ => &floatz_tech,
             };
             let Some(prep) = self.prepare(mat, techs, VertexKind::World, hsm) else {
                 if kind == PassKind::Scene {
@@ -731,6 +743,7 @@ impl Renderer {
             let techs: &[usize] = match kind {
                 PassKind::Scene => self.scene_techs(light, sun_shadows),
                 PassKind::SunShadow => &shadow_tech,
+                PassKind::FloatZ => &floatz_tech,
             };
             let fc = light_frames.get(&light).unwrap_or(frame);
             let mut counted = false;
@@ -929,7 +942,7 @@ impl Renderer {
             &items,
             Target {
                 color: Some(format),
-                depth: DEPTH_FORMAT,
+                depth: Some(DEPTH_FORMAT),
             },
             sun.is_some(),
             &mut counts,
@@ -938,6 +951,28 @@ impl Renderer {
         stats.models = counts.models;
         stats.pipelines_missing = counts.missing;
         stats.draws = draws.len();
+
+        // The post chain: depth of field wants the scene's depth as a second list of the same surfaces.
+        let floatz = self.post.dof_active().then(|| {
+            let mut zf = frame.clone();
+            zf.vec[codeconst::DEPTH_FROM_CLIP as usize] = [0.0, 0.0, 0.0, 1.0];
+            let zview = self.post_state.floatz_view(&self.gpu, size, format);
+            let list = self.build_draws(
+                PassKind::FloatZ,
+                &zf,
+                &HashMap::new(),
+                &items,
+                Target {
+                    color: Some(post::FLOATZ_FORMAT),
+                    depth: Some(DEPTH_FORMAT),
+                },
+                false,
+                &mut counts,
+                view.origin,
+            );
+            (zview, list)
+        });
+        let chain = post::build(self, size, format, target, NEAR);
 
         self.upload_ring();
         let mut enc = self.gpu.device.create_command_encoder(&Default::default());
@@ -974,13 +1009,46 @@ impl Renderer {
                 record(&mut rp, list, &self.vs_bg, &self.ps_bg, None);
             }
         }
+        if let Some((zview, list)) = &floatz {
+            let depth = &self.depth.as_ref().expect("depth").0;
+            let timestamps = self.timer.as_mut().and_then(|t| t.pass("floatz"));
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("floatz"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: zview,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: post::FLOATZ_CLEAR,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: timestamps,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            record(&mut rp, list, &self.vs_bg, &self.ps_bg, None);
+        }
         {
             let depth = &self.depth.as_ref().expect("depth").0;
             let timestamps = self.timer.as_mut().and_then(|t| t.pass("scene"));
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: chain.scene.as_ref().unwrap_or(target),
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1013,6 +1081,14 @@ impl Renderer {
                 Some((size.0 as f32, size.1 as f32)),
             );
         }
+        post::record(
+            &mut enc,
+            &chain,
+            &self.post_state,
+            &self.vs_bg,
+            &self.ps_bg,
+            self.timer.as_mut(),
+        );
         if let Some(t) = self.timer.as_mut() {
             t.resolve(&mut enc);
         }

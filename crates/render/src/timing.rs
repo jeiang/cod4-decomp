@@ -22,6 +22,10 @@ struct Slot {
     names: Vec<&'static str>,
 }
 
+/// A slot of [`GpuTimer::span`].
+#[derive(Clone, Copy)]
+pub struct Span(u32);
+
 pub struct GpuTimer {
     set: wgpu::QuerySet,
     resolve: wgpu::Buffer,
@@ -159,6 +163,32 @@ impl GpuTimer {
             query_set: &self.set,
             beginning_of_pass_write_index: Some(2 * k as u32),
             end_of_pass_write_index: Some(2 * k as u32 + 1),
+        })
+    }
+
+    /// A timed stretch of consecutive passes named `name`, which takes one of the frame's slots however many passes it
+    /// covers; `None` when this frame cannot be timed.
+    pub fn span(&mut self, name: &'static str) -> Option<Span> {
+        self.current?;
+        let k = self.names.len();
+        if k >= MAX_PASSES {
+            return None;
+        }
+        self.names.push(name);
+        Some(Span(k as u32))
+    }
+
+    /// Timestamp writes of one pass of `span`: the first writes the begin, the last the end, the ones between none.
+    pub fn writes(
+        &self,
+        span: Span,
+        first: bool,
+        last: bool,
+    ) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        (first || last).then(|| wgpu::RenderPassTimestampWrites {
+            query_set: &self.set,
+            beginning_of_pass_write_index: first.then_some(2 * span.0),
+            end_of_pass_write_index: last.then_some(2 * span.0 + 1),
         })
     }
 
