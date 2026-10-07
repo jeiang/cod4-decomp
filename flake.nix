@@ -54,8 +54,10 @@
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               pkgs.pkg-config
               pkgs.udev
+              # cpal (sound) links ALSA on Linux.
+              pkgs.alsa-lib
             ];
-            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath (windowLibs ++ [ pkgs.udev ]));
+            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath (windowLibs ++ [ pkgs.udev pkgs.alsa-lib ]));
           };
       });
       formatter = forAll (pkgs: pkgs.nixfmt);

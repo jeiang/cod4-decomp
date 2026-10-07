@@ -366,6 +366,9 @@ impl Server {
         for line in NetSv::world_commands(&mut self.game, &map) {
             net.command(slot, &line);
         }
+        if let Some(a) = &self.game.ambient {
+            net.command(slot, a);
+        }
         self.say(&format!(
             "{name} connected as client {slot} from {}\n",
             req.from
@@ -970,9 +973,11 @@ impl Server {
             }
             net.flush_ui(&mut self.game);
             net.send_snapshots(&self.game, self.svs_time);
+            net.send_sounds(&mut self.game);
         } else {
             self.game.ui.out.clear();
             self.game.ui.dirty_cs.clear();
+            self.game.sound_out.clear();
         }
         let net_t = t.elapsed();
         self.record_errors(errors);

@@ -152,7 +152,40 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     } else if hits < 1.0 {
         failures.push(format!("{shots} shots fired, none hit an enemy"));
     }
+    let snd = &net["sound"];
+    let heard = |names: &[&str]| -> f64 {
+        names
+            .iter()
+            .map(|n| num(snd, &["by_channel", n]))
+            .sum::<f64>()
+    };
+    if snd["ready"] != true {
+        failures.push(format!("the sound tables never loaded: {}", snd["error"]));
+    } else {
+        if num(snd, &["started"]) < 50.0 {
+            failures.push(format!("only {} sounds started", num(snd, &["started"])));
+        }
+        if heard(&["weapon", "weapon2d"]) < 1.0 {
+            failures.push("no weapon fire was heard".into());
+        }
+        if heard(&["body", "body2d"]) < 1.0 {
+            failures.push("no footsteps were heard".into());
+        }
+        if heard(&["ambient", "music"]) < 1.0 {
+            failures.push("neither the map's ambience nor music played".into());
+        }
+        if num(snd, &["lost_commands"]) > 0.0 {
+            failures.push("the mixer's command queue overflowed".into());
+        }
+        if snd["failed"].as_array().is_some_and(|f| !f.is_empty()) {
+            failures.push(format!("sound files failed: {}", snd["failed"]));
+        }
+    }
     let m = &mut report.metrics;
+    m.insert("sound.started".into(), num(snd, &["started"]));
+    m.insert("sound.refused".into(), num(snd, &["refused"]));
+    m.insert("sound.replaced".into(), num(snd, &["replaced"]));
+    m.insert("sound.underruns".into(), num(snd, &["underruns"]));
     m.insert("client.snapshots_per_s".into(), snaps / secs);
     m.insert(
         "client.bytes_in_per_s".into(),

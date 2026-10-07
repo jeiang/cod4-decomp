@@ -298,6 +298,11 @@ impl Viewer {
                 &self.cli.name,
                 limits,
                 self.cli.autoplay,
+                crate::sound::ClientSound::start(
+                    &self.cli.install,
+                    &self.cli.map,
+                    !self.cli.no_sound,
+                ),
             )?);
         }
         let want_video = self.cli.video && self.cli.flythrough;

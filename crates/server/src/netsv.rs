@@ -5,7 +5,7 @@
 //! use, so scripts cannot tell a person from a bot.
 
 use crate::client::{Conn, Session, Team};
-use crate::game::{EntKind, Game};
+use crate::game::{EntKind, Game, SoundTo};
 use crate::ui::Dest;
 use net::connect::{ConnectRequest, Gate, serve};
 use net::entity::{EntityState, etype};
@@ -330,6 +330,22 @@ impl NetSv {
                 };
                 if wanted {
                     let _ = p.link.command(line.clone());
+                }
+            }
+        }
+    }
+
+    /// Sends the game's queued sound commands to the clients that should hear them.
+    pub fn send_sounds(&mut self, game: &mut Game) {
+        for (to, line) in std::mem::take(&mut game.sound_out) {
+            for slot in 0..self.peers.len() as u16 {
+                let hears = match to {
+                    SoundTo::All => true,
+                    SoundTo::Client(n) => n == slot,
+                    SoundTo::Team(t) => game.client(slot).is_some_and(|c| c.team == t),
+                };
+                if hears {
+                    self.command(slot, &line);
                 }
             }
         }

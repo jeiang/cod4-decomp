@@ -1,0 +1,16 @@
+[package]
+name = "audio"
+description = "Sound: the original's alias model on a lock-free mixer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+assets = { path = "../assets" }
+cpal = "0.18"
+crossbeam-queue = "0.3"
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "wav", "pcm"] }
+
+[lints]
+workspace = true

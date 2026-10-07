@@ -370,6 +370,18 @@ pub struct Game {
     /// The skeleton locational hits are tested against, built on the first shot of a map.
     pub player_anims: Option<Arc<PlayerAnims>>,
     pub attractors: Attractors,
+    /// Sound commands for the clients (see `script::sound`), drained by the network side every frame.
+    pub sound_out: Vec<(SoundTo, String)>,
+    /// The `ambient` command in force, replayed to clients that join.
+    pub ambient: Option<String>,
+}
+
+/// Who hears a sound command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoundTo {
+    All,
+    Client(u16),
+    Team(crate::client::Team),
 }
 
 impl Game {
@@ -412,6 +424,8 @@ impl Game {
             penetration: None,
             player_anims: None,
             attractors: Attractors::default(),
+            sound_out: Vec::new(),
+            ambient: None,
         }
     }
 
@@ -471,6 +485,8 @@ impl Game {
     /// Clears per-map state for a new `G_InitGame`.
     pub fn reset_level(&mut self, max_clients: usize) {
         self.level = Level::default();
+        self.ambient = None;
+        self.sound_out.clear();
         self.ents.clear();
         self.world = None;
         self.ui = crate::ui::ServerUi::default();

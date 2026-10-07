@@ -16,8 +16,6 @@ const fn r(f: MethFn) -> Impl<MethFn> {
     Real(f)
 }
 
-const M7: &str = "M7 audio";
-
 pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     // entity
     ("delete", r(delete)),
@@ -48,12 +46,12 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
         "rotatevelocity",
         r(|g, _, e, a| mover::rotate_velocity(g, e, a)),
     ),
-    ("playsound", Later(M7)),
-    ("playloopsound", Later(M7)),
-    ("stoploopsound", Later(M7)),
-    ("playsoundasmaster", Later(M7)),
-    ("playsoundtoteam", Later(M7)),
-    ("playsoundtoplayer", Later(M7)),
+    ("playsound", r(super::sound::play_sound)),
+    ("playloopsound", r(super::sound::play_loop_sound)),
+    ("stoploopsound", r(super::sound::stop_loop_sound)),
+    ("playsoundasmaster", r(super::sound::play_sound)),
+    ("playsoundtoteam", r(super::sound::play_sound_to_team)),
+    ("playsoundtoplayer", r(super::sound::play_sound_to_player)),
     ("logstring", r(|_, _, _, _| Ok(Value::Undefined))),
     ("fireweapon", Later("M8 vehicles")),
     // hud elements

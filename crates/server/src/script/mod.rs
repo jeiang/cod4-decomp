@@ -18,6 +18,7 @@ mod methods;
 mod misc;
 mod missile;
 mod player;
+mod sound;
 mod uicmd;
 mod weapons;
 

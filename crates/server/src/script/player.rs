@@ -131,7 +131,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
         "setviewmodeldepthoffield",
         r(|_, _, _, _| Ok(Value::Undefined)),
     ),
-    ("playlocalsound", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("playlocalsound", r(super::sound::play_local_sound)),
     ("stoplocalsound", r(|_, _, _, _| Ok(Value::Undefined))),
     ("pingplayer", r(|_, _, _, _| Ok(Value::Undefined))),
     ("istalking", r(|_, _, _, _| Ok(Value::Int(0)))),

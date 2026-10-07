@@ -10,6 +10,7 @@ mod listen;
 mod models;
 mod netplay;
 mod showcase;
+mod sound;
 mod video;
 mod viewmodel;
 
@@ -37,11 +38,13 @@ usage: cod4e [options]
                          front of a fixed camera (--model-count N sets the number of players, default 7)
   --video / --screenshot record a video / save a screenshot during the flythrough
   --config <path>        key binds and settings file (default: <config dir>/cod4e/config_mp.cfg)
+  --audio-selftest       check the sound system on the real tables without a window or sound card, then exit (harness stage)
   --input-selftest       check key binds, mouse look and the config file without a window, then exit (harness stage)
   --listen               play a team deathmatch against bots on a server started inside this process
   --bots <n>             bots on the listen server (default 9)
   --connect <host:port>  play on a server (see cod4e-server)
   --name <name>          player name on the server
+  --no-sound             mix the sound without opening a sound card
   --autoplay             a scripted player instead of the keyboard, for --duration seconds (harness stage 4)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
 
@@ -63,6 +66,7 @@ pub struct Cli {
     pub list: bool,
     pub config: Option<PathBuf>,
     pub input_selftest: bool,
+    pub audio_selftest: bool,
     /// Number of showcase players, when the scene is on.
     pub show_models: Option<usize>,
     /// Server to play on, `host:port`.
@@ -73,6 +77,8 @@ pub struct Cli {
     pub name: String,
     /// A scripted player instead of the keyboard (harness): walks, aims at and shoots enemies for `--duration`.
     pub autoplay: bool,
+    /// Never open a sound card (the harness: CI machines have none).
+    pub no_sound: bool,
 }
 
 impl Cli {
@@ -102,12 +108,14 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         list: false,
         config: None,
         input_selftest: false,
+        audio_selftest: false,
         show_models: None,
         connect: None,
         listen: false,
         bots: 9,
         name: "player".into(),
         autoplay: false,
+        no_sound: false,
     };
     let mut it = args.iter();
     let mut size_given = false;
@@ -149,6 +157,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--video" => c.video = true,
             "--screenshot" => c.screenshot = true,
             "--input-selftest" => c.input_selftest = true,
+            "--audio-selftest" => c.audio_selftest = true,
             "--config" => c.config = Some(val(a)?.into()),
             "--show-models" => c.show_models = Some(7),
             "--model-count" => {
@@ -159,6 +168,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--bots" => c.bots = val(a)?.parse().map_err(|_| "bad bot count")?,
             "--name" => c.name = val(a)?,
             "--autoplay" => c.autoplay = true,
+            "--no-sound" => c.no_sound = true,
             "--list-display-modes" => c.list = true,
             "--json" => {}
             "-h" | "--help" => return Err(String::new()),
@@ -200,6 +210,23 @@ fn main() -> ExitCode {
         } else {
             eprintln!("input selftest failed: {}", bad.join("; "));
             ExitCode::from(1)
+        };
+    }
+    if cli.audio_selftest {
+        return match sound::selftest(&cli.install, &cli.map) {
+            Ok(m) => {
+                let json = serde_json::to_string_pretty(&m).unwrap_or_default();
+                if let Some(out) = &cli.out {
+                    let _ = std::fs::create_dir_all(out);
+                    let _ = std::fs::write(out.join("audio.json"), &json);
+                }
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(bad) => {
+                eprintln!("audio selftest failed: {}", bad.join("; "));
+                ExitCode::from(1)
+            }
         };
     }
     match app::run(cli) {
