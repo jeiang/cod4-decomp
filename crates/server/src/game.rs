@@ -17,6 +17,7 @@ use sim::traj::Trajectory;
 use sim::world::{ClipEnt, World};
 
 use crate::anim::AnimTree;
+use crate::client::Client;
 use crate::content::Content;
 use crate::cvar::{self, Cvars};
 use crate::mover::Mover;
@@ -160,6 +161,10 @@ pub struct Ent {
     pub anim: Option<AnimTree>,
     /// Level time when the slot was freed, in ms.
     pub free_time: i32,
+    /// `takedamage`: damage reaches the entity's scripts (`setcandamage`, living players).
+    pub takedamage: bool,
+    /// `ent->flags`: 1 invulnerable, 2 cannot die, 8 takes no knockback.
+    pub flags: i32,
 }
 
 impl Ent {
@@ -184,6 +189,8 @@ impl Ent {
             mv: Mover::default(),
             anim: None,
             free_time: 0,
+            takedamage: false,
+            flags: 0,
         }
     }
 }
@@ -218,6 +225,26 @@ impl Precache {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
+}
+
+/// Script entry points the engine calls (`Scr_ExecEntThread` targets).
+#[derive(Default, Clone, Copy)]
+pub struct Callbacks {
+    pub start_game_type: Option<u32>,
+    pub player_connect: Option<u32>,
+    pub player_disconnect: Option<u32>,
+    pub player_damage: Option<u32>,
+    pub player_killed: Option<u32>,
+    pub player_last_stand: Option<u32>,
+}
+
+/// A script function the engine wants run: queued by game code, run by the script host as soon
+/// as the running builtin or frame step returns (`Scr_ExecEntThread` runs it to its first wait).
+pub struct ScriptCall {
+    pub func: u32,
+    /// The entity the callback runs on (`self`); `level` when `None`.
+    pub this: Option<u16>,
+    pub args: Vec<Value>,
 }
 
 #[derive(Default)]
@@ -260,6 +287,15 @@ pub struct Game {
     pub printed: Vec<String>,
     /// Builtins that were called but belong to a later milestone, with call counts.
     pub stub_calls: HashMap<String, u64>,
+    pub clients: Vec<Client>,
+    pub callbacks: Callbacks,
+    /// Script calls waiting for the host (see [`ScriptCall`]).
+    pub calls: Vec<ScriptCall>,
+    /// Errors of script calls that ran nested inside a builtin.
+    pub nested_errors: Vec<gsc::VmError>,
+    /// Clients whose disconnect callback is queued; their slots free afterwards.
+    pub pending_free: Vec<u16>,
+    pub pm_params: sim::pm::Params,
 }
 
 impl Game {
@@ -285,6 +321,12 @@ impl Game {
             rng: 0x9E37_79B9_7F4A_7C15,
             printed: Vec::new(),
             stub_calls: HashMap::new(),
+            clients: Vec::new(),
+            callbacks: Callbacks::default(),
+            calls: Vec::new(),
+            nested_errors: Vec::new(),
+            pending_free: Vec::new(),
+            pm_params: sim::pm::Params::default(),
         }
     }
 
@@ -354,6 +396,17 @@ impl Game {
         self.configstrings.clear();
         self.team_score = [0; 3];
         self.max_clients = max_clients;
+        self.clients = (0..max_clients)
+            .map(|n| {
+                let mut c = Client::new(n as u16, false, String::new());
+                c.conn = crate::client::Conn::Free;
+                c
+            })
+            .collect();
+        self.ents.resize(max_clients, None);
+        self.calls.clear();
+        self.nested_errors.clear();
+        self.pending_free.clear();
     }
 
     pub fn map_exists(&self, map: &str) -> bool {
@@ -505,7 +558,7 @@ impl Game {
 }
 
 /// `trigger_hurt` contents: every trigger type (`CONTENTS_ANY_TRIGGER`).
-const TRIGGER_HURT_CONTENTS: i32 = 0x405C_0008;
+pub const TRIGGER_HURT_CONTENTS: i32 = 0x405C_0008;
 
 /// `InitSentientTrigger`: which kinds of player set the trigger off.
 fn sentient_trigger(spawnflags: i32) -> i32 {

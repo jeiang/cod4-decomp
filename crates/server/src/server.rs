@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, compile};
 
+use crate::bot::Brain;
 use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
 use crate::cvar::{self, Cvars};
@@ -33,16 +34,20 @@ pub struct TickSample {
     pub total_ms: f64,
     /// Script threads: the three drains of `G_RunFrame`.
     pub gsc_ms: f64,
+    /// Bot decisions: building each bot's usercmd.
+    pub bot_ms: f64,
+    /// Client commands: movement, weapons, hits and what they raise.
+    pub client_ms: f64,
     /// Everything else in the frame (entity think, console, bookkeeping).
     pub game_ms: f64,
 }
 
 /// Names of the per-subsystem tick columns, in [`TickSample::subsystems`] order.
-pub const TICK_SUBSYSTEMS: [&str; 2] = ["gsc", "game"];
+pub const TICK_SUBSYSTEMS: [&str; 4] = ["gsc", "bot", "client", "game"];
 
 impl TickSample {
-    pub fn subsystems(&self) -> [f64; 2] {
-        [self.gsc_ms, self.game_ms]
+    pub fn subsystems(&self) -> [f64; 4] {
+        [self.gsc_ms, self.bot_ms, self.client_ms, self.game_ms]
     }
 }
 
@@ -65,6 +70,7 @@ pub const COMMANDS: &[&str] = &[
     "serverinfo",
     "wait",
     "killserver",
+    "bots",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -79,18 +85,15 @@ const CLIENT_ONLY: &[&str] = &[
     "exec_noop",
 ];
 
-#[derive(Default)]
-struct Callbacks {
-    start_game_type: Option<u32>,
-    player_connect: Option<u32>,
-    player_disconnect: Option<u32>,
-}
-
 struct Running {
     vm: Vm,
     dispatch: Dispatch,
-    callbacks: Callbacks,
+    /// `TestClient` of the engine's bot script: the team and class picks of a test client.
+    test_client: u32,
 }
+
+/// The bot's menu choices as script (the stock `_dev` script has them behind developer mode).
+const TEST_CLIENT_GSC: &str = include_str!("testclient.gsc");
 
 pub struct Server {
     pub game: Game,
@@ -117,6 +120,9 @@ pub struct Server {
     pub map_load_ms: f64,
     pub boot_ms: f64,
     pub ticks: u64,
+    /// Bots wanted on every map (`bots N`); they join again after a map change.
+    bot_target: usize,
+    bot_serial: u32,
 }
 
 fn register_core_dvars(c: &mut Cvars) {
@@ -199,6 +205,8 @@ impl Server {
             map_load_ms: 0.0,
             boot_ms: 0.0,
             ticks: 0,
+            bot_target: 0,
+            bot_serial: 0,
         };
         s.say("CoD4 MP headless server (cod4e)\n");
         s.say(&format!(
@@ -356,6 +364,14 @@ impl Server {
             }
             "map_rotate" => self.map_rotate()?,
             "status" => self.status(),
+            "bots" => {
+                let n = arg(1)
+                    .map(cvar::parse_int)
+                    .ok_or("usage: bots <count>")?
+                    .clamp(0, 64) as usize;
+                self.bot_target = self.bot_target.max(n);
+                self.add_bots(n)?;
+            }
             "serverinfo" => {
                 let s = self.game.cvars.info_string(cvar::SERVERINFO);
                 self.say(&format!("Server info settings:\n{s}\n"));
@@ -509,6 +525,9 @@ impl Server {
             self.run_frame();
         }
         self.flush_game_output();
+        if self.bot_target > 0 {
+            self.add_bots(self.bot_target)?;
+        }
         self.map_load_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let errs = self.script_errors.len();
         self.say(&format!(
@@ -529,10 +548,11 @@ impl Server {
                 .filter(|(n, _)| n.ends_with(".gsc"))
                 .map(|(n, b)| (n.to_owned(), String::from_utf8_lossy(b).into_owned()))
                 .collect();
-            let refs: Vec<(&str, &str)> = sources
+            let mut refs: Vec<(&str, &str)> = sources
                 .iter()
                 .map(|(n, t)| (n.as_str(), t.as_str()))
                 .collect();
+            refs.push(("cod4e/testclient.gsc", TEST_CLIENT_GSC));
             compile(&refs, &Builtins::stock_mp(), Options::default()).map_err(|errs| {
                 let mut s = String::from("script compile errors:\n");
                 for e in errs.iter().take(20) {
@@ -557,14 +577,22 @@ impl Server {
             &format!("label main in script {gt_file}"),
         )?;
         let cbs = "maps/mp/gametypes/_callbacksetup";
-        let callbacks = Callbacks {
+        let callbacks = game::Callbacks {
             start_game_type: Some(need(
                 find(cbs, "CodeCallback_StartGameType"),
                 "CodeCallback_StartGameType",
             )?),
             player_connect: find(cbs, "CodeCallback_PlayerConnect"),
             player_disconnect: find(cbs, "CodeCallback_PlayerDisconnect"),
+            player_damage: find(cbs, "CodeCallback_PlayerDamage"),
+            player_killed: find(cbs, "CodeCallback_PlayerKilled"),
+            player_last_stand: find(cbs, "CodeCallback_PlayerLastStand"),
         };
+        self.game.callbacks = callbacks;
+        let test_client = need(
+            find("cod4e/testclient", "TestClient"),
+            "TestClient in the bot script",
+        )?;
         let level_main = find(&format!("maps/mp/{map}"), "main");
         let dispatch = Dispatch::new(&prog);
         let mut vm = Vm::new(prog).map_err(|e| format!("script load: {e}"))?;
@@ -608,19 +636,21 @@ impl Server {
             if let Some(cb) = callbacks.start_game_type {
                 call(&mut vm, &mut host, cb, None, &mut errors);
             }
+            host.run_calls(&mut vm);
         }
         self.game.level.initializing = false;
         self.record_errors(errors);
         self.run = Some(Running {
             vm,
             dispatch,
-            callbacks,
+            test_client,
         });
         self.flush_game_output();
         Ok(())
     }
 
-    fn record_errors(&mut self, errors: Vec<VmError>) {
+    fn record_errors(&mut self, mut errors: Vec<VmError>) {
+        errors.append(&mut self.game.nested_errors);
         for e in errors {
             let kind = match e.kind {
                 VmErrorKind::Script => "script runtime error",
@@ -637,7 +667,7 @@ impl Server {
     /// One `G_RunFrame` at the current `svs_time`.
     fn run_frame(&mut self) -> TickSample {
         let t0 = Instant::now();
-        let mut gsc = Duration::ZERO;
+        let (mut gsc, mut bot, mut client) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
         self.game.level.frame += 1;
         self.game.level.frametime = self.frame_ms;
         self.game.level.time = self.svs_time;
@@ -647,6 +677,24 @@ impl Server {
                 game: &mut self.game,
                 dispatch: &run.dispatch,
             };
+            // `SV_BotFrame` then each client's `ClientThink`: usercmds reach the game before
+            // the frame's script threads run.
+            for n in 0..host.game.clients.len() as u16 {
+                if !host.game.clients[usize::from(n)].connected() {
+                    continue;
+                }
+                let t = Instant::now();
+                let Some(mut b) = host.game.clients[usize::from(n)].bot_brain.take() else {
+                    continue;
+                };
+                let cmd = b.usercmd(host.game, n, self.svs_time);
+                host.game.clients[usize::from(n)].bot_brain = Some(b);
+                bot += t.elapsed();
+                let t = Instant::now();
+                host.game.client_think(&mut run.vm, n, cmd);
+                host.run_calls(&mut run.vm);
+                client += t.elapsed();
+            }
             // Trigger pass: the first drain of the tick's bucket.
             let t = Instant::now();
             errors.extend(run.vm.run_current_threads(&mut host));
@@ -667,10 +715,14 @@ impl Server {
             }
             errors.extend(run.vm.inc_time(&mut host));
             gsc += t.elapsed();
-            // G_RunFrameForEntity: script movers (client end frames: nothing to run yet).
+            // G_RunFrameForEntity: script movers, then every client's end of frame.
             for n in 0..host.game.ents.len() {
                 host.game.run_mover(&mut run.vm, n as u16);
             }
+            for n in 0..host.game.clients.len() as u16 {
+                host.game.client_end_frame(&mut run.vm, n);
+            }
+            host.game.finish_disconnects(&mut run.vm);
         }
         self.record_errors(errors);
         if self.game.level.exit_requested {
@@ -685,10 +737,50 @@ impl Server {
         let s = TickSample {
             total_ms: total.as_secs_f64() * 1000.0,
             gsc_ms: gsc.as_secs_f64() * 1000.0,
-            game_ms: (total - gsc).as_secs_f64() * 1000.0,
+            bot_ms: bot.as_secs_f64() * 1000.0,
+            client_ms: client.as_secs_f64() * 1000.0,
+            game_ms: (total - gsc - bot - client).as_secs_f64() * 1000.0,
         };
         self.ticks += 1;
         s
+    }
+
+    /// `bots N`: joins `n` test clients. Each connects, begins, and a script thread picks
+    /// the team and class like a player at the menus.
+    fn add_bots(&mut self, n: usize) -> Result<(), String> {
+        let Some(run) = self.run.as_mut() else {
+            return Err("Server is not running.".into());
+        };
+        let mut errors = Vec::new();
+        let mut host = ScriptHost {
+            game: &mut self.game,
+            dispatch: &run.dispatch,
+        };
+        for _ in 0..n {
+            let name = format!("bot{}", self.bot_serial);
+            let Some(num) = host.game.connect_client(&mut run.vm, true, &name) else {
+                self.say("bots: no free client slot\n");
+                break;
+            };
+            self.bot_serial += 1;
+            host.run_calls(&mut run.vm);
+            host.game.client_begin(&mut run.vm, num);
+            host.game.clients[usize::from(num)].bot_brain = Some(Box::new(Brain::new(num)));
+            let obj = run.vm.entity(num, gsc::EntClass::Entity);
+            match run.vm.call(
+                &mut host,
+                run.test_client,
+                Some(obj),
+                &[Value::str("autoassign")],
+            ) {
+                Ok(_) => {}
+                Err(e) => errors.push(e),
+            }
+            host.run_calls(&mut run.vm);
+        }
+        self.record_errors(errors);
+        self.flush_game_output();
+        Ok(())
     }
 
     /// Runs `n` frames back to back without waiting for the clock (tests, soak runs).
@@ -778,9 +870,9 @@ impl Server {
 
     /// Script callback for a connecting client slot (used once bots and clients exist).
     pub fn callbacks_ready(&self) -> bool {
-        self.run.as_ref().is_some_and(|r| {
-            r.callbacks.player_connect.is_some() && r.callbacks.player_disconnect.is_some()
-        })
+        self.run.is_some()
+            && self.game.callbacks.player_connect.is_some()
+            && self.game.callbacks.player_disconnect.is_some()
     }
 
     pub fn thread_count(&self) -> usize {
