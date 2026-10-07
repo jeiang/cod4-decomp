@@ -3,3 +3,4 @@
 pub mod asset_load;
 pub mod client_flythrough;
 pub mod selftest;
+pub mod server;

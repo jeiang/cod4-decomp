@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use gsc::{Builtins, ErrorKind, Options, Program, compile};
+use gsc::{Builtins, ErrorKind, MethodClass, Options, Program, compile};
 
 fn build(sources: &[(&str, &str)]) -> Result<Program, Vec<gsc::CompileError>> {
     compile(sources, &Builtins::stock_mp(), Options::default())
@@ -57,24 +57,59 @@ fn identifiers_are_case_insensitive_but_strings_are_not() {
 }
 
 #[test]
-fn includes_resolve_after_own_functions() {
+fn includes_provide_the_included_files_own_functions() {
     let p = build(&[
         (
             "maps/mp/b.gsc",
             "helper() { return 1; } shared() { return 2; }",
         ),
-        (
-            "a.gsc",
-            "#include maps\\mp\\b; shared() { return 3; } f() { helper(); shared(); }",
-        ),
+        ("a.gsc", "#include maps\\mp\\b; f() { helper(); shared(); }"),
     ])
     .unwrap();
     let f = p.find("a", "f").unwrap();
     let code = p.functions[f as usize].disassemble(&p);
     let helper = p.find("maps/mp/b", "helper").unwrap();
-    let shared = p.find("a", "shared").unwrap();
+    let shared = p.find("maps/mp/b", "shared").unwrap();
     assert!(code[0].ends_with(&format!("CallFunc 0 {helper} 0")));
     assert!(code[2].ends_with(&format!("CallFunc 0 {shared} 0")));
+}
+
+#[test]
+fn includes_are_transitive() {
+    let p = build(&[
+        ("c.gsc", "deep() {}"),
+        ("b.gsc", "#include c; mid() { deep(); }"),
+        ("a.gsc", "#include b; f() { mid(); deep(); b::deep(); }"),
+    ])
+    .unwrap();
+    let deep = p.find("c", "deep").unwrap();
+    assert!(
+        dis(&p, "f")
+            .iter()
+            .any(|l| l == &format!("CallFunc 0 {deep} 0"))
+    );
+}
+
+#[test]
+fn an_included_name_that_is_already_taken_is_an_error() {
+    let own = err(&[
+        ("b.gsc", "shared() {}"),
+        ("a.gsc", "#include b; shared() {}"),
+    ]);
+    assert_eq!(own.message, "function `shared` already defined");
+    let twice = err(&[
+        ("b.gsc", "shared() {}"),
+        ("c.gsc", "shared() {}"),
+        ("a.gsc", "#include b; #include c;"),
+    ]);
+    assert_eq!(twice.message, "function `shared` already defined");
+    // The same file reached twice (a diamond) is not a collision.
+    build(&[
+        ("d.gsc", "shared() {}"),
+        ("b.gsc", "#include d;"),
+        ("a.gsc", "#include b; #include d;"),
+    ])
+    .unwrap();
 }
 
 #[test]
@@ -190,26 +225,22 @@ fn assignments_to_fields_and_arrays_use_references() {
         dis(&p, "f"),
         [
             "PushInt 1",
+            "PushStr 0 \"k\"",
             "PushLevel",
-            "RefField 0 \"a\"",
-            "PushStr 1 \"k\"",
+            "RefField 1 \"a\"",
             "RefIndex",
             "Store",
             "PushSelf",
-            "RefField 2 \"n\"",
-            "LoadRef",
+            "GetField 2 \"n\"",
             "PushInt 2",
             "Add",
-            "Swap",
+            "PushSelf",
+            "RefField 2 \"n\"",
             "Store",
-            "RefGame",
             "PushStr 3 \"x\"",
+            "RefGame",
             "RefIndex",
-            "LoadRef",
-            "PushInt 1",
-            "Add",
-            "Swap",
-            "Store",
+            "Inc",
             "ReturnUndefined",
         ]
     );
@@ -309,16 +340,32 @@ fn comments_and_line_endings() {
 }
 
 #[test]
-fn stock_inventory_has_295_builtins_plus_two_statements() {
+fn stock_tables_are_the_complete_original_ones() {
     let b = Builtins::stock_mp();
-    let both = b
-        .function_names()
-        .iter()
-        .filter(|n| b.method(n).is_some())
-        .count();
-    assert_eq!(both, 5);
-    assert_eq!(
-        b.function_names().len() + b.method_names().len() - both,
-        295
-    );
+    // 205 table entries; `weaponfiretime` is listed twice and the first entry wins.
+    assert_eq!(b.function_names().len(), 204);
+    assert_eq!(b.method_names().len(), 230);
+    // Method indices follow Scr_GetMethod's search order: Player, ScriptEnt, HudElem,
+    // Helicopter, Entity; the first name of each table fixes the boundary.
+    for (name, index, class) in [
+        ("giveweapon", 0, MethodClass::Player),
+        ("moveto", 83, MethodClass::ScriptEnt),
+        ("settext", 101, MethodClass::HudElem),
+        ("freehelicopter", 123, MethodClass::Helicopter),
+        ("attach", 148, MethodClass::Entity),
+    ] {
+        assert_eq!(b.method(name), Some(index), "{name}");
+        assert_eq!(b.method_class(index), Some(class), "{name}");
+    }
+    assert_eq!(b.method_class(229), Some(MethodClass::Entity));
+    assert_eq!(b.method_class(230), None);
+    assert_eq!(b.function("createprintchannel"), Some(0));
+}
+
+#[test]
+fn first_registration_of_a_method_wins() {
+    let mut b = Builtins::new();
+    let i = b.add_method_in(MethodClass::HudElem, "Shared");
+    assert_eq!(b.add_method_in(MethodClass::Player, "shared"), i);
+    assert_eq!(b.method_class(i), Some(MethodClass::HudElem));
 }

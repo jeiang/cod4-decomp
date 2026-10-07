@@ -1,0 +1,540 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Game state the scripts act on: entities, spawn parsing, configstrings and the level clock.
+//!
+//! Entity numbers follow the original: client slots first, then spawned entities from
+//! [`FIRST_SPAWNED`] upward, the world entity at [`ENTITYNUM_WORLD`]. Fields the original
+//! stores in the entity structure (`origin`, `targetname`, ...) live in [`Ent`]; every other
+//! field a script sets is stored on its script object by the VM.
+
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use gsc::{EntClass, Value, Vm};
+
+use crate::content::Content;
+use crate::cvar::{self, Cvars};
+
+pub const MAX_GENTITIES: usize = 1024;
+pub const ENTITYNUM_WORLD: u16 = 1022;
+/// The first entity number [`Game::spawn`] hands out (64 client slots plus 8 corpse slots).
+pub const FIRST_SPAWNED: usize = 72;
+/// Script objects of hud elements use numbers from here up so they never collide with entities.
+pub const HUDELEM_BASE: u16 = 2048;
+pub const MAX_HUDELEMS: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldTy {
+    Str,
+    Vector,
+    Float,
+    Int,
+}
+
+/// `radiant/keys.txt`: the map-entity keys that become script fields, with their types.
+pub fn parse_field_types(text: &str) -> HashMap<String, FieldTy> {
+    let mut m = HashMap::new();
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or("");
+        let mut it = line.split_whitespace();
+        let (Some(ty), Some(name)) = (it.next(), it.next()) else {
+            continue;
+        };
+        let ty = match ty {
+            "string" => FieldTy::Str,
+            "vector" => FieldTy::Vector,
+            "float" => FieldTy::Float,
+            "int" => FieldTy::Int,
+            _ => continue,
+        };
+        m.insert(name.to_ascii_lowercase(), ty);
+    }
+    m
+}
+
+pub type SpawnVars = Vec<(String, String)>;
+
+/// Parses the entity string of a map into one key/value list per entity.
+pub fn parse_spawn_vars(text: &[u8]) -> Result<Vec<SpawnVars>, String> {
+    let text = String::from_utf8_lossy(text);
+    let mut out = Vec::new();
+    let mut toks = Tokens(text.as_ref());
+    while let Some(t) = toks.next() {
+        if t != "{" {
+            return Err(format!("expected {{ in entity string, found {t:?}"));
+        }
+        let mut vars = Vec::new();
+        loop {
+            let k = toks.next().ok_or("entity string ends inside an entity")?;
+            if k == "}" {
+                break;
+            }
+            let v = toks.next().ok_or("entity string ends after a key")?;
+            vars.push((k.to_owned(), v.to_owned()));
+        }
+        out.push(vars);
+    }
+    Ok(out)
+}
+
+struct Tokens<'a>(&'a str);
+
+impl<'a> Tokens<'a> {
+    fn next(&mut self) -> Option<&'a str> {
+        let s = self
+            .0
+            .trim_start_matches(|c: char| c.is_whitespace() || c == '\0');
+        if let Some(rest) = s.strip_prefix('"') {
+            let end = rest.find('"')?;
+            self.0 = &rest[end + 1..];
+            Some(&rest[..end])
+        } else if s.is_empty() {
+            None
+        } else {
+            let end = s
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\0')
+                .unwrap_or(s.len());
+            let (tok, rest) = s.split_at(end.max(1));
+            self.0 = rest;
+            Some(tok)
+        }
+    }
+}
+
+/// First value of key `k` (case-insensitive).
+pub fn spawn_var<'a>(vars: &'a SpawnVars, k: &str) -> Option<&'a str> {
+    vars.iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(k))
+        .map(|(_, v)| v.as_str())
+}
+
+pub fn parse_vec3(s: &str) -> [f32; 3] {
+    let mut v = [0.0; 3];
+    for (o, t) in v.iter_mut().zip(s.split_whitespace()) {
+        *o = cvar::parse_float(t);
+    }
+    v
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntKind {
+    /// Anything the scripts spawn or the map defines without special engine behavior.
+    Plain,
+    World,
+    Client,
+    /// `script_brushmodel`, whose `model` is `*N`.
+    Brush,
+    Trigger,
+    Item,
+}
+
+#[derive(Debug, Clone)]
+pub struct Ent {
+    pub kind: EntKind,
+    pub classname: Rc<str>,
+    pub targetname: Option<Rc<str>>,
+    pub target: Option<Rc<str>>,
+    pub model: Rc<str>,
+    pub origin: [f32; 3],
+    pub angles: [f32; 3],
+    pub spawnflags: i32,
+    pub count: i32,
+    pub health: i32,
+    pub dmg: i32,
+    pub hidden: bool,
+    pub contents: i32,
+    /// Level time when the slot was freed, in ms.
+    pub free_time: i32,
+}
+
+impl Ent {
+    pub fn new(kind: EntKind, classname: &str) -> Self {
+        Self {
+            kind,
+            classname: classname.into(),
+            targetname: None,
+            target: None,
+            model: "".into(),
+            origin: [0.0; 3],
+            angles: [0.0; 3],
+            spawnflags: 0,
+            count: 0,
+            health: 0,
+            dmg: 0,
+            hidden: false,
+            contents: 0,
+            free_time: 0,
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct HudElem {
+    pub inuse: bool,
+}
+
+/// A name the scripts precached (`precachemodel`, `precacheshader`, ...) with its index.
+#[derive(Default)]
+pub struct Precache {
+    names: Vec<Rc<str>>,
+}
+
+impl Precache {
+    /// Index of `name`, assigning the next one on first use (1-based, 0 means none).
+    pub fn index(&mut self, name: &str) -> usize {
+        match self.names.iter().position(|n| n.eq_ignore_ascii_case(name)) {
+            Some(i) => i + 1,
+            None => {
+                self.names.push(name.into());
+                self.names.len()
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
+#[derive(Default)]
+pub struct Level {
+    /// Milliseconds since the map started (`level.time`, `gettime()`).
+    pub time: i32,
+    pub frame: u32,
+    pub frametime: i32,
+    /// True during the initial script run.
+    pub initializing: bool,
+    pub north_yaw: f32,
+    pub exit_requested: bool,
+    pub map_restart_requested: bool,
+    pub num_entities: usize,
+}
+
+pub struct Game {
+    pub cvars: Cvars,
+    pub content: Content,
+    pub level: Level,
+    pub ents: Vec<Option<Ent>>,
+    pub hudelems: Vec<HudElem>,
+    pub field_types: HashMap<String, FieldTy>,
+    pub models: Precache,
+    pub shaders: Precache,
+    pub strings: Precache,
+    pub fx: Precache,
+    pub items: Precache,
+    pub menus: Precache,
+    pub configstrings: HashMap<u32, String>,
+    pub max_clients: usize,
+    /// Score per team, indexed by [`team index`]: 1 allies, 2 axis.
+    pub team_score: [i32; 3],
+    /// Map zones of the install (`mapexists`).
+    pub known_maps: Vec<String>,
+    pub rng: u64,
+    /// Console output of the game (`Com_Printf`), drained by the server.
+    pub printed: Vec<String>,
+    /// Builtins that were called but belong to a later milestone, with call counts.
+    pub stub_calls: HashMap<String, u64>,
+}
+
+impl Game {
+    pub fn new(cvars: Cvars, content: Content) -> Self {
+        Self {
+            cvars,
+            content,
+            level: Level::default(),
+            ents: Vec::new(),
+            hudelems: Vec::new(),
+            field_types: HashMap::new(),
+            models: Precache::default(),
+            shaders: Precache::default(),
+            strings: Precache::default(),
+            fx: Precache::default(),
+            items: Precache::default(),
+            menus: Precache::default(),
+            configstrings: HashMap::new(),
+            max_clients: 0,
+            team_score: [0; 3],
+            known_maps: Vec::new(),
+            rng: 0x9E37_79B9_7F4A_7C15,
+            printed: Vec::new(),
+            stub_calls: HashMap::new(),
+        }
+    }
+
+    pub fn print(&mut self, s: impl Into<String>) {
+        self.printed.push(s.into());
+    }
+
+    pub fn ent(&self, num: u16) -> Option<&Ent> {
+        self.ents.get(usize::from(num)).and_then(Option::as_ref)
+    }
+
+    pub fn ent_mut(&mut self, num: u16) -> Option<&mut Ent> {
+        self.ents.get_mut(usize::from(num)).and_then(Option::as_mut)
+    }
+
+    /// Entities in use, by ascending number.
+    pub fn in_use(&self) -> impl Iterator<Item = (u16, &Ent)> {
+        self.ents
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.as_ref().map(|e| (i as u16, e)))
+    }
+
+    /// `G_Spawn`: the lowest free slot from [`FIRST_SPAWNED`], growing the table on demand.
+    pub fn spawn(&mut self, ent: Ent) -> Result<u16, String> {
+        let first = FIRST_SPAWNED.max(self.max_clients);
+        let slot = (first..self.ents.len())
+            .find(|&i| self.ents[i].is_none())
+            .unwrap_or_else(|| {
+                let n = self.ents.len().max(first);
+                self.ents.resize(n + 1, None);
+                n
+            });
+        if slot >= usize::from(ENTITYNUM_WORLD) {
+            return Err("G_Spawn: no free entities".into());
+        }
+        self.ents[slot] = Some(ent);
+        self.level.num_entities = self.level.num_entities.max(slot + 1);
+        Ok(slot as u16)
+    }
+
+    /// `G_FreeEntity`: the script object dies at the next `Scr_IncTime`.
+    pub fn free_entity(&mut self, vm: &mut Vm, num: u16) {
+        if let Some(slot) = self.ents.get_mut(usize::from(num))
+            && let Some(e) = slot.take()
+        {
+            let _ = e;
+            vm.free_entity(num);
+        }
+    }
+
+    /// Clears per-map state for a new `G_InitGame`.
+    pub fn reset_level(&mut self, max_clients: usize) {
+        self.level = Level::default();
+        self.ents.clear();
+        self.hudelems.clear();
+        self.models = Precache::default();
+        self.shaders = Precache::default();
+        self.strings = Precache::default();
+        self.fx = Precache::default();
+        self.items = Precache::default();
+        self.menus = Precache::default();
+        self.configstrings.clear();
+        self.team_score = [0; 3];
+        self.max_clients = max_clients;
+    }
+
+    pub fn map_exists(&self, map: &str) -> bool {
+        self.known_maps.iter().any(|m| m.eq_ignore_ascii_case(map))
+    }
+
+    /// A gametype is valid when its script is in the loaded zones.
+    pub fn valid_gametype(&self, name: &str) -> bool {
+        !name.starts_with('_')
+            && self
+                .content
+                .rawfile(&format!("maps/mp/gametypes/{name}.gsc"))
+                .is_some()
+    }
+
+    /// Next pseudo-random number (xorshift64*), seeded by `srand`.
+    pub fn rand(&mut self) -> u32 {
+        self.rng ^= self.rng >> 12;
+        self.rng ^= self.rng << 25;
+        self.rng ^= self.rng >> 27;
+        (self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as u32
+    }
+
+    /// `G_SpawnEntitiesFromString` for the map's entity string: the worldspawn first, then
+    /// one entity per entry with the spawn function of its classname.
+    pub fn spawn_map_entities(&mut self, vm: &mut Vm, ents: &[SpawnVars]) -> Result<(), String> {
+        let (world, rest) = ents.split_first().ok_or("SpawnEntities: no entities")?;
+        let get = spawn_var;
+        if !get(world, "classname").is_some_and(|c| c.eq_ignore_ascii_case("worldspawn")) {
+            return Err("SP_worldspawn: The first entity isn't worldspawn".into());
+        }
+        self.configstrings.insert(
+            CS_AMBIENT,
+            get(world, "ambienttrack").map_or(String::new(), |s| {
+                if s.is_empty() {
+                    String::new()
+                } else {
+                    format!("n\\{s}")
+                }
+            }),
+        );
+        self.configstrings
+            .insert(CS_MESSAGE, get(world, "message").unwrap_or("").to_owned());
+        self.cvars
+            .force("g_gravity", get(world, "gravity").unwrap_or("800"));
+        let north = get(world, "northyaw").unwrap_or("");
+        self.configstrings.insert(
+            CS_NORTHYAW,
+            if north.is_empty() {
+                "0".into()
+            } else {
+                north.to_owned()
+            },
+        );
+        self.level.north_yaw = cvar::parse_float(north);
+        let mut w = Ent::new(EntKind::World, "worldspawn");
+        w.spawnflags = cvar::parse_int(get(world, "spawnflags").unwrap_or("0"));
+        if self.ents.len() <= usize::from(ENTITYNUM_WORLD) {
+            self.ents.resize(usize::from(ENTITYNUM_WORLD) + 1, None);
+        }
+        self.ents[usize::from(ENTITYNUM_WORLD)] = Some(w);
+
+        for vars in rest {
+            let Some(class) = get(vars, "classname") else {
+                self.print("G_CallSpawn: NULL classname\n");
+                continue;
+            };
+            if class.starts_with("dyn_") {
+                continue;
+            }
+            let kind = spawn_kind(class);
+            // `light` and `script_struct` are freed by their spawn function.
+            if matches!(class, "light" | "script_struct") {
+                continue;
+            }
+            let mut e = Ent::new(kind, class);
+            apply_spawn_vars(&mut e, vars);
+            let num = self.spawn(e)?;
+            let obj = vm.entity(num, EntClass::Entity);
+            for (k, v) in vars {
+                if let Some(ty) = self.field_types.get(&k.to_ascii_lowercase()) {
+                    obj.set(&k.to_ascii_lowercase().into(), typed_value(*ty, v));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Configstring indices the game fills at spawn (`CS_*` of the original).
+pub const CS_MESSAGE: u32 = 2;
+pub const CS_AMBIENT: u32 = 3;
+pub const CS_NORTHYAW: u32 = 4;
+
+fn spawn_kind(class: &str) -> EntKind {
+    match class {
+        "script_brushmodel" => EntKind::Brush,
+        c if c.starts_with("trigger_") => EntKind::Trigger,
+        c if c.starts_with("weapon_") => EntKind::Item,
+        _ => EntKind::Plain,
+    }
+}
+
+/// The ten engine-stored fields (`G_ParseEntityField`); everything else is a script field.
+fn apply_spawn_vars(e: &mut Ent, vars: &SpawnVars) {
+    for (k, v) in vars {
+        match k.to_ascii_lowercase().as_str() {
+            "origin" => e.origin = parse_vec3(v),
+            "angles" => e.angles = parse_vec3(v),
+            "model" => e.model = v.as_str().into(),
+            "spawnflags" => e.spawnflags = cvar::parse_int(v),
+            "target" => e.target = Some(v.as_str().into()),
+            "targetname" => e.targetname = Some(v.as_str().into()),
+            "count" => e.count = cvar::parse_int(v),
+            "health" => e.health = cvar::parse_int(v),
+            "dmg" => e.dmg = cvar::parse_int(v),
+            _ => {}
+        }
+    }
+}
+
+pub fn typed_value(ty: FieldTy, v: &str) -> Value {
+    match ty {
+        FieldTy::Str => Value::str(v),
+        FieldTy::Vector => Value::Vector(parse_vec3(v)),
+        FieldTy::Float => Value::Float(cvar::parse_float(v)),
+        FieldTy::Int => Value::Int(cvar::parse_int(v)),
+    }
+}
+
+/// The engine-stored fields of entity `ent` as script values (`Scr_GetEntityField`).
+pub fn get_ent_field(e: &Ent, name: &str) -> Option<Value> {
+    Some(match name {
+        "classname" => Value::str(&e.classname),
+        "origin" => Value::Vector(e.origin),
+        "angles" => Value::Vector(e.angles),
+        "model" => Value::str(&e.model),
+        "spawnflags" => Value::Int(e.spawnflags),
+        "target" => e.target.as_deref().map_or(Value::Undefined, Value::str),
+        "targetname" => e.targetname.as_deref().map_or(Value::Undefined, Value::str),
+        "count" => Value::Int(e.count),
+        "health" => Value::Int(e.health),
+        "dmg" => Value::Int(e.dmg),
+        _ => return None,
+    })
+}
+
+/// `Scr_SetEntityField`; `Ok(true)` when `name` is an engine field.
+pub fn set_ent_field(e: &mut Ent, name: &str, v: &Value) -> Result<bool, String> {
+    let int = |v: &Value| match v {
+        Value::Int(i) => Ok(*i),
+        Value::Float(f) => Ok(*f as i32),
+        o => Err(format!("type {} is not an int", o.type_name())),
+    };
+    let string = |v: &Value| match v {
+        Value::Str(s) => Ok(Some(Rc::from(&**s))),
+        Value::Undefined => Ok(None),
+        o => Err(format!("type {} is not a string", o.type_name())),
+    };
+    let vec = |v: &Value| match v {
+        Value::Vector(x) => Ok(*x),
+        o => Err(format!("type {} is not a vector", o.type_name())),
+    };
+    match name {
+        "classname" | "model" | "spawnflags" => {
+            return Err(format!("field '{name}' is read-only"));
+        }
+        "origin" => e.origin = vec(v)?,
+        "angles" => e.angles = vec(v)?,
+        "target" => e.target = string(v)?,
+        "targetname" => e.targetname = string(v)?,
+        "count" => e.count = int(v)?,
+        "health" => e.health = int(v)?,
+        "dmg" => e.dmg = int(v)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_entity_strings() {
+        let t = b"{\n\"classname\" \"worldspawn\"\n\"gravity\" \"800\"\n}\n{\n\"classname\" \"script_model\"\n\"origin\" \"1 2 3\"\n}\n\0";
+        let e = parse_spawn_vars(t).unwrap();
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[1][1], ("origin".into(), "1 2 3".into()));
+        assert!(parse_spawn_vars(b"{ \"a\"").is_err());
+    }
+
+    #[test]
+    fn field_types_ignore_comments() {
+        let m = parse_field_types(
+            "// x\nvector\torigin\nfloat script_wait // c\nint  \tscript_cheap\nbad x\n",
+        );
+        assert_eq!(m["script_wait"], FieldTy::Float);
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn spawn_starts_after_the_client_and_corpse_slots() {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.max_clients = 32;
+        let a = g.spawn(Ent::new(EntKind::Plain, "a")).unwrap();
+        let b = g.spawn(Ent::new(EntKind::Plain, "b")).unwrap();
+        assert_eq!((a, b), (72, 73));
+        g.ents[72] = None;
+        assert_eq!(g.spawn(Ent::new(EntKind::Plain, "c")).unwrap(), 72);
+    }
+}

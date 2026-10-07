@@ -90,6 +90,8 @@ pub enum Kind {
     Builtin(fn(&StageCtx) -> std::io::Result<StageReport>),
     /// A scenario script compiled into the binary.
     Script(&'static str),
+    /// A scenario script run against the headless server (needs the install).
+    Server(&'static str),
 }
 
 pub struct StageDef {
@@ -120,7 +122,7 @@ pub static STAGES: &[StageDef] = &[
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
-        kind: Kind::Script(include_str!("../scenarios/headless-bots.cfg")),
+        kind: Kind::Server(include_str!("../scenarios/headless-bots.cfg")),
     },
     StageDef {
         name: "client-flythrough",
@@ -172,11 +174,21 @@ pub fn find(name: &str) -> Option<&'static StageDef> {
 /// Run a script in the current process and report it. `Skipped` when it holds
 /// engine commands and none could run.
 pub fn run_script(name: &str, src: &str) -> StageReport {
+    run_script_on(name, src, &mut NoEngine, std::thread::sleep)
+}
+
+/// [`run_script`] against any console; `sleep` performs the waits.
+pub fn run_script_on(
+    name: &str,
+    src: &str,
+    console: &mut dyn script::Console,
+    sleep: impl FnMut(Duration),
+) -> StageReport {
     let cmds = match script::parse(src) {
         Ok(c) => c,
         Err(e) => return StageReport::new(name, Status::Failed).with_reason(e.to_string()),
     };
-    let reports = script::run(&cmds, &mut NoEngine, std::thread::sleep);
+    let reports = script::run(&cmds, console, sleep);
     let failed = reports
         .iter()
         .find(|r| matches!(r.outcome, Outcome::Failed(_)));

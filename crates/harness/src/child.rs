@@ -52,10 +52,12 @@ pub fn run(args: ChildArgs) -> i32 {
                         StageReport::new(&name, Status::Failed).with_reason(e.to_string())
                     }),
                     Kind::Script(src) => stage::run_script(&name, src),
+                    Kind::Server(src) => crate::stages::server::run(&ctx, &name, src),
                 },
                 None => StageReport::new(&name, Status::Failed).with_reason("unknown stage"),
             },
             (None, Some(path)) => match std::fs::read_to_string(path) {
+                Ok(src) if ctx.install.is_some() => crate::stages::server::run(&ctx, &name, &src),
                 Ok(src) => stage::run_script(&name, &src),
                 Err(e) => StageReport::new(&name, Status::Failed)
                     .with_reason(format!("cannot read script: {e}")),

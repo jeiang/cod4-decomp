@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Usage: scripts/artemis.sh [git-ref] [-- run-options...]
-# Ships a git ref to artemis, runs build/test/clippy/fmt in the devshell with
+# Usage: scripts/remote-linux.sh [git-ref] [-- run-options...]
+# Ships a git ref to the Linux test host, runs build/test/clippy/fmt in the devshell with
 # COD4_PATH=~/cod4e/COD4, and, when run-options are given, runs
 # `cod4e-harness run --out bundles <run-options>` (a bare `--` runs the default
-# suite). The harness writes cod4e-run-<date>.zip into bundles/ on artemis; that
+# suite). The harness writes cod4e-run-<date>.zip into bundles/ on that host; that
 # directory is copied back to ./bundles/ and the bundles are listed.
 # The client is built in release next to the harness so stage 3 can drive it.
-# Stage 3 needs a window: set ARTEMIS_WAYLAND_DISPLAY (e.g. wayland-1) and
-# ARTEMIS_XDG_RUNTIME_DIR (e.g. /run/user/1000) to use artemis's Hyprland
+# Stage 3 needs a window: set COD4E_LINUX_WAYLAND_DISPLAY (e.g. wayland-1) and
+# COD4E_LINUX_XDG_RUNTIME_DIR (e.g. /run/user/1000) to use the host's Wayland
 # session; they are exported as WAYLAND_DISPLAY / XDG_RUNTIME_DIR for the run.
 # Without them the stage reports `no display` and is skipped.
 set -euo pipefail
@@ -16,12 +16,12 @@ ref=HEAD
 if [ $# -gt 0 ] && [ "$1" != -- ]; then ref=$1; shift; fi
 run=0
 if [ "${1:-}" = -- ]; then run=1; shift; fi
-host=artemis.jeiang.vpn
+host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test machine}
 dir='~/cod4e-run'
 harness=""
 display=""
-[ -n "${ARTEMIS_WAYLAND_DISPLAY:-}" ] && display="WAYLAND_DISPLAY=$(printf '%q' "$ARTEMIS_WAYLAND_DISPLAY") "
-[ -n "${ARTEMIS_XDG_RUNTIME_DIR:-}" ] && display="${display}XDG_RUNTIME_DIR=$(printf '%q' "$ARTEMIS_XDG_RUNTIME_DIR") "
+[ -n "${COD4E_LINUX_WAYLAND_DISPLAY:-}" ] && display="WAYLAND_DISPLAY=$(printf '%q' "$COD4E_LINUX_WAYLAND_DISPLAY") "
+[ -n "${COD4E_LINUX_XDG_RUNTIME_DIR:-}" ] && display="${display}XDG_RUNTIME_DIR=$(printf '%q' "$COD4E_LINUX_XDG_RUNTIME_DIR") "
 [ $run = 1 ] && harness="cargo build --release -p harness -p client && ${display}COD4E_NO_PROMPT=1 cargo run --release -p harness -- run --out bundles $(printf '%q ' "$@")"
 
 git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -C $dir'"
