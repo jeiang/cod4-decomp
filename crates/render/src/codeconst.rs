@@ -102,6 +102,15 @@ pub const NAMES: [&str; 0x5A] = [
 
 /// Ids of the vector constants the renderer sets.
 pub const RENDER_TARGET_SIZE: u32 = 0x0A;
+pub const DOF_EQUATION_VIEWMODEL_AND_FAR_BLUR: u32 = 0x0C;
+pub const DOF_EQUATION_SCENE: u32 = 0x0D;
+pub const DOF_LERP_SCALE: u32 = 0x0E;
+pub const DOF_LERP_BIAS: u32 = 0x0F;
+pub const DOF_ROW_DELTA: u32 = 0x10;
+/// The first of eight consecutive filter tap constants.
+pub const FILTER_TAP_0: u32 = 0x15;
+pub const GLOW_SETUP: u32 = 0x2B;
+pub const GLOW_APPLY: u32 = 0x2C;
 pub const GAMETIME: u32 = 0x12;
 pub const ZNEAR: u32 = 0x22;
 pub const SUN_POSITION: u32 = 0x23;
@@ -120,6 +129,8 @@ pub const FOG: u32 = 0x29;
 pub const FOG_COLOR: u32 = 0x2A;
 pub const COLOR_BIAS: u32 = 0x2D;
 pub const COLOR_TINT_BASE: u32 = 0x2E;
+pub const COLOR_TINT_DELTA: u32 = 0x2F;
+pub const DEPTH_FROM_CLIP: u32 = 0x36;
 pub const OUTDOOR_FEATHER_PARMS: u32 = 0x30;
 pub const ENVMAP_PARMS: u32 = 0x31;
 pub const BASE_LIGHTING_COORDS: u32 = 0x39;
@@ -167,6 +178,10 @@ pub mod tex {
     pub const MODEL_LIGHTING: u32 = 3;
     pub const LIGHTMAP_PRIMARY: u32 = 4;
     pub const LIGHTMAP_SECONDARY: u32 = 5;
+    pub const FEEDBACK: u32 = 9;
+    pub const RESOLVED_SCENE: u32 = 11;
+    pub const POST_EFFECT_0: u32 = 12;
+    pub const POST_EFFECT_1: u32 = 13;
     pub const SHADOWMAP_SUN: u32 = 7;
     pub const SHADOWMAP_SPOT: u32 = 8;
     pub const SKY: u32 = 14;

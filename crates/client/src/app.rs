@@ -23,6 +23,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+/// Frames the surface size must hold before the recorder starts.
+const RECORD_AFTER_STABLE: u32 = 10;
+
 pub fn run(cli: Cli) -> Result<(), String> {
     let el = EventLoop::new().map_err(|e| format!("no display: {e}"))?;
     el.set_control_flow(ControlFlow::Poll);
@@ -137,9 +140,11 @@ struct State {
     gpu_ms: Vec<Option<f64>>,
     rss: u64,
     recorder: Option<Recorder>,
-    /// The recorder starts on the first frame, at the size the compositor really gave the window.
+    /// The recorder starts once the frame size has held for [`RECORD_AFTER_STABLE`] frames: a compositor may still be
+    /// resizing the window after the first frame.
     want_video: bool,
     rec_size: (u32, u32),
+    rec_stable: u32,
     shot_taken: bool,
     shot_ok: bool,
     notes: Vec<String>,
@@ -239,6 +244,7 @@ impl Viewer {
             recorder: None,
             want_video,
             rec_size: (0, 0),
+            rec_stable: 0,
             shot_taken: false,
             shot_ok: false,
             notes,
@@ -370,15 +376,23 @@ impl Viewer {
         st.surfaces_drawn.push(stats.surfaces as f64);
         record_gpu(&mut st.gpu_ms, st.renderer.take_gpu_times());
         if st.want_video && st.recorder.is_none() {
+            let size = (frame.texture.width(), frame.texture.height());
+            if size == st.rec_size {
+                st.rec_stable += 1;
+            } else {
+                st.rec_size = size;
+                st.rec_stable = 0;
+            }
+        }
+        if st.want_video && st.recorder.is_none() && st.rec_stable >= RECORD_AFTER_STABLE {
             st.want_video = false;
-            st.rec_size = (frame.texture.width(), frame.texture.height());
             let path = self
                 .cli
                 .out
                 .as_deref()
                 .unwrap_or(Path::new("."))
                 .join("flythrough.mp4");
-            match Recorder::start(&path, st.rec_size, 960, 30) {
+            match Recorder::start(&path, st.rec_size, 720, 30) {
                 Ok(r) => st.recorder = Some(r),
                 Err(e) => st.notes.push(format!("video: {e}")),
             }
