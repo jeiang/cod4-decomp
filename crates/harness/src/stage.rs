@@ -175,7 +175,7 @@ pub static STAGES: &[StageDef] = &[
     StageDef {
         name: "audio",
         description: "cod4e --audio-selftest on the real sound tables: direction, falloff, range, voice caps, footsteps, streamed ambience and music (no window or sound card)",
-        needs_install: true,
+        needs_install: false,
         timeout: Duration::from_secs(3 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::audio::run),

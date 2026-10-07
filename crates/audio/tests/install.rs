@@ -142,7 +142,7 @@ fn sound() -> Option<Sound> {
 fn energy(s: &mut Sound, frames: usize) -> [f32; 2] {
     let out = s.render(frames);
     let mut e = [0.0f32; 2];
-    for f in out.chunks_exact(2) {
+    for f in out.as_chunks::<2>().0 {
         e[0] += f[0] * f[0];
         e[1] += f[1] * f[1];
     }

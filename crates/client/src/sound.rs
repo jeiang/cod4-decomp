@@ -186,6 +186,23 @@ impl ClientSound {
         }
     }
 
+    /// Whether a server console line is one of the sound commands.
+    pub fn is_command(line: &str) -> bool {
+        matches!(
+            line.split_whitespace().next(),
+            Some(
+                "snd"
+                    | "lsnd"
+                    | "loop"
+                    | "stoploop"
+                    | "ambient"
+                    | "ambientstop"
+                    | "music"
+                    | "musicstop"
+            )
+        )
+    }
+
     /// A console command from the server (see `server::script::sound`). Ambience and music wait for the tables.
     pub fn command(&mut self, line: &str) {
         if self.ready().is_none() {
@@ -374,7 +391,9 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     };
     let energy = |s: &mut Sound, frames| {
         let out = s.render(frames);
-        out.chunks_exact(2)
+        out.as_chunks::<2>()
+            .0
+            .iter()
             .fold([0.0f32; 2], |e, f| [e[0] + f[0] * f[0], e[1] + f[1] * f[1]])
     };
     check(

@@ -224,7 +224,12 @@ impl NetPlay {
     fn hear(&mut self, dt: f32, eye: Vec3, ps: &PlayerState, snap: &net::Snapshot) {
         let yaw = self.angles[1].to_radians();
         self.sound.frame(eye.to_array(), yaw, dt);
-        for line in std::mem::take(&mut self.net.commands) {
+        // Only the sound commands; the rest belong to other systems.
+        let (mine, rest): (Vec<String>, Vec<String>) = std::mem::take(&mut self.net.commands)
+            .into_iter()
+            .partition(|l| ClientSound::is_command(l));
+        self.net.commands = rest;
+        for line in mine {
             self.sound.command(&line);
         }
         let s = &snap.ps;
