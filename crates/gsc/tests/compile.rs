@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use gsc::{Builtins, ErrorKind, Options, Program, compile};
+use gsc::{Builtins, ErrorKind, MethodClass, Options, Program, compile};
 
 fn build(sources: &[(&str, &str)]) -> Result<Program, Vec<gsc::CompileError>> {
     compile(sources, &Builtins::stock_mp(), Options::default())
@@ -340,16 +340,32 @@ fn comments_and_line_endings() {
 }
 
 #[test]
-fn stock_inventory_has_295_builtins_plus_two_statements() {
+fn stock_tables_are_the_complete_original_ones() {
     let b = Builtins::stock_mp();
-    let both = b
-        .function_names()
-        .iter()
-        .filter(|n| b.method(n).is_some())
-        .count();
-    assert_eq!(both, 5);
-    assert_eq!(
-        b.function_names().len() + b.method_names().len() - both,
-        295
-    );
+    // 205 table entries; `weaponfiretime` is listed twice and the first entry wins.
+    assert_eq!(b.function_names().len(), 204);
+    assert_eq!(b.method_names().len(), 230);
+    // Method indices follow Scr_GetMethod's search order: Player, ScriptEnt, HudElem,
+    // Helicopter, Entity; the first name of each table fixes the boundary.
+    for (name, index, class) in [
+        ("giveweapon", 0, MethodClass::Player),
+        ("moveto", 83, MethodClass::ScriptEnt),
+        ("settext", 101, MethodClass::HudElem),
+        ("freehelicopter", 123, MethodClass::Helicopter),
+        ("attach", 148, MethodClass::Entity),
+    ] {
+        assert_eq!(b.method(name), Some(index), "{name}");
+        assert_eq!(b.method_class(index), Some(class), "{name}");
+    }
+    assert_eq!(b.method_class(229), Some(MethodClass::Entity));
+    assert_eq!(b.method_class(230), None);
+    assert_eq!(b.function("createprintchannel"), Some(0));
+}
+
+#[test]
+fn first_registration_of_a_method_wins() {
+    let mut b = Builtins::new();
+    let i = b.add_method_in(MethodClass::HudElem, "Shared");
+    assert_eq!(b.add_method_in(MethodClass::Player, "shared"), i);
+    assert_eq!(b.method_class(i), Some(MethodClass::HudElem));
 }

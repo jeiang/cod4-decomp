@@ -120,7 +120,14 @@ pub(crate) enum Root {
     Field(Obj, Str),
 }
 
-/// Insertion-ordered map with int and string keys.
+/// Map with int and string keys, stored in insertion order.
+///
+/// The original keeps an array's elements as a child list of the array object. A new element
+/// is linked in at the **head** (`GetNewVariableIndexInternal2`, used by every ordinary array
+/// store), removal unlinks in place, and `getarraykeys` (`Scr_AddArrayKeys`) walks the list
+/// head to tail. So keys come out newest first: see [`Array::keys_original_order`]. Copying
+/// an array (copy on write, `CopyArray`) walks the source list head to tail and head-inserts
+/// into the copy, which **reverses** the order; [`Clone`] does the same.
 #[derive(Default)]
 pub struct Array {
     entries: Vec<(Key, Value)>,
@@ -145,8 +152,18 @@ impl Array {
         self.index.get(k).map(|&i| &self.entries[i].1)
     }
 
+    /// Elements in insertion order (oldest first), which is the *reverse* of the order the
+    /// original's scripts see; use [`Self::keys_original_order`] for that.
     pub fn iter(&self) -> impl Iterator<Item = (&Key, &Value)> {
         self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    /// The keys in the order the original's `getarraykeys` returns them: the child list from
+    /// head to tail, i.e. most recently inserted first (research: `Scr_AddArrayKeys` walks
+    /// `FindFirstSibling`/`FindNextSibling`; new elements are head-inserted). A key whose
+    /// value is overwritten keeps its place; a removed and re-added key counts as new.
+    pub fn keys_original_order(&self) -> impl Iterator<Item = &Key> {
+        self.entries.iter().rev().map(|(k, _)| k)
     }
 
     pub fn get_mut_or_insert(&mut self, k: Key) -> &mut Value {
@@ -183,13 +200,17 @@ impl Array {
 }
 
 impl Clone for Array {
+    /// Reverses the element order, as the original's `CopyArray` does (see the type docs).
     fn clone(&self) -> Array {
         bump(&OBJECTS, 1);
         bump(&VALUES, self.entries.len() as i64);
-        Array {
-            entries: self.entries.clone(),
-            index: self.index.clone(),
-        }
+        let entries: Vec<(Key, Value)> = self.entries.iter().rev().cloned().collect();
+        let index = entries
+            .iter()
+            .enumerate()
+            .map(|(i, (k, _))| (k.clone(), i))
+            .collect();
+        Array { entries, index }
     }
 }
 
