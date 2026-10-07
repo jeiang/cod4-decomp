@@ -468,7 +468,7 @@ fn physics_trace(g: &mut Game, _: &mut Vm, a: Args) -> R {
 }
 
 fn player_physics_trace(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    physics_at(g, &a, [-15.0, -15.0, 0.0], [15.0, 15.0, 70.0])
+    physics_at(g, &a, sim::pm::PLAYER_MINS, sim::pm::PLAYER_MAXS)
 }
 
 fn bool_v(b: bool) -> Value {
