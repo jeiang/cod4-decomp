@@ -7,9 +7,10 @@ use gsc::{Array, EntClass, Key, Obj, Value, Vm};
 
 use super::Impl::{self, Later, Real};
 use super::args::{Args, display};
-use super::{FuncFn, hud};
+use super::{FuncFn, hud, uicmd};
 use crate::cvar;
 use crate::game::{Ent, EntKind, Game};
+use crate::ui::Table;
 use sim::Vec3;
 use sim::cm::{Collide, ENTITYNUM_NONE, ENTITYNUM_WORLD};
 use sim::contents;
@@ -67,12 +68,12 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("setprintchannel", r(|_, _, _| Ok(Value::Undefined))),
     ("logstring", r(|_, _, _| Ok(Value::Undefined))),
     ("logprint", r(log_print)),
-    ("iprintln", r(|g, _, a| chat_print(g, a))),
-    ("iprintlnbold", r(|g, _, a| chat_print(g, a))),
-    ("allclientsprint", r(|g, _, a| chat_print(g, a))),
-    ("clientprint", Later(M5)),
-    ("announcement", Later(M5)),
-    ("clientannouncement", Later(M5)),
+    ("iprintln", r(uicmd::level_print)),
+    ("iprintlnbold", r(uicmd::level_print_bold)),
+    ("allclientsprint", r(uicmd::level_print)),
+    ("clientprint", r(uicmd::client_print_console)),
+    ("announcement", r(uicmd::announcement)),
+    ("clientannouncement", r(uicmd::client_announcement)),
     // dvars
     ("getdvar", r(get_dvar)),
     (
@@ -190,27 +191,24 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("precachemodel", r(precache_model)),
     (
         "precacheshader",
-        r(|g, _, a| precache(g, a, |g| &mut g.shaders)),
+        r(|g, _, a| precache(g, a, Table::Material)),
     ),
     ("precachestring", r(precache_string)),
     ("precacheitem", r(precache_item)),
     ("precacheshellshock", r(|_, _, _| Ok(Value::Undefined))),
     ("precacherumble", r(|_, _, _| Ok(Value::Undefined))),
-    (
-        "precachemenu",
-        r(|g, _, a| precache(g, a, |g| &mut g.menus)),
-    ),
+    ("precachemenu", r(|g, _, a| precache(g, a, Table::Menu))),
     (
         "precachestatusicon",
-        r(|g, _, a| precache(g, a, |g| &mut g.shaders)),
+        r(|g, _, a| precache(g, a, Table::Material)),
     ),
     (
         "precacheheadicon",
-        r(|g, _, a| precache(g, a, |g| &mut g.shaders)),
+        r(|g, _, a| precache(g, a, Table::Material)),
     ),
     (
         "precachelocationselector",
-        r(|g, _, a| precache(g, a, |g| &mut g.shaders)),
+        r(|g, _, a| precache(g, a, Table::Material)),
     ),
     ("precacheturret", r(|_, _, _| Ok(Value::Undefined))),
     ("loadfx", r(load_fx)),
@@ -252,8 +250,8 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("setvotetime", Later(M5)),
     ("setvoteyescount", Later(M5)),
     ("setvotenocount", Later(M5)),
-    ("setwinningplayer", Later(M5)),
-    ("setwinningteam", Later(M5)),
+    ("setwinningplayer", r(uicmd::set_winning_player)),
+    ("setwinningteam", r(uicmd::set_winning_team)),
     (
         "exitlevel",
         r(|g, _, _| {
@@ -277,15 +275,14 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
         r(|g, _, a| Ok(bool_v(g.valid_gametype(a.string(0)?)))),
     ),
     ("addtestclient", Later("M3 bots")),
-    // objectives are recorded; replication to clients is M5
-    ("objective_add", Later(M5)),
-    ("objective_delete", Later(M5)),
-    ("objective_state", Later(M5)),
-    ("objective_icon", Later(M5)),
-    ("objective_position", Later(M5)),
-    ("objective_onentity", Later(M5)),
-    ("objective_team", Later(M5)),
-    ("objective_current", Later(M5)),
+    ("objective_add", r(uicmd::objective_add)),
+    ("objective_delete", r(uicmd::objective_delete)),
+    ("objective_state", r(uicmd::objective_state)),
+    ("objective_icon", r(uicmd::objective_icon)),
+    ("objective_position", r(uicmd::objective_position)),
+    ("objective_onentity", r(uicmd::objective_on_entity)),
+    ("objective_team", r(uicmd::objective_team)),
+    ("objective_current", r(uicmd::objective_current)),
     // world rendering, FX, audio: not a server concern until clients exist
     ("setexpfog", Later(M8)),
     ("visionsetnaked", Later(M8)),
@@ -595,12 +592,6 @@ fn log_print(_: &mut Game, _: &mut Vm, _: Args) -> R {
 }
 
 /// Chat-area prints reach clients; the server console shows them too.
-fn chat_print(g: &mut Game, a: Args) -> R {
-    let s = a.display(0)?;
-    g.print(format!("{s}\n"));
-    Ok(Value::Undefined)
-}
-
 fn get_dvar(g: &mut Game, _: &mut Vm, a: Args) -> R {
     let n = a.string(0)?;
     match g.cvars.get(n) {
@@ -846,9 +837,9 @@ fn table_lookup(g: &mut Game, a: Args, localized: bool) -> R {
     })
 }
 
-fn precache(g: &mut Game, a: Args, table: fn(&mut Game) -> &mut crate::game::Precache) -> R {
+fn precache(g: &mut Game, a: Args, table: Table) -> R {
     let n = a.string(0)?.to_owned();
-    table(g).index(&n);
+    g.precache(table, &n)?;
     Ok(Value::Undefined)
 }
 
@@ -857,14 +848,19 @@ fn precache_model(g: &mut Game, _: &mut Vm, a: Args) -> R {
     if g.content.model(n).is_none() {
         g.print(format!("precachemodel: model '{n}' not found\n"));
     }
-    g.models.index(n);
+    g.precache(Table::Model, n)?;
     Ok(Value::Undefined)
 }
 
 fn precache_string(g: &mut Game, _: &mut Vm, a: Args) -> R {
     match a.get(0)? {
-        Value::LocStr(s) | Value::Str(s) => {
-            g.strings.index(s);
+        Value::LocStr(s) => {
+            g.precache(Table::Text, &format!("&{s}"))?;
+            Ok(Value::Undefined)
+        }
+        Value::Str(s) => {
+            let s = s.to_string();
+            g.precache(Table::Text, &s)?;
             Ok(Value::Undefined)
         }
         o => Err(format!("type {} is not a localized string", o.type_name())),

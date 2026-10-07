@@ -13,6 +13,7 @@ use crate::netchan::{FRAGMENT_SIZE, Netchan};
 use crate::reliable::{ReliableIn, ReliableOut};
 use crate::snapshot::{BACKUP, Snapshot, SnapshotError, read_snapshot, write_snapshot};
 use crate::transport::Transport;
+use crate::ui::{ClientUiState, ServerCmd};
 use crate::usercmd::{read_cmd, write_cmd};
 use sim::pm::UserCmd;
 use std::net::SocketAddr;
@@ -199,6 +200,7 @@ impl ServerLink {
 #[derive(Debug, Default)]
 pub struct ServerMessage {
     pub snapshot: Option<Snapshot>,
+    /// Reliable commands that are not user interface commands (those go to [`ClientLink::ui`]).
     pub reliable: Vec<String>,
 }
 
@@ -217,6 +219,8 @@ pub struct ClientLink {
     pub stats: Stats,
     /// Snapshots that arrived as a delta from one this side no longer had.
     pub unusable: u64,
+    /// What the server told the user interface: fed by every message this link receives.
+    pub ui: ClientUiState,
 }
 
 impl ClientLink {
@@ -234,6 +238,7 @@ impl ClientLink {
             scratch: Vec::new(),
             stats: Stats::default(),
             unusable: 0,
+            ui: ClientUiState::new(),
         }
     }
 
@@ -274,7 +279,14 @@ impl ClientLink {
         let mut r = BitReader::new(msg);
         let mut out = ServerMessage::default();
         self.rel_out.ack(r.read_u32()?);
-        self.rel_in.read(&mut r, &mut out.reliable)?;
+        let mut cmds = Vec::new();
+        self.rel_in.read(&mut r, &mut cmds)?;
+        for c in cmds {
+            match ServerCmd::parse(&c) {
+                Some(cmd) => self.ui.apply(cmd),
+                None => out.reliable.push(c),
+            }
+        }
         if r.read_bool()? {
             let frames = &self.frames;
             match read_snapshot(&mut r, |n| {
@@ -284,6 +296,7 @@ impl ClientLink {
             }) {
                 Ok(s) => {
                     self.ack = s.num;
+                    self.ui.apply_snapshot(&s);
                     self.frames[(s.num % BACKUP) as usize] = Some(s.clone());
                     out.snapshot = Some(s);
                 }

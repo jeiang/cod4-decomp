@@ -6,7 +6,7 @@ use gsc::{EntClass, EntRef, Value, Vm};
 use sim::pm::{PmType, button, pmf};
 
 use super::Impl::{self, Real};
-use super::{Args, MethFn};
+use super::{Args, MethFn, uicmd};
 use crate::client::{Client, Session, Team};
 use crate::combat::{self, Damage};
 use crate::game::Game;
@@ -101,14 +101,16 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
         "secondaryoffhandbuttonpressed",
         r(|g, _, e, _| flag(g, e, |c| c.buttons & button::SMOKE != 0)),
     ),
-    ("setclientdvar", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("setclientdvars", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("openmenu", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("openmenunomouse", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("closemenu", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("closeingamemenu", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("iprintln", r(client_print)),
-    ("iprintlnbold", r(client_print)),
+    ("setclientdvar", r(uicmd::set_client_dvar)),
+    ("setclientdvars", r(uicmd::set_client_dvars)),
+    ("openmenu", r(uicmd::open_menu)),
+    ("openmenunomouse", r(uicmd::open_menu_no_mouse)),
+    ("closemenu", r(uicmd::close_menu)),
+    ("closeingamemenu", r(uicmd::close_ingame_menu)),
+    ("iprintln", r(uicmd::client_print)),
+    ("iprintlnbold", r(uicmd::client_print_bold)),
+    ("sayall", r(uicmd::say_all)),
+    ("sayteam", r(uicmd::say_team)),
     ("showscoreboard", r(|_, _, _, _| Ok(Value::Undefined))),
     ("updatescores", r(|_, _, _, _| Ok(Value::Undefined))),
     ("updatedmscores", r(|_, _, _, _| Ok(Value::Undefined))),
@@ -309,11 +311,6 @@ fn set_move_speed_scale(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
 }
 
 /// Chat-area print to one client: bots hear nothing; the console shows nothing extra.
-fn client_print(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
-    client_of(g, e)?;
-    Ok(Value::Undefined)
-}
-
 fn get_guid(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client_of(g, e)?;
     Ok(Value::Int(1_000_000 + i32::from(n)))

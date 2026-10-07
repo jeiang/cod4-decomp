@@ -85,6 +85,7 @@ pub struct NetPlay {
     vm: Option<(u16, ViewModel)>,
     c: Counters,
     auto: Option<Auto>,
+    auto_join: Option<net::ui::AutoJoin>,
     last_eye: Option<Vec3>,
 }
 
@@ -118,6 +119,7 @@ impl NetPlay {
             vm: None,
             c: Counters::default(),
             auto: autoplay.then(Auto::default),
+            auto_join: autoplay.then(net::ui::AutoJoin::default),
             last_eye: None,
         })
     }
@@ -133,6 +135,7 @@ impl NetPlay {
     /// Runs one render frame of play. `None` until the server has given the player a body.
     pub fn frame(&mut self, dt: f32, input: &InputFrame) -> Option<NetFrame> {
         self.net.pump(Duration::ZERO);
+        self.answer_menus();
         let now_ms = self.net.now_ms();
         let st = self.net.snaps.server_time(now_ms);
         let own = self.net.latest().map(|s| s.ps.client_num);
@@ -430,6 +433,23 @@ struct Auto {
 }
 
 impl NetPlay {
+    /// The autoplay answers the menus the scripts open (team, then class) as a person would; a
+    /// person's menus are the menu runtime's, which drains the same events.
+    fn answer_menus(&mut self) {
+        let Some(join) = self.auto_join.as_mut() else {
+            return;
+        };
+        let Some(ui) = self.net.ui() else { return };
+        let answers: Vec<String> = ui
+            .drain_events()
+            .iter()
+            .filter_map(|e| join.step(e))
+            .collect();
+        for a in answers {
+            self.net.command(&a);
+        }
+    }
+
     fn autoplay(&mut self, dt: f32, st: i32, own: u16) -> InputFrame {
         let Some(mut a) = self.auto.take() else {
             return InputFrame::default();

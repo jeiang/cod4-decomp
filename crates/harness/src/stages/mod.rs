@@ -7,5 +7,6 @@ pub mod client_match;
 pub mod client_models;
 pub mod net_loopback;
 pub mod net_match;
+pub mod net_ui;
 pub mod selftest;
 pub mod server;

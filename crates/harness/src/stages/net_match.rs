@@ -10,6 +10,7 @@ use net::UdpTransport;
 use net::client::NetClient;
 use net::entity::etype;
 use net::predict::{Env, PlayerBoxes, Predictor};
+use net::ui::{AutoJoin, UiEvent};
 use server::server::Server;
 use sim::pm::{ANGLE_UNIT, Params, UserCmd};
 use sim::weapon::WeaponTable;
@@ -61,6 +62,29 @@ struct Result {
     bytes_out: u64,
     secs: f64,
     unusable: u64,
+    /// Script menus the server opened for the client, in order.
+    menus: Vec<String>,
+    /// The most hud elements one snapshot listed, and configstrings the table held.
+    max_hud: usize,
+    materials: usize,
+}
+
+/// What a person at the menus does: takes what the server opens and answers it.
+fn service_ui(c: &mut NetClient<UdpTransport>, join: &mut AutoJoin, r: &mut Result) {
+    let Some(ui) = c.ui() else { return };
+    let events = ui.drain_events();
+    r.max_hud = r.max_hud.max(ui.hud().len());
+    r.materials = r.materials.max(ui.materials().count());
+    let mut answers = Vec::new();
+    for ev in &events {
+        if let UiEvent::OpenMenu { name, .. } = ev {
+            r.menus.push(name.clone());
+        }
+        answers.extend(join.step(ev));
+    }
+    for a in answers {
+        c.command(&a);
+    }
 }
 
 fn client(
@@ -78,6 +102,7 @@ fn client(
     };
     let mut c = NetClient::new(t, addr, &format!("net{id}"), "", 5000 + id as u16);
     let deadline = Instant::now() + SPAWN_LIMIT;
+    let mut join = AutoJoin::default();
     // Connect, then wait for a body: the snapshot lists the client's own player.
     let mut own: Option<u16> = None;
     while own.is_none() && Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
@@ -93,6 +118,7 @@ fn client(
                 own = Some(n);
             }
         }
+        service_ui(&mut c, &mut join, &mut r);
         if r.connected {
             c.send();
         }
@@ -113,6 +139,7 @@ fn client(
                     .min(Duration::from_millis(5)),
             );
         }
+        service_ui(&mut c, &mut join, &mut r);
         let now = c.now_ms();
         let Some(st) = c.snaps.server_time(now) else {
             continue;
@@ -255,6 +282,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         } else if !r.spawned {
             failures.push(format!("client {i} was never given a body"));
         } else {
+            if !r.menus.iter().any(|m| m == "team_marinesopfor")
+                || !r.menus.iter().any(|m| m.starts_with("changeclass"))
+            {
+                failures.push(format!(
+                    "client {i}: the scripts opened {:?} instead of the team and class menus",
+                    r.menus
+                ));
+            }
+            if r.materials == 0 {
+                failures.push(format!("client {i} was told no materials"));
+            }
             let moved = ((r.end[0] - r.start[0]).powi(2) + (r.end[1] - r.start[1]).powi(2)).sqrt();
             if moved < 50.0 {
                 failures.push(format!(
@@ -305,6 +343,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         report.metrics.insert(
             "client.snapshots_per_sec".into(),
             mean(|r| r.snapshots as f64) / secs,
+        );
+        report.metrics.insert(
+            "client.max_hud_elems".into(),
+            live.iter().map(|r| r.max_hud as f64).fold(0.0, f64::max),
         );
         report.metrics.insert(
             "client.max_players_seen".into(),
