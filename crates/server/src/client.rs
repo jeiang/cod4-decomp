@@ -239,7 +239,13 @@ impl Game {
         self.level.num_entities = self.level.num_entities.max(usize::from(n) + 1);
         self.clients[usize::from(n)] = Client::new(n, bot, name.to_owned());
         let obj = vm.entity(n, EntClass::Entity);
-        obj.set(&"pers".into(), Value::Array(std::rc::Rc::new(Array::new())));
+        let mut pers = Array::new();
+        if bot {
+            // The dev script marks its test clients this way; the stat integrity check at
+            // connect skips them.
+            pers.set(Key::Str("isBot".into()), Value::Int(1));
+        }
+        obj.set(&"pers".into(), Value::Array(std::rc::Rc::new(pers)));
         if let Some(f) = self.callbacks.player_connect {
             self.calls.push(ScriptCall {
                 func: f,

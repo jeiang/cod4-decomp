@@ -16,7 +16,7 @@ const fn r(f: MethFn) -> Impl<MethFn> {
     Real(f)
 }
 
-const M3: &str = "M3 bots, pmove, traces, weapons";
+
 const M6: &str = "M6 HUD, menus, killcam";
 const M7: &str = "M7 audio";
 
@@ -34,7 +34,6 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("solid", r(|g, _, e, _| set_solid(g, e, true))),
     ("notsolid", r(|g, _, e, _| set_solid(g, e, false))),
     ("setcontents", r(set_contents)),
-    ("setcandamage", Later(M3)),
     ("moveto", r(|g, _, e, a| mover::move_to(g, e, a))),
     ("movex", r(|g, _, e, a| mover::move_axis(g, e, a, 0))),
     ("movey", r(|g, _, e, a| mover::move_axis(g, e, a, 1))),

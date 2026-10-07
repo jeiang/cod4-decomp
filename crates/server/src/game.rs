@@ -262,6 +262,8 @@ pub struct Level {
     pub exit_requested: bool,
     pub map_restart_requested: bool,
     pub num_entities: usize,
+    /// `setplayerignoreradiusdamage`.
+    pub ignore_radius_damage: bool,
     /// Next slot of the player corpse ring (`level.currentPlayerClone`).
     pub next_corpse: usize,
     /// `map(name)` was called: the server changes to this map after the frame.

@@ -315,10 +315,6 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("sighttracepassed", r(sight_trace_passed)),
     ("physicstrace", r(physics_trace)),
     ("playerphysicstrace", r(player_physics_trace)),
-    ("positionwouldtelefrag", Later(M3)),
-    ("radiusdamage", Later(M3)),
-    ("setplayerignoreradiusdamage", Later(M3)),
-    ("obituary", Later(M3)),
     ("missile_createattractorent", Later(M3)),
     ("missile_createattractororigin", Later(M3)),
     ("missile_createrepulsorent", Later(M3)),
@@ -327,7 +323,6 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("spawnhelicopter", Later("M8 vehicles")),
     ("spawnplane", Later("M8 vehicles")),
     ("spawnturret", Later(M3)),
-    ("getteamplayersalive", Later(M3)),
 ];
 
 /// `Com_SurfaceTypeToName`: the surface type (bits 20..24 of the surface flags) as the scripts

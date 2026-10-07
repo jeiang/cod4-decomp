@@ -48,6 +48,7 @@ pub const MOD_HEAD_SHOT: u8 = 8;
 pub const MOD_FALLING: u8 = 11;
 pub const MOD_SUICIDE: u8 = 12;
 pub const MOD_TRIGGER_HURT: u8 = 13;
+pub const MOD_EXPLOSIVE: u8 = 14;
 
 /// `DAMAGE_*` flags scripts see as `iDFlags`.
 pub mod dflags {

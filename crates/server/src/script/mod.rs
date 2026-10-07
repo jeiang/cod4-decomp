@@ -10,6 +10,7 @@ use gsc::{EntClass, EntRef, Host, Program, Value, Vm};
 use crate::game::{self, Game};
 
 mod args;
+mod combat;
 mod ent;
 mod funcs;
 mod hud;
@@ -56,7 +57,13 @@ impl Dispatch {
         Self {
             funcs: resolve(
                 prog.builtins.function_names(),
-                &[funcs::TABLE, ent::FUNCS, misc::FUNCS, weapons::FUNCS],
+                &[
+                    funcs::TABLE,
+                    ent::FUNCS,
+                    misc::FUNCS,
+                    weapons::FUNCS,
+                    combat::FUNCS,
+                ],
             ),
             methods: resolve(
                 prog.builtins.method_names(),
@@ -66,6 +73,7 @@ impl Dispatch {
                     ent::METHODS,
                     misc::METHODS,
                     weapons::METHODS,
+                    combat::METHODS,
                 ],
             ),
         }
