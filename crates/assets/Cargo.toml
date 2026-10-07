@@ -1,0 +1,12 @@
+[package]
+name = "assets"
+description = "Original-install access: VFS, IWD, fastfile decoding, IWI, typed assets."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

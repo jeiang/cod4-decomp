@@ -1,0 +1,13 @@
+[package]
+name = "sim"
+description = "Shared simulation: collision traces, player movement, weapons."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+assets = { path = "../assets" }
+
+[lints]
+workspace = true

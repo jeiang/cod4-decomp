@@ -1,0 +1,23 @@
+[package]
+name = "server"
+description = "Authoritative match simulation; no GPU, window, or audio dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "cod4e-server"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+assets = { path = "../assets" }
+gsc = { path = "../gsc" }
+sim = { path = "../sim" }
+net = { path = "../net" }
+
+[lints]
+workspace = true
