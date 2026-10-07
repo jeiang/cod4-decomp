@@ -2,50 +2,9 @@
 //! Install-gated: every stock SM3 blob must translate and validate with naga. Skips without `COD4_PATH`.
 //! Run with `--nocapture` to see the per-zone translation times.
 mod common;
-use sm3::{Options, Stage, blob_len, translate};
-use std::{collections::BTreeSet, fs, io::Read, path::PathBuf, time::Instant};
-
-fn install() -> Option<PathBuf> {
-    let p = PathBuf::from(std::env::var_os("COD4_PATH").unwrap_or_else(|| "./COD4".into()));
-    p.join("zone/english").is_dir().then_some(p)
-}
-
-/// Fastfile container: `IWffu100`, version 5, one zlib stream.
-fn inflate_zone(path: &std::path::Path) -> Vec<u8> {
-    let raw = fs::read(path).unwrap();
-    assert!(
-        raw.starts_with(b"IWffu100") && raw[8..12] == 5u32.to_le_bytes(),
-        "{path:?}"
-    );
-    let mut out = vec![];
-    flate2::read::ZlibDecoder::new(&raw[12..])
-        .read_to_end(&mut out)
-        .unwrap();
-    out
-}
-
-/// Byte scan for `vs_3_0` / `ps_3_0` version tokens whose token stream ends with an END token and has a CTAB.
-fn scan_blobs(zone: &[u8]) -> BTreeSet<Vec<u8>> {
-    let mut found = BTreeSet::new();
-    for (p, w) in zone.windows(4).enumerate() {
-        if w[0] == 0
-            && w[1] == 3
-            && matches!(w[2], 0xFE | 0xFF)
-            && w[3] == 0xFF
-            && let Some(n) = blob_len(&zone[p..])
-        {
-            found.insert(zone[p..p + n].to_vec());
-        }
-    }
-    found
-}
-
-/// The multiplayer zones: maps (`mp_*`), `*_mp` and their localized variants. Single-player zones, which a full
-/// install also carries, are outside the corpus.
-fn is_mp_zone(p: &std::path::Path) -> bool {
-    let s = p.file_stem().unwrap().to_string_lossy();
-    s.starts_with("mp_") || s.ends_with("_mp")
-}
+use common::{inflate_zone, install, is_mp_zone, scan_blobs};
+use sm3::{Options, Stage, translate};
+use std::{collections::BTreeSet, fs, time::Instant};
 
 #[test]
 fn stock_sm3_blobs_translate_and_validate() {
