@@ -71,6 +71,18 @@ pub struct InputFrame {
     pub pending_commands: Vec<String>,
 }
 
+impl InputFrame {
+    /// An explicit `quit` command. Never Escape: that is `togglemenu`.
+    pub fn quit(&self) -> bool {
+        self.pending_commands.iter().any(|c| c == "quit")
+    }
+
+    /// `togglemenu` ran (Escape, gamepad start): release the pointer, and open the menu where there is one.
+    pub fn toggle_menu(&self) -> bool {
+        self.pending_commands.iter().any(|c| c == "togglemenu")
+    }
+}
+
 #[derive(Default)]
 struct Held {
     count: u32,
@@ -117,10 +129,15 @@ const AXIS_CMDS: &[&str] = &[
     "toggleads_throw",
 ];
 
+/// `COD4E_INPUT_DEBUG=1`: one line per second, see [`Input::count_debug`].
 struct DebugCounter {
     last: Instant,
-    events: u64,
+    base: rawmouse::Totals,
     sum: (f64, f64),
+    frames: u32,
+    /// Frames whose mouse motion the gate threw away, and the reason of the last.
+    dropped: u32,
+    why: &'static str,
 }
 
 pub struct Input {
@@ -145,6 +162,19 @@ pub struct Input {
 
 const MAX_EXEC_DEPTH: u32 = 8;
 
+impl DebugCounter {
+    fn new(base: rawmouse::Totals) -> Self {
+        Self {
+            last: Instant::now(),
+            base,
+            sum: (0.0, 0.0),
+            frames: 0,
+            dropped: 0,
+            why: "",
+        }
+    }
+}
+
 impl Input {
     /// Load the embedded default binds, then `config_path` (or the platform default, see [`config::default_path`])
     /// if it exists. Opens the raw mouse and gamepad backends; either failing is logged, not fatal.
@@ -161,12 +191,10 @@ impl Input {
             }
         }
         i.dirty = false;
+        // The window takes the pointer on the first click; until then the cursor is free.
+        i.captured = false;
         if std::env::var_os("COD4E_INPUT_DEBUG").is_some_and(|v| v == "1") {
-            i.debug = Some(DebugCounter {
-                last: Instant::now(),
-                events: 0,
-                sum: (0.0, 0.0),
-            });
+            i.debug = Some(DebugCounter::new(rawmouse::Totals::default()));
         }
         i
     }
@@ -197,7 +225,26 @@ impl Input {
 
     /// Tell the input whether the cursor is grabbed. Mouse look only applies while it is.
     pub fn set_captured(&mut self, captured: bool) {
+        if self.debug.is_some() && captured != self.captured {
+            eprintln!(
+                "input: pointer lock {}",
+                if captured { "taken" } else { "released" }
+            );
+        }
         self.captured = captured;
+    }
+
+    /// Why this frame's mouse motion is thrown away, if it is.
+    fn look_gate(&self) -> Option<&'static str> {
+        if !self.focused {
+            Some("unfocused")
+        } else if !self.captured {
+            Some("pointer free")
+        } else if !self.cvars.bool("in_mouse") {
+            Some("in_mouse 0")
+        } else {
+            None
+        }
     }
 
     pub fn window_event(&mut self, ev: &WindowEvent) {
@@ -222,6 +269,9 @@ impl Input {
                 }
             }
             WindowEvent::Focused(f) => {
+                if self.debug.is_some() {
+                    eprintln!("input: window {}", if *f { "focused" } else { "unfocused" });
+                }
                 self.focused = *f;
                 if !*f {
                     self.release_all();
@@ -246,12 +296,9 @@ impl Input {
             }
         }
         let raw = self.mouse.drain();
-        self.count_debug(raw);
-        let (mdx, mdy) = if self.focused && self.captured && self.cvars.bool("in_mouse") {
-            raw
-        } else {
-            (0.0, 0.0)
-        };
+        let gate = self.look_gate();
+        self.count_debug(raw, gate);
+        let (mdx, mdy) = if gate.is_none() { raw } else { (0.0, 0.0) };
         let cv = &self.cvars;
         let sens = cv.f32("sensitivity");
         let invert = if cv.bool("input_invertpitch") {
@@ -498,28 +545,41 @@ impl Input {
         self.pad.right = (0.0, 0.0);
     }
 
-    fn count_debug(&mut self, raw: (f64, f64)) {
+    /// Once a second: per-source event counts, the look gate, focus, lock and the GCMouse devices.
+    fn count_debug(&mut self, raw: (f64, f64), gate: Option<&'static str>) {
         let Some(d) = self.debug.as_mut() else { return };
+        d.frames += 1;
         d.sum.0 += raw.0;
         d.sum.1 += raw.1;
+        if let (Some(why), true) = (gate, raw != (0.0, 0.0)) {
+            d.dropped += 1;
+            d.why = why;
+        }
         let el = d.last.elapsed().as_secs_f64();
         if el >= 1.0 {
-            let n = self.mouse.events();
+            let (t, b) = (self.mouse.totals(), d.base);
+            let per = |n: u64| n as f64 / el;
             eprintln!(
-                "input: raw={} mice={} events/s={:.0} sum=({:+.1},{:+.1}) focused={} captured={}",
+                "input: src={} gc/s={:.0} winit/s={:.0} used/s={:.0} sum=({:+.1},{:+.1}) look={} \
+                 focused={} pointer_lock={} frames={} mice={} {}",
                 self.mouse.source(),
-                self.mouse.devices(),
-                (n - d.events) as f64 / el,
+                per(t.gc - b.gc),
+                per(t.winit - b.winit),
+                per(t.used - b.used),
                 d.sum.0,
                 d.sum.1,
+                if d.dropped > 0 {
+                    format!("dropped({}) in {} frames", d.why, d.dropped)
+                } else {
+                    "ok".into()
+                },
                 self.focused,
                 self.captured,
+                d.frames,
+                self.mouse.devices(),
+                self.mouse.describe_devices(),
             );
-            *d = DebugCounter {
-                last: Instant::now(),
-                events: n,
-                sum: (0.0, 0.0),
-            };
+            *d = DebugCounter::new(t);
         }
     }
 }
@@ -753,5 +813,54 @@ mod tests {
         let mut i = Input::detached();
         i.exec_text("exec loop.cfg", Some(&dir), false, 0);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn escape_opens_the_menu_and_never_quits() {
+        let mut i = Input::detached();
+        i.key("escape", true);
+        let f = frame(&mut i);
+        i.key("escape", false);
+        assert!(f.toggle_menu() && !f.quit(), "{:?}", f.pending_commands);
+        i.exec_line("quit");
+        let f = frame(&mut i);
+        assert!(f.quit() && !f.toggle_menu());
+        i.key("pad_start", true);
+        assert!(frame(&mut i).toggle_menu());
+    }
+
+    #[test]
+    fn mouse_look_gate_names_why_motion_is_dropped() {
+        let mut i = Input::detached();
+        assert_eq!(i.look_gate(), None);
+        i.set_captured(false);
+        assert_eq!(i.look_gate(), Some("pointer free"));
+        i.set_captured(true);
+        i.window_event(&WindowEvent::Focused(false));
+        assert_eq!(i.look_gate(), Some("unfocused"));
+        i.window_event(&WindowEvent::Focused(true));
+        i.exec_line("set in_mouse 0");
+        assert_eq!(i.look_gate(), Some("in_mouse 0"));
+    }
+
+    /// Escape, then a click: motion made while the pointer was free is not replayed when it is taken again.
+    #[test]
+    fn released_pointer_drops_motion_and_a_click_resumes_it() {
+        let mut i = Input::detached();
+        i.set_captured(false);
+        i.mouse.winit_motion((50.0, 50.0));
+        assert_eq!(frame(&mut i).look_delta_yaw, 0.0);
+        i.set_captured(true);
+        assert_eq!(frame(&mut i).look_delta_yaw, 0.0);
+        i.mouse.winit_motion((10.0, 0.0));
+        assert_ne!(frame(&mut i).look_delta_yaw, 0.0);
+    }
+
+    #[test]
+    fn real_devices_start_with_the_pointer_free() {
+        let mut i = Input::new(Some(std::env::temp_dir().join("cod4e-no-such-config.cfg")));
+        assert_eq!(i.look_gate(), Some("pointer free"));
+        i.mouse.winit_motion((10.0, 10.0));
+        assert_eq!(frame(&mut i).look_delta_yaw, 0.0);
     }
 }

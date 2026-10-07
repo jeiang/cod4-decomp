@@ -55,7 +55,7 @@ usage: cod4e [options]
   --autoplay             a scripted player instead of the keyboard, for --duration seconds (harness stage 4)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
 
-Interactive: WASD move, Space/Ctrl up/down, Shift fast, arrows look, click to capture the mouse, Esc quits.
+Interactive: WASD move, Space/Ctrl up/down, Shift fast, arrows look, click to capture the mouse, Esc releases it (quit with the `quit` command or by closing the window).
 Keys are the config file's binds, e.g. bind w +forward.";
 
 pub struct Cli {
