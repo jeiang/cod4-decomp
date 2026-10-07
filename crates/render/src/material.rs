@@ -1,0 +1,655 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Techset passes to GPU draw state: shader translation, constant and sampler binding, pipelines.
+//!
+//! A [`Prepared`] is one (material, technique, vertex layout): the translated vertex and pixel shaders, the register
+//! writes that fill their constant banks, where each sampler's texture comes from, and the pipeline (built lazily per
+//! target format). Translation happens the first time a technique is prepared, which the world load does for every
+//! surface material up front.
+
+use crate::codeconst::{self, FrameConsts, Object};
+use crate::gpu::Gpu;
+use crate::state::StateBits;
+use crate::texture::{Tex, TextureCache};
+use assets::zone::gfx::{ArgValue, Material, Pass, TechniqueSet, TextureSource};
+use sm3::{Options, SamplerDim, Stage, Translation, VertexFix};
+use std::collections::{BTreeMap, HashMap};
+use std::cell::RefCell;
+use std::sync::Arc;
+
+/// Bytes of one constant bank slice (256 `vec4`s).
+pub const BANK_BYTES: u64 = 4096;
+pub type Bank = [[f32; 4]; 256];
+
+/// Which vertex buffer layout a draw uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VertexKind {
+    /// 44-byte `GfxWorldVertex`.
+    World,
+    /// 32-byte `GfxPackedVertex` (xmodel surfaces).
+    Model,
+}
+
+impl VertexKind {
+    pub fn stride(self) -> u64 {
+        match self {
+            VertexKind::World => 44,
+            VertexKind::Model => 32,
+        }
+    }
+
+    /// How the stock vertex shaders expect the byte-packed streams: normals, tangents and packed texture
+    /// coordinates as unnormalized bytes, colours as `D3DCOLOR`.
+    fn fixes(self) -> BTreeMap<(u32, u32), VertexFix> {
+        let mut m = BTreeMap::from([
+            ((3, 0), VertexFix::Scale255),
+            ((6, 0), VertexFix::Scale255),
+            ((5, 2), VertexFix::Scale255),
+            ((10, 0), VertexFix::Bgra),
+            ((10, 1), VertexFix::Bgra),
+        ]);
+        if self == VertexKind::Model {
+            m.insert((5, 0), VertexFix::Scale255);
+        }
+        m
+    }
+
+    /// Attribute (format, offset) for a stream source id of the vertex declaration routing.
+    fn source(self, src: u8) -> Option<(wgpu::VertexFormat, u64)> {
+        use wgpu::VertexFormat as F;
+        Some(match (self, src) {
+            (_, 0) => (F::Float32x3, 0),
+            (_, 1) => (F::Unorm8x4, 16),
+            (VertexKind::World, 2) => (F::Float32x4, 20),
+            (VertexKind::World, 3) => (F::Unorm8x4, 36),
+            (VertexKind::World, 4) => (F::Unorm8x4, 40),
+            (VertexKind::World, 5) => (F::Float32x2, 28),
+            (VertexKind::Model, 2) => (F::Unorm8x4, 20),
+            (VertexKind::Model, 3) => (F::Unorm8x4, 24),
+            (VertexKind::Model, 4) => (F::Unorm8x4, 28),
+            _ => return None,
+        })
+    }
+}
+
+/// Where a vertex shader input comes from, as a destination slot of the declaration routing.
+fn dest_slot(usage: u32, index: u32) -> Option<u8> {
+    Some(match usage {
+        0 => 0,
+        3 => 1,
+        10 => 2 + index as u8,
+        5 => 4 + index as u8,
+        6 => 4 + index as u8,
+        _ => return None,
+    })
+}
+
+pub struct Compiled {
+    pub module: wgpu::ShaderModule,
+    pub tr: Translation,
+}
+
+enum TexSource {
+    Image(Arc<Tex>, u8),
+    Code(u32),
+    Missing(u8),
+}
+
+/// One sampler register the pixel shader reads.
+pub struct SamplerSlot {
+    pub register: u32,
+    pub dim: SamplerDim,
+    source: TexSource,
+    fallback: [u8; 4],
+}
+
+pub struct Prepared {
+    pub name: String,
+    pub technique: usize,
+    pub vs: Arc<Compiled>,
+    pub ps: Arc<Compiled>,
+    pub state: StateBits,
+    pub kind: VertexKind,
+    pub slots: Vec<SamplerSlot>,
+    /// Group 2 layout for this pass's samplers.
+    pub tex_layout: Arc<wgpu::BindGroupLayout>,
+    attrs: Vec<wgpu::VertexAttribute>,
+    vs_static: Vec<(u32, [f32; 4])>,
+    ps_static: Vec<(u32, [f32; 4])>,
+    vs_code: Vec<(u32, u32, u32)>,
+    ps_code: Vec<(u32, u32, u32)>,
+    pipelines: RefCell<HashMap<wgpu::TextureFormat, Arc<wgpu::RenderPipeline>>>,
+    /// Draw sky surfaces at the far plane.
+    pub sky: bool,
+    pub sort_key: u8,
+    id: u32,
+}
+
+impl Prepared {
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn fill_vs(&self, out: &mut Bank, frame: &FrameConsts, obj: &Object) {
+        fill(out, &self.vs_static, &self.vs_code, frame, obj);
+    }
+
+    pub fn fill_ps(&self, out: &mut Bank, frame: &FrameConsts, obj: &Object) {
+        fill(out, &self.ps_static, &self.ps_code, frame, obj);
+    }
+
+    /// Whether any vertex-stage constant depends on the object.
+    pub fn per_object(&self) -> bool {
+        self.vs_code.iter().chain(&self.ps_code).any(|&(_, id, _)| {
+            id >= codeconst::FIRST_MATRIX || id == codeconst::BASE_LIGHTING_COORDS
+        })
+    }
+
+    pub fn ps_wgsl(&self) -> &str {
+        &self.ps.tr.wgsl
+    }
+
+    pub fn vs_wgsl(&self) -> &str {
+        &self.vs.tr.wgsl
+    }
+
+    /// Human-readable binding table, for debugging.
+    pub fn describe(&self) -> String {
+        use std::fmt::Write;
+        let mut o = format!("{} technique {} state {:?}\n", self.name, self.technique, self.state.0);
+        for (stage, c, st) in [("VS", &self.vs_code, &self.vs_static), ("PS", &self.ps_code, &self.ps_static)] {
+            let refl = if stage == "VS" { &self.vs.tr.reflection } else { &self.ps.tr.reflection };
+            for &(r, id, row) in c {
+                let _ = writeln!(o, "  {stage} c{r} <- code {} row {row} (ctab {:?})", codeconst::NAMES.get(id as usize).unwrap_or(&"?"), refl.constant_name(r));
+            }
+            for (r, v) in st {
+                let _ = writeln!(o, "  {stage} c{r} <- {v:?} (ctab {:?})", refl.constant_name(*r));
+            }
+        }
+        for s in &self.slots {
+            let src = match &s.source {
+                TexSource::Image(..) => "material image".to_owned(),
+                TexSource::Code(id) => format!("code {}", codeconst::TEXTURE_NAMES.get(*id as usize).unwrap_or(&"?")),
+                TexSource::Missing(_) => "missing".to_owned(),
+            };
+            let _ = writeln!(o, "  s{} {:?} {:?} <- {src}", s.register, self.ps.tr.reflection.sampler_name(s.register), s.dim);
+        }
+        o
+    }
+
+    pub fn code_textures(&self) -> impl Iterator<Item = u32> + '_ {
+        self.slots.iter().filter_map(|s| match s.source {
+            TexSource::Code(id) => Some(id),
+            _ => None,
+        })
+    }
+}
+
+fn fill(
+    out: &mut Bank,
+    statics: &[(u32, [f32; 4])],
+    code: &[(u32, u32, u32)],
+    frame: &FrameConsts,
+    obj: &Object,
+) {
+    for &(r, v) in statics {
+        out[r as usize & 255] = v;
+    }
+    for &(r, id, row) in code {
+        out[r as usize & 255] = frame.value(id, row, obj);
+    }
+}
+
+/// Caches shared by all prepared passes.
+pub struct Materials {
+    shaders: HashMap<(usize, Option<[u32; 2]>, Option<VertexKind>), Option<Arc<Compiled>>>,
+    layouts: HashMap<Vec<(u32, SamplerDim)>, Arc<wgpu::BindGroupLayout>>,
+    prepared: HashMap<(usize, usize, VertexKind), Option<Arc<Prepared>>>,
+    samplers: HashMap<u8, Arc<wgpu::Sampler>>,
+    pub vs_layout: wgpu::BindGroupLayout,
+    pub ps_layout: wgpu::BindGroupLayout,
+    techsets: HashMap<String, Arc<TechniqueSet>>,
+    next_id: u32,
+    /// Material name to why it could not be prepared.
+    pub failures: BTreeMap<String, String>,
+}
+
+fn bank_entry(binding: u32, stage: wgpu::ShaderStages, dynamic: bool, size: u64) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: stage,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: dynamic,
+            min_binding_size: wgpu::BufferSize::new(size),
+        },
+        count: None,
+    }
+}
+
+impl Materials {
+    pub fn new(gpu: &Gpu) -> Self {
+        let vs_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vs constants"),
+            entries: &[bank_entry(0, wgpu::ShaderStages::VERTEX, true, BANK_BYTES)],
+        });
+        let ps_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ps constants"),
+            entries: &[
+                bank_entry(0, wgpu::ShaderStages::FRAGMENT, true, BANK_BYTES),
+                bank_entry(1, wgpu::ShaderStages::FRAGMENT, false, 32),
+            ],
+        });
+        Materials {
+            shaders: HashMap::new(),
+            layouts: HashMap::new(),
+            prepared: HashMap::new(),
+            samplers: HashMap::new(),
+            vs_layout,
+            ps_layout,
+            techsets: HashMap::new(),
+            next_id: 0,
+            failures: BTreeMap::new(),
+        }
+    }
+
+    fn compile(
+        &mut self,
+        gpu: &Gpu,
+        program: &[u32],
+        alpha: Option<sm3::AlphaTest>,
+        vertex: Option<VertexKind>,
+    ) -> Option<Arc<Compiled>> {
+        let key = (
+            program.as_ptr() as usize,
+            alpha.map(|a| [a.func as u32, a.reference.to_bits()]),
+            vertex,
+        );
+        if let Some(c) = self.shaders.get(&key) {
+            return c.clone();
+        }
+        let bytes: Vec<u8> = program.iter().flat_map(|t| t.to_le_bytes()).collect();
+        let opts = Options {
+            vertex_fixes: vertex.map(VertexKind::fixes).unwrap_or_default(),
+            alpha_test: alpha,
+            ..Options::default()
+        };
+        let compiled = sm3::translate(&bytes, &opts).ok().map(|tr| {
+            let module = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(tr.wgsl.as_str().into()),
+            });
+            Arc::new(Compiled { module, tr })
+        });
+        self.shaders.insert(key, compiled.clone());
+        compiled
+    }
+
+    pub fn sampler(&mut self, gpu: &Gpu, state: u8) -> Arc<wgpu::Sampler> {
+        self.samplers
+            .entry(state)
+            .or_insert_with(|| {
+                let s = u32::from(state);
+                let addr = |bit: u32| {
+                    if s & bit != 0 {
+                        wgpu::AddressMode::ClampToEdge
+                    } else {
+                        wgpu::AddressMode::Repeat
+                    }
+                };
+                let nearest = s & 7 == 1;
+                let filter = if nearest { wgpu::FilterMode::Nearest } else { wgpu::FilterMode::Linear };
+                let mip = match (s >> 3) & 3 {
+                    0 => None,
+                    1 => Some(wgpu::MipmapFilterMode::Nearest),
+                    _ => Some(wgpu::MipmapFilterMode::Linear),
+                };
+                let aniso = match s & 7 {
+                    3 => 2,
+                    4 => 4,
+                    _ => 1,
+                };
+                Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                    address_mode_u: addr(0x20),
+                    address_mode_v: addr(0x40),
+                    address_mode_w: addr(0x80),
+                    mag_filter: filter,
+                    min_filter: filter,
+                    mipmap_filter: mip.unwrap_or(wgpu::MipmapFilterMode::Nearest),
+                    lod_max_clamp: if mip.is_none() { 0.0 } else { 32.0 },
+                    anisotropy_clamp: if mip == Some(wgpu::MipmapFilterMode::Linear) && !nearest { aniso } else { 1 },
+                    ..Default::default()
+                }))
+            })
+            .clone()
+    }
+
+    fn tex_layout(&mut self, gpu: &Gpu, sig: Vec<(u32, SamplerDim)>) -> Arc<wgpu::BindGroupLayout> {
+        self.layouts
+            .entry(sig.clone())
+            .or_insert_with(|| {
+                let mut entries = Vec::new();
+                for &(reg, dim) in &sig {
+                    entries.push(wgpu::BindGroupLayoutEntry {
+                        binding: reg,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: match dim {
+                                SamplerDim::D2 => wgpu::TextureViewDimension::D2,
+                                SamplerDim::Cube => wgpu::TextureViewDimension::Cube,
+                                SamplerDim::D3 => wgpu::TextureViewDimension::D3,
+                            },
+                            multisampled: false,
+                        },
+                        count: None,
+                    });
+                    entries.push(wgpu::BindGroupLayoutEntry {
+                        binding: reg + sm3::SAMPLER_BINDING_OFFSET,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    });
+                }
+                Arc::new(gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("textures"),
+                    entries: &entries,
+                }))
+            })
+            .clone()
+    }
+
+    /// Register technique sets by name, for materials whose own set is a by-name reference to another zone.
+    pub fn add_techsets(&mut self, sets: &[Arc<TechniqueSet>]) {
+        for t in sets {
+            if let Some(n) = &t.name
+                && t.techniques.iter().any(Option::is_some)
+            {
+                self.techsets.insert(n.trim_start_matches(',').to_owned(), t.clone());
+            }
+        }
+    }
+
+    fn techset(&self, mat: &Material) -> Option<Arc<TechniqueSet>> {
+        let own = mat.technique_set.as_ref()?;
+        if own.techniques.iter().any(Option::is_some) {
+            return Some(own.clone());
+        }
+        self.techsets.get(own.name.as_deref()?.trim_start_matches(',')).cloned()
+    }
+
+    /// The first technique of `techs` the material's techset has, as a drawable pass. Cached per material.
+    pub fn prepare(
+        &mut self,
+        gpu: &Gpu,
+        textures: &mut TextureCache,
+        mat: &Arc<Material>,
+        techs: &[usize],
+        kind: VertexKind,
+    ) -> Option<Arc<Prepared>> {
+        let set = self.techset(mat)?;
+        let tech = techs
+            .iter()
+            .copied()
+            .find(|&t| set.techniques.get(t).is_some_and(|x| x.as_ref().is_some_and(|x| !x.passes.is_empty())));
+        let Some(tech) = tech else {
+            let have: Vec<usize> = (0..set.techniques.len()).filter(|&i| set.techniques[i].is_some()).collect();
+            self.failures.insert(
+                mat.name.as_deref().unwrap_or("?").to_owned(),
+                format!("techset {:?} has techniques {have:?}, wanted {techs:?}", set.name),
+            );
+            return None;
+        };
+        let key = (Arc::as_ptr(mat) as usize, tech, kind);
+        if let Some(p) = self.prepared.get(&key) {
+            return p.clone();
+        }
+        let name = mat.name.as_deref().unwrap_or("?").to_owned();
+        let built = self.build(gpu, textures, mat, tech, kind);
+        let p = match built {
+            Ok(p) => Some(Arc::new(p)),
+            Err(e) => {
+                self.failures.insert(name, e);
+                None
+            }
+        };
+        self.prepared.insert(key, p.clone());
+        p
+    }
+
+    fn build(
+        &mut self,
+        gpu: &Gpu,
+        textures: &mut TextureCache,
+        mat: &Arc<Material>,
+        tech: usize,
+        kind: VertexKind,
+    ) -> Result<Prepared, String> {
+        let set = self.techset(mat).ok_or("no techset")?;
+        let technique = set.techniques[tech].as_ref().ok_or("no technique")?;
+        let pass: &Pass = &technique.passes[0];
+        let state = mat
+            .state_bits_entry
+            .get(tech)
+            .and_then(|&i| mat.state_bits.get(usize::from(i)))
+            .map_or(StateBits([0x800 | 0x8000 | 0x1800_0000, 0xD]), |&b| StateBits(b));
+        let vsh = pass.vertex_shader.as_ref().ok_or("no vertex shader")?;
+        let psh = pass.pixel_shader.as_ref().ok_or("no pixel shader")?;
+        let vs = self.compile(gpu, &vsh.program, None, Some(kind)).ok_or("vertex shader does not translate")?;
+        let ps = self
+            .compile(gpu, &psh.program, state.alpha_test(), None)
+            .ok_or("pixel shader does not translate")?;
+        if vs.tr.stage != Stage::Vertex || ps.tr.stage != Stage::Pixel {
+            return Err("shader stage mismatch".into());
+        }
+
+        let literal_of = |hash: u32| {
+            mat.constants
+                .iter()
+                .find(|c| c.name_hash == hash)
+                .map_or([0.0; 4], |c| c.literal)
+        };
+        let (mut vs_static, mut ps_static) = (Vec::new(), Vec::new());
+        let (mut vs_code, mut ps_code) = (Vec::new(), Vec::new());
+        let mut sampler_src: HashMap<u32, TexSource> = HashMap::new();
+        for a in &pass.args {
+            let dest = u32::from(a.dest);
+            match (&a.value, a.kind) {
+                (ArgValue::NameHash(h), 0) => vs_static.push((dest, literal_of(*h))),
+                (ArgValue::NameHash(h), 6) => ps_static.push((dest, literal_of(*h))),
+                (ArgValue::Literal(l), 1) => vs_static.push((dest, **l)),
+                (ArgValue::Literal(l), 7) => ps_static.push((dest, **l)),
+                (ArgValue::CodeConst { index, first_row, row_count }, k @ (3 | 5)) => {
+                    let out = if k == 3 { &mut vs_code } else { &mut ps_code };
+                    for r in 0..u32::from((*row_count).max(1)) {
+                        out.push((dest + r, u32::from(*index), u32::from(*first_row) + r));
+                    }
+                }
+                (ArgValue::NameHash(h), 2) => {
+                    let tex = mat.textures.iter().find(|t| t.name_hash == *h);
+                    let src = match tex.map(|t| (&t.source, t.sampler_state)) {
+                        Some((TextureSource::Image(Some(img)), st)) => match textures.image(gpu, img) {
+                            Some(t) => TexSource::Image(t, st),
+                            None => TexSource::Missing(st),
+                        },
+                        Some((_, st)) => TexSource::Missing(st),
+                        None => TexSource::Missing(0x72),
+                    };
+                    sampler_src.insert(dest, src);
+                }
+                (ArgValue::CodeSampler(id), 4) => {
+                    sampler_src.insert(dest, TexSource::Code(*id));
+                }
+                _ => {}
+            }
+        }
+
+        // Texture slots follow what the pixel shader actually samples.
+        let mut slots = Vec::new();
+        for (&reg, u) in &ps.tr.reflection.samplers {
+            let name = ps.tr.reflection.sampler_name(reg).unwrap_or("").to_ascii_lowercase();
+            let fallback = if name.contains("normal") {
+                [128, 128, 255, 255]
+            } else if u.dim == SamplerDim::Cube {
+                [60, 70, 80, 255]
+            } else if name.contains("modellighting") || name.contains("floatz") {
+                [0, 0, 0, 255]
+            } else {
+                [255, 255, 255, 255]
+            };
+            let source = match sampler_src.remove(&reg) {
+                Some(s) => s,
+                None => match codeconst::texture_from_ctab_name(&name) {
+                    Some(id) => TexSource::Code(id),
+                    None => TexSource::Missing(0x72),
+                },
+            };
+            slots.push(SamplerSlot {
+                register: reg,
+                dim: u.dim,
+                source,
+                fallback,
+            });
+        }
+        let tex_layout = self.tex_layout(gpu, slots.iter().map(|s| (s.register, s.dim)).collect());
+
+        // Vertex attributes: shader input semantic -> routing destination -> source stream -> buffer offset.
+        let decl = pass.vertex_decl.as_ref().ok_or("no vertex declaration")?;
+        let routing = &decl.routing[..usize::from(decl.stream_count).min(16)];
+        let mut attrs = Vec::new();
+        for input in &vs.tr.reflection.inputs {
+            let found = dest_slot(input.usage, input.index)
+                .and_then(|d| routing.iter().find(|r| r.1 == d))
+                .and_then(|r| kind.source(r.0));
+            // An input the declaration does not route reads the position stream: valid, and unused by lit shading.
+            let (format, offset) = found.unwrap_or((wgpu::VertexFormat::Float32x3, 0));
+            attrs.push(wgpu::VertexAttribute {
+                format,
+                offset,
+                shader_location: input.location,
+            });
+        }
+        self.next_id += 1;
+        Ok(Prepared {
+            name: mat.name.as_deref().unwrap_or("?").to_owned(),
+            technique: tech,
+            vs,
+            ps,
+            state,
+            kind,
+            slots,
+            tex_layout,
+            attrs,
+            vs_static,
+            ps_static,
+            vs_code,
+            ps_code,
+            pipelines: RefCell::new(HashMap::new()),
+            sky: mat.name.as_deref().is_some_and(|n| n.contains("sky")) && mat.sort_key == 1,
+            sort_key: mat.sort_key,
+            id: self.next_id,
+        })
+    }
+
+    /// The pipeline for `p` rendering into `color`/`depth`, built on first use.
+    pub fn pipeline(
+        &self,
+        gpu: &Gpu,
+        p: &Prepared,
+        color: wgpu::TextureFormat,
+        depth: wgpu::TextureFormat,
+    ) -> Arc<wgpu::RenderPipeline> {
+        let mut map = p.pipelines.borrow_mut();
+        map.entry(color)
+            .or_insert_with(|| {
+                let layout = gpu.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[Some(&self.vs_layout), Some(&self.ps_layout), Some(&p.tex_layout)],
+                    immediate_size: 0,
+                });
+                let s = p.state;
+                Arc::new(gpu.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(&p.name),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &p.vs.module,
+                        entry_point: Some("main"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: p.kind.stride(),
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &p.attrs,
+                        })],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &p.ps.module,
+                        entry_point: Some("main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: color,
+                            blend: s.blend(),
+                            write_mask: s.color_write(),
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        front_face: if std::env::var_os("CCW").is_some() { wgpu::FrontFace::Ccw } else { wgpu::FrontFace::Cw },
+                        cull_mode: if std::env::var_os("NOCULL").is_some() { None } else { s.cull() },
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: depth,
+                        depth_write_enabled: Some(s.depth_write()),
+                        depth_compare: Some(s.depth_compare()),
+                        stencil: s.stencil(),
+                        bias: s.depth_bias(),
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }))
+            })
+            .clone()
+    }
+
+    /// Group 2 bind group for `p`. `code` resolves a code texture id to a texture (and sampler state) for this draw.
+    pub fn bind_textures(
+        &mut self,
+        gpu: &Gpu,
+        textures: &mut TextureCache,
+        p: &Prepared,
+        code: &dyn Fn(u32) -> Option<(Arc<Tex>, u8)>,
+    ) -> wgpu::BindGroup {
+        let mut views: Vec<(u32, Arc<Tex>, Arc<wgpu::Sampler>)> = Vec::new();
+        for s in &p.slots {
+            let (tex, state) = match &s.source {
+                TexSource::Image(t, st) => (Some(t.clone()), *st),
+                TexSource::Code(id) => match code(*id) {
+                    Some((t, st)) => (Some(t), st),
+                    None => (None, 0x72),
+                },
+                TexSource::Missing(st) => (None, *st),
+            };
+            let tex = tex
+                .filter(|t| t.dim == s.dim)
+                .unwrap_or_else(|| textures.solid(gpu, s.dim, s.fallback));
+            let sampler = self.sampler(gpu, state);
+            views.push((s.register, tex, sampler));
+        }
+        let mut entries = Vec::new();
+        for (reg, tex, sampler) in &views {
+            entries.push(wgpu::BindGroupEntry {
+                binding: *reg,
+                resource: wgpu::BindingResource::TextureView(&tex.view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: reg + sm3::SAMPLER_BINDING_OFFSET,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
+        gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &p.tex_layout,
+            entries: &entries,
+        })
+    }
+}
