@@ -13,10 +13,12 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 
-# Install-gated tests inflate whole zones; debug-mode inflate takes minutes.
+# Install-gated tests inflate whole zones / decode thousands of files; debug-mode takes minutes.
 [profile.dev.package.gsc]
 opt-level = 3
 [profile.dev.package.flate2]
 opt-level = 3
 [profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.assets]
 opt-level = 3
