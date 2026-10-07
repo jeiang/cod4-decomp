@@ -22,3 +22,11 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.assets]
 opt-level = 3
+
+# The harness video recorder (scaling + RGB->YUV + software AV1) is unusably slow at opt-level 0.
+[profile.dev.package.client]
+opt-level = 1
+[profile.dev.package.rav1e]
+opt-level = 3
+[profile.dev.package.v_frame]
+opt-level = 3
