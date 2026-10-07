@@ -8,6 +8,7 @@
 use super::error::{Result, ZoneError};
 use super::fx::FxEffectDef;
 use super::gfx::{Name, raw_of};
+pub use super::gfxworld::Plane;
 use super::phys::PhysPreset;
 use super::stream::{Addr, Block, Fields, Ptr, Stream};
 use super::xmodel::{self, XModel};
@@ -42,14 +43,6 @@ fn map_ents(s: &mut Stream, h: &[u8]) -> Result<MapEnts> {
 
 pub(super) fn map_ents_ptr(s: &mut Stream, p: Ptr) -> Result<Option<Arc<MapEnts>>> {
     s.temp_asset(p, 4, MAP_ENTS_SIZE, map_ents)
-}
-
-#[derive(Debug)]
-pub struct Plane {
-    pub normal: [f32; 3],
-    pub dist: f32,
-    pub kind: u8,
-    pub signbits: u8,
 }
 
 #[derive(Debug)]
@@ -492,14 +485,22 @@ fn clipmap(s: &mut Stream, h: &[u8]) -> Result<Clipmap> {
     let checksum = f.u32();
 
     let name = s.string(name)?;
-    let (planes_at, planes) = array(s, planes, plane_count, 4, 20, |_, f| {
-        Ok(Plane {
-            normal: v3(f),
-            dist: f.f32(),
-            kind: f.u8(),
-            signbits: f.u8(),
-        })
-    })?;
+    // The plane array is shared with the GfxWorld that was decoded before.
+    let (planes_at, planes) = match planes {
+        Ptr::Offset(a) => (Some(a), s.lookup::<Arc<[Plane]>>(a)?),
+        p => array(s, p, plane_count, 4, 20, |_, f| {
+            let normal = v3(f);
+            let dist = f.f32();
+            let kind = f.u8();
+            let sign_bits = f.u8();
+            Ok(Plane {
+                normal,
+                dist,
+                kind,
+                sign_bits,
+            })
+        })?,
+    };
     let plane_ref =
         |f: &mut Fields| -> Result<Option<u32>> { index_in(planes_at, f.ptr()?, 20, plane_count) };
     let (_, static_models) = array(s, static_models, num_static_models, 4, 80, |s, f| {
