@@ -10,7 +10,7 @@
 
 use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
-use crate::models::{Library, Player, Team};
+use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::ViewModel;
 use glam::Vec3;
@@ -58,6 +58,8 @@ pub struct NetFrame {
 
 struct Remote {
     player: Player,
+    /// World model of the weapon the player holds.
+    weapon: Option<String>,
     seen: Instant,
 }
 
@@ -455,25 +457,46 @@ impl NetPlay {
             let Some(team) = team_of(e.eflags) else {
                 continue;
             };
-            if !self.remotes.contains_key(&e.client) {
-                let r = self
-                    .lib
-                    .team_models(team)
-                    .and_then(|set| self.lib.player(&set).ok());
-                if let Some(player) = r {
-                    self.remotes.insert(e.client, Remote { player, seen: now });
+            let weapon = self
+                .weapons
+                .get(e.weapon)
+                .and_then(|i| self.lib.content.weapon(&i.name))
+                .cloned();
+            let held = weapon
+                .as_ref()
+                .and_then(|w| w.world_models.first().cloned().flatten())
+                .and_then(|m| m.name.as_deref().map(str::to_owned));
+            let set = self.lib.team_models(team).map(|set| PlayerModelSet {
+                weapon: held.clone(),
+                ..set
+            });
+            match self.remotes.get_mut(&e.client) {
+                None => {
+                    if let Some(player) = set.and_then(|s| self.lib.player(&s).ok()) {
+                        self.remotes.insert(
+                            e.client,
+                            Remote {
+                                player,
+                                weapon: held,
+                                seen: now,
+                            },
+                        );
+                    }
                 }
+                Some(r) if r.weapon != held => {
+                    if let Some(p) = set.and_then(|s| self.lib.player(&s).ok()) {
+                        r.player.rearm(p);
+                        r.weapon = held;
+                    }
+                }
+                Some(_) => {}
             }
             let Some(r) = self.remotes.get_mut(&e.client) else {
                 continue;
             };
             r.seen = now;
-            let weapon = self
-                .weapons
-                .get(e.weapon)
-                .and_then(|i| self.lib.content.weapon(&i.name));
             let dead = e.eflags & eflags::DEAD != 0;
-            let input = pose_input(e, weapon.map(|w| &**w), dead);
+            let input = pose_input(e, weapon.as_deref(), dead);
             r.player.update(dt, &input);
             out.extend(r.player.instances(e.origin));
         }

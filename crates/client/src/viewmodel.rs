@@ -5,7 +5,7 @@
 //! The original plays the animation the weapon code last started (`weapAnim` in the player state, which this
 //! reimplementation's `PlayerState` does not carry), so the animation is derived from the state instead: each
 //! `weapon_state` names one of the weapon's animation slots and `weapon_time`, the time left in the state, gives how
-//! far through it is. Aiming down sights plays `ADS_UP` (rising) or `ADS_DOWN` (falling) by `weapon_pos_frac`.
+//! far through it is. Aiming down sights layers `ADS_UP` (rising) or `ADS_DOWN` (falling) by `weapon_pos_frac` over it.
 //! Bob is the original's angle bob (`CalculateWeaponPosition_BobAngles`) with its stock amplitudes; the idle sway,
 //! recoil kick and the stance offsets of the weapon file are not applied.
 
@@ -68,29 +68,9 @@ fn state_slot(state: u8, ads: f32, w: &WeaponDef) -> (usize, i32) {
     }
 }
 
-/// Picks the animation for a state. `rising` tells ADS up from down while `ads` is between hip and aimed.
-pub fn select(
-    state: u8,
-    weapon_time: i32,
-    ads: f32,
-    rising: bool,
-    sprint_clock: f32,
-    w: &WeaponDef,
-) -> Playing {
+/// Picks the animation for a state: what the weapon is doing, or its idle.
+pub fn select(state: u8, weapon_time: i32, ads: f32, sprint_clock: f32, w: &WeaponDef) -> Playing {
     let (s, total) = state_slot(state, ads, w);
-    if s == slot::IDLE && ads > 0.0 {
-        return if rising || ads >= 1.0 {
-            Playing {
-                slot: slot::ADS_UP,
-                time: ads,
-            }
-        } else {
-            Playing {
-                slot: slot::ADS_DOWN,
-                time: 1.0 - ads,
-            }
-        };
-    }
     if s == slot::SPRINT_LOOP {
         return Playing {
             slot: s,
@@ -103,6 +83,23 @@ pub fn select(
         0.0
     };
     Playing { slot: s, time }
+}
+
+/// The aim-down-sights layer. `ADS_UP` and `ADS_DOWN` animate only the `tag_ads` bone, which carries the whole view
+/// model to the sights; the original keeps one of them on top of whatever else plays (`PlayADSAnim`), so it is a layer,
+/// never a replacement of the idle. `rising` tells up from down while `ads` is between hip and aimed.
+pub fn ads_layer(ads: f32, rising: bool) -> Playing {
+    if rising || ads >= 1.0 {
+        Playing {
+            slot: slot::ADS_UP,
+            time: ads,
+        }
+    } else {
+        Playing {
+            slot: slot::ADS_DOWN,
+            time: 1.0 - ads,
+        }
+    }
 }
 
 struct Slot {
@@ -229,7 +226,6 @@ impl ViewModel {
             ps.weapon_state,
             ps.weapon_time,
             ads,
-            self.rising,
             self.sprint_clock,
             &self.def,
         );
@@ -240,18 +236,22 @@ impl ViewModel {
             };
         }
         self.playing = p;
-        if let Some(s) = &self.slots[p.slot] {
-            self.rig.pose(
-                &[AnimLayer {
+        let sights = ads_layer(ads, self.rising);
+        let mut layers = Vec::with_capacity(2);
+        for l in [Some(p), (ads > 0.0).then_some(sights)]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(s) = &self.slots[l.slot] {
+                layers.push(AnimLayer {
                     anim: &s.anim.parts,
                     bind: &s.bind,
-                    time: p.time,
+                    time: l.time,
                     weight: 1.0,
-                }],
-                &Controllers::NONE,
-                &mut self.pose,
-            );
+                });
+            }
         }
+        self.rig.pose(&layers, &Controllers::NONE, &mut self.pose);
         let eye = [
             ps.origin[0],
             ps.origin[1],
@@ -292,4 +292,71 @@ pub fn bob_angles(ps: &PlayerState, ads: f32, w: &WeaponDef) -> [f32; 3] {
         -cycle.sin() * speed * scale,
         0.0,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use server::content::Install;
+
+    #[test]
+    fn the_sights_layer_rises_and_falls_with_the_aim() {
+        assert_eq!(
+            ads_layer(0.3, true),
+            Playing {
+                slot: slot::ADS_UP,
+                time: 0.3
+            }
+        );
+        let down = ads_layer(0.3, false);
+        assert_eq!(down.slot, slot::ADS_DOWN);
+        assert!((down.time - 0.7).abs() < 1e-6);
+        assert_eq!(ads_layer(1.0, false).slot, slot::ADS_UP);
+    }
+
+    /// Aiming moves the whole view model a few units to the sights and keeps its orientation. Playing the sights
+    /// animation instead of layering it over the idle threw the arms and gun about the screen.
+    #[test]
+    fn aiming_down_sights_shifts_the_weapon_without_flipping_it() {
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let install = Install::open(std::path::Path::new(&root)).expect("install");
+        let mut content = Content::for_client();
+        content
+            .load_zone(&install, "common_mp", 4)
+            .expect("common_mp");
+        content.load_map(&install, "mp_backlot").expect("map");
+        let def = content.weapon("m4_mp").expect("m4_mp").clone();
+        let hands = content
+            .model_names("viewhands_")
+            .first()
+            .map(|n| (*n).to_owned());
+        let mut vm = ViewModel::new(&content, &def, hands.as_deref()).expect("view model");
+        let mut ps = PlayerState {
+            view_height_current: 60.0,
+            ..PlayerState::default()
+        };
+        let hip = vm.update(&ps, 0.01);
+        ps.weapon_pos_frac = 1.0;
+        let aimed = vm.update(&ps, 0.01);
+        let mut moved = 0.0f32;
+        for (h, a) in hip.iter().zip(&aimed) {
+            assert_eq!(h.bones.len(), a.bones.len());
+            for (hb, ab) in h.bones.iter().zip(&a.bones) {
+                let d = (0..3)
+                    .map(|i| (hb.trans[i] - ab.trans[i]).powi(2))
+                    .sum::<f32>();
+                moved = moved.max(d.sqrt());
+                let dot: f32 = hb.quat.iter().zip(&ab.quat).map(|(x, y)| x * y).sum();
+                assert!(
+                    dot.abs() > 0.98,
+                    "a bone turned by more than 12 degrees: {dot}"
+                );
+            }
+        }
+        assert!(moved > 1.0, "aiming did not move the weapon ({moved})");
+        assert!(moved < 12.0, "aiming threw the weapon {moved} units");
+    }
 }

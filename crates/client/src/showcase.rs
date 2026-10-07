@@ -3,7 +3,7 @@
 //! front of a fixed camera, so a screenshot shows whether skinning, textures and lighting are right.
 
 use crate::flythrough;
-use crate::models::{Library, Player, Team};
+use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::viewmodel::ViewModel;
 use glam::Vec3;
 use render::ModelInstance;
@@ -133,10 +133,26 @@ impl Showcase {
         let reach = 190.0 + 40.0 * (count.div_ceil(7).saturating_sub(1)) as f32;
         let (eye, yaw, pitch) = find_camera(world, tour, reach, lit)
             .ok_or("no clear spot for the stage on the flythrough path")?;
+        let def = lib
+            .content
+            .weapon(weapon)
+            .cloned()
+            .ok_or_else(|| format!("weapon {weapon} not loaded"))?;
+        let held = def
+            .world_models
+            .first()
+            .cloned()
+            .flatten()
+            .and_then(|m| m.name.as_deref().map(str::to_owned));
+        let armed = |s: PlayerModelSet| PlayerModelSet {
+            weapon: held.clone(),
+            ..s
+        };
         let allies = lib
             .team_models(Team::Allies)
+            .map(armed)
             .ok_or("no allied player models in the loaded zones")?;
-        let axis = lib.team_models(Team::Axis);
+        let axis = lib.team_models(Team::Axis).map(armed);
         let poses = poses();
         let (fx, fy) = (yaw.cos(), yaw.sin());
         let ground_z = eye.z - 60.0;
@@ -164,11 +180,6 @@ impl Showcase {
                 started: false,
             });
         }
-        let def = lib
-            .content
-            .weapon(weapon)
-            .cloned()
-            .ok_or_else(|| format!("weapon {weapon} not loaded"))?;
         let hands = lib.team_models(Team::Allies).and_then(|s| s.viewhands);
         let vm = ViewModel::new(&lib.content, &def, hands.as_deref())?;
         let ps = PlayerState {

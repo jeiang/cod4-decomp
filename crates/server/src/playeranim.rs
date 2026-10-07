@@ -521,6 +521,17 @@ impl PlayerAnims {
     /// every retained animation the selection can return. Animations the zones lack are listed
     /// by [`PlayerAnims::missing`].
     pub fn new(content: &Content, body: &str, head: Option<&str>) -> Result<Self, String> {
+        Self::with_weapon(content, body, head, None)
+    }
+
+    /// [`PlayerAnims::new`] with the world model of a held weapon attached at the body's `tag_weapon_right`; its bones
+    /// follow the head's in the rig, so the animation bindings of the body and head are unchanged.
+    pub fn with_weapon(
+        content: &Content,
+        body: &str,
+        head: Option<&str>,
+        weapon: Option<&str>,
+    ) -> Result<Self, String> {
         let spec =
             |name: &str| -> Result<(Arc<assets::zone::xmodel::XModel>, Vec<Arc<str>>), String> {
                 let m = content
@@ -535,6 +546,10 @@ impl PlayerAnims {
         if let Some(h) = head {
             parts.push(spec(h)?);
         }
+        let weapon_part = parts.len();
+        if let Some(w) = weapon {
+            parts.push(spec(w)?);
+        }
         let texts: Vec<Vec<&str>> = parts
             .iter()
             .map(|(_, n)| n.iter().map(|s| &**s).collect())
@@ -542,10 +557,11 @@ impl PlayerAnims {
         let models: Vec<RigModel> = parts
             .iter()
             .zip(&texts)
-            .map(|((m, _), t)| RigModel {
+            .enumerate()
+            .map(|(i, ((m, _), t))| RigModel {
                 model: m.clone(),
                 bone_names: t,
-                attach: None,
+                attach: (weapon.is_some() && i == weapon_part).then_some("tag_weapon_right"),
             })
             .collect();
         let rig = Rig::new(&models)?;

@@ -44,12 +44,14 @@ pub struct PlayerModelSet {
     pub body: String,
     pub head: Option<String>,
     pub viewhands: Option<String>,
+    /// The world model of the held weapon, attached at `tag_weapon_right`.
+    pub weapon: Option<String>,
 }
 
 /// The loaded content and the animation sets built from it.
 pub struct Library {
     pub content: Content,
-    anims: HashMap<(String, Option<String>), Arc<PlayerAnims>>,
+    anims: HashMap<(String, Option<String>, Option<String>), Arc<PlayerAnims>>,
 }
 
 impl Library {
@@ -83,20 +85,22 @@ impl Library {
         Some(PlayerModelSet {
             head: pick("head_mp_", &[faction]),
             viewhands: pick("viewhands_", team.hands()),
+            weapon: None,
             body,
         })
     }
 
     /// A posable player for `set`.
     pub fn player(&mut self, set: &PlayerModelSet) -> Result<Player, String> {
-        let key = (set.body.clone(), set.head.clone());
+        let key = (set.body.clone(), set.head.clone(), set.weapon.clone());
         let anims = match self.anims.get(&key) {
             Some(a) => a.clone(),
             None => {
-                let a = Arc::new(PlayerAnims::new(
+                let a = Arc::new(PlayerAnims::with_weapon(
                     &self.content,
                     &set.body,
                     set.head.as_deref(),
+                    set.weapon.as_deref(),
                 )?);
                 self.anims.insert(key, a.clone());
                 a
@@ -111,6 +115,7 @@ impl Library {
         Ok(Player {
             body: model(&set.body)?,
             head: set.head.as_deref().map(model).transpose()?,
+            weapon: set.weapon.as_deref().map(model).transpose()?,
             anims,
             state: PlayerPoseState::default(),
             pose: Pose::default(),
@@ -126,6 +131,7 @@ pub struct Player {
     pose: Pose,
     body: Arc<XModel>,
     head: Option<Arc<XModel>>,
+    weapon: Option<Arc<XModel>>,
     yaw: f32,
 }
 
@@ -135,6 +141,12 @@ impl Player {
         self.state.update(dt, input);
         self.state.pose(&self.anims, &mut self.pose);
         self.yaw = input.yaw;
+    }
+
+    /// Swaps in the models and skeleton of `other` (the same body holding another weapon), keeping the animation state.
+    pub fn rearm(&mut self, other: Player) {
+        self.anims = other.anims;
+        self.weapon = other.weapon;
     }
 
     /// The animation currently playing.
@@ -157,8 +169,51 @@ impl Player {
         };
         push(&self.body, &bones[..nb.min(bones.len())]);
         if let Some(h) = &self.head {
-            push(h, bones.get(nb..).unwrap_or(&[]));
+            let nh = usize::from(h.num_bones);
+            push(h, bones.get(nb..nb + nh).unwrap_or(&[]));
+            if let Some(w) = &self.weapon {
+                push(w, bones.get(nb + nh..).unwrap_or(&[]));
+            }
+        } else if let Some(w) = &self.weapon {
+            push(w, bones.get(nb..).unwrap_or(&[]));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A player holding a weapon draws its world model, in the hands: the gun is the third instance and its first
+    /// bone sits at hand height beside the body, not at the feet.
+    #[test]
+    fn an_armed_player_draws_the_weapon_at_the_hand() {
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut lib = Library::load(std::path::Path::new(&root), "mp_backlot").expect("content");
+        let held = lib
+            .content
+            .weapon("m4_mp")
+            .and_then(|w| w.world_models.first().cloned().flatten())
+            .and_then(|m| m.name.as_deref().map(str::to_owned))
+            .expect("m4 world model");
+        let set = PlayerModelSet {
+            weapon: Some(held.clone()),
+            ..lib.team_models(Team::Allies).expect("allied models")
+        };
+        let mut p = lib.player(&set).expect("player");
+        p.update(0.0, &PlayerPoseInput::default());
+        let models = p.instances([0.0; 3]);
+        assert_eq!(models.len(), 3);
+        let gun = &models[2];
+        assert_eq!(gun.model.name.as_deref(), Some(held.as_str()));
+        let at = gun.bones[0].trans;
+        assert!(
+            (20.0..70.0).contains(&at[2]) && at[0].hypot(at[1]) < 40.0,
+            "the gun is at {at:?}"
+        );
     }
 }
