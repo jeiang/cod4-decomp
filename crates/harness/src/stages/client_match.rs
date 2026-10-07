@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Stage 4, `client-match`: the real `cod4e` client plays a team deathmatch against bots on the server it starts
 //! in-process (`--listen --autoplay`). The scripted player connects over UDP, gets a body, walks, sees the bots,
-//! turns toward enemies it can see and shoots them, for a minute. The stage reads the client's report and asserts
+//! turns toward enemies it can see and shoots them, for 90 seconds. The stage reads the client's report and asserts
 //! what makes a match playable: connected and spawned, the player moved by prediction, the others were drawn,
 //! snapshots kept coming, prediction was rarely corrected, shots were fired and some hit, and the server ran without
 //! script errors. Bandwidth, frame times and the server's tick cost are reported as metrics. Needs a display and the
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = "client-match";
 const BOTS: usize = 9;
-const SECS: u64 = 60;
+const SECS: u64 = 90;
 const LIMIT: Duration = Duration::from_secs(300);
 
 fn num(v: &Value, path: &[&str]) -> f64 {

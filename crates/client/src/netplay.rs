@@ -446,13 +446,27 @@ impl NetPlay {
             move_forward: 1.0,
             ..InputFrame::default()
         };
-        if a.stuck > 0.4 && a.t > a.turn_until {
-            a.turn_until = a.t + 0.5;
-            a.turn_dir = if (a.t * 7.0) as i32 % 2 == 0 {
-                1.0
-            } else {
-                -1.0
+        if a.stuck > 0.3 && a.t > a.turn_until {
+            // Turn toward the side with more room.
+            let from = Vec3::from(feet) + Vec3::Z * 40.0;
+            let room = |off: f32| {
+                let y = (self.angles[1] + off).to_radians();
+                let to = from + Vec3::new(y.cos(), y.sin(), 0.0) * 400.0;
+                self.boxes
+                    .world()
+                    .trace(
+                        from.to_array(),
+                        to.to_array(),
+                        [-12.0, -12.0, 0.0],
+                        [12.0, 12.0, 30.0],
+                        ENTITYNUM_NONE,
+                        contents::SOLID,
+                    )
+                    .fraction
             };
+            let (left, right) = (room(60.0) + room(120.0), room(-60.0) + room(-120.0));
+            a.turn_until = a.t + 0.7;
+            a.turn_dir = if left >= right { 1.0 } else { -1.0 };
             a.stuck = 0.0;
         }
         let my_team = self
@@ -502,8 +516,8 @@ impl NetPlay {
         // snapshot) and turns away from walls when stuck.
         let aim = best.or(nearest);
         if a.t < a.turn_until && !visible {
-            f.look_delta_yaw = a.turn_dir * 240.0 * dt;
-            f.move_forward = 0.6;
+            f.look_delta_yaw = a.turn_dir * 200.0 * dt;
+            f.move_forward = 0.7;
         } else if let Some((dist, at)) = aim.filter(|(d, _)| *d > 120.0) {
             if visible {
                 self.c.target_frames += 1;
