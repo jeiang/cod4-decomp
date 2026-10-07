@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Loads every stock MP script into the VM and runs each file's `main` with stub builtins.
+//! Loads every stock MP script into the VM, runs each file's `main` and then every function
+//! once, with stub builtins.
 //! Skips without `COD4_PATH`.
 //!
 //! The stubs answer with defaults (empty arrays, empty strings, zeros, `undefined`), so scripts
@@ -111,10 +112,23 @@ fn stock_scripts_load_and_run_without_vm_faults() {
         }
         let _ = name;
     }
+    // Every function once, with undefined arguments and `level` as self.
+    let all = vm.program().functions.len() as u32;
+    vm.set_loop_timeout(std::time::Duration::from_millis(250));
+    for id in 0..all {
+        if let Err(e) = vm.call(&mut host, id, None, &[]) {
+            note(e);
+        }
+        if id % 64 == 0 {
+            for e in vm.inc_time(&mut host) {
+                note(e);
+            }
+        }
+    }
     let dt = t.elapsed();
     let total: u32 = script_errors.values().sum();
     eprintln!(
-        "{} mains, {} ops, {} builtin calls in {dt:?}; {total} script runtime errors, {} faults; {} threads still parked",
+        "{} mains and {all} functions called, {} ops, {} builtin calls in {dt:?}; {total} script runtime errors, {} faults; {} threads still parked",
         mains.len(),
         vm.ops_executed(),
         host.calls,

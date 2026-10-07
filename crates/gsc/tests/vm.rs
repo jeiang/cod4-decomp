@@ -728,12 +728,12 @@ fn arguments_evaluate_right_to_left() {
 }
 
 #[test]
-fn missing_arguments_are_undefined_and_extra_ones_are_dropped() {
+fn missing_arguments_are_undefined() {
     let log = run(r#"
-        main() { f(1); f(1, 2, 3); }
+        main() { f(1); }
         f(a, b) { println(a, isdefined(b)); }
     "#);
-    assert_eq!(log, ["1 0", "1 1"]);
+    assert_eq!(log, ["1 0"]);
 }
 
 #[test]
@@ -862,4 +862,31 @@ fn switch_loops_and_locals() {
         }
     "#);
     assert_eq!(log, ["d0", "one", "d2", "d4", "3"]);
+}
+
+#[test]
+fn increments_work_on_fields_and_array_elements() {
+    let log = run(r#"
+        main() {
+            level.n = 1; level.n++; a = []; a["k"] = 5; a["k"]--; i = 0; i++;
+            level.a[1] = 7; level.a[1] += 1;
+            println(level.n, a["k"], i, level.a[1]);
+        }
+    "#);
+    assert_eq!(log, ["2 4 1 8"]);
+}
+
+#[test]
+fn compound_assignment_and_indexing_evaluate_in_the_original_order() {
+    // Index before base for a store; the target is read, then the right side, then stored.
+    let log = run(r#"
+        main() {
+            a = []; a[0] = 1;
+            a[t("i")] += t("r");
+            b = [];
+            b[t("i")][t("j")] = t("v");
+        }
+        t(s) { println(s); return 0; }
+    "#);
+    assert_eq!(log, ["i", "r", "i", "v", "j", "i"]);
 }

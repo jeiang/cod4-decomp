@@ -204,6 +204,9 @@ impl Vm {
                 }
                 let callee = &prog.functions[fid];
                 let params = callee.param_count as usize;
+                if argc > params {
+                    bail!("function called with too many parameters");
+                }
                 let this: Obj = match $this {
                     Some(o) => o,
                     None => t.frames.last().expect("frame").this.clone(),
@@ -398,22 +401,15 @@ impl Vm {
                     push!(Value::Ref(Box::new(r)));
                 }
                 Op::RefIndex => {
+                    let base = pop!();
                     let k = tri!(key(&pop!()));
-                    match pop!() {
+                    match base {
                         Value::Ref(mut r) => {
                             r.path.push(k);
                             push!(Value::Ref(r));
                         }
                         other => bail!(format!("{} is not assignable", other.type_name())),
                     }
-                }
-                Op::LoadRef => {
-                    let Some(Value::Ref(r)) = t.stack.last() else {
-                        bail!("LoadRef without a reference");
-                    };
-                    let r = r.clone();
-                    let v = tri!(self.read_ref(host, t, &r));
-                    push!(v);
                 }
                 Op::Store => {
                     let Value::Ref(r) = pop!() else {
@@ -423,16 +419,24 @@ impl Vm {
                     let v = pop!();
                     tri!(self.write_ref(host, t, &r, v));
                 }
-                Op::Swap => {
-                    let n = t.stack.len();
-                    if n < 2 {
-                        save!();
-                        return Err(fault("value stack underflow"));
-                    }
-                    t.stack.swap(n - 1, n - 2);
-                }
                 Op::Pop => {
                     pop!();
+                }
+                Op::Inc | Op::Dec => {
+                    let Value::Ref(r) = pop!() else {
+                        save!();
+                        return Err(fault("Inc without a reference"));
+                    };
+                    let (sign, delta) = if op == Op::Inc { ("++", 1) } else { ("--", -1) };
+                    match tri!(self.read_ref(host, t, &r)) {
+                        Value::Int(n) => {
+                            tri!(self.write_ref(host, t, &r, Value::Int(n.wrapping_add(delta))))
+                        }
+                        other => bail!(format!(
+                            "{sign} must be applied to an int (applied to {})",
+                            other.type_name()
+                        )),
+                    }
                 }
                 Op::Neg => {
                     let v = pop!();
@@ -519,6 +523,10 @@ impl Vm {
                     let flags = code[pc];
                     let argc = code[pc + 1];
                     pc += 2;
+                    let fid = match pop!() {
+                        Value::Func(fid) => fid,
+                        other => bail!(format!("{} is not a function pointer", other.type_name())),
+                    };
                     let this = if flags & CALL_METHOD != 0 {
                         match pop!() {
                             Value::Object(o) => Some(o),
@@ -526,9 +534,6 @@ impl Vm {
                         }
                     } else {
                         None
-                    };
-                    let Value::Func(fid) = pop!() else {
-                        bail!("not a function pointer");
                     };
                     enter!(fid, flags, argc, this);
                 }

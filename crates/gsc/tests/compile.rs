@@ -75,29 +75,19 @@ fn includes_provide_the_included_files_own_functions() {
 }
 
 #[test]
-fn includes_are_not_transitive() {
-    // The original copies only the included file's own functions, so `a` cannot call `deep`.
-    let srcs = [
+fn includes_are_transitive() {
+    let p = build(&[
         ("c.gsc", "deep() {}"),
         ("b.gsc", "#include c; mid() { deep(); }"),
-        ("a.gsc", "#include b; f() { mid(); deep(); }"),
-    ];
-    let e = err(&srcs);
-    assert_eq!(
-        (e.kind, e.message.as_str()),
-        (ErrorKind::UnknownFunction, "unknown function `deep`")
+        ("a.gsc", "#include b; f() { mid(); deep(); b::deep(); }"),
+    ])
+    .unwrap();
+    let deep = p.find("c", "deep").unwrap();
+    assert!(
+        dis(&p, "f")
+            .iter()
+            .any(|l| l == &format!("CallFunc 0 {deep} 0"))
     );
-    assert!(build(&srcs[..2]).is_ok());
-}
-
-#[test]
-fn a_qualified_call_sees_only_the_files_own_functions() {
-    let e = err(&[
-        ("c.gsc", "deep() {}"),
-        ("b.gsc", "#include c;"),
-        ("a.gsc", "f() { b::deep(); }"),
-    ]);
-    assert_eq!(e.kind, ErrorKind::UnknownFunction);
 }
 
 #[test]
@@ -113,6 +103,13 @@ fn an_included_name_that_is_already_taken_is_an_error() {
         ("a.gsc", "#include b; #include c;"),
     ]);
     assert_eq!(twice.message, "function `shared` already defined");
+    // The same file reached twice (a diamond) is not a collision.
+    build(&[
+        ("d.gsc", "shared() {}"),
+        ("b.gsc", "#include d;"),
+        ("a.gsc", "#include b; #include d;"),
+    ])
+    .unwrap();
 }
 
 #[test]
@@ -228,26 +225,22 @@ fn assignments_to_fields_and_arrays_use_references() {
         dis(&p, "f"),
         [
             "PushInt 1",
+            "PushStr 0 \"k\"",
             "PushLevel",
-            "RefField 0 \"a\"",
-            "PushStr 1 \"k\"",
+            "RefField 1 \"a\"",
             "RefIndex",
             "Store",
             "PushSelf",
-            "RefField 2 \"n\"",
-            "LoadRef",
+            "GetField 2 \"n\"",
             "PushInt 2",
             "Add",
-            "Swap",
+            "PushSelf",
+            "RefField 2 \"n\"",
             "Store",
-            "RefGame",
             "PushStr 3 \"x\"",
+            "RefGame",
             "RefIndex",
-            "LoadRef",
-            "PushInt 1",
-            "Add",
-            "Swap",
-            "Store",
+            "Inc",
             "ReturnUndefined",
         ]
     );
