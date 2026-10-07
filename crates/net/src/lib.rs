@@ -7,6 +7,7 @@
 //! challenge-response connect. Wire compatibility with the original engine is not a goal.
 
 pub mod bits;
+pub mod client;
 pub mod connect;
 pub mod entity;
 pub mod field;
@@ -18,6 +19,7 @@ pub mod session;
 pub mod snapshot;
 pub mod transport;
 pub mod usercmd;
+pub mod view;
 
 pub use bits::{BitReader, BitWriter, Overflow};
 pub use entity::EntityState;
