@@ -63,10 +63,7 @@ fn includes_provide_the_included_files_own_functions() {
             "maps/mp/b.gsc",
             "helper() { return 1; } shared() { return 2; }",
         ),
-        (
-            "a.gsc",
-            "#include maps\\mp\\b; f() { helper(); shared(); }",
-        ),
+        ("a.gsc", "#include maps\\mp\\b; f() { helper(); shared(); }"),
     ])
     .unwrap();
     let f = p.find("a", "f").unwrap();

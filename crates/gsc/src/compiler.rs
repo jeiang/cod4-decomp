@@ -302,7 +302,11 @@ impl FnCompiler<'_> {
         let f = &self.files[file];
         f.funcs
             .get(name)
-            .or_else(|| f.includes.iter().find_map(|&i| self.files[i].funcs.get(name)))
+            .or_else(|| {
+                f.includes
+                    .iter()
+                    .find_map(|&i| self.files[i].funcs.get(name))
+            })
             .copied()
     }
 
