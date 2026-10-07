@@ -61,6 +61,8 @@ pub struct ServerUi {
     pub out: Vec<Outgoing>,
     /// Configstrings that changed since the network layer last took them.
     pub dirty_cs: Vec<u16>,
+    /// Clients owed a scoreboard (`showscoreboard`).
+    pub score_requests: Vec<u16>,
 }
 
 impl Default for ServerUi {
@@ -70,6 +72,7 @@ impl Default for ServerUi {
             objectives: [ObjSlot::cleared(); ui::MAX_OBJECTIVES],
             out: Vec::new(),
             dirty_cs: Vec::new(),
+            score_requests: Vec::new(),
         }
     }
 }
@@ -180,6 +183,9 @@ impl Game {
 
     /// Keeps the per-client `n\name\t\team` configstrings current.
     pub fn refresh_client_info(&mut self) {
+        let (allies, axis) = (self.team_score[2], self.team_score[1]);
+        self.set_configstring(cs::SCORES_ALLIES, &allies.to_string());
+        self.set_configstring(cs::SCORES_AXIS, &axis.to_string());
         for n in 0..cs::CLIENTINFO_COUNT {
             let text = match self.client(n).filter(|c| c.connected()) {
                 Some(c) => ui::client_info_string(&ClientInfo {
@@ -189,6 +195,47 @@ impl Game {
                 None => String::new(),
             };
             self.set_configstring(cs::CLIENTINFO + n, &text);
+        }
+    }
+
+    /// The scoreboard rows, best first, without pings (the network layer knows those).
+    pub fn score_rows(&self) -> Vec<ui::ScoreRow> {
+        let mut rows: Vec<ui::ScoreRow> = self
+            .connected_clients()
+            .map(|(n, c)| ui::ScoreRow {
+                client: n,
+                score: c.score,
+                ping: if c.bot { -1 } else { 0 },
+                deaths: c.deaths,
+                kills: c.kills,
+                assists: c.assists,
+                status_icon: self.shaders.find(&c.status_icon) as u16,
+                team: c.team as u8,
+                state: match c.session {
+                    crate::client::Session::Playing => ui::pstate::PLAYING,
+                    crate::client::Session::Dead => ui::pstate::DEAD,
+                    _ => ui::pstate::SPECTATING,
+                },
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then(b.kills.cmp(&a.kills))
+                .then(a.deaths.cmp(&b.deaths))
+                .then(a.client.cmp(&b.client))
+        });
+        rows
+    }
+
+    /// `scr_<gametype>_scorelimit`, else the round limit (what the scoreboard header shows).
+    pub fn score_limit(&self) -> i32 {
+        let gt = self.cvars.string("g_gametype").to_ascii_lowercase();
+        let n = self.cvars.int(&format!("scr_{gt}_scorelimit"));
+        if n != 0 {
+            n
+        } else {
+            self.cvars.int(&format!("scr_{gt}_roundlimit"))
         }
     }
 

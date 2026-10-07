@@ -118,6 +118,11 @@ impl<T: Transport> NetClient<T> {
         }
     }
 
+    /// Asks the server for the scoreboard (repeat every couple of seconds while it is shown).
+    pub fn request_scores(&mut self) {
+        self.command(crate::ui::SCORES_REQUEST);
+    }
+
     /// Sends what a click in the script menu `menu` answers (see [`crate::ui::menu_response`]).
     pub fn menu_response(&mut self, menu: &str, response: &str) {
         self.command(&crate::ui::menu_response(menu, response));

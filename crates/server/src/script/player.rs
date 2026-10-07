@@ -111,7 +111,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("iprintlnbold", r(uicmd::client_print_bold)),
     ("sayall", r(uicmd::say_all)),
     ("sayteam", r(uicmd::say_team)),
-    ("showscoreboard", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("showscoreboard", r(show_scoreboard)),
     ("updatescores", r(|_, _, _, _| Ok(Value::Undefined))),
     ("updatedmscores", r(|_, _, _, _| Ok(Value::Undefined))),
     ("setentertime", r(|_, _, _, _| Ok(Value::Undefined))),
@@ -332,7 +332,19 @@ fn get_stat(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
 fn set_stat(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     let n = client_of(g, e)?;
     let (i, v) = (a.int(0)?, a.int(1)?);
-    g.client_mut(n).expect("client").stats.insert(i, v);
+    let old = g.client_mut(n).expect("client").stats.insert(i, v);
+    if old != Some(v) {
+        g.send(
+            crate::ui::Dest::Client(n),
+            net::ui::ServerCmd::Stat { index: i, value: v },
+        );
+    }
+    Ok(Value::Undefined)
+}
+
+fn show_scoreboard(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
+    let n = client_of(g, e)?;
+    g.ui.score_requests.push(n);
     Ok(Value::Undefined)
 }
 

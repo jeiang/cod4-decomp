@@ -188,6 +188,18 @@ impl ServerLink {
             .filter(|s| s.num == self.acked)
     }
 
+    /// Round trip estimate in ms: how old (by server time) the newest snapshot the client
+    /// acknowledged is at `now`. `None` before the first ack.
+    pub fn ping(&self, now: i32) -> Option<i32> {
+        if self.acked == 0 {
+            return None;
+        }
+        self.frames[(self.acked % BACKUP) as usize]
+            .as_ref()
+            .filter(|s| s.num == self.acked)
+            .map(|s| now.wrapping_sub(s.server_time).max(0))
+    }
+
     /// The newest snapshot number the client acknowledged (0 = none yet).
     pub fn acked(&self) -> u32 {
         self.acked

@@ -667,6 +667,116 @@ pub enum ServerCmd {
         client: u16,
         text: String,
     },
+    /// Scoreboard rows (see [`Scoreboard`]): the rows `start..start + rows.len()` of `total`, the
+    /// team scores and the score limit. Sent when the client asks ([`SCORES_REQUEST`]) and by the
+    /// script `showscoreboard`.
+    Scores {
+        axis: i32,
+        allies: i32,
+        limit: i32,
+        start: u16,
+        total: u16,
+        rows: Vec<ScoreRow>,
+    },
+    /// A kill, for the obituary feed and the kill icons.
+    Obituary(Obituary),
+    /// `setstat`: this client's persistent stat `index` is now `value` (what menus read with
+    /// `stat(index)`).
+    Stat {
+        index: i32,
+        value: i32,
+    },
+}
+
+/// The client to server command that asks for the scoreboard; repeat it every couple of seconds
+/// while the scoreboard is up.
+pub const SCORES_REQUEST: &str = "score";
+
+/// A player's [`ScoreRow::state`].
+pub mod pstate {
+    pub const PLAYING: u8 = 0;
+    pub const DEAD: u8 = 1;
+    pub const SPECTATING: u8 = 2;
+}
+
+/// One scoreboard line.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScoreRow {
+    pub client: u16,
+    pub score: i32,
+    /// Milliseconds; -1 for a bot.
+    pub ping: i32,
+    pub deaths: i32,
+    pub kills: i32,
+    pub assists: i32,
+    /// Material index of the status icon scripts set (`ui.material(n)`), 0 = none.
+    pub status_icon: u16,
+    /// 0 free, 1 axis, 2 allies, 3 spectator.
+    pub team: u8,
+    /// [`pstate`].
+    pub state: u8,
+}
+
+impl ScoreRow {
+    fn word(&self) -> String {
+        format!(
+            "{},{},{},{},{},{},{},{},{}",
+            self.client,
+            self.score,
+            self.ping,
+            self.deaths,
+            self.kills,
+            self.assists,
+            self.status_icon,
+            self.team,
+            self.state
+        )
+    }
+
+    fn from_word(w: &str) -> Option<Self> {
+        let mut it = w.split(',');
+        let mut n = || it.next()?.parse::<i32>().ok();
+        Some(Self {
+            client: u16::try_from(n()?).ok()?,
+            score: n()?,
+            ping: n()?,
+            deaths: n()?,
+            kills: n()?,
+            assists: n()?,
+            status_icon: u16::try_from(n()?).ok()?,
+            team: u8::try_from(n()?).ok()?,
+            state: u8::try_from(n()?).ok()?,
+        })
+    }
+}
+
+/// A kill (`player_die`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Obituary {
+    /// The killing client, [`NO_ENTITY`] when the world or a non-player did it.
+    pub killer: u16,
+    pub victim: u16,
+    /// Weapon name as scripts give it (`ak47_mp`), empty for none.
+    pub weapon: String,
+    /// `MOD_RIFLE_BULLET`, `MOD_SUICIDE`, ...
+    pub mean: String,
+    pub headshot: bool,
+}
+
+impl Obituary {
+    pub fn suicide(&self) -> bool {
+        self.killer == self.victim || self.killer == NO_ENTITY
+    }
+}
+
+/// The scoreboard as the newest complete [`ServerCmd::Scores`] left it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Scoreboard {
+    pub axis: i32,
+    pub allies: i32,
+    pub limit: i32,
+    /// In the order the server sent them (best first).
+    pub rows: Vec<ScoreRow>,
 }
 
 fn quote(s: &str, out: &mut String) {
@@ -780,6 +890,35 @@ impl ServerCmd {
                 arg(&mut s, &client.to_string());
                 arg(&mut s, text);
             }
+            ServerCmd::Scores {
+                axis,
+                allies,
+                limit,
+                start,
+                total,
+                rows,
+            } => {
+                s.push_str("scores");
+                for v in [i32::from(*start), i32::from(*total), *axis, *allies, *limit] {
+                    arg(&mut s, &v.to_string());
+                }
+                for r in rows {
+                    arg(&mut s, &r.word());
+                }
+            }
+            ServerCmd::Obituary(o) => {
+                s.push_str("obit");
+                arg(&mut s, &o.killer.to_string());
+                arg(&mut s, &o.victim.to_string());
+                arg(&mut s, &o.weapon);
+                arg(&mut s, &o.mean);
+                arg(&mut s, if o.headshot { "1" } else { "0" });
+            }
+            ServerCmd::Stat { index, value } => {
+                s.push_str("stat");
+                arg(&mut s, &index.to_string());
+                arg(&mut s, &value.to_string());
+            }
         }
         s
     }
@@ -811,6 +950,31 @@ impl ServerCmd {
                 text: w[2].clone(),
             },
             ("announce", 2) => ServerCmd::Announce { text: w[1].clone() },
+            ("scores", n) if n >= 6 => {
+                let num = |i: usize| w[i].parse::<i32>().ok();
+                ServerCmd::Scores {
+                    start: u16::try_from(num(1)?).ok()?,
+                    total: u16::try_from(num(2)?).ok()?,
+                    axis: num(3)?,
+                    allies: num(4)?,
+                    limit: num(5)?,
+                    rows: w[6..]
+                        .iter()
+                        .map(|r| ScoreRow::from_word(r))
+                        .collect::<Option<_>>()?,
+                }
+            }
+            ("obit", 6) => ServerCmd::Obituary(Obituary {
+                killer: w[1].parse().ok()?,
+                victim: w[2].parse().ok()?,
+                weapon: w[3].clone(),
+                mean: w[4].clone(),
+                headshot: w[5] == "1",
+            }),
+            ("stat", 3) => ServerCmd::Stat {
+                index: w[1].parse().ok()?,
+                value: w[2].parse().ok()?,
+            },
             ("chat", 4) => ServerCmd::Chat {
                 team: a(1)? == "team",
                 client: a(2)?.parse().ok()?,
@@ -932,6 +1096,9 @@ pub enum UiEvent {
         client: u16,
         text: String,
     },
+    Obituary(Obituary),
+    /// A complete scoreboard arrived; read it with [`ClientUiState::scoreboard`].
+    Scores,
 }
 
 /// Everything the UI knows about the server's state, fed by [`crate::ClientLink`]. Pure data:
@@ -944,6 +1111,10 @@ pub struct ClientUiState {
     hud: Vec<HudElem>,
     objectives: [Objective; MAX_OBJECTIVES],
     server_time: i32,
+    scores: Scoreboard,
+    /// Rows of a multi-part scoreboard received so far.
+    scores_partial: Vec<ScoreRow>,
+    stats: HashMap<i32, i32>,
 }
 
 impl Default for ClientUiState {
@@ -955,6 +1126,9 @@ impl Default for ClientUiState {
             hud: Vec::new(),
             objectives: [Objective::default(); MAX_OBJECTIVES],
             server_time: 0,
+            scores: Scoreboard::default(),
+            scores_partial: Vec::new(),
+            stats: HashMap::new(),
         }
     }
 }
@@ -978,6 +1152,8 @@ impl ClientUiState {
     pub fn apply(&mut self, cmd: ServerCmd) {
         match cmd {
             ServerCmd::Map { name } => {
+                self.scores = Scoreboard::default();
+                self.stats.clear();
                 self.cs.iter_mut().for_each(String::clear);
                 self.hud.clear();
                 self.objectives = Default::default();
@@ -1004,6 +1180,34 @@ impl ClientUiState {
             ServerCmd::Chat { team, client, text } => {
                 self.push(UiEvent::Chat { team, client, text });
             }
+            ServerCmd::Obituary(o) => self.push(UiEvent::Obituary(o)),
+            ServerCmd::Stat { index, value } => {
+                self.stats.insert(index, value);
+            }
+            ServerCmd::Scores {
+                axis,
+                allies,
+                limit,
+                start,
+                total,
+                rows,
+            } => {
+                if start == 0 {
+                    self.scores_partial.clear();
+                }
+                if usize::from(start) == self.scores_partial.len() {
+                    self.scores_partial.extend(rows);
+                }
+                if self.scores_partial.len() >= usize::from(total) {
+                    self.scores = Scoreboard {
+                        axis,
+                        allies,
+                        limit,
+                        rows: std::mem::take(&mut self.scores_partial),
+                    };
+                    self.push(UiEvent::Scores);
+                }
+            }
         }
     }
 
@@ -1022,6 +1226,23 @@ impl ClientUiState {
 
     pub fn has_events(&self) -> bool {
         !self.events.is_empty()
+    }
+
+    /// The newest complete scoreboard (empty until the first [`UiEvent::Scores`]).
+    pub fn scoreboard(&self) -> &Scoreboard {
+        &self.scores
+    }
+
+    /// Persistent stat `index` as the server last said (0 when never set).
+    pub fn stat(&self, index: i32) -> i32 {
+        self.stats.get(&index).copied().unwrap_or(0)
+    }
+
+    /// The team scores the server keeps in configstrings, `(allies, axis)`; always current,
+    /// no request needed.
+    pub fn team_scores(&self) -> (i32, i32) {
+        let n = |i| self.config(i).parse().unwrap_or(0);
+        (n(cs::SCORES_ALLIES), n(cs::SCORES_AXIS))
     }
 
     /// Server time of the newest snapshot applied.
@@ -1142,6 +1363,62 @@ mod tests {
                 text: "  spaced  out ".into(),
             },
         ]
+    }
+
+    #[test]
+    fn scoreboard_chunks_obituaries_and_stats_apply() {
+        let rows = |r: std::ops::Range<u16>| -> Vec<ScoreRow> {
+            r.map(|c| ScoreRow {
+                client: c,
+                score: i32::from(c) * 10 - 5,
+                ping: -1,
+                deaths: 2,
+                kills: 3,
+                assists: 1,
+                status_icon: 4,
+                team: 2,
+                state: pstate::DEAD,
+            })
+            .collect()
+        };
+        let mut ui = ClientUiState::new();
+        for (start, r) in [(0, rows(0..3)), (3, rows(3..5))] {
+            let c = ServerCmd::Scores {
+                axis: 7,
+                allies: 9,
+                limit: 75,
+                start,
+                total: 5,
+                rows: r,
+            };
+            assert_eq!(ServerCmd::parse(&c.encode()), Some(c.clone()));
+            ui.apply(c);
+            // Only the last chunk completes it.
+            assert_eq!(ui.has_events(), start == 3);
+        }
+        assert_eq!(ui.drain_events(), [UiEvent::Scores]);
+        assert_eq!(ui.scoreboard().rows, rows(0..5));
+        assert_eq!((ui.scoreboard().axis, ui.scoreboard().limit), (7, 75));
+        let o = Obituary {
+            killer: 3,
+            victim: 5,
+            weapon: "ak47_mp".into(),
+            mean: "MOD_HEAD_SHOT".into(),
+            headshot: true,
+        };
+        assert!(!o.suicide());
+        ui.apply(ServerCmd::Obituary(o.clone()));
+        assert_eq!(ui.drain_events(), [UiEvent::Obituary(o)]);
+        ui.apply(ServerCmd::Stat {
+            index: 205,
+            value: 3,
+        });
+        assert_eq!((ui.stat(205), ui.stat(206)), (3, 0));
+        ui.apply(ServerCmd::ConfigStrings(vec![(
+            cs::SCORES_AXIS,
+            "12".into(),
+        )]));
+        assert_eq!(ui.team_scores(), (0, 12));
     }
 
     #[test]
