@@ -42,8 +42,8 @@ mod walk;
 
 #[cfg(test)]
 mod install_tests;
-#[cfg(test)]
-mod test_world;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_world;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -216,4 +216,56 @@ pub(crate) struct Pml {
 /// time the player's state advances to.
 pub fn pmove(pm: &mut Pmove<'_>, world: &impl Collide) {
     single::pmove(pm, world);
+}
+
+/// What one command left besides the player state.
+pub struct CmdOut {
+    pub weapon_out: WeaponOut,
+    /// Entities the player's box touched.
+    pub touched: Vec<u16>,
+    pub mins: Vec3,
+    pub maxs: Vec3,
+}
+
+/// Runs one user command exactly as the server does, so a client predicting its own player
+/// gets the same state from the same inputs: the weapon the player holds or has asked for goes
+/// into the command, `g_speed` into the state, and the trace mask follows the state.
+#[allow(clippy::too_many_arguments)]
+pub fn run_usercmd(
+    ps: &mut PlayerState,
+    inv: &mut crate::weapon::PlayerWeapons,
+    mut cmd: UserCmd,
+    old_cmd: UserCmd,
+    g_speed: i32,
+    table: &crate::weapon::WeaponTable,
+    params: &Params,
+    world: &impl Collide,
+) -> CmdOut {
+    // The weapon the player asked for: a script's `switchtoweapon`, else what it holds.
+    let want = match inv.selected() {
+        0 if inv.has(ps.weapon as u16) => ps.weapon as u16,
+        w => w,
+    };
+    cmd.weapon = u8::try_from(want).unwrap_or(0);
+    let mut pm = Pmove::new(std::mem::take(ps), params);
+    pm.weapons = Some(WeaponCtx::new(table, inv));
+    pm.cmd = cmd;
+    pm.oldcmd = old_cmd;
+    pm.tracemask = if pm.ps.pm_type < PmType::Dead {
+        crate::contents::MASK_PLAYERSOLID
+    } else {
+        crate::contents::MASK_DEADSOLID
+    };
+    pm.ps.speed = g_speed;
+    pmove(&mut pm, world);
+    let touched = pm.touched().to_vec();
+    let (mins, maxs) = (pm.mins, pm.maxs);
+    let weapon_out = pm.weapon_out;
+    *ps = pm.ps;
+    CmdOut {
+        weapon_out,
+        touched,
+        mins,
+        maxs,
+    }
 }

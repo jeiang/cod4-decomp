@@ -332,6 +332,10 @@ pub struct Game {
     /// Clients whose disconnect callback is queued; their slots free afterwards.
     pub pending_free: Vec<u16>,
     pub pm_params: sim::pm::Params,
+    /// Where every player's body has been lately, for judging a shot as its shooter saw it.
+    pub lag: crate::lagcomp::LagRing,
+    /// While a person's command runs: the server time their shot is judged at.
+    pub lag_time: Option<i32>,
     pub stats: MatchStats,
     /// Bot navigation of the current map, built when the first bot joins.
     pub nav: Option<Arc<crate::nav::NavMesh>>,
@@ -377,6 +381,8 @@ impl Game {
             nested_errors: Vec::new(),
             pending_free: Vec::new(),
             pm_params: sim::pm::Params::default(),
+            lag: crate::lagcomp::LagRing::default(),
+            lag_time: None,
             stats: MatchStats::default(),
             nav: None,
             nav_goals: Vec::new(),
@@ -462,6 +468,8 @@ impl Game {
         self.nav = None;
         self.nav_goals.clear();
         self.max_clients = max_clients;
+        self.lag = crate::lagcomp::LagRing::new(max_clients);
+        self.lag_time = None;
         self.clients = (0..max_clients)
             .map(|n| {
                 let mut c = Client::new(n as u16, false, String::new());
