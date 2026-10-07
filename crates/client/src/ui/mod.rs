@@ -569,6 +569,9 @@ impl Ui {
     }
 
     pub fn open(&mut self, host: &mut dyn Host, m: usize) {
+        // A menu is mouse-driven unless the server opened it with `openmenunomouse` (which says so after this call).
+        // Leaving the flag as the last menu set it hid the pointer of every later menu, the Escape menu included.
+        self.cursor_visible = true;
         for &o in &self.stack.clone() {
             self.lose_focus(host, o);
         }
@@ -1106,4 +1109,79 @@ impl Ui {
     }
 
     // ---- accessors for painting ---------------------------------------------------------------------------------
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use server::content::Install;
+
+    /// A host with no match behind it: menus open and close, nothing answers.
+    struct Dummy;
+    impl env::World for Dummy {}
+    impl Host for Dummy {
+        fn dvar(&self, _: &str) -> String {
+            String::new()
+        }
+        fn set_dvar(&mut self, _: &str, _: &str) {}
+        fn exec(&mut self, _: &Ui, _: &str) {}
+        fn play(&mut self, _: &str) {}
+        fn menu_response(&mut self, _: &str, _: &str) {}
+        fn ui_script(&mut self, _: &mut Ui, _: &str, _: &[String]) -> bool {
+            false
+        }
+        fn in_game(&self) -> bool {
+            true
+        }
+        fn time_ms(&self) -> i32 {
+            0
+        }
+        fn feeder_count(&mut self, _: i32) -> usize {
+            0
+        }
+        fn feeder_text(&mut self, _: i32, _: usize, _: usize) -> String {
+            String::new()
+        }
+        fn feeder_select(&mut self, _: i32, _: usize) {}
+        fn feeder_image(&mut self, _: i32, _: usize, _: usize) -> String {
+            String::new()
+        }
+        fn owner_key(&mut self, _: &Ui, _: i32, _: &UiKey) -> bool {
+            false
+        }
+        fn owner_draw(
+            &mut self,
+            _: &Ui,
+            _: &mut paint::Painter,
+            _: &ItemDef,
+            _: place::Px,
+            _: [f32; 4],
+            _: &str,
+        ) {
+        }
+    }
+
+    /// The pointer of the Escape menu is drawn even after the server opened a menu without a mouse (the class
+    /// overlay and the like), and moving it focuses what is under it.
+    #[test]
+    fn a_menu_opened_after_a_no_mouse_menu_still_has_a_cursor() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = assets::UiAssets::load(&install).expect("ui assets");
+        let mut ui = Ui::new(assets, (1280, 720));
+        let mut host = Dummy;
+        ui.open_by_name(&mut host, "team_marinesopfor");
+        // What `openmenunomouse` does after the open.
+        ui.cursor_visible = false;
+        ui.open_by_name(&mut host, "popup_leavegame");
+        assert!(ui.cursor_visible, "the next menu opened without a pointer");
+        assert!(ui.captures_input());
+    }
 }
