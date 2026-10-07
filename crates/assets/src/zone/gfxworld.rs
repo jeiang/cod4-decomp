@@ -4,7 +4,9 @@
 //! data and is empty when the consumer drops it.
 
 use super::error::{Result, ZoneError};
-use super::gfx::{GfxImage, Material, Name, image_ptr, material_ptr, raw_of};
+use super::gfx::{
+    GfxImage, Material, Name, image_ptr, image_ptr_at, material_ptr, material_ptr_at, raw_of,
+};
 use super::stream::{Addr, Block, Fields, Ptr, Stream};
 use super::world::{LightDef, load_light_def};
 use super::xmodel::{XModel, load as load_xmodel};
@@ -346,8 +348,8 @@ fn vec<T: Send + Sync + 'static>(
         Ptr::Follow if n == 0 => Ok(Vec::new()),
         Ptr::Follow => {
             let len = mul(n, size)?;
-            let (_, bytes) = s.load(align, len)?;
-            elements(s, &bytes, size, f)
+            let (base, bytes) = s.load(align, len)?;
+            elements(s, base, &bytes, size, f)
         }
         p => Err(ZoneError::BadPointer(raw_of(p))),
     }
@@ -355,13 +357,21 @@ fn vec<T: Send + Sync + 'static>(
 
 fn elements<T>(
     s: &mut Stream,
+    base: Addr,
     bytes: &[u8],
     size: u32,
     mut f: impl FnMut(&mut Stream, &mut Fields) -> Result<T>,
 ) -> Result<Vec<T>> {
     bytes
         .chunks_exact(size as usize)
-        .map(|c| f(s, &mut Fields::new(c)))
+        .enumerate()
+        .map(|(i, c)| {
+            let at = Addr {
+                block: base.block,
+                offset: base.offset + i as u32 * size,
+            };
+            f(s, &mut Fields::at(c, at))
+        })
         .collect()
 }
 
@@ -503,7 +513,8 @@ fn world(s: &mut Stream, h: &[u8]) -> Result<GfxWorld> {
     })?;
     let reflection_probes = vec(s, probes, probe_count, 4, 16, |s, f| {
         let origin = v3(f);
-        let image = image_ptr(s, f.ptr()?)?;
+        let slot = f.slot();
+        let image = image_ptr_at(s, slot, f.ptr()?)?;
         Ok(ReflectionProbe { origin, image })
     })?;
     runtime(s, probe_textures, 4, mul(probe_count, 4)?)?;
@@ -512,8 +523,10 @@ fn world(s: &mut Stream, h: &[u8]) -> Result<GfxWorld> {
     runtime(s, scene_ent_cell_bits, 4, mul(cell_count, 0x400)?)?;
     let cells = load_cells(s, cells, cell_count)?;
     let lightmaps = vec(s, lightmaps, lightmap_count, 4, 8, |s, f| {
-        let primary = image_ptr(s, f.ptr()?)?;
-        let secondary = image_ptr(s, f.ptr()?)?;
+        let slot = f.slot();
+        let primary = image_ptr_at(s, slot, f.ptr()?)?;
+        let slot = f.slot();
+        let secondary = image_ptr_at(s, slot, f.ptr()?)?;
         Ok(Lightmap { primary, secondary })
     })?;
     let light_grid = grid.load(s)?;
@@ -597,7 +610,8 @@ fn world(s: &mut Stream, h: &[u8]) -> Result<GfxWorld> {
         }
     }
     let material_memory = vec(s, material_memory, material_memory_count, 4, 8, |s, f| {
-        let material = material_ptr(s, f.ptr()?)?;
+        let slot = f.slot();
+        let material = material_ptr_at(s, slot, f.ptr()?)?;
         Ok(MaterialMemory {
             material,
             memory: f.i32(),
@@ -662,7 +676,7 @@ fn load_cells(s: &mut Stream, p: Ptr, n: u32) -> Result<Vec<Cell>> {
         Ptr::Follow => s.load(4, mul(n, 56)?)?,
         p => return Err(ZoneError::BadPointer(raw_of(p))),
     };
-    elements(s, &bytes, 56, |s, f| {
+    elements(s, base, &bytes, 56, |s, f| {
         let mins = v3(f);
         let maxs = v3(f);
         let tree_count = count(f.i32())?;
@@ -947,7 +961,8 @@ impl DpvsHeader {
             let vertex_count = f.u16();
             let tri_count = f.u16();
             let base_index = f.i32();
-            let material = material_ptr(s, f.ptr()?)?;
+            let slot = f.slot();
+            let material = material_ptr_at(s, slot, f.ptr()?)?;
             Ok(Surface {
                 vertex_layer_data,
                 first_vertex,
