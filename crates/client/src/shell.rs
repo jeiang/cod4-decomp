@@ -39,6 +39,8 @@ pub enum Action {
     },
     /// A console line the shell does not handle itself (binds, `+commands`, ...).
     Console(String),
+    /// A menu sound (`play` in a menu script) for the sound system to play.
+    Sound(String),
 }
 
 pub struct MapEntry {
@@ -495,7 +497,9 @@ impl Host for HostCx<'_> {
         self.command(ui, text);
     }
 
-    fn play(&mut self, _alias: &str) {}
+    fn play(&mut self, alias: &str) {
+        self.st.actions.push(Action::Sound(alias.to_owned()));
+    }
 
     fn menu_response(&mut self, menu: &str, response: &str) {
         self.st.actions.push(Action::MenuResponse {

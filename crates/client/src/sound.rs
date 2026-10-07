@@ -123,6 +123,11 @@ impl ClientSound {
         }
     }
 
+    /// Plays `alias` as a 2D sound (menus).
+    pub fn play_ui(&mut self, alias: &str) {
+        self.play(alias, Cue::default());
+    }
+
     /// Plays `alias` at a world position (effect sounds, impacts).
     pub fn play_world(&mut self, alias: &str, origin: [f32; 3]) {
         self.play(
@@ -488,10 +493,13 @@ fn load(install: &Path, map: &str) -> Result<Bank, String> {
         .position(|l| *l == install.language)
         .unwrap_or(0);
     let vfs = Arc::new(Vfs::open_stock(&install.root, lang).map_err(|e| e.to_string())?);
-    let zones: Vec<PathBuf> = ["code_post_gfx_mp", "localized_common_mp", map]
-        .iter()
-        .filter_map(|z| install.zone_path(z))
-        .collect();
+    // No map: the menus' own tables (the front end's `mouse_click`, `mouse_over`, ... are in the SP code zone).
+    let wanted: &[&str] = if map.is_empty() {
+        &["code_post_gfx_mp", "code_post_gfx"]
+    } else {
+        &["code_post_gfx_mp", "localized_common_mp", map]
+    };
+    let zones: Vec<PathBuf> = wanted.iter().filter_map(|z| install.zone_path(z)).collect();
     Bank::load(vfs, &zones)
 }
 
@@ -540,6 +548,7 @@ fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
 /// Returns what was measured, or what failed.
 pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     let bank = load(install, map).map_err(|e| vec![e])?;
+    let menus = load(install, "").map_err(|e| vec![format!("menu sounds: {e}")])?;
     let mut s = Sound::new(bank, false);
     s.set_listener([0.0; 3], 0.0);
     let mut bad = Vec::new();
@@ -565,6 +574,14 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         format!("{} aliases", s.bank.stats.aliases),
     );
     m.insert("aliases".into(), s.bank.stats.aliases.into());
+    // The front end's click and hover sounds exist on the menu channel.
+    for name in ["mouse_click", "mouse_over"] {
+        let on_menu = menus
+            .aliases_of(name)
+            .first()
+            .is_some_and(|a| menus.channels[usize::from(a.channel)].name == "menu");
+        check(on_menu, format!("no menu sound {name}"));
+    }
 
     // Direction and falloff of a weapon shot: the listener faces +x, its left is +y.
     let shot = "weap_ak47_fire_npc";

@@ -184,6 +184,8 @@ struct State {
     script: Option<UiScript>,
     /// A screenshot to take after the next paint (name without extension).
     shot_request: Option<String>,
+    /// The sound system of the menus when no match is running (started by the first menu sound).
+    menu_sound: Option<crate::sound::ClientSound>,
 }
 
 /// The `--ui-tour` script: which menu is open and how many frames it has been shown.
@@ -444,6 +446,7 @@ impl Viewer {
                 results: Vec::new(),
             }),
             shot_request: None,
+            menu_sound: None,
             ui_tour: self.cli.ui_tour.as_ref().map(|_| UiTour {
                 menus: TOUR_MENUS.to_vec(),
                 index: 0,
@@ -739,6 +742,9 @@ impl Viewer {
             el.exit();
         }
         st.gpu.queue.present(frame);
+        if let Some(m) = st.menu_sound.as_mut() {
+            m.frame([0.0; 3], 0.0, (interval / 1000.0) as f32);
+        }
         let actions = st
             .shell
             .as_mut()
@@ -789,6 +795,17 @@ impl Viewer {
                     }
                 }
                 Action::Console(_) => {}
+                // Menu sounds live in the zones of the front end (`code_post_gfx`), which the match's tables
+                // do not load, so they have their own small sound system.
+                Action::Sound(alias) => {
+                    if !self.cli.no_sound {
+                        st.menu_sound
+                            .get_or_insert_with(|| {
+                                crate::sound::ClientSound::start(&self.cli.install, "", true)
+                            })
+                            .play_ui(&alias);
+                    }
+                }
             }
         }
         Ok(())

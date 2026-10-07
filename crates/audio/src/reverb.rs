@@ -127,7 +127,7 @@ impl Reverb {
     pub fn new(rate: u32) -> Self {
         let r = rate as f32 / 44_100.0;
         let cap = |n: usize, extra: usize| {
-            (((n + extra) as f32) * MAX_SCALE * r.max(1.0).min(MAX_RATE_FACTOR)).ceil() as usize + 2
+            (((n + extra) as f32) * MAX_SCALE * r.clamp(1.0, MAX_RATE_FACTOR)).ceil() as usize + 2
         };
         let side = |extra: usize| {
             (

@@ -15,9 +15,13 @@ kira covers tracks, reverb, EQ and tweens, but its spatial model is a pan plus a
 - Alias choice: weighted by probability with a per-alias anti-repeat sequence, as the original's picker. A secondary alias plays together with its parent (chain of up to 10).
 - The 348 "zero-info" loaded sounds are `,null.wav` placeholders: deliberately silent.
 - Occlusion: none in the original (distance and curve are the only world inputs).
-- Reverb room table: the 26 `setReverb` room names (`generic`, `paddedcell`, `room`, ..., `psychotic`) index Miles EAX room types. Reverb itself is not implemented: `msseax.flt` is closed source. Stereo output only; 4 and 5.1 speaker maps are read but unused.
+- Reverb (`snd_setEnvironmentEffects`, GSC `setReverb`/`deactivateReverb`): two priorities (`snd_enveffectsprio_level` 1, `_shellshock` 2) over a base effect; the highest active one is heard and a change fades the wet level over its fade time. The room names (`generic`, `paddedcell`, `room`, ..., `psychotic`, 26 in all) index Miles EAX room types. The wet level applies to every voice except aliases flagged no-wet (bit 4). The dry level is accepted and **ignored**: `MSS_GetDryLevel` returns a constant 1. `msseax.flt` is closed source, so the reverb itself is ours: a Freeverb-style send bus tuned per room by the public EAX preset's decay time, damping and size (`reverb.rs`). Those numbers are an approximation, not Miles'.
+- EQ (`snd_setEq`, ...): 2 EQs of 3 bands per entity channel, each a low-pass, high-pass, low shelf, high shelf or bell (RBJ biquads in `eq.rs`; gain taken as decibels, which is an inference). Stock MP scripts never set one; only the console commands do, so the mixer supports it (`Sound::set_eq`) and no game path drives it.
+- `setChannelVolumes` (per-channel volume stacks from a shellshock definition) is not implemented: it needs the shellshock system, which is still a server stub.
+- Stereo output only; 4 and 5.1 speaker maps are read but unused.
 
 ## Consequences
 
 - The game's alias model never leaks library types; swapping the decoder or device is local.
-- No reverb, EQ or occlusion for now; adding reverb is a send bus in `Mixer::fill`.
+- Reverb is a send bus inside `Mixer::fill` (fixed buffers, no allocation) and the EQ a per-voice biquad chain; both run in the same callback an AudioWorklet would run.
+- No occlusion: the original has none.
