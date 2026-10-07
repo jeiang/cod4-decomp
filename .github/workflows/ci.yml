@@ -10,6 +10,8 @@ env:
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       # rustup reads rust-toolchain.toml (channel, components, targets) on first cargo call.
@@ -28,6 +30,8 @@ jobs:
           mkdir cod4e-harness-windows
           cp target/release/{cod4e-harness,cod4e,cod4e-server}.exe cod4e-harness-windows/
           cp crates/harness/PORTABLE-README.txt cod4e-harness-windows/README.txt
+          ./cod4e-harness-windows/cod4e-harness.exe stages > cod4e-harness-windows/STAGES.txt
+          echo "${GITHUB_SHA}" > cod4e-harness-windows/BUILD.txt
       # The tester's path: double-click is a run with no arguments. With no
       # install it must still write a bundle that says so (exit status 1).
       - name: Smoke the portable folder with no install
@@ -49,3 +53,19 @@ jobs:
         with:
           name: cod4e-harness-windows
           path: cod4e-harness-windows
+      # Rolling tester build: every push to main replaces the assets of the
+      # `windows-tester` prerelease, so the tester link never changes.
+      - name: Publish the windows-tester prerelease
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          7z a -tzip cod4e-windows-tester.zip ./cod4e-harness-windows/* > /dev/null
+          notes="Built from ${GITHUB_SHA} on $(date -u +%Y-%m-%d). Unzip, double-click cod4e-harness.exe, send back the cod4e-run-*.zip it writes. Stages: see STAGES.txt."
+          if gh release view windows-tester > /dev/null 2>&1; then
+            gh release upload windows-tester cod4e-windows-tester.zip --clobber
+            gh release edit windows-tester --notes "$notes"
+          else
+            gh release create windows-tester cod4e-windows-tester.zip --prerelease --title "Windows tester build" --notes "$notes"
+          fi
