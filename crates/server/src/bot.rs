@@ -259,16 +259,20 @@ impl Brain {
 
         // Shooting.
         if let (Some((_, _, dist)), true) = (aim, engaged) {
-            let aimed = angle_diff(ty, self.yaw).abs() < (30.0 / dist.max(1.0)).atan().to_degrees().max(2.5)
+            let aimed = angle_diff(ty, self.yaw).abs()
+                < (30.0 / dist.max(1.0)).atan().to_degrees().max(2.5)
                 && (tp - self.pitch).abs() < 4.0;
             let ready = time - self.enemy_acquired >= self.reaction_ms;
-            let usable = c.ps.weapon != 0 && dist < MAX_FIRE_DIST && c.ps.weapon_flags & sim::pm::wf::DISABLED == 0;
+            let usable = c.ps.weapon != 0
+                && dist < MAX_FIRE_DIST
+                && c.ps.weapon_flags & sim::pm::wf::DISABLED == 0;
             if clip <= 0 && stock > 0 {
                 cmd.buttons |= button::RELOAD;
             } else if ready && aimed && usable && clip > 0 {
                 if time >= self.burst_until && time >= self.pause_until {
                     self.burst_until = time + 300 + (frac(&mut self.rng) * 700.0) as i32;
-                    self.pause_until = self.burst_until + 150 + (frac(&mut self.rng) * 350.0) as i32;
+                    self.pause_until =
+                        self.burst_until + 150 + (frac(&mut self.rng) * 350.0) as i32;
                 }
                 if time < self.burst_until {
                     if info.is_semi_auto() {
@@ -287,7 +291,9 @@ impl Brain {
             if time >= self.next_frag
                 && dist > 350.0
                 && dist < 900.0
-                && c.inv.first_available_offhand(&g.weapons, &c.ps, OffhandClass::Frag) != 0
+                && c.inv
+                    .first_available_offhand(&g.weapons, &c.ps, OffhandClass::Frag)
+                    != 0
             {
                 self.frag_until = time + 330;
                 self.next_frag = time + 9000 + (frac(&mut self.rng) * 12000.0) as i32;
@@ -318,7 +324,9 @@ impl Brain {
     /// Looks for the closest enemy in view with a clear line.
     fn scan(&mut self, g: &Game, n: u16, eye: Vec3, time: i32) {
         let Some(c) = g.client(n) else { return };
-        let Some(world) = g.world.as_ref() else { return };
+        let Some(world) = g.world.as_ref() else {
+            return;
+        };
         let my_team = c.team;
         let (sy, cy) = self.yaw.to_radians().sin_cos();
         let mut best: Option<(f32, u16)> = None;
@@ -345,9 +353,8 @@ impl Brain {
             let h = g.ent(m).map_or(60.0, |e| e.maxs[2]);
             let chest = [o.ps.origin[0], o.ps.origin[1], o.ps.origin[2] + h * 0.7];
             let head = [o.ps.origin[0], o.ps.origin[1], o.ps.origin[2] + h * 0.9];
-            let clear = |to: Vec3| {
-                world.sight_trace(0, eye, to, [0.0; 3], [0.0; 3], n, m, SIGHT_MASK) == 0
-            };
+            let clear =
+                |to: Vec3| world.sight_trace(0, eye, to, [0.0; 3], [0.0; 3], n, m, SIGHT_MASK) == 0;
             if clear(chest) || clear(head) {
                 best = Some((dist, m));
             }

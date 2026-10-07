@@ -370,7 +370,10 @@ impl Server {
             "status" => self.status(),
             "expect" => {
                 let (Some(what), Some(min)) = (arg(1), arg(2)) else {
-                    return Err("usage: expect <kills|deaths|spawns|respawns|shots|hits|rounds> <minimum>".into());
+                    return Err(
+                        "usage: expect <kills|deaths|spawns|respawns|shots|hits|rounds> <minimum>"
+                            .into(),
+                    );
                 };
                 let st = self.game.stats;
                 let have = match what {

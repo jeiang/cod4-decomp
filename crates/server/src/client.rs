@@ -404,7 +404,12 @@ impl Game {
         let Some(world) = self.world.as_ref() else {
             return;
         };
-        cmd.weapon = u8::try_from(c.inv.selected()).unwrap_or(0);
+        // The weapon the player asked for: a script's `switchtoweapon`, else what it holds.
+        let want = match c.inv.selected() {
+            0 if c.inv.has(c.ps.weapon as u16) => c.ps.weapon as u16,
+            w => w,
+        };
+        cmd.weapon = u8::try_from(want).unwrap_or(0);
         let mut pm = Pmove::new(std::mem::take(&mut c.ps), &self.pm_params);
         pm.weapons = Some(WeaponCtx::new(&self.weapons, &mut c.inv));
         pm.cmd = cmd;

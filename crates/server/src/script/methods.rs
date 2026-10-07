@@ -16,7 +16,6 @@ const fn r(f: MethFn) -> Impl<MethFn> {
     Real(f)
 }
 
-
 const M6: &str = "M6 HUD, menus, killcam";
 const M7: &str = "M7 audio";
 
@@ -57,6 +56,7 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("playsoundtoteam", Later(M7)),
     ("playsoundtoplayer", Later(M7)),
     ("logstring", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("fireweapon", Later("M8 vehicles")),
     // hud elements
     ("destroy", r(hud::destroy)),
     ("settext", Later(M6)),
