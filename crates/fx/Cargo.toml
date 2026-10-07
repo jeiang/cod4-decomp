@@ -1,0 +1,14 @@
+[package]
+name = "fx"
+description = "Client-side effect simulation: FxEffectDef playback into sprites, models, decals and sounds."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+assets = { path = "../assets" }
+glam = "0.34.1"
+
+[lints]
+workspace = true

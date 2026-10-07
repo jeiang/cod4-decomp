@@ -254,6 +254,11 @@ impl Precache {
         self.names.len()
     }
 
+    /// Name of the 1-based `index`.
+    pub fn name(&self, index: usize) -> Option<&str> {
+        self.names.get(index.checked_sub(1)?).map(|n| &**n)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
@@ -376,6 +381,8 @@ pub struct Game {
     pub sound_out: Vec<(SoundTo, String)>,
     /// The `ambient` command in force, replayed to clients that join.
     pub ambient: Option<String>,
+    /// One-shot events for the clients' snapshots.
+    pub tempev: crate::tempev::TempEvents,
 }
 
 /// Who hears a sound command.
@@ -426,6 +433,7 @@ impl Game {
             weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),
             penetration: None,
             player_anims: None,
+            tempev: Default::default(),
             attractors: Attractors::default(),
             sound_out: Vec::new(),
             ambient: None,
@@ -504,6 +512,7 @@ impl Game {
         self.penetration = None;
         self.player_anims = None;
         self.attractors = Attractors::default();
+        self.tempev = Default::default();
         self.team_score = [0; 3];
         self.nav = None;
         self.nav_goals.clear();

@@ -114,6 +114,10 @@ impl Game {
             self.bullet_hits(&p, aim, spread, self.level.time, &mut hits);
         }
         for h in hits {
+            self.bullet_impact_event(n, weapon, &h);
+            if !h.damageable {
+                continue;
+            }
             if self.is_accurate_hit(h.target, n) {
                 self.stats.hits += 1;
                 if let Some(c) = self.client_mut(n) {
@@ -130,6 +134,23 @@ impl Game {
             d.hitloc = h.hitloc;
             self.g_damage(vm, h.target, d);
         }
+    }
+
+    /// Tells the clients where a bullet struck and what it struck.
+    fn bullet_impact_event(&mut self, shooter: u16, weapon: u16, h: &BulletHit) {
+        let hit_flesh = h.target != ENTITYNUM_WORLD && self.is_client(h.target);
+        if h.no_impact {
+            return;
+        }
+        let surface = if hit_flesh { 7 } else { h.surface };
+        let now = self.level.time;
+        self.tempev.add(now, crate::tempev::ev::BULLET_IMPACT, |s| {
+            s.origin = h.point;
+            s.angles = crate::tempev::dir_to_angles(h.normal);
+            s.event_parm = surface;
+            s.weapon = weapon;
+            s.client = shooter;
+        });
     }
 
     /// `Weapon_Throw_Grenade`: the grenade leaves the hand with the weapon's throw speed along

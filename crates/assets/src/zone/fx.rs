@@ -8,16 +8,42 @@ use super::xmodel::{self, XModel};
 use std::sync::Arc;
 
 /// Element types, as stored in [`FxElemDef::elem_type`].
-mod elem {
+pub mod elem {
     pub const SPRITE_BILLBOARD: u8 = 0;
     pub const SPRITE_ORIENTED: u8 = 1;
     pub const TAIL: u8 = 2;
     pub const TRAIL: u8 = 3;
     pub const CLOUD: u8 = 4;
     pub const MODEL: u8 = 5;
+    pub const OMNI_LIGHT: u8 = 6;
+    pub const SPOT_LIGHT: u8 = 7;
     pub const SOUND: u8 = 8;
     pub const DECAL: u8 = 9;
     pub const RUNNER: u8 = 10;
+}
+
+/// Bits of [`FxElemDef::flags`] (from how the original's update and draw code tests them).
+pub mod flags {
+    /// The spawn origin offset is in the effect's frame instead of the world's.
+    pub const SPAWN_RELATIVE_TO_EFFECT: i32 = 0x2;
+    pub const SPAWN_OFFSET_MASK: i32 = 0x30;
+    pub const SPAWN_OFFSET_SPHERE: i32 = 0x10;
+    pub const SPAWN_OFFSET_CYLINDER: i32 = 0x20;
+    /// Which frame the local velocity is in: none (world axes), the effect's frame when the element spawned, its
+    /// frame now, or the direction of the spawn offset.
+    pub const RUN_MASK: i32 = 0xC0;
+    pub const RUN_RELATIVE_TO_SPAWN: i32 = 0x40;
+    pub const RUN_RELATIVE_TO_EFFECT: i32 = 0x80;
+    pub const RUN_RELATIVE_TO_OFFSET: i32 = 0xC0;
+    pub const USE_COLLISION: i32 = 0x100;
+    pub const DIE_ON_TOUCH: i32 = 0x200;
+    pub const DRAW_PAST_FOG: i32 = 0x400;
+    /// The local velocity samples apply.
+    pub const HAS_VELOCITY_LOCAL: i32 = 0x100_0000;
+    /// The world velocity samples apply.
+    pub const HAS_VELOCITY_WORLD: i32 = 0x200_0000;
+    /// Sprites scale their two axes separately.
+    pub const NONUNIFORM_SCALE: i32 = 0x1000_0000;
 }
 
 /// `base + random * amplitude` range.

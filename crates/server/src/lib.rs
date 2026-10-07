@@ -24,4 +24,5 @@ pub mod playeranim;
 pub mod script;
 pub mod server;
 pub mod tags;
+pub mod tempev;
 pub mod ui;

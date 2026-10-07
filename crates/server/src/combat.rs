@@ -353,6 +353,12 @@ impl Game {
         let health = e.health;
         let attacker = self.ent_obj(vm, d.attacker);
         vm.notify_entity(target, "damage", &[attacker, Value::Int(damage)]);
+        let at = self.ent(target).map_or([0.0; 3], |e| e.origin);
+        self.tempev.add(now, crate::tempev::ev::PLAYER_PAIN, |s| {
+            s.origin = at;
+            s.client = target;
+            s.event_parm = damage.clamp(0, 255) as u8;
+        });
         if health > 0 {
             return Ok(());
         }
@@ -402,6 +408,16 @@ impl Game {
         c.ps.pm_type = PmType::Dead;
         c.ps.weapon_state = 0;
         self.stats.deaths += 1;
+        let (at, push) = (
+            self.ent(n).map_or([0.0; 3], |e| e.origin),
+            d.dir.map_or([0.0; 3], normalize),
+        );
+        let now = self.level.time;
+        self.tempev.add(now, crate::tempev::ev::PLAYER_DEATH, |s| {
+            s.origin = at;
+            s.client = n;
+            s.velocity = [push[0] * 240.0, push[1] * 240.0, push[2] * 240.0];
+        });
         if d.attacker.is_some_and(|a| a != n && self.is_client(a)) {
             self.stats.kills += 1;
         }

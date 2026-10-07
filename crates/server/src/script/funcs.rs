@@ -287,13 +287,13 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("setexpfog", Later(M8)),
     ("visionsetnaked", Later(M8)),
     ("visionsetnight", Later(M8)),
-    ("playfx", Later(M8)),
-    ("playfxontag", Later(M8)),
+    ("playfx", r(play_fx)),
+    ("playfxontag", r(play_fx_on_tag)),
     ("playloopedfx", Later(M8)),
     ("spawnfx", Later(M8)),
     ("triggerfx", Later(M8)),
     ("earthquake", Later(M8)),
-    ("physicsexplosionsphere", Later(M8)),
+    ("physicsexplosionsphere", r(physics_explosion_sphere)),
     ("physicsexplosioncylinder", Later(M8)),
     ("physicsjolt", Later(M8)),
     ("physicsjitter", Later(M8)),
@@ -878,6 +878,53 @@ fn precache_item(g: &mut Game, _: &mut Vm, a: Args) -> R {
         return Err(format!("unknown item '{n}'"));
     }
     g.items.index(n);
+    Ok(Value::Undefined)
+}
+
+/// `playfx(fx, origin, forward, up)`: an effect where the script says.
+fn play_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let index = a.int(0)?;
+    let origin = a.vector(1)?;
+    let forward = if a.len() > 2 { a.vector(2)? } else { [0.0, 0.0, 1.0] };
+    emit_fx(g, index, origin, forward, 1023);
+    Ok(Value::Undefined)
+}
+
+/// `playfxontag(fx, entity, tag)`: an effect at a tag of an entity, played where the tag is now.
+fn play_fx_on_tag(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let index = a.int(0)?;
+    let ent = a.entity(1)?;
+    let tag = a.string(2)?.to_ascii_lowercase();
+    let n = ent.num;
+    let (origin, forward) = match g.world_tag(n, &tag) {
+        Some(m) => (m[3], m[0]),
+        None => (g.ent(n).map_or([0.0; 3], |e| e.origin), [1.0, 0.0, 0.0]),
+    };
+    emit_fx(g, index, origin, forward, n);
+    Ok(Value::Undefined)
+}
+
+fn emit_fx(g: &mut Game, index: i32, origin: V3, forward: V3, ent: u16) {
+    let now = g.level.time;
+    g.tempev.add(now, crate::tempev::ev::PLAY_FX, |s| {
+        s.origin = origin;
+        s.angles = crate::tempev::dir_to_angles(forward);
+        s.model = index.clamp(0, 1023) as u16;
+        s.client = ent;
+    });
+}
+
+/// `physicsexplosionsphere(origin, radius, inner, strength)`: tells the clients' bodies to be thrown.
+fn physics_explosion_sphere(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let origin = a.vector(0)?;
+    let radius = a.float(1)?;
+    let strength = a.float(3)?;
+    let now = g.level.time;
+    g.tempev.add(now, crate::tempev::ev::PHYSICS_EXPLOSION, |s| {
+        s.origin = origin;
+        s.velocity = [radius, 0.0, 0.0];
+        s.weapon = (strength * 10.0).clamp(0.0, 511.0) as u16;
+    });
     Ok(Value::Undefined)
 }
 
