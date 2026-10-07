@@ -45,6 +45,10 @@ pub(super) fn load_string_table(s: &mut Stream, p: Ptr) -> Result<Option<Arc<Str
             .checked_mul(row_count)
             .ok_or(ZoneError::Invalid("string table too large"))?;
         let name = s.string(name)?;
+        // An empty cell array still advances the allocation to its alignment.
+        if count == 0 && values == Ptr::Follow {
+            s.alloc(4, 0)?;
+        }
         let values = s.array(values, count, 4, 4, |s, f| {
             let p = f.ptr()?;
             s.string(p)
