@@ -170,6 +170,7 @@ struct State {
     showcase: Option<Showcase>,
     net: Option<NetPlay>,
     listen: Option<Listen>,
+    tour: flythrough::Tour,
 }
 
 struct Viewer {
@@ -230,8 +231,11 @@ impl Viewer {
         renderer.settings = self.cli.settings;
         renderer.warm(config.format);
         let w = &renderer.scene.world;
-        let (mins, maxs) = (Vec3::from(w.mins), Vec3::from(w.maxs));
-        let start = flythrough::pose(0.0, mins, maxs);
+        let tour = flythrough::Tour::new(
+            &self.map.spawn_points(),
+            (Vec3::from(w.mins), Vec3::from(w.maxs)),
+        );
+        let start = tour.pose(0.0);
         if let Some(out) = &self.cli.out {
             std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
         }
@@ -241,7 +245,6 @@ impl Viewer {
                 let t = Instant::now();
                 let mut lib = Library::load(&self.cli.install, &self.cli.map)?;
                 let w = &renderer.scene.world;
-                let bounds = (Vec3::from(w.mins), Vec3::from(w.maxs));
                 let collision = renderer
                     .scene
                     .collision
@@ -254,7 +257,7 @@ impl Viewer {
                         .iter()
                         .any(Option::is_some)
                 };
-                let s = Showcase::new(&mut lib, &*collision, bounds, "m4_mp", n, &lit)?;
+                let s = Showcase::new(&mut lib, &*collision, &tour, "m4_mp", n, &lit)?;
                 notes.push(format!(
                     "showcase: {n} players, models loaded in {:.0} ms",
                     t.elapsed().as_secs_f64() * 1000.0
@@ -305,6 +308,7 @@ impl Viewer {
         let aspect = config.width as f32 / config.height as f32;
         let now = Instant::now();
         Ok(State {
+            tour,
             window,
             surface,
             config,
@@ -430,8 +434,7 @@ impl Viewer {
                 st.renderer.dynamic_models = nf.models;
             }
         } else if self.cli.flythrough {
-            let w = &st.renderer.scene.world;
-            let p = flythrough::pose(t, Vec3::from(w.mins), Vec3::from(w.maxs));
+            let p = st.tour.pose(t);
             (st.pos, st.yaw, st.pitch) = (p.origin, p.yaw, p.pitch);
         } else {
             let f = st.input.frame(dt);
