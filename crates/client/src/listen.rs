@@ -22,14 +22,23 @@ pub struct Listen {
 }
 
 /// Starts the server and returns once it listens on a map with `bots` bots.
-pub fn start(install: &Path, map: &str, bots: usize) -> Result<Listen, String> {
+///
+/// `gametype` of `None` is the harness's unlimited team deathmatch; `Some(id)` plays that gametype with its stock
+/// time and score limits (a menu-started match that ends).
+pub fn start(
+    install: &Path,
+    map: &str,
+    bots: usize,
+    gametype: Option<&str>,
+) -> Result<Listen, String> {
     let (install, map) = (install.to_owned(), map.to_owned());
+    let gametype = gametype.map(str::to_owned);
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Result<SocketAddr, String>>();
     let stop2 = stop.clone();
     let thread = std::thread::Builder::new()
         .name("listen-server".into())
-        .spawn(move || run(&install, &map, bots, &stop2, &tx))
+        .spawn(move || run(&install, &map, bots, gametype.as_deref(), &stop2, &tx))
         .map_err(|e| e.to_string())?;
     let addr = rx
         .recv()
@@ -56,6 +65,7 @@ fn run(
     install: &Path,
     map: &str,
     bots: usize,
+    gametype: Option<&str>,
     stop: &AtomicBool,
     tx: &mpsc::Sender<Result<SocketAddr, String>>,
 ) -> Value {
@@ -63,14 +73,16 @@ fn run(
         let args: Vec<String> = ["+set", "net_port", "0"].map(String::from).to_vec();
         let mut s = Server::boot(install, &args, false)?;
         let addr = s.net_addr().ok_or("cannot bind a UDP socket")?;
-        for line in [
-            "set g_gametype war".to_owned(),
-            "set scr_war_timelimit 0".to_owned(),
-            "set scr_war_scorelimit 0".to_owned(),
-            format!("set sv_mapRotation \"gametype war map {map}\""),
-            format!("map {map}"),
-            format!("bots {bots}"),
-        ] {
+        let gt = gametype.unwrap_or("war");
+        let mut lines = vec![format!("set g_gametype {gt}")];
+        if gametype.is_none() {
+            lines.push("set scr_war_timelimit 0".to_owned());
+            lines.push("set scr_war_scorelimit 0".to_owned());
+        }
+        lines.push(format!("set sv_mapRotation \"gametype {gt} map {map}\""));
+        lines.push(format!("map {map}"));
+        lines.push(format!("bots {bots}"));
+        for line in lines {
             s.exec_line(&line).map_err(|e| format!("{line}: {e}"))?;
         }
         Ok((s, SocketAddr::from(([127, 0, 0, 1], addr.port()))))

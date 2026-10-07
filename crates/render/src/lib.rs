@@ -16,6 +16,7 @@ pub mod state;
 pub mod sunshadow;
 pub mod texture;
 pub mod timing;
+pub mod ui2d;
 
 pub use gpu::{Gpu, GpuError, GpuInfo};
 pub use post::{Dof, PostParams, ShellShock};

@@ -41,6 +41,8 @@ COD4_PATH=/path/to/install nix develop -c cargo run --release -p server -- +set 
 
 ## Playing
 
+`cod4e` with no options starts in the stock main menu, drawn from the install's own menu assets (`ui_mp`/`common_mp` menus, fonts, localized strings and images; `src/ui`). Mouse and keyboard drive it like the original: Start New Server picks a map and gametype and starts a listen server with bots, Join Game takes a server, Options and Controls edit the dvars and binds, Esc opens the in-game menu. The 640x480 menu space is anchored to a 16:9 safe area at any window shape. `--ui-tour <dir>` opens the menus one by one with no world and saves a screenshot of each (harness stage `client-ui`); `--ui-script click=Start New Server,menu=createserver,click=Start,ingame,shot=a` drives them like a player.
+
 ```sh
 COD4_PATH=/path/to/install nix develop -c cargo run --release -p client -- --listen --bots 9   # solo: a team deathmatch against bots
 COD4_PATH=/path/to/install nix develop -c cargo run --release -p client -- --connect host:28960 # a `cod4e-server` (set net_port; default 28960)

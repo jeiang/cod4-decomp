@@ -9,8 +9,10 @@ mod input;
 mod listen;
 mod models;
 mod netplay;
+mod shell;
 mod showcase;
 mod sound;
+mod ui;
 mod video;
 mod viewmodel;
 
@@ -45,6 +47,9 @@ usage: cod4e [options]
   --connect <host:port>  play on a server (see cod4e-server)
   --name <name>          player name on the server
   --no-sound             mix the sound without opening a sound card
+  --ui-tour <dir>        open the stock menus in turn, save a screenshot of each and ui.json to <dir>, then exit (harness)
+  --ui-script <steps>    drive the menus like a player: click=<item>, menu=<name>[:secs], ingame[=secs], wait=<secs>, shot=<name>;
+                         writes ui-script.json (and shots) to --out, then exits (harness)
   --autoplay             a scripted player instead of the keyboard, for --duration seconds (harness stage 4)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
 
@@ -79,12 +84,25 @@ pub struct Cli {
     pub autoplay: bool,
     /// Never open a sound card (the harness: CI machines have none).
     pub no_sound: bool,
+    /// Open the stock menus one after another with no world, save a screenshot of each and a report (harness stage).
+    pub ui_tour: Option<PathBuf>,
+    /// Steps driving the menus like a player (`click=Join Game,menu=class:30,shot=a,...`); see `app::UiScript`.
+    pub ui_script: Option<String>,
 }
 
 impl Cli {
     /// Runs for `--duration` seconds, then writes the report and exits.
     pub fn timed(&self) -> bool {
         self.flythrough || self.autoplay
+    }
+
+    /// No world to start with: the player begins in the menus (no automation or direct-connect flag given).
+    pub fn menu_mode(&self) -> bool {
+        !(self.flythrough
+            || self.show_models.is_some()
+            || self.netplay()
+            || self.list
+            || self.autoplay)
     }
 
     pub fn netplay(&self) -> bool {
@@ -116,6 +134,8 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         name: "player".into(),
         autoplay: false,
         no_sound: false,
+        ui_tour: None,
+        ui_script: None,
     };
     let mut it = args.iter();
     let mut size_given = false;
@@ -169,6 +189,8 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--name" => c.name = val(a)?,
             "--autoplay" => c.autoplay = true,
             "--no-sound" => c.no_sound = true,
+            "--ui-tour" => c.ui_tour = Some(val(a)?.into()),
+            "--ui-script" => c.ui_script = Some(val(a)?),
             "--list-display-modes" => c.list = true,
             "--json" => {}
             "-h" | "--help" => return Err(String::new()),
@@ -184,7 +206,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
     if c.autoplay && !c.netplay() {
         return Err("--autoplay needs --connect or --listen".into());
     }
-    if (c.video || c.screenshot || c.timed()) && c.out.is_none() {
+    if (c.video || c.screenshot || c.timed() || c.ui_script.is_some()) && c.out.is_none() {
         c.out = Some(".".into());
     }
     Ok(c)
