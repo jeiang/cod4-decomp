@@ -21,6 +21,8 @@ usage: cod4e [options]
   --refresh <hz>         refresh rate for exclusive fullscreen
   --fullscreen <kind>    windowed (default), borderless or exclusive
   --present <mode>       auto (default, vsync), fifo, mailbox or immediate
+  --shadows <mode>       sun shadow maps: depth (default, hardware comparison), color or off
+  --no-fog / --no-lights switch the map's fog / spot and omni primary lights off
   --fov <degrees>        horizontal field of view at 4:3 (default 80); wider displays widen it (Hor+)
   --flythrough           fly the scripted path, then exit
   --duration <secs>      flythrough length (default 12)
@@ -36,6 +38,7 @@ pub struct Cli {
     pub request: Request,
     pub present: String,
     pub fov: f32,
+    pub settings: render::Settings,
     pub flythrough: bool,
     pub duration: f32,
     pub out: Option<PathBuf>,
@@ -51,6 +54,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         request: Request::default(),
         present: "auto".into(),
         fov: 80.0,
+        settings: render::Settings::default(),
         flythrough: false,
         duration: 12.0,
         out: None,
@@ -81,6 +85,16 @@ fn parse(args: &[String]) -> Result<Cli, String> {
                     FullscreenKind::parse(&v).ok_or(format!("unknown fullscreen kind {v}"))?;
             }
             "--present" => c.present = val(a)?,
+            "--shadows" => {
+                c.settings.shadows = match val(a)?.as_str() {
+                    "depth" => render::ShadowMode::Depth,
+                    "color" => render::ShadowMode::Color,
+                    "off" => render::ShadowMode::Off,
+                    other => return Err(format!("unknown shadow mode {other}")),
+                }
+            }
+            "--no-fog" => c.settings.fog = false,
+            "--no-lights" => c.settings.primary_lights = false,
             "--fov" => c.fov = val(a)?.parse().map_err(|_| "bad fov")?,
             "--duration" => c.duration = val(a)?.parse().map_err(|_| "bad duration")?,
             "--out" => c.out = Some(val(a)?.into()),

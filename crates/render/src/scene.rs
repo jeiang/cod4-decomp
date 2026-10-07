@@ -2,7 +2,7 @@
 //! One map's GPU data: world mesh, model meshes, the model-lighting volume, and the sun.
 
 use crate::gpu::Gpu;
-use crate::lightgrid::ModelLighting;
+use crate::lightgrid::{LightingEnv, ModelLighting, SightTrace};
 use crate::texture::{self, Tex};
 use crate::art::MapArt;
 use assets::zone::gfx::{Material, TechniqueSet};
@@ -11,6 +11,7 @@ use assets::zone::gfxworld::GfxWorld;
 use assets::zone::xmodel::XModel;
 use assets::zone::{Asset, DecodeFilter, XAssetType, Zone};
 use glam::{Mat4, Vec3};
+use sim::cm::CollisionWorld;
 use sm3::SamplerDim;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -32,6 +33,8 @@ pub struct MapData {
     pub com_lights: Arc<[ComPrimaryLight]>,
     /// The light definitions the primary lights name (attenuation ramps).
     pub light_defs: Vec<Arc<LightDef>>,
+    /// The map's collision data, for the sight tests of the light grid.
+    pub clipmap: Option<Arc<assets::zone::clipmap::Clipmap>>,
     /// The full-screen materials of `code_post_gfx_mp` (glow, depth of field, film, shell shock, and the filters).
     pub post_materials: Vec<Arc<Material>>,
     /// Art settings of the map: its fog and the vision file with the glow and film values.
@@ -62,6 +65,7 @@ impl MapData {
     pub fn load(install: &Path, map: &str) -> Result<MapData, LoadError> {
         let mut world = None;
         let mut com_world = None;
+        let mut clipmap = None;
         let mut techsets = Vec::new();
         let mut light_defs = Vec::new();
         let mut post_materials = Vec::new();
@@ -77,6 +81,7 @@ impl MapData {
             z.decode(&keep, |a| match a {
                 Asset::GfxWorld(w) => world = Some(w),
                 Asset::ComWorld(c) => com_world = Some(c),
+                Asset::Clipmap(c) if zone == map => clipmap = Some(c),
                 Asset::LightDef(l) => light_defs.push(l),
                 Asset::TechniqueSet(t) => techsets.push(t),
                 Asset::Material(m) if zone == "code_post_gfx_mp" => post_materials.push(m),
@@ -104,6 +109,7 @@ impl MapData {
             techsets,
             com_lights: com_world.map(|c| c.primary_lights.clone()).unwrap_or_else(|| Arc::from([])),
             light_defs,
+            clipmap,
             post_materials,
             art: MapArt::parse(art_script.as_deref(), vision.as_deref()),
         })
@@ -132,6 +138,8 @@ pub struct Scene {
     pub world_mesh: Arc<Mesh>,
     pub lighting: ModelLighting,
     pub lighting_tex: Arc<Tex>,
+    /// The map's collision world, for sight traces.
+    pub collision: Option<Arc<CollisionWorld>>,
     pub sun_dir: Vec3,
     pub sun_color: Vec3,
     models: HashMap<(usize, usize), Arc<Mesh>>,
@@ -155,7 +163,12 @@ impl Scene {
                 usage: wgpu::BufferUsages::INDEX,
             }),
         });
-        let lighting = ModelLighting::new(&world, 1024);
+        let collision = data.clipmap.clone().map(|c| Arc::new(CollisionWorld::new(c)));
+        let env = LightingEnv {
+            sight: collision.as_deref().map(|c| c as &dyn SightTrace),
+            lights: &data.com_lights,
+        };
+        let lighting = ModelLighting::new(&world, 1024, &env);
         let lighting_tex = Arc::new(upload_lighting(gpu, &lighting));
         let (sun_dir, sun_color) = match &world.sun_light {
             Some(l) => (Vec3::from(l.dir), Vec3::from(l.color)),
@@ -169,6 +182,7 @@ impl Scene {
             world_mesh,
             lighting,
             lighting_tex,
+            collision,
             sun_dir,
             sun_color,
             models: HashMap::new(),

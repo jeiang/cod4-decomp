@@ -150,6 +150,8 @@ pub struct FrameStats {
     /// GPU time of the most recent frame whose timestamps have come back (a few frames behind), if the device can
     /// time passes.
     pub gpu_ms: Option<f64>,
+    /// This frame's number for [`Renderer::take_gpu_times`]; 0 when the device cannot time passes.
+    pub frame: u64,
 }
 
 struct Draw {
@@ -320,6 +322,23 @@ impl Renderer {
         };
         r.prewarm();
         r
+    }
+
+    /// GPU times of frames that finished since the last call: `(FrameStats::frame, milliseconds)`. Results trail the
+    /// frame by a few frames.
+    pub fn take_gpu_times(&mut self) -> Vec<(u64, f64)> {
+        self.timer.as_mut().map_or_else(Vec::new, GpuTimer::take_finished)
+    }
+
+    /// Wait for the frames in flight and return their GPU times, as [`Renderer::take_gpu_times`].
+    pub fn flush_gpu_times(&mut self) -> Vec<(u64, f64)> {
+        match self.timer.as_mut() {
+            Some(t) => {
+                t.flush(&self.gpu);
+                t.take_finished()
+            }
+            None => Vec::new(),
+        }
     }
 
     fn hsm(&self) -> bool {
@@ -969,6 +988,7 @@ impl Renderer {
         if let Some(t) = self.timer.as_mut() {
             t.submitted();
             stats.gpu_ms = t.last_total_ms;
+            stats.frame = t.frame();
         }
         stats.cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
         stats

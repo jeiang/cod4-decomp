@@ -17,8 +17,8 @@ struct Slot {
     staging: wgpu::Buffer,
     ready: Arc<AtomicBool>,
     in_flight: bool,
-    /// Submission order, so results are taken oldest first.
-    seq: u64,
+    /// The frame (count of [`GpuTimer::begin_frame`] calls) whose passes the slot holds.
+    frame: u64,
     names: Vec<&'static str>,
 }
 
@@ -29,7 +29,9 @@ pub struct GpuTimer {
     /// Nanoseconds per tick.
     period: f64,
     names: Vec<&'static str>,
-    seq: u64,
+    frame: u64,
+    /// Completed frames not yet taken: `(frame, total ms)`.
+    finished: Vec<(u64, f64)>,
     /// The slot this frame's results go to.
     current: Option<usize>,
     /// Pass durations of the most recent completed frame, in milliseconds.
@@ -56,7 +58,7 @@ impl GpuTimer {
                 }),
                 ready: Arc::new(AtomicBool::new(false)),
                 in_flight: false,
-                seq: 0,
+                frame: 0,
                 names: Vec::new(),
             })
             .collect();
@@ -75,7 +77,8 @@ impl GpuTimer {
             slots,
             period: f64::from(gpu.queue.get_timestamp_period()),
             names: Vec::new(),
-            seq: 0,
+            frame: 0,
+            finished: Vec::new(),
             current: None,
             last: Vec::new(),
             last_total_ms: None,
@@ -86,6 +89,7 @@ impl GpuTimer {
     pub fn begin_frame(&mut self, gpu: &Gpu) {
         let _ = gpu.device.poll(wgpu::PollType::Poll);
         self.collect();
+        self.frame += 1;
         self.names.clear();
         self.current = self.slots.iter().position(|s| !s.in_flight);
     }
@@ -95,7 +99,7 @@ impl GpuTimer {
         let mut done: Vec<usize> = (0..self.slots.len())
             .filter(|&i| self.slots[i].in_flight && self.slots[i].ready.load(Ordering::Acquire))
             .collect();
-        done.sort_by_key(|&i| self.slots[i].seq);
+        done.sort_by_key(|&i| self.slots[i].frame);
         for i in done {
             self.read(i);
         }
@@ -128,6 +132,19 @@ impl GpuTimer {
         let first = (0..slot.names.len()).map(|k| ticks[2 * k]).min();
         let end = (0..slot.names.len()).map(|k| ticks[2 * k + 1]).max();
         self.last_total_ms = first.zip(end).map(|(a, b)| ms(a, b));
+        if let Some(total) = self.last_total_ms {
+            self.finished.push((slot.frame, total));
+        }
+    }
+
+    /// The frame number of the frame being recorded: 1 for the first [`GpuTimer::begin_frame`].
+    pub fn frame(&self) -> u64 {
+        self.frame
+    }
+
+    /// Frames whose timings arrived since the last call: `(frame number, GPU milliseconds first begin to last end)`.
+    pub fn take_finished(&mut self) -> Vec<(u64, f64)> {
+        std::mem::take(&mut self.finished)
     }
 
     /// Timestamp writes for a pass named `name`; `None` when this frame cannot be timed.
@@ -170,8 +187,7 @@ impl GpuTimer {
             return;
         }
         let slot = &mut self.slots[i];
-        self.seq += 1;
-        slot.seq = self.seq;
+        slot.frame = self.frame;
         slot.names = std::mem::take(&mut self.names);
         slot.in_flight = true;
         let ready = slot.ready.clone();

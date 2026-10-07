@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 assets = { path = "../assets" }
+sim = { path = "../sim" }
 sm3 = { path = "../sm3" }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = "0.34.1"
