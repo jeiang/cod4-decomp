@@ -360,7 +360,11 @@ pub(super) fn load(s: &mut Stream, p: Ptr) -> Result<Option<Arc<FxEffectDef>>> {
     load_at(s, None, p)
 }
 
-pub(super) fn load_at(s: &mut Stream, slot: Option<Addr>, p: Ptr) -> Result<Option<Arc<FxEffectDef>>> {
+pub(super) fn load_at(
+    s: &mut Stream,
+    slot: Option<Addr>,
+    p: Ptr,
+) -> Result<Option<Arc<FxEffectDef>>> {
     s.temp_asset_at(slot, p, 4, EFFECT_SIZE, effect)
 }
 
