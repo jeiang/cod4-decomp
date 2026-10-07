@@ -87,6 +87,8 @@ pub struct NetPlay {
     c: Counters,
     auto: Option<Auto>,
     auto_join: Option<net::ui::AutoJoin>,
+    /// Events for the menu runtime (a person's menus drain them; autoplay answers them itself).
+    ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
     sound: ClientSound,
 }
@@ -123,6 +125,7 @@ impl NetPlay {
             c: Counters::default(),
             auto: autoplay.then(Auto::default),
             auto_join: autoplay.then(net::ui::AutoJoin::default),
+            ui_events: Vec::new(),
             last_eye: None,
             sound,
         })
@@ -135,6 +138,21 @@ impl NetPlay {
     /// The server has put the player in the world (alive at least once).
     pub fn spawned(&self) -> bool {
         self.c.spawned
+    }
+
+    /// The server's UI events since the last call, in order (open a menu, set a dvar, print, ...).
+    pub fn take_ui_events(&mut self) -> Vec<net::ui::UiEvent> {
+        std::mem::take(&mut self.ui_events)
+    }
+
+    /// The UI state the server replicates (hud elements, objectives, configstrings, client dvars).
+    pub fn ui_state(&mut self) -> Option<&mut net::ui::ClientUiState> {
+        self.net.ui()
+    }
+
+    /// The client number the server gave this player.
+    pub fn own_client(&self) -> Option<u16> {
+        self.net.latest().map(|s| s.ps.client_num)
     }
 
     /// Sends a client command line to the server (`menuresponse <menu> <response>`).
@@ -520,10 +538,12 @@ impl NetPlay {
     /// The autoplay answers the menus the scripts open (team, then class) as a person would; a
     /// person's menus are the menu runtime's, which drains the same events.
     fn answer_menus(&mut self) {
+        let Some(ui) = self.net.ui() else { return };
         let Some(join) = self.auto_join.as_mut() else {
+            let events = ui.drain_events();
+            self.ui_events.extend(events);
             return;
         };
-        let Some(ui) = self.net.ui() else { return };
         let answers: Vec<String> = ui
             .drain_events()
             .iter()
