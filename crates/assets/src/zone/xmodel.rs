@@ -526,3 +526,8 @@ fn xmodel(s: &mut Stream, h: &[u8]) -> Result<XModel> {
 pub(super) fn load(s: &mut Stream, p: Ptr) -> Result<Option<Arc<XModel>>> {
     s.temp_asset(p, 4, XMODEL_SIZE, xmodel)
 }
+
+/// As [`load`], for a pointer stored in a persistent field at `slot`.
+pub(super) fn load_at(s: &mut Stream, slot: Option<Addr>, p: Ptr) -> Result<Option<Arc<XModel>>> {
+    s.temp_asset_at(slot, p, 4, XMODEL_SIZE, xmodel)
+}
