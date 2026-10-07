@@ -712,7 +712,7 @@ impl Viewer {
                 "status": if ok { "ok" } else { "failed" },
                 "steps": sc.results,
                 "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
-                "net": st.net.as_ref().map(NetPlay::report),
+                "net": st.net.as_mut().map(NetPlay::report),
             });
             let _ = std::fs::write(
                 out.join("ui-script.json"),
@@ -1073,8 +1073,9 @@ fn start_session(
         .ok_or("the map has no collision data")?;
     let lib = Library::load(&cli.install, map)?;
     let limits = st.input.pitch_limits();
+    let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
     st.net = Some(NetPlay::connect(
-        lib, clipmap, addr, &cli.name, limits, false,
+        lib, clipmap, addr, &cli.name, limits, false, sound,
     )?);
     st.listen = listen;
     st.renderer = Some(r);
