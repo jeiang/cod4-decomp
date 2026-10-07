@@ -20,10 +20,10 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use sim::Vec3;
 use sim::cm::{Collide, ENTITYNUM_NONE, Trace};
 use sim::contents::{self, MASK_PLAYERSOLID, PLAYER};
 use sim::pm::{PLAYER_MAXS, PLAYER_MINS};
-use sim::Vec3;
 
 use crate::game::{SpawnVars, parse_spawn_vars};
 
@@ -675,7 +675,15 @@ impl<'a, W: Collide> Gen<'a, W> {
 
     /// The floor under `(x, y)` for a hull starting around `from_z`. Every lattice cell is
     /// asked by up to eight neighbours at the same height on flat ground, so answers are kept.
-    fn land(&mut self, from_z: f32, x: f32, y: f32, maxs_z: f32, centre: bool, reach: Reach) -> Land {
+    fn land(
+        &mut self,
+        from_z: f32,
+        x: f32,
+        y: f32,
+        maxs_z: f32,
+        centre: bool,
+        reach: Reach,
+    ) -> Land {
         let key = [
             x.to_bits(),
             y.to_bits(),
@@ -781,11 +789,7 @@ impl<'a, W: Collide> Gen<'a, W> {
                 from[1] + (to[1] - from[1]) * f,
                 from[2] + (to[2] - from[2]) * f,
             ];
-            let t = self.tr(
-                [p[0], p[1], p[2] + TOL],
-                [p[0], p[1], p[2] - TOL],
-                maxs_z,
-            );
+            let t = self.tr([p[0], p[1], p[2] + TOL], [p[0], p[1], p[2] - TOL], maxs_z);
             if t.start_solid || t.all_solid || t.fraction >= 1.0 {
                 return false;
             }
@@ -796,7 +800,11 @@ impl<'a, W: Collide> Gen<'a, W> {
     /// A standing jump onto a ledge: straight up beside it, then across at ledge height.
     fn jumps(&mut self, from: Vec3, to: Vec3, maxs_z: f32) -> bool {
         let h = to[2] + LIFT;
-        let up = self.tr([from[0], from[1], from[2] + LIFT], [from[0], from[1], h], maxs_z);
+        let up = self.tr(
+            [from[0], from[1], from[2] + LIFT],
+            [from[0], from[1], h],
+            maxs_z,
+        );
         if !clear(&up) {
             return false;
         }
@@ -870,11 +878,8 @@ impl<'a, W: Collide> Gen<'a, W> {
             return None;
         }
         let id = self.pos.len() as u32;
-        self.pos.push([
-            (c.0 as f32 + 0.5) * CELL,
-            (c.1 as f32 + 0.5) * CELL,
-            z,
-        ]);
+        self.pos
+            .push([(c.0 as f32 + 0.5) * CELL, (c.1 as f32 + 0.5) * CELL, z]);
         let head = self.cols.insert(c, id).unwrap_or(u32::MAX);
         self.next.push(head);
         Some(id)
@@ -1013,7 +1018,7 @@ impl<'a, W: Collide> Gen<'a, W> {
         const MAXS: Vec3 = [9.0, 9.0, 70.0];
         const MIN_CLIMB: f32 = 40.0;
         let mask = MASK_PLAYERSOLID & !PLAYER;
-        let mut probe = |g: &mut Self, a: Vec3, b: Vec3| {
+        let probe = |g: &mut Self, a: Vec3, b: Vec3| {
             g.traces += 1;
             g.world.trace(a, b, MINS, MAXS, ENTITYNUM_NONE, mask)
         };
@@ -1028,7 +1033,11 @@ impl<'a, W: Collide> Gen<'a, W> {
         let mut top = p[2];
         for k in 1..=40 {
             let z = p[2] + 16.0 * k as f32;
-            let t = probe(self, [touch[0], touch[1], z], [touch[0] + d[0] * 8.0, touch[1] + d[1] * 8.0, z]);
+            let t = probe(
+                self,
+                [touch[0], touch[1], z],
+                [touch[0] + d[0] * 8.0, touch[1] + d[1] * 8.0, z],
+            );
             if t.start_solid || t.fraction >= 1.0 || t.surface_flags & SURF_LADDER == 0 {
                 break;
             }
@@ -1116,7 +1125,12 @@ impl<'a, W: Collide> Gen<'a, W> {
                 continue;
             }
             let face = [-t.normal[0] / n, -t.normal[1] / n];
-            if (d[0] * face[0] + d[1] * face[1]).clamp(-1.0, 1.0).acos().to_degrees() > 60.0 {
+            if (d[0] * face[0] + d[1] * face[1])
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees()
+                > 60.0
+            {
                 continue;
             }
             let over = t.surface_flags & SURF_MANTLEOVER != 0;
@@ -1201,7 +1215,9 @@ impl<'a, W: Collide> Gen<'a, W> {
         for &c in &comp {
             size[c as usize] += 1;
         }
-        let main = (0..ncomp).max_by_key(|&c| (size[c], std::cmp::Reverse(c))).unwrap_or(0);
+        let main = (0..ncomp)
+            .max_by_key(|&c| (size[c], std::cmp::Reverse(c)))
+            .unwrap_or(0);
         for s in 0..nseeds as usize {
             let c = comp[s] as usize;
             if c == main || size[c] >= POCKET {
@@ -1319,7 +1335,13 @@ fn csr(n: usize, edges: &[(u32, u32, u8)]) -> (Vec<u32>, Vec<u32>, Vec<u8>) {
 }
 
 /// CSR adjacency, component ids, cell index and stats from raw positions and edges.
-fn build(pos: Vec<Vec3>, edges: &[(u32, u32, u8)], traces: u32, used: u32, dropped: u32) -> NavMesh {
+fn build(
+    pos: Vec<Vec3>,
+    edges: &[(u32, u32, u8)],
+    traces: u32,
+    used: u32,
+    dropped: u32,
+) -> NavMesh {
     let n = pos.len();
     let (edge_start, edge_to, edge_flags) = csr(n, edges);
     let (comp, ncomp) = scc(n, &edge_start, &edge_to);
@@ -1778,15 +1800,16 @@ mod tests {
             .collect();
         assert!(!crouched.is_empty());
         assert!(
-            crouched
-                .iter()
-                .all(|w| m.node_pos(w[1])[0] > -16.0),
+            crouched.iter().all(|w| m.node_pos(w[1])[0] > -16.0),
             "only links into the low area crouch"
         );
         // No smoothing across crouch links.
         let mut q = p.clone();
         m.smooth(&w, &mut q);
-        assert!(q.windows(2).any(|w| m.edge_flags(w[0], w[1]).is_some_and(|f| f & edge::CROUCH != 0)));
+        assert!(q.windows(2).any(|w| {
+            m.edge_flags(w[0], w[1])
+                .is_some_and(|f| f & edge::CROUCH != 0)
+        }));
     }
 
     #[test]
@@ -1839,10 +1862,7 @@ mod tests {
     fn astar_takes_cheaper_detour_over_costly_crouch() {
         // Direct 0->1 is crouch (x1.5 = 150); the 0->2->1 detour is 2 * 72 = 144.
         let pos = vec![[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [50.0, 52.0, 0.0]];
-        let m = NavMesh::from_graph(
-            pos,
-            &[(0, 1, edge::CROUCH), (0, 2, 0), (2, 1, 0)],
-        );
+        let m = NavMesh::from_graph(pos, &[(0, 1, edge::CROUCH), (0, 2, 0), (2, 1, 0)]);
         let (mut sc, mut out) = (PathScratch::new(&m), Vec::new());
         assert!(m.path(NodeId(0), NodeId(1), &mut sc, &mut out));
         assert_eq!(out, [NodeId(0), NodeId(2), NodeId(1)]);
@@ -1888,7 +1908,11 @@ mod tests {
         let classes: Vec<_> = p.iter().map(|s| s.class.as_str()).collect();
         assert_eq!(
             classes,
-            ["mp_tdm_spawn", "mp_global_intermission", "mp_tdm_spawn_axis_start"]
+            [
+                "mp_tdm_spawn",
+                "mp_global_intermission",
+                "mp_tdm_spawn_axis_start"
+            ]
         );
         assert_eq!(p[2].origin, [7.0, 8.0, 9.0]);
     }
