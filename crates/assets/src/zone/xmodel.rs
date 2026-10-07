@@ -2,7 +2,7 @@
 //! XModel: bones, collision, hit parts, surfaces/LODs in VERTEX/INDEX.
 
 use super::error::{Result, ZoneError};
-use super::gfx::{Material, Name, material_ptr};
+use super::gfx::{Material, Name, material_ptr_at};
 use super::phys::{self, PhysPreset};
 use super::stream::{Addr, Block, Fields, Ptr, Stream};
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use std::sync::Arc;
 const XMODEL_SIZE: u32 = 220;
 const SURFACE_SIZE: u32 = 56;
 const VERTEX_SIZE: u32 = 32;
+const PLANE_SIZE: u32 = 20;
 const TRI_SIZE: u32 = 6;
 
 #[derive(Debug)]
@@ -128,7 +129,8 @@ pub struct Brush {
     pub base_adjacent_side: Arc<[u8]>,
     pub first_adjacent_side_offsets: [[i16; 3]; 2],
     pub edge_count: [[u8; 3]; 2],
-    pub planes: Arc<[Plane]>,
+    /// One per side; shared with `sides[i].plane` when the zone aliases them.
+    pub planes: Arc<[Arc<Plane>]>,
 }
 
 #[derive(Debug)]
@@ -231,14 +233,31 @@ fn brush(s: &mut Stream, h: &[u8]) -> Result<Brush> {
         let first_adjacent_side_offset = i16s(f);
         let edge_count = f.u8();
         Ok(BrushSide {
-            plane: s.shared(plane_ptr, 4, 20, plane)?,
+            plane: s.shared(plane_ptr, 4, PLANE_SIZE, plane)?,
             material_num,
             first_adjacent_side_offset,
             edge_count,
         })
     })?;
     let base_adjacent_side = s.array(adjacent, total_edges, 1, 1, |_, f| Ok(f.u8()))?;
-    let planes = s.array(planes, num_sides, 4, 20, |_, f| plane_fields(f))?;
+    let planes: Arc<[Arc<Plane>]> = match planes {
+        // The planes are the ones the sides already loaded, back to back.
+        Ptr::Offset(a) => (0..num_sides)
+            .map(|i| {
+                s.lookup::<Arc<Plane>>(Addr {
+                    block: a.block,
+                    offset: a.offset + i * PLANE_SIZE,
+                })
+            })
+            .collect::<Result<_>>()?,
+        p => s
+            .array(p, num_sides, 4, PLANE_SIZE, |_, f| {
+                plane_fields(f).map(Arc::new)
+            })?
+            .iter()
+            .cloned()
+            .collect(),
+    };
     Ok(Brush {
         mins,
         contents,
@@ -385,33 +404,6 @@ fn surface(s: &mut Stream, f: &mut Fields) -> Result<Surface> {
     })
 }
 
-/// An array of material pointers. A first occurrence stored as `Follow` is
-/// aliased by the address of its slot in the array (the array itself is not shared).
-fn material_handles(s: &mut Stream, p: Ptr, count: u32) -> Result<Arc<[Option<Arc<Material>>]>> {
-    match p {
-        Ptr::Null => Ok(Arc::from(Vec::new())),
-        Ptr::Offset(a) => Err(ZoneError::BadOffset(a)),
-        Ptr::Insert => Err(ZoneError::Invalid("insert pointer on material handles")),
-        Ptr::Follow => {
-            let (at, bytes) = s.load(4, count * 4)?;
-            let mut v = Vec::with_capacity(count as usize);
-            for (i, c) in bytes.as_chunks::<4>().0.iter().enumerate() {
-                let p = Ptr::from_raw(u32::from_le_bytes(*c))?;
-                let m = material_ptr(s, p)?;
-                if let (Ptr::Follow, Some(m)) = (p, &m) {
-                    let slot = Addr {
-                        block: at.block,
-                        offset: at.offset + 4 * i as u32,
-                    };
-                    s.register(slot, m.clone());
-                }
-                v.push(m);
-            }
-            Ok(v.into())
-        }
-    }
-}
-
 fn xmodel(s: &mut Stream, h: &[u8]) -> Result<XModel> {
     let mut f = Fields::new(h);
     let name = f.ptr()?;
@@ -467,7 +459,10 @@ fn xmodel(s: &mut Stream, h: &[u8]) -> Result<XModel> {
         })
     })?;
     let surfs = s.array(surfs, num_surfs.into(), 4, SURFACE_SIZE, surface)?;
-    let materials = material_handles(s, materials, num_surfs.into())?;
+    let materials = s.array(materials, num_surfs.into(), 4, 4, |s, f| {
+        let slot = f.slot();
+        material_ptr_at(s, slot, f.ptr()?)
+    })?;
     let coll_surfs = s.array(coll_surfs, num_coll_surfs, 4, 44, |s, f| {
         let tris = f.ptr()?;
         let tri_count = f.u32();
