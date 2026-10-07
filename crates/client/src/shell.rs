@@ -248,9 +248,6 @@ impl Shell {
     /// Carries out one thing the server asked of the UI.
     pub fn apply(&mut self, input: &mut Input, ev: net::ui::UiEvent) {
         use net::ui::UiEvent;
-        if std::env::var_os("COD4E_UI_LOG").is_some() {
-            eprintln!("ui: server event {ev:?}");
-        }
         match ev {
             UiEvent::SetDvar { name, value } => input.cvars.set(&name, &value, false),
             UiEvent::OpenMenu { name, mouse } => {
@@ -259,7 +256,11 @@ impl Shell {
             }
             UiEvent::CloseMenu { name } => {
                 let target = if name.is_empty() {
-                    self.ui.open_menus().last().map(|s| (*s).to_owned()).unwrap_or_default()
+                    self.ui
+                        .open_menus()
+                        .last()
+                        .map(|s| (*s).to_owned())
+                        .unwrap_or_default()
                 } else {
                     name
                 };
@@ -268,8 +269,11 @@ impl Shell {
             UiEvent::CloseIngameMenu => self.close_all(input),
             UiEvent::Print { kind, text } => self.st.messages.push((kind, text)),
             UiEvent::Announce { text } => self.st.messages.push((net::ui::PrintKind::Bold, text)),
-            UiEvent::Chat { client, text, .. } => self.st.messages.push((net::ui::PrintKind::Console, format!("{client}: {text}"))),
-            UiEvent::Map { .. } => {}
+            UiEvent::Chat { client, text, .. } => self
+                .st
+                .messages
+                .push((net::ui::PrintKind::Console, format!("{client}: {text}"))),
+            UiEvent::Map { .. } | UiEvent::Scores | UiEvent::Obituary(_) => {}
         }
     }
 

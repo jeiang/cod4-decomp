@@ -359,7 +359,7 @@ impl Viewer {
                 .ok_or("the map has no collision data")?;
             let lib = Library::load(&self.cli.install, &self.cli.map)?;
             let limits = Input::detached().pitch_limits();
-            net = Some(NetPlay::connect(
+            let mut n = NetPlay::connect(
                 lib,
                 clipmap,
                 addr,
@@ -371,7 +371,9 @@ impl Viewer {
                     &self.cli.map,
                     !self.cli.no_sound,
                 ),
-            )?);
+            )?;
+            n.set_autojoin(self.cli.autojoin || self.cli.autoplay);
+            net = Some(n);
         }
         let mut input = Input::new(self.cli.config.clone());
         let mut shell = if self.cli.flythrough || self.cli.show_models.is_some() {

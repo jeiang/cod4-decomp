@@ -135,6 +135,11 @@ impl NetPlay {
         self.net.refused()
     }
 
+    /// Answers the team and class menus with defaults (what a person's menus do when they pick the first choices).
+    pub fn set_autojoin(&mut self, on: bool) {
+        self.auto_join = on.then(net::ui::AutoJoin::default);
+    }
+
     /// The server has put the player in the world (alive at least once).
     pub fn spawned(&self) -> bool {
         self.c.spawned
@@ -143,16 +148,6 @@ impl NetPlay {
     /// The server's UI events since the last call, in order (open a menu, set a dvar, print, ...).
     pub fn take_ui_events(&mut self) -> Vec<net::ui::UiEvent> {
         std::mem::take(&mut self.ui_events)
-    }
-
-    /// The UI state the server replicates (hud elements, objectives, configstrings, client dvars).
-    pub fn ui_state(&mut self) -> Option<&mut net::ui::ClientUiState> {
-        self.net.ui()
-    }
-
-    /// The client number the server gave this player.
-    pub fn own_client(&self) -> Option<u16> {
-        self.net.latest().map(|s| s.ps.client_num)
     }
 
     /// Sends a client command line to the server (`menuresponse <menu> <response>`).
@@ -234,7 +229,11 @@ impl NetPlay {
             ps.origin[2] + err[2],
         ];
         let dead = matches!(ps.pm_type, PmType::Dead | PmType::DeadLinked);
-        self.c.spawned |= !dead;
+        // Alive in the world: a spectator (before the team and class are chosen) has a view but no body.
+        self.c.spawned |= matches!(
+            ps.pm_type,
+            PmType::Normal | PmType::NormalLinked | PmType::LastStand
+        );
         if self.c.start.is_none() {
             self.c.start = Some(feet);
         } else {

@@ -193,9 +193,6 @@ impl Ui {
 
     fn paint_menu(&mut self, host: &mut dyn Host, p: &mut Painter, m: usize) {
         if !self.menu_visible(host, m) {
-            if std::env::var_os("COD4E_UI_DEBUG").is_some() && self.stack.contains(&m) {
-                eprintln!("ui: open menu {} is not visible (flags {:#x})", self.menus[m].name, self.menus[m].dyn_flags);
-            }
             return;
         }
         let def = self.menus[m].def.clone();
