@@ -176,7 +176,7 @@ fn norm(s: &str, drop: &str) -> String {
 const CONST_ALIASES: &[(&str, &str)] = &[
     ("featherparms", "outdoorfeatherparms"),
     ("time", "gametime"),
-    ("nearplaneorg", "nearplaneorg"),
+    ("fogconsts", "fog"),
 ];
 const TEXTURE_ALIASES: &[(&str, &str)] = &[
     ("skymap", "sky"),
@@ -198,7 +198,8 @@ fn lookup(names: &[&str], key: &str, drop: &str, aliases: &[(&str, &str)]) -> Op
 }
 
 /// Code-constant id for a CTAB constant name (`worldViewProjectionMatrix`, `sunPosition`, ...). `filterTap` and other
-/// arrays resolve to the first element.
+/// arrays resolve to the first element. A matrix name resolves to its plain variant: the shader's CTAB does not say
+/// whether the register holds the matrix transposed or inverted, only the technique's argument does.
 pub fn from_ctab_name(name: &str) -> Option<u32> {
     let n = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '[' || c == ']');
     lookup(&NAMES, n, "", CONST_ALIASES).or_else(|| lookup(&NAMES, &format!("{n}0"), "", &[]))
