@@ -13,13 +13,21 @@ pub type Command = Vec<String>;
 fn arity(name: &str) -> Option<usize> {
     Some(match name.to_ascii_lowercase().as_str() {
         "focusfirst" | "wait" | "getautoupdate" => 0,
-        "open" | "close" | "ingameopen" | "ingameclose" | "show" | "hide" | "showmenu" | "hidemenu" | "fadein"
-        | "fadeout" | "setfocus" | "setfocusbydvar" | "exec" | "execnow" | "play" | "scriptmenuresponse"
-        | "feedertop" | "feederbottom" | "openforgametype" | "closeforgametype" | "setbackground" => 1,
-        "setdvar" | "set" | "setlocalvarbool" | "setlocalvarint" | "setlocalvarfloat" | "setlocalvarstring" => 2,
-        "execondvarstringvalue" | "execondvarintvalue" | "execondvarfloatvalue" | "execnowondvarstringvalue"
-        | "execnowondvarintvalue" | "execnowondvarfloatvalue" | "scriptmenurespondondvarstringvalue"
-        | "scriptmenurespondondvarintvalue" | "scriptmenurespondondvarfloatvalue" => 3,
+        "open" | "close" | "ingameopen" | "ingameclose" | "show" | "hide" | "showmenu"
+        | "hidemenu" | "fadein" | "fadeout" | "setfocus" | "setfocusbydvar" | "exec"
+        | "execnow" | "play" | "scriptmenuresponse" | "feedertop" | "feederbottom"
+        | "openforgametype" | "closeforgametype" | "setbackground" => 1,
+        "setdvar" | "set" | "setlocalvarbool" | "setlocalvarint" | "setlocalvarfloat"
+        | "setlocalvarstring" => 2,
+        "execondvarstringvalue"
+        | "execondvarintvalue"
+        | "execondvarfloatvalue"
+        | "execnowondvarstringvalue"
+        | "execnowondvarintvalue"
+        | "execnowondvarfloatvalue"
+        | "scriptmenurespondondvarstringvalue"
+        | "scriptmenurespondondvarintvalue"
+        | "scriptmenurespondondvarfloatvalue" => 3,
         "setcolor" | "setitemcolor" => 6,
         _ => return None,
     })
@@ -117,7 +125,9 @@ mod tests {
 
     #[test]
     fn fixed_arity_commands_need_no_separator() {
-        let c = parse(r#""setLocalVarString" "ui_team" "marines" "open" "class" "close" "self" "focusFirst" ;"#);
+        let c = parse(
+            r#""setLocalVarString" "ui_team" "marines" "open" "class" "close" "self" "focusFirst" ;"#,
+        );
         assert_eq!(
             c,
             vec![
