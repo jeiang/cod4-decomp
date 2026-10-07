@@ -50,6 +50,7 @@ usage: cod4e [options]
   --ui-tour <dir>        open the stock menus in turn, save a screenshot of each and ui.json to <dir>, then exit (harness)
   --ui-script <steps>    drive the menus like a player: click=<item>, menu=<name>[:secs], ingame[=secs], wait=<secs>, shot=<name>;
                          writes ui-script.json (and shots) to --out, then exits (harness)
+  --no-autojoin          do not answer the server's team and class menus by default (direct --listen/--connect)
   --autoplay             a scripted player instead of the keyboard, for --duration seconds (harness stage 4)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
 
@@ -88,6 +89,9 @@ pub struct Cli {
     pub ui_tour: Option<PathBuf>,
     /// Steps driving the menus like a player (`click=Join Game,menu=class:30,shot=a,...`); see `app::UiScript`.
     pub ui_script: Option<String>,
+    /// Answer the server's team and class menus with the default choices (direct `--listen`/`--connect`, until the player
+    /// picks); off with `--no-autojoin` and in menu-started matches.
+    pub autojoin: bool,
 }
 
 impl Cli {
@@ -136,6 +140,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         no_sound: false,
         ui_tour: None,
         ui_script: None,
+        autojoin: true,
     };
     let mut it = args.iter();
     let mut size_given = false;
@@ -191,6 +196,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--no-sound" => c.no_sound = true,
             "--ui-tour" => c.ui_tour = Some(val(a)?.into()),
             "--ui-script" => c.ui_script = Some(val(a)?),
+            "--no-autojoin" => c.autojoin = false,
             "--list-display-modes" => c.list = true,
             "--json" => {}
             "-h" | "--help" => return Err(String::new()),

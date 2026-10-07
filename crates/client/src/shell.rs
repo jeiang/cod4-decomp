@@ -64,6 +64,8 @@ pub struct ShellState {
     pub map_sel: usize,
     /// The live match as the expressions and HUD see it; empty in the menus.
     pub game: GameFacts,
+    /// Printed lines (feed, centre messages, chat) as the server sent them.
+    pub messages: Vec<(net::ui::PrintKind, String)>,
 }
 
 /// Facts of the running match that menu expressions read.
@@ -139,6 +141,7 @@ impl ShellState {
             gametype_sel,
             map_sel: 0,
             game: GameFacts::default(),
+            messages: Vec::new(),
         }
     }
 }
@@ -153,6 +156,7 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("ui_showEndOfGame", "0"),
     ("ui_netGametype", "war"),
     ("ui_dedicated", "0"),
+    ("onlinegame", "1"),
     ("ui_scorelimit", "0"),
     ("splitscreen", "0"),
     ("scr_allies", "usmc"),
@@ -220,6 +224,11 @@ impl Shell {
         self.ui.open_by_name(&mut h, name);
     }
 
+    pub fn close_by_name(&mut self, input: &mut Input, name: &str) {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.close_by_name(&mut h, name);
+    }
+
     pub fn close_all(&mut self, input: &mut Input) {
         let mut h = Self::host(&mut self.st, input);
         self.ui.close_all(&mut h);
@@ -234,6 +243,38 @@ impl Shell {
     pub fn click(&mut self, input: &mut Input, want: &str) -> bool {
         let mut h = Self::host(&mut self.st, input);
         self.ui.click(&mut h, want)
+    }
+
+    /// Carries out one thing the server asked of the UI.
+    pub fn apply(&mut self, input: &mut Input, ev: net::ui::UiEvent) {
+        use net::ui::UiEvent;
+        match ev {
+            UiEvent::SetDvar { name, value } => input.cvars.set(&name, &value, false),
+            UiEvent::OpenMenu { name, mouse } => {
+                self.open(input, &name);
+                self.ui.cursor_visible = mouse;
+            }
+            UiEvent::CloseMenu { name } => {
+                let target = if name.is_empty() {
+                    self.ui
+                        .open_menus()
+                        .last()
+                        .map(|s| (*s).to_owned())
+                        .unwrap_or_default()
+                } else {
+                    name
+                };
+                self.close_by_name(input, &target);
+            }
+            UiEvent::CloseIngameMenu => self.close_all(input),
+            UiEvent::Print { kind, text } => self.st.messages.push((kind, text)),
+            UiEvent::Announce { text } => self.st.messages.push((net::ui::PrintKind::Bold, text)),
+            UiEvent::Chat { client, text, .. } => self
+                .st
+                .messages
+                .push((net::ui::PrintKind::Console, format!("{client}: {text}"))),
+            UiEvent::Map { .. } | UiEvent::Scores | UiEvent::Obituary(_) => {}
+        }
     }
 
     pub fn mouse_move(&mut self, input: &mut Input, x: f32, y: f32) {

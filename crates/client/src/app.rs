@@ -204,6 +204,7 @@ const TOUR_MENUS: &[&str] = &[
     "main_controls",
     "team_marinesopfor",
     "class",
+    "changeclass",
     "scoreboard",
     "popup_leavegame",
     "endofgame",
@@ -358,7 +359,7 @@ impl Viewer {
                 .ok_or("the map has no collision data")?;
             let lib = Library::load(&self.cli.install, &self.cli.map)?;
             let limits = Input::detached().pitch_limits();
-            net = Some(NetPlay::connect(
+            let mut n = NetPlay::connect(
                 lib,
                 clipmap,
                 addr,
@@ -370,7 +371,9 @@ impl Viewer {
                     &self.cli.map,
                     !self.cli.no_sound,
                 ),
-            )?);
+            )?;
+            n.set_autojoin(self.cli.autojoin || self.cli.autoplay);
+            net = Some(n);
         }
         let mut input = Input::new(self.cli.config.clone());
         let mut shell = if self.cli.flythrough || self.cli.show_models.is_some() {
@@ -559,7 +562,22 @@ impl Viewer {
             if let Some(why) = net.refused() {
                 return Err(format!("the server refused the connection: {why}"));
             }
-            if let Some(nf) = net.frame(dt, &f) {
+            let frame_out = net.frame(dt, &f);
+            if let Some(sh) = st.shell.as_mut() {
+                for ev in net.take_ui_events() {
+                    sh.apply(&mut st.input, ev);
+                }
+                let scores = f.held_other.iter().any(|c| c == "scores");
+                if scores != sh.st.game.scoreboard {
+                    sh.st.game.scoreboard = scores;
+                    if scores {
+                        sh.open(&mut st.input, "scoreboard");
+                    } else {
+                        sh.close_by_name(&mut st.input, "scoreboard");
+                    }
+                }
+            }
+            if let Some(nf) = frame_out {
                 (st.pos, st.yaw, st.pitch) = (nf.origin, nf.yaw, nf.pitch);
                 if let Some(r) = st.renderer.as_mut() {
                     r.dynamic_models = nf.models;

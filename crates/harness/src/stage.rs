@@ -197,6 +197,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_ui::run),
     },
     StageDef {
+        name: "client-session",
+        description: "the real client gets a person into the world: direct --listen (default join answers) and the stock menus (Start New Server, team, class); the local player must spawn",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_session::run),
+    },
+    StageDef {
         name: "client-input",
         description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
         needs_install: false,
