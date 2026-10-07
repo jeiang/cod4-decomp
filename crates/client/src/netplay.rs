@@ -533,13 +533,8 @@ impl NetPlay {
             let max = 540.0 * dt;
             f.look_delta_yaw = ey.clamp(-max, max);
             f.look_delta_pitch = ep.clamp(-max, max);
-            // Pulled and released: single-shot weapons fire once per pull.
-            if visible
-                && dist < FIRE
-                && ey.abs() < 4.0
-                && ep.abs() < 4.0
-                && (a.t * 10.0) as i32 % 2 == 0
-            {
+            // Pulled for 0.35 s and released for 0.1 s: single-shot weapons fire once per pull, heavy ones need the hold.
+            if visible && dist < FIRE && ey.abs() < 4.0 && ep.abs() < 4.0 && a.t % 0.45 < 0.35 {
                 f.buttons |= buttons::ATTACK;
             }
             f.move_forward = if dist > 250.0 || !visible { 1.0 } else { 0.0 };
