@@ -9,6 +9,7 @@ use server::client::{Session, Team};
 use server::content::Content;
 use server::cvar::Cvars;
 use server::game::{Callbacks, Game};
+use sim::cm::ENTITYNUM_NONE;
 use sim::cm::test_support::{BrushSpec, MapSpec};
 use sim::contents::SOLID;
 use sim::pm::{PLAYER_MAXS, PLAYER_MINS, PmType};
@@ -267,6 +268,60 @@ fn a_shot_into_the_legs_is_not_a_headshot_and_a_miss_hurts_nobody() {
     g.client_mut(shooter).unwrap().ps.viewangles = [0.0, 90.0, 0.0];
     fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
     assert!(g.calls.is_empty());
+}
+
+/// A rifle whose hip spread is `hip` degrees in every stance and whose aimed spread is `ads`.
+fn spread_rifle(hip: f32, ads: f32) -> WeaponInfo {
+    WeaponInfo {
+        hip_spread_stand_min: hip,
+        hip_spread_stand_max: hip,
+        hip_spread_ducked_min: hip,
+        hip_spread_ducked_max: hip,
+        hip_spread_prone_min: hip,
+        hip_spread_prone_max: hip,
+        ads_spread: ads,
+        ..rifle()
+    }
+}
+
+/// Fires `shots` rounds from a fixed eye straight at a standing target 300 units away and returns how many hit.
+/// The aim never moves and the target never moves, so the only thing between a shot and a hit is the weapon's spread.
+fn rounds_that_hit(hip: f32, ads: f32, aimed: bool, shots: i32) -> (u64, u64) {
+    let (mut g, mut vm) = arena(&[], 0, vec![spread_rifle(hip, ads)]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    add_player(&mut g, &mut vm, [300.0, 0.0, 0.0], 180.0, Team::Axis);
+    let c = g.client_mut(shooter).unwrap();
+    // Eye level with the middle of the target's body.
+    c.ps.view_height_current = 35.0;
+    c.ps.aim_spread_scale = 0.0;
+    c.ps.weapon_pos_frac = if aimed { 1.0 } else { 0.0 };
+    for i in 0..shots {
+        // The game seeds each shot from the server time, which moves between shots.
+        g.level.time = 1000 + i * 50;
+        fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    }
+    (g.stats.shots, g.stats.hits)
+}
+
+#[test]
+fn aimed_fire_at_a_standing_target_hits_every_time() {
+    // 0.5 degrees is 2.6 units at 300: well inside the body.
+    assert_eq!(rounds_that_hit(8.0, 0.5, true, 200), (200, 200));
+    // A tight hip spread (2 degrees, 10 units) also stays on the torso.
+    assert_eq!(rounds_that_hit(2.0, 0.5, false, 200), (200, 200));
+}
+
+#[test]
+fn a_wide_spread_misses_some_shots_but_not_all() {
+    // 10 degrees is 53 units at 300: a 30-unit wide body takes a fair share, not everything.
+    let (shots, hits) = rounds_that_hit(10.0, 0.5, false, 400);
+    assert_eq!(shots, 400);
+    assert!(
+        (40..=280).contains(&hits),
+        "{hits} of {shots} hit with a spread of 10 degrees"
+    );
+    // Aiming down the sights tightens the same weapon to a sure hit.
+    assert_eq!(rounds_that_hit(10.0, 0.5, true, 100), (100, 100));
 }
 
 #[test]
@@ -539,6 +594,78 @@ fn stock_player(g: &mut Game, vm: &mut Vm, dx: f32, dy: f32, yaw: f32) -> u16 {
     let n = add_player(g, vm, [o[0] + dx, o[1] + dy, o[2]], yaw, Team::Axis);
     g.ent_mut(n).unwrap().model = "body_mp_usmc_assault".into();
     n
+}
+
+#[test]
+fn stock_aimed_rifle_fire_at_a_standing_player_hits_the_body_every_time() {
+    let Some(mut s) = crash() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let mut vm = vm();
+    let g = &mut s.game;
+    g.callbacks = Callbacks {
+        player_damage: Some(1),
+        ..Callbacks::default()
+    };
+    g.level.frametime = 33;
+    // Level, open floor: a spawn and a direction with 200 clear units behind it for the shooter to stand on.
+    let clip = g.content.clipmap().expect("clipmap").clone();
+    let text = &clip.map_ents.as_ref().expect("entities").entity_string;
+    let world = g.world.as_ref().expect("world");
+    let lift = |p: [f32; 3], z: f32| [p[0], p[1], p[2] + z];
+    let floor = |p: [f32; 3]| {
+        let t = world.bullet_trace(lift(p, 20.0), lift(p, -20.0), ENTITYNUM_NONE, SOLID);
+        t.fraction < 1.0 && (t.fraction * 40.0 - 20.0).abs() < 12.0
+    };
+    let (o, stand, yaw) = server::game::parse_spawn_vars(text)
+        .unwrap()
+        .iter()
+        .filter(|v| server::game::spawn_var(v, "classname") == Some("mp_tdm_spawn"))
+        .map(|v| server::game::parse_vec3(server::game::spawn_var(v, "origin").unwrap()))
+        .find_map(|o| {
+            (0..24).map(|k| k as f32 * 15.0).find_map(|yaw| {
+                let (s, c) = yaw.to_radians().sin_cos();
+                let from = [o[0] - c * 200.0, o[1] - s * 200.0, o[2]];
+                let clear = world
+                    .bullet_trace(lift(from, 45.0), lift(o, 45.0), ENTITYNUM_NONE, SOLID)
+                    .fraction
+                    >= 1.0;
+                (clear && floor(from)).then_some((o, from, yaw))
+            })
+        })
+        .expect("a spawn with open floor 200 units off");
+    let victim = add_player(g, &mut vm, o, yaw + 180.0, Team::Axis);
+    g.ent_mut(victim).unwrap().model = "body_mp_usmc_assault".into();
+    let shooter = add_player(g, &mut vm, stand, yaw, Team::Allies);
+    for t in 0..30 {
+        g.level.time = 1000 + t * 33;
+        g.client_end_frame(&mut vm, victim);
+    }
+    g.ensure_player_anims();
+    // The eye level with the chest of the standing body, aimed down the sights.
+    let c = g.client_mut(shooter).unwrap();
+    c.ps.view_height_current = 45.0;
+    c.ps.aim_spread_scale = 0.0;
+    c.ps.weapon_pos_frac = 1.0;
+    let shots = 60;
+    for i in 0..shots {
+        g.level.time = 2000 + i * 50;
+        fire_weapon(g, &mut vm, shooter, "ak47_mp");
+    }
+    let calls = damage_calls(g, victim);
+    assert_eq!(
+        (g.stats.shots, g.stats.hits, calls.len() as u64),
+        (shots as u64, shots as u64, shots as u64),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|c| c.3.contains("torso") || c.3.contains("neck")),
+        "an aimed shot at the chest hit {:?}",
+        calls.iter().map(|c| c.3.as_str()).collect::<Vec<_>>()
+    );
 }
 
 #[test]
