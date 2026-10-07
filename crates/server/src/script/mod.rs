@@ -148,7 +148,13 @@ impl Host for ScriptHost<'_> {
     fn set_field(&mut self, ent: EntRef, name: &str, value: &Value) -> Result<bool, String> {
         match ent.class {
             EntClass::Entity => match self.game.ent_mut(ent.num) {
-                Some(e) => game::set_ent_field(e, name, value),
+                Some(e) => {
+                    let set = game::set_ent_field(e, name, value)?;
+                    if set && matches!(name, "origin" | "angles") {
+                        self.game.relink(ent.num);
+                    }
+                    Ok(set)
+                }
                 None => Ok(false),
             },
             _ => Ok(false),

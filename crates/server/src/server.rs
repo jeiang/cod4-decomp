@@ -651,12 +651,26 @@ impl Server {
             let t = Instant::now();
             errors.extend(run.vm.run_current_threads(&mut host));
             gsc += t.elapsed();
-            // Client notifies and per-entity animation updates drain per notify; with no
-            // clients and no animated entities there is nothing between here and IncTime.
+            // G_XAnimUpdateEnt: each entity's animations advance one notetrack at a time and
+            // the scripts run between notetracks.
             let t = Instant::now();
+            let dt = host.game.level.frametime as f32 * 0.001;
+            for n in 0..host.game.ents.len() {
+                let n = n as u16;
+                let mut left = dt;
+                while let Some(note) = host.game.step_anim(n, left) {
+                    left -= note.elapsed;
+                    run.vm
+                        .notify_entity(n, &note.flag, &[Value::str(&note.note)]);
+                    errors.extend(run.vm.run_current_threads(&mut host));
+                }
+            }
             errors.extend(run.vm.inc_time(&mut host));
             gsc += t.elapsed();
-            // G_RunFrameForEntity, client end frames: nothing to run yet.
+            // G_RunFrameForEntity: script movers (client end frames: nothing to run yet).
+            for n in 0..host.game.ents.len() {
+                host.game.run_mover(&mut run.vm, n as u16);
+            }
         }
         self.record_errors(errors);
         if self.game.level.exit_requested {

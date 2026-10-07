@@ -82,13 +82,39 @@ fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
 
 /// Content of one layer: the boot zones, or the current map's zone.
 #[derive(Default)]
+/// What the server keeps of an animation: its length and notetracks.
+#[derive(Debug)]
+pub struct AnimInfo {
+    pub looping: bool,
+    /// Seconds (`numframes / framerate`).
+    pub length: f32,
+    /// Notetrack name and normalized time, in file order.
+    pub notes: Vec<(Arc<str>, f32)>,
+}
+
+impl AnimInfo {
+    fn new(x: &XAnimParts, strings: &[Option<Arc<str>>]) -> Self {
+        let notes = x
+            .notify
+            .iter()
+            .filter_map(|n| Some((strings.get(usize::from(n.name))?.clone()?, n.time)))
+            .collect();
+        Self {
+            looping: x.looping,
+            length: f32::from(x.num_frames) / x.frame_rate,
+            notes,
+        }
+    }
+}
+
+#[derive(Default)]
 struct Layer {
     /// Lowercase name to (tag, asset).
     raw: HashMap<String, (u8, Arc<[u8]>)>,
     tables: HashMap<String, (u8, Arc<StringTable>)>,
     weapons: HashMap<String, (u8, Arc<WeaponDef>)>,
     models: HashMap<String, (u8, Arc<XModel>)>,
-    anims: HashMap<String, (u8, Arc<XAnimParts>)>,
+    anims: HashMap<String, (u8, Arc<AnimInfo>)>,
     localize: HashMap<String, (u8, Arc<str>)>,
     clipmap: Option<(u8, Arc<Clipmap>)>,
 }
@@ -129,6 +155,7 @@ impl Content {
         } else {
             &mut self.base
         };
+        let strings = z.script_strings().to_vec();
         z.decode(&Consumer::Server, |a| match a {
             Asset::RawFile(r) => {
                 if let Some(n) = &r.name {
@@ -154,7 +181,12 @@ impl Content {
             }
             Asset::XAnimParts(x) => {
                 if let Some(n) = x.name.clone() {
-                    put(&mut layer.anims, tag, &n, x);
+                    put(
+                        &mut layer.anims,
+                        tag,
+                        &n,
+                        Arc::new(AnimInfo::new(&x, &strings)),
+                    );
                 }
             }
             Asset::Localize(l) => {
@@ -221,7 +253,7 @@ impl Content {
         get(&self.map.models, name).or_else(|| get(&self.base.models, name))
     }
 
-    pub fn anim(&self, name: &str) -> Option<&Arc<XAnimParts>> {
+    pub fn anim(&self, name: &str) -> Option<&Arc<AnimInfo>> {
         get(&self.map.anims, name).or_else(|| get(&self.base.anims, name))
     }
 
