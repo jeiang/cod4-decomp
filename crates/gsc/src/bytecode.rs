@@ -8,16 +8,17 @@
 //! continues at the next instruction.
 //!
 //! Conventions the VM relies on:
-//! * Call arguments are pushed last-to-first, then the callee pointer (`CallPtr`), then the
-//!   object (method forms), so the object is on top and argument 0 is next. The callee
-//!   binds its parameters by popping `param_count` values into locals `0..param_count`.
-//!   Missing arguments are `undefined`; extra ones are dropped.
+//! * Call arguments are pushed last-to-first (argument 0 ends on top), then the object
+//!   (method forms), then the callee pointer (`CallPtr`), which is on top. The callee binds
+//!   its parameters by popping them into locals `0..param_count`. Missing arguments are
+//!   `undefined`; passing more than `param_count` is a runtime error, as in the original.
 //! * Every call pushes exactly one result; thread calls push `undefined`.
 //! * `Jump*` with a negative offset is a backward jump: the infinite-loop guard point.
 //! * Lvalues are built as references: `RefLocal`/`RefGame` start a chain, a value on the
 //!   stack (`self`, `level`, any expression) can start one too, and `RefField`/`RefIndex`
-//!   extend it. `Store` pops the reference, then the value below it. `LoadRef` pushes the
-//!   referenced value while keeping the reference (compound assignment).
+//!   extend it. `Store` pops the reference, then the value below it. Compound assignment reads
+//!   the target as an expression and builds the reference again for the store; `Inc`/`Dec`
+//!   work on a reference. Index expressions are evaluated before the object they index.
 //! * `Waittill n` pops the event name and object, parks the thread, and on wake pushes the
 //!   notify payload padded or truncated to `n` values, first payload value on top.
 //! * `WaittillMatch n` pops the event name and object, then `n` match values (first on top).
@@ -100,55 +101,57 @@ ops! {
     RefGame = 19 [],
     RefField = 20 [U32],
     RefIndex = 21 [],
-    LoadRef = 22 [],
-    Store = 23 [],
-    Swap = 24 [],
-    Pop = 25 [],
-    Neg = 26 [],
-    Not = 27 [],
-    BitNot = 28 [],
-    ToBool = 29 [],
-    Add = 30 [],
-    Sub = 31 [],
-    Mul = 32 [],
-    Div = 33 [],
-    Mod = 34 [],
-    BitAnd = 35 [],
-    BitOr = 36 [],
-    BitXor = 37 [],
-    Shl = 38 [],
-    Shr = 39 [],
-    Eq = 40 [],
-    Ne = 41 [],
-    Lt = 42 [],
-    Le = 43 [],
-    Gt = 44 [],
-    Ge = 45 [],
-    Jump = 46 [I32],
+    Store = 22 [],
+    Pop = 23 [],
+    Neg = 24 [],
+    Not = 25 [],
+    BitNot = 26 [],
+    ToBool = 27 [],
+    Add = 28 [],
+    Sub = 29 [],
+    Mul = 30 [],
+    Div = 31 [],
+    Mod = 32 [],
+    BitAnd = 33 [],
+    BitOr = 34 [],
+    BitXor = 35 [],
+    Shl = 36 [],
+    Shr = 37 [],
+    Eq = 38 [],
+    Ne = 39 [],
+    Lt = 40 [],
+    Le = 41 [],
+    Gt = 42 [],
+    Ge = 43 [],
+    Jump = 44 [I32],
     /// Pops; jumps when falsy.
-    JumpIfFalse = 47 [I32],
+    JumpIfFalse = 45 [I32],
     /// Pops; jumps when truthy.
-    JumpIfTrue = 48 [I32],
+    JumpIfTrue = 46 [I32],
     /// `&&`: pops; when falsy pushes int 0 and jumps.
-    AndJump = 49 [I32],
+    AndJump = 47 [I32],
     /// `||`: pops; when truthy pushes int 1 and jumps.
-    OrJump = 50 [I32],
+    OrJump = 48 [I32],
     /// flags, function id, argument count.
-    CallFunc = 51 [U8, U32, U8],
+    CallFunc = 49 [U8, U32, U8],
     /// flags, argument count; the callee pointer is on the stack.
-    CallPtr = 52 [U8, U8],
+    CallPtr = 50 [U8, U8],
     /// builtin function index, argument count.
-    CallBuiltin = 53 [U16, U8],
+    CallBuiltin = 51 [U16, U8],
     /// builtin method index, argument count; the object is on top.
-    CallBuiltinMethod = 54 [U16, U8],
-    Return = 55 [],
-    ReturnUndefined = 56 [],
-    Wait = 57 [],
-    WaittillFrameEnd = 58 [],
-    Notify = 59 [U8],
-    Endon = 60 [],
-    Waittill = 61 [U8],
-    WaittillMatch = 62 [U8],
+    CallBuiltinMethod = 52 [U16, U8],
+    Return = 53 [],
+    ReturnUndefined = 54 [],
+    Wait = 55 [],
+    WaittillFrameEnd = 56 [],
+    Notify = 57 [U8],
+    Endon = 58 [],
+    Waittill = 59 [U8],
+    WaittillMatch = 60 [U8],
+    /// Pops a reference; stores its value plus one. The value must be an int.
+    Inc = 61 [],
+    /// Pops a reference; stores its value minus one. The value must be an int.
+    Dec = 62 [],
 }
 
 #[derive(Debug, Clone, Default)]

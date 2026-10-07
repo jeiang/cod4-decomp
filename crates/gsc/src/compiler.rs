@@ -64,14 +64,17 @@ pub fn compile(
         }
         symbols.push(FileSyms {
             funcs,
+            direct: HashMap::new(),
             includes: Vec::new(),
             range: start..next_id,
         });
     }
+    // Include lists, resolved to file indices.
+    let mut includes: Vec<Vec<(usize, u32)>> = vec![Vec::new(); scripts.len()];
     for (i, script) in scripts.iter().enumerate() {
         for inc in &script.includes {
             match names.iter().position(|n| *n == *inc.file) {
-                Some(j) => symbols[i].includes.push(j),
+                Some(j) => includes[i].push((j, inc.line)),
                 None => errors.push(CompileError {
                     kind: ErrorKind::UnknownFile,
                     ..file_error(
@@ -82,6 +85,29 @@ pub fn compile(
                 }),
             }
         }
+    }
+    // The original copies an included file's functions into the includer; a name that is
+    // already taken (by the file's own functions or another include) is a compile error. A
+    // file included twice, directly or through another include, is the same functions and
+    // is accepted. Stock scripts only call what they include directly; calls through a
+    // second level of includes are accepted too, resolved after the direct ones.
+    for (i, list) in includes.iter().enumerate() {
+        let mut table = symbols[i].funcs.clone();
+        for &(j, line) in list {
+            for (name, id) in &symbols[j].funcs {
+                if let Some(old) = table.insert(name.clone(), *id)
+                    && old != *id
+                {
+                    errors.push(file_error(
+                        &names[i],
+                        line,
+                        format!("function `{name}` already defined"),
+                    ));
+                }
+            }
+            symbols[i].includes.push(j);
+        }
+        symbols[i].direct = table;
     }
 
     let mut strings = Interner::default();
@@ -146,7 +172,10 @@ fn file_error(file: &str, line: u32, msg: impl Into<String>) -> CompileError {
 }
 
 struct FileSyms {
+    /// The file's own functions.
     funcs: HashMap<Name, u32>,
+    /// Own plus directly included functions.
+    direct: HashMap<Name, u32>,
     includes: Vec<usize>,
     range: std::ops::Range<u32>,
 }
@@ -283,22 +312,31 @@ impl FnCompiler<'_> {
         Ok(())
     }
 
-    /// Own file, then `#include`d files (depth first), by lowercase name.
+    /// Own and directly included functions first, then deeper includes (depth first).
     fn lookup(&self, file: usize, name: &str) -> Option<u32> {
-        fn go(files: &[FileSyms], file: usize, name: &str, seen: &mut Vec<usize>) -> Option<u32> {
+        fn deeper(
+            files: &[FileSyms],
+            file: usize,
+            name: &str,
+            seen: &mut Vec<usize>,
+        ) -> Option<u32> {
             if seen.contains(&file) {
                 return None;
             }
             seen.push(file);
-            if let Some(&id) = files[file].funcs.get(name) {
-                return Some(id);
-            }
-            files[file]
-                .includes
-                .iter()
-                .find_map(|&i| go(files, i, name, seen))
+            files[file].includes.iter().find_map(|&i| {
+                files[i]
+                    .direct
+                    .get(name)
+                    .copied()
+                    .or_else(|| deeper(files, i, name, seen))
+            })
         }
-        go(self.files, file, name, &mut Vec::new())
+        let f = &self.files[file];
+        f.direct
+            .get(name)
+            .copied()
+            .or_else(|| deeper(self.files, file, name, &mut Vec::new()))
     }
 
     /// A full canonical name, or a bare last path segment (`_utility::f`).
@@ -356,10 +394,8 @@ impl FnCompiler<'_> {
                 self.assign(target, *op, |c| c.expr(value))?;
             }
             StmtKind::IncDec { target, delta } => {
-                self.assign(target, Some(BinOp::Add), |c| {
-                    c.emit_int(*delta);
-                    Ok(())
-                })?;
+                self.lvalue(target)?;
+                self.emit(if *delta > 0 { Op::Inc } else { Op::Dec });
             }
             StmtKind::If {
                 cond,
@@ -606,11 +642,12 @@ impl FnCompiler<'_> {
                 self.emit(Op::Store);
             }
             (_, Some(op)) => {
-                self.lvalue(target)?;
-                self.emit(Op::LoadRef);
+                // The original reads the target, applies the operator, then builds the
+                // reference again for the store.
+                self.expr(target)?;
                 rhs(self)?;
                 self.emit(binop(op));
-                self.emit(Op::Swap);
+                self.lvalue(target)?;
                 self.emit(Op::Store);
             }
         }
@@ -630,8 +667,8 @@ impl FnCompiler<'_> {
                 self.emit_str(Op::RefField, name);
             }
             ExprKind::Index(b, k) => {
-                self.lvalue_base(b)?;
                 self.expr(k)?;
+                self.lvalue_base(b)?;
                 self.emit(Op::RefIndex);
             }
             _ => return self.err(ErrorKind::Semantic, "expression is not assignable"),
@@ -753,21 +790,31 @@ impl FnCompiler<'_> {
             flags |= CALL_METHOD;
         }
         let target = match &c.callee {
-            Callee::Name(n) => match self.lookup(self.file, n) {
-                Some(id) => Some(id),
-                None => return self.builtin_call(c, n, argc),
-            },
+            // Builtins are resolved first, and only for plain calls: `thread name()` always
+            // means a script function.
+            Callee::Name(n) => {
+                let builtin = c.mode == CallMode::Call
+                    && match &c.object {
+                        None => self.builtins.function(n).is_some(),
+                        Some(_) => self.builtins.method(n).is_some(),
+                    };
+                match self.lookup(self.file, n) {
+                    Some(id) if !builtin => Some(id),
+                    _ => return self.builtin_call(c, n, argc),
+                }
+            }
             Callee::Path { file, name } => Some(self.resolve(Some(&canonical_file(file)), name)?),
             Callee::Pointer(_) => None,
         };
         for a in c.args.iter().rev() {
             self.expr(a)?;
         }
-        if let Callee::Pointer(p) = &c.callee {
-            self.expr(p)?;
-        }
+        // The receiver is evaluated before the pointer, and ends up below it.
         if let Some(o) = &c.object {
             self.expr(o)?;
+        }
+        if let Callee::Pointer(p) = &c.callee {
+            self.expr(p)?;
         }
         self.line = c.line;
         match target {

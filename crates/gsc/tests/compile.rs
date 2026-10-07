@@ -57,24 +57,59 @@ fn identifiers_are_case_insensitive_but_strings_are_not() {
 }
 
 #[test]
-fn includes_resolve_after_own_functions() {
+fn includes_provide_the_included_files_own_functions() {
     let p = build(&[
         (
             "maps/mp/b.gsc",
             "helper() { return 1; } shared() { return 2; }",
         ),
-        (
-            "a.gsc",
-            "#include maps\\mp\\b; shared() { return 3; } f() { helper(); shared(); }",
-        ),
+        ("a.gsc", "#include maps\\mp\\b; f() { helper(); shared(); }"),
     ])
     .unwrap();
     let f = p.find("a", "f").unwrap();
     let code = p.functions[f as usize].disassemble(&p);
     let helper = p.find("maps/mp/b", "helper").unwrap();
-    let shared = p.find("a", "shared").unwrap();
+    let shared = p.find("maps/mp/b", "shared").unwrap();
     assert!(code[0].ends_with(&format!("CallFunc 0 {helper} 0")));
     assert!(code[2].ends_with(&format!("CallFunc 0 {shared} 0")));
+}
+
+#[test]
+fn includes_are_transitive() {
+    let p = build(&[
+        ("c.gsc", "deep() {}"),
+        ("b.gsc", "#include c; mid() { deep(); }"),
+        ("a.gsc", "#include b; f() { mid(); deep(); b::deep(); }"),
+    ])
+    .unwrap();
+    let deep = p.find("c", "deep").unwrap();
+    assert!(
+        dis(&p, "f")
+            .iter()
+            .any(|l| l == &format!("CallFunc 0 {deep} 0"))
+    );
+}
+
+#[test]
+fn an_included_name_that_is_already_taken_is_an_error() {
+    let own = err(&[
+        ("b.gsc", "shared() {}"),
+        ("a.gsc", "#include b; shared() {}"),
+    ]);
+    assert_eq!(own.message, "function `shared` already defined");
+    let twice = err(&[
+        ("b.gsc", "shared() {}"),
+        ("c.gsc", "shared() {}"),
+        ("a.gsc", "#include b; #include c;"),
+    ]);
+    assert_eq!(twice.message, "function `shared` already defined");
+    // The same file reached twice (a diamond) is not a collision.
+    build(&[
+        ("d.gsc", "shared() {}"),
+        ("b.gsc", "#include d;"),
+        ("a.gsc", "#include b; #include d;"),
+    ])
+    .unwrap();
 }
 
 #[test]
@@ -190,26 +225,22 @@ fn assignments_to_fields_and_arrays_use_references() {
         dis(&p, "f"),
         [
             "PushInt 1",
+            "PushStr 0 \"k\"",
             "PushLevel",
-            "RefField 0 \"a\"",
-            "PushStr 1 \"k\"",
+            "RefField 1 \"a\"",
             "RefIndex",
             "Store",
             "PushSelf",
-            "RefField 2 \"n\"",
-            "LoadRef",
+            "GetField 2 \"n\"",
             "PushInt 2",
             "Add",
-            "Swap",
+            "PushSelf",
+            "RefField 2 \"n\"",
             "Store",
-            "RefGame",
             "PushStr 3 \"x\"",
+            "RefGame",
             "RefIndex",
-            "LoadRef",
-            "PushInt 1",
-            "Add",
-            "Swap",
-            "Store",
+            "Inc",
             "ReturnUndefined",
         ]
     );
