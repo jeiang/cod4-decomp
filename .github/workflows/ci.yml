@@ -25,6 +25,24 @@ jobs:
         run: |
           mkdir cod4e-harness-windows
           cp target/release/{cod4e-harness,cod4e,cod4e-server}.exe cod4e-harness-windows/
+          cp crates/harness/PORTABLE-README.txt cod4e-harness-windows/README.txt
+      # The tester's path: double-click is a run with no arguments. With no
+      # install it must still write a bundle that says so (exit status 1).
+      - name: Smoke the portable folder with no install
+        shell: bash
+        working-directory: cod4e-harness-windows
+        env:
+          COD4E_NO_PROMPT: "1"
+        run: |
+          set +e
+          ./cod4e-harness.exe < /dev/null
+          [ $? -eq 1 ] || { echo "expected exit status 1"; exit 1; }
+          python -c "import glob,zipfile; z=glob.glob('cod4e-run-*.zip'); assert len(z)==1, z; a=zipfile.ZipFile(z[0]); n=a.namelist(); print(n); assert 'manifest.json' in n and 'summary.json' in n; assert b'install not found' in a.read('harness.log')"
+          mkdir ../ci-bundle && mv cod4e-run-*.zip ../ci-bundle/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cod4e-ci-bundle
+          path: ci-bundle
       - uses: actions/upload-artifact@v4
         with:
           name: cod4e-harness-windows

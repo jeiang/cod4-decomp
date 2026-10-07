@@ -1,0 +1,4 @@
+# Windows tester builds must run on a clean machine: link the C runtime
+# statically so no Visual C++ redistributable is needed.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

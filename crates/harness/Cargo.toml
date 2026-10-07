@@ -11,6 +11,22 @@ name = "cod4e-harness"
 path = "src/main.rs"
 
 [dependencies]
+assets = { version = "0.0.0", path = "../assets" }
+crash-handler = "0.8.1"
+minidumper = "0.11.0"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true
+
+[target."cfg(windows)".dependencies]
+winreg = "0.56.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
