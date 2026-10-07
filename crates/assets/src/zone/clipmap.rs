@@ -295,8 +295,12 @@ fn array<T>(
                 .ok_or(ZoneError::Invalid("clipmap array too large"))?;
             let (at, bytes) = s.load(align, len)?;
             let mut v = Vec::with_capacity(n as usize);
-            for chunk in bytes.chunks_exact(size as usize) {
-                v.push(f(s, &mut Fields::new(chunk))?);
+            for (i, chunk) in bytes.chunks_exact(size as usize).enumerate() {
+                let elem = Addr {
+                    block: at.block,
+                    offset: at.offset + i as u32 * size,
+                };
+                v.push(f(s, &mut Fields::at(chunk, elem))?);
             }
             Ok((Some(at), v.into()))
         }
@@ -372,8 +376,9 @@ fn placement(f: &mut Fields) -> Placement {
 }
 
 fn model_ref(s: &mut Stream, f: &mut Fields) -> Result<Option<Arc<XModel>>> {
+    let slot = f.slot();
     let p = f.ptr()?;
-    xmodel::load(s, p)
+    xmodel::load_at(s, slot, p)
 }
 
 fn model_pieces(s: &mut Stream, p: Ptr) -> Result<Option<Arc<XModelPieces>>> {
