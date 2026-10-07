@@ -694,11 +694,6 @@ mod tests {
 
     #[test]
     fn records_three_seconds_of_moving_pattern() {
-        // Needs a real GPU and a fast CPU: its capture cadence depends on both, so CI (software GPU) skips it.
-        if std::env::var_os("COD4E_TEST_VIDEO").is_none() {
-            eprintln!("skipping: set COD4E_TEST_VIDEO=1 to run the recorder test");
-            return;
-        }
         let Some((device, queue)) = device() else {
             eprintln!("skipping: no wgpu adapter");
             return;
@@ -745,7 +740,9 @@ mod tests {
         let t0 = Instant::now();
         let mut captured = 0u64;
         let mut ticks = 0usize;
-        while t0.elapsed() < Duration::from_secs(3) {
+        // Simulated 120 Hz render clock: capture cadence must not depend on runner speed (WARP on CI is slow).
+        while ticks < 360 {
+            let now = Duration::from_secs_f64(ticks as f64 / 120.0);
             queue.write_texture(
                 tex.as_image_copy(),
                 &patterns[ticks % 8],
@@ -760,11 +757,10 @@ mod tests {
                     depth_or_array_layers: 1,
                 },
             );
-            if rec.capture(&device, &queue, &tex, t0.elapsed()) {
+            if rec.capture(&device, &queue, &tex, now) {
                 captured += 1;
             }
             ticks += 1;
-            std::thread::sleep(Duration::from_millis(8)); // ~120 render ticks/s
         }
         let t_cap = t0.elapsed();
         let stats = rec.finish(&device).unwrap();
