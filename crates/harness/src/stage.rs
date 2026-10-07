@@ -128,9 +128,9 @@ pub static STAGES: &[StageDef] = &[
         name: "client-flythrough",
         description: "client flythrough per display mode, with video",
         needs_install: false,
-        timeout: Duration::from_secs(10 * MINUTES),
+        timeout: Duration::from_secs(20 * MINUTES),
         default: true,
-        kind: Kind::Script(include_str!("../scenarios/client-flythrough.cfg")),
+        kind: Kind::Builtin(crate::stages::client_flythrough::run),
     },
     StageDef {
         name: "client-bots-match",

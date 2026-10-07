@@ -21,7 +21,7 @@ mod parse;
 pub use ctab::{CtabEntry, RegisterSet};
 pub use emit::{
     AlphaTest, Compare, Options, Reflection, SAMPLER_BINDING_OFFSET, SamplerDim, SamplerUse,
-    Semantic, Translation, semantic_location,
+    Semantic, Translation, VertexFix, semantic_location,
 };
 pub use parse::{Dst, Inst, Reg, RegType, Shader, Src, Stage, blob_len, parse};
 

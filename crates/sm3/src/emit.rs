@@ -62,8 +62,19 @@ pub struct AlphaTest {
     pub reference: f32,
 }
 
+/// Conversion applied to a vertex shader input after fetch, for D3D9 vertex formats wgpu has no equivalent of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VertexFix {
+    /// `D3DDECLTYPE_UBYTE4`: bytes arrive as floats `0..255`; the stream is declared `unorm8x4`, so scale by 255.
+    Scale255,
+    /// `D3DDECLTYPE_D3DCOLOR`: bytes are stored `b g r a`; the register holds `(r, g, b, a)`.
+    Bgra,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Options {
+    /// Vertex shaders only: fixes by input semantic `(usage, usage index)`.
+    pub vertex_fixes: BTreeMap<(u32, u32), VertexFix>,
     /// Pixel shaders only. `None` = no alpha test.
     pub alpha_test: Option<AlphaTest>,
     /// Sampler registers sampled as depth textures with a comparison sampler (`textureSampleCompare`, reference =
@@ -71,7 +82,7 @@ pub struct Options {
     pub comparison_samplers: BTreeSet<u32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SamplerDim {
     D2,
     Cube,
@@ -734,8 +745,14 @@ pub(crate) fn emit(s: &Shader, opts: &Options) -> Result<Translation, Error> {
         w.push_str("}\nstruct VsOut {\n");
         io_fields(&mut w, &outs, true);
         w.push_str("}\n@vertex\nfn main(inp: VsIn) -> VsOut {\n");
-        for r in ins.iter().map(|s| s.register) {
-            let _ = writeln!(w, "    let v{r} = inp.v{r};");
+        for s in &ins {
+            let r = s.register;
+            let e = match opts.vertex_fixes.get(&(s.usage, s.index)) {
+                Some(VertexFix::Scale255) => format!("inp.v{r} * 255.0"),
+                Some(VertexFix::Bgra) => format!("inp.v{r}.zyxw"),
+                None => format!("inp.v{r}"),
+            };
+            let _ = writeln!(w, "    let v{r} = {e};");
         }
         for r in outs.iter().map(|s| s.register) {
             let _ = writeln!(w, "    var o{r} = vec4<f32>(0.0);");

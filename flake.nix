@@ -32,9 +32,23 @@
     {
       # rust-toolchain.toml is the single toolchain pin; Windows CI reads it through rustup.
       devShells = forAll (pkgs: {
-        default = pkgs.mkShell {
-          packages = [ (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml) ];
-        };
+        default =
+          let
+            # winit and wgpu load these at run time.
+            windowLibs = with pkgs; [
+              libxkbcommon
+              vulkan-loader
+              wayland
+              libx11
+              libxcursor
+              libxi
+              libxrandr
+            ];
+          in
+          pkgs.mkShell {
+            packages = [ (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml) ];
+            LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath windowLibs);
+          };
       });
       formatter = forAll (pkgs: pkgs.nixfmt);
     };
