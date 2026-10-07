@@ -258,7 +258,8 @@ fn v3(f: &mut Fields) -> [f32; 3] {
     [f.f32(), f.f32(), f.f32()]
 }
 
-/// Index of `p` within an array of `len` `stride`-byte elements at `base`.
+/// Index of `p` within an array of `len` `stride`-byte elements at `base`
+/// (one past the end is allowed: an empty range there).
 fn index_in(base: Option<Addr>, p: Ptr, stride: u32, len: u32) -> Result<Option<u32>> {
     match p {
         Ptr::Null => Ok(None),
@@ -267,7 +268,7 @@ fn index_in(base: Option<Addr>, p: Ptr, stride: u32, len: u32) -> Result<Option<
                 if a.block == b.block
                     && a.offset >= b.offset
                     && (a.offset - b.offset) % stride == 0
-                    && (a.offset - b.offset) / stride < len.max(1) =>
+                    && (a.offset - b.offset) / stride <= len =>
             {
                 Ok(Some((a.offset - b.offset) / stride))
             }
