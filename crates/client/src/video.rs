@@ -694,6 +694,11 @@ mod tests {
 
     #[test]
     fn records_three_seconds_of_moving_pattern() {
+        // Needs a real GPU and a fast CPU: its capture cadence depends on both, so CI (software GPU) skips it.
+        if std::env::var_os("COD4E_TEST_VIDEO").is_none() {
+            eprintln!("skipping: set COD4E_TEST_VIDEO=1 to run the recorder test");
+            return;
+        }
         let Some((device, queue)) = device() else {
             eprintln!("skipping: no wgpu adapter");
             return;
