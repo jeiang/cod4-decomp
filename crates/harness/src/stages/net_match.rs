@@ -1,0 +1,318 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! `net-match`: a headless server runs a team deathmatch with bots on mp_crash while real UDP
+//! clients (no window, no GPU) connect over loopback, spawn, walk and watch. Asserts that every
+//! client connects and is assigned a body, that the server runs its usercmds (the client's own
+//! player moves), that the clients receive the bots and interpolate them smoothly, and reports
+//! the bandwidth each client costs and the server tick time spent per client.
+use crate::perf::Percentiles;
+use crate::stage::{StageCtx, StageReport, Status};
+use net::UdpTransport;
+use net::client::NetClient;
+use net::entity::etype;
+use server::server::Server;
+use sim::pm::{ANGLE_UNIT, UserCmd};
+use std::collections::HashMap;
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
+const NAME: &str = "net-match";
+const CLIENTS: usize = 4;
+const BOTS: usize = 12;
+/// Client frames recorded after spawning.
+const FRAMES: usize = 300;
+const FRAME: Duration = Duration::from_millis(33);
+/// Longest a step of an interpolated player may be between two client frames before it counts
+/// as a snap: sprinting is about 9 units a frame, so this is generous.
+const SMOOTH_STEP: f32 = 40.0;
+/// Waiting for the game to give a client a body depends on the match start, not the runner; the
+/// limit only stops a hung run.
+const SPAWN_LIMIT: Duration = Duration::from_secs(180);
+
+#[derive(Default)]
+struct Result {
+    connected: bool,
+    refused: Option<String>,
+    spawned: bool,
+    start: [f32; 3],
+    end: [f32; 3],
+    seen_max: usize,
+    steps: u64,
+    snaps: u64,
+    max_step: f32,
+    snapshots: u64,
+    bytes_in: u64,
+    bytes_out: u64,
+    secs: f64,
+    unusable: u64,
+}
+
+fn client(addr: SocketAddr, id: usize, stop: &AtomicBool, ready: &AtomicUsize) -> Result {
+    let mut r = Result::default();
+    let Ok(t) = UdpTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0))) else {
+        return r;
+    };
+    let mut c = NetClient::new(t, addr, &format!("net{id}"), "", 5000 + id as u16);
+    let deadline = Instant::now() + SPAWN_LIMIT;
+    // Connect, then wait for a body: the snapshot lists the client's own player.
+    let mut own: Option<u16> = None;
+    while own.is_none() && Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+        c.pump(Duration::from_millis(10));
+        if let Some(reason) = c.refused() {
+            r.refused = Some(reason.to_owned());
+            return r;
+        }
+        if let Some(s) = c.latest() {
+            r.connected = true;
+            let n = s.ps.client_num;
+            if s.entity(n).is_some_and(|e| e.etype == etype::PLAYER) {
+                own = Some(n);
+            }
+        }
+        if r.connected {
+            c.send();
+        }
+    }
+    let Some(own) = own else { return r };
+    r.spawned = true;
+    ready.fetch_add(1, Ordering::SeqCst);
+    r.start = c.latest().map_or([0.0; 3], |s| s.ps.origin);
+    let began = Instant::now();
+    let mut last: HashMap<u16, [f32; 3]> = HashMap::new();
+    let mut cmd_time = 0;
+    let mut next = Instant::now();
+    for frame in 0..FRAMES {
+        next += FRAME;
+        while Instant::now() < next {
+            c.pump(
+                next.saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(5)),
+            );
+        }
+        let now = c.now_ms();
+        let Some(st) = c.snaps.server_time(now) else {
+            continue;
+        };
+        cmd_time = (cmd_time + 1).max(st);
+        // Walk forward, turning a quarter every second so walls do not stop the run.
+        let yaw = (frame / 30) as f32 * 90.0
+            + 13.0 * c.latest().map_or(0, |s| s.ps.client_num as i32) as f32;
+        c.send_cmd(UserCmd {
+            server_time: cmd_time,
+            forwardmove: 127,
+            angles: [0, (yaw / ANGLE_UNIT) as i32 & 0xffff, 0],
+            ..UserCmd::default()
+        });
+        let ents = c
+            .snaps
+            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
+        r.seen_max = r
+            .seen_max
+            .max(ents.iter().filter(|e| e.etype == etype::PLAYER).count());
+        for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
+            if let Some(p) = last.insert(e.number, e.origin) {
+                let d = ((e.origin[0] - p[0]).powi(2)
+                    + (e.origin[1] - p[1]).powi(2)
+                    + (e.origin[2] - p[2]).powi(2))
+                .sqrt();
+                r.steps += 1;
+                r.max_step = r.max_step.max(d);
+                if d > SMOOTH_STEP {
+                    r.snaps += 1;
+                }
+            }
+        }
+        if let Some(s) = c.latest() {
+            r.end = s.ps.origin;
+        }
+    }
+    r.secs = began.elapsed().as_secs_f64();
+    if let Some(s) = c.stats() {
+        r.snapshots = s.packets_in;
+        r.bytes_in = s.bytes_in;
+        r.bytes_out = s.bytes_out;
+    }
+    r.unusable = c.unusable();
+    c.disconnect();
+    r
+}
+
+pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
+    let Some(install) = ctx.install.as_deref() else {
+        return Ok(StageReport::new(NAME, Status::Skipped).with_reason("install not found"));
+    };
+    let args: Vec<String> = ["+set", "net_port", "0"].map(String::from).to_vec();
+    let mut server = match Server::boot(install, &args, false) {
+        Ok(s) => s,
+        Err(e) => return Ok(StageReport::new(NAME, Status::Failed).with_reason(e)),
+    };
+    let Some(addr) = server.net_addr() else {
+        return Ok(StageReport::new(NAME, Status::Skipped).with_reason("cannot bind a UDP socket"));
+    };
+    let addr = SocketAddr::from(([127, 0, 0, 1], addr.port()));
+    let samples = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(
+        server::server::TickSample,
+        usize,
+    )>::new()));
+    let peers = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    {
+        let samples = samples.clone();
+        let peers = peers.clone();
+        server.on_tick = Some(Box::new(move |t| {
+            samples.borrow_mut().push((*t, peers.get()))
+        }));
+    }
+    for line in [
+        "set g_gametype war",
+        "set scr_war_timelimit 0",
+        "set scr_war_scorelimit 0",
+        "set sv_mapRotation \"gametype war map mp_crash\"",
+        "map mp_crash",
+    ] {
+        if let Err(e) = server.exec_line(line) {
+            return Ok(StageReport::new(NAME, Status::Failed).with_reason(format!("{line}: {e}")));
+        }
+    }
+    if let Err(e) = server.exec_line(&format!("bots {BOTS}")) {
+        return Ok(StageReport::new(NAME, Status::Failed).with_reason(e));
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let ready = Arc::new(AtomicUsize::new(0));
+    let handles: Vec<_> = (0..CLIENTS)
+        .map(|i| {
+            let (stop, ready) = (stop.clone(), ready.clone());
+            std::thread::spawn(move || client(addr, i, &stop, &ready))
+        })
+        .collect();
+    // The server runs in this thread until every client thread has finished.
+    while !handles.iter().all(|h| h.is_finished()) {
+        server.run_for(Duration::from_millis(100));
+        peers.set(server.net_clients());
+    }
+    let results: Vec<Result> = handles
+        .into_iter()
+        .map(|h| h.join().unwrap_or_default())
+        .collect();
+    stop.store(true, Ordering::Relaxed);
+    let stats = server.net_stats().unwrap_or_default();
+
+    let mut report = StageReport::new(NAME, Status::Passed);
+    let mut failures = Vec::new();
+    for (i, r) in results.iter().enumerate() {
+        if let Some(why) = &r.refused {
+            failures.push(format!("client {i} refused: {why}"));
+        } else if !r.connected {
+            failures.push(format!("client {i} never received a snapshot"));
+        } else if !r.spawned {
+            failures.push(format!("client {i} was never given a body"));
+        } else {
+            let moved = ((r.end[0] - r.start[0]).powi(2) + (r.end[1] - r.start[1]).powi(2)).sqrt();
+            if moved < 50.0 {
+                failures.push(format!(
+                    "client {i}: the server did not move it ({moved:.0} units in {FRAMES} frames)"
+                ));
+            }
+            if r.seen_max < BOTS / 2 {
+                failures.push(format!(
+                    "client {i} saw at most {} other players of {BOTS} bots",
+                    r.seen_max
+                ));
+            }
+            if r.steps == 0 || r.snaps * 100 > r.steps {
+                failures.push(format!("client {i}: {} of {} interpolated steps jumped over {SMOOTH_STEP} units (max {:.0})", r.snaps, r.steps, r.max_step));
+            }
+        }
+    }
+    let live: Vec<&Result> = results
+        .iter()
+        .filter(|r| r.spawned && r.secs > 0.0)
+        .collect();
+    if !live.is_empty() {
+        let n = live.len() as f64;
+        let secs: f64 = live.iter().map(|r| r.secs).sum::<f64>() / n;
+        let mean = |f: fn(&Result) -> f64| live.iter().map(|r| f(r)).sum::<f64>() / n;
+        report.metrics.insert(
+            "client.down_bytes_per_sec".into(),
+            mean(|r| r.bytes_in as f64) / secs,
+        );
+        report.metrics.insert(
+            "client.up_bytes_per_sec".into(),
+            mean(|r| r.bytes_out as f64) / secs,
+        );
+        report.metrics.insert(
+            "client.snapshots_per_sec".into(),
+            mean(|r| r.snapshots as f64) / secs,
+        );
+        report.metrics.insert(
+            "client.max_players_seen".into(),
+            live.iter().map(|r| r.seen_max).max().unwrap_or(0) as f64,
+        );
+        report.metrics.insert(
+            "client.max_interp_step".into(),
+            live.iter().map(|r| r.max_step as f64).fold(0.0, f64::max),
+        );
+        report.metrics.insert(
+            "client.interp_snaps".into(),
+            live.iter().map(|r| r.snaps as f64).sum(),
+        );
+        report.metrics.insert(
+            "client.unusable_snapshots".into(),
+            live.iter().map(|r| r.unusable as f64).sum(),
+        );
+    }
+    // Server cost per client: ticks while every client was connected.
+    let all = CLIENTS;
+    let samples = samples.borrow();
+    let loaded: Vec<f64> = samples
+        .iter()
+        .filter(|(_, p)| *p == all)
+        .map(|(t, _)| t.net_ms)
+        .collect();
+    let totals: Vec<f64> = samples
+        .iter()
+        .filter(|(_, p)| *p == all)
+        .map(|(t, _)| t.total_ms)
+        .collect();
+    if let (Some(n), Some(t)) = (
+        Percentiles::from_samples(&loaded),
+        Percentiles::from_samples(&totals),
+    ) {
+        report.metrics.insert("server.net_ms_p50".into(), n.p50);
+        report.metrics.insert("server.net_ms_p99".into(), n.p99);
+        report
+            .metrics
+            .insert("server.net_ms_per_client_p50".into(), n.p50 / all as f64);
+        report.metrics.insert("server.tick_ms_p50".into(), t.p50);
+        report.metrics.insert("server.tick_ms_p99".into(), t.p99);
+    } else {
+        failures.push(format!(
+            "no server ticks ran with all {all} clients connected"
+        ));
+    }
+    report
+        .metrics
+        .insert("server.snapshots_out".into(), stats.snapshots_out as f64);
+    report
+        .metrics
+        .insert("server.bytes_out".into(), stats.bytes_out as f64);
+    report
+        .metrics
+        .insert("server.bytes_in".into(), stats.bytes_in as f64);
+    if !server.all_script_errors.is_empty() {
+        failures.push(format!(
+            "{} script runtime errors",
+            server.all_script_errors.len()
+        ));
+    }
+    report.notes.push(format!(
+        "{CLIENTS} clients and {BOTS} bots on mp_crash over loopback UDP"
+    ));
+    if !failures.is_empty() {
+        report.status = Status::Failed;
+        report.reason = Some(failures.join("; "));
+    }
+    Ok(report)
+}
