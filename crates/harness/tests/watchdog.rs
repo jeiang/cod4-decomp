@@ -41,8 +41,9 @@ fn no_install_still_writes_a_bundle_that_says_so() {
             .any(|(n, t)| n == "harness.log" && t.contains("install not found"))
     );
     assert_eq!(b.manifest["install"]["found"], false);
-    // The rest of the suite is reported skipped, not run.
-    assert!(b.stages[1..].iter().all(|s| s.status == Status::Skipped));
+    // Nothing else fails because the install is missing: stages that need it are skipped, and the
+    // ones that do not (net-loopback) still run.
+    assert!(b.stages[1..].iter().all(|s| s.status != Status::Failed));
 }
 
 #[test]
