@@ -855,10 +855,12 @@ dependencies = [
  "assets",
  "crash-handler",
  "minidumper",
+ "net",
  "rfd",
  "serde",
  "serde_json",
  "server",
+ "sim",
  "sysinfo",
  "tempfile",
  "tracing",
@@ -1315,6 +1317,9 @@ dependencies = [
 [[package]]
 name = "net"
 version = "0.0.0"
+dependencies = [
+ "sim",
+]
 
 [[package]]
 name = "new_debug_unreachable"

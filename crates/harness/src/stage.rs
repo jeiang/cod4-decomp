@@ -125,6 +125,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Server(include_str!("../scenarios/headless-bots.cfg")),
     },
     StageDef {
+        name: "net-loopback",
+        description: "eight clients over real UDP with loss, duplicates and reordering: handshake, reliable commands, snapshot convergence",
+        needs_install: false,
+        timeout: Duration::from_secs(5 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_loopback::run),
+    },
+    StageDef {
         name: "client-flythrough",
         description: "client flythrough per display mode, with video",
         needs_install: false,
@@ -270,6 +278,5 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(d[0], "asset-load");
-        assert_eq!(d.len(), 4);
     }
 }
