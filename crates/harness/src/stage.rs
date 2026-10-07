@@ -173,12 +173,12 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_input::run),
     },
     StageDef {
-        name: "client-bots-match",
-        description: "client plus bots match, perf only",
+        name: "client-match",
+        description: "stage 4: the client plays a team deathmatch against bots on its own listen server: connects, spawns, predicts, draws the others, shoots and hits; bandwidth and tick cost",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
-        kind: Kind::Script(include_str!("../scenarios/client-bots-match.cfg")),
+        kind: Kind::Builtin(crate::stages::client_match::run),
     },
     StageDef {
         name: "headless-bots-32",

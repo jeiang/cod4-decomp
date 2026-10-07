@@ -79,6 +79,9 @@ impl Game {
         let spread = aim_spread_degrees(info, &c.ps, &WeaponParams::default());
         let fuse_left = c.ps.grenade_time_left;
         self.stats.shots += 1;
+        if let Some(c) = self.client_mut(n) {
+            c.shots += 1;
+        }
         match weap_type {
             WeaponType::Bullet => self.fire_bullets(vm, n, weapon, &aim, spread),
             WeaponType::Grenade => self.throw_grenade(vm, n, weapon, &aim, fuse_left),
@@ -113,6 +116,9 @@ impl Game {
         for h in hits {
             if self.is_accurate_hit(h.target, n) {
                 self.stats.hits += 1;
+                if let Some(c) = self.client_mut(n) {
+                    c.hits += 1;
+                }
             }
             let mut d = Damage::new(h.damage, h.mean);
             d.inflictor = Some(n);
