@@ -118,7 +118,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "headless-bots",
-        description: "headless server with bots on two maps",
+        description: "headless server, 18 bots play a team deathmatch round and the map rotates",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
@@ -139,6 +139,14 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
         kind: Kind::Script(include_str!("../scenarios/client-bots-match.cfg")),
+    },
+    StageDef {
+        name: "headless-bots-32",
+        description: "headless server with 32 bots (the 32-player server budget)",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: false,
+        kind: Kind::Server(include_str!("../scenarios/headless-bots-32.cfg")),
     },
     // Self tests of the watchdog; run by name only.
     StageDef {
