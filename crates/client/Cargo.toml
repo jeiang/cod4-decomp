@@ -16,7 +16,7 @@ sim = { path = "../sim" }
 net = { path = "../net" }
 render = { path = "../render" }
 server = { path = "../server" }
-rav1e = { version = "0.8", default-features = false, features = ["threading"] }
+rav1e = { version = "0.8", default-features = false, features = ["threading", "asm"] }
 wgpu = "30.0.1"
 glam = "0.34.1"
 png = "0.18.1"
