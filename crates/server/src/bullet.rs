@@ -306,7 +306,16 @@ pub struct BulletParams<'a> {
 /// One damage event a bullet caused.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BulletHit {
+    /// The entity hit, [`ENTITYNUM_WORLD`] for the map.
     pub target: u16,
+    /// Whether the hit deals damage; every other hit is an impact only (decals, sparks).
+    pub damageable: bool,
+    /// The surface normal at the point.
+    pub normal: Vec3,
+    /// `surface_type` of the surface hit; flesh for players and other entities without one.
+    pub surface: u8,
+    /// The surface takes no marks (sky, no-impact brushes).
+    pub no_impact: bool,
     pub point: Vec3,
     pub dir: Vec3,
     pub damage: i32,
@@ -403,10 +412,10 @@ impl Game {
         dflag: i32,
         out: &mut Vec<BulletHit>,
     ) {
-        let Some(target) = br.hit_ent else { return };
-        if !self.ent(target).is_some_and(|e| e.takedamage) {
-            return;
-        }
+        let target = br.hit_ent.unwrap_or(ENTITYNUM_WORLD);
+        let damageable = br
+            .hit_ent
+            .is_some_and(|t| self.ent(t).is_some_and(|e| e.takedamage));
         let dist = length(sub(br.hit_pos, bp.orig_start));
         let mut flags = dflag;
         if p.info.armor_piercing {
@@ -414,6 +423,10 @@ impl Game {
         }
         out.push(BulletHit {
             target,
+            damageable,
+            normal: br.t.normal,
+            surface: surface_type(br.t.surface_flags) as u8,
+            no_impact: br.t.surface_flags & (SURF_NOIMPACT | SURF_SKY) != 0,
             point: br.hit_pos,
             dir: bp.dir,
             damage: bullet_damage(p.info, dist, bp.multiplier),

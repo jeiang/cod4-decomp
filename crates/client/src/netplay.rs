@@ -8,6 +8,7 @@
 //! [`net::view::INTERP_DELAY_MS`] behind the server clock between the two snapshots around that moment, which is also
 //! the moment the server rewinds them to when it judges this client's shots.
 
+use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
 use crate::models::{Library, Player, Team};
 use crate::sound::{ClientSound, Who};
@@ -44,6 +45,15 @@ pub struct NetFrame {
     /// Radians, positive up.
     pub pitch: f32,
     pub models: Vec<ModelInstance>,
+    /// Happenings new this frame; see [`crate::events`].
+    #[expect(dead_code, reason = "read by effects, audio and the interface")]
+    pub events: Vec<ClientEvent>,
+    /// Server console commands other than the effect names the event layer takes.
+    #[expect(
+        dead_code,
+        reason = "read by the interface once it has server commands to act on"
+    )]
+    pub commands: Vec<String>,
 }
 
 struct Remote {
@@ -67,6 +77,8 @@ struct Counters {
     target_frames: u64,
     in_range_frames: u64,
     unknown_weapon: std::collections::BTreeMap<String, String>,
+    /// Events received, by kind.
+    events: std::collections::BTreeMap<&'static str, u64>,
 }
 
 pub struct NetPlay {
@@ -91,6 +103,7 @@ pub struct NetPlay {
     ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
     sound: ClientSound,
+    events: Events,
 }
 
 impl NetPlay {
@@ -128,6 +141,7 @@ impl NetPlay {
             ui_events: Vec::new(),
             last_eye: None,
             sound,
+            events: Events::default(),
         })
     }
 
@@ -205,11 +219,14 @@ impl NetPlay {
             self.last_eye = Some(eye);
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.view_model(dt, &ps, ps.origin, &snap));
+            let (events, commands) = self.take_events(&snap);
             return Some(NetFrame {
                 origin: eye,
                 yaw: ps.viewangles[1].to_radians(),
                 pitch: -ps.viewangles[0].to_radians(),
                 models,
+                events,
+                commands,
             });
         }
         self.boxes.sync(&snap);
@@ -248,6 +265,7 @@ impl NetPlay {
         self.last_eye = Some(eye);
         self.hear(dt, eye, &ps, &snap);
 
+        let (events, commands) = self.take_events(&snap);
         let mut models = self.remote_players(dt, st, own);
         if !dead {
             models.extend(self.view_model(dt, &ps, feet, &snap));
@@ -263,7 +281,19 @@ impl NetPlay {
             yaw: yaw.to_radians(),
             pitch: -pitch.to_radians(),
             models,
+            events,
+            commands,
         })
+    }
+
+    /// The events new in `snap` and the server commands nothing here consumed.
+    fn take_events(&mut self, snap: &net::Snapshot) -> (Vec<ClientEvent>, Vec<String>) {
+        let commands = self.events.take_commands(&mut self.net.commands);
+        let events = self.events.scan(snap);
+        for e in &events {
+            *self.c.events.entry(e.kind()).or_default() += 1;
+        }
+        (events, commands)
     }
 
     /// Feeds the sound system: the listener, the server's sound commands, and the own player's events.
@@ -477,6 +507,7 @@ impl NetPlay {
             "weapon": self.c.weapon,
             "viewmodel_frames": self.c.frames_with_viewmodel,
             "weapons_without_models": self.c.unknown_weapon,
+            "events": self.c.events,
             "eye": self.last_eye.map(|e| e.to_array()),
             "sound": self.sound.report(),
         })

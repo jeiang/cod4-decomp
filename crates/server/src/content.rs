@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::clipmap::Clipmap;
+use assets::zone::fx::{FxEffectDef, FxImpactTable};
 use assets::zone::text::StringTable;
 use assets::zone::weapon::WeaponDef;
 use assets::zone::xanim::XAnimParts;
@@ -161,7 +162,9 @@ struct ContentFilter {
 
 impl DecodeFilter for ContentFilter {
     fn keep(&self, ty: XAssetType) -> bool {
-        Consumer::Server.keep(ty)
+        // A client draws effects; the server only needs the weapons that name them.
+        (self.presentation && matches!(ty, XAssetType::Fx | XAssetType::ImpactFx))
+            || Consumer::Server.keep(ty)
     }
 
     fn keep_presentation(&self) -> bool {
@@ -184,6 +187,9 @@ struct Layer {
     motions: HashMap<String, (u8, Arc<RootMotion>)>,
     localize: HashMap<String, (u8, Arc<str>)>,
     clipmap: Option<(u8, Arc<Clipmap>)>,
+    /// Effects by lowercase name (client content only).
+    fx: HashMap<String, (u8, Arc<FxEffectDef>)>,
+    impact: Option<(u8, Arc<FxImpactTable>)>,
 }
 
 fn resolve(strings: &[Option<Arc<str>>], i: u16) -> Arc<str> {
@@ -299,6 +305,14 @@ impl Content {
                     }
                 }
             }
+            Asset::Fx(e) => {
+                if let Some(n) = e.name.clone() {
+                    put(&mut layer.fx, tag, &n, e);
+                }
+            }
+            Asset::ImpactFx(t) if layer.impact.as_ref().is_none_or(|(g, _)| *g <= tag) => {
+                layer.impact = Some((tag, t));
+            }
             Asset::Localize(l) => {
                 if let (Some(n), Some(v)) = (&l.name, &l.value) {
                     put(&mut layer.localize, tag, n, v.clone());
@@ -353,6 +367,20 @@ impl Content {
 
     pub fn string_table(&self, name: &str) -> Option<&Arc<StringTable>> {
         get(&self.map.tables, name).or_else(|| get(&self.base.tables, name))
+    }
+
+    /// An effect by name (`fx/...`); client content only.
+    pub fn fx(&self, name: &str) -> Option<&Arc<FxEffectDef>> {
+        get(&self.map.fx, name).or_else(|| get(&self.base.fx, name))
+    }
+
+    /// The bullet and explosion impact effects by weapon impact type and surface.
+    pub fn impact_table(&self) -> Option<&Arc<FxImpactTable>> {
+        self.map
+            .impact
+            .as_ref()
+            .or(self.base.impact.as_ref())
+            .map(|(_, t)| t)
     }
 
     pub fn weapon(&self, name: &str) -> Option<&Arc<WeaponDef>> {

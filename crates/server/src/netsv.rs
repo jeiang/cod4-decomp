@@ -40,6 +40,8 @@ pub struct Peer {
     pub cmds: VecDeque<UserCmd>,
     pub name: String,
     last_heard: Instant,
+    /// Effect names announced so far (`fx <index> <name>` commands).
+    fx_sent: usize,
 }
 
 pub enum Inbound {
@@ -135,6 +137,7 @@ impl NetSv {
                 && let Some(p) = peer.link.receive(packet)
             {
                 peer.last_heard = Instant::now();
+                peer.fx_sent = 0;
                 for (_, c) in p.cmds {
                     if peer.cmds.len() < MAX_QUEUED_CMDS {
                         peer.cmds.push_back(c);
@@ -153,6 +156,7 @@ impl NetSv {
             cmds: VecDeque::new(),
             name: name.to_owned(),
             last_heard: Instant::now(),
+            fx_sent: 0,
         });
         self.stats.joins += 1;
         self.t.send_to(req.from, &Oob::ConnectResponse.encode());
@@ -380,6 +384,19 @@ impl NetSv {
                 continue;
             };
             let peer = self.peers[slot].as_mut().expect("peer");
+            while peer.fx_sent < game.fx.len() {
+                let Some(name) = game.fx.name(peer.fx_sent + 1) else {
+                    break;
+                };
+                if peer
+                    .link
+                    .command(format!("fx {} {name}", peer.fx_sent + 1))
+                    .is_err()
+                {
+                    break;
+                }
+                peer.fx_sent += 1;
+            }
             let bytes = peer.link.send(&mut self.t, Some(snap.canonical()));
             self.stats.snapshots_out += 1;
             self.stats.bytes_out += bytes as u64;
@@ -551,5 +568,6 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
         };
         out.push(state.canonical());
     }
+    out.extend(game.tempev.live(game.level.time).cloned());
     out
 }

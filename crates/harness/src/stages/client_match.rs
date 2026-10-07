@@ -181,6 +181,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             failures.push(format!("sound files failed: {}", snd["failed"]));
         }
     }
+    // What the shots did must have reached the client as events.
+    let (impacts, pains) = (
+        num(net, &["events", "bullet_impact"]),
+        num(net, &["events", "player_pain"]),
+    );
+    if shots >= 1.0 && impacts < 1.0 {
+        failures.push("shots were fired but the client saw no bullet impact event".into());
+    }
+    if hits >= 1.0 && pains < 1.0 {
+        failures.push("enemies were hit but the client saw no pain event".into());
+    }
     let m = &mut report.metrics;
     m.insert("sound.started".into(), num(snd, &["started"]));
     m.insert("sound.refused".into(), num(snd, &["refused"]));
@@ -201,6 +212,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         num(net, &["players_seen_max"]),
     );
     m.insert("client.walked".into(), num(net, &["path"]));
+    m.insert("client.event_bullet_impacts".into(), impacts);
+    m.insert("client.event_pains".into(), pains);
     m.insert("match.shots".into(), shots);
     m.insert("match.hits".into(), hits);
     m.insert("match.kills".into(), num(srv, &["stats", "kills"]));

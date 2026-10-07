@@ -564,6 +564,19 @@ impl Game {
         let angles = self.ent(n).map_or([0.0; 3], |e| e.angles);
         self.missile_set_pose(n, origin, None);
         vm.notify_entity(n, "explode", &[Value::Vector(origin)]);
+        let normal = if m.surface_normal == [0.0; 3] {
+            [0.0, 0.0, 1.0]
+        } else {
+            m.surface_normal
+        };
+        let weapon = m.weapon;
+        let owner = m.parent.unwrap_or(1023);
+        self.tempev.add(now, crate::tempev::ev::EXPLOSION, |s| {
+            s.origin = origin;
+            s.angles = crate::tempev::dir_to_angles(normal);
+            s.weapon = weapon;
+            s.client = owner;
+        });
         if m.info.explosion_inner_damage != 0 {
             self.missile_blast(vm, n, m, origin, math::angle_vectors(&angles).0, None);
         }
@@ -732,6 +745,15 @@ impl Game {
             m.ground = Some(tr.hit);
         }
         let origin = self.ent(n).map_or([0.0; 3], |e| e.origin);
+        let (weapon, owner) = (m.weapon, m.parent.unwrap_or(1023));
+        self.tempev
+            .add(now, crate::tempev::ev::MISSILE_BOUNCE, |s| {
+                s.origin = origin;
+                s.angles = crate::tempev::dir_to_angles(tr.normal);
+                s.event_parm = surf as u8;
+                s.weapon = weapon;
+                s.client = owner;
+            });
         if m.bounces {
             let speed = length(velocity);
             if speed > 0.0 && d <= 0.0 {

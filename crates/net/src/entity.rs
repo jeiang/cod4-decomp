@@ -13,6 +13,8 @@ pub mod etype {
     pub const SCRIPT_MODEL: u8 = 3;
     pub const MISSILE: u8 = 4;
     pub const ITEM: u8 = 5;
+    /// A one-shot happening (impact, explosion, effect): see `server::tempev`.
+    pub const EVENT: u8 = 6;
 }
 
 pub const MAX_ENTITIES: usize = 1024;
