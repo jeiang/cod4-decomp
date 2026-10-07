@@ -51,3 +51,22 @@ fn config_exec_order_and_map_rotation() {
     s.run_frames(60);
     assert!(s.script_errors.is_empty(), "{:#?}", s.script_errors);
 }
+
+#[test]
+fn map_restart_reloads_the_level() {
+    let Some(mut s) = boot(&["+set", "net_port", "0", "+map", "mp_crash"]) else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    s.run_frames(60);
+    let t = s.level_time();
+    s.exec_line("map_restart").unwrap();
+    assert_eq!(
+        s.level_time(),
+        300,
+        "level time restarts with the settle frames"
+    );
+    assert!(t > 300);
+    s.run_frames(60);
+    assert!(s.script_errors.is_empty(), "{:#?}", s.script_errors);
+}
