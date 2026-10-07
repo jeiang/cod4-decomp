@@ -1,0 +1,31 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup reads rust-toolchain.toml (channel, components, targets) on first cargo call.
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo fmt --check
+      - run: cargo build --release -p harness -p client -p server
+      - name: Collect harness folder
+        shell: bash
+        run: |
+          mkdir cod4e-harness-windows
+          cp target/release/{cod4e-harness,cod4e,cod4e-server}.exe cod4e-harness-windows/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cod4e-harness-windows
+          path: cod4e-harness-windows
