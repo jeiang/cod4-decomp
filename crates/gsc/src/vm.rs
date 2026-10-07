@@ -281,6 +281,11 @@ impl Vm {
         &self.game
     }
 
+    /// Replaces the `game` variable; the server carries it over `map_restart`.
+    pub fn set_game(&mut self, v: Value) {
+        self.game = v;
+    }
+
     /// Opcodes executed so far.
     pub fn ops_executed(&self) -> u64 {
         self.ops

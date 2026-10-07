@@ -2,3 +2,4 @@
 //! Built-in stages.
 pub mod asset_load;
 pub mod selftest;
+pub mod server;
