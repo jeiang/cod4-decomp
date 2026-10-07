@@ -39,7 +39,10 @@ impl Producer {
     /// Free space in samples.
     pub fn space(&self) -> usize {
         let s = &self.0;
-        s.buf.len() - s.tail.load(Ordering::Relaxed).wrapping_sub(s.head.load(Ordering::Acquire))
+        s.buf.len()
+            - s.tail
+                .load(Ordering::Relaxed)
+                .wrapping_sub(s.head.load(Ordering::Acquire))
     }
 
     /// Pushes as many of `samples` as fit; returns how many.
@@ -68,7 +71,9 @@ impl Producer {
 impl Consumer {
     pub fn len(&self) -> usize {
         let s = &self.0;
-        s.tail.load(Ordering::Acquire).wrapping_sub(s.head.load(Ordering::Relaxed))
+        s.tail
+            .load(Ordering::Acquire)
+            .wrapping_sub(s.head.load(Ordering::Relaxed))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -85,7 +90,8 @@ impl Consumer {
         for (i, v) in out.iter_mut().enumerate() {
             *v = f32::from_bits(s.buf[head.wrapping_add(i) & s.mask].load(Ordering::Relaxed));
         }
-        s.head.store(head.wrapping_add(out.len()), Ordering::Release);
+        s.head
+            .store(head.wrapping_add(out.len()), Ordering::Release);
         true
     }
 

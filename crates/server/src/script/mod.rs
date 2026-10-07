@@ -19,6 +19,7 @@ mod misc;
 mod missile;
 mod player;
 mod uicmd;
+mod sound;
 mod weapons;
 
 pub use args::Args;

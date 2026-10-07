@@ -13,7 +13,16 @@ pub struct Curve {
 
 impl Curve {
     pub const LINEAR: Curve = Curve {
-        knots: [[0.0, 1.0], [1.0, 0.0], [0.0; 2], [0.0; 2], [0.0; 2], [0.0; 2], [0.0; 2], [0.0; 2]],
+        knots: [
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [0.0; 2],
+            [0.0; 2],
+            [0.0; 2],
+            [0.0; 2],
+            [0.0; 2],
+            [0.0; 2],
+        ],
         count: 2,
     };
 
@@ -41,7 +50,11 @@ impl Curve {
         for w in k.windows(2) {
             if w[1][0] >= f {
                 let span = w[1][0] - w[0][0];
-                let t = if span > 0.0 { (f - w[0][0]) / span } else { 1.0 };
+                let t = if span > 0.0 {
+                    (f - w[0][0]) / span
+                } else {
+                    1.0
+                };
                 return w[0][1] + (w[1][1] - w[0][1]) * t.clamp(0.0, 1.0);
             }
         }

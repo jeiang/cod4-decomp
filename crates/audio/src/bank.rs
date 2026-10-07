@@ -122,7 +122,9 @@ fn pcm_of(l: &assets::zone::sound::LoadedSound) -> Option<Pcm> {
     if l.format != 1 || l.bits != 16 || l.rate == 0 || l.data.len() < 2 {
         return None;
     }
-    let channels = u8::try_from(l.channels).ok().filter(|c| (1..=2).contains(c))?;
+    let channels = u8::try_from(l.channels)
+        .ok()
+        .filter(|c| (1..=2).contains(c))?;
     Some(Pcm {
         rate: l.rate,
         channels,
@@ -160,7 +162,11 @@ impl Bank {
                 .map_err(|e| format!("{name}: {e}"))?;
             zone.decode(&SoundOnly, |a| match a {
                 Asset::Sound(list) => bank.add_list(&list, &mut loaded),
-                Asset::RawFile(r) if r.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(CHANNELS_DEF)) => {
+                Asset::RawFile(r)
+                    if r.name
+                        .as_deref()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(CHANNELS_DEF)) =>
+                {
                     let text = r.data.strip_suffix(&[0]).unwrap_or(&r.data);
                     channels = Some(channels::parse(&String::from_utf8_lossy(text)));
                 }
@@ -188,7 +194,11 @@ impl Bank {
             .insert(name.to_ascii_lowercase(), List { aliases, sequence });
     }
 
-    fn alias(&mut self, a: &SoundAlias, loaded: &mut HashMap<String, Arc<Pcm>>) -> Option<Arc<Alias>> {
+    fn alias(
+        &mut self,
+        a: &SoundAlias,
+        loaded: &mut HashMap<String, Arc<Pcm>>,
+    ) -> Option<Arc<Alias>> {
         let name = a.name.clone()?;
         let audio = match a.sound_file.as_deref().map(|f| &f.source) {
             Some(SoundSource::Loaded(Some(l))) => {
@@ -217,7 +227,10 @@ impl Bank {
             Clip::Streamed(_) => self.stats.streamed += 1,
             Clip::Silent => self.stats.silent += 1,
         }
-        let curve = a.volume_falloff_curve.as_deref().map_or(Curve::LINEAR, Curve::from_asset);
+        let curve = a
+            .volume_falloff_curve
+            .as_deref()
+            .map_or(Curve::LINEAR, Curve::from_asset);
         Some(Arc::new(Alias {
             name,
             secondary: a.secondary_alias_name.clone().filter(|s| !s.is_empty()),
@@ -239,7 +252,9 @@ impl Bank {
     }
 
     pub fn has(&self, name: &str) -> bool {
-        self.lists.get(&name.to_ascii_lowercase()).is_some_and(|l| !l.aliases.is_empty())
+        self.lists
+            .get(&name.to_ascii_lowercase())
+            .is_some_and(|l| !l.aliases.is_empty())
     }
 
     /// Picks a variant of `name` the way the original does: by probability, never the one played last when

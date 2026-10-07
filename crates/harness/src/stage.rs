@@ -173,6 +173,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_models::run),
     },
     StageDef {
+        name: "audio",
+        description: "cod4e --audio-selftest on the real sound tables: direction, falloff, range, voice caps, footsteps, streamed ambience and music (no window or sound card)",
+        needs_install: true,
+        timeout: Duration::from_secs(3 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::audio::run),
+    },
+    StageDef {
         name: "client-input",
         description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
         needs_install: false,

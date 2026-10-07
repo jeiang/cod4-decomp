@@ -32,7 +32,12 @@ impl Decoder {
         let mut hint = Hint::new();
         hint.with_extension(ext);
         let format = symphonia::default::get_probe()
-            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+            .probe(
+                &hint,
+                mss,
+                FormatOptions::default(),
+                MetadataOptions::default(),
+            )
             .map_err(|e| format!("not a sound file: {e}"))?;
         let track = format
             .default_track(TrackType::Audio)
@@ -259,7 +264,10 @@ mod tests {
             assert!(job.pump());
             let mut drain = vec![0.0; s.ring.len()];
             assert!(s.ring.pop_exact(&mut drain));
-            assert!(drain.len() > 5000, "the loop refilled the ring past one pass");
+            assert!(
+                drain.len() > 5000,
+                "the loop refilled the ring past one pass"
+            );
         }
         assert!(!s.ring.is_finished());
     }

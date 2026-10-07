@@ -24,7 +24,13 @@ fn bank() -> Option<&'static std::sync::Mutex<Bank>> {
     static B: OnceLock<Option<std::sync::Mutex<Bank>>> = OnceLock::new();
     B.get_or_init(|| {
         let root = root()?;
-        let vfs = Arc::new(Vfs::open_stock(&root, LANGUAGES.iter().position(|l| *l == "english").unwrap()).unwrap());
+        let vfs = Arc::new(
+            Vfs::open_stock(
+                &root,
+                LANGUAGES.iter().position(|l| *l == "english").unwrap(),
+            )
+            .unwrap(),
+        );
         let zones: Vec<PathBuf> = ["code_post_gfx_mp", "localized_common_mp", "mp_crossfire"]
             .iter()
             .map(|z| root.join(format!("zone/english/{z}.ff")))
@@ -56,7 +62,12 @@ fn channels_and_aliases_load_and_agree() {
             }
         }
     }
-    assert!(bad.is_empty(), "{} bad, e.g. {:?}", bad.len(), &bad[..bad.len().min(5)]);
+    assert!(
+        bad.is_empty(),
+        "{} bad, e.g. {:?}",
+        bad.len(),
+        &bad[..bad.len().min(5)]
+    );
 }
 
 #[test]
@@ -86,7 +97,13 @@ fn every_streamed_alias_names_a_decodable_file() {
             Err(e) => missing.push(e),
         }
     }
-    assert!(missing.is_empty(), "{} of {}: {:?}", missing.len(), paths.len(), &missing[..missing.len().min(5)]);
+    assert!(
+        missing.is_empty(),
+        "{} of {}: {:?}",
+        missing.len(),
+        paths.len(),
+        &missing[..missing.len().min(5)]
+    );
     assert!(mp3 > 5, "the map's music and ambience are MP3 ({mp3})");
 }
 
@@ -137,7 +154,15 @@ fn a_weapon_shot_is_heard_from_its_side_and_fades_with_distance() {
     let Some(mut s) = sound() else { return };
     let name = "weap_ak47_fire_npc";
     let shot = |s: &mut Sound, at: [f32; 3]| {
-        s.play(name, Cue { origin: Some(at), ..Cue::default() }).is_some().then(|| energy(s, 48_000))
+        s.play(
+            name,
+            Cue {
+                origin: Some(at),
+                ..Cue::default()
+            },
+        )
+        .is_some()
+        .then(|| energy(s, 48_000))
     };
     let left = shot(&mut s, [300.0, 300.0, 0.0]).expect("plays");
     assert!(left[0] > 3.0 * left[1], "left {left:?}");
@@ -147,7 +172,10 @@ fn a_weapon_shot_is_heard_from_its_side_and_fades_with_distance() {
     let far = shot(&mut s, [1500.0, 0.0, 0.0]).expect("plays");
     let (n, f) = (near[0] + near[1], far[0] + far[1]);
     assert!(n > 4.0 * f, "near {n} far {f}");
-    assert!(shot(&mut s, [1.0e6, 0.0, 0.0]).is_none(), "beyond the alias's range nothing starts");
+    assert!(
+        shot(&mut s, [1.0e6, 0.0, 0.0]).is_none(),
+        "beyond the alias's range nothing starts"
+    );
     assert!(s.played.by_channel.values().sum::<u64>() >= 4);
 }
 
@@ -169,7 +197,10 @@ fn music_and_ambience_stream_from_the_iwds() {
             }
         }
     }
-    for n in [music.expect("a streamed music alias"), ambient.expect("a streamed ambient alias")] {
+    for n in [
+        music.expect("a streamed music alias"),
+        ambient.expect("a streamed ambient alias"),
+    ] {
         let mut s2 = sound().unwrap();
         s2.ambient_play(&n, 0);
         // Give the decoder thread time to fill the ring, then listen for a second.

@@ -10,6 +10,7 @@
 
 use crate::input::{InputFrame, buttons};
 use crate::models::{Library, Player, Team};
+use crate::sound::{ClientSound, Who};
 use crate::viewmodel::ViewModel;
 use glam::Vec3;
 use net::UdpTransport;
@@ -87,6 +88,7 @@ pub struct NetPlay {
     auto: Option<Auto>,
     auto_join: Option<net::ui::AutoJoin>,
     last_eye: Option<Vec3>,
+    sound: ClientSound,
 }
 
 impl NetPlay {
@@ -97,6 +99,7 @@ impl NetPlay {
         name: &str,
         pitch_limits: (f32, f32),
         autoplay: bool,
+        sound: ClientSound,
     ) -> Result<Self, String> {
         let t = UdpTransport::bind(SocketAddr::from(([0, 0, 0, 0], 0)))
             .map_err(|e| format!("cannot open a UDP socket: {e}"))?;
@@ -121,6 +124,7 @@ impl NetPlay {
             auto: autoplay.then(Auto::default),
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             last_eye: None,
+            sound,
         })
     }
 
@@ -196,6 +200,7 @@ impl NetPlay {
         self.c.end = feet;
         let eye = Vec3::new(feet[0], feet[1], feet[2] + ps.view_height_current);
         self.last_eye = Some(eye);
+        self.hear(dt, eye, &ps, &snap);
 
         let mut models = self.remote_players(dt, st, own);
         if !dead {
@@ -213,6 +218,36 @@ impl NetPlay {
             pitch: -pitch.to_radians(),
             models,
         })
+    }
+
+    /// Feeds the sound system: the listener, the server's sound commands, and the own player's events.
+    fn hear(&mut self, dt: f32, eye: Vec3, ps: &PlayerState, snap: &net::Snapshot) {
+        let yaw = self.angles[1].to_radians();
+        self.sound.frame(eye.to_array(), yaw, dt);
+        for line in std::mem::take(&mut self.net.commands) {
+            self.sound.command(&line);
+        }
+        let s = &snap.ps;
+        let newest: Vec<(u8, u8)> = (0..4u8)
+            .map(|i| s.event_sequence.wrapping_sub(4 - i))
+            .map(|n| {
+                (
+                    s.events[usize::from(n & 3)],
+                    s.event_parms[usize::from(n & 3)],
+                )
+            })
+            .collect();
+        let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
+        self.sound.events(
+            &Who {
+                own: true,
+                entity: s.client_num,
+                origin: eye.to_array(),
+                weapon: def.map(|d| &**d),
+            },
+            s.event_sequence,
+            &newest,
+        );
     }
 
     fn command(&mut self, cmd: &str) {
@@ -322,6 +357,20 @@ impl NetPlay {
         let mut players = 0;
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
             players += 1;
+            let def = self
+                .weapons
+                .get(e.weapon)
+                .and_then(|i| self.lib.content.weapon(&i.name));
+            self.sound.events(
+                &Who {
+                    own: false,
+                    entity: e.number,
+                    origin: e.origin,
+                    weapon: def.map(|d| &**d),
+                },
+                e.event_seq,
+                &[(e.event, e.event_parm)],
+            );
             let Some(team) = team_of(e.eflags) else {
                 continue;
             };
@@ -353,7 +402,7 @@ impl NetPlay {
     }
 
     /// What the run saw, for the client report.
-    pub fn report(&self) -> Value {
+    pub fn report(&mut self) -> Value {
         let s = self.net.stats();
         let moved = self.c.start.map_or(0.0, |s| {
             ((self.c.end[0] - s[0]).powi(2) + (self.c.end[1] - s[1]).powi(2)).sqrt()
@@ -378,6 +427,7 @@ impl NetPlay {
             "viewmodel_frames": self.c.frames_with_viewmodel,
             "weapons_without_models": self.c.unknown_weapon,
             "eye": self.last_eye.map(|e| e.to_array()),
+            "sound": self.sound.report(),
         })
     }
 

@@ -396,6 +396,7 @@ name = "client"
 version = "0.0.0"
 dependencies = [
  "assets",
+ "audio",
  "block2 0.6.2",
  "crossbeam-queue",
  "dispatch2",

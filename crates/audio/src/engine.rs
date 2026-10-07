@@ -8,7 +8,9 @@
 use crate::bank::{Alias, Bank, Clip};
 use crate::decode::{self, StreamJob};
 use crate::device::{Config, Output};
-use crate::mixer::{Duck, Emitter, Handle, Listener, Mixer, NO_ENTITY, Play, Source, VoiceId, mixer};
+use crate::mixer::{
+    Duck, Emitter, Handle, Listener, Mixer, NO_ENTITY, Play, Source, VoiceId, mixer,
+};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -65,6 +67,7 @@ pub struct Sound {
     listener: Listener,
     loops: HashMap<(u32, String), VoiceId>,
     ambient: Option<VoiceId>,
+    music: Option<VoiceId>,
     pub played: Played,
     /// Why there is no device, when there is none.
     pub device_note: Option<String>,
@@ -134,6 +137,7 @@ impl Sound {
             listener: Listener::from_yaw([0.0; 3], 0.0),
             loops: HashMap::new(),
             ambient: None,
+            music: None,
             played: Played::default(),
             device_note: note,
             scratch: vec![0.0; 4096],
@@ -159,10 +163,14 @@ impl Sound {
     pub fn tick(&mut self, dt: Duration) {
         let loops = &mut self.loops;
         let ambient = &mut self.ambient;
+        let music = &mut self.music;
         self.handle.reap(|id| {
             loops.retain(|_, v| *v != id);
             if *ambient == Some(id) {
                 *ambient = None;
+            }
+            if *music == Some(id) {
+                *music = None;
             }
         });
         if let Out::Silent(m) = &mut self.out {
@@ -192,7 +200,11 @@ impl Sound {
 
     fn play_chain(&mut self, name: &str, cue: Cue, depth: u32) -> Option<VoiceId> {
         let Some(alias) = self.bank.pick(name) else {
-            *self.played.missing.entry(name.to_ascii_lowercase()).or_default() += 1;
+            *self
+                .played
+                .missing
+                .entry(name.to_ascii_lowercase())
+                .or_default() += 1;
             return None;
         };
         let id = self.start(&alias, name, cue);
@@ -208,7 +220,9 @@ impl Sound {
         let def = self.bank.channels.get(usize::from(alias.channel))?.clone();
         let emitter = if def.is_3d {
             let pos = cue.origin.unwrap_or(self.listener.pos);
-            let d2: f32 = (0..3).map(|i| (pos[i] - self.listener.pos[i]).powi(2)).sum();
+            let d2: f32 = (0..3)
+                .map(|i| (pos[i] - self.listener.pos[i]).powi(2))
+                .sum();
             if d2 > alias.dist.1 * alias.dist.1 {
                 self.played.out_of_range += 1;
                 return None;
@@ -280,7 +294,11 @@ impl Sound {
             self.loops.insert(key, id);
         }
         *self.played.by_channel.entry(def.name).or_default() += 1;
-        *self.played.aliases.entry(name.to_ascii_lowercase()).or_default() += 1;
+        *self
+            .played
+            .aliases
+            .entry(name.to_ascii_lowercase())
+            .or_default() += 1;
         Some(id)
     }
 
@@ -320,6 +338,18 @@ impl Sound {
 
     pub fn ambient_stop(&mut self, fade_ms: u32) {
         if let Some(old) = self.ambient.take() {
+            self.handle.fade_out(old, fade_ms);
+        }
+    }
+
+    /// `musicPlay`: the music replaces what played before (a quick fade) and runs beside the ambience.
+    pub fn music_play(&mut self, alias: &str) {
+        self.music_stop(200);
+        self.music = self.play(alias, Cue::default());
+    }
+
+    pub fn music_stop(&mut self, fade_ms: u32) {
+        if let Some(old) = self.music.take() {
             self.handle.fade_out(old, fade_ms);
         }
     }

@@ -32,8 +32,12 @@ pub fn parse(text: &str) -> Vec<ChannelDef> {
         };
         let priority = cols.next().and_then(|v| v.parse().ok()).unwrap_or(0);
         let is_3d = cols.next().is_some_and(|v| v.eq_ignore_ascii_case("3d"));
-        let restricted = !cols.next().is_some_and(|v| v.eq_ignore_ascii_case("unrestricted"));
-        let pausable = !cols.next().is_some_and(|v| v.eq_ignore_ascii_case("nopause"));
+        let restricted = !cols
+            .next()
+            .is_some_and(|v| v.eq_ignore_ascii_case("unrestricted"));
+        let pausable = !cols
+            .next()
+            .is_some_and(|v| v.eq_ignore_ascii_case("nopause"));
         let max_voices = cols
             .next()
             .and_then(|v| v.parse::<usize>().ok())
@@ -63,7 +67,10 @@ mod tests {
         let t = "# comment\n\nphysics,0,3d,unrestricted,pause,6\nauto,1,3d,unrestricted\nbody,3,3d\nmenu,2,2d,unrestricted,nopause\nbulletimpact,1,3d,unrestricted,,10\nplain\n";
         let c = parse(t);
         assert_eq!(c.len(), 6);
-        assert_eq!((c[0].priority, c[0].max_voices, c[0].restricted), (0, 6, false));
+        assert_eq!(
+            (c[0].priority, c[0].max_voices, c[0].restricted),
+            (0, 6, false)
+        );
         assert!(c[1].is_3d && c[1].pausable && c[1].max_voices == 64);
         assert!(c[2].restricted, "restricted is the default");
         assert!(!c[3].is_3d && !c[3].pausable);

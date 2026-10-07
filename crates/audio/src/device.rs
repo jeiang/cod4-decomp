@@ -49,7 +49,9 @@ impl Config {
             SampleFormat::U16 => run::<u16>(&device, config, mixer),
             f => Err(format!("unsupported sample format {f}")),
         }?;
-        stream.play().map_err(|e| format!("cannot start the stream: {e}"))?;
+        stream
+            .play()
+            .map_err(|e| format!("cannot start the stream: {e}"))?;
         Ok(Output { _stream: stream })
     }
 }
@@ -62,7 +64,11 @@ pub struct Output {
 /// Frames mixed per pass, so the callback needs no buffer of the device's size.
 const BLOCK: usize = 1024;
 
-fn run<T>(device: &cpal::Device, config: StreamConfig, mut mixer: Mixer) -> Result<cpal::Stream, String>
+fn run<T>(
+    device: &cpal::Device,
+    config: StreamConfig,
+    mut mixer: Mixer,
+) -> Result<cpal::Stream, String>
 where
     T: SizedSample + FromSample<f32>,
 {

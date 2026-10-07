@@ -557,9 +557,13 @@ impl Mixer {
                 .count()
         };
         let free = self.voices.iter().position(Option::is_none);
-        let slot = if in_pool(self) < POOL_SIZE[pool as usize] && let Some(f) = free {
+        let slot = if in_pool(self) < POOL_SIZE[pool as usize]
+            && let Some(f) = free
+        {
             f
-        } else if let Some(victim) = self.victim(pool, info.priority, p.emitter.map(|e| e.pos), p.volume) {
+        } else if let Some(victim) =
+            self.victim(pool, info.priority, p.emitter.map(|e| e.pos), p.volume)
+        {
             if let Some(v) = self.voices[victim].take() {
                 let _ = self.retired.push((v.id, v.source));
             }
@@ -653,7 +657,11 @@ fn mix_voice(v: &mut Voice, out: &mut [f32], l: &Listener, slave_lerp: f32) -> (
     let mut target = [[0.0f32; 2]; 2];
     match &v.emitter {
         Some(e) => {
-            let rel = [e.pos[0] - l.pos[0], e.pos[1] - l.pos[1], e.pos[2] - l.pos[2]];
+            let rel = [
+                e.pos[0] - l.pos[0],
+                e.pos[1] - l.pos[1],
+                e.pos[2] - l.pos[2],
+            ];
             let d = dist2(e.pos, l.pos).sqrt();
             level *= e.curve.attenuate(d, e.min, e.max);
             // Pan by the sine of the angle to the right of the listener; a sound on top of the listener is central.
@@ -722,7 +730,10 @@ fn mix_voice(v: &mut Voice, out: &mut [f32], l: &Listener, slave_lerp: f32) -> (
             }
         }
         let t = v.frac as f32;
-        let s = [v.a[0] + (v.b[0] - v.a[0]) * t, v.a[1] + (v.b[1] - v.a[1]) * t];
+        let s = [
+            v.a[0] + (v.b[0] - v.a[0]) * t,
+            v.a[1] + (v.b[1] - v.a[1]) * t,
+        ];
         for o in 0..2 {
             out[2 * f + o] += v.fade * (s[0] * g[o][0] + s[1] * g[o][1]);
         }
@@ -1027,6 +1038,10 @@ mod tests {
         for _ in 0..6 {
             m.fill(&mut out);
         }
-        assert_eq!(h.stats.finished.load(Ordering::Relaxed), 1, "100 ms ends within 60 ms at double speed");
+        assert_eq!(
+            h.stats.finished.load(Ordering::Relaxed),
+            1,
+            "100 ms ends within 60 ms at double speed"
+        );
     }
 }
