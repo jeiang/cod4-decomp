@@ -60,6 +60,11 @@ impl Library {
         self.effects.get(&name.to_ascii_lowercase())
     }
 
+    /// The names of every effect, lowercase.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.effects.keys().map(String::as_str)
+    }
+
     pub fn len(&self) -> usize {
         self.effects.len()
     }
@@ -754,6 +759,8 @@ fn visual_state(d: &FxElemDef, el: &Elem, t: f32) -> Vis {
         let to = f32::from(q.base.color[c]) * (1.0 - vl) + f32::from(q.amplitude.color[c]) * vl;
         *out = (from * (1.0 - l) + to * l).round().clamp(0.0, 255.0) as u8;
     }
+    // The zone stores effect colours blue first.
+    color.swap(0, 2);
     let size = |ch: usize, r: f32| {
         let from = r * p.amplitude.size[ch] + p.base.size[ch];
         let to = r * q.amplitude.size[ch] + q.base.size[ch];

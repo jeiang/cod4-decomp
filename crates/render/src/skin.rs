@@ -114,7 +114,7 @@ fn unpack_unit(b: &[u8]) -> Vec3A {
     )
 }
 
-fn pack_unit(v: Vec3A, out: &mut [u8]) {
+pub(crate) fn pack_unit(v: Vec3A, out: &mut [u8]) {
     for (o, c) in out.iter_mut().zip(v.to_array()) {
         *o = (c * 127.0 + 127.5).clamp(0.0, 255.0) as u8;
     }

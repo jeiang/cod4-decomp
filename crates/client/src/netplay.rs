@@ -10,6 +10,7 @@
 
 mod hud;
 
+use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
 use crate::models::{Library, Player, PlayerModelSet, Team};
@@ -30,7 +31,6 @@ use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
 use sim::weapon::{PlayerWeapons, WeaponTable};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The shortest interval between two usercmds.
@@ -49,6 +49,11 @@ pub struct NetFrame {
     /// Radians, positive up.
     pub pitch: f32,
     pub models: Vec<ModelInstance>,
+    /// Sounds the effects started this frame (alias, position), for the mixer.
+    #[expect(dead_code, reason = "read by the mixer")]
+    pub sounds: Vec<fx::SoundPlay>,
+    /// Effect sprites and decals.
+    pub meshes: Vec<render::DynMesh>,
     /// Happenings new this frame; see [`crate::events`].
     #[expect(dead_code, reason = "read by effects, audio and the interface")]
     pub events: Vec<ClientEvent>,
@@ -85,6 +90,9 @@ struct Counters {
     unknown_weapon: std::collections::BTreeMap<String, String>,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
+    fx_quads_max: usize,
+    fx_decals_max: usize,
+    fx_live_max: usize,
 }
 
 pub struct NetPlay {
@@ -117,18 +125,23 @@ pub struct NetPlay {
     kill_icons: HashMap<String, crate::hud::KillIcon>,
     scores_asked: Option<Instant>,
     server_addr: String,
+    effects: Effects,
+    /// The effect `--fx-demo` plays, and when it last did.
+    fx_demo: Option<(String, Option<i32>)>,
 }
 
 impl NetPlay {
     pub fn connect(
         lib: Library,
-        clipmap: Arc<assets::zone::clipmap::Clipmap>,
+        map: &render::MapData,
         server: SocketAddr,
         name: &str,
         pitch_limits: (f32, f32),
         autoplay: bool,
         sound: ClientSound,
     ) -> Result<Self, String> {
+        let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
+        let world = map.world.clone();
         let t = UdpTransport::bind(SocketAddr::from(([0, 0, 0, 0], 0)))
             .map_err(|e| format!("cannot open a UDP socket: {e}"))?;
         let qport = (std::process::id() & 0xffff) as u16;
@@ -136,7 +149,6 @@ impl NetPlay {
             WeaponTable::new(&lib.content.weapons()).map_err(|e| format!("weapon table: {e:?}"))?;
         Ok(Self {
             net: NetClient::new(t, server, name, "", qport),
-            lib,
             weapons,
             params: Params::default(),
             boxes: PlayerBoxes::new(clipmap),
@@ -155,12 +167,20 @@ impl NetPlay {
             last_eye: None,
             hud_view: None,
             sound,
+            effects: Effects::new(&lib.content, world),
+            lib,
             events: Events::default(),
             live_time: 0,
             kill_icons: HashMap::new(),
             scores_asked: None,
             server_addr: server.to_string(),
+            fx_demo: None,
         })
+    }
+
+    /// Plays effect `name` in front of the player every 1.5 s of server time.
+    pub fn set_fx_demo(&mut self, name: String) {
+        self.fx_demo = Some((name, None));
     }
 
     pub fn refused(&self) -> Option<&str> {
@@ -227,7 +247,12 @@ impl NetPlay {
         // Autoplay replaces the player's input with a bot's.
         let auto_input;
         let input = if self.auto.is_some() {
-            auto_input = self.autoplay(dt, st, own);
+            // The effect demo stands still so the effect stays in front of the camera.
+            auto_input = if self.fx_demo.is_some() {
+                InputFrame::default()
+            } else {
+                self.autoplay(dt, st, own)
+            };
             &auto_input
         } else {
             input
@@ -266,6 +291,8 @@ impl NetPlay {
                 yaw: ps.viewangles[1].to_radians(),
                 pitch: -ps.viewangles[0].to_radians(),
                 models,
+                meshes: Vec::new(),
+                sounds: Vec::new(),
                 events,
                 commands,
             });
@@ -313,6 +340,23 @@ impl NetPlay {
         self.hear(dt, eye, &ps, &snap);
 
         let (events, commands) = self.take_events(&snap);
+        for e in &events {
+            let (weapons, content) = (&self.weapons, &self.lib.content);
+            self.effects.event(e, &|w| {
+                weapons
+                    .get(w)
+                    .and_then(|i| content.weapon(&i.name))
+                    .cloned()
+            });
+        }
+        if let Some((name, last)) = &mut self.fx_demo
+            && last.is_none_or(|l| st.wrapping_sub(l) >= 1500)
+        {
+            *last = Some(st);
+            let (yaw, pitch) = (self.angles[1].to_radians(), -self.angles[0].to_radians());
+            self.effects.demo(name, eye, yaw, pitch);
+        }
+        self.effects.update(st, self.boxes.world());
         let mut models = self.remote_players(dt, st, own);
         if !dead {
             models.extend(self.view_model(dt, &ps, feet, &snap));
@@ -323,11 +367,19 @@ impl NetPlay {
             self.angles[1]
         };
         let pitch = if dead { 0.0 } else { self.angles[0] };
+        let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
+        let drawn = self.effects.draw(eye, yaw, pitch);
+        self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
+        self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
+        self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
+        models.extend(drawn.models);
         Some(NetFrame {
             origin: eye,
-            yaw: yaw.to_radians(),
-            pitch: -pitch.to_radians(),
+            yaw,
+            pitch,
             models,
+            sounds: self.effects.take_sounds(),
+            meshes: drawn.meshes,
             events,
             commands,
         })
@@ -590,6 +642,13 @@ impl NetPlay {
             "viewmodel_frames": self.c.frames_with_viewmodel,
             "weapons_without_models": self.c.unknown_weapon,
             "events": self.c.events,
+            "fx": {
+                "played": self.effects.played,
+                "missing": self.effects.missing,
+                "quads_max": self.c.fx_quads_max,
+                "decals_max": self.c.fx_decals_max,
+                "live_elems_max": self.c.fx_live_max,
+            },
             "eye": self.last_eye.map(|e| e.to_array()),
             "sound": self.sound.report(),
         })

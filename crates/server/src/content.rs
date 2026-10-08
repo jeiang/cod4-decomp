@@ -387,6 +387,21 @@ impl Content {
         get(&self.map.weapons, name).or_else(|| get(&self.base.weapons, name))
     }
 
+    /// Every effect the loaded zones define, each name once (the map's copy wins); client content only.
+    pub fn effects(&self) -> Vec<Arc<FxEffectDef>> {
+        let base = self
+            .base
+            .fx
+            .iter()
+            .filter(|(k, _)| !self.map.fx.contains_key(*k));
+        self.map
+            .fx
+            .iter()
+            .chain(base)
+            .map(|(_, (_, e))| e.clone())
+            .collect()
+    }
+
     /// Every weapon definition the loaded zones define, each name once (the map's copy wins).
     pub fn weapons(&self) -> Vec<Arc<WeaponDef>> {
         let base = self
