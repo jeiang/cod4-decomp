@@ -18,6 +18,7 @@ pub mod sunshadow;
 pub mod texture;
 pub mod timing;
 pub mod ui2d;
+pub mod water;
 
 pub use dynmesh::{DynMesh, DynVertex};
 pub use gpu::{Gpu, GpuError, GpuInfo};

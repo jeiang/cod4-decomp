@@ -1290,6 +1290,7 @@ impl Renderer {
         if let Some(f) = self.art.fog.as_ref().filter(|_| self.settings.fog) {
             self.clear = f.color.map(f64::from);
         }
+        self.materials.update_waters(&self.gpu, view.time);
         frame.vec[codeconst::GAMETIME as usize] = [view.time; 4];
         frame.vec[codeconst::ZNEAR as usize] = [NEAR * 0.984_375, 0.0, 0.0, 0.0];
         frame.vec[codeconst::RENDER_TARGET_SIZE as usize] = [
