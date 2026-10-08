@@ -193,7 +193,9 @@ impl Server {
         let install =
             Install::open(root).map_err(|e| format!("{}: {}", root.display(), io_err(e)))?;
         let mut cvars = Cvars::new();
-        // Com_StartupVariable: only set lines run before the cvars are registered.
+        // Com_StartupVariable: set lines run before the cvars are registered, and again with the other held
+        // commands (Com_AddStartupCommands) so they win over the stock configs, whose `set` lines would
+        // otherwise replace the command line's value (`+set scr_war_timelimit 1`).
         let held = parse_command_line(cmdline);
         let mut startup = Vec::new();
         for line in held {
@@ -204,9 +206,8 @@ impl Server {
             ) && argv.len() >= 3
             {
                 cvars.set(&argv[1], &argv[2..].join(" "));
-            } else {
-                startup.push(line);
             }
+            startup.push(line);
         }
         register_core_dvars(&mut cvars);
         let game = Game::new(cvars, Content::default());
