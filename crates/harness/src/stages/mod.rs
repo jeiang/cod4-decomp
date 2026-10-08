@@ -23,6 +23,7 @@ pub mod net_match;
 pub mod net_objective;
 pub mod net_ui;
 pub mod net_vote;
+pub mod script_pool;
 pub mod selftest;
 pub mod server;
 pub mod web_client;

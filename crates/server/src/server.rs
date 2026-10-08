@@ -139,6 +139,8 @@ pub struct Server {
     pub on_tick: Option<TickHook>,
     net: Option<NetSv>,
     pub map_load_ms: f64,
+    /// Levels started so far: a map change or restart, each of which resets the script pool.
+    pub level_loads: u32,
     pub boot_ms: f64,
     pub ticks: u64,
     /// Bots wanted on every map (`bots N`); they join again after a map change.
@@ -239,6 +241,7 @@ impl Server {
             on_tick: None,
             net: None,
             map_load_ms: 0.0,
+            level_loads: 0,
             boot_ms: 0.0,
             ticks: 0,
             bot_target: 0,
@@ -903,6 +906,7 @@ impl Server {
         // People stay connected across a map change; the level they were in is gone.
         let humans = self.net.as_mut().map_or_else(Vec::new, NetSv::take_peers);
         self.run = None;
+        self.level_loads += 1;
         self.script_errors.clear();
         self.say("------ Server Initialization ------\n");
         self.say(&format!("Server: {map}\n"));
@@ -1346,6 +1350,11 @@ impl Server {
         self.run.is_some()
             && self.game.callbacks.player_connect.is_some()
             && self.game.callbacks.player_disconnect.is_some()
+    }
+
+    /// Live script objects and values, counted against the original's pool limits.
+    pub fn script_pool() -> (u32, u32) {
+        gsc::value::pool_usage()
     }
 
     pub fn thread_count(&self) -> usize {

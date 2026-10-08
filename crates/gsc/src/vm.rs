@@ -225,6 +225,12 @@ pub fn wait_ticks(v: &Value) -> Result<u64, String> {
     Ok(ticks)
 }
 
+impl Drop for Vm {
+    fn drop(&mut self) {
+        crate::value::release_objects(&self.game);
+    }
+}
+
 impl Vm {
     /// Checks every function's bytecode and prepares an empty VM at tick 0.
     pub fn new(prog: Program) -> Result<Vm, VmError> {

@@ -7,10 +7,14 @@
 //! The original keeps every object and every field or array element in one fixed pool
 //! (0x8000 parents, 0xFFFE children). The same two counters are kept here and checked where
 //! scripts allocate; locals, thread stacks and notify registrations are not counted.
+//!
+//! Objects are reference counted, so a cycle (a hud element and its `parent`/`children`, say)
+//! is never freed by dropping its last outside handle. The original frees the whole pool when
+//! the level ends; [`release_objects`] does the same by emptying every object still alive.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::rc::Rc;
+use std::collections::{HashMap, HashSet};
+use std::rc::{Rc, Weak};
 
 use crate::bytecode::FuncId;
 
@@ -22,6 +26,9 @@ pub const MAX_VALUES: u32 = 0xFFFE;
 thread_local! {
     static OBJECTS: Cell<u32> = const { Cell::new(0) };
     static VALUES: Cell<u32> = const { Cell::new(0) };
+    /// Every object created on this thread that may still be alive, and the length at which
+    /// the dead entries are next pruned.
+    static LIVE: RefCell<(Vec<Weak<Object>>, usize)> = const { RefCell::new((Vec::new(), 1024)) };
 }
 
 fn bump(counter: &'static std::thread::LocalKey<Cell<u32>>, by: i64) {
@@ -289,12 +296,20 @@ impl PartialEq for Obj {
 impl Obj {
     pub(crate) fn new(kind: Kind) -> Obj {
         bump(&OBJECTS, 1);
-        Obj(Rc::new(Object {
+        let o = Rc::new(Object {
             kind,
             dead: Cell::new(false),
             fields: RefCell::default(),
             notify: RefCell::default(),
-        }))
+        });
+        LIVE.with_borrow_mut(|(live, limit)| {
+            if live.len() >= *limit {
+                live.retain(|w| w.strong_count() > 0);
+                *limit = (live.len() * 2).max(1024);
+            }
+            live.push(Rc::downgrade(&o));
+        });
+        Obj(o)
     }
 
     /// A fresh plain object, as `spawnstruct()` returns.
@@ -389,5 +404,41 @@ impl Obj {
                 n.remove(name);
             }
         }
+    }
+}
+
+fn reachable(v: &Value, seen: &mut HashSet<*const Object>) {
+    match v {
+        Value::Array(a) => a.entries.iter().for_each(|(_, v)| reachable(v, seen)),
+        Value::Object(o) if seen.insert(Rc::as_ptr(&o.0)) => {
+            o.0.fields
+                .borrow()
+                .values()
+                .for_each(|v| reachable(v, seen));
+        }
+        _ => {}
+    }
+}
+
+/// Empties every object on this thread except those `keep` reaches, which breaks the
+/// reference cycles that would otherwise outlive the level (the original's pool reset).
+/// One level's objects exist at a time.
+pub fn release_objects(keep: &Value) {
+    let mut kept = HashSet::new();
+    reachable(keep, &mut kept);
+    let all: Vec<Rc<Object>> = LIVE.with_borrow_mut(|(live, limit)| {
+        let all = live.iter().filter_map(Weak::upgrade).collect();
+        live.clear();
+        *limit = 1024;
+        all
+    });
+    for o in all {
+        if kept.contains(&Rc::as_ptr(&o)) {
+            LIVE.with_borrow_mut(|(live, _)| live.push(Rc::downgrade(&o)));
+            continue;
+        }
+        let o = Obj(o);
+        o.clear_fields();
+        o.0.notify.take();
     }
 }

@@ -162,6 +162,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_vote::run),
     },
     StageDef {
+        name: "script-pool",
+        description: "headless server with bots plays 32 Search and Destroy rounds and a team deathmatch rotating two maps: the script variable pool must return to the same level every round",
+        needs_install: false,
+        timeout: Duration::from_secs(20 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::script_pool::run),
+    },
+    StageDef {
         name: "net-ui",
         description: "a real UDP client answers the menus the stock scripts open and checks the hud elements, objectives, configstrings, client dvars and print lines it is sent",
         needs_install: false,
