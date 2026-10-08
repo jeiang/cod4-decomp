@@ -17,6 +17,7 @@ mod helicopter;
 mod hud;
 mod hudstate;
 mod input;
+mod kick;
 #[cfg_attr(target_arch = "wasm32", path = "listen_web.rs")]
 mod listen;
 mod loader;

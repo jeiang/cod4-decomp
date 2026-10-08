@@ -174,6 +174,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if shots < 1.0 {
         failures.push("the player never fired a shot the server ran".into());
     }
+    // Recoil kicks the view and the kick is in the cmds the server aims the shots by.
+    if shots >= 1.0 && num(net, &["view_kick_max"]) <= 0.0 {
+        failures.push("shots were fired but the view never kicked".into());
+    }
+    if shots >= 1.0 && num(net, &["view_kick_in_cmd_max"]) <= 0.0 {
+        failures.push("shots were fired but no cmd carried the kick".into());
+    }
     let snd = &net["sound"];
     let heard = |names: &[&str]| -> f64 {
         names
