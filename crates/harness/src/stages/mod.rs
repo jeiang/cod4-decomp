@@ -20,3 +20,4 @@ pub mod net_ui;
 pub mod selftest;
 pub mod server;
 pub mod web_client;
+pub mod web_join;

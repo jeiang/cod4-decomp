@@ -177,6 +177,8 @@ fn overlay_values(st: &State) -> Value {
         "draws skipped (no pipeline)": st.pipelines_missing,
         "surfaces drawn": st.surfaces_drawn.last().copied().unwrap_or(0.0),
         "wasm memory MiB": crate::web::memory_bytes() >> 20,
+        "net phase": st.net.as_ref().map_or("none", NetPlay::phase),
+        "net snapshots": st.net.as_ref().map_or(0, NetPlay::snapshots),
     })
 }
 

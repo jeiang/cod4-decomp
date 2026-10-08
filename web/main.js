@@ -187,7 +187,14 @@ async function play() {
       overlay["page"] = navigator.userAgent;
       showOverlay();
       window.__cod4 = { ...window.__cod4, overlay, startedAt: started };
-      if (params.has("report") && !t.reported && (overlay.frames ?? 0) >= Number(params.get("report") || 600)) {
+      // Joined to a server: the run counts from the moment the server put the player in the world.
+      if (params.has("connect") && overlay["net phase"] === "spawned") {
+        t.spawnedFrames ??= overlay.frames ?? 0;
+        t.spawnedMs ??= Math.round(performance.now() - started);
+      }
+      overlay["spawned at (ms)"] = t.spawnedMs ?? "";
+      const reportFrames = params.has("connect") ? (t.spawnedFrames ?? Infinity) : 0;
+      if (params.has("report") && !t.reported && (overlay.frames ?? 0) - reportFrames >= Number(params.get("report") || 600)) {
         t.reported = true;
         fetch("/report", { method: "POST", body: JSON.stringify({ ua: navigator.userAgent, overlay }) }).catch(() => {});
       }
