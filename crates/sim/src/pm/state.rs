@@ -279,6 +279,9 @@ pub struct PlayerState {
     /// 0 = hip, 1 = fully aimed down sights.
     pub weapon_pos_frac: f32,
     pub ads_delay_time: i32,
+    /// Model index (the model configstrings) of the hands the first-person weapon is drawn with, set by the
+    /// script's `setviewmodel`; 0 is the weapon's own hand model.
+    pub viewmodel_index: u16,
     pub viewangles: Vec3,
     pub view_height_target: i32,
     pub view_height_current: f32,
@@ -368,6 +371,7 @@ impl Default for PlayerState {
             weapon_flags: 0,
             weapon_pos_frac: 0.0,
             ads_delay_time: 0,
+            viewmodel_index: 0,
             viewangles: [0.0; 3],
             view_height_target: VIEW_STAND,
             view_height_current: VIEW_STAND as f32,

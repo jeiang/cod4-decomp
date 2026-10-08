@@ -112,6 +112,7 @@ fn table() -> Vec<Field<PlayerState>> {
         int!(s, s.weapon_flags, Bits(12)),
         flt!(s, s.weapon_pos_frac),
         int!(s, s.ads_delay_time, SBits(32)),
+        int!(s, s.viewmodel_index, Bits(9)),
         flt!(s, s.viewangles[0]),
         flt!(s, s.viewangles[1]),
         flt!(s, s.viewangles[2]),

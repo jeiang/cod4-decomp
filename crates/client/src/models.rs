@@ -29,13 +29,6 @@ impl Team {
             Team::Axis => &["arab", "russian"],
         }
     }
-
-    fn hands(self) -> &'static [&'static str] {
-        match self {
-            Team::Allies => &["usmc", "sas"],
-            Team::Axis => &["opfor", "militia", "arab", "russian"],
-        }
-    }
 }
 
 /// Which models make up a player.
@@ -43,7 +36,6 @@ impl Team {
 pub struct PlayerModelSet {
     pub body: String,
     pub head: Option<String>,
-    pub viewhands: Option<String>,
     /// The world model of the held weapon, attached at `tag_weapon_right`.
     pub weapon: Option<String>,
 }
@@ -84,7 +76,6 @@ impl Library {
             .copied()?;
         Some(PlayerModelSet {
             head: pick("head_mp_", &[faction]),
-            viewhands: pick("viewhands_", team.hands()),
             weapon: None,
             body,
         })
