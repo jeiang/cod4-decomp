@@ -80,6 +80,8 @@ pub struct LiveUi {
     pub active: bool,
     /// The scope picture over the screen while a sniper aims.
     pub scope: Option<crate::viewmodel::Overlay>,
+    /// The weapon's crosshair over the world, its field of view filled in by the app.
+    pub reticle: Option<crate::crosshair::Reticle>,
     /// The client's estimate of the server clock, ms.
     pub time: i32,
     /// The clock script hud element times are read on: `time`, minus the replay offset in a killcam.

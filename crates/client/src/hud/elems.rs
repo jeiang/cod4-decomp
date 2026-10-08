@@ -117,6 +117,10 @@ pub fn draw_under(ui: &Ui, p: &mut Painter, st: &ShellState) {
     if let Some(o) = &st.live.scope {
         draw_scope(ui, p, o);
     }
+    if let Some(r) = st.live.reticle.as_ref().filter(|_| !ui.captures_input()) {
+        let (w, h) = ui.place.size;
+        crate::crosshair::draw(p.g, p.cache, r, (w as u32, h as u32));
+    }
     st.feed.draw_chat(ui, p, &st.live, st.game.scoreboard);
     draw_elems(ui, p, &st.live, false);
 }

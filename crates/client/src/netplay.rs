@@ -10,6 +10,7 @@
 
 mod hud;
 
+use crate::crosshair::Reticle;
 use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
@@ -31,7 +32,8 @@ use server::playeranim::PlayerPoseInput;
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
 use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
-use sim::weapon::{PlayerWeapons, WeaponTable};
+use sim::weapon::fire::aim_spread_degrees;
+use sim::weapon::{PlayerWeapons, WeaponParams, WeaponTable};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -164,6 +166,9 @@ pub struct NetPlay {
     last_eye: Option<Vec3>,
     /// The state the HUD shows (predicted, or the followed player's) and the view yaw in degrees, from the last frame.
     hud_view: Option<(PlayerState, f32)>,
+    /// The crosshair of the held weapon from the last frame; `None` when dead, watching another player or the weapon
+    /// has no reticle. The HUD draws it; the field of view is the app's to fill in.
+    reticle: Option<Reticle>,
     sound: ClientSound,
     events: Events,
     /// The client's estimate of the server clock at the last frame, for the HUD.
@@ -222,6 +227,7 @@ impl NetPlay {
             ui_events: Vec::new(),
             last_eye: None,
             hud_view: None,
+            reticle: None,
             sound,
             props: Props::new(
                 lib.content
@@ -296,6 +302,7 @@ impl NetPlay {
     pub fn fill_live(&mut self, live: &mut crate::hud::LiveUi) {
         crate::hud::fill::fill(&mut self.net, live, self.live_time, self.last_eye);
         live.scope = self.sight.as_ref().and_then(|s| s.overlay.clone());
+        live.reticle.clone_from(&self.reticle);
         if live.kill_icons.len() != self.kill_icons.len() {
             live.kill_icons.clone_from(&self.kill_icons);
         }
@@ -422,6 +429,7 @@ impl NetPlay {
             );
             self.last_eye = Some(eye);
             self.hud_view = Some((ps.clone(), ps.viewangles[1]));
+            self.reticle = None;
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.script_models(&snap));
             models.extend(self.view_model(dt, &ps, ps.origin));
@@ -503,6 +511,7 @@ impl NetPlay {
         }
         self.last_eye = Some(eye);
         self.hud_view = Some((ps.clone(), yaw_deg));
+        self.reticle = if dead { None } else { self.reticle_of(&ps) };
         self.hear(dt, eye, &ps, &snap);
 
         let (events, commands) = self.take_events(&snap);
@@ -587,6 +596,20 @@ impl NetPlay {
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
         self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
         drawn
+    }
+
+    /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
+    fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
+        let index = ps.weapon as u16;
+        let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
+        let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &WeaponParams::default());
+        Some(Reticle {
+            weapon,
+            spread_deg,
+            spread_scale: ps.aim_spread_scale,
+            ads: ps.weapon_pos_frac,
+            tan_half_fov_y: 0.0,
+        })
     }
 
     /// The events new in `snap` and the server commands nothing here consumed.
