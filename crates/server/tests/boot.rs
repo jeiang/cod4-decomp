@@ -70,3 +70,18 @@ fn map_restart_reloads_the_level() {
     s.run_frames(60);
     assert!(s.script_errors.is_empty(), "{:#?}", s.script_errors);
 }
+
+#[test]
+fn command_line_sets_win_over_the_stock_configs() {
+    let Some(mut s) = boot(&[
+        "+set", "net_port", "0", "+set", "g_gametype", "war", "+set", "scr_war_timelimit", "1",
+        "+map", "mp_crash",
+    ]) else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    s.run_frames(30);
+    // The stock default_mp_gamesettings.cfg sets 10; the gametype's script copies the dvar into the UI's.
+    assert_eq!(s.game.cvars.string("scr_war_timelimit"), "1");
+    assert_eq!(s.game.cvars.string("ui_timelimit"), "1");
+}
