@@ -360,7 +360,7 @@ pub struct Game {
     pub menus: Precache,
     pub configstrings: HashMap<u32, String>,
     pub max_clients: usize,
-    /// Score per team, indexed by [`team index`]: 1 allies, 2 axis.
+    /// Score per team, indexed like [`Team`](crate::client::Team): 1 axis, 2 allies.
     pub team_score: [i32; 3],
     /// Map zones of the install (`mapexists`).
     pub known_maps: Vec<String>,

@@ -144,6 +144,8 @@ pub fn fill(net: &mut NetClient<Wire>, live: &mut LiveUi, time: i32, eye: Option
                 kills: r.kills,
                 deaths: r.deaths,
                 assists: r.assists,
+                rank: c.rank,
+                prestige: c.prestige,
                 ping: r.ping,
                 status_icon: ui.material(r.status_icon).to_owned(),
             })

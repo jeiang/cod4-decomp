@@ -62,6 +62,8 @@ pub struct ScoreLine {
     pub kills: i32,
     pub deaths: i32,
     pub assists: i32,
+    pub rank: u8,
+    pub prestige: u8,
     pub ping: i32,
     pub status_icon: String,
 }

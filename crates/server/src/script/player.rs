@@ -115,7 +115,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("updatescores", r(|_, _, _, _| Ok(Value::Undefined))),
     ("updatedmscores", r(|_, _, _, _| Ok(Value::Undefined))),
     ("setentertime", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("setrank", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("setrank", r(set_rank)),
     ("getguid", r(get_guid)),
     ("getxuid", r(get_guid)),
     ("getclanid", r(|_, _, _, _| Ok(Value::Int(0)))),
@@ -381,6 +381,27 @@ fn allow_spectate_team(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
+/// `setrank(rank[, prestige])`: both are bytes, published to everybody in the client info.
+fn set_rank(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client_of(g, e)?;
+    let byte = |v: i32, what: &str| {
+        u8::try_from(v)
+            .map_err(|_| format!("'{v}' is an illegal {what} value.  Must be less than 256.\n"))
+    };
+    let rank = byte(a.int(0)?, "rank")?;
+    let prestige = if a.get(1).is_ok() {
+        Some(byte(a.int(1)?, "prestige")?)
+    } else {
+        None
+    };
+    let c = g.client_mut(n).ok_or("not a player")?;
+    c.rank = rank;
+    if let Some(p) = prestige {
+        c.prestige = p;
+    }
+    Ok(Value::Undefined)
+}
+
 fn show_scoreboard(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client_of(g, e)?;
     g.ui.score_requests.push(n);
@@ -581,5 +602,38 @@ pub fn set_client_field(g: &mut Game, n: u16, name: &str, v: &Value) -> Option<R
         Err(e) => Some(Err(e)),
         Ok(_) if known => Some(Ok(())),
         Ok(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gsc::{Builtins, Options, compile};
+
+    #[test]
+    fn setrank_keeps_the_prestige_unless_given_and_rejects_a_byte_overflow() {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(prog).unwrap();
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.reset_level(4);
+        let n = g.connect_client(&mut vm, true, "Ann").unwrap();
+        let e = EntRef {
+            num: n,
+            class: EntClass::Entity,
+        };
+        let mut call = |args: &[i32]| {
+            let v: Vec<Value> = args.iter().map(|n| Value::Int(*n)).collect();
+            set_rank(&mut g, &mut vm, e, Args::new("setrank", &v))
+        };
+        call(&[30, 2]).unwrap();
+        call(&[31]).unwrap();
+        assert!(call(&[256]).is_err() && call(&[1, -1]).is_err());
+        let c = g.client(n).unwrap();
+        assert_eq!((c.rank, c.prestige), (31, 2));
     }
 }

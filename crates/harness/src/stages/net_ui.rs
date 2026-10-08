@@ -48,6 +48,8 @@ struct Seen {
     named_rows: usize,
     best_score_first: bool,
     stat: i32,
+    /// Highest score any client info carried: live without a scoreboard request.
+    info_score_max: i32,
     bytes_in: u64,
     secs: f64,
 }
@@ -141,6 +143,10 @@ fn client(addr: SocketAddr, stop: &std::sync::atomic::AtomicBool) -> Seen {
             .filter(|r| ui.client(r.client).is_some_and(|c| !c.name.is_empty()))
             .count();
         s.stat = ui.stat(205);
+        s.info_score_max = (0..64)
+            .filter_map(|n| ui.client(n))
+            .map(|c| c.score)
+            .fold(s.info_score_max, i32::max);
         for e in &events {
             if let UiEvent::Obituary(o) = e {
                 s.obituaries += 1;
@@ -294,6 +300,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 "stat 205 is {} on the client: the join announced the server's stand-in",
                 seen.stat
             ));
+        }
+        if seen.info_score_max <= 0 {
+            failures
+                .push("no kill ever raised a score in the client info configstrings".to_owned());
         }
         if seen.clients < BOTS {
             failures.push(format!(

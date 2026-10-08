@@ -357,6 +357,28 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
     }
 }
 
+/// One cell of a string table: the row whose first column is `key`, column `col`.
+fn table_cell<'a>(ui: &'a Ui, table: &str, key: u8, col: usize) -> Option<&'a str> {
+    let t = ui.assets.table(table)?;
+    let cols = t.column_count as usize;
+    let key = key.to_string();
+    (0..t.row_count as usize)
+        .find(|&r| t.values.get(r * cols).and_then(|v| v.as_deref()) == Some(key.as_str()))
+        .and_then(|r| t.values.get(r * cols + col)?.as_deref())
+}
+
+/// The material of a rank's icon (`CL_GetRankIcon`: `mp/rankIconTable.csv`, column `prestige + 1`), if it has one.
+fn rank_icon(ui: &Ui, rank: u8, prestige: u8) -> Option<String> {
+    table_cell(ui, "mp/rankiconTable.csv", rank, usize::from(prestige) + 1)
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
+}
+
+/// The level shown next to the icon (`rankTable.csv` display level column).
+fn rank_level(ui: &Ui, rank: u8) -> Option<String> {
+    table_cell(ui, "mp/rankTable.csv", rank, 14).map(str::to_owned)
+}
+
 /// Draws a string at a scale, position, colour and style.
 type TextFn<'a> = dyn Fn(&mut Painter, &str, f32, f32, f32, [f32; 4], i32) + 'a;
 
@@ -388,12 +410,24 @@ fn draw_row(
         let w = frac * LIST_W;
         let value = match col {
             Col::Name => Some(r.name.clone()),
+            Col::Rank if !spectator => rank_level(ui, r.rank),
             Col::Score if !spectator => Some(r.score.to_string()),
             Col::Kills if !spectator => Some(r.kills.to_string()),
             Col::Assists if !spectator => Some(r.assists.to_string()),
             Col::Deaths if !spectator => Some(r.deaths.to_string()),
             Col::Ping => Some(r.ping.max(0).to_string()),
             _ => None,
+        };
+        // `CG_DrawScoreboard` LCT_RANK: the rank icon, then the display level right of it.
+        let icon_w = if col == Col::Rank && !spectator {
+            let icon = rank_icon(ui, r.rank, r.prestige);
+            if let Some(name) = &icon {
+                let img = p.named(&ui.assets, name);
+                p.pic(&img, rect(x, y, ITEM_H, ITEM_H), [1.0; 4]);
+            }
+            ITEM_H
+        } else {
+            0.0
         };
         if let Some(s) = value {
             let scale = fit(ui, &s, w);
@@ -409,7 +443,7 @@ fn draw_row(
                 p,
                 &s,
                 scale,
-                x + adj,
+                x + adj + icon_w,
                 (th + ITEM_H) * TEXT_OFFSET + y,
                 color,
                 style,

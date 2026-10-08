@@ -220,6 +220,11 @@ impl Game {
                 Some(c) => ui::client_info_string(&ClientInfo {
                     name: c.name.clone(),
                     team: c.team as u8,
+                    score: c.score,
+                    kills: c.kills,
+                    deaths: c.deaths,
+                    rank: c.rank,
+                    prestige: c.prestige,
                 }),
                 None => String::new(),
             };
@@ -340,6 +345,44 @@ mod tests {
             [("shown", "1"), ("shown", "0")],
             "only changes, only server info"
         );
+    }
+
+    #[test]
+    fn live_score_and_rank_are_published_in_the_client_info() {
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        let mut prog = None;
+        let vm = prog.get_or_insert_with(|| {
+            let p = gsc::compile(
+                &[("t.gsc", "main() {}")],
+                &gsc::Builtins::stock_mp(),
+                gsc::Options::default(),
+            )
+            .unwrap();
+            gsc::Vm::new(p).unwrap()
+        });
+        g.reset_level(4);
+        let n = g.connect_client(vm, true, "Ann").expect("slot");
+        {
+            let c = g.client_mut(n).unwrap();
+            c.conn = crate::client::Conn::Connected;
+            (c.score, c.kills, c.deaths, c.rank, c.prestige) = (120, 4, 2, 17, 1);
+        }
+        g.refresh_client_info();
+        let info = ui::client_info(&g.configstrings[&u32::from(cs::CLIENTINFO + n)]).unwrap();
+        assert_eq!(
+            (
+                info.score,
+                info.kills,
+                info.deaths,
+                info.rank,
+                info.prestige
+            ),
+            (120, 4, 2, 17, 1)
+        );
+        g.client_mut(n).unwrap().score = 130;
+        g.refresh_client_info();
+        let info = ui::client_info(&g.configstrings[&u32::from(cs::CLIENTINFO + n)]).unwrap();
+        assert_eq!(info.score, 130, "follows the next kill without a request");
     }
 
     #[test]

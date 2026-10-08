@@ -1097,11 +1097,27 @@ pub struct ClientInfo {
     pub name: String,
     /// 0 free, 1 axis, 2 allies, 3 spectator.
     pub team: u8,
+    /// Live score, kills and deaths (`updatescores` keeps the engine's copy current; here it is always current).
+    pub score: i32,
+    pub kills: i32,
+    pub deaths: i32,
+    /// `setrank`: row of `mp/rankIconTable.csv` and the prestige column offset.
+    pub rank: u8,
+    pub prestige: u8,
 }
 
 /// Builds the `n\<name>\t\<team>` string for a client slot.
 pub fn client_info_string(info: &ClientInfo) -> String {
-    format!("n\\{}\\t\\{}", info.name.replace('\\', ""), info.team)
+    format!(
+        "n\\{}\\t\\{}\\s\\{}\\k\\{}\\d\\{}\\r\\{}\\p\\{}",
+        info.name.replace('\\', ""),
+        info.team,
+        info.score,
+        info.kills,
+        info.deaths,
+        info.rank,
+        info.prestige
+    )
 }
 
 /// Parses a [`cs::CLIENTINFO`] string; `None` for an empty slot.
@@ -1115,6 +1131,11 @@ pub fn client_info(s: &str) -> Option<ClientInfo> {
         match k {
             "n" => out.name = v.to_owned(),
             "t" => out.team = v.parse().unwrap_or(0),
+            "s" => out.score = v.parse().unwrap_or(0),
+            "k" => out.kills = v.parse().unwrap_or(0),
+            "d" => out.deaths = v.parse().unwrap_or(0),
+            "r" => out.rank = v.parse().unwrap_or(0),
+            "p" => out.prestige = v.parse().unwrap_or(0),
             _ => {}
         }
     }
@@ -1536,6 +1557,11 @@ mod tests {
                 client_info_string(&ClientInfo {
                     name: "Ann".into(),
                     team: 2,
+                    score: -3,
+                    kills: 4,
+                    deaths: 5,
+                    rank: 6,
+                    prestige: 1,
                 }),
             ),
         ]));
@@ -1557,7 +1583,12 @@ mod tests {
             ui.client(5),
             Some(ClientInfo {
                 name: "Ann".into(),
-                team: 2
+                team: 2,
+                score: -3,
+                kills: 4,
+                deaths: 5,
+                rank: 6,
+                prestige: 1,
             })
         );
         assert_eq!(ui.client(6), None);
