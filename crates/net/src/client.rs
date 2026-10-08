@@ -28,8 +28,14 @@ pub struct NetClient<T: Transport> {
     pub snaps: SnapshotBuffer,
     /// Server console commands received and not yet taken.
     pub commands: Vec<String>,
+    /// The person's profile, sent as soon as the connection is up ([`PROFILE_DONE`] ends it).
+    profile: Vec<String>,
     buf: Vec<u8>,
 }
+
+/// The command that ends a client's profile upload: the server holds a new person back until it arrives, as the
+/// original holds the game state until the stats are in.
+pub const PROFILE_DONE: &str = "statsdone";
 
 impl<T: Transport> NetClient<T> {
     pub fn new(t: T, server: SocketAddr, name: &str, password: &str, qport: u16) -> Self {
@@ -40,8 +46,15 @@ impl<T: Transport> NetClient<T> {
             started: Instant::now(),
             snaps: SnapshotBuffer::default(),
             commands: Vec::new(),
+            profile: Vec::new(),
             buf: vec![0; 2048],
         }
+    }
+
+    /// Commands (`statsync ...`) that carry the person's profile to the server right after the connection is up. A
+    /// client with no profile sends none and still ends the upload.
+    pub fn set_profile(&mut self, commands: Vec<String>) {
+        self.profile = commands;
     }
 
     pub fn now_ms(&self) -> u64 {
@@ -108,8 +121,12 @@ impl<T: Transport> NetClient<T> {
                     c.handle(from, o);
                     match c.state() {
                         ConnectState::Connected => {
-                            self.phase =
-                                Phase::Playing(Box::new(ClientLink::new(self.server, c.qport)));
+                            let mut link = Box::new(ClientLink::new(self.server, c.qport));
+                            for line in self.profile.drain(..) {
+                                let _ = link.command(&line);
+                            }
+                            let _ = link.command(PROFILE_DONE);
+                            self.phase = Phase::Playing(link);
                         }
                         ConnectState::Refused(r) => self.phase = Phase::Refused(r.clone()),
                         _ => {}

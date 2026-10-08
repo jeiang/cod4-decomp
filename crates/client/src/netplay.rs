@@ -75,6 +75,8 @@ pub struct NetFrame {
 
 struct Remote {
     player: Player,
+    /// The body model the player is drawn with.
+    body: String,
     /// World model of the weapon the player holds.
     weapon: Option<String>,
     seen: Instant,
@@ -112,6 +114,10 @@ struct Counters {
     shots: u64,
     predictions: u64,
     max_players_seen: usize,
+    /// The most other players drawn in one frame, and why the others could not be built (a model or animation the
+    /// zones lack): a player the snapshot has but the picture does not.
+    max_players_drawn: usize,
+    player_faults: std::collections::BTreeSet<String>,
     spawned: bool,
     start: Option<[f32; 3]>,
     end: [f32; 3],
@@ -385,6 +391,12 @@ impl NetPlay {
         self.c.spawned = false;
         self.c.start = None;
         Ok(())
+    }
+
+    /// The profile that goes to the server as soon as the connection is up, before the person begins: the scripts
+    /// read the rank and the classes when they begin.
+    pub fn set_profile(&mut self, stats: &[i32]) {
+        self.net.set_profile(crate::profile::upload_commands(stats));
     }
 
     /// Hands the server the profile's stats (it fabricates stand-ins when a person joins) and takes what it says now
@@ -1035,6 +1047,7 @@ impl NetPlay {
         let now = Instant::now();
         let mut out = Vec::new();
         let mut players = 0;
+        let mut drawn = 0;
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
             players += 1;
             let def = self
@@ -1051,9 +1064,6 @@ impl NetPlay {
                 e.event_seq,
                 &[(e.event, e.event_parm)],
             );
-            let Some(team) = team_of(e.eflags) else {
-                continue;
-            };
             let weapon = self
                 .weapons
                 .get(e.weapon)
@@ -1063,17 +1073,43 @@ impl NetPlay {
                 .as_ref()
                 .and_then(|w| w.world_models.first().cloned().flatten())
                 .and_then(|m| m.name.as_deref().map(str::to_owned));
-            let set = self.lib.team_models(team).map(|set| PlayerModelSet {
-                weapon: held.clone(),
-                ..set
-            });
+            // The body the scripts gave the player; failing that, the stock body of the team's faction.
+            let scripted = self
+                .net
+                .ui()
+                .map(|u| u.model(e.model).to_owned())
+                .and_then(|n| self.lib.body_models(&n));
+            let set = scripted
+                .or_else(|| team_of(e.eflags).and_then(|t| self.lib.team_models(t)))
+                .map(|set| PlayerModelSet {
+                    weapon: held.clone(),
+                    ..set
+                });
+            // A player the scripts have not given a model yet (just joined) is not drawn.
+            let Some(set) = set else {
+                continue;
+            };
             match self.remotes.get_mut(&e.client) {
-                None => {
-                    if let Some(player) = set.and_then(|s| self.lib.player(&s).ok()) {
+                Some(r) if r.body != set.body => {
+                    // A new class: another body.
+                    match self.lib.player(&set) {
+                        Ok(p) => {
+                            r.player = p;
+                            r.body.clone_from(&set.body);
+                            r.weapon = held;
+                        }
+                        Err(e) => {
+                            self.c.player_faults.insert(e);
+                        }
+                    }
+                }
+                None => match self.lib.player(&set) {
+                    Ok(player) => {
                         self.remotes.insert(
                             e.client,
                             Remote {
                                 player,
+                                body: set.body.clone(),
                                 weapon: held,
                                 seen: now,
                                 dead: None,
@@ -1081,13 +1117,19 @@ impl NetPlay {
                             },
                         );
                     }
-                }
-                Some(r) if r.weapon != held => {
-                    if let Some(p) = set.and_then(|s| self.lib.player(&s).ok()) {
+                    Err(e) => {
+                        self.c.player_faults.insert(e);
+                    }
+                },
+                Some(r) if r.weapon != held => match self.lib.player(&set) {
+                    Ok(p) => {
                         r.player.rearm(p);
                         r.weapon = held;
                     }
-                }
+                    Err(e) => {
+                        self.c.player_faults.insert(e);
+                    }
+                },
                 Some(_) => {}
             }
             let Some(r) = self.remotes.get_mut(&e.client) else {
@@ -1107,6 +1149,7 @@ impl NetPlay {
             }
             r.dead = Some(dead);
             r.player.update(dt, &input);
+            drawn += 1;
             match &mut r.ragdoll {
                 Some((at, yaw, body)) => {
                     body.update(dt, self.boxes.world());
@@ -1116,6 +1159,7 @@ impl NetPlay {
             }
         }
         self.c.max_players_seen = self.c.max_players_seen.max(players);
+        self.c.max_players_drawn = self.c.max_players_drawn.max(drawn);
         self.remotes.retain(|_, r| now - r.seen < GONE_AFTER);
         out
     }
@@ -1131,7 +1175,7 @@ impl NetPlay {
         let moved = self.c.start.map_or(0.0, |s| {
             ((self.c.end[0] - s[0]).powi(2) + (self.c.end[1] - s[1]).powi(2)).sqrt()
         });
-        json!({
+        let mut report = json!({
             "connected": self.net.connected(),
             "spawned": self.c.spawned,
             "snapshots": s.map(|s| s.packets_in),
@@ -1177,7 +1221,10 @@ impl NetPlay {
             "eye": self.last_eye.map(|e| e.to_array()),
             "eye_speed": eye_speed_summary(&self.c.eye_speeds),
             "sound": self.sound.report(),
-        })
+        });
+        report["players_drawn_max"] = self.c.max_players_drawn.into();
+        report["player_faults"] = json!(self.c.player_faults);
+        report
     }
 
     /// Where the player's body is, for the autoplay and the report.

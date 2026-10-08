@@ -92,7 +92,22 @@ pub(super) fn verdict(report: &Value) -> Option<String> {
     if report["net"]["spawned"] != Value::Bool(true) {
         return Some("the player never spawned (left floating as a spectator)".into());
     }
+    if let Some(w) = players_problem(&report["net"]) {
+        return Some(w);
+    }
     hud_problem(&report["hud"])
+}
+
+/// Why the other players were not in the picture, or `None`: every player the server announced must have been built
+/// and drawn in some frame (a mode without teams once drew nobody).
+fn players_problem(net: &Value) -> Option<String> {
+    let seen = net["players_seen_max"].as_u64().unwrap_or(0);
+    let drawn = net["players_drawn_max"].as_u64().unwrap_or(0);
+    if let Some(f) = net["player_faults"].as_array().filter(|f| !f.is_empty()) {
+        return Some(format!("other players could not be drawn: {f:?}"));
+    }
+    (seen > 0 && drawn == 0)
+        .then(|| format!("{seen} other players were announced and none was ever drawn"))
 }
 
 /// What a spawned player's HUD must have: health replicated from the server, the weapon's ammunition, the map
@@ -184,6 +199,29 @@ mod tests {
     fn good() -> Value {
         json!({"live": true, "health": 100, "max_health": 100, "weapon": {"clip": 30},
             "map": "compass_map_mp_crash", "drawn": {"112": 5, "117": 5, "159": 5, "150": 5}})
+    }
+
+    #[test]
+    fn announced_players_must_be_drawn() {
+        assert_eq!(players_problem(&json!({})), None);
+        assert_eq!(
+            players_problem(
+                &json!({"players_seen_max": 3, "players_drawn_max": 2, "player_faults": []})
+            ),
+            None
+        );
+        assert!(
+            players_problem(
+                &json!({"players_seen_max": 3, "players_drawn_max": 0, "player_faults": []})
+            )
+            .unwrap()
+            .contains("none was ever drawn")
+        );
+        assert!(
+            players_problem(&json!({"players_seen_max": 3, "players_drawn_max": 3, "player_faults": ["no body"]}))
+                .unwrap()
+                .contains("no body")
+        );
     }
 
     #[test]

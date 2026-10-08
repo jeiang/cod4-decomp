@@ -165,14 +165,15 @@ impl NetSv {
     }
 
     /// Every connected client, for a map change; they rejoin with [`Self::put_peer`].
-    pub fn take_peers(&mut self) -> Vec<(Peer, String)> {
+    pub fn take_peers(&mut self) -> Vec<(u16, Peer, String)> {
         self.peers
             .iter_mut()
-            .filter_map(Option::take)
-            .map(|mut p| {
+            .enumerate()
+            .filter_map(|(slot, p)| Some((slot as u16, p.take()?)))
+            .map(|(slot, mut p)| {
                 p.cmds.clear();
                 let name = p.name.clone();
-                (p, name)
+                (slot, p, name)
             })
             .collect()
     }
@@ -545,6 +546,9 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 let mut s = EntityState::new(n);
                 s.etype = etype::PLAYER;
                 s.client = n;
+                // The body model the scripts gave this player (`playerModelForWeapon`): in a mode without teams the
+                // session team is none, but the model is still there to draw.
+                s.model = game.models.find(&e.model) as u16;
                 s.origin = c.ps.origin;
                 s.angles = [c.ps.viewangles[0], c.ps.viewangles[1], c.ps.leanf * 45.0];
                 s.velocity = c.ps.velocity;

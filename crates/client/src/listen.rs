@@ -184,6 +184,7 @@ fn run(
     let _ = tx.send(Ok(addr));
     // The first person's counters, kept while they are connected (the slot is freed when they leave).
     let mut person = json!(null);
+    let mut reported_errors = 0;
     while !stop.load(Ordering::Relaxed) {
         let lines = CONSOLE
             .lock()
@@ -193,6 +194,11 @@ fn run(
             let _ = server.exec_line(&line);
         }
         server.run_for(Duration::from_millis(100));
+        // A script error ends a thread chain silently for the player; the client log is where it shows.
+        for (map, text) in server.all_script_errors.iter().skip(reported_errors) {
+            eprintln!("[{map}] {text}");
+        }
+        reported_errors = server.all_script_errors.len();
         if let Ok(mut o) = OBJECTIVES.lock() {
             *o = (
                 server.game.stats.plants,

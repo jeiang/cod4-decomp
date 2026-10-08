@@ -287,9 +287,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         } else if seen.named_rows < seen.scoreboard_rows - 1 || !seen.best_score_first {
             failures.push("scoreboard rows unnamed or not sorted best first".to_owned());
         }
-        if seen.stat != 1 {
+        // The server's stand-in profile stats stay its own: a client that took them for news would write them into
+        // its saved profile (perk 1 in every custom class, a script error at every spawn).
+        if seen.stat != 0 {
             failures.push(format!(
-                "stat 205 is {}, the profile default is 1",
+                "stat 205 is {} on the client: the join announced the server's stand-in",
                 seen.stat
             ));
         }
