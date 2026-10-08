@@ -751,6 +751,10 @@ impl NetPlay {
     }
 
     fn command(&mut self, cmd: &str) {
+        if cmd.starts_with("callvote ") || cmd.starts_with("vote ") {
+            self.net.command(cmd);
+            return;
+        }
         if let Some(arg) = cmd.strip_prefix("actionslot ") {
             self.action_slot(arg);
             return;

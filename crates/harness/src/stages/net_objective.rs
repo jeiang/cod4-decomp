@@ -20,10 +20,10 @@ const NAME: &str = "net-objective";
 /// Waiting for a round to start and a bomb to be planted depends on the scripts' timers.
 const LIMIT: Duration = Duration::from_secs(120);
 
-struct Human {
-    c: NetClient<UdpTransport>,
+pub(super) struct Human {
+    pub(super) c: NetClient<UdpTransport>,
     join: AutoJoin,
-    own: Option<u16>,
+    pub(super) own: Option<u16>,
     cmd_time: i32,
     hold_use: bool,
     /// The hint the server's player state showed at the zone, and its text.
@@ -31,7 +31,7 @@ struct Human {
 }
 
 impl Human {
-    fn new(addr: SocketAddr, id: u16) -> io::Result<Self> {
+    pub(super) fn new(addr: SocketAddr, id: u16) -> io::Result<Self> {
         let t = UdpTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
         Ok(Self {
             c: NetClient::new(t, addr, &format!("human{id}"), "", 6000 + id),
@@ -44,7 +44,7 @@ impl Human {
     }
 
     /// One client frame: take the packets, answer the join menus, send a command.
-    fn step(&mut self) {
+    pub(super) fn step(&mut self) {
         self.c.pump(Duration::from_millis(1));
         if let Some(ui) = self.c.ui() {
             let events = ui.drain_events();

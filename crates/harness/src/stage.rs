@@ -154,6 +154,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_objective::run),
     },
     StageDef {
+        name: "net-vote",
+        description: "two real UDP clients vote: a kick vote drops one, a typemap vote changes the gametype and map",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_vote::run),
+    },
+    StageDef {
         name: "net-ui",
         description: "a real UDP client answers the menus the stock scripts open and checks the hud elements, objectives, configstrings, client dvars and print lines it is sent",
         needs_install: false,
