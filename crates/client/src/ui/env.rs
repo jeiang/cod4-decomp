@@ -56,6 +56,10 @@ pub trait World {
     fn key_binding(&self, _: &str) -> String {
         String::new()
     }
+    /// The key ids (`KEY_Q`, `KEY_MOUSE1`) bound to a command, in name order.
+    fn key_bindings(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
     fn action_slot_usable(&self, _: i32) -> bool {
         false
     }
@@ -174,7 +178,7 @@ impl ExprEnv for Env<'_> {
         self.host.following()
     }
     fn key_binding(&self, c: &str) -> String {
-        self.host.key_binding(c)
+        self.ui.localize_key(&self.host.key_binding(c))
     }
     fn action_slot_usable(&self, s: i32) -> bool {
         self.host.action_slot_usable(s)

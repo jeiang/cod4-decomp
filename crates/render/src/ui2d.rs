@@ -153,7 +153,17 @@ impl<H: Clone + PartialEq> Batcher<H> {
         if matches!(self.scissor, Some([_, _, 0, _] | [_, _, _, 0])) {
             return;
         }
-        let [x, y, w, h] = rect;
+        // A negative extent mirrors the picture inside the same box (`UI_DrawHandlePic`), it does not grow leftward.
+        let [x, y, mut w, mut h] = rect;
+        let [mut s0, mut t0, mut s1, mut t1] = uv;
+        if w < 0.0 {
+            w = -w;
+            std::mem::swap(&mut s0, &mut s1);
+        }
+        if h < 0.0 {
+            h = -h;
+            std::mem::swap(&mut t0, &mut t1);
+        }
         let mut p = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
         if let Some((angle, [px, py])) = rot {
             let (s, c) = angle.sin_cos();
@@ -162,7 +172,6 @@ impl<H: Clone + PartialEq> Batcher<H> {
                 *q = [px + dx * c - dy * s, py + dy * c + dx * s];
             }
         }
-        let [s0, t0, s1, t1] = uv;
         let t = [[s0, t0], [s1, t0], [s1, t1], [s0, t1]];
         let color = color_bytes(color);
         let v = |i: usize| Vertex {
@@ -1185,6 +1194,24 @@ mod tests {
             ]
         );
         assert_eq!(b.vertices.len(), 36);
+    }
+
+    #[test]
+    fn a_negative_extent_mirrors_the_picture_inside_the_same_box() {
+        let mut b = Batcher::<u32>::new();
+        b.begin((100, 100));
+        b.quad(
+            &1,
+            [40.0, 10.0, -16.0, 8.0],
+            [0.0, 0.0, 1.0, 1.0],
+            WHITE,
+            None,
+        );
+        let xs: Vec<f32> = b.vertices.iter().map(|v| v.pos[0]).collect();
+        assert!(xs.iter().all(|&x| (40.0..=56.0).contains(&x)), "{xs:?}");
+        // The left edge of the box shows the picture's right edge.
+        assert_eq!(b.vertices[0].uv, [1.0, 0.0]);
+        assert_eq!(b.vertices[1].uv, [0.0, 0.0]);
     }
 
     #[test]

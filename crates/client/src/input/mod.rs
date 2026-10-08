@@ -11,6 +11,19 @@
 pub mod config;
 mod cvar;
 mod keys;
+
+/// The input layer's name of a physical key, for binding it from a menu.
+pub fn physical_key_name(code: winit::keyboard::KeyCode) -> Option<String> {
+    keys::key_name(code).map(str::to_owned)
+}
+
+/// The input layer's name of a mouse button.
+pub fn mouse_key_name(b: winit::event::MouseButton) -> String {
+    keys::mouse_name(b)
+}
+
+/// The id the original's UI localizes a key by (`KEY_MOUSE1`).
+pub use keys::key_id;
 mod pad;
 mod rawmouse;
 pub mod selftest;
@@ -377,7 +390,6 @@ impl Input {
     }
 
     /// Set a cvar; it is written back on [`Self::save`] only if it was archived (`seta`, or a default archived one).
-    #[allow(dead_code)] // netplay integration API
     pub fn set_cvar(&mut self, name: &str, value: &str) {
         self.cvars.set(name, value, false);
         self.dirty = true;
