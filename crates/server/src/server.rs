@@ -280,6 +280,7 @@ impl Server {
         };
         let max = usize::try_from(self.game.cvars.int("sv_maxclients")).unwrap_or(32);
         let wt = self.game.cvars.string("net_wt").trim().to_owned();
+        #[cfg(not(target_arch = "wasm32"))]
         let t: Box<dyn net::Transport + Send> = if wt.is_empty() {
             Box::new(udp)
         } else {
@@ -287,6 +288,12 @@ impl Server {
                 Ok(j) => Box::new(j),
                 Err(e) => return self.say(&format!("WARNING: webtransport {wt}: {e}\n")),
             }
+        };
+        // The WebTransport endpoint needs a runtime the browser build does not have (a browser never serves).
+        #[cfg(target_arch = "wasm32")]
+        let t: Box<dyn net::Transport + Send> = {
+            let _ = wt;
+            Box::new(udp)
         };
         let n = NetSv::new(t, max.clamp(1, 64));
         self.say(&format!(
@@ -298,6 +305,7 @@ impl Server {
 
     /// Adds the WebTransport endpoint for `bind` (`[host:]port`) to the UDP socket and publishes
     /// the certificate hash (log line, and the `net_wt_info` JSON file).
+    #[cfg(not(target_arch = "wasm32"))]
     fn start_webtransport(
         &mut self,
         udp: net::UdpTransport,

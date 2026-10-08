@@ -17,8 +17,11 @@ path = "src/lib.rs"
 assets = { path = "../assets" }
 gsc = { path = "../gsc" }
 sim = { path = "../sim" }
-net = { path = "../net", features = ["webtransport"] }
+net = { path = "../net" }
 web-time = "1.1.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+net = { path = "../net", features = ["webtransport"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
