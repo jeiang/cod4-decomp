@@ -202,8 +202,10 @@ impl Vehicle {
             max_angle_vel: [45.0, 90.0, 45.0],
             yaw_accel: 25.0,
             yaw_decel: 15.0,
-            max_pitch: 30.0,
-            max_roll: 30.0,
+            // `VEH_InitPhysics` in the MP binary: 45/90/45 degrees a second, yaw 25 up and 15 down, 25 degrees
+            // of pitch and roll until the script's `setmaxpitchroll`.
+            max_pitch: 25.0,
+            max_roll: 25.0,
             manual_speed: 0.0,
             manual_accel: 0.0,
             manual_decel: 0.0,
@@ -976,6 +978,53 @@ mod tests {
         fly(&mut v, &mut pos, 100);
         assert!((v.angles[1] - 90.0).abs() < 5.0, "yaw {}", v.angles[1]);
         assert!(pos[1] > 500.0);
+    }
+
+    /// However hard it is pushed, in a straight run or a turn, pitch and roll stay within `setmaxpitchroll`, and
+    /// the leaning never turns faster than the angular velocity limits.
+    #[test]
+    fn pitch_and_roll_stay_within_the_limits() {
+        let mut v = cobra();
+        v.max_pitch = 30.0;
+        v.max_roll = 20.0;
+        v.state = MoveState::Move;
+        let mut pos = [0.0; 3];
+        let (mut pitch, mut roll) = (0.0f32, 0.0f32);
+        // Out, then hard back and across, so it brakes, turns and leans every way.
+        for goal in [
+            [6000.0, 0.0, 0.0],
+            [-4000.0, 3000.0, 0.0],
+            [500.0, -5000.0, 0.0],
+        ] {
+            v.goal = goal;
+            for _ in 0..300 {
+                fly(&mut v, &mut pos, 1);
+                pitch = pitch.max(v.angles[0].abs());
+                roll = roll.max(v.angles[2].abs());
+                assert!(
+                    v.rot_vel[0].abs() <= v.max_angle_vel[0] + 0.1,
+                    "{:?}",
+                    v.rot_vel
+                );
+                assert!(
+                    v.rot_vel[2].abs() <= v.max_angle_vel[2] + 0.1,
+                    "{:?}",
+                    v.rot_vel
+                );
+            }
+        }
+        // The brake may carry it a little past its target before it settles, never far.
+        assert!(pitch > 10.0 && pitch <= 33.0, "pitch {pitch}");
+        assert!(roll > 3.0 && roll <= 22.0, "roll {roll}");
+    }
+
+    /// A vehicle nobody told otherwise has the original's physics defaults.
+    #[test]
+    fn new_vehicles_have_the_original_defaults() {
+        let v = Vehicle::new(cobra().info, 0, [0.0; 3], 1);
+        assert_eq!((v.max_pitch, v.max_roll), (25.0, 25.0));
+        assert_eq!(v.max_angle_vel, [45.0, 90.0, 45.0]);
+        assert_eq!((v.yaw_accel, v.yaw_decel), (25.0, 15.0));
     }
 
     /// A goal yaw is reached and announced.
