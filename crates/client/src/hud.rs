@@ -42,12 +42,8 @@ pub struct LiveElem {
     pub world: Option<[f32; 3]>,
 }
 
-/// An objective with a position in the world, for the compass owner draws (`152`, `182`) to mark.
+/// An objective with a position in the world; the compass draws (`152`, `182`) mark it.
 #[derive(Clone, Debug, Default)]
-#[expect(
-    dead_code,
-    reason = "read by the compass objective draws, not written yet"
-)]
 pub struct LiveObjective {
     pub pos: [f32; 3],
     pub icon: String,
