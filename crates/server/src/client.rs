@@ -395,6 +395,7 @@ impl Game {
         let spawn_count = c.spawn_count + 1;
         let mut ps = PlayerState {
             client_num: n,
+            spawn_count: spawn_count as u16,
             e_flags: keep ^ 2,
             ..PlayerState::default()
         };

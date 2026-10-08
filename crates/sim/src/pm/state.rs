@@ -305,6 +305,8 @@ pub struct PlayerState {
     /// `stats[STAT_HEALTH]` and `stats[STAT_MAX_HEALTH]`: the server's, for the HUD.
     pub health: i32,
     pub max_health: i32,
+    /// `stats[STAT_SPAWN_COUNT]`: bumped by every spawn, so the client can tell a respawn from a mere state change.
+    pub spawn_count: u16,
     pub prone_direction: f32,
     pub prone_direction_pitch: f32,
     pub prone_torso_pitch: f32,
@@ -403,6 +405,7 @@ impl Default for PlayerState {
             dead_yaw: DEAD_YAW_UNSET,
             health: 0,
             max_health: 0,
+            spawn_count: 0,
             prone_direction: 0.0,
             prone_direction_pitch: 0.0,
             prone_torso_pitch: 0.0,

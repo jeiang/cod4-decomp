@@ -4,9 +4,7 @@
 
 use super::{NetPlay, team_of};
 use crate::compass::MapInfo;
-use crate::hudstate::{
-    self, Actor, Counter, HudFacts, OffhandFacts, OverlayParams, Stance, WeaponFacts,
-};
+use crate::hudstate::{self, Actor, Counter, HudFacts, OffhandFacts, Stance, WeaponFacts};
 use crate::models::Team;
 use crate::shell::GameFacts;
 use net::entity::etype;
@@ -38,6 +36,7 @@ impl NetPlay {
             (self.net.latest(), self.net.ui_ref(), self.hud_view.as_ref())
         else {
             g.hud.live = false;
+            g.hud.forget_view();
             return;
         };
         let own = snap.own();
@@ -210,17 +209,10 @@ impl NetPlay {
         if first || ammo_now.0 != h.prev_weapon {
             h.weapon_select_time = now;
         }
-        if h.prev_dead && !dead {
-            h.overlay.reset(&OverlayParams::default());
-        }
+        h.note_spawn(ps.client_num, ps.spawn_count);
         (h.prev_health, h.prev_stance, h.prev_ammo, h.prev_offhand) =
             (h.health, Some(h.stance), ammo_now, off_now);
-        (
-            h.prev_origin,
-            h.prev_weapon,
-            h.prev_sprint_left,
-            h.prev_dead,
-        ) = (ps.origin, ammo_now.0, h.sprint_left, dead);
+        (h.prev_origin, h.prev_weapon, h.prev_sprint_left) = (ps.origin, ammo_now.0, h.sprint_left);
         self.hint_events(&mut g.hud, &snap.ps, first, now);
 
         g.hud.map = MapInfo::parse(ui.config(cs::MINIMAP), ui.config(cs::NORTHYAW));
