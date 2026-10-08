@@ -16,7 +16,7 @@ use assets::zone::weapon::WeaponDef;
 use assets::zone::xmodel::XModel;
 use render::{ModelInstance, ModelKind};
 use server::content::{Content, PlayerAnim};
-use sim::pm::{PlayerState, weapon_state as ws};
+use sim::pm::{PlayerState, VIEW_CROUCH, VIEW_PRONE, pmf, weapon_state as ws};
 use sim::skel::{AnimBinding, AnimLayer, Controllers, Pose, Rig, RigModel};
 use std::sync::Arc;
 
@@ -40,10 +40,10 @@ pub mod slot {
     pub const COUNT: usize = 33;
 }
 
-/// `cg_bobWeaponAmplitude`.
-const BOB_AMPLITUDE: f32 = 0.16;
-/// `cg_bobWeaponMax`.
-const BOB_MAX: f32 = 6.0;
+/// Ground speed to bob speed (`BG_CalculateWeaponPosition_BobOffset`).
+const BOB_SPEED: f32 = 0.16;
+/// The bob angle cap, degrees.
+const BOB_MAX: f32 = 10.0;
 
 /// What to play: an animation slot and the normalised time in it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -406,16 +406,41 @@ impl ViewModel {
     }
 }
 
-/// Weapon bob as angles (pitch, yaw, roll degrees): the original's angle offsets for the bob cycle at the player's
-/// ground speed, scaled down while aiming.
+/// `bg_bobAmplitude{Standing,Ducked,Prone,Sprinting}`: (horizontal, vertical) degrees of bob per unit of bob speed.
+fn bob_amplitude(ps: &PlayerState) -> (f32, f32) {
+    if ps.view_height_target == VIEW_PRONE {
+        (0.02, 0.005)
+    } else if ps.view_height_target == VIEW_CROUCH {
+        (0.0075, 0.0075)
+    } else if ps.pm_flags & pmf::SPRINTING != 0 {
+        (0.02, 0.014)
+    } else {
+        (0.007, 0.007)
+    }
+}
+
+/// Weapon bob as angles (pitch, yaw, roll degrees), `BG_CalculateWeaponPosition_BobOffset`: the stance's bob
+/// amplitude times the ground speed, capped, scaled by the weapon's `adsBobFactor` while aiming, and faded out
+/// entirely for a scoped weapon.
 pub fn bob_angles(ps: &PlayerState, ads: f32, w: &WeaponDef) -> [f32; 3] {
-    let speed = (ps.velocity[0].hypot(ps.velocity[1]) * BOB_AMPLITUDE).min(BOB_MAX);
-    let cycle = f32::from(ps.bob_cycle) / 256.0 * std::f32::consts::TAU;
-    let scale = 1.0 - (1.0 - w.ads_bob_factor) * ads;
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let (h, v) = bob_amplitude(ps);
+    let cycle = f32::from(ps.bob_cycle) / 255.0 * TAU + TAU + PI / 4.0 + TAU;
+    let speed = ps.velocity[0].hypot(ps.velocity[1]) * BOB_SPEED;
+    let vertical = |cycle: f32, speed: f32| {
+        let amp = (speed * v).min(BOB_MAX);
+        ((cycle * 4.0 + FRAC_PI_2).sin() * 0.2 + (cycle * 2.0).sin()) * 0.75 * amp
+    };
+    let horizontal = |cycle: f32, speed: f32| cycle.sin() * (speed * h).min(BOB_MAX);
+    let roll = horizontal(cycle - 0.471_238_9, speed * 1.5).min(0.0);
+    let mut scale = 1.0 - (1.0 - w.ads_bob_factor) * ads;
+    if w.overlay_reticle != 0 {
+        scale *= 1.0 - ads;
+    }
     [
-        -(cycle * 2.0).sin() * speed * scale,
-        -cycle.sin() * speed * scale,
-        0.0,
+        -vertical(cycle, speed) * scale,
+        -horizontal(cycle, speed) * scale,
+        roll * scale,
     ]
 }
 
@@ -491,6 +516,16 @@ mod tests {
         (b.trans, f.to_array())
     }
 
+    /// [`gun_root`] in world space, with the instance's bob and aim angles applied (the view is level here).
+    fn world_gun_root(inst: &[ModelInstance]) -> ([f32; 3], [f32; 3]) {
+        let (t, f) = gun_root(inst);
+        let m = inst[1].world_matrix();
+        (
+            m.transform_point3(Vec3::from(t)).to_array(),
+            m.transform_vector3(Vec3::from(f)).to_array(),
+        )
+    }
+
     fn build(content: &Content, name: &str) -> Option<ViewModel> {
         let def = content.weapon(name)?.clone();
         let hands = content
@@ -556,6 +591,48 @@ mod tests {
                 "{name}: the hip pose did not come back"
             );
         }
+    }
+
+    /// Running at full aim, the sights of every weapon in the zone stay on the aim point: a run's whole bob cycle
+    /// moves the gun's root under half a unit and turns it under a degree (the original's bob is a fraction of a
+    /// degree; applied at the cap it swung the aim six degrees).
+    #[test]
+    fn the_sights_hold_steady_while_running_aimed() {
+        let Some(content) = content() else { return };
+        let mut checked = 0;
+        for w in content.weapons() {
+            let name = w.internal_name.as_deref().unwrap();
+            let Some(mut vm) = build(&content, name) else {
+                continue;
+            };
+            checked += 1;
+            let mut ps = PlayerState {
+                view_height_current: 60.0,
+                weapon_pos_frac: 1.0,
+                ..PlayerState::default()
+            };
+            let still = world_gun_root(&vm.update(&ps, 0.01));
+            ps.velocity = [190.0, 0.0, 0.0];
+            for cycle in 0..=255u8 {
+                ps.bob_cycle = cycle;
+                let (t, f) = world_gun_root(&vm.update(&ps, 0.01));
+                let moved = (0..3)
+                    .map(|i| (t[i] - still.0[i]).abs())
+                    .fold(0.0, f32::max);
+                let turned = (0..3)
+                    .map(|i| (f[i] - still.1[i]).abs())
+                    .fold(0.0, f32::max);
+                assert!(
+                    moved < 0.5,
+                    "{name}: the sights moved {moved} at cycle {cycle}"
+                );
+                assert!(
+                    turned < 0.017,
+                    "{name}: the gun turned {turned} rad at cycle {cycle}"
+                );
+            }
+        }
+        assert!(checked > 80, "only {checked} weapons have a view model");
     }
 
     /// Every weapon in the zone with a view model keeps its gun pointing away from the eye, near the screen, at the
