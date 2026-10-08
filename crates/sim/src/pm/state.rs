@@ -84,6 +84,16 @@ pub mod button {
     pub const LOC_SELECTING: i32 = 1 << 20;
 }
 
+/// `ActionSlotType` values.
+pub mod action_slot {
+    pub const NONE: u8 = 0;
+    /// `setActionSlot(n, "weapon", name)`: the key selects that weapon.
+    pub const WEAPON: u8 = 1;
+    /// `"altmode"`: toggles the alternate fire mode.
+    pub const ALT_MODE: u8 = 2;
+    pub const NIGHT_VISION: u8 = 3;
+}
+
 /// `entity_event_t` values player movement raises (`PM_AddEvent`).
 pub mod ev {
     pub const NONE: u8 = 0x00;
@@ -329,6 +339,9 @@ pub struct PlayerState {
     pub cursor_hint: u8,
     /// The use-trigger string table index of the hint's text, -1 for none (`cursorHintString`).
     pub cursor_hint_string: i8,
+    /// What each of the four action slots does (`actionSlotType`: see [`action_slot`]) and its weapon.
+    pub action_slot_type: [u8; 4],
+    pub action_slot_param: [u16; 4],
 }
 
 /// `spreadOverrideState_t`.
@@ -412,6 +425,8 @@ impl Default for PlayerState {
             cursor_hint_ent_index: ENTITYNUM_NONE,
             cursor_hint: 0,
             cursor_hint_string: -1,
+            action_slot_type: [0; 4],
+            action_slot_param: [0; 4],
         }
     }
 }

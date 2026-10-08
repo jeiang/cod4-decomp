@@ -65,7 +65,7 @@ impl TickSample {
 }
 
 /// The statistics `expect` and `until` read.
-const STATS: &str = "kills|deaths|spawns|respawns|shots|hits|rounds|plants|defuses";
+const STATS: &str = "kills|deaths|spawns|respawns|shots|hits|rounds|plants|defuses|hardpoints";
 
 /// Commands the console accepts, for `Console::has_command`.
 pub const COMMANDS: &[&str] = &[
@@ -1224,6 +1224,7 @@ impl Server {
             "rounds" => st.matches_ended,
             "plants" => st.plants,
             "defuses" => st.defuses,
+            "hardpoints" => st.hardpoints,
             w => return Err(format!("unknown statistic {w:?}")),
         })
     }

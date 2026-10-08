@@ -598,6 +598,8 @@ pub(super) fn log_string(g: &mut Game, _: &mut Vm, a: Args) -> R {
         g.stats.plants += 1;
     } else if line.starts_with("bomb defused") {
         g.stats.defuses += 1;
+    } else if line.starts_with("hardpoint: ") {
+        g.stats.hardpoints += 1;
     }
     Ok(Value::Undefined)
 }

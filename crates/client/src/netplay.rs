@@ -152,6 +152,10 @@ pub struct NetPlay {
     cmd_time: i32,
     last_cmd: Instant,
     want_weapon: Option<u16>,
+    /// The weapon held before an action slot picked another, for the slot's second press.
+    before_slot: Option<u16>,
+    /// A night-vision slot was pressed: the next command carries the button.
+    nv_press: bool,
     remotes: HashMap<u16, Remote>,
     /// The impulse of each recent death by client number, until the body is made.
     pushes: HashMap<u16, [f32; 3]>,
@@ -217,6 +221,8 @@ impl NetPlay {
             cmd_time: 0,
             last_cmd: Instant::now(),
             want_weapon: None,
+            before_slot: None,
+            nv_press: false,
             remotes: HashMap::new(),
             pushes: HashMap::new(),
             vm: None,
@@ -704,7 +710,51 @@ impl NetPlay {
         );
     }
 
+    /// `+actionslot N`: what the player state says slot N does (`CG_ActionSlotDown_f`).
+    fn action_slot(&mut self, arg: &str) {
+        use sim::pm::action_slot as at;
+        let Some(slot) = arg
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|s| (1..=4).contains(s))
+        else {
+            return;
+        };
+        let Some(snap) = self.net.latest() else {
+            return;
+        };
+        let (kind, param) = (
+            snap.ps.action_slot_type[slot - 1],
+            snap.ps.action_slot_param[slot - 1],
+        );
+        let inv = PlayerWeapons::from_words(&snap.inv);
+        let cur = self.want_weapon.unwrap_or_else(|| inv.selected());
+        match kind {
+            at::WEAPON if inv.has(param) => {
+                if cur == param {
+                    self.want_weapon = self.before_slot.filter(|w| inv.has(*w));
+                } else {
+                    self.before_slot = Some(cur);
+                    self.want_weapon = Some(param);
+                }
+            }
+            at::ALT_MODE => {
+                let alt = self.weapons.info(cur).alt_weapon;
+                if alt != 0 && inv.has(alt) {
+                    self.want_weapon = Some(alt);
+                }
+            }
+            at::NIGHT_VISION => self.nv_press = true,
+            _ => {}
+        }
+    }
+
     fn command(&mut self, cmd: &str) {
+        if let Some(arg) = cmd.strip_prefix("actionslot ") {
+            self.action_slot(arg);
+            return;
+        }
         let step: i32 = match cmd {
             "weapnext" => 1,
             "weapprev" => -1,
@@ -727,15 +777,20 @@ impl NetPlay {
             return;
         };
         self.cmd_time = (self.cmd_time + 1).max(st);
+        // A weapon the player asked for is asked for until it is held; after that the scripts decide.
+        if self.want_weapon == Some(snap.ps.weapon as u16) {
+            self.want_weapon = None;
+        }
         let delta = snap.ps.delta_angles;
         let pack = |deg: f32, d: f32| (((deg - d) / ANGLE_UNIT).round() as i32) & 0xffff;
         let weapon = self
             .want_weapon
             .unwrap_or_else(|| PlayerWeapons::from_words(&snap.inv).selected());
         let axis = |v: f32| (v.clamp(-1.0, 1.0) * 127.0) as i8;
+        let nv = std::mem::take(&mut self.nv_press);
         let cmd = UserCmd {
             server_time: self.cmd_time,
-            buttons: input.buttons as i32,
+            buttons: input.buttons as i32 | if nv { sim::pm::button::NIGHTVISION } else { 0 },
             angles: [
                 pack(self.angles[0], delta[0]),
                 pack(self.angles[1], delta[1]),

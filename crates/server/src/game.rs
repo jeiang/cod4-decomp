@@ -323,6 +323,8 @@ pub struct MatchStats {
     /// Bombs planted and defused, as the gametype scripts log them.
     pub plants: u64,
     pub defuses: u64,
+    /// Hardpoints (UAV, airstrike, helicopter) called in.
+    pub hardpoints: u64,
 }
 
 pub struct Game {

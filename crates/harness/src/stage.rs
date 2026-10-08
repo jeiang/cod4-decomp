@@ -202,6 +202,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_objective::run),
     },
     StageDef {
+        name: "headless-hardpoint",
+        description: "headless server, bots earn a killstreak hardpoint into action slot 4 and call it in",
+        needs_install: false,
+        timeout: Duration::from_secs(5 * MINUTES),
+        default: true,
+        kind: Kind::Server(include_str!("../scenarios/headless-hardpoint.cfg")),
+    },
+    StageDef {
         name: "client-flythrough",
         description: "client flythrough per display mode, with video",
         needs_install: false,

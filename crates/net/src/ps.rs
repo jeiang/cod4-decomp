@@ -164,6 +164,14 @@ fn table() -> Vec<Field<PlayerState>> {
         int!(s, s.cursor_hint_ent_index, Bits(10)),
         int!(s, s.cursor_hint, Bits(8)),
         int!(s, s.cursor_hint_string, SBits(8)),
+        int!(s, s.action_slot_type[0], Bits(2)),
+        int!(s, s.action_slot_type[1], Bits(2)),
+        int!(s, s.action_slot_type[2], Bits(2)),
+        int!(s, s.action_slot_type[3], Bits(2)),
+        int!(s, s.action_slot_param[0], Bits(9)),
+        int!(s, s.action_slot_param[1], Bits(9)),
+        int!(s, s.action_slot_param[2], Bits(9)),
+        int!(s, s.action_slot_param[3], Bits(9)),
     ]
 }
 

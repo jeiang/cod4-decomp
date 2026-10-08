@@ -20,6 +20,40 @@ const fn m(f: MethFn) -> Impl<MethFn> {
     Real(f)
 }
 
+/// `setActionSlot(slot, "weapon" name | "altmode" | "nightvision" | "")`.
+fn set_action_slot(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    use sim::pm::action_slot as at;
+    let n = client(g, e)?;
+    let slot = a.int(0)?;
+    if !(1..=4).contains(&slot) {
+        return Err(format!("Invalid slot ({slot}) given, expecting 1 - 4\n"));
+    }
+    let slot = slot as usize - 1;
+    let (kind, weapon) = match a.string(1)?.to_ascii_lowercase().as_str() {
+        "weapon" => {
+            let name = a.string(2)?;
+            let index = g.weapon_index(name);
+            if index == 0 {
+                return Err(format!("Unknown weapon name \"{name}\".\n"));
+            }
+            (at::WEAPON, index as u16)
+        }
+        "altmode" => (at::ALT_MODE, 0),
+        "nightvision" => (at::NIGHT_VISION, 0),
+        "" => (at::NONE, 0),
+        _ => {
+            return Err(
+                "Invalid option: expected \"weapon\", \"altweapon\", or \"nightvision\".\n".into(),
+            );
+        }
+    };
+    if let Some(c) = g.client_mut(n) {
+        c.ps.action_slot_type[slot] = kind;
+        c.ps.action_slot_param[slot] = weapon;
+    }
+    Ok(Value::Undefined)
+}
+
 const fn f(f: FuncFn) -> Impl<FuncFn> {
     Real(f)
 }
@@ -57,10 +91,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ),
     ("enableweapons", m(|g, _, e, _| weapons_enabled(g, e, true))),
     ("playerads", m(player_ads)),
-    (
-        "setactionslot",
-        m(|g, _, e, _| client(g, e).map(|_| Value::Undefined)),
-    ),
+    ("setactionslot", m(set_action_slot)),
     (
         "setspreadoverride",
         m(|g, _, e, _| client(g, e).map(|_| Value::Undefined)),
