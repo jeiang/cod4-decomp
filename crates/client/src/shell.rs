@@ -682,6 +682,10 @@ impl Host for HostCx<'_> {
             | "serverstatus" => true,
             "joinserver" => true,
             "createfavorite" | "deletefavorite" | "addfavorite" => true,
+            "quit" => {
+                self.st.actions.push(Action::Quit);
+                true
+            }
             "startsingleplayer" | "runmod" | "createplayerprofile" | "deleteplayerprofile" => true,
             _ => false,
         }
