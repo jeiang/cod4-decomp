@@ -125,6 +125,8 @@ fn table() -> Vec<Field<PlayerState>> {
         flt!(s, s.view_angle_clamp_range[0]),
         flt!(s, s.view_angle_clamp_range[1]),
         int!(s, s.dead_yaw, SBits(16)),
+        int!(s, s.health, SBits(16)),
+        int!(s, s.max_health, SBits(16)),
         flt!(s, s.prone_direction),
         flt!(s, s.prone_direction_pitch),
         flt!(s, s.prone_torso_pitch),

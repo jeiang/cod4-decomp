@@ -289,6 +289,9 @@ pub struct PlayerState {
     pub view_angle_clamp_range: [f32; 2],
     /// `stats[STAT_DEAD_YAW]`.
     pub dead_yaw: i32,
+    /// `stats[STAT_HEALTH]` and `stats[STAT_MAX_HEALTH]`: the server's, for the HUD.
+    pub health: i32,
+    pub max_health: i32,
     pub prone_direction: f32,
     pub prone_direction_pitch: f32,
     pub prone_torso_pitch: f32,
@@ -374,6 +377,8 @@ impl Default for PlayerState {
             view_angle_clamp_base: [0.0; 2],
             view_angle_clamp_range: [180.0; 2],
             dead_yaw: DEAD_YAW_UNSET,
+            health: 0,
+            max_health: 0,
             prone_direction: 0.0,
             prone_direction_pitch: 0.0,
             prone_torso_pitch: 0.0,
