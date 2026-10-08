@@ -331,6 +331,10 @@ pub struct HudFacts {
     /// The player is picking a point on the map (an airstrike): the full-screen map shows.
     pub selecting_location: bool,
     pub breath_hint: bool,
+    /// The map pick: the selector's material, its radius (fraction of the map's height) and the cursor.
+    pub loc_material: Option<String>,
+    pub loc_radius: f32,
+    pub loc_cursor: [f32; 2],
     /// The four action slots as the d-pad shows them.
     pub slots: [SlotFacts; 4],
     /// The crosshair hint (`cursorHint`), its raw text from the use-trigger strings, and when it was last on.

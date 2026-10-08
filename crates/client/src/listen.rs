@@ -50,11 +50,11 @@ pub fn free_standard_port() -> u16 {
 static CONSOLE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// The objective counters of the running listen server, as of its last frame batch.
-static OBJECTIVES: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
+static OBJECTIVES: std::sync::Mutex<(u64, u64, u64)> = std::sync::Mutex::new((0, 0, 0));
 
-/// Bombs planted and defused so far.
-pub fn objectives() -> (u64, u64) {
-    OBJECTIVES.lock().map_or((0, 0), |o| *o)
+/// Bombs planted, bombs defused and airstrikes called in so far.
+pub fn objectives() -> (u64, u64, u64) {
+    OBJECTIVES.lock().map_or((0, 0, 0), |o| *o)
 }
 
 /// Queues `line` for the listen server's console.
@@ -193,7 +193,11 @@ fn run(
         }
         server.run_for(Duration::from_millis(100));
         if let Ok(mut o) = OBJECTIVES.lock() {
-            *o = (server.game.stats.plants, server.game.stats.defuses);
+            *o = (
+                server.game.stats.plants,
+                server.game.stats.defuses,
+                server.game.stats.airstrikes,
+            );
         }
         if let Some((n, c)) = server.game.connected_clients().find(|(_, c)| !c.bot) {
             person = json!({

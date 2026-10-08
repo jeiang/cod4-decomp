@@ -273,6 +273,8 @@ pub struct Callbacks {
     pub player_damage: Option<u32>,
     pub player_killed: Option<u32>,
     pub player_last_stand: Option<u32>,
+    /// `_hardpoints::giveHardpointItem`, for the `devhardpoint` test hook.
+    pub give_hardpoint: Option<u32>,
 }
 
 /// A script function the engine wants run: queued by game code, run by the script host as soon
@@ -325,9 +327,13 @@ pub struct MatchStats {
     pub defuses: u64,
     /// Hardpoints (UAV, airstrike, helicopter) called in.
     pub hardpoints: u64,
+    pub airstrikes: u64,
+    pub helicopters: u64,
 }
 
 pub struct Game {
+    /// `setMiniMap`: the map's world size along its axes, north's direction and the upper left corner (location picks).
+    pub compass: Option<[f32; 6]>,
     pub vote: crate::vote::VoteState,
     pub cvars: Cvars,
     pub content: Content,
@@ -437,6 +443,7 @@ impl Game {
             nav: None,
             nav_goals: Vec::new(),
             vote: Default::default(),
+            compass: None,
             nav_loads: Vec::new(),
             hitloc_table: default_hitloc_table(),
             weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),

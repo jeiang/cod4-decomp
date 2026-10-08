@@ -218,6 +218,22 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Server(include_str!("../scenarios/headless-hardpoint.cfg")),
     },
     StageDef {
+        name: "headless-airstrike",
+        description: "headless server, bots earn the airstrike, pick a point on the map and call it in",
+        needs_install: false,
+        timeout: Duration::from_secs(5 * MINUTES),
+        default: true,
+        kind: Kind::Server(include_str!("../scenarios/headless-airstrike.cfg")),
+    },
+    StageDef {
+        name: "client-hardpoint",
+        description: "the real client calls in an airstrike: +actionslot 4, the d-pad pieces, the map pick",
+        needs_install: false,
+        timeout: Duration::from_secs(6 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_hardpoint::run),
+    },
+    StageDef {
         name: "client-flythrough",
         description: "client flythrough per display mode, with video",
         needs_install: false,

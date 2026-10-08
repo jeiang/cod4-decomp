@@ -342,6 +342,9 @@ pub struct PlayerState {
     /// What each of the four action slots does (`actionSlotType`: see [`action_slot`]) and its weapon.
     pub action_slot_type: [u8; 4],
     pub action_slot_param: [u16; 4],
+    /// `beginLocationSelection`: the selector's material index (0 when not selecting) and its radius as 1/63 of the map.
+    pub loc_selection: u16,
+    pub loc_radius: u8,
 }
 
 /// `spreadOverrideState_t`.
@@ -427,6 +430,8 @@ impl Default for PlayerState {
             cursor_hint_string: -1,
             action_slot_type: [0; 4],
             action_slot_param: [0; 4],
+            loc_selection: 0,
+            loc_radius: 0,
         }
     }
 }

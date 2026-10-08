@@ -21,7 +21,6 @@ const fn m(f: MethFn) -> Impl<MethFn> {
 }
 
 const M5: &str = "M5 connect and play";
-const M6: &str = "M6 HUD, menus, killcam";
 const M7: &str = "M7 audio";
 const M8: &str = "M8 FX, decals, post";
 const VEH: &str = "M8 vehicles";
@@ -63,8 +62,6 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("stoprumble", Later(M7)),
     ("enableaimassist", Later(M5)),
     ("disableaimassist", Later(M5)),
-    ("beginlocationselection", Later(M6)),
-    ("endlocationselection", Later(M6)),
     ("laseron", Later(M8)),
     ("laseroff", Later(M8)),
     ("showtoplayer", Later(M5)),

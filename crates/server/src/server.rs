@@ -65,7 +65,7 @@ impl TickSample {
 }
 
 /// The statistics `expect` and `until` read.
-const STATS: &str = "kills|deaths|spawns|respawns|shots|hits|rounds|plants|defuses|hardpoints";
+const STATS: &str = "kills|deaths|spawns|respawns|shots|hits|rounds|plants|defuses|hardpoints|airstrikes|helicopters";
 
 /// Commands the console accepts, for `Console::has_command`.
 pub const COMMANDS: &[&str] = &[
@@ -92,6 +92,7 @@ pub const COMMANDS: &[&str] = &[
     "devtele",
     "clientkick",
     "tempbanclient",
+    "devhardpoint",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -718,6 +719,40 @@ impl Server {
             }
             // `clientkick <n>` and `tempBanClient <n>` (what a passed vote runs): the player is dropped;
             // a temporary ban also refuses its address for five minutes.
+            // Test hook: `devhardpoint <client|human> <weapon>` gives the player a killstreak reward as the
+            // scripts would (`radar_mp`, `airstrike_mp`, `helicopter_mp`).
+            "devhardpoint" => {
+                let (Some(who), Some(weapon)) = (arg(1), arg(2)) else {
+                    return Err("usage: devhardpoint <client|human> <weapon>".into());
+                };
+                let n = if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| n)
+                        .ok_or("devhardpoint: no human is connected")?
+                } else {
+                    cvar::parse_int(who) as u16
+                };
+                let func = self
+                    .game
+                    .callbacks
+                    .give_hardpoint
+                    .ok_or("devhardpoint: no hardpoint script")?;
+                let Some(run) = self.run.as_mut() else {
+                    return Err("Server is not running.".into());
+                };
+                let mut host = ScriptHost {
+                    game: &mut self.game,
+                    dispatch: &run.dispatch,
+                };
+                host.game.calls.push(crate::game::ScriptCall {
+                    func,
+                    this: Some(n),
+                    args: vec![Value::str(weapon)],
+                });
+                host.run_calls(&mut run.vm);
+            }
             "clientkick" | "tempbanclient" => {
                 let n = arg(1)
                     .map(cvar::parse_int)
@@ -994,6 +1029,7 @@ impl Server {
                 find(cbs, "CodeCallback_StartGameType"),
                 "CodeCallback_StartGameType",
             )?),
+            give_hardpoint: find("maps/mp/gametypes/_hardpoints", "giveHardpointItem"),
             player_connect: find(cbs, "CodeCallback_PlayerConnect"),
             player_disconnect: find(cbs, "CodeCallback_PlayerDisconnect"),
             player_damage: find(cbs, "CodeCallback_PlayerDamage"),
@@ -1257,6 +1293,8 @@ impl Server {
             "plants" => st.plants,
             "defuses" => st.defuses,
             "hardpoints" => st.hardpoints,
+            "airstrikes" => st.airstrikes,
+            "helicopters" => st.helicopters,
             w => return Err(format!("unknown statistic {w:?}")),
         })
     }
