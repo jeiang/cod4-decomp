@@ -1826,6 +1826,7 @@ version = "0.0.0"
 dependencies = [
  "assets",
  "sim",
+ "socket2",
  "tokio",
  "wtransport",
 ]

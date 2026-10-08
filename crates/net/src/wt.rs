@@ -28,6 +28,8 @@
 //! order and read incoming streams in the order `incomingUnidirectionalStreams` yields them, each
 //! to its end, which keeps delivery close to send order.
 //!
+//! With no host the endpoint listens on every address, IPv4 and IPv6.
+//!
 //! Browsers cannot trust a self-signed certificate except by `serverCertificateHashes`: without
 //! configured PEM files the endpoint makes an ECDSA P-256 certificate valid [`SELF_SIGNED_DAYS`]
 //! days (the limit is 14) and reports its SHA-256; see [`Started`].
@@ -99,7 +101,7 @@ impl WtTransport {
     /// Starts the endpoint delivering received messages into `inbox`.
     pub fn start(cfg: WtConfig, inbox: Inbox) -> io::Result<(Self, Started)> {
         // Bind before the thread starts so a bad address fails here.
-        let socket = UdpSocket::bind(cfg.bind)?;
+        let socket = bind(cfg.bind)?;
         let sessions = Sessions::default();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -147,6 +149,27 @@ impl WtTransport {
             .get(&peer)
             .map(|s| datagram_limit(&s.conn))
     }
+}
+
+/// Binds `addr`; the unspecified IPv4 address means every address of both families (browsers
+/// resolve `localhost` to `::1` first), falling back to IPv4 only where IPv6 is unavailable.
+fn bind(addr: SocketAddr) -> io::Result<UdpSocket> {
+    if addr.ip() == std::net::Ipv4Addr::UNSPECIFIED {
+        let dual = || {
+            let s = socket2::Socket::new(
+                socket2::Domain::IPV6,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )?;
+            s.set_only_v6(false)?;
+            s.bind(&SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, addr.port())).into())?;
+            Ok::<_, io::Error>(UdpSocket::from(s))
+        };
+        if let Ok(s) = dual() {
+            return Ok(s);
+        }
+    }
+    UdpSocket::bind(addr)
 }
 
 async fn open(

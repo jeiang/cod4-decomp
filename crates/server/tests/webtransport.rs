@@ -58,7 +58,10 @@ impl WtClient {
                 .with_server_certificate_hashes([Sha256Digest::new(pin)])
                 .build();
             let endpoint = Endpoint::client(cfg).map_err(|e| e.to_string())?;
-            let url = format!("https://127.0.0.1:{}/", server.port());
+            let url = match server.ip() {
+                std::net::IpAddr::V4(ip) => format!("https://{ip}:{}/", server.port()),
+                std::net::IpAddr::V6(ip) => format!("https://[{ip}]:{}/", server.port()),
+            };
             let conn = endpoint.connect(url).await.map_err(|e| e.to_string())?;
             Ok::<_, String>((endpoint, conn))
         })?;
@@ -623,4 +626,35 @@ fn a_certificate_from_pem_files_is_served_and_reports_no_hash() {
             .map(|(n, _)| n),
         Some(2)
     );
+}
+
+#[test]
+fn with_no_host_both_address_families_reach_the_endpoint() {
+    let inbox = Inbox::new(16);
+    let (_wt, up) = WtTransport::start(
+        WtConfig {
+            bind: SocketAddr::from(([0, 0, 0, 0], 0)),
+            tls: None,
+        },
+        inbox.clone(),
+    )
+    .unwrap();
+    let hash = up.cert_hash.unwrap();
+    let mut buf = [0u8; 8];
+    for ip in [
+        std::net::IpAddr::from(LO),
+        std::net::IpAddr::from(std::net::Ipv6Addr::LOCALHOST),
+    ] {
+        let to = SocketAddr::new(ip, up.addr.port());
+        let Ok(mut c) = WtClient::connect(to, hash) else {
+            // Only the IPv4 fallback is a failure; a host without IPv6 has no ::1 to reach.
+            assert!(ip.is_ipv6() && up.addr.is_ipv4(), "{ip}");
+            continue;
+        };
+        c.send_to(to, b"hi");
+        assert!(
+            inbox.pop(&mut buf, Some(Duration::from_secs(5))).is_some(),
+            "{ip}"
+        );
+    }
 }
