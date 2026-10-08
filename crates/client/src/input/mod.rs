@@ -363,6 +363,14 @@ impl Input {
         self.exec_text(line, None, true, 0);
     }
 
+    /// The folder of the config file (where the player profile lives too); `None` without one.
+    pub fn config_dir(&self) -> Option<PathBuf> {
+        self.config_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
+    }
+
     /// Cvar value as text.
     pub fn cvar(&self, name: &str) -> Option<&str> {
         self.cvars.get(name)

@@ -21,24 +21,39 @@ pub struct Listen {
     thread: Option<JoinHandle<Value>>,
 }
 
-/// Starts the server and returns once it listens on a map with `bots` bots.
-///
-/// `gametype` of `None` is the harness's unlimited team deathmatch; `Some(id)` plays that gametype with its stock
-/// time and score limits (a menu-started match that ends).
-pub fn start(
-    install: &Path,
-    map: &str,
-    bots: usize,
-    gametype: Option<&str>,
-) -> Result<Listen, String> {
-    let (install, map) = (install.to_owned(), map.to_owned());
-    let gametype = gametype.map(str::to_owned);
+/// What a listen server plays.
+pub struct Config {
+    pub map: String,
+    pub bots: usize,
+    /// `None` is the harness's unlimited team deathmatch; `Some(id)` plays that gametype with its stock time and score
+    /// limits (a menu-started match that ends).
+    pub gametype: Option<String>,
+    /// `sv_mapRotation`; `None` plays `map` again after every match.
+    pub rotation: Option<String>,
+    /// UDP port; 0 picks a free one. A menu-started server takes a standard port ([`crate::serverlist::PORTS`]) when one
+    /// is free so the LAN list finds it.
+    pub port: u16,
+    /// Server dvars the player set on the client (`scr_*`: time and score limits, ...), applied before the map starts.
+    pub dvars: Vec<(String, String)>,
+}
+
+/// The first standard port nothing is listening on, else 0 (any).
+pub fn free_standard_port() -> u16 {
+    crate::serverlist::PORTS
+        .into_iter()
+        .find(|p| std::net::UdpSocket::bind(("0.0.0.0", *p)).is_ok())
+        .unwrap_or(0)
+}
+
+/// Starts the server and returns once it listens on a map with its bots.
+pub fn start(install: &Path, cfg: Config) -> Result<Listen, String> {
+    let install = install.to_owned();
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Result<SocketAddr, String>>();
     let stop2 = stop.clone();
     let thread = std::thread::Builder::new()
         .name("listen-server".into())
-        .spawn(move || run(&install, &map, bots, gametype.as_deref(), &stop2, &tx))
+        .spawn(move || run(&install, &cfg, &stop2, &tx))
         .map_err(|e| e.to_string())?;
     let addr = rx
         .recv()
@@ -63,25 +78,32 @@ impl Listen {
 
 fn run(
     install: &Path,
-    map: &str,
-    bots: usize,
-    gametype: Option<&str>,
+    cfg: &Config,
     stop: &AtomicBool,
     tx: &mpsc::Sender<Result<SocketAddr, String>>,
 ) -> Value {
     let started = || -> Result<(Server, SocketAddr), String> {
-        let args: Vec<String> = ["+set", "net_port", "0"].map(String::from).to_vec();
+        let args: Vec<String> = ["+set", "net_port", &cfg.port.to_string()]
+            .map(String::from)
+            .to_vec();
         let mut s = Server::boot(install, &args, false)?;
         let addr = s.net_addr().ok_or("cannot bind a UDP socket")?;
-        let gt = gametype.unwrap_or("war");
+        let gt = cfg.gametype.as_deref().unwrap_or("war");
         let mut lines = vec![format!("set g_gametype {gt}")];
-        if gametype.is_none() {
+        if cfg.gametype.is_none() {
             lines.push("set scr_war_timelimit 0".to_owned());
             lines.push("set scr_war_scorelimit 0".to_owned());
         }
-        lines.push(format!("set sv_mapRotation \"gametype {gt} map {map}\""));
-        lines.push(format!("map {map}"));
-        lines.push(format!("bots {bots}"));
+        for (k, v) in &cfg.dvars {
+            lines.push(format!("set {k} \"{}\"", v.replace('"', "'")));
+        }
+        let rotation = cfg
+            .rotation
+            .clone()
+            .unwrap_or_else(|| format!("gametype {gt} map {}", cfg.map));
+        lines.push(format!("set sv_mapRotation \"{rotation}\""));
+        lines.push(format!("map {}", cfg.map));
+        lines.push(format!("bots {}", cfg.bots));
         for line in lines {
             s.exec_line(&line).map_err(|e| format!("{line}: {e}"))?;
         }
@@ -128,7 +150,7 @@ fn run(
         "snapshots_out": stats.snapshots_out,
         "bytes_out": stats.bytes_out,
         "bytes_in": stats.bytes_in,
-        "bots": bots,
+        "bots": cfg.bots,
         "script_errors": server.all_script_errors.len(),
         "level_time_ms": server.level_time(),
         "stats": {

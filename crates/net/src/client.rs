@@ -119,6 +119,10 @@ impl<T: Transport> NetClient<T> {
                 && let Some(m) = link.receive(packet)
             {
                 self.commands.extend(m.reliable);
+                if m.new_map {
+                    // The new level's clock starts near zero again; the old history would reject it.
+                    self.snaps.clear();
+                }
                 if let Some(s) = m.snapshot {
                     self.snaps.push(now, s);
                 }

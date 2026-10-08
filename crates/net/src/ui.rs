@@ -1235,6 +1235,11 @@ impl ClientUiState {
         &self.scores
     }
 
+    /// Every persistent stat the server has said so far, by index.
+    pub fn stats(&self) -> &HashMap<i32, i32> {
+        &self.stats
+    }
+
     /// Persistent stat `index` as the server last said (0 when never set).
     pub fn stat(&self, index: i32) -> i32 {
         self.stats.get(&index).copied().unwrap_or(0)

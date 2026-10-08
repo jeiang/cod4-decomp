@@ -26,8 +26,10 @@ pub(super) fn run_client(
     client: &Path,
     install: &Path,
     dir: &Path,
+    config_dir: &Path,
     args: &[&str],
     steps: &str,
+    limit: Duration,
 ) -> Result<Value, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let log = File::create(dir.join("client.log")).map_err(|e| e.to_string())?;
@@ -36,6 +38,9 @@ pub(super) fn run_client(
         .arg(install)
         .args(["--size", "1280x720", "--no-sound", "--bots", "3"])
         .args(args)
+        // The player profile and config live next to the run's output, never in the tester's own folders.
+        .arg("--config")
+        .arg(config_dir.join("config_mp.cfg"))
         .arg("--ui-script")
         .arg(steps)
         .arg("--out")
@@ -45,7 +50,7 @@ pub(super) fn run_client(
         .stderr(log)
         .spawn()
         .map_err(|e| e.to_string())?;
-    let end = Instant::now() + LIMIT;
+    let end = Instant::now() + limit;
     let status = loop {
         if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
             break s;
@@ -53,7 +58,7 @@ pub(super) fn run_client(
         if Instant::now() >= end {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("client hung (killed after {} s)", LIMIT.as_secs()));
+            return Err(format!("client hung (killed after {} s)", limit.as_secs()));
         }
         std::thread::sleep(Duration::from_millis(20));
     };
@@ -69,7 +74,7 @@ pub(super) fn run_client(
 }
 
 /// Why a run failed, or `None` when every step passed and the player spawned.
-fn verdict(report: &Value) -> Option<String> {
+pub(super) fn verdict(report: &Value) -> Option<String> {
     let failed: Vec<String> = report["steps"]
         .as_array()
         .into_iter()
@@ -131,7 +136,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ("menus", &[][..], MENU_STEPS),
     ] {
         let dir = ctx.dir.join(label);
-        match run_client(&client, install, &dir, args, steps) {
+        match run_client(
+            &client,
+            install,
+            &dir,
+            &dir.join("config"),
+            args,
+            steps,
+            LIMIT,
+        ) {
             Ok(report) => {
                 out.files.push(format!("{label}/ui-script.json"));
                 out.files.push(format!("{label}/{label}.png"));

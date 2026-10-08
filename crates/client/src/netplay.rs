@@ -128,6 +128,9 @@ pub struct NetPlay {
     effects: Effects,
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
+    /// The server announced a level the app has not acted on yet.
+    new_level: Option<String>,
+    stat_sync: crate::profile::StatSync,
 }
 
 impl NetPlay {
@@ -175,6 +178,8 @@ impl NetPlay {
             scores_asked: None,
             server_addr: server.to_string(),
             fx_demo: None,
+            new_level: None,
+            stat_sync: crate::profile::StatSync::default(),
         })
     }
 
@@ -220,6 +225,57 @@ impl NetPlay {
         {
             self.scores_asked = Some(Instant::now());
             self.net.request_scores();
+        }
+    }
+
+    /// The map the server announced since the last call: the app then calls [`Self::new_level`].
+    pub fn take_new_level(&mut self) -> Option<String> {
+        self.new_level.take()
+    }
+
+    /// Starts over for a new level: the old one's prediction, models, events and clock are meaningless. With `world`
+    /// (another map was loaded) the collision, models and sound are replaced too. The connection stays.
+    pub fn new_level(
+        &mut self,
+        world: Option<(Library, &render::MapData, ClientSound)>,
+    ) -> Result<(), String> {
+        if let Some((lib, map, sound)) = world {
+            self.weapons = WeaponTable::new(&lib.content.weapons())
+                .map_err(|e| format!("weapon table: {e:?}"))?;
+            let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
+            self.effects = Effects::new(&lib.content, map.world.clone());
+            self.lib = lib;
+            self.boxes = PlayerBoxes::new(clipmap);
+            self.sound = sound;
+        }
+        self.pred = Predictor::default();
+        self.cmd_time = 0;
+        self.want_weapon = None;
+        self.remotes.clear();
+        self.vm = None;
+        self.events = Events::default();
+        self.last_eye = None;
+        self.c.spawned = false;
+        self.c.start = None;
+        Ok(())
+    }
+
+    /// Hands the server the profile's stats (it fabricates stand-ins when a person joins) and takes what it says now
+    /// as already known, so only later changes flow back ([`Self::stat_changes`]).
+    pub fn upload_stats(&mut self, stats: &[i32]) {
+        for c in crate::profile::upload_commands(stats) {
+            self.net.command(&c);
+        }
+        if let Some(ui) = self.net.ui() {
+            self.stat_sync.baseline(ui.stats());
+        }
+    }
+
+    /// Stat values the server changed since the last call.
+    pub fn stat_changes(&mut self) -> Vec<(i32, i32)> {
+        match self.net.ui() {
+            Some(ui) => self.stat_sync.changes(ui.stats()),
+            None => Vec::new(),
         }
     }
 
@@ -711,6 +767,12 @@ impl NetPlay {
     fn answer_menus(&mut self) {
         let Some(ui) = self.net.ui() else { return };
         let events = ui.drain_events();
+        if let Some(name) = events.iter().rev().find_map(|e| match e {
+            net::ui::UiEvent::Map { name } => Some(name.clone()),
+            _ => None,
+        }) {
+            self.new_level = Some(name);
+        }
         let Some(join) = self.auto_join.as_mut() else {
             self.ui_events.extend(events);
             return;

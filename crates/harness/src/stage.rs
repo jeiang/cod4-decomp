@@ -221,6 +221,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_leave::run),
     },
     StageDef {
+        name: "client-menu-match",
+        description: "the client with no flags plays a whole match from the stock menus (Start New Server with a short score limit, team, class), sees the end-of-match scoreboard, follows the server's map rotation into the next map in the same process and spawns there again",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_menu_match::run),
+    },
+    StageDef {
         name: "client-input",
         description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
         needs_install: false,

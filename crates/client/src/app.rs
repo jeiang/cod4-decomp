@@ -11,6 +11,9 @@ use crate::input::{Input, InputFrame, buttons};
 use crate::listen::{self, Listen};
 use crate::models::Library;
 use crate::netplay::NetPlay;
+use crate::profile::Profile;
+use crate::serverlist;
+use crate::session::{LevelChange, level_change, rotation};
 use crate::shell::{Action, Shell};
 use crate::showcase::Showcase;
 use crate::ui::UiKey;
@@ -30,6 +33,8 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Frames the surface size must hold before the recorder starts.
 const RECORD_AFTER_STABLE: u32 = 10;
+/// How long joining waits for the server to say which map it plays.
+const JOIN_QUERY: Duration = Duration::from_secs(2);
 
 pub fn run(cli: Cli) -> Result<(), String> {
     let el = EventLoop::new().map_err(|e| format!("no display: {e}"))?;
@@ -182,6 +187,10 @@ struct State {
     surfaces_drawn: Vec<f64>,
     showcase: Option<Showcase>,
     net: Option<NetPlay>,
+    /// The map the world, renderer and net state are for (empty in the menus).
+    map_name: String,
+    /// The player profile: the stats kept between runs.
+    profile: Profile,
     listen: Option<Listen>,
     tour: Option<flythrough::Tour>,
     ui_tour: Option<UiTour>,
@@ -221,6 +230,8 @@ const TOUR_FRAMES: u32 = 6;
 
 /// `--ui-script`: steps that drive the menus like a player.
 struct UiScript {
+    /// The map a `maprotate` step started from.
+    marker: Option<String>,
     steps: Vec<String>,
     index: usize,
     /// When the current step began and, for waits, how long it may take.
@@ -343,9 +354,19 @@ impl Viewer {
         if self.cli.netplay() {
             let t = Instant::now();
             let addr = match &self.cli.connect {
-                Some(a) => resolve(a)?,
+                Some(a) => serverlist::resolve(a)?,
                 None => {
-                    let l = listen::start(&self.cli.install, &self.cli.map, self.cli.bots, None)?;
+                    let l = listen::start(
+                        &self.cli.install,
+                        listen::Config {
+                            map: self.cli.map.clone(),
+                            bots: self.cli.bots,
+                            gametype: None,
+                            rotation: None,
+                            port: 0,
+                            dvars: Vec::new(),
+                        },
+                    )?;
                     let a = l.addr;
                     notes.push(format!(
                         "listen server with {} bots up in {:.0} ms",
@@ -391,6 +412,14 @@ impl Viewer {
                 &mut input,
             )?)
         };
+        let mut profile = Profile::new(
+            input.config_dir(),
+            input.cvar("com_playerProfile").unwrap_or("default"),
+        );
+        let stats = profile.load();
+        if let Some(sh) = shell.as_mut() {
+            sh.st.stats = stats;
+        }
         if self.cli.menu_mode()
             && let Some(sh) = shell.as_mut()
         {
@@ -442,8 +471,15 @@ impl Viewer {
             surfaces_drawn: Vec::new(),
             showcase,
             net,
+            map_name: if self.cli.netplay() {
+                self.cli.map.clone()
+            } else {
+                String::new()
+            },
+            profile,
             listen,
             script: self.cli.ui_script.as_ref().map(|s| UiScript {
+                marker: None,
                 steps: s
                     .split(',')
                     .map(|x| x.trim().to_owned())
@@ -545,6 +581,7 @@ impl Viewer {
             }
         }
         st.menu_was_open = menu_open;
+        let mut new_level = None;
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
             (st.pos, st.yaw, st.pitch) = (p, y, pi);
@@ -574,6 +611,7 @@ impl Viewer {
                 return Err(format!("the server refused the connection: {why}"));
             }
             let frame_out = net.frame(dt, &f);
+            new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {
                 net.fill_live(&mut sh.st.live);
                 for ev in net.take_ui_events() {
@@ -581,6 +619,16 @@ impl Viewer {
                 }
                 let now = sh.now_ms();
                 net.fill_game_facts(&mut sh.st.game, now);
+                // The server's later stat changes (rank, unlocks) are the profile's. A new level's first burst is not.
+                if new_level.is_none() {
+                    for (i, v) in net.stat_changes() {
+                        if let Some(s) =
+                            usize::try_from(i).ok().and_then(|i| sh.st.stats.get_mut(i))
+                        {
+                            *s = v;
+                        }
+                    }
+                }
                 sh.tick(&mut st.input);
                 let scores = f.held_other.iter().any(|c| c == "scores") || sh.st.scores_forced;
                 if scores != sh.st.game.scoreboard {
@@ -619,6 +667,17 @@ impl Viewer {
             if st.renderer.is_some() && st.shell.is_none() {
                 fly(st, &f, dt);
             }
+        }
+        if let Some(name) = new_level
+            && let Err(e) = enter_level(&self.cli, &mut self.map, st, &name)
+        {
+            eprintln!("cannot enter {name}: {e}");
+            end_session(&mut self.map, st);
+        }
+        if let Some(sh) = st.shell.as_ref()
+            && let Err(e) = st.profile.save_if_changed(&sh.st.stats)
+        {
+            eprintln!("cannot save the profile: {e}");
         }
         let frame = match st.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
@@ -800,12 +859,30 @@ impl Viewer {
                     }
                 }
                 Action::Join(addr) => {
-                    let map = self.cli.map.clone();
-                    if let Err(e) =
-                        start_session(&self.cli, &mut self.map, st, &map, "war", Some(&addr))
-                    {
-                        eprintln!("cannot join {addr}: {e}");
-                        end_session(&mut self.map, st);
+                    // The client loads what the server is playing, so it asks first.
+                    let found = serverlist::resolve(&addr)
+                        .and_then(|a| serverlist::query(a, JOIN_QUERY).map(|e| (a, e)));
+                    match found {
+                        Ok((a, e)) => {
+                            if let Err(err) = start_session(
+                                &self.cli,
+                                &mut self.map,
+                                st,
+                                &e.map,
+                                &e.gametype,
+                                Some(a),
+                            ) {
+                                eprintln!("cannot join {addr}: {err}");
+                                end_session(&mut self.map, st);
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("cannot join {addr}: {err}");
+                            st.input.cvars.set("com_errorMessage", &err, false);
+                            if let Some(sh) = st.shell.as_mut() {
+                                sh.open(&mut st.input, "error_popmenu");
+                            }
+                        }
                     }
                 }
                 Action::Disconnect => end_session(&mut self.map, st),
@@ -932,6 +1009,7 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
         "hud_draw": st.shell.as_ref().map(|s| s.st.hud_stats.report()),
         "net": st.net.as_mut().map(NetPlay::report),
         "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
+        "map": st.map_name,
     });
     let _ = std::fs::create_dir_all(&out);
     let _ = std::fs::write(
@@ -1059,6 +1137,69 @@ fn script_step(st: &mut State) -> bool {
                 );
             }
         }
+        // A console line, as typed: `set=set scr_war_scorelimit 3`.
+        "set" => {
+            st.input.exec_line(arg);
+            done(true, sc, String::new());
+        }
+        // A persistent stat, as the menus' `statset` would write it (`stat=2301 77`), and its check (`statis=2301 77`).
+        "stat" | "statis" => {
+            let mut it = arg.split_whitespace().map(|v| v.parse::<i32>().ok());
+            let (i, v) = match (it.next(), it.next()) {
+                (Some(Some(i)), Some(Some(v))) => (i, v),
+                _ => (-1, 0),
+            };
+            let slot = st.shell.as_mut().and_then(|sh| {
+                sh.st
+                    .stats
+                    .get_mut(usize::try_from(i).unwrap_or(usize::MAX))
+            });
+            match (key, slot) {
+                ("stat", Some(s)) => {
+                    *s = v;
+                    done(true, sc, String::new());
+                }
+                ("statis", Some(s)) => {
+                    let ok = *s == v;
+                    done(ok, sc, format!("stat {i} is {s}"));
+                }
+                _ => done(
+                    false,
+                    sc,
+                    format!("usage: {key}=<index> <value> (got {arg:?})"),
+                ),
+            }
+        }
+        // Joins a server like the menus' `connect` (`connect=127.0.0.1:28960`).
+        "connect" => {
+            if let Some(sh) = st.shell.as_mut() {
+                sh.st.actions.push(Action::Join(arg.to_owned()));
+            }
+            done(true, sc, String::new());
+        }
+        // Waits until the client is in map `name` with a connection (`map=mp_crash:60`).
+        "map" => {
+            let (name, secs) = arg
+                .split_once(':')
+                .map_or((arg, 60.0), |(n, s)| (n, s.parse().unwrap_or(60.0)));
+            if st.net.is_some() && st.map_name.eq_ignore_ascii_case(name) {
+                done(true, sc, String::new());
+            } else if waited > secs {
+                done(false, sc, format!("timed out; map is {:?}", st.map_name));
+            }
+        }
+        // Waits until the server has rotated to a different map than the one the step began in (`maprotate=300`).
+        "maprotate" => {
+            let from = sc.marker.get_or_insert_with(|| st.map_name.clone()).clone();
+            let secs: f32 = arg.parse().unwrap_or(300.0);
+            if st.net.is_some() && !st.map_name.is_empty() && st.map_name != from {
+                sc.marker = None;
+                done(true, sc, format!("{from} -> {}", st.map_name));
+            } else if waited > secs {
+                sc.marker = None;
+                done(false, sc, format!("timed out; still in {from}"));
+            }
+        }
         "shot" => {
             if st.shot_request.is_none() {
                 st.shot_request = Some(arg.to_owned());
@@ -1176,47 +1317,126 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
     }
 }
 
+/// Everything a map needs on the client.
+struct World {
+    data: MapData,
+    renderer: Renderer,
+    lib: Library,
+    sound: crate::sound::ClientSound,
+}
+
+/// Loads `map` and builds the renderer, collision, models and sound for it.
+fn build_world(cli: &Cli, st: &State, map: &str) -> Result<World, String> {
+    let data = MapData::load(&cli.install, map).map_err(|e| format!("cannot load {map}: {e}"))?;
+    let vfs =
+        Vfs::open_stock(&cli.install, 0).map_err(|e| format!("cannot open the install: {e}"))?;
+    let scene = Scene::new(&st.gpu, &data);
+    let mut renderer = Renderer::new(
+        st.gpu.clone(),
+        scene,
+        &data,
+        TextureCache::new(Some(vfs), 0),
+    );
+    renderer.settings = cli.settings;
+    renderer.warm(st.config.format);
+    let lib = Library::load(&cli.install, map)?;
+    let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
+    Ok(World {
+        data,
+        renderer,
+        lib,
+        sound,
+    })
+}
+
 /// Starts (`join` of `None`) or joins a match from the menus: loads the map, builds the renderer and connects.
+/// For a join, `map` is what the server said it is playing.
 fn start_session(
     cli: &Cli,
     map_slot: &mut Option<MapData>,
     st: &mut State,
     map: &str,
     gametype: &str,
-    join: Option<&str>,
+    join: Option<std::net::SocketAddr>,
 ) -> Result<(), String> {
     end_session(map_slot, st);
-    let data = MapData::load(&cli.install, map).map_err(|e| format!("cannot load {map}: {e}"))?;
-    let vfs =
-        Vfs::open_stock(&cli.install, 0).map_err(|e| format!("cannot open the install: {e}"))?;
-    let scene = Scene::new(&st.gpu, &data);
-    let mut r = Renderer::new(
-        st.gpu.clone(),
-        scene,
-        &data,
-        TextureCache::new(Some(vfs), 0),
-    );
-    r.settings = cli.settings;
-    r.warm(st.config.format);
+    let world = build_world(cli, st, map)?;
     let (addr, listen) = match join {
-        Some(a) => (resolve(a)?, None),
+        Some(a) => (a, None),
         None => {
-            let l = listen::start(&cli.install, map, cli.bots, Some(gametype))?;
+            let l = listen::start(&cli.install, listen_config(st, map, gametype, cli.bots))?;
             (l.addr, Some(l))
         }
     };
-    let lib = Library::load(&cli.install, map)?;
     let limits = st.input.pitch_limits();
-    let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
     st.net = Some(NetPlay::connect(
-        lib, &data, addr, &cli.name, limits, false, sound,
+        world.lib,
+        &world.data,
+        addr,
+        &cli.name,
+        limits,
+        false,
+        world.sound,
     )?);
     st.listen = listen;
-    st.renderer = Some(r);
-    *map_slot = Some(data);
+    st.renderer = Some(world.renderer);
+    *map_slot = Some(world.data);
+    st.map_name = map.to_owned();
     if let Some(sh) = st.shell.as_mut() {
         sh.st.in_game = true;
         sh.close_all(&mut st.input);
+    }
+    Ok(())
+}
+
+/// The menu-started server: the chosen map then the other stock maps in turn, the dvars the player set (time and score
+/// limits), on a standard port when one is free so the LAN list finds it.
+fn listen_config(st: &State, map: &str, gametype: &str, bots: usize) -> listen::Config {
+    let maps: Vec<String> = st
+        .shell
+        .as_ref()
+        .map(|s| s.st.maps.iter().map(|m| m.name.clone()).collect())
+        .unwrap_or_default();
+    listen::Config {
+        map: map.to_owned(),
+        bots,
+        gametype: Some(gametype.to_owned()),
+        rotation: Some(rotation(gametype, &maps, map)),
+        port: listen::free_standard_port(),
+        dvars: st.input.cvars.with_prefix("scr_"),
+    }
+}
+
+/// The server announced level `name`: loads it if it is another map (the old world and renderer go first), restarts
+/// the net state for the level, hands the server the profile's stats and goes back to the menus the server opens.
+fn enter_level(
+    cli: &Cli,
+    map_slot: &mut Option<MapData>,
+    st: &mut State,
+    name: &str,
+) -> Result<(), String> {
+    let world = match level_change(&st.map_name, name) {
+        LevelChange::Same => None,
+        LevelChange::Load => {
+            st.renderer = None;
+            *map_slot = None;
+            Some(build_world(cli, st, name)?)
+        }
+    };
+    let Some(net) = st.net.as_mut() else {
+        return Ok(());
+    };
+    match world {
+        Some(w) => {
+            net.new_level(Some((w.lib, &w.data, w.sound)))?;
+            st.renderer = Some(w.renderer);
+            *map_slot = Some(w.data);
+            st.map_name = name.to_owned();
+        }
+        None => net.new_level(None)?,
+    }
+    if let Some(sh) = st.shell.as_ref() {
+        net.upload_stats(&sh.st.stats);
     }
     Ok(())
 }
@@ -1233,6 +1453,7 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
     st.listen = None;
     st.renderer = None;
     *map_slot = None;
+    st.map_name.clear();
     release_pointer(st);
     if let Some(sh) = st.shell.as_mut() {
         sh.st.in_game = false;
@@ -1277,14 +1498,6 @@ fn fly(st: &mut State, f: &InputFrame, dt: f32) {
     st.pos.z += f.up * speed;
     st.yaw += f.look_delta_yaw.to_radians();
     st.pitch = (st.pitch - f.look_delta_pitch.to_radians()).clamp(-1.5, 1.5);
-}
-
-fn resolve(addr: &str) -> Result<std::net::SocketAddr, String> {
-    use std::net::ToSocketAddrs;
-    addr.to_socket_addrs()
-        .map_err(|e| format!("cannot resolve {addr}: {e}"))?
-        .find(|a| a.is_ipv4())
-        .ok_or_else(|| format!("{addr} has no IPv4 address"))
 }
 
 fn rss() -> u64 {

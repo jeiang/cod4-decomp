@@ -214,6 +214,8 @@ pub struct ServerMessage {
     pub snapshot: Option<Snapshot>,
     /// Reliable commands that are not user interface commands (those go to [`ClientLink::ui`]).
     pub reliable: Vec<String>,
+    /// The server started a new level in this message: the snapshot clock restarts.
+    pub new_map: bool,
 }
 
 pub struct ClientLink {
@@ -295,7 +297,10 @@ impl ClientLink {
         self.rel_in.read(&mut r, &mut cmds)?;
         for c in cmds {
             match ServerCmd::parse(&c) {
-                Some(cmd) => self.ui.apply(cmd),
+                Some(cmd) => {
+                    out.new_map |= matches!(cmd, ServerCmd::Map { .. });
+                    self.ui.apply(cmd);
+                }
                 None => out.reliable.push(c),
             }
         }
