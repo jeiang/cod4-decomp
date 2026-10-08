@@ -43,8 +43,8 @@ pub(super) fn run_client(
         .args(["--size", "1280x720", "--no-sound", "--bots", "3"])
         .args(args)
         // The player profile and config live next to the run's output, never in the tester's own folders.
-        .arg("--config")
-        .arg(config_dir.join("config_mp.cfg"))
+        .arg("--config-dir")
+        .arg(config_dir)
         .arg("--ui-script")
         .arg(steps)
         .arg("--out")

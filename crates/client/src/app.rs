@@ -646,7 +646,7 @@ impl Viewer {
         }
         let install = server::content::Install::open(&self.cli.install)
             .map_err(|e| format!("cannot open the install: {e}"))?;
-        let mut input = Input::new(self.cli.config.clone(), Some(&install.vfs));
+        let mut input = Input::new(self.cli.config_dir.clone(), Some(&install.vfs));
         let mut shell = if self.cli.flythrough || self.cli.show_models.is_some() {
             None
         } else {
@@ -661,8 +661,10 @@ impl Viewer {
         if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_ref()) {
             sh.ui.assets.add_weapon_icons(&n.weapon_defs());
         }
+        let (profiles, stats) = Profiles::open(&install.root, input.config_dir(), "default");
+        let (read, write) = profiles.config_paths();
+        input.use_profile(read, write);
         if let Some(sh) = shell.as_mut() {
-            let (profiles, stats) = Profiles::open(&install.root, input.config_dir(), "default");
             sh.set_profiles(&mut input, profiles, stats);
             let (modes, rates) = display::video_modes(&window);
             sh.set_display(

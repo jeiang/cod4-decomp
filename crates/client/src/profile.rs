@@ -291,18 +291,35 @@ impl Profiles {
         root.as_ref().map(|r| r.join(name))
     }
 
-    /// Where the named profile lives: the user's folder wins, then the install's.
-    fn find_dir(&self, name: &str) -> Option<PathBuf> {
-        let name = clean_name(name)?;
-        let hit = |root: &Option<PathBuf>| {
-            let root = root.as_ref()?;
-            let want = name.to_lowercase();
-            std::fs::read_dir(root).ok()?.flatten().find_map(|e| {
+    /// The folder of a profile in one root (names match without regard to case).
+    fn find_in(root: &Option<PathBuf>, name: &str) -> Option<PathBuf> {
+        let want = clean_name(name)?.to_lowercase();
+        std::fs::read_dir(root.as_ref()?)
+            .ok()?
+            .flatten()
+            .find_map(|e| {
                 let n = e.file_name().to_string_lossy().to_lowercase();
                 (n == want && e.path().is_dir()).then(|| e.path())
             })
-        };
-        hit(&self.user_root).or_else(|| hit(&self.install_root))
+    }
+
+    /// Where the named profile lives: the user's folder wins, then the install's.
+    fn find_dir(&self, name: &str) -> Option<PathBuf> {
+        Self::find_in(&self.user_root, name).or_else(|| Self::find_in(&self.install_root, name))
+    }
+
+    /// The active profile's `config_mp.cfg`: the file to read (the user's copy, else the install's) and the file
+    /// to write (always the user's folder). `None` where there is no such place.
+    pub fn config_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        if self.active.is_empty() {
+            return (None, None);
+        }
+        let write = Self::dir_of(&self.user_root, &self.active).map(|d| d.join("config_mp.cfg"));
+        let read = write.clone().filter(|p| p.is_file()).or_else(|| {
+            let d = Self::find_in(&self.install_root, &self.active)?;
+            Some(d.join("config_mp.cfg")).filter(|p| p.is_file())
+        });
+        (read, write)
     }
 
     /// The profile names found, sorted by name (ascending unless flipped), the active one included.
@@ -594,6 +611,29 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_profile_config_is_the_users_copy_else_the_installs_and_saves_to_the_users_folder() {
+        let root = tmp("cfg");
+        let (install, cfg) = (root.join("install"), root.join("cfg"));
+        let theirs = install.join("players/profiles/Lagahoo");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(install.join("players/profiles/active.txt"), "Lagahoo").unwrap();
+        let (p, _) = Profiles::open(&install, Some(cfg.clone()), "default");
+        let mine = cfg.join("players/profiles/Lagahoo/config_mp.cfg");
+        // No config anywhere: nothing to read, the user's file is where it will be written.
+        assert_eq!(p.config_paths(), (None, Some(mine.clone())));
+        std::fs::write(theirs.join("config_mp.cfg"), "bind w \"+a\"").unwrap();
+        assert_eq!(
+            p.config_paths(),
+            (Some(theirs.join("config_mp.cfg")), Some(mine.clone()))
+        );
+        std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+        std::fs::write(&mine, "bind w \"+b\"").unwrap();
+        assert_eq!(p.config_paths(), (Some(mine.clone()), Some(mine)));
+        assert_eq!(Profiles::none().config_paths(), (None, None));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

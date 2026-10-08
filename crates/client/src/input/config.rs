@@ -96,8 +96,8 @@ pub fn join(tokens: &[String]) -> String {
         .join(" ")
 }
 
-/// `<platform config dir>/cod4e/config_mp.cfg`.
-pub fn default_path() -> Option<PathBuf> {
+/// `<platform config dir>/cod4e`: where the user's profiles live.
+pub fn default_dir() -> Option<PathBuf> {
     let env = |k: &str| {
         std::env::var_os(k)
             .filter(|v| !v.is_empty())
@@ -109,7 +109,7 @@ pub fn default_path() -> Option<PathBuf> {
     let base = env("APPDATA");
     #[cfg(not(any(target_os = "macos", windows)))]
     let base = env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config")));
-    base.map(|b| b.join("cod4e").join("config_mp.cfg"))
+    base.map(|b| b.join("cod4e"))
 }
 
 #[cfg(test)]

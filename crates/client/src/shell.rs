@@ -793,8 +793,14 @@ impl HostCx<'_> {
                 {
                     return;
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Err(e) = self.input.save() {
+                    eprintln!("cannot save the settings: {e}");
+                }
                 if let Some(stats) = self.st.profiles.switch(&self.st.stats, &want) {
                     self.st.stats = stats;
+                    let (read, write) = self.st.profiles.config_paths();
+                    self.input.use_profile(read, write);
                     let active = self.st.profiles.active().to_owned();
                     self.input.cvars.set("com_playerProfile", &active, false);
                 }
@@ -1318,8 +1324,8 @@ impl Host for HostCx<'_> {
     }
 
     fn owner_key(&mut self, _ui: &Ui, id: i32, key: &UiKey) -> bool {
-        // 245: the gametype chooser of the server settings. A click or Enter steps on, the right button (or Left)
-        // back; the map list and the settings menu follow `ui_netGametypeName`.
+        // 245: the gametype chooser of the server settings. A click or Enter steps on, the right button back (the
+        // arrow keys do nothing, as in the original); the map list and the settings menu follow `ui_netGametypeName`.
         if id == 245 {
             let n = self.st.gametypes.len();
             let back = matches!(key, UiKey::Left | UiKey::Mouse2);
