@@ -38,7 +38,7 @@ n = r.get("net") or {}
 s = r.get("server") or {}
 fx = n.get("fx") or {}
 bad = []
-if code != 0: bad.append(f"exit {code}")
+if int(code) != 0: bad.append(f"exit {code}")
 if not n.get("connected"): bad.append("not connected")
 if not n.get("spawned"): bad.append("never spawned")
 if (n.get("snapshots") or 0) < 50: bad.append("few snapshots")
