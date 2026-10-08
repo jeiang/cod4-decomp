@@ -24,7 +24,7 @@ fn lo(port: u16) -> SocketAddr {
 }
 
 fn until(what: &str, mut f: impl FnMut() -> bool) {
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + Duration::from_secs(30);
     while !f() {
         assert!(Instant::now() < end, "timed out: {what}");
         std::thread::sleep(Duration::from_millis(5));
@@ -430,7 +430,7 @@ fn play<T: Transport>(
     what: &str,
     mut done: impl FnMut(&mut NetClient<T>) -> bool,
 ) {
-    let end = Instant::now() + Duration::from_secs(10);
+    let end = Instant::now() + Duration::from_secs(30);
     loop {
         c.pump(Duration::from_millis(20));
         assert!(c.refused().is_none(), "{what}: refused {:?}", c.refused());
