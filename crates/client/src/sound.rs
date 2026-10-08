@@ -41,6 +41,10 @@ pub fn volume_of(cvars: &crate::input::Cvars) -> f32 {
         .unwrap_or(audio::mixer::DEFAULT_VOLUME)
 }
 
+/// `snd_enveffectsprio_shellshock`, and the channel volume priority of `snd_channelvolprio_shellshock`.
+const SHOCK_REVERB: usize = 2;
+const SHOCK_VOLUMES: u8 = 3;
+
 pub struct ClientSound {
     state: State,
     device: bool,
@@ -177,6 +181,66 @@ impl ClientSound {
         };
         if let Some(n) = names.iter().find(|n| s.bank.has(n)) {
             s.play(n, cue);
+        }
+    }
+
+    /// What a shell shock does to the sound (`UpdateShellShockSound`): the room effect and the channel ducking
+    /// (priority 3), the tinnitus and its end stings.
+    pub fn shock(&mut self, cmds: &[crate::look::ShockSound]) {
+        use crate::look::ShockSound as S;
+        if cmds.is_empty() {
+            return;
+        }
+        for c in cmds {
+            let Some(s) = self.ready() else { return };
+            match c {
+                S::Enter {
+                    room,
+                    wet,
+                    volumes,
+                    fade_ms,
+                } => {
+                    let fade = (*fade_ms).max(0) as u32;
+                    s.set_reverb(SHOCK_REVERB, room, *wet, fade);
+                    self.set_channel_volumes(SHOCK_VOLUMES, volumes, fade);
+                }
+                S::Leave { fade_ms } => {
+                    let fade = (*fade_ms).max(0) as u32;
+                    s.deactivate_reverb(SHOCK_REVERB, fade);
+                    self.clear_channel_volumes(SHOCK_VOLUMES, fade);
+                }
+                S::Loop { loud, quiet, fade } => s.shock_loop(loud, quiet, *fade),
+                S::LoopStop => s.shock_loop_stop(),
+                S::Play(alias) => {
+                    if !alias.is_empty() {
+                        s.play(alias, Cue::default());
+                    }
+                }
+            }
+        }
+    }
+
+    /// `SND_SetChannelVolumes`: priority 1 hold breath, 2 pain, 3 shell shock; `volumes` by channel name.
+    pub fn set_channel_volumes(&mut self, priority: u8, volumes: &[(String, f32)], fade_ms: u32) {
+        let Some(s) = self.ready() else { return };
+        let mut goals = vec![1.0; s.bank.channels.len()];
+        for (name, v) in volumes {
+            if let Some(i) = s
+                .bank
+                .channels
+                .iter()
+                .position(|c| c.name.eq_ignore_ascii_case(name))
+            {
+                goals[i] = *v;
+            }
+        }
+        s.set_channel_volumes(priority, &goals, fade_ms);
+    }
+
+    /// `SND_DeactivateChannelVolumes`.
+    pub fn clear_channel_volumes(&mut self, priority: u8, fade_ms: u32) {
+        if let Some(s) = self.ready() {
+            s.deactivate_channel_volumes(priority, fade_ms);
         }
     }
 
@@ -881,6 +945,30 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             format!("the EQ did not take the shot down: {open} -> {filtered}"),
         );
         m.insert("eq_ratio".into(), (filtered / open.max(1e-9)).into());
+
+        // Shell shock ducking (priority 3): the shot's channel goes quiet while the group is in force and
+        // comes back when it is cleared.
+        let mut goals = vec![1.0; s.bank.channels.len()];
+        if let Some(i) = s.bank.channels.iter().position(|c| c.name == channel) {
+            goals[i] = 0.05;
+        }
+        s.set_channel_volumes(3, &goals, 0);
+        let (ducked, _) = shot_energy(&mut s);
+        check(
+            s.channel_volume_priority() == 3,
+            "the shell shock channel volumes are not in force".into(),
+        );
+        s.deactivate_channel_volumes(3, 0);
+        let (restored, _) = shot_energy(&mut s);
+        check(
+            s.channel_volume_priority() == 0,
+            "the shell shock channel volumes stayed on".into(),
+        );
+        check(
+            ducked < 0.3 * open && restored > 0.7 * open,
+            format!("ducking did not take: open {open}, ducked {ducked}, restored {restored}"),
+        );
+        m.insert("shock_duck_ratio".into(), (ducked / open.max(1e-9)).into());
     }
 
     // Streamed ambience and music play out of the IWDs.

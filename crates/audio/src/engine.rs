@@ -82,6 +82,8 @@ pub struct Sound {
     owed: f64,
     /// `setReverb` by priority (`snd_enveffectsprio_level`, `_shellshock`): room and wet level.
     effects: [Option<(u8, f32)>; ENV_PRIORITIES],
+    /// The two voices of a shell shock's tinnitus (loud, quiet).
+    shock_loops: [Option<VoiceId>; 2],
     /// `snd_volume` as last sent to the mixer.
     volume: f32,
 }
@@ -207,6 +209,7 @@ impl Sound {
             scratch: vec![0.0; 4096],
             owed: 0.0,
             effects: [None; ENV_PRIORITIES],
+            shock_loops: [None; 2],
             volume: crate::mixer::DEFAULT_VOLUME,
         }
     }
@@ -510,6 +513,53 @@ impl Sound {
             .copied()
             .unwrap_or((0, 0.0));
         self.handle.set_reverb(room, wet, fade_ms);
+    }
+
+    /// `SND_PlayBlendedSoundAliases` of a shell shock's tinnitus: the loud and the quiet loop play together and
+    /// `fade` (0 to 1) moves the ear from one to the other. Call every frame while it rings.
+    pub fn shock_loop(&mut self, loud: &str, quiet: &str, fade: f32) {
+        let fade = fade.clamp(0.0, 1.0);
+        for (i, (name, share)) in [(loud, 1.0 - fade), (quiet, fade)].into_iter().enumerate() {
+            let Some(base) = self.bank.pick(name).map(|a| a.volume.1) else {
+                continue;
+            };
+            if self.shock_loops[i].is_none() {
+                self.shock_loops[i] = self.play(name, Cue::default());
+            }
+            if let Some(id) = self.shock_loops[i] {
+                self.handle.set_volume(id, base * share);
+            }
+        }
+    }
+
+    /// The tinnitus ends.
+    pub fn shock_loop_stop(&mut self) {
+        for id in self.shock_loops.iter_mut().filter_map(Option::take) {
+            self.handle.fade_out(id, 100);
+        }
+    }
+
+    /// `SND_SetChannelVolumes`: group `priority` (1 hold breath, 2 pain, 3 shell shock) sets the volume of each entity
+    /// channel (by row of `channels.def`; missing ones stay full) over `fade_ms`.
+    pub fn set_channel_volumes(&mut self, priority: u8, volumes: &[f32], fade_ms: u32) {
+        let mut goals = [1.0; crate::channels::MAX_CHANNELS];
+        for (g, v) in goals.iter_mut().zip(volumes) {
+            *g = *v;
+        }
+        self.handle.set_channel_volumes(priority, goals, fade_ms);
+    }
+
+    /// `SND_DeactivateChannelVolumes`.
+    pub fn deactivate_channel_volumes(&mut self, priority: u8, fade_ms: u32) {
+        self.handle.deactivate_channel_volumes(priority, fade_ms);
+    }
+
+    /// The priority of the channel volume group in force, 0 when none.
+    pub fn channel_volume_priority(&self) -> u32 {
+        self.handle
+            .stats
+            .channel_priority
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// `snd_setEq`: sets one band of an entity channel's EQ (`eq` 0 or 1, `band` 0 to 2). Returns false for an

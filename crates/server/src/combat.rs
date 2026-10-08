@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Flashbang translated in part from KisakCOD (game_mp/g_combat_mp.cpp, game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Damage: `G_Damage`, the player damage and death paths, radius damage and damage volumes.
 //!
 //! Scripts own the rules. The engine's part is the order of events: damage reaches
@@ -13,7 +14,8 @@ use sim::cm::{ENTITYNUM_NONE, ENTITYNUM_WORLD};
 use sim::contents;
 use sim::pm::{PmType, pmf};
 
-use crate::client::Session;
+use crate::bullet::{dot, length, sub};
+use crate::client::{Session, Team};
 use crate::game::{EntKind, Game, ScriptCall};
 
 /// `meansOfDeath_t` in the original's order.
@@ -162,6 +164,26 @@ fn vec_to_yaw(v: Vec3) -> f32 {
     }
     let y = v[1].atan2(v[0]).to_degrees();
     if y < 0.0 { y + 360.0 } else { y }
+}
+
+/// The two doses of a flashbang (`FlashbangBlastEnt`): how near the blast is (1 within `radius_min`, falling to
+/// 0 at `radius_max`) and how squarely the player looks at it (1 facing it, 0 turned away).
+pub fn flashbang_percents(
+    dist: f32,
+    radius_min: f32,
+    radius_max: f32,
+    viewangles: Vec3,
+    eye: Vec3,
+    blast: Vec3,
+) -> (f32, f32) {
+    let distance = if radius_min < dist {
+        1.0 - (dist - radius_min) / (radius_max - radius_min)
+    } else {
+        1.0
+    };
+    let forward = sim::pm::math::angle_vectors(&viewangles).0;
+    let to_blast = normalize(sub(blast, eye));
+    (distance, (dot(forward, to_blast) + 1.0) * 0.5)
 }
 
 impl Game {
@@ -613,6 +635,54 @@ impl Game {
         hit
     }
 
+    /// `G_FlashbangBlast`: every player within `radius_max` that the blast can see hears of it through
+    /// `self waittill("flashbang", distance, angle, attacker, team)`; the stock script turns that into the
+    /// shell shock. `radius_min` and below is a full dose.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flashbang_blast(
+        &mut self,
+        vm: &mut Vm,
+        origin: Vec3,
+        radius_max: f32,
+        radius_min: f32,
+        attacker: Option<u16>,
+        team: Team,
+        inflictor: u16,
+    ) {
+        let radius_min = radius_min.max(1.0);
+        let radius_max = radius_max.max(radius_min);
+        let targets: Vec<u16> = self
+            .in_use()
+            .filter(|(_, e)| e.kind == EntKind::Client && e.takedamage && e.health > 0)
+            .map(|(n, _)| n)
+            .collect();
+        for n in targets {
+            let Some(c) = self.client(n) else { continue };
+            if !c.connected() || c.session != Session::Playing {
+                continue;
+            }
+            let Some(e) = self.ent(n) else { continue };
+            let dist = length(sub(e.origin, origin));
+            if dist > radius_max || self.can_damage(n, origin, inflictor).is_none() {
+                continue;
+            }
+            let eye = [
+                c.ps.origin[0],
+                c.ps.origin[1],
+                c.ps.origin[2] + c.ps.view_height_current,
+            ];
+            let (distance, angle) =
+                flashbang_percents(dist, radius_min, radius_max, c.ps.viewangles, eye, origin);
+            let args = [
+                Value::Float(distance),
+                Value::Float(angle),
+                self.ent_obj(vm, attacker),
+                Value::str(team.name()),
+            ];
+            vm.notify_entity(n, "flashbang", &args);
+        }
+    }
+
     /// `G_GetWeaponHitLocationMultiplier`.
     pub fn hitloc_multiplier(&self, weapon: u32, hitloc: u8) -> f32 {
         sim::weapon::damage::weapon_hit_location_multiplier(
@@ -628,5 +698,25 @@ impl Game {
 
     pub fn weapon_index(&self, name: &str) -> u32 {
         u32::from(self.weapons.index(name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flashbang_percents;
+
+    #[test]
+    fn a_flashbang_dose_falls_with_distance_and_with_looking_away() {
+        let eye = [0.0; 3];
+        // Looking along +x at a blast on the +x axis, then at one behind.
+        let (near, face) =
+            flashbang_percents(100.0, 200.0, 600.0, [0.0; 3], eye, [100.0, 0.0, 0.0]);
+        assert_eq!((near, face), (1.0, 1.0));
+        let (mid, away) =
+            flashbang_percents(400.0, 200.0, 600.0, [0.0; 3], eye, [-400.0, 0.0, 0.0]);
+        assert!((mid - 0.5).abs() < 1e-6 && away.abs() < 1e-6);
+        let (edge, side) =
+            flashbang_percents(600.0, 200.0, 600.0, [0.0; 3], eye, [0.0, 400.0, 0.0]);
+        assert!(edge.abs() < 1e-6 && (side - 0.5).abs() < 1e-6);
     }
 }

@@ -9,6 +9,7 @@
 //! | `loop <ent> <x> <y> <z> <alias>` / `stoploop <ent> <alias>` | a looping sound on an entity |
 //! | `ambient <fade ms> <alias>` / `ambientstop <fade ms>` | the map's ambience |
 //! | `music <alias>` / `musicstop <fade ms>` | the music, its own stream beside the ambience |
+//! | `chanvol <priority> <shock> <fade ms>` / `chanvoloff <priority> <fade ms>` | `setChannelVolumes`: duck the channels |
 //! | `reverb <priority> <room> <wet> <fade ms>` / `reverboff <priority> <fade ms>` | `setReverb`: the room effect |
 
 use gsc::{EntRef, Value, Vm};
@@ -139,6 +140,38 @@ pub fn deactivate_reverb(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     }
     let prio = env_priority(&a)?;
     let line = format!("reverboff {prio} {}", fade_ms(&a, 1));
+    g.sound_out.push((SoundTo::Client(e.num), line));
+    Ok(Value::Undefined)
+}
+
+/// `snd_channelvolprio_holdbreath` is 1, `_pain` 2 and `_shellshock` 3.
+fn channel_priority(a: &Args) -> Result<u8, String> {
+    match a.string(0)?.to_ascii_lowercase().as_str() {
+        "snd_channelvolprio_holdbreath" => Ok(1),
+        "snd_channelvolprio_pain" => Ok(2),
+        "snd_channelvolprio_shellshock" => Ok(3),
+        _ => Err("priority must be 'snd_channelvolprio_holdbreath', 'snd_channelvolprio_pain', or 'snd_channelvolprio_shellshock'".into()),
+    }
+}
+
+/// `player setChannelVolumes(priority, shockname, fadetime = 0)`.
+pub fn set_channel_volumes(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    if !g.is_client(e.num) {
+        return Err(format!("entity {} is not a player", e.num));
+    }
+    let prio = channel_priority(&a)?;
+    let line = format!("chanvol {prio} {} {}", a.string(1)?, fade_ms(&a, 2));
+    g.sound_out.push((SoundTo::Client(e.num), line));
+    Ok(Value::Undefined)
+}
+
+/// `player deactivateChannelVolumes(priority, fadetime = 0)`.
+pub fn deactivate_channel_volumes(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    if !g.is_client(e.num) {
+        return Err(format!("entity {} is not a player", e.num));
+    }
+    let prio = channel_priority(&a)?;
+    let line = format!("chanvoloff {prio} {}", fade_ms(&a, 1));
     g.sound_out.push((SoundTo::Client(e.num), line));
     Ok(Value::Undefined)
 }

@@ -16,7 +16,7 @@ enum Screen {
 }
 
 /// What a `.shock` file asks for, in milliseconds.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ShockParams {
     screen: Screen,
     blur_time: f32,
@@ -27,6 +27,62 @@ pub struct ShockParams {
     kick_period: f32,
     kick_radius: f32,
     kick_fade: f32,
+    sound: Option<SoundParams>,
+    look: Option<LookControl>,
+    /// `bg_shock_volume_<channel>` whether or not the shock has sound of its own.
+    volumes: Vec<(String, f32)>,
+}
+
+/// `bg_shock_sound*`: the room, the ducking and the tinnitus of a shock.
+#[derive(Clone, Debug, PartialEq)]
+struct SoundParams {
+    loop_alias: String,
+    loop_silent: String,
+    end: String,
+    end_abort: String,
+    fade_in: i32,
+    fade_out: i32,
+    loop_fade: i32,
+    loop_end_delay: i32,
+    mod_end_delay: i32,
+    room: String,
+    wet: f32,
+    /// `bg_shock_volume_<channel>`, by channel name.
+    volumes: Vec<(String, f32)>,
+}
+
+/// `bg_shock_lookControl*`: how much a shock slows the turning of the view.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LookControl {
+    max_pitch_speed: f32,
+    max_yaw_speed: f32,
+    sensitivity: f32,
+    fade: i32,
+}
+
+/// What the sound system is told, in the order a shock produces it (`UpdateShellShockSound`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShockSound {
+    /// The room effect and the channel volumes of the shock, fading in over `fade_ms`.
+    Enter {
+        room: String,
+        wet: f32,
+        volumes: Vec<(String, f32)>,
+        fade_ms: i32,
+    },
+    /// They fade out over `fade_ms`.
+    Leave {
+        fade_ms: i32,
+    },
+    /// The tinnitus: `fade` is 0 for the loud loop and 1 for the quiet one.
+    Loop {
+        loud: String,
+        quiet: String,
+        fade: f32,
+    },
+    LoopStop,
+    /// A one-shot: the end sting or the abort.
+    Play(String),
 }
 
 impl ShockParams {
@@ -40,7 +96,31 @@ impl ShockParams {
             kick_period: 0.0,
             kick_radius: 0.0,
             kick_fade: 3000.0,
+            sound: None,
+            look: None,
+            volumes: Vec::new(),
         };
+        let mut s = SoundParams {
+            loop_alias: String::new(),
+            loop_silent: String::new(),
+            end: String::new(),
+            end_abort: String::new(),
+            fade_in: 1,
+            fade_out: 1,
+            loop_fade: 1,
+            loop_end_delay: 0,
+            mod_end_delay: 0,
+            room: "default".into(),
+            wet: 0.0,
+            volumes: Vec::new(),
+        };
+        let mut l = LookControl {
+            max_pitch_speed: 0.0,
+            max_yaw_speed: 0.0,
+            sensitivity: 1.0,
+            fade: 1,
+        };
+        let (mut sound_on, mut look_on) = (false, false);
         for line in text.lines() {
             let mut it = line.split_whitespace();
             let (Some(name), Some(first)) = (it.next(), it.next()) else {
@@ -49,28 +129,83 @@ impl ShockParams {
             let value = line[line.find(first).unwrap_or(0)..]
                 .trim()
                 .trim_matches('"');
-            let Ok(v) = value.parse::<f32>() else {
+            let v = value.parse::<f32>().ok();
+            let secs = v.unwrap_or(0.0);
+            let ms = (secs * 1000.0).round() as i32;
+            let name = name.to_ascii_lowercase();
+            if let Some(channel) = name.strip_prefix("bg_shock_volume_") {
+                if let Some(v) = v {
+                    s.volumes.push((channel.to_owned(), v.clamp(0.0, 1.0)));
+                }
                 continue;
-            };
-            match name.to_ascii_lowercase().as_str() {
+            }
+            match name.as_str() {
                 "bg_shock_screentype" => {
-                    p.screen = match v as i32 {
-                        0 => Screen::Blurred,
-                        1 => Screen::Flashed,
+                    p.screen = match value.to_ascii_lowercase().as_str() {
+                        "blurred" | "0" => Screen::Blurred,
+                        "flashed" | "1" => Screen::Flashed,
                         _ => Screen::None,
                     }
                 }
-                "bg_shock_screenblurblendtime" => p.blur_time = v * 1000.0,
-                "bg_shock_screenblurblendfadetime" => p.blur_fade = (v * 1000.0).max(1.0),
-                "bg_shock_screenflashwhitefadetime" => p.flash_white_fade = (v * 1000.0).max(1.0),
-                "bg_shock_screenflashshotfadetime" => p.flash_shot_fade = (v * 1000.0).max(1.0),
-                "bg_shock_viewkickperiod" => p.kick_period = v,
-                "bg_shock_viewkickradius" => p.kick_radius = v,
-                "bg_shock_viewkickfadetime" => p.kick_fade = (v * 1000.0).max(1.0),
+                "bg_shock_screenblurblendtime" => p.blur_time = secs * 1000.0,
+                "bg_shock_screenblurblendfadetime" => p.blur_fade = (secs * 1000.0).max(1.0),
+                "bg_shock_screenflashwhitefadetime" => {
+                    p.flash_white_fade = (secs * 1000.0).max(1.0)
+                }
+                "bg_shock_screenflashshotfadetime" => p.flash_shot_fade = (secs * 1000.0).max(1.0),
+                "bg_shock_viewkickperiod" => p.kick_period = secs,
+                "bg_shock_viewkickradius" => p.kick_radius = secs,
+                "bg_shock_viewkickfadetime" => p.kick_fade = (secs * 1000.0).max(1.0),
+                "bg_shock_sound" => sound_on = v.is_some_and(|v| v != 0.0),
+                "bg_shock_soundloop" => s.loop_alias = value.to_owned(),
+                "bg_shock_soundloopsilent" => s.loop_silent = value.to_owned(),
+                "bg_shock_soundend" => s.end = value.to_owned(),
+                "bg_shock_soundendabort" => s.end_abort = value.to_owned(),
+                "bg_shock_soundfadeintime" => s.fade_in = ms.max(1),
+                "bg_shock_soundfadeouttime" => s.fade_out = ms.max(1),
+                "bg_shock_soundloopfadetime" => s.loop_fade = ms.max(1),
+                "bg_shock_soundloopenddelay" => s.loop_end_delay = ms,
+                "bg_shock_soundmodenddelay" => s.mod_end_delay = ms,
+                "bg_shock_soundroomtype" => s.room = value.to_owned(),
+                "bg_shock_soundwetlevel" => s.wet = secs.clamp(0.0, 1.0),
+                "bg_shock_lookcontrol" => look_on = v.is_some_and(|v| v != 0.0),
+                "bg_shock_lookcontrol_maxpitchspeed" => l.max_pitch_speed = secs,
+                "bg_shock_lookcontrol_maxyawspeed" => l.max_yaw_speed = secs,
+                "bg_shock_lookcontrol_mousesensitivityscale" => l.sensitivity = secs,
+                "bg_shock_lookcontrol_fadetime" => l.fade = ms.max(1),
                 _ => {}
             }
         }
+        p.volumes = s.volumes.clone();
+        p.sound = sound_on.then_some(s);
+        p.look = look_on.then_some(l);
         p
+    }
+
+    /// The channel volumes of the file, for `setchannelvolumes`.
+    pub fn volumes(&self) -> &[(String, f32)] {
+        &self.volumes
+    }
+
+    /// Milliseconds past the shock's own time that its sound still has to play out.
+    fn sound_tail(&self) -> i32 {
+        self.sound.as_ref().map_or(0, |s| {
+            (s.fade_out + s.mod_end_delay)
+                .max(s.loop_fade + s.loop_end_delay)
+                .max(s.loop_end_delay + 1)
+                .max(0)
+        })
+    }
+}
+
+/// `CL_CapTurnRate` on one frame's turning: `delta` degrees limited to what `max_speed` degrees per second allows in
+/// `dt` seconds; a speed of 0 is no limit.
+pub fn cap_turn(delta: f32, max_speed: f32, dt: f32) -> f32 {
+    if max_speed > 0.0 {
+        let cap = max_speed * dt;
+        delta.clamp(-cap, cap)
+    } else {
+        delta
     }
 }
 
@@ -127,6 +262,12 @@ struct Shock {
     duration_ms: i32,
     /// A copy of the screen has been kept for the overlay.
     saved: bool,
+    /// Where the shock's sound is: 0 not begun, 1 fading in, 2 steady, 3 fading out.
+    phase: u8,
+    /// The end sting has played (`shellshock.loopEndTime`).
+    ended: bool,
+    /// The tinnitus is on.
+    looping: bool,
 }
 
 /// What to put on the picture this frame.
@@ -138,6 +279,12 @@ pub struct LookOut {
     pub save_screen: bool,
     /// Pitch and yaw to add to the view, degrees.
     pub kick: [f32; 2],
+    /// What the shock asks of the sound system this frame.
+    pub sound: Vec<ShockSound>,
+    /// `CL_CapTurnRate`: the fastest the view may turn, degrees per second, pitch and yaw; 0 is no cap.
+    pub max_turn: [f32; 2],
+    /// The shock's scale on the mouse sensitivity (1 when none).
+    pub sensitivity: f32,
 }
 
 /// How long the goggles take to change the picture, milliseconds.
@@ -160,6 +307,8 @@ pub struct Look {
     pub night: Option<String>,
     pub missing: Vec<String>,
     shock: Option<Shock>,
+    /// Sound commands owed to the next frame (a shock that was replaced or cleared).
+    pending: Vec<ShockSound>,
     last_ms: i32,
     /// How many shell shocks started.
     pub shocks: u64,
@@ -181,6 +330,7 @@ impl Look {
             night: None,
             missing: Vec::new(),
             shock: None,
+            pending: Vec::new(),
             last_ms: 0,
             shocks: 0,
         }
@@ -225,9 +375,8 @@ impl Look {
                 true
             }
             ServerCmd::ShellShock { name, ms } => {
-                if name.is_empty() || *ms <= 0 {
-                    self.shock = None;
-                } else {
+                self.silence();
+                if !name.is_empty() && *ms > 0 {
                     let text = file(&format!("shock/{name}.shock"))
                         .or_else(|| file("shock/default.shock"));
                     match text {
@@ -237,6 +386,9 @@ impl Look {
                                 start_ms: now_ms,
                                 duration_ms: *ms,
                                 saved: false,
+                                phase: 0,
+                                ended: false,
+                                looping: false,
                             });
                             self.shocks += 1;
                         }
@@ -294,16 +446,79 @@ impl Look {
             shell_shock: None,
             save_screen: false,
             kick: [0.0; 2],
+            sound: std::mem::take(&mut self.pending),
+            max_turn: [0.0; 2],
+            sensitivity: 1.0,
         };
         let Some(s) = &mut self.shock else {
             return out;
         };
-        let left = s.start_ms + s.duration_ms - now_ms;
-        if left <= 0 {
+        let time = now_ms - s.start_ms;
+        let left = s.duration_ms - time;
+        let p = &s.params;
+        if left < -p.sound_tail() {
+            if s.looping {
+                out.sound.push(ShockSound::LoopStop);
+            }
             self.shock = None;
             return out;
         }
-        let p = s.params;
+        if let Some(sp) = &p.sound {
+            // `UpdateShellShockSound`.
+            let to_go = sp.fade_out + sp.mod_end_delay + s.duration_ms - time;
+            if time < sp.fade_in {
+                if s.phase != 1 {
+                    s.phase = 1;
+                    out.sound.push(enter(sp, sp.fade_in - time));
+                }
+            } else if to_go <= sp.fade_out {
+                if (0..sp.fade_out).contains(&to_go) && s.phase != 3 {
+                    s.phase = 3;
+                    out.sound.push(ShockSound::Leave { fade_ms: to_go });
+                }
+            } else if s.phase < 2 {
+                s.phase = 2;
+                out.sound.push(enter(sp, 0));
+            }
+            let loop_left = sp.loop_fade + sp.loop_end_delay + s.duration_ms - time;
+            if loop_left > 0 {
+                let fade = if loop_left <= sp.loop_fade {
+                    1.0 - loop_left as f32 / sp.loop_fade as f32
+                } else {
+                    0.0
+                };
+                s.looping = true;
+                out.sound.push(ShockSound::Loop {
+                    loud: sp.loop_alias.clone(),
+                    quiet: sp.loop_silent.clone(),
+                    fade,
+                });
+            } else if std::mem::take(&mut s.looping) {
+                out.sound.push(ShockSound::LoopStop);
+            }
+            if time >= sp.loop_end_delay + s.duration_ms {
+                if !std::mem::replace(&mut s.ended, true) {
+                    out.sound.push(ShockSound::Play(sp.end.clone()));
+                }
+            } else if std::mem::take(&mut s.ended) {
+                out.sound.push(ShockSound::Play(sp.end_abort.clone()));
+            }
+        }
+        if let Some(lc) = p.look
+            && left > 0
+        {
+            // `UpdateShellShockLookControl`: the caps loosen as the shock ends.
+            let fade = if left < lc.fade {
+                left as f32 / lc.fade as f32
+            } else {
+                1.0
+            };
+            out.sensitivity = (lc.sensitivity - 1.0) * fade + 1.0;
+            out.max_turn = [lc.max_pitch_speed / fade, lc.max_yaw_speed / fade];
+        }
+        if left <= 0 {
+            return out;
+        }
         match p.screen {
             Screen::Blurred => {
                 // Each frame the screen so far is laid over the next, which smears what moves; in the last
@@ -348,6 +563,30 @@ impl Look {
             ];
         }
         out
+    }
+
+    /// `EndShellShockSound`: whatever the shock was doing to the sound stops, and a sting that has begun is
+    /// aborted.
+    fn silence(&mut self) {
+        let Some(s) = self.shock.take() else { return };
+        if s.phase != 0 {
+            self.pending.push(ShockSound::Leave { fade_ms: 0 });
+        }
+        if s.looping {
+            self.pending.push(ShockSound::LoopStop);
+        }
+        if let (true, Some(sp)) = (s.ended, &s.params.sound) {
+            self.pending.push(ShockSound::Play(sp.end_abort.clone()));
+        }
+    }
+}
+
+fn enter(sp: &SoundParams, fade_ms: i32) -> ShockSound {
+    ShockSound::Enter {
+        room: sp.room.clone(),
+        wet: sp.wet,
+        volumes: sp.volumes.clone(),
+        fade_ms,
     }
 }
 
@@ -491,5 +730,101 @@ mod tests {
             3600,
         );
         assert!(l.frame(3700).shell_shock.is_none());
+    }
+
+    const STOCK_FLASH: &str = "bg_shock_screenType \"flashed\"\nbg_shock_sound \"1\"\nbg_shock_soundLoop \"loud\"\nbg_shock_soundLoopSilent \"quiet\"\nbg_shock_soundEnd \"end\"\nbg_shock_soundEndAbort \"abort\"\nbg_shock_soundFadeInTime \"0.25\"\nbg_shock_soundFadeOutTime \"2.0\"\nbg_shock_soundModEndDelay \"1.5\"\nbg_shock_soundLoopFadeTime \"2\"\nbg_shock_soundLoopEndDelay \"2.0\"\nbg_shock_soundRoomType \"underwater\"\nbg_shock_soundWetLevel \"0.8\"\nbg_shock_volume_weapon \"0.1\"\nbg_shock_lookControl \"1\"\nbg_shock_lookControl_maxpitchspeed \"90\"\nbg_shock_lookControl_maxyawspeed \"60\"\nbg_shock_lookControl_mousesensitivityscale \"0.5\"\nbg_shock_lookControl_fadeTime \"2\"\n";
+
+    fn flash(ms: i32) -> Rig {
+        let mut l = look(&[("shock/f.shock", STOCK_FLASH)]);
+        l.command(
+            &ServerCmd::ShellShock {
+                name: "f".into(),
+                ms,
+            },
+            0,
+        );
+        l
+    }
+
+    #[test]
+    fn a_shock_ducks_the_sound_rings_and_ends_with_a_sting() {
+        let mut l = flash(4000);
+        let first = l.frame(10).sound;
+        assert!(matches!(
+            &first[..],
+            [ShockSound::Enter { room, volumes, fade_ms: 240, .. }, ShockSound::Loop { fade, .. }]
+                if room == "underwater" && volumes == &[("weapon".to_string(), 0.1)] && *fade == 0.0
+        ));
+        // Steady: the ducking is set once, the ring only goes on.
+        let mid = l.frame(1000).sound;
+        assert!(matches!(&mid[0], ShockSound::Enter { fade_ms: 0, .. }));
+        assert!(matches!(
+            &l.frame(1100).sound[..],
+            [ShockSound::Loop { .. }]
+        ));
+        // The ducking lets go with the stock delays after the shock (4 s + 1.5 s, less its 2 s fade out).
+        let leave = l.frame(5600).sound;
+        assert!(leave.contains(&ShockSound::Leave { fade_ms: 1900 }));
+        // The sting plays once, at the loop's end delay.
+        let sting = l.frame(6100).sound;
+        assert!(sting.contains(&ShockSound::Play("end".into())));
+        assert!(
+            l.frame(6200)
+                .sound
+                .iter()
+                .all(|s| !matches!(s, ShockSound::Play(_)))
+        );
+        // The ring leans to the quiet loop near its end, then stops.
+        let late = l.frame(7500).sound;
+        assert!(
+            late.iter()
+                .any(|s| matches!(s, ShockSound::Loop { fade, .. } if *fade > 0.4))
+        );
+        assert!(l.frame(8100).sound.contains(&ShockSound::LoopStop));
+        assert!(l.frame(8200).sound.is_empty());
+        assert!(l.frame(20_000).sound.is_empty());
+    }
+
+    #[test]
+    fn clearing_a_shock_early_releases_the_ducking_and_aborts_the_sting() {
+        let mut l = flash(4000);
+        l.frame(10);
+        l.frame(1000);
+        l.command(
+            &ServerCmd::ShellShock {
+                name: String::new(),
+                ms: 0,
+            },
+            1500,
+        );
+        let s = l.frame(1510).sound;
+        assert_eq!(s, [ShockSound::Leave { fade_ms: 0 }, ShockSound::LoopStop]);
+    }
+
+    #[test]
+    fn look_control_caps_the_turn_rate_and_loosens_as_the_shock_ends() {
+        let mut l = flash(4000);
+        let held = l.frame(1000);
+        assert_eq!(held.max_turn, [90.0, 60.0]);
+        assert_eq!(held.sensitivity, 0.5);
+        // With a second left of a two second fade the cap is twice as loose and the scale halfway back.
+        let easing = l.frame(3000);
+        assert_eq!(easing.max_turn, [180.0, 120.0]);
+        assert!((easing.sensitivity - 0.75).abs() < 1e-5);
+        let over = l.frame(4500);
+        assert_eq!((over.max_turn, over.sensitivity), ([0.0; 2], 1.0));
+    }
+
+    #[test]
+    fn a_turn_rate_cap_limits_each_frame_and_zero_means_none() {
+        assert_eq!(cap_turn(10.0, 60.0, 0.1), 6.0);
+        assert_eq!(cap_turn(-10.0, 60.0, 0.1), -6.0);
+        assert_eq!(cap_turn(2.0, 60.0, 0.1), 2.0);
+        assert_eq!(cap_turn(10.0, 0.0, 0.1), 10.0);
+    }
+
+    #[test]
+    fn the_stock_flash_file_asks_for_the_flashed_screen() {
+        assert_eq!(ShockParams::parse(STOCK_FLASH).screen, Screen::Flashed);
     }
 }

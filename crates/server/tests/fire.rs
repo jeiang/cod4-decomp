@@ -951,3 +951,108 @@ fn stock_shotgun_fires_its_pellets() {
         "{hits} of {pellets}"
     );
 }
+
+fn flashbang() -> WeaponInfo {
+    WeaponInfo {
+        name: "flash_grenade_mp".into(),
+        offhand_class: OffhandClass::Flash,
+        proj_explosion: sim::weapon::ProjExplosion::Flashbang,
+        explosion_radius: 600,
+        explosion_radius_min: 200,
+        explosion_inner_damage: 0,
+        explosion_outer_damage: 0,
+        ..frag()
+    }
+}
+
+#[test]
+fn a_flashbang_tells_the_players_that_can_see_it_how_hard_they_were_hit() {
+    use gsc::{CallOutcome, EntClass, Key};
+    use server::script::{Dispatch, ScriptHost};
+
+    let script = r#"
+init() { level.d = []; level.a = []; level.t = []; level.by = []; }
+watch(slot)
+{
+	self waittill("flashbang", d, a, att, t);
+	level.d[slot] = d;
+	level.a[slot] = a;
+	level.t[slot] = t;
+	level.by[slot] = isdefined(att);
+}
+"#;
+    // A wall behind the thrower shields the player on its far side.
+    let wall = ([-52.0, -2000.0, 0.0], [-48.0, 2000.0, 1000.0]);
+    let (mut g, _) = arena(&[wall], 0, vec![flashbang()]);
+    let prog = compile(
+        &[("t.gsc", script)],
+        &Builtins::stock_mp(),
+        Options::default(),
+    )
+    .unwrap();
+    let (init, watch) = (
+        prog.find("t", "init").unwrap(),
+        prog.find("t", "watch").unwrap(),
+    );
+    let dispatch = Dispatch::new(&prog);
+    let mut vm = Vm::new(prog).unwrap();
+    let thrower = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    // Facing the blast, with their back to it, in the open but past the radius, behind the wall.
+    let facing = add_player(&mut g, &mut vm, [150.0, 0.0, 0.0], 180.0, Team::Axis);
+    let away = add_player(&mut g, &mut vm, [150.0, 100.0, 0.0], 0.0, Team::Axis);
+    let far = add_player(&mut g, &mut vm, [3000.0, 0.0, 0.0], 180.0, Team::Axis);
+    let hidden = add_player(&mut g, &mut vm, [-100.0, 0.0, 0.0], 0.0, Team::Axis);
+    let slots = [thrower, facing, away, far, hidden];
+    {
+        let mut host = ScriptHost {
+            game: &mut g,
+            dispatch: &dispatch,
+        };
+        vm.call(&mut host, init, None, &[]).unwrap();
+        for n in slots {
+            let obj = vm.entity(n, EntClass::Entity);
+            let out = vm.call(&mut host, watch, Some(obj), &[Value::Int(i32::from(n))]);
+            assert!(matches!(out, Ok(CallOutcome::Pending)));
+        }
+    }
+    g.level.time = 1000;
+    let weapon = g.weapons.index("flash_grenade_mp");
+    fire(
+        &mut g,
+        &mut vm,
+        thrower,
+        WeaponEvent::OffhandThrow {
+            weapon,
+            fuse_left: 3500,
+            cooked: 0,
+        },
+    );
+    let grenade = server_first_missile(&g);
+    g.detonate_missile(&mut vm, grenade);
+    let mut host = ScriptHost {
+        game: &mut g,
+        dispatch: &dispatch,
+    };
+    assert!(vm.run_current_threads(&mut host).is_empty());
+    let level = vm.level();
+    let got = |field: &str, n: u16| match level.get(field) {
+        Some(Value::Array(a)) => a.get(&Key::Int(i32::from(n))).cloned(),
+        other => panic!("level.{field} is {other:?}"),
+    };
+    let float = |v: Option<Value>| match v {
+        Some(Value::Float(f)) => f,
+        other => panic!("not a float: {other:?}"),
+    };
+    // Heard: the player facing the blast takes the larger angle dose, the one turned away the smaller; both
+    // are inside the radius that gives a full distance dose, and the notice names the thrower and its team.
+    for n in [facing, away] {
+        assert_eq!(float(got("d", n)), 1.0);
+        assert!(matches!(got("t", n), Some(Value::Str(s)) if &*s == "allies"));
+        assert!(matches!(got("by", n), Some(Value::Int(1))));
+    }
+    assert!(float(got("a", facing)) > 0.9);
+    assert!(float(got("a", away)) < 0.1);
+    // Out of range and out of sight hear nothing.
+    assert!(got("d", far).is_none());
+    assert!(got("d", hidden).is_none());
+}
