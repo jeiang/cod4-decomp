@@ -882,6 +882,9 @@ fn cursor_hint(dc: &mut Dc, h: &mut HudFacts, key: &str, frag_key: &str) {
             crate::hud::localize(&dc.ui.assets, &h.cursor_hint_extra)
         );
     }
+    if crate::hud::is_unresolved_key(&text) {
+        h.unresolved_text.insert(text.clone());
+    }
     let r = dc.r;
     let len = dc.tw(&text);
     let y = dc.text_h() * 0.5 + r.y;

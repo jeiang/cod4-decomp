@@ -561,6 +561,8 @@ impl Shell {
                 tag,
                 text,
             } => {
+                let text = hud::chat_text(&self.ui.assets, &text);
+                self.st.hud_stats.note_text(&text);
                 let line = self.chat_line(team, client, tag, &text);
                 self.log(&line);
                 self.st.feed.chat(line, self.st.live.time);
@@ -673,6 +675,9 @@ impl Shell {
     fn print(&mut self, kind: net::ui::PrintKind, text: &str) {
         use net::ui::PrintKind;
         let text = hud::localize(&self.ui.assets, text);
+        if hud::is_unresolved_key(&text) && !self.st.hud_stats.unresolved.contains(&text) {
+            self.st.hud_stats.unresolved.push(text.clone());
+        }
         let now = self.st.live.time;
         self.log(&text);
         match kind {
@@ -806,13 +811,16 @@ impl Shell {
             }
         }
         for cmd in marks {
-            let key = input
+            let bound: Vec<String> = input
                 .binding_keys(&cmd)
                 .into_iter()
                 .map(crate::input::key_id)
-                .next()
-                .unwrap_or_else(|| "KEY_UNBOUND".to_owned());
-            self.st.live.keys.insert(cmd, self.ui.localize_key(&key));
+                .collect();
+            let text = self
+                .ui
+                .keys_text(&bound)
+                .unwrap_or_else(|| format!("{}({cmd})", self.ui.localize_key("KEY_UNBOUND")));
+            self.st.live.keys.insert(cmd, text);
         }
     }
 

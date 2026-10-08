@@ -113,6 +113,17 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     if n("killcam_frames") > 0 && !marked {
         bad.push("the killcam drew no head icon over the viewer's body");
     }
+    // A message or hint that is still a string key (MP_CHANGE_CLASS_NEXT_SPAWN) was not localized.
+    let keys: Vec<&str> = [&h["unresolved"], &report["hud"]["unresolved_text"]]
+        .into_iter()
+        .filter_map(|v| v.as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let unresolved = format!("unlocalized text on screen: {}", keys.join(", "));
+    if !keys.is_empty() {
+        bad.push(&unresolved);
+    }
     // The grenade and d-pad icons are weapon materials; one that is missing draws as a white square.
     let icons: Vec<&str> = report["missing_images"]
         .as_array()
@@ -245,6 +256,15 @@ mod tests {
         let mut r = good();
         r["hud_draw"]["head_icon_materials"] = json!([]);
         assert!(verdict(&r).unwrap().contains("head icon"));
+        let mut r = good();
+        r["hud_draw"]["unresolved"] = json!(["MP_CHANGE_CLASS_NEXT_SPAWN"]);
+        r["hud"] = json!({"unresolved_text": ["PLATFORM_HOLD_TO_PLANT_EXPLOSIVES"]});
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("MP_CHANGE_CLASS_NEXT_SPAWN")
+                && why.contains("PLATFORM_HOLD_TO_PLANT_EXPLOSIVES"),
+            "{why}"
+        );
         let mut r = good();
         r["hud_draw"]["scoreboard_rows_max"] = json!(2);
         assert!(verdict(&r).unwrap().contains("scoreboard"));

@@ -705,7 +705,8 @@ impl Server {
                 .cast_vote(slot, argv.get(1).map_or("", String::as_str)),
             Some(cmd @ ("say" | "say_team")) if argv.len() >= 2 => {
                 // What a person types is plain text: no control characters, which steer the localizer.
-                let text = plain_text(&argv[1..].join(" "));
+                // `\x15` marks it as an argument, which the client shows as it is, never as a string key.
+                let text = format!("\x15{}", plain_text(&argv[1..].join(" ")));
                 self.game.chat(slot, &text, cmd == "say_team");
             }
             Some("menuresponse") if argv.len() >= 3 => {
