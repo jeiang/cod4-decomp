@@ -25,7 +25,7 @@ fn player(g: &Game, e: EntRef) -> Result<u16, String> {
 }
 
 /// One argument of a message: a localized reference, or text (a player's name already with its `^7`).
-enum Part {
+pub enum Part {
     Loc(String),
     Text(String),
 }
@@ -33,7 +33,7 @@ enum Part {
 /// The parts as one message (`Scr_ConstructMessageString`), in the form the clients localize
 /// (`hud::localize`): `\x14` before a localized reference, `\x15` before text. The first
 /// reference needs no mark. Marks inside a part become `.`.
-fn construct(parts: &[Part]) -> String {
+pub fn construct(parts: &[Part]) -> String {
     let mut s = String::new();
     for p in parts {
         let (mark, text) = match p {

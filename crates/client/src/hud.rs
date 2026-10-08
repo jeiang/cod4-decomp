@@ -362,6 +362,13 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// Notes text the HUD is about to show that is still a bare string key, for the harness.
+    pub fn note_text(&mut self, text: &str) {
+        if is_unresolved_key(text) && !self.unresolved.iter().any(|t| t == text) {
+            self.unresolved.push(text.to_owned());
+        }
+    }
+
     /// One frame of the live state; `rows_shown` is how many player rows the scoreboard drew, `None` when it is not up.
     pub fn frame(&mut self, live: &LiveUi, rows_shown: Option<usize>) {
         use net::ui::he;
@@ -570,6 +577,37 @@ mod tests {
         assert_eq!(localize(&a, "MP_UNKNOWN_KEY"), "MP_UNKNOWN_KEY");
         assert!(is_unresolved_key("MP_UNKNOWN_KEY"));
         assert!(!is_unresolved_key("Class changes next spawn"));
+    }
+
+    /// What the server's `construct()` sends is what the client's `localize()` reads, for the shapes scripts use.
+    #[test]
+    fn server_messages_localize_to_their_text() {
+        use server::script::uicmd::{Part, construct};
+        let mut a = UiAssets::default();
+        for (k, v) in [
+            ("MP_CHANGE_CLASS_NEXT_SPAWN", "Class changes next spawn"),
+            ("MP_CONNECTED", "&&1 connected"),
+            ("MP_KILLED", "&&1 killed &&2"),
+        ] {
+            a.localize.insert(k.into(), v.into());
+        }
+        let loc = |k: &str| Part::Loc(k.into());
+        let text = |t: &str| Part::Text(t.into());
+        let shown = |parts: &[Part]| localize(&a, &construct(parts));
+        assert_eq!(
+            shown(&[loc("MP_CHANGE_CLASS_NEXT_SPAWN")]),
+            "Class changes next spawn"
+        );
+        assert_eq!(
+            shown(&[loc("MP_CONNECTED"), text("Bob^7")]),
+            "Bob^7 connected"
+        );
+        assert_eq!(
+            shown(&[loc("MP_KILLED"), text("Al"), text("Bo")]),
+            "Al killed Bo"
+        );
+        // A script's own text that looks like a key stays text.
+        assert_eq!(shown(&[text("MP_CONNECTED")]), "MP_CONNECTED");
     }
 
     #[test]

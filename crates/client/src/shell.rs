@@ -553,8 +553,8 @@ impl Shell {
                 let mut h = Self::host(&mut self.st, input);
                 self.ui.close_ingame_menu(&mut h);
             }
-            UiEvent::Print { kind, text } => self.print(kind, &text),
-            UiEvent::Announce { text } => self.print(net::ui::PrintKind::Bold, &text),
+            UiEvent::Print { kind, text } => self.print(input, kind, &text),
+            UiEvent::Announce { text } => self.print(input, net::ui::PrintKind::Bold, &text),
             UiEvent::Chat {
                 team,
                 client,
@@ -672,12 +672,19 @@ impl Shell {
     }
 
     /// An `iprintln` line or announcement: into the message window it belongs to, or only the console log.
-    fn print(&mut self, kind: net::ui::PrintKind, text: &str) {
+    fn print(&mut self, input: &Input, kind: net::ui::PrintKind, text: &str) {
         use net::ui::PrintKind;
         let text = hud::localize(&self.ui.assets, text);
-        if hud::is_unresolved_key(&text) && !self.st.hud_stats.unresolved.contains(&text) {
-            self.st.hud_stats.unresolved.push(text.clone());
-        }
+        let marks: Vec<String> = hud::key_marks(&text)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let text = if marks.is_empty() {
+            text
+        } else {
+            hud::expand_keys(&text, &self.key_texts(input, marks))
+        };
+        self.st.hud_stats.note_text(&text);
         let now = self.st.live.time;
         self.log(&text);
         match kind {
@@ -789,14 +796,15 @@ impl Shell {
         for le in &self.st.live.elems {
             for raw in [&le.text, &le.label] {
                 let text = hud::localize(&self.ui.assets, raw);
+                self.st.hud_stats.note_text(&text);
                 marks.extend(hud::key_marks(&text).into_iter().map(str::to_owned));
             }
         }
         if self.st.live.vote.is_some() {
             marks.extend(["vote yes".to_owned(), "vote no".to_owned()]);
         }
-        self.st.live.keys.clear();
         // The spectator's help names the first of several commands that has a key.
+        let mut keys = HashMap::new();
         for cmd in hud::spectator_commands(self.st.live.spectator_flags) {
             if let Some(key) = input
                 .binding_keys(cmd)
@@ -804,24 +812,29 @@ impl Shell {
                 .map(crate::input::key_id)
                 .next()
             {
-                self.st
-                    .live
-                    .keys
-                    .insert(cmd.to_owned(), self.ui.localize_key(&key));
+                keys.insert(cmd.to_owned(), self.ui.localize_key(&key));
             }
         }
-        for cmd in marks {
-            let bound: Vec<String> = input
-                .binding_keys(&cmd)
-                .into_iter()
-                .map(crate::input::key_id)
-                .collect();
-            let text = self
-                .ui
-                .keys_text(&bound)
-                .unwrap_or_else(|| format!("{}({cmd})", self.ui.localize_key("KEY_UNBOUND")));
-            self.st.live.keys.insert(cmd, text);
-        }
+        keys.extend(self.key_texts(input, marks));
+        self.st.live.keys = keys;
+    }
+
+    /// What each `[{+command}]` mark reads as: the keys the command is bound to, or the unbound text.
+    fn key_texts(&self, input: &Input, cmds: Vec<String>) -> HashMap<String, String> {
+        cmds.into_iter()
+            .map(|cmd| {
+                let bound: Vec<String> = input
+                    .binding_keys(&cmd)
+                    .into_iter()
+                    .map(crate::input::key_id)
+                    .collect();
+                let text = self
+                    .ui
+                    .keys_text(&bound)
+                    .unwrap_or_else(|| format!("{}({cmd})", self.ui.localize_key("KEY_UNBOUND")));
+                (cmd, text)
+            })
+            .collect()
     }
 
     /// Draws the loading screen over `target`.

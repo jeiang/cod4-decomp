@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 const NAME: &str = "client-hud";
 const LIMIT: Duration = Duration::from_secs(420);
 const ARGS: &[&str] = &["--listen", "--bots", "9", "--autoplay", "--duration", "400"];
-const STEPS: &str = "ingame=120,wait=5,chat=hello from the script,saw=hello from the script:20,console=callvote kick bot5,saw=called a vote:20,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
+const STEPS: &str = "ingame=120,wait=5,chat=hello from the script,saw=hello from the script:20,console=callvote kick bot5,saw=called a vote:20,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,loc=MP_CHANGE_CLASS_NEXT_SPAWN:PLATFORM_HOLD_TO_PLANT_EXPLOSIVES,feed=120,wait=1,shot=feed,\
 killcam=300,shot=killcam_first,wait=1,shot=killcam_next,wait=1,shot=killcam,respawn=120";
 
 fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String> {

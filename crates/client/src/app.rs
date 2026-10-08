@@ -1745,6 +1745,57 @@ fn script_step(st: &mut State) -> bool {
             }
             done(true, sc, String::new());
         }
+        // `loc=MESSAGE_KEY:HINT_KEY`: puts a bare-key message (as `iprintlnbold(&"KEY")` sends it) through the print,
+        // announcement and chat paths and holds a use-trigger hint of the second key for half a second. Fails if
+        // either shows as a key, or the hint was never drawn.
+        "loc" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            let (msg, hint) = arg.split_once(':').unwrap_or((arg, ""));
+            if sc.marker.is_none() {
+                sc.marker = Some("sent".into());
+                use net::ui::{PrintKind, UiEvent};
+                for ev in [
+                    UiEvent::Print {
+                        kind: PrintKind::Bold,
+                        text: msg.to_owned(),
+                    },
+                    UiEvent::Announce {
+                        text: msg.to_owned(),
+                    },
+                    UiEvent::Chat {
+                        team: false,
+                        client: 0,
+                        text: msg.to_owned(),
+                    },
+                ] {
+                    sh.apply(&mut st.input, ev);
+                }
+            }
+            let h = &mut sh.st.game.hud;
+            (h.cursor_hint, h.cursor_hint_time) = (2, h.now);
+            h.cursor_hint_text = hint.to_owned();
+            if waited > 0.5 {
+                let shown = crate::hud::localize(&sh.ui.assets, msg);
+                let h = &sh.st.game.hud;
+                let hint_drawn = h.drawn.get(&72).copied().unwrap_or(0) > 0;
+                let unresolved = &sh.st.hud_stats.unresolved;
+                let ok = shown != msg
+                    && hint_drawn
+                    && unresolved.is_empty()
+                    && h.unresolved_text.is_empty();
+                done(
+                    ok,
+                    sc,
+                    format!(
+                        "message {shown:?}; hint drawn {hint_drawn}; unresolved {unresolved:?} {:?}",
+                        h.unresolved_text
+                    ),
+                );
+                sc.marker = None;
+            }
+        }
         // Escape as the menus get it (`key=escape`).
         "key" => {
             if let Some(sh) = st.shell.as_mut()
