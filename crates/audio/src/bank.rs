@@ -14,7 +14,8 @@ use std::fs::File as FsFile;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Where an alias's audio is.
 #[derive(Clone, Debug)]

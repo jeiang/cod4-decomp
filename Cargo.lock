@@ -197,7 +197,12 @@ dependencies = [
  "assets",
  "cpal",
  "crossbeam-queue",
+ "js-sys",
  "symphonia",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
 ]
 
 [[package]]

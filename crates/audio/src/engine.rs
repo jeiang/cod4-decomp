@@ -15,7 +15,6 @@ use crate::mixer::{
 use crate::reverb::room_index;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 /// Environment effect priorities: none, level, shellshock.
@@ -58,7 +57,7 @@ pub struct Played {
 
 enum Out {
     /// Held to keep the stream running.
-    Device(#[expect(dead_code)] Output),
+    Device(#[cfg_attr(not(target_arch = "wasm32"), expect(dead_code))] Output),
     /// No device: the mixer runs against the clock and the samples are dropped (or rendered by a test).
     Silent(Box<Mixer>),
 }
@@ -68,7 +67,7 @@ pub struct Sound {
     handle: Handle,
     out: Out,
     rate: u32,
-    streams: Sender<StreamJob>,
+    streams: Streams,
     listener: Listener,
     loops: HashMap<(u32, String), VoiceId>,
     ambient: Option<VoiceId>,
@@ -82,25 +81,82 @@ pub struct Sound {
     effects: [Option<(u8, f32)>; ENV_PRIORITIES],
 }
 
-fn stream_thread(rx: Receiver<StreamJob>) {
-    let mut jobs: Vec<StreamJob> = Vec::new();
-    loop {
+/// Where streamed files decode. Natively a thread feeds each job's ring; on `wasm32`, which has no threads
+/// to spare, the owner decodes in small slices from [`Sound::pump`].
+#[cfg(not(target_arch = "wasm32"))]
+mod streams {
+    use crate::decode::StreamJob;
+    use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+    use std::time::Duration;
+
+    pub struct Streams(Sender<StreamJob>);
+
+    impl Streams {
+        pub fn new() -> Self {
+            let (tx, rx) = channel();
+            std::thread::Builder::new()
+                .name("audio-streams".into())
+                .spawn(move || thread(rx))
+                .expect("spawn the stream decoder");
+            Self(tx)
+        }
+
+        pub fn add(&mut self, job: StreamJob) {
+            let _ = self.0.send(job);
+        }
+
+        pub fn pump(&mut self) {}
+    }
+
+    fn thread(rx: Receiver<StreamJob>) {
+        let mut jobs: Vec<StreamJob> = Vec::new();
         loop {
-            match rx.try_recv() {
-                Ok(j) => jobs.push(j),
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    if jobs.is_empty() {
-                        return;
+            loop {
+                match rx.try_recv() {
+                    Ok(j) => jobs.push(j),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        if jobs.is_empty() {
+                            return;
+                        }
+                        break;
                     }
-                    break;
                 }
             }
+            jobs.retain_mut(StreamJob::pump);
+            std::thread::sleep(Duration::from_millis(5));
         }
-        jobs.retain_mut(StreamJob::pump);
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+mod streams {
+    use crate::decode::StreamJob;
+
+    /// Samples one job decodes per [`Streams::pump`] (about 90 ms of 44.1 kHz stereo, a few ms of work).
+    const SLICE: usize = 8192;
+
+    pub struct Streams(Vec<StreamJob>);
+
+    impl Streams {
+        pub fn new() -> Self {
+            Self(Vec::new())
+        }
+
+        /// Decodes the first slice at once so the voice has samples when the mixer first looks.
+        pub fn add(&mut self, mut job: StreamJob) {
+            if job.pump_for(SLICE) {
+                self.0.push(job);
+            }
+        }
+
+        pub fn pump(&mut self) {
+            self.0.retain_mut(|j| j.pump_for(SLICE));
+        }
+    }
+}
+
+use streams::Streams;
 
 impl Sound {
     /// `use_device = false` never opens a sound card (the mixer still runs, silently).
@@ -130,17 +186,12 @@ impl Sound {
     }
 
     fn assemble(bank: Bank, handle: Handle, out: Out, rate: u32, note: Option<String>) -> Self {
-        let (streams, rx) = channel();
-        std::thread::Builder::new()
-            .name("audio-streams".into())
-            .spawn(move || stream_thread(rx))
-            .expect("spawn the stream decoder");
         Self {
             bank,
             handle,
             out,
             rate,
-            streams,
+            streams: Streams::new(),
             listener: Listener::from_yaw([0.0; 3], 0.0),
             loops: HashMap::new(),
             ambient: None,
@@ -157,6 +208,16 @@ impl Sound {
         matches!(self.out, Out::Device(_))
     }
 
+    /// The browser output's counters (frames played, underruns, queue depth); `None` natively and without a
+    /// device, where the mixer's own [`Sound::stats`] are all there is.
+    pub fn output_stats(&self) -> Option<crate::transport::OutputStats> {
+        #[cfg(target_arch = "wasm32")]
+        if let Out::Device(o) = &self.out {
+            return Some(o.stats());
+        }
+        None
+    }
+
     pub fn stats(&self) -> &Arc<crate::mixer::Stats> {
         &self.handle.stats
     }
@@ -165,6 +226,13 @@ impl Sound {
     pub fn set_listener(&mut self, pos: [f32; 3], yaw: f32) {
         self.listener = Listener::from_yaw(pos, yaw);
         self.handle.set_listener(self.listener);
+    }
+
+    /// Decodes the next slice of every streamed file. **Call once per frame on `wasm32`** (before or after
+    /// [`Sound::tick`]), where there is no decoder thread; a streamed voice starves if it is not called.
+    /// Natively a thread decodes and this does nothing.
+    pub fn pump(&mut self) {
+        self.streams.pump();
     }
 
     /// Housekeeping once a frame; without a device also runs the mixer for `dt`.
@@ -265,7 +333,7 @@ impl Sound {
                 match opened {
                     Ok((job, stream)) => {
                         let stereo = stream.channels == 2;
-                        let _ = self.streams.send(job);
+                        self.streams.add(job);
                         (Source::Stream(stream), stereo)
                     }
                     Err(e) => {

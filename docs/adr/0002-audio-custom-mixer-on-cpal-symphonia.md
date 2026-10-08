@@ -1,6 +1,6 @@
 # Audio: a custom lock-free mixer on cpal and Symphonia, not kira
 
-Sound is the `audio` crate: cpal for the device (CoreAudio, ALSA, WASAPI, Web Audio), Symphonia (MPL-2.0, dependency use only) for WAV and MP3, and our own mixer. The mixer is one function, `Mixer::fill(&mut [f32])`, with no I/O and no threads: commands come in over a bounded lock-free queue, streamed audio over per-voice SPSC rings, counters leave through atomics, and finished voices are handed back to the game thread so the callback never allocates or frees (`tests/realtime.rs` counts allocations). The same code can run in a browser AudioWorklet.
+Sound is the `audio` crate: cpal for the device on desktop (CoreAudio, ALSA, WASAPI) and an embedded AudioWorklet in the browser (cpal is not built there), Symphonia (MPL-2.0, dependency use only) for WAV and MP3, and our own mixer. The mixer is one function, `Mixer::fill(&mut [f32])`, with no I/O and no threads: commands come in over a bounded lock-free queue, streamed audio over per-voice SPSC rings, counters leave through atomics, and finished voices are handed back to the game thread so the callback never allocates or frees (`tests/realtime.rs` counts allocations). In a browser (`wasm32`) the same mixer feeds an AudioWorklet through a ring (`transport.rs`, `device/web.rs`, `device/worklet.js`).
 
 ## Why not kira
 
@@ -25,3 +25,4 @@ kira covers tracks, reverb, EQ and tweens, but its spatial model is a pan plus a
 - The game's alias model never leaks library types; swapping the decoder or device is local.
 - Reverb is a send bus inside `Mixer::fill` (fixed buffers, no allocation) and the EQ a per-voice biquad chain; both run in the same callback an AudioWorklet would run.
 - No occlusion: the original has none.
+- Browser output: the mixer runs on the page's main thread (no wasm threads), a 10 ms timer keeps 80 ms rendered ahead of the worklet, which reads a `SharedArrayBuffer` ring when cross-origin isolated and posted chunks otherwise. The embedded worklet loads from a Blob URL, so nothing is served for it. Streamed files have no decoder thread there: the owner calls `Sound::pump` once per frame and each job decodes a bounded slice. Headless Chrome (48 kHz): no underruns in steady state, and a main-thread stall of 70 ms is survived; 100 ms is not.
