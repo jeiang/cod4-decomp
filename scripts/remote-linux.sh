@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Usage: scripts/remote-linux.sh [git-ref] [-- run-options...]
 # Ships a git ref to the Linux test host, runs build/test/clippy/fmt in the devshell with
-# COD4_PATH=~/cod4e/COD4, and, when run-options are given, runs
+# COD4_PATH=~/Projects/cod4e/shared/COD4, and, when run-options are given, runs
 # `cod4e-harness run --out bundles <run-options>` (a bare `--` runs the default
 # suite). The harness writes cod4e-run-<date>.zip into bundles/ on that host; that
 # directory is copied back to ./bundles/ and the bundles are listed.
@@ -17,7 +17,7 @@ if [ $# -gt 0 ] && [ "$1" != -- ]; then ref=$1; shift; fi
 run=0
 if [ "${1:-}" = -- ]; then run=1; shift; fi
 host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test machine}
-dir="~/cod4e-run-$(hostname -s)-$$"  # per invocation: parallel runs must not wipe each other
+dir="~/Projects/cod4e/run-$(hostname -s)-$$"  # per invocation: parallel runs must not wipe each other
 harness=""
 display=""
 [ -n "${COD4E_LINUX_WAYLAND_DISPLAY:-}" ] && display="WAYLAND_DISPLAY=$(printf '%q' "$COD4E_LINUX_WAYLAND_DISPLAY") "
@@ -26,7 +26,7 @@ display=""
 
 git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -C $dir'"
 status=0
-ssh "$host" "bash -c 'cd $dir && COD4_PATH=\$HOME/cod4e/COD4 nix develop -c bash -ec \"
+ssh "$host" "bash -c 'cd $dir && COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 nix develop -c bash -ec \"
 cargo build --workspace && cargo test --workspace &&
 cargo clippy --workspace -- -D warnings && cargo fmt --check
 $harness

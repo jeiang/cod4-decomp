@@ -4,3 +4,5 @@
 /target/
 /result
 /bundles/
+# Agent and local git worktrees.
+/.worktrees/
