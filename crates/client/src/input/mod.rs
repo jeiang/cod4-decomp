@@ -91,6 +91,13 @@ impl InputFrame {
         self.pending_commands.iter().any(|c| c == "quit")
     }
 
+    /// `togglefullscreen` ran (F11).
+    pub fn toggle_fullscreen(&self) -> bool {
+        self.pending_commands
+            .iter()
+            .any(|c| c == "togglefullscreen")
+    }
+
     /// `togglemenu` ran (Escape, gamepad start): release the pointer, and open the menu where there is one.
     pub fn toggle_menu(&self) -> bool {
         self.pending_commands.iter().any(|c| c == "togglemenu")

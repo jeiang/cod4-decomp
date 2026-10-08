@@ -20,11 +20,14 @@
   fieldset { border: 1px solid #333; border-radius: 6px; margin: 1rem 0; }
   #overlay { position: fixed; top: 6px; left: 8px; margin: 0; padding: 6px 8px; background: rgba(0, 0, 0, .65); color: #9f9;
              font: 12px/1.35 ui-monospace, monospace; white-space: pre; pointer-events: none; max-width: 70vw; overflow: hidden; }
+  #sound-hint { position: fixed; bottom: 10px; right: 12px; padding: 4px 10px; background: rgba(0, 0, 0, .7); color: #fd8;
+                font: 13px ui-monospace, monospace; border-radius: 4px; pointer-events: none; }
 </style>
 </head>
 <body>
 <canvas id="cod4e-canvas" hidden tabindex="0"></canvas>
 <pre id="overlay" hidden></pre>
+<div id="sound-hint" hidden>Click to enable sound</div>
 <main id="setup">
   <h1>cod4e</h1>
   <p class="note">An engine that plays Call of Duty 4: Modern Warfare multiplayer from your own copy of the game. The
@@ -48,7 +51,7 @@
   </fieldset>
   <p><button id="play" disabled>Play</button></p>
   <p id="status"></p>
-  <p class="note">F3 shows the debug overlay (graphics backend, frame times, memory).</p>
+  <p class="note">F3 shows the debug overlay (graphics backend, frame times, memory, sound counters). Click the game to capture the mouse, Esc releases it; F11 toggles fullscreen.</p>
 </main>
 <script type="module" src="main.js"></script>
 </body>

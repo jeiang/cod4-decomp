@@ -836,6 +836,11 @@ impl NetPlay {
         out
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn sound(&self) -> &ClientSound {
+        &self.sound
+    }
+
     /// What the run saw, for the client report.
     pub fn report(&mut self) -> Value {
         let s = self.net.stats();

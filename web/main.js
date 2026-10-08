@@ -185,6 +185,12 @@ async function play() {
       overlay["load, play click to first frame (ms)"] = Math.round(t.firstOverlay);
       overlay["net"] = `${wire.state()} sent ${wire.stats.sent} received ${wire.stats.received} streams out/in ${wire.stats.streamsOut}/${wire.stats.streamsIn}`;
       overlay["page"] = navigator.userAgent;
+      // The worklet node exists as soon as the sound starts but plays nothing until the AudioContext is resumed by a
+      // gesture: the hint shows while a started output's frames_played stands still.
+      const played = /frames_played (\d+)/.exec(String(overlay.sound ?? ""));
+      const now = played ? Number(played[1]) : null;
+      $("sound-hint").hidden = now === null || now !== t.played;
+      t.played = now;
       showOverlay();
       window.__cod4 = { ...window.__cod4, overlay, startedAt: started };
       if (params.has("report") && !t.reported && (overlay.frames ?? 0) >= Number(params.get("report") || 600)) {

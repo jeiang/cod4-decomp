@@ -30,7 +30,8 @@ use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{CursorGrabMode, Window, WindowId};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 /// The original's default `cg_fov`, the field of view the weapons' zoom fields are relative to.
 const STOCK_FOV: f32 = 65.0;
@@ -164,7 +165,21 @@ fn overlay_values(st: &State) -> Value {
             .unwrap_or(0.0),
         warm.last().copied().unwrap_or(0.0)
     );
+    let sound = st
+        .net
+        .as_ref()
+        .map(|n| n.sound())
+        .or(st.menu_sound.as_ref())
+        .map_or_else(|| "off".to_owned(), |s| s.overlay_line());
     json!({
+        "sound": sound,
+        "view (x y z, yaw, pitch)": format!(
+            "{:.0} {:.0} {:.0}, {:.1}, {:.1}",
+            st.pos.x, st.pos.y, st.pos.z, st.yaw.to_degrees(), st.pitch.to_degrees()
+        ),
+        "pointer": format!("grabbed {} locked {}", st.grabbed, crate::web::pointer_locked()),
+        "canvas": format!("{}x{}", st.config.width, st.config.height),
+        "fov_x": format!("{:.1}", st.fov_x.to_degrees()),
         "backend": format!("{} ({})", info.backend, info.name),
         "BC textures on the GPU": st.gpu.bc,
         "decoded texture MiB": st.renderer.as_ref().map_or(0, |r| r.textures.decoded_bytes() >> 20),
@@ -263,6 +278,10 @@ struct State {
     input: Input,
     grabbed: bool,
     gate: crate::pointer::PointerGate,
+    /// When the pointer was last asked for, and whether the browser has confirmed the lock since: the page grants a
+    /// lock a moment after the request and drops it on its own (Escape, a lost activation).
+    grab_at: Instant,
+    lock_seen: bool,
     /// A menu was open at the last frame.
     menu_was_open: bool,
     samples: Vec<[f64; 3]>,
@@ -646,6 +665,8 @@ impl Viewer {
             input,
             grabbed: false,
             gate: Default::default(),
+            grab_at: now,
+            lock_seen: false,
             menu_was_open: false,
             samples: Vec::new(),
             gpu_ms: Vec::new(),
@@ -752,6 +773,13 @@ impl ApplicationHandler<Ready> for Viewer {
         } else {
             st.input.window_event(&ev);
         }
+        if let WindowEvent::KeyboardInput { event, .. } = &ev
+            && event.state == ElementState::Pressed
+            && !event.repeat
+            && event.physical_key == PhysicalKey::Code(KeyCode::F11)
+        {
+            toggle_fullscreen(&st.window);
+        }
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
@@ -801,6 +829,18 @@ impl Viewer {
         let dt = (t - st.last_t).min(0.1);
         st.last_t = t;
 
+        #[cfg(target_arch = "wasm32")]
+        if st.grabbed {
+            // The page owns the lock: Escape or a refused request ends it without a word to the window.
+            if crate::web::pointer_locked() {
+                st.lock_seen = true;
+            } else if st.lock_seen || st.grab_at.elapsed() > Duration::from_millis(750) {
+                // The browser took the lock back (Escape) or refused it (no user activation): like letting go on
+                // purpose, a click takes it again; asking every frame would only be refused again.
+                st.gate.let_go();
+                release_pointer(st);
+            }
+        }
         let menu_open = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
         if menu_open {
             // A locked cursor never moves, so the menu could not be clicked.
@@ -817,10 +857,16 @@ impl Viewer {
             && st.renderer.is_some()
             && !self.cli.timed()
             && self.cli.ui_script.is_none();
+        // The browser grants a lock only to a page the player just touched.
+        #[cfg(target_arch = "wasm32")]
+        let may_ask = crate::web::user_active();
+        #[cfg(not(target_arch = "wasm32"))]
+        let may_ask = true;
         if st
             .gate
             .wants_lock(in_match, menu_open, st.window.has_focus())
             && !st.grabbed
+            && may_ask
         {
             grab_pointer(st);
         }
@@ -893,6 +939,9 @@ impl Viewer {
             if f.toggle_menu() {
                 release_pointer(st);
             }
+            if f.toggle_fullscreen() {
+                toggle_fullscreen(&st.window);
+            }
             if let Some(nf) = frame_out {
                 (st.pos, st.yaw, st.pitch) = (nf.origin, nf.yaw, nf.pitch);
                 st.aim_zoom = nf.sight.as_ref().map(|s| (s.zoom_fov, s.zoom));
@@ -919,6 +968,9 @@ impl Viewer {
             }
             if f.toggle_menu() {
                 release_pointer(st);
+            }
+            if f.toggle_fullscreen() {
+                toggle_fullscreen(&st.window);
             }
             if st.renderer.is_some() && st.shell.is_none() {
                 fly(st, &f, dt);
@@ -1832,6 +1884,8 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
 
 /// Lock the cursor to the window (a click). `captured` follows what the OS actually granted.
 fn grab_pointer(st: &mut State) {
+    st.grab_at = Instant::now();
+    st.lock_seen = false;
     st.grabbed = st
         .window
         .set_cursor_grab(CursorGrabMode::Locked)
@@ -1839,6 +1893,17 @@ fn grab_pointer(st: &mut State) {
         .is_ok();
     st.window.set_cursor_visible(!st.grabbed);
     st.input.set_captured(st.grabbed);
+}
+
+/// The fullscreen state after a toggle: windowed becomes borderless on the current monitor and back.
+fn next_fullscreen(current: Option<Fullscreen>) -> Option<Fullscreen> {
+    current.is_none().then_some(Fullscreen::Borderless(None))
+}
+
+/// `togglefullscreen` and F11. In the browser this is the Fullscreen API, which only a user gesture may start, so
+/// it runs from the key event's own handler; the canvas follows with a `Resized`.
+fn toggle_fullscreen(window: &Window) {
+    window.set_fullscreen(next_fullscreen(window.fullscreen()));
 }
 
 /// Give the cursor back: Escape (`togglemenu`), the menu, or the window losing focus (winit leaves a macOS lock on
@@ -1954,4 +2019,16 @@ fn save_png(
         .and_then(|mut w| w.write_image_data(&rgba))
         .map_err(|e| e.to_string())?;
     Ok(lit as f64 / f64::from(w * h))
+}
+
+#[cfg(test)]
+mod fullscreen_tests {
+    use super::*;
+
+    #[test]
+    fn the_toggle_alternates_windowed_and_borderless() {
+        let on = next_fullscreen(None);
+        assert!(matches!(on, Some(Fullscreen::Borderless(None))));
+        assert!(next_fullscreen(on).is_none());
+    }
 }
