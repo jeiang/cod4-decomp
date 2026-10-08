@@ -982,6 +982,7 @@ impl Renderer {
                 count: d.count,
                 base_vertex: 0,
                 vb: Some(d.vb),
+                vb_offset: 0,
             });
         }
         draws
