@@ -664,6 +664,9 @@ impl Viewer {
         let (profiles, stats) = Profiles::open(&install.root, input.config_dir(), "default");
         let (read, write) = profiles.config_paths();
         input.use_profile(read, write);
+        if let Some(n) = net.as_mut() {
+            n.set_profile(&stats);
+        }
         if let Some(sh) = shell.as_mut() {
             sh.set_profiles(&mut input, profiles, stats);
             let (modes, rates) = display::video_modes(&window);
@@ -2149,6 +2152,9 @@ fn finish_load(
         let limits = st.input.pitch_limits();
         let mut net = NetPlay::connect(library, &data, addr, &cli.name, limits, false, sound)?;
         net.set_autojoin(std::mem::take(&mut st.autojoin_next));
+        if let Some(sh) = st.shell.as_ref() {
+            net.set_profile(&sh.st.stats);
+        }
         st.net = Some(net);
         st.listen = listen;
         if let Some(sh) = st.shell.as_mut() {

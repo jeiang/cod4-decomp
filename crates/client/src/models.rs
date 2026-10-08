@@ -70,6 +70,23 @@ impl Library {
             .clone()
     }
 
+    /// The models of a player whose body the scripts chose (`body_mp_<faction>_<class>`): that body and the head of its
+    /// faction. `None` when the body is not in the loaded zones.
+    pub fn body_models(&self, body: &str) -> Option<PlayerModelSet> {
+        self.content.model(body)?;
+        let rest = body.strip_prefix("body_mp_")?;
+        let faction = rest.split('_').next()?;
+        let heads = self.content.model_names("head_mp_");
+        Some(PlayerModelSet {
+            head: heads
+                .iter()
+                .find(|n| n["head_mp_".len()..].contains(faction))
+                .map(|n| (*n).to_owned()),
+            weapon: None,
+            body: body.to_owned(),
+        })
+    }
+
     fn find_team_models(&self, team: Team) -> Option<PlayerModelSet> {
         let pick = |prefix: &str, words: &[&str]| -> Option<String> {
             let names = self.content.model_names(prefix);

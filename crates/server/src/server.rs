@@ -27,6 +27,8 @@ use net::Transport;
 /// Original loop time limit while scripts run (`LOOP_TIMEOUT` of the VM) applies unchanged.
 const SETTLE_FRAMES: i32 = 3;
 const SETTLE_STEP_MS: i32 = 100;
+/// How long a joined person may take to send their profile before they begin without it (milliseconds of level time).
+const STATS_WAIT_MS: i32 = 5000;
 /// Stat pairs one `statsync` command may carry.
 const STATSYNC_MAX_PAIRS: usize = 64;
 
@@ -142,6 +144,9 @@ pub struct Server {
     /// `devheli view`: the client held behind the first script vehicle, and how far behind.
     heli_view: Option<(u16, f32)>,
     net: Option<NetSv>,
+    /// People who joined and have not yet sent their profile (`statsdone`): the slot, and the level time after which
+    /// they begin without it. The original holds a client's game state, so its `begin`, until its stats arrived.
+    begin_waits: Vec<(u16, i32)>,
     pub map_load_ms: f64,
     /// Levels started so far: a map change or restart, each of which resets the script pool.
     pub level_loads: u32,
@@ -248,6 +253,7 @@ impl Server {
             on_tick: None,
             heli_view: None,
             net: None,
+            begin_waits: Vec::new(),
             map_load_ms: 0.0,
             level_loads: 0,
             boot_ms: 0.0,
@@ -421,6 +427,16 @@ impl Server {
         for slot in net.timed_out() {
             self.net_drop(&mut net, slot);
         }
+        let now = self.game.level.time;
+        let late: Vec<u16> = self
+            .begin_waits
+            .iter()
+            .filter(|(_, until)| now >= *until)
+            .map(|(n, _)| *n)
+            .collect();
+        for slot in late {
+            self.begin_client(slot);
+        }
         self.net = Some(net);
     }
 
@@ -465,7 +481,7 @@ impl Server {
             .filter(|c| !c.is_control())
             .take(31)
             .collect();
-        let slot = match self.join_human(&name) {
+        let slot = match self.join_human(&name, None) {
             Ok(n) => n,
             Err(why) => return refuse(net, why),
         };
@@ -483,8 +499,13 @@ impl Server {
         ));
     }
 
-    /// Gives a person a client slot like a bot gets one: the scripts see a connect and a begin.
-    fn join_human(&mut self, name: &str) -> Result<u16, &'static str> {
+    /// Gives a person a client slot like a bot gets one: the scripts see a connect. With `stats` (a person kept across
+    /// a map change) they begin at once; a new person begins when their profile has arrived ([`Self::begin_client`]).
+    fn join_human(
+        &mut self,
+        name: &str,
+        stats: Option<std::collections::HashMap<i32, i32>>,
+    ) -> Result<u16, &'static str> {
         let Some(run) = self.run.as_mut() else {
             return Err("No map is loaded.");
         };
@@ -495,30 +516,45 @@ impl Server {
         let Some(slot) = host.game.connect_client(&mut run.vm, false, name) else {
             return Err("Server is full.");
         };
-        // The stock scripts kick a client whose profile stats are zero (the original's stand-in
-        // for a checksum); a person here has no profile, so it starts with the nonzero defaults.
+        let known = stats.is_some();
         if let Some(c) = host.game.client_mut(slot) {
+            // The stock scripts kick a client whose profile stats are zero (the original's stand-in for a checksum);
+            // a person has no profile until it uploads one (`statsync`), so it starts with the nonzero defaults.
+            // They are the server's own: announcing them would make the client take them for news and write them
+            // into its saved profile.
             for i in 0..5 {
                 c.stats.insert(205 + i * 10, 1);
             }
-        }
-        for i in 0..5 {
-            host.game.send(
-                crate::ui::Dest::Client(slot),
-                net::ui::ServerCmd::Stat {
-                    index: 205 + i * 10,
-                    value: 1,
-                },
-            );
+            c.stats.extend(stats.unwrap_or_default());
         }
         host.run_calls(&mut run.vm);
-        host.game.client_begin(&mut run.vm, slot);
+        if known {
+            host.game.client_begin(&mut run.vm, slot);
+        } else {
+            let until = self.game.level.time + STATS_WAIT_MS;
+            self.begin_waits.push((slot, until));
+        }
         // No team is chosen for a person: the scripts open the team menu themselves and the
         // client answers with `menuresponse`, as at the original's menus.
         Ok(slot)
     }
 
+    /// `ClientBegin` for a person whose profile has arrived (or did not in time).
+    fn begin_client(&mut self, slot: u16) {
+        self.begin_waits.retain(|(n, _)| *n != slot);
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        let mut host = ScriptHost {
+            game: &mut self.game,
+            dispatch: &run.dispatch,
+        };
+        host.game.client_begin(&mut run.vm, slot);
+        host.run_calls(&mut run.vm);
+    }
+
     fn net_drop(&mut self, net: &mut NetSv, slot: u16) {
+        self.begin_waits.retain(|(n, _)| *n != slot);
         if let Some(run) = self.run.as_mut() {
             let mut host = ScriptHost {
                 game: &mut self.game,
@@ -560,6 +596,10 @@ impl Server {
                         }
                     }
                 }
+            }
+            // The profile is complete: the person may begin.
+            Some("statsdone") if self.begin_waits.iter().any(|(n, _)| *n == slot) => {
+                self.begin_client(slot);
             }
             _ => {}
         }
@@ -987,7 +1027,17 @@ impl Server {
     fn start_game(&mut self, map: &str, game_var: Option<Value>) -> Result<(), String> {
         let t0 = Instant::now();
         // People stay connected across a map change; the level they were in is gone.
-        let humans = self.net.as_mut().map_or_else(Vec::new, NetSv::take_peers);
+        self.begin_waits.clear();
+        let humans: Vec<_> = self
+            .net
+            .as_mut()
+            .map_or_else(Vec::new, NetSv::take_peers)
+            .into_iter()
+            .map(|(slot, peer, name)| {
+                let stats = self.game.client(slot).map(|c| c.stats.clone());
+                (peer, name, stats.unwrap_or_default())
+            })
+            .collect();
         self.run = None;
         self.level_loads += 1;
         self.script_errors.clear();
@@ -1013,8 +1063,8 @@ impl Server {
             self.run_frame();
         }
         self.flush_game_output();
-        for (mut peer, name) in humans {
-            let j = self.join_human(&name);
+        for (mut peer, name, stats) in humans {
+            let j = self.join_human(&name, Some(stats));
             if let Ok(slot) = j {
                 for line in NetSv::world_commands(&mut self.game, map) {
                     let _ = peer.link.command(line);

@@ -346,6 +346,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_leave::run),
     },
     StageDef {
+        name: "client-custom-class",
+        description: "a saved profile's custom class spawns with its weapon (a P90), the profile's perk and experience survive the join, a class change in the grace period applies, and the other players are drawn",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_custom_class::run),
+    },
+    StageDef {
         name: "client-menu-match",
         description: "the client with no flags plays a whole match from the stock menus (Start New Server with a short score limit, team, class), sees the end-of-match scoreboard, follows the server's map rotation into the next map in the same process and spawns there again",
         needs_install: false,
