@@ -53,9 +53,6 @@ pub struct NetFrame {
     /// Radians, positive up.
     pub pitch: f32,
     pub models: Vec<ModelInstance>,
-    /// Sounds the effects started this frame (alias, position), for the mixer.
-    #[expect(dead_code, reason = "read by the mixer")]
-    pub sounds: Vec<fx::SoundPlay>,
     /// Effect sprites and decals.
     pub meshes: Vec<render::DynMesh>,
     /// Happenings new this frame; see [`crate::events`].
@@ -384,7 +381,6 @@ impl NetPlay {
                 pitch: pitch + look.kick[0].to_radians(),
                 models,
                 meshes: drawn.meshes,
-                sounds: self.effects.take_sounds(),
                 events,
                 commands,
                 look,
@@ -453,7 +449,6 @@ impl NetPlay {
             yaw: yaw + look.kick[1].to_radians(),
             pitch: pitch + look.kick[0].to_radians(),
             models,
-            sounds: self.effects.take_sounds(),
             meshes: drawn.meshes,
             events,
             commands,
@@ -504,6 +499,9 @@ impl NetPlay {
             self.effects.demo(name, eye, yaw, pitch);
         }
         self.effects.update(st, self.boxes.world());
+        for s in self.effects.take_sounds() {
+            self.sound.play_world(&s.alias, s.origin.to_array());
+        }
         self.props.update(dt, self.boxes.world());
         let drawn = self.effects.draw(eye, yaw, pitch);
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
