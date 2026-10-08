@@ -30,19 +30,6 @@ pub fn start(_install: &Path, _cfg: Config) -> Result<Listen, String> {
     Err("a browser cannot host a game; join a server".into())
 }
 
-/// What [`begin`] returns: nothing ever boots here.
-pub struct Booting;
-
-pub fn begin(_install: &Path, _cfg: Config) -> Result<Booting, String> {
-    Err("a browser cannot host a game; join a server".into())
-}
-
-impl Booting {
-    pub fn wait(self) -> Result<Listen, String> {
-        Err("a browser cannot host a game; join a server".into())
-    }
-}
-
 impl Listen {
     pub fn finish(&mut self) -> Value {
         Value::Null

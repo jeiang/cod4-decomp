@@ -21,6 +21,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 /// Where the session's server comes from.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))] // a browser only joins
 pub enum Server {
     /// Boot a listen server of this process.
     Boot(listen::Config),
@@ -36,6 +37,8 @@ pub struct Request {
     pub map: String,
     pub server: Server,
     pub settings: Settings,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    // the browser warms its pipelines in the frame loop
     pub format: wgpu::TextureFormat,
 }
 
@@ -280,6 +283,7 @@ fn match_models(library: &mut Library) -> Vec<Arc<XModel>> {
     models
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn run(
     req: &Request,
     gpu: &Arc<Gpu>,
@@ -361,11 +365,13 @@ fn run(
 
 /// The warm-up frame is small: the GPU is shared with the window's loading screen, and a full-size frame of a big map
 /// keeps the queue busy long enough for the screen to stop presenting. Pipelines do not depend on the size.
+#[cfg(not(target_arch = "wasm32"))]
 const WARM_SIZE: (u32, u32) = (320, 180);
 
 /// Renders one frame from a spawn point into an offscreen target: the first draw of a renderer builds its depth and
 /// shadow targets, bind groups and post-process state, and the first sight of a player uploads its meshes: all of
 /// it would otherwise stall the first frames the player sees.
+#[cfg(not(target_arch = "wasm32"))]
 fn draw_once(
     gpu: &Gpu,
     renderer: &mut Renderer,
