@@ -144,6 +144,7 @@ fn overlay_values(st: &State) -> Value {
     json!({
         "backend": format!("{} ({})", info.backend, info.name),
         "BC textures on the GPU": st.gpu.bc,
+        "decoded texture MiB": st.renderer.as_ref().map_or(0, |r| r.textures.decoded_bytes() >> 20),
         "frames": st.samples.len(),
         "CPU ms/frame (last 60)": format!("{:.1}", mean(0)),
         "frame interval ms (last 60)": format!("{:.1}", mean(1)),
@@ -336,8 +337,9 @@ impl Viewer {
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| e.to_string())?;
-        let gpu =
-            Arc::new(Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?);
+        let mut gpu = Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?;
+        gpu.bc &= !self.cli.no_bc;
+        let gpu = Arc::new(gpu);
         self.finish_init(Ready {
             window,
             surface,
@@ -354,15 +356,17 @@ impl Viewer {
         let window = Arc::new(window);
         let proxy = self.proxy.clone().ok_or("no event loop proxy")?;
         let desc = instance_descriptor(&self.cli.backend)?;
+        let no_bc = self.cli.no_bc;
         wasm_bindgen_futures::spawn_local(async move {
             let ready = async {
                 let instance = wgpu::util::new_instance_with_webgpu_detection(desc).await;
                 let surface = instance
                     .create_surface(window.clone())
                     .map_err(|e| e.to_string())?;
-                let gpu = Gpu::with_instance_async(instance, Some(&surface))
+                let mut gpu = Gpu::with_instance_async(instance, Some(&surface))
                     .await
                     .map_err(|e| e.to_string())?;
+                gpu.bc &= !no_bc;
                 Ok::<_, String>(Ready {
                     window,
                     surface,

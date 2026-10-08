@@ -47,6 +47,7 @@ usage: cod4e [options]
   --fullscreen <kind>    windowed (default), borderless or exclusive
   --present <mode>       auto (default, vsync), fifo, mailbox or immediate
   --backend <name>       graphics backend: auto (default), or one of vulkan, metal, dx12, gl, webgpu (webgpu or webgl in a browser)
+  --no-bc                decode BC textures on the CPU, as GPUs and browsers without BC do (bounded decoded memory)
   --shadows <mode>       sun shadow maps: depth (default, hardware comparison), color or off
   --no-fog / --no-lights switch the map's fog / spot and omni primary lights off
   --fov <degrees>        horizontal field of view at 4:3 (default 80); wider displays widen it (Hor+)
@@ -84,6 +85,8 @@ pub struct Cli {
     pub present: String,
     /// Graphics backends to try: `auto` (default), or wgpu backend names; `webgpu` and `webgl` on the web.
     pub backend: String,
+    /// Treat the GPU as having no BC textures: decode them on the CPU, as the GPUs and browsers without BC do.
+    pub no_bc: bool,
     pub fov: f32,
     pub settings: render::Settings,
     pub flythrough: bool,
@@ -144,6 +147,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         request: Request::default(),
         present: "auto".into(),
         backend: "auto".into(),
+        no_bc: false,
         fov: 80.0,
         settings: render::Settings::default(),
         flythrough: false,
@@ -191,6 +195,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             }
             "--present" => c.present = val(a)?,
             "--backend" => c.backend = val(a)?,
+            "--no-bc" => c.no_bc = true,
             "--shadows" => {
                 c.settings.shadows = match val(a)?.as_str() {
                     "depth" => render::ShadowMode::Depth,
