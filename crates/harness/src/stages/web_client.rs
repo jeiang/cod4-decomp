@@ -16,7 +16,7 @@ const NAME: &str = "web-client";
 const FRAMES: u32 = 120;
 const PORT: u16 = 18_090;
 
-fn find_web_dir() -> Option<PathBuf> {
+pub(super) fn find_web_dir() -> Option<PathBuf> {
     let ok = |d: &Path| d.join("serve.py").is_file() && d.join("pkg/cod4e_bg.wasm").is_file();
     if let Some(d) = std::env::var_os("COD4E_WEB_DIR").map(PathBuf::from) {
         return ok(&d).then_some(d);
@@ -29,7 +29,7 @@ fn find_web_dir() -> Option<PathBuf> {
         .find(|d| ok(d))
 }
 
-fn find_chrome() -> Option<PathBuf> {
+pub(super) fn find_chrome() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("COD4E_CHROME") {
         return Some(p.into());
     }
@@ -50,7 +50,7 @@ fn find_chrome() -> Option<PathBuf> {
     })
 }
 
-struct Kill(Child);
+pub(super) struct Kill(pub Child);
 
 impl Drop for Kill {
     fn drop(&mut self) {

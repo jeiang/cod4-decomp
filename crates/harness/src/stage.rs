@@ -277,6 +277,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::web_client::run),
     },
     StageDef {
+        name: "web-join",
+        description: "the browser client (web/pkg) in a headless Chromium joins a native server over WebTransport, is given a body and gets snapshots, among bots; checked from the page's report and from the server (skipped without a built web/pkg, a Chromium or an install)",
+        needs_install: false,
+        timeout: Duration::from_secs(12 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::web_join::run),
+    },
+    StageDef {
         name: "headless-bots-32",
         description: "headless server with 32 bots (the 32-player server budget)",
         needs_install: false,

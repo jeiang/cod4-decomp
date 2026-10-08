@@ -237,6 +237,24 @@ impl NetPlay {
         self.c.weapon.clone()
     }
 
+    /// Where the join stands, for the browser overlay: "connecting", "connected" (snapshots arrive) or "spawned".
+    #[cfg(target_arch = "wasm32")]
+    pub fn phase(&self) -> &'static str {
+        if self.c.spawned {
+            "spawned"
+        } else if self.net.connected() {
+            "connected"
+        } else {
+            "connecting"
+        }
+    }
+
+    /// Snapshots received so far.
+    #[cfg(target_arch = "wasm32")]
+    pub fn snapshots(&self) -> u64 {
+        self.net.stats().map_or(0, |s| s.packets_in)
+    }
+
     /// The server has put the player in the world (alive at least once).
     pub fn spawned(&self) -> bool {
         self.c.spawned
