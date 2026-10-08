@@ -217,6 +217,8 @@ const TOUR_MENUS: &[&str] = &[
     "main_options",
     "options_graphics",
     "main_controls",
+    "options_look",
+    "options_move",
     "team_marinesopfor",
     "class",
     "changeclass",
