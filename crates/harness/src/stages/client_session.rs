@@ -18,7 +18,7 @@ const LIMIT: Duration = Duration::from_secs(240);
 
 const DIRECT: &[&str] = &["--listen", "--bots", "3"];
 const DIRECT_STEPS: &str = "ingame=120,wait=3,shot=direct";
-const MENU_STEPS: &str = "click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
+const MENU_STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
 click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=3,shot=menus";
 
 /// Domination: its flags are objectives, which the minimap must mark.

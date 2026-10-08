@@ -330,6 +330,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_ingame_menu::run),
     },
     StageDef {
+        name: "client-frontend",
+        description: "the front end with the install's own player profile: the main menu rows, Select Profile, Create a Class opening, the game mode order, and the install's players folder unchanged",
+        needs_install: false,
+        timeout: Duration::from_secs(4 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_frontend::run),
+    },
+    StageDef {
         name: "client-leave",
         description: "leaving a match from its in-game menu returns to a drawn main menu with no world; Quit from there exits with status 0",
         needs_install: false,

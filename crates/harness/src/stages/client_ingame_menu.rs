@@ -16,13 +16,16 @@ const NAME: &str = "client-ingame-menu";
 /// (The waits let the server's answer to a pick, which closes the menus again, arrive before the next menu opens.)
 /// Join with the Assault class, then: Escape closes the in-game menu, a class pick closes the class menu,
 /// and a team change (which kills the player) ends on the other team with a Spec Ops weapon after the respawn.
-const STEPS: &str = "click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
-mouse=auto_assign,menu=changeclass:30,wait=1,mouse=Assault,ingame=120,wait=3,team=save,weapon=_gl:5,\
-togglemenu,wait=1,key=escape,nomenu=5,\
-togglemenu,wait=1,mouse=Choose Class,menu=changeclass:5,key=escape,nomenu=5,\
+const STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
+see=OpFor+Marines+Auto-Assign+Controls+Options+Leave Game,nosee=Spectator,shot=team_pre,\
+mouse=OpFor,menu=changeclass:30,wait=1,see=Assault+Spec Ops+Heavy Gunner+Demolitions+Sniper,shot=class_pre,\
+mouse=Assault,ingame=120,wait=3,team=1:5,weapon=_gl:5,\
+togglemenu,wait=1,see=Choose Class+Change Team+Controls+Options+Call Vote+Mute Players+Leave Game,shot=escape_menu,key=escape,nomenu=5,\
+togglemenu,wait=1,mouse=Choose Class,menu=changeclass:5,wait=1,shot=class_in,key=escape,nomenu=5,\
 togglemenu,wait=1,mouse=Choose Class,menu=changeclass:5,mouse=Spec Ops,nomenu=5,wait=2,\
-togglemenu,wait=1,mouse=Change Team,menu=team_marinesopfor:5,mouse=OpFor|Marines,menu=changeclass:10,\
-mouse=Spec Ops,nomenu=5,team=other:10,weapon=mp5:90,wait=2,nomenu=5,shot=changed";
+togglemenu,wait=1,mouse=Change Team,menu=team_marinesopfor:5,wait=1,see=Marines+Auto-Assign+Spectator,nosee=Controls+Options+Leave Game,shot=change_team,\
+mouse=Marines,menu=changeclass:10,\
+mouse=Spec Ops,nomenu=5,team=2:10,weapon=mp5:90,wait=2,nomenu=5,shot=changed";
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
@@ -47,7 +50,16 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     ) {
         Ok(report) => {
             out.files.push("ui-script.json".into());
-            out.files.push("changed.png".into());
+            for f in [
+                "team_pre",
+                "class_pre",
+                "escape_menu",
+                "class_in",
+                "change_team",
+                "changed",
+            ] {
+                out.files.push(format!("{f}.png"));
+            }
             match verdict(&report) {
                 Some(w) => {
                     out.status = Status::Failed;

@@ -57,6 +57,9 @@ pub struct MapEntry {
 pub struct GameTypeEntry {
     pub id: String,
     pub title: String,
+    /// The in-game description (`OBJECTIVES_<ID>`), and its form with a score limit (`&&1` is the limit).
+    pub objective: String,
+    pub objective_score: String,
 }
 
 /// Everything the shell remembers between frames.
@@ -70,7 +73,6 @@ pub struct ShellState {
     pub started: Instant,
     pub maps: Vec<MapEntry>,
     pub gametypes: Vec<GameTypeEntry>,
-    pub gametype_sel: usize,
     pub map_sel: usize,
     /// The rows picked in the kick/vote list (feeder 7) and the mute list (feeder 20), as player numbers.
     pub player_sel: usize,
@@ -169,9 +171,17 @@ impl ShellState {
                 });
             }
         }
+        // The server settings list the maps alphabetically by title; the table's first map stays the selected one.
+        let first = maps.first().map(|m: &MapEntry| m.name.clone());
+        maps.sort_by_cached_key(|m| m.title.to_lowercase());
+        let map_sel = maps
+            .iter()
+            .position(|m| Some(&m.name) == first.as_ref())
+            .unwrap_or(0);
         let mut gametypes = Vec::new();
         if let Some(t) = assets.table("mp/gametypestable.csv") {
-            for r in 0..t.row_count as usize {
+            // Row 0 is the column header (`a0,b1,c2,d3`).
+            for r in 1..t.row_count as usize {
                 let cell = |c: usize| {
                     t.values[r * t.column_count as usize + c]
                         .as_deref()
@@ -179,13 +189,29 @@ impl ShellState {
                         .to_owned()
                 };
                 let title = cell(1);
+                let id = cell(0);
+                let text = |key: String| {
+                    assets
+                        .translate(&key)
+                        .map(|t| t.to_string())
+                        .unwrap_or_default()
+                };
                 gametypes.push(GameTypeEntry {
-                    id: cell(0),
+                    objective: text(format!("OBJECTIVES_{}", id.to_ascii_uppercase())),
+                    objective_score: text(format!("OBJECTIVES_{}_SCORE", id.to_ascii_uppercase())),
+                    id,
                     title: assets.translate(&title).map_or(title, |t| t.to_string()),
                 });
             }
         }
-        let gametype_sel = gametypes.iter().position(|g| g.id == "war").unwrap_or(0);
+        // The original's chooser steps through the modes in this order, not the table's.
+        const MODE_ORDER: [&str; 6] = ["dm", "dom", "sd", "sab", "war", "koth"];
+        gametypes.sort_by_key(|g| {
+            MODE_ORDER
+                .iter()
+                .position(|m| *m == g.id)
+                .unwrap_or(MODE_ORDER.len())
+        });
         ShellState {
             stats: vec![0; STAT_COUNT],
             profiles: Profiles::none(),
@@ -195,8 +221,7 @@ impl ShellState {
             started: Instant::now(),
             maps,
             gametypes,
-            gametype_sel,
-            map_sel: 0,
+            map_sel,
             player_sel: 0,
             mute_sel: 0,
             muted: Default::default(),
@@ -254,7 +279,7 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("fs_game", ""),
     ("ui_hideBack", "0"),
     ("ui_showEndOfGame", "0"),
-    ("ui_netGametype", "1"),
+    ("ui_netGametype", "4"),
     ("ui_netGametypeName", "war"),
     ("ui_dedicated", "0"),
     ("onlinegame", "1"),
@@ -470,6 +495,12 @@ impl Shell {
     pub fn mouse_click(&mut self, input: &mut Input, want: &str) -> bool {
         let mut h = Self::host(&mut self.st, input);
         self.ui.mouse_click(&mut h, want)
+    }
+
+    /// Whether the top menu shows an item named or labelled `want`.
+    pub fn has_item(&mut self, input: &mut Input, want: &str) -> bool {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.has_item(&mut h, want)
     }
 
     /// Clicks the item of the top menu named or labelled `want`.
@@ -744,6 +775,13 @@ impl HostCx<'_> {
             None => value,
         };
         self.input.set_cvar(name, value);
+    }
+
+    /// The game mode the server settings show: the one `ui_netGametypeName` holds (a saved profile may have set it).
+    fn gametype_sel(&self) -> usize {
+        let want = self.dvar_get("ui_netGametypeName");
+        let at = |id: &str| self.st.gametypes.iter().position(|g| g.id == id);
+        at(&want).or_else(|| at("war")).unwrap_or(0)
     }
 
     fn dvar_get(&self, name: &str) -> String {
@@ -1023,6 +1061,24 @@ impl World for HostCx<'_> {
             self.st.game.gametype.clone()
         }
     }
+    fn gametype_name(&self) -> String {
+        let gt = self.gametype();
+        let t = self.st.gametypes.iter().find(|g| g.id == gt);
+        t.map(|g| g.title.clone()).unwrap_or_default()
+    }
+    /// What the in-game menus say under the mode's name: the objective, with the score limit when there is one.
+    fn gametype_description(&self) -> String {
+        let gt = self.gametype();
+        let Some(g) = self.st.gametypes.iter().find(|g| g.id == gt) else {
+            return String::new();
+        };
+        let limit = self.dvar_get("ui_scorelimit");
+        if limit.parse::<i32>().unwrap_or(0) > 0 && !g.objective_score.is_empty() {
+            g.objective_score.replace("&&1", &limit)
+        } else {
+            g.objective.clone()
+        }
+    }
     fn key_binding(&self, cmd: &str) -> String {
         self.key_bindings(cmd)
             .into_iter()
@@ -1128,7 +1184,7 @@ impl Host for HostCx<'_> {
                 let gametype = self
                     .st
                     .gametypes
-                    .get(self.st.gametype_sel)
+                    .get(self.gametype_sel())
                     .map_or_else(|| "war".into(), |g| g.id.clone());
                 self.st.actions.push(Action::StartServer { map, gametype });
                 true
@@ -1167,7 +1223,13 @@ impl Host for HostCx<'_> {
                 }
                 true
             }
-            "loadarenas" | "stoprefresh" | "setpbclstatus" | "getlanguage" | "verifylanguage"
+            // The server settings open on the selected map, the list scrolled to it.
+            "loadarenas" => {
+                let row = self.st.map_sel;
+                ui.select_feeder_row(self, 4, row);
+                true
+            }
+            "stoprefresh" | "setpbclstatus" | "getlanguage" | "verifylanguage"
             | "setrecommended" | "closejoin" | "getcdkey" | "verifycdkey" | "clearmods"
             | "loadmods" | "serverstatus" => true,
             "quit" => {
@@ -1217,7 +1279,7 @@ impl Host for HostCx<'_> {
                 let gt = self
                     .st
                     .gametypes
-                    .get(self.st.gametype_sel)
+                    .get(self.gametype_sel())
                     .map(|g| g.id.as_str());
                 let line = match (name.to_ascii_lowercase().as_str(), map, gt) {
                     ("votemap", Some(m), _) => Some(format!("callvote map {m}")),
@@ -1335,11 +1397,11 @@ impl Host for HostCx<'_> {
             );
             if n > 0 && step {
                 let d = if back { n - 1 } else { 1 };
-                self.st.gametype_sel = (self.st.gametype_sel + d) % n;
-                let id = self.st.gametypes[self.st.gametype_sel].id.clone();
+                let sel = (self.gametype_sel() + d) % n;
+                let id = self.st.gametypes[sel].id.clone();
                 self.input
                     .cvars
-                    .set("ui_netGametype", &self.st.gametype_sel.to_string(), false);
+                    .set("ui_netGametype", &sel.to_string(), false);
                 self.input.cvars.set("ui_netGametypeName", &id, false);
                 self.input.cvars.set("g_gametype", &id, false);
             }
@@ -1385,7 +1447,7 @@ impl Host for HostCx<'_> {
                 let t = self
                     .st
                     .gametypes
-                    .get(self.st.gametype_sel)
+                    .get(self.gametype_sel())
                     .map(|g| g.title.clone())
                     .unwrap_or_default();
                 let t = ui.assets.translate(&t).map_or(t.clone(), |s| s.to_string());
@@ -1466,6 +1528,8 @@ mod tests {
         let types = vec![GameTypeEntry {
             id: "war".into(),
             title: "MPUI_WAR".into(),
+            objective: String::new(),
+            objective_score: String::new(),
         }];
         let mut e = Entry::unanswered("10.0.0.1:28960".parse().unwrap());
         // Unanswered: the address stands in for the name and the ping shows dots.
@@ -1805,15 +1869,54 @@ mod tests {
             input: &mut input,
         };
         assert_eq!(h.dvar("ui_netGametypeName"), "war");
-        assert!(h.owner_key(&ui, 245, &UiKey::Mouse1));
-        assert_eq!(h.dvar("ui_netGametypeName"), "sd");
-        assert_eq!(h.dvar("g_gametype"), "sd");
+        // Left click goes on through Free-for-all, Domination, Search and Destroy, Sabotage, Team Deathmatch and
+        // Headquarters, round again; right click goes back.
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            assert!(h.owner_key(&ui, 245, &UiKey::Mouse1));
+            seen.push(h.dvar("ui_netGametypeName"));
+        }
+        assert_eq!(seen, ["koth", "dm", "dom", "sd", "sab", "war"]);
+        assert_eq!(h.dvar("g_gametype"), "war");
         assert!(h.owner_key(&ui, 245, &UiKey::Mouse2));
-        assert!(h.owner_key(&ui, 245, &UiKey::Mouse2));
-        assert_eq!(h.dvar("ui_netGametypeName"), "dm");
+        assert_eq!(h.dvar("ui_netGametypeName"), "sab");
         assert!(!h.owner_key(&ui, 245, &UiKey::Up));
         assert!(h.owner_key(&ui, 245, &UiKey::Enter));
         assert_eq!(h.dvar("ui_netGametypeName"), "war");
+    }
+
+    /// The in-game menus name the mode and describe its objective, with the score limit when there is one.
+    #[test]
+    fn the_in_game_menus_name_the_mode_and_say_its_objective() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let mut st = ShellState::new(&assets, &install);
+        let mut input = Input::detached();
+        register_defaults(&mut input);
+        input.cvars.set("g_gametype", "war", false);
+        input.cvars.set("ui_scorelimit", "750", false);
+        let h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        assert_eq!(h.gametype_name(), "Team Deathmatch");
+        assert_eq!(
+            h.gametype_description(),
+            "Gain points by eliminating enemy players.  First team to 750 wins."
+        );
+        h.input.cvars.set("ui_scorelimit", "0", false);
+        assert_eq!(
+            h.gametype_description(),
+            "Gain points by eliminating enemy players."
+        );
     }
 
     /// The wheel, arrows and page keys scroll a scoreboard that has more rows than fit, and stay in range.

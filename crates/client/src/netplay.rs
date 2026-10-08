@@ -442,7 +442,9 @@ impl NetPlay {
             auto_input = if self.fx_demo.is_some() {
                 InputFrame::default()
             } else {
-                self.autoplay(dt, st, own)
+                let mut f = self.autoplay(dt, st, own);
+                f.buttons |= input.buttons;
+                f
             };
             &auto_input
         } else {

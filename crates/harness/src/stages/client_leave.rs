@@ -12,7 +12,7 @@ use std::io;
 
 const NAME: &str = "client-leave";
 
-const STEPS: &str = "click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
+const STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
 click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,togglemenu,wait=1,\
 shot=ingame,click=Leave Game,menu=popup_leavegame:5,click=Yes,home=20,wait=2,shot=home,\
 click=Quit,menu=quit_popmenu:5,click=Yes,wait=5";

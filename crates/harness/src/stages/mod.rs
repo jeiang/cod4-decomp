@@ -3,6 +3,7 @@
 pub mod asset_load;
 pub mod audio;
 pub mod client_flythrough;
+pub mod client_frontend;
 pub mod client_fx;
 pub mod client_gfx;
 pub mod client_hardpoint;

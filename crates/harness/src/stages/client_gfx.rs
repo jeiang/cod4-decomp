@@ -17,7 +17,7 @@ const LIMIT: Duration = Duration::from_secs(300);
 const STEPS: &str = "set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 4,\
 set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_enable 0,\
 vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
-click=Start New Server,menu=createserver:20,click=Start,\
+set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
 menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\
 gfxis=aa 4,gfxis=specular 0,gfxis=dof 0,gfxis=glow 0,gfxis=shadows 0,shot=gfx-on,\
 set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\

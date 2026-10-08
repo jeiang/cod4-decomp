@@ -25,7 +25,7 @@ const LIMITS: &str = "set=set scr_war_scorelimit 3,set=set scr_war_timelimit 4";
 
 fn steps() -> String {
     format!(
-        "{LIMITS},click=Start New Server,menu=createserver:20,click=Start,{JOIN},wait=2,shot=match,\
+        "{LIMITS},set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,{JOIN},wait=2,shot=match,\
          menu=scoreboard:240,wait=1,shot=scoreboard,maprotate=120,{JOIN},wait=3,shot=rotated"
     )
 }
