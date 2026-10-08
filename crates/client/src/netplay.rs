@@ -423,12 +423,12 @@ impl NetPlay {
         };
         self.live_time = st;
         if let Some(snap) = self.net.latest() {
-            let delta = snap.ps.delta_angles;
-            if let Some(old) = self.last_delta.replace(delta) {
-                for i in 0..2 {
-                    self.angles[i] += (delta[i] - old[i] + 180.0).rem_euclid(360.0) - 180.0;
-                }
-            }
+            follow_server_turn(
+                &mut self.angles,
+                &mut self.last_delta,
+                snap.ps.delta_angles,
+                snap.follow.is_some(),
+            );
         }
         // Autoplay replaces the player's input with a bot's.
         let auto_input;
@@ -483,7 +483,7 @@ impl NetPlay {
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.script_models(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
-            models.extend(self.view_model(dt, &ps, ps.origin));
+            models.extend(self.view_model(dt, &ps, ps.origin, [ps.viewangles[0], ps.viewangles[1]]));
             let (events, commands) = self.take_events(&snap);
             self.look
                 .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
@@ -571,7 +571,7 @@ impl NetPlay {
         models.extend(self.script_models(&snap));
         models.extend(self.vehicles(dt, st, own));
         if !dead {
-            models.extend(self.view_model(dt, &ps, feet));
+            models.extend(self.view_model(dt, &ps, feet, self.angles));
         }
         let yaw = if dead {
             ps.viewangles[1]
@@ -879,7 +879,13 @@ impl NetPlay {
     }
 
     /// The view model of the held weapon, built when the weapon changes.
-    fn view_model(&mut self, dt: f32, ps: &PlayerState, feet: [f32; 3]) -> Vec<ModelInstance> {
+    fn view_model(
+        &mut self,
+        dt: f32,
+        ps: &PlayerState,
+        feet: [f32; 3],
+        look: [f32; 2],
+    ) -> Vec<ModelInstance> {
         let index = ps.weapon as u16;
         let key = (index, ps.viewmodel_index);
         if self.vm.as_ref().is_none_or(|(k, _)| *k != key) {
@@ -917,7 +923,7 @@ impl NetPlay {
         };
         let mut shown = ps.clone();
         shown.origin = feet;
-        shown.viewangles = [self.angles[0], self.angles[1], 0.0];
+        shown.viewangles = [look[0], look[1], 0.0];
         self.c.frames_with_viewmodel += 1;
         let models = vm.update(&shown, dt);
         let sight = vm.sight();
@@ -1366,5 +1372,41 @@ impl NetPlay {
         }
         self.auto = Some(a);
         f
+    }
+}
+
+/// The server turning the player (a spawn, a script) moves the look angles with it: `angles` follow the change
+/// of `delta` since the last one seen. While watching another player (`following`) the delta is theirs, not a turn
+/// of this player's view; the turn is measured against the last delta that was the player's own.
+fn follow_server_turn(
+    angles: &mut [f32; 2],
+    last: &mut Option<[f32; 3]>,
+    delta: [f32; 3],
+    following: bool,
+) {
+    if following {
+        return;
+    }
+    if let Some(old) = last.replace(delta) {
+        for i in 0..2 {
+            angles[i] += (delta[i] - old[i] + 180.0).rem_euclid(360.0) - 180.0;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_watched_players_deltas_do_not_turn_the_watchers_view() {
+        let (mut angles, mut last) = ([10.0, 90.0], None);
+        follow_server_turn(&mut angles, &mut last, [0.0, 90.0, 0.0], false);
+        // A killcam of someone facing elsewhere.
+        follow_server_turn(&mut angles, &mut last, [5.0, 200.0, 0.0], true);
+        assert_eq!(angles, [10.0, 90.0]);
+        // Respawned facing 30 degrees further round: the turn counts from the last delta of their own.
+        follow_server_turn(&mut angles, &mut last, [0.0, 120.0, 0.0], false);
+        assert_eq!(angles, [10.0, 120.0]);
     }
 }
