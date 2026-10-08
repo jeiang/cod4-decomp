@@ -1846,7 +1846,6 @@ fn begin_load(cli: &Cli, st: &mut State, map: &str, server: loader::Server) {
         server,
         settings: cli.settings,
         format: st.config.format,
-        size: (st.config.width, st.config.height),
     };
     st.loading = Some(Load::start(req, st.gpu.clone()));
     st.load_gaps = Some(LoadGaps {

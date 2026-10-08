@@ -34,8 +34,6 @@ pub struct Request {
     pub server: Server,
     pub settings: Settings,
     pub format: wgpu::TextureFormat,
-    /// The window's size in pixels, for the warm-up frame.
-    pub size: (u32, u32),
 }
 
 /// Everything a session needs, built.
@@ -185,6 +183,28 @@ fn run(
     let scene = Scene::new(gpu, &data);
     let mut renderer = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
     renderer.settings = req.settings;
+    // What a match draws that the map does not hold: every weapon's gun, hands and world model and the players.
+    let mut models = Vec::new();
+    for w in library.content.weapons() {
+        models.extend(w.gun_models.iter().flatten().cloned());
+        models.extend(w.world_models.iter().flatten().cloned());
+        models.extend(w.hand_model.clone());
+    }
+    for team in [Team::Allies, Team::Axis] {
+        if let Some(set) = library.team_models(team) {
+            let names = [Some(&set.body), set.head.as_ref()];
+            models.extend(
+                names
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|n| library.content.model(n).cloned()),
+            );
+        }
+    }
+    for name in library.content.model_names("viewhands_") {
+        models.extend(library.content.model(name).cloned());
+    }
+    renderer.warm_models(&models);
     check()?;
     progress.set(2, 0.25);
     // The browser builds its pipelines a few milliseconds per frame instead, see the client's `WARM_BUDGET`.
@@ -217,6 +237,10 @@ fn run(
     })
 }
 
+/// The warm-up frame is small: the GPU is shared with the window's loading screen, and a full-size frame of a big map
+/// keeps the queue busy long enough for the screen to stop presenting. Pipelines do not depend on the size.
+const WARM_SIZE: (u32, u32) = (320, 180);
+
 /// Renders one frame from a spawn point into an offscreen target: the first draw of a renderer builds its depth and
 /// shadow targets, bind groups and post-process state, and the first sight of a player uploads its meshes: all of
 /// it would otherwise stall the first frames the player sees.
@@ -234,8 +258,8 @@ fn draw_once(
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("warm-up frame"),
         size: wgpu::Extent3d {
-            width: req.size.0.max(1),
-            height: req.size.1.max(1),
+            width: WARM_SIZE.0,
+            height: WARM_SIZE.1,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -267,7 +291,7 @@ fn draw_once(
         &view,
         &target.create_view(&Default::default()),
         req.format,
-        req.size,
+        WARM_SIZE,
     );
     // The frame's timestamp read-back would still be pending: a surface cannot be reconfigured (a window resize)
     // while the queue has work in flight, so wait for it here, off the window thread.

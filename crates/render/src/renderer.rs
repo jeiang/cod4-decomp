@@ -14,6 +14,7 @@ use crate::sunshadow::{self, SunShadow};
 use crate::texture::{Tex, TextureCache};
 use crate::timing::GpuTimer;
 use assets::zone::gfx::Material;
+use assets::zone::xmodel::XModel;
 use glam::{Mat4, Vec3, Vec4};
 use sm3::SamplerDim;
 use std::collections::{HashMap, HashSet};
@@ -307,6 +308,8 @@ pub struct Renderer {
     warm: Option<Warm>,
     /// Skinned models to draw in the next [`Renderer::render`]; the caller refills the list every frame.
     pub dynamic_models: Vec<ModelInstance>,
+    /// Materials of models the map does not contain but a match draws (players, weapons), warmed with the map's.
+    warm_extra: Vec<Arc<Material>>,
     /// Sprites and decals to draw in the next [`Renderer::render`], in drawing order within a material.
     pub dynamic_meshes: Vec<DynMesh>,
     /// An index buffer that counts up from zero, for draws of unindexed dynamic triangles.
@@ -407,6 +410,7 @@ impl Renderer {
             shadow_dummy,
             timer,
             dynamic_models: Vec::new(),
+            warm_extra: Vec::new(),
             dynamic_meshes: Vec::new(),
             count_mesh: Arc::new(counting_mesh(&gpu_for_dyn)),
             viewmodel_fov_x: None,
@@ -469,6 +473,23 @@ impl Renderer {
     }
 
     /// Every (pass, target) pair a frame into `format` can draw with, in the order materials come.
+    /// Models the map does not contain but the match will draw (players, weapons): their materials get their pipelines
+    /// with [`Renderer::warm`], so the first sight of them does not stall a frame.
+    pub fn warm_models<'a>(&mut self, models: impl IntoIterator<Item = &'a Arc<XModel>>) {
+        let mut seen: HashSet<usize> = self
+            .warm_extra
+            .iter()
+            .map(|m| Arc::as_ptr(m) as usize)
+            .collect();
+        for model in models {
+            for m in model.materials.iter().flatten() {
+                if seen.insert(Arc::as_ptr(m) as usize) {
+                    self.warm_extra.push(m.clone());
+                }
+            }
+        }
+    }
+
     fn warm_jobs(&mut self, format: wgpu::TextureFormat) -> Vec<(Arc<Prepared>, Target)> {
         let hsm = self.hsm();
         let scene = Target {
@@ -476,7 +497,13 @@ impl Renderer {
             depth: Some(DEPTH_FORMAT),
         };
         let mut jobs = Vec::new();
-        for m in self.scene.materials() {
+        let materials: Vec<Arc<Material>> = self
+            .scene
+            .materials()
+            .into_iter()
+            .chain(self.warm_extra.iter().cloned())
+            .collect();
+        for m in materials {
             for kind in [VertexKind::World, VertexKind::Model] {
                 for techs in [
                     &SUN_SHADOW_TECHS[..],
