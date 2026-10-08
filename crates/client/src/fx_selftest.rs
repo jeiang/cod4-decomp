@@ -15,6 +15,7 @@ use sim::cm::Collide;
 use std::path::Path;
 
 const GUN: &str = "ak47_mp";
+const ROCKET: &str = "rpg_mp";
 const EXPLOSION: &str = "explosions/grenadeexp_dirt_1";
 const VISION: &str = "mp_crash";
 /// A stock map whose puddles use the water simulation.
@@ -150,6 +151,44 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     }
     if flash_quads == 0 {
         bad.push("the muzzle flash drew no sprite".into());
+    }
+
+    // A rocket in flight leaves a smoke trail behind it: a strip through the points it passed, which ends once the
+    // rocket is gone and the smoke has faded.
+    match lib.content.weapon(ROCKET).cloned() {
+        Some(rocket) if rocket.proj_trail_effect.is_some() => {
+            let rw = |_: u16| Some(rocket.clone());
+            let mut fx = Effects::new(&lib.content, data.world.clone());
+            let (mut strips, mut tris) = (0, 0);
+            for step in 1..=60 {
+                let at = eye + glam::Vec3::X * (step as f32 * 40.0) + glam::Vec3::Z * 200.0;
+                fx.missiles(&[(9, at, glam::Vec3::X * 1200.0, 0)], &rw);
+                fx.update(step * 33, world);
+                let d = fx.draw(eye, 0.0, 0.0);
+                strips = strips.max(d.trails);
+                tris = tris.max(d.meshes.iter().map(|m| m.verts.len() / 3).sum::<usize>());
+            }
+            fx.missiles(&[], &rw);
+            let end = (2..=240)
+                .map(|s| {
+                    fx.update(60 * 33 + s * 100, world);
+                    fx.draw(eye, 0.0, 0.0).trails
+                })
+                .last()
+                .unwrap_or(0);
+            report.insert("rocket_trail_strips_max".into(), strips.into());
+            report.insert("rocket_trail_tris_max".into(), tris.into());
+            if strips == 0 || tris == 0 {
+                bad.push("the rocket's smoke trail drew no strip".into());
+            }
+            if end != 0 || fx.live_elems() != 0 {
+                bad.push(format!(
+                    "the rocket's trail had not ended: {end} strips, {} elements",
+                    fx.live_elems()
+                ));
+            }
+        }
+        _ => bad.push(format!("weapon {ROCKET} has no projectile trail effect")),
     }
 
     // The stock scripts' vision and shock files are there and do something.
