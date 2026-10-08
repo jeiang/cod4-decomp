@@ -11,6 +11,8 @@ use sim::weapon::{InventoryType, OffhandClass};
 use super::Impl::{self, Real};
 use super::{Args, FuncFn, MethFn};
 use crate::game::Game;
+use crate::ui::Table;
+use net::ui::cs;
 
 type R = Result<Value, String>;
 
@@ -67,14 +69,8 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
         "resetspreadoverride",
         m(|g, _, e, _| client(g, e).map(|_| Value::Undefined)),
     ),
-    (
-        "getviewmodel",
-        m(|g, _, e, _| client(g, e).map(|_| Value::str("viewmodel_base_viewhands"))),
-    ),
-    (
-        "setviewmodel",
-        m(|g, _, e, _| client(g, e).map(|_| Value::Undefined)),
-    ),
+    ("getviewmodel", m(get_view_model)),
+    ("setviewmodel", m(set_view_model)),
     ("itemweaponsetammo", m(|_, _, _, _| Ok(Value::Undefined))),
 ];
 
@@ -228,6 +224,25 @@ fn get_current_offhand(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client(g, e)?;
     let w = g.clients[usize::from(n)].ps.offhand_index;
     Ok(Value::str(g.weapons.name(w)))
+}
+
+/// `setviewmodel(model)`: the hands the player's first-person weapon is drawn with; the client reads the model's
+/// configstring from `viewmodel_index`.
+fn set_view_model(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client(g, e)?;
+    let i = g.precache(Table::Model, a.string(0)?)?;
+    g.clients[usize::from(n)].ps.viewmodel_index = i;
+    Ok(Value::Undefined)
+}
+
+fn get_view_model(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
+    let n = client(g, e)?;
+    let i = g.clients[usize::from(n)].ps.viewmodel_index;
+    Ok(Value::str(
+        g.configstrings
+            .get(&(u32::from(cs::MODELS) + u32::from(i)))
+            .map_or("", String::as_str),
+    ))
 }
 
 fn switch_to_weapon(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {

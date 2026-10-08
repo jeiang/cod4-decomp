@@ -180,8 +180,7 @@ impl Showcase {
                 started: false,
             });
         }
-        let hands = lib.team_models(Team::Allies).and_then(|s| s.viewhands);
-        let vm = ViewModel::new(&lib.content, &def, hands.as_deref())?;
+        let vm = ViewModel::new(&lib.content, &def, None)?;
         let ps = PlayerState {
             origin: [eye.x, eye.y, ground_z],
             view_height_current: 60.0,

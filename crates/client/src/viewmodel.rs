@@ -470,6 +470,87 @@ mod tests {
         assert!(checked > 80, "only {checked} weapons have a view model");
     }
 
+    /// The models the stock character scripts hand to `setViewmodel`, with the zones loaded here.
+    fn scripted_hands(content: &Content) -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, bytes) in content.rawfiles() {
+            if !name.starts_with("character/") {
+                continue;
+            }
+            for l in String::from_utf8_lossy(bytes).lines() {
+                let l = l.to_ascii_lowercase();
+                let Some((_, rest)) = l.split_once("setviewmodel(\"") else {
+                    continue;
+                };
+                let n = rest.split('"').next().unwrap_or("").to_owned();
+                if content.model(&n).is_some() && !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the renderer can draw every surface of `m`: a material with a technique set for each.
+    fn drawable(m: &XModel) -> bool {
+        !m.materials.is_empty()
+            && m.materials
+                .iter()
+                .all(|x| x.as_ref().is_some_and(|x| x.technique_set.is_some()))
+    }
+
+    /// How many lod-0 vertices of `m` fall inside the default view (4:3, 80 degrees across).
+    fn visible_vertices(m: &ModelInstance) -> usize {
+        let model = &m.model;
+        let posed = render::skin::skin_matrices(model, &m.bones);
+        let lod = &model.lod_info[0];
+        let first = usize::from(lod.surf_index);
+        let mut n = 0;
+        for s in &model.surfs[first..first + usize::from(lod.surf_count)] {
+            let mut b = Vec::new();
+            render::skin::skin_surface(s, &posed, &mut b);
+            for v in b.as_chunks::<32>().0 {
+                let f = |k: usize| f32::from_le_bytes(v[k..k + 4].try_into().unwrap());
+                let (x, y, z) = (f(0), f(4), f(8));
+                n += usize::from(x > 1.0 && y.abs() < 0.84 * x && z.abs() < 0.63 * x);
+            }
+        }
+        n
+    }
+
+    /// The arms are drawn with the gun: the hands the stock scripts give the players are models the renderer can draw,
+    /// and the hands of every default-class weapon are posed into the view. The client once picked `viewhands_usmc`
+    /// by name, a stub whose materials live in another zone, so no arms were drawn at all.
+    #[test]
+    fn the_hands_of_every_class_weapon_are_drawn_in_view() {
+        let Some(content) = content() else { return };
+        let scripted = scripted_hands(&content);
+        assert!(
+            scripted.iter().any(|n| n == "viewmodel_base_viewhands")
+                && scripted.iter().any(|n| n == "viewhands_desert_opfor"),
+            "the scripts' hands in the zones: {scripted:?}"
+        );
+        for n in &scripted {
+            assert!(
+                drawable(content.model(n).unwrap()),
+                "{n} has materials the renderer cannot draw"
+            );
+        }
+        for name in class_loadouts(&content) {
+            for hands in std::iter::once(None).chain(scripted.iter().map(|n| Some(n.as_str()))) {
+                let def = content.weapon(&name).unwrap().clone();
+                let mut vm = ViewModel::new(&content, &def, hands).expect("view model");
+                let [hip, _, _] = hip_ads_hip(&mut vm);
+                let seen = visible_vertices(&hip[0]);
+                // A thrown weapon is held low, mostly below the view.
+                assert!(
+                    vm.slots[slot::ADS_UP].is_none() || seen > 300,
+                    "{name} with {hands:?}: only {seen} hand vertices in view"
+                );
+            }
+        }
+    }
+
     /// The longest edge of the posed lod-0 mesh relative to the same edge in the bind pose (edges shorter than a
     /// unit count as a unit).
     fn worst_stretch(m: &ModelInstance) -> f32 {

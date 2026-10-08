@@ -109,7 +109,7 @@ pub struct NetPlay {
     last_cmd: Instant,
     want_weapon: Option<u16>,
     remotes: HashMap<u16, Remote>,
-    vm: Option<(u16, ViewModel)>,
+    vm: Option<((u16, u16), ViewModel)>,
     c: Counters,
     auto: Option<Auto>,
     auto_join: Option<net::ui::AutoJoin>,
@@ -340,7 +340,7 @@ impl NetPlay {
             self.last_eye = Some(eye);
             self.hud_view = Some((ps.clone(), ps.viewangles[1]));
             let mut models = self.remote_players(dt, st, ps.client_num);
-            models.extend(self.view_model(dt, &ps, ps.origin, &snap));
+            models.extend(self.view_model(dt, &ps, ps.origin));
             let (events, commands) = self.take_events(&snap);
             return Some(NetFrame {
                 origin: eye,
@@ -415,7 +415,7 @@ impl NetPlay {
         self.effects.update(st, self.boxes.world());
         let mut models = self.remote_players(dt, st, own);
         if !dead {
-            models.extend(self.view_model(dt, &ps, feet, &snap));
+            models.extend(self.view_model(dt, &ps, feet));
         }
         let yaw = if dead {
             ps.viewangles[1]
@@ -551,22 +551,19 @@ impl NetPlay {
     }
 
     /// The view model of the held weapon, built when the weapon changes.
-    fn view_model(
-        &mut self,
-        dt: f32,
-        ps: &PlayerState,
-        feet: [f32; 3],
-        snap: &net::Snapshot,
-    ) -> Vec<ModelInstance> {
+    fn view_model(&mut self, dt: f32, ps: &PlayerState, feet: [f32; 3]) -> Vec<ModelInstance> {
         let index = ps.weapon as u16;
-        if self.vm.as_ref().is_none_or(|(i, _)| *i != index) {
+        let key = (index, ps.viewmodel_index);
+        if self.vm.as_ref().is_none_or(|(k, _)| *k != key) {
             self.vm = None;
             let name = self.weapons.name(index).to_owned();
-            let team = team_of(snap.entity(ps.client_num).map_or(0, |e| e.eflags));
+            // The hands the script gave the player (`setviewmodel`), else the weapon's own.
             let hands = self
-                .lib
-                .team_models(team.unwrap_or(Team::Allies))
-                .and_then(|s| s.viewhands);
+                .net
+                .ui_ref()
+                .map(|ui| ui.model(ps.viewmodel_index))
+                .filter(|n| self.lib.content.model(n).is_some())
+                .map(str::to_owned);
             match self
                 .lib
                 .content
@@ -577,7 +574,7 @@ impl NetPlay {
             {
                 Ok(v) => {
                     self.c.weapon = name;
-                    self.vm = Some((index, v));
+                    self.vm = Some((key, v));
                 }
                 // Weapon 0 is "none": the player has no body yet.
                 Err(e) if index != 0 => {
