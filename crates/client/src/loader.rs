@@ -9,12 +9,15 @@
 use crate::listen::{self, Listen};
 use crate::models::{Library, Team};
 use assets::vfs::Vfs;
+use assets::zone::xmodel::XModel;
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, Settings, TextureCache};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, mpsc};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
 use std::time::Instant;
 
 /// Where the session's server comes from.
@@ -52,7 +55,11 @@ pub struct Load {
     pub map: String,
     /// A level change of a running session ([`Server::Keep`]), not the start of one.
     pub level_change: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     rx: mpsc::Receiver<Result<Loaded, String>>,
+    /// The browser has no threads: the same work in steps, one per [`Load::poll`], so the page draws between them.
+    #[cfg(target_arch = "wasm32")]
+    steps: Option<Steps>,
     state: Arc<Progress>,
     cancel: Arc<AtomicBool>,
 }
@@ -81,6 +88,7 @@ impl Progress {
 
 impl Load {
     pub fn start(req: Request, gpu: Arc<Gpu>) -> Load {
+        #[cfg(not(target_arch = "wasm32"))]
         let (tx, rx) = mpsc::channel();
         let state = Arc::new(Progress::default());
         let cancel = Arc::new(AtomicBool::new(false));
@@ -99,13 +107,13 @@ impl Load {
                 let _ = failed.send(Err(e.to_string()));
             }
         }
-        // The browser has no threads: the load runs here, as it always did, and is ready at the first poll.
-        #[cfg(target_arch = "wasm32")]
-        let _ = tx.send(run(&req, &gpu, &state, &cancel));
         Load {
             map,
             level_change,
+            #[cfg(not(target_arch = "wasm32"))]
             rx,
+            #[cfg(target_arch = "wasm32")]
+            steps: Some(Steps::new(req, gpu)),
             state,
             cancel,
         }
@@ -113,6 +121,16 @@ impl Load {
 
     /// The result, once the load has finished.
     pub fn poll(&mut self) -> Option<Result<Loaded, String>> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let steps = self.steps.as_mut()?;
+            let done = steps.advance(&self.state, &self.cancel);
+            if done.is_some() {
+                self.steps = None;
+            }
+            return done;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         match self.rx.try_recv() {
             Ok(r) => Some(r),
             Err(mpsc::TryRecvError::Empty) => None,
@@ -135,6 +153,131 @@ impl Drop for Load {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
+}
+
+/// The browser's load: [`run`]'s work split where the page can draw a frame between the pieces.
+#[cfg(target_arch = "wasm32")]
+struct Steps {
+    req: Request,
+    gpu: Arc<Gpu>,
+    started: Instant,
+    stage: u8,
+    data: Option<MapData>,
+    library: Option<Library>,
+    renderer: Option<Renderer>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Steps {
+    fn new(req: Request, gpu: Arc<Gpu>) -> Self {
+        Steps {
+            req,
+            gpu,
+            started: Instant::now(),
+            stage: 0,
+            data: None,
+            library: None,
+            renderer: None,
+        }
+    }
+
+    /// Does the next piece of the load; the result once the last one is done.
+    fn advance(
+        &mut self,
+        progress: &Progress,
+        cancel: &AtomicBool,
+    ) -> Option<Result<Loaded, String>> {
+        if cancel.load(Ordering::Relaxed) {
+            return Some(Err("cancelled".to_owned()));
+        }
+        let r = self.step(progress);
+        match r {
+            Ok(None) => None,
+            Ok(Some(l)) => Some(Ok(l)),
+            Err(e) => Some(Err(e)),
+        }
+    }
+
+    fn step(&mut self, progress: &Progress) -> Result<Option<Loaded>, String> {
+        let (req, map) = (&self.req, &self.req.map);
+        match self.stage {
+            0 => {
+                progress.set(0, 0.0);
+                self.data = Some(
+                    MapData::load(&req.install, map)
+                        .map_err(|e| format!("cannot load {map}: {e}"))?,
+                );
+                progress.set(0, 0.08);
+            }
+            1 => {
+                self.library = Some(Library::load(&req.install, map)?);
+                progress.set(1, 0.15);
+            }
+            2 => {
+                let data = self.data.as_ref().ok_or("no map")?;
+                let vfs = Vfs::open_stock(&req.install, 0)
+                    .map_err(|e| format!("cannot open the install: {e}"))?;
+                let scene = Scene::new(&self.gpu, data);
+                let mut renderer = Renderer::new(
+                    self.gpu.clone(),
+                    scene,
+                    data,
+                    TextureCache::new(Some(vfs), 0),
+                );
+                renderer.settings = req.settings;
+                self.renderer = Some(renderer);
+                progress.set(1, 0.2);
+            }
+            3 => {
+                let library = self.library.as_mut().ok_or("no library")?;
+                let renderer = self.renderer.as_mut().ok_or("no renderer")?;
+                renderer.warm_models(&match_models(library));
+                // The browser builds its pipelines a few milliseconds per frame instead, see the client's `WARM_BUDGET`.
+                progress.set(3, 0.9);
+            }
+            _ => {
+                let server = match &req.server {
+                    Server::Join(addr) => Some((*addr, None)),
+                    _ => None,
+                };
+                progress.set(3, 1.0);
+                return Ok(Some(Loaded {
+                    data: self.data.take().ok_or("no map")?,
+                    renderer: self.renderer.take().ok_or("no renderer")?,
+                    library: self.library.take().ok_or("no library")?,
+                    server,
+                    ms: self.started.elapsed().as_secs_f64() * 1000.0,
+                }));
+            }
+        }
+        self.stage += 1;
+        Ok(None)
+    }
+}
+
+/// What a match draws that the map does not hold: every weapon's gun, hands and world model and the players.
+fn match_models(library: &mut Library) -> Vec<Arc<XModel>> {
+    let mut models = Vec::new();
+    for w in library.content.weapons() {
+        models.extend(w.gun_models.iter().flatten().cloned());
+        models.extend(w.world_models.iter().flatten().cloned());
+        models.extend(w.hand_model.clone());
+    }
+    for team in [Team::Allies, Team::Axis] {
+        if let Some(set) = library.team_models(team) {
+            let names = [Some(&set.body), set.head.as_ref()];
+            models.extend(
+                names
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|n| library.content.model(n).cloned()),
+            );
+        }
+    }
+    for name in library.content.model_names("viewhands_") {
+        models.extend(library.content.model(name).cloned());
+    }
+    models
 }
 
 fn run(
@@ -174,7 +317,6 @@ fn run(
         Library::load(&req.install, map),
     );
     let (data, library) = (data?, library?);
-    #[cfg(not(target_arch = "wasm32"))]
     let mut library = library;
     check()?;
     progress.set(1, 0.15);
@@ -183,27 +325,7 @@ fn run(
     let scene = Scene::new(gpu, &data);
     let mut renderer = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
     renderer.settings = req.settings;
-    // What a match draws that the map does not hold: every weapon's gun, hands and world model and the players.
-    let mut models = Vec::new();
-    for w in library.content.weapons() {
-        models.extend(w.gun_models.iter().flatten().cloned());
-        models.extend(w.world_models.iter().flatten().cloned());
-        models.extend(w.hand_model.clone());
-    }
-    for team in [Team::Allies, Team::Axis] {
-        if let Some(set) = library.team_models(team) {
-            let names = [Some(&set.body), set.head.as_ref()];
-            models.extend(
-                names
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|n| library.content.model(n).cloned()),
-            );
-        }
-    }
-    for name in library.content.model_names("viewhands_") {
-        models.extend(library.content.model(name).cloned());
-    }
+    let models = match_models(&mut library);
     renderer.warm_models(&models);
     check()?;
     progress.set(2, 0.25);
