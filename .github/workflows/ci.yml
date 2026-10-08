@@ -19,12 +19,16 @@ jobs:
       - run: choco install nasm -y --no-progress
       - run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace
+      - run: cargo fmt --check
+      # `cargo test` compiles every target, so a separate `cargo build` adds nothing.
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
-      - run: cargo fmt --check
-      - run: cargo build --release -p harness -p client -p server
+      # Release build, smoke test, artifacts and the tester zip run on main only, keeping
+      # the required PR check short (main does not require up-to-date branches).
+      - if: github.event_name == 'push'
+        run: cargo build --release -p harness -p client -p server
       - name: Collect harness folder
+        if: github.event_name == 'push'
         shell: bash
         run: |
           mkdir cod4e-harness-windows
@@ -35,6 +39,7 @@ jobs:
       # The tester's path: double-click is a run with no arguments. With no
       # install it must still write a bundle that says so (exit status 1).
       - name: Smoke the portable folder with no install
+        if: github.event_name == 'push'
         shell: bash
         working-directory: cod4e-harness-windows
         env:
@@ -45,11 +50,13 @@ jobs:
           [ $? -eq 1 ] || { echo "expected exit status 1"; exit 1; }
           python -c "import glob,zipfile; z=glob.glob('cod4e-run-*.zip'); assert len(z)==1, z; a=zipfile.ZipFile(z[0]); n=a.namelist(); print(n); assert 'manifest.json' in n and 'summary.json' in n; assert b'install not found' in a.read('harness.log')"
           mkdir ../ci-bundle && mv cod4e-run-*.zip ../ci-bundle/
-      - uses: actions/upload-artifact@v4
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
         with:
           name: cod4e-ci-bundle
           path: ci-bundle
-      - uses: actions/upload-artifact@v4
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
         with:
           name: cod4e-harness-windows
           path: cod4e-harness-windows
