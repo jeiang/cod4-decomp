@@ -173,3 +173,9 @@ Loading screen for a free-for-all map showed "Free-for-all / Bloc / Setting up g
 - (e) kill/connect console messages, radar/airstrike notices, grenade-key labels in use: no kill obtained.
 - (f) killcam: not captured (needs a kill). The host is otherwise ready; see the h.js helper in scripts/original.
 - Create a Class and unlock-gated screens: Create a Class stays greyed at rank 1 with the reset stats file.
+
+## Killcam attempt 2 (time-boxed)
+Relaunch with one bot (`scr_testclients 1`, `sv_botsPressAttackBtn 1`, TDM, no limits) and ~15 minutes of
+randomised walking plus minimap-based homing: the bot never found or shot the player, so no death, obituary or
+killcam was captured. Killcam band height/colour/opacity, viewmodel and camera-follow remain unrecorded.
+The original game was closed afterwards; ydotoold is left running.
