@@ -199,9 +199,19 @@ impl Ui {
         }
         if self.cursor_visible && !self.stack.is_empty() {
             let (x, y) = self.cursor;
-            let s = self.place.unit() * 16.0;
+            // 32 virtual units square, centred on the pointer (what the original draws; the system cursor is hidden).
+            let (w, h) = (self.place.scale.0 * 32.0, self.place.scale.1 * 32.0);
             let img = p.named(&self.assets, "ui_cursor");
-            p.pic(&img, Px { x, y, w: s, h: s }, [1.0; 4]);
+            p.pic(
+                &img,
+                Px {
+                    x: x - w * 0.5,
+                    y: y - h * 0.5,
+                    w,
+                    h,
+                },
+                [1.0; 4],
+            );
         }
     }
 

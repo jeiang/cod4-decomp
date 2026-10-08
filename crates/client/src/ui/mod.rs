@@ -1055,8 +1055,14 @@ impl Ui {
                         return true;
                     }
                 }
+                if d.ty == ity::OWNERDRAW {
+                    host.owner_key(&*self, d.window.owner_draw, &key);
+                }
                 self.activate(host, m, i, key == UiKey::Mouse1);
                 true
+            }
+            UiKey::Mouse2 if d.ty == ity::OWNERDRAW => {
+                host.owner_key(&*self, d.window.owner_draw, &key)
             }
             _ => def.window.static_flags & statf::POPUP != 0,
         }
@@ -1208,6 +1214,28 @@ impl Ui {
             it.list_start = it.list_cursor - vis + 1;
         }
         let row = it.list_cursor as usize;
+        host.feeder_select(feeder, row);
+    }
+
+    /// Picks `row` in every open list that shows `feeder`, scrolling it into view, and tells the host (the original's
+    /// `Menu_SetFeederSelection`).
+    pub fn select_feeder_row(&mut self, host: &mut dyn Host, feeder: i32, row: usize) {
+        for m in self.stack.clone() {
+            let def = self.menus[m].def.clone();
+            for (i, d) in def.items.iter().enumerate() {
+                if d.ty != ity::LISTBOX || d.special as i32 != feeder {
+                    continue;
+                }
+                let vis = self.list_rows_visible(m, i);
+                let it = &mut self.menus[m].items[i];
+                it.list_cursor = row as i32;
+                if it.list_cursor < it.list_start {
+                    it.list_start = it.list_cursor;
+                } else if it.list_cursor >= it.list_start + vis {
+                    it.list_start = it.list_cursor - vis + 1;
+                }
+            }
+        }
         host.feeder_select(feeder, row);
     }
 

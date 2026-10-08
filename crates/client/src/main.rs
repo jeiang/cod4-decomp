@@ -70,7 +70,7 @@ usage: cod4e [options]
   --show-models          smoke scene: stock player models in different poses and the first-person weapon in
                          front of a fixed camera (--model-count N sets the number of players, default 7)
   --video / --screenshot record a video / save a screenshot during the flythrough
-  --config <path>        key binds and settings file (default: <config dir>/cod4e/config_mp.cfg)
+  --config-dir <dir>     the user's profiles (stats, key binds and settings per profile; default: <config dir>/cod4e)
   --audio-selftest       check the sound system on the real tables without a window or sound card, then exit (harness stage)
   --viewmodel-tour <n>   draw the first-person weapon headless from n spawn points of --map (two headings each) with and without it, and fail when it is tinted one colour or black (viewmodel.json in --out, harness)
   --fx-selftest          play effects on the real content without a window: an explosion draws and ends, an impact leaves a decal, a shot flashes, the vision and shock files work, then exit (harness stage)
@@ -114,7 +114,7 @@ pub struct Cli {
     pub video: bool,
     pub screenshot: bool,
     pub list: bool,
-    pub config: Option<PathBuf>,
+    pub config_dir: Option<PathBuf>,
     pub input_selftest: bool,
     pub audio_selftest: bool,
     pub fx_selftest: bool,
@@ -181,7 +181,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         video: false,
         screenshot: false,
         list: false,
-        config: None,
+        config_dir: None,
         input_selftest: false,
         audio_selftest: false,
         fx_selftest: false,
@@ -253,7 +253,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--viewmodel-tour" => {
                 c.viewmodel_tour = Some(val(a)?.parse().map_err(|_| "bad view count")?)
             }
-            "--config" => c.config = Some(val(a)?.into()),
+            "--config-dir" => c.config_dir = Some(val(a)?.into()),
             "--show-models" => c.show_models = Some(7),
             "--model-count" => {
                 c.show_models = Some(val(a)?.parse().map_err(|_| "bad model count")?)

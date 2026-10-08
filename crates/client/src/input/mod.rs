@@ -179,6 +179,8 @@ pub struct Input {
     focused: bool,
     captured: bool,
     prev_buttons: u32,
+    /// The user's folder, and the file [`Input::save`] writes (the active profile's `config_mp.cfg` there).
+    config_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
     dirty: bool,
     debug: Option<DebugCounter>,
@@ -200,22 +202,16 @@ impl DebugCounter {
 }
 
 impl Input {
-    /// Execute the install's `default_mp.cfg` (through `vfs`, as the original does at startup), then `config_path`
-    /// (or the platform default, see [`config::default_path`]) if it exists. Opens the raw mouse and gamepad
-    /// backends; either failing is logged, not fatal.
-    pub fn new(config_path: Option<PathBuf>, vfs: Option<&Vfs>) -> Self {
+    /// Execute the install's `default_mp.cfg` (through `vfs`, as the original does at startup). The profile's own
+    /// `config_mp.cfg` follows through [`Input::use_profile`]. `config_dir` is the user's folder (or the platform
+    /// default, see [`config::default_dir`]). Opens the raw mouse and gamepad backends; either failing is logged,
+    /// not fatal.
+    pub fn new(config_dir: Option<PathBuf>, vfs: Option<&Vfs>) -> Self {
         let mut i = Self::bare();
         i.load_defaults(vfs);
         i.mouse = RawMouse::new();
         i.pad = pad::Pad::new();
-        i.config_path = config_path.or_else(config::default_path);
-        if let Some(p) = i.config_path.clone() {
-            match std::fs::read_to_string(&p) {
-                Ok(text) => i.exec_text(&text, p.parent(), false, 0),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => eprintln!("cannot read {}: {e}", p.display()),
-            }
-        }
+        i.config_dir = config_dir.or_else(config::default_dir);
         i.dirty = false;
         // The window takes the pointer on the first click; until then the cursor is free.
         i.captured = false;
@@ -278,6 +274,7 @@ impl Input {
             focused: true,
             captured: true,
             prev_buttons: 0,
+            config_dir: None,
             config_path: None,
             dirty: false,
             debug: None,
@@ -430,12 +427,24 @@ impl Input {
         self.exec_text(line, None, true, 0);
     }
 
-    /// The folder of the config file (where the player profile lives too); `None` without one.
+    /// The user's folder, where the profiles live; `None` without one.
     pub fn config_dir(&self) -> Option<PathBuf> {
-        self.config_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(Path::to_path_buf)
+        self.config_dir.clone()
+    }
+
+    /// Takes a profile's settings: runs `read` (its `config_mp.cfg`, the user's copy or else the install's; the stock
+    /// `default_mp.cfg` has already run) and makes `save` the file [`Input::save`] writes. A profile without a file
+    /// keeps what is set now.
+    pub fn use_profile(&mut self, read: Option<PathBuf>, save: Option<PathBuf>) {
+        if let Some(p) = read {
+            match std::fs::read_to_string(&p) {
+                Ok(text) => self.exec_text(&text, p.parent(), false, 0),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => eprintln!("cannot read {}: {e}", p.display()),
+            }
+        }
+        self.config_path = save;
+        self.dirty = false;
     }
 
     /// Cvar value as text.
@@ -932,6 +941,42 @@ mod tests {
         assert_eq!(b.cvar("sensitivity"), Some("7.5"));
         assert_eq!(b.cvar("MY_NAME"), Some("a \"b\" c"));
         assert_eq!(b.cvar("tmp"), None);
+    }
+
+    #[test]
+    fn the_profile_config_runs_after_the_defaults_and_saves_to_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("cod4e-input-profile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (theirs, mine) = (dir.join("install.cfg"), dir.join("users/p/config_mp.cfg"));
+        std::fs::write(
+            &theirs,
+            "unbindall\nbind w \"+profile\"\nseta sensitivity 4\n",
+        )
+        .unwrap();
+        let mut i = Input::detached();
+        assert_eq!(i.bound("w"), Some("+forward"), "the defaults came first");
+        i.use_profile(Some(theirs.clone()), Some(mine.clone()));
+        assert_eq!(
+            (i.bound("w"), i.cvar("sensitivity")),
+            (Some("+profile"), Some("4"))
+        );
+        i.save().unwrap();
+        assert!(!mine.exists(), "reading a profile changes nothing to write");
+        i.exec_line("seta sensitivity 6");
+        i.save().unwrap();
+        assert!(
+            std::fs::read_to_string(&mine)
+                .unwrap()
+                .contains("seta sensitivity \"6\"")
+        );
+        assert!(
+            std::fs::read_to_string(&theirs)
+                .unwrap()
+                .contains("sensitivity 4"),
+            "the install's file is never written"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
