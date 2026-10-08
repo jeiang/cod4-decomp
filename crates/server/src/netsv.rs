@@ -583,6 +583,28 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.model = model as u16;
                 s
             }
+            EntKind::Plain if e.veh.is_some() => {
+                let (Some(v), model) = (e.veh.as_deref(), game.models.find(&e.model)) else {
+                    continue;
+                };
+                if e.hidden || model == 0 {
+                    continue;
+                }
+                let mut s = EntityState::new(n);
+                s.etype = etype::VEHICLE;
+                s.origin = e.origin;
+                s.angles = e.angles;
+                s.velocity = v.vel;
+                s.model = model as u16;
+                s.client = v.owner;
+                s.pm_type = v.stage;
+                s.eflags = match game.client(v.owner).map(|c| c.team) {
+                    Some(Team::Axis) => eflags::TEAM_AXIS,
+                    Some(Team::Allies) => eflags::TEAM_ALLIES,
+                    _ => 0,
+                };
+                s
+            }
             _ => {
                 let Some(m) = e.missile.as_ref() else {
                     continue;

@@ -121,20 +121,31 @@ impl Game {
             };
             self.bullet_hits(&p, aim, spread, self.level.time, &mut hits);
         }
+        self.apply_bullet_hits(vm, n, weapon, hits);
+    }
+
+    /// The impacts and damage of the bullets `shooter` (a player or a vehicle) fired.
+    pub(crate) fn apply_bullet_hits(
+        &mut self,
+        vm: &mut Vm,
+        shooter: u16,
+        weapon: u16,
+        hits: Vec<BulletHit>,
+    ) {
         for h in hits {
-            self.bullet_impact_event(n, weapon, &h);
+            self.bullet_impact_event(shooter, weapon, &h);
             if !h.damageable {
                 continue;
             }
-            if self.is_accurate_hit(h.target, n) {
+            if self.is_accurate_hit(h.target, shooter) {
                 self.stats.hits += 1;
-                if let Some(c) = self.client_mut(n) {
+                if let Some(c) = self.client_mut(shooter) {
                     c.hits += 1;
                 }
             }
             let mut d = Damage::new(h.damage, h.mean);
-            d.inflictor = Some(n);
-            d.attacker = Some(n);
+            d.inflictor = Some(shooter);
+            d.attacker = Some(shooter);
             d.dir = Some(h.dir);
             d.point = Some(h.point);
             d.flags = h.flags;

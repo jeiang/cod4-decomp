@@ -58,7 +58,6 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
         "logstring",
         r(|g, vm, _, a| super::funcs::log_string(g, vm, a)),
     ),
-    ("fireweapon", Later("M8 vehicles")),
     // hud elements
     ("destroy", r(hud::destroy)),
     ("settext", r(hud::set_text)),

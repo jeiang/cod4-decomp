@@ -15,6 +15,10 @@ pub mod etype {
     pub const ITEM: u8 = 5;
     /// A one-shot happening (impact, explosion, effect): see `server::tempev`.
     pub const EVENT: u8 = 6;
+    /// A script vehicle (the helicopter hardpoint): drawn from its model index at `origin` and `angles` (pitch, yaw,
+    /// roll), interpolated between snapshots; `velocity` is its motion, `pm_type` its damage stage (3 whole, 2 light
+    /// smoke, 1 heavy smoke, 0 crashing) and `client` its owner's client number.
+    pub const VEHICLE: u8 = 7;
 }
 
 pub const MAX_ENTITIES: usize = 1024;

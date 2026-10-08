@@ -316,7 +316,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("sighttracepassed", r(sight_trace_passed)),
     ("physicstrace", r(physics_trace)),
     ("playerphysicstrace", r(player_physics_trace)),
-    ("spawnhelicopter", Later("M8 vehicles")),
+    ("spawnhelicopter", r(spawn_helicopter)),
     ("spawnplane", Later("M8 vehicles")),
     ("spawnturret", Later(M3)),
 ];
@@ -1024,6 +1024,13 @@ fn get_ent_array(g: &mut Game, vm: &mut Vm, a: Args) -> R {
         );
     }
     Ok(Value::Array(Rc::new(out)))
+}
+
+/// `spawnHelicopter(owner, origin, angles, vehicleType, model)`.
+fn spawn_helicopter(g: &mut Game, vm: &mut Vm, a: Args) -> R {
+    let owner = a.entity(0)?;
+    let n = g.spawn_helicopter(owner.num, a.vector(1)?, a.vector(2)?, a.string(3)?, a.string(4)?)?;
+    Ok(g.entity_value(vm, n))
 }
 
 fn spawn(g: &mut Game, vm: &mut Vm, a: Args) -> R {

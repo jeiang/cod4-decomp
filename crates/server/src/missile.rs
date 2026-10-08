@@ -340,7 +340,12 @@ impl Game {
             curvature = mad(mad([0.0; 3], r * c, right), r * s, up);
         }
         let life = ((info.proj_lifetime * 1000.0) as i32).min(60_000);
-        let team = self.client(parent).map_or(Team::Free, |c| c.team);
+        // A vehicle's missiles belong to the team of the player it was called in for.
+        let credit = self
+            .ent(parent)
+            .and_then(|p| p.veh.as_ref())
+            .map_or(parent, |v| v.owner);
+        let team = self.client(credit).map_or(Team::Free, |c| c.team);
         e.missile = Some(Box::new(Missile {
             kind: MissileKind::Rocket,
             weapon,
@@ -374,6 +379,8 @@ impl Game {
             self.run_missile(vm, n);
         } else if e.kind == EntKind::Item && e.mv.pos.tr.kind == TrType::Gravity {
             self.run_item(n);
+        } else if e.veh.is_some() {
+            self.run_vehicle(vm, n);
         } else {
             self.run_mover(vm, n);
         }
