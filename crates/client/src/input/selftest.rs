@@ -28,6 +28,11 @@ pub fn run() -> Vec<String> {
         );
         i.key(key, false);
     }
+    // The held-button machinery, whatever the install's config binds these keys to.
+    i.exec_line(
+        "bind mouse2 +speed_throw; bind e +activate; bind f +melee; bind g +frag; bind ctrl +movedown; \
+         bind z +prone; bind mwheelup weapnext",
+    );
     for (key, bit) in [
         ("mouse1", buttons::ATTACK),
         ("mouse2", buttons::ADS),

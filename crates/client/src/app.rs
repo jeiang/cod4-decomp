@@ -644,12 +644,12 @@ impl Viewer {
             }
             net = Some(n);
         }
-        let mut input = Input::new(self.cli.config.clone());
+        let install = server::content::Install::open(&self.cli.install)
+            .map_err(|e| format!("cannot open the install: {e}"))?;
+        let mut input = Input::new(self.cli.config.clone(), Some(&install.vfs));
         let mut shell = if self.cli.flythrough || self.cli.show_models.is_some() {
             None
         } else {
-            let install = server::content::Install::open(&self.cli.install)
-                .map_err(|e| format!("cannot open the install: {e}"))?;
             Some(Shell::new(
                 gpu.clone(),
                 config.format,
