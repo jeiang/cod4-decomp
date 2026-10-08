@@ -994,6 +994,8 @@ fn compass_objectives(
     objectives: &[crate::hud::LiveObjective],
 ) {
     let a = if full { 1.0 } else { compass_alpha(dc, h) };
+    h.objectives_listed = h.objectives_listed.max(objectives.len() as u32);
+    h.objectives_alpha = h.objectives_alpha.max(a);
     let Some(map) = h.map.clone().filter(|_| a > 0.0) else {
         return;
     };

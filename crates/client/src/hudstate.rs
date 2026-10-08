@@ -356,6 +356,9 @@ pub struct HudFacts {
     pub drawn: std::collections::BTreeMap<i32, u32>,
     /// Objective marks the compass and the full map drew since the match began.
     pub objective_marks: u32,
+    /// The most objectives the server listed and the most alpha the compass drew them with.
+    pub objectives_listed: u32,
+    pub objectives_alpha: f32,
 }
 
 impl HudFacts {
@@ -379,6 +382,8 @@ impl HudFacts {
             "overlay_alpha": self.overlay.alpha(self.now),
             "drawn": self.drawn,
             "objective_marks": self.objective_marks,
+            "objectives_listed": self.objectives_listed,
+            "objectives_alpha": self.objectives_alpha,
         })
     }
 }
