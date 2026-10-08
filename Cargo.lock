@@ -3275,6 +3275,7 @@ dependencies = [
  "libc",
  "net",
  "sim",
+ "tempfile",
  "tokio",
  "web-time",
  "wtransport",

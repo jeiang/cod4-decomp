@@ -4,6 +4,7 @@
 pub mod activate;
 pub mod anim;
 pub mod archive;
+pub mod ban;
 pub mod bot;
 pub mod bullet;
 pub mod client;
@@ -22,6 +23,7 @@ pub mod mover;
 pub mod nav;
 pub mod netsv;
 pub mod playeranim;
+pub mod rcon;
 pub mod script;
 pub mod server;
 pub mod tags;
