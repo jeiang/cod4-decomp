@@ -528,7 +528,9 @@ impl Input {
         self.wheel.push(name.to_owned());
     }
 
-    fn release_all(&mut self) {
+    /// Lets go of every key, button and stick: the state the input holds when the events that would end it will go
+    /// elsewhere (a menu takes the window's events while it is open).
+    pub fn release_all(&mut self) {
         let keys: Vec<String> = self
             .down
             .keys()

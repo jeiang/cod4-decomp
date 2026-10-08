@@ -359,4 +359,56 @@ mod tests {
         assert!(moved > 1.0, "aiming did not move the weapon ({moved})");
         assert!(moved < 12.0, "aiming threw the weapon {moved} units");
     }
+
+    /// Letting the sights down puts the weapon back exactly where the hip pose had it, off to the right and low, not in
+    /// front of the view; nothing of the sights layer stays.
+    #[test]
+    fn the_hip_pose_comes_back_after_aiming() {
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let install = Install::open(std::path::Path::new(&root)).expect("install");
+        let mut content = Content::for_client();
+        content
+            .load_zone(&install, "common_mp", 4)
+            .expect("common_mp");
+        content.load_map(&install, "mp_backlot").expect("map");
+        let hands = content
+            .model_names("viewhands_")
+            .first()
+            .map(|n| (*n).to_owned());
+        for weapon in ["m4_mp", "ak47_mp", "mp5_mp"] {
+            let def = content.weapon(weapon).expect("weapon").clone();
+            let mut vm = ViewModel::new(&content, &def, hands.as_deref()).expect("view model");
+            let mut ps = PlayerState {
+                view_height_current: 60.0,
+                ..PlayerState::default()
+            };
+            let hip = vm.update(&ps, 0.01);
+            // The gun's root is right of the view axis and below it at the hip (view space: x forward, y left).
+            let root = hip[1].bones[0].trans;
+            assert!(
+                root[1] < -1.5 && root[2] < -1.0,
+                "{weapon}: hip gun at {root:?}"
+            );
+            for ads in [0.4, 1.0, 0.6, 0.0] {
+                ps.weapon_pos_frac = ads;
+                vm.update(&ps, 0.01);
+            }
+            let back = vm.update(&ps, 0.01);
+            for (h, b) in hip.iter().zip(&back) {
+                for (hb, bb) in h.bones.iter().zip(&b.bones) {
+                    assert_eq!(
+                        hb.trans, bb.trans,
+                        "{weapon}: the hip pose did not come back"
+                    );
+                }
+            }
+            // And fully aimed it is centred sideways.
+            ps.weapon_pos_frac = 1.0;
+            let aimed = vm.update(&ps, 0.01)[1].bones[0].trans;
+            assert!(aimed[1].abs() < 0.5, "{weapon}: aimed gun at {aimed:?}");
+        }
+    }
 }
