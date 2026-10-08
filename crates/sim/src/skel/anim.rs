@@ -181,19 +181,18 @@ fn add_rot(acc: &mut Accum, w: f32, q: [f32; 4], end: bool) {
 ///
 /// `to_model[i]` is the `out` index of the animation's `i`-th named part ([`NO_BONE`] skips
 /// it; so does an index past `out`). Looping animations wrap `time` into `[0, 1)`; others clamp
-/// it to `[0, 1]`. Allocation-free; a truncated or malformed animation reads zeros rather than
-/// panicking.
+/// it to `[0, 1]`. A one-pose animation (`num_frames == 0`) always takes its last keys. Allocation-free; a truncated
+/// or malformed animation reads zeros rather than panicking.
 pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: &mut [Accum]) {
-    if a.num_frames == 0 {
-        return;
-    }
     let time = if a.looping {
         let t = time - time.floor();
         if t >= 1.0 { 0.0 } else { t }
     } else {
         time.clamp(0.0, 1.0)
     };
-    let end = !a.looping && time >= 1.0;
+    // A one-pose animation (`num_frames == 0`) holds only last keys, read the way the original reads a finished
+    // non-looping animation (`XAnimCalcNonLoopEnd`).
+    let end = !a.looping && (time >= 1.0 || a.num_frames == 0);
     let frame_frac = f32::from(a.num_frames) * time;
     let mut w = Walk {
         a,

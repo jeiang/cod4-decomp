@@ -297,6 +297,7 @@ pub fn bob_angles(ps: &PlayerState, ads: f32, w: &WeaponDef) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::{Affine3A, Quat, Vec3};
     use server::content::Install;
 
     #[test]
@@ -314,33 +315,204 @@ mod tests {
         assert_eq!(ads_layer(1.0, false).slot, slot::ADS_UP);
     }
 
-    /// Aiming moves the whole view model a few units to the sights and keeps its orientation. Playing the sights
-    /// animation instead of layering it over the idle threw the arms and gun about the screen.
-    #[test]
-    fn aiming_down_sights_shifts_the_weapon_without_flipping_it() {
+    fn content() -> Option<Content> {
         let Some(root) = std::env::var_os("COD4_PATH") else {
             eprintln!("COD4_PATH not set; skipping");
-            return;
+            return None;
         };
         let install = Install::open(std::path::Path::new(&root)).expect("install");
         let mut content = Content::for_client();
-        content
-            .load_zone(&install, "common_mp", 4)
-            .expect("common_mp");
+        content.load_boot(&install).expect("boot zones");
         content.load_map(&install, "mp_backlot").expect("map");
-        let def = content.weapon("m4_mp").expect("m4_mp").clone();
+        Some(content)
+    }
+
+    /// The weapons of the five stock classes: primary and sidearm with their attachments, and the grenades, read
+    /// from `mp/classTable.csv` the way `_class.gsc` does (`stat + 1`/`+ 2` primary and attachment, `+ 3`/`+ 4` sidearm,
+    /// `stat` and `+ 8` the grenades).
+    fn class_loadouts(content: &Content) -> Vec<String> {
+        let t = content.string_table("mp/classTable.csv").expect("table");
+        let cols = t.column_count as usize;
+        let cell = |r: usize, c: usize| t.values.get(r * cols + c).and_then(|n| n.as_deref());
+        let find = |stat: usize| {
+            let key = stat.to_string();
+            (0..t.row_count as usize)
+                .find(|&r| cell(r, 1) == Some(&key))
+                .and_then(|r| cell(r, 4))
+                .unwrap_or("")
+                .to_owned()
+        };
+        let with = |weapon: String, attachment: String| match attachment.as_str() {
+            "" | "none" => format!("{weapon}_mp"),
+            a => format!("{weapon}_{a}_mp"),
+        };
+        let mut out = Vec::new();
+        for stat in [200usize, 210, 220, 230, 240] {
+            out.push(with(find(stat + 1), find(stat + 2)));
+            out.push(with(find(stat + 3), find(stat + 4)));
+            out.push(with(find(stat), String::new()));
+            out.push(with(find(stat + 8), String::new()));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Where the gun hangs and where it points in view space (x forward, y left, z up from the eye): the root bone's
+    /// position and its forward axis.
+    fn gun_root(inst: &[ModelInstance]) -> ([f32; 3], [f32; 3]) {
+        let b = &inst[1].bones[0];
+        let f = Quat::from_xyzw(b.quat[0], b.quat[1], b.quat[2], b.quat[3]) * Vec3::X;
+        (b.trans, f.to_array())
+    }
+
+    fn build(content: &Content, name: &str) -> Option<ViewModel> {
+        let def = content.weapon(name)?.clone();
         let hands = content
             .model_names("viewhands_")
             .first()
             .map(|n| (*n).to_owned());
-        let mut vm = ViewModel::new(&content, &def, hands.as_deref()).expect("view model");
+        ViewModel::new(content, &def, hands.as_deref()).ok()
+    }
+
+    /// The hip pose of every weapon in the zone that can be held, back at hip after aiming.
+    fn hip_ads_hip(vm: &mut ViewModel) -> [Vec<ModelInstance>; 3] {
         let mut ps = PlayerState {
             view_height_current: 60.0,
             ..PlayerState::default()
         };
         let hip = vm.update(&ps, 0.01);
         ps.weapon_pos_frac = 1.0;
-        let aimed = vm.update(&ps, 0.01);
+        let ads = vm.update(&ps, 0.01);
+        ps.weapon_pos_frac = 0.0;
+        let back = vm.update(&ps, 0.01);
+        [hip, ads, back]
+    }
+
+    /// Every weapon of every default class (primaries and sidearms with their attachments, grenades): at the hip the
+    /// gun hangs forward, low and to the right, pointing away from the eye; aimed it is centred on the view. A
+    /// one-pose idle animation (the stock M16 family's: `num_frames == 0`) used to be skipped, which left the arms and
+    /// gun at the eye, pointing back at it.
+    #[test]
+    fn every_class_weapon_hangs_low_right_at_the_hip_and_centres_when_aimed() {
+        let Some(content) = content() else { return };
+        let loadouts = class_loadouts(&content);
+        assert!(
+            loadouts.iter().any(|w| w == "m16_gl_mp"),
+            "the assault class: {loadouts:?}"
+        );
+        for name in &loadouts {
+            let mut vm = build(&content, name).unwrap_or_else(|| panic!("{name}: no view model"));
+            let [hip, ads, back] = hip_ads_hip(&mut vm);
+            let ((ht, hf), (at, _)) = (gun_root(&hip), gun_root(&ads));
+            assert!(hf[0] > 0.9, "{name}: the gun points back at the eye {hf:?}");
+            assert!(
+                (5.0..20.0).contains(&ht[0]) && ht[1] <= 0.5 && (-9.0..-2.0).contains(&ht[2]),
+                "{name}: hip pose {ht:?} is not forward, right and low"
+            );
+            if vm.slots[slot::ADS_UP].is_some() {
+                assert!(
+                    ht[1] < -1.0,
+                    "{name}: hip pose {ht:?} is not off to the right"
+                );
+                assert!(
+                    at[1].abs() < 0.7
+                        && (0.0..20.0).contains(&at[0])
+                        && (-7.0..0.0).contains(&at[2]),
+                    "{name}: aimed pose {at:?} is not centred on the view"
+                );
+                assert!(
+                    (ht[1] - at[1]).abs() > 1.5,
+                    "{name}: aiming did not move it"
+                );
+            }
+            assert_eq!(
+                hip[1].bones, back[1].bones,
+                "{name}: the hip pose did not come back"
+            );
+        }
+    }
+
+    /// Every weapon in the zone with a view model keeps its gun pointing away from the eye, near the screen, at the
+    /// hip and aimed, and the skinned meshes of hands and gun stay the size they are in the bind pose (stretched
+    /// triangles across the gun came from bones left unposed).
+    #[test]
+    fn every_stock_weapon_points_away_and_skins_without_stretching() {
+        let Some(content) = content() else { return };
+        let mut checked = 0;
+        for w in content.weapons() {
+            let name = w.internal_name.as_deref().unwrap();
+            let Some(mut vm) = build(&content, name) else {
+                continue;
+            };
+            checked += 1;
+            let [hip, ads, _] = hip_ads_hip(&mut vm);
+            for (what, inst) in [("hip", &hip), ("aimed", &ads)] {
+                let (t, f) = gun_root(inst);
+                assert!(
+                    f[0] > 0.3,
+                    "{name} {what}: the gun points back at the eye {f:?}"
+                );
+                assert!(
+                    t[0] > 0.0 && t.iter().all(|c| c.abs() < 40.0),
+                    "{name} {what}: the gun is at {t:?}"
+                );
+                for m in inst {
+                    let worst = worst_stretch(m);
+                    assert!(
+                        worst < 3.0,
+                        "{name} {what}: {} has a triangle edge {worst:.1}x its bind pose length",
+                        m.model.name.as_deref().unwrap_or("?")
+                    );
+                }
+            }
+        }
+        assert!(checked > 80, "only {checked} weapons have a view model");
+    }
+
+    /// The longest edge of the posed lod-0 mesh relative to the same edge in the bind pose (edges shorter than a
+    /// unit count as a unit).
+    fn worst_stretch(m: &ModelInstance) -> f32 {
+        let model = &m.model;
+        let bind = vec![Affine3A::IDENTITY; usize::from(model.num_bones)];
+        let posed = render::skin::skin_matrices(model, &m.bones);
+        let lod = &model.lod_info[0];
+        let first = usize::from(lod.surf_index);
+        let mut worst = 0.0f32;
+        for s in &model.surfs[first..first + usize::from(lod.surf_count)] {
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            render::skin::skin_surface(s, &bind, &mut a);
+            render::skin::skin_surface(s, &posed, &mut b);
+            let at = |v: &[u8], i: usize| {
+                let f = |k: usize| {
+                    f32::from_le_bytes(v[32 * i + k..32 * i + k + 4].try_into().unwrap())
+                };
+                Vec3::new(f(0), f(4), f(8))
+            };
+            for t in s.tri_indices.as_chunks::<3>().0 {
+                for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+                    let (p, q) = (usize::from(t[i]), usize::from(t[j]));
+                    if 32 * p.max(q) + 12 > a.len() || 32 * p.max(q) + 12 > b.len() {
+                        continue;
+                    }
+                    let (l0, l1) = (
+                        (at(&a, p) - at(&a, q)).length().max(1.0),
+                        (at(&b, p) - at(&b, q)).length(),
+                    );
+                    worst = worst.max(l1 / l0);
+                }
+            }
+        }
+        worst
+    }
+
+    /// Aiming moves the whole view model a few units to the sights and keeps its orientation. Playing the sights
+    /// animation instead of layering it over the idle threw the arms and gun about the screen.
+    #[test]
+    fn aiming_down_sights_shifts_the_weapon_without_flipping_it() {
+        let Some(content) = content() else { return };
+        let mut vm = build(&content, "m4_mp").expect("view model");
+        let [hip, aimed, _] = hip_ads_hip(&mut vm);
         let mut moved = 0.0f32;
         for (h, a) in hip.iter().zip(&aimed) {
             assert_eq!(h.bones.len(), a.bones.len());
