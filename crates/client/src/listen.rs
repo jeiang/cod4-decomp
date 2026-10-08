@@ -46,6 +46,16 @@ pub fn free_standard_port() -> u16 {
         .unwrap_or(0)
 }
 
+/// Console lines for the running listen server (the harness's `server=` steps), run between its frames.
+static CONSOLE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Queues `line` for the listen server's console.
+pub fn send(line: &str) {
+    if let Ok(mut q) = CONSOLE.lock() {
+        q.push(line.to_owned());
+    }
+}
+
 /// A listen server that is still booting (map zone, scripts, navigation); see [`begin`].
 pub struct Booting {
     rx: mpsc::Receiver<Result<SocketAddr, String>>,
@@ -166,6 +176,13 @@ fn run(
     // The first person's counters, kept while they are connected (the slot is freed when they leave).
     let mut person = json!(null);
     while !stop.load(Ordering::Relaxed) {
+        let lines = CONSOLE
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default();
+        for line in lines {
+            let _ = server.exec_line(&line);
+        }
         server.run_for(Duration::from_millis(100));
         if let Some((n, c)) = server.game.connected_clients().find(|(_, c)| !c.bot) {
             person = json!({
@@ -197,6 +214,7 @@ fn run(
         "stats": {
             "shots": server.game.stats.shots, "hits": server.game.stats.hits,
             "kills": server.game.stats.kills, "deaths": server.game.stats.deaths,
+            "plants": server.game.stats.plants, "defuses": server.game.stats.defuses,
         },
         "person": person,
     })

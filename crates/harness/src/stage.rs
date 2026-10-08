@@ -73,6 +73,11 @@ impl StageReport {
         }
     }
 
+    pub fn with_status(mut self, status: Status) -> Self {
+        self.status = status;
+        self
+    }
+
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
         self.reason = Some(reason.into());
         self
@@ -141,6 +146,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_match::run),
     },
     StageDef {
+        name: "net-objective",
+        description: "two real UDP clients play Search and Destroy: one plants the bomb holding +activate at the zone's hint, the other defuses it",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_objective::run),
+    },
+    StageDef {
         name: "net-ui",
         description: "a real UDP client answers the menus the stock scripts open and checks the hud elements, objectives, configstrings, client dvars and print lines it is sent",
         needs_install: false,
@@ -163,6 +176,30 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(5 * MINUTES),
         default: true,
         kind: Kind::Server(include_str!("../scenarios/headless-bots-sd.cfg")),
+    },
+    StageDef {
+        name: "headless-sd-objective",
+        description: "headless server, 12 bots plant the Search and Destroy bomb and the other team defuses it",
+        needs_install: false,
+        timeout: Duration::from_secs(5 * MINUTES),
+        default: true,
+        kind: Kind::Server(include_str!("../scenarios/headless-sd-objective.cfg")),
+    },
+    StageDef {
+        name: "headless-sab-objective",
+        description: "headless server, 16 bots plant a Sabotage bomb and defuse one",
+        needs_install: false,
+        timeout: Duration::from_secs(5 * MINUTES),
+        default: true,
+        kind: Kind::Server(include_str!("../scenarios/headless-sab-objective.cfg")),
+    },
+    StageDef {
+        name: "client-objective",
+        description: "the real client plays Search and Destroy: the zone's hint is drawn and the player plants the bomb holding +activate",
+        needs_install: false,
+        timeout: Duration::from_secs(6 * MINUTES),
+        default: false,
+        kind: Kind::Builtin(crate::stages::client_objective::run),
     },
     StageDef {
         name: "client-flythrough",

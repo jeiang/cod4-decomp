@@ -162,6 +162,8 @@ fn table() -> Vec<Field<PlayerState>> {
             kind: Bits(2),
         },
         int!(s, s.cursor_hint_ent_index, Bits(10)),
+        int!(s, s.cursor_hint, Bits(8)),
+        int!(s, s.cursor_hint_string, SBits(8)),
     ]
 }
 

@@ -63,6 +63,11 @@ pub struct Brain {
     stuck_events: u32,
     jump_until: i32,
     spawn_time: i32,
+    /// The objective trigger the bot is walking to, and the one it holds +activate on.
+    obj: Option<u16>,
+    using: Option<(u16, i32)>,
+    /// A trigger the bot gave up on (it did nothing for the bot) and until when.
+    gave_up: Option<(u16, i32)>,
 }
 
 fn xorshift(s: &mut u32) -> u32 {
@@ -126,6 +131,9 @@ impl Brain {
             stuck_events: 0,
             jump_until: 0,
             spawn_time: -1,
+            obj: None,
+            using: None,
+            gave_up: None,
         }
     }
 
@@ -137,7 +145,11 @@ impl Brain {
         };
         let Some(c) = g.client(n) else { return cmd };
         let delta = c.ps.delta_angles;
-        let alive = c.session == Session::Playing && c.ps.pm_type == sim::pm::PmType::Normal;
+        let alive = c.session == Session::Playing
+            && matches!(
+                c.ps.pm_type,
+                sim::pm::PmType::Normal | sim::pm::PmType::NormalLinked
+            );
         if !alive {
             // Waiting to respawn: tap use on alternate ticks so the script sees a press.
             if (time / 33) % 2 == 0 {
@@ -176,7 +188,13 @@ impl Brain {
         let mut sprint = false;
         let engaged = self.enemy.is_some() && time - self.enemy_seen < 400;
         let mut aim: Option<(f32, f32, f32)> = None; // pitch, yaw, distance
-        if let (Some(e), true) = (self.enemy, engaged)
+        // Standing in a use trigger the player's hint names: hold +activate, and stay on it
+        // once begun, as a planter must.
+        let holding =
+            (!engaged || self.using.is_some()) && self.hold_use(c.ps.cursor_hint_ent_index, time);
+        if holding {
+            cmd.buttons |= button::USE;
+        } else if let (Some(e), true) = (self.enemy, engaged)
             && let Some(te) = g.ent(e)
         {
             let h = te.maxs[2];
@@ -221,6 +239,15 @@ impl Brain {
             ];
         } else {
             self.navigate(g, sh, pos, time, &mut want_dir, &mut cmd, &mut sprint);
+            // The path ends at the node nearest the trigger; walk the rest of the way in.
+            if time < self.idle_until
+                && let Some(t) = self.obj
+                && let Some(mid) = g.use_center(t)
+            {
+                let d = [mid[0] - pos[0], mid[1] - pos[1]];
+                let len = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1.0);
+                want_dir = [d[0] / len, d[1] / len, 0.0];
+            }
         }
 
         // View.
@@ -397,8 +424,11 @@ impl Brain {
         // Head for where the enemy was last seen before roaming on.
         if self.path.is_empty() || time >= self.next_path {
             self.next_path = time + 1500;
-            if self.path.is_empty() || self.steer_arrived(&mesh, pos) {
-                self.pick_goal(g, &mesh, scratch, pos);
+            // A bot that is only roaming looks again for an objective now and then, so a
+            // trigger that just came on for its team (a planted bomb) draws it.
+            let reroll = self.obj.is_none() && frac(&mut self.rng) < 0.3;
+            if self.path.is_empty() || reroll || self.steer_arrived(&mesh, pos) {
+                self.pick_goal(g, &mesh, scratch, pos, time);
                 self.steer.reset();
             }
         }
@@ -409,7 +439,12 @@ impl Brain {
         let out = self.steer.update(&mesh, &self.path, pos);
         if out.arrived {
             self.path.clear();
-            self.idle_until = time + (frac(&mut self.rng) * 600.0) as i32;
+            self.idle_until = time
+                + if self.obj.is_some() {
+                    2500
+                } else {
+                    (frac(&mut self.rng) * 600.0) as i32
+                };
             return;
         }
         if out.stuck {
@@ -431,6 +466,32 @@ impl Brain {
         *sprint = true;
     }
 
+    /// Whether to keep +activate down: a use trigger is under the hint. A trigger that does
+    /// nothing for the bot within 9 s is given up for 20 s.
+    fn hold_use(&mut self, hint_ent: u16, time: i32) -> bool {
+        if hint_ent == sim::cm::ENTITYNUM_NONE
+            || self
+                .gave_up
+                .is_some_and(|(t, until)| t == hint_ent && time < until)
+        {
+            self.using = None;
+            return false;
+        }
+        let start = match self.using {
+            Some((t, s)) if t == hint_ent => s,
+            _ => time,
+        };
+        self.using = Some((hint_ent, start));
+        if time - start > 9000 {
+            self.gave_up = Some((hint_ent, time + 20000));
+            self.using = None;
+            self.obj = None;
+            self.path.clear();
+            return false;
+        }
+        true
+    }
+
     fn steer_arrived(&mut self, mesh: &NavMesh, pos: Vec3) -> bool {
         self.path.last().is_some_and(|l| {
             let p = mesh.node_pos(*l);
@@ -438,13 +499,39 @@ impl Brain {
         })
     }
 
-    fn pick_goal(&mut self, g: &Game, mesh: &NavMesh, scratch: &mut PathScratch, pos: Vec3) {
+    fn pick_goal(
+        &mut self,
+        g: &Game,
+        mesh: &NavMesh,
+        scratch: &mut PathScratch,
+        pos: Vec3,
+        time: i32,
+    ) {
         let Some(from) = mesh.nearest_node(pos) else {
             self.path.clear();
             return;
         };
+        let (objectives, n_use) = g.bot_objectives(self.num);
         for _ in 0..4 {
+            self.obj = None;
             let to = if let Some(p) = self.last_known.take() {
+                mesh.nearest_node(p)
+            } else if !objectives.is_empty() && frac(&mut self.rng) < 0.85 {
+                // Use triggers first: a team rushes the zones its carrier needs.
+                let span = if n_use > 0 && frac(&mut self.rng) < 0.8 {
+                    n_use
+                } else {
+                    objectives.len()
+                };
+                let i = xorshift(&mut self.rng) as usize % span;
+                let (t, p) = objectives[i];
+                if self
+                    .gave_up
+                    .is_some_and(|(g, until)| g == t && time < until)
+                {
+                    continue;
+                }
+                self.obj = Some(t);
                 mesh.nearest_node(p)
             } else if !g.nav_goals.is_empty() && frac(&mut self.rng) < 0.7 {
                 let i = xorshift(&mut self.rng) as usize % g.nav_goals.len();

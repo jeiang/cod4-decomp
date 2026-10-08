@@ -1668,6 +1668,11 @@ fn script_step(st: &mut State) -> bool {
             st.input.exec_line(arg);
             done(true, sc, String::new());
         }
+        // A line for the listen server's console, as typed there: `server=devtele human bombzone`.
+        "server" => {
+            listen::send(arg);
+            done(true, sc, String::new());
+        }
         // `vid_restart` as the graphics menu's Apply does it.
         "vidrestart" => {
             if let Some(sh) = st.shell.as_mut() {

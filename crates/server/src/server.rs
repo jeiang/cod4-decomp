@@ -64,6 +64,9 @@ impl TickSample {
     }
 }
 
+/// The statistics `expect` and `until` read.
+const STATS: &str = "kills|deaths|spawns|respawns|shots|hits|rounds|plants|defuses";
+
 /// Commands the console accepts, for `Console::has_command`.
 pub const COMMANDS: &[&str] = &[
     "set",
@@ -85,6 +88,8 @@ pub const COMMANDS: &[&str] = &[
     "killserver",
     "bots",
     "expect",
+    "until",
+    "devtele",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -164,6 +169,8 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_password", "", 0),
         ("g_speed", "190", 0),
         ("g_lagcomp", "1", 0),
+        ("g_useholdtime", "0", 0),
+        ("g_useholdspawndelay", "500", 0),
         ("g_gravity", "800", 0),
         ("g_knockback", "1000", 0),
         ("g_minGrenadeDamageSpeed", "400", CHEAT),
@@ -644,25 +651,57 @@ impl Server {
             "status" => self.status(),
             "expect" => {
                 let (Some(what), Some(min)) = (arg(1), arg(2)) else {
-                    return Err(
-                        "usage: expect <kills|deaths|spawns|respawns|shots|hits|rounds> <minimum>"
-                            .into(),
-                    );
+                    return Err(format!("usage: expect <{STATS}> <minimum>"));
                 };
-                let st = self.game.stats;
-                let have = match what {
-                    "kills" => st.kills,
-                    "deaths" => st.deaths,
-                    "spawns" => st.spawns,
-                    "respawns" => st.respawns,
-                    "shots" => st.shots,
-                    "hits" => st.hits,
-                    "rounds" => st.matches_ended,
-                    w => return Err(format!("expect: unknown statistic {w:?}")),
-                };
+                let have = self.stat(what)?;
                 let min = u64::try_from(cvar::parse_int(min)).unwrap_or(0);
                 if have < min {
                     return Err(format!("expect {what} {min}: only {have}"));
+                }
+            }
+            // `until <stat> <minimum> <seconds>`: runs the server, unpaced, until the statistic
+            // reaches the minimum; an error when it has not within the simulated time.
+            "until" => {
+                let (Some(what), Some(min), Some(secs)) = (arg(1), arg(2), arg(3)) else {
+                    return Err(format!("usage: until <{STATS}> <minimum> <seconds>"));
+                };
+                let min = u64::try_from(cvar::parse_int(min)).unwrap_or(0);
+                let limit =
+                    cvar::parse_int(secs).max(0) as u32 * 1000 / self.frame_ms.max(1) as u32;
+                let mut have = self.stat(what)?;
+                for _ in 0..limit / 15 {
+                    if have >= min {
+                        return Ok(());
+                    }
+                    self.run_frames(15);
+                    have = self.stat(what)?;
+                }
+                if have < min {
+                    return Err(format!("until {what} {min}: only {have} after {secs} s"));
+                }
+            }
+            // Test hook: `devtele <client|human> <x> <y> <z>` puts the player there, standing still;
+            // `devtele <client|human> <name>` puts it on the floor in the first live trigger whose
+            // targetname starts with `name` and that is on for the player's team. `human` is the first
+            // client that is not a bot.
+            "devtele" => {
+                let (Some(who), Some(first)) = (arg(1), arg(2)) else {
+                    return Err("usage: devtele <client|human> <x y z | name>".into());
+                };
+                let n = if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| n)
+                        .ok_or("devtele: no human is connected")?
+                } else {
+                    cvar::parse_int(who) as u16
+                };
+                match (arg(3), arg(4)) {
+                    (Some(y), Some(z)) => {
+                        self.game.teleport(n, [first, y, z].map(cvar::parse_float));
+                    }
+                    _ => self.game.teleport_to_named(n, first)?,
                 }
             }
             "bots" => {
@@ -1171,10 +1210,30 @@ impl Server {
     }
 
     /// Runs `n` frames back to back without waiting for the clock (tests, soak runs).
+    /// The value of the match statistic `what`, as `expect` names it.
+    fn stat(&self, what: &str) -> Result<u64, String> {
+        let st = self.game.stats;
+        Ok(match what {
+            "kills" => st.kills,
+            "deaths" => st.deaths,
+            "spawns" => st.spawns,
+            "respawns" => st.respawns,
+            "shots" => st.shots,
+            "hits" => st.hits,
+            "rounds" => st.matches_ended,
+            "plants" => st.plants,
+            "defuses" => st.defuses,
+            w => return Err(format!("unknown statistic {w:?}")),
+        })
+    }
+
     pub fn run_frames(&mut self, n: u32) {
         for _ in 0..n {
             self.svs_time += self.frame_ms;
-            self.run_frame();
+            let sample = self.run_frame();
+            if let Some(h) = self.on_tick.as_mut() {
+                h(&sample);
+            }
             if let Some(r) = self.run.as_mut() {
                 r.vm.set_loading(false);
             }
