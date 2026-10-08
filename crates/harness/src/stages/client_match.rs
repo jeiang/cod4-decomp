@@ -211,6 +211,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if num(fx, &["played", "bullet_impact"]) >= 1.0 && num(fx, &["quads_max"]) < 1.0 {
         failures.push("impact effects played but no sprite was ever drawn".into());
     }
+    if fx["look_missing"].as_array().is_some_and(|f| !f.is_empty()) {
+        failures.push(format!(
+            "vision or shock files the scripts named are missing: {}",
+            fx["look_missing"]
+        ));
+    }
     let m = &mut report.metrics;
     m.insert("sound.impacts_heard".into(), heard(&["bulletimpact"]));
     m.insert("fx.ragdolls".into(), num(fx, &["ragdolls"]));

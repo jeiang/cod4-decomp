@@ -14,6 +14,7 @@ mod hudstate;
 mod input;
 #[cfg_attr(target_arch = "wasm32", path = "listen_web.rs")]
 mod listen;
+mod look;
 mod models;
 mod netplay;
 mod ownerdraw;

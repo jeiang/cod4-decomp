@@ -122,8 +122,8 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("getclanname", r(|_, _, _, _| Ok(Value::str("")))),
     ("getstat", r(get_stat)),
     ("setstat", r(set_stat)),
-    ("shellshock", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("stopshellshock", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("shellshock", r(shell_shock)),
+    ("stopshellshock", r(stop_shell_shock)),
     ("viewkick", r(|_, _, _, _| Ok(Value::Undefined))),
     ("vibrate", r(|_, _, _, _| Ok(Value::Undefined))),
     ("setdepthoffield", r(|_, _, _, _| Ok(Value::Undefined))),
@@ -311,6 +311,30 @@ fn set_move_speed_scale(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
 }
 
 /// Chat-area print to one client: bots hear nothing; the console shows nothing extra.
+/// `shellshock(name, seconds)`: the player's screen and ears take the named shell shock.
+fn shell_shock(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client_of(g, e)?;
+    let name = a.string(0)?.to_owned();
+    let ms = (a.float(1)? * 1000.0).round() as i32;
+    g.send(
+        crate::ui::Dest::Client(n),
+        net::ui::ServerCmd::ShellShock { name, ms },
+    );
+    Ok(Value::Undefined)
+}
+
+fn stop_shell_shock(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
+    let n = client_of(g, e)?;
+    g.send(
+        crate::ui::Dest::Client(n),
+        net::ui::ServerCmd::ShellShock {
+            name: String::new(),
+            ms: 0,
+        },
+    );
+    Ok(Value::Undefined)
+}
+
 fn get_guid(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client_of(g, e)?;
     Ok(Value::Int(1_000_000 + i32::from(n)))

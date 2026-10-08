@@ -13,6 +13,7 @@ mod hud;
 use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
+use crate::look::{Look, LookOut};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::Props;
 use crate::ragdoll::Ragdoll;
@@ -66,6 +67,8 @@ pub struct NetFrame {
         reason = "read by the interface once it has server commands to act on"
     )]
     pub commands: Vec<String>,
+    /// Vision set and shell shock for the picture.
+    pub look: LookOut,
 }
 
 struct Remote {
@@ -138,6 +141,7 @@ pub struct NetPlay {
     server_addr: String,
     effects: Effects,
     props: Props,
+    look: Look,
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
     /// The server announced a level the app has not acted on yet.
@@ -191,6 +195,7 @@ impl NetPlay {
                     .clipmap()
                     .map_or(&[][..], |c| &c.dyn_entities[..]),
             ),
+            look: Look::new((map.art.glow, map.art.film)),
             effects: Effects::new(&lib.content, world),
             lib,
             events: Events::default(),
@@ -363,6 +368,7 @@ impl NetPlay {
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.view_model(dt, &ps, ps.origin));
             let (events, commands) = self.take_events(&snap);
+            let look = self.look.frame(st);
             return Some(NetFrame {
                 origin: eye,
                 yaw: ps.viewangles[1].to_radians(),
@@ -372,6 +378,7 @@ impl NetPlay {
                 sounds: Vec::new(),
                 events,
                 commands,
+                look,
             });
         }
         self.boxes.sync(&snap);
@@ -417,6 +424,7 @@ impl NetPlay {
         self.hear(dt, eye, &ps, &snap);
 
         let (events, commands) = self.take_events(&snap);
+        let look = self.look.frame(st);
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         for e in &events {
@@ -469,18 +477,30 @@ impl NetPlay {
         models.extend(drawn.models);
         Some(NetFrame {
             origin: eye,
-            yaw,
-            pitch,
+            yaw: yaw + look.kick[1].to_radians(),
+            pitch: pitch + look.kick[0].to_radians(),
             models,
             sounds: self.effects.take_sounds(),
             meshes: drawn.meshes,
             events,
             commands,
+            look,
         })
     }
 
     /// The events new in `snap` and the server commands nothing here consumed.
     fn take_events(&mut self, snap: &net::Snapshot) -> (Vec<ClientEvent>, Vec<String>) {
+        let now = snap.server_time;
+        let (look, content) = (&mut self.look, &self.lib.content);
+        let file = |n: &str| {
+            content.rawfile(n).map(|b| {
+                let end = b.iter().position(|&x| x == 0).unwrap_or(b.len());
+                String::from_utf8_lossy(&b[..end]).into_owned()
+            })
+        };
+        self.net.commands.retain(|c| {
+            !net::ui::ServerCmd::parse(c).is_some_and(|c| look.command(&c, now, &file))
+        });
         let commands = self.events.take_commands(&mut self.net.commands);
         let events = self.events.scan(snap);
         for e in &events {
@@ -757,6 +777,10 @@ impl NetPlay {
                 "quads_max": self.c.fx_quads_max,
                 "decals_max": self.c.fx_decals_max,
                 "ragdolls": self.c.ragdolls,
+                "vision": self.look.naked,
+                "vision_night": self.look.night,
+                "look_missing": self.look.missing,
+                "shocks": self.look.shocks,
                 "props": self.props.len(),
                 "props_woken": self.props.woken,
                 "live_elems_max": self.c.fx_live_max,

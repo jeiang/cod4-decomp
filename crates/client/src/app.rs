@@ -828,6 +828,11 @@ impl Viewer {
                 if let Some(r) = st.renderer.as_mut() {
                     r.dynamic_models = nf.models;
                     r.dynamic_meshes = nf.meshes;
+                    if let Some((glow, film)) = nf.look.vision {
+                        (r.post.glow, r.post.film) = (glow, film);
+                    }
+                    r.post.shell_shock = nf.look.shell_shock;
+                    r.post.save_screen |= nf.look.save_screen;
                 }
             }
         } else if self.cli.flythrough {
