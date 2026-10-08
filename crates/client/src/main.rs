@@ -67,6 +67,7 @@ usage: cod4e [options]
   --fx-selftest          play effects on the real content without a window: an explosion draws and ends, an impact leaves a decal, a shot flashes, the vision and shock files work, then exit (harness stage)
   --input-selftest       check key binds, mouse look and the config file without a window, then exit (harness stage)
   --listen               play a team deathmatch against bots on a server started inside this process
+  --gametype <name>      gametype of the --listen server (war, dm, dom, koth, sab, sd; default war with no limits)
   --bots <n>             bots on the listen server (default 9)
   --connect <host:port>  play on a server (see cod4e-server)
   --name <name>          player name on the server
@@ -112,6 +113,7 @@ pub struct Cli {
     /// Play on a server started inside this process.
     pub listen: bool,
     pub bots: usize,
+    pub gametype: Option<String>,
     pub name: String,
     /// A scripted player instead of the keyboard (harness): walks, aims at and shoots enemies for `--duration`.
     pub autoplay: bool,
@@ -171,6 +173,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         connect: None,
         listen: false,
         bots: 9,
+        gametype: None,
         name: "player".into(),
         autoplay: false,
         fx_demo: None,
@@ -186,6 +189,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         match a.as_str() {
             "--install" => c.install = val(a)?.into(),
             "--map" => c.map = val(a)?,
+            "--gametype" => c.gametype = Some(val(a)?),
             "--size" => {
                 let v = val(a)?;
                 let (w, h) = v.split_once('x').ok_or("--size takes WxH")?;

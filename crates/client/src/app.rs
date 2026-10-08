@@ -505,7 +505,7 @@ impl Viewer {
                         listen::Config {
                             map: self.cli.map.clone(),
                             bots: self.cli.bots,
-                            gametype: None,
+                            gametype: self.cli.gametype.clone(),
                             rotation: None,
                             port: 0,
                             dvars: Vec::new(),
