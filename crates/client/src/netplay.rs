@@ -8,6 +8,8 @@
 //! [`net::view::INTERP_DELAY_MS`] behind the server clock between the two snapshots around that moment, which is also
 //! the moment the server rewinds them to when it judges this client's shots.
 
+mod hud;
+
 use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
 use crate::models::{Library, Player, PlayerModelSet, Team};
@@ -104,6 +106,8 @@ pub struct NetPlay {
     /// Events for the menu runtime (a person's menus drain them; autoplay answers them itself).
     ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
+    /// The state the HUD shows (predicted, or the followed player's) and the view yaw in degrees, from the last frame.
+    hud_view: Option<(PlayerState, f32)>,
     sound: ClientSound,
     events: Events,
 }
@@ -142,6 +146,7 @@ impl NetPlay {
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
+            hud_view: None,
             sound,
             events: Events::default(),
         })
@@ -219,6 +224,7 @@ impl NetPlay {
                 ps.origin[2] + ps.view_height_current,
             );
             self.last_eye = Some(eye);
+            self.hud_view = Some((ps.clone(), ps.viewangles[1]));
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.view_model(dt, &ps, ps.origin, &snap));
             let (events, commands) = self.take_events(&snap);
@@ -264,7 +270,13 @@ impl NetPlay {
         }
         self.c.end = feet;
         let eye = Vec3::new(feet[0], feet[1], feet[2] + ps.view_height_current);
+        let yaw_deg = if dead {
+            ps.viewangles[1]
+        } else {
+            self.angles[1]
+        };
         self.last_eye = Some(eye);
+        self.hud_view = Some((ps.clone(), yaw_deg));
         self.hear(dt, eye, &ps, &snap);
 
         let (events, commands) = self.take_events(&snap);

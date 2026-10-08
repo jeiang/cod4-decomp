@@ -649,6 +649,8 @@ impl Game {
         let health = self.ents[usize::from(n)].as_ref().map_or(0, |e| e.health);
         let linked = self.is_linked(n);
         let c = &mut self.clients[usize::from(n)];
+        c.ps.health = health;
+        c.ps.max_health = c.max_health;
         c.ps.pm_type = match c.session {
             Session::Intermission => PmType::Intermission,
             Session::Spectator => PmType::Spectator,

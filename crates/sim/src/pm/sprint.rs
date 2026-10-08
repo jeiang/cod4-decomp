@@ -5,30 +5,33 @@
 //! needs `player_sprintMinTime` seconds left; the budget refills while not sprinting.
 
 use super::ads::exit_ads;
-use super::state::{PERK_SPRINT, PmType, button, pmf, weapon_state as ws};
-use super::{PLAYER_MAXS, PLAYER_MINS, Pmove};
+use super::state::{PERK_SPRINT, PlayerState, PmType, button, pmf, weapon_state as ws};
+use super::{PLAYER_MAXS, PLAYER_MINS, Params, Pmove};
 use crate::cm::Collide;
 use crate::contents::MASK_IGNORE_CHARACTERS;
 
 /// `BG_GetMaxSprintTime`: the sprint budget in ms, capped at 0x3FFF.
-pub(super) fn max_sprint_time(pm: &Pmove<'_>) -> i32 {
-    let mut t = pm.weapon.sprint_duration_scale * (pm.params.player_sprint_time * 1000.0);
-    if pm.ps.perks & PERK_SPRINT != 0 {
-        t *= pm.params.perk_sprint_multiplier;
+pub fn max_sprint_ms(params: &Params, duration_scale: f32, perks: u32) -> i32 {
+    let mut t = duration_scale * (params.player_sprint_time * 1000.0);
+    if perks & PERK_SPRINT != 0 {
+        t *= params.perk_sprint_multiplier;
     }
     (t as i32).min(0x3FFF)
 }
 
-/// `PM_GetSprintLeft`: the remaining budget in ms at `time`.
-pub(super) fn sprint_left(pm: &Pmove<'_>, time: i32) -> i32 {
-    let max = max_sprint_time(pm);
-    let s = &pm.ps.sprint_state;
+fn max_sprint_time(pm: &Pmove<'_>) -> i32 {
+    max_sprint_ms(pm.params, pm.weapon.sprint_duration_scale, pm.ps.perks)
+}
+
+/// `PM_GetSprintLeft`: the remaining budget in ms at `time`, given the budget `max`.
+pub fn sprint_left_ms(ps: &PlayerState, params: &Params, time: i32, max: i32) -> i32 {
+    let s = &ps.sprint_state;
     let left = if s.last_sprint_start != 0 {
         if s.last_sprint_start <= s.last_sprint_end {
             let spent = s.last_sprint_end - s.last_sprint_start;
             let base = time + s.sprint_start_max_length - spent - s.last_sprint_end;
             if s.sprint_delay {
-                base - (pm.params.player_sprint_recharge_pause * 1000.0) as i32
+                base - (params.player_sprint_recharge_pause * 1000.0) as i32
             } else {
                 base
             }
@@ -39,6 +42,10 @@ pub(super) fn sprint_left(pm: &Pmove<'_>, time: i32) -> i32 {
         max
     };
     left.clamp(0, max)
+}
+
+fn sprint_left(pm: &Pmove<'_>, time: i32) -> i32 {
+    sprint_left_ms(&pm.ps, pm.params, time, max_sprint_time(pm))
 }
 
 /// `PM_IsSprinting`.

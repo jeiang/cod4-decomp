@@ -225,7 +225,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
         r(|g, _, _| Ok(Value::Float(g.level.north_yaw))),
     ),
     ("setmapcenter", r(|g, _, a| store_vec(g, a, "mapcenter"))),
-    ("setminimap", r(|_, _, _| Ok(Value::Undefined))),
+    ("setminimap", r(set_minimap)),
     ("newhudelem", r(hud::new_hud_elem)),
     ("newclienthudelem", r(hud::new_client_hud_elem)),
     ("newteamhudelem", r(hud::new_team_hud_elem)),
@@ -234,7 +234,11 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("setteamscore", r(set_team_score)),
     (
         "setgameendtime",
-        r(|g, _, a| store_int(g, a, "gameendtime")),
+        r(|g, _, a| {
+            let t = a.int(0)?;
+            g.set_configstring(net::ui::cs::GAMEENDTIME, &t.to_string());
+            Ok(Value::Undefined)
+        }),
     ),
     ("setclientnamemode", r(|_, _, _| Ok(Value::Undefined))),
     ("updateclientnames", r(|_, _, _| Ok(Value::Undefined))),
@@ -1024,9 +1028,20 @@ fn store_vec(g: &mut Game, a: Args, key: &str) -> R {
     Ok(Value::Undefined)
 }
 
-fn store_int(g: &mut Game, a: Args, key: &str) -> R {
-    g.configstrings
-        .insert(config_key(key), a.int(0)?.to_string());
+/// `setMiniMap(material, upperLeftX, upperLeftY, lowerRightX, lowerRightY)`: the clients draw the compass from it.
+fn set_minimap(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if a.len() != 5 {
+        return Err("Expecting 5 arguments".into());
+    }
+    let text = format!(
+        "\"{}\" {} {} {} {}",
+        a.string(0)?,
+        a.float(1)?,
+        a.float(2)?,
+        a.float(3)?,
+        a.float(4)?
+    );
+    g.set_configstring(net::ui::cs::MINIMAP, &text);
     Ok(Value::Undefined)
 }
 
