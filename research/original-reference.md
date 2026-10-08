@@ -107,9 +107,21 @@ Escape toggles: in the game it opens this menu; in this menu it closes it (back 
 - In-game the console treats lines as chat unless they are known commands typed with the console already open.
   Bare dvar names or `scr_testclients 6` are sent as chat ("<name>: text" in the top-left chat feed, small white
   text starting x~12,y~230).
-- `scr_testclients N` (set before `devmap`, at run time, with `developer 1`, `sv_cheats 1`) did **not** add bots
-  in this 1.7 retail install, and `addtestclient` is not a console command. No bots were obtained this way (see
-  open questions).
+- Bots: `scr_testclients N` only works when `developer 1`, `developer_script 1`, `sv_cheats 1` are set on the
+  command line BEFORE the map loads (`+set developer 1 +set developer_script 1 +set sv_cheats 1 +set scr_testclients 5
+  +set sv_botsPressAttackBtn 1 +devmap mp_backlot`). Setting them from the console afterwards adds nothing.
+  Bots appear as bot0..botN, ping column shows 999 (team modes) or -1 (free-for-all), a green "C" icon before
+  the name, team games split them across both teams. In free-for-all rows are plain olive bars (no team headers).
+- Bots stand still and did not kill the player in ~10 minutes of waiting at the spawn, so no kill/killcam was captured.
+- Console typing: `grave` opens the small one-line console; Shift+grave opens the full-screen console. Console
+  commands typed with a leading `/` are treated as chat when the console is closed; type them without `/`.
+- The Key Code dialog (Options > Multiplayer Options > Enter Key Code) has four boxes plus a dash box, buttons
+  Verify / Cancel (Cancel becomes Close after verify), and says "Key code appears to be valid." on success. The
+  user's key was entered there only (stored by the game in the Wine prefix, not in this repo).
+- A second client joining the first (`connect 127.0.0.1`) first showed "Invalid Server." (lan-only server) and, when
+  the key was valid, "An error occurred while reading the stats data. Your stats have been reset." (same stats-file
+  complaint as above); the client then sat at "Awaiting connection". Two windows overlapping at the same geometry made
+  focus/typing unreliable; not resolved.
 - Two cursors can be on screen at once in `grim -c` shots: the game's own arrow (grey, ~25 px) and the OS
   pointer (a small blue-grey arrow/hand drawn by the compositor) when the OS pointer is not hidden.
 
@@ -137,3 +149,27 @@ Positions in 1920x1060 px.
   at x~415..1500: team row "Marines  ( 1 )" with column headers Score, Kills, Assists, Deaths, Ping
   (x 985, 1120, 1228, 1335, 1448), player row with a rank icon + level, highlighted bar; then "OpFor ( 0 )". Bottom
   left server name, bottom right "Listen Server".
+
+## Main-menu Options (found while looking for the key dialog)
+Title "Options" (gold). Right-aligned list (right edge x~720 of 1920): Graphics..., Texture Settings..., Sound...,
+Voice Chat..., Game Options..., Multiplayer Options..., Optimal System Settings; Back at the bottom. Hovering
+"Multiplayer Options..." shows a panel to the right: header "Multiplayer Options...", rows PunkBuster Yes, Allow
+Downloading Yes, (gap) Player Name <name>, Enter Key Code.
+
+## Scoreboard (hold Tab)
+- Team game: top strip (own emblem + score at left, enemy emblem + score, centre text "Team Deathmatch" or
+  "Tied with 0 of 750 points.", timer right); body x 415..1500 (1920 wide): team header "Marines ( 4 )" with columns Score,
+  Kills, Assists, Deaths, Ping (right-aligned at x~1040, 1150, 1260, 1340, 1475), rank chevron+level before each
+  name, own row gold, then "OpFor ( 2 )". Footer: server name left, "Listen Server" right.
+- Free-for-all: strip with one emblem + score, centre "Free-for-all"; a single list headed "( 6 )" with no team header.
+
+## End of round
+After the time limit the round ends with a "Game Summary" dialog (title gold, Rank: chevron + "Private First Class",
+"XP Required:" bar and 30, "Next Rank: ... I", Score / Challenge Completed / Match Bonus XP lines, "Total XP Earned:",
+a ">>>" button). Clicking it returns to Choose Team on the next map (rotation went from mp_crash to mp_backlot).
+Loading screen for a free-for-all map showed "Free-for-all / Bloc / Setting up game..." and an INTEL tip box.
+
+## Open items not captured
+- (e) kill/connect console messages, radar/airstrike notices, grenade-key labels in use: no kill obtained.
+- (f) killcam: not captured (needs a kill). The host is otherwise ready; see the h.js helper in scripts/original.
+- Create a Class and unlock-gated screens: Create a Class stays greyed at rank 1 with the reset stats file.
