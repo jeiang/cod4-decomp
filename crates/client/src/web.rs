@@ -163,6 +163,23 @@ pub fn overlay(values: &Value) {
     page_overlay(&values.to_string());
 }
 
+/// Whether the page holds the pointer lock on the canvas.
+pub fn pointer_locked() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .is_some_and(|d| d.pointer_lock_element().is_some())
+}
+
+/// Whether the player touched the page in the last few seconds (transient user activation): what the browser wants
+/// before it grants a pointer lock or fullscreen.
+pub fn user_active() -> bool {
+    web_sys::window()
+        .and_then(|w| js_sys::Reflect::get(&w.navigator(), &"userActivation".into()).ok())
+        .and_then(|a| js_sys::Reflect::get(&a, &"isActive".into()).ok())
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+}
+
 /// Wasm linear memory in bytes. It only grows, so this is the peak.
 pub fn memory_bytes() -> u64 {
     (core::arch::wasm32::memory_size::<0>() * 65536) as u64

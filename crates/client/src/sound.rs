@@ -20,10 +20,14 @@ use sim::weapon::damage::SURFACE_TYPE_NAMES;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 enum State {
+    #[cfg_attr(
+        target_arch = "wasm32",
+        expect(dead_code, reason = "the browser loads in place")
+    )]
     Loading(Receiver<Result<Bank, String>>),
     Ready(Box<Sound>),
     Failed(String),
@@ -55,17 +59,7 @@ pub struct Who<'a> {
 impl ClientSound {
     /// Starts loading the sound tables of `map`. `device = false` mixes without a sound card.
     pub fn start(install: &Path, map: &str, device: bool) -> Self {
-        let (install, map) = (install.to_owned(), map.to_owned());
-        let (tx, rx) = channel();
-        let spawned = std::thread::Builder::new()
-            .name("sound-load".into())
-            .spawn(move || {
-                let _ = tx.send(load(&install, &map));
-            });
-        let state = match spawned {
-            Ok(_) => State::Loading(rx),
-            Err(e) => State::Failed(e.to_string()),
-        };
+        let state = Self::begin(install, map, device);
         Self {
             state,
             device,
@@ -74,6 +68,52 @@ impl ClientSound {
             dropped: 0,
             pending: Vec::new(),
             eye: [0.0; 3],
+        }
+    }
+
+    /// The browser has no threads to spare: the tables load here and now, once per map.
+    #[cfg(target_arch = "wasm32")]
+    fn begin(install: &Path, map: &str, device: bool) -> State {
+        match load(install, map) {
+            Ok(bank) => State::Ready(Box::new(Sound::new(bank, device))),
+            Err(e) => State::Failed(e),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn begin(install: &Path, map: &str, _: bool) -> State {
+        let (install, map) = (install.to_owned(), map.to_owned());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("sound-load".into())
+            .spawn(move || {
+                let _ = tx.send(load(&install, &map));
+            });
+        match spawned {
+            Ok(_) => State::Loading(rx),
+            Err(e) => State::Failed(e.to_string()),
+        }
+    }
+
+    /// One line for the page's overlay: the browser output's counters, or why there are none.
+    #[cfg(target_arch = "wasm32")]
+    pub fn overlay_line(&self) -> String {
+        match &self.state {
+            State::Loading(_) => "loading".into(),
+            State::Failed(e) => format!("failed: {e}"),
+            State::Ready(s) => match s.output_stats() {
+                None => format!("no device ({})", s.device_note.as_deref().unwrap_or("?")),
+                Some(o) => format!(
+                    "{} frames_played {} underruns {} buffered {} peak {:.2} {}{}",
+                    if o.running { "running" } else { "suspended" },
+                    o.frames_played,
+                    o.underruns,
+                    o.buffered_frames,
+                    o.peak,
+                    if o.shared { "shared" } else { "posted" },
+                    o.error.map(|e| format!(" error: {e}")).unwrap_or_default(),
+                ),
+            },
         }
     }
 
@@ -97,6 +137,8 @@ impl ClientSound {
         self.eye = eye;
         let Some(s) = self.ready() else { return };
         s.set_listener(eye, yaw);
+        #[cfg(target_arch = "wasm32")]
+        s.pump();
         s.tick(Duration::from_secs_f32(dt.clamp(0.0, 0.25)));
         for l in std::mem::take(&mut self.pending) {
             self.run(&l);
