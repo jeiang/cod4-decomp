@@ -9,12 +9,15 @@
 use crate::listen::{self, Listen};
 use crate::models::{Library, Team};
 use assets::vfs::Vfs;
+#[cfg(not(target_arch = "wasm32"))]
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, Settings, TextureCache};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, mpsc};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
 use std::time::Instant;
 
 /// Where the session's server comes from.
@@ -33,6 +36,7 @@ pub struct Request {
     pub map: String,
     pub server: Server,
     pub settings: Settings,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser warms from its frames
     pub format: wgpu::TextureFormat,
 }
 
@@ -52,9 +56,21 @@ pub struct Load {
     pub map: String,
     /// A level change of a running session ([`Server::Keep`]), not the start of one.
     pub level_change: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     rx: mpsc::Receiver<Result<Loaded, String>>,
     state: Arc<Progress>,
     cancel: Arc<AtomicBool>,
+    #[cfg(target_arch = "wasm32")]
+    steps: Steps,
+}
+
+/// Where the browser's load is: each [`Load::poll`] does the next piece.
+#[cfg(target_arch = "wasm32")]
+enum Steps {
+    Start(Arc<Request>, Arc<Gpu>),
+    Decoded(Box<Work>),
+    Built(Box<Work>),
+    Finished,
 }
 
 /// Progress as a fraction in millionths, and what is being done.
@@ -81,11 +97,13 @@ impl Progress {
 
 impl Load {
     pub fn start(req: Request, gpu: Arc<Gpu>) -> Load {
+        #[cfg(not(target_arch = "wasm32"))]
         let (tx, rx) = mpsc::channel();
         let state = Arc::new(Progress::default());
         let cancel = Arc::new(AtomicBool::new(false));
         let map = req.map.clone();
         let level_change = matches!(req.server, Server::Keep);
+        let req = Arc::new(req);
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (st, c) = (state.clone(), cancel.clone());
@@ -93,31 +111,56 @@ impl Load {
             let spawned = std::thread::Builder::new()
                 .name("map-load".into())
                 .spawn(move || {
-                    let _ = tx.send(run(&req, &gpu, &st, &c));
+                    let _ = tx.send(run(req, gpu, &st, &c));
                 });
             if let Err(e) = spawned {
                 let _ = failed.send(Err(e.to_string()));
             }
         }
-        // The browser has no threads: the load runs here, as it always did, and is ready at the first poll.
-        #[cfg(target_arch = "wasm32")]
-        let _ = tx.send(run(&req, &gpu, &state, &cancel));
+        // The browser has no threads: the pieces run one per poll, the page repainting in between.
         Load {
             map,
             level_change,
+            #[cfg(not(target_arch = "wasm32"))]
             rx,
             state,
             cancel,
+            #[cfg(target_arch = "wasm32")]
+            steps: Steps::Start(req, gpu),
         }
     }
 
     /// The result, once the load has finished.
     pub fn poll(&mut self) -> Option<Result<Loaded, String>> {
+        #[cfg(target_arch = "wasm32")]
+        return self.step();
+        #[cfg(not(target_arch = "wasm32"))]
         match self.rx.try_recv() {
             Ok(r) => Some(r),
             Err(mpsc::TryRecvError::Empty) => None,
             Err(e) => Some(Err(e.to_string())),
         }
+    }
+
+    /// Does the next piece of the browser's load.
+    #[cfg(target_arch = "wasm32")]
+    fn step(&mut self) -> Option<Result<Loaded, String>> {
+        let state = &*self.state;
+        let next = std::mem::replace(&mut self.steps, Steps::Finished);
+        let r = match next {
+            Steps::Start(req, gpu) => Work::new(req, gpu).and_then(|mut w| {
+                w.decode(state)?;
+                self.steps = Steps::Decoded(Box::new(w));
+                Ok(None)
+            }),
+            Steps::Decoded(mut w) => w.build_world(state).map(|()| {
+                self.steps = Steps::Built(w);
+                None
+            }),
+            Steps::Built(mut w) => w.add_models().and_then(|()| w.finish(state)).map(Some),
+            Steps::Finished => return None,
+        };
+        r.transpose()
     }
 
     pub fn progress(&self) -> f32 {
@@ -137,13 +180,137 @@ impl Drop for Load {
     }
 }
 
+/// A load in pieces: native runs them in a row on the loader thread, the browser one per [`Load::poll`] so the page
+/// repaints (the loading screen) between them.
+struct Work {
+    req: Arc<Request>,
+    gpu: Arc<Gpu>,
+    started: Instant,
+    booting: Option<listen::Booting>,
+    data: Option<MapData>,
+    library: Option<Library>,
+    renderer: Option<Renderer>,
+}
+
+impl Work {
+    fn new(req: Arc<Request>, gpu: Arc<Gpu>) -> Result<Self, String> {
+        let booting = match &req.server {
+            Server::Boot(cfg) => Some(listen::begin(&req.install, cfg.clone())?),
+            _ => None,
+        };
+        Ok(Work {
+            req,
+            gpu,
+            started: Instant::now(),
+            booting,
+            data: None,
+            library: None,
+            renderer: None,
+        })
+    }
+
+    /// The map zone and the client's content decode (side by side, where there are threads).
+    fn decode(&mut self, progress: &Progress) -> Result<(), String> {
+        let (req, map) = (&*self.req, &self.req.map);
+        progress.set(0, 0.0);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (data, library) = std::thread::scope(|s| {
+            let lib = s.spawn(|| Library::load(&req.install, map));
+            let data =
+                MapData::load(&req.install, map).map_err(|e| format!("cannot load {map}: {e}"));
+            (
+                data,
+                lib.join()
+                    .unwrap_or_else(|_| Err("content decode panicked".into())),
+            )
+        });
+        #[cfg(target_arch = "wasm32")]
+        let (data, library) = (
+            MapData::load(&req.install, map).map_err(|e| format!("cannot load {map}: {e}")),
+            Library::load(&req.install, map),
+        );
+        self.data = Some(data?);
+        self.library = Some(library?);
+        progress.set(1, 0.15);
+        Ok(())
+    }
+
+    /// The scene (uploads) and the renderer.
+    fn build_world(&mut self, progress: &Progress) -> Result<(), String> {
+        let data = self.data.as_ref().ok_or("not decoded")?;
+        let vfs = Vfs::open_stock(&self.req.install, 0)
+            .map_err(|e| format!("cannot open the install: {e}"))?;
+        let scene = Scene::new(&self.gpu, data);
+        let mut renderer = Renderer::new(
+            self.gpu.clone(),
+            scene,
+            data,
+            TextureCache::new(Some(vfs), 0),
+        );
+        renderer.settings = self.req.settings;
+        self.renderer = Some(renderer);
+        progress.set(2, 0.25);
+        Ok(())
+    }
+
+    /// What a match draws that the map does not hold: every weapon's gun, hands and world model and the players get
+    /// their pipelines too.
+    fn add_models(&mut self) -> Result<(), String> {
+        let library = self.library.as_ref().ok_or("not decoded")?;
+        let renderer = self.renderer.as_mut().ok_or("not built")?;
+        let mut models = Vec::new();
+        for w in library.content.weapons() {
+            models.extend(w.gun_models.iter().flatten().cloned());
+            models.extend(w.world_models.iter().flatten().cloned());
+            models.extend(w.hand_model.clone());
+        }
+        for team in [Team::Allies, Team::Axis] {
+            if let Some(set) = library.team_models(team) {
+                let names = [Some(&set.body), set.head.as_ref()];
+                models.extend(
+                    names
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|n| library.content.model(n).cloned()),
+                );
+            }
+        }
+        for name in library.content.model_names("viewhands_") {
+            models.extend(library.content.model(name).cloned());
+        }
+        renderer.warm_models(&models);
+        Ok(())
+    }
+
+    /// Waits for the listen server and hands everything over.
+    fn finish(self, progress: &Progress) -> Result<Loaded, String> {
+        progress.set(3, 0.9);
+        let server = match (&self.req.server, self.booting) {
+            (Server::Join(addr), _) => Some((*addr, None)),
+            (_, Some(b)) => {
+                let l = b.wait()?;
+                Some((l.addr, Some(l)))
+            }
+            _ => None,
+        };
+        progress.set(3, 1.0);
+        Ok(Loaded {
+            data: self.data.ok_or("not decoded")?,
+            renderer: self.renderer.ok_or("not built")?,
+            library: self.library.ok_or("not decoded")?,
+            server,
+            ms: self.started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn run(
-    req: &Request,
-    gpu: &Arc<Gpu>,
+    req: Arc<Request>,
+    gpu: Arc<Gpu>,
     progress: &Progress,
     cancel: &AtomicBool,
 ) -> Result<Loaded, String> {
-    let started = Instant::now();
     let check = || {
         if cancel.load(Ordering::Relaxed) {
             Err("cancelled".to_owned())
@@ -151,99 +318,38 @@ fn run(
             Ok(())
         }
     };
-    let map = &req.map;
-    let booting = match &req.server {
-        Server::Boot(cfg) => Some(listen::begin(&req.install, cfg.clone())?),
-        _ => None,
-    };
-    progress.set(0, 0.0);
-    // The map zone and the client's content decode side by side.
-    #[cfg(not(target_arch = "wasm32"))]
-    let (data, library) = std::thread::scope(|s| {
-        let lib = s.spawn(|| Library::load(&req.install, map));
-        let data = MapData::load(&req.install, map).map_err(|e| format!("cannot load {map}: {e}"));
-        (
-            data,
-            lib.join()
-                .unwrap_or_else(|_| Err("content decode panicked".into())),
-        )
-    });
-    #[cfg(target_arch = "wasm32")]
-    let (data, library) = (
-        MapData::load(&req.install, map).map_err(|e| format!("cannot load {map}: {e}")),
-        Library::load(&req.install, map),
-    );
-    let (data, library) = (data?, library?);
-    #[cfg(not(target_arch = "wasm32"))]
-    let mut library = library;
+    let mut w = Work::new(req.clone(), gpu.clone())?;
+    w.decode(progress)?;
     check()?;
-    progress.set(1, 0.15);
-    let vfs =
-        Vfs::open_stock(&req.install, 0).map_err(|e| format!("cannot open the install: {e}"))?;
-    let scene = Scene::new(gpu, &data);
-    let mut renderer = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
-    renderer.settings = req.settings;
-    // What a match draws that the map does not hold: every weapon's gun, hands and world model and the players.
-    let mut models = Vec::new();
-    for w in library.content.weapons() {
-        models.extend(w.gun_models.iter().flatten().cloned());
-        models.extend(w.world_models.iter().flatten().cloned());
-        models.extend(w.hand_model.clone());
-    }
-    for team in [Team::Allies, Team::Axis] {
-        if let Some(set) = library.team_models(team) {
-            let names = [Some(&set.body), set.head.as_ref()];
-            models.extend(
-                names
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|n| library.content.model(n).cloned()),
-            );
-        }
-    }
-    for name in library.content.model_names("viewhands_") {
-        models.extend(library.content.model(name).cloned());
-    }
-    renderer.warm_models(&models);
+    w.build_world(progress)?;
+    w.add_models()?;
     check()?;
-    progress.set(2, 0.25);
-    // The browser builds its pipelines a few milliseconds per frame instead, see the client's `WARM_BUDGET`.
-    #[cfg(not(target_arch = "wasm32"))]
+    let renderer = w.renderer.as_mut().ok_or("not built")?;
     renderer.warm_progress(req.format, &|done, total| {
         progress.set(2, 0.25 + 0.65 * done as f32 / total.max(1) as f32);
     });
     check()?;
     progress.set(3, 0.88);
-    // Not in the browser, where it would stall the page for the frame it takes and its pipelines come over frames.
-    #[cfg(not(target_arch = "wasm32"))]
-    draw_once(gpu, &mut renderer, &mut library, &data, req);
+    draw_once(
+        &gpu,
+        w.renderer.as_mut().ok_or("not built")?,
+        w.library.as_mut().ok_or("not decoded")?,
+        w.data.as_ref().ok_or("not decoded")?,
+        &req,
+    );
     check()?;
-    progress.set(3, 0.9);
-    let server = match (&req.server, booting) {
-        (Server::Join(addr), _) => Some((*addr, None)),
-        (_, Some(b)) => {
-            let l = b.wait()?;
-            Some((l.addr, Some(l)))
-        }
-        _ => None,
-    };
-    progress.set(3, 1.0);
-    Ok(Loaded {
-        data,
-        renderer,
-        library,
-        server,
-        ms: started.elapsed().as_secs_f64() * 1000.0,
-    })
+    w.finish(progress)
 }
 
 /// The warm-up frame is small: the GPU is shared with the window's loading screen, and a full-size frame of a big map
 /// keeps the queue busy long enough for the screen to stop presenting. Pipelines do not depend on the size.
+#[cfg(not(target_arch = "wasm32"))]
 const WARM_SIZE: (u32, u32) = (320, 180);
 
 /// Renders one frame from a spawn point into an offscreen target: the first draw of a renderer builds its depth and
 /// shadow targets, bind groups and post-process state, and the first sight of a player uploads its meshes: all of
 /// it would otherwise stall the first frames the player sees.
+#[cfg(not(target_arch = "wasm32"))]
 fn draw_once(
     gpu: &Gpu,
     renderer: &mut Renderer,

@@ -571,8 +571,8 @@ impl Renderer {
     /// Build pipelines for up to `budget` (at least one if any is left), those the last frames wanted and could not
     /// draw first, then the rest in [`Renderer::warm`]'s order. Call it once per frame before
     /// [`Renderer::render`]: until every pipeline is built the frame will not compile any itself (its draws are
-    /// skipped and counted in [`FrameStats::pipelines_missing`]), afterwards a frame may compile one that turns up
-    /// late (a model first drawn) within `budget` and skips the draw if that is used up.
+    /// skipped and counted in [`FrameStats::pipelines_missing`]); afterwards a frame builds one that turns up late
+    /// (something `warm` did not list, first drawn) itself, as on native.
     pub fn warm_step(&mut self, format: wgpu::TextureFormat, budget: Duration) -> Progress {
         let start = Instant::now();
         if self.warm.as_ref().is_none_or(|w| w.format != format) {
@@ -622,11 +622,7 @@ impl Renderer {
             total: w.jobs.len(),
         };
         self.materials
-            .set_deadline(Some(if progress.done < progress.total {
-                Instant::now()
-            } else {
-                end
-            }));
+            .set_deadline((progress.done < progress.total).then(Instant::now));
         progress
     }
 
