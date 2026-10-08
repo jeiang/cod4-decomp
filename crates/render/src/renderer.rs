@@ -16,9 +16,10 @@ use crate::timing::GpuTimer;
 use assets::zone::gfx::Material;
 use glam::{Mat4, Vec3, Vec4};
 use sm3::SamplerDim;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use web_time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -161,6 +162,33 @@ pub struct FrameStats {
     pub frame: u64,
 }
 
+/// How far [`Renderer::warm_step`] has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// The enumeration [`Renderer::warm_step`] walks across frames.
+struct Warm {
+    format: wgpu::TextureFormat,
+    jobs: Vec<(Rc<Prepared>, Target)>,
+    built: Vec<bool>,
+    done: usize,
+    cursor: usize,
+    /// Time spent in, and the number of, the builds [`Renderer::warm_step`] did.
+    spent: Duration,
+    timed: u32,
+    /// Pipelines frames wanted and skipped, by (pass id, target); built first.
+    demand: HashSet<(u32, Target)>,
+}
+
+impl Warm {
+    fn mean_build(&self) -> Duration {
+        self.spent / self.timed.max(1)
+    }
+}
+
 struct Draw {
     prepared: Rc<Prepared>,
     pipeline: Arc<wgpu::RenderPipeline>,
@@ -272,6 +300,7 @@ pub struct Renderer {
     /// What the post chain does this frame; starts as the map's own glow and film.
     pub post: PostParams,
     pub(crate) post_state: post::State,
+    warm: Option<Warm>,
     /// Skinned models to draw in the next [`Renderer::render`]; the caller refills the list every frame.
     pub dynamic_models: Vec<ModelInstance>,
     /// Sprites and decals to draw in the next [`Renderer::render`], in drawing order within a material.
@@ -368,6 +397,7 @@ impl Renderer {
             art: data.art.clone(),
             post: PostParams::from_art(&data.art),
             post_state,
+            warm: None,
             lights,
             shadow: None,
             shadow_dummy,
@@ -434,14 +464,14 @@ impl Renderer {
         }
     }
 
-    /// Build the pipelines for rendering into `format`, again to keep them off the frame path. Returns how many.
-    pub fn warm(&mut self, format: wgpu::TextureFormat) -> usize {
+    /// Every (pass, target) pair a frame into `format` can draw with, in the order materials come.
+    fn warm_jobs(&mut self, format: wgpu::TextureFormat) -> Vec<(Rc<Prepared>, Target)> {
         let hsm = self.hsm();
         let scene = Target {
             color: Some(format),
             depth: Some(DEPTH_FORMAT),
         };
-        let mut n = 0;
+        let mut jobs = Vec::new();
         for m in self.scene.materials() {
             for kind in [VertexKind::World, VertexKind::Model] {
                 for techs in [
@@ -452,19 +482,89 @@ impl Renderer {
                     &OMNI_TECHS,
                 ] {
                     if let Some(p) = self.prepare(&m, techs, kind, hsm) {
-                        self.materials.pipeline(&self.gpu, &p, scene);
-                        n += 1;
+                        jobs.push((p, scene));
                     }
                 }
                 if self.settings.shadows != ShadowMode::Off
                     && let Some(p) = self.prepare(&m, &[self.shadow_tech()], kind, hsm)
                 {
-                    self.materials.pipeline(&self.gpu, &p, self.shadow_target());
-                    n += 1;
+                    jobs.push((p, self.shadow_target()));
                 }
             }
         }
-        n
+        jobs
+    }
+
+    /// Build the pipelines for rendering into `format`, again to keep them off the frame path. Returns how many.
+    /// Blocks until all are built; [`Renderer::warm_step`] does the same across frames.
+    pub fn warm(&mut self, format: wgpu::TextureFormat) -> usize {
+        let jobs = self.warm_jobs(format);
+        for (p, target) in &jobs {
+            self.materials.pipeline_now(&self.gpu, p, *target);
+        }
+        jobs.len()
+    }
+
+    /// Build pipelines for up to `budget` (at least one if any is left), those the last frames wanted and could not
+    /// draw first, then the rest in [`Renderer::warm`]'s order. Call it once per frame before
+    /// [`Renderer::render`]: until every pipeline is built the frame will not compile any itself (its draws are
+    /// skipped and counted in [`FrameStats::pipelines_missing`]), afterwards a frame may compile one that turns up
+    /// late (a model first drawn) within `budget` and skips the draw if that is used up.
+    pub fn warm_step(&mut self, format: wgpu::TextureFormat, budget: Duration) -> Progress {
+        let start = Instant::now();
+        if self.warm.as_ref().is_none_or(|w| w.format != format) {
+            let jobs = self.warm_jobs(format);
+            let built = vec![false; jobs.len()];
+            self.warm = Some(Warm {
+                format,
+                jobs,
+                built,
+                done: 0,
+                cursor: 0,
+                spent: Duration::ZERO,
+                timed: 0,
+                demand: HashSet::new(),
+            });
+        }
+        let end = start + budget;
+        let w = self.warm.as_mut().expect("set above");
+        let (_, demand) = self.materials.take_deferred();
+        w.demand.extend(demand);
+        // Demanded first, then the cursor.
+        let mut rush: Vec<usize> = (0..w.jobs.len())
+            .filter(|&i| !w.built[i] && w.demand.contains(&(w.jobs[i].0.id(), w.jobs[i].1)))
+            .collect();
+        w.demand.clear();
+        rush.reverse();
+        let mut first = true;
+        // Stop early enough that the next build (about twice the average, builds vary a lot) fits the budget.
+        while w.done < w.jobs.len() && (first || Instant::now() + w.mean_build() * 2 < end) {
+            first = false;
+            let began = Instant::now();
+            let n = rush.pop().unwrap_or_else(|| {
+                while w.built[w.cursor] {
+                    w.cursor += 1;
+                }
+                w.cursor
+            });
+            let (p, t) = &w.jobs[n];
+            self.materials.pipeline_now(&self.gpu, p, *t);
+            w.built[n] = true;
+            w.done += 1;
+            w.spent += began.elapsed();
+            w.timed += 1;
+        }
+        let progress = Progress {
+            done: w.done,
+            total: w.jobs.len(),
+        };
+        self.materials
+            .set_deadline(Some(if progress.done < progress.total {
+                Instant::now()
+            } else {
+                end
+            }));
+        progress
     }
 
     fn shadow_target(&self) -> Target {
@@ -738,7 +838,9 @@ impl Renderer {
             };
             let fc = light_frames.get(&light).unwrap_or(frame);
             let (vs, ps) = self.banks(&prep, fc, &Object::default(), &mut shared, light);
-            let pipeline = self.materials.pipeline(&self.gpu, &prep, target);
+            let Some(pipeline) = self.materials.pipeline(&self.gpu, &prep, target) else {
+                continue;
+            };
             let tex_bg = self.tex_group(
                 &prep,
                 surf.lightmap_index,
@@ -815,7 +917,9 @@ impl Renderer {
                     continue;
                 };
                 let (vs, ps) = self.banks(&prep, fc, &obj, &mut shared, light);
-                let pipeline = self.materials.pipeline(&self.gpu, &prep, target);
+                let Some(pipeline) = self.materials.pipeline(&self.gpu, &prep, target) else {
+                    continue;
+                };
                 let tex_bg = self.tex_group(&prep, 0, inst.reflection_probe_index, light);
                 let tris = u32::from(model.surfs[idx].tri_count) * 3;
                 draws.push(Draw {
@@ -964,7 +1068,9 @@ impl Renderer {
             };
             let fc = light_frames.get(&d.light).unwrap_or(frame);
             let (vs, ps) = self.banks(&prep, fc, &d.obj, &mut shared, d.light);
-            let pipeline = self.materials.pipeline(&self.gpu, &prep, target);
+            let Some(pipeline) = self.materials.pipeline(&self.gpu, &prep, target) else {
+                continue;
+            };
             let probe = meshes[d.mesh]
                 .light_origin
                 .map_or(0, |o| self.nearest_probe(o));
@@ -1028,7 +1134,9 @@ impl Renderer {
             };
             let fc = light_frames.get(&light).unwrap_or(frame);
             let (vs, ps) = self.banks(&prep, fc, &d.obj, &mut shared, light);
-            let pipeline = self.materials.pipeline(&self.gpu, &prep, target);
+            let Some(pipeline) = self.materials.pipeline(&self.gpu, &prep, target) else {
+                continue;
+            };
             let probe = self.nearest_probe(inst.light_origin);
             let tex_bg = self.tex_group(&prep, 0, probe, light);
             draws.push(Draw {
@@ -1089,7 +1197,7 @@ impl Renderer {
         format: wgpu::TextureFormat,
         size: (u32, u32),
     ) -> FrameStats {
-        let t0 = web_time::Instant::now();
+        let t0 = Instant::now();
         self.ensure_depth(size);
         self.ensure_shadow();
         self.ring.clear();
@@ -1278,7 +1386,11 @@ impl Renderer {
         );
         stats.models += insts.len();
         stats.models = counts.models;
-        stats.pipelines_missing = counts.missing;
+        let (deferred, demand) = self.materials.take_deferred();
+        stats.pipelines_missing = counts.missing + deferred;
+        if let Some(w) = self.warm.as_mut() {
+            w.demand.extend(demand);
+        }
         stats.draws = draws.len();
 
         // The post chain: depth of field wants the scene's depth as a second list of the same surfaces.

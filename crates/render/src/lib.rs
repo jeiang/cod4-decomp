@@ -22,7 +22,7 @@ pub mod ui2d;
 pub use dynmesh::{DynMesh, DynVertex};
 pub use gpu::{Gpu, GpuError, GpuInfo};
 pub use post::{Dof, PostParams, ShellShock};
-pub use renderer::{FrameStats, Renderer, Settings, ShadowMode, View};
+pub use renderer::{FrameStats, Progress, Renderer, Settings, ShadowMode, View};
 pub use scene::{MapData, Scene};
 pub use skin::{ModelInstance, ModelKind};
 pub use texture::TextureCache;

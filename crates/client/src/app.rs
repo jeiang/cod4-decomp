@@ -144,13 +144,37 @@ fn overlay_values(st: &State) -> Value {
     let info = st.gpu.describe();
     let recent = &st.samples[st.samples.len().saturating_sub(60)..];
     let mean = |i: usize| recent.iter().map(|s| s[i]).sum::<f64>() / recent.len().max(1) as f64;
+    let mut cpu: Vec<f64> = st.samples[st.samples.len().saturating_sub(120)..]
+        .iter()
+        .map(|s| s[0])
+        .collect();
+    cpu.sort_by(f64::total_cmp);
+    let p99 = cpu.get((cpu.len() * 99 / 100).min(cpu.len().saturating_sub(1)));
+    let cpu_tail = format!(
+        "{:.1}/{:.1}",
+        p99.copied().unwrap_or(0.0),
+        cpu.last().copied().unwrap_or(0.0)
+    );
+    let mut warm: Vec<f64> = st.warm_ms[st.warm_ms.len().saturating_sub(120)..].to_vec();
+    warm.sort_by(f64::total_cmp);
+    let warm_tail = format!(
+        "{:.1}/{:.1}",
+        warm.get((warm.len() * 99 / 100).min(warm.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0),
+        warm.last().copied().unwrap_or(0.0)
+    );
     json!({
         "backend": format!("{} ({})", info.backend, info.name),
         "BC textures on the GPU": st.gpu.bc,
         "decoded texture MiB": st.renderer.as_ref().map_or(0, |r| r.textures.decoded_bytes() >> 20),
         "frames": st.samples.len(),
         "CPU ms/frame (last 60)": format!("{:.1}", mean(0)),
+        "CPU ms p99/max (last 120)": cpu_tail,
         "frame interval ms (last 60)": format!("{:.1}", mean(1)),
+        "warm_step ms p99/max (last 120)": warm_tail,
+        "pipelines built": format!("{}/{}", st.warm.done, st.warm.total),
+        "draws skipped (no pipeline)": st.pipelines_missing,
         "surfaces drawn": st.surfaces_drawn.last().copied().unwrap_or(0.0),
         "wasm memory MiB": crate::web::memory_bytes() >> 20,
     })
@@ -278,6 +302,14 @@ struct State {
     /// When the page's debug overlay was last given its values.
     #[cfg(target_arch = "wasm32")]
     overlay_at: Instant,
+    /// How many pipelines the background compile has built, and how many draws the last frame skipped for want of one.
+    #[cfg(target_arch = "wasm32")]
+    warm: render::Progress,
+    #[cfg(target_arch = "wasm32")]
+    pipelines_missing: usize,
+    /// Milliseconds of each frame's [`Renderer::warm_step`].
+    #[cfg(target_arch = "wasm32")]
+    warm_ms: Vec<f64>,
 }
 
 /// The `--ui-tour` script: which menu is open and how many frames it has been shown.
@@ -305,6 +337,11 @@ const TOUR_MENUS: &[&str] = &[
     "popup_leavegame",
     "endofgame",
 ];
+
+/// What a browser frame spends compiling pipelines (shader linking is serial there and would freeze the page for
+/// seconds if done at once): the frames before every pipeline exists skip the draws that lack one.
+#[cfg(target_arch = "wasm32")]
+const WARM_BUDGET: Duration = Duration::from_millis(6);
 
 /// Frames a tour menu is shown before its screenshot (fades and expressions settle).
 const TOUR_FRAMES: u32 = 6;
@@ -438,7 +475,9 @@ impl Viewer {
                 let mut r = Renderer::new(gpu.clone(), scene, map, TextureCache::new(Some(vfs), 0));
                 r.settings = self.cli.settings;
                 #[cfg(target_arch = "wasm32")]
-                crate::web::log("compiling pipelines");
+                crate::web::log("compiling pipelines in the background");
+                // The browser builds its pipelines a few milliseconds per frame, see `WARM_BUDGET`.
+                #[cfg(not(target_arch = "wasm32"))]
                 r.warm(config.format);
                 #[cfg(target_arch = "wasm32")]
                 crate::web::log("renderer ready");
@@ -647,6 +686,12 @@ impl Viewer {
             menu_sound: None,
             #[cfg(target_arch = "wasm32")]
             overlay_at: now,
+            #[cfg(target_arch = "wasm32")]
+            warm: render::Progress { done: 0, total: 0 },
+            #[cfg(target_arch = "wasm32")]
+            pipelines_missing: 0,
+            #[cfg(target_arch = "wasm32")]
+            warm_ms: Vec::new(),
             ui_tour: self.cli.ui_tour.as_ref().map(|_| UiTour {
                 menus: TOUR_MENUS.to_vec(),
                 index: 0,
@@ -864,7 +909,7 @@ impl Viewer {
             }
         } else if self.cli.flythrough {
             if let Some(tour) = st.tour.as_ref() {
-                let p = tour.pose(t);
+                let p = tour.pose(self.cli.fly_at.unwrap_or(t));
                 (st.pos, st.yaw, st.pitch) = (p.origin, p.yaw, p.pitch);
             }
         } else {
@@ -920,7 +965,17 @@ impl Viewer {
         let size = (st.config.width, st.config.height);
         if let Some(r) = st.renderer.as_mut() {
             r.viewmodel_fov_x = Some(st.fov_x);
+            #[cfg(target_arch = "wasm32")]
+            {
+                let t = Instant::now();
+                st.warm = r.warm_step(st.config.format, WARM_BUDGET);
+                st.warm_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
             let stats = r.render(&view, &target, st.config.format, size);
+            #[cfg(target_arch = "wasm32")]
+            {
+                st.pipelines_missing = stats.pipelines_missing;
+            }
             st.surfaces_drawn.push(stats.surfaces as f64);
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
@@ -1649,6 +1704,7 @@ fn build_world(cli: &Cli, st: &State, map: &str) -> Result<World, String> {
         TextureCache::new(Some(vfs), 0),
     );
     renderer.settings = cli.settings;
+    #[cfg(not(target_arch = "wasm32"))]
     renderer.warm(st.config.format);
     let lib = Library::load(&cli.install, map)?;
     let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);

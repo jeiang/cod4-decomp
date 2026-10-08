@@ -59,6 +59,7 @@ usage: cod4e [options]
   --fov <degrees>        horizontal field of view at 4:3 (default 80); wider displays widen it (Hor+)
   --flythrough           fly the scripted path, then exit
   --duration <secs>      flythrough length (default 12)
+  --fly-at <secs>        hold the flythrough at this time of its path (the same picture every run, for comparing renders)
   --out <dir>            flythrough output: frames.raw.csv, client.json, flythrough.mp4, screenshot.png
   --show-models          smoke scene: stock player models in different poses and the first-person weapon in
                          front of a fixed camera (--model-count N sets the number of players, default 7)
@@ -99,6 +100,7 @@ pub struct Cli {
     pub settings: render::Settings,
     pub flythrough: bool,
     pub duration: f32,
+    pub fly_at: Option<f32>,
     pub out: Option<PathBuf>,
     pub video: bool,
     pub screenshot: bool,
@@ -162,6 +164,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         settings: render::Settings::default(),
         flythrough: false,
         duration: 12.0,
+        fly_at: None,
         out: None,
         video: false,
         screenshot: false,
@@ -220,6 +223,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--no-fog" => c.settings.fog = false,
             "--no-lights" => c.settings.primary_lights = false,
             "--fov" => c.fov = val(a)?.parse().map_err(|_| "bad fov")?,
+            "--fly-at" => c.fly_at = Some(val(a)?.parse().map_err(|_| "bad time")?),
             "--duration" => c.duration = val(a)?.parse().map_err(|_| "bad duration")?,
             "--out" => c.out = Some(val(a)?.into()),
             "--flythrough" => c.flythrough = true,
