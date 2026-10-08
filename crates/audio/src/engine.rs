@@ -231,9 +231,9 @@ impl Sound {
 
     /// `snd_volume`: the master volume, 0 to 1. Cheap to call every frame.
     pub fn set_volume(&mut self, volume: f32) {
-        if volume != self.volume {
+        // Only remembered once queued, so a full queue is retried next frame.
+        if volume != self.volume && self.handle.set_master_volume(volume) {
             self.volume = volume;
-            self.handle.set_master_volume(volume);
         }
     }
 

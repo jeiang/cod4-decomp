@@ -992,7 +992,7 @@ impl Viewer {
                 return Err(format!("cannot reach the server: {why}"));
             }
             let t_net = Instant::now();
-            net.set_volume(st.input.cvars.f32("snd_volume"));
+            net.set_volume(crate::sound::volume_of(&st.input.cvars));
             let frame_out = net.frame(dt, &f);
             st.prev_cost[0] = t_net.elapsed().as_secs_f64() * 1000.0;
             if net.spawned()
@@ -1280,7 +1280,7 @@ impl Viewer {
         st.gpu.queue.present(frame);
         st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
         if let Some(m) = st.menu_sound.as_mut() {
-            m.set_volume(st.input.cvars.f32("snd_volume"));
+            m.set_volume(crate::sound::volume_of(&st.input.cvars));
             m.frame([0.0; 3], 0.0, (interval / 1000.0) as f32);
         }
         let actions = st

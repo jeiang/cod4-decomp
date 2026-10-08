@@ -241,10 +241,13 @@ impl Handle {
         self.next_id
     }
 
-    fn send(&self, c: Command) {
-        if self.queue.push(c).is_err() {
+    /// False when the queue was full and the command lost.
+    fn send(&self, c: Command) -> bool {
+        let sent = self.queue.push(c).is_ok();
+        if !sent {
             self.stats.lost_commands.fetch_add(1, Ordering::Relaxed);
         }
+        sent
     }
 
     pub fn play(&self, p: Play) {
@@ -292,8 +295,8 @@ impl Handle {
     }
 
     /// The master volume, `snd_volume`: 0 to 1, scaling everything that plays.
-    pub fn set_master_volume(&self, volume: f32) {
-        self.send(Command::Master(volume));
+    pub fn set_master_volume(&self, volume: f32) -> bool {
+        self.send(Command::Master(volume))
     }
 
     pub fn set_listener(&self, l: Listener) {

@@ -954,6 +954,7 @@ impl HostCx<'_> {
                 "statclearbitmask"
                 | "statclearperknew"
                 | "wait"
+                // Stays a no-op: `snd_volume` is read live every frame, and no other snd_ dvar needs a restart.
                 | "snd_restart"
                 | "updatedvarsfromprofile"
                 | "loc_warnings"

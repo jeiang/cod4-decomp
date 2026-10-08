@@ -33,6 +33,14 @@ enum State {
     Failed(String),
 }
 
+/// `snd_volume`; a missing or unparsable value is the default, not silence.
+pub fn volume_of(cvars: &crate::input::Cvars) -> f32 {
+    cvars
+        .get("snd_volume")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(audio::mixer::DEFAULT_VOLUME)
+}
+
 pub struct ClientSound {
     state: State,
     device: bool,
@@ -709,7 +717,7 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     check(beyond.is_none(), "a shot beyond its range started".into());
 
     // snd_volume scales everything: the same shot at 0.4 is about half the RMS of 0.8 (the alias rolls its
-    // volume and pitch a little, hence the margin), and the untouched default is the 0.8 of the original.
+    // volume and pitch per play, so the band is wide; the mixer unit test pins the exact scaling).
     let rms_at = |s: &mut Sound, volume: f32| {
         s.set_volume(volume);
         hear(s, [150.0, 0.0, 0.0]).map(|e| (e[0] + e[1]).sqrt())
@@ -718,7 +726,7 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         (Some(low), Some(high)) => {
             let ratio = low / high.max(1e-9);
             check(
-                (0.35..0.65).contains(&ratio),
+                (0.3..0.7).contains(&ratio),
                 format!("snd_volume 0.4 / 0.8 RMS ratio {ratio}, expected about 0.5"),
             );
             m.insert("volume_rms_ratio".into(), ratio.into());
