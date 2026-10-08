@@ -388,7 +388,7 @@ impl Input {
         pitch -= ry * cv.f32("in_gamepad_pitchrate") * dt * invert;
 
         let walk = if cv.bool("cl_run") { 1.0 } else { 0.5 };
-        let mut buttons = self.ads_toggle as u32 * buttons::ADS | self.stance;
+        let mut buttons = (self.ads_toggle as u32 * buttons::ADS) | self.stance;
         let mut held_other = Vec::new();
         for (name, h) in &self.held {
             if h.count > 0 || h.tapped {
