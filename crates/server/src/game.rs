@@ -328,6 +328,7 @@ pub struct MatchStats {
 }
 
 pub struct Game {
+    pub vote: crate::vote::VoteState,
     pub cvars: Cvars,
     pub content: Content,
     pub level: Level,
@@ -435,6 +436,7 @@ impl Game {
             stats: MatchStats::default(),
             nav: None,
             nav_goals: Vec::new(),
+            vote: Default::default(),
             nav_loads: Vec::new(),
             hitloc_table: default_hitloc_table(),
             weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),
