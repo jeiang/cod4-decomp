@@ -269,4 +269,7 @@ fn draw_once(
         req.format,
         req.size,
     );
+    // The frame's timestamp read-back would still be pending: a surface cannot be reconfigured (a window resize)
+    // while the queue has work in flight, so wait for it here, off the window thread.
+    renderer.flush_gpu_times();
 }

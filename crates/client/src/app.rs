@@ -309,8 +309,9 @@ struct State {
     load_report: Option<Value>,
     /// The next session answers the team and class menus by itself (a script's `start=` step).
     autojoin_next: bool,
-    /// Milliseconds the last frame spent in the network frame and in the renderer, to explain a slow gap.
-    prev_cost: [f64; 2],
+    /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
+    /// to explain a slow gap.
+    prev_cost: [f64; 4],
     /// A resize that arrived during a map load; see [`apply_resize`].
     pending_resize: Option<(u32, u32)>,
     /// When the page's debug overlay was last given its values.
@@ -713,7 +714,7 @@ impl Viewer {
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
-            prev_cost: [0.0; 2],
+            prev_cost: [0.0; 4],
             pending_resize: None,
             #[cfg(target_arch = "wasm32")]
             overlay_at: now,
@@ -838,6 +839,8 @@ impl Viewer {
                     "loading_screen": st.loading.is_some(),
                     "net_ms": st.prev_cost[0].round(),
                     "render_ms": st.prev_cost[1].round(),
+                    "acquire_ms": st.prev_cost[2].round(),
+                    "present_ms": st.prev_cost[3].round(),
                 }));
             }
         }
@@ -1009,15 +1012,24 @@ impl Viewer {
         {
             eprintln!("cannot save the profile: {e}");
         }
+        if st.loading.is_none()
+            && let Some(size) = st.pending_resize.take()
+        {
+            apply_resize(st, self.cli.fov, size);
+        }
+        let t_acquire = Instant::now();
         let frame = match st.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             _ => {
-                st.surface.configure(&st.gpu.device, &st.config);
+                if st.loading.is_none() {
+                    reconfigure(st);
+                }
                 st.window.request_redraw();
                 return Ok(());
             }
         };
+        st.prev_cost[2] = t_acquire.elapsed().as_secs_f64() * 1000.0;
         let cpu_start = Instant::now();
         // Aiming zooms the world towards the weapon's zoom field of view (relative to the stock `cg_fov`); the gun
         // keeps the unzoomed one.
@@ -1173,7 +1185,9 @@ impl Viewer {
             write_script_report(st, self.cli.out.clone().unwrap_or_default(), false);
             el.exit();
         }
+        let t_present = Instant::now();
         st.gpu.queue.present(frame);
+        st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
         if let Some(m) = st.menu_sound.as_mut() {
             m.frame([0.0; 3], 0.0, (interval / 1000.0) as f32);
         }
@@ -1778,6 +1792,15 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
     }
 }
 
+/// Configures the surface again. wgpu refuses while the queue still has work to finish (a timestamp read-back that has
+/// not come back is enough: the call panics), so the renderer's are waited for first.
+fn reconfigure(st: &mut State) {
+    if let Some(r) = st.renderer.as_mut() {
+        record_gpu(&mut st.gpu_ms, r.flush_gpu_times());
+    }
+    st.surface.configure(&st.gpu.device, &st.config);
+}
+
 /// Follows a window resize: the surface, the field of view and the menus.
 ///
 /// Never while a map loads: reconfiguring a surface fails (a panic) when another thread submits to the queue at the
@@ -1785,7 +1808,7 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
 fn apply_resize(st: &mut State, fov: f32, (w, h): (u32, u32)) {
     st.config.width = w;
     st.config.height = h;
-    st.surface.configure(&st.gpu.device, &st.config);
+    reconfigure(st);
     st.fov_x = hor_plus(fov, w as f32 / h as f32);
     if let Some(sh) = st.shell.as_mut() {
         sh.resize(w, h);
