@@ -10,6 +10,7 @@ use crate::codeconst::{self, FrameConsts, Object};
 use crate::gpu::Gpu;
 use crate::state::StateBits;
 use crate::texture::{Tex, TextureCache};
+use crate::water::WaterSim;
 use assets::zone::gfx::{ArgValue, Material, Pass, TechniqueSet, TextureSource};
 use sm3::{Options, SamplerDim, Stage, Translation, VertexFix};
 use std::cell::RefCell;
@@ -128,6 +129,8 @@ pub struct Compiled {
 
 pub(crate) enum TexSource {
     Image(Arc<Tex>, u8),
+    /// A water height map, by its key in [`Materials::waters`].
+    Water(usize, u8),
     Code(u32),
     Missing(u8),
 }
@@ -251,6 +254,7 @@ impl Prepared {
         for s in &self.slots {
             let src = match &s.source {
                 TexSource::Image(..) => "material image".to_owned(),
+                TexSource::Water(..) => "water height map".to_owned(),
                 TexSource::Code(id) => format!(
                     "code {}",
                     codeconst::TEXTURE_NAMES.get(*id as usize).unwrap_or(&"?")
@@ -320,6 +324,8 @@ pub struct Materials {
     demand: Mutex<HashSet<(u32, Target)>>,
     /// Material name to why it could not be prepared.
     pub failures: BTreeMap<String, String>,
+    /// The ocean simulations of the water textures prepared so far, by `Arc` address of their [`Water`].
+    pub waters: HashMap<usize, WaterSim>,
 }
 
 fn bank_entry(
@@ -370,6 +376,7 @@ impl Materials {
             deferred: AtomicUsize::new(0),
             demand: Mutex::new(HashSet::new()),
             failures: BTreeMap::new(),
+            waters: HashMap::new(),
         }
     }
 
@@ -599,6 +606,13 @@ impl Materials {
         })
     }
 
+    /// Advance every water simulation to `time` seconds.
+    pub fn update_waters(&mut self, gpu: &Gpu, time: f32) {
+        for w in self.waters.values_mut() {
+            w.update(gpu, time);
+        }
+    }
+
     /// The first technique of `techs` the material's techset has, as a drawable pass. Cached per material.
     pub fn prepare(
         &mut self,
@@ -712,6 +726,20 @@ impl Materials {
                             match textures.image(gpu, img) {
                                 Some(t) => TexSource::Image(t, st),
                                 None => TexSource::Missing(st),
+                            }
+                        }
+                        Some((TextureSource::Water(Some(w)), st)) => {
+                            let key = Arc::as_ptr(w) as usize;
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                self.waters.entry(key)
+                                && let Some(sim) = WaterSim::new(gpu, w.clone())
+                            {
+                                e.insert(sim);
+                            }
+                            if self.waters.contains_key(&key) {
+                                TexSource::Water(key, st)
+                            } else {
+                                TexSource::Missing(st)
                             }
                         }
                         Some((_, st)) => TexSource::Missing(st),
@@ -930,6 +958,10 @@ impl Materials {
         for s in &p.slots {
             let (tex, state) = match &s.source {
                 TexSource::Image(t, st) => (Some(t.clone()), SamplerKey::State(*st)),
+                TexSource::Water(key, st) => (
+                    self.waters.get(key).map(|w| w.tex.clone()),
+                    SamplerKey::State(*st),
+                ),
                 TexSource::Code(id) => match code(*id) {
                     Some((t, st)) => (Some(t), st),
                     None => (None, SamplerKey::State(0x72)),

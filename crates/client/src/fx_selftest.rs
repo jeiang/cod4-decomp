@@ -17,6 +17,8 @@ use std::path::Path;
 const GUN: &str = "ak47_mp";
 const EXPLOSION: &str = "explosions/grenadeexp_dirt_1";
 const VISION: &str = "mp_crash";
+/// A stock map whose puddles use the water simulation.
+const WATER_MAP: &str = "mp_farm";
 const SHOCK: &str = "concussion_grenade_mp";
 
 /// Plays `effects` from `from_ms` for `secs` seconds in 50 ms steps and returns (most sprites in one frame, most
@@ -185,9 +187,70 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         bad.push(format!("shell shock {SHOCK} did nothing to the picture"));
     }
 
+    water(install, &mut report, &mut bad);
+
     if bad.is_empty() {
         Ok(Value::Object(report))
     } else {
         Err(bad)
+    }
+}
+
+/// The ocean simulation of a stock map's water: a height image with real relief that moves and stays in range.
+fn water(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mut Vec<String>) {
+    use assets::zone::gfx::TextureSource;
+    let data = match render::MapData::load(install, WATER_MAP) {
+        Ok(d) => d,
+        Err(e) => return bad.push(format!("{WATER_MAP}: {e:?}")),
+    };
+    let water = data
+        .world
+        .dpvs
+        .surfaces
+        .iter()
+        .filter_map(|s| s.material.as_ref())
+        .flat_map(|m| m.textures.iter())
+        .find_map(|t| match &t.source {
+            TextureSource::Water(Some(w)) => Some(w.clone()),
+            _ => None,
+        });
+    let Some(mut field) = water.and_then(render::water::WaterField::new) else {
+        return bad.push(format!("{WATER_MAP} has no usable water"));
+    };
+    let before = field.pixels().to_vec();
+    let n = before.len() as f32;
+    let mean = before.iter().map(|&p| f32::from(p)).sum::<f32>() / n;
+    let spread = (before
+        .iter()
+        .map(|&p| (f32::from(p) - mean).powi(2))
+        .sum::<f32>()
+        / n)
+        .sqrt();
+    let clipped = before.iter().filter(|&&p| p == 0 || p == 255).count() as f32 / n;
+    field.update(2.0);
+    let moved = before
+        .iter()
+        .zip(field.pixels())
+        .map(|(&a, &b)| f32::from(a.abs_diff(b)))
+        .sum::<f32>()
+        / n;
+    report.insert("water_spread".into(), spread.into());
+    report.insert("water_clipped".into(), clipped.into());
+    report.insert("water_moved".into(), moved.into());
+    if !(20.0..=60.0).contains(&spread) {
+        bad.push(format!(
+            "the water height image has a spread of {spread}, not about 42"
+        ));
+    }
+    if clipped > 0.02 {
+        bad.push(format!(
+            "{:.1}% of the water image is clipped",
+            clipped * 100.0
+        ));
+    }
+    if moved < 3.0 {
+        bad.push(format!(
+            "the water barely moved in two seconds ({moved} per texel)"
+        ));
     }
 }
