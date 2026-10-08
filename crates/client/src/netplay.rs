@@ -220,6 +220,11 @@ impl NetPlay {
         self.auto_join = on.then(net::ui::AutoJoin::default);
     }
 
+    /// The name of the weapon in hand, as the view model last drew it.
+    pub fn weapon(&self) -> String {
+        self.c.weapon.clone()
+    }
+
     /// The server has put the player in the world (alive at least once).
     pub fn spawned(&self) -> bool {
         self.c.spawned

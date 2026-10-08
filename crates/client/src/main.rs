@@ -19,6 +19,7 @@ mod look;
 mod models;
 mod netplay;
 mod ownerdraw;
+mod pointer;
 mod profile;
 mod props;
 mod ragdoll;
@@ -73,7 +74,7 @@ usage: cod4e [options]
   --name <name>          player name on the server
   --no-sound             mix the sound without opening a sound card
   --ui-tour <dir>        open the stock menus in turn, save a screenshot of each and ui.json to <dir>, then exit (harness)
-  --ui-script <steps>    drive the menus like a player: click=<item>, open=<menu>, close=<menu>, menu=<name>[:secs], ingame[=secs], wait=<secs>, shot=<name>,
+  --ui-script <steps>    drive the menus like a player: click=<item> or mouse=<item> (through the pointer; `a|b` takes the first present), key=escape, nomenu[=secs], team=<n>|save|other[:secs], weapon=<name part>[:secs], open=<menu>, close=<menu>, menu=<name>[:secs], ingame[=secs], wait=<secs>, shot=<name>,
                          scores=on|off, togglemenu, home[=secs], set=<console line>, connect=<host[:port]>, stat=<i> <v>, statis=<i> <v>,
                          map=<name>[:secs], maprotate[=secs], and waits for killcam|dead|intermission|feed[=secs];
                          writes ui-script.json (and shots) to --out, then exits (harness)

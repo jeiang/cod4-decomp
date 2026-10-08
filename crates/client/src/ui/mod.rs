@@ -938,8 +938,16 @@ impl Ui {
                 Some(s) if !s.trim().is_empty() && s.trim() != ";" => {
                     self.run_script(host, Some(m), None, s)
                 }
+                // No handler: the original closes every menu unless a full-screen one is up (the way back into the
+                // game from options and vote menus that have no `onESC`), and closes a popup or a blank handler's menu.
                 _ => {
-                    if def.window.static_flags & statf::POPUP != 0 || def.on_esc.is_some() {
+                    let stack = self.stack.clone();
+                    let full = stack
+                        .iter()
+                        .any(|&o| self.menus[o].def.full_screen != 0 && self.menu_visible(host, o));
+                    if def.on_esc.is_none() && !full && host.in_game() {
+                        self.close_all(host);
+                    } else if def.window.static_flags & statf::POPUP != 0 || def.on_esc.is_some() {
                         self.close(host, m);
                     }
                 }
@@ -1230,12 +1238,14 @@ impl Ui {
         }
     }
 
-    /// Activates the visible item of the top menu whose name or text is `want` (case-insensitive, localized):
-    /// what a click on it does. `true` if there was one.
-    pub fn click(&mut self, host: &mut dyn Host, want: &str) -> bool {
-        let Some(&m) = self.stack.last() else {
-            return false;
-        };
+    /// The visible item of the top menu whose name or text is `want` (case-insensitive, localized); `a|b` takes the
+    /// first of the alternatives that has one.
+    fn find_item(&mut self, host: &mut dyn Host, want: &str) -> Option<(usize, usize)> {
+        want.split('|').find_map(|w| self.find_one_item(host, w))
+    }
+
+    fn find_one_item(&mut self, host: &mut dyn Host, want: &str) -> Option<(usize, usize)> {
+        let &m = self.stack.last()?;
         let def = self.menus[m].def.clone();
         for (i, d) in def.items.iter().enumerate() {
             let named = d
@@ -1248,12 +1258,33 @@ impl Ui {
                 !t.is_empty() && t.eq_ignore_ascii_case(want)
             };
             if (named || texted) && self.item_visible(host, m, i) {
-                self.set_focus(host, m, i);
-                self.activate(host, m, i, false);
-                return true;
+                return Some((m, i));
             }
         }
-        false
+        None
+    }
+
+    /// Activates the visible item of the top menu whose name or text is `want`: what a click on it does. `true` if
+    /// there was one.
+    pub fn click(&mut self, host: &mut dyn Host, want: &str) -> bool {
+        let Some((m, i)) = self.find_item(host, want) else {
+            return false;
+        };
+        self.set_focus(host, m, i);
+        self.activate(host, m, i, false);
+        true
+    }
+
+    /// Clicks the item as a mouse would: the pointer moves onto its centre, then the button goes down. A locked or
+    /// hidden item takes the click without effect. `true` if there was such an item.
+    pub fn mouse_click(&mut self, host: &mut dyn Host, want: &str) -> bool {
+        let Some((m, i)) = self.find_item(host, want) else {
+            return false;
+        };
+        let p = self.item_pixels(m, i);
+        self.mouse_move(host, p.x + p.w / 2.0, p.y + p.h / 2.0);
+        self.key(host, UiKey::Mouse1);
+        true
     }
 
     // ---- accessors for painting ---------------------------------------------------------------------------------
@@ -1269,6 +1300,8 @@ mod tests {
     struct Dummy {
         /// `(key, command)` binds.
         binds: Vec<(String, String)>,
+        /// What the menus sent the server (`scriptMenuResponse`).
+        responses: Vec<(String, String)>,
     }
     impl env::World for Dummy {
         fn key_bindings(&self, c: &str) -> Vec<String> {
@@ -1286,7 +1319,9 @@ mod tests {
         fn set_dvar(&mut self, _: &str, _: &str) {}
         fn exec(&mut self, _: &Ui, _: &str) {}
         fn play(&mut self, _: &str) {}
-        fn menu_response(&mut self, _: &str, _: &str) {}
+        fn menu_response(&mut self, menu: &str, response: &str) {
+            self.responses.push((menu.into(), response.into()));
+        }
         fn set_bind(&mut self, key: &str, command: &str) {
             self.binds.retain(|(k, _)| k != key);
             if !command.is_empty() {
@@ -1475,5 +1510,54 @@ mod tests {
         ui.activate(&mut host, m, i, true);
         ui.bind_capture(&mut host, "backspace");
         assert!(host.key_bindings("+leanleft").is_empty());
+    }
+
+    /// Escape in a menu of a match always leads back to the game: the menu closes, or the script menus that handle
+    /// it themselves (`onESC` answering `back`) tell the server, which closes them.
+    #[test]
+    fn escape_leaves_every_menu_a_match_opens() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = assets::UiAssets::load(&install).expect("ui assets");
+        let mut ui = Ui::new(assets, (1280, 720));
+        for name in [
+            "class_marines",
+            "class_opfor",
+            "class",
+            "changeclass",
+            "team_marinesopfor",
+            "main_controls",
+            "ingame_controls",
+            "main_options",
+            "options_graphics",
+            "callvote",
+            "muteplayer",
+            "popup_leavegame",
+            "popup_endgame",
+        ] {
+            let mut host = Dummy::default();
+            ui.close_all(&mut host);
+            ui.open_by_name(&mut host, name);
+            assert!(ui.captures_input(), "{name} opened nothing");
+            // A sub-menu may step back to its parent (`callvote` to `class`) first.
+            for _ in 0..3 {
+                if ui.captures_input() && !host.responses.iter().any(|(_, r)| r == "back") {
+                    ui.key(&mut host, UiKey::Escape);
+                }
+            }
+            let asked_back = host.responses.iter().any(|(_, r)| r == "back");
+            assert!(
+                !ui.captures_input() || asked_back,
+                "Escape in {name} left {:?} open",
+                ui.open_menus()
+            );
+        }
     }
 }

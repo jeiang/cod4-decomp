@@ -399,6 +399,12 @@ impl Shell {
         self.ui.bind_capture(&mut h, key);
     }
 
+    /// Like [`Shell::click`], through the pointer.
+    pub fn mouse_click(&mut self, input: &mut Input, want: &str) -> bool {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.mouse_click(&mut h, want)
+    }
+
     /// Clicks the item of the top menu named or labelled `want`.
     pub fn click(&mut self, input: &mut Input, want: &str) -> bool {
         let mut h = Self::host(&mut self.st, input);
