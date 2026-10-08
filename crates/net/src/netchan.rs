@@ -28,7 +28,12 @@ pub struct Netchan {
     /// Datagrams skipped before the last accepted one.
     pub dropped: u32,
     frag_seq: u32,
+    /// The fragments of message `frag_seq` received so far, each at its offset.
     frag_buf: Vec<u8>,
+    /// Bit `k` set: the fragment at offset `k * FRAGMENT_SIZE` is in `frag_buf`.
+    frag_mask: u64,
+    /// Message length, known once its short last fragment has arrived.
+    frag_end: Option<usize>,
     /// Bytes handed to the transport, headers included.
     pub bytes_out: u64,
     pub packets_out: u64,
@@ -126,17 +131,39 @@ impl Netchan {
         if body.len() < len || len > FRAGMENT_SIZE {
             return false;
         }
-        if seq != self.frag_seq || (start == 0 && !self.frag_buf.is_empty()) {
+        // Fragments may arrive out of order (WebTransport streams and datagrams race); a fragment
+        // of an older message than the one being collected is stale.
+        let behind = self.frag_seq.wrapping_sub(seq) & !FRAGMENT_BIT;
+        if self.frag_mask != 0 && behind != 0 && behind < 1 << 30 {
+            return false;
+        }
+        if start % FRAGMENT_SIZE != 0 || start + len > MAX_MESSAGE {
+            return false;
+        }
+        if seq != self.frag_seq {
             self.frag_seq = seq;
             self.frag_buf.clear();
+            self.frag_mask = 0;
+            self.frag_end = None;
         }
-        if start != self.frag_buf.len() || start + len > MAX_MESSAGE {
+        if self.frag_buf.len() < start + len {
+            self.frag_buf.resize(start + len, 0);
+        }
+        self.frag_buf[start..start + len].copy_from_slice(&body[..len]);
+        self.frag_mask |= 1 << (start / FRAGMENT_SIZE);
+        if len < FRAGMENT_SIZE {
+            self.frag_end = Some(start + len);
+        }
+        let Some(end) = self.frag_end else {
+            return false;
+        };
+        let want = (1u64 << (end / FRAGMENT_SIZE + 1)) - 1;
+        if self.frag_mask & want != want {
             return false;
         }
-        self.frag_buf.extend_from_slice(&body[..len]);
-        if len == FRAGMENT_SIZE {
-            return false;
-        }
+        self.frag_buf.truncate(end);
+        self.frag_mask = 0;
+        self.frag_end = None;
         self.dropped = ahead - 1;
         self.in_seq = seq;
         out.clear();
@@ -243,5 +270,22 @@ mod tests {
         let mut bad = (1u32 | FRAGMENT_BIT).to_le_bytes().to_vec();
         bad.extend_from_slice(&[0, 0, 0xff, 0xff, 1]);
         assert!(!b.process(&bad, &mut out));
+    }
+
+    #[test]
+    fn fragments_reassemble_in_any_order_and_stale_ones_are_ignored() {
+        for n in [1201, 2400, 3000, 7777] {
+            let mut a = Netchan::new();
+            let m = msg(n);
+            let mut p = collect(&mut a, &m);
+            let old = collect(&mut a, &msg(3000));
+            p.reverse();
+            let mut b = Netchan::new();
+            let mut out = Vec::new();
+            let done: Vec<bool> = p.iter().map(|f| b.process(f, &mut out)).collect();
+            assert_eq!(done.iter().filter(|d| **d).count(), 1, "{n}");
+            assert_eq!(out, m, "{n}");
+            assert!(!b.process(&old[0], &mut out), "an older message is stale");
+        }
     }
 }

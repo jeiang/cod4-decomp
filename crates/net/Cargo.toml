@@ -6,9 +6,16 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# The WebTransport endpoint for browser clients (`net::wt`); pure Rust (rustls with ring).
+webtransport = ["dep:wtransport", "dep:tokio", "dep:socket2"]
+
 [dependencies]
 assets = { path = "../assets" }
 sim = { path = "../sim" }
+socket2 = { version = "0.6", optional = true }
+wtransport = { version = "0.7.2", optional = true }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "macros", "sync", "time"] }
 
 [dev-dependencies]
 sim = { path = "../sim", features = ["test-support"] }

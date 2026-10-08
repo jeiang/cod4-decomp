@@ -22,6 +22,8 @@ pub mod transport;
 pub mod ui;
 pub mod usercmd;
 pub mod view;
+#[cfg(feature = "webtransport")]
+pub mod wt;
 
 pub use bits::{BitReader, BitWriter, Overflow};
 pub use entity::EntityState;

@@ -12,7 +12,7 @@ use net::connect::{ConnectRequest, Gate, serve};
 use net::entity::{EntityState, etype};
 use net::oob::{Challenger, Oob};
 use net::snapshot::Follow;
-use net::transport::{Transport, UdpTransport};
+use net::transport::{MAX_MESSAGE, Transport};
 use net::ui::HudElem;
 use net::ui::ServerCmd;
 use net::{ServerLink, Snapshot};
@@ -60,7 +60,7 @@ pub struct NetStats {
 }
 
 pub struct NetSv {
-    pub t: UdpTransport,
+    pub t: Box<dyn Transport + Send>,
     challenger: Challenger,
     started: Instant,
     /// By client number.
@@ -76,7 +76,7 @@ pub struct NetSv {
 }
 
 impl NetSv {
-    pub fn new(t: UdpTransport, max_clients: usize) -> Self {
+    pub fn new(t: Box<dyn Transport + Send>, max_clients: usize) -> Self {
         Self {
             t,
             challenger: Challenger::new(),
@@ -86,7 +86,7 @@ impl NetSv {
             stats: NetStats::default(),
             now: 0,
             archive: Archive::default(),
-            buf: vec![0; 2048],
+            buf: vec![0; MAX_MESSAGE],
         }
     }
 
