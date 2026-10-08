@@ -9,6 +9,7 @@ mod display;
 mod effects;
 mod events;
 mod flythrough;
+#[cfg(not(target_arch = "wasm32"))]
 mod fx_selftest;
 mod hud;
 mod hudstate;
