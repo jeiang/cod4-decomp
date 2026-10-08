@@ -18,7 +18,7 @@ use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::Props;
 use crate::ragdoll::Ragdoll;
 use crate::sound::{ClientSound, Who};
-use crate::viewmodel::ViewModel;
+use crate::viewmodel::{Sight, ViewModel};
 use crate::wire::Wire;
 use glam::Vec3;
 use net::client::NetClient;
@@ -53,6 +53,8 @@ pub struct NetFrame {
     /// Radians, positive up.
     pub pitch: f32,
     pub models: Vec<ModelInstance>,
+    /// The aim zoom and scope overlay of the held weapon.
+    pub sight: Option<Sight>,
     /// Effect sprites and decals.
     pub meshes: Vec<render::DynMesh>,
     /// Happenings new this frame; see [`crate::events`].
@@ -121,6 +123,8 @@ pub struct NetPlay {
     /// The impulse of each recent death by client number, until the body is made.
     pushes: HashMap<u16, [f32; 3]>,
     vm: Option<((u16, u16), ViewModel)>,
+    /// What aiming did to the view in the last frame.
+    sight: Option<Sight>,
     c: Counters,
     auto: Option<Auto>,
     auto_join: Option<net::ui::AutoJoin>,
@@ -180,6 +184,7 @@ impl NetPlay {
             remotes: HashMap::new(),
             pushes: HashMap::new(),
             vm: None,
+            sight: None,
             c: Counters::default(),
             auto: autoplay.then(Auto::default),
             auto_join: autoplay.then(net::ui::AutoJoin::default),
@@ -241,6 +246,7 @@ impl NetPlay {
     /// every couple of seconds while the scoreboard is up (`live.scores_wanted`).
     pub fn fill_live(&mut self, live: &mut crate::hud::LiveUi) {
         crate::hud::fill::fill(&mut self.net, live, self.live_time, self.last_eye);
+        live.scope = self.sight.as_ref().and_then(|s| s.overlay.clone());
         if live.kill_icons.len() != self.kill_icons.len() {
             live.kill_icons.clone_from(&self.kill_icons);
         }
@@ -385,6 +391,7 @@ impl NetPlay {
                 yaw: yaw + look.kick[1].to_radians(),
                 pitch: pitch + look.kick[0].to_radians(),
                 models,
+                sight: self.sight.clone(),
                 meshes: drawn.meshes,
                 events,
                 commands,
@@ -454,6 +461,7 @@ impl NetPlay {
             yaw: yaw + look.kick[1].to_radians(),
             pitch: pitch + look.kick[0].to_radians(),
             models,
+            sight: self.sight.clone(),
             meshes: drawn.meshes,
             events,
             commands,
@@ -669,13 +677,19 @@ impl NetPlay {
             }
         }
         let Some((_, vm)) = self.vm.as_mut() else {
+            self.sight = None;
             return Vec::new();
         };
         let mut shown = ps.clone();
         shown.origin = feet;
         shown.viewangles = [self.angles[0], self.angles[1], 0.0];
         self.c.frames_with_viewmodel += 1;
-        vm.update(&shown, dt)
+        let models = vm.update(&shown, dt);
+        let sight = vm.sight();
+        // Through the scope the original draws no gun.
+        let scoped = sight.overlay.is_some();
+        self.sight = Some(sight);
+        if scoped { Vec::new() } else { models }
     }
 
     /// Models of every other player, between the snapshots around the interpolation moment.

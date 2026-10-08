@@ -78,6 +78,8 @@ pub struct KillIcon {
 #[derive(Default)]
 pub struct LiveUi {
     pub active: bool,
+    /// The scope picture over the screen while a sniper aims.
+    pub scope: Option<crate::viewmodel::Overlay>,
     /// The client's estimate of the server clock, ms.
     pub time: i32,
     /// The clock script hud element times are read on: `time`, minus the replay offset in a killcam.

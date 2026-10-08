@@ -32,6 +32,9 @@ use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+/// The original's default `cg_fov`, the field of view the weapons' zoom fields are relative to.
+const STOCK_FOV: f32 = 65.0;
+
 /// Frames the surface size must hold before the recorder starts.
 const RECORD_AFTER_STABLE: u32 = 10;
 /// How long joining waits for the server to say which map it plays.
@@ -255,6 +258,8 @@ struct State {
     notes: Vec<String>,
     present_mode: wgpu::PresentMode,
     fov_x: f32,
+    /// The held weapon's zoom field of view and how far the zoom has come.
+    aim_zoom: Option<(f32, f32)>,
     surfaces_drawn: Vec<f64>,
     showcase: Option<Showcase>,
     net: Option<NetPlay>,
@@ -616,6 +621,7 @@ impl Viewer {
             notes,
             present_mode,
             fov_x: hor_plus(self.cli.fov, aspect),
+            aim_zoom: None,
             surfaces_drawn: Vec::new(),
             showcase,
             net,
@@ -844,6 +850,7 @@ impl Viewer {
             }
             if let Some(nf) = frame_out {
                 (st.pos, st.yaw, st.pitch) = (nf.origin, nf.yaw, nf.pitch);
+                st.aim_zoom = nf.sight.as_ref().map(|s| (s.zoom_fov, s.zoom));
                 st.fx_in_view = nf.meshes.len();
                 if let Some(r) = st.renderer.as_mut() {
                     r.dynamic_models = nf.models;
@@ -893,16 +900,26 @@ impl Viewer {
             }
         };
         let cpu_start = Instant::now();
+        // Aiming zooms the world towards the weapon's zoom field of view (relative to the stock `cg_fov`); the gun
+        // keeps the unzoomed one.
+        let fov_x = match st.aim_zoom {
+            Some((zoom_fov, k)) if zoom_fov > 0.0 => hor_plus(
+                self.cli.fov * (1.0 - (1.0 - zoom_fov / STOCK_FOV) * k),
+                st.config.width as f32 / st.config.height.max(1) as f32,
+            ),
+            _ => st.fov_x,
+        };
         let view = View {
             origin: st.pos,
             yaw: st.yaw,
             pitch: st.pitch,
-            fov_x: st.fov_x,
+            fov_x,
             time: t,
         };
         let target = frame.texture.create_view(&Default::default());
         let size = (st.config.width, st.config.height);
         if let Some(r) = st.renderer.as_mut() {
+            r.viewmodel_fov_x = Some(st.fov_x);
             let stats = r.render(&view, &target, st.config.format, size);
             st.surfaces_drawn.push(stats.surfaces as f64);
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());

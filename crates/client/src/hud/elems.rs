@@ -114,8 +114,34 @@ pub fn draw_under(ui: &Ui, p: &mut Painter, st: &ShellState) {
     if !st.live.active {
         return;
     }
+    if let Some(o) = &st.live.scope {
+        draw_scope(ui, p, o);
+    }
     st.feed.draw_chat(ui, p, &st.live, st.game.scoreboard);
     draw_elems(ui, p, &st.live, false);
+}
+
+/// The scope overlay centred on the screen (`CG_DrawAdsOverlay`), black beyond its edges.
+fn draw_scope(ui: &Ui, p: &mut Painter, o: &crate::viewmodel::Overlay) {
+    let [w, h] = o.size;
+    let r = ui
+        .place
+        .rect(-w * 0.5, -h * 0.5, w, h, horz::CENTER, vert::CENTER);
+    let img = p.g.image(p.cache, &o.material);
+    p.pic(&img, r, [1.0, 1.0, 1.0, o.alpha]);
+    let (sw, sh) = ui.place.size;
+    let black = [0.0, 0.0, 0.0, o.alpha];
+    let edge = |x, y, w, h| Px { x, y, w, h };
+    for e in [
+        edge(0.0, 0.0, sw, r.y),
+        edge(0.0, r.y + r.h, sw, sh - r.y - r.h),
+        edge(0.0, r.y, r.x, r.h),
+        edge(r.x + r.w, r.y, sw - r.x - r.w, r.h),
+    ] {
+        if e.w > 0.0 && e.h > 0.0 {
+            p.fill(e, black);
+        }
+    }
 }
 
 /// Foreground elements, the spectated player's name and the scoreboard rows, over the menus.
