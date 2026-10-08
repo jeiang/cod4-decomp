@@ -394,7 +394,7 @@ impl Vehicle {
                 let cap = self.manual_accel * DT * 3.0;
                 let v = if braking - cap < 0.0 { braking } else { cap };
                 let v = if -cap - braking < 0.0 { v } else { -cap };
-                self.vel[2] = v - accel_vec[2] + self.vel[2];
+                self.vel[2] += v - accel_vec[2];
                 accel_vec[2] = v;
             }
         }
@@ -454,7 +454,8 @@ impl Vehicle {
         let fraction = self.accel_fraction(horizontal);
         let mut stopping = 1.0;
         if self.stopping && horizontal > 0.0 {
-            let time_to_goal = (self.vel[0] * self.vel[0] + self.vel[1] * self.vel[1]).sqrt() / horizontal;
+            let time_to_goal =
+                (self.vel[0] * self.vel[0] + self.vel[1] * self.vel[1]).sqrt() / horizontal;
             let stopping_time = (1.0 - fraction) * 3.5 + fraction * 2.5;
             if stopping_time > time_to_goal {
                 stopping = time_to_goal / stopping_time;
@@ -709,13 +710,14 @@ impl Game {
     fn update_aim(&mut self, vm: &mut Vm, n: u16, v: &mut Vehicle) {
         let alive = self.ent(n).is_some_and(|e| e.health > 0);
         let target = match v.target {
-            Target::Ent(t, off) if alive => self
-                .ent(t)
-                .map(|te| (Some(t), mad(te.origin, 1.0, off))),
+            Target::Ent(t, off) if alive => {
+                self.ent(t).map(|te| (Some(t), mad(te.origin, 1.0, off)))
+            }
             Target::Point(p) if alive => Some((None, p)),
             _ => None,
         };
-        let (Some((tgt_ent, tgt_pos)), Some(barrel)) = (target, self.world_tag(n, "tag_barrel")) else {
+        let (Some((tgt_ent, tgt_pos)), Some(barrel)) = (target, self.world_tag(n, "tag_barrel"))
+        else {
             match v.turret {
                 TurretState::Moving => v.turret = TurretState::Stopping,
                 TurretState::Stopping => v.turret = TurretState::Stopped,
@@ -728,10 +730,7 @@ impl Game {
         let want = [math::vec_to_pitch(&dir), math::vec_to_yaw(&dir), 0.0];
         // The target angles relative to the body.
         let body = tags::angles_to_axis(v.angles);
-        let rel = tags::mul3(
-            &tags::angles_to_axis(want),
-            &tags::transpose3(&body),
-        );
+        let rel = tags::mul3(&tags::angles_to_axis(want), &tags::transpose3(&body));
         let rel = tags::axis_to_angles(&rel);
         let delta = [
             math::angle_delta(rel[0], v.gun_pitch).abs(),
@@ -769,7 +768,15 @@ impl Game {
             }
             _ => false,
         };
-        vm.notify_entity(n, if seen { "turret_on_vistarget" } else { "turret_no_vis" }, &[]);
+        vm.notify_entity(
+            n,
+            if seen {
+                "turret_on_vistarget"
+            } else {
+                "turret_no_vis"
+            },
+            &[],
+        );
     }
 
     /// `CMD_VEH_FireWeapon`: one shot from `tag` along the barrel (a bullet) or the tag (a projectile, homing
@@ -916,7 +923,10 @@ mod tests {
         let src = b"VEHICLEFILE\\type\\helicopter\\maxSpeed\\60\\accel\\20\\turretWeapon\\cobra_20mm_mp\\turretHorizSpanLeft\\120\\turretHorizSpanRight\\110\\turretVertSpanUp\\25\\turretVertSpanDown\\100\\turretRotRate\\80\\";
         let i = VehicleInfo::parse("cobra_mp", src).unwrap();
         assert_eq!(i.accel, 352.0);
-        assert_eq!((i.span_left, i.span_right, i.span_up, i.span_down), (120.0, 110.0, 25.0, 100.0));
+        assert_eq!(
+            (i.span_left, i.span_right, i.span_up, i.span_down),
+            (120.0, 110.0, 25.0, 100.0)
+        );
         assert_eq!(i.turret_weapon, "cobra_20mm_mp");
         assert!(VehicleInfo::parse("x", b"WEAPONFILE\\a\\b").is_err());
     }
@@ -978,7 +988,11 @@ mod tests {
         v.goal_yaw = Some(60.0);
         let mut pos = [0.0; 3];
         let ev = fly(&mut v, &mut pos, 200);
-        assert!(ev.iter().any(|(_, e)| *e == Notify::GoalYaw), "yaw {}", v.angles[1]);
+        assert!(
+            ev.iter().any(|(_, e)| *e == Notify::GoalYaw),
+            "yaw {}",
+            v.angles[1]
+        );
         assert!((v.angles[1] - 60.0).abs() < 2.0);
     }
 }

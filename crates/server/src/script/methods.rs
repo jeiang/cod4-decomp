@@ -4,7 +4,7 @@
 
 use gsc::{EntClass, EntRef, Value, Vm};
 
-use super::Impl::{self, Later, Real};
+use super::Impl::{self, Real};
 use super::{Args, MethFn, hud};
 use crate::game::{EntKind, Game};
 use crate::mover;

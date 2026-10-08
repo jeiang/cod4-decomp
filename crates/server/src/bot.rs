@@ -414,6 +414,21 @@ impl Brain {
                 best = Some((dist, m));
             }
         }
+        // An enemy helicopter in the open is shot at too.
+        for (m, e, v) in g.vehicles() {
+            if v.owner == n
+                || (my_team != Team::Free && g.client(v.owner).map(|c| c.team) == Some(my_team))
+            {
+                continue;
+            }
+            let dist = dist3(e.origin, eye);
+            if dist > MAX_FIRE_DIST || best.is_some_and(|(b, _)| b <= dist) {
+                continue;
+            }
+            if world.sight_trace(0, eye, e.origin, [0.0; 3], [0.0; 3], n, m, SIGHT_MASK) == 0 {
+                best = Some((dist, m));
+            }
+        }
         match best {
             Some((_, m)) => {
                 if self.enemy != Some(m) || time - self.enemy_seen > 1500 {

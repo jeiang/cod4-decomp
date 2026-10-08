@@ -234,6 +234,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Server(include_str!("../scenarios/headless-airstrike.cfg")),
     },
     StageDef {
+        name: "headless-helicopter",
+        description: "headless server, a bot calls in the helicopter hardpoint; it flies its path, fires and is shot down",
+        needs_install: false,
+        timeout: Duration::from_secs(5 * MINUTES),
+        default: true,
+        kind: Kind::Server(include_str!("../scenarios/headless-helicopter.cfg")),
+    },
+    StageDef {
         name: "client-hardpoint",
         description: "the real client calls in an airstrike: +actionslot 4, the d-pad pieces, the map pick",
         needs_install: false,

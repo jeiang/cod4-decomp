@@ -317,7 +317,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("physicstrace", r(physics_trace)),
     ("playerphysicstrace", r(player_physics_trace)),
     ("spawnhelicopter", r(spawn_helicopter)),
-    ("spawnplane", Later("M8 vehicles")),
+    ("spawnplane", r(spawn_plane)),
     ("spawnturret", Later(M3)),
 ];
 
@@ -1029,7 +1029,29 @@ fn get_ent_array(g: &mut Game, vm: &mut Vm, a: Args) -> R {
 /// `spawnHelicopter(owner, origin, angles, vehicleType, model)`.
 fn spawn_helicopter(g: &mut Game, vm: &mut Vm, a: Args) -> R {
     let owner = a.entity(0)?;
-    let n = g.spawn_helicopter(owner.num, a.vector(1)?, a.vector(2)?, a.string(3)?, a.string(4)?)?;
+    let n = g.spawn_helicopter(
+        owner.num,
+        a.vector(1)?,
+        a.vector(2)?,
+        a.string(3)?,
+        a.string(4)?,
+    )?;
+    Ok(g.entity_value(vm, n))
+}
+
+/// `spawnPlane(owner, "script_model", origin)`: a model the airstrike flies past; clients draw it as a script model.
+fn spawn_plane(g: &mut Game, vm: &mut Vm, a: Args) -> R {
+    let owner = a.entity(0)?;
+    if !g.is_client(owner.num) {
+        return Err("Owner entity is not a player".into());
+    }
+    if a.string(1)? != "script_model" {
+        return Err("spawnPlane only spawns a script_model".into());
+    }
+    let mut e = Ent::new(EntKind::Plain, "script_model");
+    e.origin = a.vector(2)?;
+    let n = g.spawn(e)?;
+    g.init_clip(n, None);
     Ok(g.entity_value(vm, n))
 }
 

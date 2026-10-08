@@ -413,6 +413,63 @@ impl Game {
         t
     }
 
+    /// `GuidedMissileSteering` for the sidewinder kind (`guidedMissileType` 1, the helicopter's rockets): a missile
+    /// with a target bends its velocity toward it, within the weapon's steering acceleration, once it has finished
+    /// accelerating. Hellfire and javelin guidance are not simulated.
+    fn guided_steering(&self, m: &mut Missile, now: i32, dt: f32) {
+        let Some(target) = m.target.and_then(|t| self.ent(t)) else {
+            return;
+        };
+        let Some(def) = self.content.weapon(&m.info.name) else {
+            return;
+        };
+        let max_accel = def.max_steering_accel;
+        if def.guided_missile_type != 1 || max_accel <= 0.0 {
+            return;
+        }
+        if m.time_to_accelerate - (now - m.pos.time) as f32 * 0.001 > 0.0 {
+            return;
+        }
+        let flat = (m.pos.delta[0] * m.pos.delta[0] + m.pos.delta[1] * m.pos.delta[1]).sqrt();
+        if flat == 0.0 {
+            return;
+        }
+        let dir = [m.pos.delta[0] / flat, m.pos.delta[1] / flat];
+        let right = [dir[1], -dir[0]];
+        let to = sub(mad(target.origin, 1.0, m.target_offset), m.pos.base);
+        let rel = [
+            dir[1] * to[1] + dir[0] * to[0],
+            right[1] * to[1] + right[0] * to[0],
+            to[2],
+        ];
+        let speed = m.info.projectile_speed as f32;
+        let tightest = speed * speed / max_accel;
+        let radius = if rel[1] == 0.0 {
+            f32::MAX
+        } else {
+            (rel[1] * rel[1] + rel[0] * rel[0]) / (rel[1] * 2.0)
+        };
+        let mut steer = [0.0f32; 3];
+        let mut side = None;
+        if rel[0] <= 0.0 {
+            if radius.abs() >= tightest + 60.0 {
+                side = Some(if rel[1] <= 0.0 { -max_accel } else { max_accel });
+            }
+        } else if rel[1] != 0.0 && tightest <= radius.abs() {
+            side = Some((flat * 2.0 * flat / radius).clamp(-max_accel, max_accel));
+        }
+        if let Some(a) = side {
+            steer[0] = a * right[0];
+            steer[1] = a * right[1];
+        }
+        let horz = (rel[0] * rel[0] + rel[1] * rel[1]).sqrt();
+        if horz != 0.0 && rel[0] / horz >= 0.0 {
+            let wish = (rel[0] / horz * flat).abs() * rel[2] / horz;
+            steer[2] = ((wish - m.pos.delta[2]) * 20.0).clamp(-max_accel, max_accel);
+        }
+        m.pos.delta = mad(m.pos.delta, dt, steer);
+    }
+
     /// `MissileTrajectory`: where the missile wants to be this frame.
     fn missile_next_origin(&self, n: u16, m: &mut Missile) -> Vec3 {
         let now = self.level.time;
@@ -432,6 +489,7 @@ impl Game {
             if m.curvature != [0.0; 3] {
                 m.pos.delta = mad(m.pos.delta, dt, m.curvature);
             }
+            self.guided_steering(m, now, dt);
             m.pos.base = mad(m.pos.base, dt, m.pos.delta);
             m.pos.base
         } else {
@@ -478,6 +536,17 @@ impl Game {
         }
         let old = origin;
         let next = self.missile_next_origin(n, m);
+        if m.target.is_some() && m.kind == MissileKind::Rocket && m.pos.kind != TrType::Linear {
+            // A steered rocket points where it flies.
+            let d = m.pos.delta;
+            if length(d) > 1.0 {
+                self.missile_set_pose(
+                    n,
+                    origin,
+                    Some([math::vec_to_pitch(&d), math::vec_to_yaw(&d), 0.0]),
+                );
+            }
+        }
         let dir = normalized(sub(next, origin));
         if length(sub(next, origin)) < 0.001 {
             self.missile_think(vm, n, m);

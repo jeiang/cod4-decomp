@@ -18,7 +18,10 @@ const fn m(f: MethFn) -> Impl<MethFn> {
 pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("freehelicopter", m(free_helicopter)),
     ("setspeed", m(set_speed)),
-    ("getspeed", m(|g, _, e, _| get(g, e, |v| Value::Float(v.speed)))),
+    (
+        "getspeed",
+        m(|g, _, e, _| get(g, e, |v| Value::Float(v.speed))),
+    ),
     (
         "getspeedmph",
         m(|g, _, e, _| get(g, e, |v| Value::Float(v.speed / MPH))),
@@ -56,7 +59,10 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
             with(g, e, |v| v.goal_yaw = Some(x))
         }),
     ),
-    ("cleargoalyaw", m(|g, _, e, _| with(g, e, |v| v.goal_yaw = None))),
+    (
+        "cleargoalyaw",
+        m(|g, _, e, _| with(g, e, |v| v.goal_yaw = None)),
+    ),
     (
         "settargetyaw",
         m(|g, _, e, a| {
@@ -86,7 +92,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
 ];
 
 /// The vehicle of the receiver.
-fn veh<'a>(g: &'a mut Game, e: EntRef) -> Result<&'a mut Vehicle, String> {
+fn veh(g: &mut Game, e: EntRef) -> Result<&mut Vehicle, String> {
     super::methods::live(g, e)?;
     g.ent_mut(e.num)
         .and_then(|x| x.veh.as_deref_mut())
@@ -116,8 +122,16 @@ fn set_speed(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     if speed < 0.0 {
         return Err("Cannot set negative speed on vehicle".into());
     }
-    let accel = if a.len() > 1 { Some(a.float(1)? * MPH) } else { None };
-    let decel = if a.len() > 2 { Some(a.float(2)? * MPH) } else { None };
+    let accel = if a.len() > 1 {
+        Some(a.float(1)? * MPH)
+    } else {
+        None
+    };
+    let decel = if a.len() > 2 {
+        Some(a.float(2)? * MPH)
+    } else {
+        None
+    };
     let v = veh(g, e)?;
     v.manual_speed = speed;
     if let Some(x) = accel {
@@ -232,7 +246,11 @@ fn set_weapon(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
 /// `fireWeapon([tag[, target[, offset]]])`: a bullet or a projectile; the missile entity comes back.
 fn fire_weapon(g: &mut Game, vm: &mut Vm, e: EntRef, a: Args) -> R {
     veh(g, e)?;
-    let tag = if a.is_empty() { None } else { Some(a.string(0)?) };
+    let tag = if a.is_empty() {
+        None
+    } else {
+        Some(a.string(0)?)
+    };
     let target = match a.opt(1) {
         Some(Value::Object(o)) => o.entity().map(|t| {
             let off = a.vector(2).unwrap_or([0.0; 3]);
@@ -278,7 +296,11 @@ fn set_team(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
         "axis" => 1,
         "allies" => 2,
         "none" => 0,
-        _ => return Err("setVehicleTeam: invalid team used must be 'axis', 'allies', or 'none'\n".into()),
+        _ => {
+            return Err(
+                "setVehicleTeam: invalid team used must be 'axis', 'allies', or 'none'\n".into(),
+            );
+        }
     };
     with(g, e, |v| v.team = team)
 }
