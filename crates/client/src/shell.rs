@@ -939,10 +939,6 @@ impl Host for HostCx<'_> {
             | "muteplayer"
             | "votetempban"
             | "votekick" => true,
-            "quit" => {
-                self.st.actions.push(Action::Quit);
-                true
-            }
             "clearerror" => {
                 self.input.cvars.set("com_errorMessage", "", false);
                 self.input.cvars.set("com_isNotice", "0", false);
