@@ -244,14 +244,14 @@ impl Scene {
 
     /// Lights a dynamic model at `origin`: the lighting handle and the effective primary light, or `None` when the
     /// reserved entries are used up.
-    pub fn light_point(&mut self, origin: [f32; 3]) -> Option<(u16, u8)> {
+    pub fn light_point(&mut self, origin: [f32; 3], show_missing: bool) -> Option<(u16, u8)> {
         let env = LightingEnv {
             sight: self.collision.as_deref().map(|c| c as &dyn SightTrace),
             lights: &self.com_lights,
         };
-        let handle = self
-            .lighting
-            .alloc_point(&self.world.light_grid, origin, 0, &env)?;
+        let handle =
+            self.lighting
+                .alloc_point(&self.world.light_grid, origin, 0, &env, show_missing)?;
         Some((handle, self.lighting.primary_light(handle)))
     }
 

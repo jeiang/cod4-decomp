@@ -692,7 +692,9 @@ impl Game {
             }
             let mut e = Ent::new(kind, class);
             apply_spawn_vars(&mut e, vars);
+            let model = e.model.clone();
             let num = self.spawn(e)?;
+            self.note_model(&model);
             let radius = get(vars, "radius").map(cvar::parse_float);
             let height = get(vars, "height").map(cvar::parse_float);
             self.init_clip(num, radius.zip(height));
@@ -836,6 +838,32 @@ mod tests {
         assert_eq!(e.len(), 2);
         assert_eq!(e[1][1], ("origin".into(), "1 2 3".into()));
         assert!(parse_spawn_vars(b"{ \"a\"").is_err());
+    }
+
+    #[test]
+    fn script_models_reach_clients_by_precache_index() {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        let mut e = Ent::new(EntKind::Plain, "script_model");
+        e.model = "vehicle_sedan".into();
+        e.origin = [1.0, 2.0, 3.0];
+        let n = g.spawn(e).unwrap();
+        // Not registered yet: a client could not name it.
+        let published = |g: &Game| {
+            crate::netsv::world_entities(g)
+                .into_iter()
+                .find(|s| s.number == n)
+        };
+        assert!(published(&g).is_none());
+        g.note_model("vehicle_sedan");
+        let s = published(&g).expect("a registered script_model is published");
+        assert_eq!(s.etype, net::entity::etype::SCRIPT_MODEL);
+        assert_eq!(s.origin, [1.0, 2.0, 3.0]);
+        assert_eq!(
+            g.configstrings[&(u32::from(net::ui::cs::MODELS) + u32::from(s.model))],
+            "vehicle_sedan"
+        );
+        g.ent_mut(n).unwrap().hidden = true;
+        assert!(published(&g).is_none(), "a hidden model is not drawn");
     }
 
     #[test]

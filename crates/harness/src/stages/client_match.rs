@@ -7,7 +7,7 @@
 //! script errors. Bandwidth, frame times and the server's tick cost are reported as metrics. Needs a display and the
 //! install; skips cleanly without.
 use super::client_flythrough::locate_client;
-use super::client_models::no_display;
+use super::client_models::{decode, no_display};
 use crate::perf::Percentiles;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
@@ -20,6 +20,8 @@ const NAME: &str = "client-match";
 const BOTS: usize = 9;
 const SECS: u64 = 90;
 const LIMIT: Duration = Duration::from_secs(300);
+/// Share of the last frame's pixels that may look magenta.
+const MAX_MAGENTA: f64 = 0.002;
 
 fn num(v: &Value, path: &[&str]) -> f64 {
     path.iter()
@@ -141,6 +143,19 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             net["weapons_without_models"]
         ));
     }
+    // Every scripted model the server published (props, cars, objectives) must be drawn.
+    let (seen, drawn) = (
+        num(net, &["script_models_seen"]),
+        num(net, &["script_models_drawn"]),
+    );
+    if seen < 1.0 {
+        failures.push("the server published no script_model for the client to draw".into());
+    } else if drawn < seen {
+        failures.push(format!(
+            "{drawn} of {seen} script_models drawn; models missing: {}",
+            net["script_models_unloaded"]
+        ));
+    }
     if num(srv, &["script_errors"]) > 0.0 {
         failures.push(format!(
             "{} script runtime errors on the server",
@@ -217,9 +232,41 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             fx["look_missing"]
         ));
     }
+    if num(net, &["skin_faults"]) > 0.0 {
+        failures.push(format!(
+            "{} skinned surfaces had vertices outside their model (stretched triangles)",
+            num(net, &["skin_faults"])
+        ));
+    }
+    // A missing texture or a model outside the light grid shows as magenta: the last frame must hold none.
+    match decode(&dir.join("screenshot.png")) {
+        Ok((_, _, rgb)) => {
+            let magenta = rgb
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .filter(|p| {
+                    let (r, g, b) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+                    r > 60 && b > 60 && g * 3 < r.min(b)
+                })
+                .count();
+            let share = magenta as f64 / (rgb.len() / 3).max(1) as f64;
+            report
+                .metrics
+                .insert("client.magenta_pixel_share".into(), share);
+            if share > MAX_MAGENTA {
+                failures.push(format!(
+                    "{:.2}% of the last frame is magenta (a missing texture or lighting)",
+                    share * 100.0
+                ));
+            }
+        }
+        Err(e) => failures.push(format!("no screenshot to check for magenta: {e}")),
+    }
     let m = &mut report.metrics;
     m.insert("sound.impacts_heard".into(), heard(&["bulletimpact"]));
     m.insert("fx.ragdolls".into(), num(fx, &["ragdolls"]));
+    m.insert("client.script_models_drawn".into(), drawn);
     m.insert("fx.quads_max".into(), num(fx, &["quads_max"]));
     m.insert("fx.decals_max".into(), num(fx, &["decals_max"]));
     m.insert("fx.live_elems_max".into(), num(fx, &["live_elems_max"]));

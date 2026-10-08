@@ -228,6 +228,30 @@ pub fn skin_surface(surf: &Surface, mats: &[Affine3A], out: &mut Vec<u8>) {
     }
 }
 
+static FAULTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many skinned surfaces so far had a vertex that was not finite or lay far outside the model: such a vertex
+/// stretches its triangles across the screen. A run that draws players must end with 0.
+pub fn skin_faults() -> u64 {
+    FAULTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Checks skinned `verts` of a model of bounding `radius`: every position finite and within a few radii (a limb is
+/// never further from the model's origin than the model is large) of the origin. Counts a fault in
+/// [`skin_faults`] and returns false otherwise.
+pub fn check_skinned(verts: &[u8], radius: f32) -> bool {
+    let limit = 4.0 * radius + 256.0;
+    let ok = verts
+        .as_chunks::<VERTEX_SIZE>()
+        .0
+        .iter()
+        .all(|v| position(v).to_array().iter().all(|c| c.abs() <= limit));
+    if !ok {
+        FAULTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    ok
+}
+
 /// Whether a surface is hidden by `hidden` (any bone it needs is hidden).
 pub fn is_hidden(surf: &Surface, hidden: &[u32; 4]) -> bool {
     surf.part_bits
@@ -318,6 +342,18 @@ mod tests {
         skin_blended(&vertex([0.0; 3]), &blends3, [0, 0, 1, 0], &mats, &mut out);
         // 0.25 * 10 + 0.25 * 20 + 0.5 * 0.
         assert_eq!(pos(&out), [7.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn skinned_vertices_far_from_the_model_or_not_finite_are_faults() {
+        let before = skin_faults();
+        let mut good = vertex([10.0, -20.0, 30.0]);
+        good.extend(vertex([0.0; 3]));
+        assert!(check_skinned(&good, 40.0));
+        assert!(!check_skinned(&vertex([1.0e6, 0.0, 0.0]), 40.0));
+        assert!(!check_skinned(&vertex([f32::NAN, 0.0, 0.0]), 40.0));
+        assert!(!check_skinned(&vertex([f32::INFINITY, 0.0, 0.0]), 40.0));
+        assert_eq!(skin_faults() - before, 3);
     }
 
     #[test]

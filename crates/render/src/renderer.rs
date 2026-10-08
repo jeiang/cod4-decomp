@@ -133,6 +133,9 @@ pub struct Settings {
     pub fog: bool,
     /// Spot and omni primary lights; off draws their surfaces with the plain lit technique.
     pub primary_lights: bool,
+    /// `r_showMissingLightGrid`: a dynamic model (the player's gun, other players) outside the light grid is drawn
+    /// in rainbow colours, a level designer's aid. Off, it takes the grid's default lighting.
+    pub show_missing_light_grid: bool,
 }
 
 impl Default for Settings {
@@ -141,6 +144,7 @@ impl Default for Settings {
             shadows: ShadowMode::Depth,
             fog: true,
             primary_lights: true,
+            show_missing_light_grid: false,
         }
     }
 }
@@ -869,7 +873,10 @@ impl Renderer {
             let lod = inst.lod.unwrap_or_else(|| pick_lod(model, dist)).min(3);
             let info = &model.lod_info[lod];
             let mats = skin::skin_matrices(model, &inst.bones);
-            let (base_lighting, light) = match self.scene.light_point(inst.light_origin) {
+            let (base_lighting, light) = match self
+                .scene
+                .light_point(inst.light_origin, self.settings.show_missing_light_grid)
+            {
                 Some((h, l)) => (self.scene.lighting.base_coords(h), l),
                 None => (
                     Object::default().base_lighting,
@@ -893,6 +900,15 @@ impl Renderer {
                 }
                 let at = self.dyn_bytes.len() as u64;
                 skin::skin_surface(surf, &mats, &mut self.dyn_bytes);
+                if !skin::check_skinned(&self.dyn_bytes[at as usize..], model.radius) {
+                    eprintln!(
+                        "skinning fault: surface {idx} of {} left the model",
+                        model.name.as_deref().unwrap_or("?")
+                    );
+                    // Leave the surface out rather than stretch triangles across the screen.
+                    self.dyn_bytes.truncate(at as usize);
+                    continue;
+                }
                 out.push(DynSurf {
                     inst: ii,
                     surf: idx,
@@ -904,14 +920,17 @@ impl Renderer {
         }
         let mut mesh_draws = Vec::new();
         for (mi, m) in meshes.iter().enumerate() {
-            let (base_lighting, light) =
-                match m.light_origin.and_then(|o| self.scene.light_point(o)) {
-                    Some((h, l)) => (self.scene.lighting.base_coords(h), l),
-                    None => (
-                        Object::default().base_lighting,
-                        self.scene.world.sun_primary_light_index as u8,
-                    ),
-                };
+            let show_missing = self.settings.show_missing_light_grid;
+            let (base_lighting, light) = match m
+                .light_origin
+                .and_then(|o| self.scene.light_point(o, show_missing))
+            {
+                Some((h, l)) => (self.scene.lighting.base_coords(h), l),
+                None => (
+                    Object::default().base_lighting,
+                    self.scene.world.sun_primary_light_index as u8,
+                ),
+            };
             for run in m.verts.chunks(dynmesh::MAX_DRAW_VERTS) {
                 let at = self.dyn_bytes.len() as u64;
                 for v in run {
