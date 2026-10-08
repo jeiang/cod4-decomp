@@ -854,15 +854,33 @@ impl World for HostCx<'_> {
     }
     fn team_field(&self, t: TeamSel, f: TeamField) -> Value {
         let g = &self.st.game;
-        let allies = match t {
-            TeamSel::Marines => true,
-            TeamSel::Opfor => false,
-            TeamSel::Own => g.team == "allies",
-            TeamSel::Other => g.team == "axis",
+        // `GetTeamField`: the player's own team, as `TEAM_FREE` before the server has said (or on no team), and
+        // `GetOtherTeamField`: the opposing team, the same spectator and unassigned names otherwise.
+        let team = match t {
+            TeamSel::Marines => "allies",
+            TeamSel::Opfor => "axis",
+            TeamSel::Own => g.team.as_str(),
+            TeamSel::Other => match g.team.as_str() {
+                "allies" => "axis",
+                "axis" => "allies",
+                other => other,
+            },
         };
         match f {
-            TeamField::Score => Value::Int(if allies { g.allies_score } else { g.axis_score }),
-            TeamField::Name => Value::Str(if allies { "TEAM_ALLIES" } else { "TEAM_AXIS" }.into()),
+            TeamField::Score => Value::Int(match team {
+                "allies" => g.allies_score,
+                "axis" => g.axis_score,
+                _ => 0,
+            }),
+            TeamField::Name => Value::Str(
+                match team {
+                    "allies" => "TEAM_ALLIES",
+                    "axis" => "TEAM_AXIS",
+                    "spectator" => "TEAM_SPECTATOR",
+                    _ => "TEAM_FREE",
+                }
+                .into(),
+            ),
         }
     }
     fn stat(&self, i: i32) -> i32 {
@@ -1394,6 +1412,48 @@ mod tests {
             }
         }
         assert!(ui.unknown.is_empty(), "unimplemented: {:?}", ui.unknown);
+    }
+
+    /// The team menu lists both teams to a player on none (and on the spectators), and the other team to a player on
+    /// one: `team(name)` is `TEAM_FREE` / `TEAM_SPECTATOR` there, not an axis stand-in.
+    #[test]
+    fn the_team_menu_lists_the_teams_a_player_can_join() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        // What the server hears when the player clicks `want` (the banner texts at the left answer no click).
+        let join = |team: &str, want: &str| -> Option<String> {
+            let assets = UiAssets::load(&install).expect("ui assets");
+            let mut st = ShellState::new(&assets, &install);
+            st.game.team = team.into();
+            let mut ui = Ui::new(assets, (1280, 720));
+            let mut input = Input::detached();
+            register_defaults(&mut input);
+            let mut h = HostCx {
+                st: &mut st,
+                input: &mut input,
+            };
+            ui.open_by_name(&mut h, "team_marinesopfor");
+            ui.click(&mut h, want);
+            st.actions.iter().find_map(|a| match a {
+                Action::MenuResponse { response, .. } => Some(response.clone()),
+                _ => None,
+            })
+        };
+        let some = |s: &str| Some(s.to_owned());
+        for team in ["free", "spectator"] {
+            assert_eq!(join(team, "OpFor"), some("axis"), "{team}: OpFor");
+            assert_eq!(join(team, "Marines"), some("allies"), "{team}: Marines");
+        }
+        // On a team, the other team stays listed.
+        assert_eq!(join("allies", "OpFor"), some("axis"));
+        assert_eq!(join("axis", "Marines"), some("allies"));
     }
 
     /// Opening the graphics menu copies the engine's settings into the menu's own dvars, and every value the menu
