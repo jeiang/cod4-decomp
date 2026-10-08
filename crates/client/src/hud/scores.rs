@@ -221,6 +221,11 @@ fn fit(ui: &Ui, text: &str, width: f32) -> f32 {
     scale
 }
 
+/// Banner and row lines the list holds, the most it scrolls.
+pub fn scoreboard_lines(rows: &[ScoreLine], own_team: u8) -> usize {
+    plan(rows, own_team, 1).total
+}
+
 /// How many player rows the scoreboard shows for these rows scrolled to `top`.
 pub fn rows_shown(rows: &[ScoreLine], own_team: u8, top: usize) -> usize {
     plan(rows, own_team, top)

@@ -21,6 +21,10 @@ const DIRECT_STEPS: &str = "ingame=120,wait=3,shot=direct";
 const MENU_STEPS: &str = "click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
 click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=3,shot=menus";
 
+/// Domination: its flags are objectives, which the minimap must mark.
+const OBJECTIVE_ARGS: &[&str] = &["--listen", "--gametype", "dom", "--bots", "3"];
+const OBJECTIVE_STEPS: &str = "ingame=120,wait=8,shot=objectives";
+
 /// Runs the client with `args` and `--ui-script steps`; returns the parsed `ui-script.json`.
 pub(super) fn run_client(
     client: &Path,
@@ -134,6 +138,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     for (label, args, steps) in [
         ("direct", DIRECT, DIRECT_STEPS),
         ("menus", &[][..], MENU_STEPS),
+        ("objectives", OBJECTIVE_ARGS, OBJECTIVE_STEPS),
     ] {
         let dir = ctx.dir.join(label);
         match run_client(
@@ -150,6 +155,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 out.files.push(format!("{label}/{label}.png"));
                 if let Some(w) = verdict(&report) {
                     problems.push(format!("{label}: {w}"));
+                } else if label == "objectives"
+                    && report["hud"]["objective_marks"].as_u64().unwrap_or(0) == 0
+                {
+                    problems.push("objectives: the minimap drew no objective marks".into());
                 }
                 if let Some(v) = report["net"]["snapshots"].as_f64() {
                     out.metrics.insert(format!("{label}.snapshots"), v);
@@ -159,7 +168,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     }
     out.notes
-        .push("direct --listen and the stock-menu path each spawned the local player".into());
+        .push("direct --listen and the stock-menu path each spawned the local player; the minimap marked domination's flags".into());
     if !problems.is_empty() {
         out.status = Status::Failed;
         out.reason = Some(problems.join("; "));

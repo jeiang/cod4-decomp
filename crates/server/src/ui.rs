@@ -191,6 +191,25 @@ impl Game {
         self.ui.out.push(Outgoing { to, cmd });
     }
 
+    /// A script's `setdvar`. A server-info variable is mirrored to the players' screens when it changes (the
+    /// engine resends the server info), as menus read variables such as `ui_hud_hardcore` from there.
+    pub fn script_set_dvar(&mut self, name: &str, value: &str) {
+        let before = self.cvars.get(name).map(|c| c.value.clone());
+        self.cvars.set(name, value);
+        let mirrored = self.cvars.get(name).is_some_and(|c| {
+            c.flags & crate::cvar::SERVERINFO != 0 && before.as_deref() != Some(&c.value)
+        });
+        if mirrored {
+            self.send(
+                Dest::All,
+                ServerCmd::SetDvar {
+                    name: name.to_owned(),
+                    value: value.to_owned(),
+                },
+            );
+        }
+    }
+
     /// Keeps the per-client `n\name\t\team` configstrings current.
     pub fn refresh_client_info(&mut self) {
         let (allies, axis) = (self.team_score[2], self.team_score[1]);
@@ -298,6 +317,30 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_changed_server_info_dvar_goes_to_the_screens() {
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.script_set_dvar("plain", "1");
+        g.cvars.set("shown", "");
+        g.cvars.add_flags("shown", crate::cvar::SERVERINFO);
+        g.script_set_dvar("shown", "1");
+        g.script_set_dvar("shown", "1");
+        g.script_set_dvar("shown", "0");
+        let sent: Vec<_> =
+            g.ui.out
+                .iter()
+                .map(|o| match &o.cmd {
+                    ServerCmd::SetDvar { name, value } => (name.as_str(), value.as_str()),
+                    _ => ("", ""),
+                })
+                .collect();
+        assert_eq!(
+            sent,
+            [("shown", "1"), ("shown", "0")],
+            "only changes, only server info"
+        );
+    }
 
     #[test]
     fn clip_cuts_on_a_character_boundary() {

@@ -177,6 +177,43 @@ pub fn create_window(
     Ok((window, note))
 }
 
+/// Moves a running window to what `req` asks: windowed at its size, or fullscreen on the monitor it is on. Returns a
+/// note about any fallback taken. The window answers with a resize, which the surface follows.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn apply(window: &Window, req: &Request) -> Option<String> {
+    let mon = window
+        .current_monitor()
+        .or_else(|| window.primary_monitor());
+    match req.kind {
+        FullscreenKind::Windowed => {
+            window.set_fullscreen(None);
+            let (w, h) = req.size.unwrap_or((1280, 720));
+            let _ = window.request_inner_size(Size::Physical(PhysicalSize::new(w, h)));
+            None
+        }
+        FullscreenKind::Borderless => {
+            window.set_fullscreen(Some(Fullscreen::Borderless(mon)));
+            None
+        }
+        FullscreenKind::Exclusive => match mon.as_ref().and_then(|m| pick_mode(m, req)) {
+            Some(m) => {
+                window.set_fullscreen(Some(Fullscreen::Exclusive(m)));
+                None
+            }
+            None => {
+                window.set_fullscreen(Some(Fullscreen::Borderless(mon)));
+                Some("no matching video mode; fell back to borderless".to_owned())
+            }
+        },
+    }
+}
+
+/// The page lays the canvas out; there is nothing to move.
+#[cfg(target_arch = "wasm32")]
+pub fn apply(_: &Window, _: &Request) -> Option<String> {
+    None
+}
+
 /// Create the window: the page's canvas, which the page lays out, so the window is whatever size the canvas has.
 #[cfg(target_arch = "wasm32")]
 pub fn create_window(

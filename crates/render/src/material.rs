@@ -148,6 +148,8 @@ pub struct SamplerSlot {
 pub struct Target {
     pub color: Option<wgpu::TextureFormat>,
     pub depth: Option<wgpu::TextureFormat>,
+    /// Samples per pixel of the attachments (1, 2 or 4).
+    pub samples: u32,
 }
 
 pub struct Prepared {
@@ -324,6 +326,8 @@ pub struct Materials {
     pub failures: BTreeMap<String, String>,
     /// The ocean simulations of the water textures prepared so far, by `Arc` address of their [`Water`].
     pub waters: HashMap<usize, WaterSim>,
+    /// `r_texFilterAnisoMax`: the most anisotropic filtering a sampler asks for; set before the samplers are made.
+    pub aniso_max: u16,
 }
 
 fn bank_entry(
@@ -375,6 +379,7 @@ impl Materials {
             demand: Mutex::new(HashSet::new()),
             failures: BTreeMap::new(),
             waters: HashMap::new(),
+            aniso_max: 16,
         }
     }
 
@@ -488,7 +493,8 @@ impl Materials {
                     3 => 2,
                     4 => 4,
                     _ => 1,
-                };
+                }
+                .min(self.aniso_max.max(1));
                 Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
                     address_mode_u: addr(0x20),
                     address_mode_v: addr(0x40),
@@ -935,7 +941,10 @@ impl Materials {
                                 stencil: s.stencil(),
                                 bias: s.depth_bias(),
                             }),
-                            multisample: Default::default(),
+                            multisample: wgpu::MultisampleState {
+                                count: target.samples.max(1),
+                                ..Default::default()
+                            },
                             multiview_mask: None,
                             cache: None,
                         }),

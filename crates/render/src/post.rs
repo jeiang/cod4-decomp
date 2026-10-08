@@ -676,6 +676,7 @@ impl Builder<'_> {
             Target {
                 color: Some(self.targets.format),
                 depth: None,
+                samples: 1,
             },
         );
         let quad = self.quads.len() as u32;
@@ -760,7 +761,7 @@ pub(crate) fn build(
     target: &wgpu::TextureView,
     z_near: f32,
 ) -> Chain {
-    let p = r.post.clone();
+    let p = r.post_params();
     let offscreen = p.offscreen();
     let save = p.save_screen;
     let shock = p.shell_shock.filter(|s| {
