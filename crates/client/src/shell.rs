@@ -265,6 +265,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("sv_punkbuster", "0"),
     // The stock message windows show only while this is 1 (the server's scripts turn it off for hardcore).
     ("ui_hud_obituaries", "1"),
+    // The objective icons on the minimap draw only while this is not 0 (the stock config sets 1; hardcore turns it off).
+    ("ui_hud_showobjicons", "1"),
 ];
 
 /// The settings of the options menus with the stock engine's defaults: archived, so a change survives a restart.

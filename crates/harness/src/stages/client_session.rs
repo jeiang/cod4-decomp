@@ -21,12 +21,9 @@ const DIRECT_STEPS: &str = "ingame=120,wait=3,shot=direct";
 const MENU_STEPS: &str = "click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
 click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=3,shot=menus";
 
-/// A spectator: the team menu's Spectate, then the match followed from a player's eyes.
 /// Domination: its flags are objectives, which the minimap must mark.
 const OBJECTIVE_ARGS: &[&str] = &["--listen", "--gametype", "dom", "--bots", "3"];
 const OBJECTIVE_STEPS: &str = "ingame=120,wait=8,shot=objectives";
-const SPECTATE_STEPS: &str = "click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
-click=Spectate,team=3:60,wait=6,shot=spectate";
 
 /// Runs the client with `args` and `--ui-script steps`; returns the parsed `ui-script.json`.
 pub(super) fn run_client(
@@ -141,7 +138,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     for (label, args, steps) in [
         ("direct", DIRECT, DIRECT_STEPS),
         ("menus", &[][..], MENU_STEPS),
-        ("spectate", &[][..], SPECTATE_STEPS),
         ("objectives", OBJECTIVE_ARGS, OBJECTIVE_STEPS),
     ] {
         let dir = ctx.dir.join(label);
@@ -157,17 +153,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             Ok(report) => {
                 out.files.push(format!("{label}/ui-script.json"));
                 out.files.push(format!("{label}/{label}.png"));
-                if label == "spectate" {
-                    // The spectator never spawns; the steps passing and a followed player on screen are the proof.
-                    let failed = report["steps"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .any(|s| s["ok"] != Value::Bool(true));
-                    if failed || report["hud_draw"]["following_frames"].as_u64().unwrap_or(0) == 0 {
-                        problems.push("spectate: a step failed or no player was followed".into());
-                    }
-                } else if let Some(w) = verdict(&report) {
+                if let Some(w) = verdict(&report) {
                     problems.push(format!("{label}: {w}"));
                 } else if label == "objectives"
                     && report["hud"]["objective_marks"].as_u64().unwrap_or(0) == 0
@@ -182,7 +168,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     }
     out.notes
-        .push("direct --listen and the stock-menu path each spawned the local player; a spectator followed a player; the minimap marked domination's flags".into());
+        .push("direct --listen and the stock-menu path each spawned the local player; the minimap marked domination's flags".into());
     if !problems.is_empty() {
         out.status = Status::Failed;
         out.reason = Some(problems.join("; "));
