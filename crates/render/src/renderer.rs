@@ -1094,16 +1094,24 @@ impl Renderer {
         draws
     }
 
-    /// The reflection probe closest to `p`: a model that moves has no baked probe index.
+    /// The reflection probe of a model that moves (it has no baked index), as `R_CalcReflectionProbeIndex` picks it: the
+    /// nearest of the probes of the cell holding `p`, or of all but the default probe 0 outside every cell. A probe
+    /// from another room lights the model with that room's sky and walls.
     fn nearest_probe(&self, p: [f32; 3]) -> u8 {
-        let d = |o: &[f32; 3]| (0..3).map(|k| (o[k] - p[k]).powi(2)).sum::<f32>();
-        self.scene
-            .world
-            .reflection_probes
+        let w = &self.scene.world;
+        let d = |i: u8| {
+            let o = &w.reflection_probes[usize::from(i)].origin;
+            (0..3).map(|k| (o[k] - p[k]).powi(2)).sum::<f32>()
+        };
+        let in_cell = crate::cull::cell_for_point(w, Vec3::from(p)).and_then(|c| w.cells.get(c));
+        let all = (1..w.reflection_probes.len().min(255) as u8).collect::<Vec<_>>();
+        let probes = in_cell.map_or(&all, |c| &c.reflection_probes);
+        probes
             .iter()
-            .enumerate()
-            .min_by(|a, b| d(&a.1.origin).total_cmp(&d(&b.1.origin)))
-            .map_or(0, |(i, _)| i as u8)
+            .copied()
+            .filter(|&i| usize::from(i) < w.reflection_probes.len())
+            .min_by(|&a, &b| d(a).total_cmp(&d(b)))
+            .unwrap_or(0)
     }
 
     /// Skins every dynamic model's surfaces into the frame's vertex buffer and lights the models.

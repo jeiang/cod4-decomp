@@ -36,6 +36,7 @@ mod ui;
 #[cfg_attr(target_arch = "wasm32", path = "video_web.rs")]
 mod video;
 mod viewmodel;
+mod vmtour;
 #[cfg(target_arch = "wasm32")]
 mod web;
 mod wire;
@@ -70,6 +71,7 @@ usage: cod4e [options]
   --video / --screenshot record a video / save a screenshot during the flythrough
   --config <path>        key binds and settings file (default: <config dir>/cod4e/config_mp.cfg)
   --audio-selftest       check the sound system on the real tables without a window or sound card, then exit (harness stage)
+  --viewmodel-tour <n>   draw the first-person weapon headless from n spawn points of --map (two headings each) with and without it, and fail when it is tinted one colour or black (viewmodel.json in --out, harness)
   --fx-selftest          play effects on the real content without a window: an explosion draws and ends, an impact leaves a decal, a shot flashes, the vision and shock files work, then exit (harness stage)
   --input-selftest       check key binds, mouse look and the config file without a window, then exit (harness stage)
   --listen               play a team deathmatch against bots on a server started inside this process
@@ -115,6 +117,8 @@ pub struct Cli {
     pub input_selftest: bool,
     pub audio_selftest: bool,
     pub fx_selftest: bool,
+    /// Spawn points of the map to draw the first-person weapon from, headless.
+    pub viewmodel_tour: Option<usize>,
     /// Number of showcase players, when the scene is on.
     pub show_models: Option<usize>,
     /// Server to play on, `host:port`.
@@ -180,6 +184,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         input_selftest: false,
         audio_selftest: false,
         fx_selftest: false,
+        viewmodel_tour: None,
         show_models: None,
         connect: None,
         listen: false,
@@ -244,6 +249,9 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--input-selftest" => c.input_selftest = true,
             "--audio-selftest" => c.audio_selftest = true,
             "--fx-selftest" => c.fx_selftest = true,
+            "--viewmodel-tour" => {
+                c.viewmodel_tour = Some(val(a)?.parse().map_err(|_| "bad view count")?)
+            }
             "--config" => c.config = Some(val(a)?.into()),
             "--show-models" => c.show_models = Some(7),
             "--model-count" => {
@@ -323,6 +331,28 @@ fn main() -> ExitCode {
             }
             Err(bad) => {
                 eprintln!("audio selftest failed: {}", bad.join("; "));
+                ExitCode::from(1)
+            }
+        };
+    }
+    if let Some(n) = cli.viewmodel_tour {
+        return match vmtour::run(&cli.install, &cli.map, n, cli.out.as_deref()) {
+            Ok((m, bad)) => {
+                let json = serde_json::to_string_pretty(&m).unwrap_or_default();
+                if let Some(out) = &cli.out {
+                    let _ = std::fs::create_dir_all(out);
+                    let _ = std::fs::write(out.join("viewmodel.json"), &json);
+                }
+                println!("{json}");
+                if bad.is_empty() {
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("viewmodel tour failed: {}", bad.join("; "));
+                    ExitCode::from(1)
+                }
+            }
+            Err(e) => {
+                eprintln!("viewmodel tour failed: {e}");
                 ExitCode::from(1)
             }
         };

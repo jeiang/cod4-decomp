@@ -15,6 +15,7 @@ pub mod client_menu_match;
 pub mod client_models;
 pub mod client_session;
 pub mod client_ui;
+pub mod client_viewmodel;
 pub mod net_killcam;
 pub mod net_loopback;
 pub mod net_match;
