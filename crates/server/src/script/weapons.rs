@@ -20,6 +20,37 @@ const fn m(f: MethFn) -> Impl<MethFn> {
     Real(f)
 }
 
+/// `beginLocationSelection(selector [, radius])`: the player picks a point on the map; the answer is the
+/// `confirm_location` (with the world point) or `cancel_location` notify.
+fn begin_location_selection(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client(g, e)?;
+    let index = g.precache(crate::ui::Table::Material, a.string(0)?)?;
+    let radius = if a.len() > 1 {
+        let r = a.float(1)?;
+        if r <= 0.0 {
+            return Err("Radius of location selector must be greater than zero\n".into());
+        }
+        let span = g.compass.map_or(1000.0, |c| c[1]).max(1.0);
+        (r / span).clamp(0.0, 1.0)
+    } else {
+        0.15
+    };
+    if let Some(c) = g.client_mut(n) {
+        c.ps.loc_selection = index;
+        c.ps.loc_radius = (radius * 63.0).round() as u8;
+    }
+    Ok(Value::Undefined)
+}
+
+fn end_location_selection(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
+    let n = client(g, e)?;
+    if let Some(c) = g.client_mut(n) {
+        c.ps.loc_selection = 0;
+        c.ps.loc_radius = 0;
+    }
+    Ok(Value::Undefined)
+}
+
 /// `setActionSlot(slot, "weapon" name | "altmode" | "nightvision" | "")`.
 fn set_action_slot(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     use sim::pm::action_slot as at;
@@ -92,6 +123,8 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("enableweapons", m(|g, _, e, _| weapons_enabled(g, e, true))),
     ("playerads", m(player_ads)),
     ("setactionslot", m(set_action_slot)),
+    ("beginlocationselection", m(begin_location_selection)),
+    ("endlocationselection", m(end_location_selection)),
     (
         "setspreadoverride",
         m(|g, _, e, _| client(g, e).map(|_| Value::Undefined)),

@@ -172,6 +172,8 @@ fn table() -> Vec<Field<PlayerState>> {
         int!(s, s.action_slot_param[1], Bits(9)),
         int!(s, s.action_slot_param[2], Bits(9)),
         int!(s, s.action_slot_param[3], Bits(9)),
+        int!(s, s.loc_selection, Bits(9)),
+        int!(s, s.loc_radius, Bits(6)),
     ]
 }
 

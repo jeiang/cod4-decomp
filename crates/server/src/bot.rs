@@ -342,6 +342,17 @@ impl Brain {
         if c.ps.pm_flags & pmf::MANTLE != 0 {
             cmd.forwardmove = 127;
         }
+        // Picking a point on the map for an airstrike: somewhere on it, confirmed after a moment.
+        if c.ps.loc_selection != 0 {
+            cmd.buttons |= button::LOC_SELECTING;
+            if time - self.spawn_time > 500 && (time / 33) % 2 == 0 {
+                cmd.buttons |= button::LOC_CONFIRM;
+                cmd.selected_location = [
+                    ((frac(&mut self.rng) - 0.5) * 120.0) as i8,
+                    ((frac(&mut self.rng) - 0.5) * 120.0) as i8,
+                ];
+            }
+        }
         // A hardpoint in action slot 4 is called in by selecting its weapon, as the key would.
         let slot_weapon = c.ps.action_slot_param[3];
         if !engaged

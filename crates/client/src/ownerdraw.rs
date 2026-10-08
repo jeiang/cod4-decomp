@@ -186,6 +186,7 @@ pub fn draw(
         5 | 6
             | 20
             | 165..=169
+            | 186
             | 71
             | 72
             | 79
@@ -278,6 +279,7 @@ pub fn draw(
         187 => map_border(&mut dc, h),
         72 => cursor_hint(&mut dc, h, &use_key),
         165 => dpad_back(&mut dc, h),
+        186 => location_selector(&mut dc, h),
         166..=169 => action_slot(&mut dc, h, (id - 166) as usize),
         // 109 and
         // 110 mark the offhand weapon the player has equipped, which only a controller cycles.
@@ -940,6 +942,31 @@ fn action_slot(dc: &mut Dc, h: &mut HudFacts, i: usize) {
         x += r.w;
     }
     dc.text(x, r.y + r.h + 3.0 * dc.u(), color, &format!("{:3}", s.ammo));
+}
+
+/// `CG_CompassDrawPlayerMapLocationSelector`: the selector picture (a circle of the strike's radius) around the
+/// point the player has picked on the full map.
+fn location_selector(dc: &mut Dc, h: &mut HudFacts) {
+    let (Some(map), Some(name)) = (h.map.as_ref(), h.loc_material.clone()) else {
+        return;
+    };
+    let m = full_rect(dc, map);
+    let d = h.loc_radius * m.h * 2.0;
+    if d <= 0.0 {
+        return;
+    }
+    let at = (m.x + m.w * h.loc_cursor[0], m.y + m.h * h.loc_cursor[1]);
+    let img = dc.p.named(&dc.ui.assets, &name);
+    dc.p.pic(
+        &img,
+        Px {
+            x: at.0 - d * 0.5,
+            y: at.1 - d * 0.5,
+            w: d,
+            h: d,
+        },
+        dc.color,
+    );
 }
 
 fn invalid_cmd_hint(dc: &mut Dc, h: &mut HudFacts) {

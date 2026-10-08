@@ -600,6 +600,11 @@ pub(super) fn log_string(g: &mut Game, _: &mut Vm, a: Args) -> R {
         g.stats.defuses += 1;
     } else if line.starts_with("hardpoint: ") {
         g.stats.hardpoints += 1;
+        if line.contains("airstrike_mp") {
+            g.stats.airstrikes += 1;
+        } else if line.contains("helicopter_mp") {
+            g.stats.helicopters += 1;
+        }
     }
     Ok(Value::Undefined)
 }
@@ -1070,6 +1075,18 @@ fn set_minimap(g: &mut Game, _: &mut Vm, a: Args) -> R {
         a.float(3)?,
         a.float(4)?
     );
+    let (ul, lr) = ([a.float(1)?, a.float(2)?], [a.float(3)?, a.float(4)?]);
+    let yaw = g.level.north_yaw.to_radians();
+    let north = [yaw.cos(), yaw.sin()];
+    let d = [lr[0] - ul[0], lr[1] - ul[1]];
+    let size = [
+        d[0] * north[1] - d[1] * north[0],
+        -d[0] * north[0] - d[1] * north[1],
+    ];
+    if size[0] < 0.0 || size[1] < 0.0 {
+        return Err("lower-right X and Y coordinates must be both south and east of upper-left X and Y coordinates in terms of the northyaw".into());
+    }
+    g.compass = Some([size[0], size[1], north[0], north[1], ul[0], ul[1]]);
     g.set_configstring(net::ui::cs::MINIMAP, &text);
     Ok(Value::Undefined)
 }
