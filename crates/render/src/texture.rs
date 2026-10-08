@@ -79,8 +79,39 @@ pub fn upload(
     }
 }
 
+/// Bytes of decoded RGBA8 a cache may hold before it starts dropping top mip levels (GPUs without BC textures only: a
+/// browser's WebGL2 on Firefox held 892 MiB of wasm memory for one map without a bound).
+pub const DECODED_BUDGET: u64 = 320 << 20;
+
+/// How many top mip levels to leave out of an image of `dims` (width, height per level, largest first) so a cache that
+/// already holds `used` of `budget` decoded bytes stays inside it: the largest level allowed shrinks from 1024 texels
+/// as the cache fills, to 256 once it is over.
+fn mips_to_skip(used: u64, budget: u64, dims: impl Iterator<Item = (usize, usize)>) -> usize {
+    let max_dim = if used >= budget {
+        256
+    } else if used * 4 >= budget * 3 {
+        512
+    } else {
+        1024
+    };
+    let mut skip = 0;
+    let mut last = 0;
+    for (i, (w, h)) in dims.enumerate() {
+        last = i;
+        if w.max(h) <= max_dim {
+            return i;
+        }
+        skip = i + 1;
+    }
+    // Every level is over the cap: keep the smallest.
+    skip.min(last)
+}
+
 pub struct TextureCache {
     vfs: Option<Vfs>,
+    /// Decoded RGBA8 bytes uploaded so far (only counted when the GPU has no BC textures).
+    decoded: u64,
+    decoded_budget: u64,
     cache: HashMap<String, Option<Arc<Tex>>>,
     placeholders: HashMap<(SamplerDim, [u8; 4]), Arc<Tex>>,
     picmip: usize,
@@ -92,6 +123,8 @@ impl TextureCache {
     pub fn new(vfs: Option<Vfs>, picmip: usize) -> Self {
         TextureCache {
             vfs,
+            decoded: 0,
+            decoded_budget: DECODED_BUDGET,
             cache: HashMap::new(),
             placeholders: HashMap::new(),
             picmip,
@@ -151,12 +184,32 @@ impl TextureCache {
         tex
     }
 
-    fn load_iwi(&self, gpu: &Gpu, name: &str) -> Option<Tex> {
+    /// Overrides [`DECODED_BUDGET`].
+    pub fn with_decoded_budget(mut self, bytes: u64) -> Self {
+        self.decoded_budget = bytes;
+        self
+    }
+
+    /// Decoded RGBA8 bytes held so far on a GPU without BC textures.
+    pub fn decoded_bytes(&self) -> u64 {
+        self.decoded
+    }
+
+    fn load_iwi(&mut self, gpu: &Gpu, name: &str) -> Option<Tex> {
         let vfs = self.vfs.as_ref()?;
         let image = iwi::load_picmip(vfs, name, self.picmip).ok()?;
+        let skip = if gpu.bc {
+            0
+        } else {
+            mips_to_skip(
+                self.decoded,
+                self.decoded_budget,
+                (0..image.mip_count()).map(|m| (image.level(m, 0).width, image.level(m, 0).height)),
+            )
+        };
         let (w, h) = (
-            image.level(0, 0).width as u32,
-            image.level(0, 0).height as u32,
+            image.level(skip, 0).width as u32,
+            image.level(skip, 0).height as u32,
         );
         let cube = image.faces == 6;
         let dim = if cube {
@@ -164,7 +217,8 @@ impl TextureCache {
         } else {
             SamplerDim::D2
         };
-        let mips = image.mip_count();
+        let first = skip;
+        let mips = image.mip_count() - skip;
         let block = !matches!(image.texels, Texels::Rgba8);
         let bc_ok = gpu.bc && block && w % 4 == 0 && h % 4 == 0;
         let (format, convert) = match (image.texels, bc_ok) {
@@ -175,7 +229,7 @@ impl TextureCache {
         };
         let mut data = Vec::new();
         for face in 0..image.faces {
-            for mip in 0..mips {
+            for mip in first..first + mips {
                 let l = image.level(mip, face);
                 if convert {
                     data.extend_from_slice(&l.to_rgba8(image.texels));
@@ -183,6 +237,9 @@ impl TextureCache {
                     data.extend_from_slice(&l.data);
                 }
             }
+        }
+        if convert {
+            self.decoded += data.len() as u64;
         }
         Some(upload(
             gpu,
@@ -242,4 +299,33 @@ fn load_inline(gpu: &Gpu, img: &GfxImage) -> Option<Tex> {
         wgpu::TextureFormat::Rgba8Unorm,
         &out,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chain(base: usize) -> impl Iterator<Item = (usize, usize)> {
+        (0..)
+            .map(move |m| ((base >> m).max(1), (base >> m).max(1)))
+            .take(12)
+    }
+
+    #[test]
+    fn an_empty_cache_keeps_textures_up_to_1024_and_a_full_one_drops_to_256() {
+        assert_eq!(mips_to_skip(0, 100, chain(1024)), 0);
+        assert_eq!(mips_to_skip(0, 100, chain(2048)), 1);
+        assert_eq!(mips_to_skip(80, 100, chain(1024)), 1);
+        assert_eq!(mips_to_skip(100, 100, chain(1024)), 2);
+        assert_eq!(mips_to_skip(100, 100, chain(256)), 0);
+    }
+
+    #[test]
+    fn a_texture_is_never_dropped_below_its_last_level() {
+        assert_eq!(mips_to_skip(100, 100, [(512, 512)].into_iter()), 0);
+        assert_eq!(
+            mips_to_skip(100, 100, [(2048, 2048), (1024, 1024)].into_iter()),
+            1
+        );
+    }
 }

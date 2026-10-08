@@ -245,6 +245,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_match::run),
     },
     StageDef {
+        name: "web-client",
+        description: "the browser client (web/pkg) in a headless Chromium on WebGL2 and, where it has it, WebGPU: draws mp_crash; records load time, frame cost and wasm memory (skipped without a built web/pkg or a Chromium)",
+        needs_install: false,
+        timeout: Duration::from_secs(12 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::web_client::run),
+    },
+    StageDef {
         name: "headless-bots-32",
         description: "headless server with 32 bots (the 32-player server budget)",
         needs_install: false,

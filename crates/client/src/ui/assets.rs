@@ -10,8 +10,6 @@ use assets::zone::text::{Font, StringTable};
 use assets::zone::{Asset, XAssetType, Zone};
 use server::content::Install;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
 use std::sync::Arc;
 
 /// Zones the menus come from, in boot order.
@@ -65,9 +63,8 @@ impl UiAssets {
         let path = install
             .zone_path(zone)
             .ok_or_else(|| format!("Could not find zone '{zone}'"))?;
-        let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let z = Zone::open(BufReader::with_capacity(1 << 16, file))
-            .map_err(|e| format!("{zone}: {e}"))?;
+        let file = ::assets::fs::buffered(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let z = Zone::open(file).map_err(|e| format!("{zone}: {e}"))?;
         z.decode(&UiFilter, |a| self.add(a))
             .map_err(|e| format!("{zone}: {e}"))?;
         Ok(())

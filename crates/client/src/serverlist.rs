@@ -8,12 +8,15 @@
 //! [`query`] is the blocking form for joining a typed address: it must learn the map before the client can load it.
 
 use net::oob::Oob;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::ToSocketAddrs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 /// Ports a server is looked for on: the original's default and the next three (a few servers on one host).
 pub const PORTS: [u16; 4] = [28960, 28961, 28962, 28963];
 /// The port assumed for an address typed without one.
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_PORT: u16 = PORTS[0];
 /// Most rows a list keeps.
 const MAX_ENTRIES: usize = 256;
@@ -69,12 +72,21 @@ impl Entry {
     }
 }
 
-/// `host:port`, or `host` alone for the default port. Resolves names.
+/// `host:port`, or `host` alone for the default port. Resolves names; a browser cannot, so there the page's
+/// WebTransport connects by the text and the address is a stand-in.
 pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
     let a = addr.trim();
     if a.is_empty() || a.starts_with(':') {
         return Err("no server address".into());
     }
+    #[cfg(target_arch = "wasm32")]
+    return Ok(crate::web::server_addr(a));
+    #[cfg(not(target_arch = "wasm32"))]
+    resolve_name(a)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_name(a: &str) -> Result<SocketAddr, String> {
     let with_port = if a
         .rsplit_once(':')
         .is_some_and(|(_, p)| p.parse::<u16>().is_ok())

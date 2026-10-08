@@ -11,7 +11,8 @@ use crate::ui::ClientUiState;
 use crate::view::SnapshotBuffer;
 use sim::pm::UserCmd;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 enum Phase {
     Connecting(Connector),

@@ -91,6 +91,7 @@ impl Cvars {
     }
 
     /// Archived `(name, value)` pairs, sorted by name.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn archived(&self) -> Vec<(&str, &str)> {
         let mut v: Vec<_> = self
             .map

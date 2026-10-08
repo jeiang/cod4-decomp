@@ -9,11 +9,11 @@
 //! (tag 8) is always the highest and is dropped when the next map loads.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, BufReader};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::clipmap::Clipmap;
@@ -46,7 +46,7 @@ impl Install {
     /// Opens the install: language from line 1 of `localization.txt` (default `english`) and
     /// the stock search path.
     pub fn open(root: &Path) -> io::Result<Self> {
-        let language = std::fs::read_to_string(root.join("localization.txt"))
+        let language = assets::fs::read_to_string(root.join("localization.txt"))
             .ok()
             .and_then(|t| t.lines().next().map(|l| l.trim().to_ascii_lowercase()))
             .and_then(|l| LANGUAGES.iter().position(|n| *n == l))
@@ -74,10 +74,10 @@ impl Install {
 
 fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     let direct = dir.join(name);
-    if direct.exists() {
+    if assets::fs::exists(&direct) {
         return Some(direct);
     }
-    std::fs::read_dir(dir)
+    assets::fs::read_dir(dir)
         .ok()?
         .flatten()
         .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name))
@@ -239,9 +239,8 @@ impl Content {
             .zone_path(zone)
             .ok_or_else(|| format!("Could not find zone '{zone}'"))?;
         let t = Instant::now();
-        let file = File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let z = Zone::open(BufReader::with_capacity(1 << 16, file))
-            .map_err(|e| format!("{zone}: {e}"))?;
+        let file = assets::fs::buffered(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let z = Zone::open(file).map_err(|e| format!("{zone}: {e}"))?;
         let layer = if tag == MAP_TAG {
             &mut self.map
         } else {

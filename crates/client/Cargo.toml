@@ -18,14 +18,27 @@ audio = { path = "../audio" }
 fx = { path = "../fx" }
 render = { path = "../render" }
 server = { path = "../server" }
-rav1e = { version = "0.8", default-features = false, features = ["threading", "asm"] }
 wgpu = "30.0.1"
 glam = "0.34.1"
 png = "0.18.1"
 serde_json = "1.0.151"
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 winit = "0.30.13"
+web-time = "1.1.0"
 gilrs = "0.11"
+
+# The video recorder (harness) and the process memory probe are native only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rav1e = { version = "0.8", default-features = false, features = ["threading", "asm"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+
+# The browser build: wgpu gets its WebGL2 fallback next to WebGPU, and the page talks to the wasm through wasm-bindgen.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+js-sys = "0.3.106"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+web-sys = { version = "0.3.106", features = ["Document", "Element", "HtmlCanvasElement", "Window", "console"] }
+wgpu = { version = "30.0.1", features = ["webgl"] }
 
 # macOS raw mouse (GCMouse); see src/input/rawmouse.rs.
 [target.'cfg(target_os = "macos")'.dependencies]

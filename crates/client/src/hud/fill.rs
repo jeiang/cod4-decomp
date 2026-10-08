@@ -3,7 +3,7 @@
 //! looked up, objectives, scoreboard lines, names and teams, and the replay state of a killcam.
 
 use super::{KillIcon, LiveElem, LiveObjective, LiveUi, ScoreLine};
-use net::UdpTransport;
+use crate::wire::Wire;
 use net::client::NetClient;
 use net::entity::etype;
 use net::ui::{ClientUiState, HudElem, NO_ENTITY, UiEvent, cs, he};
@@ -30,12 +30,7 @@ fn drawn_order(a: &LiveElem, b: &LiveElem) -> std::cmp::Ordering {
     a.e.sort.total_cmp(&b.e.sort).then(a.e.id.cmp(&b.e.id))
 }
 
-pub fn fill(
-    net: &mut NetClient<UdpTransport>,
-    live: &mut LiveUi,
-    time: i32,
-    eye: Option<glam::Vec3>,
-) {
+pub fn fill(net: &mut NetClient<Wire>, live: &mut LiveUi, time: i32, eye: Option<glam::Vec3>) {
     let Some(snap) = net.latest() else {
         live.active = false;
         return;
