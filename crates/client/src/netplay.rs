@@ -577,6 +577,28 @@ impl NetPlay {
             let (yaw, pitch) = (self.angles[1].to_radians(), -self.angles[0].to_radians());
             self.effects.demo(name, eye, yaw, pitch);
         }
+        let missiles: Vec<_> = self
+            .net
+            .snaps
+            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own))
+            .iter()
+            .filter(|e| e.etype == etype::MISSILE)
+            .map(|e| {
+                (
+                    e.number,
+                    Vec3::from(e.origin),
+                    Vec3::from(e.velocity),
+                    e.weapon,
+                )
+            })
+            .collect();
+        let (weapons, content) = (&self.weapons, &self.lib.content);
+        self.effects.missiles(&missiles, &|w| {
+            weapons
+                .get(w)
+                .and_then(|i| content.weapon(&i.name))
+                .cloned()
+        });
         self.effects.update(st, self.boxes.world());
         for s in self.effects.take_sounds() {
             self.sound.play_world(&s.alias, s.origin.to_array());

@@ -69,6 +69,13 @@ pub struct Effects {
     impact: Option<Arc<FxImpactTable>>,
     world: Arc<GfxWorld>,
     marks: HashMap<u64, Mark>,
+    /// The trail effect playing on each missile entity, by entity number.
+    missiles: HashMap<u16, u64>,
+    /// A `--fx-demo` effect with a trail, swept around a circle so the trail has a path: the handle, the circle's
+    /// centre and axes, and when it started.
+    /// The server time of the last update.
+    clock: i32,
+    sweep: Option<(u64, Frame, i32)>,
     /// The client number of this player and the gun in their hands, for the first-person flash.
     own: u16,
     view: Option<ViewTags>,
@@ -86,6 +93,8 @@ pub struct Drawn {
     /// How many sprites and decals the meshes hold.
     pub quads: usize,
     pub decals: usize,
+    /// How many trail strips the meshes hold.
+    pub trails: usize,
 }
 
 impl Effects {
@@ -99,6 +108,9 @@ impl Effects {
             impact: content.impact_table().cloned(),
             world,
             marks: HashMap::new(),
+            missiles: HashMap::new(),
+            clock: 0,
+            sweep: None,
             own: u16::MAX,
             view: None,
             played: BTreeMap::new(),
@@ -289,6 +301,35 @@ impl Effects {
         }
     }
 
+    /// Keeps the trail effect of every missile in flight at the missile: starts it for a new one, follows it as it
+    /// moves, ends it when the missile is gone. Each item is the entity number, its position, its velocity and its
+    /// weapon.
+    pub fn missiles(
+        &mut self,
+        flying: &[(u16, Vec3, Vec3, u16)],
+        weapon: &dyn Fn(u16) -> Option<Arc<WeaponDef>>,
+    ) {
+        for (number, origin, velocity, w) in flying {
+            let frame = Frame::facing(*origin, *velocity);
+            if let Some(id) = self.missiles.get(number) {
+                self.fx.move_effect(*id, frame);
+            } else if let Some(def) = weapon(*w).and_then(|d| d.proj_trail_effect.clone()) {
+                let def = self.resolve(&def);
+                let id = self.fx.play_attached(&def, frame);
+                self.missiles.insert(*number, id);
+                *self.played.entry("missile_trail").or_default() += 1;
+            }
+        }
+        let fx = &mut self.fx;
+        self.missiles.retain(|n, id| {
+            let flying = flying.iter().any(|m| m.0 == *n);
+            if !flying {
+                fx.stop(*id);
+            }
+            flying
+        });
+    }
+
     /// Tells the effects who this player is and where the gun in their hands has its muzzle and ejection port.
     pub fn set_view(&mut self, own: u16, tags: Option<ViewTags>) {
         self.own = own;
@@ -319,11 +360,30 @@ impl Effects {
                     .map(|n| format!("  did you mean {n}")),
             );
         }
-        self.play("demo", def, eye + forward * 90.0, -forward);
+        if let Some(id) = self.sweep.take().map(|s| s.0) {
+            self.fx.stop(id);
+        }
+        match def.map(|d| self.resolve(&d)) {
+            Some(d) if d.elems.iter().any(|e| e.trail.is_some()) => {
+                let centre = Frame::facing(eye + forward * 150.0, forward);
+                let id = self.fx.play_attached(&d, centre);
+                self.sweep = Some((id, centre, self.clock));
+                *self.played.entry("demo").or_default() += 1;
+            }
+            d => self.play("demo", d, eye + forward * 90.0, -forward),
+        }
     }
 
     /// Advances every playing effect to `now_ms` of the server clock.
     pub fn update(&mut self, now_ms: i32, world: &dyn Collide) {
+        self.clock = now_ms;
+        if let Some((id, c, t0)) = self.sweep {
+            // Round a circle 60 units wide in 1.5 s, facing along its path.
+            let a = (now_ms - t0) as f32 * std::f32::consts::TAU / 1500.0;
+            let at = c.origin + c.axis[1] * (60.0 * a.cos()) + c.axis[2] * (60.0 * a.sin());
+            let heading = c.axis[1] * -a.sin() + c.axis[2] * a.cos();
+            self.fx.move_effect(id, Frame::facing(at, heading));
+        }
         self.fx.update(now_ms, &Tracer(world));
     }
 
@@ -378,6 +438,29 @@ impl Effects {
                 .last_mut()
                 .expect("just pushed")
                 .push_quad([v(0), v(1), v(2), v(3)]);
+        }
+
+        // Trails last: the strips of points the effects left behind, far to near.
+        d.trails.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then(b.depth.total_cmp(&a.depth))
+        });
+        for t in &d.trails {
+            let mut mesh = DynMesh::new(t.material.clone());
+            let v = |i: u32| {
+                let v = &t.verts[i as usize];
+                DynVertex {
+                    pos: v.pos.to_array(),
+                    color: v.color,
+                    uv: v.uv,
+                    normal: v.normal.to_array(),
+                    tangent: v.tangent.to_array(),
+                }
+            };
+            mesh.verts = t.indices.iter().map(|&i| v(i)).collect();
+            out.meshes.push(mesh);
+            out.trails += 1;
         }
 
         let mut seen = HashSet::new();

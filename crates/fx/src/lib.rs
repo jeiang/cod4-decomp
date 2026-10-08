@@ -123,6 +123,29 @@ pub struct Quad {
     pub sort_order: u8,
 }
 
+/// One vertex of a trail ribbon.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrailVertex {
+    pub pos: Vec3,
+    pub normal: Vec3,
+    pub tangent: Vec3,
+    pub uv: [f32; 2],
+    /// RGBA.
+    pub color: [u8; 4],
+}
+
+/// A trail: the strip a moving effect leaves behind it, as indexed triangles.
+#[derive(Clone)]
+pub struct Trail {
+    pub material: Arc<Material>,
+    pub verts: Vec<TrailVertex>,
+    /// Three per triangle, into `verts`.
+    pub indices: Vec<u32>,
+    /// Distance of the strip's newest point to the camera, to sort far to near.
+    pub depth: f32,
+    pub sort_order: u8,
+}
+
 /// A mark on the world's surfaces.
 #[derive(Clone)]
 pub struct Decal {
@@ -167,6 +190,7 @@ pub struct Draws {
     pub decals: Vec<Decal>,
     pub models: Vec<ModelDraw>,
     pub lights: Vec<Light>,
+    pub trails: Vec<Trail>,
 }
 
 /// Counters of a run.
@@ -176,6 +200,16 @@ pub struct Stats {
     pub elems_spawned: u64,
     pub impacts: u64,
     pub dropped: u64,
+}
+
+/// What makes an element one point of a trail: the effect travelled `dist` units when it spawned, and the effect's
+/// right and up axes then span the plane of the ribbon's cross-section.
+#[derive(Clone, Copy)]
+struct TrailPoint {
+    seq: u32,
+    dist: f32,
+    right: Vec3,
+    up: Vec3,
 }
 
 struct Elem {
@@ -195,16 +229,24 @@ struct Elem {
     started: bool,
     emit_left: f32,
     id: u64,
+    trail: Option<TrailPoint>,
 }
 
 struct Effect {
     def: Arc<FxEffectDef>,
     frame: Frame,
-    start: i32,
     elems: Vec<Elem>,
     /// Next spawn time of each looping element.
     next_loop: Vec<i32>,
     loop_end: i32,
+    id: u64,
+    /// Where the owner moved the effect to since the last update.
+    goal: Option<Frame>,
+    /// Distance the effect has travelled, and the time of its last move.
+    dist: f32,
+    last_move: i32,
+    /// Elements spawned so far, per element definition (looping ones stop at their count).
+    spawned: Vec<u32>,
 }
 
 pub struct Fx {
@@ -255,7 +297,7 @@ impl Fx {
     }
 
     /// Plays `def` at `frame`, starting `at` the given time (milliseconds on the effect clock).
-    pub fn play_at(&mut self, def: &Arc<FxEffectDef>, frame: Frame, at: i32) {
+    pub fn play_at(&mut self, def: &Arc<FxEffectDef>, frame: Frame, at: i32) -> u64 {
         if self.effects.len() >= MAX_EFFECTS {
             self.effects.remove(0);
             self.stats.dropped += 1;
@@ -271,19 +313,63 @@ impl Fx {
         let mut e = Effect {
             def: def.clone(),
             frame,
-            start: at,
             elems: Vec::new(),
             next_loop: vec![at; looping],
             loop_end,
+            id: self.next_id,
+            goal: None,
+            dist: 0.0,
+            last_move: at,
+            spawned: vec![0; def.elems.len()],
         };
+        self.next_id += 1;
+        for k in 0..def.elems.len() {
+            if is_trail(&def.elems[k]) {
+                // Trails spawn by distance travelled, not on an interval.
+                if let Some(n) = e.next_loop.get_mut(k) {
+                    *n = i32::MAX;
+                }
+                self.spawn_trail_point(&mut e, k, at, 0.0);
+            }
+        }
         for k in looping..(looping + one_shot).min(def.elems.len()) {
             let d = &def.elems[k];
+            if is_trail(d) {
+                continue;
+            }
             let count = d.spawn[0] as f32 + d.spawn[1] as f32 * self.rng.f();
             for _ in 0..(count as i32).max(0) {
                 self.spawn(&mut e, k, at);
             }
         }
+        let id = e.id;
         self.effects.push(e);
+        id
+    }
+
+    /// Plays `def` at `frame` as an effect that goes on until [`Fx::stop`] and follows [`Fx::move_effect`]: a missile's
+    /// smoke trail. Returns its handle.
+    pub fn play_attached(&mut self, def: &Arc<FxEffectDef>, frame: Frame) -> u64 {
+        let id = self.play_at(def, frame, self.now);
+        if let Some(e) = self.effects.iter_mut().find(|e| e.id == id) {
+            e.loop_end = i32::MAX;
+        }
+        id
+    }
+
+    /// Moves a playing effect to `frame`; it spawns what its movement calls for (trail points along the way) at the
+    /// next update. Does nothing if the effect is over.
+    pub fn move_effect(&mut self, id: u64, frame: Frame) {
+        if let Some(e) = self.effects.iter_mut().find(|e| e.id == id) {
+            e.goal = Some(frame);
+        }
+    }
+
+    /// Ends the looping of an effect started with [`Fx::play_attached`]; what it already spawned plays out.
+    pub fn stop(&mut self, id: u64) {
+        if let Some(e) = self.effects.iter_mut().find(|e| e.id == id) {
+            e.loop_end = e.loop_end.min(self.now);
+        }
     }
 
     pub fn play(&mut self, def: &Arc<FxEffectDef>, frame: Frame) {
@@ -316,33 +402,8 @@ impl Fx {
         let life =
             (d.life_span_msec.base as f32 + d.life_span_msec.amplitude as f32 * r[18]).max(1.0);
         // The spawn point.
-        let off = Vec3::new(
-            pick(r[6], &d.spawn_origin[0]),
-            pick(r[7], &d.spawn_origin[1]),
-            pick(r[8], &d.spawn_origin[2]),
-        );
         let f = &e.frame;
-        let mut pos = if d.flags & flags::SPAWN_RELATIVE_TO_EFFECT != 0 {
-            f.origin + f.axis[0] * off.x + f.axis[1] * off.y + f.axis[2] * off.z
-        } else {
-            f.origin + off
-        };
-        let mut offset = Vec3::ZERO;
-        match d.flags & flags::SPAWN_OFFSET_MASK {
-            flags::SPAWN_OFFSET_SPHERE => {
-                let dir = random_dir(r[9], r[10]);
-                offset = dir * pick(r[11], &d.spawn_offset_radius);
-            }
-            flags::SPAWN_OFFSET_CYLINDER => {
-                let radius = pick(r[11], &d.spawn_offset_radius);
-                let yaw = r[9] * std::f32::consts::TAU;
-                offset = f.axis[1] * (radius * yaw.cos())
-                    + f.axis[2] * (radius * yaw.sin())
-                    + f.axis[0] * pick(r[10], &d.spawn_offset_height);
-            }
-            _ => {}
-        }
-        pos += offset;
+        let (pos, offset) = spawn_origin(d, &r, f);
         let orient = match d.flags & flags::RUN_MASK {
             0 => [Vec3::X, Vec3::Y, Vec3::Z],
             flags::RUN_RELATIVE_TO_OFFSET => {
@@ -369,7 +430,71 @@ impl Fx {
             started: false,
             emit_left: d.emit_dist.base + d.emit_dist.amplitude * r[19],
             id,
+            trail: None,
         });
+    }
+
+    /// Spawns the trail point of element `k` that the effect leaves at `dist` units of travel, from the effect's
+    /// frame now.
+    fn spawn_trail_point(&mut self, e: &mut Effect, k: usize, time: i32, dist: f32) {
+        let before = e.elems.len();
+        self.spawn(e, k, time);
+        if e.elems.len() == before {
+            return;
+        }
+        let seq = e.spawned[k];
+        e.spawned[k] += 1;
+        let [_, right, up] = e.frame.axis;
+        e.elems[before].trail = Some(TrailPoint {
+            seq,
+            dist,
+            right,
+            up,
+        });
+    }
+
+    /// Carries the effect to `goal`: a trail point for every split distance crossed on the way, and the newest point
+    /// of each trail follows the effect.
+    fn move_trails(&mut self, e: &mut Effect, goal: Frame, now: i32) {
+        let from = e.frame;
+        let moved = from.origin.distance(goal.origin);
+        let (t0, d0) = (e.last_move, e.dist);
+        let def = e.def.clone();
+        for (k, d) in def.elems.iter().enumerate() {
+            let Some(trail) = d.trail.as_ref().filter(|_| is_trail(d)) else {
+                continue;
+            };
+            let split = trail.split_dist.max(1) as f32;
+            let mut n = (d0 / split).floor() + 1.0;
+            while moved > 0.0 && n * split <= d0 + moved {
+                let lerp = (n * split - d0) / moved;
+                e.frame = lerp_frame(&from, &goal, lerp);
+                let time = t0 + ((now - t0) as f32 * lerp) as i32;
+                self.spawn_trail_point(e, k, time, n * split);
+                n += 1.0;
+            }
+        }
+        e.frame = goal;
+        e.dist = d0 + moved;
+        e.last_move = now;
+        for (k, d) in def.elems.iter().enumerate() {
+            if !is_trail(d) {
+                continue;
+            }
+            if let Some(el) = e
+                .elems
+                .iter_mut()
+                .rev()
+                .find(|x| x.def == k && x.trail.is_some())
+            {
+                el.pos = spawn_origin(d, &el.r, &goal).0;
+                if let Some(t) = &mut el.trail {
+                    t.dist = e.dist;
+                    t.right = goal.axis[1];
+                    t.up = goal.axis[2];
+                }
+            }
+        }
     }
 
     /// Advances every effect to `now_ms`.
@@ -399,7 +524,20 @@ impl Fx {
             !(looping_over && e.elems.iter().all(|x| x.done))
         });
         for e in &mut effects {
-            e.elems.retain(|x| !x.done);
+            // A trail keeps the last of its expired points: the strip is cut off between it and the next.
+            let mut next_done: Vec<bool> = vec![true; e.def.elems.len()];
+            let mut keep = vec![true; e.elems.len()];
+            for (i, x) in e.elems.iter().enumerate().rev() {
+                keep[i] = !x.done || (x.trail.is_some() && !next_done[x.def]);
+                if x.trail.is_some() {
+                    next_done[x.def] = x.done;
+                }
+            }
+            let mut i = 0;
+            e.elems.retain(|_| {
+                i += 1;
+                keep[i - 1]
+            });
         }
         self.live_elems = effects.iter().map(|e| e.elems.len()).sum();
         self.effects = effects;
@@ -412,22 +550,31 @@ impl Fx {
         world: &dyn World,
         spawned: &mut Vec<(Arc<FxEffectDef>, Frame, i32)>,
     ) {
+        if let Some(goal) = e.goal.take() {
+            self.move_trails(e, goal, now);
+        }
         // Looping elements spawn on their interval until the effect's looping life is over.
         let looping = e.next_loop.len();
         for k in 0..looping {
-            let d = &e.def.elems[k];
-            let interval = d.spawn[0].max(1);
-            let count = d.spawn[1].max(1);
-            while e.next_loop[k] <= now && e.next_loop[k] <= e.loop_end {
-                let t = e.next_loop[k];
-                for _ in 0..count {
-                    self.spawn(e, k, t);
-                }
-                e.next_loop[k] = t + interval;
+            let d = e.def.clone();
+            let d = &d.elems[k];
+            if is_trail(d) {
+                continue;
             }
-            if e.loop_end == e.start {
-                // No looping life: one batch only.
-                e.next_loop[k] = e.loop_end + 1;
+            let interval = d.spawn[0].max(1);
+            // A looping element spawns one at every interval, `count` in all; only the unlimited ones stop with the
+            // effect's looping life.
+            let limited = d.spawn[1] != i32::MAX;
+            let until = if limited { i32::MAX } else { e.loop_end };
+            while e.next_loop[k] <= now && e.next_loop[k] <= until {
+                let t = e.next_loop[k];
+                self.spawn(e, k, t);
+                e.spawned[k] += 1;
+                e.next_loop[k] = if limited && e.spawned[k] as i64 >= i64::from(d.spawn[1]) {
+                    i32::MAX
+                } else {
+                    t + interval
+                };
             }
         }
         let def = e.def.clone();
@@ -599,8 +746,9 @@ impl Fx {
     /// Everything to draw at the current time.
     pub fn draw(&self, cam: &Camera, out: &mut Draws) {
         for e in &self.effects {
+            self.draw_trails(e, cam, out);
             for el in &e.elems {
-                if el.done || !el.started || self.now < el.begin {
+                if el.done || el.trail.is_some() || !el.started || self.now < el.begin {
                     continue;
                 }
                 let d = &e.def.elems[el.def];
@@ -687,6 +835,171 @@ impl Fx {
                     _ => {}
                 }
             }
+        }
+    }
+}
+
+/// Where an element of `d` with random draws `r` spawns for an effect at `f`, and the offset from the frame's spawn
+/// point that the run direction may follow.
+fn spawn_origin(d: &FxElemDef, r: &[f32; 24], f: &Frame) -> (Vec3, Vec3) {
+    let off = Vec3::new(
+        pick(r[6], &d.spawn_origin[0]),
+        pick(r[7], &d.spawn_origin[1]),
+        pick(r[8], &d.spawn_origin[2]),
+    );
+    let pos = if d.flags & flags::SPAWN_RELATIVE_TO_EFFECT != 0 {
+        f.origin + f.axis[0] * off.x + f.axis[1] * off.y + f.axis[2] * off.z
+    } else {
+        f.origin + off
+    };
+    let mut offset = Vec3::ZERO;
+    match d.flags & flags::SPAWN_OFFSET_MASK {
+        flags::SPAWN_OFFSET_SPHERE => {
+            let dir = random_dir(r[9], r[10]);
+            offset = dir * pick(r[11], &d.spawn_offset_radius);
+        }
+        flags::SPAWN_OFFSET_CYLINDER => {
+            let radius = pick(r[11], &d.spawn_offset_radius);
+            let yaw = r[9] * std::f32::consts::TAU;
+            offset = f.axis[1] * (radius * yaw.cos())
+                + f.axis[2] * (radius * yaw.sin())
+                + f.axis[0] * pick(r[10], &d.spawn_offset_height);
+        }
+        _ => {}
+    }
+    (pos + offset, offset)
+}
+
+fn is_trail(d: &FxElemDef) -> bool {
+    d.elem_type == elem::TRAIL && d.trail.is_some() && matches!(d.visuals, FxVisuals::Materials(_))
+}
+
+fn lerp_frame(a: &Frame, b: &Frame, t: f32) -> Frame {
+    Frame {
+        origin: a.origin.lerp(b.origin, t),
+        axis: [0, 1, 2].map(|i| {
+            a.axis[i]
+                .lerp(b.axis[i], t)
+                .try_normalize()
+                .unwrap_or(a.axis[i])
+        }),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Section {
+    pos: Vec3,
+    right: Vec3,
+    up: Vec3,
+    rotation: f32,
+    size: [f32; 2],
+    color: [u8; 4],
+    u: f32,
+}
+
+fn lerp_section(a: &Section, b: &Section, t: f32) -> Section {
+    Section {
+        pos: a.pos.lerp(b.pos, t),
+        right: a.right.lerp(b.right, t),
+        up: a.up.lerp(b.up, t),
+        u: a.u + (b.u - a.u) * t,
+        ..*a
+    }
+}
+
+impl Fx {
+    /// Draws the trails of `e`: one strip per trail element, through the points the effect left, each cross-section
+    /// the trail definition's polygon (an angled pair of fins) at the point's size, colour and rotation. Points whose
+    /// life is over are not drawn; the strip ends in the cut between the last of them and the next point.
+    fn draw_trails(&self, e: &Effect, cam: &Camera, out: &mut Draws) {
+        for (k, d) in e.def.elems.iter().enumerate() {
+            let (true, Some(td), FxVisuals::Materials(mats)) = (is_trail(d), &d.trail, &d.visuals)
+            else {
+                continue;
+            };
+            let points: Vec<&Elem> = e
+                .elems
+                .iter()
+                .filter(|x| x.def == k && x.trail.is_some() && x.started && x.begin <= self.now)
+                .collect();
+            let (Some(first), Some(last)) = (points.first(), points.last()) else {
+                continue;
+            };
+            let Some(Some(material)) = mats.get(pick_index(last, mats.len())) else {
+                continue;
+            };
+            let repeat = td.repeat_dist.max(1) as f32;
+            let mut u0 = -(first.trail.expect("filtered").dist / repeat).floor();
+            if td.scroll_time_msec != 0 {
+                let s = td.scroll_time_msec;
+                u0 += if s <= 0 {
+                    1.0 - (self.now % s) as f32 / s as f32
+                } else {
+                    (self.now % -s) as f32 / -s as f32
+                };
+            }
+            let mut sections: Vec<Section> = Vec::new();
+            let mut prev: Option<(f32, Section)> = None;
+            for el in &points {
+                let tp = el.trail.expect("filtered");
+                let norm = (self.now - el.begin) as f32 / el.life;
+                let vis = visual_state(d, el, norm.clamp(0.0, 0.999_999));
+                let mut sec = Section {
+                    pos: el.pos,
+                    right: tp.right,
+                    up: tp.up,
+                    rotation: vis.rotation,
+                    size: vis.size,
+                    color: vis.color,
+                    u: tp.dist / repeat + u0,
+                };
+                if norm < 1.0 {
+                    match prev {
+                        None if tp.seq == 0 => sec.color[3] = 0,
+                        Some((pn, ps)) if pn >= 1.0 => {
+                            sections.push(lerp_section(&ps, &sec, (1.0 - pn) / (norm - pn)));
+                        }
+                        _ => {}
+                    }
+                    sections.push(sec);
+                }
+                prev = Some((norm, sec));
+            }
+            if sections.len() < 2 || td.verts.is_empty() {
+                continue;
+            }
+            let per = td.verts.len();
+            let mut verts = Vec::with_capacity(per * sections.len());
+            for s in &sections {
+                let (sin, cos) = s.rotation.sin_cos();
+                let left = s.right * cos + s.up * sin;
+                let up = s.right * sin - s.up * cos;
+                for v in td.verts.iter() {
+                    verts.push(TrailVertex {
+                        pos: s.pos + left * (v[0] * s.size[0]) + up * (v[1] * s.size[1]),
+                        normal: (left * v[2] + up * v[3]).try_normalize().unwrap_or(left),
+                        tangent: left,
+                        uv: [s.u, v[4]],
+                        color: s.color,
+                    });
+                }
+            }
+            let mut indices = Vec::new();
+            for seg in 0..sections.len() - 1 {
+                let near = (seg * per) as u32;
+                let far = near + per as u32;
+                for pair in td.indices.as_chunks::<2>().0 {
+                    let (a, b) = (u32::from(pair[0]), u32::from(pair[1]));
+                    indices.extend([near + a, near + b, far + a, far + b, far + a, near + b]);
+                }
+            }
+            out.trails.push(Trail {
+                material: material.clone(),
+                verts,
+                indices,
+                depth: (last.pos - cam.origin).dot(cam.axis[0]),
+                sort_order: d.sort_order,
+            });
         }
     }
 }
@@ -989,7 +1302,7 @@ mod tests {
     #[test]
     fn a_looping_element_spawns_on_its_interval_for_the_looping_life_only() {
         let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
-        e.spawn = [100, 1];
+        e.spawn = [100, i32::MAX];
         let def = effect("fx/loop", 1, 0, 450, vec![e]);
         let mut fx = Fx::new(lib(vec![def.clone()]));
         fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
@@ -997,6 +1310,97 @@ mod tests {
         // t = 0, 100, 200, 300 and 400.
         assert_eq!(fx.stats.elems_spawned, 5);
         assert_eq!(fx.live_effects(), 0);
+    }
+
+    #[test]
+    fn a_looping_element_stops_at_its_count_even_without_a_looping_life() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [100, 3];
+        let def = effect("fx/count", 1, 0, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(2000, &Empty);
+        assert_eq!(fx.stats.elems_spawned, 3);
+    }
+
+    fn trail_effect(life: i32) -> Arc<FxEffectDef> {
+        let material = Arc::new(Material {
+            name: None,
+            game_flags: 0,
+            sort_key: 0,
+            atlas_rows: 1,
+            atlas_columns: 1,
+            draw_surf: 0,
+            surface_type_bits: 0,
+            hash_index: 0,
+            state_bits_entry: [0; 34],
+            state_flags: 0,
+            camera_region: 0,
+            technique_set: None,
+            textures: Arc::from(Vec::new()),
+            constants: Arc::from(Vec::new()),
+            state_bits: Arc::from(Vec::new()),
+        });
+        let mut e = elem_def(elem::TRAIL, FxVisuals::Materials(vec![Some(material)].into()));
+        e.spawn = [1, i32::MAX];
+        e.life_span_msec = range(life, 0);
+        e.trail = Some(Arc::new(assets::zone::fx::FxTrailDef {
+            scroll_time_msec: 0,
+            repeat_dist: 100,
+            split_dist: 50,
+            // One fin, a unit wide.
+            verts: Arc::new([[1.0, 0.0, 0.0, 1.0, 0.0], [-1.0, 0.0, 0.0, 1.0, 1.0]]),
+            indices: Arc::new([0, 1]),
+        }));
+        effect("fx/trail", 1, 0, 0, vec![e])
+    }
+
+    fn trail_cam() -> Camera {
+        Camera {
+            origin: Vec3::new(-500.0, 0.0, 0.0),
+            axis: [Vec3::X, Vec3::Y, Vec3::Z],
+        }
+    }
+
+    #[test]
+    fn a_moving_effect_leaves_a_strip_through_the_points_it_passed_that_ends_when_they_expire() {
+        let def = trail_effect(1000);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        let id = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::X));
+        // 400 units along x in 400 ms: a point every 50 units, plus the newest at the effect.
+        for i in 1..=8 {
+            fx.move_effect(id, Frame::facing(Vec3::X * (i as f32 * 50.0), Vec3::X));
+            fx.update(i * 50, &Empty);
+        }
+        let mut d = Draws::default();
+        fx.draw(&trail_cam(), &mut d);
+        assert_eq!(d.trails.len(), 1);
+        let t = &d.trails[0];
+        assert_eq!(t.verts.len(), 2 * 9);
+        // Each of the eight segments is two triangles of the fin.
+        assert_eq!(t.indices.len(), 8 * 6);
+        let (min, max) = t.verts.iter().fold((f32::MAX, f32::MIN), |(a, b), v| {
+            (a.min(v.pos.x), b.max(v.pos.x))
+        });
+        assert_eq!((min, max), (0.0, 400.0));
+        // A trail whose effect stopped fades out and the strip goes with it.
+        fx.stop(id);
+        fx.update(3000, &Empty);
+        let mut d = Draws::default();
+        fx.draw(&trail_cam(), &mut d);
+        assert!(d.trails.is_empty());
+        assert_eq!(fx.live_elems(), 0);
+    }
+
+    #[test]
+    fn a_standing_effect_leaves_no_strip() {
+        let def = trail_effect(1000);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::X));
+        fx.update(300, &Empty);
+        let mut d = Draws::default();
+        fx.draw(&trail_cam(), &mut d);
+        assert!(d.trails.is_empty());
     }
 
     #[test]
