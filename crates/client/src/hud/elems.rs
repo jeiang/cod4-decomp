@@ -363,11 +363,7 @@ pub(super) type Clamped = ((f32, f32), (f32, f32), f32);
 
 /// Pulls `pt` inside the screen shrunk by `pad` (left, right, top, bottom); `None` when it is already inside, else
 /// the clamped point, the outward unit direction and how far outside it was.
-pub(super) fn clamp_to_edges(
-    pt: (f32, f32),
-    size: (f32, f32),
-    pad: [f32; 4],
-) -> Option<Clamped> {
+pub(super) fn clamp_to_edges(pt: (f32, f32), size: (f32, f32), pad: [f32; 4]) -> Option<Clamped> {
     let c = (
         pt.0.clamp(pad[0], (size.0 - pad[1]).max(pad[0])),
         pt.1.clamp(pad[2], (size.1 - pad[3]).max(pad[2])),

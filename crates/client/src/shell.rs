@@ -84,7 +84,6 @@ pub struct ShellState {
 #[derive(Default)]
 pub struct GameFacts {
     pub scoreboard: bool,
-    pub killcam: bool,
     pub dead: bool,
     pub team: String,
     pub gametype: String,

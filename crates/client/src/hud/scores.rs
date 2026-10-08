@@ -353,7 +353,7 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
 }
 
 /// Draws a string at a scale, position, colour and style.
-type TextFn = dyn Fn(&mut Painter, &str, f32, f32, f32, [f32; 4], i32);
+type TextFn<'a> = dyn Fn(&mut Painter, &str, f32, f32, f32, [f32; 4], i32) + 'a;
 
 #[allow(clippy::too_many_arguments)]
 fn draw_row(
@@ -365,7 +365,7 @@ fn draw_row(
     y: f32,
     x0: f32,
     white: &render::ui2d::UiImage,
-    text: &TextFn,
+    text: &TextFn<'_>,
     rect: &dyn Fn(f32, f32, f32, f32) -> Px,
 ) {
     let tc = view.team_color[usize::from(r.team.min(3))];
