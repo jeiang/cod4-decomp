@@ -12,6 +12,7 @@ use crate::shell::ShellState;
 use crate::ui::Ui;
 use crate::ui::paint::{Painter, TextDraw};
 use crate::ui::place::{Px, horz};
+use assets::zone::text::StringTable;
 
 pub const PANEL_W: f32 = 500.0;
 pub const PANEL_H: f32 = 435.0;
@@ -357,6 +358,37 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
     }
 }
 
+/// One cell of a string table: the row whose first column is `key`, column `col`.
+fn table_cell(t: &StringTable, key: u8, col: usize) -> Option<&str> {
+    let cols = t.column_count as usize;
+    let key = key.to_string();
+    (0..t.row_count as usize)
+        .find(|&r| t.values.get(r * cols).and_then(|v| v.as_deref()) == Some(key.as_str()))
+        .and_then(|r| t.values.get(r * cols + col)?.as_deref())
+}
+
+/// `LCT_RANK_ICON`: the icon material (`mp/rankIconTable.csv`, column `prestige + 1`) and the display level
+/// (`mp/rankTable.csv` column 14) of a rank. Upstream draws both only when the icon material exists.
+fn rank_cell(ui: &Ui, rank: u8, prestige: u8) -> Option<(String, String)> {
+    rank_cell_in(
+        ui.assets.table("mp/rankiconTable.csv")?,
+        ui.assets.table("mp/rankTable.csv")?,
+        rank,
+        prestige,
+    )
+}
+
+fn rank_cell_in(
+    icons: &StringTable,
+    ranks: &StringTable,
+    rank: u8,
+    prestige: u8,
+) -> Option<(String, String)> {
+    let icon = table_cell(icons, rank, usize::from(prestige) + 1).filter(|n| !n.is_empty())?;
+    let level = table_cell(ranks, rank, 14).unwrap_or("");
+    Some((icon.to_owned(), level.to_owned()))
+}
+
 /// Draws a string at a scale, position, colour and style.
 type TextFn<'a> = dyn Fn(&mut Painter, &str, f32, f32, f32, [f32; 4], i32) + 'a;
 
@@ -395,6 +427,28 @@ fn draw_row(
             Col::Ping => Some(r.ping.max(0).to_string()),
             _ => None,
         };
+        // `CG_DrawScoreboard` LCT_RANK_ICON: with an icon, the icon and the level text; without, nothing.
+        if col == Col::Rank {
+            if let Some((icon, level)) = rank_cell(ui, r.rank, r.prestige).filter(|_| !spectator) {
+                let img = p.named(&ui.assets, &icon);
+                p.pic(&img, rect(x, y, ITEM_H, ITEM_H), [1.0; 4]);
+                let room = (w - ITEM_H).max(1.0);
+                let scale = fit(ui, &level, room);
+                let th = ui.text_height(0, scale);
+                let style = if scale < 0.2 { 0 } else { 3 };
+                text(
+                    p,
+                    &level,
+                    scale,
+                    x + ITEM_H,
+                    (th + ITEM_H) * TEXT_OFFSET + y,
+                    color,
+                    style,
+                );
+            }
+            x += w;
+            continue;
+        }
         if let Some(s) = value {
             let scale = fit(ui, &s, w);
             let tw = ui.text_width(&s, 0, scale);
@@ -425,6 +479,37 @@ fn draw_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    fn table(rows: &[&[&str]]) -> StringTable {
+        StringTable {
+            name: None,
+            column_count: rows[0].len() as u32,
+            row_count: rows.len() as u32,
+            values: rows
+                .iter()
+                .flat_map(|r| r.iter().map(|c| Some(Arc::<str>::from(*c))))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_rank_cell_needs_an_icon_for_the_prestige() {
+        let icons = table(&[&["0", "rank_a", ""], &["1", "", "rank_b_p1"]]);
+        let mut ranks_rows = vec![vec![""; 15]; 2];
+        ranks_rows[0][0] = "0";
+        ranks_rows[0][14] = "1";
+        ranks_rows[1][0] = "1";
+        ranks_rows[1][14] = "2";
+        let refs: Vec<&[&str]> = ranks_rows.iter().map(|r| r.as_slice()).collect();
+        let ranks = table(&refs);
+        let cell = |r, p| rank_cell_in(&icons, &ranks, r, p);
+        assert_eq!(cell(0, 0), Some(("rank_a".into(), "1".into())));
+        assert_eq!(cell(1, 1), Some(("rank_b_p1".into(), "2".into())));
+        assert_eq!(cell(0, 1), None, "no icon for that prestige: nothing drawn");
+        assert_eq!(cell(1, 0), None, "empty icon cell");
+        assert_eq!(cell(9, 0), None, "unknown rank");
+    }
 
     fn row(client: u16, team: u8) -> ScoreLine {
         ScoreLine {

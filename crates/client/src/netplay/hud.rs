@@ -74,9 +74,12 @@ impl NetPlay {
         } else {
             0
         };
+        // The client info is current every frame; only the ping needs the scoreboard rows.
+        if let Some(c) = ui.client(own) {
+            (g.score, g.kills, g.deaths) = (c.score, c.kills, c.deaths);
+        }
         if let Some(row) = ui.scoreboard().rows.iter().find(|r| r.client == own) {
-            (g.score, g.kills, g.deaths, g.ping) =
-                (row.score, row.kills, row.deaths, row.ping.max(0));
+            g.ping = row.ping.max(0);
         }
 
         let inv = PlayerWeapons::from_words(&snap.inv);

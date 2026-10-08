@@ -132,6 +132,9 @@ pub struct Client {
     pub deaths: i32,
     pub kills: i32,
     pub assists: i32,
+    /// `setrank`: rank and prestige, published in the client info for the scoreboard.
+    pub rank: u8,
+    pub prestige: u8,
     pub has_radar: bool,
     pub status_icon: String,
     pub head_icon: String,
@@ -197,6 +200,8 @@ impl Client {
             deaths: 0,
             kills: 0,
             assists: 0,
+            rank: 0,
+            prestige: 0,
             has_radar: false,
             status_icon: String::new(),
             head_icon: String::new(),

@@ -1129,8 +1129,8 @@ fn config_key(name: &str) -> u32 {
 
 fn team_index(a: Args) -> Result<usize, String> {
     match a.string(0)? {
-        "allies" => Ok(1),
-        "axis" => Ok(2),
+        "axis" => Ok(1),
+        "allies" => Ok(2),
         t => Err(format!("team '{t}' is not allies or axis")),
     }
 }
@@ -1168,5 +1168,47 @@ mod trace_tests {
         assert_eq!(surface_type_name(0x0150_0000 | 0x2), "wood");
         assert_eq!(surface_type_name(0x01C0_0000), "paintedmetal");
         assert_eq!(surface_type_name(0x01D0_0000), "default");
+    }
+}
+
+#[cfg(test)]
+mod team_score_tests {
+    use super::*;
+    use gsc::{Builtins, Options, compile};
+    use net::ui::cs;
+
+    fn vm() -> Vm {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        Vm::new(prog).unwrap()
+    }
+
+    #[test]
+    fn a_team_score_reaches_that_teams_banner_only() {
+        let (mut g, mut vm) = (
+            Game::new(crate::cvar::Cvars::new(), Default::default()),
+            vm(),
+        );
+        let set = |g: &mut Game, vm: &mut Vm, team: &str, n: i32| {
+            let v = [Value::str(team), Value::Int(n)];
+            set_team_score(g, vm, Args::new("setteamscore", &v)).unwrap();
+        };
+        set(&mut g, &mut vm, "allies", 5);
+        g.refresh_client_info();
+        assert_eq!(g.configstrings[&u32::from(cs::SCORES_ALLIES)], "5");
+        assert_eq!(g.configstrings[&u32::from(cs::SCORES_AXIS)], "0");
+        set(&mut g, &mut vm, "axis", 7);
+        g.refresh_client_info();
+        assert_eq!(g.configstrings[&u32::from(cs::SCORES_ALLIES)], "5");
+        assert_eq!(g.configstrings[&u32::from(cs::SCORES_AXIS)], "7");
+        let v = [Value::str("allies")];
+        assert!(matches!(
+            get_team_score(&mut g, &mut vm, Args::new("getteamscore", &v)),
+            Ok(Value::Int(5))
+        ));
     }
 }
