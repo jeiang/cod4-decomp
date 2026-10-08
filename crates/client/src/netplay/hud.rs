@@ -64,7 +64,6 @@ impl NetPlay {
         .into();
         let dead = ps.pm_type >= PmType::Dead && ps.pm_type != PmType::Spectator;
         g.dead = dead;
-        g.killcam = snap.killcam();
         g.intermission = ps.pm_type == PmType::Intermission;
         g.gametype = info_value(ui.config(cs::SERVERINFO), "g_gametype")
             .unwrap_or_else(|| ui.config(cs::GAMETYPE))

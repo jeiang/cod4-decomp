@@ -567,12 +567,14 @@ impl Viewer {
             }
             let frame_out = net.frame(dt, &f);
             if let Some(sh) = st.shell.as_mut() {
+                net.fill_live(&mut sh.st.live);
                 for ev in net.take_ui_events() {
                     sh.apply(&mut st.input, ev);
                 }
                 let now = sh.now_ms();
                 net.fill_game_facts(&mut sh.st.game, now);
-                let scores = f.held_other.iter().any(|c| c == "scores");
+                sh.tick(&mut st.input);
+                let scores = f.held_other.iter().any(|c| c == "scores") || sh.st.scores_forced;
                 if scores != sh.st.game.scoreboard {
                     sh.st.game.scoreboard = scores;
                     if scores {
@@ -634,6 +636,7 @@ impl Viewer {
         }
         if let Some(sh) = st.shell.as_mut() {
             let clear = st.renderer.is_none().then_some(wgpu::Color::BLACK);
+            sh.st.live.clip = Some(view.clip_from_world(size.0 as f32 / size.1.max(1) as f32));
             sh.paint(&mut st.input, &target, size, clear);
         }
         if st.want_video && st.recorder.is_none() {
@@ -742,6 +745,7 @@ impl Viewer {
                 "status": if ok { "ok" } else { "failed" },
                 "steps": sc.results,
                 "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
+                "hud_draw": st.shell.as_ref().map(|s| s.st.hud_stats.report()),
                 "net": st.net.as_mut().map(NetPlay::report),
                 "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
             });
@@ -976,6 +980,29 @@ fn script_step(st: &mut State) -> bool {
             } else if waited > secs {
                 done(false, sc, "timed out".into());
             }
+        }
+        // Waits for something the HUD shows: `killcam`, `dead`, `intermission` (the match is over), `feed` (a message
+        // window has a line up), each for at most `=secs` seconds.
+        "killcam" | "dead" | "intermission" | "feed" => {
+            let live = st.shell.as_ref().map(|s| (&s.st.live, &s.st.feed));
+            let reached = live.is_some_and(|(l, f)| match key {
+                "killcam" => l.killcam,
+                "dead" => l.dead,
+                "intermission" => l.intermission,
+                _ => (0..crate::hud::WINDOWS).any(|w| f.active(w, l.time)),
+            });
+            if reached {
+                done(true, sc, String::new());
+            } else if waited > arg.parse::<f32>().unwrap_or(120.0) {
+                done(false, sc, "timed out".into());
+            }
+        }
+        // `scores=on` holds the scoreboard up as the Tab key would, `scores=off` lets go.
+        "scores" => {
+            if let Some(sh) = st.shell.as_mut() {
+                sh.st.scores_forced = arg != "off";
+            }
+            done(true, sc, String::new());
         }
         "shot" => {
             if st.shot_request.is_none() {

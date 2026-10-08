@@ -3,6 +3,7 @@
 pub mod asset_load;
 pub mod audio;
 pub mod client_flythrough;
+pub mod client_hud;
 pub mod client_input;
 pub mod client_match;
 pub mod client_models;
