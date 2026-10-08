@@ -78,11 +78,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     match (decode(&dir.join("heli.png")), decode(&dir.join("bare.png"))) {
         (Ok(a), Ok(b)) if (a.0, a.1) == (b.0, b.1) => {
             let changed =
-                a.2.chunks_exact(3)
-                    .zip(b.2.chunks_exact(3))
+                a.2.as_chunks::<3>().0.iter()
+                    .zip(b.2.as_chunks::<3>().0.iter())
                     .filter(|(p, q)| {
                         p.iter()
-                            .zip(*q)
+                            .zip(q.iter())
                             .any(|(x, y)| (i32::from(*x) - i32::from(*y)).abs() > CHANNEL_DELTA)
                     })
                     .count();
