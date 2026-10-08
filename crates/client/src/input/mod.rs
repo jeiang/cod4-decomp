@@ -793,6 +793,21 @@ mod tests {
         assert_eq!(frame(&mut i).look_delta_yaw, 0.0);
     }
 
+    /// The d-pad HUD and the Controls menu look keys up by the exact command `+actionslot N`.
+    #[test]
+    fn action_slots_have_stock_default_keys_and_rebind() {
+        let mut i = Input::detached();
+        for (slot, key) in [(1, "n"), (2, "7"), (3, "5"), (4, "6")] {
+            assert_eq!(i.binding_keys(&format!("+actionslot {slot}")), [key]);
+        }
+        i.key("6", true);
+        assert_eq!(frame(&mut i).pending_commands, ["actionslot 4"]);
+        // What the menu's bind capture executes.
+        i.exec_line("unbind \"n\"");
+        i.exec_line("bind \"h\" \"+actionslot 1\"");
+        assert_eq!(i.binding_keys("+actionslot 1"), ["h"]);
+    }
+
     #[test]
     fn config_round_trips_binds_and_archived_cvars() {
         let mut a = Input::detached();
