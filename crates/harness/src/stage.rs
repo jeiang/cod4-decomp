@@ -205,6 +205,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_session::run),
     },
     StageDef {
+        name: "client-gfx",
+        description: "the options menus' graphics settings take effect: vsync, aspect, antialiasing, specular, depth of field, glow and shadows through vid_restart, at the menu and in a running match",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_gfx::run),
+    },
+    StageDef {
         name: "client-hud",
         description: "the HUD the client draws over the stock menus in a team deathmatch against bots: scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam",
         needs_install: false,

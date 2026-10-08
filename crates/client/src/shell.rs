@@ -41,6 +41,8 @@ pub enum Action {
     },
     /// A console line the shell does not handle itself (binds, `+commands`, ...).
     Console(String),
+    /// `vid_restart`: take the graphics settings.
+    VidRestart,
     /// A menu sound (`play` in a menu script) for the sound system to play.
     Sound(String),
 }
@@ -242,7 +244,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
 const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("r_aspectRatio", "auto"),
     ("r_gamma", "0.8"),
-    ("r_vsync", "0"),
+    // On, unlike the stock default: the window has always waited for the display, and this keeps it so.
+    ("r_vsync", "1"),
     ("r_aaSamples", "1"),
     ("r_picmip", "0"),
     ("r_picmip_bump", "0"),
@@ -332,6 +335,7 @@ impl Shell {
         mut modes: Vec<(u32, u32)>,
         mut rates: Vec<u32>,
         current: (u32, u32),
+        fullscreen: bool,
     ) {
         modes.sort_unstable();
         modes.dedup();
@@ -342,6 +346,11 @@ impl Shell {
         }
         if !rates.is_empty() {
             self.st.refresh_rates = rates;
+        }
+        if input.cvars.get("r_fullscreen").is_none() {
+            input
+                .cvars
+                .set("r_fullscreen", if fullscreen { "1" } else { "0" }, true);
         }
         if input.cvars.get("r_mode").is_none_or(str::is_empty) {
             input
@@ -707,13 +716,13 @@ impl HostCx<'_> {
                 | "statclearperknew"
                 | "wait"
                 | "snd_restart"
-                | "vid_restart"
                 | "updatedvarsfromprofile"
                 | "loc_warnings"
                 | "r_applypicmip"
                 | "writeconfig"
                 | "setprofile" => {}
                 "exec" => self.exec_file(ui, a(1)),
+                "vid_restart" => self.st.actions.push(Action::VidRestart),
                 "quit" => self.st.actions.push(Action::Quit),
                 "disconnect" => self.st.actions.push(Action::Disconnect),
                 "connect" => self.st.actions.push(Action::Join(a(1).to_owned())),

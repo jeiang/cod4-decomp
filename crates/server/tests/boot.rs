@@ -74,7 +74,6 @@ fn map_restart_reloads_the_level() {
 #[test]
 fn command_line_sets_win_over_the_stock_configs() {
     let Some(mut s) = boot(&[
-<<<<<<< HEAD
         "+set",
         "net_port",
         "0",
@@ -86,10 +85,6 @@ fn command_line_sets_win_over_the_stock_configs() {
         "1",
         "+map",
         "mp_crash",
-=======
-        "+set", "net_port", "0", "+set", "g_gametype", "war", "+set", "scr_war_timelimit", "1",
-        "+map", "mp_crash",
->>>>>>> 0daec21 (fix(server): command-line sets run again after the stock configs, so +set scr_war_timelimit takes effect (Refs #122))
     ]) else {
         eprintln!("COD4_PATH not set; skipping");
         return;

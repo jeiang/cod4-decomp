@@ -36,6 +36,9 @@ pub struct Request {
     pub map: String,
     pub server: Server,
     pub settings: Settings,
+    /// Texture sizes dropped (`r_picmip`) and the most anisotropic filtering (`r_texFilterAnisoMax`).
+    pub picmip: usize,
+    pub aniso_max: u16,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser warms from its frames
     pub format: wgpu::TextureFormat,
 }
@@ -245,8 +248,9 @@ impl Work {
             self.gpu.clone(),
             scene,
             data,
-            TextureCache::new(Some(vfs), 0),
+            TextureCache::new(Some(vfs), self.req.picmip),
         );
+        renderer.materials.aniso_max = self.req.aniso_max;
         renderer.settings = self.req.settings;
         self.renderer = Some(renderer);
         progress.set(2, 0.25);

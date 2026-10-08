@@ -7,6 +7,7 @@
 use crate::Cli;
 use crate::display::{self, hor_plus};
 use crate::flythrough;
+use crate::gfx::Gfx;
 use crate::input::{Input, InputFrame, buttons};
 use crate::listen::{self, Listen};
 use crate::loader::{self, Load};
@@ -206,6 +207,11 @@ fn pick_present(
     let want = match requested {
         "mailbox" => wgpu::PresentMode::Mailbox,
         "immediate" => wgpu::PresentMode::Immediate,
+        // Vsync off without a mode asked for: the first the surface has that does not wait for the display.
+        "uncapped" => [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox]
+            .into_iter()
+            .find(|m| caps.contains(m))
+            .unwrap_or(wgpu::PresentMode::Fifo),
         _ => wgpu::PresentMode::Fifo,
     };
     if caps.contains(&want) {
@@ -304,6 +310,10 @@ struct State {
     shot_ok: bool,
     notes: Vec<String>,
     present_mode: wgpu::PresentMode,
+    /// `r_aspectRatio`: the screen's shape, if the menu chose one.
+    aspect: Option<f32>,
+    /// The saved graphics settings are applied by the first frame.
+    video_pending: bool,
     fov_x: f32,
     /// The held weapon's zoom field of view and how far the zoom has come.
     aim_zoom: Option<(f32, f32)>,
@@ -656,7 +666,13 @@ impl Viewer {
         if let Some(sh) = shell.as_mut() {
             sh.st.stats = stats;
             let (modes, rates) = display::video_modes(&window);
-            sh.set_display(&mut input, modes, rates, (config.width, config.height));
+            sh.set_display(
+                &mut input,
+                modes,
+                rates,
+                (config.width, config.height),
+                window.fullscreen().is_some(),
+            );
         }
         if self.cli.menu_mode()
             && let Some(sh) = shell.as_mut()
@@ -708,6 +724,8 @@ impl Viewer {
             shot_ok: false,
             notes,
             present_mode,
+            aspect: None,
+            video_pending: !self.cli.video_given && !self.cli.flythrough,
             fov_x: hor_plus(self.cli.fov, aspect),
             aim_zoom: None,
             surfaces_drawn: Vec::new(),
@@ -1070,6 +1088,9 @@ impl Viewer {
         {
             eprintln!("cannot save the profile: {e}");
         }
+        if std::mem::take(&mut st.video_pending) && st.shell.is_some() {
+            vid_restart(&self.cli, st);
+        }
         if st.loading.is_none()
             && let Some(size) = st.pending_resize.take()
         {
@@ -1094,7 +1115,8 @@ impl Viewer {
         let fov_x = match st.aim_zoom {
             Some((zoom_fov, k)) if zoom_fov > 0.0 => hor_plus(
                 self.cli.fov * (1.0 - (1.0 - zoom_fov / STOCK_FOV) * k),
-                st.config.width as f32 / st.config.height.max(1) as f32,
+                st.aspect
+                    .unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
             ),
             _ => st.fov_x,
         };
@@ -1327,6 +1349,7 @@ impl Viewer {
                         n.send_command(&format!("menuresponse {menu} {response}"));
                     }
                 }
+                Action::VidRestart => vid_restart(&self.cli, st),
                 Action::Console(_) => {}
                 // Menu sounds live in the zones of the front end (`code_post_gfx`), which the match's tables
                 // do not load, so they have their own small sound system.
@@ -1644,6 +1667,56 @@ fn script_step(st: &mut State) -> bool {
             st.input.exec_line(arg);
             done(true, sc, String::new());
         }
+        // `vid_restart` as the graphics menu's Apply does it.
+        "vidrestart" => {
+            if let Some(sh) = st.shell.as_mut() {
+                sh.st.actions.push(Action::VidRestart);
+            }
+            done(true, sc, String::new());
+        }
+        // What the graphics settings came to (`gfxis=aa 4`, `gfxis=specular 0`, `gfxis=aspect 1.78`,
+        // `gfxis=fullscreen 0`, `gfxis=uncapped 1`): the renderer's and the surface's own state.
+        "gfxis" => {
+            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+            let have = match name {
+                "aa" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.samples(st.config.format).to_string()),
+                "specular" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.settings.specular).to_string()),
+                "dof" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.settings.dof).to_string()),
+                "glow" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.settings.glow).to_string()),
+                "shadows" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.settings.shadows != render::ShadowMode::Off).to_string()),
+                "aspect" => Some(format!("{:.2}", st.aspect.unwrap_or(0.0))),
+                "fullscreen" => Some(u8::from(st.window.fullscreen().is_some()).to_string()),
+                // 1 when the surface does not wait for the display, or has no mode that does not.
+                "uncapped" => {
+                    let caps = st.surface.get_capabilities(&st.gpu.adapter);
+                    let free = caps
+                        .present_modes
+                        .iter()
+                        .any(|m| *m != wgpu::PresentMode::Fifo);
+                    Some(u8::from(st.present_mode != wgpu::PresentMode::Fifo || !free).to_string())
+                }
+                _ => None,
+            };
+            match have {
+                Some(h) => done(h == want, sc, format!("{name} is {h}")),
+                None => done(false, sc, format!("gfxis: unknown or unavailable {name:?}")),
+            }
+        }
         // A persistent stat, as the menus' `statset` would write it (`stat=2301 77`), and its check (`statis=2301 77`).
         "stat" | "statis" => {
             let mut it = arg.split_whitespace().map(|v| v.parse::<i32>().ok());
@@ -1859,6 +1932,38 @@ fn reconfigure(st: &mut State) {
     st.surface.configure(&st.gpu.device, &st.config);
 }
 
+/// `vid_restart`: the window, the present mode and the aspect take the graphics settings now; a running match's
+/// renderer takes the ones it can change live (shadows, specular, depth of field, glow, antialiasing), and the texture
+/// size and filtering wait for the next map, which loads its textures again.
+fn vid_restart(cli: &Cli, st: &mut State) {
+    let g = Gfx::from_cvars(&st.input.cvars);
+    if let Some(note) = display::apply(&st.window, &g.request(&cli.request)) {
+        st.notes.push(note);
+    }
+    let caps = st.surface.get_capabilities(&st.gpu.adapter);
+    let (mode, _) = pick_present(g.present(&cli.present), &caps.present_modes);
+    let mut reconfigure_surface = mode != st.config.present_mode;
+    st.config.present_mode = mode;
+    st.present_mode = mode;
+    if st.aspect != g.aspect {
+        st.aspect = g.aspect;
+        reconfigure_surface = true;
+    }
+    let (w, h) = (st.config.width, st.config.height);
+    if let Some(r) = st.renderer.as_mut() {
+        let before = r.samples(st.config.format);
+        r.settings = g.settings(cli.settings);
+        #[cfg(not(target_arch = "wasm32"))]
+        if r.samples(st.config.format) != before && st.loading.is_none() {
+            r.warm(st.config.format);
+        }
+    }
+    if reconfigure_surface {
+        // Applied by the next frame once no load is running (see `apply_resize`).
+        st.pending_resize = Some((w, h));
+    }
+}
+
 /// Follows a window resize: the surface, the field of view and the menus.
 ///
 /// Never while a map loads: reconfiguring a surface fails (a panic) when another thread submits to the queue at the
@@ -1867,7 +1972,7 @@ fn apply_resize(st: &mut State, fov: f32, (w, h): (u32, u32)) {
     st.config.width = w;
     st.config.height = h;
     reconfigure(st);
-    st.fov_x = hor_plus(fov, w as f32 / h as f32);
+    st.fov_x = hor_plus(fov, st.aspect.unwrap_or(w as f32 / h as f32));
     if let Some(sh) = st.shell.as_mut() {
         sh.resize(w, h);
     }
@@ -1898,11 +2003,14 @@ fn start_session(
 
 /// Starts the background load of `map` and the measuring of its frame gaps.
 fn begin_load(cli: &Cli, st: &mut State, map: &str, server: loader::Server) {
+    let gfx = Gfx::from_cvars(&st.input.cvars);
     let req = loader::Request {
         install: cli.install.clone(),
         map: map.to_owned(),
         server,
-        settings: cli.settings,
+        settings: gfx.settings(cli.settings),
+        picmip: gfx.picmip,
+        aniso_max: gfx.aniso_max,
         format: st.config.format,
     };
     st.loading = Some(Load::start(req, st.gpu.clone()));

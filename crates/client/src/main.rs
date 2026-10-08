@@ -12,6 +12,7 @@ mod events;
 mod flythrough;
 #[cfg(not(target_arch = "wasm32"))]
 mod fx_selftest;
+mod gfx;
 mod hud;
 mod hudstate;
 mod input;
@@ -94,6 +95,8 @@ pub struct Cli {
     pub install: PathBuf,
     pub map: String,
     pub request: Request,
+    /// `--size`, `--refresh` or `--fullscreen` was given: the graphics menu's saved video choice does not apply.
+    pub video_given: bool,
     pub present: String,
     /// Graphics backends to try: `auto` (default), or wgpu backend names; `webgpu` and `webgl` on the web.
     pub backend: String,
@@ -160,6 +163,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         install: std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), Into::into),
         map: "mp_crash".into(),
         request: Request::default(),
+        video_given: false,
         present: "auto".into(),
         backend: "auto".into(),
         no_bc: false,
@@ -205,12 +209,17 @@ fn parse(args: &[String]) -> Result<Cli, String> {
                     h.parse().map_err(|_| "bad height")?,
                 ));
                 size_given = true;
+                c.video_given = true;
             }
-            "--refresh" => c.request.refresh = Some(val(a)?.parse().map_err(|_| "bad refresh")?),
+            "--refresh" => {
+                c.request.refresh = Some(val(a)?.parse().map_err(|_| "bad refresh")?);
+                c.video_given = true;
+            }
             "--fullscreen" => {
                 let v = val(a)?;
                 c.request.kind =
                     FullscreenKind::parse(&v).ok_or(format!("unknown fullscreen kind {v}"))?;
+                c.video_given = true;
             }
             "--present" => c.present = val(a)?,
             "--backend" => c.backend = val(a)?,

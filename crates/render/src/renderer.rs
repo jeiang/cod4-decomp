@@ -128,6 +128,13 @@ pub enum ShadowMode {
     Color,
 }
 
+/// The scene pass's multisampled attachments and what they were made for.
+struct Msaa {
+    color: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    key: ((u32, u32), wgpu::TextureFormat, u32),
+}
+
 /// What the frame draws.
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
@@ -138,6 +145,16 @@ pub struct Settings {
     /// `r_showMissingLightGrid`: a dynamic model (the player's gun, other players) outside the light grid is drawn
     /// in rainbow colours, a level designer's aid. Off, it takes the grid's default lighting.
     pub show_missing_light_grid: bool,
+    /// `r_specular`: off, the sun's specular highlight is dropped.
+    pub specular: bool,
+    /// `r_dof_enable`: off, the map's and the game's depth of field is not drawn.
+    pub dof: bool,
+    /// `r_glow_allowed`: off, the glow is not drawn.
+    pub glow: bool,
+    /// `r_aaSamples`: samples per pixel of the scene pass; the renderer uses the most the device offers up to this.
+    pub aa_samples: u32,
+    /// `r_aspectRatio`: the shape of the screen when its pixels are not square; `None` takes the target's.
+    pub aspect: Option<f32>,
 }
 
 impl Default for Settings {
@@ -147,6 +164,11 @@ impl Default for Settings {
             fog: true,
             primary_lights: true,
             show_missing_light_grid: false,
+            specular: true,
+            dof: true,
+            glow: true,
+            aa_samples: 1,
+            aspect: None,
         }
     }
 }
@@ -292,6 +314,8 @@ pub struct Renderer {
     ps_bg: wgpu::BindGroup,
     bools: wgpu::Buffer,
     depth: Option<(wgpu::TextureView, (u32, u32))>,
+    /// The multisampled colour and depth of the scene pass, while `r_aaSamples` asks for more than one sample.
+    msaa: Option<Msaa>,
     tex_bgs: HashMap<TexKey, Arc<wgpu::BindGroup>>,
     pub clear: [f64; 3],
     pub settings: Settings,
@@ -398,6 +422,7 @@ impl Renderer {
             ps_bg,
             bools,
             depth: None,
+            msaa: None,
             tex_bgs: HashMap::new(),
             clear: [0.45, 0.43, 0.38],
             settings: Settings::default(),
@@ -495,6 +520,7 @@ impl Renderer {
         let scene = Target {
             color: Some(format),
             depth: Some(DEPTH_FORMAT),
+            samples: self.samples(format),
         };
         let mut jobs = Vec::new();
         let materials: Vec<Arc<Material>> = self
@@ -630,6 +656,7 @@ impl Renderer {
         Target {
             color: (self.settings.shadows == ShadowMode::Color).then_some(SHADOW_COLOR_FORMAT),
             depth: Some(DEPTH_FORMAT),
+            samples: 1,
         }
     }
 
@@ -653,6 +680,69 @@ impl Renderer {
     ) -> Option<Arc<Prepared>> {
         self.materials
             .prepare(&self.gpu, &mut self.textures, m, techs, kind, hsm)
+    }
+
+    /// The post parameters as the settings allow them: depth of field and glow can be switched off.
+    pub(crate) fn post_params(&self) -> crate::post::PostParams {
+        let mut p = self.post.clone();
+        if !self.settings.dof {
+            p.dof = None;
+        }
+        if !self.settings.glow {
+            p.glow.enabled = false;
+        }
+        p
+    }
+
+    /// The sample count the scene pass uses: `r_aaSamples` lowered to the largest count the device supports for the
+    /// colour and depth formats.
+    pub fn samples(&self, format: wgpu::TextureFormat) -> u32 {
+        let ok = |f: wgpu::TextureFormat, n: u32| {
+            self.gpu
+                .adapter
+                .get_texture_format_features(f)
+                .flags
+                .sample_count_supported(n)
+        };
+        [4u32, 2]
+            .into_iter()
+            .find(|&n| n <= self.settings.aa_samples && ok(format, n) && ok(DEPTH_FORMAT, n))
+            .unwrap_or(1)
+    }
+
+    fn ensure_msaa(&mut self, size: (u32, u32), format: wgpu::TextureFormat, samples: u32) {
+        if samples <= 1 {
+            self.msaa = None;
+            return;
+        }
+        let key = (size, format, samples);
+        if self.msaa.as_ref().is_some_and(|m| m.key == key) {
+            return;
+        }
+        let make = |label, format| {
+            self.gpu
+                .device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: samples,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
+        };
+        self.msaa = Some(Msaa {
+            color: make("scene msaa colour", format),
+            depth: make("scene msaa depth", DEPTH_FORMAT),
+            key,
+        });
     }
 
     fn ensure_depth(&mut self, size: (u32, u32)) {
@@ -1278,10 +1368,17 @@ impl Renderer {
         if let Some(t) = self.timer.as_mut() {
             t.begin_frame(&self.gpu);
         }
-        let aspect = size.0 as f32 / size.1 as f32;
+        let aspect = self
+            .settings
+            .aspect
+            .unwrap_or(size.0 as f32 / size.1 as f32);
         let (v, p) = view.matrices(aspect);
         let mut frame = FrameConsts::new(v, p, view.origin);
-        frame.set_sun(self.scene.sun_dir, self.scene.sun_color, 1.0);
+        frame.set_sun(
+            self.scene.sun_dir,
+            self.scene.sun_color,
+            if self.settings.specular { 1.0 } else { 0.0 },
+        );
         frame.set_fog(if self.settings.fog {
             self.art.fog.as_ref()
         } else {
@@ -1398,9 +1495,12 @@ impl Renderer {
             surfaces: &vis.surfaces,
             smodels: &vis.smodels,
         };
+        let samples = self.samples(format);
+        self.ensure_msaa(size, format, samples);
         let scene_target = Target {
             color: Some(format),
             depth: Some(DEPTH_FORMAT),
+            samples,
         };
         let mut draws = self.build_draws(
             PassKind::Scene,
@@ -1469,7 +1569,7 @@ impl Renderer {
         stats.draws = draws.len();
 
         // The post chain: depth of field wants the scene's depth as a second list of the same surfaces.
-        let floatz = self.post.dof_active().then(|| {
+        let floatz = self.post_params().dof_active().then(|| {
             let mut zf = frame.clone();
             zf.vec[codeconst::DEPTH_FROM_CLIP as usize] = [0.0, 0.0, 0.0, 1.0];
             let zview = self.post_state.floatz_view(&self.gpu, size, format);
@@ -1481,6 +1581,7 @@ impl Renderer {
                 Target {
                     color: Some(post::FLOATZ_FORMAT),
                     depth: Some(DEPTH_FORMAT),
+                    samples: 1,
                 },
                 false,
                 &mut counts,
@@ -1496,6 +1597,7 @@ impl Renderer {
                 Target {
                     color: Some(post::FLOATZ_FORMAT),
                     depth: Some(DEPTH_FORMAT),
+                    samples: 1,
                 },
                 false,
             ));
@@ -1572,14 +1674,18 @@ impl Renderer {
             record(&mut rp, list, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
         }
         {
-            let depth = &self.depth.as_ref().expect("depth").0;
+            let final_view = chain.scene.as_ref().unwrap_or(target);
+            let (depth, color, resolve) = match &self.msaa {
+                Some(m) => (&m.depth, &m.color, Some(final_view)),
+                None => (&self.depth.as_ref().expect("depth").0, final_view, None),
+            };
             let timestamps = self.timer.as_mut().and_then(|t| t.pass("scene"));
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: chain.scene.as_ref().unwrap_or(target),
+                    view: color,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: resolve,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: self.clear[0],
@@ -1587,7 +1693,11 @@ impl Renderer {
                             b: self.clear[2],
                             a: 1.0,
                         }),
-                        store: wgpu::StoreOp::Store,
+                        store: if resolve.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
