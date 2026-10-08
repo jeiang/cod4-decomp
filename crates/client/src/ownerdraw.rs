@@ -26,6 +26,7 @@ struct Cfg {
     draw_health: bool,
     breath_hint: bool,
     mantle_hint: bool,
+    cursor_hints: i32,
     fade_ammo: f32,
     fade_health: f32,
     fade_compass: f32,
@@ -47,6 +48,7 @@ impl Cfg {
             draw_health: b("cg_drawHealth", false),
             breath_hint: b("cg_drawBreathHint", true),
             mantle_hint: b("cg_drawMantleHint", true),
+            cursor_hints: f("cg_cursorHints", 4.0) as i32,
             fade_ammo: f("hud_fade_ammodisplay", 0.0),
             fade_health: f("hud_fade_healthbar", 2.0),
             fade_compass: f("hud_fade_compass", 0.0),
@@ -226,9 +228,12 @@ pub fn draw(
         .into_iter()
         .find(|k| k != "KEY_UNBOUND")
         .map_or_else(|| ui.localize_key("KEY_UNBOUND"), |k| ui.localize_key(&k));
+    let use_key = ui.localize_key(&cx.key_binding("+activate"));
     let objectives = cx.st.live.objectives.clone();
     let h = &mut cx.st.game.hud;
-    *h.drawn.entry(id).or_default() += 1;
+    if id != 72 {
+        *h.drawn.entry(id).or_default() += 1;
+    }
     let mut dc = Dc {
         ui,
         p,
@@ -270,7 +275,8 @@ pub fn draw(
         185 => compass_friendlies(&mut dc, h, true),
         188 => compass_enemies(&mut dc, h, true),
         187 => map_border(&mut dc, h),
-        // 72 (use hints) has nothing to show until the server tells the client what the crosshair is on; 109 and
+        72 => cursor_hint(&mut dc, h, &use_key),
+        // 109 and
         // 110 mark the offhand weapon the player has equipped, which only a controller cycles.
         _ => {}
     }
@@ -803,6 +809,81 @@ fn mantle_hint(dc: &mut Dc, h: &mut HudFacts, key: &str) {
         },
         dc.color,
     );
+}
+
+/// `CG_DrawCursorhint`: the use hint under the crosshair (icon and text), for as long as the server's player state
+/// names a use trigger and 100 ms after.
+fn cursor_hint(dc: &mut Dc, h: &mut HudFacts, key: &str) {
+    const HINT_NOICON: u8 = 1;
+    let mode = dc.cfg.cursor_hints;
+    if mode == 0 || h.cursor_hint == 0 {
+        return;
+    }
+    let Some(fade) = hudstate::fade_color(h.now, h.cursor_hint_time, 100, 100) else {
+        return;
+    };
+    *h.drawn.entry(72).or_default() += 1;
+    let mut color = with_alpha(dc.color, dc.color[3] * fade);
+    let pulse = (h.now as f32 / 150.0).sin() * 0.5 + 0.5;
+    if mode == 3 {
+        color[3] *= pulse;
+    }
+    let scale = if mode == 2 {
+        (h.cursor_hint_time % 1000) as f32 / 100.0
+    } else if mode < 3 {
+        pulse * 10.0
+    } else {
+        0.0
+    };
+    let raw = if h.cursor_hint_text.is_empty() && h.cursor_hint == 3 {
+        "&PLATFORM_PICKUPHEALTH"
+    } else {
+        h.cursor_hint_text.as_str()
+    };
+    let mut keys = std::collections::HashMap::new();
+    keys.insert("+activate".to_owned(), key.to_owned());
+    let text = crate::hud::expand_keys(&crate::hud::localize(&dc.ui.assets, raw), &keys)
+        .replace("&&1", key);
+    let r = dc.r;
+    let len = dc.tw(&text);
+    let y = dc.text_h() * 0.5 + r.y;
+    if h.cursor_hint == HINT_NOICON {
+        if !text.is_empty() {
+            dc.text(r.x - (scale + len) * 0.5, y, color, &text);
+        }
+        return;
+    }
+    let icon = match h.cursor_hint {
+        3 => "hint_health",
+        4 => "hint_friendly",
+        _ => "hint_usable",
+    };
+    if text.is_empty() {
+        let half = scale * 0.5;
+        dc.pic(
+            icon,
+            Px {
+                x: r.x - (r.w + half) * 0.5,
+                y: r.y - half,
+                w: r.w + scale,
+                h: r.h + scale,
+            },
+            color,
+        );
+    } else {
+        let x = r.x - (r.w + scale + len) * 0.5;
+        dc.text(x, y, color, &text);
+        dc.pic(
+            icon,
+            Px {
+                x: x + len,
+                y: r.y - r.h * 0.5,
+                w: r.w + scale,
+                h: r.h + scale,
+            },
+            color,
+        );
+    }
 }
 
 fn invalid_cmd_hint(dc: &mut Dc, h: &mut HudFacts) {

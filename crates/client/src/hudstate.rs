@@ -317,6 +317,10 @@ pub struct HudFacts {
     /// The player is picking a point on the map (an airstrike): the full-screen map shows.
     pub selecting_location: bool,
     pub breath_hint: bool,
+    /// The crosshair hint (`cursorHint`), its raw text from the use-trigger strings, and when it was last on.
+    pub cursor_hint: u8,
+    pub cursor_hint_text: String,
+    pub cursor_hint_time: i32,
     /// "No ammo" style hint: the localize key and when it appeared.
     pub invalid_cmd: Option<(&'static str, i32)>,
     /// The player's own client number, and whether their team is known (a spectator has no friends).

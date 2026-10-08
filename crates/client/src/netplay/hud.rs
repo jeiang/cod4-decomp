@@ -127,6 +127,16 @@ impl NetPlay {
         h.sprint_left = sim::pm::sprint_left_ms(ps, &self.params, server_time, h.sprint_max);
         h.sprinting = ps.pm_flags & pmf::SPRINTING != 0;
         h.mantle_hint = ps.mantle_state.flags & 8 != 0;
+        if ps.cursor_hint != 0 {
+            h.cursor_hint = ps.cursor_hint;
+            h.cursor_hint_time = now;
+            h.cursor_hint_text = if ps.cursor_hint_string >= 0 {
+                ui.config(cs::USE_TRIG_STRINGS + ps.cursor_hint_string as u16)
+                    .to_owned()
+            } else {
+                String::new()
+            };
+        }
         h.selecting_location = ps.e_flags & sim::pm::ef::LOC_SELECTING != 0;
         let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
         h.breath_hint = ps.weapon_flags & wf::HOLD_BREATH == 0

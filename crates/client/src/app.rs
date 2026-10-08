@@ -1471,6 +1471,7 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
         "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
         "map": st.map_name,
         "load": st.load_report,
+        "objectives": {"plants": listen::objectives().0, "defuses": listen::objectives().1},
     });
     let _ = std::fs::create_dir_all(&out);
     let _ = std::fs::write(
@@ -1666,6 +1667,11 @@ fn script_step(st: &mut State) -> bool {
         // A console line, as typed: `set=set scr_war_scorelimit 3`.
         "set" => {
             st.input.exec_line(arg);
+            done(true, sc, String::new());
+        }
+        // A line for the listen server's console, as typed there: `server=devtele human bombzone`.
+        "server" => {
+            listen::send(arg);
             done(true, sc, String::new());
         }
         // `vid_restart` as the graphics menu's Apply does it.

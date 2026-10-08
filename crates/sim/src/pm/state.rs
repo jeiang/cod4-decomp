@@ -325,6 +325,10 @@ pub struct PlayerState {
     pub spread_override_state: SpreadOverrideState,
     /// Entity the use-hint cursor points at; off-hand weapons cannot start while one shows.
     pub cursor_hint_ent_index: u16,
+    /// What the crosshair hint shows (`cursorHint`: 0 none, 1 no icon, 2 activate, 3 health, 4 friendly).
+    pub cursor_hint: u8,
+    /// The use-trigger string table index of the hint's text, -1 for none (`cursorHintString`).
+    pub cursor_hint_string: i8,
 }
 
 /// `spreadOverrideState_t`.
@@ -406,6 +410,8 @@ impl Default for PlayerState {
             spread_override: 0,
             spread_override_state: SpreadOverrideState::Disabled,
             cursor_hint_ent_index: ENTITYNUM_NONE,
+            cursor_hint: 0,
+            cursor_hint_string: -1,
         }
     }
 }

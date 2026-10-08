@@ -156,6 +156,11 @@ pub struct Client {
     pub buttons: i32,
     pub old_buttons: i32,
     pub latched_buttons: i32,
+    /// The trigger +activate was pressed on, until its hold is over (`useHoldEntity`), and when it began.
+    pub use_hold_ent: Option<u16>,
+    pub use_hold_time: i32,
+    /// The use press was consumed; a held button is not a fresh press until released.
+    pub use_button_done: bool,
     /// Pitch/yaw/roll recoil kick applied to the view this frame (`viewkick` and weapon kick).
     pub damage_time: i32,
     pub allow_ads: bool,
@@ -214,6 +219,9 @@ impl Client {
             buttons: 0,
             old_buttons: 0,
             latched_buttons: 0,
+            use_hold_ent: None,
+            use_hold_time: 0,
+            use_button_done: false,
             damage_time: 0,
             allow_ads: true,
             inv: PlayerWeapons::new(),
@@ -405,6 +413,8 @@ impl Game {
         c.ufo = false;
         c.buttons = c.cmd.buttons;
         c.latched_buttons = 0;
+        c.use_hold_ent = None;
+        c.use_button_done = false;
         c.cmd.server_time = time;
         c.ps.command_time = time - 100;
         let _ = max_clients;
@@ -465,7 +475,13 @@ impl Game {
             _ => {}
         }
         c.old_buttons = c.buttons;
+        if !c.use_button_done {
+            c.old_buttons &= !(pm::button::USE | pm::button::USE_RELOAD);
+        }
         c.buttons = cmd.buttons;
+        if c.buttons & (pm::button::USE | pm::button::USE_RELOAD) == 0 {
+            c.use_button_done = false;
+        }
         c.latched_buttons = c.buttons & !c.old_buttons;
         let old_events = c.ps.event_sequence;
         let Some(world) = self.world.as_ref() else {
@@ -506,6 +522,7 @@ impl Game {
             vm.notify_entity(t, "touch", &[me]);
         }
         self.touch_triggers(vm, n);
+        self.update_activate(vm, n);
     }
 
     /// `ClientEvents`: the predictable events the movement raised this command.
@@ -669,6 +686,7 @@ impl Game {
             };
         }
         self.set_client_contents(n);
+        self.update_cursor_hints(n);
         self.update_pose(n);
         self.per_frame_notifies(_vm, n);
     }

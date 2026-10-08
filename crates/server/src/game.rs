@@ -320,6 +320,9 @@ pub struct MatchStats {
     pub hits: u64,
     /// Rounds ended (`exitlevel`): the match reached its score or time limit.
     pub matches_ended: u64,
+    /// Bombs planted and defused, as the gametype scripts log them.
+    pub plants: u64,
+    pub defuses: u64,
 }
 
 pub struct Game {
@@ -605,6 +608,11 @@ impl Game {
         match &*e.classname {
             "script_model" => e.contents = contents::MISSILECLIP | contents::CLIPSHOT,
             "trigger_hurt" => e.contents = TRIGGER_HURT_CONTENTS,
+            "trigger_use" | "trigger_use_touch" => {
+                e.contents = contents::USE;
+                // `trigger_use`: HINT_NOICON until a script or the map says otherwise.
+                e.x.cursor_hint = 1;
+            }
             "trigger_radius" | "trigger_disk" => {
                 if let Some((r, h)) = radius_height {
                     e.mins = [-r, -r, 0.0];
@@ -698,6 +706,20 @@ impl Game {
             let radius = get(vars, "radius").map(cvar::parse_float);
             let height = get(vars, "height").map(cvar::parse_float);
             self.init_clip(num, radius.zip(height));
+            if class.starts_with("trigger_use") {
+                if let Some(h) =
+                    get(vars, "cursorhint").and_then(|h| crate::script::hint_value(h, true))
+                    && let Some(e) = self.ent_mut(num)
+                {
+                    e.x.cursor_hint = h;
+                }
+                if let Some(text) = get(vars, "hintstring") {
+                    let slot = self.hint_string_index(text)?;
+                    if let Some(e) = self.ent_mut(num) {
+                        e.x.hint = Some(slot);
+                    }
+                }
+            }
             let obj = vm.entity(num, EntClass::Entity);
             for (k, v) in vars {
                 if let Some(ty) = self.field_types.get(&k.to_ascii_lowercase()) {

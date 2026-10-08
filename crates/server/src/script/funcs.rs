@@ -66,7 +66,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("line", r(|_, _, _| Ok(Value::Undefined))),
     ("createprintchannel", r(|_, _, _| Ok(Value::Undefined))),
     ("setprintchannel", r(|_, _, _| Ok(Value::Undefined))),
-    ("logstring", r(|_, _, _| Ok(Value::Undefined))),
+    ("logstring", r(log_string)),
     ("logprint", r(log_print)),
     ("iprintln", r(uicmd::level_print)),
     ("iprintlnbold", r(uicmd::level_print_bold)),
@@ -587,6 +587,17 @@ fn dev_print(g: &mut Game, a: Args, newline: bool) -> R {
             s.push('\n');
         }
         g.print(s);
+    }
+    Ok(Value::Undefined)
+}
+
+/// `logString(text)`: the game log line; the stage counters read the bomb events from it.
+pub(super) fn log_string(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let line = a.display(0)?;
+    if line.starts_with("bomb planted") {
+        g.stats.plants += 1;
+    } else if line.starts_with("bomb defused") {
+        g.stats.defuses += 1;
     }
     Ok(Value::Undefined)
 }

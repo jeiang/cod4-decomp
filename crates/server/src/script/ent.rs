@@ -14,7 +14,6 @@ use crate::delta;
 use crate::game::{Ent, EntKind, Game};
 use crate::link::MAX_ATTACH;
 use crate::tags;
-use net::ui::cs;
 
 type R = Result<Value, String>;
 
@@ -358,7 +357,7 @@ fn is_shaped(e: &Ent) -> bool {
 }
 
 /// `SV_EntityContact`: whether the box `mins..maxs` touches `other`.
-fn entity_contact(g: &Game, mins: [f32; 3], maxs: [f32; 3], other: &Ent) -> bool {
+pub(crate) fn entity_contact(g: &Game, mins: [f32; 3], maxs: [f32; 3], other: &Ent) -> bool {
     let center = [(mins[0] + maxs[0]) * 0.5, (mins[1] + maxs[1]) * 0.5];
     let d2 = |o: [f32; 3]| (o[0] - center[0]).powi(2) + (o[1] - center[1]).powi(2);
     match &*other.classname {
@@ -629,20 +628,24 @@ const HINTS: [&str; 4] = [
     "HINT_HEALTH",
     "HINT_FRIENDLY",
 ];
-const MAX_HINT_STRINGS: u32 = 32;
 
-fn set_cursor_hint(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
-    let ent = ent_of(g, e)?;
-    let hint = a.string(0)?;
-    let use_trigger = is_use_trigger(&ent.classname);
-    let value = if use_trigger && hint.eq_ignore_ascii_case("HINT_INHERIT") {
+/// A hint type name's value: `HINT_INHERIT` (-1, use triggers only) or its place in [`HINTS`] plus one.
+pub(crate) fn hint_value(hint: &str, use_trigger: bool) -> Option<i32> {
+    if use_trigger && hint.eq_ignore_ascii_case("HINT_INHERIT") {
         Some(-1)
     } else {
         HINTS
             .iter()
             .position(|h| h.eq_ignore_ascii_case(hint))
             .map(|i| i as i32 + 1)
-    };
+    }
+}
+
+fn set_cursor_hint(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let ent = ent_of(g, e)?;
+    let hint = a.string(0)?;
+    let use_trigger = is_use_trigger(&ent.classname);
+    let value = hint_value(hint, use_trigger);
     let Some(value) = value else {
         let mut list = String::from("List of valid hint type strings\n");
         if use_trigger {
@@ -678,18 +681,7 @@ fn set_hint_string(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
         for i in 0..a.len() {
             text.push_str(&a.display(i)?);
         }
-        let slot = (0..MAX_HINT_STRINGS).find(|i| {
-            g.configstrings
-                .get(&(u32::from(cs::USE_TRIG_STRINGS) + i))
-                .is_none_or(|s| s.is_empty() || *s == text)
-        });
-        let Some(i) = slot else {
-            return Err(format!(
-                "Too many different hintstring values. Max allowed is {MAX_HINT_STRINGS} different strings"
-            ));
-        };
-        g.set_configstring(cs::USE_TRIG_STRINGS + i as u16, &text);
-        Some(i as usize)
+        Some(g.hint_string_index(&text)?)
     };
     if let Some(ent) = g.ent_mut(e.num) {
         ent.x.hint = hint;
