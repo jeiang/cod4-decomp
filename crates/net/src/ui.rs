@@ -688,6 +688,18 @@ pub enum ServerCmd {
         index: i32,
         value: i32,
     },
+    /// `visionsetnaked` / `visionsetnight`: the named vision file (`vision/<name>.vision`) becomes the picture's
+    /// glow and film, blended over `ms`. The renderer, not the interface, acts on it.
+    Vision {
+        night: bool,
+        name: String,
+        ms: i32,
+    },
+    /// `shellshock` on a player: the named shell shock (`shellshock/<name>.shock`) for `ms`; an empty name ends it.
+    ShellShock {
+        name: String,
+        ms: i32,
+    },
 }
 
 /// The client to server command that asks for the scoreboard; repeat it every couple of seconds
@@ -921,6 +933,17 @@ impl ServerCmd {
                 arg(&mut s, &index.to_string());
                 arg(&mut s, &value.to_string());
             }
+            ServerCmd::Vision { night, name, ms } => {
+                s.push_str("vision");
+                arg(&mut s, if *night { "night" } else { "naked" });
+                arg(&mut s, name);
+                arg(&mut s, &ms.to_string());
+            }
+            ServerCmd::ShellShock { name, ms } => {
+                s.push_str("shellshock");
+                arg(&mut s, name);
+                arg(&mut s, &ms.to_string());
+            }
         }
         s
     }
@@ -976,6 +999,15 @@ impl ServerCmd {
             ("stat", 3) => ServerCmd::Stat {
                 index: w[1].parse().ok()?,
                 value: w[2].parse().ok()?,
+            },
+            ("vision", 4) => ServerCmd::Vision {
+                night: a(1)? == "night",
+                name: w[2].clone(),
+                ms: w[3].parse().ok()?,
+            },
+            ("shellshock", 3) => ServerCmd::ShellShock {
+                name: w[1].clone(),
+                ms: w[2].parse().ok()?,
             },
             ("chat", 4) => ServerCmd::Chat {
                 team: a(1)? == "team",
@@ -1186,6 +1218,8 @@ impl ClientUiState {
             ServerCmd::Stat { index, value } => {
                 self.stats.insert(index, value);
             }
+            // The renderer's, taken out of the stream before the interface sees it.
+            ServerCmd::Vision { .. } | ServerCmd::ShellShock { .. } => {}
             ServerCmd::Scores {
                 axis,
                 allies,
@@ -1337,6 +1371,19 @@ mod tests {
 
     fn samples() -> Vec<ServerCmd> {
         vec![
+            ServerCmd::Vision {
+                night: true,
+                name: "mp_crash".into(),
+                ms: 1500,
+            },
+            ServerCmd::ShellShock {
+                name: "concussion_grenade_mp".into(),
+                ms: 4000,
+            },
+            ServerCmd::ShellShock {
+                name: String::new(),
+                ms: 0,
+            },
             ServerCmd::Map {
                 name: "mp_crash".into(),
             },

@@ -229,6 +229,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_menu_match::run),
     },
     StageDef {
+        name: "client-fx",
+        description: "effects on the real content, headless: an explosion draws and ends, an impact leaves a decal, a shot flashes and ejects a shell, vision and shock files work",
+        needs_install: false,
+        timeout: Duration::from_secs(5 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_fx::run),
+    },
+    StageDef {
         name: "client-input",
         description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
         needs_install: false,

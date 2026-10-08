@@ -8,6 +8,7 @@
 
 use crate::decal::{self, Placement};
 use crate::events::ClientEvent;
+use crate::viewmodel::ViewTags;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
 use assets::zone::gfx::Material;
 use assets::zone::gfxworld::GfxWorld;
@@ -68,6 +69,9 @@ pub struct Effects {
     impact: Option<Arc<FxImpactTable>>,
     world: Arc<GfxWorld>,
     marks: HashMap<u64, Mark>,
+    /// The client number of this player and the gun in their hands, for the first-person flash.
+    own: u16,
+    view: Option<ViewTags>,
     /// What was played, by kind; for the report.
     pub played: BTreeMap<&'static str, u64>,
     /// Names of effects an event asked for that the content lacks.
@@ -95,6 +99,8 @@ impl Effects {
             impact: content.impact_table().cloned(),
             world,
             marks: HashMap::new(),
+            own: u16::MAX,
+            view: None,
             played: BTreeMap::new(),
             missing: HashSet::new(),
         }
@@ -122,8 +128,20 @@ impl Effects {
         }
     }
 
+    /// The effect a table or a weapon points at. Tables in one zone name effects of another by a placeholder (the
+    /// name with a comma in front and nothing in it); the effect itself is in the library under the plain name.
+    fn resolve(&self, d: &Arc<FxEffectDef>) -> Arc<FxEffectDef> {
+        d.name
+            .as_deref()
+            .and_then(|n| n.strip_prefix(','))
+            .and_then(|n| self.fx.library().get(n))
+            .unwrap_or(d)
+            .clone()
+    }
+
     fn play(&mut self, kind: &'static str, def: Option<Arc<FxEffectDef>>, at: Vec3, dir: Vec3) {
         if let Some(d) = def {
+            let d = self.resolve(&d);
             self.fx.play(&d, Frame::facing(at, dir));
             *self.played.entry(kind).or_default() += 1;
         }
@@ -223,7 +241,58 @@ impl Effects {
                 );
             }
             ClientEvent::PhysicsExplosion { .. } => {}
+            ClientEvent::WeaponFire {
+                eye,
+                angles,
+                weapon: w,
+                shooter,
+            } => {
+                let Some(d) = weapon(*w) else { return };
+                let mine = *shooter == self.own;
+                let (flash, eject) = if mine {
+                    (&d.view_flash_effect, &d.view_shell_eject_effect)
+                } else {
+                    (&d.world_flash_effect, &d.world_shell_eject_effect)
+                };
+                let (flash_at, brass_at) = match self.view.filter(|_| mine) {
+                    Some(t) => (t.flash, t.brass),
+                    None => {
+                        // Another player's gun is not drawn: put the muzzle where a rifle's would be.
+                        let (f, r, u) = sim::pm::math::angle_vectors(angles);
+                        let (f, r, u) = (Vec3::from(f), Vec3::from(r), Vec3::from(u));
+                        let eye = Vec3::from(*eye);
+                        let at =
+                            |fwd: f32, right: f32, down: f32| eye + f * fwd + r * right - u * down;
+                        (
+                            Some(Frame {
+                                origin: at(30.0, 6.0, 6.0),
+                                axis: [f, -r, u],
+                            }),
+                            Some(Frame {
+                                origin: at(12.0, 6.0, 5.0),
+                                axis: [r, f, u],
+                            }),
+                        )
+                    }
+                };
+                for (kind, def, at) in [
+                    ("muzzle_flash", flash, flash_at),
+                    ("shell_eject", eject, brass_at),
+                ] {
+                    if let (Some(def), Some(at)) = (def, at) {
+                        let def = self.resolve(def);
+                        self.fx.play(&def, at);
+                        *self.played.entry(kind).or_default() += 1;
+                    }
+                }
+            }
         }
+    }
+
+    /// Tells the effects who this player is and where the gun in their hands has its muzzle and ejection port.
+    pub fn set_view(&mut self, own: u16, tags: Option<ViewTags>) {
+        self.own = own;
+        self.view = tags;
     }
 
     /// Plays `name` 90 units ahead of a camera, facing it (for `--fx-demo`).

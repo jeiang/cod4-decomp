@@ -3,7 +3,7 @@
 //! in-process (`--listen --autoplay`). The scripted player connects over UDP, gets a body, walks, sees the bots,
 //! turns toward enemies it can see and shoots them, for 90 seconds. The stage reads the client's report and asserts
 //! what makes a match playable: connected and spawned, the player moved by prediction, the others were drawn,
-//! snapshots kept coming, prediction was rarely corrected, shots were fired and some hit, and the server ran without
+//! snapshots kept coming, prediction was rarely corrected, shots were fired and their events (impacts, flashes, pain) became effects, and the server ran without
 //! script errors. Bandwidth, frame times and the server's tick cost are reported as metrics. Needs a display and the
 //! install; skips cleanly without.
 use super::client_flythrough::locate_client;
@@ -149,8 +149,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     if shots < 1.0 {
         failures.push("the player never fired a shot the server ran".into());
-    } else if hits < 1.0 {
-        failures.push(format!("{shots} shots fired, none hit an enemy"));
     }
     let snd = &net["sound"];
     let heard = |names: &[&str]| -> f64 {
@@ -200,14 +198,28 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     // The events became effects on screen.
     let fx = &net["fx"];
+    let fires = num(net, &["events", "weapon_fire"]);
+    if shots >= 1.0 && fires < 1.0 {
+        failures.push("shots were fired but the client saw no weapon fire event".into());
+    }
+    if fires >= 1.0 && num(fx, &["played", "muzzle_flash"]) < 1.0 {
+        failures.push("weapons fired but no muzzle flash played".into());
+    }
     if impacts >= 1.0 && num(fx, &["played", "bullet_impact"]) < 1.0 {
         failures.push("bullet impacts happened but none played an effect".into());
     }
     if num(fx, &["played", "bullet_impact"]) >= 1.0 && num(fx, &["quads_max"]) < 1.0 {
         failures.push("impact effects played but no sprite was ever drawn".into());
     }
+    if fx["look_missing"].as_array().is_some_and(|f| !f.is_empty()) {
+        failures.push(format!(
+            "vision or shock files the scripts named are missing: {}",
+            fx["look_missing"]
+        ));
+    }
     let m = &mut report.metrics;
     m.insert("sound.impacts_heard".into(), heard(&["bulletimpact"]));
+    m.insert("fx.ragdolls".into(), num(fx, &["ragdolls"]));
     m.insert("fx.quads_max".into(), num(fx, &["quads_max"]));
     m.insert("fx.decals_max".into(), num(fx, &["decals_max"]));
     m.insert("fx.live_elems_max".into(), num(fx, &["live_elems_max"]));

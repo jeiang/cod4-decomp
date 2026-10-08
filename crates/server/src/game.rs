@@ -383,6 +383,8 @@ pub struct Game {
     pub ambient: Option<String>,
     /// One-shot events for the clients' snapshots.
     pub tempev: crate::tempev::TempEvents,
+    /// The vision set in force (`visionsetnaked`, `visionsetnight`) as `(name)`, replayed to clients that join.
+    pub vision: [Option<String>; 2],
 }
 
 /// Who hears a sound command.
@@ -434,6 +436,7 @@ impl Game {
             penetration: None,
             player_anims: None,
             tempev: Default::default(),
+            vision: [None, None],
             attractors: Attractors::default(),
             sound_out: Vec::new(),
             ambient: None,
@@ -513,6 +516,7 @@ impl Game {
         self.player_anims = None;
         self.attractors = Attractors::default();
         self.tempev = Default::default();
+        self.vision = [None, None];
         self.team_score = [0; 3];
         self.nav = None;
         self.nav_goals.clear();

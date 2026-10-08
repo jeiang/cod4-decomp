@@ -238,6 +238,18 @@ impl NetSv {
             .encode(),
         ];
         out.extend(config_commands(all));
+        for (night, name) in game.vision.iter().enumerate() {
+            if let Some(name) = name {
+                out.push(
+                    ServerCmd::Vision {
+                        night: night == 1,
+                        name: name.clone(),
+                        ms: 0,
+                    }
+                    .encode(),
+                );
+            }
+        }
         out
     }
 

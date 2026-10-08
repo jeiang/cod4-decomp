@@ -289,8 +289,8 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("objective_current", r(uicmd::objective_current)),
     // world rendering, FX, audio: not a server concern until clients exist
     ("setexpfog", Later(M8)),
-    ("visionsetnaked", Later(M8)),
-    ("visionsetnight", Later(M8)),
+    ("visionsetnaked", r(|g, _, a| vision_set(g, a, false))),
+    ("visionsetnight", r(|g, _, a| vision_set(g, a, true))),
     ("playfx", r(play_fx)),
     ("playfxontag", r(play_fx_on_tag)),
     ("playloopedfx", Later(M8)),
@@ -909,6 +909,22 @@ fn play_fx_on_tag(g: &mut Game, _: &mut Vm, a: Args) -> R {
         None => (g.ent(n).map_or([0.0; 3], |e| e.origin), [1.0, 0.0, 0.0]),
     };
     emit_fx(g, index, origin, forward, n);
+    Ok(Value::Undefined)
+}
+
+/// `visionsetnaked(name, seconds)` and `visionsetnight(name, seconds)`: every client blends to the named vision file.
+fn vision_set(g: &mut Game, a: Args, night: bool) -> R {
+    let name = a.string(0)?.to_owned();
+    let ms = if a.len() > 1 {
+        (a.float(1)? * 1000.0).round() as i32
+    } else {
+        1000
+    };
+    g.vision[usize::from(night)] = Some(name.clone());
+    g.send(
+        crate::ui::Dest::All,
+        net::ui::ServerCmd::Vision { night, name, ms },
+    );
     Ok(Value::Undefined)
 }
 

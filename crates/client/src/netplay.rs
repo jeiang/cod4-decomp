@@ -13,7 +13,10 @@ mod hud;
 use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
+use crate::look::{Look, LookOut};
 use crate::models::{Library, Player, PlayerModelSet, Team};
+use crate::props::Props;
+use crate::ragdoll::Ragdoll;
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::ViewModel;
 use crate::wire::Wire;
@@ -50,9 +53,6 @@ pub struct NetFrame {
     /// Radians, positive up.
     pub pitch: f32,
     pub models: Vec<ModelInstance>,
-    /// Sounds the effects started this frame (alias, position), for the mixer.
-    #[expect(dead_code, reason = "read by the mixer")]
-    pub sounds: Vec<fx::SoundPlay>,
     /// Effect sprites and decals.
     pub meshes: Vec<render::DynMesh>,
     /// Happenings new this frame; see [`crate::events`].
@@ -64,6 +64,8 @@ pub struct NetFrame {
         reason = "read by the interface once it has server commands to act on"
     )]
     pub commands: Vec<String>,
+    /// Vision set and shell shock for the picture.
+    pub look: LookOut,
 }
 
 struct Remote {
@@ -71,6 +73,10 @@ struct Remote {
     /// World model of the weapon the player holds.
     weapon: Option<String>,
     seen: Instant,
+    /// Whether the player was dead as of the last frame; `None` before the first.
+    dead: Option<bool>,
+    /// The body of a player who died while watched: where it fell from, which way it faced, and the simulation.
+    ragdoll: Option<([f32; 3], f32, Ragdoll)>,
 }
 
 /// Numbers the run reports.
@@ -93,6 +99,8 @@ struct Counters {
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
     fx_decals_max: usize,
+    /// Ragdolls made for players seen dying.
+    ragdolls: u64,
     fx_live_max: usize,
 }
 
@@ -110,6 +118,8 @@ pub struct NetPlay {
     last_cmd: Instant,
     want_weapon: Option<u16>,
     remotes: HashMap<u16, Remote>,
+    /// The impulse of each recent death by client number, until the body is made.
+    pushes: HashMap<u16, [f32; 3]>,
     vm: Option<((u16, u16), ViewModel)>,
     c: Counters,
     auto: Option<Auto>,
@@ -127,6 +137,8 @@ pub struct NetPlay {
     scores_asked: Option<Instant>,
     server_addr: String,
     effects: Effects,
+    props: Props,
+    look: Look,
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
     /// The server announced a level the app has not acted on yet.
@@ -166,6 +178,7 @@ impl NetPlay {
             last_cmd: Instant::now(),
             want_weapon: None,
             remotes: HashMap::new(),
+            pushes: HashMap::new(),
             vm: None,
             c: Counters::default(),
             auto: autoplay.then(Auto::default),
@@ -174,6 +187,12 @@ impl NetPlay {
             last_eye: None,
             hud_view: None,
             sound,
+            props: Props::new(
+                lib.content
+                    .clipmap()
+                    .map_or(&[][..], |c| &c.dyn_entities[..]),
+            ),
+            look: Look::new((map.art.glow, map.art.film)),
             effects: Effects::new(&lib.content, world),
             lib,
             events: Events::default(),
@@ -346,15 +365,25 @@ impl NetPlay {
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.view_model(dt, &ps, ps.origin));
             let (events, commands) = self.take_events(&snap);
+            let look = self.look.frame(st);
+            let (yaw, pitch) = (
+                ps.viewangles[1].to_radians(),
+                -ps.viewangles[0].to_radians(),
+            );
+            // The effects the followed player's guns and the map's events start are as visible to a watcher.
+            self.boxes.sync(&snap);
+            let drawn = self.fx_frame(dt, st, ps.client_num, &events, eye, (yaw, pitch));
+            models.extend(self.props.instances());
+            models.extend(drawn.models);
             return Some(NetFrame {
                 origin: eye,
-                yaw: ps.viewangles[1].to_radians(),
-                pitch: -ps.viewangles[0].to_radians(),
+                yaw: yaw + look.kick[1].to_radians(),
+                pitch: pitch + look.kick[0].to_radians(),
                 models,
-                meshes: Vec::new(),
-                sounds: Vec::new(),
+                meshes: drawn.meshes,
                 events,
                 commands,
+                look,
             });
         }
         self.boxes.sync(&snap);
@@ -400,8 +429,61 @@ impl NetPlay {
         self.hear(dt, eye, &ps, &snap);
 
         let (events, commands) = self.take_events(&snap);
-        for e in &events {
-            let (weapons, content) = (&self.weapons, &self.lib.content);
+        let look = self.look.frame(st);
+        let mut models = self.remote_players(dt, st, own);
+        if !dead {
+            models.extend(self.view_model(dt, &ps, feet));
+        }
+        let yaw = if dead {
+            ps.viewangles[1]
+        } else {
+            self.angles[1]
+        };
+        let pitch = if dead { 0.0 } else { self.angles[0] };
+        let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
+        let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch));
+        models.extend(self.props.instances());
+        models.extend(drawn.models);
+        Some(NetFrame {
+            origin: eye,
+            yaw: yaw + look.kick[1].to_radians(),
+            pitch: pitch + look.kick[0].to_radians(),
+            models,
+            meshes: drawn.meshes,
+            events,
+            commands,
+            look,
+        })
+    }
+
+    /// Plays what `events` start and advances the effects and the props to `st`; returns what to draw from `eye`
+    /// looking along `(yaw, pitch)` radians. `own` is whose gun the first-person flash comes from.
+    fn fx_frame(
+        &mut self,
+        dt: f32,
+        st: i32,
+        own: u16,
+        events: &[ClientEvent],
+        eye: Vec3,
+        (yaw, pitch): (f32, f32),
+    ) -> crate::effects::Drawn {
+        self.effects
+            .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
+        for e in events {
+            if let ClientEvent::PlayerDeath { client, push, .. } = e {
+                self.pushes.insert(*client, *push);
+            }
+            let weapons = &self.weapons;
+            self.props.event(
+                e,
+                &|w| {
+                    weapons
+                        .get(w)
+                        .is_some_and(|i| i.weap_type == sim::weapon::WeaponType::Bullet)
+                },
+                self.boxes.world(),
+            );
+            let content = &self.lib.content;
             self.effects.event(e, &|w| {
                 weapons
                     .get(w)
@@ -417,36 +499,30 @@ impl NetPlay {
             self.effects.demo(name, eye, yaw, pitch);
         }
         self.effects.update(st, self.boxes.world());
-        let mut models = self.remote_players(dt, st, own);
-        if !dead {
-            models.extend(self.view_model(dt, &ps, feet));
+        for s in self.effects.take_sounds() {
+            self.sound.play_world(&s.alias, s.origin.to_array());
         }
-        let yaw = if dead {
-            ps.viewangles[1]
-        } else {
-            self.angles[1]
-        };
-        let pitch = if dead { 0.0 } else { self.angles[0] };
-        let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
+        self.props.update(dt, self.boxes.world());
         let drawn = self.effects.draw(eye, yaw, pitch);
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
         self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
-        models.extend(drawn.models);
-        Some(NetFrame {
-            origin: eye,
-            yaw,
-            pitch,
-            models,
-            sounds: self.effects.take_sounds(),
-            meshes: drawn.meshes,
-            events,
-            commands,
-        })
+        drawn
     }
 
     /// The events new in `snap` and the server commands nothing here consumed.
     fn take_events(&mut self, snap: &net::Snapshot) -> (Vec<ClientEvent>, Vec<String>) {
+        let now = snap.server_time;
+        let (look, content) = (&mut self.look, &self.lib.content);
+        let file = |n: &str| {
+            content.rawfile(n).map(|b| {
+                let end = b.iter().position(|&x| x == 0).unwrap_or(b.len());
+                String::from_utf8_lossy(&b[..end]).into_owned()
+            })
+        };
+        self.net.commands.retain(|c| {
+            !net::ui::ServerCmd::parse(c).is_some_and(|c| look.command(&c, now, &file))
+        });
         let commands = self.events.take_commands(&mut self.net.commands);
         let events = self.events.scan(snap);
         for e in &events {
@@ -647,6 +723,8 @@ impl NetPlay {
                                 player,
                                 weapon: held,
                                 seen: now,
+                                dead: None,
+                                ragdoll: None,
                             },
                         );
                     }
@@ -665,8 +743,24 @@ impl NetPlay {
             r.seen = now;
             let dead = e.eflags & eflags::DEAD != 0;
             let input = pose_input(e, weapon.as_deref(), dead);
+            // A player who dies in view falls as a ragdoll from the pose they stood in.
+            if dead && r.dead == Some(false) {
+                let push = self.pushes.remove(&e.client).unwrap_or_default();
+                let body = r.player.ragdoll(e.origin, push);
+                r.ragdoll = Some((e.origin, r.player.yaw(), body));
+                self.c.ragdolls += 1;
+            } else if !dead {
+                r.ragdoll = None;
+            }
+            r.dead = Some(dead);
             r.player.update(dt, &input);
-            out.extend(r.player.instances(e.origin));
+            match &mut r.ragdoll {
+                Some((at, yaw, body)) => {
+                    body.update(dt, self.boxes.world());
+                    out.extend(r.player.instances_posed(*at, *yaw, &body.bones()));
+                }
+                None => out.extend(r.player.instances(e.origin)),
+            }
         }
         self.c.max_players_seen = self.c.max_players_seen.max(players);
         self.remotes.retain(|_, r| now - r.seen < GONE_AFTER);
@@ -704,6 +798,13 @@ impl NetPlay {
                 "missing": self.effects.missing,
                 "quads_max": self.c.fx_quads_max,
                 "decals_max": self.c.fx_decals_max,
+                "ragdolls": self.c.ragdolls,
+                "vision": self.look.naked,
+                "vision_night": self.look.night,
+                "look_missing": self.look.missing,
+                "shocks": self.look.shocks,
+                "props": self.props.len(),
+                "props_woken": self.props.woken,
                 "live_elems_max": self.c.fx_live_max,
             },
             "eye": self.last_eye.map(|e| e.to_array()),

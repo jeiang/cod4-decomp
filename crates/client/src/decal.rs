@@ -85,13 +85,14 @@ pub fn clip(tris: impl IntoIterator<Item = [Vec3; 3]>, p: &Placement) -> Vec<Dyn
             }
         };
         for i in 1..poly.len() - 1 {
-            out.extend([vert(poly[0]), vert(poly[i]), vert(poly[i + 1])]);
+            // Back to the map's own order, clockwise seen from outside, the way its surfaces are drawn.
+            out.extend([vert(poly[0]), vert(poly[i + 1]), vert(poly[i])]);
         }
     }
     out
 }
 
-/// The world's triangles whose surface bounds overlap `[mins, maxs]`.
+/// The world's triangles whose surface bounds overlap `[mins, maxs]`, counter-clockwise seen from outside.
 pub fn world_triangles<'a>(
     w: &'a GfxWorld,
     mins: Vec3,
@@ -118,7 +119,9 @@ pub fn world_triangles<'a>(
                     (s.first_vertex as usize + usize::from(i) + 1) * 44 <= w.vertices.len()
                 };
                 (at(ix[0]) && at(ix[1]) && at(ix[2]))
-                    .then(|| [vert(ix[0]), vert(ix[1]), vert(ix[2])])
+                    // The map's triangles are clockwise seen from outside (Direct3D's front face); the clipper wants
+                    // counter-clockwise.
+                    .then(|| [vert(ix[0]), vert(ix[2]), vert(ix[1])])
             })
         })
 }

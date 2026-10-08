@@ -76,12 +76,20 @@ impl Game {
         let (weap_type, class) = (info.weap_type, info.weap_class);
         let Some(c) = self.client(n) else { return };
         let aim = AimBasis::from_angles(view_origin(&c.ps), &c.ps.viewangles);
+        let aim_angles = c.ps.viewangles;
         let spread = aim_spread_degrees(info, &c.ps, &WeaponParams::default());
         let fuse_left = c.ps.grenade_time_left;
         self.stats.shots += 1;
         if let Some(c) = self.client_mut(n) {
             c.shots += 1;
         }
+        let (now, eye, angles) = (self.level.time, aim.origin, aim_angles);
+        self.tempev.add(now, crate::tempev::ev::WEAPON_FIRE, |s| {
+            s.origin = eye;
+            s.angles = angles;
+            s.weapon = weapon;
+            s.client = n;
+        });
         match weap_type {
             WeaponType::Bullet => self.fire_bullets(vm, n, weapon, &aim, spread),
             WeaponType::Grenade => self.throw_grenade(vm, n, weapon, &aim, fuse_left),
