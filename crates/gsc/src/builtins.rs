@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Builtin binding tables. The compiler turns every builtin call into an index into one of
 //! two tables; the server registers the implementations under the same indices.
 //!

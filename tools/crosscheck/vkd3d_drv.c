@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* SPDX-License-Identifier: GPL-3.0-only */
 /* Cross-check driver: vkd3d-shader (LGPL-2.1+, linked as a separate program) d3dbc -> SPIR-V (Vulkan 1.0 env).
    usage: vkd3d_drv list.txt blobdir outdir      list lines: "<vs|ps> <hash>"
    reads <blobdir>/<kind>_<h>.bin, writes <outdir>/<kind>_<h>.spv

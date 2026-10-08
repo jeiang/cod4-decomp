@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The frame: cull, build the draw lists, fill constant banks, record the sun shadow pass and the scene pass.
 
 use crate::art::MapArt;

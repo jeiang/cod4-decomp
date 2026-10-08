@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Movement behaviour against a hand-built box world.
 
 use super::test_world::{SURF_CONCRETE, SURF_LADDER, SURF_MANTLEON, TestWorld};

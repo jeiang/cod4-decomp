@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Per-trace working set (`traceWork_t`): everything derived once from the swept bounds.
 //!
 //! The original treats every swept hull as a capsule: the radius is the smaller of the half

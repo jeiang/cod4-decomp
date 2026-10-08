@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Install-gated IWI tests; they skip when the original install is absent.
 
 use assets::iwi::{self, Format, Header, Image, Texels};

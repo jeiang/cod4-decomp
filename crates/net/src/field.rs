@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Field-table delta coding: a state struct is a table of fields, each read and written through
 //! two function pointers as a raw 32-bit word, plus how many bits that word takes on the wire.
 //! A delta is the count of leading fields that may differ, then one changed bit per field and the

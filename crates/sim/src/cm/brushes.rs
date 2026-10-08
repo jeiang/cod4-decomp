@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Swept tests against the BSP tree, the leaf-brush k-d trees and single brushes.
 
 use assets::zone::clipmap::{Brush, Leaf};

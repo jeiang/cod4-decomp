@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Script hud elements (`newHudElem` and friends): `CG_Draw2dHudElems` and `DrawSingleHudElem2d` of the original.
 //!
 //! Sizes and positions are worked out in pixels. An element is `width x height` big (text: label plus text width and

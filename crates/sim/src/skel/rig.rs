@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The server-side skeleton of one entity: bones of one or more models, posed from weighted
 //! animations plus the player controllers, in entity space.
 //!

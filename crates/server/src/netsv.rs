@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The server's network side: accepts connecting clients, collects their usercmds and console
 //! commands, and builds and sends each client's snapshot every frame. The game state it reads
 //! lives in [`crate::game::Game`]; joining and leaving go through the same slot calls the bots

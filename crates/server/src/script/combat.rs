@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Damage builtins: `radiusdamage`, `setcandamage`, the cone traces, `positionwouldtelefrag`,
 //! `obituary` and the player counts.
 

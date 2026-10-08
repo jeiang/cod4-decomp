@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The watchdog parent: launches each stage as a child process, captures its
 //! output, exit status and minidump, enforces the timeout, and keeps going
 //! after a crash so the bundle always gets written.

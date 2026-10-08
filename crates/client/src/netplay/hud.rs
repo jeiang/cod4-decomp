@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Fills [`GameFacts`] each frame from what the network play knows: the player state, the weapon inventory and the
 //! weapon definitions, the server's configstrings and scoreboard, and the other players in the snapshots.
 

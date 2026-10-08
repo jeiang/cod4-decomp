@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The sound alias tables of the zones: names to lists of variants, each with its volume, pitch and distance
 //! ranges, falloff curve, speaker map, channel and flags, and where its audio is (in the zone, or a file in an
 //! IWD). Also `soundaliases/channels.def`.

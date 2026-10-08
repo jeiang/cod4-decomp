@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Traces against the stock map mp_crash. Skipped without `COD4_PATH`.
 
 use super::test_support::crash_map;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Builtin methods. The original binds them by name across five class tables (player, script
 //! entity, hud element, helicopter, entity); each body checks its receiver's class.
 

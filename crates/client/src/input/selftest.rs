@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `cod4e --input-selftest`: the harness's `client-input` stage. Drives the real [`Input`] with synthetic key, wheel
 //! and mouse events (no window, GPU, install or timing involved) and checks what comes out. Prints one line per check;
 //! returns the failures.

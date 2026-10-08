@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Script vehicles: the helicopter of the helicopter hardpoint (`spawnhelicopter` and the methods the
 //! stock `_helicopter.gsc` calls on it).
 //!

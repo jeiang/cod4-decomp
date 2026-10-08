@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The mixer callback must not allocate or free: it runs on a realtime thread (and, later, an AudioWorklet).
 //! A counting global allocator watches `fill` through a busy mix: plays, replacements, finishing sounds, a
 //! stream and a listener that moves.

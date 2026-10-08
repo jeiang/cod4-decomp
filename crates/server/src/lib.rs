@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Authoritative match simulation; no GPU, window, or audio dependencies.
 
 pub mod activate;

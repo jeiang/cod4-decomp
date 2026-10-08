@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Typed access to builtin arguments, with the original's error wording.
 
 use gsc::{Array, EntRef, Obj, Value};

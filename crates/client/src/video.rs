@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Harness video recorder: wgpu texture -> async readback -> background AV1 (rav1e) encode -> MP4.
 //!
 //! The render thread only records a texture->buffer copy and polls finished maps; scaling,

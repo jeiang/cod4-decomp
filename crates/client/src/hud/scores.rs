@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The scoreboard's player rows (`CG_DrawScoreboard`): the stock `scoreboard` menu draws the bars and team scores at
 //! the top of the screen, the lines of players under them are the client's own drawing.
 //!

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stages: the unit the suite runs, each in its own child process.
 use crate::perf::Percentiles;
 use crate::script::{self, CommandReport, NoEngine, Outcome};

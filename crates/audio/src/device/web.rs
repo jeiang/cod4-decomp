@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The browser output: an `AudioContext` with an `AudioWorkletNode` whose processor is embedded in this
 //! crate (`worklet.js`, loaded through a Blob URL, so nothing extra is served).
 //!

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Game state the scripts act on: entities, spawn parsing, configstrings and the level clock.
 //!
 //! Entity numbers follow the original: client slots first, then spawned entities from

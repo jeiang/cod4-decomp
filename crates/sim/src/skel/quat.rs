@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Quaternion helpers in the engine's `[x, y, z, w]` layout.
 
 use crate::Vec3;

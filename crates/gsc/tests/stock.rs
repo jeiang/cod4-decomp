@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Compiles every stock MP script from an original install. Skips without `COD4_PATH`.
 
 mod common;

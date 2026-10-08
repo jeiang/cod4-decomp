@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Firing helpers for the game side: the spread a shot is fired with, the bullet directions of
 //! one trigger pull, and the view/gun kick of a shot. The muzzle origin and the view basis come
 //! from the server.

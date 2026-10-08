@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Techset passes to GPU draw state: shader translation, constant and sampler binding, pipelines.
 //!
 //! A [`Prepared`] is one (material, technique, vertex layout): the translated vertex and pixel shaders, the register

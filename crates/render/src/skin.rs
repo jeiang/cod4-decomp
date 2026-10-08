@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Dynamic (skinned) models: the instances the client hands the renderer each frame and the CPU skinning of their
 //! surfaces.
 //!

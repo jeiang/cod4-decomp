@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Player movement (`Pmove`): shared by the server and client prediction.
 //!
 //! One [`pmove`] call consumes one user command: it splits the time since the player's last

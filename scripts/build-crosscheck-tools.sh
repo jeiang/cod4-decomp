@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 # Builds the two reference SM3 translators the sm3 render cross-check compares against:
 #   mojo_drv  - MojoShader (zlib, icculus/mojoshader), SPIR-V profile
 #   vkd3d_drv - vkd3d-shader 2.1 (Wine vkd3d, LGPL-2.1-or-later), linked statically into our own driver

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The first-person weapon: the hands model with the gun attached at `tag_weapon`, animated by the weapon's
 //! `viewmodel_*` animations from the player state's weapon state machine.
 //!

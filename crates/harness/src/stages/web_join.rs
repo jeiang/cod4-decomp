@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The browser joining a server: a native server (in this process, WebTransport on a free port, ten bots in a team
 //! deathmatch on mp_crash) and `web/serve.py`; a headless Chromium opens the built page with
 //! `?connect=127.0.0.1:<port>&cert=<hash>&report=N` and posts its overlay once N frames have run after the server

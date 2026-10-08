@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Sprint stamina and start/stop rules (`PM_UpdateSprint` and friends).
 //!
 //! Sprint time is a budget (`player_sprintTime` seconds, scaled by weapon and perk). Starting

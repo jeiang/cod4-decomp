@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Instance, adapter and device creation, and the facts about them the harness reports.
 
 use std::fmt;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-ui`: the client's `--ui-tour` opens the stock menus one after another (front end, server setup, options,
 //! the script menus a match opens) with no world, saves a screenshot of each and a report. The stage passes when
 //! every menu opens, draws a meaningful share of the picture (fonts, localized text and images resolved) and no UI

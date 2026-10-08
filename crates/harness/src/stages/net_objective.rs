@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `net-objective`: two people (real UDP clients, no window) play Search and Destroy on mp_crash.
 //! One picks up the bomb and holds +activate in the bomb zone, which has to show the zone's hint in
 //! the client's own player state and end with the bomb planted; the other holds +activate at the

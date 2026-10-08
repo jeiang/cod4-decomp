@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The datagram transport everything above it uses: UDP for the network, an in-memory switchboard
 //! for the listen server and tests, and [`Joined`], which lets a server take its datagrams from UDP
 //! and from further transports (the [`wt`](crate::wt) WebTransport endpoint) at once.

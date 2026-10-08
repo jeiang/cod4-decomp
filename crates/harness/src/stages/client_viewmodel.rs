@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-viewmodel`: runs `cod4e --viewmodel-tour` on three stock maps. The first-person weapon and hands are drawn
 //! headless from the spawn points and the paths between them, with and without, and the pixels they change must not
 //! be dominated by one colour channel (a wrong reflection probe once painted them solid red) and the spawn views must

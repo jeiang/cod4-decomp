@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `WeaponTable`: every weapon of the loaded zones, numbered the way scripts and usercmds refer
 //! to them.
 //!

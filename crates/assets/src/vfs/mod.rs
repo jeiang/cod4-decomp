@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Virtual file system over the original install: IWDs and loose directories
 //! resolved in the original engine's search order (first hit wins).
 //!

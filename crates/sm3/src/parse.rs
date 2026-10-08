@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! D3D9 shader-model 2/3 token-stream parser, written from the public token-format documentation.
 
 use crate::{

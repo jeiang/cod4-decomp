@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Traces and point queries against a model placed in the world (an entity's `origin` and
 //! `angles`).
 

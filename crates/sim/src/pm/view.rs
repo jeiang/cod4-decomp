@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! View angles and lean (`PM_UpdateViewAngles*`, `PM_UpdateLean`, `PM_UpdatePronePitch`).
 
 use super::math::{self, angle_delta, angle_normalize_360, angle_wrap_180};

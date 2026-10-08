@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Server-side animation clocks and notetrack delivery (`G_XAnimUpdateEnt`).
 //!
 //! An entity that plays a flagged animation gets a notify (`ent notify(flag, note)`) each time

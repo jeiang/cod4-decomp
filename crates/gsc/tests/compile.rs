@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 use gsc::{Builtins, ErrorKind, MethodClass, Options, Program, compile};
 
 fn build(sources: &[(&str, &str)]) -> Result<Program, Vec<gsc::CompileError>> {

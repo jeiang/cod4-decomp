@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Footstep cadence and events (`PM_Footsteps`): the bob cycle advances with ground speed and
 //! each half-cycle raises a footstep event for the surface underfoot.
 

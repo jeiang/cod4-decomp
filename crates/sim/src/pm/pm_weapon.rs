@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `PM_Weapon`: the weapon state machine one user command steps through, and
 //! `PM_AdjustAimSpreadScale`.
 //!

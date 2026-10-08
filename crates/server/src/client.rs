@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Client slots: connect, begin, spawn, the per-command think, the end-of-frame update and
 //! disconnect (`ClientConnect`, `ClientBegin`, `ClientSpawn`, `ClientThink_real`,
 //! `ClientEndFrame`, `ClientDisconnect` of the original).

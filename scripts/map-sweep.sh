@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 # Plays every stock map in every gametype with the windowed client (--listen --autoplay) and prints one row per
 # combination: did it start, spawn, see the bots, fire (a run with no shot is rerun at three times the length, then fails), run its scripts without errors, and find every effect, vision and
 # shock file. Needs a display, so run it on a machine with one (see scripts/remote-linux.sh).

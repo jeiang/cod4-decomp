@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stage 2: the headless server driven by a console scenario.
 //!
 //! The harness runs the server in this process through its console: `map` boots a map, `wait`

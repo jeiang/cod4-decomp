@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Missile builtins: `detonate`, grenade touch damage, `missile_settarget`, `dropitem` and the
 //! attractor and repulsor slots.
 //!

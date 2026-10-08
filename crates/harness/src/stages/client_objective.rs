@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-objective`: the real client plays Search and Destroy against bots and plants the bomb. The
 //! stage puts the player in the bomb's pickup trigger, then in the zone, and holds +activate: the zone's hint
 //! must be drawn (owner-draw 72, shot saved) and the server must count the plant. Needs a display and

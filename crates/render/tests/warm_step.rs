@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Install- and adapter-gated: with a spent pipeline budget a frame skips draws whose pipeline is not built and counts
 //! them, `warm_step` builds the demanded ones first and in the end every pipeline, and then a frame misses none.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The original engine's `XAssetType` numbering (IW3 1.7).
 
 /// Asset type tag stored in each entry of the zone's asset list.

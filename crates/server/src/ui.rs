@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What the game tells players' screens: hud elements, objectives, configstrings and the
 //! one-shot commands (`openmenu`, `iprintln`, `setclientdvar`, ...). Scripts write into
 //! [`ServerUi`]; [`crate::netsv::NetSv`] turns it into reliable commands and snapshot state

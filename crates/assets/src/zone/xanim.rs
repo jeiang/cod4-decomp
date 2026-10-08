@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! XAnimParts: animation keyframe data, notetracks and per-bone delta parts.
 
 use super::error::{Result, ZoneError};

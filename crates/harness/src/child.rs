@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The child side: runs one stage in its own process so a crash or hang
 //! cannot take the watchdog with it.
 use crate::stage::{self, Kind, StageCtx, StageReport, Status};

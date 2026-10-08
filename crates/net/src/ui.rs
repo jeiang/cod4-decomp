@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What the server tells a client's user interface, and the store the client reads it from.
 //!
 //! The client crate consumes this module only: it never parses a reliable command or a snapshot

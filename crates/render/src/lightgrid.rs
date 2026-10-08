@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The `modelLightingSampler` volume: a CPU-built 3D texture holding one 4x4x4
 //! block of light-grid colours per lit model.
 //!

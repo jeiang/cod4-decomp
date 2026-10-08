@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `--fx-selftest`: the effects on the real content, without a window or a GPU. An explosion draws sprites and then
 //! ends, a bullet that hits the map leaves a decal clipped to the map's surface, a shot plays its muzzle flash and
 //! ejects a shell, and the vision and shock files the stock scripts name are in the install and take effect. Reports

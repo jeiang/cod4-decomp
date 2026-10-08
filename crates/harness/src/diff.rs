@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `harness diff a.zip b.zip`: percentile deltas per stage, environment
 //! differences, and log errors that are new in `b`.
 use crate::stage::StageReport;

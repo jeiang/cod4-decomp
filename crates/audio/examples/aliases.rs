@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Lists alias names containing the given words: `cargo run -p audio --example aliases -- <map> <word>...`
 use assets::vfs::Vfs;
 use audio::bank::Bank;

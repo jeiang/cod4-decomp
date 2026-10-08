@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Prone placement checks (`BG_CheckProne` / `BG_CheckProneValid`): whether a prone body fits
 //! at a position and yaw, and the torso and waist pitch it settles into on uneven ground.
 

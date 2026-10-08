@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 """Summarise budget-run bundles: python3 scripts/budget-table.py <arch> <bundle.zip>..."""
 import json, sys, zipfile
 

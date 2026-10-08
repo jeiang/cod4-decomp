@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! GSC lexer. Identifiers are lowercased (the language is case-insensitive there);
 //! string literals keep their case.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The menu shell: owns the menu system and its drawing state, and answers what the menus ask of the client.
 //!
 //! [`Shell`] is the player-facing front end. The menus run scripts that read and write dvars, run console text, start

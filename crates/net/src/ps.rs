@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The field table of [`PlayerState`]: everything client prediction reads or writes goes over
 //! the wire at full precision, so replaying the unacknowledged commands on a received state
 //! lands where the server would.

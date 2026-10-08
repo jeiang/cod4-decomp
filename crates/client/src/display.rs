@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Display modes: what the monitors offer, what the user asked for, and the window that results.
 
 #[cfg(not(target_arch = "wasm32"))]

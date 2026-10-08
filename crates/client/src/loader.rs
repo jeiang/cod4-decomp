@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Loading a map for a session in the background, so the window keeps presenting (and shows the loading screen)
 //! instead of freezing for seconds.
 //!

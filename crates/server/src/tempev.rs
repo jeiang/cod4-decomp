@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! One-shot happenings clients show or hear but do not simulate: bullet impacts, explosions, script effects, deaths.
 //!
 //! They travel as entities of type [`net::entity::etype::EVENT`] in every snapshot for [`LIFETIME_MS`] after they

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Generates navigation meshes for every stock map and checks the spawn points connect.
 //! Skips without `COD4_PATH`. Run with `--release`: debug collision is an order of magnitude
 //! slower and the timing assertion is skipped there.

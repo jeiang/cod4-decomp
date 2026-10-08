@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

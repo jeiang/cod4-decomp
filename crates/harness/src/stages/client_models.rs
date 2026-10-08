@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-models`: the client's `--show-models` scene (stock player models posed in a row, the first-person
 //! hands and weapon in front) is rendered twice from the same camera, once with players and once without. The
 //! stage passes only if the player rows change a meaningful share of the upper part of the picture: skinned

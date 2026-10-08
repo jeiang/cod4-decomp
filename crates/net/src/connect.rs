@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The challenge-response handshake from both ends. Neither side keeps state for a stranger:
 //! the server answers `getchallenge` with a keyed hash of the sender's address and only a valid
 //! `connect` creates a slot, so a spoofed source address cannot make it send much or hold memory.

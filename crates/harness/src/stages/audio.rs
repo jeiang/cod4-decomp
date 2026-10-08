@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `audio`: runs `cod4e --audio-selftest` on the real alias tables. With no window and no sound card it plays
 //! stock sounds through the mixer and asserts what a match depends on: a shot on the left is louder in the
 //! left ear and a shot on the right in the right, volume falls with distance, a sound beyond its range does not

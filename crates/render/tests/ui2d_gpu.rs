@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Install- and adapter-gated: draws rects, a scissored rect, an alpha-blended material and a line of stock
 //! `fonts/normalFont` text into an offscreen target and reads the pixels back. Skips without either.
 

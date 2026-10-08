@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Movement tunables (the original's dvars) and the per-weapon values movement reads.
 //!
 //! Defaults are the multiplayer registration defaults of `iw3mp.exe` 1.7 (fact source: the

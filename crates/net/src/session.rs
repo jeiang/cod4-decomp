@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The two ends of an established connection. [`ServerLink`] is the server's state for one client;
 //! [`ClientLink`] is the client's. Each owns a [`Netchan`], the reliable command queues and the
 //! snapshot history that delta coding needs, and turns messages into packets and back.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Hud elements (`g_hudelem.cpp` of the original): allocation, the engine-owned fields scripts
 //! read and write (`alpha`, `color`, `alignx`, ...), and the methods that set what an element
 //! shows. The state lives in [`crate::ui::ServerUi`]; clients receive the visible set in their

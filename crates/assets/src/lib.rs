@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Original-install access: VFS, IWD, fastfile decoding, IWI, typed assets.
 pub mod fs;
 pub mod vfs;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Runs the real binary: the watchdog must survive each way a child can fail
 //! and still write a readable bundle. Needs no install.
 use harness::diff;

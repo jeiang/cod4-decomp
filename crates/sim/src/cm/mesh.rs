@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Terrain (and patch) collision: collision AABB trees over triangle partitions plus the
 //! partition borders that stop a capsule from sliding off a mesh edge.
 

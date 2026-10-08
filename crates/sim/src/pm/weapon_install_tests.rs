@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Weapons from the stock zones. Skipped without `COD4_PATH`.
 
 use super::install_tests::decode;

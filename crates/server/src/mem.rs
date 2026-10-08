@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Process memory, for the server's own reports.
 
 /// Resident set size in bytes, where the platform tells us cheaply.

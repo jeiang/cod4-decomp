@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `iwi-dump <install> <image name> <out.png> [mip] [face]`: decode one stock
 //! image to a PNG (RGBA8) for eyeballing.
 

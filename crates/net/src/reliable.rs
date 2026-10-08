@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Reliable command strings carried inside the unreliable message stream: each packet repeats
 //! every command the peer has not yet acknowledged, the peer takes them in order exactly once.
 

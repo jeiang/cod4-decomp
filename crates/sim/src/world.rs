@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The static map plus the entities linked into it: entity clipping (`SV_Trace`,
 //! `SV_PointContents`, `SV_SightTrace`, `SV_AreaEntities`) over a preallocated sector tree.
 //!

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 # Usage: scripts/budget.sh <map> <gametype> <minutes> [out-dir]
 # One cell of the server budget matrix (ticket #56): 32 bots on <map> in <gametype> for
 # <minutes>, pinned to CPU $BUDGET_CPU (default 0) with MemoryMax=512M when the host allows it. Run from a repo

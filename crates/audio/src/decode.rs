@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! WAV and MP3 decoding with Symphonia (MPL-2.0), whole into memory or packet by packet into a ring.
 //!
 //! The stock install holds only 16-bit PCM WAV and MPEG layer 3 (see the audio research); loaded sounds in

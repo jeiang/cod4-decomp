@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What the server tells the client happened: the one-shot events of `server::tempev` turned into [`ClientEvent`]s,
 //! each delivered once however many snapshots repeat it.
 //!

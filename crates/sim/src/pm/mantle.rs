@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Ledge mantling (`Mantle_*`).
 //!
 //! A mantle is found by tracing forward against `MANTLE` contents, then probing ledge heights

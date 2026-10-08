@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The XFile stream reader: inflated byte source, the nine-block allocator
 //! with its push/pop stack, pointer kinds, and the offset-pointer registry.
 

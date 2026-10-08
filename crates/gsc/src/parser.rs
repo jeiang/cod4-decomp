@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Recursive-descent parser: tokens to [`Script`].
 //!
 //! Object calls have no dot: after a primary expression, an identifier,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The original builtin tables, names in table order. Source: the iw3mp.exe 1.7 data tables
 //! (each entry is `{ name, handler, developer-only }`, 12 bytes), cross-checked entry by entry
 //! against KisakCOD `g_scr_main_mp`, `g_client_script_cmd_mp`, `g_scr_mover`, `g_hudelem` and

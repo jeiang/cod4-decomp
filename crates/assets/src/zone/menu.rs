@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! MenuList, menuDef, itemDef and expressions.
 
 use super::error::{Result, ZoneError};

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The builtins that talk to players' screens: client dvars, script menus, print lines,
 //! announcements, chat, the winner configstring and the compass objectives.
 

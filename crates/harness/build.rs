@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Embeds the git revision so a bundle identifies the build that produced it.
 use std::process::Command;
 

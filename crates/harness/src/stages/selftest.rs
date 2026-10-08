@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stages that misbehave on purpose, to prove the watchdog catches each way a
 //! child can go wrong.
 use crate::stage::{StageCtx, StageReport};

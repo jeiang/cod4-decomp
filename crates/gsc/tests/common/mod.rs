@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Shared by the install-gated tests: the stock MP scripts out of the original install.
 //!
 //! Rawfile records are found by byte scan until the zone decoder (#29) lands:

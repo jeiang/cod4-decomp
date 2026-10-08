@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Finding servers: the stock join menu's list (LAN discovery and favorites) and the map query that precedes joining.
 //!
 //! A server answers `getinfo <challenge>` with its `hostname`, `mapname`, `gametype`, `clients` and `sv_maxclients`

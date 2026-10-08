@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! VM behavior and the scheduler's ordering rules (research/gsc-sched, ticket #20).
 //!
 //! Scripts log through `println`; the test host joins the arguments with spaces.

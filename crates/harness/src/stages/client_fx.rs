@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-fx`: runs `cod4e --fx-selftest` on the real effects. With no window and no GPU it plays stock effects
 //! against a stock map and asserts what a match shows: an explosion draws sprites and then ends, a bullet into the
 //! floor leaves a decal clipped to it, a shot plays its muzzle flash and ejects a shell, and the vision and shock

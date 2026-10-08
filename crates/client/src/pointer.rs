@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! When the window holds the mouse in a match. Mouse look only works while the pointer is locked, so every way into
 //! the game must end with the lock taken, with no click needed (the original does the same when a menu closes):
 //! the first frame of a match, a menu closing, the window regaining focus. The one exception is the player letting go

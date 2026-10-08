@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The remaining builtins: server administration, the developer file functions, queries with
 //! fixed answers on a dedicated server, and the names that only matter once their milestone
 //! lands (accepted and logged once).

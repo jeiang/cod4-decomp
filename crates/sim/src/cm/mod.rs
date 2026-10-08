@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Collision world, box/capsule traces, point contents.
 
 // The trace code indexes several parallel per-axis arrays; iterators would obscure it.

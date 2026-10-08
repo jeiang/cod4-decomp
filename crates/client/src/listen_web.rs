@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The browser has no threads and no sockets to run a listen server on: `listen.rs` keeps the native one. The player
 //! joins a server (`--connect`) instead.
 

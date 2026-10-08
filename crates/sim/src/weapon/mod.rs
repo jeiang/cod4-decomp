@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Runtime weapons: the table of weapon definitions, the per-player inventory, the events the
 //! weapon state machine hands to the game, and the pure firing and damage helpers.
 //!

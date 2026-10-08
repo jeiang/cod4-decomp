@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The helicopter's rotors: the original's `CG_GetHelicopterAnims` loops the `bh_rotors` animation on the vehicle's
 //! model, so the main and tail rotors turn while everything else stays at the model's rest pose.
 

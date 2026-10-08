@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The browser platform layer: how the page and the wasm module talk.
 //!
 //! The page (`web/`) picks the install, gives it to a reader worker, and instantiates this module. The module reads

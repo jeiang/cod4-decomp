@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `script-pool`: a long headless Search and Destroy match and a long team deathmatch with map
 //! rotations, with bots. The script variable pool (the original's 0xFFFE-value limit) must
 //! return to the same level every round: what a round leaves behind is what ends a server

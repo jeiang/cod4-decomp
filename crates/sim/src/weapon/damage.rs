@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Damage rules for the game side: distance falloff, hit-location scaling, bullet penetration,
 //! explosions and melee.
 //!

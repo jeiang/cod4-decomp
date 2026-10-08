@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Wavelet-compressed IWI pixel data (formats 6-10).
 //!
 //! Reconstructed from `iw3mp.exe` 1.7 (image load path: format switch, level

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Install-gated: every stock SM3 blob must translate and validate with naga. Skips without `COD4_PATH`.
 //! Run with `--nocapture` to see the per-zone translation times.
 mod common;

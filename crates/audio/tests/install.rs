@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Install-gated: the real alias tables, channels and files. Skips when the original install is absent.
 
 use assets::vfs::{LANGUAGES, Vfs};

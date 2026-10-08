@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The original install as the server sees it: the VFS and the dedicated-server zone set.
 //!
 //! A dedicated server loads `code_post_gfx_mp`, `localized_code_post_gfx_mp`, `common_mp` and

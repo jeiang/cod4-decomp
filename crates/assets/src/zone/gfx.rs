@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Typed decoders for the `_load`-zone asset types: material, technique set
 //! (passes, vertex declarations, shader blobs), image header, and raw file.
 

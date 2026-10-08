@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Finds the CoD4 install: `--cod4`, `COD4_PATH`, the Windows registry, Steam
 //! libraries, `./COD4`, then a native folder prompt.
 //!

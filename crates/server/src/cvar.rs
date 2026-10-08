@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Console variables (the original calls them dvars).
 //!
 //! Names are case-insensitive. A variable set before it is registered (`+set` on the command

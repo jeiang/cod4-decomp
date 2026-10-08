@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Gamepads through `gilrs`: button edges for the bind table, stick positions for move and look.
 //!
 //! Failure to initialise is logged and the pad stays inert; there is no game state that depends on one.

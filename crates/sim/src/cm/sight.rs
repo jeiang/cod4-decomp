@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Visibility traces (`CM_BoxSightTrace`): a yes/no "is anything solid in the way" with the
 //! original's own rules. Unlike a normal trace there is no contact epsilon (touching a brush
 //! does not block) and the answer is a hit number the caller can pass back as a cache hint.

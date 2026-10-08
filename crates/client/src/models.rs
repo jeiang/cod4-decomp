@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Player models: loading the stock body, head and view hands for a team, and posing a player each frame.
 //!
 //! The server's [`PlayerAnims`] (rig, `pb_*` animation selection, cross-fades) is the pose source for remote

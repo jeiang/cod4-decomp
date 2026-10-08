@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Install-gated: every code constant and code sampler a stock technique binds must be named, in the shader's CTAB,
 //! by something `codeconst` maps back to the same id. Skips without an install.
 

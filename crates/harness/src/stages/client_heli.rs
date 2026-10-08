@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-heli`: the real client sees a helicopter. A bot is given the helicopter reward (`devhardpoint`) and
 //! calls it in; once the server counts it, the player is put behind the helicopter looking at it
 //! (`devheli view`) and a screenshot is saved. The client must have drawn at least one `VEHICLE` entity, and the

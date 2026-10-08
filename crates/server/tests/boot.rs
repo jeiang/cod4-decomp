@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Boots stock maps with TDM and idles them. Skips without `COD4_PATH`.
 
 use server::server::Server;

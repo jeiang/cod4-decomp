@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The use button and the crosshair hint (`player_use_mp`): which use trigger a player is
 //! looking at or standing in, the hint the client shows for it, and the `trigger` notify
 //! pressing +activate sends to its scripts.

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* SPDX-License-Identifier: GPL-3.0-only */
 /* Cross-check driver: MojoShader (zlib) D3D9 bytecode -> SPIR-V, linked per (vs, ps) pair.
    usage: mojo_drv pairs.txt blobdir outdir     pairs.txt lines: "<vshash> <pshash>"
    reads  <blobdir>/vs_<h>.bin, ps_<h>.bin

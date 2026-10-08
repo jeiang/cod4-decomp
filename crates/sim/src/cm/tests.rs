@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Unit tests on hand-built maps. Expected fractions are worked out by hand in the comments:
 //! a contact stops `0.125` short of the surface, and the player hull is a capsule of radius 15
 //! whose center sits 35 above the origin.

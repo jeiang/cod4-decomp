@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Swept traces against the world or one model, and the point/area queries.
 
 use assets::zone::clipmap::Leaf;

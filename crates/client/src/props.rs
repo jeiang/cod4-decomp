@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The map's loose props (the clipmap's clutter and destructible dynamic entities: crates, barrels, bottles). The
 //! server does not simulate them, so each client draws them where the map puts them and, when a shot, a blast or a
 //! physics explosion reaches one, lets it fall as a Verlet body: the corners of its bounds are points, every pair of

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Drawing menus: windows, borders, items and their text onto the 2D layer.
 
 use super::assets::UiAssets;

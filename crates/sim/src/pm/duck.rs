@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stance changes and eye height (`PM_CheckDuck`, `PM_ViewHeightAdjust`).
 //!
 //! Stances are 60 (standing), 40 (crouched) and 11 (prone) units of eye height. A change starts

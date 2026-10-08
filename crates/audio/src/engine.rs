@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The game-facing sound system: alias names in, voices out.
 //!
 //! [`Sound::play`] does what the original's `SND_PlaySoundAlias` does on the game thread: picks a variant,

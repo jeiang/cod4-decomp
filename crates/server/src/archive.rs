@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The state ring killcams replay: every server frame, the entities clients can see and, for
 //! each player in the match, the player state, weapon inventory and the archived hud elements
 //! and objectives that player's screen had. `archivetime` of a spectating client picks the frame

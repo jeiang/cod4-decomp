@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Vector and angle helpers for player movement.
 //!
 //! Determinism: every operation here is a plain IEEE-754 `+ - * /`, `sqrt`, `floor` or

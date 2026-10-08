@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The winit application: window, surface, render loop, fly camera, flythrough recording.
 //!
 //! The render loop runs as fast as the present mode allows and is independent of any simulation tick: the camera is a

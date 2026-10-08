@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! A dead player's body as a Verlet ragdoll: every bone is a point, every bone-to-parent link a fixed-length
 //! constraint, and the points fall and slide on the map's solid geometry. It is the client's own simulation (the
 //! server's body stays the death animation's box); the bones it hands back replace the animated pose.

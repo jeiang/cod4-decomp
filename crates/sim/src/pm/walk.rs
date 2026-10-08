@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Ground and air movement: friction, acceleration, wish velocity, the ground trace, landing
 //! and the fly/noclip/dead special cases.
 

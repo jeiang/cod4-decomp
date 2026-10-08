@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Virtual 640x480 coordinates to pixels (the original's `ScreenPlacement`).
 //!
 //! Menus and the HUD are laid out in a 640x480 virtual space whose rects carry an alignment per axis. One virtual

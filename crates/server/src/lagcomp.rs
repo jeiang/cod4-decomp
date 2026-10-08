@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Lag compensation: a short history of every player's body, so a shot is judged against the
 //! world the shooter saw. A client draws other players a fixed interval behind the server
 //! clock ([`net::view::INTERP_DELAY_MS`]) and stamps every command with its clock; when the

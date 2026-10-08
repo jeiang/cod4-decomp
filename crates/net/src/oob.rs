@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Out-of-band packets: a `0xffffffff` marker, then one line of text. They carry the
 //! challenge-response connect and server discovery; everything else is in the [`Netchan`](crate::Netchan).
 

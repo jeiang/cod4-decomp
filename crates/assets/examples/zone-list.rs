@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Print per-type top-level asset counts of fastfiles.
 //!
 //! `cargo run -p assets --example zone-list -- [--inflate] [--decode | --server] <zone.ff | zone-name>...`

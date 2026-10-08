@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Post-pass for MojoShader/vkd3d SPIR-V: split combined image+sampler uniform-constant variables
 //! (`OpTypeSampledImage` variables, valid Vulkan SPIR-V but rejected by naga) into a separate
 //! texture variable (keeps the original id/decorations) and a sampler variable

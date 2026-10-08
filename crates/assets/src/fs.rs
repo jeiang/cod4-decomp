@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! File access for the original install, the one place the code base touches `std::fs` for install content.
 //!
 //! Native targets are `std::fs`. A browser has no file system: on `wasm32` the page [`mount`]s the files it can read

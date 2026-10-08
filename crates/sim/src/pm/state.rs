@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Player state, user commands and the flag/event constants player movement shares with the
 //! rest of the game. Values are the original engine's (fact source: `iw3mp.exe` 1.7 `pmflags_t`,
 //! `entity_event_t`, `usercmd_t` bit assignments).

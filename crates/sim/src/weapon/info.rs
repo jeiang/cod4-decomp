@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `WeaponInfo`: the part of a decoded [`WeaponDef`] that simulation reads, without the models,
 //! effects, materials and sounds.
 //!

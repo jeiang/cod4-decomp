@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `cod4e-server`: the headless dedicated server.
 //!
 //! `cod4e-server [+set name value] [+exec server.cfg] [+map mp_crash]`; the install comes from

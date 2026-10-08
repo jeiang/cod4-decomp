@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Visibility: the camera's cell from the BSP, a portal walk that narrows the frustum through each portal, and
 //! AABB-tree traversal of the visible cells.
 

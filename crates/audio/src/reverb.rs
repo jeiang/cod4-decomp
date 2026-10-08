@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Room reverb: the send bus behind `setReverb`. The original hands this to Miles' EAX reverb (`msseax.flt`,
 //! closed source) with one of 26 room types; its wet level is the effect's and its dry level is fixed at 1
 //! (`MSS_GetDryLevel`). Here a Freeverb-style bus (eight damped combs, four all-passes) is tuned per room by

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The HUD pieces the stock menus ask the client to draw (`ownerdraw` items): health, ammunition and weapon,
 //! grenades, stance, sprint, hints, the corner compass and the full-screen map.
 //!

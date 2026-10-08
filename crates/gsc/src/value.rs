@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Script values and the objects they point to.
 //!
 //! Arrays have value semantics (copy on write, as in the original: writing through a shared

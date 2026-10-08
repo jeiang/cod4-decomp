@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // The install reader. The wasm module runs on the page's main thread (winit owns the canvas there) and needs
 // synchronous ranged reads of the install; a File or an OPFS file can only be read synchronously in a worker. This
 // worker answers the page's requests through two SharedArrayBuffers (see bridge.js for the other side):

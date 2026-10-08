@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The weapon state machine inside `pmove`, against a hand-built weapon table on a flat floor.
 //! Timings are exact: the harness steps in whole milliseconds and asserts the state after the
 //! step a timer expires on.

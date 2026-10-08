@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stage 3 against a fake `cod4e` shell script that follows the client CLI
 //! contract. Unix only: the fake is a `sh` script.
 #![cfg(unix)]

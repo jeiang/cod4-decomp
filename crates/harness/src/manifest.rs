@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `manifest.json`: what built, ran and hosted this run. No host name, user
 //! name, serial number or home path (the bundle writer scrubs the last two).
 use crate::install::Detection;

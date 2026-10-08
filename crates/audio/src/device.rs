@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The sound output: [`Config::probe`], [`Config::start`], and an [`Output`] that plays until dropped.
 //!
 //! Natively that is a cpal stream running [`Mixer::fill`](crate::mixer::Mixer::fill) in its callback; in a

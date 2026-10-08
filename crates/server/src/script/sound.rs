@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Sound builtins. The server plays nothing: each call becomes a console command to the clients that should
 //! hear it, which the client's sound system turns into voices (`crates/client/src/sound.rs`).
 //!

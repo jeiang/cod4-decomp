@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The headless server: boot, map load, console commands and the frame loop.
 //!
 //! Boot follows the original's dedicated start: command-line `set`s first, `default_mp.cfg`

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The loading screen: the map's `loadscreen_<map>` picture over the whole window, its name and a progress bar.
 //! Painted while a map loads in the background, so the window keeps presenting.
 

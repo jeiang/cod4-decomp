@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // The page's side of the install read bridge (the reader worker's side is reader.js): a synchronous ranged read that
 // the wasm module calls. The wasm module owns the main thread and cannot await, and the reader worker is the only
 // place a File or an OPFS file can be read synchronously, so the request goes through shared memory and this thread

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! User commands on the wire: each is a delta against the one before it in the packet.
 
 use crate::bits::{BitReader, BitWriter, Overflow};

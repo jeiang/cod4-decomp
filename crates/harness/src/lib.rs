@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Runs scenarios and writes run bundles. See `cod4e-harness --help`.
 pub mod bundle;
 pub mod child;

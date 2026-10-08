@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The GSC host: builtin dispatch and entity fields.
 //!
 //! The compiler binds every builtin call to an index into the program's builtin tables. At
