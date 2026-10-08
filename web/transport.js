@@ -81,7 +81,8 @@ export function createTransport() {
       const s = session;
       s.ready.then(() => {
         if (s !== session) return;
-        writer = s.datagrams.writable.getWriter();
+        // Safari 27 has the older spec's createWritable() and no `writable`.
+        writer = (s.datagrams.writable ?? s.datagrams.createWritable()).getWriter();
         limit = Math.min(MAX_DATAGRAM, s.datagrams.maxDatagramSize || MAX_DATAGRAM);
         state = "open";
         readDatagrams(s).catch(() => {});
