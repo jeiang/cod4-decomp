@@ -22,7 +22,7 @@ const MENU_STEPS: &str = "click=Start New Server,menu=createserver:20,click=Star
 click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=3,shot=menus";
 
 /// Runs the client with `args` and `--ui-script steps`; returns the parsed `ui-script.json`.
-fn run_client(
+pub(super) fn run_client(
     client: &Path,
     install: &Path,
     dir: &Path,
