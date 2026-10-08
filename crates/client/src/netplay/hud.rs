@@ -167,6 +167,11 @@ impl NetPlay {
                 },
             };
         }
+        h.loc_material = (ps.loc_selection != 0)
+            .then(|| ui.material(ps.loc_selection).to_owned())
+            .filter(|m| !m.is_empty());
+        h.loc_radius = f32::from(ps.loc_radius) / 63.0;
+        h.loc_cursor = self.loc_cursor;
         h.selecting_location = ps.e_flags & sim::pm::ef::LOC_SELECTING != 0;
         let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
         h.breath_hint = ps.weapon_flags & wf::HOLD_BREATH == 0

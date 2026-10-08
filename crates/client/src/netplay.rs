@@ -139,6 +139,9 @@ struct Counters {
     eye_speeds: Vec<f32>,
 }
 
+/// How far one degree of mouse turn moves the map pick, as a fraction of the map.
+const LOC_CURSOR_SPEED: f32 = 0.004;
+
 pub struct NetPlay {
     net: NetClient<Wire>,
     lib: Library,
@@ -156,6 +159,8 @@ pub struct NetPlay {
     before_slot: Option<u16>,
     /// A night-vision slot was pressed: the next command carries the button.
     nv_press: bool,
+    /// Where the map pick of a location selection points, 0..1 across and down the map.
+    pub loc_cursor: [f32; 2],
     remotes: HashMap<u16, Remote>,
     /// The impulse of each recent death by client number, until the body is made.
     pushes: HashMap<u16, [f32; 3]>,
@@ -223,6 +228,7 @@ impl NetPlay {
             want_weapon: None,
             before_slot: None,
             nv_press: false,
+            loc_cursor: [0.5; 2],
             remotes: HashMap::new(),
             pushes: HashMap::new(),
             vm: None,
@@ -410,9 +416,19 @@ impl NetPlay {
             input
         };
 
-        self.angles[1] += input.look_delta_yaw;
-        self.angles[0] = (self.angles[0] + input.look_delta_pitch)
-            .clamp(self.pitch_limits.0, self.pitch_limits.1);
+        let picking = self.net.latest().is_some_and(|s| s.ps.loc_selection != 0);
+        if picking {
+            // The mouse moves the point on the map, not the view.
+            self.loc_cursor[0] =
+                (self.loc_cursor[0] - input.look_delta_yaw * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
+            self.loc_cursor[1] =
+                (self.loc_cursor[1] + input.look_delta_pitch * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
+        } else {
+            self.loc_cursor = [0.5; 2];
+            self.angles[1] += input.look_delta_yaw;
+            self.angles[0] = (self.angles[0] + input.look_delta_pitch)
+                .clamp(self.pitch_limits.0, self.pitch_limits.1);
+        }
         for c in &input.pending_commands {
             self.command(c);
         }
@@ -792,9 +808,24 @@ impl NetPlay {
             .unwrap_or_else(|| PlayerWeapons::from_words(&snap.inv).selected());
         let axis = |v: f32| (v.clamp(-1.0, 1.0) * 127.0) as i8;
         let nv = std::mem::take(&mut self.nv_press);
+        let mut buttons = input.buttons as i32 | if nv { sim::pm::button::NIGHTVISION } else { 0 };
+        let mut selected_location = [0i8; 2];
+        if snap.ps.loc_selection != 0 {
+            use sim::pm::button as b;
+            let stance = buttons & (b::PRONE | b::CROUCH | b::TEMP_STANCE);
+            buttons = stance | b::LOC_SELECTING;
+            if input.pressed & buttons::ATTACK != 0 {
+                buttons |= b::LOC_CONFIRM;
+                let at = |v: f32| ((v * 255.0 + 0.5).floor() as i32 - 128) as i8;
+                selected_location = [at(self.loc_cursor[0]), at(self.loc_cursor[1])];
+            } else if input.pressed & (buttons::MELEE | buttons::RELOAD) != 0 {
+                buttons |= b::LOC_CANCEL;
+            }
+        }
         let cmd = UserCmd {
+            selected_location,
             server_time: self.cmd_time,
-            buttons: input.buttons as i32 | if nv { sim::pm::button::NIGHTVISION } else { 0 },
+            buttons,
             angles: [
                 pack(self.angles[0], delta[0]),
                 pack(self.angles[1], delta[1]),

@@ -535,6 +535,26 @@ impl Game {
         }
         self.touch_triggers(vm, n);
         self.update_activate(vm, n);
+        self.location_input(vm, n, &cmd);
+    }
+
+    /// The answer of a location selection (`beginLocationSelection`): a confirm turns the map point the
+    /// player picked into world coordinates, a cancel says so.
+    fn location_input(&mut self, vm: &mut Vm, n: u16, cmd: &UserCmd) {
+        let Some(c) = self.client(n) else { return };
+        if c.ps.loc_selection == 0 {
+            return;
+        }
+        let pressed = c.latched_buttons;
+        if pressed & pm::button::LOC_CONFIRM != 0 {
+            let [sx, sy, nx, ny, ux, uy] = self.compass.unwrap_or([1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+            let fx = (f32::from(cmd.selected_location[0]) + 128.0) / 255.0 * sx;
+            let fy = (f32::from(cmd.selected_location[1]) + 128.0) / 255.0 * sy;
+            let at = [fx * ny + ux - fy * nx, uy - fx * nx - fy * ny, 0.0];
+            vm.notify_entity(n, "confirm_location", &[Value::Vector(at)]);
+        } else if pressed & pm::button::LOC_CANCEL != 0 {
+            vm.notify_entity(n, "cancel_location", &[]);
+        }
     }
 
     /// `ClientEvents`: the predictable events the movement raised this command.
