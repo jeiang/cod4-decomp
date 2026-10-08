@@ -290,6 +290,20 @@ pub struct Actor {
 }
 
 /// Everything the owner-draws read.
+/// One action slot (`setActionSlot`) for the d-pad pieces.
+#[derive(Clone, Debug, Default)]
+pub struct SlotFacts {
+    /// `sim::pm::action_slot` type.
+    pub kind: u8,
+    pub usable: bool,
+    /// The slot's weapon is the one held.
+    pub active: bool,
+    /// The weapon's d-pad icon material and its ratio (0 square, 1 two to one, 2 four to one).
+    pub icon: Option<String>,
+    pub icon_ratio: i32,
+    pub ammo: i32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct HudFacts {
     /// A live match is being played; the pieces draw nothing otherwise.
@@ -317,6 +331,8 @@ pub struct HudFacts {
     /// The player is picking a point on the map (an airstrike): the full-screen map shows.
     pub selecting_location: bool,
     pub breath_hint: bool,
+    /// The four action slots as the d-pad shows them.
+    pub slots: [SlotFacts; 4],
     /// The crosshair hint (`cursorHint`), its raw text from the use-trigger strings, and when it was last on.
     pub cursor_hint: u8,
     pub cursor_hint_text: String,

@@ -454,6 +454,18 @@ impl Game {
         if msec < 1 {
             return;
         }
+        // The weapon a person asked for (the weapon keys, action slots): honoured unless a script has
+        // chosen one or the weapons are disabled.
+        let want = u16::from(cmd.weapon);
+        if want != 0
+            && want != c.ps.weapon as u16
+            && c.inv.selected() == 0
+            && c.inv.has(want)
+            && c.ps.weapon_flags & pm::wf::DISABLED == 0
+            && c.ps.pm_type < PmType::Dead
+        {
+            c.inv.select(want);
+        }
         c.old_cmd = c.cmd;
         c.cmd = cmd;
         match c.session {

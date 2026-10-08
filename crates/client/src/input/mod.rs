@@ -493,6 +493,10 @@ impl Input {
             ("bind" | "unbind" | "unbindall" | "set" | "seta" | "sets" | "setu" | "exec", _) => {
                 eprintln!("bad arguments: {}", config::join(toks));
             }
+            ("+actionslot", _) if sink => {
+                self.pending.push(config::join(toks).replacen('+', "", 1))
+            }
+            ("-actionslot", _) => {}
             _ if name.starts_with('+') && sink => self.console_hold(&name[1..], true),
             _ if name.starts_with('-') && sink => self.console_hold(&name[1..], false),
             _ if sink => self.pending.push(config::join(toks)),
@@ -541,7 +545,10 @@ impl Input {
         let mut started = Vec::new();
         if let Some(line) = self.binds.get(name).cloned() {
             for toks in config::split_commands(&line) {
-                if let Some(c) = toks[0].strip_prefix('+') {
+                if toks[0] == "+actionslot" {
+                    // A press, not a held button: the game selects the slot's weapon once.
+                    self.pending.push(config::join(&toks).replacen('+', "", 1));
+                } else if let Some(c) = toks[0].strip_prefix('+') {
                     self.hold(c);
                     started.push(c.to_owned());
                 } else {

@@ -342,6 +342,17 @@ impl Brain {
         if c.ps.pm_flags & pmf::MANTLE != 0 {
             cmd.forwardmove = 127;
         }
+        // A hardpoint in action slot 4 is called in by selecting its weapon, as the key would.
+        let slot_weapon = c.ps.action_slot_param[3];
+        if !engaged
+            && c.ps.action_slot_type[3] == sim::pm::action_slot::WEAPON
+            && slot_weapon != 0
+            && c.inv.has(slot_weapon)
+            && c.ps.weapon != u32::from(slot_weapon)
+            && time - self.spawn_time > 4000
+        {
+            cmd.weapon = slot_weapon as u8;
+        }
         self.finish(&mut cmd, delta);
         cmd
     }

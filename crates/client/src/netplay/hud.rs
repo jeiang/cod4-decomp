@@ -137,6 +137,36 @@ impl NetPlay {
                 String::new()
             };
         }
+        for (i, slot) in h.slots.iter_mut().enumerate() {
+            let (kind, param) = (ps.action_slot_type[i], ps.action_slot_param[i]);
+            // Alt mode shows the alternate weapon of the one held.
+            let target = match kind {
+                sim::pm::action_slot::WEAPON => param,
+                sim::pm::action_slot::ALT_MODE => self.weapons.info(ps.weapon as u16).alt_weapon,
+                _ => 0,
+            };
+            let usable = match kind {
+                sim::pm::action_slot::NIGHT_VISION => true,
+                _ => target != 0 && inv.has(target),
+            };
+            let def = (target != 0 && usable)
+                .then(|| self.lib.content.weapon(self.weapons.name(target)))
+                .flatten();
+            *slot = crate::hudstate::SlotFacts {
+                kind,
+                usable,
+                active: kind == sim::pm::action_slot::WEAPON && target == ps.weapon as u16,
+                icon: def
+                    .and_then(|d| d.dpad_icon.as_ref())
+                    .and_then(|m| m.name.as_deref().map(str::to_owned)),
+                icon_ratio: def.map_or(0, |d| d.dpad_icon_ratio),
+                ammo: if usable && target != 0 {
+                    inv.weapon_ammo(&self.weapons, target)
+                } else {
+                    0
+                },
+            };
+        }
         h.selecting_location = ps.e_flags & sim::pm::ef::LOC_SELECTING != 0;
         let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
         h.breath_hint = ps.weapon_flags & wf::HOLD_BREATH == 0

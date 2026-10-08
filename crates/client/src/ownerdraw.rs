@@ -185,6 +185,7 @@ pub fn draw(
         id,
         5 | 6
             | 20
+            | 165..=169
             | 71
             | 72
             | 79
@@ -276,6 +277,8 @@ pub fn draw(
         188 => compass_enemies(&mut dc, h, true),
         187 => map_border(&mut dc, h),
         72 => cursor_hint(&mut dc, h, &use_key),
+        165 => dpad_back(&mut dc, h),
+        166..=169 => action_slot(&mut dc, h, (id - 166) as usize),
         // 109 and
         // 110 mark the offhand weapon the player has equipped, which only a controller cycles.
         _ => {}
@@ -884,6 +887,59 @@ fn cursor_hint(dc: &mut Dc, h: &mut HudFacts, key: &str) {
             color,
         );
     }
+}
+
+/// `CG_DrawPlayerActionSlotDpad`: the d-pad's backdrop, shown while any slot has something to use.
+fn dpad_back(dc: &mut Dc, h: &mut HudFacts) {
+    let a = ammo_alpha(dc.cfg, h) * dc.color[3];
+    if a > 0.0
+        && h.slots.iter().any(|s| s.usable)
+        && let Some(img) = dc.bg()
+    {
+        let c = with_alpha(dc.color, a);
+        dc.p.pic(&img, dc.r, c);
+    }
+}
+
+/// `CG_DrawPlayerActionSlot`: the weapon icon of slot `i` and its ammunition (red when empty); lit while the weapon is held.
+fn action_slot(dc: &mut Dc, h: &mut HudFacts, i: usize) {
+    let mut a = ammo_alpha(dc.cfg, h) * dc.color[3];
+    let s = h.slots[i].clone();
+    if s.active {
+        a = ammo_alpha(dc.cfg, h);
+    }
+    let mut color = with_alpha(dc.color, a);
+    if s.active {
+        color[0] *= 1.0;
+        color[1] *= 0.97;
+        color[2] *= 0.55;
+    }
+    if a <= 0.0 || !s.usable || s.kind == sim::pm::action_slot::NIGHT_VISION {
+        return;
+    }
+    let Some(icon) = s.icon else { return };
+    let r = dc.r;
+    let icon_rect = match s.icon_ratio {
+        2 => Px {
+            x: r.x,
+            y: r.h * 0.25 + r.y,
+            w: r.w * 2.0,
+            h: r.h * 0.5,
+        },
+        1 => Px { w: r.w * 2.0, ..r },
+        _ => r,
+    };
+    dc.pic(&icon, icon_rect, color);
+    if s.ammo == 0 {
+        color[0] = 1.0;
+        color[1] = 0.3;
+        color[2] = 0.3;
+    }
+    let mut x = r.x + r.w - 13.0 * dc.u();
+    if s.icon_ratio != 0 {
+        x += r.w;
+    }
+    dc.text(x, r.y + r.h + 3.0 * dc.u(), color, &format!("{:3}", s.ammo));
 }
 
 fn invalid_cmd_hint(dc: &mut Dc, h: &mut HudFacts) {

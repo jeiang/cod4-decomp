@@ -891,6 +891,9 @@ impl World for HostCx<'_> {
             .map(crate::input::key_id)
             .collect()
     }
+    fn action_slot_usable(&self, slot: i32) -> bool {
+        self.st.game.hud.slots[(slot - 1) as usize].usable
+    }
     fn hud_fade(&self, f: HudFade) -> f32 {
         crate::ownerdraw::menu_fade(&self.st.game.hud, &self.input.cvars, f)
     }
