@@ -46,7 +46,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut out = out;
     out.files.push("plant/ui-script.json".into());
     out.files.push("plant/hint.png".into());
-    let plants = report["server"]["stats"]["plants"].as_u64().unwrap_or(0);
+    let server: serde_json::Value = std::fs::read(dir.join("client.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let plants = server["server"]["stats"]["plants"].as_u64().unwrap_or(0);
     let drawn = report["hud"]["drawn"]["72"].as_u64().unwrap_or(0);
     out.metrics.insert("plants".into(), plants as f64);
     out.metrics.insert("hint_draws".into(), drawn as f64);
