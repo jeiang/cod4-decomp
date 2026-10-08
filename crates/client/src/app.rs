@@ -20,7 +20,7 @@ use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, TextureCache, View};
 use serde_json::{Value, json};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -731,37 +731,23 @@ impl Viewer {
         if let Some(name) = st.shot_request.take() {
             let out = self.cli.out.clone().unwrap_or_default();
             let _ = std::fs::create_dir_all(&out);
-            let ok = save_png(
+            let lit = save_png(
                 &st.gpu,
                 &frame.texture,
                 st.config.format,
                 &out.join(format!("{name}.png")),
-            )
-            .is_ok();
+            );
+            let ok = lit.is_ok();
             let hud = st.shell.as_ref().map(|s| s.st.game.hud.report());
             if let Some(sc) = st.script.as_mut() {
-                sc.results
-                    .push(json!({"step": format!("shot={name}"), "ok": ok, "hud": hud}));
+                sc.results.push(json!({"step": format!("shot={name}"), "ok": ok, "hud": hud,
+                    "lit_fraction": lit.as_ref().ok(), "menus": st.shell.as_ref().map(|s| s.ui.open_menus().join(","))}));
                 sc.index += 1;
                 sc.began = Instant::now();
             }
         }
         if st.script.is_some() && script_step(st) {
-            let out = self.cli.out.clone().unwrap_or_default();
-            let sc = st.script.take().unwrap_or_else(|| unreachable!());
-            let ok = sc.results.iter().all(|r| r["ok"] == Value::Bool(true));
-            let report = json!({
-                "status": if ok { "ok" } else { "failed" },
-                "steps": sc.results,
-                "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
-                "hud_draw": st.shell.as_ref().map(|s| s.st.hud_stats.report()),
-                "net": st.net.as_mut().map(NetPlay::report),
-                "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
-            });
-            let _ = std::fs::write(
-                out.join("ui-script.json"),
-                serde_json::to_vec_pretty(&report).unwrap_or_default(),
-            );
+            write_script_report(st, self.cli.out.clone().unwrap_or_default(), false);
             el.exit();
         }
         st.gpu.queue.present(frame);
@@ -793,7 +779,13 @@ impl Viewer {
         for a in actions {
             let st = self.st.as_mut().ok_or("no window")?;
             match a {
-                Action::Quit => el.exit(),
+                Action::Quit => {
+                    // A scripted run that reaches Quit has proved the exit path.
+                    if st.script.is_some() {
+                        write_script_report(st, self.cli.out.clone().unwrap_or_default(), true);
+                    }
+                    el.exit();
+                }
                 Action::StartServer { map, gametype } => {
                     if let Err(e) =
                         start_session(&self.cli, &mut self.map, st, &map, &gametype, None)
@@ -923,6 +915,26 @@ fn record_gpu(slots: &mut Vec<Option<f64>>, finished: Vec<(u64, f64)>) {
     }
 }
 
+/// Writes `ui-script.json` and ends the script; `quit` when the run ended through the Quit command.
+fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
+    let Some(sc) = st.script.take() else { return };
+    let ok = sc.results.iter().all(|r| r["ok"] == Value::Bool(true));
+    let report = json!({
+        "status": if ok { "ok" } else { "failed" },
+        "quit": quit,
+        "steps": sc.results,
+        "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
+        "hud_draw": st.shell.as_ref().map(|s| s.st.hud_stats.report()),
+        "net": st.net.as_mut().map(NetPlay::report),
+        "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
+    });
+    let _ = std::fs::create_dir_all(&out);
+    let _ = std::fs::write(
+        out.join("ui-script.json"),
+        serde_json::to_vec_pretty(&report).unwrap_or_default(),
+    );
+}
+
 /// One frame of the `--ui-script`; `true` once every step has run.
 fn script_step(st: &mut State) -> bool {
     let Some(sc) = st.script.as_mut() else {
@@ -1012,6 +1024,35 @@ fn script_step(st: &mut State) -> bool {
                 sh.st.scores_forced = arg != "off";
             }
             done(true, sc, String::new());
+        }
+        "togglemenu" => {
+            // Escape in a match: the server's script main menu.
+            if let Some(sh) = st.shell.as_mut() {
+                let menu = st.input.cvar("g_scriptMainMenu").unwrap_or("").to_owned();
+                sh.open(&mut st.input, &menu);
+            }
+            done(true, sc, String::new());
+        }
+        "home" => {
+            // Back at the front end: no match, the main menu open.
+            let secs: f32 = arg.parse().unwrap_or(20.0);
+            let home = st.net.is_none()
+                && st.renderer.is_none()
+                && st.shell.as_ref().is_some_and(|s| s.ui.is_open("main"));
+            if home {
+                done(true, sc, String::new());
+            } else if waited > secs {
+                let open = st.shell.as_ref().map(|s| s.ui.open_menus().join(","));
+                done(
+                    false,
+                    sc,
+                    format!(
+                        "timed out; net {} renderer {} open {open:?}",
+                        st.net.is_some(),
+                        st.renderer.is_some()
+                    ),
+                );
+            }
         }
         "shot" => {
             if st.shot_request.is_none() {
