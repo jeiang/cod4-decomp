@@ -34,30 +34,41 @@ ydo_start() {
 
 win_json() { hyprctl clients -j | jq -c '[.[]|select((.class|test("iw3mp|cod|steam_app|umu";"i")) or (.title|test("Call of Duty";"i")))][0]'; }
 
+# Hyprland 0.56 uses the Lua dispatcher syntax. Another window taking focus makes the game translucent
+# and drops key input, so re-focus before every input action.
+do_focus() { hyprctl dispatch 'hl.dsp.focus({window="class:iw3mp.exe"})' >/dev/null; }
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   launch) # launch [extra game args...]; logs to $ORIG_OUT/game.log
     cd "$ORIG_DIR" || exit 1
     export WINEPREFIX="$ORIG_PREFIX" GAMEID="${GAMEID:-umu-cod4-ref}" PROTONPATH="${PROTONPATH:-GE-Proton}"
     export PROTON_LOG=1 PROTON_LOG_DIR="$ORIG_OUT" WINEDLLOVERRIDES="mss32=n,b;binkw32=n,b"
-    nohup umu-run iw3mp.exe +set r_fullscreen 0 +set sv_pure 0 "$@" >"$ORIG_OUT/game.log" 2>&1 &
+    nohup umu-run iw3mp.exe +set r_fullscreen 0 +set r_mode 1920x1080 +set sv_pure 0 "$@" >"$ORIG_OUT/game.log" 2>&1 &
     echo "pid $!" ;;
   win) tools "$cmd" "$@"; win_json ;;
   shot) tools "$cmd" "$@" # shot [name]: screenshot of the game window (whole output if not found)
     name="${1:-shot-$(date +%H%M%S)}"; g=$(win_json)
     if [ "$g" != null ] && [ -n "$g" ]; then
-      geo=$(echo "$g" | jq -r '"\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"'); grim -g "$geo" "$ORIG_OUT/$name.png"
+      geo=$(echo "$g" | jq -r '"\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"'); grim -c -g "$geo" "$ORIG_OUT/$name.png"
     else grim "$ORIG_OUT/$name.png"; fi
     echo "$ORIG_OUT/$name.png" ;;
-  key) tools "$cmd" "$@"; ydo_start # key esc down enter ...
+  key) tools "$cmd" "$@"; do_focus; ydo_start # key esc down enter ...
     for k in "$@"; do c=${KC[$k]:?unknown key $k}; ydotool key "$c:1" "$c:0"; sleep 0.25; done ;;
-  type) tools "$cmd" "$@"; ydo_start; ydotool type --key-delay 40 "$*" ;;
-  move) tools "$cmd" "$@"; hyprctl dispatch movecursor "$1" "$2" >/dev/null ;; # absolute layout coords
-  click) tools "$cmd" "$@"; ydo_start # click [left|right] [x y] (x y relative to game window)
-    b=${1:-left}; [ $# -ge 3 ] && { g=$(win_json); ox=$(echo "$g"|jq .at[0]); oy=$(echo "$g"|jq .at[1])
-      hyprctl dispatch movecursor $((ox+$2)) $((oy+$3)) >/dev/null; sleep 0.2; }
+  type) tools "$cmd" "$@"; do_focus; ydo_start; ydotool type --key-delay 40 "$*" ;;
+  cmd) tools "$cmd" "$@"; do_focus; ydo_start # cmd 'devmap mp_crash': run a console command (opens/closes the console)
+    c=${KC[grave]}; ydotool key "$c:1" "$c:0"; sleep 0.4; ydotool type --key-delay 30 "$*"; ydotool key 28:1 28:0; sleep 0.3; ydotool key "$c:1" "$c:0" ;;
+  # Mouse: Hyprland 0.56 absolute move via the Lua dispatcher, then a 1px wiggle through uinput so the game
+  # (which reads relative deltas) sees real motion and updates its own cursor/hover. Coordinates are
+  # relative to the game window. Screenshots need `grim -c` to include the cursor (the game cursor is
+  # drawn by the game itself, the OS cursor is hidden/identical).
+  move) tools "$cmd" "$@"; ydo_start; g=$(win_json); ox=$(echo "$g"|jq .at[0]); oy=$(echo "$g"|jq .at[1])
+    hyprctl dispatch "hl.dsp.cursor.move({x=$((ox+$1)),y=$((oy+$2))})" >/dev/null
+    ydotool mousemove -x 1 -y 0; sleep 0.1; ydotool mousemove -x -1 -y 0; sleep 0.25 ;;
+  click) tools "$cmd" "$@"; ydo_start # click [left|right] [x y]
+    b=${1:-left}; [ $# -ge 3 ] && { ORIG_IN_SHELL=1 "$0" move "$2" "$3"; }
     case $b in left) ydotool click 0xC0;; right) ydotool click 0xC1;; esac ;;
-  focus) tools "$cmd" "$@"; hyprctl dispatch focuswindow "class:$(win_json | jq -r .class)" ;;
+  focus) tools "$cmd" "$@"; do_focus ;;
   kill) tools "$cmd" "$@"; pid=$(win_json | jq -r '.pid'); [ "$pid" != null ] && kill "$pid" ;;
-  *) echo "usage: $0 launch|win|shot [name]|key K..|type TEXT|move X Y|click [left|right] [x y]|focus|kill" >&2; exit 2 ;;
+  *) echo "usage: $0 launch|cmd TEXT|win|shot [name]|key K..|type TEXT|move X Y|click [left|right] [x y]|focus|kill" >&2; exit 2 ;;
 esac
