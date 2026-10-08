@@ -890,3 +890,49 @@ fn compound_assignment_and_indexing_evaluate_in_the_original_order() {
     "#);
     assert_eq!(log, ["i", "r", "i", "v", "j", "i"]);
 }
+
+// ---- the pool is released with the VM ----
+
+#[test]
+fn objects_in_a_reference_cycle_are_released_with_the_vm() {
+    // A hud element and its parent point at each other (`parent` and `children`), as the
+    // stock hud code builds them, so dropping the handles never frees either.
+    let mut e = env(r#"
+        main() {
+            for (i = 0; i < 50; i++) {
+                parent = spawnstruct(); parent.children = [];
+                child = spawnstruct(); child.parent = parent;
+                parent.children[0] = child;
+            }
+        }
+    "#);
+    e.call("main");
+    e.ticks(2);
+    let (objects, values) = gsc::value::pool_usage();
+    assert!(
+        objects >= 100 && values >= 150,
+        "the cycles are alive: {objects}, {values}"
+    );
+    drop(e);
+    assert_eq!(gsc::value::pool_usage(), (0, 0));
+}
+
+#[test]
+fn what_game_holds_survives_a_restart_and_nothing_else_does() {
+    let mut e = env(r#"
+        main() {
+            game["kept"] = spawnstruct(); game["kept"].n = 5;
+            lost = spawnstruct(); lost.me = lost;
+        }
+    "#);
+    e.call("main");
+    let game = e.vm.game().clone();
+    drop(e);
+    let Value::Array(a) = &game else { panic!() };
+    let Some(Value::Object(kept)) = a.get(&gsc::Key::Str("kept".into())) else {
+        panic!("game[\"kept\"] is gone");
+    };
+    assert!(matches!(kept.get("n"), Some(Value::Int(5))));
+    // The game array, the kept object, and their two values: the cycle is gone.
+    assert_eq!(gsc::value::pool_usage(), (2, 2));
+}
