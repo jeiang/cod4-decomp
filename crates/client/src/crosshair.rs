@@ -190,7 +190,7 @@ mod tests {
         // Wider spread, wider crosshair; and it fades a little.
         assert!(top_gap(&lay(8.0, 128.0, 0.0)) > top_gap(&r));
         let alpha = r.0;
-        assert!(alpha < 1.0 && alpha >= MIN_ALPHA);
+        assert!((MIN_ALPHA..1.0).contains(&alpha));
     }
 
     #[test]
