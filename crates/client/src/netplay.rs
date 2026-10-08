@@ -483,7 +483,12 @@ impl NetPlay {
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.script_models(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
-            models.extend(self.view_model(dt, &ps, ps.origin, [ps.viewangles[0], ps.viewangles[1]]));
+            models.extend(self.view_model(
+                dt,
+                &ps,
+                ps.origin,
+                [ps.viewangles[0], ps.viewangles[1]],
+            ));
             let (events, commands) = self.take_events(&snap);
             self.look
                 .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
