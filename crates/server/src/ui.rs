@@ -162,6 +162,16 @@ impl Game {
         Ok(i as u16)
     }
 
+    /// `G_ModelIndex`: an entity's model gets a precache index (and its configstring) when it is set, so clients can
+    /// name it. Inline models (`*N`) are map geometry and need none; a full table leaves the entity undrawn.
+    pub fn note_model(&mut self, name: &str) {
+        if !name.starts_with('*')
+            && let Err(e) = self.precache(Table::Model, name)
+        {
+            self.print(format!("setmodel: {e}\n"));
+        }
+    }
+
     /// `G_LocalizedStringIndex`: the index of a localized reference (`&NAME`) or literal text.
     pub fn localized_index(&mut self, text: &str) -> Result<u16, String> {
         self.precache(Table::Text, &clip(text))

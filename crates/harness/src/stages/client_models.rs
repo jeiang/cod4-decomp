@@ -19,7 +19,7 @@ const LIMIT: Duration = Duration::from_secs(180);
 const MIN_CHANGED: f64 = 0.01;
 const CHANNEL_DELTA: i32 = 32;
 
-fn decode(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
+pub fn decode(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let dec = png::Decoder::new(io::BufReader::new(
         File::open(path).map_err(|e| format!("{}: {e}", path.display()))?,
     ));

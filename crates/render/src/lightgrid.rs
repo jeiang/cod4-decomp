@@ -675,12 +675,15 @@ impl ModelLighting {
     /// Light a dynamic model at a world point; `None` when the reserved
     /// dynamic entries are used up. `non_sun_primary_light` is the model's
     /// non-sun primary light index (used when the grid has light regions).
+    /// `show_missing` is `r_showMissingLightGrid`: a point below the populated grid gets the rainbow
+    /// "missing" colour set instead of the grid's default entry.
     pub fn alloc_point(
         &mut self,
         grid: &LightGrid,
         origin: [f32; 3],
         non_sun_primary_light: u32,
         env: &LightingEnv,
+        show_missing: bool,
     ) -> Option<u16> {
         if self.next_dynamic >= self.total_entries {
             return None;
@@ -691,7 +694,11 @@ impl ModelLighting {
             grid,
             origin,
             non_sun_primary_light,
-            Extrapolate::ShowMissing,
+            if show_missing {
+                Extrapolate::ShowMissing
+            } else {
+                Extrapolate::Default
+            },
             env,
         );
         self.apply(grid, entry, &patch);
@@ -950,14 +957,14 @@ mod tests {
             primary: vec![0; 64],
         };
         let h = ml
-            .alloc_point(&g, [16.0, 16.0, 32.0], 0, &LightingEnv::none())
+            .alloc_point(&g, [16.0, 16.0, 32.0], 0, &LightingEnv::none(), true)
             .unwrap();
         let o = ml.texel_offset(u32::from(h) - 1, 5);
         // mean of 0,10,..,70 = 35 in every channel; alpha 0 (no primary light).
         assert_eq!(&ml.texels[o..o + 4], &[35, 35, 35, 0]);
         // Entry 1 lands at x=4..8, centre coords use the block centre.
         let h2 = ml
-            .alloc_point(&g, [0.0, 0.0, 0.0], 0, &LightingEnv::none())
+            .alloc_point(&g, [0.0, 0.0, 0.0], 0, &LightingEnv::none(), true)
             .unwrap();
         assert_eq!(h2, 2);
         assert_eq!(ml.base_coords(h2), [6.0 / 256.0, 2.0 / 4.0, 0.5, 1.0]);
@@ -966,10 +973,37 @@ mod tests {
         let l = light_grid_lookup(&g, [1.0e9, -1.0e9, f32::MAX], None);
         assert!(l.entries.iter().all(Option::is_none));
         let h3 = ml
-            .alloc_point(&g, [1.0e9, -1.0e9, f32::NAN], 0, &LightingEnv::none())
+            .alloc_point(&g, [1.0e9, -1.0e9, f32::NAN], 0, &LightingEnv::none(), true)
             .unwrap();
         let o = ml.texel_offset(u32::from(h3) - 1, 0);
         assert_eq!(&ml.texels[o..o + 3], &[10, 10, 10]);
+    }
+
+    #[test]
+    fn below_the_grid_a_dynamic_model_is_rainbow_only_when_asked() {
+        let g = grid_2x2x2();
+        let below = [0.0, 0.0, -300.0];
+        let l = light_grid_lookup(&g, below, None);
+        assert!(l.entries.iter().all(Option::is_none));
+        assert_eq!(l.default_entry, 0, "below the populated cells");
+        let colour = |show: bool| {
+            let mut ml = ModelLighting {
+                height: 4,
+                texels: vec![0; (WIDTH * 4 * DEPTH * 4) as usize],
+                static_count: 0,
+                total_entries: 64,
+                next_dynamic: 0,
+                primary: vec![0; 64],
+            };
+            let h = ml
+                .alloc_point(&g, below, 0, &LightingEnv::none(), show)
+                .unwrap();
+            let o = ml.texel_offset(u32::from(h) - 1, 0);
+            ml.texels[o..o + 3].to_vec()
+        };
+        let last = (g.color_count - 1) as u8 * 10;
+        assert_eq!(colour(true), vec![last; 3], "the last (missing) colour set");
+        assert_eq!(colour(false), vec![0; 3], "the default entry's colours");
     }
 
     #[test]
@@ -984,17 +1018,20 @@ mod tests {
             primary: vec![0; 64],
         };
         assert_eq!(
-            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()),
+            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none(), true),
             Some(63)
         );
         assert_eq!(
-            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()),
+            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none(), true),
             Some(64)
         );
-        assert_eq!(ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()), None);
+        assert_eq!(
+            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none(), true),
+            None
+        );
         ml.reset_dynamic();
         assert_eq!(
-            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none()),
+            ml.alloc_point(&g, [0.0; 3], 0, &LightingEnv::none(), true),
             Some(63)
         );
     }
@@ -1138,7 +1175,7 @@ mod tests {
                 let l = light_grid_lookup(&w.light_grid, p, None);
                 assert!(l.entries.iter().all(Option::is_none), "{p:?}");
                 assert!(
-                    ml.alloc_point(&w.light_grid, p, 0, &LightingEnv::none())
+                    ml.alloc_point(&w.light_grid, p, 0, &LightingEnv::none(), true)
                         .is_some()
                 );
             }
@@ -1165,7 +1202,7 @@ mod tests {
             let c = [0, 1, 2].map(|k| (inst.mins[k] + inst.maxs[k]) * 0.5);
             let sun = u32::from(w.dpvs.smodel_draw_insts[i].primary_light_index);
             let h = ml
-                .alloc_point(&w.light_grid, c, sun, &LightingEnv::none())
+                .alloc_point(&w.light_grid, c, sun, &LightingEnv::none(), true)
                 .unwrap();
             assert!(usize::from(h) > w.dpvs.smodel_draw_insts.len());
             for s in 0..64 {

@@ -103,6 +103,7 @@ fn set_model(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     if g.content.model(name).is_none() {
         g.print(format!("setmodel: model '{name}' not found\n"));
     }
+    g.note_model(name);
     if let Some(ent) = g.ent_mut(e.num) {
         ent.model = name.into();
     }

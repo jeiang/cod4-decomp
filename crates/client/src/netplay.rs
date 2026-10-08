@@ -97,6 +97,13 @@ struct Counters {
     target_frames: u64,
     in_range_frames: u64,
     unknown_weapon: std::collections::BTreeMap<String, String>,
+    /// `script_model` entities in the newest snapshot, how many of them were drawn, and the names of those that could
+    /// not be (a model the zones lack).
+    script_models_seen: usize,
+    script_models_drawn: usize,
+    script_models_unloaded: std::collections::BTreeSet<String>,
+    /// Every model a `script_model` was drawn with at some frame.
+    script_models_names: std::collections::BTreeSet<String>,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
@@ -374,6 +381,7 @@ impl NetPlay {
             self.last_eye = Some(eye);
             self.hud_view = Some((ps.clone(), ps.viewangles[1]));
             let mut models = self.remote_players(dt, st, ps.client_num);
+            models.extend(self.script_models(&snap));
             models.extend(self.view_model(dt, &ps, ps.origin));
             let (events, commands) = self.take_events(&snap);
             self.look
@@ -447,6 +455,7 @@ impl NetPlay {
         let (events, commands) = self.take_events(&snap);
         let look = self.look.frame(st);
         let mut models = self.remote_players(dt, st, own);
+        models.extend(self.script_models(&snap));
         if !dead {
             models.extend(self.view_model(dt, &ps, feet));
         }
@@ -696,6 +705,43 @@ impl NetPlay {
         if scoped { Vec::new() } else { models }
     }
 
+    /// The scripted models of the level (`script_model`: props, cars, objectives), posed at the origin and angles the
+    /// server gave them. They move in steps of the snapshots; the stock scripts only move them a few at a time.
+    fn script_models(&mut self, snap: &net::Snapshot) -> Vec<ModelInstance> {
+        let Some(ui) = self.net.ui() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut seen = 0;
+        self.c.script_models_unloaded.clear();
+        for e in snap
+            .entities
+            .iter()
+            .filter(|e| e.etype == etype::SCRIPT_MODEL)
+        {
+            seen += 1;
+            let name = ui.model(e.model);
+            match self.lib.content.model(name) {
+                Some(model) => {
+                    let mut m = ModelInstance::new(model.clone(), render::ModelKind::World);
+                    m.origin = e.origin;
+                    m.angles = e.angles;
+                    m.light_origin = e.origin;
+                    out.push(m);
+                    if !self.c.script_models_names.contains(name) {
+                        self.c.script_models_names.insert(name.to_owned());
+                    }
+                }
+                None => {
+                    self.c.script_models_unloaded.insert(name.to_owned());
+                }
+            }
+        }
+        self.c.script_models_seen = seen;
+        self.c.script_models_drawn = out.len();
+        out
+    }
+
     /// Models of every other player, between the snapshots around the interpolation moment.
     fn remote_players(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
         let ents = self
@@ -815,6 +861,11 @@ impl NetPlay {
             "weapon": self.c.weapon,
             "viewmodel_frames": self.c.frames_with_viewmodel,
             "weapons_without_models": self.c.unknown_weapon,
+            "skin_faults": render::skin::skin_faults(),
+            "script_models_seen": self.c.script_models_seen,
+            "script_models_drawn": self.c.script_models_drawn,
+            "script_models_unloaded": self.c.script_models_unloaded,
+            "script_models_names": self.c.script_models_names,
             "events": self.c.events,
             "fx": {
                 "played": self.effects.played,

@@ -566,6 +566,20 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 };
                 s
             }
+            EntKind::Plain if &*e.classname == "script_model" => {
+                // The index names the model in the clients' configstrings; one that was never registered cannot be
+                // drawn.
+                let model = game.models.find(&e.model);
+                if e.hidden || model == 0 {
+                    continue;
+                }
+                let mut s = EntityState::new(n);
+                s.etype = etype::SCRIPT_MODEL;
+                s.origin = e.origin;
+                s.angles = e.angles;
+                s.model = model as u16;
+                s
+            }
             _ => {
                 let Some(m) = e.missile.as_ref() else {
                     continue;
