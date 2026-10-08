@@ -43,6 +43,12 @@ pub struct Px {
     pub h: f32,
 }
 
+impl Px {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Place {
     /// Window size in pixels.

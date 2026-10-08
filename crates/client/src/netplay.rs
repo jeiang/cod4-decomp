@@ -360,6 +360,8 @@ impl NetPlay {
     pub fn fill_live(&mut self, live: &mut crate::hud::LiveUi) {
         crate::hud::fill::fill(&mut self.net, live, self.live_time, self.last_eye);
         live.scope = self.sight.as_ref().and_then(|s| s.overlay.clone());
+        live.flashed = self.look.flashbanged(self.live_time);
+        live.night_vision = self.look.night_vision();
         live.reticle.clone_from(&self.reticle);
         if live.kill_icons.len() != self.kill_icons.len() {
             live.kill_icons.clone_from(&self.kill_icons);

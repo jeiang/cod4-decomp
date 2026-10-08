@@ -516,10 +516,11 @@ impl Shell {
         match ev {
             UiEvent::SetDvar { name, value } => input.cvars.set(&name, &value, false),
             UiEvent::OpenMenu { name, mouse } => {
-                self.open(input, &name);
-                self.ui.cursor_visible = mouse;
+                let mut h = Self::host(&mut self.st, input);
+                self.ui.open_script_menu(&mut h, &name, mouse);
             }
             UiEvent::CloseMenu { name } => {
+                self.ui.clear_waiting_menu();
                 let target = if name.is_empty() {
                     self.ui
                         .open_menus()
@@ -531,7 +532,12 @@ impl Shell {
                 };
                 self.close_by_name(input, &target);
             }
-            UiEvent::CloseIngameMenu => self.close_all(input),
+            UiEvent::CloseIngameMenu => {
+                let mut h = Self::host(&mut self.st, input);
+                if !self.ui.full_screen_visible(&mut h) {
+                    self.ui.close_all(&mut h);
+                }
+            }
             UiEvent::Print { kind, text } => self.print(kind, &text),
             UiEvent::Announce { text } => self.print(net::ui::PrintKind::Bold, &text),
             UiEvent::Chat { team, client, text } => {
@@ -550,7 +556,13 @@ impl Shell {
                 self.st.hud_stats.obituaries += 1;
             }
             // A new level: the old one's menus are gone; the server opens its own again.
-            UiEvent::Map { .. } => self.close_all(input),
+            // Nothing the closing menus would answer reaches a server that has moved on (`CG_CloseScriptMenu`).
+            UiEvent::Map { .. } => {
+                self.ui.clear_waiting_menu();
+                self.ui.allow_menu_response = false;
+                self.close_all(input);
+                self.ui.allow_menu_response = true;
+            }
             UiEvent::Scores => {}
         }
     }
@@ -582,6 +594,10 @@ impl Shell {
     /// Once a frame, after the network has been read: what follows from the live state. Opens the end-of-match
     /// menus, clears the feed between matches and says whether the scoreboard needs fresh rows.
     pub fn tick(&mut self, input: &mut Input) {
+        {
+            let mut h = Self::host(&mut self.st, input);
+            self.ui.check_waiting_menu(&mut h);
+        }
         let live_now = self.st.live.active;
         if live_now != self.st.was_active {
             self.st.was_active = live_now;
@@ -981,6 +997,22 @@ impl HostCx<'_> {
 }
 
 impl World for HostCx<'_> {
+    fn flashbanged(&self) -> bool {
+        self.st.live.flashed
+    }
+    fn scoped(&self) -> bool {
+        self.st.live.scope.is_some()
+    }
+    fn following(&self) -> bool {
+        self.st.live.following.is_some()
+    }
+    /// `UI_GetScoreAtRank`: the score of the n-th row of the scoreboard as the server ordered it, 0 past the end.
+    fn score_at_rank(&self, rank: i32) -> i32 {
+        usize::try_from(rank - 1)
+            .ok()
+            .and_then(|i| self.st.live.scores.get(i))
+            .map_or(0, |r| r.score)
+    }
     fn scoreboard_visible(&self) -> bool {
         self.st.game.scoreboard
     }
@@ -1012,7 +1044,7 @@ impl World for HostCx<'_> {
             ),
             PlayerField::Dead => Value::Int(i32::from(g.dead)),
             PlayerField::ClipAmmo => Value::Int(g.clip_ammo),
-            PlayerField::NightVision => Value::Int(0),
+            PlayerField::NightVision => Value::Int(i32::from(self.st.live.night_vision)),
             PlayerField::Score => Value::Int(g.score),
             PlayerField::Deaths => Value::Int(g.deaths),
             PlayerField::Kills => Value::Int(g.kills),
