@@ -585,7 +585,7 @@ impl Input {
     }
 
     /// A key (or button) changed state. Repeats are ignored: the key is already down.
-    fn key(&mut self, name: &str, down: bool) {
+    pub(crate) fn key(&mut self, name: &str, down: bool) {
         if !down {
             for c in self.down.remove(name).unwrap_or_default() {
                 self.release(&c);
@@ -884,6 +884,19 @@ mod tests {
         let mut b = Input::bare();
         b.exec_text(&text, None, false, 0);
         assert_eq!(b.binding_keys("+actionslot 1"), ["h"]);
+    }
+
+    /// The grenade slots' bind labels and the throw buttons come from the install's own config.
+    #[test]
+    fn stock_config_binds_the_grenade_keys() {
+        let Some(mut i) = stock_input() else { return };
+        assert_eq!(i.binding_keys("+frag"), ["mouse3", "g"]);
+        assert_eq!(i.binding_keys("+smoke"), ["4"]);
+        i.key("g", true);
+        assert_eq!(frame(&mut i).buttons, buttons::FRAG);
+        i.key("g", false);
+        i.key("4", true);
+        assert_eq!(frame(&mut i).buttons, buttons::SMOKE);
     }
 
     #[test]

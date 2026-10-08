@@ -24,9 +24,58 @@ fn player(g: &Game, e: EntRef) -> Result<u16, String> {
     }
 }
 
-/// Arguments `from..` as one message (`Scr_ConstructMessageString`): localized references keep
-/// their `&`.
-fn message(a: Args, from: usize) -> String {
+/// One argument of a message: a localized reference, or text (a player's name already with its `^7`).
+enum Part {
+    Loc(String),
+    Text(String),
+}
+
+/// The parts as one message (`Scr_ConstructMessageString`), in the form the clients localize
+/// (`hud::localize`): `\x14` before a localized reference, `\x15` before text. The first
+/// reference needs no mark. Marks inside a part become `.`.
+fn construct(parts: &[Part]) -> String {
+    let mut s = String::new();
+    for p in parts {
+        let (mark, text) = match p {
+            Part::Loc(n) => (if s.is_empty() { None } else { Some('\x14') }, n),
+            Part::Text(t) => (Some('\x15'), t),
+        };
+        if let Some(m) = mark.filter(|_| !text.is_empty()) {
+            s.push(m);
+        }
+        s.extend(text.chars().map(|c| {
+            if ('\x14'..='\x16').contains(&c) {
+                '.'
+            } else {
+                c
+            }
+        }));
+    }
+    clip(&s)
+}
+
+/// Arguments `from..` as one message; a player entity is its name.
+fn message(g: &Game, a: Args, from: usize) -> Result<String, String> {
+    let mut parts = Vec::new();
+    for v in a.v.iter().skip(from) {
+        parts.push(match v {
+            Value::LocStr(n) => Part::Loc(n.to_string()),
+            Value::Object(o) if o.entity().is_some() => {
+                let e = o.entity().expect("checked");
+                let c = (e.class == EntClass::Entity)
+                    .then(|| g.client(e.num))
+                    .flatten()
+                    .ok_or("Entity is not a player")?;
+                Part::Text(format!("{}^7", c.name))
+            }
+            v => Part::Text(display(v)),
+        });
+    }
+    Ok(construct(&parts))
+}
+
+/// Arguments `from..` run together, localized references keeping their `&`: chat and dvar values.
+fn joined(a: Args, from: usize) -> String {
     let mut s = String::new();
     for v in a.v.iter().skip(from) {
         match v {
@@ -64,7 +113,7 @@ pub fn set_client_dvar(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
         return Err(format!("Dvar {name} has an invalid dvar name"));
     }
     let value = if a.len() > 2 {
-        message(a, 1)
+        joined(a, 1)
     } else {
         display(a.get(1)?)
     };
@@ -144,27 +193,27 @@ fn print_to(g: &mut Game, dest: Dest, kind: PrintKind, text: String) {
 /// `iprintln` / `iprintlnbold` called on a player.
 pub fn client_print(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     let n = player(g, e)?;
-    print_to(g, Dest::Client(n), PrintKind::Normal, message(a, 0));
+    print_to(g, Dest::Client(n), PrintKind::Normal, message(g, a, 0)?);
     Ok(Value::Undefined)
 }
 
 pub fn client_print_bold(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     let n = player(g, e)?;
-    print_to(g, Dest::Client(n), PrintKind::Bold, message(a, 0));
+    print_to(g, Dest::Client(n), PrintKind::Bold, message(g, a, 0)?);
     Ok(Value::Undefined)
 }
 
 /// `iprintln` / `iprintlnbold` called on the level: everybody.
 pub fn level_print(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    let text = message(a, 0);
-    g.print(format!("{text}\n"));
+    let text = message(g, a, 0)?;
+    g.print(format!("{}\n", text.replace(['\x14', '\x15', '\x16'], "")));
     print_to(g, Dest::All, PrintKind::Normal, text);
     Ok(Value::Undefined)
 }
 
 pub fn level_print_bold(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    let text = message(a, 0);
-    g.print(format!("{text}\n"));
+    let text = message(g, a, 0)?;
+    g.print(format!("{}\n", text.replace(['\x14', '\x15', '\x16'], "")));
     print_to(g, Dest::All, PrintKind::Bold, text);
     Ok(Value::Undefined)
 }
@@ -180,21 +229,21 @@ pub fn client_print_console(g: &mut Game, _: &mut Vm, a: Args) -> R {
 }
 
 pub fn announcement(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    let text = message(a, 0);
+    let text = message(g, a, 0)?;
     g.send(Dest::All, ServerCmd::Announce { text });
     Ok(Value::Undefined)
 }
 
 pub fn client_announcement(g: &mut Game, _: &mut Vm, a: Args) -> R {
     let n = player(g, a.entity(0)?)?;
-    let text = message(a, 1);
+    let text = message(g, a, 1)?;
     g.send(Dest::Client(n), ServerCmd::Announce { text });
     Ok(Value::Undefined)
 }
 
 fn say(g: &mut Game, e: EntRef, a: Args, team: bool) -> R {
     let n = player(g, e)?;
-    let text = message(a, 0);
+    let text = joined(a, 0);
     let c = g.client(n).expect("client");
     let (name, side) = (c.name.clone(), c.team);
     g.print(format!(
@@ -393,4 +442,29 @@ pub fn objective_current(g: &mut Game, _: &mut Vm, a: Args) -> R {
         }
     }
     Ok(Value::Undefined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_are_marked_the_way_the_clients_read_them() {
+        let loc = |k: &str| Part::Loc(k.into());
+        let text = |t: &str| Part::Text(t.into());
+        // `iprintln(&"MP_CONNECTED", player)`: the key, then the name as an argument.
+        assert_eq!(
+            construct(&[loc("MP_CONNECTED"), text("Bob^7")]),
+            "MP_CONNECTED\x15Bob^7"
+        );
+        assert_eq!(
+            construct(&[loc("MP_WAR_RADAR_ACQUIRED_ENEMY"), text("30")]),
+            "MP_WAR_RADAR_ACQUIRED_ENEMY\x1530"
+        );
+        // Plain text is an argument too, and a later reference is marked as a key.
+        assert_eq!(construct(&[text("hi")]), "\x15hi");
+        assert_eq!(construct(&[loc("A"), loc("B")]), "A\x14B");
+        // A mark a script puts in its text cannot start a part.
+        assert_eq!(construct(&[loc("A"), text("x\x14y")]), "A\x15x.y");
+    }
 }

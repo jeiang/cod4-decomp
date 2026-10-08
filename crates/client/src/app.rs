@@ -663,6 +663,9 @@ impl Viewer {
             input.cvar("com_playerProfile").unwrap_or("default"),
         );
         let stats = profile.load();
+        if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_ref()) {
+            sh.ui.assets.add_weapon_icons(&n.weapon_defs());
+        }
         if let Some(sh) = shell.as_mut() {
             sh.st.stats = stats;
             let (modes, rates) = display::video_modes(&window);
@@ -1599,6 +1602,37 @@ fn script_step(st: &mut State) -> bool {
             }
             done(arg == "escape", sc, format!("key {arg}"));
         }
+        // Holds a key down until the grenade count of the HUD drops (`throw=g:10`: the key, at most that many
+        // seconds): the bind, the button and the server's throw as a player's key press goes through them.
+        "throw" => {
+            let (name, secs) = arg
+                .split_once(':')
+                .map_or((arg, 10.0), |(k, s)| (k, s.parse().unwrap_or(10.0)));
+            let now = st.shell.as_ref().map_or((None, None), |s| {
+                let h = &s.st.game.hud;
+                (
+                    h.frag.as_ref().map(|o| o.ammo),
+                    h.second.as_ref().map(|o| o.ammo),
+                )
+            });
+            match sc.marker.clone() {
+                None => {
+                    sc.marker = Some(format!("{now:?}"));
+                    st.input.key(name, true);
+                }
+                Some(before) if before != format!("{now:?}") => {
+                    st.input.key(name, false);
+                    done(true, sc, format!("{before} -> {now:?}"));
+                    sc.marker = None;
+                }
+                Some(before) if waited > secs => {
+                    st.input.key(name, false);
+                    done(false, sc, format!("no throw; counts stayed {before}"));
+                    sc.marker = None;
+                }
+                Some(_) => {}
+            }
+        }
         // Waits until no menu is open: the game has the keyboard and mouse back (`nomenu=5`).
         "nomenu" => {
             let open = st.shell.as_ref().map(|s| s.ui.open_menus().join(","));
@@ -2074,6 +2108,9 @@ fn finish_load(
     let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
     if let Some(g) = st.load_gaps.as_mut() {
         g.load_ms = Some(ms);
+    }
+    if let Some(sh) = st.shell.as_mut() {
+        sh.ui.assets.add_weapon_icons(&library.content.weapons());
     }
     if load.level_change {
         let net = st.net.as_mut().ok_or("the session ended during the load")?;
