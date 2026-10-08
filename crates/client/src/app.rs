@@ -165,6 +165,7 @@ struct State {
     pitch: f32,
     input: Input,
     grabbed: bool,
+    gate: crate::pointer::PointerGate,
     /// A menu was open at the last frame.
     menu_was_open: bool,
     samples: Vec<[f64; 3]>,
@@ -458,6 +459,7 @@ impl Viewer {
             pitch: start.pitch,
             input,
             grabbed: false,
+            gate: Default::default(),
             menu_was_open: false,
             samples: Vec::new(),
             gpu_ms: Vec::new(),
@@ -545,7 +547,10 @@ impl ApplicationHandler for Viewer {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !self.cli.timed() && !captured && st.renderer.is_some() => grab_pointer(st),
+            } if !self.cli.timed() && !captured && st.renderer.is_some() => {
+                st.gate.click();
+                grab_pointer(st);
+            }
             WindowEvent::Focused(false) => release_pointer(st),
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.frame(el) {
@@ -585,6 +590,18 @@ impl Viewer {
             }
         }
         st.menu_was_open = menu_open;
+        // In a match the pointer is the game's whenever no menu wants it; a click is not required.
+        let in_match = st.net.is_some()
+            && st.renderer.is_some()
+            && !self.cli.timed()
+            && self.cli.ui_script.is_none();
+        if st
+            .gate
+            .wants_lock(in_match, menu_open, st.window.has_focus())
+            && !st.grabbed
+        {
+            grab_pointer(st);
+        }
         let mut new_level = None;
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
@@ -607,6 +624,9 @@ impl Viewer {
             {
                 let menu = st.input.cvar("g_scriptMainMenu").unwrap_or("").to_owned();
                 sh.open(&mut st.input, &menu);
+                if !sh.ui.captures_input() {
+                    st.gate.let_go();
+                }
             }
             if self.cli.autoplay && f.toggle_menu() {
                 el.exit();
@@ -1049,6 +1069,15 @@ fn script_step(st: &mut State) -> bool {
             let open = sh.ui.open_menus().join(",");
             done(ok, sc, format!("open: {open}"));
         }
+        // The same through the pointer, as a player's mouse does it.
+        "mouse" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            let ok = sh.mouse_click(&mut st.input, arg);
+            let open = sh.ui.open_menus().join(",");
+            done(ok, sc, format!("open: {open}"));
+        }
         "open" | "close" => {
             let Some(sh) = st.shell.as_mut() else {
                 return true;
@@ -1111,6 +1140,51 @@ fn script_step(st: &mut State) -> bool {
                 sh.st.scores_forced = arg != "off";
             }
             done(true, sc, String::new());
+        }
+        // Escape as the menus get it (`key=escape`).
+        "key" => {
+            if let Some(sh) = st.shell.as_mut()
+                && arg == "escape"
+            {
+                sh.key(&mut st.input, UiKey::Escape);
+            }
+            done(arg == "escape", sc, format!("key {arg}"));
+        }
+        // Waits until no menu is open: the game has the keyboard and mouse back (`nomenu=5`).
+        "nomenu" => {
+            let open = st.shell.as_ref().map(|s| s.ui.open_menus().join(","));
+            if open.as_deref().is_none_or(str::is_empty) {
+                done(true, sc, String::new());
+            } else if waited > arg.parse::<f32>().unwrap_or(10.0) {
+                done(false, sc, format!("timed out; open: {open:?}"));
+            }
+        }
+        // Waits until the server says the player is on team `n` (1 axis, 2 allies, 3 spectator): `team=2:20`.
+        // `team=save` remembers the team; `team=other:secs` waits for a different one.
+        "team" | "weapon" => {
+            let (want, secs) = arg
+                .split_once(':')
+                .map_or((arg, 20.0), |(n, s)| (n, s.parse().unwrap_or(20.0)));
+            let saved = sc.marker.clone();
+            let have = if key == "team" {
+                st.shell
+                    .as_ref()
+                    .map_or(String::new(), |s| s.st.live.own_team.to_string())
+            } else {
+                st.net.as_ref().map(NetPlay::weapon).unwrap_or_default()
+            };
+            if key == "team" && want == "save" {
+                sc.marker = Some(have.clone());
+                done(true, sc, format!("team {have}"));
+            } else if match (key, want) {
+                ("team", "other") => saved.is_some_and(|t| t != have && have != "0"),
+                ("team", _) => have == want,
+                _ => have.contains(want),
+            } {
+                done(true, sc, format!("{key} {have}"));
+            } else if waited > secs {
+                done(false, sc, format!("timed out; {key} is {have:?}"));
+            }
         }
         "togglemenu" => {
             // Escape in a match: the server's script main menu.

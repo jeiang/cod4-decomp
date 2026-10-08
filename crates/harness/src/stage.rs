@@ -213,6 +213,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_hud::run),
     },
     StageDef {
+        name: "client-ingame-menu",
+        description: "changing class and team mid-round through the stock menus with the mouse: Escape and each pick return to the game, the team changes and the new class spawns",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_ingame_menu::run),
+    },
+    StageDef {
         name: "client-leave",
         description: "leaving a match from its in-game menu returns to a drawn main menu with no world; Quit from there exits with status 0",
         needs_install: false,

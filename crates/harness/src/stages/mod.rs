@@ -4,6 +4,7 @@ pub mod asset_load;
 pub mod audio;
 pub mod client_flythrough;
 pub mod client_hud;
+pub mod client_ingame_menu;
 pub mod client_input;
 pub mod client_leave;
 pub mod client_match;
