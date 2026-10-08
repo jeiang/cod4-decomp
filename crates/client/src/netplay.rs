@@ -231,6 +231,7 @@ impl NetPlay {
     }
 
     /// Where the join stands, for the browser overlay: "connecting", "connected" (snapshots arrive) or "spawned".
+    #[cfg(target_arch = "wasm32")]
     pub fn phase(&self) -> &'static str {
         if self.c.spawned {
             "spawned"
@@ -242,6 +243,7 @@ impl NetPlay {
     }
 
     /// Snapshots received so far.
+    #[cfg(target_arch = "wasm32")]
     pub fn snapshots(&self) -> u64 {
         self.net.stats().map_or(0, |s| s.packets_in)
     }
