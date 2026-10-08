@@ -51,6 +51,7 @@ fn spent_budget_skips_draws_until_warm_step_has_built_them() {
         origin: at,
         yaw: 0.0,
         pitch: 0.0,
+        roll: 0.0,
         fov_x: 1.5,
         time: 0.0,
     };

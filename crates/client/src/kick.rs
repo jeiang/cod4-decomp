@@ -62,20 +62,25 @@ impl Kick {
         self.vel = [0.0; 3];
         self.angles = [0.0; 3];
         self.gun = [0.0; 2];
+        // Whatever shots the state shows next are learnt, not kicked for.
+        self.seen = None;
     }
 
     /// Kicks for each shot `ps` fired since the last call (`CG_FireWeapon` of the own player). `ps` is the
     /// predicted state: each event is seen once however often the prediction replays it.
     pub fn shots(&mut self, ps: &PlayerState, info: &WeaponInfo) {
         let seq = ps.event_sequence;
-        let Some(last) = self.seen.replace(seq) else {
+        let Some(last) = self.seen else {
+            self.seen = Some(seq);
             return;
         };
         let new = seq.wrapping_sub(last);
-        // A sequence that went back is a prediction that changed its mind, not new shots.
+        // `seen` only moves forward: a prediction that changed its mind and went back must not kick again for
+        // the shots it then replays.
         if new == 0 || new > 128 {
             return;
         }
+        self.seen = Some(seq);
         for i in (1..=new.min(4)).rev() {
             let e = ps.events[usize::from(seq.wrapping_sub(i) & 3)];
             if matches!(e, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT) {
@@ -148,8 +153,10 @@ mod tests {
     }
 
     fn fired(seq: u8, event: u8) -> PlayerState {
-        let mut ps = PlayerState::default();
-        ps.event_sequence = seq;
+        let mut ps = PlayerState {
+            event_sequence: seq,
+            ..PlayerState::default()
+        };
         ps.events[usize::from(seq.wrapping_sub(1) & 3)] = event;
         ps
     }
@@ -194,11 +201,42 @@ mod tests {
     }
 
     #[test]
+    fn a_regressed_prediction_does_not_kick_for_the_same_shot_again() {
+        let mut k = Kick::default();
+        let info = rifle();
+        k.shots(&fired(5, 0), &info);
+        k.shots(&fired(6, ev::FIRE_WEAPON), &info);
+        k.take_gun_speed();
+        // The prediction went back a step, then replays the shot.
+        k.shots(&fired(5, 0), &info);
+        k.shots(&fired(6, ev::FIRE_WEAPON), &info);
+        assert_eq!(k.take_gun_speed(), [0.0; 2]);
+        // A new shot still kicks.
+        k.shots(&fired(7, ev::FIRE_WEAPON), &info);
+        assert!(k.take_gun_speed()[0] > 0.0);
+    }
+
+    #[test]
+    fn shots_shown_after_a_clear_are_learnt_not_kicked() {
+        let mut k = Kick::default();
+        let info = rifle();
+        k.shots(&fired(5, 0), &info);
+        k.clear();
+        // Back from watching someone else: the counter is somewhere else entirely.
+        k.shots(&fired(90, ev::FIRE_WEAPON), &info);
+        assert_eq!(k.take_gun_speed(), [0.0; 2]);
+        k.shots(&fired(91, ev::FIRE_WEAPON), &info);
+        assert!(k.take_gun_speed()[0] > 0.0);
+    }
+
+    #[test]
     fn the_spring_frame_rate_does_not_change_where_it_ends() {
         let d = Some([500.0; 2]);
         let run = |dt: f32, n: usize| {
-            let mut k = Kick::default();
-            k.vel = [-120.0, 30.0, -15.0];
+            let mut k = Kick {
+                vel: [-120.0, 30.0, -15.0],
+                ..Kick::default()
+            };
             for _ in 0..n {
                 k.step(dt, 0.0, d);
             }
@@ -212,8 +250,10 @@ mod tests {
 
     #[test]
     fn the_kick_is_capped() {
-        let mut k = Kick::default();
-        k.vel = [-100_000.0, 0.0, 0.0];
+        let mut k = Kick {
+            vel: [-100_000.0, 0.0, 0.0],
+            ..Kick::default()
+        };
         k.step(0.05, 0.0, None);
         assert!(k.angles()[0] >= -MAX_KICK);
     }

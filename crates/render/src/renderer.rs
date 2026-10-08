@@ -65,6 +65,8 @@ pub struct View {
     pub origin: Vec3,
     pub yaw: f32,
     pub pitch: f32,
+    /// Rolls the view clockwise by this many radians.
+    pub roll: f32,
     /// Horizontal field of view; the vertical one follows from the aspect ratio (Hor+).
     pub fov_x: f32,
     pub time: f32,
@@ -92,6 +94,8 @@ impl View {
         let f = dir.normalize();
         let s = Vec3::Y.cross(f).normalize();
         let u = f.cross(s);
+        let (sin, cos) = self.roll.sin_cos();
+        let (s, u) = (s * cos - u * sin, u * cos + s * sin);
         let look = Mat4::from_cols(
             Vec4::new(s.x, u.x, f.x, 0.0),
             Vec4::new(s.y, u.y, f.y, 0.0),

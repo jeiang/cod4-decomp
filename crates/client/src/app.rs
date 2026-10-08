@@ -285,6 +285,8 @@ struct State {
     pos: Vec3,
     yaw: f32,
     pitch: f32,
+    /// Roll of the view, radians (the recoil kick of the own player).
+    roll: f32,
     input: Input,
     grabbed: bool,
     /// Whether the system cursor is hidden now (see `sync_os_cursor`).
@@ -710,6 +712,7 @@ impl Viewer {
             pos: start.origin,
             yaw: start.yaw,
             pitch: start.pitch,
+            roll: 0.0,
             input,
             grabbed: false,
             os_cursor_hidden: false,
@@ -951,7 +954,7 @@ impl Viewer {
         let mut new_level = None;
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
-            (st.pos, st.yaw, st.pitch) = (p, y, pi);
+            (st.pos, st.yaw, st.pitch, st.roll) = (p, y, pi, 0.0);
             if let Some(r) = st.renderer.as_mut() {
                 r.dynamic_models = sc.update(dt);
             }
@@ -1047,7 +1050,7 @@ impl Viewer {
                 toggle_fullscreen(&st.window);
             }
             if let Some(nf) = frame_out {
-                (st.pos, st.yaw, st.pitch) = (nf.origin, nf.yaw, nf.pitch);
+                (st.pos, st.yaw, st.pitch, st.roll) = (nf.origin, nf.yaw, nf.pitch, nf.roll);
                 st.aim_zoom = nf.sight.as_ref().map(|s| (s.zoom_fov, s.zoom));
                 st.fx_in_view = nf.meshes.len();
                 if let Some(r) = st.renderer.as_mut() {
@@ -1071,7 +1074,7 @@ impl Viewer {
         } else if self.cli.flythrough {
             if let Some(tour) = st.tour.as_ref() {
                 let p = tour.pose(self.cli.fly_at.unwrap_or(t));
-                (st.pos, st.yaw, st.pitch) = (p.origin, p.yaw, p.pitch);
+                (st.pos, st.yaw, st.pitch, st.roll) = (p.origin, p.yaw, p.pitch, 0.0);
             }
         } else {
             let f = st.input.frame(dt);
@@ -1135,6 +1138,7 @@ impl Viewer {
             origin: st.pos,
             yaw: st.yaw,
             pitch: st.pitch,
+            roll: st.roll,
             fov_x,
             time: t,
         };

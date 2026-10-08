@@ -181,6 +181,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if shots >= 1.0 && num(net, &["view_kick_in_cmd_max"]) <= 0.0 {
         failures.push("shots were fired but no cmd carried the kick".into());
     }
+    if shots >= 1.0 && num(net, &["view_kick_settled"]) < 1.0 {
+        failures.push("the view kicked but never came back to rest".into());
+    }
     let snd = &net["sound"];
     let heard = |names: &[&str]| -> f64 {
         names

@@ -56,6 +56,8 @@ pub struct NetFrame {
     pub yaw: f32,
     /// Radians, positive up.
     pub pitch: f32,
+    /// Radians, clockwise: the roll of the recoil kick.
+    pub roll: f32,
     pub models: Vec<ModelInstance>,
     /// The aim zoom and scope overlay of the held weapon.
     pub sight: Option<Sight>,
@@ -116,6 +118,9 @@ struct Counters {
     /// The most the view kicked up, and the most the pitch of a sent cmd differed from the player's own aim, degrees.
     max_kick_up: f32,
     max_kick_in_cmd: f32,
+    /// How many times the view kick came back to rest after a kick.
+    kick_settled: u64,
+    kicked: bool,
     predictions: u64,
     max_players_seen: usize,
     /// The most other players drawn in one frame, and why the others could not be built (a model or animation the
@@ -540,6 +545,7 @@ impl NetPlay {
                 origin: eye,
                 yaw: yaw + look.kick[1].to_radians(),
                 pitch: pitch + look.kick[0].to_radians(),
+                roll: 0.0,
                 models,
                 sight: self.sight.clone(),
                 meshes: drawn.meshes,
@@ -576,7 +582,9 @@ impl NetPlay {
                 def.map(|d| [d.hip_view_kick_center_speed, d.ads_view_kick_center_speed]),
             );
         }
-        let kick = self.kick.angles();
+        let (was_kicked, kick) = (self.c.kicked, self.kick.angles());
+        self.c.kicked = kick != [0.0; 3];
+        self.c.kick_settled += u64::from(was_kicked && !self.c.kicked);
         self.c.max_kick_up = self.c.max_kick_up.max(-kick[0]);
         // Alive in the world: a spectator (before the team and class are chosen) has a view but no body.
         self.c.spawned |= matches!(
@@ -642,6 +650,7 @@ impl NetPlay {
             origin: eye,
             yaw: yaw + look.kick[1].to_radians(),
             pitch: pitch + look.kick[0].to_radians(),
+            roll: if dead { 0.0 } else { kick[2].to_radians() },
             models,
             sight: self.sight.clone(),
             meshes: drawn.meshes,
@@ -1261,6 +1270,7 @@ impl NetPlay {
         });
         report["view_kick_max"] = json!(self.c.max_kick_up);
         report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
+        report["view_kick_settled"] = json!(self.c.kick_settled);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
         report["player_faults"] = json!(self.c.player_faults);
         report

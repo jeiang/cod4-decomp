@@ -83,6 +83,7 @@ fn main() {
         origin: glam::Vec3::new(num(3), num(4), num(5)),
         yaw: num(6).to_radians(),
         pitch: num(7).to_radians(),
+        roll: 0.0,
         fov_x: 90f32.to_radians(),
         time: 0.0,
     };
@@ -134,6 +135,7 @@ fn main() {
                 origin: glam::Vec3::from(p) + glam::Vec3::Z * 56.0,
                 yaw: i as f32 * 1.3,
                 pitch: -0.05,
+                roll: 0.0,
                 fov_x: 90f32.to_radians(),
                 time: 0.0,
             };

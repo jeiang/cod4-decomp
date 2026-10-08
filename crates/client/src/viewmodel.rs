@@ -6,10 +6,10 @@
 //! reimplementation's `PlayerState` does not carry), so the animation is derived from the state instead: each
 //! `weapon_state` names one of the weapon's animation slots and `weapon_time`, the time left in the state, gives how
 //! far through it is. Aiming down sights layers `ADS_UP` (rising) or `ADS_DOWN` (falling) by `weapon_pos_frac` over it.
-//! Bob is the original's angle bob (`CalculateWeaponPosition_BobAngles`) with its stock amplitudes; the idle sway,
-//! stance offsets of the weapon file are not applied; the gun's recoil is the original's spring ([`GunRecoil`]). The weapon's `hideTags` hide the sights and
-//! mounts of the variants it is not; [`Sight`] carries what aiming does outside the model, the zoom field of view and
-//! the scope overlay of a sniper rifle.
+//! Bob is the original's angle bob (`CalculateWeaponPosition_BobAngles`) with its stock amplitudes, and the gun's recoil
+//! is the original's spring ([`GunRecoil`]). The idle sway and the stance offsets of the weapon file are not applied
+//! yet (ticket #193). The weapon's `hideTags` hide the sights and mounts of the variants it is not; [`Sight`] carries
+//! what aiming does outside the model, the zoom field of view and the scope overlay of a sniper rifle.
 
 use assets::zone::gfx::Material;
 use assets::zone::weapon::WeaponDef;

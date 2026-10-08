@@ -172,6 +172,7 @@ pub fn run(
                 origin: Vec3::from(p) + Vec3::Z * EYE_HEIGHT,
                 yaw,
                 pitch: 0.0,
+                roll: 0.0,
                 fov_x: 90f32.to_radians(),
                 time: 0.0,
             };

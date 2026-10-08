@@ -548,6 +548,7 @@ mod tests {
         View {
             origin: glam::Vec3::new(100.0, 0.0, 0.0),
             yaw: 0.0,
+            roll: 0.0,
             pitch: 0.0,
             fov_x: 90f32.to_radians(),
             time: 0.0,
