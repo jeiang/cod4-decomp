@@ -131,6 +131,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "the server corrected {corrected} of {predicted} predictions"
         ));
     }
+    // A steady walk moves the eye at a steady speed; a view that jerks (the clock following snapshot jitter, a stair
+    // snap) has frames that cover twice the usual ground. The jittery clock put about 5% of frames there.
+    let jerky = num(net, &["eye_speed", "over_twice_median"]);
+    if net["eye_speed"].is_object() && jerky > 0.02 {
+        failures.push(format!(
+            "{:.1}% of the drawn frames moved the eye over twice as fast as the median: the view is jerky",
+            jerky * 100.0
+        ));
+    }
     if net["viewmodel_frames"].as_f64().unwrap_or(0.0) < secs {
         failures.push("the first-person weapon was hardly drawn".into());
     }
@@ -293,6 +302,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     m.insert("client.event_pains".into(), pains);
     m.insert("match.shots".into(), shots);
     m.insert("match.hits".into(), hits);
+    m.insert("match.eye_jerk".into(), jerky);
     m.insert("match.kills".into(), num(srv, &["stats", "kills"]));
     m.insert("server.tick_ms_p50".into(), num(srv, &["tick_ms_p50"]));
     m.insert("server.tick_ms_p99".into(), num(srv, &["tick_ms_p99"]));

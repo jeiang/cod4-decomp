@@ -14,10 +14,20 @@ pub const INTERP_DELAY_MS: i32 = 100;
 /// How long past the newest snapshot an entity is held in place before it is considered stale.
 const HOLD_MS: i32 = 250;
 
+/// How much of the gap between a snapshot's clock reading and the running estimate the estimate takes up.
+const CLOCK_EASE: f64 = 0.05;
+/// A reading this far (ms) from the estimate is a different clock (a map change, a long stall), not jitter: the estimate
+/// jumps to it instead of easing.
+const CLOCK_JUMP_MS: f64 = 100.0;
+
 #[derive(Debug, Default)]
 pub struct SnapshotBuffer {
     /// Oldest first; `recv_ms` is the client clock at arrival.
     snaps: VecDeque<(u64, Snapshot)>,
+    /// Estimated `server time - client clock` in ms, eased toward each snapshot's reading.
+    offset: Option<f64>,
+    /// The newest time handed out, so the clock never runs backwards.
+    handed_out: std::cell::Cell<i32>,
 }
 
 impl SnapshotBuffer {
@@ -32,6 +42,14 @@ impl SnapshotBuffer {
         if self.snaps.len() == HISTORY {
             self.snaps.pop_front();
         }
+        let reading = f64::from(snap.server_time) - recv_ms as f64;
+        self.offset = Some(match self.offset {
+            Some(o) if (reading - o).abs() < CLOCK_JUMP_MS => o + (reading - o) * CLOCK_EASE,
+            _ => {
+                self.handed_out.set(i32::MIN);
+                reading
+            }
+        });
         self.snaps.push_back((recv_ms, snap));
     }
 
@@ -44,11 +62,16 @@ impl SnapshotBuffer {
         self.snaps.back().map(|(_, s)| s)
     }
 
-    /// The server's time now, as far as this client can tell: the newest snapshot's time plus
-    /// what has passed on the local clock since it arrived.
+    /// The server's time now, as far as this client can tell: the local clock plus an offset eased toward what each
+    /// snapshot reads. A snapshot's arrival time carries the network's and the sender's jitter; taking the newest
+    /// snapshot's time plus the time since it arrived would move this clock by that jitter at every snapshot, and the
+    /// player's own commands and every interpolated body would follow it. Never runs backwards.
     pub fn server_time(&self, now_ms: u64) -> Option<i32> {
-        let (recv, s) = self.snaps.back()?;
-        Some(s.server_time + now_ms.saturating_sub(*recv) as i32)
+        let offset = self.offset?;
+        let t = (now_ms as f64 + offset).round() as i32;
+        let t = t.max(self.handed_out.get());
+        self.handed_out.set(t);
+        Some(t)
     }
 
     /// Entities (not the viewer's own player) as they were at `render_time` of the server clock.
@@ -134,6 +157,43 @@ mod tests {
             ..EntityState::default()
         });
         s
+    }
+
+    /// Snapshots 33 ms apart that arrive up to 12 ms early or late: the clock a client reads every 4 ms moves by 4 ms
+    /// a step, give or take a millisecond, and never backwards.
+    #[test]
+    fn the_clock_does_not_follow_arrival_jitter() {
+        let mut b = SnapshotBuffer::default();
+        let jitter = [0i64, 9, -7, 12, -11, 3, 8, -12, 5, -4, 10, -9];
+        let mut sent = 0usize;
+        let mut last: Option<i32> = None;
+        let mut worst = 0;
+        for now in (0u64..3000).step_by(4) {
+            // Snapshot k leaves the server at 33 k and arrives 20 ms later plus its jitter.
+            while 33 * sent as i64 + 20 + jitter[sent % jitter.len()] <= now as i64 {
+                let t = 33 * sent as i32;
+                b.push(
+                    33 * sent as u64 + (20 + jitter[sent % jitter.len()]) as u64,
+                    snap(t, 0.0, 0.0),
+                );
+                sent += 1;
+            }
+            let Some(t) = b.server_time(now) else {
+                continue;
+            };
+            if let Some(l) = last {
+                assert!(t >= l, "the clock ran back from {l} to {t} at {now}");
+                // Past the first second the estimate has settled.
+                if now > 1000 {
+                    worst = worst.max((t - l - 4).abs());
+                }
+            }
+            last = Some(t);
+        }
+        assert!(
+            worst <= 1,
+            "the clock stepped {worst} ms off the local rate"
+        );
     }
 
     #[test]

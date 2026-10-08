@@ -81,6 +81,27 @@ struct Remote {
     ragdoll: Option<([f32; 3], f32, Ragdoll)>,
 }
 
+/// The spread of how fast the eye moved: median, 99th percentile and the share of frames faster than twice the median
+/// (the walking player's speed is steady; a view that jerks is not).
+fn eye_speed_summary(speeds: &[f32]) -> Value {
+    let moving: Vec<f32> = speeds.iter().copied().filter(|v| *v > 20.0).collect();
+    if moving.len() < 20 {
+        return Value::Null;
+    }
+    let mut v = moving.clone();
+    v.sort_by(f32::total_cmp);
+    let at = |q: f32| v[((v.len() - 1) as f32 * q) as usize];
+    let median = at(0.5);
+    let fast = moving.iter().filter(|s| **s > 2.0 * median).count();
+    json!({
+        "frames": moving.len(),
+        "median": median,
+        "p99": at(0.99),
+        "max": at(1.0),
+        "over_twice_median": fast as f32 / moving.len() as f32,
+    })
+}
+
 /// Numbers the run reports.
 #[derive(Default)]
 struct Counters {
@@ -111,6 +132,9 @@ struct Counters {
     /// Ragdolls made for players seen dying.
     ragdolls: u64,
     fx_live_max: usize,
+    /// How fast the eye moved between drawn frames (units per second) while the player walked; the spread of these
+    /// is what a jerky view is made of.
+    eye_speeds: Vec<f32>,
 }
 
 pub struct NetPlay {
@@ -448,6 +472,17 @@ impl NetPlay {
         } else {
             self.angles[1]
         };
+        if let Some(last) = self.last_eye
+            && dt > 0.0
+            && dt < 0.05
+            && !dead
+        {
+            let step = eye.distance(last);
+            // A respawn or a teleport is not walking.
+            if step < 64.0 {
+                self.c.eye_speeds.push(step / dt);
+            }
+        }
         self.last_eye = Some(eye);
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.hear(dt, eye, &ps, &snap);
@@ -882,6 +917,7 @@ impl NetPlay {
                 "live_elems_max": self.c.fx_live_max,
             },
             "eye": self.last_eye.map(|e| e.to_array()),
+            "eye_speed": eye_speed_summary(&self.c.eye_speeds),
             "sound": self.sound.report(),
         })
     }
