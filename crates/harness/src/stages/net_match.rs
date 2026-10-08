@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `net-match`: a headless server runs a team deathmatch with bots on mp_crash while real UDP
 //! clients (no window, no GPU) connect over loopback, spawn, walk and watch. Asserts that every
 //! client connects and is assigned a body, that the server runs its usercmds (the client's own

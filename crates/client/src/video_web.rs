@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The flythrough video recorder (harness) is native only: it needs a software AV1 encoder and a file to write.
 
 use std::io;

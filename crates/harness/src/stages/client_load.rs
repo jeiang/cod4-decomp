@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-load`: loading a map must not freeze the window. The real client starts a match on `mp_crash` and on the
 //! largest map zone of the install from a script step (the menus' `Start New Server` path: the map loads on a worker
 //! thread while the loading screen draws) and reports the longest gap between two presented frames from the start of

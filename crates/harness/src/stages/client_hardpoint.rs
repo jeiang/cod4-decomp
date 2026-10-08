@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-hardpoint`: the real client calls in an airstrike. The player is given it as a killstreak reward
 //! (`devhardpoint`), presses `+actionslot 4` (the d-pad slot selects the weapon), picks a point on the
 //! full-screen map with the mouse movement and confirms with the attack key. The d-pad pieces (166, 168, 169)

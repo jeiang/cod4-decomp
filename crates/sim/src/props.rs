@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Static models (props baked into the map) as bullets see them: thin lines traced against each
 //! model's collision triangles. Hulls ignore props; only point traces and sight checks that ask
 //! for them use this.

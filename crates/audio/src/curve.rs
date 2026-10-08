@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The volume falloff curve of an alias (`.vfcurve`): up to eight (distance fraction, volume) knots,
 //! piecewise linear. Curves with fewer than two knots (80 aliases have none) fall back to a straight line
 //! from full volume to silence.

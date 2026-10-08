@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What the weapon state machine asks the game to do: fire bullets, swing the knife, throw
 //! grenades, and the script notifies that follow (`HandleClientEvent`, `FireWeapon`,
 //! `FireWeaponMelee`, `G_UseOffHand`).

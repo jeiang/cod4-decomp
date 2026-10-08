@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Loads every stock MP script into the VM, runs each file's `main` and then every function
 //! once, with stub builtins.
 //! Skips without `COD4_PATH`.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! GSC compiler and bytecode VM.
 //!
 //! Source text goes through [`lexer`], [`parser`] (AST in [`ast`]) and [`compiler`] into a

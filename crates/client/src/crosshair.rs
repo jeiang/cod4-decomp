@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The hip-fire crosshair: the weapon's centre dot and four ticks that move out with the weapon's spread.
 //!
 //! The weapon file names the two materials, their sizes (in the 640x480 menu space), the smallest distance of a tick

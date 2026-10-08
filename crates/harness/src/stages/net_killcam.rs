@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `net-killcam`: the stock killcam, replayed from the server's state ring. A headless server
 //! runs team deathmatch with bots; one real UDP client (no window) joins through the menus, and
 //! once it has a body a bot's rifle kills it. The stock `_killcam.gsc` then puts the client in

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The scrolling message windows of the original's console (`Con_DrawGameMessageWindow`): `iprintln` lines and
 //! obituaries in window 0, `iprintlnbold` and announcements in window 1, subtitles in window 2; plus chat, the
 //! centre string and the kill-feed lines.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The post chain of `code_post_gfx_mp`, in the original pass order (`RB_StandardDrawCommands`,
 //! `RB_ProcessPostEffects`).
 //!

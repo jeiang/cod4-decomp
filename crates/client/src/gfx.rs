@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The graphics settings of the options menus (`r_*`, `sm_enable`), read as the renderer and the window take them.
 //!
 //! The menus only write dvars; [`Gfx::from_cvars`] turns them into the video request, the present mode, the aspect

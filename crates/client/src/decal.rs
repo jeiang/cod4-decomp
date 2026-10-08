@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Decals: an effect's decal element is a box on a surface; the picture is the part of the world's triangles inside
 //! it, clipped to the box and textured by projecting along the surface normal (the original's `FX_GenerateMark`).
 

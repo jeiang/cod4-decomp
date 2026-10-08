@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The two-partition sun shadow map: where the near and far partitions sit in the 1024x2048 map, the matrices that
 //! render casters into them, and the lookup constants the stock lit-sun-shadow pixel shaders read.
 //!

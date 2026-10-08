@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! WeaponDef: the fixed weapon definition with its model, effect, material and
 //! sound references.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Runs `cod4e --input-selftest`: the client's input layer driven by synthetic events, pass/fail. Needs neither a
 //! display, a GPU nor the install, and has no timing in it.
 use crate::stage::{StageCtx, StageReport, Status};

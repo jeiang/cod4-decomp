@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The transport the client plays on: UDP natively, WebTransport through the page in a browser.
 
 use net::Transport;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The protocol between the mixer and the browser's AudioWorklet, as plain Rust so it is tested natively.
 //!
 //! The worklet (`device/worklet.js`) owns a ring of interleaved stereo `f32` frames, `CAPACITY` frames long

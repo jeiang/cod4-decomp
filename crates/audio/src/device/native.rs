@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The sound card: a cpal output stream that runs [`Mixer::fill`] in its callback.
 //!
 //! cpal gives CoreAudio on macOS, ALSA on Linux and WASAPI on Windows. The mixer is stereo; a device with more

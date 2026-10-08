@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The player profiles: the persistent stats (rank, unlocks, class setups; `stat(n)` in the menus and `setstat` in the
 //! scripts) kept between runs, one set per profile.
 //!

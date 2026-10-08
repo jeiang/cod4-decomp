@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Saves a copy of the files the client reads into the browser's origin-private file system (OPFS), so the next visit
 // needs no folder pick (Safari and Firefox cannot remember a picked folder). The copy stays in this browser; nothing
 // is uploaded. It is resumable: a file already saved at full size is skipped, and the reader only uses the copy once

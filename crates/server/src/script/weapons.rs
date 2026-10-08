@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Weapon builtins: the player's inventory (`giveweapon`, ammo, switching) and the
 //! weapon-definition queries (`weaponclass`, `weaponclipsize`, ...).
 

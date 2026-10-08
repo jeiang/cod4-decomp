@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! D3D9-free cross-check of the SM3 -> WGSL translation.
 //!
 //! Every stock MP SM3 blob is also translated by two independent reference translators run as external programs

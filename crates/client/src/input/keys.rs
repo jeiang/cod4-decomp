@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Key names as used in `bind` lines. Physical keys, so binds follow position, not layout.
 //!
 //! Left/right modifiers are separate keys (`shift`/`rshift`, ...). `;` is `semicolon` since it separates commands.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! D3D9 SM3 bytecode to WGSL translation.
 //!
 //! [`translate`] parses a `vs_3_0` / `ps_3_0` token stream (with its CTAB comment) and emits WGSL that stays inside

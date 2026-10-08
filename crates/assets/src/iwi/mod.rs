@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! IWI images: the version-6 container, raw and wavelet pixel formats and
 //! DXT1/3/5, as stored in `images/<name>.iwi` inside IWDs.
 //!

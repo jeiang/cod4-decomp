@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The client's effects: [`ClientEvent`]s become effect playbacks (impact sprites and decals, explosions, blood), the
 //! playback runs on the server clock against the static map, and every frame yields the sprites, decals, models and
 //! sounds to draw.

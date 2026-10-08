@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `net-loopback`: eight clients connect to one server over real UDP on the loopback interface,
 //! through a path that loses, duplicates and reorders datagrams. Asserts the handshake, that
 //! reliable commands arrive exactly once and in order, that every snapshot a client accepts equals

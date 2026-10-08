@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Server-side player body animation: which `pb_*` animation a player is in, how far through
 //! it, and the resulting skeleton for locational hits.
 //!

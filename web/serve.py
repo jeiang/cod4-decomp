@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 """Serve web/ on localhost with the cross-origin isolation headers (COOP + COEP) the install read bridge needs.
 
 The page reads the user's install folder in the browser and uploads nothing; this server hands out the page and the

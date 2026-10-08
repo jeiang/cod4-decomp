@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Netchan, snapshot delta codec, and transport trait.
 //!
 //! Layers, bottom up: a [`Transport`] moves datagrams; a [`Netchan`] sequences, fragments and

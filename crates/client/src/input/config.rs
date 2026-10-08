@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Config-file syntax: tokenizing command lines, quoting on write, and the platform config path.
 //!
 //! A line holds commands separated by `;`. Tokens are whitespace separated or `"quoted"`; inside quotes `\"`, `\\`

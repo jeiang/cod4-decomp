@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The `--show-models` smoke scene: a row of stock player models in different poses and the first-person weapon in
 //! front of a fixed camera, so a screenshot shows whether skinning, textures and lighting are right.
 

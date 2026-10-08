@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! A tiny axis-aligned-box world for movement tests: boxes with contents and surface flags,
 //! swept by the Minkowski expansion of the mover's bounds.
 

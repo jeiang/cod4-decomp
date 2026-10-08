@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The per-channel parametric EQ of the original (`snd_setEq`): two EQs of three bands for every entity
 //! channel, each band a low-pass, high-pass, low shelf, high shelf or bell. The coefficients are the usual
 //! biquads of the Audio EQ Cookbook; the original's Miles filter is closed source, so its exact response is

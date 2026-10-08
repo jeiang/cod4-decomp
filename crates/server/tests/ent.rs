@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Tag lookup and attachments against the stock models. Skips without `COD4_PATH`.
 
 use server::game::{Ent, EntKind, Game};

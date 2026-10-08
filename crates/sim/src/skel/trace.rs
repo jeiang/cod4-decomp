@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Locational hit detection against a posed [`Rig`] (`DObjTraceline`).
 //!
 //! The original does not intersect player models with triangles (the stock player models have

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! A client's whole network side behind one object: connect, exchange packets, keep the snapshot
 //! history. No window or GPU, so the game client, the listen server and the harness all use it.
 

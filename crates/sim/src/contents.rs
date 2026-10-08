@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Brush content flags and the trace masks built from them (IW3 values).
 
 pub const SOLID: i32 = 0x1;

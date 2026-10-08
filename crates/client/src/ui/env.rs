@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The expression environment: what menu expressions read, assembled from the UI's own state and the client's.
 
 use super::expr::{

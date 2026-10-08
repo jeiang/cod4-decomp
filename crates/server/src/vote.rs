@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `callvote` and `vote` (`g_oldVoting`: the engine runs the vote, not the scripts): a player calls a vote for
 //! `map`, `typemap`, `g_gametype`, `map_restart`, `map_rotate`, `kick` or `tempBanUser`, the other players
 //! answer `vote y` or `vote n`, and a majority of the voting players runs the command three seconds later.

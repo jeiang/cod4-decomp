@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The sequenced channel between a client and a server (Q3 `netchan` style): each datagram
 //! carries a sequence number; messages larger than a datagram are split into fragments and
 //! reassembled; stale and duplicate datagrams are dropped. The message inside is opaque here.

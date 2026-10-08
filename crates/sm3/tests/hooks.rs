@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Hand-assembled ps_3_0: `texld r0, v0, s0; mov oC0, r0`. No original content involved.
 mod common;
 use sm3::{AlphaTest, Compare, Error, Options, SamplerDim, translate};

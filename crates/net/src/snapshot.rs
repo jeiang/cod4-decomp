@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! One snapshot (the world as one client sees it for one tick) and its delta coding against the
 //! last snapshot that client acknowledged.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Synthetic skeleton, sampling and hit tests: hand-built models and animations whose answers
 //! follow from the geometry.
 

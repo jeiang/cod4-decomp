@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Collision response: sliding along up to eight clip planes and stepping over low ledges
 //! (`PM_SlideMove`, `PM_StepSlideMove`).
 

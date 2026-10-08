@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Model tags and the small matrix algebra entity linking and tag lookup need.
 //!
 //! A model's tags are its bones. [`Skeleton`] keeps the rest pose of every bone in model

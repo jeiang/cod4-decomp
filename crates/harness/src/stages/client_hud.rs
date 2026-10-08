@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-hud`: what the client draws on top of the stock HUD menus during a match. The real client plays a team
 //! deathmatch against bots on its own listen server with the scripted player, holds the scoreboard up, waits for a
 //! message window to have a line up and for a bot to kill it (the killcam), and reports what the HUD got to show

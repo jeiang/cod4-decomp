@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // The page: finds the user's install (a saved copy in this browser, or a folder the user picks), keeps a copy for
 // next time, and starts the wasm client. The files are read in this browser only; nothing is uploaded.
 import { createBridge } from "./bridge.js";

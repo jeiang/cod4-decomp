@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What the menus draw from: the boot zones' menu lists, fonts, localized strings, string tables and materials.
 //!
 //! The original loads `code_post_gfx_mp`, `localized_code_post_gfx_mp`, `ui_mp`, `common_mp` and

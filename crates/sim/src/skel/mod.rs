@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Server-side player skeletons and locational hit detection.
 //!
 //! The server never renders a player but its bullets still hit individual body parts, so it

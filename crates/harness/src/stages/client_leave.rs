@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-leave`: a player leaves a match through the stock menus. Start a server from the main menu, spawn,
 //! open the in-game menu, confirm Leave Game: the client must be back at the front end (no connection, no world,
 //! the main menu open and drawn, not a black screen). Then Quit from the main menu must end the process with

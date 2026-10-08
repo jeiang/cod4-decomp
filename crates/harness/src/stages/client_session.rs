@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-session`: the real client gets a person into the world, both ways. Run 1 is the direct
 //! `--listen` path (no menus: the default team and class answers); run 2 starts from the main menu and clicks
 //! through the stock menus (Start New Server, the server's team menu, the class menu, Assault). Each run must

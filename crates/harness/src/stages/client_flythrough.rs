@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stage 3: drives the `cod4e` client through a mp_crash flythrough once per
 //! display mode, recording video, a screenshot and per-frame timings.
 //!

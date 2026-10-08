@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Bytecode for the GSC VM.
 //!
 //! One [`Function`] is one byte string; operands are little-endian and jump offsets are

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What the original's cgame draws itself on top of the stock HUD menus: the script hud elements, the message
 //! windows behind the `gamemessages` menus, chat, the centre string, the kill feed and the scoreboard rows.
 //!

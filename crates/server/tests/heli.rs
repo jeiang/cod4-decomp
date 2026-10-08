@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The helicopter hardpoint end to end on the stock scripts: a bot calls it in, it flies the map's path, fires
 //! at players and is shot down by bots. Skips without `COD4_PATH`.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stage 4, `client-match`: the real `cod4e` client plays a team deathmatch against bots on the server it starts
 //! in-process (`--listen --autoplay`). The scripted player connects over UDP, gets a body, walks, sees the bots,
 //! turns toward enemies it can see and shoots them, for 90 seconds. The stage reads the client's report and asserts

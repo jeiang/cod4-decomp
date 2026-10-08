@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The ocean simulation behind `TS_WATER_MAP` textures.
 //!
 //! A water material carries a Phillips-spectrum snapshot (`h0`) and the dispersion term `w` per frequency cell of an

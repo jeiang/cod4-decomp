@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-menu-match`: the real client, started with no match flags, plays a whole match from the stock menus and
 //! carries on into the next map. A person's path: Start New Server (the score limit set low beforehand, as a player can
 //! set it), the server's team menu, the class menu, play, the end-of-match scoreboard, the server's map rotation, then

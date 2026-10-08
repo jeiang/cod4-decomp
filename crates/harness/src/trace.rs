@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `tracing` plumbing: a layer that logs events to stderr (captured by the
 //! watchdog into the bundle) and a layer that records spans for one window
 //! as a Chrome trace, which Perfetto opens directly.

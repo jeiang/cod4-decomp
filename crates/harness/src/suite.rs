@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The suite runner: detects the install, runs each selected stage under the
 //! watchdog, and writes the bundle.
 use crate::bundle::{self, Written};

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Player builtins (`PlayerCmd_*`) and the client fields scripts read and write
 //! (`self.sessionstate`, `self.score`, ...; `g_client_fields.cpp` of the original).
 

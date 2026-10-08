@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! IW3 v5 fastfile (`IWffu100`) decoding: header, incremental zlib, the XFile
 //! block model, pointer kinds, the script-string table and the asset list.
 //!

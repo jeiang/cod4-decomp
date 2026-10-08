@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Aim-down-sights state as far as movement depends on it: the `SIGHT_AIMING` flag (which slows
 //! walking and blocks sprint), the blend fraction, and the walking flag derived from it.
 

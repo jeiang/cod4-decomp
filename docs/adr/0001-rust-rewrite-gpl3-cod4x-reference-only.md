@@ -1,4 +1,6 @@
-# Rust rewrite under GPL-3.0-or-later; non-compatible sources are reference-only
+# Rust rewrite; non-compatible sources are reference-only
+
+**Status:** licensing superseded by ADR 0003 (the project is now GPL-3.0-only, and GPL-3.0 sources may be translated). The rest stands.
 
 The engine is a new Rust codebase (wgpu for rendering) and does not fork the C lineage (ioquake3, CoD4X). Reasons: one renderer covers Vulkan, Metal, DX12, and WebGPU; the browser path goes through WASM; and the server gets memory safety. The project is licensed GPL-3.0-or-later, and every file stays under that license.
 

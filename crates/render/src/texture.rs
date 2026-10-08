@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Images to GPU textures: IWI files from the VFS and the images a zone carries inline (lightmaps, probes).
 
 use crate::gpu::Gpu;

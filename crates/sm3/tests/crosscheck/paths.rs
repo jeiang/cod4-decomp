@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! WGSL plus binding reflection of one shader for each translation path.
 use crate::spvsplit;
 use naga::valid::{Capabilities, ValidationFlags, Validator};

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The art settings a map carries: its exponential fog (the `setExpFog` call of its `createart` script) and the glow
 //! and film values of its vision file (dvar assignments, one per line).
 //!

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The helicopter's builtin methods (`CMD_VEH_*`, `CMD_Heli_*`): they set the goals and limits the vehicle's think
 //! (`crate::vehicle`) flies by.
 

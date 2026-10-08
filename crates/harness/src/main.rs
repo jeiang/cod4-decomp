@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 use harness::child::{self, ChildArgs};
 use harness::diff;
 use harness::stage;

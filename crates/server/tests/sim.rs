@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The collision world and script movers on a booted stock map. Skips without `COD4_PATH`.
 
 use gsc::{EntClass, EntRef, Value};

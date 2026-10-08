@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Sampling of [`XAnimParts`]: one animation at one normalised time, accumulated per bone.
 //!
 //! An animation names the bones it drives (`names`, script strings) and stores them grouped by

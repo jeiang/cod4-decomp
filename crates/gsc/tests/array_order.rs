@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Pins the element order of script arrays to the original's.
 //!
 //! Evidence (KisakCOD `script/scr_variable.cpp`, same code as iw3mp.exe 1.7):

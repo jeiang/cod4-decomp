@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! A single-producer single-consumer ring of `f32` samples between a decoder (producer) and the mixer
 //! (consumer). Fixed size, no locks and no allocation after [`ring`], so the consumer may run on a realtime
 //! audio thread (or an AudioWorklet).

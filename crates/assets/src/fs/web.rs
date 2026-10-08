@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The wasm32 side of [`crate::fs`]: an index of mounted [`ReadAt`] sources.
 
 use crate::vfs::ReadAt;

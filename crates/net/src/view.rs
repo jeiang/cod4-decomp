@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What a client does with the snapshots it has accepted: keep a short history, keep a clock in
 //! step with the server's, and interpolate other entities between the two snapshots that straddle
 //! the render time, a little in the past, so motion stays smooth despite jitter and loss.

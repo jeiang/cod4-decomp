@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! IWD (zip) reader: central directory index plus ranged entry reads.
 
 use super::ReadAt;

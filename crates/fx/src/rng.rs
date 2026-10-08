@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The random numbers of element spawning: a small deterministic generator, so a replay of the same events looks
 //! the same.
 

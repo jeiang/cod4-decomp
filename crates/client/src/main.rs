@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `cod4e`, the player-facing client. For now: a fly camera over a map, and the scripted flythrough the harness
 //! drives as stage 3 (`--flythrough`), which records frame times, a video and a screenshot.
 

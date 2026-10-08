@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `shot <install> <map> <x> <y> <z> <yaw deg> <pitch deg> <out.png> [WxH]`: render one frame headless.
 //!
 //! `DUMP=<material substring>` also prints the translated binding table of the matching materials

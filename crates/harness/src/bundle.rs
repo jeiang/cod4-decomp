@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Writes the run bundle: a scrubbed zip of the run directory, capped at
 //! 100 MB.
 use crate::scrub::Scrubber;

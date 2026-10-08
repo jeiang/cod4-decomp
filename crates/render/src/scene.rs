@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! One map's GPU data: world mesh, model meshes, the model-lighting volume, and the sun.
 
 use crate::art::MapArt;

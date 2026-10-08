@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Bullets, melee, grenades and rockets: against a hand-built map (always) and against the
 //! stock mp_crash and weapon files (skipped without `COD4_PATH`).
 

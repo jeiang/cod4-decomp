@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Entity trajectories (`trajectory_t`): how scripted movers, missiles and falling items move
 //! between server ticks. Shared with client interpolation.
 

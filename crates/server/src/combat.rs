@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Damage: `G_Damage`, the player damage and death paths, radius damage and damage volumes.
 //!
 //! Scripts own the rules. The engine's part is the order of events: damage reaches

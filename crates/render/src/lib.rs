@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! wgpu renderer: draws a map's `GfxWorld` with the original techsets (translated from D3D9 SM3 at load), lightmaps,
 //! reflection probes, the model-lighting volume, sky, and static models.
 

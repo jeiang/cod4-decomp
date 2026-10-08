@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Player animation and locational hits on the stock player models. Skips without `COD4_PATH`.
 
 use server::content::{Content, Install};

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! CPU decode of the three block-compressed formats IWI uses (BC1/2/3, a.k.a.
 //! DXT1/3/5) to RGBA8, for adapters without BC texture support.
 //!

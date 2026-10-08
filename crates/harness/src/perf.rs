@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Performance data plumbing: percentile summaries and the per-frame and
 //! per-tick CSV writers. Clients and servers feed these during perf stages.
 use serde::{Deserialize, Serialize};

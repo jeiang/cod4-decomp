@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Immediate-mode 2D layer for menus, HUD text and icons.
 //!
 //! Coordinates are target pixels with the origin at the top left and y growing down; the caller maps its own virtual

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `--viewmodel-tour <n>`: the first-person weapon and hands, drawn headless from `n` spawn points of the map and the
 //! points on the way between opposite ones (two headings each), once with and once without them. The pixels the two frames
 //! differ in are the view model: the report lists their share of the picture, mean colour and the share of pixels one channel dominates per view. A tint that does not belong to the lighting (a

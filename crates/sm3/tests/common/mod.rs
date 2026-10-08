@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // Each test binary uses a different subset of these helpers.
 #![allow(dead_code)]
 

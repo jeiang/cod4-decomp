@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Engine-supplied ("code") shader constants and samplers: their ids, their CTAB names, and the per-frame values.
 //!
 //! Technique passes bind a register to a code constant by id; the shader's CTAB names the same constant (for example

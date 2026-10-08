@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! View angles to the six player controller angles (`BG_Player_DoControllersInternal`).
 //!
 //! The original eases every angle toward its goal at `frametime * 0.36` degrees per step and

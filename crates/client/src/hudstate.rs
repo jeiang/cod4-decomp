@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What the owner-draw HUD pieces read: facts of the player and the match, filled each frame from the network
 //! play, and the pure logic over them (fades, the low-health pulse, ammo thresholds).
 //!

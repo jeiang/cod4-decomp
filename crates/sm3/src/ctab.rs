@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! CTAB (constant table) reflection: names, register sets and registers of constants and samplers.
 
 /// D3DXREGISTER_SET.

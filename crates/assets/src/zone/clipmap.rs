@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! clipMap_t (MP and SP share one loader) and MapEnts.
 //!
 //! References that point into another array of the same clipmap (a node's

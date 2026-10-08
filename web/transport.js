@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // The browser's datagram transport to a cod4e server: WebTransport, carrying the same datagrams a UDP client
 // exchanges. The framing is the server's (crates/net/src/wt.rs): a datagram that fits is one WebTransport datagram;
 // a longer one (up to 8192 bytes) is one unidirectional stream carrying exactly its bytes, ended by FIN; both forms

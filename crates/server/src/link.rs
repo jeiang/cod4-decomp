@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Entity linking, model attachments and player corpses (`G_EntLinkTo`, `G_EntUnlink`,
 //! `G_EntAttach`, `G_GeneralLink`, `PlayerCmd_ClonePlayer`).
 //!

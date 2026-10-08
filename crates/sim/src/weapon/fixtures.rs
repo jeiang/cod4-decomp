@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Hand-built weapons for tests.
 
 use super::info::{InventoryType, OffhandClass, WeaponClass, WeaponInfo, WeaponType};

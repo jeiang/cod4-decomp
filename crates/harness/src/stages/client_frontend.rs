@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-frontend`: the front end as a player meets it, with the install's own player profile. The main menu lists
 //! every stock row, Select Profile opens the profile list, the profile's unlocks make Create a Class open its
 //! menu, and Start New Server's game mode chooser steps through the modes in the original's order. The install's

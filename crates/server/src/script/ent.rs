@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Entity and world builtins: linking, attachments, tags, touch tests, corpses, use triggers
 //! and the vector helpers scripts build on them.
 

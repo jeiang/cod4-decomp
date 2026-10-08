@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Operators on script values. Errors are the original's runtime error messages.
 
 use std::rc::Rc;

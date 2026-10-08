@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Stage 1: load every MP zone, then scan the VFS.
 //!
 //! Each zone is opened (header and asset list) and decoded as far as the

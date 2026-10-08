@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Root motion of an animation between two times (`XAnimGetRelDelta`): what `getmovedelta`
 //! and `getangledelta` report.
 

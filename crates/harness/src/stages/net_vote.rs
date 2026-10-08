@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `net-vote`: two real UDP clients vote. One calls a kick vote against the other, who votes yes: the
 //! server drops the second client three seconds after the vote passes. The first then calls a
 //! gametype-and-map vote alone (it is the only voter) and the server changes to that map and gametype.

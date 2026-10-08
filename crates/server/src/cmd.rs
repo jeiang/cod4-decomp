@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Console text: command splitting, tokenizing and the command buffer.
 //!
 //! Commands are separated by newlines and by `;` outside double quotes. `//` starts a comment

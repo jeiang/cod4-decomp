@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Jumping (`Jump_*`): launch speed from the jump height, the slowdown after landing, and the
 //! step-up allowance near the top of the arc.
 

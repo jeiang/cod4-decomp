@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Bullets: the point traces shots and missiles use, and `Bullet_Fire`.
 //!
 //! A shot is traced in two passes. The map, its props and every non-player entity come from

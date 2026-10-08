@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! GfxWorld: the renderable map (geometry, visibility cells, lighting, static
 //! models). Bulk payload (vertices, indices, light grid texels) is presentation
 //! data and is empty when the consumer drops it.

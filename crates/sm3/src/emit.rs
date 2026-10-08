@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Token stream to WGSL. Covers the opcodes the stock MP SM3 corpus uses. Semantics follow documented D3D9
 //! behaviour (rcp/rsq of 0 = FLT_MAX, pow(|a|, b), lrp = mix, cmp selects on >= 0, ...).
 

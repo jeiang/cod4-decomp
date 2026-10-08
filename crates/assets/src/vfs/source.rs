@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Random-access byte sources. Object-safe so other backends (the browser's picked files and OPFS) can implement it.
 
 use std::io;

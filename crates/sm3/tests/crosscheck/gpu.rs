@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The fixed synthetic frame: one quad, fixed constants and textures, offscreen targets, readback.
 use crate::paths::{Dim, Kind, Prog};
 use sm3::{Reflection, RegisterSet};

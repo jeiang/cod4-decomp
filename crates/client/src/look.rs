@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! How the picture looks beyond the map: the vision set the scripts pick (`visionsetnaked` blends the glow and film
 //! settings to those of `vision/<name>.vision`) and the shell shock a player takes (`shock/<name>.shock`: a blurred or
 //! flashed copy of the saved screen laid over the view, and a shaking of the camera).

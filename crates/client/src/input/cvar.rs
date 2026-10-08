@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The client cvar store: name -> string value, with a default and an archive flag.
 //!
 //! Names are case-insensitive (stored lowercase), as in the original. Only archived cvars are written back to the

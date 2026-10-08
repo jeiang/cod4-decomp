@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Menu expression evaluator.
 //!
 //! The stock menus store each expression (`visible`, `text`, `material`, `rect x/y/w/h`, `forecolor a`)

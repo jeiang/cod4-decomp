@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Syntax tree for one GSC file. Names are already lowercased.
 
 pub type Name = Box<str>;

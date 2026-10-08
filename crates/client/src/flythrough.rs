@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The scripted camera path of the flythrough scenario: a tour of the places players stand, a pure function of time
 //! so every machine and display mode sees the same tour.
 //!

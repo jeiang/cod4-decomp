@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The in-process listen server for solo play: the headless server running in a thread of the client, a team
 //! deathmatch on the chosen map with bots, listening on a loopback-reachable UDP port. The client connects to it
 //! like to any other server.

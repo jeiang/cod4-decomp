@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Copies what the server told the UI into a [`LiveUi`] once per frame: the script hud elements with their strings
 //! looked up, objectives, scoreboard lines, names and teams, and the replay state of a killcam.
 

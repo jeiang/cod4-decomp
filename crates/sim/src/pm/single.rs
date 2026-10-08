@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `Pmove` and `PmoveSingle`: the per-command driver.
 
 use super::ads;

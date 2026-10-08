@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The menu action language: `"open" "main_text" ; "setDvar" ui_x 1 ; ...`.
 //!
 //! A script is a list of commands separated by `;`. A command is a name followed by arguments, each a quoted string or

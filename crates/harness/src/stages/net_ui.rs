@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `net-ui`: what the stock scripts tell a person's screen. A headless server runs Domination
 //! with bots; one real UDP client (no window) answers the menus the scripts open the way the
 //! stock menus would (team, then class) and records everything the UI store delivers. Asserts

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! GPU pass timing with timestamp queries.
 //!
 //! Every render pass of a frame writes a begin and an end timestamp. The frame resolves them into a buffer, copies that

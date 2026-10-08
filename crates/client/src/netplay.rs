@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Playing on a server: the connection, the usercmds built from the player's input, prediction of the player's own
 //! movement, and the models of everyone else drawn from the interpolated snapshots.
 //!

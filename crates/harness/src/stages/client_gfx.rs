@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-gfx`: the graphics settings of the options menus reach the window and the renderer. The real client sets
 //! the dvars the menu writes, applies them with `vid_restart` (vsync off, a 4:3 screen), starts a match (4x
 //! antialiasing, no specular, depth of field, glow or shadows), then turns the match's settings back with a second

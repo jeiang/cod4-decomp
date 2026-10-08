@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Hand-built clipmaps for the unit tests, and the install-gated mp_crash loader.
 
 use std::path::{Path, PathBuf};

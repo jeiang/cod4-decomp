@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Raw (unaccelerated) relative mouse motion.
 //!
 //! On Windows and Linux winit's `DeviceEvent::MouseMotion` is raw already. On macOS it comes from `NSEvent` deltas:

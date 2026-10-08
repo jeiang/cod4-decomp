@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What the player hears: the `audio` crate fed from the match. Sound tables load on a thread while the
 //! match connects; sounds asked for before they are ready are dropped.
 //!

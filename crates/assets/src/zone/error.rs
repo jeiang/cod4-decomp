@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 use super::asset_type::XAssetType;
 use super::stream::{Addr, Block};
 use std::fmt;

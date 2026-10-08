@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! ComWorld (primary lights), GameWorldMp and GfxLightDef.
 
 use super::error::Result;

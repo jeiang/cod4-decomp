@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `GfxStateBits` (two words per material state) to wgpu pipeline state.
 //!
 //! Word 0: blend (src/dst RGB 4 bits each, op RGB 3 bits at 8; alpha at 16/20/24; a zero alpha op copies RGB), alpha

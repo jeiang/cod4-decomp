@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Ladders (`PM_CheckLadderMove`, `PM_LadderMove`): grabbing a ladder face, climbing, and
 //! letting go.
 

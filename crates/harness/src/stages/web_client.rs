@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The browser client: `web/serve.py` serves the built page and the install, a headless Chromium loads it with
 //! `?dev-install=/install&autostart&flythrough&report=N`, and the page posts its overlay values (backend, frame
 //! times, memory) back to the server's log. Skipped unless the wasm is built (`web/build.sh`), a Chromium is found

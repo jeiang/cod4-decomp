@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Decisions about the match the client is in that do not need a window: what to do when the server announces a level,
 //! and the map rotation a menu-started server runs.
 

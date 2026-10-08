@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The compass and the full-screen map: the map's frame of reference and the transforms between world and screen.
 //!
 //! The map script's `setMiniMap` tells the clients which image shows the level and which two world points are the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The entity channels of `soundaliases/channels.def`, a rawfile of `code_post_gfx_mp`: one row per channel
 //! (`name, priority, 2d|3d, restricted|unrestricted, pause|nopause, max voices`), in the order the aliases'
 //! channel index refers to. Empty or missing columns take the defaults.

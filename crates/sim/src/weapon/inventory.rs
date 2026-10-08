@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `PlayerWeapons`: what a player owns and how much ammunition each counter holds.
 //!
 //! The original keeps this in `playerState_t` (`weapons`, `weaponold`, `weaponrechamber`,

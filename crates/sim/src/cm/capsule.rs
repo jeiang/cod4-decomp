@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Capsule against capsule: how entities without a brush model block a moving hull. The
 //! stationary capsule is the entity's bounds read as a capsule (radius = the smaller of half
 //! width and half height, the rest of the height a vertical segment).

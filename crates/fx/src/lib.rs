@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Effect playback. An [`Fx`] runs [`FxEffectDef`]s: each effect spawns its elements (looping ones at an interval,
 //! one-shot ones at once, runners that start further effects), and every element lives for its lifespan moving by
 //! its velocity samples and gravity, bouncing off the world when it collides, and reads its colour, size and

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Player input: keys, mouse, wheel and gamepad resolved through the bind table into one [`InputFrame`] per frame.
 //!
 //! Decoupled from networking: the netplay layer turns an `InputFrame` into a usercmd. Commands keep their original

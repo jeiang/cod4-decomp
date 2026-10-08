@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Client-side prediction: the player's own movement is run locally, with the same
 //! [`sim::pm::run_usercmd`] the server uses, so it responds at once instead of one round trip
 //! later. Every snapshot carries the server's state for the last command it ran; the client

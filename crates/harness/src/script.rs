@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Console-script scenarios.
 //!
 //! A script is console commands separated by newlines or `;`, with `//` and

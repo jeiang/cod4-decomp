@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 # Build the browser client into web/pkg: `nix develop -c web/build.sh [debug]`, then serve with web/serve.py.
 set -euo pipefail
 cd "$(dirname "$0")/.."

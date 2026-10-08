@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Shared simulation: collision traces, player movement, weapons.
 //!
 //! Everything here is plain data and pure functions: it builds for `wasm32` (client prediction

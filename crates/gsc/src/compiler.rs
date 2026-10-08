@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! AST to bytecode. All files are compiled together so cross-file calls bind to function ids.
 
 use std::collections::HashMap;

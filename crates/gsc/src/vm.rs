@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The bytecode VM and its scheduler.
 //!
 //! A thread is its saved frames and value stack. Threads park in time buckets (a map from the

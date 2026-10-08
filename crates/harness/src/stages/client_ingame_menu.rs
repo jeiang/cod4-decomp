@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! `client-ingame-menu`: a player changes class and team in the middle of a round through the stock menus, with the
 //! mouse, and gets back to the game each time. Escape closes the in-game menu; picking a class closes the class menu;
 //! picking the other team closes the team menu, opens the server's class menu, and after that class pick the player

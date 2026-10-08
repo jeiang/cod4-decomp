@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 // The AudioWorklet half of the browser output; the protocol is documented in transport.rs.
 // processorOptions: { capacity, ring?: SharedArrayBuffer, ctrl?: SharedArrayBuffer }. Without `ring` the
 // processor keeps its own ring and fills it from posted Float32Array chunks (interleaved L R).

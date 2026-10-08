@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! What a client is told about one entity: enough to draw it, interpolate it and animate a
 //! player body. Positions are quantized (1/16 unit); prediction uses the player state instead.
 

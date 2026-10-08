@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Triangles the client builds every frame: effect sprites, decals clipped to the world. They are drawn with the same
 //! `VertexKind::Model` pipelines as a skinned model surface, from the frame's dynamic vertex buffer, which is how the
 //! original draws particles and marks of models (`GfxPackedVertex`).

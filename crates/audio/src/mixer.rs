@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The mixer: voices in, interleaved stereo `f32` out.
 //!
 //! [`Mixer::fill`] is the whole audio callback. It never locks, allocates or blocks: voices live in a fixed

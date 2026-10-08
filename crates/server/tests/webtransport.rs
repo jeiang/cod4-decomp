@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Browser clients over WebTransport: a real `wtransport` client, pinning the server's certificate
 //! hash the way a page's `serverCertificateHashes` does, talks to a [`NetSv`] next to UDP clients.
 //! [`WtClient`] is written from the framing rule in the `net::wt` docs, not from the server code.

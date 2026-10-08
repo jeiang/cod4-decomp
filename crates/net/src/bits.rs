@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Bit-packed message buffers. Bits are written least significant first; a message is the byte
 //! string of the bits written so far, padded with zero bits.
 

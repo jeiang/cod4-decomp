@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Decode the dedicated-server zone set with `Consumer::Server`, keep every
 //! asset alive and print the retained heap and per-type asset counts.
 //!

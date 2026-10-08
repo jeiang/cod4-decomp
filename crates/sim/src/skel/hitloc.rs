@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Hit locations, the bullet priority maps, and the box fallback used without a skeleton.
 
 use crate::Vec3;

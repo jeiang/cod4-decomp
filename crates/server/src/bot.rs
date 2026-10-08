@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Server-side bots: they inject usercmds directly (no netchan).
 //!
 //! A bot is a [`Brain`] that, once per tick, reads the world through the same state a player's

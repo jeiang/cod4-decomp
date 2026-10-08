@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! WebTransport endpoint for browser clients: the same datagrams a UDP client exchanges (connect
 //! handshake packets and netchan packets), carried over a WebTransport session.
 //!

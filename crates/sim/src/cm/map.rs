@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! The collision world: a decoded clipmap plus the flattened tables the traces read.
 
 use std::sync::Arc;

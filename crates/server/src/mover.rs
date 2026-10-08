@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Script movers: `moveto`, `rotateto` and friends as trajectories the frame loop advances.
 //!
 //! A move is up to three phases: accelerate for `accel` seconds, cruise, decelerate for

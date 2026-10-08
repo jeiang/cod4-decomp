@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Inventory semantics: ownership, ammunition counters, alternate weapons, limits.
 
 use super::fixtures::{grenade, rifle};

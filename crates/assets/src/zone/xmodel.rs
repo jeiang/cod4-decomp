@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! XModel: bones, collision, hit parts, surfaces/LODs in VERTEX/INDEX.
 
 use super::error::{Result, ZoneError};

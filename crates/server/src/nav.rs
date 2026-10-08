@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Bot navigation mesh generated from collision geometry.
 //!
 //! Stock maps ship no waypoints, so the mesh is derived at map load from the clipmap alone:

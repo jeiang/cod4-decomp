@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Player skeleton against the stock player models and animations. Skipped without `COD4_PATH`.
 
 use super::controllers::{self, ControllerInput};

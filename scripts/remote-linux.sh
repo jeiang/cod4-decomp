@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 # Usage: scripts/remote-linux.sh [git-ref] [-- run-options...]
 # Ships a git ref to the Linux test host, runs build/test/clippy/fmt in the devshell with
 # COD4_PATH=~/cod4e/COD4, and, when run-options are given, runs

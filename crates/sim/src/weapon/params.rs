@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-only
 //! Weapon tunables (the original's dvars). `WeaponParams::default()` is a stock multiplayer
 //! server; fact source: the dvar registrations in `BG_RegisterDvars` and `BG_RegisterPerks`.
 
