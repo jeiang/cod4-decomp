@@ -14,10 +14,10 @@ use std::time::Duration;
 const NAME: &str = "client-heli";
 const LIMIT: Duration = Duration::from_secs(300);
 const ARGS: &[&str] = &["--listen", "--bots", "3"];
-// The bot selects its action slot 4 weapon some seconds after spawning when it is not fighting; the view is
-// placed and both pictures taken in quick succession, as the helicopter flies on and the player falls.
+// The bot selects its action slot 4 weapon some seconds after spawning when it is not fighting. `devheli view`
+// holds the player behind the helicopter every frame; the waits let that reach the client before each picture.
 const STEPS: &str = "ingame=120,wait=2,server=devhardpoint bot helicopter_mp,counter=helicopters:1:120,wait=2,\
-server=devheli view human,shot=heli,set=drawvehicles 0,shot=bare,wait=1";
+server=devheli view human,wait=1,shot=heli,set=drawvehicles 0,wait=1,shot=bare,wait=1";
 /// Share of the picture that must differ with the helicopter in it, and by how much per channel.
 const MIN_CHANGED: f64 = 0.002;
 const CHANNEL_DELTA: i32 = 24;

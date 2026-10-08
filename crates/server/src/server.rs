@@ -139,6 +139,8 @@ pub struct Server {
     pub log: Vec<String>,
     pub echo_stdout: bool,
     pub on_tick: Option<TickHook>,
+    /// `devheli view`: the client held behind the first script vehicle, and how far behind.
+    heli_view: Option<(u16, f32)>,
     net: Option<NetSv>,
     pub map_load_ms: f64,
     /// Levels started so far: a map change or restart, each of which resets the script pool.
@@ -244,6 +246,7 @@ impl Server {
             log: Vec::new(),
             echo_stdout: echo,
             on_tick: None,
+            heli_view: None,
             net: None,
             map_load_ms: 0.0,
             level_loads: 0,
@@ -760,8 +763,8 @@ impl Server {
                 });
                 host.run_calls(&mut run.vm);
             }
-            // Test hook: `devheli view <client|human> [distance]` floats the player `distance` (700) units behind the
-            // first script vehicle (where it will be in half a second), a little below it, looking at it.
+            // Test hook: `devheli view <client|human> [distance]` makes the player a chase camera: every frame it
+            // floats `distance` (700) units behind and to the side of the first script vehicle, a little below it, looking at it.
             "devheli" if arg(1) == Some("view") => {
                 let who = arg(2).ok_or("usage: devheli view <client|human> [distance]")?;
                 let distance = arg(3).map_or(700.0, cvar::parse_float);
@@ -774,38 +777,8 @@ impl Server {
                 } else {
                     cvar::parse_int(who) as u16
                 };
-                let (target, yaw) = self
-                    .game
-                    .vehicles()
-                    .next()
-                    .map(|(_, e, v)| {
-                        // Where it will be when the picture is taken, half a second on.
-                        let at = [0, 1, 2].map(|i| e.origin[i] + v.vel[i] * 0.5);
-                        (at, e.angles[1])
-                    })
-                    .ok_or("devheli: no vehicle")?;
-                // Behind it: opposite its heading, so the view shows its tail and side as it flies away.
-                let (s, c) = yaw.to_radians().sin_cos();
-                let from = [
-                    target[0] - c * distance,
-                    target[1] - s * distance,
-                    target[2] - 120.0,
-                ];
-                let (dx, dy, dz) = (
-                    target[0] - from[0],
-                    target[1] - from[1],
-                    target[2] - (from[2] + 60.0),
-                );
-                let horizontal = dx.hypot(dy);
-                // Quake pitch: negative looks up. The eye is 60 units above the feet.
-                let pitch = -dz.atan2(horizontal).to_degrees();
-                self.game.teleport(n, from);
-                // Floating there: a player in the air would fall out of the picture.
-                if let Some(c) = self.game.client_mut(n) {
-                    c.noclip = true;
-                }
-                self.game
-                    .set_client_view_angle(n, [pitch, dy.atan2(dx).to_degrees(), 0.0]);
+                self.heli_view = Some((n, distance));
+                self.place_heli_view();
             }
             // Test hook: `devheli` prints every script vehicle: where it is, how fast, how it leans and its damage stage.
             "devheli" => {
@@ -1385,6 +1358,7 @@ impl Server {
         for _ in 0..n {
             self.svs_time += self.frame_ms;
             let sample = self.run_frame();
+            self.place_heli_view();
             if let Some(h) = self.on_tick.as_mut() {
                 h(&sample);
             }
@@ -1395,6 +1369,44 @@ impl Server {
             self.cbuf.end_frame();
         }
         self.flush_game_output();
+    }
+
+    /// `devheli view`: floats the client behind the first script vehicle (opposite its heading, turned aside, so the view shows its
+    /// tail and flank as it flies away), a little below it, looking at it. Does nothing without a vehicle.
+    fn place_heli_view(&mut self) {
+        let Some((n, distance)) = self.heli_view else {
+            return;
+        };
+        let Some((target, yaw)) = self
+            .game
+            .vehicles()
+            .next()
+            .map(|(_, e, _)| (e.origin, e.angles[1]))
+        else {
+            return;
+        };
+        // A third of a turn round to the side, so the tilt shows in profile instead of end on.
+        let (s, c) = (yaw - 50.0).to_radians().sin_cos();
+        let from = [
+            target[0] - c * distance,
+            target[1] - s * distance,
+            target[2] - 120.0,
+        ];
+        // The eye is 60 units above the feet.
+        let (dx, dy, dz) = (
+            target[0] - from[0],
+            target[1] - from[1],
+            target[2] - (from[2] + 60.0),
+        );
+        // Quake pitch: negative looks up.
+        let pitch = -dz.atan2(dx.hypot(dy)).to_degrees();
+        self.game.teleport(n, from);
+        // Floating there: a player in the air would fall out of the picture.
+        if let Some(c) = self.game.client_mut(n) {
+            c.noclip = true;
+        }
+        self.game
+            .set_client_view_angle(n, [pitch, dy.atan2(dx).to_degrees(), 0.0]);
     }
 
     /// Runs the server for `d` of wall-clock time (frames at `sv_fps`, console between them).
