@@ -376,6 +376,10 @@ impl NetPlay {
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.view_model(dt, &ps, ps.origin));
             let (events, commands) = self.take_events(&snap);
+            self.look
+                .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+            self.look
+                .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
             let look = self.look.frame(st);
             let (yaw, pitch) = (
                 ps.viewangles[1].to_radians(),

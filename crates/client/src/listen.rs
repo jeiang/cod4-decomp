@@ -76,6 +76,9 @@ impl Listen {
     }
 }
 
+/// Seconds of server time before anyone joins: the spawn logic needs to have scored every spawn point once.
+const SPAWN_SETTLE_SECS: u64 = 3;
+
 fn run(
     install: &Path,
     cfg: &Config,
@@ -103,10 +106,14 @@ fn run(
             .unwrap_or_else(|| format!("gametype {gt} map {}", cfg.map));
         lines.push(format!("set sv_mapRotation \"{rotation}\""));
         lines.push(format!("map {}", cfg.map));
-        lines.push(format!("bots {}", cfg.bots));
         for line in lines {
             s.exec_line(&line).map_err(|e| format!("{line}: {e}"))?;
         }
+        // The spawn logic scores one spawn point per frame from the first frame on; a player placed before its
+        // first sweep reads an unset field and the gametype's spawn script fails (koth does on every map).
+        s.run_for(Duration::from_secs(SPAWN_SETTLE_SECS));
+        let bots = format!("bots {}", cfg.bots);
+        s.exec_line(&bots).map_err(|e| format!("{bots}: {e}"))?;
         Ok((s, SocketAddr::from(([127, 0, 0, 1], addr.port()))))
     };
     let (mut server, addr) = match started() {

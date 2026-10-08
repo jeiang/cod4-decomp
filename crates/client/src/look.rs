@@ -140,11 +140,19 @@ pub struct LookOut {
     pub kick: [f32; 2],
 }
 
+/// How long the goggles take to change the picture, milliseconds.
+const GOGGLES_BLEND_MS: i32 = 300;
+
 pub struct Look {
     /// A script has picked a vision set.
     active: bool,
     from: (Glow, Film),
     to: (Glow, Film),
+    /// What the picture returns to when the goggles come off: the map's own look or the last `visionsetnaked`.
+    day: (Glow, Film),
+    /// The look of `visionsetnight`, shown while the goggles are on.
+    night_set: Option<(Glow, Film)>,
+    goggles: bool,
     start_ms: i32,
     blend_ms: i32,
     /// The names the scripts set, for the report.
@@ -164,6 +172,9 @@ impl Look {
             active: false,
             from: base,
             to: base,
+            day: base,
+            night_set: None,
+            goggles: false,
             start_ms: 0,
             blend_ms: 0,
             naked: None,
@@ -192,11 +203,8 @@ impl Look {
                 match file(&format!("vision/{name}.vision")) {
                     Some(text) => {
                         let art = MapArt::parse(None, Some(&text));
-                        self.active = true;
-                        self.from = self.current(now_ms);
-                        self.to = (art.glow, art.film);
-                        self.start_ms = now_ms;
-                        self.blend_ms = *ms;
+                        self.day = (art.glow, art.film);
+                        self.go(now_ms, *ms);
                     }
                     None => self.missing.push(format!("vision/{name}.vision")),
                 }
@@ -206,7 +214,13 @@ impl Look {
             ServerCmd::Vision {
                 night: true, name, ..
             } => {
-                // Night vision goggles are not drawn yet; the name is kept for the report.
+                match file(&format!("vision/{name}.vision")) {
+                    Some(text) => {
+                        let art = MapArt::parse(None, Some(&text));
+                        self.night_set = Some((art.glow, art.film));
+                    }
+                    None => self.missing.push(format!("vision/{name}.vision")),
+                }
                 self.night = Some(name.clone());
                 true
             }
@@ -232,6 +246,29 @@ impl Look {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Starts the blend from what is on screen to the look that now applies.
+    fn go(&mut self, now_ms: i32, ms: i32) {
+        self.active = true;
+        self.from = self.current(now_ms);
+        self.to = match (self.goggles, self.night_set) {
+            (true, Some(n)) => n,
+            _ => self.day,
+        };
+        self.start_ms = now_ms;
+        self.blend_ms = ms;
+    }
+
+    /// The night vision goggles went on or off (the player state's weapon flag); the look blends to the night set
+    /// and back.
+    pub fn goggles(&mut self, on: bool, now_ms: i32) {
+        if on != self.goggles {
+            self.goggles = on;
+            if self.night_set.is_some() {
+                self.go(now_ms, GOGGLES_BLEND_MS);
+            }
         }
     }
 
@@ -378,6 +415,26 @@ mod tests {
             (end.1.contrast, end.1.enabled, end.0.radius),
             (2.0, true, 10.0)
         );
+    }
+
+    #[test]
+    fn the_goggles_blend_to_the_night_set_and_back_to_the_day_look() {
+        let mut l = look(&[("vision/dark.vision", NIGHT)]);
+        let night = ServerCmd::Vision {
+            night: true,
+            name: "dark".into(),
+            ms: 0,
+        };
+        l.command(&night, 0);
+        assert!(
+            l.frame(100).vision.is_none(),
+            "the set alone changes nothing"
+        );
+        l.goggles(true, 1000);
+        assert_eq!(l.frame(1000).vision.unwrap().1.contrast, 1.0);
+        assert_eq!(l.frame(1300).vision.unwrap().1.contrast, 2.0);
+        l.goggles(false, 2000);
+        assert_eq!(l.frame(2300).vision.unwrap().1.contrast, 1.0);
     }
 
     #[test]
