@@ -387,8 +387,14 @@ pub struct HudFacts {
 }
 
 impl HudFacts {
-    /// `CG_Respawn`'s low-health part: a first snapshot, another viewed client or a changed spawn count starts the
-    /// overlay over, whether or not a dead player state was ever seen in between.
+    /// No snapshot to show: the next one counts as a first snapshot, even from the same client and spawn count.
+    pub fn forget_view(&mut self) {
+        self.prev_spawn = None;
+    }
+
+    /// `CG_Respawn`'s low-health part, keyed on the player whose state is shown (`ps.client_num`, which follows a
+    /// killcam or followed player; not the own client): a first snapshot, another viewed client or a changed spawn
+    /// count starts the overlay over, whether or not a dead player state was ever seen in between.
     pub fn note_spawn(&mut self, client: u16, spawn_count: u16) {
         if self.prev_spawn != Some((client, spawn_count)) {
             self.overlay.reset(&OverlayParams::default());
@@ -552,5 +558,30 @@ mod tests {
         run(&mut h.overlay, &p, 800, 1400, 0.3);
         h.note_spawn(5, 2);
         assert_eq!(h.overlay.alpha(1400), 0.0);
+    }
+
+    #[test]
+    fn following_another_player_at_the_same_spawn_count_starts_over() {
+        let p = OverlayParams::default();
+        let mut h = HudFacts::default();
+        // Watching B, then C (killcam, follow): the shown player changes while the spawn count is equal.
+        h.note_spawn(4, 2);
+        run(&mut h.overlay, &p, 0, 600, 0.3);
+        assert!(h.overlay.alpha(600) > 0.0);
+        h.note_spawn(7, 2);
+        assert_eq!(h.overlay.alpha(600), 0.0);
+    }
+
+    #[test]
+    fn a_new_session_with_the_same_client_and_spawn_count_starts_over() {
+        let p = OverlayParams::default();
+        let mut h = HudFacts::default();
+        h.note_spawn(3, 1);
+        run(&mut h.overlay, &p, 0, 600, 0.3);
+        assert!(h.overlay.alpha(600) > 0.0);
+        // Disconnected (no snapshot), then back as the same client at the same count.
+        h.forget_view();
+        h.note_spawn(3, 1);
+        assert_eq!(h.overlay.alpha(600), 0.0);
     }
 }

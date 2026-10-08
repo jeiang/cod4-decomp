@@ -36,6 +36,7 @@ impl NetPlay {
             (self.net.latest(), self.net.ui_ref(), self.hud_view.as_ref())
         else {
             g.hud.live = false;
+            g.hud.forget_view();
             return;
         };
         let own = snap.own();
@@ -208,7 +209,7 @@ impl NetPlay {
         if first || ammo_now.0 != h.prev_weapon {
             h.weapon_select_time = now;
         }
-        h.note_spawn(own, ps.spawn_count);
+        h.note_spawn(ps.client_num, ps.spawn_count);
         (h.prev_health, h.prev_stance, h.prev_ammo, h.prev_offhand) =
             (h.health, Some(h.stance), ammo_now, off_now);
         (h.prev_origin, h.prev_weapon, h.prev_sprint_left) = (ps.origin, ammo_now.0, h.sprint_left);
