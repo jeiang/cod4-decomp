@@ -23,7 +23,10 @@
 //!
 //! Receivers accept both forms whatever the size: every incoming datagram is one message, and
 //! every incoming unidirectional stream, read to its end, is one message. Bidirectional streams
-//! are ignored. Streams are unordered relative to datagrams and to each other; the netchan copes.
+//! are ignored. Streams and datagrams race each other, so messages can arrive out of order, as
+//! over UDP; the netchan reassembles fragments in any order. Open one stream per message in send
+//! order and read incoming streams in the order `incomingUnidirectionalStreams` yields them, each
+//! to its end, which keeps delivery close to send order.
 //!
 //! Browsers cannot trust a self-signed certificate except by `serverCertificateHashes`: without
 //! configured PEM files the endpoint makes an ECDSA P-256 certificate valid [`SELF_SIGNED_DAYS`]
@@ -34,6 +37,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use wtransport::tls::{Certificate, Identity};
@@ -44,6 +48,10 @@ pub const BROWSER_DATAGRAM: usize = 1200;
 
 /// Validity of a generated certificate; browsers accept hashed certificates for at most 14 days.
 pub const SELF_SIGNED_DAYS: u32 = 13;
+
+/// Stream messages queued for one peer; more are dropped like a congested datagram, so a slow
+/// peer cannot make the server pile up memory.
+const MAX_QUEUED: usize = 128;
 
 /// How long a peer may take to finish a stream message.
 const STREAM_TIMEOUT: Duration = Duration::from_secs(3);
@@ -63,13 +71,20 @@ pub struct Started {
     pub cert_hash: Option<[u8; 32]>,
 }
 
-type Sessions = Arc<Mutex<HashMap<SocketAddr, Connection>>>;
+/// A session and the queue of stream messages waiting to be sent on it.
+#[derive(Clone)]
+struct Session {
+    conn: Connection,
+    queue: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+}
+
+type Sessions = Arc<Mutex<HashMap<SocketAddr, Session>>>;
 
 pub struct WtTransport {
     local: SocketAddr,
     sessions: Sessions,
     inbox: Inbox,
-    rt: tokio::runtime::Handle,
     /// Dropping this stops the endpoint's thread.
     _stop: tokio::sync::oneshot::Sender<()>,
 }
@@ -104,7 +119,7 @@ impl WtTransport {
                     Ok(v) => v,
                     Err(e) => return drop(ready_tx.send(Err(e))),
                 };
-                let _ = ready_tx.send(Ok((rt.handle().clone(), started)));
+                let _ = ready_tx.send(Ok(started));
                 rt.block_on(async {
                     tokio::select! {
                         () = accept_loop(endpoint, s2, q2) => {}
@@ -112,14 +127,13 @@ impl WtTransport {
                     }
                 });
             })?;
-        let (rt, started) = ready_rx
+        let started = ready_rx
             .recv()
             .map_err(|_| io::Error::other("webtransport thread died"))??;
         let t = Self {
             local: started.addr,
             sessions,
             inbox,
-            rt,
             _stop: stop,
         };
         Ok((t, started))
@@ -127,7 +141,11 @@ impl WtTransport {
 
     /// The datagram limit of `peer`'s session, if it has one (see [`datagram_limit`]).
     pub fn datagram_limit_of(&self, peer: SocketAddr) -> Option<usize> {
-        self.sessions.lock().unwrap().get(&peer).map(datagram_limit)
+        self.sessions
+            .lock()
+            .unwrap()
+            .get(&peer)
+            .map(|s| datagram_limit(&s.conn))
     }
 }
 
@@ -193,14 +211,24 @@ async fn session(
         return;
     };
     let peer = conn.remote_address();
-    sessions.lock().unwrap().insert(peer, conn.clone());
+    let (queue, rx) = tokio::sync::mpsc::unbounded_channel();
+    let queued = Arc::new(AtomicUsize::new(0));
+    sessions.lock().unwrap().insert(
+        peer,
+        Session {
+            conn: conn.clone(),
+            queue,
+            queued: queued.clone(),
+        },
+    );
     tokio::select! {
         () = datagrams(&conn, peer, &inbox) => {}
         () = streams(&conn, peer, &inbox) => {}
+        () = send_streams(&conn, rx, &queued) => {}
     }
     let mut s = sessions.lock().unwrap();
     if s.get(&peer)
-        .is_some_and(|c| c.stable_id() == conn.stable_id())
+        .is_some_and(|c| c.conn.stable_id() == conn.stable_id())
     {
         s.remove(&peer);
     }
@@ -212,25 +240,45 @@ async fn datagrams(conn: &Connection, peer: SocketAddr, inbox: &Inbox) {
     }
 }
 
+/// Reads each incoming stream to its end before the next: streams are accepted in the order the
+/// peer opened them, and a netchan message's fragments must be handled in order.
 async fn streams(conn: &Connection, peer: SocketAddr, inbox: &Inbox) {
     while let Ok(mut rx) = conn.accept_uni().await {
-        let inbox = inbox.clone();
-        tokio::spawn(async move {
-            let read = async {
-                let mut msg = Vec::new();
-                let mut chunk = [0u8; 2048];
-                while let Some(n) = rx.read(&mut chunk).await.ok()? {
-                    msg.extend_from_slice(&chunk[..n]);
-                    if msg.len() > MAX_MESSAGE {
-                        return None;
-                    }
+        let read = async {
+            let mut msg = Vec::new();
+            let mut chunk = [0u8; 2048];
+            while let Some(n) = rx.read(&mut chunk).await.ok()? {
+                msg.extend_from_slice(&chunk[..n]);
+                if msg.len() > MAX_MESSAGE {
+                    return None;
                 }
-                Some(msg)
-            };
-            if let Ok(Some(msg)) = tokio::time::timeout(STREAM_TIMEOUT, read).await {
-                inbox.push(peer, &msg);
             }
-        });
+            Some(msg)
+        };
+        if let Ok(Some(msg)) = tokio::time::timeout(STREAM_TIMEOUT, read).await {
+            inbox.push(peer, &msg);
+        }
+    }
+}
+
+/// Sends queued messages one stream each, opening them in queue order (without waiting for the
+/// peer to acknowledge one before opening the next).
+async fn send_streams(
+    conn: &Connection,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    queued: &AtomicUsize,
+) {
+    while let Some(data) = rx.recv().await {
+        queued.fetch_sub(1, Ordering::SeqCst);
+        let Ok(opening) = conn.open_uni().await else {
+            return;
+        };
+        let Ok(mut tx) = opening.await else { return };
+        if tx.write_all(&data).await.is_ok() {
+            tokio::spawn(async move {
+                let _ = tx.finish().await;
+            });
+        }
     }
 }
 
@@ -240,22 +288,19 @@ impl Transport for WtTransport {
     }
 
     fn send_to(&mut self, to: SocketAddr, data: &[u8]) {
-        let Some(conn) = self.sessions.lock().unwrap().get(&to).cloned() else {
+        let Some(Session {
+            conn,
+            queue,
+            queued,
+        }) = self.sessions.lock().unwrap().get(&to).cloned()
+        else {
             return;
         };
         if data.len() <= datagram_limit(&conn) {
             let _ = conn.send_datagram(data);
-        } else if data.len() <= MAX_MESSAGE {
-            let data = data.to_vec();
-            self.rt.spawn(async move {
-                let Ok(opening) = conn.open_uni().await else {
-                    return;
-                };
-                let Ok(mut tx) = opening.await else { return };
-                if tx.write_all(&data).await.is_ok() {
-                    let _ = tx.finish().await;
-                }
-            });
+        } else if data.len() <= MAX_MESSAGE && queued.load(Ordering::SeqCst) < MAX_QUEUED {
+            queued.fetch_add(1, Ordering::SeqCst);
+            let _ = queue.send(data.to_vec());
         }
     }
 

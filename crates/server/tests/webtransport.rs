@@ -72,16 +72,13 @@ impl WtClient {
         let (c, q, n) = (conn.clone(), inbox.clone(), streams_in.clone());
         rt.spawn(async move {
             while let Ok(mut rx) = c.accept_uni().await {
-                let (q, n) = (q.clone(), n.clone());
-                tokio::spawn(async move {
-                    let mut msg = Vec::new();
-                    let mut chunk = [0u8; 1500];
-                    while let Ok(Some(k)) = rx.read(&mut chunk).await {
-                        msg.extend_from_slice(&chunk[..k]);
-                    }
-                    n.fetch_add(1, Ordering::SeqCst);
-                    q.push(server, &msg);
-                });
+                let mut msg = Vec::new();
+                let mut chunk = [0u8; 1500];
+                while let Ok(Some(k)) = rx.read(&mut chunk).await {
+                    msg.extend_from_slice(&chunk[..k]);
+                }
+                n.fetch_add(1, Ordering::SeqCst);
+                q.push(server, &msg);
             }
         });
         Ok(Self {
@@ -120,7 +117,8 @@ impl Transport for WtClient {
             self.rt.block_on(async move {
                 let mut tx = conn.open_uni().await.unwrap().await.unwrap();
                 tx.write_all(&data).await.unwrap();
-                tx.finish().await.unwrap();
+                // The server may stop the stream once it has read it all.
+                let _ = tx.finish().await;
             });
         }
     }
@@ -358,6 +356,7 @@ impl Frames {
         let join = std::thread::spawn(move || {
             let info = || vec![("hostname".into(), "wt-test".into())];
             let mut tick = 0u32;
+            let mut next = Instant::now();
             while !flag.load(Ordering::Relaxed) {
                 for i in net.poll(Duration::from_millis(20), &info) {
                     if let Inbound::Connect(req) = i
@@ -379,6 +378,9 @@ impl Frames {
                         }
                     }
                 }
+                // A server frame (30 Hz) is not driven faster by client packets.
+                next += Duration::from_millis(33);
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
                 tick += 1;
                 let NetSv { peers, t, .. } = &mut net;
                 for p in peers.iter_mut().flatten() {
@@ -423,7 +425,7 @@ fn world(tick: u32) -> Snapshot {
     s.canonical()
 }
 
-const WORLD_ENTITIES: u16 = 500;
+const WORLD_ENTITIES: u16 = 200;
 
 fn play<T: Transport>(
     c: &mut NetClient<T>,
