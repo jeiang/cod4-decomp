@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Random-access byte sources. Object-safe so other backends (browser OPFS,
-//! `File`) can implement it later.
+//! Random-access byte sources. Object-safe so other backends (the browser's picked files and OPFS) can implement it.
 
-use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -20,17 +18,30 @@ pub trait ReadAt: Send + Sync {
     fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
 }
 
-/// A [`ReadAt`] over an open file.
+/// A [`ReadAt`] over an open file (on the web, over the mounted source of that path).
 pub struct FileSource {
-    file: File,
+    #[cfg(not(target_arch = "wasm32"))]
+    file: std::fs::File,
+    #[cfg(target_arch = "wasm32")]
+    source: std::sync::Arc<dyn ReadAt>,
     len: u64,
 }
 
 impl FileSource {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: &Path) -> io::Result<Self> {
-        let file = File::open(path)?;
+        let file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
         Ok(Self { file, len })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let source = crate::fs::File::open(path)?.source();
+        Ok(Self {
+            len: source.len(),
+            source,
+        })
     }
 }
 
@@ -40,6 +51,10 @@ impl ReadAt for FileSource {
     }
 
     fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.source.read_exact_at(offset, buf)
+        }
         #[cfg(unix)]
         {
             std::os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)
@@ -59,7 +74,7 @@ impl ReadAt for FileSource {
             }
             Ok(())
         }
-        #[cfg(not(any(unix, windows)))]
+        #[cfg(not(any(unix, windows, target_arch = "wasm32")))]
         {
             let _ = (&self.file, offset, buf);
             Err(io::ErrorKind::Unsupported.into())

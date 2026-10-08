@@ -81,7 +81,7 @@ impl Hit<'_> {
     pub fn read(&self) -> io::Result<Vec<u8>> {
         match self {
             Hit::Iwd { iwd, entry } => iwd.read(entry),
-            Hit::File(path) => std::fs::read(path),
+            Hit::File(path) => crate::fs::read(path),
         }
     }
 }
@@ -146,17 +146,17 @@ fn find_file(dir: &Path, norm: &str) -> Option<PathBuf> {
     let mut cur = dir.to_path_buf();
     for part in norm.split('/').filter(|p| !p.is_empty()) {
         let direct = cur.join(part);
-        cur = if direct.exists() {
+        cur = if crate::fs::exists(&direct) {
             direct
         } else {
-            std::fs::read_dir(&cur)
+            crate::fs::read_dir(&cur)
                 .ok()?
                 .flatten()
                 .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == part)?
                 .path()
         };
     }
-    cur.is_file().then_some(cur)
+    crate::fs::is_file(&cur).then_some(cur)
 }
 
 /// Builds the search path the way `AddGameDirectory` does: every addition is
@@ -202,7 +202,7 @@ impl Builder {
         subfolder_lang: Option<usize>,
     ) -> io::Result<()> {
         let path = self.base.join(rel);
-        if !path.is_dir() {
+        if !crate::fs::is_dir(&path) {
             return Ok(());
         }
         self.push(Node {
@@ -211,7 +211,7 @@ impl Builder {
         });
 
         let mut found: Vec<(String, Option<usize>)> = vec![];
-        for e in std::fs::read_dir(&path)? {
+        for e in crate::fs::read_dir(&path)? {
             let name = e?.file_name().to_string_lossy().into_owned();
             if !name.to_ascii_lowercase().ends_with(".iwd") {
                 continue;

@@ -17,3 +17,4 @@ pub mod net_match;
 pub mod net_ui;
 pub mod selftest;
 pub mod server;
+pub mod web_client;

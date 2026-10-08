@@ -19,7 +19,7 @@ use render::{Gpu, TextureCache};
 use server::content::Install;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use web_time::Instant;
 
 /// What the app does on the menus' behalf after a UI call.
 #[derive(Debug, PartialEq)]

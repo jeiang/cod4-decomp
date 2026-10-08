@@ -31,7 +31,8 @@ use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
 use sim::weapon::{PlayerWeapons, WeaponTable};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// The shortest interval between two usercmds.
 const CMD_INTERVAL: Duration = Duration::from_millis(8);

@@ -44,11 +44,27 @@
               libxi
               libxrandr
             ];
+            # The CLI must match the wasm-bindgen crate in Cargo.lock exactly; nixpkgs lags it.
+            wasm-bindgen-cli = pkgs.buildWasmBindgenCli rec {
+              src = pkgs.fetchCrate {
+                pname = "wasm-bindgen-cli";
+                version = "0.2.129";
+                hash = "sha256-pcecKQd7E8Opw6bkFoE569epUi7gh5qpQF1e5PJY6V8=";
+              };
+              cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+                inherit src;
+                inherit (src) pname version;
+                hash = "sha256-vmUrWVU7kPJJxO5qIVeAkwQyWDELO1Z4Z5gitz2kco8=";
+              };
+            };
           in
           pkgs.mkShell {
             packages = [
               (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
               pkgs.nasm # rav1e x86_64 asm
+              wasm-bindgen-cli # web/ build
+              pkgs.binaryen # wasm-opt for web/ release builds
+              pkgs.python3 # web/serve.py
             ]
             # gilrs (gamepads) links libudev on Linux.
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [

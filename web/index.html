@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cod4e</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #ddd; font: 15px/1.45 system-ui, sans-serif; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none; }
+  #setup { max-width: 38rem; margin: 6vh auto; padding: 0 1.5rem; overflow: auto; max-height: 88vh; }
+  h1 { font-size: 1.3rem; margin: 0 0 .25rem; }
+  p, label { margin: .4rem 0; }
+  .note { color: #999; }
+  #status.bad { color: #f88; }
+  #drop { border: 2px dashed #555; border-radius: 6px; padding: .8rem 1rem; margin: 1rem 0; }
+  #drop.over { border-color: #8cf; }
+  button { font: inherit; padding: .35rem .9rem; }
+  input, select { font: inherit; }
+  fieldset { border: 1px solid #333; border-radius: 6px; margin: 1rem 0; }
+  #overlay { position: fixed; top: 6px; left: 8px; margin: 0; padding: 6px 8px; background: rgba(0, 0, 0, .65); color: #9f9;
+             font: 12px/1.35 ui-monospace, monospace; white-space: pre; pointer-events: none; max-width: 70vw; overflow: hidden; }
+</style>
+</head>
+<body>
+<canvas id="cod4e-canvas" hidden tabindex="0"></canvas>
+<pre id="overlay" hidden></pre>
+<main id="setup">
+  <h1>cod4e</h1>
+  <p class="note">An engine that plays Call of Duty 4: Modern Warfare multiplayer from your own copy of the game. The
+    game's files are read in this browser only; nothing is uploaded.</p>
+  <p id="gpu" class="note"></p>
+  <div id="drop">
+    <p><button id="browse" hidden>Choose the install folder…</button>
+      <label>Choose the install folder: <input id="dir" type="file" webkitdirectory multiple></label></p>
+    <p class="note">or drop the folder here. It is the one holding <code>main</code> and <code>zone</code>.</p>
+    <label><input id="keep" type="checkbox" checked> Keep a copy in this browser (about 4 GB) so I do not pick again</label>
+    <p id="copy" class="note"></p>
+    <button id="forget" hidden>Delete the saved copy</button>
+  </div>
+  <fieldset>
+    <legend>Play</legend>
+    <label>Server <input id="server" size="26" placeholder="host:port (empty: menus)"></label><br>
+    <label>Name <input id="name" size="14" value="Player"></label>
+    <label>Map <input id="map" size="12" value="mp_crash"></label>
+    <label>Graphics <select id="backend"><option>auto</option><option>webgpu</option><option>webgl</option></select></label>
+  </fieldset>
+  <p><button id="play" disabled>Play</button></p>
+  <p id="status"></p>
+  <p class="note">F3 shows the debug overlay (graphics backend, frame times, memory).</p>
+</main>
+<script type="module" src="main.js"></script>
+</body>
+</html>

@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Display modes: what the monitors offer, what the user asked for, and the window that results.
 
+#[cfg(not(target_arch = "wasm32"))]
 use serde_json::{Value, json};
+#[cfg(not(target_arch = "wasm32"))]
 use winit::dpi::{PhysicalSize, Size};
 use winit::event_loop::ActiveEventLoop;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::monitor::{MonitorHandle, VideoModeHandle};
-use winit::window::{Fullscreen, Window, WindowAttributes};
+use winit::window::Window;
+#[cfg(not(target_arch = "wasm32"))]
+use winit::window::{Fullscreen, WindowAttributes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FullscreenKind {
@@ -60,6 +65,7 @@ pub fn hor_plus(fov_4_3: f32, aspect: f32) -> f32 {
     2.0 * (tan_x * 0.75 * aspect).atan()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn mode_json(m: &VideoModeHandle) -> Value {
     json!({
         "width": m.size().width,
@@ -69,6 +75,7 @@ fn mode_json(m: &VideoModeHandle) -> Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn monitors_json(el: &ActiveEventLoop) -> Value {
     let primary = el.primary_monitor();
     el.available_monitors()
@@ -90,6 +97,7 @@ pub fn monitors_json(el: &ActiveEventLoop) -> Value {
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The sizes and refresh rates (Hz) the window's monitor offers, for the graphics menus.
 pub fn video_modes(window: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
     let Some(m) = window
@@ -106,6 +114,13 @@ pub fn video_modes(window: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
     (sizes.collect(), rates.collect())
 }
 
+/// A page has no video modes to offer.
+#[cfg(target_arch = "wasm32")]
+pub fn video_modes(_: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
+    (Vec::new(), Vec::new())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn monitor(el: &ActiveEventLoop) -> Option<MonitorHandle> {
     el.primary_monitor()
         .or_else(|| el.available_monitors().next())
@@ -113,6 +128,7 @@ fn monitor(el: &ActiveEventLoop) -> Option<MonitorHandle> {
 
 /// The video mode closest to the request on `m`: the size asked for (else native), then the refresh nearest to the
 /// one asked for (else the highest).
+#[cfg(not(target_arch = "wasm32"))]
 fn pick_mode(m: &MonitorHandle, r: &Request) -> Option<VideoModeHandle> {
     let want = r.size.unwrap_or((m.size().width, m.size().height));
     let mut modes: Vec<VideoModeHandle> = m
@@ -130,6 +146,7 @@ fn pick_mode(m: &MonitorHandle, r: &Request) -> Option<VideoModeHandle> {
 }
 
 /// Create the window for `req`. Returns it with a note about any fallback taken.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn create_window(
     el: &ActiveEventLoop,
     req: &Request,
@@ -158,6 +175,32 @@ pub fn create_window(
     }
     let window = el.create_window(attrs).map_err(|e| e.to_string())?;
     Ok((window, note))
+}
+
+/// Create the window: the page's canvas, which the page lays out, so the window is whatever size the canvas has.
+#[cfg(target_arch = "wasm32")]
+pub fn create_window(
+    el: &ActiveEventLoop,
+    _req: &Request,
+) -> Result<(Window, Option<String>), String> {
+    use winit::platform::web::WindowAttributesExtWebSys;
+    let attrs = Window::default_attributes()
+        .with_title("cod4e")
+        .with_canvas(Some(page_canvas()?))
+        .with_prevent_default(true);
+    let window = el.create_window(attrs).map_err(|e| e.to_string())?;
+    Ok((window, None))
+}
+
+/// The page's `<canvas id="cod4e-canvas">`.
+#[cfg(target_arch = "wasm32")]
+fn page_canvas() -> Result<web_sys::HtmlCanvasElement, String> {
+    use wasm_bindgen::JsCast;
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id("cod4e-canvas"))
+        .and_then(|e| e.dyn_into().ok())
+        .ok_or_else(|| "the page has no canvas".to_owned())
 }
 
 #[cfg(test)]

@@ -25,7 +25,8 @@ use serde_json::{Value, json};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -36,14 +37,27 @@ const RECORD_AFTER_STABLE: u32 = 10;
 /// How long joining waits for the server to say which map it plays.
 const JOIN_QUERY: Duration = Duration::from_secs(2);
 
+/// The GPU, once the browser has handed it out (the adapter and device are asynchronous there).
+struct Ready {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    gpu: Arc<Gpu>,
+    note: Option<String>,
+}
+
 pub fn run(cli: Cli) -> Result<(), String> {
-    let el = EventLoop::new().map_err(|e| format!("no display: {e}"))?;
+    let el = EventLoop::<Ready>::with_user_event()
+        .build()
+        .map_err(|e| format!("no display: {e}"))?;
     el.set_control_flow(ControlFlow::Poll);
+    #[cfg(not(target_arch = "wasm32"))]
     if cli.list {
         let mut l = Lister { error: None };
         el.run_app(&mut l).map_err(|e| e.to_string())?;
         return l.error.map_or(Ok(()), Err);
     }
+    #[cfg(target_arch = "wasm32")]
+    crate::web::log("loading the map");
     let t = Instant::now();
     let map = if cli.menu_mode() {
         None
@@ -54,36 +68,88 @@ pub fn run(cli: Cli) -> Result<(), String> {
         )
     };
     let load_ms = t.elapsed().as_secs_f64() * 1000.0;
+    #[cfg(target_arch = "wasm32")]
+    crate::web::log(&format!("map loaded in {load_ms:.0} ms"));
     let mut v = Viewer {
         cli,
         map,
         load_ms,
         st: None,
         error: None,
+        proxy: None,
+        #[cfg(target_arch = "wasm32")]
+        starting: false,
     };
-    el.run_app(&mut v).map_err(|e| e.to_string())?;
-    if let Some(st) = v.st.as_mut()
-        && let Err(e) = st.input.save()
+    v.proxy = Some(el.create_proxy());
+    #[cfg(target_arch = "wasm32")]
     {
-        eprintln!("cannot save the config: {e}");
+        use winit::platform::web::EventLoopExtWebSys;
+        // The page owns the loop; there is no exit to return through.
+        el.spawn_app(v);
+        Ok(())
     }
-    if let Some(st) = v.st.as_mut() {
-        if let Some(n) = st.net.as_mut() {
-            n.disconnect();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        el.run_app(&mut v).map_err(|e| e.to_string())?;
+        if let Some(st) = v.st.as_mut()
+            && let Err(e) = st.input.save()
+        {
+            eprintln!("cannot save the config: {e}");
         }
-        if let Some(l) = st.listen.as_mut() {
-            l.finish();
+        if let Some(st) = v.st.as_mut() {
+            if let Some(n) = st.net.as_mut() {
+                n.disconnect();
+            }
+            if let Some(l) = st.listen.as_mut() {
+                l.finish();
+            }
         }
+        let out = v.cli.out.clone();
+        if let (Some(e), Some(out)) = (&v.error, out) {
+            let _ = std::fs::create_dir_all(&out);
+            let _ = std::fs::write(
+                out.join("client.json"),
+                json!({"status": "error", "error": e}).to_string(),
+            );
+        }
+        v.error.map_or(Ok(()), Err)
     }
-    let out = v.cli.out.clone();
-    if let (Some(e), Some(out)) = (&v.error, out) {
-        let _ = std::fs::create_dir_all(&out);
-        let _ = std::fs::write(
-            out.join("client.json"),
-            json!({"status": "error", "error": e}).to_string(),
-        );
+}
+
+/// The GPU backends a `--backend` name allows: `auto` leaves wgpu's choice (every backend the platform has; on the
+/// web WebGPU, and WebGL2 when the browser has no WebGPU); otherwise a comma list of wgpu backend names (`vulkan`,
+/// `metal`, `dx12`, `gl` or `webgl`, `webgpu`).
+fn instance_descriptor(name: &str) -> Result<wgpu::InstanceDescriptor, String> {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    if name == "auto" {
+        return Ok(desc);
     }
-    v.error.map_or(Ok(()), Err)
+    let b = wgpu::Backends::from_comma_list(match name {
+        "webgl" => "gl",
+        n => n,
+    });
+    if b.is_empty() {
+        return Err(format!("unknown --backend {name}"));
+    }
+    desc.backends = b;
+    Ok(desc)
+}
+
+/// What the page's debug overlay shows: the graphics backend and where the frame time goes.
+#[cfg(target_arch = "wasm32")]
+fn overlay_values(st: &State) -> Value {
+    let info = st.gpu.describe();
+    let recent = &st.samples[st.samples.len().saturating_sub(60)..];
+    let mean = |i: usize| recent.iter().map(|s| s[i]).sum::<f64>() / recent.len().max(1) as f64;
+    json!({
+        "backend": format!("{} ({})", info.backend, info.name),
+        "BC textures on the GPU": st.gpu.bc,
+        "frames": st.samples.len(),
+        "CPU ms/frame (last 60)": format!("{:.1}", mean(0)),
+        "frame interval ms (last 60)": format!("{:.1}", mean(1)),
+        "surfaces drawn": st.surfaces_drawn.last().copied().unwrap_or(0.0),
+        "wasm memory MiB": crate::web::memory_bytes() >> 20,
+    })
 }
 
 fn pick_present(
@@ -105,6 +171,7 @@ fn pick_present(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn present_names(caps: &[wgpu::PresentMode]) -> Vec<String> {
     caps.iter()
         .map(|p| format!("{p:?}").to_lowercase())
@@ -120,11 +187,13 @@ fn gpu_json(g: &Gpu) -> Value {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Lister {
     error: Option<String>,
 }
 
-impl ApplicationHandler for Lister {
+#[cfg(not(target_arch = "wasm32"))]
+impl ApplicationHandler<Ready> for Lister {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         let result = (|| -> Result<Value, String> {
             let attrs = Window::default_attributes().with_visible(false);
@@ -199,6 +268,9 @@ struct State {
     shot_request: Option<String>,
     /// The sound system of the menus when no match is running (started by the first menu sound).
     menu_sound: Option<crate::sound::ClientSound>,
+    /// When the page's debug overlay was last given its values.
+    #[cfg(target_arch = "wasm32")]
+    overlay_at: Instant,
 }
 
 /// The `--ui-tour` script: which menu is open and how many frames it has been shown.
@@ -247,18 +319,75 @@ struct Viewer {
     load_ms: f64,
     st: Option<State>,
     error: Option<String>,
+    /// Where the GPU arrives on the web.
+    proxy: Option<winit::event_loop::EventLoopProxy<Ready>>,
+    /// The browser window is open and the GPU has been asked for.
+    #[cfg(target_arch = "wasm32")]
+    starting: bool,
 }
 
 impl Viewer {
+    /// Window, surface and GPU, where the platform can wait for the adapter.
+    #[cfg(not(target_arch = "wasm32"))]
     fn init(&mut self, el: &ActiveEventLoop) -> Result<State, String> {
         let (window, note) = display::create_window(el, &self.cli.request)?;
         let window = Arc::new(window);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(instance_descriptor(&self.cli.backend)?);
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| e.to_string())?;
         let gpu =
             Arc::new(Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?);
+        self.finish_init(Ready {
+            window,
+            surface,
+            gpu,
+            note,
+        })
+    }
+
+    /// The browser hands out the adapter and device asynchronously: open the window now and finish in
+    /// [`ApplicationHandler::user_event`] when the GPU arrives.
+    #[cfg(target_arch = "wasm32")]
+    fn begin_init(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
+        let (window, note) = display::create_window(el, &self.cli.request)?;
+        let window = Arc::new(window);
+        let proxy = self.proxy.clone().ok_or("no event loop proxy")?;
+        let desc = instance_descriptor(&self.cli.backend)?;
+        wasm_bindgen_futures::spawn_local(async move {
+            let ready = async {
+                let instance = wgpu::util::new_instance_with_webgpu_detection(desc).await;
+                let surface = instance
+                    .create_surface(window.clone())
+                    .map_err(|e| e.to_string())?;
+                let gpu = Gpu::with_instance_async(instance, Some(&surface))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>(Ready {
+                    window,
+                    surface,
+                    gpu: Arc::new(gpu),
+                    note,
+                })
+            }
+            .await;
+            match ready {
+                Ok(r) => {
+                    let _ = proxy.send_event(r);
+                }
+                Err(e) => crate::web::fatal(&format!("no usable graphics: {e}")),
+            }
+        });
+        Ok(())
+    }
+
+    fn finish_init(&mut self, ready: Ready) -> Result<State, String> {
+        let Ready {
+            window,
+            surface,
+            gpu,
+            note,
+        } = ready;
         let caps = surface.get_capabilities(&gpu.adapter);
         // The shaders write display-referred values: an 8-bit linear (non-sRGB) target, not an HDR one.
         let format = [
@@ -291,10 +420,18 @@ impl Viewer {
             .map_err(|e| format!("cannot open the install: {e}"))?;
         let renderer = match &self.map {
             Some(map) => {
+                #[cfg(target_arch = "wasm32")]
+                crate::web::log("building the scene");
                 let scene = Scene::new(&gpu, map);
+                #[cfg(target_arch = "wasm32")]
+                crate::web::log("building the renderer");
                 let mut r = Renderer::new(gpu.clone(), scene, map, TextureCache::new(Some(vfs), 0));
                 r.settings = self.cli.settings;
+                #[cfg(target_arch = "wasm32")]
+                crate::web::log("compiling pipelines");
                 r.warm(config.format);
+                #[cfg(target_arch = "wasm32")]
+                crate::web::log("renderer ready");
                 Some(r)
             }
             None => None,
@@ -313,6 +450,7 @@ impl Viewer {
             || flythrough::Tour::new(&[], (Vec3::splat(-1000.0), Vec3::splat(1000.0))).pose(0.0),
             |t| t.pose(0.0),
         );
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(out) = &self.cli.out {
             std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
         }
@@ -495,6 +633,8 @@ impl Viewer {
             }),
             shot_request: None,
             menu_sound: None,
+            #[cfg(target_arch = "wasm32")]
+            overlay_at: now,
             ui_tour: self.cli.ui_tour.as_ref().map(|_| UiTour {
                 menus: TOUR_MENUS.to_vec(),
                 index: 0,
@@ -505,17 +645,42 @@ impl Viewer {
     }
 }
 
-impl ApplicationHandler for Viewer {
+impl ApplicationHandler<Ready> for Viewer {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.st.is_some() {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         match self.init(el) {
             Ok(s) => {
                 s.window.request_redraw();
                 self.st = Some(s);
             }
             Err(e) => {
+                #[cfg(target_arch = "wasm32")]
+                crate::web::fatal(&e);
+                self.error = Some(e);
+                el.exit();
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        if !self.starting {
+            self.starting = true;
+            if let Err(e) = self.begin_init(el) {
+                crate::web::fatal(&e);
+            }
+        }
+    }
+
+    fn user_event(&mut self, el: &ActiveEventLoop, ready: Ready) {
+        match self.finish_init(ready) {
+            Ok(s) => {
+                s.window.request_redraw();
+                self.st = Some(s);
+            }
+            Err(e) => {
+                #[cfg(target_arch = "wasm32")]
+                crate::web::fatal(&e);
                 self.error = Some(e);
                 el.exit();
             }
@@ -549,6 +714,8 @@ impl ApplicationHandler for Viewer {
             WindowEvent::Focused(false) => release_pointer(st),
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.frame(el) {
+                    #[cfg(target_arch = "wasm32")]
+                    crate::web::fatal(&e);
                     self.error = Some(e);
                     el.exit();
                 }
@@ -834,6 +1001,11 @@ impl Viewer {
             st.rss = rss();
         }
         st.samples.push([cpu_ms, interval, st.rss as f64]);
+        #[cfg(target_arch = "wasm32")]
+        if st.overlay_at.elapsed() >= Duration::from_millis(500) {
+            st.overlay_at = Instant::now();
+            crate::web::overlay(&overlay_values(st));
+        }
         if self.cli.timed() && t >= self.cli.duration {
             self.finish(el)?;
             el.exit();
@@ -1535,6 +1707,13 @@ fn fly(st: &mut State, f: &InputFrame, dt: f32) {
     st.pitch = (st.pitch - f.look_delta_pitch.to_radians()).clamp(-1.5, 1.5);
 }
 
+/// Memory the process holds, bytes: on the web the wasm linear memory (it only grows).
+#[cfg(target_arch = "wasm32")]
+fn rss() -> u64 {
+    (core::arch::wasm32::memory_size::<0>() * 65536) as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn rss() -> u64 {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     let Ok(pid) = sysinfo::get_current_pid() else {

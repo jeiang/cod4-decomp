@@ -12,6 +12,7 @@ mod flythrough;
 mod hud;
 mod hudstate;
 mod input;
+#[cfg_attr(target_arch = "wasm32", path = "listen_web.rs")]
 mod listen;
 mod models;
 mod netplay;
@@ -23,13 +24,18 @@ mod shell;
 mod showcase;
 mod sound;
 mod ui;
+#[cfg_attr(target_arch = "wasm32", path = "video_web.rs")]
 mod video;
 mod viewmodel;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 use display::{FullscreenKind, Request};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::ExitCode;
 
+#[cfg(not(target_arch = "wasm32"))]
 const USAGE: &str = "\
 cod4e: CoD4 multiplayer client (world viewer)
 
@@ -40,6 +46,7 @@ usage: cod4e [options]
   --refresh <hz>         refresh rate for exclusive fullscreen
   --fullscreen <kind>    windowed (default), borderless or exclusive
   --present <mode>       auto (default, vsync), fifo, mailbox or immediate
+  --backend <name>       graphics backend: auto (default), or one of vulkan, metal, dx12, gl, webgpu (webgpu or webgl in a browser)
   --shadows <mode>       sun shadow maps: depth (default, hardware comparison), color or off
   --no-fog / --no-lights switch the map's fog / spot and omni primary lights off
   --fov <degrees>        horizontal field of view at 4:3 (default 80); wider displays widen it (Hor+)
@@ -75,6 +82,8 @@ pub struct Cli {
     pub map: String,
     pub request: Request,
     pub present: String,
+    /// Graphics backends to try: `auto` (default), or wgpu backend names; `webgpu` and `webgl` on the web.
+    pub backend: String,
     pub fov: f32,
     pub settings: render::Settings,
     pub flythrough: bool,
@@ -134,6 +143,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         map: "mp_crash".into(),
         request: Request::default(),
         present: "auto".into(),
+        backend: "auto".into(),
         fov: 80.0,
         settings: render::Settings::default(),
         flythrough: false,
@@ -180,6 +190,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
                     FullscreenKind::parse(&v).ok_or(format!("unknown fullscreen kind {v}"))?;
             }
             "--present" => c.present = val(a)?,
+            "--backend" => c.backend = val(a)?,
             "--shadows" => {
                 c.settings.shadows = match val(a)?.as_str() {
                     "depth" => render::ShadowMode::Depth,
@@ -234,6 +245,14 @@ fn parse(args: &[String]) -> Result<Cli, String> {
     Ok(c)
 }
 
+/// The browser starts here when the page instantiates the module: the page has put the install and the arguments in
+/// place (see `web`).
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    web::start();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli = match parse(&args) {

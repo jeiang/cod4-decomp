@@ -10,8 +10,6 @@ use assets::vfs::Vfs;
 use assets::zone::sound::{SoundAlias, SoundAliasList, SoundSource, SpeakerMap};
 use assets::zone::{Asset, DecodeFilter, XAssetType, Zone};
 use std::collections::HashMap;
-use std::fs::File as FsFile;
-use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -160,9 +158,9 @@ impl Bank {
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let file = FsFile::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let zone = Zone::open(BufReader::with_capacity(1 << 16, file))
-                .map_err(|e| format!("{name}: {e}"))?;
+            let file =
+                assets::fs::buffered(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let zone = Zone::open(file).map_err(|e| format!("{name}: {e}"))?;
             zone.decode(&SoundOnly, |a| match a {
                 Asset::Sound(list) => bank.add_list(&list, &mut loaded),
                 Asset::RawFile(r)

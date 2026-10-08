@@ -546,6 +546,7 @@ fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
 /// `--audio-selftest`: loads the real tables and checks, with no window and no sound card, that a match's
 /// sounds come out right: direction, falloff, range, voice caps, footsteps, and streamed ambience and music.
 /// Returns what was measured, or what failed.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     let bank = load(install, map).map_err(|e| vec![e])?;
     let menus = load(install, "").map_err(|e| vec![format!("menu sounds: {e}")])?;

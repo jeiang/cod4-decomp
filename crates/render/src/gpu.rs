@@ -11,6 +11,8 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     /// BC1-3 textures are uploaded as they are; otherwise they are decoded to RGBA8 on the CPU.
     pub bc: bool,
+    /// Indexed draws may start at a base vertex; WebGL2 has no such draw.
+    pub base_vertex: bool,
     /// GPU pass timing via timestamp queries.
     pub timestamps: bool,
 }
@@ -34,36 +36,58 @@ impl std::error::Error for GpuError {}
 
 impl Gpu {
     /// `surface` makes the adapter choice compatible with a window; `None` is headless.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, GpuError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         Self::with_instance(instance, surface)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_instance(
         instance: wgpu::Instance,
         surface: Option<&wgpu::Surface<'_>>,
     ) -> Result<Gpu, GpuError> {
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: surface,
-            ..Default::default()
-        }))
-        .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
+        pollster::block_on(Self::with_instance_async(instance, surface))
+    }
+
+    /// The browser has no blocking wait for the adapter and device, so this is the only constructor on the web.
+    pub async fn with_instance_async(
+        instance: wgpu::Instance,
+        surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Gpu, GpuError> {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: surface,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
         let have = adapter.features();
         let want =
             (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TIMESTAMP_QUERY) & have;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("cod4e"),
-            required_features: want,
-            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
-            ..Default::default()
-        }))
-        .map_err(|e| GpuError::Device(e.to_string()))?;
+        // The WebGL2 fallback runs on the downlevel limits; the adapter's own are already that tier.
+        let adapter_backend = adapter.get_info().backend;
+        let base = if cfg!(target_arch = "wasm32") && adapter_backend == wgpu::Backend::Gl {
+            wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            wgpu::Limits::default()
+        };
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("cod4e"),
+                required_features: want,
+                required_limits: base.using_resolution(adapter.limits()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| GpuError::Device(e.to_string()))?;
         Ok(Gpu {
             instance,
             adapter,
             device,
             queue,
+            base_vertex: !(cfg!(target_arch = "wasm32") && adapter_backend == wgpu::Backend::Gl),
             bc: want.contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             timestamps: want.contains(wgpu::Features::TIMESTAMP_QUERY),
         })

@@ -113,8 +113,8 @@ impl MapData {
         let art_name = format!("maps/createart/{map}_art.gsc");
         for zone in ["code_post_gfx_mp", "common_mp", map] {
             let path = install.join("zone/english").join(format!("{zone}.ff"));
-            let file = std::fs::File::open(path).map_err(LoadError::Io)?;
-            let z = Zone::open(std::io::BufReader::new(file)).map_err(LoadError::Zone)?;
+            let file = assets::fs::buffered(path).map_err(LoadError::Io)?;
+            let z = Zone::open(file).map_err(LoadError::Zone)?;
             let keep = Keep(zone);
             z.decode(&keep, |a| match a {
                 Asset::GfxWorld(w) => world = Some(w),

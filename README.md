@@ -70,6 +70,17 @@ A match started from the menus runs on to its end: the scoreboard stays up until
 
 Harness stage `client-menu-match` runs the client with no flags and a `--ui-script`: Start New Server with a three-kill score limit, team, class, the end-of-match scoreboard, the rotation into the next map, then team and class again and a second spawn. It needs a display and skips without one. `--ui-script` also has `set=<console line>`, `connect=<host[:port]>`, `stat=<index> <value>`, `statis=<index> <value>`, `map=<name>[:secs]` and `maprotate[=secs]` steps.
 
+## Browser
+
+The `client` crate also builds for `wasm32-unknown-unknown` (`web/`): one build, WebGPU when the browser has it and WebGL2 otherwise (`--backend` / the page's Graphics choice overrides; the F3 overlay shows the backend, frame times and memory). The page reads your install in the browser and never uploads it: pick the install folder (or drop it); with "keep a copy" on, the files the client reads (about 4 GB) are also saved in the browser's private storage (OPFS) so the next visit needs no pick. The wasm runs on the page's main thread and reads the install synchronously through a reader worker (`web/reader.js`, shared memory), so the page needs cross-origin isolation (COOP and COEP headers; `web/serve.py` sends them).
+
+```sh
+nix develop -c web/build.sh                 # wasm-bindgen + wasm-opt into web/pkg
+nix develop -c python3 web/serve.py 8080    # then open http://localhost:8080/
+```
+
+For automated runs `web/serve.py --install <dir>` also serves the install files under `/install/` (development only, never on a public host) and `?dev-install=/install&autostart` makes the page use them without a picker; `?flythrough` flies the camera, `?report=N` posts the overlay values to the server log after N frames. Harness stage `web-client` does this with a headless Chromium when one is found (`COD4E_CHROME`) and skips otherwise.
+
 ## Layout
 
 | crate | role |
@@ -83,4 +94,7 @@ Harness stage `client-menu-match` runs the client with no flags and a `--ui-scri
 | `render` | wgpu renderer |
 | `audio` | sound alias tables, realtime-safe mixer (`Mixer::fill`, AudioWorklet-ready), WAV/MP3 decoding, cpal output (AudioWorklet in the browser) |
 | `client` | `cod4e`, the player-facing client |
+
+| `audio` | sound alias tables, realtime-safe mixer (`Mixer::fill`, AudioWorklet-ready), WAV/MP3 decoding, cpal output |
+| `client` | `cod4e`, the player-facing client (native, and wasm for `web/`) |
 | `harness` | `cod4e-harness`, scenario runner and run bundles |
