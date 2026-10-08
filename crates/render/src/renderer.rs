@@ -19,8 +19,8 @@ use sm3::SamplerDim;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 use web_time::{Duration, Instant};
+use wgpu::util::DeviceExt;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
@@ -176,8 +176,17 @@ struct Warm {
     built: Vec<bool>,
     done: usize,
     cursor: usize,
+    /// Time spent in, and the number of, the builds [`Renderer::warm_step`] did.
+    spent: Duration,
+    timed: u32,
     /// Pipelines frames wanted and skipped, by (pass id, target); built first.
     demand: HashSet<(u32, Target)>,
+}
+
+impl Warm {
+    fn mean_build(&self) -> Duration {
+        self.spent / self.timed.max(1)
+    }
 }
 
 struct Draw {
@@ -512,6 +521,8 @@ impl Renderer {
                 built,
                 done: 0,
                 cursor: 0,
+                spent: Duration::ZERO,
+                timed: 0,
                 demand: HashSet::new(),
             });
         }
@@ -526,8 +537,10 @@ impl Renderer {
         w.demand.clear();
         rush.reverse();
         let mut first = true;
-        while w.done < w.jobs.len() && (first || Instant::now() < end) {
+        // Stop early enough that the next build (about twice the average, builds vary a lot) fits the budget.
+        while w.done < w.jobs.len() && (first || Instant::now() + w.mean_build() * 2 < end) {
             first = false;
+            let began = Instant::now();
             let n = rush.pop().unwrap_or_else(|| {
                 while w.built[w.cursor] {
                     w.cursor += 1;
@@ -538,16 +551,19 @@ impl Renderer {
             self.materials.pipeline_now(&self.gpu, p, *t);
             w.built[n] = true;
             w.done += 1;
+            w.spent += began.elapsed();
+            w.timed += 1;
         }
         let progress = Progress {
             done: w.done,
             total: w.jobs.len(),
         };
-        self.materials.set_deadline(Some(if progress.done < progress.total {
-            Instant::now()
-        } else {
-            end
-        }));
+        self.materials
+            .set_deadline(Some(if progress.done < progress.total {
+                Instant::now()
+            } else {
+                end
+            }));
         progress
     }
 

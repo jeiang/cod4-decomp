@@ -44,7 +44,9 @@ fn spent_budget_skips_draws_until_warm_step_has_built_them() {
     });
     let view = target.create_view(&Default::default());
     let tour = data.spawn_points();
-    let at = tour.first().map_or(Vec3::ZERO, |p| Vec3::from(*p) + Vec3::Z * 60.0);
+    let at = tour
+        .first()
+        .map_or(Vec3::ZERO, |p| Vec3::from(*p) + Vec3::Z * 60.0);
     let v = View {
         origin: at,
         yaw: 0.0,

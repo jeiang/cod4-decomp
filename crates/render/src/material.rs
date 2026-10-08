@@ -850,7 +850,12 @@ impl Materials {
     }
 
     /// The pipeline for `p` rendering into `target`, built now whatever the deadline.
-    pub fn pipeline_now(&self, gpu: &Gpu, p: &Prepared, target: Target) -> Arc<wgpu::RenderPipeline> {
+    pub fn pipeline_now(
+        &self,
+        gpu: &Gpu,
+        p: &Prepared,
+        target: Target,
+    ) -> Arc<wgpu::RenderPipeline> {
         let mut map = p.pipelines.borrow_mut();
         map.entry(target)
             .or_insert_with(|| {
