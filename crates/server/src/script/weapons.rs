@@ -157,9 +157,10 @@ fn weapon(g: &Game, a: &Args, i: usize) -> Result<u16, String> {
     Ok(idx)
 }
 
+/// A weapon-definition query: a name no zone defines (`explodable_barrel`, which the damage callback passes for a
+/// barrel's blast) reads as the empty weapon, as the original's lookup returns index 0 rather than failing.
 fn def(g: &Game, a: &Args, f: impl Fn(&sim::weapon::WeaponInfo) -> Value) -> R {
-    let idx = weapon(g, a, 0)?;
-    Ok(f(g.weapons.info(idx)))
+    Ok(f(g.weapons.info(g.weapons.index(a.string(0)?))))
 }
 
 fn weapon_alt_name(g: &mut Game, _: &mut Vm, a: Args) -> R {
