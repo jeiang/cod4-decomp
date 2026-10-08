@@ -33,6 +33,18 @@ impl Frustum {
         Frustum { planes }
     }
 
+    /// The same frustum with the near plane moved to pass through `eye`, for the portal walk: a doorway beside the eye
+    /// lies between the eye and the near plane, and clipping it there narrows the view through it to the rays that
+    /// cross it at a grazing angle, hiding everything beyond. (The original moves the near plane to the nearest point
+    /// of each portal.)
+    pub fn with_near_at(&self, eye: Vec3) -> Frustum {
+        let mut f = self.clone();
+        if let Some(near) = f.planes.first_mut() {
+            near.w = -near.truncate().dot(eye);
+        }
+        f
+    }
+
     /// True when the box is entirely outside one plane.
     pub fn culls(&self, mins: Vec3, maxs: Vec3) -> bool {
         self.planes.iter().any(|p| {
@@ -97,6 +109,7 @@ pub struct Visible {
 
 pub fn visible(world: &GfxWorld, eye: Vec3, frustum: &Frustum) -> Visible {
     let mut out = Visible::default();
+    let frustum = &frustum.with_near_at(eye);
     match cell_for_point(world, eye) {
         Some(c) => {
             let mut path = vec![c];
@@ -234,5 +247,35 @@ fn tree(
         if c >= 0 {
             tree(world, trees, c as usize, frustum, inside, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A doorway 2 units ahead of the eye (nearer than the near plane) still shows what is behind it: the view
+    /// through it is not narrowed to the rays that graze it.
+    #[test]
+    fn portal_nearer_than_the_near_plane_keeps_the_view_through_it() {
+        let eye = Vec3::ZERO;
+        let view = crate::View {
+            origin: eye,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_x: 90f32.to_radians(),
+            time: 0.0,
+        };
+        let frustum = Frustum::from_clip(&view.clip_from_world(16.0 / 9.0)).with_near_at(eye);
+        let portal = vec![
+            Vec3::new(2.0, 30.0, 30.0),
+            Vec3::new(2.0, -30.0, 30.0),
+            Vec3::new(2.0, -30.0, -30.0),
+            Vec3::new(2.0, 30.0, -30.0),
+        ];
+        let clipped = clip_polygon(portal, &frustum).expect("the portal is in view");
+        let through = narrow(eye, &clipped, &frustum);
+        let ahead = Vec3::new(500.0, 20.0, -10.0);
+        assert!(!through.culls(ahead, ahead));
     }
 }
