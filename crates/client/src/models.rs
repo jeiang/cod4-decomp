@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::ragdoll::Ragdoll;
 use render::{ModelInstance, ModelKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,20 +141,47 @@ impl Player {
         self.weapon = other.weapon;
     }
 
+    /// The yaw of the last update, degrees.
+    pub fn yaw(&self) -> f32 {
+        self.yaw
+    }
+
     /// The animation currently playing.
     pub fn animation(&self) -> Option<&'static str> {
         self.state.current()
     }
 
+    /// A ragdoll of the body as the last [`Player::update`] posed it, thrown with velocity `push`.
+    pub fn ragdoll(&self, origin: [f32; 3], push: [f32; 3]) -> Ragdoll {
+        let rig = self.anims.rig();
+        Ragdoll::new(
+            self.pose.bones(),
+            |i| rig.parent(i),
+            |i| rig.duplicate_of(i),
+            origin,
+            self.yaw,
+            push,
+        )
+    }
+
     /// The body and head as model instances for a player standing at `origin`.
     pub fn instances(&self, origin: [f32; 3]) -> Vec<ModelInstance> {
-        let bones = self.pose.bones();
+        self.instances_posed(origin, self.yaw, self.pose.bones())
+    }
+
+    /// The body and head in the pose `bones`, for an entity at `origin` facing `yaw` degrees.
+    pub fn instances_posed(
+        &self,
+        origin: [f32; 3],
+        yaw: f32,
+        bones: &[sim::skel::BoneMat],
+    ) -> Vec<ModelInstance> {
         let nb = usize::from(self.body.num_bones);
         let mut out = Vec::with_capacity(2);
         let mut push = |model: &Arc<XModel>, bones: &[sim::skel::BoneMat]| {
             let mut m = ModelInstance::new(model.clone(), ModelKind::World);
             m.origin = origin;
-            m.angles = [0.0, self.yaw, 0.0];
+            m.angles = [0.0, yaw, 0.0];
             m.bones = bones.to_vec();
             m.light_origin = [origin[0], origin[1], origin[2] + 36.0];
             out.push(m);

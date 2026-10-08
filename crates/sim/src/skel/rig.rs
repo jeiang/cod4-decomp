@@ -254,6 +254,21 @@ impl Rig {
         &self.names[i]
     }
 
+    /// The bone `i` hangs from, if it has one.
+    pub fn parent(&self, i: usize) -> Option<usize> {
+        let b = self.bones.get(i)?;
+        (!matches!(b.kind, Kind::Duplicate(_)) && b.parent != NO_BONE)
+            .then_some(usize::from(b.parent))
+    }
+
+    /// The bone whose matrix bone `i` copies (a model melded onto another), if it does.
+    pub fn duplicate_of(&self, i: usize) -> Option<usize> {
+        match self.bones.get(i)?.kind {
+            Kind::Duplicate(src) => Some(usize::from(src)),
+            _ => None,
+        }
+    }
+
     /// Index of the first bone with this name (case-insensitive).
     pub fn bone_index(&self, name: &str) -> Option<usize> {
         self.names.iter().position(|n| n.eq_ignore_ascii_case(name))

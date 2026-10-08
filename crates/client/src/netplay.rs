@@ -14,6 +14,7 @@ use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
 use crate::models::{Library, Player, PlayerModelSet, Team};
+use crate::ragdoll::Ragdoll;
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::ViewModel;
 use crate::wire::Wire;
@@ -71,6 +72,10 @@ struct Remote {
     /// World model of the weapon the player holds.
     weapon: Option<String>,
     seen: Instant,
+    /// Whether the player was dead as of the last frame; `None` before the first.
+    dead: Option<bool>,
+    /// The body of a player who died while watched: where it fell from, which way it faced, and the simulation.
+    ragdoll: Option<([f32; 3], f32, Ragdoll)>,
 }
 
 /// Numbers the run reports.
@@ -93,6 +98,8 @@ struct Counters {
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
     fx_decals_max: usize,
+    /// Ragdolls made for players seen dying.
+    ragdolls: u64,
     fx_live_max: usize,
 }
 
@@ -110,6 +117,8 @@ pub struct NetPlay {
     last_cmd: Instant,
     want_weapon: Option<u16>,
     remotes: HashMap<u16, Remote>,
+    /// The impulse of each recent death by client number, until the body is made.
+    pushes: HashMap<u16, [f32; 3]>,
     vm: Option<((u16, u16), ViewModel)>,
     c: Counters,
     auto: Option<Auto>,
@@ -166,6 +175,7 @@ impl NetPlay {
             last_cmd: Instant::now(),
             want_weapon: None,
             remotes: HashMap::new(),
+            pushes: HashMap::new(),
             vm: None,
             c: Counters::default(),
             auto: autoplay.then(Auto::default),
@@ -403,6 +413,9 @@ impl NetPlay {
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         for e in &events {
+            if let ClientEvent::PlayerDeath { client, push, .. } = e {
+                self.pushes.insert(*client, *push);
+            }
             let (weapons, content) = (&self.weapons, &self.lib.content);
             self.effects.event(e, &|w| {
                 weapons
@@ -649,6 +662,8 @@ impl NetPlay {
                                 player,
                                 weapon: held,
                                 seen: now,
+                                dead: None,
+                                ragdoll: None,
                             },
                         );
                     }
@@ -667,8 +682,24 @@ impl NetPlay {
             r.seen = now;
             let dead = e.eflags & eflags::DEAD != 0;
             let input = pose_input(e, weapon.as_deref(), dead);
+            // A player who dies in view falls as a ragdoll from the pose they stood in.
+            if dead && r.dead == Some(false) {
+                let push = self.pushes.remove(&e.client).unwrap_or_default();
+                let body = r.player.ragdoll(e.origin, push);
+                r.ragdoll = Some((e.origin, r.player.yaw(), body));
+                self.c.ragdolls += 1;
+            } else if !dead {
+                r.ragdoll = None;
+            }
+            r.dead = Some(dead);
             r.player.update(dt, &input);
-            out.extend(r.player.instances(e.origin));
+            match &mut r.ragdoll {
+                Some((at, yaw, body)) => {
+                    body.update(dt, self.boxes.world());
+                    out.extend(r.player.instances_posed(*at, *yaw, &body.bones()));
+                }
+                None => out.extend(r.player.instances(e.origin)),
+            }
         }
         self.c.max_players_seen = self.c.max_players_seen.max(players);
         self.remotes.retain(|_, r| now - r.seen < GONE_AFTER);
@@ -706,6 +737,7 @@ impl NetPlay {
                 "missing": self.effects.missing,
                 "quads_max": self.c.fx_quads_max,
                 "decals_max": self.c.fx_decals_max,
+                "ragdolls": self.c.ragdolls,
                 "live_elems_max": self.c.fx_live_max,
             },
             "eye": self.last_eye.map(|e| e.to_array()),

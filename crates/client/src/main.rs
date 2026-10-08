@@ -18,6 +18,7 @@ mod models;
 mod netplay;
 mod ownerdraw;
 mod profile;
+mod ragdoll;
 mod serverlist;
 mod session;
 mod shell;
