@@ -2,7 +2,7 @@
 //! `client-hud`: what the client draws on top of the stock HUD menus during a match. The real client plays a team
 //! deathmatch against bots on its own listen server with the scripted player, holds the scoreboard up, waits for a
 //! message window to have a line up and for a bot to kill it (the killcam), and reports what the HUD got to show
-//! (`hud` of `ui-script.json`). The scoreboard must have listed the players, the message windows must have drawn
+//! (`hud_draw` of `ui-script.json`). The scoreboard must have listed the players, the message windows must have drawn
 //! lines, the script hud elements must have arrived and the killcam must have played. Needs a display and the
 //! install; skips without.
 use super::client_flythrough::locate_client;
@@ -73,7 +73,7 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     if !failed.is_empty() {
         return Some(format!("steps failed: {}", failed.join(", ")));
     }
-    let h = &report["hud"];
+    let h = &report["hud_draw"];
     let n = |k: &str| h[k].as_u64().unwrap_or(0);
     let sum = |k: &str| {
         h[k].as_array()
@@ -128,7 +128,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 "obituaries",
                 "killcam_frames",
             ] {
-                if let Some(v) = report["hud"][k].as_f64() {
+                if let Some(v) = report["hud_draw"][k].as_f64() {
                     out.metrics.insert(format!("hud.{k}"), v);
                 }
             }
@@ -156,7 +156,7 @@ mod tests {
     fn good() -> Value {
         json!({
             "steps": [{"step": "ingame=120", "ok": true}],
-            "hud": {
+            "hud_draw": {
                 "elems_max": 12, "scoreboard_frames": 90, "scoreboard_rows_max": 10,
                 "messages": [2, 0, 0, 0], "obituaries": 3, "window_lines": [40, 0, 0, 0],
                 "killcam_frames": 120
@@ -172,15 +172,15 @@ mod tests {
     #[test]
     fn each_missing_piece_is_named() {
         let mut r = good();
-        r["hud"]["window_lines"] = json!([0, 0, 0, 0]);
-        r["hud"]["killcam_frames"] = json!(0);
+        r["hud_draw"]["window_lines"] = json!([0, 0, 0, 0]);
+        r["hud_draw"]["killcam_frames"] = json!(0);
         let why = verdict(&r).unwrap();
         assert!(
             why.contains("message windows") && why.contains("killcam"),
             "{why}"
         );
         let mut r = good();
-        r["hud"]["scoreboard_rows_max"] = json!(2);
+        r["hud_draw"]["scoreboard_rows_max"] = json!(2);
         assert!(verdict(&r).unwrap().contains("scoreboard"));
         let mut r = good();
         r["steps"] = json!([{"step": "killcam=300", "ok": false, "note": "timed out"}]);

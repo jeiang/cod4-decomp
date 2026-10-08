@@ -745,7 +745,7 @@ impl Viewer {
                 "status": if ok { "ok" } else { "failed" },
                 "steps": sc.results,
                 "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
-                "hud": st.shell.as_ref().map(|s| s.st.hud_stats.report()),
+                "hud_draw": st.shell.as_ref().map(|s| s.st.hud_stats.report()),
                 "net": st.net.as_mut().map(NetPlay::report),
                 "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
             });
