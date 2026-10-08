@@ -324,7 +324,7 @@ impl Viewer {
                     &mut lib,
                     &*collision,
                     tour.as_ref().ok_or("no map")?,
-                    "m4_mp",
+                    "m16_gl_mp",
                     n,
                     &lit,
                 )?;
