@@ -375,7 +375,8 @@ pub struct HudFacts {
     pub prev_ammo: (u16, i32, i32),
     pub prev_offhand: (i32, i32),
     pub prev_origin: [f32; 3],
-    pub prev_dead: bool,
+    /// The viewed client and its spawn count in the last snapshot (`CG_Respawn` fires when either changes).
+    pub prev_spawn: Option<(u16, u16)>,
     /// How often each owner-draw piece drew since the match began, for the run report.
     pub drawn: std::collections::BTreeMap<i32, u32>,
     /// Objective marks the compass and the full map drew since the match began.
@@ -386,6 +387,15 @@ pub struct HudFacts {
 }
 
 impl HudFacts {
+    /// `CG_Respawn`'s low-health part: a first snapshot, another viewed client or a changed spawn count starts the
+    /// overlay over, whether or not a dead player state was ever seen in between.
+    pub fn note_spawn(&mut self, client: u16, spawn_count: u16) {
+        if self.prev_spawn != Some((client, spawn_count)) {
+            self.overlay.reset(&OverlayParams::default());
+            self.prev_spawn = Some((client, spawn_count));
+        }
+    }
+
     /// The facts as the run report shows them.
     pub fn report(&self) -> serde_json::Value {
         serde_json::json!({
@@ -517,5 +527,30 @@ mod tests {
         o.reset(&p);
         assert_eq!(o.alpha(610), 0.0);
         assert_eq!(o.alpha(10_000), 0.0);
+    }
+
+    #[test]
+    fn a_spawn_clears_the_overlay_without_a_dead_state_in_between() {
+        let p = OverlayParams::default();
+        let mut h = HudFacts::default();
+        h.note_spawn(3, 1);
+        run(&mut h.overlay, &p, 0, 600, 0.3);
+        assert!(h.overlay.alpha(600) > 0.0);
+        // Same spawn: the pulse keeps running.
+        h.note_spawn(3, 1);
+        assert!(h.overlay.alpha(600) > 0.0);
+        // Respawned at full health, never seen dead.
+        h.note_spawn(3, 2);
+        run(&mut h.overlay, &p, 610, 700, 1.0);
+        assert_eq!(h.overlay.alpha(700), 0.0);
+        assert_eq!(h.overlay, {
+            let mut o = Overlay::default();
+            o.reset(&p);
+            o
+        });
+        // Following someone else starts over too.
+        run(&mut h.overlay, &p, 800, 1400, 0.3);
+        h.note_spawn(5, 2);
+        assert_eq!(h.overlay.alpha(1400), 0.0);
     }
 }

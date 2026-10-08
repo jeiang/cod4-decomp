@@ -1609,6 +1609,27 @@ fn script_step(st: &mut State) -> bool {
                 done(false, sc, "timed out".into());
             }
         }
+        // Waits for the player to die and come back (`respawn=300`: at most that many seconds): once alive again with
+        // health and out of the killcam, the low-health overlay must be off (`CG_Respawn` resets it).
+        "respawn" => {
+            let Some(sh) = st.shell.as_ref() else {
+                return true;
+            };
+            let h = &sh.st.game.hud;
+            if sc.marker.is_none() && h.pm_dead {
+                sc.marker = Some("dead".into());
+            }
+            if sc.marker.is_some() && h.live && !h.pm_dead && !sh.st.live.killcam && h.health > 0 {
+                let alpha = h.overlay.alpha(h.now);
+                done(
+                    alpha == 0.0,
+                    sc,
+                    format!("overlay alpha {alpha} after respawn"),
+                );
+            } else if waited > arg.parse::<f32>().unwrap_or(300.0) {
+                done(false, sc, "timed out".into());
+            }
+        }
         // `scores=on` holds the scoreboard up as the Tab key would, `scores=off` lets go.
         "scores" => {
             if let Some(sh) = st.shell.as_mut() {
