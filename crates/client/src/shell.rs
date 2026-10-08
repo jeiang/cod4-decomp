@@ -68,6 +68,11 @@ pub struct ShellState {
     pub gametypes: Vec<GameTypeEntry>,
     pub gametype_sel: usize,
     pub map_sel: usize,
+    /// The rows picked in the kick/vote list (feeder 7) and the mute list (feeder 20), as player numbers.
+    pub player_sel: usize,
+    pub mute_sel: usize,
+    /// Players the user muted (the toggle the mute menu shows; there is no voice chat to silence).
+    pub muted: std::collections::HashSet<u16>,
     /// The live match as the expressions and HUD see it; empty in the menus.
     pub game: GameFacts,
     /// What the native HUD draws this frame, filled by `NetPlay::fill_live` before painting.
@@ -186,6 +191,9 @@ impl ShellState {
             gametypes,
             gametype_sel,
             map_sel: 0,
+            player_sel: 0,
+            mute_sel: 0,
+            muted: Default::default(),
             game: GameFacts::default(),
             live: LiveUi::default(),
             feed: Feed::default(),
@@ -207,6 +215,26 @@ impl ShellState {
         self.game.scoreboard
             || self.scores_forced
             || (self.live.intermission && ui.is_open("scoreboard"))
+    }
+
+    /// The wheel, the arrows and the page keys move the scoreboard's list while it is up and has more rows than fit.
+    pub fn scroll_scores(&mut self, ui: &Ui, key: &UiKey) -> bool {
+        if !self.scoreboard_shown(ui) || self.live.scores.is_empty() {
+            return false;
+        }
+        let live = &self.live;
+        let page = hud::rows_shown(&live.scores, live.own_team, self.scores_top).max(1);
+        let total = hud::scoreboard_lines(&live.scores, live.own_team);
+        let top = self.scores_top;
+        let to = match key {
+            UiKey::WheelUp | UiKey::Up => top.saturating_sub(1),
+            UiKey::WheelDown | UiKey::Down => top + 1,
+            UiKey::PageUp => top.saturating_sub(page),
+            UiKey::PageDown => top + page,
+            _ => return false,
+        };
+        self.scores_top = to.clamp(1, total.max(1));
+        true
     }
 }
 
@@ -399,6 +427,9 @@ impl Shell {
     }
 
     pub fn key(&mut self, input: &mut Input, key: UiKey) -> bool {
+        if self.st.scroll_scores(&self.ui, &key) {
+            return true;
+        }
         let mut h = Self::host(&mut self.st, input);
         self.ui.key(&mut h, key)
     }
@@ -539,6 +570,7 @@ impl Shell {
     ) {
         self.ui2d.begin(size);
         self.st.score_view.refresh(&input.cvars);
+        self.resolve_keys(input);
         self.ui2d.team_colors = hud::team_colors(&input.cvars);
         {
             let mut p = Painter {
@@ -557,6 +589,34 @@ impl Shell {
             }
         }
         self.ui2d.flush(target, clear);
+    }
+
+    /// The keys of the `[{+command}]` marks in the HUD elements' text this frame.
+    fn resolve_keys(&mut self, input: &Input) {
+        let mut marks = Vec::new();
+        for le in &self.st.live.elems {
+            for raw in [&le.text, &le.label] {
+                let text = hud::localize(&self.ui.assets, raw);
+                marks.extend(hud::key_marks(&text).into_iter().map(str::to_owned));
+            }
+        }
+        if self.st.live.following.is_some() {
+            marks.extend(
+                hud::SPECTATE_PROMPTS
+                    .iter()
+                    .map(|(_, cmd)| (*cmd).to_owned()),
+            );
+        }
+        self.st.live.keys.clear();
+        for cmd in marks {
+            let key = input
+                .binding_keys(&cmd)
+                .into_iter()
+                .map(crate::input::key_id)
+                .next()
+                .unwrap_or_else(|| "KEY_UNBOUND".to_owned());
+            self.st.live.keys.insert(cmd, self.ui.localize_key(&key));
+        }
     }
 
     /// Draws the loading screen over `target`.
@@ -618,6 +678,17 @@ impl HostCx<'_> {
             self.command(ui, line);
         }
         self.st.exec_depth -= 1;
+    }
+
+    /// The other players of the match: client number and name, in slot order.
+    fn players(&self) -> Vec<(u16, String)> {
+        let live = &self.st.live;
+        live.names
+            .iter()
+            .enumerate()
+            .filter(|(n, name)| !name.is_empty() && *n != usize::from(live.own))
+            .map(|(n, name)| (n as u16, name.clone()))
+            .collect()
     }
 
     /// The strings of an enumerated dvar, as the menus list them.
@@ -968,12 +1039,28 @@ impl Host for HostCx<'_> {
             }
             "startsingleplayer" | "runmod" | "createplayerprofile" | "deleteplayerprofile" => true,
             // No single-player, mods, player list or language switch here; the menus still run these.
-            "clearloaderrorssummary"
-            | "playerstart"
-            | "updatelanguage"
-            | "muteplayer"
-            | "votetempban"
-            | "votekick" => true,
+            "clearloaderrorssummary" | "playerstart" | "updatelanguage" => true,
+            "muteplayer" => {
+                if let Some((n, _)) = self.players().get(self.st.mute_sel).cloned()
+                    && !self.st.muted.remove(&n)
+                {
+                    self.st.muted.insert(n);
+                }
+                true
+            }
+            "votetempban" | "votekick" => {
+                if let Some((n, _)) = self.players().get(self.st.player_sel) {
+                    let how = if name.eq_ignore_ascii_case("votekick") {
+                        "kick"
+                    } else {
+                        "tempBanUser"
+                    };
+                    self.st
+                        .actions
+                        .push(Action::Console(format!("callvote {how} {n}")));
+                }
+                true
+            }
             "clearerror" => {
                 self.input.cvars.set("com_errorMessage", "", false);
                 self.input.cvars.set("com_isNotice", "0", false);
@@ -1017,6 +1104,7 @@ impl Host for HostCx<'_> {
                 self.st.servers.rows(src).len()
             }
             4 => self.st.maps.len(),
+            7 | 20 => self.players().len(),
             _ => 0,
         }
     }
@@ -1032,6 +1120,22 @@ impl Host for HostCx<'_> {
                     .map(|e| server_cell(e, col, &self.st.maps, &self.st.gametypes))
                     .unwrap_or_default()
             }
+            (7, _) => self
+                .players()
+                .get(row)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_default(),
+            (20, 0) => self
+                .players()
+                .get(row)
+                .filter(|(n, _)| self.st.muted.contains(n))
+                .map(|_| "@MP_MUTED".to_owned())
+                .unwrap_or_default(),
+            (20, _) => self
+                .players()
+                .get(row)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_default(),
             (4, _) => self
                 .st
                 .maps
@@ -1046,6 +1150,12 @@ impl Host for HostCx<'_> {
         if feeder == 2 {
             let src = self.net_source();
             self.st.servers.select(src, row);
+        }
+        if feeder == 7 {
+            self.st.player_sel = row;
+        }
+        if feeder == 20 {
+            self.st.mute_sel = row;
         }
         if feeder == 4 {
             self.st.map_sel = row;
@@ -1335,5 +1445,98 @@ mod tests {
         assert_eq!(h.dvar("r_mode"), "1920x1080");
         h.set_dvar("r_aspectRatio", "2");
         assert_eq!(h.dvar("r_aspectRatio"), "2", "not an enumerated dvar");
+    }
+
+    /// The kick/vote list (feeder 7) and the mute list (feeder 20) show the other players, and the picks reach the
+    /// vote command and the mute toggle.
+    #[test]
+    fn the_player_lists_feed_the_kick_vote_and_mute_menus() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let mut st = ShellState::new(&assets, &install);
+        let mut ui = Ui::new(assets, (1280, 720));
+        let mut input = Input::detached();
+        st.live.own = 1;
+        st.live.names = ["Ann", "Me", "", "Bo"].map(String::from).to_vec();
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        for feeder in [7, 20] {
+            assert_eq!(h.feeder_count(feeder), 2, "not me, not the empty slot");
+        }
+        assert_eq!(h.feeder_text(7, 1, 0), "Bo");
+        assert_eq!(h.feeder_text(20, 0, 1), "Ann");
+        h.feeder_select(7, 1);
+        assert!(h.ui_script(&mut ui, "voteKick", &[]));
+        h.feeder_select(20, 0);
+        assert_eq!(h.feeder_text(20, 0, 0), "");
+        assert!(h.ui_script(&mut ui, "mutePlayer", &[]));
+        assert_eq!(h.feeder_text(20, 0, 0), "@MP_MUTED");
+        assert!(h.ui_script(&mut ui, "mutePlayer", &[]));
+        assert_eq!(h.feeder_text(20, 0, 0), "");
+        let lines: Vec<_> = st
+            .actions
+            .iter()
+            .filter_map(|a| match a {
+                Action::Console(l) => Some(l.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["callvote kick 3"]);
+    }
+
+    /// The wheel, arrows and page keys scroll a scoreboard that has more rows than fit, and stay in range.
+    #[test]
+    fn the_scoreboard_scrolls_with_the_wheel_and_page_keys() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let mut st = ShellState::new(&assets, &install);
+        let ui = Ui::new(assets, (1280, 720));
+        assert!(
+            !st.scroll_scores(&ui, &UiKey::WheelDown),
+            "no scoreboard up"
+        );
+        st.scores_forced = true;
+        st.live.own_team = 2;
+        st.live.scores = (0..30)
+            .map(|i| crate::hud::ScoreLine {
+                client: i,
+                team: 2,
+                ..Default::default()
+            })
+            .collect();
+        assert!(st.scroll_scores(&ui, &UiKey::WheelUp));
+        assert_eq!(st.scores_top, 1, "not above the top");
+        st.scroll_scores(&ui, &UiKey::WheelDown);
+        assert_eq!(st.scores_top, 2);
+        st.scroll_scores(&ui, &UiKey::PageDown);
+        assert!(st.scores_top > 4);
+        for _ in 0..100 {
+            st.scroll_scores(&ui, &UiKey::Down);
+        }
+        assert_eq!(st.scores_top, 32, "the last of 30 rows and the banners");
+        st.scroll_scores(&ui, &UiKey::PageUp);
+        assert!(st.scores_top < 32);
+        assert!(
+            !st.scroll_scores(&ui, &UiKey::Tab),
+            "other keys are not its own"
+        );
     }
 }

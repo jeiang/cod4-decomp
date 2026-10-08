@@ -1017,6 +1017,7 @@ fn compass_objectives(
                     alpha: a,
                 })
                 .collect();
+            h.objective_marks += marks.len() as u32;
             draw_marks(dc, h, &map, full, icon, &marks);
         }
     }

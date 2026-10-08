@@ -21,9 +21,9 @@ use crate::ui::assets::UiAssets;
 use net::ui::HudElem;
 use std::collections::HashMap;
 
-pub use elems::{draw_over, draw_under};
+pub use elems::{SPECTATE_PROMPTS, draw_over, draw_under};
 pub use feed::{BOLD, Feed, NOTIFY, WINDOWS};
-pub use scores::{ScoreView, draw_scoreboard, rows_shown};
+pub use scores::{ScoreView, draw_scoreboard, rows_shown, scoreboard_lines};
 
 use serde_json::{Value, json};
 
@@ -100,6 +100,8 @@ pub struct LiveUi {
     /// Client names and teams by slot.
     pub names: Vec<String>,
     pub teams: Vec<u8>,
+    /// The keys the commands named in `[{+cmd}]` marks of the elements' text are bound to, as the player reads them.
+    pub keys: HashMap<String, String>,
     pub elems: Vec<LiveElem>,
     pub objectives: Vec<LiveObjective>,
     pub scores: Vec<ScoreLine>,
@@ -159,6 +161,41 @@ pub fn localize(assets: &UiAssets, raw: &str) -> String {
             .replace(&format!("&&{}", i + 1), arg)
             .replace(&format!("&{}", i + 1), arg);
     }
+    out
+}
+
+/// The `{+command}` marks of `text`, without the braces.
+pub fn key_marks(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(a) = rest.find("[{") {
+        let Some(b) = rest[a..].find("}]") else { break };
+        out.push(&rest[a + 2..a + b]);
+        rest = &rest[a + b + 2..];
+    }
+    out
+}
+
+/// `text` with each `[{+command}]` replaced by `[key]`, the key `command` is bound to in `keys` (a mark with no
+/// entry is left as it is).
+pub fn expand_keys(text: &str, keys: &HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(a) = rest.find("[{") {
+        let Some(b) = rest[a..].find("}]") else { break };
+        let cmd = &rest[a + 2..a + b];
+        out.push_str(&rest[..a]);
+        match keys.get(cmd) {
+            Some(k) => {
+                out.push('[');
+                out.push_str(k);
+                out.push(']');
+            }
+            None => out.push_str(&rest[a..a + b + 2]),
+        }
+        rest = &rest[a + b + 2..];
+    }
+    out.push_str(rest);
     out
 }
 
@@ -286,6 +323,23 @@ pub fn elem_time_ms(e: &HudElem, now: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_marks_are_found_and_replaced_by_the_bound_key() {
+        let text =
+            "Press [{+actionslot 4}] to use, [{+activate}] to open, [{+nothing}] and [{+open";
+        assert_eq!(key_marks(text), ["+actionslot 4", "+activate", "+nothing"]);
+        let keys: HashMap<String, String> = [
+            ("+actionslot 4".to_owned(), "4".to_owned()),
+            ("+activate".to_owned(), "F".to_owned()),
+        ]
+        .into();
+        assert_eq!(
+            expand_keys(text, &keys),
+            "Press [4] to use, [F] to open, [{+nothing}] and [{+open"
+        );
+        assert_eq!(expand_keys("plain", &keys), "plain");
+    }
+
     use super::*;
     use net::ui::he;
 

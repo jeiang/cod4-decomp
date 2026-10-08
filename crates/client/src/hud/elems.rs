@@ -13,6 +13,7 @@ use crate::ui::Ui;
 use crate::ui::paint::{Painter, TextDraw};
 use crate::ui::place::{Place, Px, horz, vert};
 use net::ui::{HudElem, he, hf};
+use std::collections::HashMap;
 
 /// Base text scale and menu font number of the script font numbers (`GetHudElemInfo`).
 fn font_of(e: &HudElem) -> (i32, f32) {
@@ -161,7 +162,17 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
         .filter(|_| !st.scoreboard_shown(ui))
     {
         let header = localize(&ui.assets, "CGAME_FOLLOWING");
-        for (text, y) in [(header.as_str(), 20.0), (name, 36.0)] {
+        let prompts = SPECTATE_PROMPTS.map(|(key, cmd)| {
+            let bound = live.keys.get(cmd).map_or("", String::as_str);
+            localize(&ui.assets, key).replace("&&1", bound)
+        });
+        let lines = [(header.as_str(), 20.0), (name, 36.0)].into_iter().chain(
+            prompts
+                .iter()
+                .zip([52.0, 64.0, 76.0])
+                .map(|(t, y)| (t.as_str(), y)),
+        );
+        for (text, y) in lines {
             let w = ui.text_width(text, 6, 1.0 / 3.0);
             ui.draw_text(
                 p,
@@ -184,6 +195,13 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
     }
 }
 
+/// What a spectator is told about following players: the string and the command whose key it names.
+pub const SPECTATE_PROMPTS: [(&str, &str); 3] = [
+    ("PLATFORM_FOLLOWNEXTPLAYER", "+attack"),
+    ("PLATFORM_FOLLOWPREVIOUSPLAYER", "+speed_throw"),
+    ("PLATFORM_FOLLOWSTOP", "+activate"),
+];
+
 fn draw_elems(ui: &Ui, p: &mut Painter, live: &LiveUi, foreground: bool) {
     let menu_open = !ui.open_menus().is_empty();
     for le in &live.elems {
@@ -204,12 +222,19 @@ fn draw_elems(ui: &Ui, p: &mut Painter, live: &LiveUi, foreground: bool) {
         if e.kind == he::WAYPOINT {
             draw_waypoint(ui, p, live, le, color);
         } else {
-            draw_elem(ui, p, le, now, color);
+            draw_elem(ui, p, le, now, color, &live.keys);
         }
     }
 }
 
-fn draw_elem(ui: &Ui, p: &mut Painter, le: &LiveElem, now: i32, color: [f32; 4]) {
+fn draw_elem(
+    ui: &Ui,
+    p: &mut Painter,
+    le: &LiveElem,
+    now: i32,
+    color: [f32; 4],
+    keys: &HashMap<String, String>,
+) {
     let e = &le.e;
     let place = &ui.place;
     let (font_enum, font_scale) = font_of(e);
@@ -236,6 +261,8 @@ fn draw_elem(ui: &Ui, p: &mut Painter, le: &LiveElem, now: i32, color: [f32; 4])
         text = consolidate(&label, &text);
         label.clear();
     }
+    let text = super::expand_keys(&text, keys);
+    let label = super::expand_keys(&label, keys);
     let label_w = if label.is_empty() {
         0.0
     } else {

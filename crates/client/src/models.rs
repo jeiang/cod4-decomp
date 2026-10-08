@@ -45,6 +45,8 @@ pub struct PlayerModelSet {
 pub struct Library {
     pub content: Content,
     anims: HashMap<(String, Option<String>, Option<String>), Arc<PlayerAnims>>,
+    /// [`Library::team_models`] by team: the loaded models never change, and the net frame asks for every player.
+    teams: [std::sync::OnceLock<Option<PlayerModelSet>>; 2],
 }
 
 impl Library {
@@ -57,11 +59,18 @@ impl Library {
         Ok(Library {
             content,
             anims: HashMap::new(),
+            teams: Default::default(),
         })
     }
 
     /// The first stock body, head and view hands of `team` the loaded zones have, in name order.
     pub fn team_models(&self, team: Team) -> Option<PlayerModelSet> {
+        self.teams[team as usize]
+            .get_or_init(|| self.find_team_models(team))
+            .clone()
+    }
+
+    fn find_team_models(&self, team: Team) -> Option<PlayerModelSet> {
         let pick = |prefix: &str, words: &[&str]| -> Option<String> {
             let names = self.content.model_names(prefix);
             words
