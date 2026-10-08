@@ -205,6 +205,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_session::run),
     },
     StageDef {
+        name: "client-hud",
+        description: "the HUD the client draws over the stock menus in a team deathmatch against bots: scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_hud::run),
+    },
+    StageDef {
         name: "client-input",
         description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
         needs_install: false,

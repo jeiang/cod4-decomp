@@ -5,6 +5,7 @@
 //! a server, join one and answer the server's script menus; [`HostCx`] implements those over the client's input layer
 //! (dvars) and a [`ShellState`] (stats, map and gametype lists, queued [`Action`]s the app carries out).
 
+use crate::hud::{self, Feed, LiveUi, ScoreView};
 use crate::input::Input;
 use crate::ui::assets::UiAssets;
 use crate::ui::env::World;
@@ -66,15 +67,23 @@ pub struct ShellState {
     pub map_sel: usize,
     /// The live match as the expressions and HUD see it; empty in the menus.
     pub game: GameFacts,
-    /// Printed lines (feed, centre messages, chat) as the server sent them.
-    pub messages: Vec<(net::ui::PrintKind, String)>,
+    /// What the native HUD draws this frame, filled by `NetPlay::fill_live` before painting.
+    pub live: LiveUi,
+    /// Message windows, chat and the centre string, which keep their lines between frames.
+    pub feed: Feed,
+    pub score_view: ScoreView,
+    /// First scoreboard line shown (1 = the top).
+    pub scores_top: usize,
+    /// The scoreboard held up by a script step instead of the key (the `--ui-script` `scores` step).
+    pub scores_forced: bool,
+    pub hud_stats: hud::Stats,
+    was_active: bool,
 }
 
 /// Facts of the running match that menu expressions read.
 #[derive(Default)]
 pub struct GameFacts {
     pub scoreboard: bool,
-    pub killcam: bool,
     pub dead: bool,
     pub team: String,
     pub gametype: String,
@@ -145,8 +154,21 @@ impl ShellState {
             gametype_sel,
             map_sel: 0,
             game: GameFacts::default(),
-            messages: Vec::new(),
+            live: LiveUi::default(),
+            feed: Feed::default(),
+            score_view: ScoreView::default(),
+            scores_top: 1,
+            scores_forced: false,
+            hud_stats: hud::Stats::default(),
+            was_active: false,
         }
+    }
+
+    /// The scoreboard rows are on screen: held by the player, or the match is over and its menu is up.
+    pub fn scoreboard_shown(&self, ui: &Ui) -> bool {
+        self.game.scoreboard
+            || self.scores_forced
+            || (self.live.intermission && ui.is_open("scoreboard"))
     }
 }
 
@@ -175,6 +197,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("scr_teambalance", "0"),
     ("g_allowvote", "1"),
     ("sv_punkbuster", "0"),
+    // The stock message windows show only while this is 1 (the server's scripts turn it off for hardcore).
+    ("ui_hud_obituaries", "1"),
 ];
 
 pub struct Shell {
@@ -276,13 +300,82 @@ impl Shell {
                 self.close_by_name(input, &target);
             }
             UiEvent::CloseIngameMenu => self.close_all(input),
-            UiEvent::Print { kind, text } => self.st.messages.push((kind, text)),
-            UiEvent::Announce { text } => self.st.messages.push((net::ui::PrintKind::Bold, text)),
-            UiEvent::Chat { client, text, .. } => self
-                .st
-                .messages
-                .push((net::ui::PrintKind::Console, format!("{client}: {text}"))),
-            UiEvent::Map { .. } | UiEvent::Scores | UiEvent::Obituary(_) => {}
+            UiEvent::Print { kind, text } => self.print(kind, &text),
+            UiEvent::Announce { text } => self.print(net::ui::PrintKind::Bold, &text),
+            UiEvent::Chat { team, client, text } => {
+                let live = &self.st.live;
+                let esc = hud::team_color_escape(live.own_team, live.team(client));
+                let who = format!("{esc}{}^7", live.name(client));
+                let line = format!("{}{who}: {text}", if team { "(Team) " } else { "" });
+                self.st.feed.chat(line, live.time);
+                self.st.hud_stats.chat += 1;
+            }
+            UiEvent::Obituary(o) => {
+                let now = self.st.live.time;
+                self.st
+                    .feed
+                    .obituary(&o, &self.st.live, &self.ui.assets, now);
+                self.st.hud_stats.obituaries += 1;
+            }
+            UiEvent::Map { .. } | UiEvent::Scores => {}
+        }
+    }
+
+    /// An `iprintln` line or announcement: into the message window it belongs to, or only the console log.
+    fn print(&mut self, kind: net::ui::PrintKind, text: &str) {
+        use net::ui::PrintKind;
+        let text = hud::localize(&self.ui.assets, text);
+        let now = self.st.live.time;
+        match kind {
+            PrintKind::Console => {
+                let log = &mut self.st.feed.console;
+                log.push(text);
+                if log.len() > 256 {
+                    log.remove(0);
+                }
+            }
+            PrintKind::Normal => {
+                self.st.feed.text(hud::NOTIFY, &text, now);
+                self.st.hud_stats.messages[hud::NOTIFY] += 1;
+            }
+            PrintKind::Bold => {
+                self.st.feed.text(hud::BOLD, &text, now);
+                self.st.hud_stats.messages[hud::BOLD] += 1;
+            }
+        }
+    }
+
+    /// Once a frame, after the network has been read: what follows from the live state. Opens the end-of-match
+    /// menus, clears the feed between matches and says whether the scoreboard needs fresh rows.
+    pub fn tick(&mut self, input: &mut Input) {
+        let live_now = self.st.live.active;
+        if live_now != self.st.was_active {
+            self.st.was_active = live_now;
+            self.st.feed.clear();
+        }
+        // `DrawIntermission`: at the end of a match the scoreboard (or the end-of-game menu when the scripts ask
+        // for it) is up for as long as the server holds the players there.
+        if self.st.live.intermission {
+            let show_end = input
+                .cvars
+                .get("ui_showEndOfGame")
+                .is_some_and(|v| v.trim() == "1");
+            let want = if show_end { "endofgame" } else { "scoreboard" };
+            if !self.ui.is_open(want) {
+                self.open(input, want);
+            }
+        }
+        self.st.live.scores_wanted = self.st.scoreboard_shown(&self.ui);
+        if self.st.live.active {
+            let st = &mut self.st;
+            let rows = st
+                .live
+                .scores_wanted
+                .then(|| hud::rows_shown(&st.live.scores, st.live.own_team, st.scores_top));
+            st.hud_stats.frame(&st.live, rows);
+        }
+        if !self.st.live.scores_wanted {
+            self.st.scores_top = 1;
         }
     }
 
@@ -300,15 +393,23 @@ impl Shell {
         clear: Option<wgpu::Color>,
     ) {
         self.ui2d.begin(size);
+        self.st.score_view.refresh(&input.cvars);
+        self.ui2d.team_colors = hud::team_colors(&input.cvars);
         {
             let mut p = Painter {
                 g: &mut self.ui2d,
                 cache: &mut self.cache,
                 images: &mut self.images,
             };
+            let in_game = self.st.in_game;
+            if in_game {
+                hud::draw_under(&self.ui, &mut p, &self.st);
+            }
             let mut h = Self::host(&mut self.st, input);
-            let in_game = h.st.in_game;
             self.ui.paint(&mut h, &mut p, in_game);
+            if in_game {
+                hud::draw_over(&self.ui, &mut p, &self.st);
+            }
         }
         self.ui2d.flush(target, clear);
     }
@@ -424,7 +525,10 @@ impl World for HostCx<'_> {
         self.st.game.scoreboard
     }
     fn in_killcam(&self) -> bool {
-        self.st.game.killcam
+        self.st.live.killcam
+    }
+    fn game_message_window_active(&self, w: i32) -> bool {
+        usize::try_from(w).is_ok_and(|w| self.st.feed.active(w, self.st.live.time))
     }
     fn player_field(&self, f: PlayerField) -> Value {
         let g = &self.st.game;
@@ -640,6 +744,22 @@ impl Host for HostCx<'_> {
         false
     }
 
+    fn game_message_window(
+        &mut self,
+        ui: &Ui,
+        p: &mut Painter,
+        d: &ItemDef,
+        rect: &::assets::zone::menu::Rect,
+        color: [f32; 4],
+    ) {
+        let now = self.st.live.time;
+        let window = usize::try_from(d.game_msg_window_index).unwrap_or(usize::MAX);
+        let lines = self.st.feed.draw_window(ui, p, window, rect, d, color, now);
+        if let Some(n) = self.st.hud_stats.window_lines.get_mut(window) {
+            *n += lines as u32;
+        }
+    }
+
     fn owner_draw(
         &mut self,
         ui: &Ui,
@@ -653,6 +773,10 @@ impl Host for HostCx<'_> {
             return;
         }
         match d.window.owner_draw {
+            90 => {
+                let now = self.st.live.time;
+                self.st.feed.draw_center(ui, p, d, rect, color, now);
+            }
             245 => {
                 let t = self
                     .st

@@ -196,10 +196,12 @@ pub fn draw(
             | 146
             | 150
             | 151
+            | 152
             | 158
             | 159
             | 170
             | 181
+            | 182
             | 183
             | 185
             | 187
@@ -224,6 +226,7 @@ pub fn draw(
         .into_iter()
         .find(|k| k != "KEY_UNBOUND")
         .unwrap_or_else(|| "KEY_UNBOUND".to_owned());
+    let objectives = cx.st.live.objectives.clone();
     let h = &mut cx.st.game.hud;
     *h.drawn.entry(id).or_default() += 1;
     let mut dc = Dc {
@@ -258,6 +261,8 @@ pub fn draw(
         145 | 146 => compass_tape(&mut dc, h),
         150 => compass_player(&mut dc, h, false),
         159 => compass_map(&mut dc, h),
+        152 => compass_objectives(&mut dc, h, false, &objectives),
+        182 => compass_objectives(&mut dc, h, true, &objectives),
         158 => compass_friendlies(&mut dc, h, false),
         170 => compass_enemies(&mut dc, h, false),
         183 => compass_player(&mut dc, h, true),
@@ -977,6 +982,43 @@ fn draw_marks(dc: &mut Dc, h: &HudFacts, map: &MapInfo, full: bool, icon: &str, 
             m.angle.to_radians(),
             c,
         );
+    }
+}
+
+/// The scripts' objectives (`objective_add` with a position) on the minimap and the full map, the current one over
+/// the others; each keeps its own icon.
+fn compass_objectives(
+    dc: &mut Dc,
+    h: &mut HudFacts,
+    full: bool,
+    objectives: &[crate::hud::LiveObjective],
+) {
+    let a = if full { 1.0 } else { compass_alpha(dc, h) };
+    let Some(map) = h.map.clone().filter(|_| a > 0.0) else {
+        return;
+    };
+    for current in [false, true] {
+        let mut icons: Vec<&str> = Vec::new();
+        for o in objectives
+            .iter()
+            .filter(|o| o.current == current && !o.icon.is_empty())
+        {
+            if !icons.contains(&o.icon.as_str()) {
+                icons.push(&o.icon);
+            }
+        }
+        for icon in icons {
+            let marks: Vec<Mark> = objectives
+                .iter()
+                .filter(|o| o.current == current && o.icon == icon)
+                .map(|o| Mark {
+                    pos: [o.pos[0], o.pos[1]],
+                    angle: 0.0,
+                    alpha: a,
+                })
+                .collect();
+            draw_marks(dc, h, &map, full, icon, &marks);
+        }
     }
 }
 

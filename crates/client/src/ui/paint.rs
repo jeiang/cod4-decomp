@@ -126,6 +126,17 @@ impl Ui {
     }
 
     pub fn draw_text(&self, p: &mut Painter, t: &TextDraw) {
+        self.draw_text_fx(p, t, None, 0);
+    }
+
+    /// Like [`Ui::draw_text`], with a glow colour and a limit on the letters drawn (0: all), as hud elements use.
+    pub fn draw_text_fx(
+        &self,
+        p: &mut Painter,
+        t: &TextDraw,
+        glow: Option<[f32; 4]>,
+        max_chars: usize,
+    ) {
         let Some(font) = pick_font(&self.assets, t.font_enum, t.scale, self.place.unit()) else {
             return;
         };
@@ -136,7 +147,7 @@ impl Ui {
             self.place.y(t.y, t.vert).round(),
         );
         let scale = t.scale * self.place.scale.0;
-        let style = TextStyle::from_menu_style(t.style, None);
+        let style = TextStyle::from_menu_style(t.style, glow);
         p.g.draw_text(
             font,
             &fimg,
@@ -147,7 +158,7 @@ impl Ui {
             scale,
             t.color,
             style,
-            0,
+            max_chars,
         );
     }
 }
@@ -546,6 +557,11 @@ impl Ui {
                 self.paint_value_text(host, p, m, i, d, &key);
             }
             ity::LISTBOX => self.paint_listbox(host, p, m, i, d),
+            ity::GAME_MSG_WINDOW => {
+                let r = self.menus[m].items[i].rect;
+                let color = self.text_color(m, i, d, &*host);
+                host.game_message_window(&*self, p, d, &r, color);
+            }
             ity::OWNERDRAW => {
                 let r = self.menus[m].items[i].rect;
                 let px = self

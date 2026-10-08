@@ -53,6 +53,7 @@ pub mod ity {
     pub const VALIDFILEFIELD: i32 = 16;
     pub const DECIMALFIELD: i32 = 17;
     pub const UPREDITFIELD: i32 = 18;
+    pub const GAME_MSG_WINDOW: i32 = 19;
 }
 
 /// Keys the menus react to.
@@ -102,6 +103,17 @@ pub trait Host: env::World {
     fn feeder_image(&mut self, feeder: i32, row: usize, col: usize) -> String;
     /// A key on an owner-draw item (`ownerdraw` id); `true` if it was used.
     fn owner_key(&mut self, ui: &Ui, id: i32, key: &UiKey) -> bool;
+    /// Draws the game message window an item of type 19 stands for (`d.game_msg_window_index`), anchored at `rect`
+    /// (virtual units and alignments, size unused).
+    fn game_message_window(
+        &mut self,
+        _ui: &Ui,
+        _p: &mut paint::Painter,
+        _d: &ItemDef,
+        _rect: &Rect,
+        _color: [f32; 4],
+    ) {
+    }
     /// Draws an owner-draw item (`ownerdraw` id in `d.window.owner_draw`) inside `rect` (pixels).
     fn owner_draw(
         &mut self,
