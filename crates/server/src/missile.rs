@@ -500,7 +500,9 @@ impl Game {
     /// `G_RunFrameForEntity`: what one entity does each frame.
     pub fn run_entity(&mut self, vm: &mut Vm, n: u16) {
         let Some(e) = self.ent(n) else { return };
-        if e.missile.is_some() {
+        if e.free_at.is_some_and(|t| self.level.time >= t) {
+            self.free_entity(vm, n);
+        } else if e.missile.is_some() {
             self.run_missile(vm, n);
         } else if e.kind == EntKind::Item && e.mv.pos.tr.kind == TrType::Gravity {
             self.run_item(n);

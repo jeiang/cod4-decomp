@@ -23,6 +23,7 @@ pub mod client_ui;
 pub mod client_viewmodel;
 pub mod net_killcam;
 pub mod net_loopback;
+pub mod net_mantle;
 pub mod net_match;
 pub mod net_objective;
 pub mod net_rcon;

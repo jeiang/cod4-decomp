@@ -26,6 +26,7 @@ use assets::zone::{Asset, Consumer, DecodeFilter, XAssetType, Zone};
 
 use crate::delta::RootMotion;
 use crate::tags::Skeleton;
+use sim::pm::{MANTLE_ANIM_NAMES, MantleAnims};
 
 /// Zone load order and tags of a dedicated server (`code_post_gfx_mp` first).
 pub const BOOT_ZONES: [(&str, u8); 4] = [
@@ -147,11 +148,16 @@ impl PlayerAnim {
     }
 }
 
-/// True for the animations the server skeleton samples (`pb_*`), and, for a client, the weapon
-/// view model animations (`viewmodel_*`) and the helicopter's rotors (`bh_rotors`).
+/// True for the animations the server skeleton samples (`pb_*`), the mantle animations whose
+/// root motion moves a climbing player, and, for a client, the weapon view model animations
+/// (`viewmodel_*`) and the helicopter's rotors (`bh_rotors`).
 fn is_player_anim(name: &str, client: bool) -> bool {
     let starts = |p: &str| name.len() > p.len() && name[..p.len()].eq_ignore_ascii_case(p);
-    starts("pb_") || (client && (starts("viewmodel_") || name.eq_ignore_ascii_case("bh_rotors")))
+    starts("pb_")
+        || MANTLE_ANIM_NAMES
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(name))
+        || (client && (starts("viewmodel_") || name.eq_ignore_ascii_case("bh_rotors")))
 }
 
 /// The server's asset selection, with the render payload (vertices, skin weights) kept when the
@@ -475,6 +481,12 @@ impl Content {
     /// A retained `pb_*` player-body animation.
     pub fn player_anim(&self, name: &str) -> Option<&Arc<PlayerAnim>> {
         get(&self.map.player_anims, name).or_else(|| get(&self.base.player_anims, name))
+    }
+
+    /// The mantle animation set movement climbs ledges with; `None` when an animation is
+    /// missing. Server and client both build it here so their prediction agrees.
+    pub fn mantle_anims(&self) -> Option<MantleAnims> {
+        MantleAnims::from_xanims(|name| self.player_anim(name).map(|a| &*a.parts))
     }
 
     /// Every retained player-body animation, each name once.

@@ -240,7 +240,10 @@ impl NetPlay {
         Ok(Self {
             net: NetClient::new(t, server, name, "", qport),
             weapons,
-            params: Params::default(),
+            params: Params {
+                mantle_anims: lib.content.mantle_anims(),
+                ..Params::default()
+            },
             boxes: PlayerBoxes::new(clipmap),
             pred: Predictor::default(),
             angles: [0.0; 2],
@@ -377,6 +380,7 @@ impl NetPlay {
                 .map_err(|e| format!("weapon table: {e:?}"))?;
             let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
             self.effects = Effects::new(&lib.content, map.world.clone());
+            self.params.mantle_anims = lib.content.mantle_anims();
             self.lib = lib;
             self.boxes = PlayerBoxes::new(clipmap);
             self.sound = sound;
