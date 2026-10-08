@@ -258,9 +258,10 @@ impl Effects {
                 angles,
                 weapon: w,
                 shooter,
+                vehicle,
             } => {
                 let Some(d) = weapon(*w) else { return };
-                let mine = *shooter == self.own;
+                let mine = *shooter == self.own && !vehicle;
                 let (flash, eject) = if mine {
                     (&d.view_flash_effect, &d.view_shell_eject_effect)
                 } else {
@@ -268,6 +269,15 @@ impl Effects {
                 };
                 let (flash_at, brass_at) = match self.view.filter(|_| mine) {
                     Some(t) => (t.flash, t.brass),
+                    // A vehicle's event names its muzzle, and it throws no shells.
+                    None if *vehicle => {
+                        let (f, r, u) = sim::pm::math::angle_vectors(angles);
+                        let flash = Frame {
+                            origin: Vec3::from(*eye),
+                            axis: [Vec3::from(f), -Vec3::from(r), Vec3::from(u)],
+                        };
+                        (Some(flash), None)
+                    }
                     None => {
                         // Another player's gun is not drawn: put the muzzle where a rifle's would be.
                         let (f, r, u) = sim::pm::math::angle_vectors(angles);

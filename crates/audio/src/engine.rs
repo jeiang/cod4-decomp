@@ -70,6 +70,9 @@ pub struct Sound {
     streams: Streams,
     listener: Listener,
     loops: HashMap<(u32, String), VoiceId>,
+    /// Entity loops that were out of range when asked for, started by [`Sound::follow_entity`] once their entity is
+    /// near enough.
+    waiting: HashMap<(u32, String), Arc<Alias>>,
     ambient: Option<VoiceId>,
     music: Option<VoiceId>,
     pub played: Played,
@@ -194,6 +197,7 @@ impl Sound {
             streams: Streams::new(),
             listener: Listener::from_yaw([0.0; 3], 0.0),
             loops: HashMap::new(),
+            waiting: HashMap::new(),
             ambient: None,
             music: None,
             played: Played::default(),
@@ -300,7 +304,12 @@ impl Sound {
                 .map(|i| (pos[i] - self.listener.pos[i]).powi(2))
                 .sum();
             if d2 > alias.dist.1 * alias.dist.1 {
-                self.played.out_of_range += 1;
+                if alias.looping && cue.entity != NO_ENTITY {
+                    self.waiting
+                        .insert((cue.entity, alias.name.to_ascii_lowercase()), alias.clone());
+                } else {
+                    self.played.out_of_range += 1;
+                }
                 return None;
             }
             Some(Emitter {
@@ -385,14 +394,43 @@ impl Sound {
 
     /// Stops a looping sound started with this entity and alias.
     pub fn stop_loop(&mut self, entity: u32, alias: &str) {
-        if let Some(id) = self.loops.remove(&(entity, alias.to_ascii_lowercase())) {
+        let key = (entity, alias.to_ascii_lowercase());
+        self.waiting.remove(&key);
+        if let Some(id) = self.loops.remove(&key) {
             self.handle.stop(id);
         }
     }
 
     pub fn stop_entity(&mut self, entity: u32) {
         self.loops.retain(|k, _| k.0 != entity);
+        self.waiting.retain(|k, _| k.0 != entity);
         self.handle.stop_entity(entity);
+    }
+
+    /// The entity moved to `pos`: its looping sounds move with it, and those that were out of range start if they
+    /// are in range now.
+    pub fn follow_entity(&mut self, entity: u32, pos: [f32; 3]) {
+        for (k, id) in &self.loops {
+            if k.0 == entity {
+                self.handle.set_position(*id, pos);
+            }
+        }
+        let ready: Vec<_> = self
+            .waiting
+            .iter()
+            .filter(|(k, _)| k.0 == entity)
+            .map(|(k, a)| (k.1.clone(), a.clone()))
+            .collect();
+        for (name, alias) in ready {
+            let cue = Cue {
+                origin: Some(pos),
+                entity,
+                ..Cue::default()
+            };
+            if self.start(&alias, &name, cue).is_some() {
+                self.waiting.remove(&(entity, name));
+            }
+        }
     }
 
     pub fn move_voice(&self, id: VoiceId, pos: [f32; 3]) {

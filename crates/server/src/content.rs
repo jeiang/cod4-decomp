@@ -148,10 +148,10 @@ impl PlayerAnim {
 }
 
 /// True for the animations the server skeleton samples (`pb_*`), and, for a client, the weapon
-/// view model animations (`viewmodel_*`).
+/// view model animations (`viewmodel_*`) and the helicopter's rotors (`bh_rotors`).
 fn is_player_anim(name: &str, client: bool) -> bool {
     let starts = |p: &str| name.len() > p.len() && name[..p.len()].eq_ignore_ascii_case(p);
-    starts("pb_") || (client && starts("viewmodel_"))
+    starts("pb_") || (client && (starts("viewmodel_") || name.eq_ignore_ascii_case("bh_rotors")))
 }
 
 /// The server's asset selection, with the render payload (vertices, skin weights) kept when the
