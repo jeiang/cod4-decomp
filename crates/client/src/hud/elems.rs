@@ -289,10 +289,8 @@ fn draw_elem(ui: &Ui, p: &mut Painter, le: &LiveElem, now: i32, color: [f32; 4])
     }
     match (e.kind, mat) {
         (_, None) => {
-            if !text.is_empty() {
-                if chars != Some(0) {
-                    draw(p, &text, x, glow, chars.unwrap_or(0));
-                }
+            if !text.is_empty() && chars != Some(0) {
+                draw(p, &text, x, glow, chars.unwrap_or(0));
             }
         }
         (he::MATERIAL, Some((mw, mh))) => {
