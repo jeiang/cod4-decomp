@@ -1065,6 +1065,30 @@ impl AutoJoin {
             None
         }
     }
+
+    /// Answers the join menus among `events` and returns the answers and the events the screen still shows.
+    /// A scripted player never sees the server's menus. A person's `--listen`/`--connect` session answers only the
+    /// first team and class menus of a level, so the join is quick; after that the menus are the player's own
+    /// (Escape's Choose Class and Change Team open the server's menus, and Escape closes them again). A new level
+    /// starts the join over.
+    pub fn filter(&mut self, events: Vec<UiEvent>, scripted: bool) -> (Vec<String>, Vec<UiEvent>) {
+        let (mut answers, mut shown) = (Vec::new(), Vec::new());
+        for ev in events {
+            if matches!(ev, UiEvent::Map { .. }) {
+                self.classes = 0;
+            }
+            let joining = self.classes == 0;
+            answers.extend(self.step(&ev).filter(|_| scripted || joining));
+            let menu = matches!(
+                ev,
+                UiEvent::OpenMenu { .. } | UiEvent::CloseMenu { .. } | UiEvent::CloseIngameMenu
+            );
+            if !(menu && (scripted || joining)) {
+                shown.push(ev);
+            }
+        }
+        (answers, shown)
+    }
 }
 
 /// The parts of a [`cs::CLIENTINFO`] string.
@@ -1664,5 +1688,62 @@ mod tests {
         assert_eq!((e.horz_align(), e.vert_align()), (7, 3));
         assert_eq!(e.align_org, 0b1001);
         assert_eq!(e.align_screen, 0b111_011);
+    }
+
+    fn open(name: &str) -> UiEvent {
+        UiEvent::OpenMenu {
+            name: name.into(),
+            mouse: true,
+        }
+    }
+
+    /// A person on `--listen` is joined quickly, then the server's menus are theirs: Choose Class and Change Team
+    /// open, and Escape's close reaches the screen.
+    #[test]
+    fn auto_join_answers_the_join_menus_then_leaves_the_rest_to_the_player() {
+        let mut join = AutoJoin::default();
+        let (answers, shown) = join.filter(vec![open("team_marinesopfor")], false);
+        assert_eq!(answers.len(), 1, "the team menu is answered");
+        assert!(shown.is_empty());
+        let (answers, shown) =
+            join.filter(vec![open("changeclass"), UiEvent::CloseIngameMenu], false);
+        assert_eq!(answers.len(), 1, "the class menu is answered");
+        // The join is over once the class is answered: the server's close reaches the (menu-less) screen.
+        assert_eq!(shown, vec![UiEvent::CloseIngameMenu]);
+        // Mid-round: the player's own menus.
+        let mid = vec![
+            open("changeclass"),
+            open("team_marinesopfor"),
+            UiEvent::CloseIngameMenu,
+        ];
+        let (answers, shown) = join.filter(mid.clone(), false);
+        assert!(answers.is_empty());
+        assert_eq!(shown, mid);
+        // A new level joins again.
+        let (answers, shown) = join.filter(
+            vec![
+                UiEvent::Map {
+                    name: "mp_crash".into(),
+                },
+                open("team_marinesopfor"),
+            ],
+            false,
+        );
+        assert_eq!(answers.len(), 1);
+        assert_eq!(shown.len(), 1, "only the map change shows");
+    }
+
+    /// A scripted player answers every join menu and shows no server menu.
+    #[test]
+    fn a_scripted_player_answers_every_menu_and_shows_none() {
+        let mut join = AutoJoin::default();
+        let ev = vec![
+            open("changeclass"),
+            open("changeclass"),
+            UiEvent::CloseIngameMenu,
+        ];
+        let (answers, shown) = join.filter(ev, true);
+        assert_eq!(answers.len(), 2);
+        assert!(shown.is_empty());
     }
 }

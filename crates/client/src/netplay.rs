@@ -1245,19 +1245,11 @@ impl NetPlay {
             self.ui_events.extend(events);
             return;
         };
-        let answers: Vec<String> = events.iter().filter_map(|e| join.step(e)).collect();
+        let (answers, shown) = join.filter(events, self.auto.is_some());
         for a in answers {
             self.net.command(&a);
         }
-        // The scripted player has no use for the menus the server opens, but its screen shows the rest.
-        self.ui_events.extend(events.into_iter().filter(|e| {
-            !matches!(
-                e,
-                net::ui::UiEvent::OpenMenu { .. }
-                    | net::ui::UiEvent::CloseMenu { .. }
-                    | net::ui::UiEvent::CloseIngameMenu
-            )
-        }));
+        self.ui_events.extend(shown);
     }
 
     fn autoplay(&mut self, dt: f32, st: i32, own: u16) -> InputFrame {
