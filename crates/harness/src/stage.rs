@@ -245,6 +245,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_fx::run),
     },
     StageDef {
+        name: "client-load",
+        description: "loading a map must not freeze the window: the real client starts a match on mp_crash and on the largest map; the longest gap between presented frames during the load stays under 100 ms",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_load::run),
+    },
+    StageDef {
         name: "client-input",
         description: "client input layer: default binds, mouse look scaling and config round trip (no display needed)",
         needs_install: false,

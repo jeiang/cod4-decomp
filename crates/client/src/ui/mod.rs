@@ -8,6 +8,7 @@
 pub mod assets;
 pub mod env;
 pub mod expr;
+pub mod loading;
 pub mod paint;
 pub mod place;
 pub mod script;

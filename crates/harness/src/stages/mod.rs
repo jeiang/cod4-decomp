@@ -8,6 +8,7 @@ pub mod client_hud;
 pub mod client_ingame_menu;
 pub mod client_input;
 pub mod client_leave;
+pub mod client_load;
 pub mod client_match;
 pub mod client_menu_match;
 pub mod client_models;

@@ -12,9 +12,7 @@ use crate::state::StateBits;
 use crate::texture::{Tex, TextureCache};
 use assets::zone::gfx::{ArgValue, Material, Pass, TechniqueSet, TextureSource};
 use sm3::{Options, SamplerDim, Stage, Translation, VertexFix};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use web_time::Instant;
@@ -164,7 +162,7 @@ pub struct Prepared {
     ps_static: Vec<(u32, [f32; 4])>,
     vs_code: Vec<(u32, u32, u32)>,
     ps_code: Vec<(u32, u32, u32)>,
-    pipelines: RefCell<HashMap<Target, Arc<wgpu::RenderPipeline>>>,
+    pipelines: Mutex<HashMap<Target, Arc<wgpu::RenderPipeline>>>,
     id: u32,
 }
 
@@ -309,7 +307,7 @@ type ShaderKey = (usize, Option<[u32; 2]>, Option<VertexKind>, bool);
 pub struct Materials {
     shaders: HashMap<ShaderKey, Option<Arc<Compiled>>>,
     layouts: HashMap<Vec<(u32, SamplerDim, Fetch)>, Arc<wgpu::BindGroupLayout>>,
-    prepared: HashMap<(usize, usize, VertexKind, bool), Option<Rc<Prepared>>>,
+    prepared: HashMap<(usize, usize, VertexKind, bool), Option<Arc<Prepared>>>,
     samplers: HashMap<SamplerKey, Arc<wgpu::Sampler>>,
     pub vs_layout: wgpu::BindGroupLayout,
     pub ps_layout: wgpu::BindGroupLayout,
@@ -608,7 +606,7 @@ impl Materials {
         techs: &[usize],
         kind: VertexKind,
         hsm: bool,
-    ) -> Option<Rc<Prepared>> {
+    ) -> Option<Arc<Prepared>> {
         let set = self.techset(mat, hsm)?;
         let tech = techs.iter().copied().find(|&t| {
             set.techniques
@@ -635,7 +633,7 @@ impl Materials {
         let name = mat.name.as_deref().unwrap_or("?").to_owned();
         let built = self.build(gpu, textures, mat, tech, kind, hsm);
         let p = match built {
-            Ok(p) => Some(Rc::new(p)),
+            Ok(p) => Some(Arc::new(p)),
             Err(e) => {
                 self.failures.insert(name, e);
                 None
@@ -807,7 +805,7 @@ impl Materials {
             ps_static,
             vs_code,
             ps_code,
-            pipelines: RefCell::new(HashMap::new()),
+            pipelines: Mutex::new(HashMap::new()),
             id: self.next_id,
         })
     }
@@ -827,7 +825,7 @@ impl Materials {
 
     /// Whether `p` has a pipeline for `target` already.
     pub fn has_pipeline(&self, p: &Prepared, target: Target) -> bool {
-        p.pipelines.borrow().contains_key(&target)
+        lock(&p.pipelines).contains_key(&target)
     }
 
     /// The pipeline for `p` rendering into `target`, built on first use; `None` when it is not built and the
@@ -838,7 +836,7 @@ impl Materials {
         p: &Prepared,
         target: Target,
     ) -> Option<Arc<wgpu::RenderPipeline>> {
-        if let Some(built) = p.pipelines.borrow().get(&target) {
+        if let Some(built) = lock(&p.pipelines).get(&target) {
             return Some(built.clone());
         }
         if lock(&self.deadline).is_some_and(|d| Instant::now() >= d) {
@@ -856,7 +854,7 @@ impl Materials {
         p: &Prepared,
         target: Target,
     ) -> Arc<wgpu::RenderPipeline> {
-        let mut map = p.pipelines.borrow_mut();
+        let mut map = lock(&p.pipelines);
         map.entry(target)
             .or_insert_with(|| {
                 let layout = gpu

@@ -22,6 +22,7 @@ pub struct Listen {
 }
 
 /// What a listen server plays.
+#[derive(Clone)]
 pub struct Config {
     pub map: String,
     pub bots: usize,
@@ -45,8 +46,20 @@ pub fn free_standard_port() -> u16 {
         .unwrap_or(0)
 }
 
+/// A listen server that is still booting (map zone, scripts, navigation); see [`begin`].
+pub struct Booting {
+    rx: mpsc::Receiver<Result<SocketAddr, String>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<Value>>,
+}
+
 /// Starts the server and returns once it listens on a map with its bots.
 pub fn start(install: &Path, cfg: Config) -> Result<Listen, String> {
+    begin(install, cfg)?.wait()
+}
+
+/// Starts the server's thread and returns at once; [`Booting::wait`] joins the boot.
+pub fn begin(install: &Path, cfg: Config) -> Result<Booting, String> {
     let install = install.to_owned();
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Result<SocketAddr, String>>();
@@ -55,14 +68,35 @@ pub fn start(install: &Path, cfg: Config) -> Result<Listen, String> {
         .name("listen-server".into())
         .spawn(move || run(&install, &cfg, &stop2, &tx))
         .map_err(|e| e.to_string())?;
-    let addr = rx
-        .recv()
-        .map_err(|_| "the listen server died while starting".to_string())??;
-    Ok(Listen {
-        addr,
+    Ok(Booting {
+        rx,
         stop,
         thread: Some(thread),
     })
+}
+
+impl Booting {
+    /// Blocks until the server listens.
+    pub fn wait(mut self) -> Result<Listen, String> {
+        let addr = self
+            .rx
+            .recv()
+            .map_err(|_| "the listen server died while starting".to_string())??;
+        Ok(Listen {
+            addr,
+            stop: self.stop.clone(),
+            thread: self.thread.take(),
+        })
+    }
+}
+
+impl Drop for Booting {
+    /// A boot nobody waited for (the load was abandoned) stops its server once it is up.
+    fn drop(&mut self) {
+        if self.thread.is_some() {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Listen {

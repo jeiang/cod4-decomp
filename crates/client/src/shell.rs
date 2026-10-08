@@ -10,6 +10,7 @@ use crate::input::Input;
 use crate::ui::assets::UiAssets;
 use crate::ui::env::World;
 use crate::ui::expr::{HudFade, PlayerField, TeamField, TeamSel, Value};
+use crate::ui::loading::LoadingView;
 use crate::ui::paint::Painter;
 use crate::ui::place::Px;
 use crate::ui::{Host, Ui, UiKey};
@@ -547,6 +548,25 @@ impl Shell {
             }
         }
         self.ui2d.flush(target, clear);
+    }
+
+    /// Draws the loading screen over `target`.
+    pub fn paint_loading(
+        &mut self,
+        target: &wgpu::TextureView,
+        size: (u32, u32),
+        view: &LoadingView,
+    ) {
+        self.ui2d.begin(size);
+        {
+            let mut p = Painter {
+                g: &mut self.ui2d,
+                cache: &mut self.cache,
+                images: &mut self.images,
+            };
+            self.ui.paint_loading(&mut p, view);
+        }
+        self.ui2d.flush(target, Some(wgpu::Color::BLACK));
     }
 
     /// Images the UI could not find, for the log.
