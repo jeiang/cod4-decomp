@@ -132,6 +132,13 @@ impl ClientSound {
         }
     }
 
+    /// `snd_volume`: the master volume, 0 to 1.
+    pub fn set_volume(&mut self, volume: f32) {
+        if let Some(s) = self.ready() {
+            s.set_volume(volume);
+        }
+    }
+
     /// Once a frame: the listener (the eye, `yaw` in radians counter-clockwise from +x) and the mixer's upkeep.
     pub fn frame(&mut self, eye: [f32; 3], yaw: f32, dt: f32) {
         self.eye = eye;
@@ -700,6 +707,24 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         _ => check(false, format!("{shot} did not play")),
     }
     check(beyond.is_none(), "a shot beyond its range started".into());
+
+    // snd_volume scales everything: the same shot at 0.4 is about half the RMS of 0.8 (the alias rolls its
+    // volume and pitch a little, hence the margin), and the untouched default is the 0.8 of the original.
+    let rms_at = |s: &mut Sound, volume: f32| {
+        s.set_volume(volume);
+        hear(s, [150.0, 0.0, 0.0]).map(|e| (e[0] + e[1]).sqrt())
+    };
+    match (rms_at(&mut s, 0.4), rms_at(&mut s, 0.8)) {
+        (Some(low), Some(high)) => {
+            let ratio = low / high.max(1e-9);
+            check(
+                (0.35..0.65).contains(&ratio),
+                format!("snd_volume 0.4 / 0.8 RMS ratio {ratio}, expected about 0.5"),
+            );
+            m.insert("volume_rms_ratio".into(), ratio.into());
+        }
+        _ => check(false, format!("{shot} did not play for the volume check")),
+    }
 
     // Footsteps (positioned, per surface).
     let step = s.play(

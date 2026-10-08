@@ -34,10 +34,12 @@ pub const NO_ENTITY: u32 = u32::MAX;
 const POOL_SIZE: [usize; 3] = [8, 32, 13];
 const MAX_VOICES: usize = 64;
 const QUEUE: usize = 1024;
-/// The gain of everything (`snd_volume` times 0.75 in the original).
 /// Frames mixed at a time, so the reverb send needs one fixed buffer.
 const CHUNK: usize = 512;
+/// What `snd_volume` is multiplied by to give the gain of everything (the original's `g_snd.volume`).
 const MASTER: f32 = 0.75;
+/// `snd_volume`'s default, so an untouched mixer is as loud as the original's.
+pub const DEFAULT_VOLUME: f32 = 0.8;
 /// How long a slave takes to duck or recover (`snd_slaveFadeTime`).
 const SLAVE_FADE_MS: f32 = 500.0;
 /// Stopping a voice fades it over this long instead of clicking.
@@ -172,6 +174,8 @@ enum Command {
     StopEntity(u32),
     SetPosition(VoiceId, [f32; 3]),
     SetVolume(VoiceId, f32),
+    /// `snd_volume`.
+    Master(f32),
     Listener(Listener),
     /// The room and wet level to fade to over `fade_ms`.
     Reverb {
@@ -285,6 +289,11 @@ impl Handle {
             band,
             set,
         });
+    }
+
+    /// The master volume, `snd_volume`: 0 to 1, scaling everything that plays.
+    pub fn set_master_volume(&self, volume: f32) {
+        self.send(Command::Master(volume));
     }
 
     pub fn set_listener(&self, l: Listener) {
@@ -432,6 +441,8 @@ pub struct Mixer {
     channels: [ChannelInfo; MAX_CHANNELS],
     voices: [Option<Voice>; MAX_VOICES],
     listener: Listener,
+    /// The gain of everything: `snd_volume` times [`MASTER`].
+    gain: f32,
     /// 0 when no master plays, 1 when one does; slaves follow it over [`SLAVE_FADE_MS`].
     slave_lerp: f32,
     age: u64,
@@ -442,6 +453,15 @@ pub struct Mixer {
     eq: [ChannelEq; MAX_CHANNELS],
     /// The mono sum of the sounds that feed the reverb, one chunk.
     send: Vec<f32>,
+}
+
+/// The gain of everything for a `snd_volume`; the dvar's range is 0 to 1.
+fn master_gain(volume: f32) -> f32 {
+    if volume.is_nan() {
+        0.0
+    } else {
+        volume.clamp(0.0, 1.0) * MASTER
+    }
 }
 
 /// A mixer and the handle that drives it.
@@ -478,6 +498,7 @@ pub fn mixer(rate: u32, channels: &[ChannelDef]) -> (Handle, Mixer) {
             channels: table,
             voices: [const { None }; MAX_VOICES],
             listener: Listener::from_yaw([0.0; 3], 0.0),
+            gain: master_gain(DEFAULT_VOLUME),
             slave_lerp: 0.0,
             age: 0,
             reverb: Reverb::new(rate),
@@ -553,7 +574,7 @@ impl Mixer {
         }
         let mut peak = 0.0f32;
         for s in out.iter_mut() {
-            *s = (*s * MASTER).clamp(-1.0, 1.0);
+            *s = (*s * self.gain).clamp(-1.0, 1.0);
             peak = peak.max(s.abs());
         }
         let st = &self.stats;
@@ -588,6 +609,7 @@ impl Mixer {
                     v.volume = vol.max(0.0);
                 }
             }
+            Command::Master(v) => self.gain = master_gain(v),
             Command::Listener(l) => self.listener = l,
             Command::Reverb { room, wet, fade_ms } => {
                 if room != self.reverb.room() {
@@ -990,6 +1012,29 @@ mod tests {
     }
 
     #[test]
+    fn snd_volume_scales_the_output_and_defaults_to_stock_gain() {
+        assert!((master_gain(DEFAULT_VOLUME) - 0.6).abs() < 1e-6);
+        let level_at = |volume: Option<f32>| {
+            let (mut h, mut m) = mixer(RATE, &table());
+            if let Some(v) = volume {
+                h.set_master_volume(v);
+            }
+            let id = h.next_id();
+            let mut p = Play::new(id, Source::Loaded(dc(500)), 0);
+            p.speaker = [[1.0, 1.0], [0.0; 2]];
+            h.play(p);
+            level(&mut m)[0]
+        };
+        let default = level_at(None);
+        assert!((default - 0.5 * 0.6).abs() < 1e-3, "{default}");
+        assert!((level_at(Some(0.4)) * 2.0 - level_at(Some(0.8))).abs() < 1e-3);
+        assert_eq!(level_at(Some(0.0)), 0.0);
+        // Out of range values are the dvar's limits.
+        assert_eq!(level_at(Some(7.0)), level_at(Some(1.0)));
+        assert_eq!(level_at(Some(-1.0)), 0.0);
+    }
+
+    #[test]
     fn a_flat_mono_sound_goes_through_its_speaker_map() {
         let (mut h, mut m) = mixer(RATE, &table());
         let id = h.next_id();
@@ -997,8 +1042,14 @@ mod tests {
         p.speaker = [[0.5, 0.25], [0.0; 2]];
         h.play(p);
         let [l, r] = level(&mut m);
-        assert!((l - 0.5 * 0.5 * MASTER).abs() < 1e-3, "{l}");
-        assert!((r - 0.5 * 0.25 * MASTER).abs() < 1e-3, "{r}");
+        assert!(
+            (l - 0.5 * 0.5 * master_gain(DEFAULT_VOLUME)).abs() < 1e-3,
+            "{l}"
+        );
+        assert!(
+            (r - 0.5 * 0.25 * master_gain(DEFAULT_VOLUME)).abs() < 1e-3,
+            "{r}"
+        );
     }
 
     #[test]
@@ -1112,7 +1163,7 @@ mod tests {
         h.play(p);
         let mut out = vec![0.0; 960];
         m.fill(&mut out);
-        assert!((out[10] - 0.5 * MASTER).abs() < 1e-3);
+        assert!((out[10] - 0.5 * master_gain(DEFAULT_VOLUME)).abs() < 1e-3);
         m.fill(&mut out);
         m.fill(&mut out);
         assert_eq!(h.stats.finished.load(Ordering::Relaxed), 1);

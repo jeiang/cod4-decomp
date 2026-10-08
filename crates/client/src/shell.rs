@@ -330,6 +330,7 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("r_glow_allowed", "1"),
     ("r_texFilterAnisoMin", "1"),
     ("r_texFilterAnisoMax", "4"),
+    ("snd_volume", "0.8"),
     ("sm_enable", "1"),
     ("sc_enable", "1"),
     ("ragdoll_enable", "1"),

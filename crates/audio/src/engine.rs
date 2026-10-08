@@ -82,6 +82,8 @@ pub struct Sound {
     owed: f64,
     /// `setReverb` by priority (`snd_enveffectsprio_level`, `_shellshock`): room and wet level.
     effects: [Option<(u8, f32)>; ENV_PRIORITIES],
+    /// `snd_volume` as last sent to the mixer.
+    volume: f32,
 }
 
 /// Where streamed files decode. Natively a thread feeds each job's ring; on `wasm32`, which has no threads
@@ -205,6 +207,7 @@ impl Sound {
             scratch: vec![0.0; 4096],
             owed: 0.0,
             effects: [None; ENV_PRIORITIES],
+            volume: crate::mixer::DEFAULT_VOLUME,
         }
     }
 
@@ -224,6 +227,14 @@ impl Sound {
 
     pub fn stats(&self) -> &Arc<crate::mixer::Stats> {
         &self.handle.stats
+    }
+
+    /// `snd_volume`: the master volume, 0 to 1. Cheap to call every frame.
+    pub fn set_volume(&mut self, volume: f32) {
+        if volume != self.volume {
+            self.volume = volume;
+            self.handle.set_master_volume(volume);
+        }
     }
 
     /// Moves the listener (the player's eye; `yaw` radians counter-clockwise from +x).
