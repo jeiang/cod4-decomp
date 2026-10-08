@@ -58,6 +58,24 @@ impl UiAssets {
         Ok(a)
     }
 
+    /// Adds the icon materials the weapons carry (HUD, ammunition counter, kill feed, d-pad): most are defined
+    /// by the weapon that first names them and no UI zone lists them.
+    pub fn add_weapon_icons(&mut self, weapons: &[Arc<assets::zone::weapon::WeaponDef>]) {
+        for w in weapons {
+            for m in [
+                &w.hud_icon,
+                &w.ammo_counter_icon,
+                &w.kill_icon,
+                &w.dpad_icon,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                self.add_material(m.clone());
+            }
+        }
+    }
+
     /// Adds the menus, fonts, strings and materials of `zone`.
     pub fn load_zone(&mut self, install: &Install, zone: &str) -> Result<(), String> {
         let path = install
@@ -188,5 +206,24 @@ mod tests {
         assert!(a.translate("@MENU_JOIN_GAME").is_some());
         assert!(a.table("mp/mapstable.csv").is_some());
         assert!(a.material("white").is_some(), "white");
+    }
+
+    /// The d-pad and grenade icons are materials only the weapons define; the UI must be able to draw them.
+    #[test]
+    fn weapon_icons_resolve_after_registering_the_weapons() {
+        let Some(i) = install() else { return };
+        let mut content = server::content::Content::for_client();
+        content.load_zone(&i, "common_mp", 4).unwrap();
+        let mut a = UiAssets::load(&i).unwrap();
+        assert!(
+            a.material("hud_icon_40mm_grenade_mp")
+                .is_none_or(|m| m.textures.is_empty()),
+            "the UI zones do not carry it"
+        );
+        a.add_weapon_icons(&content.weapons());
+        for name in ["hud_icon_40mm_grenade_mp", "hud_icon_rpg_dpad"] {
+            let m = a.material(name).unwrap_or_else(|| panic!("{name}"));
+            assert!(!m.textures.is_empty(), "{name} has its image");
+        }
     }
 }

@@ -141,27 +141,79 @@ pub fn team_color_escape(viewer_team: u8, team: u8) -> &'static str {
     }
 }
 
-/// A server string as the player reads it. A script reference to a localized string arrives as `&KEY` (or a bare `&`
-/// for none); the text is the key's translation, with `&&1`.. replaced by the arguments that follow after `\x15`
-/// separators. Anything else is shown as it is.
+/// A server string as the player reads it (`SEH_LocalizeTextMessage`). A script reference to a localized string
+/// arrives as `&KEY` (or a bare `&` for none). Within a message the first piece is a localized key, `\x14` starts
+/// another key and `\x15` a literal argument (a player's name, a number); each piece after the first fills the
+/// next `&&1`, `&&2`.. left in the text before it, and `\x16` keeps the pieces after it from being filled in.
+/// Text without any of those is shown as it is.
 pub fn localize(assets: &UiAssets, raw: &str) -> String {
-    let mut parts = raw.split('\x15');
-    let key = parts.next().unwrap_or("");
-    let reference = key.strip_prefix('&').filter(|k| !k.starts_with('&'));
-    let key = reference.unwrap_or(key);
-    let mut out = if reference == Some("") {
-        String::new()
-    } else {
-        assets
-            .translate(key)
-            .map_or_else(|| key.to_owned(), |s| s.to_string())
-    };
-    for (i, arg) in parts.enumerate() {
-        out = out
-            .replace(&format!("&&{}", i + 1), arg)
-            .replace(&format!("&{}", i + 1), arg);
+    let reference = raw.strip_prefix('&').filter(|k| !k.starts_with('&'));
+    let raw = reference.unwrap_or(raw);
+    if reference.is_none() && !raw.bytes().any(|c| matches!(c, 20..=22)) {
+        return raw.to_owned();
     }
-    out
+    let digit =
+        |s: &[u8], j: usize| s.get(j + 2).is_some_and(u8::is_ascii_digit) && s[j..j + 2] == *b"&&";
+    let b = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let (mut loc_on, mut insert_enabled, mut skipped) = (true, true, false);
+    let (mut level, mut index) = (0i32, 1u8);
+    let (mut start, mut i) = (0, 0);
+    while start < b.len() {
+        if i < b.len() && !matches!(b[i], 20..=22) {
+            i += 1;
+            continue;
+        }
+        if i > start {
+            let mut tok = b[start..i].to_vec();
+            if loc_on {
+                let key = String::from_utf8_lossy(&tok);
+                if let Some(t) = assets.translate(&key).filter(|_| key.len() > 1) {
+                    tok = t.as_bytes().to_vec();
+                }
+            }
+            for j in 0..tok.len().saturating_sub(2) {
+                if digit(&tok, j) {
+                    if insert_enabled {
+                        level += 1;
+                    } else {
+                        tok[j] = 22;
+                        skipped = true;
+                    }
+                }
+            }
+            let slot = (level > 0 && !out.is_empty())
+                .then(|| (0..out.len()).find(|&j| digit(&out, j) && out[j + 2] - b'0' == index))
+                .flatten();
+            match slot {
+                Some(j) => {
+                    let tail = out.split_off(j + 3);
+                    out.truncate(j);
+                    out.extend_from_slice(&tok);
+                    out.extend_from_slice(&tail);
+                    index += 1;
+                    level -= 1;
+                }
+                None => out.extend_from_slice(&tok),
+            }
+        }
+        insert_enabled = true;
+        if i < b.len() {
+            match b[i] {
+                20 => (loc_on, i) = (true, i + 1),
+                21 => (loc_on, i) = (false, i + 1),
+                _ => {}
+            }
+        }
+        if i < b.len() && b[i] == 22 {
+            (insert_enabled, i) = (false, i + 1);
+        }
+        start = i;
+    }
+    if skipped {
+        out.iter_mut().filter(|c| **c == 22).for_each(|c| *c = b'%');
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The `{+command}` marks of `text`, without the braces.
@@ -372,6 +424,29 @@ mod tests {
         assert_eq!(localize(&a, "&MP_CONNECTED\x15Bob"), "Bob connected");
         assert_eq!(localize(&a, "plain text"), "plain text");
         assert_eq!(localize(&a, "&NO_SUCH_KEY"), "NO_SUCH_KEY");
+    }
+
+    #[test]
+    fn messages_fill_their_parameters_in_order() {
+        let mut a = UiAssets::default();
+        for (k, v) in [
+            ("MP_CONNECTED", "&&1 connected"),
+            ("MP_WAR_RADAR", "Radar for &&1 seconds"),
+            ("MP_TWO", "&&1 killed &&2"),
+            ("CGAME_TEAMMATE", "(teammate)"),
+            ("CGAME_YOUKILLED", "You killed &&1&&2"),
+        ] {
+            a.localize.insert(k.into(), v.into());
+        }
+        // The first piece is a key; each literal after it fills the next marker; a name is literal text.
+        assert_eq!(localize(&a, "MP_CONNECTED\x15Bob^7"), "Bob^7 connected");
+        assert_eq!(localize(&a, "MP_WAR_RADAR\x1530"), "Radar for 30 seconds");
+        assert_eq!(localize(&a, "MP_TWO\x15Al\x15Bo"), "Al killed Bo");
+        // `\x14` makes the next piece a key again, and a key's own marker is filled by what follows it.
+        assert_eq!(
+            localize(&a, "CGAME_YOUKILLED\x15Bob\x14CGAME_TEAMMATE"),
+            "You killed Bob(teammate)"
+        );
     }
 
     #[test]

@@ -350,6 +350,11 @@ impl NetPlay {
         }
     }
 
+    /// Every weapon definition of the loaded content.
+    pub fn weapon_defs(&self) -> Vec<std::sync::Arc<assets::zone::weapon::WeaponDef>> {
+        self.lib.content.weapons()
+    }
+
     /// The map the server announced since the last call: the app then calls [`Self::new_level`].
     pub fn take_new_level(&mut self) -> Option<String> {
         self.new_level.take()

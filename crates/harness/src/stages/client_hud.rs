@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 const NAME: &str = "client-hud";
 const LIMIT: Duration = Duration::from_secs(420);
 const ARGS: &[&str] = &["--listen", "--bots", "9", "--autoplay", "--duration", "400"];
-const STEPS: &str = "ingame=120,wait=5,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
+const STEPS: &str = "ingame=120,wait=5,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
 killcam=300,wait=2,shot=killcam";
 
 fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String> {
@@ -94,6 +94,18 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     }
     if n("killcam_frames") == 0 {
         bad.push("no killcam frame");
+    }
+    // The grenade and d-pad icons are weapon materials; one that is missing draws as a white square.
+    let icons: Vec<&str> = report["missing_images"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|n| n.starts_with("hud_"))
+        .collect();
+    let missing = format!("missing HUD icons: {}", icons.join(", "));
+    if !icons.is_empty() {
+        bad.push(&missing);
     }
     (!bad.is_empty()).then(|| bad.join(", "))
 }
