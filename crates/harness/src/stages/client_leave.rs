@@ -58,7 +58,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         return Ok(r);
     }
     let mut out = StageReport::new(NAME, Status::Passed);
-    match run_client(&client, install, &ctx.dir, &[], STEPS) {
+    match run_client(
+        &client,
+        install,
+        &ctx.dir,
+        &ctx.dir.join("config"),
+        &[],
+        STEPS,
+        std::time::Duration::from_secs(240),
+    ) {
         Ok(report) => {
             out.files.push("ui-script.json".into());
             out.files.push("ingame.png".into());
