@@ -80,7 +80,33 @@ pub struct ShellState {
     was_active: bool,
     /// The join menu's server lists (LAN discovery, favorites).
     pub servers: crate::serverlist::ServerList,
+    /// The install's files, for `exec <file>.cfg` from a menu script.
+    vfs: Option<::assets::vfs::Vfs>,
+    exec_depth: u32,
+    /// The display's video modes as `r_mode` and `r_displayRefresh` list them.
+    pub video_modes: Vec<(u32, u32)>,
+    pub refresh_rates: Vec<u32>,
 }
+
+/// The `r_mode` list when the display's own is unknown.
+const STOCK_MODES: &[(u32, u32)] = &[
+    (640, 480),
+    (800, 600),
+    (1024, 768),
+    (1152, 864),
+    (1280, 720),
+    (1280, 768),
+    (1280, 800),
+    (1280, 960),
+    (1280, 1024),
+    (1360, 768),
+    (1440, 900),
+    (1600, 900),
+    (1600, 1200),
+    (1680, 1050),
+    (1920, 1080),
+    (1920, 1200),
+];
 
 /// Facts of the running match that menu expressions read.
 #[derive(Default)]
@@ -166,6 +192,10 @@ impl ShellState {
             hud_stats: hud::Stats::default(),
             was_active: false,
             servers: Default::default(),
+            vfs: ::assets::vfs::Vfs::open_stock(&install.root, 0).ok(),
+            exec_depth: 0,
+            video_modes: STOCK_MODES.to_vec(),
+            refresh_rates: vec![60],
         }
     }
 
@@ -206,6 +236,60 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("ui_hud_obituaries", "1"),
 ];
 
+/// The settings of the options menus with the stock engine's defaults: archived, so a change survives a restart.
+/// (The graphics ones only the menus read yet; `r_mode` and `r_displayRefresh` are filled from the display at start.)
+const OPTION_DEFAULTS: &[(&str, &str)] = &[
+    ("r_aspectRatio", "auto"),
+    ("r_gamma", "0.8"),
+    ("r_vsync", "0"),
+    ("r_aaSamples", "1"),
+    ("r_picmip", "0"),
+    ("r_picmip_bump", "0"),
+    ("r_picmip_spec", "0"),
+    ("r_picmip_manual", "0"),
+    ("r_rendererPreference", "dx9"),
+    ("r_multiGpu", "0"),
+    ("r_dlightLimit", "4"),
+    ("r_zfeather", "1"),
+    ("r_depthPrepassModels", "0"),
+    ("r_lodScaleRigid", "1"),
+    ("r_lodScaleSkinned", "1"),
+    ("r_lodBiasRigid", "0"),
+    ("r_lodBiasSkinned", "0"),
+    ("r_drawWater", "1"),
+    ("r_specular", "1"),
+    ("r_dof_enable", "1"),
+    ("r_glow_allowed", "1"),
+    ("r_texFilterAnisoMin", "1"),
+    ("r_texFilterAnisoMax", "4"),
+    ("sm_enable", "1"),
+    ("sc_enable", "1"),
+    ("ragdoll_enable", "1"),
+    ("fx_marks", "1"),
+    ("ai_corpseCount", "10"),
+    ("cl_freelook", "1"),
+    ("m_filter", "0"),
+];
+
+/// Gives every dvar the menus read its stock value unless the config set it.
+fn register_defaults(input: &mut Input) {
+    for (k, v) in UI_DEFAULTS {
+        if input.cvars.get(k).is_none() {
+            input.cvars.set(k, v, false);
+        }
+    }
+    for (k, v) in OPTION_DEFAULTS {
+        if input.cvars.get(k).is_none() {
+            input.cvars.set(k, v, true);
+        }
+    }
+    // The invert-mouse switch shows what `m_pitch` already says.
+    let inverted = input.cvars.f32("m_pitch") < 0.0;
+    input
+        .cvars
+        .set("ui_mousePitch", if inverted { "1" } else { "0" }, false);
+}
+
 pub struct Shell {
     pub ui: Ui,
     pub st: ShellState,
@@ -225,11 +309,7 @@ impl Shell {
         let mut assets = UiAssets::load(install)?;
         assets.note_menu_materials();
         let st = ShellState::new(&assets, install);
-        for (k, v) in UI_DEFAULTS {
-            if input.cvars.get(k).is_none() {
-                input.cvars.set(k, v, false);
-            }
-        }
+        register_defaults(input);
         let vfs = ::assets::vfs::Vfs::open_stock(&install.root, 0)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         let mut shell = Shell {
@@ -241,6 +321,42 @@ impl Shell {
         };
         shell.ui.cursor_visible = true;
         Ok(shell)
+    }
+
+    /// Tells the menus which video modes and refresh rates the display has, and the mode the window is in now
+    /// (`r_mode` and `r_displayRefresh` start there unless the config chose one).
+    pub fn set_display(
+        &mut self,
+        input: &mut Input,
+        mut modes: Vec<(u32, u32)>,
+        mut rates: Vec<u32>,
+        current: (u32, u32),
+    ) {
+        modes.sort_unstable();
+        modes.dedup();
+        rates.sort_unstable();
+        rates.dedup();
+        if !modes.is_empty() {
+            self.st.video_modes = modes;
+        }
+        if !rates.is_empty() {
+            self.st.refresh_rates = rates;
+        }
+        if input.cvars.get("r_mode").is_none_or(str::is_empty) {
+            input
+                .cvars
+                .set("r_mode", &format!("{}x{}", current.0, current.1), true);
+        }
+        if input
+            .cvars
+            .get("r_displayRefresh")
+            .is_none_or(str::is_empty)
+        {
+            let hz = self.st.refresh_rates.last().copied().unwrap_or(60);
+            input
+                .cvars
+                .set("r_displayRefresh", &format!("{hz} Hz"), true);
+        }
     }
 
     /// The clock the menus and the HUD run on, in milliseconds.
@@ -275,6 +391,12 @@ impl Shell {
     pub fn key(&mut self, input: &mut Input, key: UiKey) -> bool {
         let mut h = Self::host(&mut self.st, input);
         self.ui.key(&mut h, key)
+    }
+
+    /// Gives a pending bind item the key the player pressed.
+    pub fn bind_key(&mut self, input: &mut Input, key: &str) {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.bind_capture(&mut h, key);
     }
 
     /// Clicks the item of the top menu named or labelled `want`.
@@ -441,6 +563,57 @@ fn atoi(s: &str) -> i32 {
 }
 
 impl HostCx<'_> {
+    /// Runs a config file of the install, one line at a time (`exec options_graphics.cfg`).
+    fn exec_file(&mut self, ui: &Ui, name: &str) {
+        const MAX_DEPTH: u32 = 8;
+        if self.st.exec_depth >= MAX_DEPTH {
+            return;
+        }
+        let bytes = self
+            .st
+            .vfs
+            .as_ref()
+            .and_then(|v| v.read(name).ok().flatten());
+        let Some(bytes) = bytes else {
+            eprintln!("ui: exec {name}: no such file");
+            return;
+        };
+        self.st.exec_depth += 1;
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            self.command(ui, line);
+        }
+        self.st.exec_depth -= 1;
+    }
+
+    /// The strings of an enumerated dvar, as the menus list them.
+    fn enum_list(&self, name: &str) -> Vec<String> {
+        match name.to_ascii_lowercase().as_str() {
+            "r_mode" => self
+                .st
+                .video_modes
+                .iter()
+                .map(|(w, h)| format!("{w}x{h}"))
+                .collect(),
+            "r_displayrefresh" => self
+                .st
+                .refresh_rates
+                .iter()
+                .map(|hz| format!("{hz} Hz"))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Sets a dvar; an enumerated one given an index (what the menus store) keeps the string it names.
+    fn store(&mut self, name: &str, value: &str) {
+        let list = self.enum_list(name);
+        let value = match value.trim().parse::<usize>().ok().and_then(|i| list.get(i)) {
+            Some(s) => s.as_str(),
+            None => value,
+        };
+        self.input.set_cvar(name, value);
+    }
+
     fn dvar_get(&self, name: &str) -> String {
         self.input.cvars.get(name).unwrap_or("").to_owned()
     }
@@ -465,7 +638,7 @@ impl HostCx<'_> {
             match name.as_str() {
                 "setfromdvar" => {
                     let v = self.dvar_get(a(2));
-                    self.input.cvars.set(a(1), &v, false);
+                    self.store(a(1), &v);
                 }
                 "setdvartotime" => {
                     let t = self.st.started.elapsed().as_secs();
@@ -512,9 +685,9 @@ impl HostCx<'_> {
                 | "updatedvarsfromprofile"
                 | "loc_warnings"
                 | "r_applypicmip"
-                | "exec"
                 | "writeconfig"
                 | "setprofile" => {}
+                "exec" => self.exec_file(ui, a(1)),
                 "quit" => self.st.actions.push(Action::Quit),
                 "disconnect" => self.st.actions.push(Action::Disconnect),
                 "connect" => self.st.actions.push(Action::Join(a(1).to_owned())),
@@ -598,10 +771,17 @@ impl World for HostCx<'_> {
         }
     }
     fn key_binding(&self, cmd: &str) -> String {
+        self.key_bindings(cmd)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "KEY_UNBOUND".to_owned())
+    }
+    fn key_bindings(&self, cmd: &str) -> Vec<String> {
         self.input
             .binding_keys(cmd)
-            .first()
-            .map_or_else(|| "KEY_UNBOUND".to_owned(), |k| k.to_ascii_uppercase())
+            .into_iter()
+            .map(crate::input::key_id)
+            .collect()
     }
     fn hud_fade(&self, f: HudFade) -> f32 {
         crate::ownerdraw::menu_fade(&self.st.game.hud, &self.input.cvars, f)
@@ -620,7 +800,24 @@ impl Host for HostCx<'_> {
     }
 
     fn set_dvar(&mut self, name: &str, value: &str) {
-        self.input.cvars.set(name, value, false);
+        self.store(name, value);
+    }
+
+    fn dvar_enum(&self, name: &str) -> Vec<String> {
+        self.enum_list(name)
+    }
+
+    fn set_bind(&mut self, key: &str, command: &str) {
+        let line = if command.is_empty() {
+            format!("unbind {}", crate::input::config::quote(key))
+        } else {
+            format!(
+                "bind {} {}",
+                crate::input::config::quote(key),
+                crate::input::config::quote(command)
+            )
+        };
+        self.input.exec_line(&line);
     }
 
     fn exec(&mut self, ui: &Ui, text: &str) {
@@ -653,6 +850,15 @@ impl Host for HostCx<'_> {
                     } else {
                         ui.close_by_name(self, &m);
                     }
+                }
+                true
+            }
+            "update" => {
+                // The original's `UI_Update` knows one name that matters here: the invert-mouse switch.
+                if a(0).eq_ignore_ascii_case("ui_mousePitch") {
+                    let invert = atoi(&self.dvar_get("ui_mousePitch")) != 0;
+                    self.input
+                        .set_cvar("m_pitch", if invert { "-0.022" } else { "0.022" });
                 }
                 true
             }
@@ -709,7 +915,6 @@ impl Host for HostCx<'_> {
             | "stoprefresh"
             | "addplayerprofiles"
             | "setpbclstatus"
-            | "update"
             | "getlanguage"
             | "verifylanguage"
             | "setrecommended"
@@ -727,6 +932,40 @@ impl Host for HostCx<'_> {
                 true
             }
             "startsingleplayer" | "runmod" | "createplayerprofile" | "deleteplayerprofile" => true,
+            // No single-player, mods, player list or language switch here; the menus still run these.
+            "clearloaderrorssummary"
+            | "playerstart"
+            | "updatelanguage"
+            | "muteplayer"
+            | "votetempban"
+            | "votekick" => true,
+            "quit" => {
+                self.st.actions.push(Action::Quit);
+                true
+            }
+            "clearerror" => {
+                self.input.cvars.set("com_errorMessage", "", false);
+                self.input.cvars.set("com_isNotice", "0", false);
+                true
+            }
+            "votemap" | "votetypemap" | "votegame" => {
+                let map = self.st.maps.get(self.st.map_sel).map(|m| m.name.as_str());
+                let gt = self
+                    .st
+                    .gametypes
+                    .get(self.st.gametype_sel)
+                    .map(|g| g.id.as_str());
+                let line = match (name.to_ascii_lowercase().as_str(), map, gt) {
+                    ("votemap", Some(m), _) => Some(format!("callvote map {m}")),
+                    ("votetypemap", Some(m), Some(g)) => Some(format!("callvote typemap {g} {m}")),
+                    ("votegame", _, Some(g)) => Some(format!("callvote g_gametype {g}")),
+                    _ => None,
+                };
+                if let Some(l) = line {
+                    self.st.actions.push(Action::Console(l));
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -943,5 +1182,127 @@ mod tests {
         assert_eq!(server_cell(&e, 10, &maps, &types), "12");
         e.map = "mp_custom".into();
         assert_eq!(server_cell(&e, 3, &maps, &types), "mp_custom");
+    }
+
+    use ::assets::zone::menu::{ItemData, MenuDef};
+
+    /// Every action script of a menu: its open/close/escape handlers, key handlers and its items' handlers.
+    fn scripts(m: &MenuDef) -> Vec<&str> {
+        let mut out: Vec<&str> = [&m.on_open, &m.on_close, &m.on_esc]
+            .into_iter()
+            .chain(m.on_key.iter().map(|k| &k.action))
+            .flatten()
+            .map(|s| &**s)
+            .collect();
+        for it in &m.items {
+            let own = [
+                &it.action,
+                &it.on_accept,
+                &it.on_focus,
+                &it.leave_focus,
+                &it.mouse_enter,
+                &it.mouse_exit,
+            ];
+            let dbl = match &it.data {
+                ItemData::ListBox(Some(l)) => Some(&l.on_double_click),
+                _ => None,
+            };
+            out.extend(
+                own.into_iter()
+                    .chain(it.on_key.iter().map(|k| &k.action))
+                    .chain(dbl)
+                    .flatten()
+                    .map(|s| &**s),
+            );
+        }
+        out
+    }
+
+    /// No script of a stock menu names a command or `uiScript` that nothing implements.
+    #[test]
+    fn every_stock_menu_script_command_and_ui_script_is_known() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let mut st = ShellState::new(&assets, &install);
+        let mut ui = Ui::new(assets, (1280, 720));
+        let mut input = Input::detached();
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        let defs: Vec<_> = ui.assets.menus.values().cloned().collect();
+        for def in defs {
+            let m = ui
+                .menu_index(def.window.name.as_deref().unwrap_or(""))
+                .unwrap();
+            for src in scripts(&def) {
+                ui.run_script(&mut h, Some(m), None, src);
+            }
+        }
+        assert!(ui.unknown.is_empty(), "unimplemented: {:?}", ui.unknown);
+    }
+
+    /// Opening the graphics menu copies the engine's settings into the menu's own dvars, and every value the menu
+    /// shows names an entry of its list.
+    #[test]
+    fn the_graphics_menu_shows_the_current_settings() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let mut st = ShellState::new(&assets, &install);
+        let mut ui = Ui::new(assets, (1280, 720));
+        let mut input = Input::detached();
+        register_defaults(&mut input);
+        input.cvars.set("r_mode", "1280x720", true);
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        ui.open_by_name(&mut h, "options_graphics");
+        let def = ui.assets.menus["options_graphics"].clone();
+        let mut shown = 0;
+        for d in &def.items {
+            let dv = d.dvar.as_deref().unwrap_or("");
+            match (&d.data, d.ty) {
+                (ItemData::Multi(Some(mu)), crate::ui::ity::MULTI) => {
+                    let cur = h.dvar(dv);
+                    // The menu's own copies come from the exec'd config; the rest are engine dvars.
+                    assert!(
+                        crate::ui::multi_index(mu, &cur).is_some(),
+                        "{dv} = {cur:?} is not one of the menu's choices"
+                    );
+                    shown += 1;
+                }
+                (ItemData::EnumDvarName(n), crate::ui::ity::DVARENUM) => {
+                    let list = h.dvar_enum(n.as_deref().unwrap_or(""));
+                    assert!(!list.is_empty(), "{n:?} has no list");
+                    shown += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(shown >= 9, "only {shown} value items checked");
+        // The mode menu stores an index and the engine dvar keeps the name it stands for.
+        h.set_dvar("r_mode", "2");
+        assert_eq!(h.dvar("r_mode"), "1024x768");
+        h.set_dvar("r_mode", "1920x1080");
+        assert_eq!(h.dvar("r_mode"), "1920x1080");
+        h.set_dvar("r_aspectRatio", "2");
+        assert_eq!(h.dvar("r_aspectRatio"), "2", "not an enumerated dvar");
     }
 }

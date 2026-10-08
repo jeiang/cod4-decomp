@@ -3,7 +3,10 @@
 
 use super::assets::UiAssets;
 use super::place::Px;
-use super::{Host, Ui, dynf, ity, statf};
+use super::{
+    Host, SLIDER_H, SLIDER_W, Ui, dynf, enum_index, ity, multi_index, slider_bar_x, slider_thumb_x,
+    statf,
+};
 use ::assets::zone::gfx::Material;
 use ::assets::zone::menu::{ItemData, ItemDef, Rect};
 use ::assets::zone::text::Font;
@@ -469,92 +472,73 @@ impl Ui {
                     .assets
                     .translate(if on { "MENU_YES" } else { "MENU_NO" })
                     .map_or_else(
-                        || {
-                            if on {
-                                "Yes".to_owned()
-                            } else {
-                                "No".to_owned()
-                            }
-                        },
+                        || if on { "Yes" } else { "No" }.to_owned(),
                         |s| s.to_string(),
                     );
-                self.paint_item_text(host, p, m, i, d, None);
-                self.paint_value_text(host, p, m, i, d, &v);
+                self.paint_item_text(host, p, m, i, d, Some(&v));
             }
             ity::MULTI => {
                 let cur = host.dvar(d.dvar.as_deref().unwrap_or(""));
                 let label = match &d.data {
-                    ItemData::Multi(Some(mu)) => (0..mu.count.max(0) as usize).find_map(|k| {
-                        let hit = if mu.str_def != 0 {
-                            mu.dvar_str
-                                .get(k)
-                                .and_then(|s| s.as_deref())
-                                .is_some_and(|s| s.eq_ignore_ascii_case(&cur))
-                        } else {
-                            mu.dvar_value.get(k).is_some_and(|v| {
-                                (cur.trim().parse::<f32>().unwrap_or(f32::NAN) - v).abs() < 1e-4
-                            })
-                        };
-                        hit.then(|| {
-                            mu.dvar_list
-                                .get(k)
-                                .and_then(|s| s.as_deref())
-                                .unwrap_or("")
-                                .to_owned()
-                        })
-                    }),
-                    _ => None,
-                }
-                .unwrap_or_default();
-                let label = match label.strip_prefix('@') {
-                    Some(k) => self
-                        .assets
-                        .translate(k)
-                        .map_or(label.clone(), |s| s.to_string()),
-                    None => label,
+                    ItemData::Multi(Some(mu)) => multi_index(mu, &cur)
+                        .and_then(|k| mu.dvar_list.get(k))
+                        .and_then(|s| s.as_deref())
+                        .unwrap_or(""),
+                    _ => "",
                 };
-                self.paint_item_text(host, p, m, i, d, None);
-                self.paint_value_text(host, p, m, i, d, &label);
+                let label = self.translate(label);
+                self.paint_item_text(host, p, m, i, d, Some(&label));
+            }
+            ity::DVARENUM => {
+                let name = match &d.data {
+                    ItemData::EnumDvarName(n) => n.as_deref().unwrap_or(""),
+                    _ => "",
+                };
+                let list = host.dvar_enum(name);
+                let cur = host.dvar(d.dvar.as_deref().unwrap_or(""));
+                let label = list
+                    .get(enum_index(&list, &cur))
+                    .cloned()
+                    .unwrap_or_default();
+                let label = self.translate(&label);
+                self.paint_item_text(host, p, m, i, d, Some(&label));
             }
             ity::SLIDER => {
-                self.paint_item_text(host, p, m, i, d, None);
                 if let ItemData::EditField(Some(e)) = &d.data {
                     let v = host
                         .dvar(d.dvar.as_deref().unwrap_or(""))
                         .trim()
                         .parse::<f32>()
-                        .unwrap_or(e.def_val);
-                    let t = if e.max_val > e.min_val {
-                        ((v - e.min_val) / (e.max_val - e.min_val)).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    let r = self.menus[m].items[i].rect;
-                    let bar = self.place.rect(
-                        r.x + r.w * 0.5,
-                        r.y + r.h * 0.5 - 1.0,
-                        r.w * 0.5,
-                        2.0,
-                        r.horz_align,
-                        r.vert_align,
+                        .unwrap_or(0.0);
+                    let it = &self.menus[m].items[i];
+                    let (r, color) = (it.rect, self.text_color(m, i, d, &*host));
+                    let x = slider_bar_x(&r, d);
+                    let y = Self::item_align_y(
+                        d.text_align_mode & 0xC,
+                        r.y + d.text_align_y,
+                        r.h,
+                        SLIDER_H,
                     );
-                    p.fill(bar, [0.6, 0.6, 0.6, 0.8]);
-                    let knob = self.place.rect(
-                        r.x + r.w * 0.5 + r.w * 0.5 * t - 2.0,
-                        r.y + 2.0,
-                        4.0,
-                        r.h - 4.0,
-                        r.horz_align,
-                        r.vert_align,
-                    );
-                    p.fill(knob, self.menus[m].items[i].fore);
+                    let bar = self
+                        .place
+                        .rect(x, y, SLIDER_W, SLIDER_H, r.horz_align, r.vert_align);
+                    let img = p.named(&self.assets, "ui_slider2");
+                    p.pic(&img, bar, color);
+                    let tx = slider_thumb_x(x, e, v);
+                    let thumb =
+                        self.place
+                            .rect(tx - 5.0, y - 2.0, 10.0, 20.0, r.horz_align, r.vert_align);
+                    let img = p.named(&self.assets, "ui_sliderbutt_1");
+                    p.pic(&img, thumb, color);
                 }
             }
             ity::BIND => {
-                self.paint_item_text(host, p, m, i, d, None);
-                let cmd = host.dvar(d.dvar.as_deref().unwrap_or(""));
-                let key = host.key_binding(&cmd);
-                self.paint_value_text(host, p, m, i, d, &key);
+                let text = if self.bind_pending == Some((m, i)) {
+                    self.translate("@MENU_BIND_KEY_PENDING")
+                } else {
+                    self.bind_label(&*host, d.dvar.as_deref().unwrap_or(""))
+                };
+                self.paint_item_text(host, p, m, i, d, Some(&text));
             }
             ity::LISTBOX => self.paint_listbox(host, p, m, i, d),
             ity::GAME_MSG_WINDOW => {
@@ -575,35 +559,13 @@ impl Ui {
         }
     }
 
-    /// Draws a value (yes/no, multi, bind) at the right of its label.
-    fn paint_value_text(
-        &self,
-        host: &dyn Host,
-        p: &mut Painter,
-        m: usize,
-        i: usize,
-        d: &ItemDef,
-        value: &str,
-    ) {
-        let r = self.menus[m].items[i].rect;
-        let color = self.text_color(m, i, d, host);
-        let h = self.text_height(d.font_enum, d.text_scale);
-        let x = r.x + r.w * 0.5 + d.text_align_x;
-        let y = r.y + d.text_align_y + self.text_y(d.text_align_mode & 0xC, r.h, h);
-        self.draw_text(
-            p,
-            &TextDraw {
-                text: value,
-                font_enum: d.font_enum,
-                scale: d.text_scale,
-                style: d.text_style,
-                color,
-                x,
-                y,
-                horz: r.horz_align,
-                vert: r.vert_align,
-            },
-        );
+    /// Where a box of height `self_h` sits in a container (`Item_GetRectPlacementY`).
+    pub(super) fn item_align_y(mode: i32, y0: f32, container: f32, self_h: f32) -> f32 {
+        match mode {
+            12 => container - self_h + y0,
+            8 => (container - self_h) * 0.5 + y0,
+            _ => y0,
+        }
     }
 
     fn text_y(&self, mode: i32, container: f32, h: f32) -> f32 {

@@ -221,11 +221,11 @@ pub fn draw(
     ]
     .into_iter()
     .find(|k| k != "KEY_UNBOUND")
-    .unwrap_or_else(|| "KEY_UNBOUND".to_owned());
+    .map_or_else(|| ui.localize_key("KEY_UNBOUND"), |k| ui.localize_key(&k));
     let mantle_key = [cx.key_binding("+gostand"), cx.key_binding("+moveup")]
         .into_iter()
         .find(|k| k != "KEY_UNBOUND")
-        .unwrap_or_else(|| "KEY_UNBOUND".to_owned());
+        .map_or_else(|| ui.localize_key("KEY_UNBOUND"), |k| ui.localize_key(&k));
     let objectives = cx.st.live.objectives.clone();
     let h = &mut cx.st.game.hud;
     *h.drawn.entry(id).or_default() += 1;

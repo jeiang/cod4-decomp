@@ -419,6 +419,8 @@ impl Viewer {
         let stats = profile.load();
         if let Some(sh) = shell.as_mut() {
             sh.st.stats = stats;
+            let (modes, rates) = display::video_modes(&window);
+            sh.set_display(&mut input, modes, rates, (config.width, config.height));
         }
         if self.cli.menu_mode()
             && let Some(sh) = shell.as_mut()
@@ -1256,6 +1258,37 @@ fn tour_step(
 fn ui_event(st: &mut State, ev: &WindowEvent) {
     use winit::keyboard::{Key, NamedKey};
     let Some(sh) = st.shell.as_mut() else { return };
+    // A bind item is waiting: the next key or button is the binding (Escape cancels, via the menus).
+    if sh.ui.bind_pending() {
+        let name = match ev {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => Some(crate::input::mouse_key_name(*button)),
+            WindowEvent::MouseWheel { delta, .. } => {
+                let y = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                (y != 0.0).then(|| if y > 0.0 { "mwheelup" } else { "mwheeldown" }.to_owned())
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !event.repeat =>
+            {
+                match event.physical_key {
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => None,
+                    winit::keyboard::PhysicalKey::Code(c) => crate::input::physical_key_name(c),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(n) = name {
+            sh.bind_key(&mut st.input, &n);
+            return;
+        }
+    }
     match ev {
         WindowEvent::CursorMoved { position, .. } => {
             sh.mouse_move(&mut st.input, position.x as f32, position.y as f32);

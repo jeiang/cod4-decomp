@@ -56,6 +56,65 @@ pub mod ity {
     pub const GAME_MSG_WINDOW: i32 = 19;
 }
 
+/// The slider bar picture, in virtual units; the thumb travels 84 of it, 6 in from the left.
+pub(crate) const SLIDER_W: f32 = 96.0;
+pub(crate) const SLIDER_H: f32 = 16.0;
+const SLIDER_TRAVEL: f32 = 84.0;
+const SLIDER_INSET: f32 = 6.0;
+
+/// Left edge of a slider's bar: the bar is placed in the item's rect by its text alignment (`Item_Slider_Paint`).
+pub(crate) fn slider_bar_x(r: &Rect, d: &ItemDef) -> f32 {
+    let x0 = r.x + d.text_align_x;
+    match d.text_align_mode & 3 {
+        1 => (r.w - SLIDER_W) * 0.5 + x0,
+        2 => r.w - SLIDER_W + x0,
+        _ => x0,
+    }
+}
+
+/// Where the thumb's centre sits for value `v`, given the bar's left edge.
+pub(crate) fn slider_thumb_x(bar_x: f32, e: &::assets::zone::menu::EditFieldDef, v: f32) -> f32 {
+    let t = if e.max_val > e.min_val {
+        ((v.clamp(e.min_val, e.max_val) - e.min_val) / (e.max_val - e.min_val)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    bar_x + SLIDER_INSET + t * SLIDER_TRAVEL
+}
+
+/// The value a click at fraction `t` (0..1) of the usable travel selects.
+pub(crate) fn slider_value_at(e: &::assets::zone::menu::EditFieldDef, t: f32) -> f32 {
+    e.min_val + t.clamp(0.0, 1.0) * (e.max_val - e.min_val)
+}
+
+/// The entry of a multi item whose value the dvar currently holds.
+pub(crate) fn multi_index(mu: &::assets::zone::menu::MultiDef, cur: &str) -> Option<usize> {
+    let num = cur.trim().parse::<f32>().unwrap_or(f32::NAN);
+    (0..mu.count.clamp(0, 32) as usize).find(|&k| {
+        if mu.str_def != 0 {
+            mu.dvar_str
+                .get(k)
+                .and_then(|s| s.as_deref())
+                .is_some_and(|s| s.eq_ignore_ascii_case(cur))
+        } else {
+            mu.dvar_value.get(k).is_some_and(|v| (num - v).abs() < 1e-4)
+        }
+    })
+}
+
+/// The entry of a dvar-enum item: the dvar holds an index, or one of the strings; anything else is entry 0.
+pub(crate) fn enum_index(list: &[String], cur: &str) -> usize {
+    let cur = cur.trim();
+    if let Ok(i) = cur.parse::<usize>()
+        && i < list.len()
+    {
+        return i;
+    }
+    list.iter()
+        .position(|s| s.eq_ignore_ascii_case(cur))
+        .unwrap_or(0)
+}
+
 /// Keys the menus react to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiKey {
@@ -93,6 +152,12 @@ pub trait Host: env::World {
     /// Runs one `uiScript` (server list, start server, profiles, ...). `false` if unknown.
     fn ui_script(&mut self, ui: &mut Ui, name: &str, args: &[String]) -> bool;
     /// Whether a match is running (menus opened with `ingameopen`).
+    /// The strings of an enumerated dvar (`r_mode`, `r_displayRefresh`); empty if it is not one.
+    fn dvar_enum(&self, _name: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// Binds `key` to `command` (an empty command unbinds the key).
+    fn set_bind(&mut self, _key: &str, _command: &str) {}
     fn in_game(&self) -> bool;
     fn time_ms(&self) -> i32;
     /// The number of rows of a feeder list and its text.
@@ -227,9 +292,21 @@ pub struct Ui {
     pub cursor_visible: bool,
     /// Clipboard of closed menu names for `closeForGameType` etc. is not needed; kept lean.
     pub now_ms: i32,
+    /// Script commands and `uiScript`s nothing implements, each once (also logged once); the stock-menu test
+    /// requires this to stay empty.
+    pub unknown: Vec<String>,
+    /// The bind item waiting for a key (menu, item).
+    bind_pending: Option<(usize, usize)>,
 }
 
 impl Ui {
+    fn note_unknown(&mut self, what: String) {
+        if !self.unknown.contains(&what) {
+            eprintln!("ui: unknown {what}");
+            self.unknown.push(what);
+        }
+    }
+
     pub fn new(assets: UiAssets, size: (u32, u32)) -> Self {
         let mut menus = Vec::new();
         let mut index = HashMap::new();
@@ -258,6 +335,8 @@ impl Ui {
             cursor: (size.0 as f32 * 0.5, size.1 as f32 * 0.5),
             cursor_visible: false,
             now_ms: 0,
+            unknown: Vec::new(),
+            bind_pending: None,
         }
     }
 
@@ -336,6 +415,7 @@ impl Ui {
                     self.close(host, m);
                 }
             }
+            "closemenu" => self.close_by_name(host, &arg(0)),
             "ingameopen" if host.in_game() => self.open_by_name(host, &arg(0)),
             "ingameclose" if host.in_game() => {
                 if let Some(m) = self.menu_index(&arg(0)) {
@@ -512,10 +592,10 @@ impl Ui {
                 let args: Vec<String> = cmd.iter().skip(2).map(|w| self.translate(w)).collect();
                 let n = arg(0);
                 if !host.ui_script(self, &n, &args) {
-                    eprintln!("ui: unknown uiScript '{n}'");
+                    self.note_unknown(format!("uiScript '{n}'"));
                 }
             }
-            other => eprintln!("ui: unknown menu command '{other}'"),
+            other => self.note_unknown(format!("menu command '{other}'")),
         }
     }
 
@@ -783,11 +863,69 @@ impl Ui {
         x >= p.x && x < p.x + p.w && y >= p.y && y < p.y + p.h
     }
 
+    /// True while a bind item waits for the key to bind (the next key press goes to [`Ui::bind_capture`]).
+    pub fn bind_pending(&self) -> bool {
+        self.bind_pending.is_some()
+    }
+
+    /// The key `name` (the input layer's name: `q`, `mouse1`, `backspace`, ...) answers a pending bind item:
+    /// Backspace clears the command's keys, any other key replaces them (`Item_Bind_HandleKey`: a command holds at
+    /// most two keys, and a third press starts over). Returns whether a bind was pending.
+    pub fn bind_capture(&mut self, host: &mut dyn Host, name: &str) -> bool {
+        let Some((m, i)) = self.bind_pending.take() else {
+            return false;
+        };
+        let Some(cmd) = self.menus[m].def.items[i].dvar.clone() else {
+            return true;
+        };
+        let held = host.key_bindings(&cmd);
+        if name == "backspace" || held.len() >= 2 {
+            for k in held {
+                host.set_bind(&k, "");
+            }
+        }
+        if name != "backspace" {
+            host.set_bind(name, &cmd);
+        }
+        true
+    }
+
+    /// The localized name of a key (`KEY_MOUSE1`); a key without a translation shows its bare name.
+    pub fn localize_key(&self, id: &str) -> String {
+        match self.assets.translate(id) {
+            Some(t) => t.to_string(),
+            None => id.strip_prefix("KEY_").unwrap_or(id).to_owned(),
+        }
+    }
+
+    /// What a bind item shows for `command`: its keys (at most two, joined by "or"), or the unbound text.
+    pub(crate) fn bind_label(&self, host: &dyn Host, command: &str) -> String {
+        let keys: Vec<String> = host
+            .key_bindings(command)
+            .iter()
+            .take(2)
+            .map(|k| self.localize_key(k))
+            .collect();
+        match keys.as_slice() {
+            [] => self.localize_key("KEY_UNBOUND"),
+            [a] => a.clone(),
+            [a, b] => format!("{a} {} {b}", self.localize_key("KEY_OR")),
+            _ => unreachable!(),
+        }
+    }
+
     /// Handles a key press. Returns whether the menus used it.
     pub fn key(&mut self, host: &mut dyn Host, key: UiKey) -> bool {
         let Some(&m) = self.stack.last() else {
             return false;
         };
+        if self.bind_pending.is_some() {
+            // The next key is the new binding (`bind_capture`); Escape and text input only get in the way.
+            if key == UiKey::Escape {
+                self.bind_pending = None;
+            }
+            return true;
+        }
         let def = self.menus[m].def.clone();
         // Key handlers of the menu (`onKey`), keyed by the original's key numbers: only Esc matters here.
         if key == UiKey::Escape {
@@ -948,7 +1086,7 @@ impl Ui {
                     self.run_script(host, Some(m), Some(i), s);
                 }
             }
-            ity::BIND => {}
+            ity::BIND => self.bind_pending = Some((m, i)),
             _ => {
                 if let Some(s) = &d.action {
                     host.play("mouse_click");
@@ -972,20 +1110,7 @@ impl Ui {
             }
             (ItemData::Multi(Some(mu)), ity::MULTI) => {
                 let n = mu.count.max(1);
-                let pos = (0..n as usize)
-                    .find(|&k| {
-                        if mu.str_def != 0 {
-                            mu.dvar_str
-                                .get(k)
-                                .and_then(|s| s.as_deref())
-                                .is_some_and(|s| s.eq_ignore_ascii_case(&cur))
-                        } else {
-                            mu.dvar_value.get(k).is_some_and(|v| {
-                                (cur.trim().parse::<f32>().unwrap_or(f32::NAN) - v).abs() < 1e-4
-                            })
-                        }
-                    })
-                    .unwrap_or(0) as i32;
+                let pos = multi_index(mu, &cur).unwrap_or(0) as i32;
                 let next = (pos + dir).rem_euclid(n) as usize;
                 if mu.str_def != 0 {
                     host.set_dvar(
@@ -1008,8 +1133,13 @@ impl Ui {
                     .clamp(e.min_val, e.max_val);
                 host.set_dvar(&dv, &format!("{v}"));
             }
-            (ItemData::EnumDvarName(list), ity::DVARENUM) => {
-                let _ = list;
+            (ItemData::EnumDvarName(name), ity::DVARENUM) => {
+                let list = host.dvar_enum(name.as_deref().unwrap_or(""));
+                if !list.is_empty() {
+                    let n = list.len() as i32;
+                    let next = (enum_index(&list, &cur) as i32 + dir).rem_euclid(n);
+                    host.set_dvar(&dv, &next.to_string());
+                }
             }
             _ => {}
         }
@@ -1025,11 +1155,17 @@ impl Ui {
         let (Some(dv), ItemData::EditField(Some(e))) = (d.dvar.clone(), &d.data) else {
             return;
         };
-        let p = self.item_pixels(m, i);
-        // The slider bar is the right part of the item; its width follows the text offset like the original.
-        let bar_x = p.x + p.w * 0.5;
-        let t = ((self.cursor.0 - bar_x) / (p.w * 0.5).max(1.0)).clamp(0.0, 1.0);
-        let v = e.min_val + t * (e.max_val - e.min_val);
+        let it = &self.menus[m].items[i];
+        let r = it.rect;
+        let travel = self.place.rect(
+            slider_bar_x(&r, d) + SLIDER_INSET,
+            0.0,
+            SLIDER_TRAVEL,
+            0.0,
+            r.horz_align,
+            r.vert_align,
+        );
+        let v = slider_value_at(e, (self.cursor.0 - travel.x) / travel.w.max(1.0));
         host.set_dvar(&dv, &format!("{v}"));
     }
 
@@ -1129,8 +1265,20 @@ mod tests {
     use server::content::Install;
 
     /// A host with no match behind it: menus open and close, nothing answers.
-    struct Dummy;
-    impl env::World for Dummy {}
+    #[derive(Default)]
+    struct Dummy {
+        /// `(key, command)` binds.
+        binds: Vec<(String, String)>,
+    }
+    impl env::World for Dummy {
+        fn key_bindings(&self, c: &str) -> Vec<String> {
+            self.binds
+                .iter()
+                .filter(|(_, cmd)| cmd == c)
+                .map(|(k, _)| k.clone())
+                .collect()
+        }
+    }
     impl Host for Dummy {
         fn dvar(&self, _: &str) -> String {
             String::new()
@@ -1139,6 +1287,12 @@ mod tests {
         fn exec(&mut self, _: &Ui, _: &str) {}
         fn play(&mut self, _: &str) {}
         fn menu_response(&mut self, _: &str, _: &str) {}
+        fn set_bind(&mut self, key: &str, command: &str) {
+            self.binds.retain(|(k, _)| k != key);
+            if !command.is_empty() {
+                self.binds.push((key.into(), command.into()));
+            }
+        }
         fn ui_script(&mut self, _: &mut Ui, _: &str, _: &[String]) -> bool {
             false
         }
@@ -1188,12 +1342,138 @@ mod tests {
         };
         let assets = assets::UiAssets::load(&install).expect("ui assets");
         let mut ui = Ui::new(assets, (1280, 720));
-        let mut host = Dummy;
+        let mut host = Dummy::default();
         ui.open_by_name(&mut host, "team_marinesopfor");
         // What `openmenunomouse` does after the open.
         ui.cursor_visible = false;
         ui.open_by_name(&mut host, "popup_leavegame");
         assert!(ui.cursor_visible, "the next menu opened without a pointer");
         assert!(ui.captures_input());
+    }
+
+    fn multi(count: i32, str_def: i32) -> ::assets::zone::menu::MultiDef {
+        let name = |s: &str| Some(Arc::<str>::from(s));
+        ::assets::zone::menu::MultiDef {
+            dvar_list: vec![name("a"), name("b"), name("c")],
+            dvar_str: vec![name("auto"), name("standard"), name("wide")],
+            dvar_value: vec![1.0, 2.0, 4.0],
+            count,
+            str_def,
+        }
+    }
+
+    #[test]
+    fn a_multi_item_finds_its_entry_by_number_or_by_string() {
+        assert_eq!(multi_index(&multi(3, 0), "2"), Some(1));
+        assert_eq!(multi_index(&multi(3, 0), "4.0"), Some(2));
+        assert_eq!(multi_index(&multi(3, 0), "3"), None, "no entry holds 3");
+        assert_eq!(
+            multi_index(&multi(3, 0), ""),
+            None,
+            "an unset dvar matches nothing"
+        );
+        assert_eq!(multi_index(&multi(3, 1), "WIDE"), Some(2));
+        assert_eq!(
+            multi_index(&multi(2, 1), "wide"),
+            None,
+            "only `count` entries count"
+        );
+    }
+
+    #[test]
+    fn a_dvar_enum_item_takes_an_index_or_a_string() {
+        let list: Vec<String> = ["640x480", "1280x720", "1920x1080"]
+            .map(String::from)
+            .into();
+        assert_eq!(enum_index(&list, "2"), 2);
+        assert_eq!(enum_index(&list, "1280x720"), 1);
+        assert_eq!(
+            enum_index(&list, "7"),
+            0,
+            "out of range falls back to the first"
+        );
+        assert_eq!(enum_index(&list, ""), 0);
+        assert_eq!(enum_index(&[], "3"), 0);
+    }
+
+    #[test]
+    fn the_slider_thumb_follows_the_value_over_the_bar() {
+        let e = ::assets::zone::menu::EditFieldDef {
+            min_val: 0.5,
+            max_val: 3.0,
+            def_val: 1.0,
+            range: 0.0,
+            max_chars: 0,
+            max_chars_goto_next: 0,
+            max_paint_chars: 0,
+            paint_offset: 0,
+        };
+        let bar = 100.0;
+        assert_eq!(
+            slider_thumb_x(bar, &e, 0.5),
+            106.0,
+            "minimum: 6 in from the bar's left"
+        );
+        assert_eq!(slider_thumb_x(bar, &e, 3.0), 190.0, "maximum: 84 further");
+        assert_eq!(slider_thumb_x(bar, &e, 99.0), 190.0, "clamped");
+        assert!(
+            (slider_thumb_x(bar, &e, 1.75) - 148.0).abs() < 1e-3,
+            "halfway"
+        );
+        assert_eq!(slider_value_at(&e, 0.5), 1.75);
+        assert_eq!(slider_value_at(&e, -1.0), 0.5);
+        assert_eq!(slider_value_at(&e, 9.0), 3.0);
+    }
+
+    /// A bind item of a stock controls menu shows the keys of its command and rebinds on the next key.
+    #[test]
+    fn a_bind_item_shows_its_keys_and_takes_the_next_key() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut ui = Ui::new(
+            assets::UiAssets::load(&install).expect("ui assets"),
+            (1280, 720),
+        );
+        let mut host = Dummy::default();
+        let m = ui.menu_index("options_look").unwrap();
+        let def = ui.menus[m].def.clone();
+        let i = def
+            .items
+            .iter()
+            .position(|d| d.ty == ity::BIND && d.dvar.as_deref() == Some("+leanleft"))
+            .expect("the lean-left bind item");
+        assert_eq!(
+            ui.bind_label(&host, "+leanleft"),
+            ui.localize_key("KEY_UNBOUND")
+        );
+        host.set_bind("Q", "+leanleft");
+        assert_eq!(ui.bind_label(&host, "+leanleft"), "Q");
+        ui.activate(&mut host, m, i, true);
+        assert!(ui.bind_pending());
+        assert!(ui.bind_capture(&mut host, "j"));
+        assert_eq!(
+            host.key_bindings("+leanleft"),
+            ["Q", "j"],
+            "a command holds two keys"
+        );
+        assert!(!ui.bind_pending());
+        assert!(
+            ui.bind_label(&host, "+leanleft")
+                .contains(&ui.localize_key("KEY_OR"))
+        );
+        // A third key starts over; Backspace clears.
+        ui.activate(&mut host, m, i, true);
+        ui.bind_capture(&mut host, "l");
+        assert_eq!(host.key_bindings("+leanleft"), ["l"]);
+        ui.activate(&mut host, m, i, true);
+        ui.bind_capture(&mut host, "backspace");
+        assert!(host.key_bindings("+leanleft").is_empty());
     }
 }

@@ -90,6 +90,22 @@ pub fn monitors_json(el: &ActiveEventLoop) -> Value {
         .collect()
 }
 
+/// The sizes and refresh rates (Hz) the window's monitor offers, for the graphics menus.
+pub fn video_modes(window: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
+    let Some(m) = window
+        .current_monitor()
+        .or_else(|| window.primary_monitor())
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    let modes: Vec<VideoModeHandle> = m.video_modes().collect();
+    let sizes = modes.iter().map(|v| (v.size().width, v.size().height));
+    let rates = modes
+        .iter()
+        .map(|v| (v.refresh_rate_millihertz() + 500) / 1000);
+    (sizes.collect(), rates.collect())
+}
+
 fn monitor(el: &ActiveEventLoop) -> Option<MonitorHandle> {
     el.primary_monitor()
         .or_else(|| el.available_monitors().next())

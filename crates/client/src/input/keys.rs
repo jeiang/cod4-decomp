@@ -112,6 +112,17 @@ pub fn key_name(code: KeyCode) -> Option<&'static str> {
     })
 }
 
+/// The id the original's UI localizes a key by: `Q` for a character key, `KEY_MOUSE1`, `KEY_CTRL`, ... otherwise.
+/// Gamepad buttons have no stock string and keep their upper-case name.
+pub fn key_id(name: &str) -> String {
+    let upper = name.to_ascii_uppercase();
+    if name.chars().count() == 1 || name.starts_with("pad_") {
+        upper
+    } else {
+        format!("KEY_{upper}")
+    }
+}
+
 pub fn mouse_name(b: MouseButton) -> String {
     match b {
         MouseButton::Left => "mouse1".into(),
@@ -145,4 +156,19 @@ pub fn pad_name(b: gilrs::Button) -> Option<&'static str> {
         DPadRight => "pad_dpad_right",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_ids_follow_the_original_names() {
+        assert_eq!(key_id("q"), "Q");
+        assert_eq!(key_id("7"), "7");
+        assert_eq!(key_id("mouse1"), "KEY_MOUSE1");
+        assert_eq!(key_id("ctrl"), "KEY_CTRL");
+        assert_eq!(key_id("semicolon"), "KEY_SEMICOLON");
+        assert_eq!(key_id("pad_a"), "PAD_A");
+    }
 }
