@@ -148,7 +148,16 @@ pub fn encode(stats: &[i32]) -> Vec<u8> {
     out
 }
 
-/// The stats of an `mpdata` file.
+/// Whether the stats checksum of an `mpdata` file matches its stats.
+pub fn checksum_ok(bytes: &[u8]) -> bool {
+    bytes.len() == FILE_LEN
+        && u32::from_le_bytes(bytes[CRC_AT..CRC_AT + 4].try_into().unwrap())
+            == crc32(&bytes[STATS_AT..STATS_AT + CHECKED_LEN])
+}
+
+/// The stats of an `mpdata` file. Only the size and the magic must be right: the original's own check (the `iwm0`
+/// magic, the key, the hashes) is stricter, and it throws away a file written by CoD 4 X (`ice0`) as corrupt; this
+/// client reads such a file, and a file whose checksum is off, as it stands.
 pub fn decode(bytes: &[u8]) -> Result<Vec<i32>, MpdataError> {
     if bytes.len() != FILE_LEN {
         return Err(MpdataError::Corrupt);
@@ -158,10 +167,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<i32>, MpdataError> {
         b"ice0" => {}
         _ => return Err(MpdataError::Corrupt),
     }
-    let crc = u32::from_le_bytes(bytes[CRC_AT..CRC_AT + 4].try_into().unwrap());
-    if crc != crc32(&bytes[STATS_AT..STATS_AT + CHECKED_LEN]) {
-        return Err(MpdataError::Corrupt);
-    }
+    // A wrong checksum is not fatal: the stats are used as they are (see `checksum_ok`).
     let mut stats = vec![0; STAT_COUNT];
     for (i, s) in stats.iter_mut().enumerate().take(FILE_STATS) {
         *s = if i < BYTE_STATS {
@@ -337,7 +343,12 @@ impl Profiles {
         self.find_dir(name)
             .and_then(|d| std::fs::read(d.join("mpdata")).ok())
             .and_then(|b| match decode(&b) {
-                Ok(s) => Some(s),
+                Ok(s) => {
+                    if !checksum_ok(&b) {
+                        eprintln!("profile {name}: the stats checksum does not match; using the stats anyway");
+                    }
+                    Some(s)
+                }
                 Err(e) => {
                     eprintln!("profile {name}: cannot read its stats ({e:?}); starting fresh");
                     None
@@ -486,7 +497,12 @@ mod tests {
         assert_eq!(decode(&good[..100]), Err(MpdataError::Corrupt));
         let mut bad = good.clone();
         bad[STATS_AT + 5] ^= 1;
-        assert_eq!(decode(&bad), Err(MpdataError::Corrupt));
+        assert!(!checksum_ok(&bad));
+        assert_eq!(
+            decode(&bad).unwrap()[5],
+            default_stats()[5] ^ 1,
+            "a bad checksum still reads"
+        );
         let mut enc = good.clone();
         enc[..4].copy_from_slice(b"iwm0");
         assert_eq!(decode(&enc), Err(MpdataError::Encrypted));
@@ -535,6 +551,49 @@ mod tests {
         assert_eq!(again.active(), "Lagahoo");
         assert_eq!(back, mine, "the user's copy shadows the install's");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn loading_and_saving_leave_the_install_untouched() {
+        let root = tmp("untouched");
+        let (install, cfg) = (root.join("install"), root.join("cfg"));
+        let store = install.join("players/profiles");
+        let dir = store.join("Lagahoo");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file the original rejects: CoD 4 X's magic and a checksum that does not match.
+        let mut theirs = encode(&default_stats());
+        theirs[CRC_AT] ^= 0xFF;
+        std::fs::write(dir.join("mpdata"), &theirs).unwrap();
+        std::fs::write(store.join("active.txt"), "Lagahoo").unwrap();
+        let snapshot = || {
+            let mut v: Vec<_> = walk(&install)
+                .into_iter()
+                .map(|p| (p.clone(), std::fs::read(&p).ok()))
+                .collect();
+            v.sort();
+            v
+        };
+        let before = snapshot();
+        let (mut p, mut s) = Profiles::open(&install, Some(cfg), "default");
+        assert_eq!(s, default_stats(), "read despite the checksum");
+        p.list();
+        s[2301] = 5;
+        p.save_if_changed(&s).unwrap();
+        p.switch(&s, "Lagahoo").unwrap();
+        assert_eq!(snapshot(), before, "no file renamed, rewritten or added");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn walk(d: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+            let p = e.path();
+            out.push(p.clone());
+            if p.is_dir() {
+                out.extend(walk(&p));
+            }
+        }
+        out
     }
 
     #[test]
