@@ -5,6 +5,7 @@
 
 use audio::channels::ChannelDef;
 use audio::curve::Curve;
+use audio::eq::{Band, EqType};
 use audio::mixer::{Emitter, Listener, Pcm, Play, Source, Stream, mixer};
 use audio::ring::ring;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -96,6 +97,21 @@ fn fill_neither_allocates_nor_frees() {
     ALLOCS.with(|a| a.set(0));
     for i in 0..400 {
         h.set_listener(Listener::from_yaw([i as f32, 0.0, 0.0], i as f32 * 0.1));
+        if i % 50 == 0 {
+            // Changing the room retunes in place; the EQ and the reverb are part of the busy mix.
+            h.set_reverb((i / 50 % 26) as u8, 0.6, 100);
+            h.set_eq(
+                (i / 50 % 4) as u8,
+                0,
+                (i / 50 % 3) as u8,
+                Some(Band {
+                    kind: EqType::Bell,
+                    gain_db: 6.0,
+                    freq: 1000.0,
+                    q: 1.0,
+                }),
+            );
+        }
         m.fill(&mut out);
     }
     WATCH.with(|w| w.set(false));

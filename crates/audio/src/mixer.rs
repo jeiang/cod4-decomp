@@ -10,11 +10,16 @@
 //! cap, a priority per channel and replacement of the lowest-priority (then farthest or quietest) voice, one
 //! sound per entity on restricted channels, master/slave ducking, and distance gain from the alias's own falloff
 //! curve. Positioned sounds are panned on the left/right of the listener; 2D sounds use the alias's speaker map.
+//!
+//! Two effects ride on it: a room reverb send bus (`setReverb`; sounds whose alias is not flagged no-wet feed
+//! it) and a parametric EQ per entity channel.
 
 #![allow(clippy::needless_range_loop)] // 2x2 gain matrices read better indexed
 
 use crate::channels::{ChannelDef, MAX_CHANNELS};
 use crate::curve::Curve;
+use crate::eq::{BANDS, Band, ChannelEq, Coeffs, EQS, EqState};
+use crate::reverb::Reverb;
 use crate::ring::Consumer;
 use crossbeam_queue::ArrayQueue;
 use std::sync::Arc;
@@ -30,6 +35,8 @@ const POOL_SIZE: [usize; 3] = [8, 32, 13];
 const MAX_VOICES: usize = 64;
 const QUEUE: usize = 1024;
 /// The gain of everything (`snd_volume` times 0.75 in the original).
+/// Frames mixed at a time, so the reverb send needs one fixed buffer.
+const CHUNK: usize = 512;
 const MASTER: f32 = 0.75;
 /// How long a slave takes to duck or recover (`snd_slaveFadeTime`).
 const SLAVE_FADE_MS: f32 = 500.0;
@@ -114,6 +121,8 @@ pub struct Play {
     pub duck: Duck,
     /// 2D sounds: the gain of source channel `c` into the left (`[c][0]`) and right (`[c][1]`) speaker.
     pub speaker: [[f32; 2]; 2],
+    /// Feeds the reverb bus (the alias does not have its no-wet flag).
+    pub wet: bool,
 }
 
 impl Play {
@@ -133,6 +142,7 @@ impl Play {
             emitter: None,
             duck: Duck::None,
             speaker: [[0.5, 0.5], [1.0, 0.0]],
+            wet: true,
         }
     }
 }
@@ -163,6 +173,19 @@ enum Command {
     SetPosition(VoiceId, [f32; 3]),
     SetVolume(VoiceId, f32),
     Listener(Listener),
+    /// The room and wet level to fade to over `fade_ms`.
+    Reverb {
+        room: u8,
+        wet: f32,
+        fade_ms: u32,
+    },
+    /// Band `band` of EQ `eq` of entity channel `channel`.
+    Eq {
+        channel: u8,
+        eq: u8,
+        band: u8,
+        set: Option<Band>,
+    },
 }
 
 /// What the mixer has done, readable from any thread.
@@ -245,6 +268,25 @@ impl Handle {
         self.send(Command::SetVolume(id, volume));
     }
 
+    /// Fades the reverb bus to `wet` in `room` (an index of [`crate::reverb::ROOMS`]) over `fade_ms`.
+    pub fn set_reverb(&self, room: u8, wet: f32, fade_ms: u32) {
+        self.send(Command::Reverb {
+            room,
+            wet: wet.clamp(0.0, 1.0),
+            fade_ms,
+        });
+    }
+
+    /// Sets (`Some`) or clears (`None`) one band of an entity channel's EQ.
+    pub fn set_eq(&self, channel: u8, eq: u8, band: u8, set: Option<Band>) {
+        self.send(Command::Eq {
+            channel,
+            eq,
+            band,
+            set,
+        });
+    }
+
     pub fn set_listener(&self, l: Listener) {
         self.send(Command::Listener(l));
     }
@@ -292,6 +334,8 @@ struct Voice {
     emitter: Option<Emitter>,
     duck: Duck,
     speaker: [[f32; 2]; 2],
+    wet: bool,
+    eq: EqState,
     gain: [[f32; 2]; 2],
     /// Source frames still to read before the next output frame (2 at the start, then 1 per advance).
     need: u8,
@@ -324,6 +368,8 @@ impl Voice {
             emitter: p.emitter,
             duck: p.duck,
             speaker: p.speaker,
+            wet: p.wet,
+            eq: [[[[0.0; 2]; 2]; BANDS]; EQS],
             gain: [[0.0; 2]; 2],
             need: 2,
             fresh: true,
@@ -389,6 +435,13 @@ pub struct Mixer {
     /// 0 when no master plays, 1 when one does; slaves follow it over [`SLAVE_FADE_MS`].
     slave_lerp: f32,
     age: u64,
+    reverb: Reverb,
+    wet: f32,
+    wet_goal: f32,
+    wet_step: f32,
+    eq: [ChannelEq; MAX_CHANNELS],
+    /// The mono sum of the sounds that feed the reverb, one chunk.
+    send: Vec<f32>,
 }
 
 /// A mixer and the handle that drives it.
@@ -427,6 +480,12 @@ pub fn mixer(rate: u32, channels: &[ChannelDef]) -> (Handle, Mixer) {
             listener: Listener::from_yaw([0.0; 3], 0.0),
             slave_lerp: 0.0,
             age: 0,
+            reverb: Reverb::new(rate),
+            wet: 0.0,
+            wet_goal: 0.0,
+            wet_step: 0.0,
+            eq: [[[None; BANDS]; EQS]; MAX_CHANNELS],
+            send: vec![0.0; CHUNK],
         },
     )
 }
@@ -438,11 +497,18 @@ impl Mixer {
 
     /// Mixes `out.len() / 2` stereo frames into `out` (overwriting it).
     pub fn fill(&mut self, out: &mut [f32]) {
+        for chunk in out.chunks_mut(CHUNK * 2) {
+            self.fill_chunk(chunk);
+        }
+    }
+
+    fn fill_chunk(&mut self, out: &mut [f32]) {
         out.fill(0.0);
         let frames = out.len() / 2;
         if frames == 0 {
             return;
         }
+        self.send[..frames].fill(0.0);
         while let Some(c) = self.queue.pop() {
             self.apply(c);
         }
@@ -461,13 +527,28 @@ impl Mixer {
         let mut underruns = 0;
         for slot in &mut self.voices {
             let Some(v) = slot else { continue };
-            let (done, starved) = mix_voice(v, out, &listener, lerp);
+            let eq = &self.eq[usize::from(v.channel).min(MAX_CHANNELS - 1)];
+            let (done, starved) = mix_voice(v, out, &mut self.send[..frames], eq, &listener, lerp);
             underruns += starved;
             if done {
                 if let Some(v) = slot.take() {
                     let _ = self.retired.push((v.id, v.source));
                 }
                 finished += 1;
+            }
+        }
+        if self.wet > 0.0 || self.wet_goal > 0.0 {
+            for f in 0..frames {
+                if self.wet != self.wet_goal {
+                    self.wet = if self.wet_goal > self.wet {
+                        (self.wet + self.wet_step).min(self.wet_goal)
+                    } else {
+                        (self.wet - self.wet_step).max(self.wet_goal)
+                    };
+                }
+                let t = self.reverb.run(self.send[f]);
+                out[2 * f] += t[0] * self.wet;
+                out[2 * f + 1] += t[1] * self.wet;
             }
         }
         let mut peak = 0.0f32;
@@ -508,6 +589,29 @@ impl Mixer {
                 }
             }
             Command::Listener(l) => self.listener = l,
+            Command::Reverb { room, wet, fade_ms } => {
+                if room != self.reverb.room() {
+                    self.reverb.set_room(room);
+                }
+                let frames = (u64::from(fade_ms.max(1)) * u64::from(self.rate) / 1000).max(1);
+                self.wet_goal = wet;
+                self.wet_step = (wet - self.wet).abs() / frames as f32;
+            }
+            Command::Eq {
+                channel,
+                eq,
+                band,
+                set,
+            } => {
+                if let Some(slot) = self
+                    .eq
+                    .get_mut(usize::from(channel))
+                    .and_then(|c| c.get_mut(usize::from(eq)))
+                    .and_then(|e| e.get_mut(usize::from(band)))
+                {
+                    *slot = set.map(|b| Coeffs::design(&b, self.rate));
+                }
+            }
         }
     }
 
@@ -646,7 +750,15 @@ fn fetch(v: &mut Voice) -> Read {
 }
 
 /// Mixes one voice into `out`; returns whether it is finished and how many frames starved.
-fn mix_voice(v: &mut Voice, out: &mut [f32], l: &Listener, slave_lerp: f32) -> (bool, u64) {
+fn mix_voice(
+    v: &mut Voice,
+    out: &mut [f32],
+    send: &mut [f32],
+    eq: &ChannelEq,
+    l: &Listener,
+    slave_lerp: f32,
+) -> (bool, u64) {
+    let filtered = eq.iter().flatten().any(Option::is_some);
     let frames = out.len() / 2;
     let src_ch = v.source.channels().clamp(1, 2);
     let mut level = v.volume;
@@ -730,12 +842,29 @@ fn mix_voice(v: &mut Voice, out: &mut [f32], l: &Listener, slave_lerp: f32) -> (
             }
         }
         let t = v.frac as f32;
-        let s = [
+        let mut s = [
             v.a[0] + (v.b[0] - v.a[0]) * t,
             v.a[1] + (v.b[1] - v.a[1]) * t,
         ];
+        if filtered {
+            for (e, bands) in eq.iter().enumerate() {
+                for (b, co) in bands.iter().enumerate() {
+                    if let Some(co) = co {
+                        for (c, x) in s.iter_mut().enumerate().take(src_ch) {
+                            *x = co.run(&mut v.eq[e][b][c], *x);
+                        }
+                    }
+                }
+            }
+        }
+        let mut sum = 0.0;
         for o in 0..2 {
-            out[2 * f + o] += v.fade * (s[0] * g[o][0] + s[1] * g[o][1]);
+            let y = v.fade * (s[0] * g[o][0] + s[1] * g[o][1]);
+            out[2 * f + o] += y;
+            sum += y;
+        }
+        if v.wet {
+            send[f] += sum * 0.5;
         }
         v.frac += v.step;
         while v.frac >= 1.0 {
@@ -1042,6 +1171,103 @@ mod tests {
             h.stats.finished.load(Ordering::Relaxed),
             1,
             "100 ms ends within 60 ms at double speed"
+        );
+    }
+
+    fn energy(m: &mut Mixer, frames: usize) -> f32 {
+        let mut out = vec![0.0; frames * 2];
+        m.fill(&mut out);
+        out.iter().map(|s| s * s).sum()
+    }
+
+    fn click(h: &mut Handle, wet: bool) {
+        let id = h.next_id();
+        let mut p = Play::new(id, Source::Loaded(dc(5)), 0);
+        p.wet = wet;
+        h.play(p);
+    }
+
+    #[test]
+    fn reverb_rings_on_after_the_sound_and_no_wet_sounds_stay_dry() {
+        let tail = |wet: bool, reverb: bool| {
+            let (mut h, mut m) = mixer(RATE, &table());
+            if reverb {
+                h.set_reverb(crate::reverb::room_index("hangar").unwrap(), 1.0, 1);
+            }
+            click(&mut h, wet);
+            let _ = energy(&mut m, 4800);
+            energy(&mut m, 24_000)
+        };
+        let dry = tail(true, false);
+        assert!(dry < 1e-6, "a dry mix is silent after the sound: {dry}");
+        assert!(tail(true, true) > 1e-3, "no reverb tail");
+        assert!(
+            tail(false, true) < 1e-6,
+            "a no-wet sound reached the reverb"
+        );
+    }
+
+    #[test]
+    fn the_reverb_fades_in_over_its_time() {
+        let (mut h, mut m) = mixer(RATE, &table());
+        h.set_reverb(1, 1.0, 1000);
+        let id = h.next_id();
+        let mut p = Play::new(id, Source::Loaded(dc(2000)), 0);
+        p.looping = true;
+        h.play(p);
+        let early = energy(&mut m, 2400);
+        let _ = energy(&mut m, 60_000);
+        let late = energy(&mut m, 2400);
+        assert!(late > early, "early {early} late {late}");
+    }
+
+    #[test]
+    fn an_eq_filters_only_its_channel_and_clearing_it_restores_the_sound() {
+        let band = Band {
+            kind: crate::eq::EqType::LowPass,
+            gain_db: 0.0,
+            freq: 200.0,
+            q: 0.707,
+        };
+        // A 6 kHz tone on channels 0 and 1.
+        let tone = || {
+            Arc::new(Pcm {
+                rate: RATE,
+                channels: 1,
+                samples: (0..RATE as usize)
+                    .map(|i| {
+                        ((i as f32 * 6000.0 * std::f32::consts::TAU / RATE as f32).sin() * 16384.0)
+                            as i16
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            })
+        };
+        let (mut h, mut m) = mixer(RATE, &table());
+        h.set_eq(0, 0, 0, Some(band));
+        for ch in [0u8, 1] {
+            let id = h.next_id();
+            let mut p = Play::new(id, Source::Loaded(tone()), ch);
+            p.volume = 0.5;
+            h.play(p);
+        }
+        let _ = energy(&mut m, 2400);
+        // Both voices are summed; compare against channel 1 alone.
+        let both = energy(&mut m, 4800);
+        let (mut h2, mut m2) = mixer(RATE, &table());
+        let id = h2.next_id();
+        let mut p = Play::new(id, Source::Loaded(tone()), 1);
+        p.volume = 0.5;
+        h2.play(p);
+        let _ = energy(&mut m2, 2400);
+        let only_unfiltered = energy(&mut m2, 4800);
+        assert!(
+            both < only_unfiltered * 1.1,
+            "the filtered voice still sounds: {both} vs {only_unfiltered}"
+        );
+        assert!(
+            both > only_unfiltered * 0.9,
+            "the other channel was filtered too"
         );
     }
 }

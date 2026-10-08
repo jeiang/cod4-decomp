@@ -295,6 +295,20 @@ impl NetPlay {
         for e in &events {
             *self.c.events.entry(e.kind()).or_default() += 1;
         }
+        let (weapons, lib) = (&self.weapons, &self.lib);
+        self.sound.world_events(
+            &events,
+            &|w| {
+                let info = weapons.get(w)?;
+                lib.content.weapon(&info.name).cloned()
+            },
+            &|client| {
+                snap.entities
+                    .iter()
+                    .find(|e| e.etype == etype::PLAYER && e.client == client)
+                    .map(|e| [e.origin[0], e.origin[1], e.origin[2] + 60.0])
+            },
+        );
         (events, commands)
     }
 

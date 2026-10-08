@@ -192,7 +192,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if hits >= 1.0 && pains < 1.0 {
         failures.push("enemies were hit but the client saw no pain event".into());
     }
+    if impacts >= 1.0 && heard(&["bulletimpact"]) < 1.0 {
+        failures.push(format!(
+            "{impacts} bullet impacts reached the client but none was heard: {}",
+            snd["by_channel"]
+        ));
+    }
     let m = &mut report.metrics;
+    m.insert("sound.impacts_heard".into(), heard(&["bulletimpact"]));
     m.insert("sound.started".into(), num(snd, &["started"]));
     m.insert("sound.refused".into(), num(snd, &["refused"]));
     m.insert("sound.replaced".into(), num(snd, &["replaced"]));
