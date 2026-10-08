@@ -16,6 +16,9 @@ mod listen;
 mod models;
 mod netplay;
 mod ownerdraw;
+mod profile;
+mod serverlist;
+mod session;
 mod shell;
 mod showcase;
 mod sound;
@@ -56,7 +59,8 @@ usage: cod4e [options]
   --no-sound             mix the sound without opening a sound card
   --ui-tour <dir>        open the stock menus in turn, save a screenshot of each and ui.json to <dir>, then exit (harness)
   --ui-script <steps>    drive the menus like a player: click=<item>, open=<menu>, close=<menu>, menu=<name>[:secs], ingame[=secs], wait=<secs>, shot=<name>,
-                         scores=on|off, togglemenu, home[=secs], and waits for killcam|dead|intermission|feed[=secs];
+                         scores=on|off, togglemenu, home[=secs], set=<console line>, connect=<host[:port]>, stat=<i> <v>, statis=<i> <v>,
+                         map=<name>[:secs], maprotate[=secs], and waits for killcam|dead|intermission|feed[=secs];
                          writes ui-script.json (and shots) to --out, then exits (harness)
   --no-autojoin          do not answer the server's team and class menus by default (direct --listen/--connect)
   --fx-demo <name>       play the named effect (fx/...) in front of the player every 1.5 s, for looking at effects

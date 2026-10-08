@@ -78,6 +78,8 @@ pub struct ShellState {
     pub scores_forced: bool,
     pub hud_stats: hud::Stats,
     was_active: bool,
+    /// The join menu's server lists (LAN discovery, favorites).
+    pub servers: crate::serverlist::ServerList,
 }
 
 /// Facts of the running match that menu expressions read.
@@ -121,9 +123,10 @@ impl ShellState {
                 if !install.map_exists(&name) {
                     continue;
                 }
+                let title = cell(3);
                 maps.push(MapEntry {
                     name,
-                    title: cell(3),
+                    title: assets.translate(&title).map_or(title, |t| t.to_string()),
                     image: cell(4),
                 });
             }
@@ -137,9 +140,10 @@ impl ShellState {
                         .unwrap_or("")
                         .to_owned()
                 };
+                let title = cell(1);
                 gametypes.push(GameTypeEntry {
                     id: cell(0),
-                    title: cell(1),
+                    title: assets.translate(&title).map_or(title, |t| t.to_string()),
                 });
             }
         }
@@ -161,6 +165,7 @@ impl ShellState {
             scores_forced: false,
             hud_stats: hud::Stats::default(),
             was_active: false,
+            servers: Default::default(),
         }
     }
 
@@ -317,7 +322,9 @@ impl Shell {
                     .obituary(&o, &self.st.live, &self.ui.assets, now);
                 self.st.hud_stats.obituaries += 1;
             }
-            UiEvent::Map { .. } | UiEvent::Scores => {}
+            // A new level: the old one's menus are gone; the server opens its own again.
+            UiEvent::Map { .. } => self.close_all(input),
+            UiEvent::Scores => {}
         }
     }
 
@@ -436,6 +443,11 @@ fn atoi(s: &str) -> i32 {
 impl HostCx<'_> {
     fn dvar_get(&self, name: &str) -> String {
         self.input.cvars.get(name).unwrap_or("").to_owned()
+    }
+
+    /// The list the join menu shows (`ui_netSource`).
+    fn net_source(&self) -> crate::serverlist::Source {
+        crate::serverlist::Source::from_dvar(&self.dvar_get("ui_netSource"))
     }
 
     /// One console command the shell understands; `false` if it is not one of its own.
@@ -659,10 +671,43 @@ impl Host for HostCx<'_> {
                 self.st.actions.push(Action::StartServer { map, gametype });
                 true
             }
+            "refreshservers" | "refreshfilter" | "updatefilter" => {
+                self.st.servers.refresh();
+                true
+            }
+            "serversort" => {
+                self.st.servers.sort_by(atoi(a(0)).max(0) as usize);
+                true
+            }
+            "joinserver" => {
+                if let Some(addr) = self.st.servers.selected() {
+                    self.st.actions.push(Action::Join(addr.to_string()));
+                }
+                true
+            }
+            "createfavorite" => {
+                // The popup's typed address; the stock script adds it only while the favorites list is showing.
+                let typed = self.dvar_get("ui_favoriteAddress");
+                if let Ok(addr) = crate::serverlist::resolve(&typed) {
+                    self.st.servers.add_favorite(addr);
+                }
+                true
+            }
+            "addfavorite" => {
+                if let Some(addr) = self.st.servers.selected() {
+                    self.st.servers.add_favorite(addr);
+                }
+                true
+            }
+            "deletefavorite" => {
+                if let Some(addr) = self.st.servers.selected() {
+                    self.st.servers.remove_favorite(addr);
+                }
+                true
+            }
             "loadarenas"
             | "stoprefresh"
             | "addplayerprofiles"
-            | "updatefilter"
             | "setpbclstatus"
             | "update"
             | "getlanguage"
@@ -676,12 +721,7 @@ impl Host for HostCx<'_> {
             | "verifycdkey"
             | "clearmods"
             | "loadmods"
-            | "refreshfilter"
-            | "refreshservers"
-            | "serversort"
             | "serverstatus" => true,
-            "joinserver" => true,
-            "createfavorite" | "deletefavorite" | "addfavorite" => true,
             "quit" => {
                 self.st.actions.push(Action::Quit);
                 true
@@ -701,6 +741,11 @@ impl Host for HostCx<'_> {
 
     fn feeder_count(&mut self, feeder: i32) -> usize {
         match feeder {
+            2 => {
+                self.st.servers.poll();
+                let src = self.net_source();
+                self.st.servers.rows(src).len()
+            }
             4 => self.st.maps.len(),
             _ => 0,
         }
@@ -708,6 +753,15 @@ impl Host for HostCx<'_> {
 
     fn feeder_text(&mut self, feeder: i32, row: usize, col: usize) -> String {
         match (feeder, col) {
+            (2, _) => {
+                let src = self.net_source();
+                self.st
+                    .servers
+                    .rows(src)
+                    .get(row)
+                    .map(|e| server_cell(e, col, &self.st.maps, &self.st.gametypes))
+                    .unwrap_or_default()
+            }
             (4, _) => self
                 .st
                 .maps
@@ -719,6 +773,10 @@ impl Host for HostCx<'_> {
     }
 
     fn feeder_select(&mut self, feeder: i32, row: usize) {
+        if feeder == 2 {
+            let src = self.net_source();
+            self.st.servers.select(src, row);
+        }
         if feeder == 4 {
             self.st.map_sel = row;
             if let Some(m) = self.st.maps.get(row) {
@@ -805,6 +863,32 @@ impl Host for HostCx<'_> {
     }
 }
 
+/// One cell of the stock server list (the columns of the original's join menu).
+fn server_cell(
+    e: &crate::serverlist::Entry,
+    col: usize,
+    maps: &[MapEntry],
+    gametypes: &[GameTypeEntry],
+) -> String {
+    match col {
+        2 if e.ping > 0 => e.hostname.chars().take(38).collect(),
+        2 => e.addr.to_string(),
+        3 => maps
+            .iter()
+            .find(|m| m.name == e.map)
+            .map_or_else(|| e.map.clone(), |m| m.title.clone()),
+        4 => format!("{} ({})", e.clients, e.max_clients),
+        5 if e.gametype.is_empty() => "?".into(),
+        5 => gametypes
+            .iter()
+            .find(|g| g.id == e.gametype)
+            .map_or_else(|| e.gametype.clone(), |g| g.title.clone()),
+        10 if e.ping > 0 => e.ping.to_string(),
+        10 => "...".into(),
+        _ => String::new(),
+    }
+}
+
 /// Draws text inside a pixel rect for an owner-draw item, left aligned with the item's text offset.
 fn ui_text(ui: &Ui, p: &mut Painter, d: &ItemDef, rect: Px, color: [f32; 4], text: &str) {
     use crate::ui::paint::TextDraw;
@@ -823,4 +907,41 @@ fn ui_text(ui: &Ui, p: &mut Painter, d: &ItemDef, rect: Px, color: [f32; 4], tex
             vert: 5,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serverlist::Entry;
+
+    #[test]
+    fn server_list_cells_follow_the_stock_columns() {
+        let maps = vec![MapEntry {
+            name: "mp_crash".into(),
+            title: "MPUI_CRASH".into(),
+            image: String::new(),
+        }];
+        let types = vec![GameTypeEntry {
+            id: "war".into(),
+            title: "MPUI_WAR".into(),
+        }];
+        let mut e = Entry::unanswered("10.0.0.1:28960".parse().unwrap());
+        // Unanswered: the address stands in for the name and the ping shows dots.
+        assert_eq!(server_cell(&e, 2, &maps, &types), "10.0.0.1:28960");
+        assert_eq!(server_cell(&e, 10, &maps, &types), "...");
+        assert_eq!(server_cell(&e, 5, &maps, &types), "?");
+        e.hostname = "Host".into();
+        e.map = "mp_crash".into();
+        e.gametype = "war".into();
+        e.clients = 3;
+        e.max_clients = 18;
+        e.ping = 12;
+        assert_eq!(server_cell(&e, 2, &maps, &types), "Host");
+        assert_eq!(server_cell(&e, 3, &maps, &types), "MPUI_CRASH");
+        assert_eq!(server_cell(&e, 4, &maps, &types), "3 (18)");
+        assert_eq!(server_cell(&e, 5, &maps, &types), "MPUI_WAR");
+        assert_eq!(server_cell(&e, 10, &maps, &types), "12");
+        e.map = "mp_custom".into();
+        assert_eq!(server_cell(&e, 3, &maps, &types), "mp_custom");
+    }
 }

@@ -35,6 +35,11 @@ impl SnapshotBuffer {
         self.snaps.push_back((recv_ms, snap));
     }
 
+    /// Forgets the history (a new level restarts the server clock).
+    pub fn clear(&mut self) {
+        self.snaps.clear();
+    }
+
     pub fn latest(&self) -> Option<&Snapshot> {
         self.snaps.back().map(|(_, s)| s)
     }

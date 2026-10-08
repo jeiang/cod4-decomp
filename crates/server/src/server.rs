@@ -27,6 +27,8 @@ use net::Transport;
 /// Original loop time limit while scripts run (`LOOP_TIMEOUT` of the VM) applies unchanged.
 const SETTLE_FRAMES: i32 = 3;
 const SETTLE_STEP_MS: i32 = 100;
+/// Stat pairs one `statsync` command may carry.
+const STATSYNC_MAX_PAIRS: usize = 64;
 
 /// Called after every frame with its cost.
 pub type TickHook = Box<dyn FnMut(&TickSample)>;
@@ -435,6 +437,18 @@ impl Server {
                         "menuresponse",
                         &[Value::str(&argv[1]), Value::str(&argv[2])],
                     );
+                }
+            }
+            // The client's profile stats (`statsync <index> <value> ...`): the person's own, as the
+            // original's stats file is kept on the client.
+            Some("statsync") => {
+                if let Some(c) = self.game.client_mut(slot) {
+                    for kv in argv[1..].as_chunks::<2>().0.iter().take(STATSYNC_MAX_PAIRS) {
+                        let (i, v) = (cvar::parse_int(&kv[0]), cvar::parse_int(&kv[1]));
+                        if (0..4000).contains(&i) {
+                            c.stats.insert(i, v);
+                        }
+                    }
                 }
             }
             _ => {}

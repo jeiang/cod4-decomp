@@ -78,6 +78,18 @@ impl Cvars {
         c.archive |= archive;
     }
 
+    /// `(name, value)` of every cvar whose lowercase name starts with `prefix`, sorted by name.
+    pub fn with_prefix(&self, prefix: &str) -> Vec<(String, String)> {
+        let mut v: Vec<_> = self
+            .map
+            .iter()
+            .filter(|(n, _)| n.starts_with(prefix))
+            .map(|(n, c)| (n.clone(), c.value.clone()))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
     /// Archived `(name, value)` pairs, sorted by name.
     pub fn archived(&self) -> Vec<(&str, &str)> {
         let mut v: Vec<_> = self
