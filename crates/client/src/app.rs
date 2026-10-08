@@ -160,6 +160,8 @@ struct State {
     pitch: f32,
     input: Input,
     grabbed: bool,
+    /// A menu was open at the last frame.
+    menu_was_open: bool,
     samples: Vec<[f64; 3]>,
     /// GPU milliseconds per render call, once the timestamps come back (index = frame number - 1).
     gpu_ms: Vec<Option<f64>>,
@@ -425,6 +427,7 @@ impl Viewer {
             pitch: start.pitch,
             input,
             grabbed: false,
+            menu_was_open: false,
             samples: Vec::new(),
             gpu_ms: Vec::new(),
             rss: 0,
@@ -536,7 +539,13 @@ impl Viewer {
         if menu_open {
             // A locked cursor never moves, so the menu could not be clicked.
             release_pointer(st);
+            // The menu takes the window's events: a button or key let go while it is open never reaches the input,
+            // and a right click held when it opened would keep the sights up for good.
+            if !st.menu_was_open {
+                st.input.release_all();
+            }
         }
+        st.menu_was_open = menu_open;
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
             (st.pos, st.yaw, st.pitch) = (p, y, pi);
