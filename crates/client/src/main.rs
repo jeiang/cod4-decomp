@@ -9,6 +9,7 @@ mod display;
 mod effects;
 mod events;
 mod flythrough;
+mod fx_selftest;
 mod hud;
 mod hudstate;
 mod input;
@@ -63,6 +64,7 @@ usage: cod4e [options]
   --video / --screenshot record a video / save a screenshot during the flythrough
   --config <path>        key binds and settings file (default: <config dir>/cod4e/config_mp.cfg)
   --audio-selftest       check the sound system on the real tables without a window or sound card, then exit (harness stage)
+  --fx-selftest          play effects on the real content without a window: an explosion draws and ends, an impact leaves a decal, a shot flashes, the vision and shock files work, then exit (harness stage)
   --input-selftest       check key binds, mouse look and the config file without a window, then exit (harness stage)
   --listen               play a team deathmatch against bots on a server started inside this process
   --bots <n>             bots on the listen server (default 9)
@@ -102,6 +104,7 @@ pub struct Cli {
     pub config: Option<PathBuf>,
     pub input_selftest: bool,
     pub audio_selftest: bool,
+    pub fx_selftest: bool,
     /// Number of showcase players, when the scene is on.
     pub show_models: Option<usize>,
     /// Server to play on, `host:port`.
@@ -163,6 +166,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         config: None,
         input_selftest: false,
         audio_selftest: false,
+        fx_selftest: false,
         show_models: None,
         connect: None,
         listen: false,
@@ -218,6 +222,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--screenshot" => c.screenshot = true,
             "--input-selftest" => c.input_selftest = true,
             "--audio-selftest" => c.audio_selftest = true,
+            "--fx-selftest" => c.fx_selftest = true,
             "--config" => c.config = Some(val(a)?.into()),
             "--show-models" => c.show_models = Some(7),
             "--model-count" => {
@@ -297,6 +302,23 @@ fn main() -> ExitCode {
             }
             Err(bad) => {
                 eprintln!("audio selftest failed: {}", bad.join("; "));
+                ExitCode::from(1)
+            }
+        };
+    }
+    if cli.fx_selftest {
+        return match fx_selftest::run(&cli.install, &cli.map) {
+            Ok(m) => {
+                let json = serde_json::to_string_pretty(&m).unwrap_or_default();
+                if let Some(out) = &cli.out {
+                    let _ = std::fs::create_dir_all(out);
+                    let _ = std::fs::write(out.join("fx.json"), &json);
+                }
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(bad) => {
+                eprintln!("fx selftest failed: {}", bad.join("; "));
                 ExitCode::from(1)
             }
         };

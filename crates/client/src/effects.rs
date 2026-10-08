@@ -128,8 +128,20 @@ impl Effects {
         }
     }
 
+    /// The effect a table or a weapon points at. Tables in one zone name effects of another by a placeholder (the
+    /// name with a comma in front and nothing in it); the effect itself is in the library under the plain name.
+    fn resolve(&self, d: &Arc<FxEffectDef>) -> Arc<FxEffectDef> {
+        d.name
+            .as_deref()
+            .and_then(|n| n.strip_prefix(','))
+            .and_then(|n| self.fx.library().get(n))
+            .unwrap_or(d)
+            .clone()
+    }
+
     fn play(&mut self, kind: &'static str, def: Option<Arc<FxEffectDef>>, at: Vec3, dir: Vec3) {
         if let Some(d) = def {
+            let d = self.resolve(&d);
             self.fx.play(&d, Frame::facing(at, dir));
             *self.played.entry(kind).or_default() += 1;
         }
@@ -268,7 +280,8 @@ impl Effects {
                     ("shell_eject", eject, brass_at),
                 ] {
                     if let (Some(def), Some(at)) = (def, at) {
-                        self.fx.play(def, at);
+                        let def = self.resolve(def);
+                        self.fx.play(&def, at);
                         *self.played.entry(kind).or_default() += 1;
                     }
                 }
