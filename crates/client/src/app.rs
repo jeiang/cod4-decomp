@@ -13,7 +13,7 @@ use crate::listen::{self, Listen};
 use crate::loader::{self, Load};
 use crate::models::Library;
 use crate::netplay::NetPlay;
-use crate::profile::Profile;
+use crate::profile::Profiles;
 use crate::serverlist;
 use crate::session::{LevelChange, level_change, rotation};
 use crate::shell::{Action, Shell};
@@ -287,6 +287,8 @@ struct State {
     pitch: f32,
     input: Input,
     grabbed: bool,
+    /// Whether the system cursor is hidden now (see `sync_os_cursor`).
+    os_cursor_hidden: bool,
     gate: crate::pointer::PointerGate,
     /// When the pointer was last asked for, and whether the browser has confirmed the lock since: the page grants a
     /// lock a moment after the request and drops it on its own (Escape, a lost activation).
@@ -322,8 +324,6 @@ struct State {
     net: Option<NetPlay>,
     /// The map the world, renderer and net state are for (empty in the menus).
     map_name: String,
-    /// The player profile: the stats kept between runs.
-    profile: Profile,
     listen: Option<Listen>,
     tour: Option<flythrough::Tour>,
     ui_tour: Option<UiTour>,
@@ -658,16 +658,12 @@ impl Viewer {
                 &mut input,
             )?)
         };
-        let mut profile = Profile::new(
-            input.config_dir(),
-            input.cvar("com_playerProfile").unwrap_or("default"),
-        );
-        let stats = profile.load();
         if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_ref()) {
             sh.ui.assets.add_weapon_icons(&n.weapon_defs());
         }
         if let Some(sh) = shell.as_mut() {
-            sh.st.stats = stats;
+            let (profiles, stats) = Profiles::open(&install.root, input.config_dir(), "default");
+            sh.set_profiles(&mut input, profiles, stats);
             let (modes, rates) = display::video_modes(&window);
             sh.set_display(
                 &mut input,
@@ -711,6 +707,7 @@ impl Viewer {
             pitch: start.pitch,
             input,
             grabbed: false,
+            os_cursor_hidden: false,
             gate: Default::default(),
             grab_at: now,
             lock_seen: false,
@@ -739,7 +736,6 @@ impl Viewer {
             } else {
                 String::new()
             },
-            profile,
             listen,
             script: self.cli.ui_script.as_ref().map(|s| UiScript {
                 marker: None,
@@ -928,6 +924,7 @@ impl Viewer {
             }
         }
         st.menu_was_open = menu_open;
+        sync_os_cursor(st);
         // In a match the pointer is the game's whenever no menu wants it; a click is not required.
         let in_match = st.net.is_some()
             && st.renderer.is_some()
@@ -1086,8 +1083,8 @@ impl Viewer {
             eprintln!("cannot enter {name}: {e}");
             end_session(&mut self.map, st);
         }
-        if let Some(sh) = st.shell.as_ref()
-            && let Err(e) = st.profile.save_if_changed(&sh.st.stats)
+        if let Some(sh) = st.shell.as_mut()
+            && let Err(e) = sh.st.profiles.save_if_changed(&sh.st.stats)
         {
             eprintln!("cannot save the profile: {e}");
         }
@@ -2214,8 +2211,22 @@ fn grab_pointer(st: &mut State) {
         .set_cursor_grab(CursorGrabMode::Locked)
         .or_else(|_| st.window.set_cursor_grab(CursorGrabMode::Confined))
         .is_ok();
-    st.window.set_cursor_visible(!st.grabbed);
+    sync_os_cursor(st);
     st.input.set_captured(st.grabbed);
+}
+
+/// Hides the system cursor while the game draws its own (a menu with a pointer open) or has the pointer locked, shows
+/// it otherwise. The original does the same; two cursors on screen, offset from each other, was the alternative.
+fn sync_os_cursor(st: &mut State) {
+    let drawn = st
+        .shell
+        .as_ref()
+        .is_some_and(|s| s.ui.cursor_visible && s.ui.captures_input());
+    let hide = st.grabbed || drawn;
+    if hide != st.os_cursor_hidden {
+        st.window.set_cursor_visible(!hide);
+        st.os_cursor_hidden = hide;
+    }
 }
 
 /// The fullscreen state after a toggle: windowed becomes borderless on the current monitor and back.
@@ -2234,9 +2245,9 @@ fn toggle_fullscreen(window: &Window) {
 fn release_pointer(st: &mut State) {
     if st.grabbed {
         let _ = st.window.set_cursor_grab(CursorGrabMode::None);
-        st.window.set_cursor_visible(true);
         st.grabbed = false;
     }
+    sync_os_cursor(st);
     st.input.set_captured(false);
 }
 

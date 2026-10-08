@@ -7,6 +7,7 @@
 
 use crate::hud::{self, Feed, LiveUi, ScoreView};
 use crate::input::Input;
+use crate::profile::{CreateError, Profiles};
 use crate::ui::assets::UiAssets;
 use crate::ui::env::World;
 use crate::ui::expr::{HudFade, PlayerField, TeamField, TeamSel, Value};
@@ -61,6 +62,9 @@ pub struct GameTypeEntry {
 /// Everything the shell remembers between frames.
 pub struct ShellState {
     pub stats: Vec<i32>,
+    /// The player profiles, and the names the profile menu lists (feeder 24) in its order.
+    pub profiles: Profiles,
+    pub profile_names: Vec<String>,
     pub actions: Vec<Action>,
     pub in_game: bool,
     pub started: Instant,
@@ -184,6 +188,8 @@ impl ShellState {
         let gametype_sel = gametypes.iter().position(|g| g.id == "war").unwrap_or(0);
         ShellState {
             stats: vec![0; STAT_COUNT],
+            profiles: Profiles::none(),
+            profile_names: Vec::new(),
             actions: Vec::new(),
             in_game: false,
             started: Instant::now(),
@@ -240,13 +246,16 @@ impl ShellState {
 
 /// The dvars the menus expect to exist before the first frame.
 const UI_DEFAULTS: &[(&str, &str)] = &[
-    ("com_playerProfile", "player"),
-    ("ui_playerProfileCount", "1"),
-    ("ui_playerProfileSelected", "player"),
+    ("com_playerProfile", ""),
+    ("ui_playerProfileCount", "0"),
+    ("ui_playerProfileSelected", ""),
+    ("ui_playerProfileNameNew", ""),
+    ("ui_playerProfileAlreadyChosen", "0"),
     ("fs_game", ""),
     ("ui_hideBack", "0"),
     ("ui_showEndOfGame", "0"),
-    ("ui_netGametype", "war"),
+    ("ui_netGametype", "1"),
+    ("ui_netGametypeName", "war"),
     ("ui_dedicated", "0"),
     ("onlinegame", "1"),
     ("ui_scorelimit", "0"),
@@ -355,6 +364,21 @@ impl Shell {
         };
         shell.ui.cursor_visible = true;
         Ok(shell)
+    }
+
+    /// Installs the player profiles and the active one's stats, and tells the menus.
+    pub fn set_profiles(&mut self, input: &mut Input, profiles: Profiles, stats: Vec<i32>) {
+        self.st.stats = stats;
+        self.st.profiles = profiles;
+        self.st.profile_names = self.st.profiles.list();
+        let active = self.st.profiles.active().to_owned();
+        input.cvars.set("com_playerProfile", &active, false);
+        input.cvars.set(
+            "ui_playerProfileCount",
+            &self.st.profile_names.len().to_string(),
+            false,
+        );
+        input.cvars.set("ui_playerProfileSelected", &active, false);
     }
 
     /// Tells the menus which video modes and refresh rates the display has, and the mode the window is in now
@@ -726,6 +750,103 @@ impl HostCx<'_> {
         self.input.cvars.get(name).unwrap_or("").to_owned()
     }
 
+    /// Re-reads the profile list into the menu's order and publishes the count.
+    fn refresh_profile_names(&mut self) {
+        self.st.profile_names = self.st.profiles.list();
+        let n = self.st.profile_names.len().to_string();
+        self.input.cvars.set("ui_playerProfileCount", &n, false);
+    }
+
+    /// The profile menu's scripts (`UI_AddPlayerProfiles` and friends).
+    fn profile_script(&mut self, ui: &mut Ui, name: &str) {
+        let select = |h: &mut Self, ui: &mut Ui, row: usize| {
+            if row < h.st.profile_names.len() {
+                ui.select_feeder_row(h, 24, row);
+            }
+        };
+        let position = |h: &Self, name: &str| {
+            h.st.profile_names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(name))
+        };
+        match name {
+            "addplayerprofiles" | "sortplayerprofiles" => {
+                let flip = name == "sortplayerprofiles";
+                let up = if flip {
+                    !self.st.profiles.ascending()
+                } else {
+                    true
+                };
+                self.st.profiles.set_ascending(up);
+                self.refresh_profile_names();
+                select(self, ui, 0);
+            }
+            "selectactiveplayerprofile" => {
+                let active = self.dvar_get("com_playerProfile");
+                if let Some(row) = position(self, &active) {
+                    select(self, ui, row);
+                }
+            }
+            "loadplayerprofile" => {
+                let want = self.dvar_get("ui_playerProfileSelected");
+                if want.is_empty() || want.eq_ignore_ascii_case(&self.dvar_get("com_playerProfile"))
+                {
+                    return;
+                }
+                if let Some(stats) = self.st.profiles.switch(&self.st.stats, &want) {
+                    self.st.stats = stats;
+                    let active = self.st.profiles.active().to_owned();
+                    self.input.cvars.set("com_playerProfile", &active, false);
+                }
+            }
+            "createplayerprofile" => {
+                let new = self.dvar_get("ui_playerProfileNameNew");
+                if new.trim().is_empty() {
+                    return;
+                }
+                self.input.cvars.set("ui_playerProfileNameNew", "", false);
+                match self.st.profiles.create(&new) {
+                    Ok(made) => {
+                        self.refresh_profile_names();
+                        if let Some(row) = position(self, &made) {
+                            select(self, ui, row);
+                        }
+                    }
+                    Err(e) => {
+                        let popup = match e {
+                            CreateError::TooMany => "profile_create_too_many_popmenu",
+                            CreateError::Exists => "profile_exists_popmenu",
+                            CreateError::Failed => "profile_create_fail_popmenu",
+                        };
+                        ui.open_by_name(self, popup);
+                    }
+                }
+            }
+            "deleteplayerprofile" => {
+                let gone = self.dvar_get("ui_playerProfileSelected");
+                if self.st.profile_names.is_empty() {
+                    return;
+                }
+                if !self.st.profiles.delete(&gone) {
+                    ui.open_by_name(self, "profile_delete_fail_popmenu");
+                    return;
+                }
+                let row = position(self, &gone).unwrap_or(0);
+                if self.st.profiles.active().is_empty() {
+                    self.input.cvars.set("com_playerProfile", "", false);
+                    self.st.stats = crate::profile::default_stats();
+                }
+                self.refresh_profile_names();
+                if self.st.profile_names.is_empty() {
+                    self.input.cvars.set("ui_playerProfileSelected", "", false);
+                } else {
+                    select(self, ui, row.min(self.st.profile_names.len() - 1));
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The list the join menu shows (`ui_netSource`).
     fn net_source(&self) -> crate::serverlist::Source {
         crate::serverlist::Source::from_dvar(&self.dvar_get("ui_netSource"))
@@ -1040,27 +1161,23 @@ impl Host for HostCx<'_> {
                 }
                 true
             }
-            "loadarenas"
-            | "stoprefresh"
-            | "addplayerprofiles"
-            | "setpbclstatus"
-            | "getlanguage"
-            | "verifylanguage"
-            | "setrecommended"
-            | "closejoin"
-            | "sortplayerprofiles"
-            | "selectactiveplayerprofile"
-            | "loadplayerprofile"
-            | "getcdkey"
-            | "verifycdkey"
-            | "clearmods"
-            | "loadmods"
-            | "serverstatus" => true,
+            "loadarenas" | "stoprefresh" | "setpbclstatus" | "getlanguage" | "verifylanguage"
+            | "setrecommended" | "closejoin" | "getcdkey" | "verifycdkey" | "clearmods"
+            | "loadmods" | "serverstatus" => true,
             "quit" => {
                 self.st.actions.push(Action::Quit);
                 true
             }
-            "startsingleplayer" | "runmod" | "createplayerprofile" | "deleteplayerprofile" => true,
+            "startsingleplayer" | "runmod" => true,
+            "addplayerprofiles"
+            | "sortplayerprofiles"
+            | "selectactiveplayerprofile"
+            | "loadplayerprofile"
+            | "createplayerprofile"
+            | "deleteplayerprofile" => {
+                self.profile_script(ui, &name.to_ascii_lowercase());
+                true
+            }
             // No single-player, mods, player list or language switch here; the menus still run these.
             "clearloaderrorssummary" | "playerstart" | "updatelanguage" => true,
             "muteplayer" => {
@@ -1127,6 +1244,7 @@ impl Host for HostCx<'_> {
                 self.st.servers.rows(src).len()
             }
             4 => self.st.maps.len(),
+            24 => self.st.profile_names.len(),
             7 | 20 => self.players().len(),
             _ => 0,
         }
@@ -1159,6 +1277,7 @@ impl Host for HostCx<'_> {
                 .get(row)
                 .map(|(_, n)| n.clone())
                 .unwrap_or_default(),
+            (24, _) => self.st.profile_names.get(row).cloned().unwrap_or_default(),
             (4, _) => self
                 .st
                 .maps
@@ -1180,6 +1299,11 @@ impl Host for HostCx<'_> {
         if feeder == 20 {
             self.st.mute_sel = row;
         }
+        if feeder == 24
+            && let Some(n) = self.st.profile_names.get(row).cloned()
+        {
+            self.input.cvars.set("ui_playerProfileSelected", &n, false);
+        }
         if feeder == 4 {
             self.st.map_sel = row;
             if let Some(m) = self.st.maps.get(row) {
@@ -1194,17 +1318,26 @@ impl Host for HostCx<'_> {
     }
 
     fn owner_key(&mut self, _ui: &Ui, id: i32, key: &UiKey) -> bool {
-        // 245: the gametype chooser of the server settings.
+        // 245: the gametype chooser of the server settings. A click or Enter steps on, the right button (or Left)
+        // back; the map list and the settings menu follow `ui_netGametypeName`.
         if id == 245 {
             let n = self.st.gametypes.len();
-            if n > 0 {
-                let d = if *key == UiKey::Left { n - 1 } else { 1 };
+            let back = matches!(key, UiKey::Left | UiKey::Mouse2);
+            let step = matches!(
+                key,
+                UiKey::Left | UiKey::Right | UiKey::Mouse1 | UiKey::Mouse2 | UiKey::Enter
+            );
+            if n > 0 && step {
+                let d = if back { n - 1 } else { 1 };
                 self.st.gametype_sel = (self.st.gametype_sel + d) % n;
                 let id = self.st.gametypes[self.st.gametype_sel].id.clone();
-                self.input.cvars.set("ui_netGametype", &id, false);
+                self.input
+                    .cvars
+                    .set("ui_netGametype", &self.st.gametype_sel.to_string(), false);
+                self.input.cvars.set("ui_netGametypeName", &id, false);
                 self.input.cvars.set("g_gametype", &id, false);
             }
-            return true;
+            return step;
         }
         false
     }
@@ -1292,10 +1425,10 @@ fn server_cell(
     }
 }
 
-/// Draws text inside a pixel rect for an owner-draw item, left aligned with the item's text offset.
+/// Draws text for an owner-draw item with no text of its own: the baseline is the item's text offset below the top of its
+/// rect, as the original places it (`UI_OwnerDraw` adds the offsets to the rect).
 fn ui_text(ui: &Ui, p: &mut Painter, d: &ItemDef, rect: Px, color: [f32; 4], text: &str) {
     use crate::ui::paint::TextDraw;
-    let h = ui.text_height(d.font_enum, d.text_scale);
     ui.draw_text(
         p,
         &TextDraw {
@@ -1305,7 +1438,7 @@ fn ui_text(ui: &Ui, p: &mut Painter, d: &ItemDef, rect: Px, color: [f32; 4], tex
             style: d.text_style,
             color,
             x: rect.x + d.text_align_x * ui.place.scale.0,
-            y: rect.y + (d.text_align_y + h * 0.5) * ui.place.scale.1 + rect.h * 0.5,
+            y: rect.y + d.text_align_y * ui.place.scale.1,
             horz: 5,
             vert: 5,
         },
@@ -1557,6 +1690,124 @@ mod tests {
             })
             .collect();
         assert_eq!(lines, ["callvote kick 3"]);
+    }
+
+    /// The profile menu lists the install's profiles, picks one, makes one and deletes it; the active profile's stats
+    /// are the ones the menus read (so a profile with everything unlocked unlocks Create a Class).
+    #[test]
+    fn the_profile_menu_lists_picks_creates_and_deletes_profiles() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let tmp = std::env::temp_dir().join(format!("cod4e-shell-profiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let store = tmp.join("install/players/profiles");
+        for (name, xp) in [("Lagahoo", 125_490), ("Ann", 0)] {
+            std::fs::create_dir_all(store.join(name)).unwrap();
+            let mut s = crate::profile::default_stats();
+            s[2301] = xp;
+            std::fs::write(store.join(name).join("mpdata"), crate::profile::encode(&s)).unwrap();
+        }
+        std::fs::write(store.join("active.txt"), "Lagahoo").unwrap();
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let mut st = ShellState::new(&assets, &install);
+        let mut ui = Ui::new(assets, (1280, 720));
+        let mut input = Input::detached();
+        register_defaults(&mut input);
+        let (profiles, stats) =
+            Profiles::open(&tmp.join("install"), Some(tmp.join("cfg")), "default");
+        st.stats = stats;
+        st.profiles = profiles;
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        h.input.cvars.set("com_playerProfile", "Lagahoo", false);
+        assert_eq!(
+            h.st.stats[2301], 125_490,
+            "the install's profile is the active one"
+        );
+        ui.open_by_name(&mut h, "player_profile");
+        assert_eq!(h.feeder_count(24), 2);
+        assert_eq!(
+            (h.feeder_text(24, 0, 0), h.feeder_text(24, 1, 0)),
+            ("Ann".into(), "Lagahoo".into())
+        );
+        assert_eq!(h.dvar("ui_playerProfileCount"), "2");
+        assert_eq!(
+            h.dvar("ui_playerProfileSelected"),
+            "Lagahoo",
+            "the active profile is picked"
+        );
+        // Pick Ann and load her: her stats replace the active ones.
+        h.feeder_select(24, 0);
+        assert!(h.ui_script(&mut ui, "loadPlayerProfile", &[]));
+        assert_eq!(
+            (h.dvar("com_playerProfile"), h.st.stats[2301]),
+            ("Ann".into(), 0)
+        );
+        // A new profile is listed, picked and starts with the default classes.
+        h.set_dvar("ui_playerProfileNameNew", "Zed");
+        assert!(h.ui_script(&mut ui, "createPlayerProfile", &[]));
+        assert_eq!(h.feeder_count(24), 3);
+        assert_eq!(h.dvar("ui_playerProfileSelected"), "Zed");
+        assert_eq!(h.dvar("ui_playerProfileNameNew"), "");
+        assert!(h.ui_script(&mut ui, "loadPlayerProfile", &[]));
+        assert_eq!(h.st.stats, crate::profile::default_stats());
+        // Deleting the active one leaves none chosen; the install's profiles cannot be deleted.
+        assert!(h.ui_script(&mut ui, "deletePlayerProfile", &[]));
+        assert_eq!(
+            (h.feeder_count(24), h.dvar("com_playerProfile")),
+            (2, String::new())
+        );
+        h.feeder_select(24, 1);
+        assert!(h.ui_script(&mut ui, "deletePlayerProfile", &[]));
+        assert_eq!(h.feeder_count(24), 2);
+        assert!(ui.open_menus().contains(&"profile_delete_fail_popmenu"));
+        // The column header flips the order.
+        assert!(h.ui_script(&mut ui, "sortPlayerProfiles", &["0".into()]));
+        assert_eq!(h.feeder_text(24, 0, 0), "Lagahoo");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The game mode chooser steps through the modes on a click and back on the right button, and the settings menus
+    /// follow `ui_netGametypeName`.
+    #[test]
+    fn the_game_mode_chooser_steps_on_click() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let mut st = ShellState::new(&assets, &install);
+        let ui = Ui::new(assets, (1280, 720));
+        let mut input = Input::detached();
+        register_defaults(&mut input);
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        assert_eq!(h.dvar("ui_netGametypeName"), "war");
+        assert!(h.owner_key(&ui, 245, &UiKey::Mouse1));
+        assert_eq!(h.dvar("ui_netGametypeName"), "sd");
+        assert_eq!(h.dvar("g_gametype"), "sd");
+        assert!(h.owner_key(&ui, 245, &UiKey::Mouse2));
+        assert!(h.owner_key(&ui, 245, &UiKey::Mouse2));
+        assert_eq!(h.dvar("ui_netGametypeName"), "dm");
+        assert!(!h.owner_key(&ui, 245, &UiKey::Up));
+        assert!(h.owner_key(&ui, 245, &UiKey::Enter));
+        assert_eq!(h.dvar("ui_netGametypeName"), "war");
     }
 
     /// The wheel, arrows and page keys scroll a scoreboard that has more rows than fit, and stay in range.
