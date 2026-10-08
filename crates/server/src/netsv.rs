@@ -73,6 +73,8 @@ pub struct NetSv {
     /// The last [`crate::archive::KEEP_MS`] of the world, for killcams.
     archive: Archive,
     buf: Vec<u8>,
+    /// Addresses refused until the given time (`tempBanClient`).
+    pub bans: Vec<(std::net::IpAddr, Instant)>,
 }
 
 impl NetSv {
@@ -87,6 +89,7 @@ impl NetSv {
             now: 0,
             archive: Archive::default(),
             buf: vec![0; MAX_MESSAGE],
+            bans: Vec::new(),
         }
     }
 

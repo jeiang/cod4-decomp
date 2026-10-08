@@ -90,6 +90,8 @@ pub const COMMANDS: &[&str] = &[
     "expect",
     "until",
     "devtele",
+    "clientkick",
+    "tempbanclient",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -170,6 +172,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_speed", "190", 0),
         ("g_lagcomp", "1", 0),
         ("bot_idle", "0", 0),
+        ("g_allowvote", "1", 0),
         ("g_useholdtime", "0", 0),
         ("g_useholdspawndelay", "500", 0),
         ("g_gravity", "800", 0),
@@ -437,6 +440,10 @@ impl Server {
             net.t.send_to(req.from, &net::Oob::ConnectResponse.encode());
             return;
         }
+        net.bans.retain(|(_, until)| *until > Instant::now());
+        if net.bans.iter().any(|(ip, _)| *ip == req.from.ip()) {
+            return refuse(net, "You are temporarily banned from this server.");
+        }
         let pw = self.game.cvars.string("g_password");
         if !pw.is_empty() && pw != req.password {
             return refuse(net, "Invalid password.");
@@ -518,6 +525,10 @@ impl Server {
         match argv.first().map(String::as_str) {
             Some("disconnect") => self.net_drop(net, slot),
             Some(net::ui::SCORES_REQUEST) => net.send_scoreboard(slot, &self.game),
+            Some("callvote") => self.game.call_vote(slot, &argv[1..]),
+            Some("vote") => self
+                .game
+                .cast_vote(slot, argv.get(1).map_or("", String::as_str)),
             Some("menuresponse") if argv.len() >= 3 => {
                 if let Some(run) = self.run.as_mut() {
                     run.vm.notify_entity(
@@ -704,6 +715,24 @@ impl Server {
                     }
                     _ => self.game.teleport_to_named(n, first)?,
                 }
+            }
+            // `clientkick <n>` and `tempBanClient <n>` (what a passed vote runs): the player is dropped;
+            // a temporary ban also refuses its address for five minutes.
+            "clientkick" | "tempbanclient" => {
+                let n = arg(1)
+                    .map(cvar::parse_int)
+                    .ok_or("usage: clientkick <client>")? as u16;
+                let Some(mut net) = self.net.take() else {
+                    return Err("clientkick: no network".into());
+                };
+                if lname == "tempbanclient"
+                    && let Some(p) = net.peers.get(usize::from(n)).and_then(Option::as_ref)
+                {
+                    let until = Instant::now() + Duration::from_secs(300);
+                    net.bans.push((p.link.addr.ip(), until));
+                }
+                self.net_drop(&mut net, n);
+                self.net = Some(net);
             }
             "bots" => {
                 let n = arg(1)
@@ -1056,6 +1085,9 @@ impl Server {
         self.game.level.frame += 1;
         self.game.level.frametime = self.frame_ms;
         self.game.level.time = self.svs_time;
+        for line in self.game.vote_frame() {
+            self.cbuf.add_text(&format!("{line}\n"));
+        }
         let mut errors = Vec::new();
         // A killcam cannot start before the history does; the script sees the trimmed
         // `archivetime` and gives up when too little is left.
