@@ -521,6 +521,7 @@ impl Game {
         );
         let touched = out.touched;
         let (mins, maxs) = (out.mins, out.maxs);
+        let mantle = out.mantle;
         let out = out.weapon_out;
         let origin = c.ps.origin;
         let yaw = c.ps.viewangles[1];
@@ -531,6 +532,9 @@ impl Game {
             e.maxs = maxs;
         }
         self.relink(n);
+        if let Some((end, duration)) = mantle {
+            self.add_mantle_blockage(n, end, duration);
+        }
         self.client_events(vm, n, old_events);
         self.weapon_events(vm, n, &out);
         self.lag_time = None;
@@ -542,6 +546,23 @@ impl Game {
         self.touch_triggers(vm, n);
         self.update_activate(vm, n);
         self.location_input(vm, n, &cmd);
+    }
+
+    /// `G_AddPlayerMantleBlockage`: an invisible player-sized box at the end of a mantle keeps
+    /// anyone else out of the landing spot while the climb runs and `g_mantleBlockTimeBuffer`
+    /// ms after. The climbing player's own traces pass through it.
+    fn add_mantle_blockage(&mut self, owner: u16, end: Vec3, duration: i32) {
+        let Some(o) = self.ent(owner) else { return };
+        let mut e = Ent::new(EntKind::Plain, "player_mantle_block");
+        e.origin = end;
+        e.mins = o.mins;
+        e.maxs = o.maxs;
+        e.contents = contents::PLAYERCLIP;
+        e.owner = Some(owner);
+        e.free_at = Some(self.level.time + duration + self.cvars.int("g_mantleBlockTimeBuffer"));
+        if let Ok(n) = self.spawn(e) {
+            self.relink(n);
+        }
     }
 
     /// The answer of a location selection (`beginLocationSelection`): a confirm turns the map point the

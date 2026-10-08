@@ -187,6 +187,8 @@ fn register_core_dvars(c: &mut Cvars) {
         ("net_wt_info", "", LATCH),
         ("g_password", "", 0),
         ("g_speed", "190", 0),
+        // Milliseconds past a mantle that its landing spot stays blocked to other players.
+        ("g_mantleBlockTimeBuffer", "500", 0),
         ("g_lagcomp", "1", 0),
         ("bot_idle", "0", 0),
         ("g_allowvote", "1", 0),
@@ -1431,6 +1433,7 @@ impl Server {
         self.game.callbacks = callbacks;
         self.game.weapons = sim::weapon::WeaponTable::new(&self.game.content.weapons())
             .map_err(|e| format!("weapon table: {e:?}"))?;
+        self.game.pm_params.mantle_anims = self.game.content.mantle_anims();
         let test_client = need(
             find("cod4e/testclient", "TestClient"),
             "TestClient in the bot script",

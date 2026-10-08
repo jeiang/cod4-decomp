@@ -165,6 +165,8 @@ pub struct Ent {
     pub anim: Option<AnimTree>,
     /// Level time when the slot was freed, in ms.
     pub free_time: i32,
+    /// Level time at which the engine frees the entity (`nextthink` of a mantle blocker).
+    pub free_at: Option<i32>,
     /// `takedamage`: damage reaches the entity's scripts (`setcandamage`, living players).
     pub takedamage: bool,
     /// `ent->flags`: 1 invulnerable, 2 cannot die, 8 takes no knockback.
@@ -201,6 +203,7 @@ impl Ent {
             mv: Mover::default(),
             anim: None,
             free_time: 0,
+            free_at: None,
             takedamage: false,
             flags: 0,
             x: crate::link::EntExtra::default(),
