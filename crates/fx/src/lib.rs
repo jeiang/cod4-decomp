@@ -1341,7 +1341,10 @@ mod tests {
             constants: Arc::from(Vec::new()),
             state_bits: Arc::from(Vec::new()),
         });
-        let mut e = elem_def(elem::TRAIL, FxVisuals::Materials(vec![Some(material)].into()));
+        let mut e = elem_def(
+            elem::TRAIL,
+            FxVisuals::Materials(vec![Some(material)].into()),
+        );
         e.spawn = [1, i32::MAX];
         e.life_span_msec = range(life, 0);
         e.trail = Some(Arc::new(assets::zone::fx::FxTrailDef {
