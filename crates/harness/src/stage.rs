@@ -181,6 +181,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_models::run),
     },
     StageDef {
+        name: "client-viewmodel",
+        description: "cod4e --viewmodel-tour on three maps: the first-person weapon and hands drawn from spawn points and paths must not be one colour (a wrong reflection probe painted them red) nor black",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_viewmodel::run),
+    },
+    StageDef {
         name: "audio",
         description: "cod4e --audio-selftest on the real sound tables: direction, falloff, range, voice caps, footsteps, streamed ambience and music (no window or sound card)",
         needs_install: false,
