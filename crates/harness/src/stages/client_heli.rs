@@ -78,7 +78,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     match (decode(&dir.join("heli.png")), decode(&dir.join("bare.png"))) {
         (Ok(a), Ok(b)) if (a.0, a.1) == (b.0, b.1) => {
             let changed =
-                a.2.as_chunks::<3>().0.iter()
+                a.2.as_chunks::<3>()
+                    .0
+                    .iter()
                     .zip(b.2.as_chunks::<3>().0.iter())
                     .filter(|(p, q)| {
                         p.iter()
