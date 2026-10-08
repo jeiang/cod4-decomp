@@ -427,6 +427,11 @@ impl NetPlay {
         self.net.disconnect();
     }
 
+    /// `snd_volume`, from the cvar store each frame.
+    pub fn set_volume(&mut self, volume: f32) {
+        self.sound.set_volume(volume);
+    }
+
     /// Runs one render frame of play. `None` until the server has given the player a body.
     pub fn frame(&mut self, dt: f32, input: &InputFrame) -> Option<NetFrame> {
         self.net.pump(Duration::ZERO);
