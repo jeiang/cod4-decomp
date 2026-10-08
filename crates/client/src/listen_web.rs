@@ -10,12 +10,22 @@ pub struct Listen {
     pub addr: SocketAddr,
 }
 
-pub fn start(
-    _install: &Path,
-    _map: &str,
-    _bots: usize,
-    _gametype: Option<&str>,
-) -> Result<Listen, String> {
+/// What a listen server would be started with (the menus build it; nothing starts one here).
+#[allow(dead_code)] // built by the menus, read only by the native listen server
+pub struct Config {
+    pub map: String,
+    pub bots: usize,
+    pub gametype: Option<String>,
+    pub rotation: Option<String>,
+    pub port: u16,
+    pub dvars: Vec<(String, String)>,
+}
+
+pub fn free_standard_port() -> u16 {
+    0
+}
+
+pub fn start(_install: &Path, _cfg: Config) -> Result<Listen, String> {
     Err("a browser cannot host a game; join a server".into())
 }
 

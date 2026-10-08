@@ -8,12 +8,15 @@
 //! [`query`] is the blocking form for joining a typed address: it must learn the map before the client can load it.
 
 use net::oob::Oob;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+#[cfg(not(target_arch = "wasm32"))]
+use std::net::ToSocketAddrs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 /// Ports a server is looked for on: the original's default and the next three (a few servers on one host).
 pub const PORTS: [u16; 4] = [28960, 28961, 28962, 28963];
 /// The port assumed for an address typed without one.
+#[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_PORT: u16 = PORTS[0];
 /// Most rows a list keeps.
 const MAX_ENTRIES: usize = 256;
