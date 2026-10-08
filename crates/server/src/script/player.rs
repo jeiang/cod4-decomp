@@ -114,6 +114,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("showscoreboard", r(show_scoreboard)),
     ("updatescores", r(|_, _, _, _| Ok(Value::Undefined))),
     ("updatedmscores", r(|_, _, _, _| Ok(Value::Undefined))),
+    // Upstream stores `sess.enterTime` and nothing ever reads it: no observable effect, so no state kept here.
     ("setentertime", r(|_, _, _, _| Ok(Value::Undefined))),
     ("setrank", r(set_rank)),
     ("getguid", r(get_guid)),
@@ -389,7 +390,8 @@ fn set_rank(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
             .map_err(|_| format!("'{v}' is an illegal {what} value.  Must be less than 256.\n"))
     };
     let rank = byte(a.int(0)?, "rank")?;
-    let prestige = if a.get(1).is_ok() {
+    // `Scr_GetNumParam() >= 2`: an explicit argument, whatever its value, counts as given.
+    let prestige = if a.len() >= 2 {
         Some(byte(a.int(1)?, "prestige")?)
     } else {
         None

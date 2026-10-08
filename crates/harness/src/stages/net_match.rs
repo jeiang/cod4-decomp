@@ -274,6 +274,30 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
     let mut report = StageReport::new(NAME, Status::Passed);
     let mut failures = Vec::new();
+    // Team deathmatch scores a kill for the killer's team through `setteamscore`, so a team that out-killed the
+    // other must not hold the lower score (the allies/axis indices once swapped).
+    let kills = |team: server::client::Team| -> i32 {
+        server
+            .game
+            .connected_clients()
+            .filter(|(_, c)| c.team == team)
+            .map(|(_, c)| c.kills)
+            .sum()
+    };
+    let (axis_kills, allies_kills) = (
+        kills(server::client::Team::Axis),
+        kills(server::client::Team::Allies),
+    );
+    let (axis, allies) = (server.game.team_score[1], server.game.team_score[2]);
+    if allies + axis == 0 && axis_kills + allies_kills > 0 {
+        failures.push("kills were made but no team score was set".to_owned());
+    }
+    if (axis_kills > allies_kills && axis < allies) || (allies_kills > axis_kills && allies < axis)
+    {
+        failures.push(format!(
+            "team scores follow the wrong team: kills axis {axis_kills} allies {allies_kills}, scores axis {axis} allies {allies}"
+        ));
+    }
     for (i, r) in results.iter().enumerate() {
         if let Some(why) = &r.refused {
             failures.push(format!("client {i} refused: {why}"));
