@@ -1466,6 +1466,7 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
         "steps": sc.results,
         "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
         "hud_draw": st.shell.as_ref().map(|s| s.st.hud_stats.report()),
+        "open_menus": st.shell.as_ref().map(|s| s.ui.open_menus().join(",")),
         "net": st.net.as_mut().map(NetPlay::report),
         "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
         "map": st.map_name,

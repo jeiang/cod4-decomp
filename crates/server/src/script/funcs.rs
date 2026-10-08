@@ -629,7 +629,7 @@ fn set_dvar(g: &mut Game, _: &mut Vm, a: Args) -> R {
         Value::Vector(v) => display(&Value::Vector(*v)),
         o => return Err(format!("type {} is not a string", o.type_name())),
     };
-    g.cvars.set(n, &v);
+    g.script_set_dvar(n, &v);
     Ok(Value::Undefined)
 }
 
