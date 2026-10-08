@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Key names as used in `bind` lines. Physical keys, so binds follow position, not layout.
 //!
-//! Left/right modifiers are separate keys (`shift`/`rshift`, ...). `;` is `semicolon` since it separates commands.
+//! Either physical Shift, Ctrl or Alt is the one key `shift` / `ctrl` / `alt`, as the original's window procedure maps them.
+//! `;` is `semicolon` since it separates commands.
 
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
@@ -62,12 +63,9 @@ pub fn key_name(code: KeyCode) -> Option<&'static str> {
         Escape => "escape",
         Tab => "tab",
         Backspace => "backspace",
-        ShiftLeft => "shift",
-        ShiftRight => "rshift",
-        ControlLeft => "ctrl",
-        ControlRight => "rctrl",
-        AltLeft => "alt",
-        AltRight => "ralt",
+        ShiftLeft | ShiftRight => "shift",
+        ControlLeft | ControlRight => "ctrl",
+        AltLeft | AltRight => "alt",
         SuperLeft => "super",
         SuperRight => "rsuper",
         ArrowUp => "uparrow",
@@ -81,6 +79,9 @@ pub fn key_name(code: KeyCode) -> Option<&'static str> {
         PageUp => "pgup",
         PageDown => "pgdn",
         CapsLock => "capslock",
+        Pause => "pause",
+        ScrollLock => "scrolllock",
+        NumLock => "kp_numlock",
         Minus => "-",
         Equal => "=",
         BracketLeft => "[",
@@ -108,6 +109,7 @@ pub fn key_name(code: KeyCode) -> Option<&'static str> {
         NumpadMultiply => "kp_multiply",
         NumpadDivide => "kp_slash",
         NumpadDecimal => "kp_del",
+        NumpadEqual => "kp_equals",
         _ => return None,
     })
 }
@@ -170,5 +172,20 @@ mod tests {
         assert_eq!(key_id("ctrl"), "KEY_CTRL");
         assert_eq!(key_id("semicolon"), "KEY_SEMICOLON");
         assert_eq!(key_id("pad_a"), "PAD_A");
+    }
+
+    /// Either physical modifier is the one named key, so the stock sprint and stance binds answer to both.
+    #[test]
+    fn both_physical_modifiers_are_one_key() {
+        use KeyCode::*;
+        for (left, right, name) in [
+            (ShiftLeft, ShiftRight, "shift"),
+            (ControlLeft, ControlRight, "ctrl"),
+            (AltLeft, AltRight, "alt"),
+        ] {
+            assert_eq!(key_name(left), Some(name));
+            assert_eq!(key_name(right), Some(name));
+        }
+        assert_eq!(key_name(Pause), Some("pause"));
     }
 }

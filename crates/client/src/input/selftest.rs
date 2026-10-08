@@ -3,7 +3,7 @@
 //! and mouse events (no window, GPU, install or timing involved) and checks what comes out. Prints one line per check;
 //! returns the failures.
 
-use super::{Input, RawMouse, buttons};
+use super::{Feedback, Input, RawMouse, buttons};
 
 fn check(out: &mut Vec<String>, name: &str, ok: bool) {
     println!("{} {name}", if ok { "pass" } else { "FAIL" });
@@ -58,6 +58,46 @@ pub fn run() -> Vec<String> {
                 && up.released & bit != 0,
         );
     }
+    // The stock ADS binds also hold THROW (`+speed_throw`, `+toggleads_throw`).
+    i.key("mouse2", true);
+    let ads = i.frame(0.01);
+    i.key("mouse2", false);
+    check(
+        o,
+        "ADS throw bind holds ADS and THROW",
+        ads.buttons & (buttons::ADS | buttons::THROW) == buttons::ADS | buttons::THROW,
+    );
+    // A forced stand (sprinting out of prone, a ladder) resets the latched stance.
+    i.exec_line("goprone");
+    let latched = i.frame(0.01).buttons & buttons::PRONE != 0;
+    i.apply(&Feedback {
+        stances: vec![0],
+        ..Feedback::default()
+    });
+    check(
+        o,
+        "forced stand resets the goprone latch",
+        latched && i.frame(0.01).buttons & buttons::PRONE == 0,
+    );
+    i.exec_line("goprone");
+    check(
+        o,
+        "goprone after the reset goes prone again",
+        i.frame(0.01).buttons & buttons::PRONE != 0,
+    );
+    i.apply(&Feedback {
+        stances: vec![0],
+        ..Feedback::default()
+    });
+    // Held +prone is a temporary stance.
+    i.key("z", true);
+    let temp = i.frame(0.01).buttons;
+    i.key("z", false);
+    check(
+        o,
+        "held +prone sends PRONE with TEMP_STANCE",
+        temp & (buttons::PRONE | buttons::TEMP_STANCE) == buttons::PRONE | buttons::TEMP_STANCE,
+    );
     i.pulse("mwheelup");
     check(
         o,
