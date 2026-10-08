@@ -670,7 +670,7 @@ impl Builder<'_> {
                 g
             }
         };
-        let pipeline = r.materials.pipeline(
+        let pipeline = r.materials.pipeline_now(
             &r.gpu,
             &prep,
             Target {

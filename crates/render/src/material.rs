@@ -13,9 +13,15 @@ use crate::texture::{Tex, TextureCache};
 use assets::zone::gfx::{ArgValue, Material, Pass, TechniqueSet, TextureSource};
 use sm3::{Options, SamplerDim, Stage, Translation, VertexFix};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use web_time::Instant;
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Which sampler object a texture binding uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -309,6 +315,9 @@ pub struct Materials {
     pub ps_layout: wgpu::BindGroupLayout,
     techsets: HashMap<String, Arc<TechniqueSet>>,
     next_id: u32,
+    deadline: Mutex<Option<Instant>>,
+    deferred: AtomicUsize,
+    demand: Mutex<HashSet<(u32, Target)>>,
     /// Material name to why it could not be prepared.
     pub failures: BTreeMap<String, String>,
 }
@@ -357,6 +366,9 @@ impl Materials {
             ps_layout,
             techsets: HashMap::new(),
             next_id: 0,
+            deadline: Mutex::new(None),
+            deferred: AtomicUsize::new(0),
+            demand: Mutex::new(HashSet::new()),
             failures: BTreeMap::new(),
         }
     }
@@ -800,8 +812,45 @@ impl Materials {
         })
     }
 
-    /// The pipeline for `p` rendering into `target`, built on first use.
-    pub fn pipeline(&self, gpu: &Gpu, p: &Prepared, target: Target) -> Arc<wgpu::RenderPipeline> {
+    /// Stop building pipelines in [`Materials::pipeline`] after `deadline` (`None`: never stop). Shader linking can
+    /// dominate a frame (serial on WebGL2), so a client that must keep presenting spreads the builds over frames:
+    /// draws whose pipeline is not ready are skipped and remembered as demanded, see [`Materials::take_demand`].
+    pub fn set_deadline(&self, deadline: Option<Instant>) {
+        *lock(&self.deadline) = deadline;
+    }
+
+    /// How many [`Materials::pipeline`] calls came back empty since the last call, and which pipelines they wanted.
+    pub fn take_deferred(&self) -> (usize, HashSet<(u32, Target)>) {
+        let demand = std::mem::take(&mut *lock(&self.demand));
+        (self.deferred.swap(0, Ordering::Relaxed), demand)
+    }
+
+    /// Whether `p` has a pipeline for `target` already.
+    pub fn has_pipeline(&self, p: &Prepared, target: Target) -> bool {
+        p.pipelines.borrow().contains_key(&target)
+    }
+
+    /// The pipeline for `p` rendering into `target`, built on first use; `None` when it is not built and the
+    /// [deadline](Materials::set_deadline) has passed. The draw is skipped for now.
+    pub fn pipeline(
+        &self,
+        gpu: &Gpu,
+        p: &Prepared,
+        target: Target,
+    ) -> Option<Arc<wgpu::RenderPipeline>> {
+        if let Some(built) = p.pipelines.borrow().get(&target) {
+            return Some(built.clone());
+        }
+        if lock(&self.deadline).is_some_and(|d| Instant::now() >= d) {
+            self.deferred.fetch_add(1, Ordering::Relaxed);
+            lock(&self.demand).insert((p.id, target));
+            return None;
+        }
+        Some(self.pipeline_now(gpu, p, target))
+    }
+
+    /// The pipeline for `p` rendering into `target`, built now whatever the deadline.
+    pub fn pipeline_now(&self, gpu: &Gpu, p: &Prepared, target: Target) -> Arc<wgpu::RenderPipeline> {
         let mut map = p.pipelines.borrow_mut();
         map.entry(target)
             .or_insert_with(|| {
