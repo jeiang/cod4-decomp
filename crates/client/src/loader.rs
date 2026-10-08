@@ -10,6 +10,7 @@ use crate::listen::{self, Listen};
 use crate::models::{Library, Team};
 use assets::vfs::Vfs;
 use assets::zone::xmodel::XModel;
+#[cfg(not(target_arch = "wasm32"))]
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, Settings, TextureCache};
 use std::net::SocketAddr;
