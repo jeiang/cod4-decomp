@@ -179,3 +179,12 @@ Relaunch with one bot (`scr_testclients 1`, `sv_botsPressAttackBtn 1`, TDM, no l
 randomised walking plus minimap-based homing: the bot never found or shot the player, so no death, obituary or
 killcam was captured. Killcam band height/colour/opacity, viewmodel and camera-follow remain unrecorded.
 The original game was closed afterwards; ydotoold is left running.
+
+## Killcam attempt 3 (two clients)
+Two original instances on one host work: the server must be started WITHOUT developer mode (a developer-mode server
+rejects clients: "Clients can't connect if the server is in developer mode"; devmap forces it, so use `+map`, plus
+`+set sv_lanonly 1`). The second instance needs `+set net_port 28961` and joins with `connect 127.0.0.1:28960`
+typed in its console (the command-line +connect fired before the server was up). Both then sat in FFA on mp_backlot
+and were controllable one at a time (raise + focus the window before each input). With no player positions
+available (`viewpos` prints nothing in this build) I could not line up a kill within the time box, so the killcam
+(bands, viewmodel, camera follow, obituary) is still not captured. Both games closed; ydotoold left running.
