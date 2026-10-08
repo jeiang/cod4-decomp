@@ -592,6 +592,134 @@ fn a_rocket_hurts_what_it_hits_once_and_the_neighbours_by_the_blast() {
     assert_eq!(WeaponParams::default().melee_range, 64.0);
 }
 
+// ---- guided rockets -----------------------------------------------------------------------
+
+/// The helicopter's rocket (`cobra_ffar_mp`): sidewinder guidance, the stock steering acceleration and spool-up,
+/// slowed from 6000 to fit the test arena.
+fn sidewinder() -> WeaponInfo {
+    WeaponInfo {
+        name: "cobra_ffar_mp".into(),
+        projectile_speed: 2000,
+        time_to_accelerate: 1.0,
+        guided_missile_type: 1,
+        max_steering_accel: 2000.0,
+        proj_lifetime: 5.0,
+        ..rpg()
+    }
+}
+
+/// A lock-on launcher rocket: tossed out, motor lit after the ignition delay, then climb and dive.
+fn lock_on_launcher() -> WeaponInfo {
+    WeaponInfo {
+        name: "javelin_mp".into(),
+        projectile_speed: 1000,
+        guided_missile_type: 3,
+        proj_ignition_delay: 500,
+        proj_lifetime: 10.0,
+        ..rpg()
+    }
+}
+
+/// Hellfire guidance: the same steering as the sidewinder, but it first climbs.
+fn hellfire() -> WeaponInfo {
+    WeaponInfo {
+        name: "hellfire_mp".into(),
+        guided_missile_type: 2,
+        ..sidewinder()
+    }
+}
+
+/// Fires `weapon` from `from` along `dir`, optionally homing on a point, and returns every position it
+/// passed through until it blew up.
+fn flight_path(
+    weapon: &str,
+    target: Option<[f32; 3]>,
+    from: [f32; 3],
+    dir: [f32; 3],
+) -> Vec<[f32; 3]> {
+    let infos = vec![sidewinder(), lock_on_launcher(), hellfire(), rpg()];
+    let (mut g, mut vm) = arena(&[], 0, infos);
+    for (name, defaults) in server::missile::JAVELIN_CVARS {
+        g.cvars.register(name, defaults, 0);
+    }
+    let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
+    let weapon = g.weapons.index(weapon);
+    g.level.time = 1000;
+    let n = g.launch_rocket(shooter, weapon, from, dir).expect("launch");
+    if let Some(t) = target {
+        let mut goal = server::game::Ent::new(server::game::EntKind::Plain, "goal");
+        goal.origin = t;
+        let goal = g.spawn(goal).expect("spawn target");
+        g.ent_mut(n).unwrap().missile.as_mut().unwrap().target = Some(goal);
+    }
+    let mut path = vec![from];
+    for t in (1005..12_000).step_by(5) {
+        g.level.time = t;
+        g.run_entity(&mut vm, n);
+        match g.ent(n) {
+            Some(e) => path.push(e.origin),
+            None => break,
+        }
+    }
+    path
+}
+
+fn closest(path: &[[f32; 3]], to: [f32; 3]) -> f32 {
+    path.iter()
+        .map(|p| (0..3).map(|i| (p[i] - to[i]).powi(2)).sum::<f32>().sqrt())
+        .fold(f32::MAX, f32::min)
+}
+
+#[test]
+fn a_sidewinder_rocket_curves_toward_its_target_and_an_unguided_one_does_not() {
+    let (from, dir, goal) = ([0.0, 0.0, 500.0], [1.0, 0.0, 0.0], [3000.0, 1000.0, 500.0]);
+    let guided = flight_path("cobra_ffar_mp", Some(goal), from, dir);
+    let straight = flight_path("cobra_ffar_mp", None, from, dir);
+    // It left the line to the side its target is on and ended nearer.
+    let last = guided.iter().rfind(|p| p[0] < 3000.0).unwrap();
+    assert!(last[1] > 100.0, "never turned toward the target: {last:?}");
+    assert!(closest(&guided, goal) < closest(&straight, goal) * 0.5);
+    // Without a target it flies dead straight.
+    assert!(
+        straight
+            .iter()
+            .all(|p| p[1].abs() < 1.0 && (p[2] - 500.0).abs() < 1.0)
+    );
+    // A target on a rocket that cannot steer changes nothing.
+    let plain = flight_path("rpg_mp", None, from, dir);
+    assert_eq!(flight_path("rpg_mp", Some(goal), from, dir), plain);
+    assert!(plain.iter().all(|p| p[1].abs() < 1.0));
+}
+
+#[test]
+fn a_hellfire_rocket_also_curves_and_climbs_toward_a_target_above_its_line() {
+    let (from, dir, goal) = ([0.0, 0.0, 200.0], [1.0, 0.0, 0.0], [3000.0, 1000.0, 900.0]);
+    let guided = flight_path("hellfire_mp", Some(goal), from, dir);
+    let straight = flight_path("hellfire_mp", None, from, dir);
+    assert!(guided.iter().any(|p| p[1] > 100.0));
+    assert!(guided.iter().any(|p| p[2] > 300.0));
+    assert!(closest(&guided, goal) < closest(&straight, goal) * 0.5);
+}
+
+#[test]
+fn a_lock_on_rocket_is_tossed_out_then_climbs_and_dives_on_its_target() {
+    let (from, dir, goal) = (
+        [0.0, 0.0, 300.0],
+        [0.894, 0.0, 0.447],
+        [2500.0, 1500.0, 0.0],
+    );
+    let guided = flight_path("javelin_mp", Some(goal), from, dir);
+    let unlocked = flight_path("javelin_mp", None, from, dir);
+    // Soft launch: for the ignition delay it only follows its toss, the same as one that never locked on.
+    let coast = 500 / 5 - 2;
+    assert_eq!(guided[..coast], unlocked[..coast]);
+    // After ignition it leaves the toss's line toward the target and ends far nearer than the unlocked one.
+    assert!(guided.iter().any(|p| p[1] > 500.0), "never turned");
+    assert!(unlocked.iter().all(|p| p[1].abs() < 1.0));
+    let (g, u) = (closest(&guided, goal), closest(&unlocked, goal));
+    assert!(g < 150.0 && g < u * 0.25, "guided {g}, unlocked {u}");
+}
+
 // ---- the stock install --------------------------------------------------------------------
 
 fn crash() -> Option<server::server::Server> {

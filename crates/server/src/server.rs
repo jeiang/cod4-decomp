@@ -194,6 +194,9 @@ fn register_core_dvars(c: &mut Cvars) {
     ] {
         c.register(n, d, f);
     }
+    for (n, d) in crate::missile::JAVELIN_CVARS {
+        c.register(n, d, CHEAT);
+    }
 }
 
 fn io_err(e: impl std::fmt::Display) -> String {
