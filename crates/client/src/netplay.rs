@@ -14,6 +14,7 @@ use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::input::{InputFrame, buttons};
 use crate::models::{Library, Player, PlayerModelSet, Team};
+use crate::props::Props;
 use crate::ragdoll::Ragdoll;
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::ViewModel;
@@ -136,6 +137,7 @@ pub struct NetPlay {
     scores_asked: Option<Instant>,
     server_addr: String,
     effects: Effects,
+    props: Props,
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
     /// The server announced a level the app has not acted on yet.
@@ -184,6 +186,11 @@ impl NetPlay {
             last_eye: None,
             hud_view: None,
             sound,
+            props: Props::new(
+                lib.content
+                    .clipmap()
+                    .map_or(&[][..], |c| &c.dyn_entities[..]),
+            ),
             effects: Effects::new(&lib.content, world),
             lib,
             events: Events::default(),
@@ -416,7 +423,17 @@ impl NetPlay {
             if let ClientEvent::PlayerDeath { client, push, .. } = e {
                 self.pushes.insert(*client, *push);
             }
-            let (weapons, content) = (&self.weapons, &self.lib.content);
+            let weapons = &self.weapons;
+            self.props.event(
+                e,
+                &|w| {
+                    weapons
+                        .get(w)
+                        .is_some_and(|i| i.weap_type == sim::weapon::WeaponType::Bullet)
+                },
+                self.boxes.world(),
+            );
+            let content = &self.lib.content;
             self.effects.event(e, &|w| {
                 weapons
                     .get(w)
@@ -432,7 +449,9 @@ impl NetPlay {
             self.effects.demo(name, eye, yaw, pitch);
         }
         self.effects.update(st, self.boxes.world());
+        self.props.update(dt, self.boxes.world());
         let mut models = self.remote_players(dt, st, own);
+        models.extend(self.props.instances());
         if !dead {
             models.extend(self.view_model(dt, &ps, feet));
         }
@@ -738,6 +757,8 @@ impl NetPlay {
                 "quads_max": self.c.fx_quads_max,
                 "decals_max": self.c.fx_decals_max,
                 "ragdolls": self.c.ragdolls,
+                "props": self.props.len(),
+                "props_woken": self.props.woken,
                 "live_elems_max": self.c.fx_live_max,
             },
             "eye": self.last_eye.map(|e| e.to_array()),
