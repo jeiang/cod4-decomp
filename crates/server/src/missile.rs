@@ -9,8 +9,9 @@
 //! `G_ExplodeMissile` runs: `explode` and `death` reach the scripts, the radius damage is dealt
 //! and the entity is freed.
 //!
-//! Ceilings: guided missiles (javelin steering, attractors and repulsors only steer those),
-//! rocket destabilisation, water splashes, `trigger_damage` volumes touched by grenades, glass
+//! Guided missiles (`guidedMissileType` 1 to 3) steer toward the target a script gave them with
+//! `missile_settarget`. Ceilings: attractors and repulsors, the top-attack flight mode (no
+//! multiplayer script can select it), rocket destabilisation, water splashes, `trigger_damage` volumes touched by grenades, glass
 //! entities and flashbang blinding are not simulated; impact and explosion effects and sounds
 //! belong to the clients.
 
@@ -96,8 +97,121 @@ pub struct Missile {
     pub spawn_time: i32,
     /// `time_to_accelerate` of the weapon, `rotate` of the grenade.
     pub time_to_accelerate: f32,
+    /// `missile.stage`: where a javelin is in its flight.
+    pub stage: JavelinStage,
     pub target: Option<u16>,
     pub target_offset: Vec3,
+}
+
+/// `MISSILESTAGE_*`: a javelin is tossed out (`SoftLaunch`), lights its motor and climbs (`Ascent`), then dives
+/// on its target (`Descent`). Other missiles never leave `SoftLaunch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavelinStage {
+    SoftLaunch,
+    Ascent,
+    Descent,
+}
+
+/// `guidedMissileType`: 1 sidewinder, 2 hellfire, 3 javelin.
+const GUIDED_HELLFIRE: i32 = 2;
+const GUIDED_JAVELIN: i32 = 3;
+/// `missileHellfireMaxSlope`, `missileHellfireUpAccel`: stock values of the cheat dvars.
+const HELLFIRE_MAX_SLOPE: f32 = 0.5;
+const HELLFIRE_UP_ACCEL: f32 = 1000.0;
+
+/// The javelin's tuning dvars (`missileJav*`), with the defaults the multiplayer binary registers.
+pub const JAVELIN_CVARS: &[(&str, &str)] = &[
+    ("missileJavClimbHeightDirect", "10000"),
+    ("missileJavClimbAngleDirect", "85"),
+    ("missileJavClimbCeilingDirect", "0"),
+    ("missileJavTurnRateDirect", "60"),
+    ("missileJavAccelClimb", "300"),
+    ("missileJavAccelDescend", "3000"),
+    ("missileJavSpeedLimitClimb", "1000"),
+    ("missileJavSpeedLimitDescend", "6000"),
+    ("missileJavTurnDecel", "0.05"),
+    ("missileJavClimbToOwner", "700"),
+];
+
+/// `VecToQuat`: the orientation looking along `dir`, as `[x, y, z, w]`.
+fn dir_to_quat(dir: Vec3) -> [f32; 4] {
+    let angles = [math::vec_to_pitch(&dir), math::vec_to_yaw(&dir), 0.0];
+    let (f, r, u) = math::angle_vectors(&angles);
+    // Columns forward, left, up.
+    let m = [
+        [f[0], -r[0], u[0]],
+        [f[1], -r[1], u[1]],
+        [f[2], -r[2], u[2]],
+    ];
+    let trace = m[0][0] + m[1][1] + m[2][2];
+    if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [
+            (m[2][1] - m[1][2]) / s,
+            (m[0][2] - m[2][0]) / s,
+            (m[1][0] - m[0][1]) / s,
+            s / 4.0,
+        ]
+    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
+        let s = (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt() * 2.0;
+        [
+            s / 4.0,
+            (m[0][1] + m[1][0]) / s,
+            (m[0][2] + m[2][0]) / s,
+            (m[2][1] - m[1][2]) / s,
+        ]
+    } else if m[1][1] > m[2][2] {
+        let s = (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt() * 2.0;
+        [
+            (m[0][1] + m[1][0]) / s,
+            s / 4.0,
+            (m[1][2] + m[2][1]) / s,
+            (m[0][2] - m[2][0]) / s,
+        ]
+    } else {
+        let s = (1.0 + m[2][2] - m[0][0] - m[1][1]).sqrt() * 2.0;
+        [
+            (m[0][2] + m[2][0]) / s,
+            (m[1][2] + m[2][1]) / s,
+            s / 4.0,
+            (m[1][0] - m[0][1]) / s,
+        ]
+    }
+}
+
+/// `QuatSlerp` followed by `Vec4Normalize`.
+fn quat_slerp(from: [f32; 4], to: [f32; 4], frac: f32) -> [f32; 4] {
+    let mut dot: f32 = (0..4).map(|i| from[i] * to[i]).sum();
+    let flip = dot < 0.0;
+    if flip {
+        dot = -dot;
+    }
+    let (scale_from, scale_to) = if dot <= 0.95 {
+        let angle = dot.acos();
+        let sin = angle.sin();
+        (
+            ((1.0 - frac) * angle).sin() / sin,
+            (angle * frac).sin() / sin,
+        )
+    } else {
+        (1.0 - frac, frac)
+    };
+    let sign = if flip { -1.0 } else { 1.0 };
+    let mut q = [0.0f32; 4];
+    for i in 0..4 {
+        q[i] = scale_from * from[i] + scale_to * to[i] * sign;
+    }
+    let len = q.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if len != 0.0 { q.map(|v| v / len) } else { q }
+}
+
+/// `UnitQuatToForward`.
+fn quat_forward(q: [f32; 4]) -> Vec3 {
+    [
+        1.0 - (q[1] * q[1] + q[2] * q[2]) * 2.0,
+        (q[0] * q[1] + q[2] * q[3]) * 2.0,
+        (q[0] * q[2] - q[1] * q[3]) * 2.0,
+    ]
 }
 
 /// `Missile_CreateAttractorEnt` and friends: slots scripts fill for guided missiles.
@@ -269,6 +383,7 @@ impl Game {
             curvature: [0.0; 3],
             spawn_time: now,
             time_to_accelerate: 0.0,
+            stage: JavelinStage::SoftLaunch,
             target: None,
             target_offset: [0.0; 3],
             info: Box::new(info),
@@ -302,8 +417,8 @@ impl Game {
         let now = self.level.time;
         let dir = normalized(dir);
         let speed = info.projectile_speed as f32;
-        let tta = def.as_ref().map_or(0.0, |d| d.time_to_accelerate);
-        let curvature_max = def.as_ref().map_or(0.0, |d| d.projectile_curvature);
+        let tta = info.time_to_accelerate;
+        let curvature_max = info.projectile_curvature;
         let angles = [math::vec_to_pitch(&dir), math::vec_to_yaw(&dir), 0.0];
         let mut e = Ent::new(EntKind::Plain, "rocket");
         if let Some(m) = def.as_ref().and_then(|d| d.projectile_model.as_ref()) {
@@ -339,6 +454,15 @@ impl Game {
             let (s, c) = math::sincos_deg(theta);
             curvature = mad(mad([0.0; 3], r * c, right), r * s, up);
         }
+        if info.guided_missile_type != 0 {
+            pos.kind = TrType::Interpolate;
+            pos.duration = 0;
+            if info.guided_missile_type == GUIDED_JAVELIN {
+                // Tossed out under gravity until the motor lights.
+                pos.kind = TrType::Gravity;
+                pos.time = now;
+            }
+        }
         let life = ((info.proj_lifetime * 1000.0) as i32).min(60_000);
         // A vehicle's missiles belong to the team of the player it was called in for.
         let credit = self
@@ -363,6 +487,7 @@ impl Game {
             curvature,
             spawn_time: now,
             time_to_accelerate: tta,
+            stage: JavelinStage::SoftLaunch,
             target: None,
             target_offset: [0.0; 3],
             info: Box::new(info),
@@ -413,65 +538,231 @@ impl Game {
         t
     }
 
-    /// `GuidedMissileSteering` for the sidewinder kind (`guidedMissileType` 1, the helicopter's rockets): a missile
-    /// with a target bends its velocity toward it, within the weapon's steering acceleration, once it has finished
-    /// accelerating. Hellfire and javelin guidance are not simulated.
-    fn guided_steering(&self, m: &mut Missile, now: i32, dt: f32) {
+    /// `MissileIsReadyForSteering`: the motor has finished spooling up.
+    fn ready_for_steering(m: &Missile, now: i32) -> bool {
+        m.time_to_accelerate - (now - m.pos.time) as f32 * 0.001 <= 0.0
+    }
+
+    /// `GuidedMissileSteering`: a missile with a target bends its velocity toward it once it is ready. Sidewinder
+    /// (`guidedMissileType` 1, the helicopter's rockets) and hellfire (2) steer by acceleration within the weapon's
+    /// `maxSteeringAccel`; the javelin (3) rotates its velocity at a capped turn rate through soft launch, climb
+    /// and descent.
+    fn guided_steering(&self, m: &mut Missile, origin: Vec3, now: i32, dt: f32) {
+        let kind = m.info.guided_missile_type;
+        if kind == 0 || !Self::ready_for_steering(m, now) {
+            return;
+        }
         let Some(target) = m.target.and_then(|t| self.ent(t)) else {
             return;
         };
-        let Some(def) = self.content.weapon(&m.info.name) else {
-            return;
-        };
-        let max_accel = def.max_steering_accel;
-        if def.guided_missile_type != 1 || max_accel <= 0.0 {
+        let target_pos = mad(target.origin, 1.0, m.target_offset);
+        if kind == GUIDED_JAVELIN {
+            let owner = m
+                .parent
+                .and_then(|p| self.ent(p))
+                .map_or([0.0; 3], |e| e.origin);
+            self.javelin_steering(m, origin, now, dt, target_pos, target.origin, owner);
             return;
         }
-        if m.time_to_accelerate - (now - m.pos.time) as f32 * 0.001 > 0.0 {
+        let max_accel = m.info.max_steering_accel;
+        if max_accel <= 0.0 {
             return;
         }
         let flat = (m.pos.delta[0] * m.pos.delta[0] + m.pos.delta[1] * m.pos.delta[1]).sqrt();
-        if flat == 0.0 {
-            return;
-        }
-        let dir = [m.pos.delta[0] / flat, m.pos.delta[1] / flat];
+        let dir = if flat == 0.0 {
+            [0.0; 2]
+        } else {
+            [m.pos.delta[0] / flat, m.pos.delta[1] / flat]
+        };
         let right = [dir[1], -dir[0]];
-        let to = sub(mad(target.origin, 1.0, m.target_offset), m.pos.base);
+        let to = sub(target_pos, m.pos.base);
         let rel = [
             dir[1] * to[1] + dir[0] * to[0],
             right[1] * to[1] + right[0] * to[0],
             to[2],
         ];
-        let speed = m.info.projectile_speed as f32;
+        let mut steer = [0.0f32; 3];
+        Self::horz_steer(&m.info, right, rel, flat, &mut steer);
+        Self::vertical_steer(m, rel, flat, &mut steer);
+        m.pos.delta = mad(m.pos.delta, dt, steer);
+    }
+
+    /// `MissileHorzSteerToTarget`.
+    fn horz_steer(
+        info: &WeaponInfo,
+        right: [f32; 2],
+        rel: Vec3,
+        horz_speed: f32,
+        steer: &mut Vec3,
+    ) {
+        let max_accel = info.max_steering_accel;
+        let speed = info.projectile_speed as f32;
         let tightest = speed * speed / max_accel;
         let radius = if rel[1] == 0.0 {
             f32::MAX
         } else {
             (rel[1] * rel[1] + rel[0] * rel[0]) / (rel[1] * 2.0)
         };
-        let mut steer = [0.0f32; 3];
         let mut side = None;
         if rel[0] <= 0.0 {
             if radius.abs() >= tightest + 60.0 {
                 side = Some(if rel[1] <= 0.0 { -max_accel } else { max_accel });
             }
         } else if rel[1] != 0.0 && tightest <= radius.abs() {
-            side = Some((flat * 2.0 * flat / radius).clamp(-max_accel, max_accel));
+            side = Some((horz_speed * 2.0 * horz_speed / radius).clamp(-max_accel, max_accel));
         }
         if let Some(a) = side {
             steer[0] = a * right[0];
             steer[1] = a * right[1];
         }
+    }
+
+    /// `MissileVerticalSteering`: sidewinder always steers its climb to the target; hellfire first climbs at
+    /// `missileHellfireUpAccel` until it is on its way up, then does the same.
+    fn vertical_steer(m: &mut Missile, rel: Vec3, horz_speed: f32, steer: &mut Vec3) {
         let horz = (rel[0] * rel[0] + rel[1] * rel[1]).sqrt();
-        if horz != 0.0 && rel[0] / horz >= 0.0 {
-            let wish = (rel[0] / horz * flat).abs() * rel[2] / horz;
-            steer[2] = ((wish - m.pos.delta[2]) * 20.0).clamp(-max_accel, max_accel);
+        steer[2] = 0.0;
+        if horz == 0.0 {
+            return;
         }
-        m.pos.delta = mad(m.pos.delta, dt, steer);
+        let max_accel = m.info.max_steering_accel;
+        let speed = m.info.projectile_speed as f32;
+        if m.info.guided_missile_type != GUIDED_HELLFIRE || m.pos.duration != 0 {
+            // `MissileVerticalSteerToTarget`.
+            if rel[0] / horz >= 0.0 {
+                let wish = (rel[0] / horz * horz_speed).abs() * rel[2] / horz;
+                steer[2] = ((wish - m.pos.delta[2]) * 20.0).clamp(-max_accel, max_accel);
+            }
+            return;
+        }
+        let min_time = if rel[0] <= 0.0 || horz_speed == 0.0 {
+            horz / speed
+        } else {
+            rel[0] / speed
+        };
+        let mut max_vert = rel[2] / min_time;
+        max_vert = (max_accel * 0.5 * min_time + max_vert) * 0.9;
+        max_vert = max_vert.min(horz_speed * HELLFIRE_MAX_SLOPE);
+        if m.pos.delta[2] >= max_vert {
+            m.pos.duration = 1;
+        } else {
+            let want = (max_vert - m.pos.delta[2]) * 20.0;
+            steer[2] = if -max_accel - want < 0.0 {
+                want.min(HELLFIRE_UP_ACCEL)
+            } else {
+                -max_accel
+            };
+        }
+    }
+
+    /// `JavelinSteering`.
+    #[allow(clippy::too_many_arguments)]
+    fn javelin_steering(
+        &self,
+        m: &mut Missile,
+        origin: Vec3,
+        now: i32,
+        dt: f32,
+        target_pos: Vec3,
+        target_origin: Vec3,
+        owner_origin: Vec3,
+    ) {
+        if m.stage == JavelinStage::SoftLaunch {
+            if now - m.launch_time < m.info.proj_ignition_delay {
+                return;
+            }
+            m.stage = JavelinStage::Ascent;
+            m.pos.kind = TrType::Interpolate;
+            m.pos.base = origin;
+        }
+        let mut aim = target_pos;
+        if m.stage == JavelinStage::Ascent {
+            if self.javelin_climb_end(m, aim) {
+                m.stage = JavelinStage::Descent;
+            } else {
+                // `JavelinClimbOffset`, direct-fire mode (every multiplayer javelin): aim high, and a way back
+                // toward the owner so the dive comes in over the target.
+                aim[2] += self.cvars.float("missileJavClimbHeightDirect");
+                let back = [
+                    owner_origin[0] - target_origin[0],
+                    owner_origin[1] - target_origin[1],
+                ];
+                let len = (back[0] * back[0] + back[1] * back[1]).sqrt();
+                if len != 0.0 {
+                    let scale = self.cvars.float("missileJavClimbToOwner") / len;
+                    aim[0] += back[0] * scale;
+                    aim[1] += back[1] * scale;
+                }
+            }
+        }
+        let to = normalized(sub(aim, m.pos.base));
+        m.pos.delta = self.javelin_rotate_velocity(m, to, dt);
+    }
+
+    /// `JavelinClimbEnd`: above the ceiling, and either the climb angle or the distance says dive.
+    fn javelin_climb_end(&self, m: &Missile, target_pos: Vec3) -> bool {
+        let height = m.pos.base[2] - target_pos[2] - m.target_offset[2];
+        if self.cvars.float("missileJavClimbCeilingDirect") >= height {
+            return false;
+        }
+        // `JavelinClimbExceededAngle`.
+        let limit = self.cvars.float("missileJavClimbAngleDirect");
+        let flat = (m.pos.delta[0] * m.pos.delta[0] + m.pos.delta[1] * m.pos.delta[1]).sqrt();
+        let dir = if flat == 0.0 {
+            [0.0; 2]
+        } else {
+            [m.pos.delta[0] / flat, m.pos.delta[1] / flat]
+        };
+        let to = sub(target_pos, m.pos.base);
+        let along = dir[1] * to[1] + dir[0] * to[0];
+        let deg = (along / to[2]).atan().to_degrees().abs();
+        if limit > deg || deg.is_nan() {
+            return true;
+        }
+        // `JavelinClimbWithinDistance`.
+        let (dx, dy) = (m.pos.base[0] - target_pos[0], m.pos.base[1] - target_pos[1]);
+        (dx * dx + dy * dy).sqrt() < 400.0
+    }
+
+    /// `JavelinRotateVelocity`: turn toward `target_dir`, speed up while the turn is small, slow with the turn.
+    fn javelin_rotate_velocity(&self, m: &Missile, target_dir: Vec3, dt: f32) -> Vec3 {
+        let vel = m.pos.delta;
+        let mut len = length(vel);
+        let (dir, turn_diff) = self.javelin_rotate_dir(normalized(vel), target_dir, dt);
+        if turn_diff < 30.0 {
+            let (accel, limit) = if m.stage == JavelinStage::Ascent || vel[2] > 0.0 {
+                ("missileJavAccelClimb", "missileJavSpeedLimitClimb")
+            } else {
+                ("missileJavAccelDescend", "missileJavSpeedLimitDescend")
+            };
+            len = (self.cvars.float(accel) * dt + len).min(self.cvars.float(limit));
+        }
+        len *= 1.0 - turn_diff / 180.0 * self.cvars.float("missileJavTurnDecel");
+        mad([0.0; 3], len, dir)
+    }
+
+    /// `JavelinRotateDir`: turns toward `target` by at most `missileJavTurnRateDirect` degrees a second. Returns
+    /// the new direction and how much it had to turn (in the engine's scaled units; 0 when it reached the target).
+    fn javelin_rotate_dir(&self, current: Vec3, target: Vec3, dt: f32) -> (Vec3, f32) {
+        let max_dps = self.cvars.float("missileJavTurnRateDirect");
+        let diff = (1.0 - (dot(target, current) + 1.0) * 0.5) * 180.0;
+        if diff <= 0.1 {
+            return (target, 0.0);
+        }
+        let wanted_dps = diff / dt;
+        if max_dps > wanted_dps {
+            return (target, 0.0);
+        }
+        let q = quat_slerp(
+            dir_to_quat(current),
+            dir_to_quat(target),
+            max_dps / wanted_dps,
+        );
+        (quat_forward(q), diff)
     }
 
     /// `MissileTrajectory`: where the missile wants to be this frame.
-    fn missile_next_origin(&self, n: u16, m: &mut Missile) -> Vec3 {
+    fn missile_next_origin(&mut self, n: u16, m: &mut Missile) -> Vec3 {
         let now = self.level.time;
         if now > m.launch_time && m.pos.kind != TrType::Linear && m.kind == MissileKind::Rocket {
             let dt = self.level.frametime as f32 * 0.001;
@@ -489,9 +780,29 @@ impl Game {
             if m.curvature != [0.0; 3] {
                 m.pos.delta = mad(m.pos.delta, dt, m.curvature);
             }
-            self.guided_steering(m, now, dt);
-            m.pos.base = mad(m.pos.base, dt, m.pos.delta);
-            m.pos.base
+            let origin = self.ent(n).map_or(m.pos.base, |e| e.origin);
+            self.guided_steering(m, origin, now, dt);
+            let javelin_coasting =
+                m.info.guided_missile_type == GUIDED_JAVELIN && m.stage == JavelinStage::SoftLaunch;
+            let next = if javelin_coasting {
+                m.pos.evaluate(now)
+            } else {
+                m.pos.base = mad(m.pos.base, dt, m.pos.delta);
+                m.pos.base
+            };
+            if m.info.guided_missile_type != 0
+                && Self::ready_for_steering(m, now)
+                && length(m.pos.delta) > 1.0
+                && let Some(e) = self.ent_mut(n)
+            {
+                // A guided rocket points where it flies.
+                e.angles = [
+                    math::vec_to_pitch(&m.pos.delta),
+                    math::vec_to_yaw(&m.pos.delta),
+                    0.0,
+                ];
+            }
+            next
         } else {
             m.pos.evaluate(now)
         }
@@ -536,17 +847,6 @@ impl Game {
         }
         let old = origin;
         let next = self.missile_next_origin(n, m);
-        if m.target.is_some() && m.kind == MissileKind::Rocket && m.pos.kind != TrType::Linear {
-            // A steered rocket points where it flies.
-            let d = m.pos.delta;
-            if length(d) > 1.0 {
-                self.missile_set_pose(
-                    n,
-                    origin,
-                    Some([math::vec_to_pitch(&d), math::vec_to_yaw(&d), 0.0]),
-                );
-            }
-        }
         let dir = normalized(sub(next, origin));
         if length(sub(next, origin)) < 0.001 {
             self.missile_think(vm, n, m);
@@ -732,8 +1032,11 @@ impl Game {
         let mut explode_on_impact = m.info.proj_impact_explode;
         let damage = m.info.damage;
         let owner = self.ent(n).and_then(|e| e.owner);
-        let dud = m.info.projectile_activate_dist > 0
-            && m.travel_dist < m.info.projectile_activate_dist as f32;
+        // `GrenadeDud` or `JavelinDud`: one that never armed, or a javelin still being tossed out.
+        let dud = (m.info.projectile_activate_dist > 0
+            && m.travel_dist < m.info.projectile_activate_dist as f32)
+            || (m.info.guided_missile_type == GUIDED_JAVELIN
+                && m.stage == JavelinStage::SoftLaunch);
         let mean = if dud {
             explode_on_impact = false;
             m.travel_dist = -1.0e10;
