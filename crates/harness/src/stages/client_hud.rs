@@ -19,7 +19,7 @@ const NAME: &str = "client-hud";
 const LIMIT: Duration = Duration::from_secs(420);
 const ARGS: &[&str] = &["--listen", "--bots", "9", "--autoplay", "--duration", "400"];
 const STEPS: &str = "ingame=120,wait=5,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
-killcam=300,wait=2,shot=killcam";
+killcam=300,shot=killcam_first,wait=1,shot=killcam_next,wait=1,shot=killcam";
 
 fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -129,6 +129,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 "ui-script.json",
                 "scoreboard.png",
                 "feed.png",
+                "killcam_first.png",
+                "killcam_next.png",
                 "killcam.png",
             ] {
                 out.files.push(format!("hud/{f}"));

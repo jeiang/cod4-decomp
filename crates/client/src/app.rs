@@ -956,7 +956,12 @@ impl Viewer {
             && let Some(net) = st.net.as_mut()
         {
             let f = if self.cli.autoplay {
-                InputFrame::default()
+                // The bot drives; only the grenade keys stay a script's (`throw=`).
+                let keys = st.input.frame(dt).buttons;
+                InputFrame {
+                    buttons: keys & (buttons::FRAG | buttons::SMOKE),
+                    ..InputFrame::default()
+                }
             } else {
                 let f = st.input.frame(dt);
                 if menu_open { InputFrame::default() } else { f }
@@ -1518,6 +1523,22 @@ fn script_step(st: &mut State) -> bool {
             let open = sh.ui.open_menus().join(",");
             done(ok, sc, format!("open: {open}"));
         }
+        // `see=Controls+Options` fails unless the top menu shows every one of the items; `nosee=` the reverse.
+        "see" | "nosee" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            let wrong: Vec<&str> = arg
+                .split('+')
+                .filter(|w| sh.has_item(&mut st.input, w) != (key == "see"))
+                .collect();
+            let open = sh.ui.open_menus().join(",");
+            done(
+                wrong.is_empty(),
+                sc,
+                format!("{key} wrong: {wrong:?}; open: {open}"),
+            );
+        }
         "open" | "close" => {
             let Some(sh) = st.shell.as_mut() else {
                 return true;
@@ -1719,6 +1740,12 @@ fn script_step(st: &mut State) -> bool {
                     ),
                 );
             }
+        }
+        // A cvar's value (`cvaris=ui_netGametypeName dom`).
+        "cvaris" => {
+            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+            let have = st.input.cvar(name).unwrap_or("").to_owned();
+            done(have == want, sc, format!("{name} is {have:?}"));
         }
         // A console line, as typed: `set=set scr_war_scorelimit 3`.
         "set" => {
@@ -2132,6 +2159,8 @@ fn finish_load(
     st.renderer = Some(renderer);
     *map_slot = Some(data);
     st.map_name = map.to_owned();
+    // The menus' map title and minimap look the map up by this (the original sets it from the server's info).
+    st.input.cvars.set("mapname", map, false);
     Ok(())
 }
 

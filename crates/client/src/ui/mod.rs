@@ -1267,7 +1267,8 @@ impl Ui {
         }
     }
 
-    /// The visible item of the top menu whose name or text is `want` (case-insensitive, localized); `a|b` takes the
+    /// The visible item of the top menu whose name or text is `want` (case-insensitive, localized), or `#id` for its
+    /// owner-draw id; `a|b` takes the
     /// first of the alternatives that has one.
     fn find_item(&mut self, host: &mut dyn Host, want: &str) -> Option<(usize, usize)> {
         want.split('|').find_map(|w| self.find_one_item(host, w))
@@ -1277,11 +1278,16 @@ impl Ui {
         let &m = self.stack.last()?;
         let def = self.menus[m].def.clone();
         for (i, d) in def.items.iter().enumerate() {
+            // `#245` names an item by its owner-draw id, for those that have no name or text of their own.
             let named = d
                 .window
                 .name
                 .as_deref()
-                .is_some_and(|n| n.eq_ignore_ascii_case(want));
+                .is_some_and(|n| n.eq_ignore_ascii_case(want))
+                || want
+                    .strip_prefix('#')
+                    .and_then(|id| id.parse::<i32>().ok())
+                    .is_some_and(|id| id == d.window.owner_draw);
             let texted = !named && {
                 let t = self.item_text(&*host, m, i, d);
                 !t.is_empty() && t.eq_ignore_ascii_case(want)
@@ -1291,6 +1297,11 @@ impl Ui {
             }
         }
         None
+    }
+
+    /// Whether the top menu shows an item named or labelled `want`.
+    pub fn has_item(&mut self, host: &mut dyn Host, want: &str) -> bool {
+        self.find_item(host, want).is_some()
     }
 
     /// Activates the visible item of the top menu whose name or text is `want`: what a click on it does. `true` if
