@@ -12,8 +12,10 @@ use assets::fs::{self, WEB_ROOT};
 use assets::vfs::ReadAt;
 use serde_json::Value;
 use std::io;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -37,6 +39,97 @@ extern "C" {
     /// Debug overlay data, a JSON object of name to value.
     #[wasm_bindgen(js_namespace = cod4, js_name = overlay)]
     fn page_overlay(json: &str);
+}
+
+#[wasm_bindgen]
+extern "C" {
+    /// Opens the WebTransport session to `target` (`host:port` or an https URL); the page knows any pinned certificate.
+    #[wasm_bindgen(js_namespace = cod4)]
+    fn net_open(target: &str);
+    #[wasm_bindgen(js_namespace = cod4)]
+    fn net_send(data: &[u8]);
+    /// The next received datagram copied into `buf`, as its length; -1 when none is waiting.
+    #[wasm_bindgen(js_namespace = cod4)]
+    fn net_recv(buf: &mut [u8]) -> i32;
+    /// `idle`, `connecting`, `open` or `closed`.
+    #[wasm_bindgen(js_namespace = cod4)]
+    fn net_state() -> String;
+    #[wasm_bindgen(js_namespace = cod4)]
+    fn net_error() -> String;
+    #[wasm_bindgen(js_namespace = cod4)]
+    fn net_close();
+}
+
+/// The session the client plays on: [`net::Transport`] over the page's WebTransport. There is one peer, the server,
+/// so the address datagrams are sent to is ignored and everything received comes from `server`. Receiving never waits:
+/// the browser delivers datagrams between frames.
+pub struct Wire {
+    server: SocketAddr,
+}
+
+impl Wire {
+    /// Opens a session to `target`; `server` is the stand-in address the net layer names the peer by.
+    pub fn open(target: &str, server: SocketAddr) -> Self {
+        net_open(target);
+        Self { server }
+    }
+}
+
+impl net::Transport for Wire {
+    fn local_addr(&self) -> SocketAddr {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    }
+
+    fn send_to(&mut self, _to: SocketAddr, data: &[u8]) {
+        net_send(data);
+    }
+
+    fn recv_from(
+        &mut self,
+        buf: &mut [u8],
+        _timeout: Option<Duration>,
+    ) -> io::Result<Option<(usize, SocketAddr)>> {
+        let n = net_recv(buf);
+        Ok((n >= 0).then(|| (n as usize, self.server)))
+    }
+}
+
+impl Drop for Wire {
+    fn drop(&mut self) {
+        net_close();
+    }
+}
+
+/// Why the session cannot be used, once it has closed.
+pub fn wire_failure() -> Option<String> {
+    (net_state() == "closed").then(|| {
+        let e = net_error();
+        if e.is_empty() {
+            "the connection to the server closed".to_owned()
+        } else {
+            e
+        }
+    })
+}
+
+/// The address text the player gave for the server, kept for the transport (a browser cannot resolve names).
+static TARGET: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The stand-in socket address for the server at `target` (`host:port`): the net layer names its peer by address, and
+/// the browser connects by name, so the address only has to be stable.
+pub fn server_addr(target: &str) -> SocketAddr {
+    *TARGET.lock().unwrap() = target.to_owned();
+    let port = target
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.trim_end_matches('/').parse().ok())
+        .unwrap_or(443);
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+/// The target last given to [`server_addr`].
+pub fn server_target() -> String {
+    TARGET.lock().unwrap().clone()
 }
 
 /// One install file, read through the page.

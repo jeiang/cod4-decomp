@@ -785,6 +785,10 @@ impl Viewer {
             if let Some(why) = net.refused() {
                 return Err(format!("the server refused the connection: {why}"));
             }
+            #[cfg(target_arch = "wasm32")]
+            if let Some(why) = crate::web::wire_failure() {
+                return Err(format!("cannot reach the server: {why}"));
+            }
             let frame_out = net.frame(dt, &f);
             new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {

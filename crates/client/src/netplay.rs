@@ -16,8 +16,8 @@ use crate::input::{InputFrame, buttons};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::ViewModel;
+use crate::wire::Wire;
 use glam::Vec3;
-use net::UdpTransport;
 use net::client::NetClient;
 use net::entity::{EntityState, etype};
 use net::predict::{Env, PlayerBoxes, Predictor};
@@ -97,7 +97,7 @@ struct Counters {
 }
 
 pub struct NetPlay {
-    net: NetClient<UdpTransport>,
+    net: NetClient<Wire>,
     lib: Library,
     weapons: WeaponTable,
     params: Params,
@@ -146,9 +146,12 @@ impl NetPlay {
     ) -> Result<Self, String> {
         let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
         let world = map.world.clone();
-        let t = UdpTransport::bind(SocketAddr::from(([0, 0, 0, 0], 0)))
-            .map_err(|e| format!("cannot open a UDP socket: {e}"))?;
+        let t = Wire::open(server)?;
+        #[cfg(not(target_arch = "wasm32"))]
         let qport = (std::process::id() & 0xffff) as u16;
+        // No process id in a browser: any value the server has not seen from this address will do.
+        #[cfg(target_arch = "wasm32")]
+        let qport = (js_sys::Math::random() * 65536.0) as u16;
         let weapons =
             WeaponTable::new(&lib.content.weapons()).map_err(|e| format!("weapon table: {e:?}"))?;
         Ok(Self {

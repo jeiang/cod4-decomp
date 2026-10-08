@@ -69,12 +69,21 @@ impl Entry {
     }
 }
 
-/// `host:port`, or `host` alone for the default port. Resolves names.
+/// `host:port`, or `host` alone for the default port. Resolves names; a browser cannot, so there the page's
+/// WebTransport connects by the text and the address is a stand-in.
 pub fn resolve(addr: &str) -> Result<SocketAddr, String> {
     let a = addr.trim();
     if a.is_empty() || a.starts_with(':') {
         return Err("no server address".into());
     }
+    #[cfg(target_arch = "wasm32")]
+    return Ok(crate::web::server_addr(a));
+    #[cfg(not(target_arch = "wasm32"))]
+    resolve_name(a)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_name(a: &str) -> Result<SocketAddr, String> {
     let with_port = if a
         .rsplit_once(':')
         .is_some_and(|(_, p)| p.parse::<u16>().is_ok())

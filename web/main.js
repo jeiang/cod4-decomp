@@ -2,6 +2,7 @@
 // The page: finds the user's install (a saved copy in this browser, or a folder the user picks), keeps a copy for
 // next time, and starts the wasm client. The files are read in this browser only; nothing is uploaded.
 import { createBridge } from "./bridge.js";
+import { createTransport } from "./transport.js";
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -60,6 +61,7 @@ const fromInput = (files) =>
 // ---- state ----------------------------------------------------------------------------------------------------
 
 const bridge = createBridge();
+const wire = createTransport();
 let reader = null;
 let copier = null;
 let install = null; // [[path, size], ...] once a reader is ready
@@ -162,6 +164,12 @@ async function play() {
   const t = {};
   globalThis.cod4 = {
     read_into: (id, offset, dst) => bridge.read(id, offset, dst),
+    net_open: (target) => wire.open(target, $("cert").value.trim()),
+    net_send: (bytes) => wire.send(bytes),
+    net_recv: (dst) => wire.recv(dst),
+    net_state: () => wire.state(),
+    net_error: () => wire.error(),
+    net_close: () => wire.close(),
     config: () => JSON.stringify({ args: clientArgs(), files: install }),
     fatal: (message) => {
       $("setup").hidden = false;
@@ -175,6 +183,7 @@ async function play() {
       overlay = JSON.parse(json);
       t.firstOverlay ??= performance.now() - started;
       overlay["load, play click to first frame (ms)"] = Math.round(t.firstOverlay);
+      overlay["net"] = `${wire.state()} sent ${wire.stats.sent} received ${wire.stats.received} streams out/in ${wire.stats.streamsOut}/${wire.stats.streamsIn}`;
       overlay["page"] = navigator.userAgent;
       showOverlay();
       window.__cod4 = { ...window.__cod4, overlay, startedAt: started };
@@ -214,6 +223,17 @@ async function boot() {
   if (params.has("map")) $("map").value = params.get("map");
   if (params.has("backend")) $("backend").value = params.get("backend");
   if (params.has("connect")) $("server").value = params.get("connect");
+  if (params.has("cert")) $("cert").value = params.get("cert");
+  // A server started with --wt-info writes {"url", "certHashSha256Base64"}; ?wt-info=<where the page can fetch it>.
+  if (params.has("wt-info")) {
+    try {
+      const info = await (await fetch(params.get("wt-info"))).json();
+      $("server").value = info.url;
+      $("cert").value = info.certHashSha256Base64 ?? "";
+    } catch (e) {
+      status(`cannot read ${params.get("wt-info")}: ${e?.message ?? e}`, "bad");
+    }
+  }
   if (params.has("name")) $("name").value = params.get("name");
   $("play").onclick = play;
   if (!self.crossOriginIsolated) {

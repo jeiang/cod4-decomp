@@ -29,6 +29,7 @@ mod video;
 mod viewmodel;
 #[cfg(target_arch = "wasm32")]
 mod web;
+mod wire;
 
 use display::{FullscreenKind, Request};
 use std::path::PathBuf;
