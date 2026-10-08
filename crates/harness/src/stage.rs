@@ -247,7 +247,7 @@ pub static STAGES: &[StageDef] = &[
     StageDef {
         name: "web-client",
         description: "the browser client (web/pkg) in a headless Chromium on WebGL2 and, where it has it, WebGPU: draws mp_crash; records load time, frame cost and wasm memory (skipped without a built web/pkg or a Chromium)",
-        needs_install: true,
+        needs_install: false,
         timeout: Duration::from_secs(12 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::web_client::run),
