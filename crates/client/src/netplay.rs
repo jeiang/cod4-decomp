@@ -35,6 +35,8 @@ use std::time::{Duration, Instant};
 
 /// The shortest interval between two usercmds.
 const CMD_INTERVAL: Duration = Duration::from_millis(8);
+/// How often the scoreboard asks for fresh rows while it is up (`UpdateScores`).
+const SCORES_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
 
@@ -110,6 +112,11 @@ pub struct NetPlay {
     hud_view: Option<(PlayerState, f32)>,
     sound: ClientSound,
     events: Events,
+    /// The client's estimate of the server clock at the last frame, for the HUD.
+    live_time: i32,
+    kill_icons: HashMap<String, crate::hud::KillIcon>,
+    scores_asked: Option<Instant>,
+    server_addr: String,
 }
 
 impl NetPlay {
@@ -149,6 +156,10 @@ impl NetPlay {
             hud_view: None,
             sound,
             events: Events::default(),
+            live_time: 0,
+            kill_icons: HashMap::new(),
+            scores_asked: None,
+            server_addr: server.to_string(),
         })
     }
 
@@ -168,7 +179,28 @@ impl NetPlay {
 
     /// The server's UI events since the last call, in order (open a menu, set a dvar, print, ...).
     pub fn take_ui_events(&mut self) -> Vec<net::ui::UiEvent> {
-        std::mem::take(&mut self.ui_events)
+        let events = std::mem::take(&mut self.ui_events);
+        crate::hud::fill::note_kill_icons(&events, &self.lib.content, &mut self.kill_icons);
+        events
+    }
+
+    /// Copies what the server told the UI into `live` for this frame's drawing, and asks for fresh scoreboard rows
+    /// every couple of seconds while the scoreboard is up (`live.scores_wanted`).
+    pub fn fill_live(&mut self, live: &mut crate::hud::LiveUi) {
+        crate::hud::fill::fill(&mut self.net, live, self.live_time, self.last_eye);
+        if live.kill_icons.len() != self.kill_icons.len() {
+            live.kill_icons.clone_from(&self.kill_icons);
+        }
+        live.server_addr.clone_from(&self.server_addr);
+        if !live.active || !live.scores_wanted {
+            self.scores_asked = None;
+        } else if self
+            .scores_asked
+            .is_none_or(|t| t.elapsed() >= SCORES_INTERVAL)
+        {
+            self.scores_asked = Some(Instant::now());
+            self.net.request_scores();
+        }
     }
 
     /// Sends a client command line to the server (`menuresponse <menu> <response>`).
@@ -191,6 +223,7 @@ impl NetPlay {
             self.net.send();
             return None;
         };
+        self.live_time = st;
         // Autoplay replaces the player's input with a bot's.
         let auto_input;
         let input = if self.auto.is_some() {
@@ -618,19 +651,24 @@ impl NetPlay {
     /// person's menus are the menu runtime's, which drains the same events.
     fn answer_menus(&mut self) {
         let Some(ui) = self.net.ui() else { return };
+        let events = ui.drain_events();
         let Some(join) = self.auto_join.as_mut() else {
-            let events = ui.drain_events();
             self.ui_events.extend(events);
             return;
         };
-        let answers: Vec<String> = ui
-            .drain_events()
-            .iter()
-            .filter_map(|e| join.step(e))
-            .collect();
+        let answers: Vec<String> = events.iter().filter_map(|e| join.step(e)).collect();
         for a in answers {
             self.net.command(&a);
         }
+        // The scripted player has no use for the menus the server opens, but its screen shows the rest.
+        self.ui_events.extend(events.into_iter().filter(|e| {
+            !matches!(
+                e,
+                net::ui::UiEvent::OpenMenu { .. }
+                    | net::ui::UiEvent::CloseMenu { .. }
+                    | net::ui::UiEvent::CloseIngameMenu
+            )
+        }));
     }
 
     fn autoplay(&mut self, dt: f32, st: i32, own: u16) -> InputFrame {
