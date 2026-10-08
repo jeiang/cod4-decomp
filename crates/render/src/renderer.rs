@@ -14,11 +14,12 @@ use crate::sunshadow::{self, SunShadow};
 use crate::texture::{Tex, TextureCache};
 use crate::timing::GpuTimer;
 use assets::zone::gfx::Material;
+use assets::zone::xmodel::XModel;
 use glam::{Mat4, Vec3, Vec4};
 use sm3::SamplerDim;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use web_time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 
@@ -176,7 +177,7 @@ pub struct Progress {
 /// The enumeration [`Renderer::warm_step`] walks across frames.
 struct Warm {
     format: wgpu::TextureFormat,
-    jobs: Vec<(Rc<Prepared>, Target)>,
+    jobs: Vec<(Arc<Prepared>, Target)>,
     built: Vec<bool>,
     done: usize,
     cursor: usize,
@@ -194,7 +195,7 @@ impl Warm {
 }
 
 struct Draw {
-    prepared: Rc<Prepared>,
+    prepared: Arc<Prepared>,
     pipeline: Arc<wgpu::RenderPipeline>,
     tex_bg: Arc<wgpu::BindGroup>,
     mesh: Arc<Mesh>,
@@ -307,6 +308,8 @@ pub struct Renderer {
     warm: Option<Warm>,
     /// Skinned models to draw in the next [`Renderer::render`]; the caller refills the list every frame.
     pub dynamic_models: Vec<ModelInstance>,
+    /// Materials of models the map does not contain but a match draws (players, weapons), warmed with the map's.
+    warm_extra: Vec<Arc<Material>>,
     /// Sprites and decals to draw in the next [`Renderer::render`], in drawing order within a material.
     pub dynamic_meshes: Vec<DynMesh>,
     /// An index buffer that counts up from zero, for draws of unindexed dynamic triangles.
@@ -407,6 +410,7 @@ impl Renderer {
             shadow_dummy,
             timer,
             dynamic_models: Vec::new(),
+            warm_extra: Vec::new(),
             dynamic_meshes: Vec::new(),
             count_mesh: Arc::new(counting_mesh(&gpu_for_dyn)),
             viewmodel_fov_x: None,
@@ -469,14 +473,37 @@ impl Renderer {
     }
 
     /// Every (pass, target) pair a frame into `format` can draw with, in the order materials come.
-    fn warm_jobs(&mut self, format: wgpu::TextureFormat) -> Vec<(Rc<Prepared>, Target)> {
+    /// Models the map does not contain but the match will draw (players, weapons): their materials get their pipelines
+    /// with [`Renderer::warm`], so the first sight of them does not stall a frame.
+    pub fn warm_models<'a>(&mut self, models: impl IntoIterator<Item = &'a Arc<XModel>>) {
+        let mut seen: HashSet<usize> = self
+            .warm_extra
+            .iter()
+            .map(|m| Arc::as_ptr(m) as usize)
+            .collect();
+        for model in models {
+            for m in model.materials.iter().flatten() {
+                if seen.insert(Arc::as_ptr(m) as usize) {
+                    self.warm_extra.push(m.clone());
+                }
+            }
+        }
+    }
+
+    fn warm_jobs(&mut self, format: wgpu::TextureFormat) -> Vec<(Arc<Prepared>, Target)> {
         let hsm = self.hsm();
         let scene = Target {
             color: Some(format),
             depth: Some(DEPTH_FORMAT),
         };
         let mut jobs = Vec::new();
-        for m in self.scene.materials() {
+        let materials: Vec<Arc<Material>> = self
+            .scene
+            .materials()
+            .into_iter()
+            .chain(self.warm_extra.iter().cloned())
+            .collect();
+        for m in materials {
             for kind in [VertexKind::World, VertexKind::Model] {
                 for techs in [
                     &SUN_SHADOW_TECHS[..],
@@ -502,11 +529,43 @@ impl Renderer {
     /// Build the pipelines for rendering into `format`, again to keep them off the frame path. Returns how many.
     /// Blocks until all are built; [`Renderer::warm_step`] does the same across frames.
     pub fn warm(&mut self, format: wgpu::TextureFormat) -> usize {
+        self.warm_progress(format, &|_, _| {})
+    }
+
+    /// [`Renderer::warm`] spread over half the cores (the driver's shader compiler dominates a native map load), with
+    /// `progress(done, total)` called as each pipeline finishes, from any of the worker threads. The browser has no
+    /// threads: one after another there.
+    pub fn warm_progress(
+        &mut self,
+        format: wgpu::TextureFormat,
+        progress: &(dyn Fn(usize, usize) + Sync),
+    ) -> usize {
         let jobs = self.warm_jobs(format);
+        let done = AtomicUsize::new(0);
+        let total = jobs.len();
+        #[cfg(target_arch = "wasm32")]
         for (p, target) in &jobs {
             self.materials.pipeline_now(&self.gpu, p, *target);
+            progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
         }
-        jobs.len()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let next = AtomicUsize::new(0);
+            // Half the cores: the window thread keeps presenting while this runs.
+            let workers = (std::thread::available_parallelism().map_or(4, usize::from) / 2).max(1);
+            std::thread::scope(|s| {
+                for _ in 0..workers.min(total) {
+                    s.spawn(|| {
+                        while let Some((p, target)) = jobs.get(next.fetch_add(1, Ordering::Relaxed))
+                        {
+                            self.materials.pipeline_now(&self.gpu, p, *target);
+                            progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+                        }
+                    });
+                }
+            });
+        }
+        total
     }
 
     /// Build pipelines for up to `budget` (at least one if any is left), those the last frames wanted and could not
@@ -584,7 +643,7 @@ impl Renderer {
         m: &Arc<Material>,
         techs: &[usize],
         kind: VertexKind,
-    ) -> Option<Rc<Prepared>> {
+    ) -> Option<Arc<Prepared>> {
         let hsm = self.hsm();
         self.prepare(m, techs, kind, hsm)
     }
@@ -595,7 +654,7 @@ impl Renderer {
         techs: &[usize],
         kind: VertexKind,
         hsm: bool,
-    ) -> Option<Rc<Prepared>> {
+    ) -> Option<Arc<Prepared>> {
         self.materials
             .prepare(&self.gpu, &mut self.textures, m, techs, kind, hsm)
     }
@@ -673,7 +732,7 @@ impl Renderer {
     /// light `light`.
     fn tex_group(
         &mut self,
-        p: &Rc<Prepared>,
+        p: &Arc<Prepared>,
         lm: u8,
         probe: u8,
         light: u8,
@@ -1180,7 +1239,7 @@ impl Renderer {
     /// Constant banks of one draw: object-independent banks are filled once per pass and light.
     fn banks(
         &mut self,
-        prep: &Rc<Prepared>,
+        prep: &Arc<Prepared>,
         frame: &FrameConsts,
         obj: &Object,
         shared: &mut SharedBanks,

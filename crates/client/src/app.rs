@@ -9,6 +9,7 @@ use crate::display::{self, hor_plus};
 use crate::flythrough;
 use crate::input::{Input, InputFrame, buttons};
 use crate::listen::{self, Listen};
+use crate::loader::{self, Load};
 use crate::models::Library;
 use crate::netplay::NetPlay;
 use crate::profile::Profile;
@@ -17,6 +18,7 @@ use crate::session::{LevelChange, level_change, rotation};
 use crate::shell::{Action, Shell};
 use crate::showcase::Showcase;
 use crate::ui::UiKey;
+use crate::ui::loading::LoadingView;
 use crate::video::Recorder;
 use assets::vfs::Vfs;
 use glam::Vec3;
@@ -318,6 +320,19 @@ struct State {
     shot_request: Option<String>,
     /// The sound system of the menus when no match is running (started by the first menu sound).
     menu_sound: Option<crate::sound::ClientSound>,
+    /// The map being loaded in the background (the loading screen shows meanwhile).
+    loading: Option<Load>,
+    /// Frame intervals from the start of a map load until the player is in the world.
+    load_gaps: Option<LoadGaps>,
+    /// What the last load measured, for the report.
+    load_report: Option<Value>,
+    /// The next session answers the team and class menus by itself (a script's `start=` step).
+    autojoin_next: bool,
+    /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
+    /// to explain a slow gap.
+    prev_cost: [f64; 4],
+    /// A resize that arrived during a map load; see [`apply_resize`].
+    pending_resize: Option<(u32, u32)>,
     /// When the page's debug overlay was last given its values.
     #[cfg(target_arch = "wasm32")]
     overlay_at: Instant,
@@ -329,6 +344,17 @@ struct State {
     /// Milliseconds of each frame's [`Renderer::warm_step`].
     #[cfg(target_arch = "wasm32")]
     warm_ms: Vec<f64>,
+}
+
+/// The longest gap between two presented frames while a map loads.
+struct LoadGaps {
+    map: String,
+    started: Instant,
+    frames: u32,
+    max_ms: f64,
+    load_ms: Option<f64>,
+    /// Gaps over 40 ms: how long, what the last frame spent where, and whether the loading screen was still up.
+    slow: Vec<Value>,
 }
 
 /// The `--ui-tour` script: which menu is open and how many frames it has been shown.
@@ -705,6 +731,12 @@ impl Viewer {
             }),
             shot_request: None,
             menu_sound: None,
+            loading: None,
+            load_gaps: None,
+            load_report: None,
+            autojoin_next: false,
+            prev_cost: [0.0; 4],
+            pending_resize: None,
             #[cfg(target_arch = "wasm32")]
             overlay_at: now,
             #[cfg(target_arch = "wasm32")]
@@ -783,12 +815,10 @@ impl ApplicationHandler<Ready> for Viewer {
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
-                st.config.width = s.width;
-                st.config.height = s.height;
-                st.surface.configure(&st.gpu.device, &st.config);
-                st.fov_x = hor_plus(self.cli.fov, s.width as f32 / s.height as f32);
-                if let Some(sh) = st.shell.as_mut() {
-                    sh.resize(s.width, s.height);
+                if st.loading.is_some() {
+                    st.pending_resize = Some((s.width, s.height));
+                } else {
+                    apply_resize(st, self.cli.fov, (s.width, s.height));
                 }
             }
             WindowEvent::MouseInput {
@@ -828,6 +858,29 @@ impl Viewer {
         st.last_frame = now;
         let dt = (t - st.last_t).min(0.1);
         st.last_t = t;
+        if let Some(g) = st.load_gaps.as_mut() {
+            g.frames += 1;
+            g.max_ms = g.max_ms.max(interval);
+            if interval > 40.0 && g.slow.len() < 16 {
+                g.slow.push(json!({
+                    "ms": interval.round(),
+                    "loading_screen": st.loading.is_some(),
+                    "net_ms": st.prev_cost[0].round(),
+                    "render_ms": st.prev_cost[1].round(),
+                    "acquire_ms": st.prev_cost[2].round(),
+                    "present_ms": st.prev_cost[3].round(),
+                }));
+            }
+        }
+        if let Some(done) = st.loading.as_mut().and_then(Load::poll)
+            && let Some(load) = st.loading.take()
+        {
+            let result = done.and_then(|l| finish_load(&self.cli, &mut self.map, st, &load, l));
+            if let Err(e) = result {
+                eprintln!("cannot load {}: {e}", load.map);
+                end_session(&mut self.map, st);
+            }
+        }
 
         #[cfg(target_arch = "wasm32")]
         if st.grabbed {
@@ -877,7 +930,9 @@ impl Viewer {
             if let Some(r) = st.renderer.as_mut() {
                 r.dynamic_models = sc.update(dt);
             }
-        } else if let Some(net) = st.net.as_mut() {
+        } else if st.loading.is_none()
+            && let Some(net) = st.net.as_mut()
+        {
             let f = if self.cli.autoplay {
                 InputFrame::default()
             } else {
@@ -906,7 +961,21 @@ impl Viewer {
             if let Some(why) = crate::web::wire_failure() {
                 return Err(format!("cannot reach the server: {why}"));
             }
+            let t_net = Instant::now();
             let frame_out = net.frame(dt, &f);
+            st.prev_cost[0] = t_net.elapsed().as_secs_f64() * 1000.0;
+            if net.spawned()
+                && let Some(g) = st.load_gaps.take()
+            {
+                st.load_report = Some(json!({
+                    "map": g.map,
+                    "load_ms": g.load_ms,
+                    "to_spawn_ms": g.started.elapsed().as_secs_f64() * 1000.0,
+                    "frames": g.frames,
+                    "max_frame_gap_ms": g.max_ms,
+                    "slow_gaps_ms": g.slow,
+                }));
+            }
             new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {
                 net.fill_live(&mut sh.st.live);
@@ -956,6 +1025,14 @@ impl Viewer {
                     r.post.save_screen |= nf.look.save_screen;
                 }
             }
+        } else if st.loading.is_some() {
+            let f = st.input.frame(dt);
+            if f.quit() {
+                el.exit();
+            }
+            if f.toggle_menu() {
+                end_session(&mut self.map, st);
+            }
         } else if self.cli.flythrough {
             if let Some(tour) = st.tour.as_ref() {
                 let p = tour.pose(self.cli.fly_at.unwrap_or(t));
@@ -987,15 +1064,24 @@ impl Viewer {
         {
             eprintln!("cannot save the profile: {e}");
         }
+        if st.loading.is_none()
+            && let Some(size) = st.pending_resize.take()
+        {
+            apply_resize(st, self.cli.fov, size);
+        }
+        let t_acquire = Instant::now();
         let frame = match st.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             _ => {
-                st.surface.configure(&st.gpu.device, &st.config);
+                if st.loading.is_none() {
+                    reconfigure(st);
+                }
                 st.window.request_redraw();
                 return Ok(());
             }
         };
+        st.prev_cost[2] = t_acquire.elapsed().as_secs_f64() * 1000.0;
         let cpu_start = Instant::now();
         // Aiming zooms the world towards the weapon's zoom field of view (relative to the stock `cg_fov`); the gun
         // keeps the unzoomed one.
@@ -1023,7 +1109,9 @@ impl Viewer {
                 st.warm = r.warm_step(st.config.format, WARM_BUDGET);
                 st.warm_ms.push(t.elapsed().as_secs_f64() * 1000.0);
             }
+            let t_render = Instant::now();
             let stats = r.render(&view, &target, st.config.format, size);
+            st.prev_cost[1] = t_render.elapsed().as_secs_f64() * 1000.0;
             #[cfg(target_arch = "wasm32")]
             {
                 st.pipelines_missing = stats.pipelines_missing;
@@ -1031,7 +1119,14 @@ impl Viewer {
             st.surfaces_drawn.push(stats.surfaces as f64);
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
-        if let Some(sh) = st.shell.as_mut() {
+        if let (Some(sh), Some(l)) = (st.shell.as_mut(), st.loading.as_ref()) {
+            let view = LoadingView {
+                map: &l.map,
+                note: l.note(),
+                progress: l.progress(),
+            };
+            sh.paint_loading(&target, size, &view);
+        } else if let Some(sh) = st.shell.as_mut() {
             let clear = st.renderer.is_none().then_some(wgpu::Color::BLACK);
             sh.st.live.clip = Some(view.clip_from_world(size.0 as f32 / size.1.max(1) as f32));
             sh.paint(&mut st.input, &target, size, clear);
@@ -1142,7 +1237,9 @@ impl Viewer {
             write_script_report(st, self.cli.out.clone().unwrap_or_default(), false);
             el.exit();
         }
+        let t_present = Instant::now();
         st.gpu.queue.present(frame);
+        st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
         if let Some(m) = st.menu_sound.as_mut() {
             m.frame([0.0; 3], 0.0, (interval / 1000.0) as f32);
         }
@@ -1343,6 +1440,7 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
         "net": st.net.as_mut().map(NetPlay::report),
         "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
         "map": st.map_name,
+        "load": st.load_report,
     });
     let _ = std::fs::create_dir_all(&out);
     let _ = std::fs::write(
@@ -1418,6 +1516,17 @@ fn script_step(st: &mut State) -> bool {
                     .unwrap_or_default();
                 done(false, sc, format!("timed out; open: {have}"));
             }
+        }
+        "start" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            sh.st.actions.push(Action::StartServer {
+                map: arg.to_owned(),
+                gametype: "war".to_owned(),
+            });
+            st.autojoin_next = true;
+            done(true, sc, String::new());
         }
         "ingame" => {
             let secs: f32 = arg.parse().unwrap_or(120.0);
@@ -1735,40 +1844,31 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
     }
 }
 
-/// Everything a map needs on the client.
-struct World {
-    data: MapData,
-    renderer: Renderer,
-    lib: Library,
-    sound: crate::sound::ClientSound,
+/// Configures the surface again. wgpu refuses while the queue still has work to finish (a timestamp read-back that has
+/// not come back is enough: the call panics), so the renderer's are waited for first.
+fn reconfigure(st: &mut State) {
+    if let Some(r) = st.renderer.as_mut() {
+        record_gpu(&mut st.gpu_ms, r.flush_gpu_times());
+    }
+    st.surface.configure(&st.gpu.device, &st.config);
 }
 
-/// Loads `map` and builds the renderer, collision, models and sound for it.
-fn build_world(cli: &Cli, st: &State, map: &str) -> Result<World, String> {
-    let data = MapData::load(&cli.install, map).map_err(|e| format!("cannot load {map}: {e}"))?;
-    let vfs =
-        Vfs::open_stock(&cli.install, 0).map_err(|e| format!("cannot open the install: {e}"))?;
-    let scene = Scene::new(&st.gpu, &data);
-    let mut renderer = Renderer::new(
-        st.gpu.clone(),
-        scene,
-        &data,
-        TextureCache::new(Some(vfs), 0),
-    );
-    renderer.settings = cli.settings;
-    #[cfg(not(target_arch = "wasm32"))]
-    renderer.warm(st.config.format);
-    let lib = Library::load(&cli.install, map)?;
-    let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
-    Ok(World {
-        data,
-        renderer,
-        lib,
-        sound,
-    })
+/// Follows a window resize: the surface, the field of view and the menus.
+///
+/// Never while a map loads: reconfiguring a surface fails (a panic) when another thread submits to the queue at the
+/// same moment, and the loader does. The size is kept in `pending_resize` until the load is done.
+fn apply_resize(st: &mut State, fov: f32, (w, h): (u32, u32)) {
+    st.config.width = w;
+    st.config.height = h;
+    reconfigure(st);
+    st.fov_x = hor_plus(fov, w as f32 / h as f32);
+    if let Some(sh) = st.shell.as_mut() {
+        sh.resize(w, h);
+    }
 }
 
-/// Starts (`join` of `None`) or joins a match from the menus: loads the map, builds the renderer and connects.
+/// Starts (`join` of `None`) or joins a match from the menus: begins loading the map in the background. The window
+/// keeps drawing the loading screen; [`finish_load`] connects once the load is done.
 /// For a join, `map` is what the server said it is playing.
 fn start_session(
     cli: &Cli,
@@ -1779,32 +1879,79 @@ fn start_session(
     join: Option<std::net::SocketAddr>,
 ) -> Result<(), String> {
     end_session(map_slot, st);
-    let world = build_world(cli, st, map)?;
-    let (addr, listen) = match join {
-        Some(a) => (a, None),
-        None => {
-            let l = listen::start(&cli.install, listen_config(st, map, gametype, cli.bots))?;
-            (l.addr, Some(l))
-        }
+    let server = match join {
+        Some(a) => loader::Server::Join(a),
+        None => loader::Server::Boot(listen_config(st, map, gametype, cli.bots)),
     };
-    let limits = st.input.pitch_limits();
-    st.net = Some(NetPlay::connect(
-        world.lib,
-        &world.data,
-        addr,
-        &cli.name,
-        limits,
-        false,
-        world.sound,
-    )?);
-    st.listen = listen;
-    st.renderer = Some(world.renderer);
-    *map_slot = Some(world.data);
-    st.map_name = map.to_owned();
+    begin_load(cli, st, map, server);
     if let Some(sh) = st.shell.as_mut() {
-        sh.st.in_game = true;
         sh.close_all(&mut st.input);
     }
+    Ok(())
+}
+
+/// Starts the background load of `map` and the measuring of its frame gaps.
+fn begin_load(cli: &Cli, st: &mut State, map: &str, server: loader::Server) {
+    let req = loader::Request {
+        install: cli.install.clone(),
+        map: map.to_owned(),
+        server,
+        settings: cli.settings,
+        format: st.config.format,
+    };
+    st.loading = Some(Load::start(req, st.gpu.clone()));
+    st.load_gaps = Some(LoadGaps {
+        map: map.to_owned(),
+        started: Instant::now(),
+        frames: 0,
+        max_ms: 0.0,
+        load_ms: None,
+        slow: Vec::new(),
+    });
+}
+
+/// The background load is done: a started session connects to its server and shows the world; a level change hands the
+/// new world to the running session.
+fn finish_load(
+    cli: &Cli,
+    map_slot: &mut Option<MapData>,
+    st: &mut State,
+    load: &Load,
+    loaded: loader::Loaded,
+) -> Result<(), String> {
+    let loader::Loaded {
+        data,
+        renderer,
+        library,
+        server,
+        ms,
+    } = loaded;
+    let map = &load.map;
+    let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
+    if let Some(g) = st.load_gaps.as_mut() {
+        g.load_ms = Some(ms);
+    }
+    if load.level_change {
+        let net = st.net.as_mut().ok_or("the session ended during the load")?;
+        net.new_level(Some((library, &data, sound)))?;
+        if let Some(sh) = st.shell.as_ref() {
+            net.upload_stats(&sh.st.stats);
+        }
+    } else {
+        let (addr, listen) = server.ok_or("no server to connect to")?;
+        let limits = st.input.pitch_limits();
+        let mut net = NetPlay::connect(library, &data, addr, &cli.name, limits, false, sound)?;
+        net.set_autojoin(std::mem::take(&mut st.autojoin_next));
+        st.net = Some(net);
+        st.listen = listen;
+        if let Some(sh) = st.shell.as_mut() {
+            sh.st.in_game = true;
+            sh.close_all(&mut st.input);
+        }
+    }
+    st.renderer = Some(renderer);
+    *map_slot = Some(data);
+    st.map_name = map.to_owned();
     Ok(())
 }
 
@@ -1826,36 +1973,29 @@ fn listen_config(st: &State, map: &str, gametype: &str, bots: usize) -> listen::
     }
 }
 
-/// The server announced level `name`: loads it if it is another map (the old world and renderer go first), restarts
-/// the net state for the level, hands the server the profile's stats and goes back to the menus the server opens.
+/// The server announced level `name`: if it is another map, begins loading it in the background (the old world and
+/// renderer go first; [`finish_load`] hands over the new one) and goes back to the menus the server opens.
 fn enter_level(
     cli: &Cli,
     map_slot: &mut Option<MapData>,
     st: &mut State,
     name: &str,
 ) -> Result<(), String> {
-    let world = match level_change(&st.map_name, name) {
-        LevelChange::Same => None,
+    match level_change(&st.map_name, name) {
+        LevelChange::Same => {
+            let Some(net) = st.net.as_mut() else {
+                return Ok(());
+            };
+            net.new_level(None)?;
+            if let Some(sh) = st.shell.as_ref() {
+                net.upload_stats(&sh.st.stats);
+            }
+        }
         LevelChange::Load => {
             st.renderer = None;
             *map_slot = None;
-            Some(build_world(cli, st, name)?)
+            begin_load(cli, st, name, loader::Server::Keep);
         }
-    };
-    let Some(net) = st.net.as_mut() else {
-        return Ok(());
-    };
-    match world {
-        Some(w) => {
-            net.new_level(Some((w.lib, &w.data, w.sound)))?;
-            st.renderer = Some(w.renderer);
-            *map_slot = Some(w.data);
-            st.map_name = name.to_owned();
-        }
-        None => net.new_level(None)?,
-    }
-    if let Some(sh) = st.shell.as_ref() {
-        net.upload_stats(&sh.st.stats);
     }
     Ok(())
 }
@@ -1866,6 +2006,8 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
         n.disconnect();
     }
     st.net = None;
+    st.loading = None;
+    st.load_gaps = None;
     if let Some(l) = st.listen.as_mut() {
         l.finish();
     }
