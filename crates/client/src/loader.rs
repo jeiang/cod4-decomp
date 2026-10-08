@@ -394,6 +394,7 @@ fn draw_once(
         origin: eye,
         yaw: 0.0,
         pitch: 0.0,
+        roll: 0.0,
         fov_x: 1.9,
         time: 0.0,
     };

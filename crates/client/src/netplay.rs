@@ -15,6 +15,7 @@ use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::helicopter::Rotors;
 use crate::input::{InputFrame, buttons};
+use crate::kick::Kick;
 use crate::look::{Look, LookOut};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::Props;
@@ -55,6 +56,8 @@ pub struct NetFrame {
     pub yaw: f32,
     /// Radians, positive up.
     pub pitch: f32,
+    /// Radians, clockwise: the roll of the recoil kick.
+    pub roll: f32,
     pub models: Vec<ModelInstance>,
     /// The aim zoom and scope overlay of the held weapon.
     pub sight: Option<Sight>,
@@ -112,6 +115,12 @@ fn eye_speed_summary(speeds: &[f32]) -> Value {
 struct Counters {
     cmds: u64,
     shots: u64,
+    /// The most the view kicked up, and the most the pitch of a sent cmd differed from the player's own aim, degrees.
+    max_kick_up: f32,
+    max_kick_in_cmd: f32,
+    /// How many times the view kick came back to rest after a kick.
+    kick_settled: u64,
+    kicked: bool,
     predictions: u64,
     max_players_seen: usize,
     /// The most other players drawn in one frame, and why the others could not be built (a model or animation the
@@ -164,6 +173,8 @@ pub struct NetPlay {
     pred: Predictor,
     /// Pitch (positive down) and yaw (positive left) in degrees, as the player has turned.
     angles: [f32; 2],
+    /// The kick of the player's own shots; kept apart from `angles`, the player's aim.
+    kick: Kick,
     pitch_limits: (f32, f32),
     cmd_time: i32,
     last_cmd: Instant,
@@ -247,6 +258,7 @@ impl NetPlay {
             boxes: PlayerBoxes::new(clipmap),
             pred: Predictor::default(),
             angles: [0.0; 2],
+            kick: Kick::default(),
             pitch_limits,
             cmd_time: 0,
             last_cmd: Instant::now(),
@@ -500,6 +512,7 @@ impl NetPlay {
             // Watching another player (a killcam or a followed spectator): the snapshot's
             // player state is theirs, so nothing is predicted; draw their view as it came.
             let ps = snap.ps.clone();
+            self.kick.clear();
             let eye = Vec3::new(
                 ps.origin[0],
                 ps.origin[1],
@@ -529,13 +542,14 @@ impl NetPlay {
             );
             // The effects the followed player's guns and the map's events start are as visible to a watcher.
             self.boxes.sync(&snap);
-            let drawn = self.fx_frame(dt, st, ps.client_num, &events, eye, (yaw, pitch));
+            let drawn = self.fx_frame(dt, st, ps.client_num, &events, eye, (yaw, pitch, 0.0));
             models.extend(self.props.instances());
             models.extend(drawn.models);
             return Some(NetFrame {
                 origin: eye,
                 yaw: yaw + look.kick[1].to_radians(),
                 pitch: pitch + look.kick[0].to_radians(),
+                roll: 0.0,
                 models,
                 sight: self.sight.clone(),
                 meshes: drawn.meshes,
@@ -561,6 +575,21 @@ impl NetPlay {
             ps.origin[2] + err[2],
         ];
         let dead = matches!(ps.pm_type, PmType::Dead | PmType::DeadLinked);
+        if dead {
+            self.kick.clear();
+        } else {
+            let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
+            self.kick.shots(&ps, self.weapons.info(ps.weapon as u16));
+            self.kick.step(
+                dt,
+                ps.weapon_pos_frac,
+                def.map(|d| [d.hip_view_kick_center_speed, d.ads_view_kick_center_speed]),
+            );
+        }
+        let (was_kicked, kick) = (self.c.kicked, self.kick.angles());
+        self.c.kicked = kick != [0.0; 3];
+        self.c.kick_settled += u64::from(was_kicked && !self.c.kicked);
+        self.c.max_kick_up = self.c.max_kick_up.max(-kick[0]);
         // Alive in the world: a spectator (before the team and class are chosen) has a view but no body.
         self.c.spawned |= matches!(
             ps.pm_type,
@@ -604,22 +633,29 @@ impl NetPlay {
         models.extend(self.script_models(&snap));
         models.extend(self.vehicles(dt, st, own));
         if !dead {
-            models.extend(self.view_model(dt, &ps, feet, self.angles));
+            models.extend(self.view_model(
+                dt,
+                &ps,
+                feet,
+                [self.angles[0] + kick[0], self.angles[1] + kick[1]],
+            ));
         }
         let yaw = if dead {
             ps.viewangles[1]
         } else {
-            self.angles[1]
+            self.angles[1] + kick[1]
         };
-        let pitch = if dead { 0.0 } else { self.angles[0] };
+        let pitch = if dead { 0.0 } else { self.angles[0] + kick[0] };
         let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
-        let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch));
+        let roll = if dead { 0.0 } else { kick[2].to_radians() };
+        let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch, roll));
         models.extend(self.props.instances());
         models.extend(drawn.models);
         Some(NetFrame {
             origin: eye,
             yaw: yaw + look.kick[1].to_radians(),
             pitch: pitch + look.kick[0].to_radians(),
+            roll,
             models,
             sight: self.sight.clone(),
             meshes: drawn.meshes,
@@ -630,7 +666,7 @@ impl NetPlay {
     }
 
     /// Plays what `events` start and advances the effects and the props to `st`; returns what to draw from `eye`
-    /// looking along `(yaw, pitch)` radians. `own` is whose gun the first-person flash comes from.
+    /// looking along `(yaw, pitch, roll)` radians. `own` is whose gun the first-person flash comes from.
     fn fx_frame(
         &mut self,
         dt: f32,
@@ -638,7 +674,7 @@ impl NetPlay {
         own: u16,
         events: &[ClientEvent],
         eye: Vec3,
-        (yaw, pitch): (f32, f32),
+        (yaw, pitch, roll): (f32, f32, f32),
     ) -> crate::effects::Drawn {
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
@@ -698,7 +734,7 @@ impl NetPlay {
             self.sound.play_world(&s.alias, s.origin.to_array());
         }
         self.props.update(dt, self.boxes.world());
-        let drawn = self.effects.draw(eye, yaw, pitch);
+        let drawn = self.effects.draw(eye, yaw, pitch, roll);
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
         self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
@@ -889,14 +925,16 @@ impl NetPlay {
                 buttons |= b::LOC_CANCEL;
             }
         }
+        // The kick of the player's shots goes to the server with the aim (`CL_FinishMove`).
+        let kick = self.kick.angles();
         let cmd = UserCmd {
             selected_location,
             server_time: self.cmd_time,
             buttons,
             angles: [
-                pack(self.angles[0], delta[0]),
-                pack(self.angles[1], delta[1]),
-                0,
+                pack(self.angles[0] + kick[0], delta[0]),
+                pack(self.angles[1] + kick[1], delta[1]),
+                pack(kick[2], delta[2]),
             ],
             weapon: weapon as u8,
             forwardmove: axis(input.move_forward),
@@ -906,6 +944,9 @@ impl NetPlay {
         if input.buttons & buttons::ATTACK != 0 {
             self.c.shots += 1;
         }
+        let sent =
+            (cmd.angles[0].wrapping_sub(pack(self.angles[0], delta[0])) as i16).unsigned_abs();
+        self.c.max_kick_in_cmd = self.c.max_kick_in_cmd.max(f32::from(sent) * ANGLE_UNIT);
         self.c.cmds += 1;
         self.pred.push(cmd);
         self.net.send_cmd(cmd);
@@ -958,6 +999,7 @@ impl NetPlay {
         shown.origin = feet;
         shown.viewangles = [look[0], look[1], 0.0];
         self.c.frames_with_viewmodel += 1;
+        vm.kick_gun(self.kick.take_gun_speed());
         let models = vm.update(&shown, dt);
         let sight = vm.sight();
         // Through the scope the original draws no gun.
@@ -1231,6 +1273,9 @@ impl NetPlay {
             "eye_speed": eye_speed_summary(&self.c.eye_speeds),
             "sound": self.sound.report(),
         });
+        report["view_kick_max"] = json!(self.c.max_kick_up);
+        report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
+        report["view_kick_settled"] = json!(self.c.kick_settled);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
         report["player_faults"] = json!(self.c.player_faults);
         report

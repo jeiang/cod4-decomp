@@ -36,7 +36,7 @@ fn run_for(
     let mut last = (0, 0);
     for step in 1..=secs * 20 {
         effects.update(from_ms + step * 50, world);
-        let d = effects.draw(eye, 0.0, pitch);
+        let d = effects.draw(eye, 0.0, pitch, 0.0);
         quads = quads.max(d.quads);
         decals = decals.max(d.decals);
         last = (d.quads, effects.live_elems());
@@ -165,7 +165,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 let at = eye + glam::Vec3::X * (step as f32 * 40.0) + glam::Vec3::Z * 200.0;
                 fx.missiles(&[(9, at, glam::Vec3::X * 1200.0, 0)], &rw);
                 fx.update(step * 33, world);
-                let d = fx.draw(eye, 0.0, 0.0);
+                let d = fx.draw(eye, 0.0, 0.0, 0.0);
                 strips = strips.max(d.trails);
                 tris = tris.max(d.meshes.iter().map(|m| m.verts.len() / 3).sum::<usize>());
             }
@@ -173,7 +173,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             let end = (2..=240)
                 .map(|s| {
                     fx.update(60 * 33 + s * 100, world);
-                    fx.draw(eye, 0.0, 0.0).trails
+                    fx.draw(eye, 0.0, 0.0, 0.0).trails
                 })
                 .last()
                 .unwrap_or(0);

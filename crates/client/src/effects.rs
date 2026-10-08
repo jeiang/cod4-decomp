@@ -407,14 +407,17 @@ impl Effects {
     }
 
     /// What to draw from a camera at `eye` looking along `yaw` and `pitch` (radians).
-    pub fn draw(&mut self, eye: Vec3, yaw: f32, pitch: f32) -> Drawn {
+    pub fn draw(&mut self, eye: Vec3, yaw: f32, pitch: f32, roll: f32) -> Drawn {
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
         let forward = Vec3::new(cp * cy, cp * sy, sp);
         let left = Vec3::new(-sy, cy, 0.0);
+        let up = forward.cross(left);
+        // Rolled clockwise like the view (`render::View::roll`).
+        let (sr, cr) = roll.sin_cos();
         let cam = Camera {
             origin: eye,
-            axis: [forward, left, forward.cross(left)],
+            axis: [forward, left * cr + up * sr, up * cr - left * sr],
         };
         let mut d = Draws::default();
         self.fx.draw(&cam, &mut d);

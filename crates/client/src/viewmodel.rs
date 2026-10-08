@@ -6,10 +6,10 @@
 //! reimplementation's `PlayerState` does not carry), so the animation is derived from the state instead: each
 //! `weapon_state` names one of the weapon's animation slots and `weapon_time`, the time left in the state, gives how
 //! far through it is. Aiming down sights layers `ADS_UP` (rising) or `ADS_DOWN` (falling) by `weapon_pos_frac` over it.
-//! Bob is the original's angle bob (`CalculateWeaponPosition_BobAngles`) with its stock amplitudes; the idle sway,
-//! recoil kick and the stance offsets of the weapon file are not applied. The weapon's `hideTags` hide the sights and
-//! mounts of the variants it is not; [`Sight`] carries what aiming does outside the model, the zoom field of view and
-//! the scope overlay of a sniper rifle.
+//! Bob is the original's angle bob (`CalculateWeaponPosition_BobAngles`) with its stock amplitudes, and the gun's recoil
+//! is the original's spring ([`GunRecoil`]). The idle sway and the stance offsets of the weapon file are not applied
+//! yet (ticket #193). The weapon's `hideTags` hide the sights and mounts of the variants it is not; [`Sight`] carries
+//! what aiming does outside the model, the zoom field of view and the scope overlay of a sniper rifle.
 
 use assets::zone::gfx::Material;
 use assets::zone::weapon::WeaponDef;
@@ -160,6 +160,94 @@ pub struct ViewModel {
     flash_bone: Option<usize>,
     brass_bone: Option<usize>,
     tags: Option<ViewTags>,
+    recoil: GunRecoil,
+}
+
+/// The gun's recoil spring (`BG_CalculateWeaponPosition_GunRecoil`): shots give its pitch and yaw a speed, which
+/// moves the gun's offset (degrees) until the weapon file's pull back and decay bring it to rest.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GunRecoil {
+    offset: [f32; 2],
+    speed: [f32; 2],
+}
+
+/// The integration step of the spring, seconds.
+const RECOIL_STEP: f32 = 0.005;
+
+impl GunRecoil {
+    pub fn kick(&mut self, speed: [f32; 2]) {
+        self.speed[0] += speed[0];
+        self.speed[1] += speed[1];
+    }
+
+    /// Advances the spring by `dt` seconds; the weapon file's hip and ADS values are blended by `ads`. A weapon
+    /// that cannot aim down sights has no recoil spring.
+    pub fn step(&mut self, dt: f32, ads: f32, w: &WeaponDef) {
+        if w.aim_down_sight == 0 {
+            return;
+        }
+        let blend = |hip: f32, aimed: f32| (aimed - hip) * ads + hip;
+        let accel = blend(w.hip_gun_kick_accel, w.ads_gun_kick_accel);
+        let max = blend(w.hip_gun_kick_speed_max, w.ads_gun_kick_speed_max);
+        let decay = blend(w.hip_gun_kick_speed_decay, w.ads_gun_kick_speed_decay);
+        let rest = blend(w.hip_gun_kick_static_decay, w.ads_gun_kick_static_decay);
+        let mut left = dt;
+        while left > 0.0 {
+            let ft = left.min(RECOIL_STEP);
+            left -= ft;
+            let pitch_done = spring(
+                &mut self.offset[0],
+                &mut self.speed[0],
+                ft,
+                [w.gun_max_pitch, accel, max, decay, rest],
+            );
+            let yaw_done = spring(
+                &mut self.offset[1],
+                &mut self.speed[1],
+                ft,
+                [w.gun_max_yaw, accel, max, decay, rest],
+            );
+            if pitch_done && yaw_done {
+                break;
+            }
+        }
+    }
+}
+
+/// One axis of the spring for `dt` seconds (`..._GunRecoil_SingleAngle`); `[cap, accel, speed max, speed decay,
+/// static decay]`. Returns whether the axis is at rest.
+fn spring(
+    offset: &mut f32,
+    speed: &mut f32,
+    dt: f32,
+    [cap, accel, max, decay, rest]: [f32; 5],
+) -> bool {
+    if offset.abs() < 0.25 && speed.abs() < 1.0 {
+        *offset = 0.0;
+        *speed = 0.0;
+        return true;
+    }
+    *offset += *speed * dt;
+    if *offset > cap {
+        *offset = cap;
+        *speed = speed.min(0.0);
+    } else if *offset < -cap {
+        *offset = -cap;
+        *speed = speed.max(0.0);
+    }
+    if *offset > 0.0 {
+        *speed -= accel * dt;
+    } else if *offset < 0.0 {
+        *speed += accel * dt;
+    }
+    *speed -= *speed * decay * dt;
+    if *speed <= 0.0 {
+        *speed = (*speed + rest * dt).min(0.0);
+    } else {
+        *speed = (*speed - rest * dt).max(0.0);
+    }
+    *speed = speed.clamp(-max, max);
+    false
 }
 
 /// Where the gun's muzzle and ejection port are in the world.
@@ -261,6 +349,7 @@ impl ViewModel {
             last_ads: 0.0,
             rising: true,
             sprint_clock: 0.0,
+            recoil: GunRecoil::default(),
             playing: Playing {
                 slot: slot::IDLE,
                 time: 0.0,
@@ -303,6 +392,11 @@ impl ViewModel {
             zoom,
             overlay,
         }
+    }
+
+    /// Gives the gun's recoil spring the speed of the shots since the last update.
+    pub fn kick_gun(&mut self, speed: [f32; 2]) {
+        self.recoil.kick(speed);
     }
 
     /// The animation of the last update.
@@ -363,6 +457,9 @@ impl ViewModel {
         for (a, b) in angles.iter_mut().zip(bob) {
             *a += b;
         }
+        self.recoil.step(dt, ads, &self.def);
+        angles[0] += self.recoil.offset[0];
+        angles[1] += self.recoil.offset[1];
         let bones = self.pose.bones();
         let nh = usize::from(self.hands.num_bones);
         let mut out = Vec::with_capacity(2);
@@ -449,6 +546,25 @@ mod tests {
     use super::*;
     use glam::{Affine3A, Quat, Vec3};
     use server::content::Install;
+
+    /// A kick moves the gun back, the spring pulls it home and it comes to rest exactly at zero; the cap holds.
+    #[test]
+    fn the_gun_recoil_spring_kicks_and_settles() {
+        let params = [8.0, 50.0, 400.0, 3.0, 20.0];
+        let (mut offset, mut speed) = (0.0f32, 300.0f32);
+        let mut peak = 0.0f32;
+        let mut at_rest = false;
+        for _ in 0..2000 {
+            at_rest = spring(&mut offset, &mut speed, RECOIL_STEP, params);
+            peak = peak.max(offset);
+            assert!(offset <= params[0]);
+            if at_rest {
+                break;
+            }
+        }
+        assert!(peak > 1.0, "the gun moved: {peak}");
+        assert!(at_rest && offset == 0.0 && speed == 0.0);
+    }
 
     #[test]
     fn the_sights_layer_rises_and_falls_with_the_aim() {
