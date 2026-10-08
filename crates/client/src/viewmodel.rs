@@ -121,6 +121,17 @@ pub struct ViewModel {
     rising: bool,
     sprint_clock: f32,
     playing: Playing,
+    /// Indices of `tag_flash` and `tag_brass` among the gun's bones.
+    flash_bone: Option<usize>,
+    brass_bone: Option<usize>,
+    tags: Option<ViewTags>,
+}
+
+/// Where the gun's muzzle and ejection port are in the world.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewTags {
+    pub flash: Option<fx::Frame>,
+    pub brass: Option<fx::Frame>,
 }
 
 impl ViewModel {
@@ -169,6 +180,8 @@ impl ViewModel {
                 attach: Some("tag_weapon"),
             },
         ])?;
+        let bone = |n: &str| gn.iter().position(|b| &**b == n);
+        let (flash_bone, brass_bone) = (bone("tag_flash"), bone("tag_brass"));
         let mut slots: Vec<Option<Slot>> = (0..slot::COUNT).map(|_| None).collect();
         for (i, n) in weapon.anims.iter().enumerate().take(slot::COUNT) {
             let Some(name) = n.as_deref().filter(|n| !n.is_empty()) else {
@@ -203,7 +216,15 @@ impl ViewModel {
                 slot: slot::IDLE,
                 time: 0.0,
             },
+            flash_bone,
+            brass_bone,
+            tags: None,
         })
+    }
+
+    /// The muzzle and the ejection port as of the last update.
+    pub fn tags(&self) -> Option<ViewTags> {
+        self.tags
     }
 
     /// The animation of the last update.
@@ -277,6 +298,27 @@ impl ViewModel {
             m.light_origin = eye;
             out.push(m);
         }
+        let gun = &out[1];
+        let frame = |i: Option<usize>| -> Option<fx::Frame> {
+            let b = gun.bones.get(i?)?;
+            let m = gun.world_matrix()
+                * glam::Mat4::from_rotation_translation(
+                    glam::Quat::from_xyzw(b.quat[0], b.quat[1], b.quat[2], b.quat[3]).normalize(),
+                    glam::Vec3::from(b.trans),
+                );
+            Some(fx::Frame {
+                origin: m.w_axis.truncate(),
+                axis: [
+                    m.x_axis.truncate(),
+                    m.y_axis.truncate(),
+                    m.z_axis.truncate(),
+                ],
+            })
+        };
+        self.tags = Some(ViewTags {
+            flash: frame(self.flash_bone),
+            brass: frame(self.brass_bone),
+        });
         out
     }
 }

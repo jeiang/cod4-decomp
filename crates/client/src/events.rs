@@ -61,6 +61,13 @@ pub enum ClientEvent {
         radius: f32,
         strength: f32,
     },
+    /// A weapon fired: from the shooter's `eye`, looking along `angles` (degrees).
+    WeaponFire {
+        eye: [f32; 3],
+        angles: [f32; 3],
+        weapon: u16,
+        shooter: u16,
+    },
 }
 
 impl ClientEvent {
@@ -74,6 +81,7 @@ impl ClientEvent {
             Self::PlayerDeath { .. } => "player_death",
             Self::PlayerPain { .. } => "player_pain",
             Self::PhysicsExplosion { .. } => "physics_explosion",
+            Self::WeaponFire { .. } => "weapon_fire",
         }
     }
 }
@@ -180,6 +188,12 @@ impl Events {
                 radius: e.velocity[0],
                 strength: f32::from(e.weapon) / 10.0,
             },
+            ev::WEAPON_FIRE => ClientEvent::WeaponFire {
+                eye: e.origin,
+                angles: e.angles,
+                weapon: e.weapon,
+                shooter: e.client,
+            },
             _ => return None,
         })
     }
@@ -265,6 +279,29 @@ mod tests {
             ClientEvent::PlayFx { name, .. } => assert_eq!(name, "fx/explosions/grenadeexp_dirt"),
             o => panic!("{o:?}"),
         }
+    }
+
+    #[test]
+    fn a_weapon_fire_event_carries_the_eye_the_aim_and_the_shooter() {
+        let mut ev = Events::default();
+        let mut e = event(964, super::ev::WEAPON_FIRE, 1);
+        e.origin = [1.0, 2.0, 60.0];
+        e.angles = [5.0, 90.0, 0.0];
+        e.weapon = 7;
+        e.client = 3;
+        let out = ev.scan(&snap(&[e]));
+        assert!(
+            matches!(
+                out[..],
+                [ClientEvent::WeaponFire {
+                    eye: [1.0, 2.0, 60.0],
+                    angles: [5.0, 90.0, 0.0],
+                    weapon: 7,
+                    shooter: 3
+                }]
+            ),
+            "{out:?}"
+        );
     }
 
     #[test]

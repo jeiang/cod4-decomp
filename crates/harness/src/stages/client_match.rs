@@ -200,6 +200,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     // The events became effects on screen.
     let fx = &net["fx"];
+    let fires = num(net, &["events", "weapon_fire"]);
+    if shots >= 1.0 && fires < 1.0 {
+        failures.push("shots were fired but the client saw no weapon fire event".into());
+    }
+    if fires >= 1.0 && num(fx, &["played", "muzzle_flash"]) < 1.0 {
+        failures.push("weapons fired but no muzzle flash played".into());
+    }
     if impacts >= 1.0 && num(fx, &["played", "bullet_impact"]) < 1.0 {
         failures.push("bullet impacts happened but none played an effect".into());
     }

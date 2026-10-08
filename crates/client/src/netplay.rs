@@ -400,6 +400,8 @@ impl NetPlay {
         self.hear(dt, eye, &ps, &snap);
 
         let (events, commands) = self.take_events(&snap);
+        self.effects
+            .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         for e in &events {
             let (weapons, content) = (&self.weapons, &self.lib.content);
             self.effects.event(e, &|w| {

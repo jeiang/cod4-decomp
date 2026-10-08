@@ -22,12 +22,16 @@ pub mod ev {
     pub const PLAYER_PAIN: u8 = 0x85;
     /// A physics blast (`physicsexplosionsphere`): `velocity[0]` carries the radius, `weapon` the strength in tenths.
     pub const PHYSICS_EXPLOSION: u8 = 0x86;
+    /// A weapon fired (`FireWeapon`): `origin` is the shooter's eye, `angles` where they look, `client` who, `weapon`
+    /// which; the muzzle flash and the ejected shell.
+    pub const WEAPON_FIRE: u8 = 0x87;
 }
 
 pub const LIFETIME_MS: i32 = 300;
 /// Entity numbers events use, above anything the game allocates.
 const FIRST: u16 = 960;
-const SLOTS: u16 = 48;
+/// Entity numbers 960 to 1021; 1022 and 1023 mean the world and none.
+const SLOTS: u16 = 62;
 
 struct Slot {
     state: EntityState,

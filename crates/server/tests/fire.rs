@@ -251,6 +251,27 @@ fn a_rifle_shot_at_the_head_hits_the_head_for_triple_damage() {
 }
 
 #[test]
+fn firing_tells_clients_who_fired_what_from_where() {
+    use server::tempev::ev;
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    g.client_mut(shooter).unwrap().ps.view_height_current = 66.0;
+    g.client_mut(shooter).unwrap().ps.viewangles = [0.0, 90.0, 0.0];
+    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    let now = g.level.time;
+    let fired: Vec<_> = g
+        .tempev
+        .live(now)
+        .filter(|e| e.event == ev::WEAPON_FIRE)
+        .collect();
+    assert_eq!(fired.len(), 1);
+    assert_eq!(fired[0].client, shooter);
+    assert_eq!(fired[0].weapon, g.weapons.index("ak47_mp"));
+    assert_eq!(fired[0].origin[2], 66.0);
+    assert!((fired[0].angles[1] - 90.0).abs() < 0.5);
+}
+
+#[test]
 fn a_shot_into_the_legs_is_not_a_headshot_and_a_miss_hurts_nobody() {
     let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
     let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
