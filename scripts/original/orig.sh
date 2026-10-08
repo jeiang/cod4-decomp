@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: GPL-3.0-only
 # Driver for the original game run (via umu-run/Proton) on the Linux reference host.
 # Runs ON the host. Needs: nix-shell, hyprland session, /dev/uinput access (ACL), umu-run.
 # Contains no game content; the install path is supplied by the environment.

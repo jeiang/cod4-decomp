@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
 # Original game reference notes (ticket #157)
 
 Observed behaviour of the original CoD4 1.7 MP client (version string `1.7.568`), run through Proton in a

@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
 # Original-game reference driver
 
 `orig.sh` runs on the Linux reference host (not the Mac). It launches the

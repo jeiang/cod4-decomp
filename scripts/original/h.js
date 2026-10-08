@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 // Mac-side helper (Bun): drives the reference host over ssh. Load with: %load scripts/original/h.js
 const HOST = process.env.ORIG_HOST;
 const Y = process.env.ORIG_YDOTOOL ?? "ydotool", G = process.env.ORIG_GRIM ?? "grim";
