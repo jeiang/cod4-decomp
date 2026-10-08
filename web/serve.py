@@ -7,7 +7,9 @@ wasm module. Two development aids, both off unless asked for:
 
   --install DIR   also serve the files the client reads under /install/ (with an index.json), so automated browser
                   runs can read the install over HTTP without a folder picker (open the page with ?dev-install=/install).
-                  Never use this on a public host.
+                  Never use this on a public host. Safari cannot use it: the reader worker's synchronous request is
+                  served through the page's main thread, which is blocked inside the wasm client, so the page never
+                  starts. In Safari pick the install folder once and use the saved copy (no ?dev-install).
   POST /report    the page posts its run statistics (numbers only, no file content) with ?report; printed here.
 """
 import argparse
