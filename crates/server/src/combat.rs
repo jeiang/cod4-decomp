@@ -176,6 +176,12 @@ impl Game {
     pub fn g_damage(&mut self, vm: &mut Vm, target: u16, d: Damage) {
         let Some(t) = self.ent(target) else { return };
         if t.kind == EntKind::Client {
+            if d.attacker
+                .and_then(|a| self.ent(a))
+                .is_some_and(|a| a.veh.is_some())
+            {
+                self.stats.heli_hits += 1;
+            }
             self.damage_client(vm, target, d);
             return;
         }

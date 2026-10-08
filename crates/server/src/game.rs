@@ -175,6 +175,8 @@ pub struct Ent {
     pub missile: Option<Box<Missile>>,
     /// `r.ownerNum`: traces made by the owner pass through this entity.
     pub owner: Option<u16>,
+    /// A script vehicle's flight and turret state (`scr_vehicle`).
+    pub veh: Option<Box<crate::vehicle::Vehicle>>,
 }
 
 impl Ent {
@@ -204,6 +206,7 @@ impl Ent {
             x: crate::link::EntExtra::default(),
             missile: None,
             owner: None,
+            veh: None,
         }
     }
 }
@@ -329,6 +332,10 @@ pub struct MatchStats {
     pub hardpoints: u64,
     pub airstrikes: u64,
     pub helicopters: u64,
+    /// Rounds a hardpoint helicopter fired, hits it dealt to players, and times one began to crash.
+    pub heli_shots: u64,
+    pub heli_hits: u64,
+    pub heli_crashes: u64,
 }
 
 pub struct Game {
@@ -501,7 +508,11 @@ impl Game {
         if let Some(slot) = self.ents.get_mut(usize::from(num))
             && let Some(e) = slot.take()
         {
-            let _ = e;
+            if e.veh.is_some() {
+                // The engine hum on the vehicle ends with it.
+                self.sound_out
+                    .push((SoundTo::All, format!("stoploop {num} *")));
+            }
             self.attractors.free_entity(num);
             if let Some(w) = self.world.as_mut() {
                 w.unlink(num);

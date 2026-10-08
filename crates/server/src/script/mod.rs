@@ -21,6 +21,7 @@ mod missile;
 mod player;
 mod sound;
 mod uicmd;
+mod vehicle;
 mod weapons;
 
 pub use args::Args;
@@ -79,6 +80,7 @@ impl Dispatch {
                     player::METHODS,
                     ent::METHODS,
                     misc::METHODS,
+                    vehicle::METHODS,
                     missile::METHODS,
                     weapons::METHODS,
                     combat::METHODS,

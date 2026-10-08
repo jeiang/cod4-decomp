@@ -65,7 +65,7 @@ impl TickSample {
 }
 
 /// The statistics `expect` and `until` read.
-const STATS: &str = "kills|deaths|spawns|respawns|shots|hits|rounds|plants|defuses|hardpoints|airstrikes|helicopters";
+const STATS: &str = "kills|deaths|spawns|respawns|shots|hits|rounds|plants|defuses|hardpoints|airstrikes|helicopters|heli_shots|heli_hits|heli_crashes";
 
 /// Commands the console accepts, for `Console::has_command`.
 pub const COMMANDS: &[&str] = &[
@@ -93,6 +93,7 @@ pub const COMMANDS: &[&str] = &[
     "clientkick",
     "tempbanclient",
     "devhardpoint",
+    "devheli",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -756,6 +757,30 @@ impl Server {
                 });
                 host.run_calls(&mut run.vm);
             }
+            // Test hook: `devheli` prints every script vehicle: where it is, how fast, how it leans and its damage stage.
+            "devheli" => {
+                let lines: Vec<String> = self
+                    .game
+                    .vehicles()
+                    .map(|(n, e, v)| {
+                        format!(
+                            "heli {n}: origin {:.0} {:.0} {:.0}, {:.1} mph, angles {:.0} {:.0} {:.0}, stage {}, {:?}\n",
+                            e.origin[0],
+                            e.origin[1],
+                            e.origin[2],
+                            v.speed / crate::vehicle::MPH,
+                            e.angles[0],
+                            e.angles[1],
+                            e.angles[2],
+                            v.stage,
+                            v.state
+                        )
+                    })
+                    .collect();
+                for l in lines {
+                    self.say(&l);
+                }
+            }
             "clientkick" | "tempbanclient" => {
                 let n = arg(1)
                     .map(cvar::parse_int)
@@ -1299,6 +1324,9 @@ impl Server {
             "hardpoints" => st.hardpoints,
             "airstrikes" => st.airstrikes,
             "helicopters" => st.helicopters,
+            "heli_shots" => st.heli_shots,
+            "heli_hits" => st.heli_hits,
+            "heli_crashes" => st.heli_crashes,
             w => return Err(format!("unknown statistic {w:?}")),
         })
     }

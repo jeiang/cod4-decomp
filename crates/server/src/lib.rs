@@ -27,4 +27,5 @@ pub mod server;
 pub mod tags;
 pub mod tempev;
 pub mod ui;
+pub mod vehicle;
 pub mod vote;
