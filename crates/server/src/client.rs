@@ -560,8 +560,11 @@ impl Game {
         e.contents = contents::PLAYERCLIP;
         e.owner = Some(owner);
         e.free_at = Some(self.level.time + duration + self.cvars.int("g_mantleBlockTimeBuffer"));
-        if let Ok(n) = self.spawn(e) {
-            self.relink(n);
+        match self.spawn(e) {
+            Ok(n) => self.relink(n),
+            Err(err) => self.print(format!(
+                "WARNING: mantle blocker for client {owner}: {err}\n"
+            )),
         }
     }
 

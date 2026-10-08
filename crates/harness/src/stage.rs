@@ -146,6 +146,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_match::run),
     },
     StageDef {
+        name: "net-mantle",
+        description: "a real UDP client jumps at a ledge: the server climbs it and blocks the landing spot, and the client's prediction mantles to the same place with no correction",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_mantle::run),
+    },
+    StageDef {
         name: "net-objective",
         description: "two real UDP clients play Search and Destroy: one plants the bomb holding +activate at the zone's hint, the other defuses it",
         needs_install: false,
