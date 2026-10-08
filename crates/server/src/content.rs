@@ -184,6 +184,8 @@ struct Layer {
     player_anims: HashMap<String, (u8, Arc<PlayerAnim>)>,
     /// Bone names of every model, as text.
     model_bones: HashMap<String, (u8, BoneNames)>,
+    /// The tag names each weapon hides on its view model (`hideTags`), as text.
+    hide_tags: HashMap<String, (u8, BoneNames)>,
     motions: HashMap<String, (u8, Arc<RootMotion>)>,
     localize: HashMap<String, (u8, Arc<str>)>,
     clipmap: Option<(u8, Arc<Clipmap>)>,
@@ -266,6 +268,13 @@ impl Content {
             }
             Asset::Weapon(w) => {
                 if let Some(n) = w.internal_name.clone() {
+                    let tags: BoneNames = w
+                        .hide_tags
+                        .iter()
+                        .take_while(|t| **t != 0)
+                        .map(|t| resolve(&strings, *t))
+                        .collect();
+                    put(&mut layer.hide_tags, tag, &n, tags);
                     put(&mut layer.weapons, tag, &n, w);
                 }
             }
@@ -485,6 +494,11 @@ impl Content {
     /// One bone name per bone of the model, resolved from the zone that defined it.
     pub fn model_bone_names(&self, name: &str) -> Option<&BoneNames> {
         get(&self.map.model_bones, name).or_else(|| get(&self.base.model_bones, name))
+    }
+
+    /// The tags `weapon` hides on its view model (`hideTags`): the sights and parts other variants of the model show.
+    pub fn weapon_hide_tags(&self, name: &str) -> Option<&BoneNames> {
+        get(&self.map.hide_tags, name).or_else(|| get(&self.base.hide_tags, name))
     }
 
     pub fn localize(&self, name: &str) -> Option<&Arc<str>> {

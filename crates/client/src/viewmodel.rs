@@ -7,8 +7,11 @@
 //! `weapon_state` names one of the weapon's animation slots and `weapon_time`, the time left in the state, gives how
 //! far through it is. Aiming down sights layers `ADS_UP` (rising) or `ADS_DOWN` (falling) by `weapon_pos_frac` over it.
 //! Bob is the original's angle bob (`CalculateWeaponPosition_BobAngles`) with its stock amplitudes; the idle sway,
-//! recoil kick and the stance offsets of the weapon file are not applied.
+//! recoil kick and the stance offsets of the weapon file are not applied. The weapon's `hideTags` hide the sights and
+//! mounts of the variants it is not; [`Sight`] carries what aiming does outside the model, the zoom field of view and
+//! the scope overlay of a sniper rifle.
 
+use assets::zone::gfx::Material;
 use assets::zone::weapon::WeaponDef;
 use assets::zone::xmodel::XModel;
 use render::{ModelInstance, ModelKind};
@@ -109,11 +112,43 @@ struct Slot {
     length: f32,
 }
 
+/// The scope picture of a weapon with an overlay (`adsOverlay*`), drawn over the screen centre while aimed.
+#[derive(Clone)]
+pub struct Overlay {
+    pub material: Arc<Material>,
+    /// Width and height in the 640 by 480 virtual screen.
+    pub size: [f32; 2],
+    pub alpha: f32,
+}
+
+/// What aiming does besides moving the view model: the zoom and the scope overlay (`CG_GetViewFov`,
+/// `CG_DrawWeapReticle`).
+#[derive(Clone)]
+pub struct Sight {
+    /// The field of view in degrees at full zoom (`adsZoomFov`).
+    pub zoom_fov: f32,
+    /// How far the zoom has come, 0 to 1.
+    pub zoom: f32,
+    /// Set once the overlay shows; the original draws no gun then.
+    pub overlay: Option<Overlay>,
+}
+
+/// How far the zoom has come at aim fraction `ads`, when it runs over the last `frac` of the way in (`adsZoomInFrac`)
+/// or the first `frac` of the way out (`adsZoomOutFrac`).
+pub fn zoom_frac(ads: f32, frac: f32) -> f32 {
+    if ads >= 1.0 {
+        return 1.0;
+    }
+    ((ads - (1.0 - frac)) / frac.max(1e-3)).clamp(0.0, 1.0)
+}
+
 /// One weapon's view model and animation state.
 pub struct ViewModel {
     def: Arc<WeaponDef>,
     hands: Arc<XModel>,
     gun: Arc<XModel>,
+    /// Surfaces of the gun hidden for this weapon (`hideTags`): the sights and mounts of the variants it is not.
+    hidden: [u32; 4],
     rig: Rig,
     slots: Vec<Option<Slot>>,
     pose: Pose,
@@ -166,6 +201,19 @@ impl ViewModel {
                 .ok_or_else(|| format!("model {n} has no bone names"))
         };
         let (hn, gn) = (names(&hands_model)?, names(&gun)?);
+        let mut hidden = [0u32; 4];
+        let tags = weapon
+            .internal_name
+            .as_deref()
+            .and_then(|n| content.weapon_hide_tags(n))
+            .map_or(&[][..], |t| &t[..]);
+        for tag in tags {
+            let i = gn
+                .iter()
+                .position(|b| b.eq_ignore_ascii_case(tag))
+                .ok_or_else(|| format!("{tag} is not a bone of the gun"))?;
+            hidden[i >> 5] |= 0x8000_0000 >> (i & 31);
+        }
         let hr: Vec<&str> = hn.iter().map(|s| &**s).collect();
         let gr: Vec<&str> = gn.iter().map(|s| &**s).collect();
         let rig = Rig::new(&[
@@ -206,6 +254,7 @@ impl ViewModel {
             def: weapon.clone(),
             hands: hands_model,
             gun,
+            hidden,
             rig,
             slots,
             pose: Pose::default(),
@@ -225,6 +274,35 @@ impl ViewModel {
     /// The muzzle and the ejection port as of the last update.
     pub fn tags(&self) -> Option<ViewTags> {
         self.tags
+    }
+
+    /// The zoom and scope overlay of the last update.
+    pub fn sight(&self) -> Sight {
+        let w = &self.def;
+        let zoom = if self.slots[slot::ADS_UP].is_some() {
+            let frac = if self.rising {
+                w.ads_zoom_in_frac
+            } else {
+                w.ads_zoom_out_frac
+            };
+            zoom_frac(self.last_ads, frac)
+        } else {
+            0.0
+        };
+        let overlay = w
+            .overlay_material
+            .clone()
+            .filter(|_| w.overlay_reticle != 0 && zoom > 0.01)
+            .map(|material| Overlay {
+                material,
+                size: [w.overlay_width, w.overlay_height],
+                alpha: zoom,
+            });
+        Sight {
+            zoom_fov: w.ads_zoom_fov,
+            zoom,
+            overlay,
+        }
     }
 
     /// The animation of the last update.
@@ -279,6 +357,8 @@ impl ViewModel {
             ps.origin[2] + ps.view_height_current,
         ];
         let mut angles = ps.viewangles;
+        // The sights line up with the aim: the weapon file's pitch for the aimed pose.
+        angles[0] += self.def.ads_aim_pitch * ads;
         let bob = bob_angles(ps, ads, &self.def);
         for (a, b) in angles.iter_mut().zip(bob) {
             *a += b;
@@ -296,6 +376,9 @@ impl ViewModel {
             m.bones = b.to_vec();
             m.lod = Some(0);
             m.light_origin = eye;
+            if std::sync::Arc::ptr_eq(model, &self.gun) {
+                m.hidden_parts = self.hidden;
+            }
             out.push(m);
         }
         let gun = &out[1];
@@ -591,6 +674,166 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The sight attachments of the gun that are drawn (not hidden by the weapon's `hideTags`), by tag, with the centre
+    /// of their posed mesh in view space (x forward, y left, z up from the eye). Tags without a surface are not drawn.
+    fn drawn_sights(
+        content: &Content,
+        vm: &ViewModel,
+        gun: &ModelInstance,
+    ) -> Vec<(String, [f32; 3], f32)> {
+        let model = &gun.model;
+        let names = content
+            .model_bone_names(model.name.as_deref().unwrap())
+            .unwrap();
+        let posed = render::skin::skin_matrices(model, &gun.bones);
+        let lod = &model.lod_info[0];
+        let first = usize::from(lod.surf_index);
+        let mut out = Vec::new();
+        for (i, tag) in names.iter().enumerate() {
+            if !["sight", "acog", "scope"].iter().any(|k| tag.contains(k)) {
+                continue;
+            }
+            let bit = |p: [i32; 4]| (p[i >> 5] as u32) & (0x8000_0000 >> (i & 31)) != 0;
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            let mut any = false;
+            for sf in &model.surfs[first..first + usize::from(lod.surf_count)] {
+                if !bit(sf.part_bits) || render::skin::is_hidden(sf, &vm.hidden) {
+                    continue;
+                }
+                let mut b = Vec::new();
+                render::skin::skin_surface(sf, &posed, &mut b);
+                for v in b.as_chunks::<32>().0 {
+                    let f = |k: usize| f32::from_le_bytes(v[k..k + 4].try_into().unwrap());
+                    let p = Vec3::new(f(0), f(4), f(8));
+                    (lo, hi, any) = (lo.min(p), hi.max(p), true);
+                }
+            }
+            if any {
+                out.push((tag.to_string(), ((lo + hi) * 0.5).to_array(), hi.z - lo.z));
+            }
+        }
+        out
+    }
+
+    /// Aimed, a weapon shows one sight attachment (the variants share a model and the weapon's `hideTags` hide the
+    /// others) and the sight it aims through is on the view's centre line. Pixels are those of a 1280x720 screen at
+    /// the stock 80 degree field of view across 4:3 (a focal length of about 570 px).
+    #[test]
+    fn aimed_down_sights_one_sight_is_in_the_middle_of_the_screen() {
+        const FOCAL_PX: f32 = 570.0;
+        // An optic's mesh centre is its lens; an iron sight's is only roughly the aperture.
+        const OPTIC_PX: f32 = 80.0;
+        const IRON_PX: f32 = 100.0;
+        let Some(content) = content() else { return };
+        let mut aimed = 0;
+        for w in content.weapons() {
+            let name = w.internal_name.as_deref().unwrap();
+            let Some(mut vm) = build(&content, name) else {
+                continue;
+            };
+            // A scoped weapon shows its overlay and no gun when aimed.
+            if vm.slots[slot::ADS_UP].is_none() || w.overlay_reticle != 0 {
+                continue;
+            }
+            let [_, ads, _] = hip_ads_hip(&mut vm);
+            let sights = drawn_sights(&content, &vm, &ads[1]);
+            let optics: Vec<_> = sights
+                .iter()
+                .filter(|(t, ..)| t != "tag_iron_sight" && !t.contains("front"))
+                .collect();
+            assert!(optics.len() <= 1, "{name} draws {sights:?}");
+            // The optic if there is one, else the iron sight (unless its surfaces are the gun's body too, as the RPD's).
+            let Some((tag, c, _)) = optics.first().copied().or_else(|| {
+                sights
+                    .iter()
+                    .find(|(t, _, height)| t == "tag_iron_sight" && *height < 4.0)
+            }) else {
+                continue;
+            };
+            aimed += 1;
+            let off = |v: f32| (v / c[0] * FOCAL_PX).abs();
+            let tolerance = if *tag == "tag_iron_sight" {
+                IRON_PX
+            } else {
+                OPTIC_PX
+            };
+            assert!(
+                c[0] > 1.0 && off(c[1]) < tolerance && off(c[2]) < tolerance,
+                "{name}: {tag} is at {c:?}, {:.0} px right and {:.0} px low of the screen centre",
+                off(c[1]),
+                off(c[2])
+            );
+        }
+        assert!(aimed > 50, "only {aimed} weapons checked");
+    }
+
+    /// Aiming zooms the world towards the weapon's zoom field of view, and a scoped weapon fades its overlay in over the
+    /// same stretch and takes the gun off the screen; nothing else shows an overlay.
+    #[test]
+    fn aiming_zooms_and_scoped_weapons_draw_their_overlay() {
+        let Some(content) = content() else { return };
+        let (mut scoped, mut zoomed) = (0, 0);
+        for w in content.weapons() {
+            let name = w.internal_name.as_deref().unwrap();
+            let Some(mut vm) = build(&content, name) else {
+                continue;
+            };
+            let [_, _, _] = hip_ads_hip(&mut vm);
+            let hip = vm.sight();
+            assert!(
+                hip.overlay.is_none() && hip.zoom == 0.0,
+                "{name} zooms at the hip"
+            );
+            let ps = PlayerState {
+                weapon_pos_frac: 1.0,
+                ..PlayerState::default()
+            };
+            vm.update(&ps, 0.01);
+            let aimed = vm.sight();
+            if vm.slots[slot::ADS_UP].is_none() {
+                continue;
+            }
+            assert_eq!(aimed.zoom, 1.0, "{name}");
+            assert!(
+                (1.0..=90.0).contains(&aimed.zoom_fov),
+                "{name}: {} degrees",
+                aimed.zoom_fov
+            );
+            zoomed += 1;
+            match (&aimed.overlay, w.overlay_reticle != 0) {
+                (Some(o), true) => {
+                    scoped += 1;
+                    assert_eq!(o.alpha, 1.0, "{name}");
+                    assert_eq!(o.size, [w.overlay_width, w.overlay_height], "{name}");
+                    assert!(
+                        aimed.zoom_fov <= 30.0,
+                        "{name} scopes at {}",
+                        aimed.zoom_fov
+                    );
+                }
+                (None, false) => {}
+                (o, _) => panic!(
+                    "{name}: overlay {} with reticle {}",
+                    o.is_some(),
+                    w.overlay_reticle
+                ),
+            }
+        }
+        assert!(
+            scoped >= 5 && zoomed > 50,
+            "{scoped} scoped, {zoomed} zooming weapons"
+        );
+    }
+
+    #[test]
+    fn the_zoom_runs_over_the_last_part_of_the_way_in_and_the_first_part_of_the_way_out() {
+        assert_eq!(zoom_frac(0.0, 0.5), 0.0);
+        assert_eq!(zoom_frac(0.5, 0.5), 0.0);
+        assert!((zoom_frac(0.75, 0.5) - 0.5).abs() < 1e-6);
+        assert_eq!(zoom_frac(1.0, 0.5), 1.0);
+        assert!((zoom_frac(0.9, 0.25) - 0.6).abs() < 1e-5);
     }
 
     /// The longest edge of the posed lod-0 mesh relative to the same edge in the bind pose (edges shorter than a
