@@ -369,13 +369,22 @@ impl NetPlay {
             models.extend(self.view_model(dt, &ps, ps.origin));
             let (events, commands) = self.take_events(&snap);
             let look = self.look.frame(st);
+            let (yaw, pitch) = (
+                ps.viewangles[1].to_radians(),
+                -ps.viewangles[0].to_radians(),
+            );
+            // The effects the followed player's guns and the map's events start are as visible to a watcher.
+            self.boxes.sync(&snap);
+            let drawn = self.fx_frame(dt, st, ps.client_num, &events, eye, (yaw, pitch));
+            models.extend(self.props.instances());
+            models.extend(drawn.models);
             return Some(NetFrame {
                 origin: eye,
-                yaw: ps.viewangles[1].to_radians(),
-                pitch: -ps.viewangles[0].to_radians(),
+                yaw: yaw + look.kick[1].to_radians(),
+                pitch: pitch + look.kick[0].to_radians(),
                 models,
-                meshes: Vec::new(),
-                sounds: Vec::new(),
+                meshes: drawn.meshes,
+                sounds: self.effects.take_sounds(),
                 events,
                 commands,
                 look,
@@ -425,9 +434,47 @@ impl NetPlay {
 
         let (events, commands) = self.take_events(&snap);
         let look = self.look.frame(st);
+        let mut models = self.remote_players(dt, st, own);
+        if !dead {
+            models.extend(self.view_model(dt, &ps, feet));
+        }
+        let yaw = if dead {
+            ps.viewangles[1]
+        } else {
+            self.angles[1]
+        };
+        let pitch = if dead { 0.0 } else { self.angles[0] };
+        let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
+        let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch));
+        models.extend(self.props.instances());
+        models.extend(drawn.models);
+        Some(NetFrame {
+            origin: eye,
+            yaw: yaw + look.kick[1].to_radians(),
+            pitch: pitch + look.kick[0].to_radians(),
+            models,
+            sounds: self.effects.take_sounds(),
+            meshes: drawn.meshes,
+            events,
+            commands,
+            look,
+        })
+    }
+
+    /// Plays what `events` start and advances the effects and the props to `st`; returns what to draw from `eye`
+    /// looking along `(yaw, pitch)` radians. `own` is whose gun the first-person flash comes from.
+    fn fx_frame(
+        &mut self,
+        dt: f32,
+        st: i32,
+        own: u16,
+        events: &[ClientEvent],
+        eye: Vec3,
+        (yaw, pitch): (f32, f32),
+    ) -> crate::effects::Drawn {
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
-        for e in &events {
+        for e in events {
             if let ClientEvent::PlayerDeath { client, push, .. } = e {
                 self.pushes.insert(*client, *push);
             }
@@ -458,34 +505,11 @@ impl NetPlay {
         }
         self.effects.update(st, self.boxes.world());
         self.props.update(dt, self.boxes.world());
-        let mut models = self.remote_players(dt, st, own);
-        models.extend(self.props.instances());
-        if !dead {
-            models.extend(self.view_model(dt, &ps, feet));
-        }
-        let yaw = if dead {
-            ps.viewangles[1]
-        } else {
-            self.angles[1]
-        };
-        let pitch = if dead { 0.0 } else { self.angles[0] };
-        let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
         let drawn = self.effects.draw(eye, yaw, pitch);
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
         self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
-        models.extend(drawn.models);
-        Some(NetFrame {
-            origin: eye,
-            yaw: yaw + look.kick[1].to_radians(),
-            pitch: pitch + look.kick[0].to_radians(),
-            models,
-            sounds: self.effects.take_sounds(),
-            meshes: drawn.meshes,
-            events,
-            commands,
-            look,
-        })
+        drawn
     }
 
     /// The events new in `snap` and the server commands nothing here consumed.
