@@ -17,13 +17,15 @@ path = "src/lib.rs"
 assets = { path = "../assets" }
 gsc = { path = "../gsc" }
 sim = { path = "../sim" }
-net = { path = "../net" }
+net = { path = "../net", features = ["webtransport"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 sim = { path = "../sim", features = ["test-support"] }
+wtransport = "0.7.2"
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time"] }
 
 [lints]
 workspace = true

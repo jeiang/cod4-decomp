@@ -39,6 +39,16 @@ COD4_PATH=/path/to/install nix develop -c cargo run --release -p server -- +set 
 
 `cod4e-server` boots like the original's dedicated server: command-line `set`s, `default_mp.cfg`, the dedicated zone set, then `+exec` and `+map`. It runs the stock gametype scripts at 30 Hz (`sv_fps`) on one thread. Console commands include `bots N` (server-side test clients that pick a team and class and play: they roam a navigation mesh generated from the map's collision data, shoot enemies they see, and inject usercmds directly, with no netchan), `status` and `expect <stat> <min>`. Harness stage 2 (`headless-bots`, plus `headless-bots-sd` for Search and Destroy; every server stage fails over 512 MiB peak RSS) plays an 18-bot team deathmatch round on mp_crash to its time limit and the map rotation, and records `ticks.csv` (per-tick total and gsc/bot/client/game columns), RSS, map-load and navigation-generation time and match counters; `headless-bots-32` is the 32-player budget run.
 
+### Browser clients (WebTransport)
+
+`--webtransport [host:]port` (cvar `net_wt`, empty = off) also serves WebTransport next to UDP: a browser sends and receives the same datagrams as a UDP client (connect packets and netchan), peers named by their QUIC address. A datagram up to the session's maximum datagram size (capped at 1200 bytes, the browsers' limit) is one WebTransport datagram; a longer one, up to 8192 bytes, is one unidirectional stream carrying exactly those bytes, ended by FIN; both forms are accepted in both directions (`net::wt` module docs). Anyone may connect; bans, rate limits and the password apply to the connect packets as for UDP.
+
+Without `--wt-cert cert.pem --wt-key key.pem` (cvars `net_wt_cert`, `net_wt_key`) the server makes an ECDSA P-256 certificate valid 13 days at each start and logs its SHA-256 (base64 and hex). With `--wt-info file.json` (`net_wt_info`) it writes what the page needs for `new WebTransport(url, { serverCertificateHashes: [{ algorithm: "sha-256", value }] })`: `{"url":"https://localhost:4433/","certHashSha256Base64":"..."}` (`localhost` when bound to every address; a loaded certificate has no hash field). The page decodes the base64 to the 32-byte `value`.
+
+```sh
+COD4_PATH=/path/to/install nix develop -c cargo run --release -p server -- --webtransport 4433 --wt-info wt.json +map mp_crash
+```
+
 ## Playing
 
 `cod4e` with no options starts in the stock main menu, drawn from the install's own menu assets (`ui_mp`/`common_mp` menus, fonts, localized strings and images; `src/ui`). Mouse and keyboard drive it like the original: Start New Server picks a map and gametype and starts a listen server with bots, Join Game takes a server, Options and Controls edit the dvars and binds, Esc opens the in-game menu. The 640x480 menu space is anchored to a 16:9 safe area at any window shape. `--ui-tour <dir>` opens the menus one by one with no world and saves a screenshot of each (harness stage `client-ui`); `--ui-script click=Start New Server,menu=createserver,click=Start,ingame,shot=a` drives them like a player.

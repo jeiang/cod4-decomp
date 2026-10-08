@@ -152,6 +152,13 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_mapname", "", ROM | SERVERINFO),
         ("sv_hostname", "CoD4Host", ARCHIVE | SERVERINFO),
         ("net_port", "28960", LATCH),
+        // WebTransport for browser clients, off when `net_wt` is empty: `[host:]port`, the
+        // certificate and key PEM files (empty: a 13-day self-signed one), and the JSON file the
+        // page reads for the URL and certificate hash. Command line: `--webtransport`, ...
+        ("net_wt", "", LATCH),
+        ("net_wt_cert", "", LATCH),
+        ("net_wt_key", "", LATCH),
+        ("net_wt_info", "", LATCH),
         ("g_password", "", 0),
         ("g_speed", "190", 0),
         ("g_lagcomp", "1", 0),
@@ -265,18 +272,82 @@ impl Server {
     fn bind_socket(&mut self) {
         let port = self.game.cvars.int("net_port");
         let addr = SocketAddr::from(([0, 0, 0, 0], u16::try_from(port).unwrap_or(28960)));
-        match net::UdpTransport::bind(addr) {
-            Ok(t) => {
-                let max = usize::try_from(self.game.cvars.int("sv_maxclients")).unwrap_or(32);
-                let n = NetSv::new(t, max.clamp(1, 64));
-                self.say(&format!(
-                    "listening on udp port {}\n",
-                    n.local_addr().port()
-                ));
-                self.net = Some(n);
+        let udp = match net::UdpTransport::bind(addr) {
+            Ok(t) => t,
+            Err(e) => return self.say(&format!("WARNING: cannot bind udp port {port}: {e}\n")),
+        };
+        let max = usize::try_from(self.game.cvars.int("sv_maxclients")).unwrap_or(32);
+        let wt = self.game.cvars.string("net_wt").trim().to_owned();
+        let t: Box<dyn net::Transport + Send> = if wt.is_empty() {
+            Box::new(udp)
+        } else {
+            match self.start_webtransport(udp, &wt) {
+                Ok(j) => Box::new(j),
+                Err(e) => return self.say(&format!("WARNING: webtransport {wt}: {e}\n")),
             }
-            Err(e) => self.say(&format!("WARNING: cannot bind udp port {port}: {e}\n")),
+        };
+        let n = NetSv::new(t, max.clamp(1, 64));
+        self.say(&format!(
+            "listening on udp port {}\n",
+            n.local_addr().port()
+        ));
+        self.net = Some(n);
+    }
+
+    /// Adds the WebTransport endpoint for `bind` (`[host:]port`) to the UDP socket and publishes
+    /// the certificate hash (log line, and the `net_wt_info` JSON file).
+    fn start_webtransport(
+        &mut self,
+        udp: net::UdpTransport,
+        bind: &str,
+    ) -> Result<net::transport::Joined, String> {
+        let addr = bind
+            .parse::<SocketAddr>()
+            .or_else(|_| {
+                bind.parse::<u16>()
+                    .map(|p| SocketAddr::from(([0, 0, 0, 0], p)))
+            })
+            .map_err(|_| "expected [host:]port".to_owned())?;
+        let c = &self.game.cvars;
+        let (cert, key, info) = (
+            c.string("net_wt_cert").to_owned(),
+            c.string("net_wt_key").to_owned(),
+            c.string("net_wt_info").to_owned(),
+        );
+        let tls = match (cert.is_empty(), key.is_empty()) {
+            (true, true) => None,
+            (false, false) => Some((cert.into(), key.into())),
+            _ => return Err("net_wt_cert and net_wt_key go together".to_owned()),
+        };
+        let mut joined = net::transport::Joined::new(udp).map_err(io_err)?;
+        let (wt, up) =
+            net::wt::WtTransport::start(net::wt::WtConfig { bind: addr, tls }, joined.inbox())
+                .map_err(io_err)?;
+        joined.add(Box::new(wt));
+        let host = if addr.ip().is_unspecified() {
+            "localhost".to_owned()
+        } else if addr.is_ipv6() {
+            format!("[{}]", addr.ip())
+        } else {
+            addr.ip().to_string()
+        };
+        let url = format!("https://{host}:{}/", up.addr.port());
+        let mut json = format!("{{\"url\":\"{url}\"");
+        self.say(&format!("listening on webtransport {url}\n"));
+        if let Some(h) = up.cert_hash {
+            let b64 = net::wt::base64(&h);
+            let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();
+            json.push_str(&format!(",\"certHashSha256Base64\":\"{b64}\""));
+            self.say(&format!(
+                "webtransport certificate (valid {} days) sha256 base64={b64} hex={hex}\n",
+                net::wt::SELF_SIGNED_DAYS
+            ));
         }
+        json.push('}');
+        if !info.is_empty() {
+            std::fs::write(&info, json).map_err(|e| format!("{info}: {e}"))?;
+        }
+        Ok(joined)
     }
 
     /// Where clients connect (the port is the real one when `net_port` was 0).
