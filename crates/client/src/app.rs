@@ -1088,6 +1088,7 @@ impl Viewer {
                 toggle_fullscreen(&st.window);
             }
             if st.renderer.is_some() && st.shell.is_none() {
+                st.roll = 0.0;
                 fly(st, &f, dt);
             }
         }
@@ -2248,6 +2249,7 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
         n.disconnect();
     }
     st.net = None;
+    st.roll = 0.0;
     st.loading = None;
     st.load_gaps = None;
     if let Some(l) = st.listen.as_mut() {

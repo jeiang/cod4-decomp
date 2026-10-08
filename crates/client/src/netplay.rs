@@ -538,7 +538,7 @@ impl NetPlay {
             );
             // The effects the followed player's guns and the map's events start are as visible to a watcher.
             self.boxes.sync(&snap);
-            let drawn = self.fx_frame(dt, st, ps.client_num, &events, eye, (yaw, pitch));
+            let drawn = self.fx_frame(dt, st, ps.client_num, &events, eye, (yaw, pitch, 0.0));
             models.extend(self.props.instances());
             models.extend(drawn.models);
             return Some(NetFrame {
@@ -643,14 +643,15 @@ impl NetPlay {
         };
         let pitch = if dead { 0.0 } else { self.angles[0] + kick[0] };
         let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
-        let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch));
+        let roll = if dead { 0.0 } else { kick[2].to_radians() };
+        let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch, roll));
         models.extend(self.props.instances());
         models.extend(drawn.models);
         Some(NetFrame {
             origin: eye,
             yaw: yaw + look.kick[1].to_radians(),
             pitch: pitch + look.kick[0].to_radians(),
-            roll: if dead { 0.0 } else { kick[2].to_radians() },
+            roll,
             models,
             sight: self.sight.clone(),
             meshes: drawn.meshes,
@@ -661,7 +662,7 @@ impl NetPlay {
     }
 
     /// Plays what `events` start and advances the effects and the props to `st`; returns what to draw from `eye`
-    /// looking along `(yaw, pitch)` radians. `own` is whose gun the first-person flash comes from.
+    /// looking along `(yaw, pitch, roll)` radians. `own` is whose gun the first-person flash comes from.
     fn fx_frame(
         &mut self,
         dt: f32,
@@ -669,7 +670,7 @@ impl NetPlay {
         own: u16,
         events: &[ClientEvent],
         eye: Vec3,
-        (yaw, pitch): (f32, f32),
+        (yaw, pitch, roll): (f32, f32, f32),
     ) -> crate::effects::Drawn {
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
@@ -729,7 +730,7 @@ impl NetPlay {
             self.sound.play_world(&s.alias, s.origin.to_array());
         }
         self.props.update(dt, self.boxes.world());
-        let drawn = self.effects.draw(eye, yaw, pitch);
+        let drawn = self.effects.draw(eye, yaw, pitch, roll);
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
         self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
