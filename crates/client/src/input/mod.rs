@@ -32,6 +32,7 @@ pub mod selftest;
 pub use cvar::Cvars;
 pub use rawmouse::RawMouse;
 
+use assets::vfs::Vfs;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use web_time::Instant;
@@ -168,6 +169,8 @@ pub struct Input {
     down: HashMap<String, Vec<String>>,
     held: HashMap<String, Held>,
     ads_toggle: bool,
+    /// The stance `goprone` / `gocrouch` latched: `buttons::PRONE`, `buttons::CROUCH` or 0. Jumping clears it.
+    stance: u32,
     pending: Vec<String>,
     /// Wheel "keys" to release after the next frame has seen them.
     wheel: Vec<String>,
@@ -197,10 +200,12 @@ impl DebugCounter {
 }
 
 impl Input {
-    /// Load the embedded default binds, then `config_path` (or the platform default, see [`config::default_path`])
-    /// if it exists. Opens the raw mouse and gamepad backends; either failing is logged, not fatal.
-    pub fn new(config_path: Option<PathBuf>) -> Self {
-        let mut i = Self::detached();
+    /// Execute the install's `default_mp.cfg` (through `vfs`, as the original does at startup), then `config_path`
+    /// (or the platform default, see [`config::default_path`]) if it exists. Opens the raw mouse and gamepad
+    /// backends; either failing is logged, not fatal.
+    pub fn new(config_path: Option<PathBuf>, vfs: Option<&Vfs>) -> Self {
+        let mut i = Self::bare();
+        i.load_defaults(vfs);
         i.mouse = RawMouse::new();
         i.pad = pad::Pad::new();
         i.config_path = config_path.or_else(config::default_path);
@@ -220,14 +225,52 @@ impl Input {
         i
     }
 
-    /// Default binds and cvars only; no devices, no file. Focused and cursor-captured.
+    /// Fallback binds and cvars only; no devices, no file, no install. Focused and cursor-captured.
     pub fn detached() -> Self {
-        let mut i = Self {
+        let mut i = Self::bare();
+        i.load_defaults(None);
+        i
+    }
+
+    /// `default_mp.cfg` from the install, or the small built-in fallback without one, then the extra binds.
+    fn load_defaults(&mut self, vfs: Option<&Vfs>) {
+        let stock = vfs.is_some_and(|v| self.exec_vfs(v, "default_mp.cfg", 0));
+        if !stock {
+            self.exec_text(include_str!("fallback_mp.cfg"), None, false, 0);
+        }
+        self.exec_text(include_str!("extra_binds.cfg"), None, false, 0);
+        self.dirty = false;
+    }
+
+    /// `exec <name>` through the search path; `false` if the file is not there. Unknown commands in it are skipped,
+    /// as when the original loads a config with commands another build lacks.
+    fn exec_vfs(&mut self, vfs: &Vfs, name: &str, depth: u32) -> bool {
+        let Ok(Some(bytes)) = vfs.read(name) else {
+            return false;
+        };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            for toks in config::split_commands(line) {
+                match (toks[0].to_ascii_lowercase().as_str(), &toks[1..]) {
+                    ("exec", [file]) if depth < MAX_EXEC_DEPTH => {
+                        if !self.exec_vfs(vfs, file, depth + 1) {
+                            eprintln!("couldn't exec {file}");
+                        }
+                    }
+                    _ => self.exec_tokens(&toks, None, false, depth),
+                }
+            }
+        }
+        true
+    }
+
+    fn bare() -> Self {
+        Self {
             cvars: Cvars::default(),
             binds: BTreeMap::new(),
             down: HashMap::new(),
             held: HashMap::new(),
             ads_toggle: false,
+            stance: 0,
             pending: Vec::new(),
             wheel: Vec::new(),
             mouse: RawMouse::detached(),
@@ -238,10 +281,7 @@ impl Input {
             config_path: None,
             dirty: false,
             debug: None,
-        };
-        i.exec_text(include_str!("default_mp.cfg"), None, false, 0);
-        i.dirty = false;
-        i
+        }
     }
 
     /// Tell the input whether the cursor is grabbed. Mouse look only applies while it is.
@@ -327,6 +367,12 @@ impl Input {
         } else {
             1.0
         };
+        if ["gostand", "moveup"]
+            .iter()
+            .any(|c| self.held.get(*c).is_some_and(|h| h.count > 0 || h.tapped))
+        {
+            self.stance = 0;
+        }
         let held = |c: &str| self.held.get(c).is_some_and(|h| h.count > 0 || h.tapped);
         let axis = |pos: &str, neg: &str| f32::from(i8::from(held(pos)) - i8::from(held(neg)));
 
@@ -342,7 +388,7 @@ impl Input {
         pitch -= ry * cv.f32("in_gamepad_pitchrate") * dt * invert;
 
         let walk = if cv.bool("cl_run") { 1.0 } else { 0.5 };
-        let mut buttons = self.ads_toggle as u32 * buttons::ADS;
+        let mut buttons = self.ads_toggle as u32 * buttons::ADS | self.stance;
         let mut held_other = Vec::new();
         for (name, h) in &self.held {
             if h.count > 0 || h.tapped {
@@ -493,6 +539,9 @@ impl Input {
             ("bind" | "unbind" | "unbindall" | "set" | "seta" | "sets" | "setu" | "exec", _) => {
                 eprintln!("bad arguments: {}", config::join(toks));
             }
+            // The stock stance keys: press again to get back up.
+            ("goprone", []) if sink => self.toggle_stance(buttons::PRONE),
+            ("gocrouch", []) if sink => self.toggle_stance(buttons::CROUCH),
             ("+actionslot", _) if sink => {
                 self.pending.push(config::join(toks).replacen('+', "", 1))
             }
@@ -502,6 +551,10 @@ impl Input {
             _ if sink => self.pending.push(config::join(toks)),
             _ => {}
         }
+    }
+
+    fn toggle_stance(&mut self, stance: u32) {
+        self.stance = if self.stance == stance { 0 } else { stance };
     }
 
     /// `+cmd` / `-cmd` typed rather than bound: held until the matching `-cmd`.
@@ -660,6 +713,7 @@ mod tests {
     #[test]
     fn two_keys_one_command_hold_until_both_up() {
         let mut i = Input::detached();
+        i.exec_line("bind ctrl \"+movedown\"; bind c \"+movedown\"");
         i.key("ctrl", true);
         i.key("c", true);
         i.key("ctrl", false);
@@ -793,19 +847,62 @@ mod tests {
         assert_eq!(frame(&mut i).look_delta_yaw, 0.0);
     }
 
-    /// The d-pad HUD and the Controls menu look keys up by the exact command `+actionslot N`.
+    /// An input that executed the install's `default_mp.cfg`; `None` (skip) without `COD4_PATH`.
+    fn stock_input() -> Option<Input> {
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; skipping");
+            return None;
+        };
+        let install = server::content::Install::open(Path::new(&root)).unwrap();
+        let mut i = Input::bare();
+        i.load_defaults(Some(&install.vfs));
+        Some(i)
+    }
+
+    /// The d-pad HUD and the Controls menu look keys up by the exact command `+actionslot N`; the keys are whatever
+    /// the install's own config binds.
     #[test]
-    fn action_slots_have_stock_default_keys_and_rebind() {
-        let mut i = Input::detached();
-        for (slot, key) in [(1, "n"), (2, "7"), (3, "5"), (4, "6")] {
-            assert_eq!(i.binding_keys(&format!("+actionslot {slot}")), [key]);
+    fn action_slots_come_from_the_stock_config_and_rebind() {
+        let Some(mut i) = stock_input() else { return };
+        for slot in 1..=4 {
+            let keys = i.binding_keys(&format!("+actionslot {slot}"));
+            assert_eq!(keys.len(), 1, "slot {slot}: {keys:?}");
         }
-        i.key("6", true);
+        let key6 = i.binding_keys("+actionslot 4")[0].to_owned();
+        i.key(&key6, true);
         assert_eq!(frame(&mut i).pending_commands, ["actionslot 4"]);
+        // The use key the cursor hint shows, and the stock stance toggles.
+        assert_eq!(i.binding_keys("+activate")[0], "f");
+        assert_eq!(i.bound("ctrl"), Some("goprone"));
         // What the menu's bind capture executes.
-        i.exec_line("unbind \"n\"");
+        let key1 = i.binding_keys("+actionslot 1")[0].to_owned();
+        i.exec_line(&format!("unbind \"{key1}\""));
         i.exec_line("bind \"h\" \"+actionslot 1\"");
         assert_eq!(i.binding_keys("+actionslot 1"), ["h"]);
+        // Binds and cvars the profile config writes back are the stock ones plus the changes.
+        let text = i.config_text();
+        let mut b = Input::bare();
+        b.exec_text(&text, None, false, 0);
+        assert_eq!(b.binding_keys("+actionslot 1"), ["h"]);
+    }
+
+    #[test]
+    fn stock_stance_keys_latch_and_jump_stands() {
+        let Some(mut i) = stock_input() else { return };
+        i.key("ctrl", true);
+        i.key("ctrl", false);
+        assert_eq!(frame(&mut i).buttons, buttons::PRONE);
+        assert_eq!(frame(&mut i).buttons, buttons::PRONE);
+        i.key("c", true);
+        i.key("c", false);
+        assert_eq!(frame(&mut i).buttons, buttons::CROUCH);
+        i.key("c", true);
+        i.key("c", false);
+        assert_eq!(frame(&mut i).buttons, 0);
+        i.key("ctrl", true);
+        i.key("ctrl", false);
+        i.key("space", true);
+        assert_eq!(frame(&mut i).buttons & buttons::PRONE, 0);
     }
 
     #[test]
@@ -913,7 +1010,10 @@ mod tests {
 
     #[test]
     fn real_devices_start_with_the_pointer_free() {
-        let mut i = Input::new(Some(std::env::temp_dir().join("cod4e-no-such-config.cfg")));
+        let mut i = Input::new(
+            Some(std::env::temp_dir().join("cod4e-no-such-config.cfg")),
+            None,
+        );
         assert_eq!(i.look_gate(), Some("pointer free"));
         i.mouse.winit_motion((10.0, 10.0));
         assert_eq!(frame(&mut i).look_delta_yaw, 0.0);
