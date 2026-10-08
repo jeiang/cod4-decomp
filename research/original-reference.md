@@ -97,3 +97,43 @@ to x~713: Choose Class 475, Change Team 528, Controls 582, Options 634, (gap), C
 763, Leave Game 815. Team emblem + name at left, map plate + minimap at right, Back at the bottom.
 Escape toggles: in the game it opens this menu; in this menu it closes it (back to the game).
 `Change Team` opens the team screen above; Escape there returns to the game.
+
+## Running the original with a mouse-driven walk (notes for repeating)
+- The first launch shows two Windows dialogs (safe mode after a crash kill; "Set Optimal Settings?"): answer No to both.
+- `+devmap mp_backlot +set g_gametype war` on the command line goes straight to CHOOSE TEAM after the map loads.
+- Loading screen: map-photo background, centred three lines "Team Deathmatch" / "Backlot" / "Setting up game.." (pixel
+  font, white with shadow, y 170..300), a boxed "INTEL" tip panel bottom-left (x 320..955, y 595..900; header
+  "INTEL" gold, body white; one tip was about Create-a-class), a white progress bar below it (x 670..1255, y~972).
+- In-game the console treats lines as chat unless they are known commands typed with the console already open.
+  Bare dvar names or `scr_testclients 6` are sent as chat ("<name>: text" in the top-left chat feed, small white
+  text starting x~12,y~230).
+- `scr_testclients N` (set before `devmap`, at run time, with `developer 1`, `sv_cheats 1`) did **not** add bots
+  in this 1.7 retail install, and `addtestclient` is not a console command. No bots were obtained this way (see
+  open questions).
+- Two cursors can be on screen at once in `grim -c` shots: the game's own arrow (grey, ~25 px) and the OS
+  pointer (a small blue-grey arrow/hand drawn by the compositor) when the OS pointer is not hidden.
+
+## In-game HUD, class Assault, TDM, just after spawn (priority e, partial)
+Positions in 1920x1060 px.
+- Spawn splash, top centre: line 1 "Tied 0 - 0" (yellow, y~26), line 2 big pixel-font text "Marine Force Recon"
+  (white, y~100, ~45 px tall), team emblem under it (y~195, ~75 px wide). It fades after a few seconds.
+- Minimap, top left: framed square (x 12..245, y 37..266) with a compass-letter strip above it (N NE E SE S as
+  you turn). Player is a yellow arrow in the centre.
+- Bottom left: team emblem in a circle (x 10..100, y 940..1040) and two score bars (own team, enemy) with
+  numeric 0 / 0 and a small triangle marker at the bar end; round timer to its right ("9:24", x~373, y~1015,
+  white).
+- Bottom centre-left, two action/equipment slots at y~975..1020: a **grenade-launcher (underbarrel) icon**
+  with the count `2` to its right and the key label `[5]` under it (grey, bracketed) at x~795; a second icon
+  (a claymore/NVG style glyph) with label `[N]` at x~960 (no count).
+- Bottom right, grenade slots: a triangle badge holding the frag grenade icon with `1` right of it, then a
+  round "radar ring" badge holding the special-grenade (stun) icon with `1` right of it (x 1800..1900,
+  y~980); under them the ammo clip bar (thin ticked bar, x 1725..1845) and ammo count `60` big at the right end
+  (y~1012).
+- Right side, perk notices: two lines right-aligned to x~1830 with a rounded-square icon at the far right:
+  "Stopping Power" (y~755, red icon) and "Extreme Conditioning" (y~825, green running icon).
+- Bottom edge: a thin compass tick strip along the very bottom.
+- Scoreboard (hold Tab): a header strip at the top ("<own team emblem> 0", "<enemy emblem> 0", centre
+  gametype "Team Deathmatch" or, after a while, "Tied with 0 of 750 points.", timer top right); a panel
+  at x~415..1500: team row "Marines  ( 1 )" with column headers Score, Kills, Assists, Deaths, Ping
+  (x 985, 1120, 1228, 1335, 1448), player row with a rank icon + level, highlighted bar; then "OpFor ( 0 )". Bottom
+  left server name, bottom right "Listen Server".

@@ -3,7 +3,7 @@ const HOST = process.env.ORIG_HOST;
 const Y = process.env.ORIG_YDOTOOL ?? "ydotool", G = process.env.ORIG_GRIM ?? "grim";
 const D = process.env.ORIG_EVIDENCE ?? `${process.env.HOME}/cod4e-evidence/original-ref/`;
 const ENV = `export HYPRLAND_INSTANCE_SIGNATURE=$(ls /run/user/1000/hypr | head -1) WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 YDOTOOL_SOCKET=/run/user/1000/.ydotool_socket; Y=${Y}; `;
-globalThis.D = D;
+globalThis.D = D; globalThis.ENV = ENV;
 globalThis.sh = async (c) => { const p = Bun.spawn(["ssh", HOST, "bash -s"], { stdin: new Blob([c]), stdout: "pipe", stderr: "pipe" }); const [o, e] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]); await p.exited; return (o + e).trim(); };
 globalThis.hc = (c) => sh(`${ENV} hyprctl ${c}`);
 globalThis.focus = () => hc(`dispatch 'hl.dsp.focus({window="class:iw3mp.exe"})'`);
