@@ -59,6 +59,14 @@ impl<T: Transport> NetClient<T> {
         }
     }
 
+    /// [`NetClient::ui`] for readers that only look.
+    pub fn ui_ref(&self) -> Option<&ClientUiState> {
+        match &self.phase {
+            Phase::Playing(l) => Some(&l.ui),
+            _ => None,
+        }
+    }
+
     /// What the server told the user interface, once connected (see [`crate::ui`]).
     pub fn ui(&mut self) -> Option<&mut ClientUiState> {
         match &mut self.phase {

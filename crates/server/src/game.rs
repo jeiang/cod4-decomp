@@ -661,6 +661,8 @@ impl Game {
         let north = get(world, "northyaw").unwrap_or("");
         self.set_configstring(cs::NORTHYAW, if north.is_empty() { "0" } else { north });
         self.level.north_yaw = cvar::parse_float(north);
+        let gametype = self.cvars.string("g_gametype").to_ascii_lowercase();
+        self.set_configstring(cs::GAMETYPE, &gametype);
         if let Some(clip) = self.content.clipmap() {
             self.world = Some(World::new(clip.clone()));
         }

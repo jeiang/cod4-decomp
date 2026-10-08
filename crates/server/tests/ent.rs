@@ -529,3 +529,32 @@ fn a_linked_player_is_carried_by_its_parent_and_leaves_in_place() {
     assert_eq!(g.client(n).unwrap().ps.pm_type, PmType::Normal);
     assert!(near(g.client(n).unwrap().ps.origin, [10.0, 0.0, 500.0]));
 }
+
+#[test]
+fn the_players_state_carries_health_and_its_cap_for_the_hud() {
+    use gsc::{Builtins, Options, Vm, compile};
+    use sim::pm::PmType;
+    let Some(mut s) = boot() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let prog = compile(
+        &[("t.gsc", "main() {}")],
+        &Builtins::stock_mp(),
+        Options::default(),
+    )
+    .unwrap();
+    let mut vm = Vm::new(prog).unwrap();
+    let g = &mut s.game;
+    let n = g.connect_client(&mut vm, true, "hurt").expect("slot");
+    g.client_mut(n).unwrap().session = server::client::Session::Playing;
+    g.client_mut(n).unwrap().max_health = 150;
+    g.ent_mut(n).unwrap().health = 40;
+    g.client_end_frame(&mut vm, n);
+    let ps = &g.client(n).unwrap().ps;
+    assert_eq!((ps.health, ps.max_health), (40, 150));
+    g.ent_mut(n).unwrap().health = -5;
+    g.client_end_frame(&mut vm, n);
+    assert_eq!(g.client(n).unwrap().ps.health, -5);
+    assert_eq!(g.client(n).unwrap().ps.pm_type, PmType::Dead);
+}

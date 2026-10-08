@@ -51,6 +51,8 @@ pub mod cs {
     pub const LOCALIZED_COUNT: u16 = 512;
     pub const AMBIENT: u16 = 821;
     pub const NORTHYAW: u16 = 822;
+    /// `"<material>" <upper left x> <y> <lower right x> <y>`, set by the map script's `setMiniMap`.
+    pub const MINIMAP: u16 = 823;
     pub const MODELS: u16 = 830;
     pub const MODELS_COUNT: u16 = 512;
     /// Menus registered with `precachemenu`.

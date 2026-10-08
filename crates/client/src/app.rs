@@ -396,6 +396,12 @@ impl Viewer {
         {
             sh.open(&mut input, "main");
         }
+        // A match started from the command line is a match in progress: the HUD menus draw.
+        if net.is_some()
+            && let Some(sh) = shell.as_mut()
+        {
+            sh.st.in_game = true;
+        }
         let want_video = self.cli.video && self.cli.flythrough;
         if want_video && !copy_src {
             notes.push("surface cannot be copied from; no video".into());
@@ -564,6 +570,8 @@ impl Viewer {
                 for ev in net.take_ui_events() {
                     sh.apply(&mut st.input, ev);
                 }
+                let now = sh.now_ms();
+                net.fill_game_facts(&mut sh.st.game, now);
                 let scores = f.held_other.iter().any(|c| c == "scores");
                 if scores != sh.st.game.scoreboard {
                     sh.st.game.scoreboard = scores;
@@ -718,9 +726,10 @@ impl Viewer {
                 &out.join(format!("{name}.png")),
             )
             .is_ok();
+            let hud = st.shell.as_ref().map(|s| s.st.game.hud.report());
             if let Some(sc) = st.script.as_mut() {
                 sc.results
-                    .push(json!({"step": format!("shot={name}"), "ok": ok}));
+                    .push(json!({"step": format!("shot={name}"), "ok": ok, "hud": hud}));
                 sc.index += 1;
                 sc.began = Instant::now();
             }
@@ -734,6 +743,7 @@ impl Viewer {
                 "steps": sc.results,
                 "missing_images": st.shell.as_ref().map(|s| s.missing().to_vec()),
                 "net": st.net.as_mut().map(NetPlay::report),
+                "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
             });
             let _ = std::fs::write(
                 out.join("ui-script.json"),
@@ -926,6 +936,17 @@ fn script_step(st: &mut State) -> bool {
             let ok = sh.click(&mut st.input, arg);
             let open = sh.ui.open_menus().join(",");
             done(ok, sc, format!("open: {open}"));
+        }
+        "open" | "close" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            if key == "open" {
+                sh.open(&mut st.input, arg);
+            } else {
+                sh.close_by_name(&mut st.input, arg);
+            }
+            done(true, sc, format!("open: {}", sh.ui.open_menus().join(",")));
         }
         "wait" => {
             if waited >= arg.parse::<f32>().unwrap_or(1.0) {
@@ -1137,6 +1158,7 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
     release_pointer(st);
     if let Some(sh) = st.shell.as_mut() {
         sh.st.in_game = false;
+        sh.st.game.hud.live = false;
         sh.close_all(&mut st.input);
         sh.open(&mut st.input, "main");
     }

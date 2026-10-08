@@ -83,6 +83,33 @@ fn verdict(report: &Value) -> Option<String> {
     if report["net"]["spawned"] != Value::Bool(true) {
         return Some("the player never spawned (left floating as a spectator)".into());
     }
+    hud_problem(&report["hud"])
+}
+
+/// What a spawned player's HUD must have: health replicated from the server, the weapon's ammunition, the map
+/// image the minimap draws, and the stock owner-draw pieces (low-health overlay, magazine, compass) actually drawn.
+fn hud_problem(hud: &Value) -> Option<String> {
+    if hud["live"] != Value::Bool(true) {
+        return Some("the HUD facts never went live".into());
+    }
+    if hud["health"].as_i64().unwrap_or(0) <= 0 || hud["max_health"].as_i64().unwrap_or(0) <= 0 {
+        return Some(format!(
+            "health did not reach the client ({} of {})",
+            hud["health"], hud["max_health"]
+        ));
+    }
+    if hud["weapon"]["clip"].as_i64().unwrap_or(-1) <= 0 {
+        return Some("the HUD has no ammunition for the held weapon".into());
+    }
+    if hud["map"].as_str().is_none_or(str::is_empty) {
+        return Some("the map's minimap (setMiniMap) never reached the client".into());
+    }
+    // Overlay, magazine graphic, minimap image, player arrow.
+    for id in ["112", "117", "159", "150"] {
+        if hud["drawn"][id].as_u64().unwrap_or(0) == 0 {
+            return Some(format!("owner-draw {id} never drew"));
+        }
+    }
     None
 }
 
@@ -125,4 +152,32 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         out.reason = Some(problems.join("; "));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn good() -> Value {
+        json!({"live": true, "health": 100, "max_health": 100, "weapon": {"clip": 30},
+            "map": "compass_map_mp_crash", "drawn": {"112": 5, "117": 5, "159": 5, "150": 5}})
+    }
+
+    #[test]
+    fn a_working_hud_passes_and_each_missing_piece_is_named() {
+        assert_eq!(hud_problem(&good()), None);
+        let mut h = good();
+        h["health"] = json!(0);
+        assert!(hud_problem(&h).unwrap().contains("health"));
+        let mut h = good();
+        h["map"] = Value::Null;
+        assert!(hud_problem(&h).unwrap().contains("minimap"));
+        let mut h = good();
+        h["drawn"] = json!({"112": 5, "117": 5, "150": 5});
+        assert!(hud_problem(&h).unwrap().contains("159"));
+        let mut h = good();
+        h["weapon"]["clip"] = json!(0);
+        assert!(hud_problem(&h).unwrap().contains("ammunition"));
+    }
 }

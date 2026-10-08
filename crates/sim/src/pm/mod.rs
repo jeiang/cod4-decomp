@@ -56,6 +56,7 @@ pub use mantle::{
     weapon_inactive,
 };
 pub use params::{Params, WeaponMove};
+pub use sprint::{max_sprint_ms, sprint_left_ms};
 pub use state::*;
 
 use crate::Vec3;

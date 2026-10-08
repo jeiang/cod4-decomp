@@ -87,6 +87,8 @@ pub struct GameFacts {
     pub ping: i32,
     pub clip_ammo: i32,
     pub intermission: bool,
+    /// What the HUD owner-draws read.
+    pub hud: crate::hudstate::HudFacts,
 }
 
 /// Number of persistent stats the original keeps.
@@ -210,6 +212,11 @@ impl Shell {
         };
         shell.ui.cursor_visible = true;
         Ok(shell)
+    }
+
+    /// The clock the menus and the HUD run on, in milliseconds.
+    pub fn now_ms(&self) -> i32 {
+        self.st.started.elapsed().as_millis() as i32
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -468,7 +475,11 @@ impl World for HostCx<'_> {
         self.st.game.time_left
     }
     fn gametype(&self) -> String {
-        self.st.game.gametype.clone()
+        if self.st.game.gametype.is_empty() {
+            self.dvar_get("g_gametype")
+        } else {
+            self.st.game.gametype.clone()
+        }
     }
     fn key_binding(&self, cmd: &str) -> String {
         self.input
@@ -476,8 +487,11 @@ impl World for HostCx<'_> {
             .first()
             .map_or_else(|| "KEY_UNBOUND".to_owned(), |k| k.to_ascii_uppercase())
     }
-    fn hud_fade(&self, _: HudFade) -> f32 {
-        1.0
+    fn hud_fade(&self, f: HudFade) -> f32 {
+        crate::ownerdraw::menu_fade(&self.st.game.hud, &self.input.cvars, f)
+    }
+    fn selecting_location(&self) -> bool {
+        self.st.game.hud.selecting_location
     }
     fn is_intermission(&self) -> bool {
         self.st.game.intermission
@@ -635,6 +649,9 @@ impl Host for HostCx<'_> {
         color: [f32; 4],
         text: &str,
     ) {
+        if crate::ownerdraw::draw(self, ui, p, d, rect, color) {
+            return;
+        }
         match d.window.owner_draw {
             245 => {
                 let t = self
