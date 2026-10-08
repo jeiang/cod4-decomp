@@ -1471,6 +1471,7 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
         "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
         "map": st.map_name,
         "load": st.load_report,
+        "objectives": {"plants": listen::objectives().0, "defuses": listen::objectives().1},
     });
     let _ = std::fs::create_dir_all(&out);
     let _ = std::fs::write(

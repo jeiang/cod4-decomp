@@ -49,6 +49,14 @@ pub fn free_standard_port() -> u16 {
 /// Console lines for the running listen server (the harness's `server=` steps), run between its frames.
 static CONSOLE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+/// The objective counters of the running listen server, as of its last frame batch.
+static OBJECTIVES: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
+
+/// Bombs planted and defused so far.
+pub fn objectives() -> (u64, u64) {
+    OBJECTIVES.lock().map_or((0, 0), |o| *o)
+}
+
 /// Queues `line` for the listen server's console.
 pub fn send(line: &str) {
     if let Ok(mut q) = CONSOLE.lock() {
@@ -184,6 +192,9 @@ fn run(
             let _ = server.exec_line(&line);
         }
         server.run_for(Duration::from_millis(100));
+        if let Ok(mut o) = OBJECTIVES.lock() {
+            *o = (server.game.stats.plants, server.game.stats.defuses);
+        }
         if let Some((n, c)) = server.game.connected_clients().find(|(_, c)| !c.bot) {
             person = json!({
                 "slot": n, "shots": c.shots, "hits": c.hits,

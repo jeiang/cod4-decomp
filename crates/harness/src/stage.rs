@@ -198,7 +198,7 @@ pub static STAGES: &[StageDef] = &[
         description: "the real client plays Search and Destroy: the zone's hint is drawn and the player plants the bomb holding +activate",
         needs_install: false,
         timeout: Duration::from_secs(6 * MINUTES),
-        default: false,
+        default: true,
         kind: Kind::Builtin(crate::stages::client_objective::run),
     },
     StageDef {

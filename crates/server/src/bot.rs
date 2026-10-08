@@ -163,6 +163,12 @@ impl Brain {
             self.finish(&mut cmd, delta);
             return cmd;
         }
+        // `bot_idle`: bots stand where they are (a stage that needs a quiet round).
+        if g.cvars.bool("bot_idle") {
+            self.yaw = c.ps.viewangles[1];
+            self.finish(&mut cmd, delta);
+            return cmd;
+        }
         if self.spawn_time < 0 {
             self.spawn_time = time;
             self.yaw = c.ps.viewangles[1];

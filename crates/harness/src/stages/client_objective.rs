@@ -12,10 +12,10 @@ use std::time::Duration;
 
 const NAME: &str = "client-objective";
 const LIMIT: Duration = Duration::from_secs(240);
-const ARGS: &[&str] = &["--listen", "--gametype", "sd", "--bots", "6"];
+const ARGS: &[&str] = &["--listen", "--gametype", "sd", "--bots", "4"];
 // The attackers' bomb zone and the bomb itself; the player's team may be the defenders, in which case the
 // server refuses the move and the run reports it.
-const STEPS: &str = "ingame=120,wait=12,server=devtele human sd_bomb_pickup,wait=2,\
+const STEPS: &str = "ingame=120,server=set bot_idle 1,wait=1,server=devtele human sd_bomb_pickup,wait=3,\
 server=devtele human bombzone,wait=2,set=+activate,wait=2,shot=hint,wait=8,set=-activate,wait=1";
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -46,11 +46,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut out = out;
     out.files.push("plant/ui-script.json".into());
     out.files.push("plant/hint.png".into());
-    let server: serde_json::Value = std::fs::read(dir.join("client.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
-    let plants = server["server"]["stats"]["plants"].as_u64().unwrap_or(0);
+    let plants = report["objectives"]["plants"].as_u64().unwrap_or(0);
     let drawn = report["hud"]["drawn"]["72"].as_u64().unwrap_or(0);
     out.metrics.insert("plants".into(), plants as f64);
     out.metrics.insert("hint_draws".into(), drawn as f64);

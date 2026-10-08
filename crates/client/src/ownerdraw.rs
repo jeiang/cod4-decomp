@@ -231,7 +231,9 @@ pub fn draw(
     let use_key = ui.localize_key(&cx.key_binding("+activate"));
     let objectives = cx.st.live.objectives.clone();
     let h = &mut cx.st.game.hud;
-    *h.drawn.entry(id).or_default() += 1;
+    if id != 72 {
+        *h.drawn.entry(id).or_default() += 1;
+    }
     let mut dc = Dc {
         ui,
         p,
@@ -820,6 +822,7 @@ fn cursor_hint(dc: &mut Dc, h: &mut HudFacts, key: &str) {
     let Some(fade) = hudstate::fade_color(h.now, h.cursor_hint_time, 100, 100) else {
         return;
     };
+    *h.drawn.entry(72).or_default() += 1;
     let mut color = with_alpha(dc.color, dc.color[3] * fade);
     let pulse = (h.now as f32 / 150.0).sin() * 0.5 + 0.5;
     if mode == 3 {

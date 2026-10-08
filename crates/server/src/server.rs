@@ -169,6 +169,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_password", "", 0),
         ("g_speed", "190", 0),
         ("g_lagcomp", "1", 0),
+        ("bot_idle", "0", 0),
         ("g_useholdtime", "0", 0),
         ("g_useholdspawndelay", "500", 0),
         ("g_gravity", "800", 0),
