@@ -4,6 +4,7 @@
 
 mod app;
 mod compass;
+mod crosshair;
 mod decal;
 mod display;
 mod effects;
