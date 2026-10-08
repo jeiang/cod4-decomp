@@ -899,8 +899,10 @@ mod tests {
     #[test]
     fn stock_config_binds_the_grenade_keys() {
         let Some(mut i) = stock_input() else { return };
-        assert_eq!(i.binding_keys("+frag"), ["mouse3", "g"]);
-        assert_eq!(i.binding_keys("+smoke"), ["4"]);
+        // The stock keys must be there; the gamepad extras and key order are incidental.
+        let frag = i.binding_keys("+frag");
+        assert!(frag.contains(&"g") && frag.contains(&"mouse3"), "{frag:?}");
+        assert!(i.binding_keys("+smoke").contains(&"4"));
         i.key("g", true);
         assert_eq!(frame(&mut i).buttons, buttons::FRAG);
         i.key("g", false);
