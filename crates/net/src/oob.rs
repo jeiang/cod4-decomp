@@ -30,6 +30,37 @@ pub enum Oob {
     InfoResponse(Vec<(String, String)>),
     Disconnect,
     Error(String),
+    /// `rcon <password> <command>`: run a console command on the server (see the server's
+    /// `rcon_password`).
+    Rcon {
+        password: String,
+        command: String,
+    },
+    /// `print\n<text>`: console output the server redirected to the sender of an `rcon`.
+    Print(String),
+}
+
+/// Most text one [`Oob::Print`] carries (`SV_FlushRedirect`); longer output is sent in pieces.
+pub const PRINT_CHUNK: usize = 1294;
+
+impl Oob {
+    /// `text` as the [`Oob::Print`] packets that carry it, each at most [`PRINT_CHUNK`] bytes
+    /// (cut on a character boundary). Empty text still gives one packet: the sender is waiting.
+    pub fn print_chunks(text: &str) -> Vec<Oob> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while rest.len() > PRINT_CHUNK {
+            let mut cut = PRINT_CHUNK;
+            while !rest.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let (head, tail) = rest.split_at(cut);
+            out.push(Oob::Print(head.to_owned()));
+            rest = tail;
+        }
+        out.push(Oob::Print(rest.to_owned()));
+        out
+    }
 }
 
 fn quote(s: &str) -> String {
@@ -95,6 +126,8 @@ impl Oob {
             }
             Oob::Disconnect => "disconnect".to_owned(),
             Oob::Error(e) => format!("error {e}"),
+            Oob::Rcon { password, command } => format!("rcon {} {command}", quote(password)),
+            Oob::Print(t) => format!("print\n{t}"),
         };
         let mut v = OOB_MARKER.to_le_bytes().to_vec();
         v.extend_from_slice(text.as_bytes());
@@ -106,9 +139,12 @@ impl Oob {
         if !is_oob(packet) {
             return None;
         }
-        let text = std::str::from_utf8(&packet[4..])
-            .ok()?
-            .trim_end_matches(['\0', '\n']);
+        let text = std::str::from_utf8(&packet[4..]).ok()?;
+        // Output keeps its own trailing newlines.
+        if let Some(t) = text.strip_prefix("print\n") {
+            return Some(Oob::Print(t.trim_end_matches('\0').to_owned()));
+        }
+        let text = text.trim_end_matches(['\0', '\n']);
         let (cmd, rest) = text.split_once(' ').unwrap_or((text, ""));
         Some(match cmd {
             "getchallenge" => Oob::GetChallenge,
@@ -135,6 +171,18 @@ impl Oob {
             }
             "disconnect" => Oob::Disconnect,
             "error" => Oob::Error(rest.to_owned()),
+            "rcon" => {
+                let rest = rest.trim_start();
+                // The password is one word, quoted or not; the command is everything after it.
+                let (password, command) = match rest.strip_prefix('"') {
+                    Some(q) => q.split_once('"').unwrap_or((q, "")),
+                    None => rest.split_once(char::is_whitespace).unwrap_or((rest, "")),
+                };
+                Oob::Rcon {
+                    password: password.to_owned(),
+                    command: command.trim_start().to_owned(),
+                }
+            }
             _ => return None,
         })
     }
@@ -205,6 +253,11 @@ mod tests {
             ]),
             Oob::Disconnect,
             Oob::Error("Server is full.".into()),
+            Oob::Rcon {
+                password: "pass word".into(),
+                command: "set a \"b c\"; status".into(),
+            },
+            Oob::Print("line one\nline two\n".into()),
         ] {
             let parsed = Oob::parse(&o.encode()).unwrap();
             let expect = match &o {
@@ -219,6 +272,34 @@ mod tests {
             };
             assert_eq!(parsed, expect);
         }
+    }
+
+    #[test]
+    fn rcon_takes_an_unquoted_password_and_keeps_the_command_whole() {
+        let mut p = OOB_MARKER.to_le_bytes().to_vec();
+        p.extend_from_slice(b"rcon secret  kick  \"Mr X\"\n");
+        assert_eq!(
+            Oob::parse(&p),
+            Some(Oob::Rcon {
+                password: "secret".into(),
+                command: "kick  \"Mr X\"".into()
+            })
+        );
+    }
+
+    #[test]
+    fn long_output_is_cut_into_packets_that_join_back_to_the_text() {
+        let text: String = "é0123456789\n".repeat(400);
+        let chunks = Oob::print_chunks(&text);
+        assert!(chunks.len() > 1);
+        let mut joined = String::new();
+        for c in &chunks {
+            let Oob::Print(t) = c else { panic!() };
+            assert!(t.len() <= PRINT_CHUNK);
+            joined.push_str(t);
+        }
+        assert_eq!(joined, text);
+        assert_eq!(Oob::print_chunks(""), vec![Oob::Print(String::new())]);
     }
 
     #[test]

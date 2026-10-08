@@ -154,6 +154,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_objective::run),
     },
     StageDef {
+        name: "net-rcon",
+        description: "a UDP socket administers the server with rcon: bad password refused, status/set/say/kick/unbanUser/banClient run and answered in print packets, rate limited, bans enforced at connect and persisted",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_rcon::run),
+    },
+    StageDef {
         name: "net-vote",
         description: "two real UDP clients vote: a kick vote drops one, a typemap vote changes the gametype and map",
         needs_install: false,

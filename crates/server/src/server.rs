@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, compile};
 
+use crate::ban::BanList;
 use crate::bot::{BotShared, Brain};
 use crate::client::Conn;
 use crate::cmd::{Argv, CommandBuffer, split_commands};
@@ -21,6 +22,7 @@ use crate::content::{Content, Install};
 use crate::cvar::{self, Cvars};
 use crate::game::{self, Game};
 use crate::netsv::{Inbound, NetSv};
+use crate::rcon::{self, Throttle, Verdict};
 use crate::script::{Dispatch, ScriptHost};
 use net::Transport;
 
@@ -106,7 +108,6 @@ const CLIENT_ONLY: &[&str] = &[
     "unbindall",
     "bindlist",
     "seta_noop",
-    "setfromdvar",
     "exec_noop",
 ];
 
@@ -156,6 +157,11 @@ pub struct Server {
     bot_target: usize,
     bot_serial: u32,
     bot_shared: BotShared,
+    /// While set, console output is collected here instead of printed (`rcon` replies).
+    redirect: Option<String>,
+    rcon_throttle: Throttle,
+    /// Lines typed on the server's own terminal (see [`Self::attach_console`]).
+    console: Option<std::sync::mpsc::Receiver<String>>,
 }
 
 fn register_core_dvars(c: &mut Cvars) {
@@ -192,6 +198,12 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_inactivity", "0", 0),
         ("g_synchronousClients", "0", SYSTEMINFO),
         ("sv_cheats", "0", 0),
+        // Remote console: empty switches `rcon` off.
+        ("rcon_password", "", 0),
+        // Seconds `kick` and `tempBanClient` keep a player out (0-3600).
+        ("sv_kickBanTime", "300", ARCHIVE),
+        // Where `banUser` / `banClient` keep the permanent bans.
+        ("sv_banFile", "ban.txt", 0),
         ("sv_mapRotation", "", 0),
         ("sv_mapRotationCurrent", "", 0),
         ("nextmap", "map_restart", 0),
@@ -261,6 +273,9 @@ impl Server {
             bot_target: 0,
             bot_serial: 0,
             bot_shared: BotShared::default(),
+            redirect: None,
+            rcon_throttle: Throttle::default(),
+            console: None,
         };
         s.say("CoD4 MP headless server (cod4e)\n");
         s.say(&format!(
@@ -324,7 +339,8 @@ impl Server {
             let _ = wt;
             Box::new(udp)
         };
-        let n = NetSv::new(t, max.clamp(1, 64));
+        let mut n = NetSv::new(t, max.clamp(1, 64));
+        n.bans = BanList::load(PathBuf::from(self.game.cvars.string("sv_banFile")));
         self.say(&format!(
             "listening on udp port {}\n",
             n.local_addr().port()
@@ -411,8 +427,14 @@ impl Server {
             return;
         };
         let info = self.server_info();
+        let mut remote = Vec::new();
         for i in net.poll(wait, &|| info.clone()) {
             match i {
+                Inbound::Rcon {
+                    from,
+                    password,
+                    command,
+                } => remote.push((from, password, command)),
                 Inbound::Connect(req) => self.net_accept(&mut net, &req),
                 Inbound::Left(addr) => {
                     if let Some(slot) = net.slot_of(addr) {
@@ -438,6 +460,52 @@ impl Server {
             self.begin_client(slot);
         }
         self.net = Some(net);
+        // Commands may kick, ban or change the map, which need the network back in place.
+        for (from, password, command) in remote {
+            self.remote_command(from, &password, &command);
+        }
+    }
+
+    /// `rcon <password> <command>` from `from`: the password is checked, the attempt logged, the
+    /// commands run now with their console output sent back as print packets.
+    fn remote_command(&mut self, from: SocketAddr, password: &str, command: &str) {
+        if !self.rcon_throttle.allow(Instant::now()) {
+            return;
+        }
+        let verdict = rcon::check(self.game.cvars.string("rcon_password"), password);
+        let bad = if verdict == Verdict::Granted {
+            ""
+        } else {
+            "Bad "
+        };
+        self.say(&format!("{bad}Rcon from {from}:\n{command}\n"));
+        self.redirect = Some(String::new());
+        match verdict {
+            Verdict::Disabled => {
+                self.say("The server must set 'rcon_password' for clients to use 'rcon'.\n");
+            }
+            Verdict::Missing => self.say("You must give the password: rcon <password> <command>\n"),
+            Verdict::Wrong => self.say("Invalid password.\n"),
+            Verdict::Granted => {
+                for line in split_commands(command) {
+                    if let Err(e) = self.exec_command(&crate::cmd::tokenize(&line)) {
+                        self.say(&format!("{e}\n"));
+                    }
+                    self.flush_game_output();
+                }
+            }
+        }
+        let out = self.redirect.take().unwrap_or_default();
+        if let Some(net) = self.net.as_mut() {
+            for p in net::Oob::print_chunks(&out) {
+                net.t.send_to(from, &p.encode());
+            }
+        }
+    }
+
+    /// Runs lines arriving on `lines` as console commands: the server's terminal.
+    pub fn attach_console(&mut self, lines: std::sync::mpsc::Receiver<String>) {
+        self.console = Some(lines);
     }
 
     fn server_info(&self) -> Vec<(String, String)> {
@@ -467,9 +535,8 @@ impl Server {
             net.t.send_to(req.from, &net::Oob::ConnectResponse.encode());
             return;
         }
-        net.bans.retain(|(_, until)| *until > Instant::now());
-        if net.bans.iter().any(|(ip, _)| *ip == req.from.ip()) {
-            return refuse(net, "You are temporarily banned from this server.");
+        if net.bans.is_banned(req.from.ip(), Instant::now()) {
+            return refuse(net, "You are banned from this server.");
         }
         let pw = self.game.cvars.string("g_password");
         if !pw.is_empty() && pw != req.password {
@@ -607,6 +674,10 @@ impl Server {
 
     /// Prints a console line: to the log and, when enabled, stdout.
     pub fn say(&mut self, s: &str) {
+        if let Some(r) = self.redirect.as_mut() {
+            r.push_str(s);
+            return;
+        }
         if self.echo_stdout {
             print!("{s}");
         }
@@ -767,8 +838,6 @@ impl Server {
                     _ => self.game.teleport_to_named(n, first)?,
                 }
             }
-            // `clientkick <n>` and `tempBanClient <n>` (what a passed vote runs): the player is dropped;
-            // a temporary ban also refuses its address for five minutes.
             // Test hook: `devhardpoint <client|human|bot> <weapon>` gives the player a killstreak reward as the
             // scripts would (`radar_mp`, `airstrike_mp`, `helicopter_mp`).
             "devhardpoint" => {
@@ -844,21 +913,162 @@ impl Server {
                     self.say(&l);
                 }
             }
-            "clientkick" | "tempbanclient" => {
+            // Kicking: `clientkick` / `tempBanClient` / `banClient` take a client number (what a passed vote runs),
+            // `onlykick` / `kick` (a brief ban, `sv_kickBanTime` seconds) / `tempBanUser` / `banUser` (for good) a name.
+            "clientkick" | "tempbanclient" | "banclient" => {
                 let n = arg(1)
                     .map(cvar::parse_int)
-                    .ok_or("usage: clientkick <client>")? as u16;
-                let Some(mut net) = self.net.take() else {
-                    return Err("clientkick: no network".into());
-                };
-                if lname == "tempbanclient"
-                    && let Some(p) = net.peers.get(usize::from(n)).and_then(Option::as_ref)
-                {
-                    let until = Instant::now() + Duration::from_secs(300);
-                    net.bans.push((p.link.addr.ip(), until));
+                    .ok_or_else(|| format!("usage: {lname} <client number>"))?;
+                let slot = u16::try_from(n)
+                    .ok()
+                    .filter(|s| {
+                        self.game
+                            .clients
+                            .get(usize::from(*s))
+                            .is_some_and(|c| c.conn != Conn::Free)
+                    })
+                    .ok_or_else(|| format!("Client {n} is not on the server."))?;
+                self.kick(slot, Penalty::of(&lname))?;
+            }
+            "onlykick" | "kick" | "tempbanuser" | "banuser" => {
+                let who = arg(1).ok_or_else(|| {
+                    format!("usage: {lname} <player name>\n{lname} all = kick everyone")
+                })?;
+                if self.run.is_none() {
+                    return Err("Server is not running.".into());
                 }
-                self.net_drop(&mut net, n);
-                self.net = Some(net);
+                match self.find_player(who) {
+                    Some(slot) => self.kick(slot, Penalty::of(&lname))?,
+                    None if lname != "banuser" && who.eq_ignore_ascii_case("all") => {
+                        let all: Vec<u16> = (0..self.game.clients.len() as u16)
+                            .filter(|n| self.game.clients[usize::from(*n)].conn != Conn::Free)
+                            .collect();
+                        for slot in all {
+                            self.kick(slot, Penalty::None)?;
+                        }
+                    }
+                    None => return Err(format!("Player {who} is not on the server")),
+                }
+            }
+            "unbanuser" => {
+                let ip: std::net::IpAddr = arg(1)
+                    .ok_or("usage: unbanUser <ip address>")?
+                    .parse()
+                    .map_err(
+                    |_| "unbanUser takes an IP address, as banUser and banClient record it",
+                )?;
+                let net = self.net.as_mut().ok_or("There is no network.")?;
+                let was = net.bans.unban(ip)?;
+                self.say(&if was {
+                    format!("{ip} is no longer banned\n")
+                } else {
+                    format!("{ip} is not banned\n")
+                });
+            }
+            "say" | "tell" => {
+                let (to, from_arg) = if lname == "tell" {
+                    let n = arg(1)
+                        .and_then(|n| n.parse::<u16>().ok())
+                        .ok_or("usage: tell <client number> <message>")?;
+                    (crate::ui::Dest::Client(n), 2)
+                } else {
+                    (crate::ui::Dest::All, 1)
+                };
+                if argv.len() <= from_arg {
+                    return Err(format!("usage: {lname} <message>"));
+                }
+                let text = format!("console: {}", argv[from_arg..].join(" "));
+                self.say(&format!("{text}\n"));
+                self.game.send(
+                    to,
+                    net::ui::ServerCmd::Print {
+                        kind: net::ui::PrintKind::Normal,
+                        text,
+                    },
+                );
+            }
+            "systeminfo" => {
+                let s = self.game.cvars.info_string(cvar::SYSTEMINFO);
+                self.say(&format!("System info settings:\n{s}\n"));
+            }
+            "dumpuser" => {
+                let who = arg(1).ok_or("usage: dumpuser <player name>")?;
+                let slot = self
+                    .find_player(who)
+                    .ok_or_else(|| format!("Player {who} is not on the server"))?;
+                self.dump_user(slot);
+            }
+            // This server announces itself to no master server, so there is nothing to send.
+            "heartbeat" | "gamecompletestatus" => {
+                self.say("This server has no master server to tell.\n");
+            }
+            "toggle" => {
+                let n = arg(1).ok_or("usage: toggle <variable> [value1 value2 ...]")?;
+                if !self.game.cvars.exists(n) {
+                    return Err(format!("toggle: {n} is not a variable"));
+                }
+                let cur = self.game.cvars.string(n).to_owned();
+                let next = if argv.len() > 2 {
+                    let at = argv[2..].iter().position(|v| *v == cur);
+                    argv[2 + at.map_or(0, |i| (i + 1) % (argv.len() - 2))].clone()
+                } else {
+                    (if cvar::parse_int(&cur) == 0 { "1" } else { "0" }).to_owned()
+                };
+                self.game.cvars.set(n, &next);
+            }
+            "reset" => {
+                let n = arg(1).ok_or("usage: reset <variable>")?;
+                let default = self
+                    .game
+                    .cvars
+                    .get(n)
+                    .map(|c| c.default.clone())
+                    .ok_or_else(|| format!("reset: {n} is not a variable"))?;
+                self.game.cvars.set(n, &default);
+            }
+            "setfromdvar" => {
+                let (Some(dst), Some(src)) = (arg(1), arg(2)) else {
+                    return Err("usage: setfromdvar <variable> <source variable>".into());
+                };
+                let v = self
+                    .game
+                    .cvars
+                    .get(src)
+                    .map(|c| c.value.clone())
+                    .ok_or_else(|| format!("setfromdvar: {src} is not a variable"))?;
+                self.game.cvars.set(dst, &v);
+            }
+            "cvarlist" => {
+                let filter = arg(1).map(str::to_ascii_lowercase);
+                let mut out = String::new();
+                let mut n = 0;
+                for c in self.game.cvars.iter() {
+                    if filter
+                        .as_ref()
+                        .is_some_and(|f| !c.name.to_ascii_lowercase().contains(f))
+                    {
+                        continue;
+                    }
+                    n += 1;
+                    let f = |bit, ch| if c.flags & bit != 0 { ch } else { ' ' };
+                    out.push_str(&format!(
+                        "{}{}{}{}{}{}{} {} \"{}\"\n",
+                        f(cvar::ARCHIVE, 'A'),
+                        f(cvar::USERINFO, 'U'),
+                        f(cvar::SERVERINFO, 'S'),
+                        f(cvar::SYSTEMINFO, 'Y'),
+                        f(cvar::LATCH, 'L'),
+                        f(cvar::ROM, 'R'),
+                        f(cvar::CHEAT, 'C'),
+                        c.name,
+                        if c.name.eq_ignore_ascii_case("rcon_password") {
+                            "*"
+                        } else {
+                            &c.value
+                        }
+                    ));
+                }
+                self.say(&format!("{out}\n{n} cvar indexes\n"));
             }
             "bots" => {
                 let n = arg(1)
@@ -951,11 +1161,33 @@ impl Server {
     fn status(&mut self) {
         let map = self.map_name().unwrap_or("(none)").to_owned();
         let host = self.game.cvars.string("sv_hostname").to_owned();
-        let mut s =
-            format!("hostname: {host}\nmap: {map}\nnum score ping name\n--- ----- ---- ----\n");
-        for (n, c) in self.game.connected_clients() {
-            let ping = if c.bot { "BOT" } else { "0" };
-            s.push_str(&format!("{n:3} {:5} {ping:>4} {}\n", c.score, c.name));
+        let mut s = format!(
+            "hostname: {host}\nmap: {map}\nnum score ping guid name            lastmsg address               qport rate\n\
+             --- ----- ---- ---- --------------- ------- --------------------- ----- ----\n"
+        );
+        for (n, c) in self.game.clients.iter().enumerate() {
+            if c.conn == Conn::Free {
+                continue;
+            }
+            let n = n as u16;
+            let net = self.net.as_ref();
+            let peer = net.and_then(|net| net.peer_line(n));
+            let ping = ping_field(
+                c.bot,
+                self.game.pending_free.contains(&n),
+                c.conn == Conn::Connecting,
+                net.and_then(|net| net.ping_of(n)),
+            );
+            // The guid column is the original's key hash, which this server has no use for; the rate
+            // column its per-client rate setting, which this protocol does not have.
+            let (last, addr, qport) = match peer {
+                Some((a, q, ms)) => (ms.to_string(), a.to_string(), q),
+                None => ("0".into(), (if c.bot { "bot" } else { "-" }).into(), 0),
+            };
+            s.push_str(&format!(
+                "{n:3} {:5} {ping:>4} {:>4} {:<15} {last:>7} {addr:<21} {qport:5} {:>4}\n",
+                c.score, 0, c.name, "-"
+            ));
         }
         s.push_str(&format!(
             "tick: {}  level time: {} ms  entities: {}  script threads: {}\n",
@@ -971,6 +1203,64 @@ impl Server {
         ));
         if let Some(r) = rss_line() {
             s.push_str(&r);
+        }
+        self.say(&s);
+    }
+
+    /// The slot of the player called `who`, with or without colour codes, in any case.
+    fn find_player(&self, who: &str) -> Option<u16> {
+        let clean = crate::vote::clean_name(who);
+        self.game
+            .clients
+            .iter()
+            .enumerate()
+            .find(|(_, c)| {
+                c.conn != Conn::Free
+                    && (c.name.eq_ignore_ascii_case(who)
+                        || crate::vote::clean_name(&c.name).eq_ignore_ascii_case(&clean))
+            })
+            .map(|(n, _)| n as u16)
+    }
+
+    /// Drops a client, and bans its address as `penalty` says.
+    fn kick(&mut self, slot: u16, penalty: Penalty) -> Result<(), String> {
+        let Some(mut net) = self.net.take() else {
+            return Err("There is no network.".into());
+        };
+        let name = self.game.clients[usize::from(slot)].name.clone();
+        if let Some((addr, ..)) = net.peer_line(slot) {
+            let ip = addr.ip();
+            match penalty {
+                Penalty::None => {}
+                Penalty::Brief => {
+                    let secs = self.game.cvars.int("sv_kickBanTime").clamp(0, 3600);
+                    net.bans.ban_briefly(ip, Instant::now(), secs as u64);
+                }
+                Penalty::Permanent => {
+                    if let Err(e) = net.bans.ban(ip) {
+                        self.say(&format!(
+                            "WARNING: the ban will not outlast this run: {e}\n"
+                        ));
+                    }
+                }
+            }
+        }
+        self.net_drop(&mut net, slot);
+        self.net = Some(net);
+        self.say(&format!("{name} was removed from the server\n"));
+        Ok(())
+    }
+
+    /// `dumpuser`: what the server knows of one client.
+    fn dump_user(&mut self, slot: u16) {
+        let c = &self.game.clients[usize::from(slot)];
+        let mut s = format!(
+            "userinfo\n--------\nname   {}\nclient {slot}\nbot    {}\n",
+            c.name,
+            u8::from(c.bot)
+        );
+        if let Some((addr, qport, _)) = self.net.as_ref().and_then(|n| n.peer_line(slot)) {
+            s.push_str(&format!("ip     {}\nqport  {qport}\n", addr.ip()));
         }
         self.say(&s);
     }
@@ -1478,6 +1768,9 @@ impl Server {
             if end.is_some_and(|e| now >= e) {
                 break;
             }
+            while let Some(line) = self.console.as_ref().and_then(|c| c.try_recv().ok()) {
+                self.cbuf.add_text(&line);
+            }
             self.exec_buffer();
             self.cbuf.end_frame();
             if self.quit {
@@ -1565,6 +1858,38 @@ impl Server {
     }
 }
 
+/// What a kick costs the player.
+enum Penalty {
+    None,
+    /// `sv_kickBanTime` seconds.
+    Brief,
+    Permanent,
+}
+
+impl Penalty {
+    /// The penalty of a kick command by its lower-case name.
+    fn of(command: &str) -> Self {
+        match command {
+            "kick" | "tempbanuser" | "tempbanclient" => Self::Brief,
+            "banuser" | "banclient" => Self::Permanent,
+            _ => Self::None,
+        }
+    }
+}
+
+/// The `ping` column of `status`: the measured round trip (at most 9999), or the state the client is in.
+fn ping_field(bot: bool, zombie: bool, connecting: bool, ping: Option<i32>) -> String {
+    if bot {
+        "BOT".into()
+    } else if zombie {
+        "ZMBI".into()
+    } else if connecting {
+        "CNCT".into()
+    } else {
+        ping.unwrap_or(0).clamp(0, 9999).to_string()
+    }
+}
+
 /// Splits `+a b +c d` into command lines.
 fn parse_command_line(args: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -1649,4 +1974,19 @@ fn rss_line() -> Option<String> {
     let peak = crate::mem::peak_rss()?;
     let cur = crate::mem::rss().map_or(String::new(), |r| format!("rss {} MiB, ", r >> 20));
     Some(format!("memory: {cur}peak {} MiB\n", peak >> 20))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ping_field;
+
+    #[test]
+    fn status_ping_shows_the_state_before_the_round_trip_and_caps_it() {
+        assert_eq!(ping_field(true, false, false, Some(40)), "BOT");
+        assert_eq!(ping_field(false, true, true, Some(40)), "ZMBI");
+        assert_eq!(ping_field(false, false, true, Some(40)), "CNCT");
+        assert_eq!(ping_field(false, false, false, Some(40)), "40");
+        assert_eq!(ping_field(false, false, false, Some(123_456)), "9999");
+        assert_eq!(ping_field(false, false, false, None), "0");
+    }
 }

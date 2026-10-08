@@ -23,7 +23,7 @@ const VOTE_MS: i32 = 30_000;
 const EXECUTE_DELAY_MS: i32 = 3_000;
 
 /// A name without its `^n` colour codes.
-fn clean_name(name: &str) -> String {
+pub(crate) fn clean_name(name: &str) -> String {
     let mut out = String::new();
     let mut it = name.chars().peekable();
     while let Some(c) = it.next() {

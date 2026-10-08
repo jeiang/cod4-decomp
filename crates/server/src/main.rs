@@ -3,7 +3,8 @@
 //!
 //! `cod4e-server [+set name value] [+exec server.cfg] [+map mp_crash]`; the install comes from
 //! `COD4_PATH` (default `./COD4`). The `--webtransport` family of flags turns on the endpoint for
-//! browser clients; each is shorthand for setting a cvar.
+//! browser clients; each is shorthand for setting a cvar. Lines on stdin run as console commands;
+//! with `rcon_password` set, `rcon` packets do the same from the network.
 
 use server::server::Server;
 use std::path::PathBuf;
@@ -65,6 +66,16 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Whatever is typed on the terminal runs as a console command (`status`, `kick name`, `map x`).
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    s.attach_console(rx);
     s.run_forever();
     ExitCode::SUCCESS
 }

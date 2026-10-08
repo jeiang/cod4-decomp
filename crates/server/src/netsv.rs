@@ -5,6 +5,7 @@
 //! use, so scripts cannot tell a person from a bot.
 
 use crate::archive::{ArchPlayer, Archive, Frame};
+use crate::ban::BanList;
 use crate::client::{Conn, Session, Team};
 use crate::game::{EntKind, Game, SoundTo};
 use crate::ui::Dest;
@@ -47,6 +48,12 @@ pub struct Peer {
 pub enum Inbound {
     Connect(ConnectRequest),
     Left(SocketAddr),
+    /// An `rcon` packet; whether it is allowed is the server's to judge.
+    Rcon {
+        from: SocketAddr,
+        password: String,
+        command: String,
+    },
 }
 
 /// Counters for the report.
@@ -73,8 +80,8 @@ pub struct NetSv {
     /// The last [`crate::archive::KEEP_MS`] of the world, for killcams.
     archive: Archive,
     buf: Vec<u8>,
-    /// Addresses refused until the given time (`tempBanClient`).
-    pub bans: Vec<(std::net::IpAddr, Instant)>,
+    /// Addresses refused at connect.
+    pub bans: BanList,
 }
 
 impl NetSv {
@@ -89,7 +96,7 @@ impl NetSv {
             now: 0,
             archive: Archive::default(),
             buf: vec![0; MAX_MESSAGE],
-            bans: Vec::new(),
+            bans: BanList::default(),
         }
     }
 
@@ -123,6 +130,14 @@ impl NetSv {
             let packet = &buf[..n];
             self.stats.bytes_in += n as u64;
             if let Some(o) = Oob::parse(packet) {
+                if let Oob::Rcon { password, command } = o {
+                    out.push(Inbound::Rcon {
+                        from,
+                        password,
+                        command,
+                    });
+                    continue;
+                }
                 match serve(
                     &self.challenger,
                     self.started.elapsed().as_secs(),
@@ -150,6 +165,25 @@ impl NetSv {
         }
         self.buf = buf;
         out
+    }
+
+    /// The measured round trip of a connected client in ms, once it has acknowledged a snapshot.
+    pub fn ping_of(&self, slot: u16) -> Option<i32> {
+        self.peers
+            .get(usize::from(slot))?
+            .as_ref()?
+            .link
+            .ping(self.now)
+    }
+
+    /// Address, qport and ms since the last packet of a connected client.
+    pub fn peer_line(&self, slot: u16) -> Option<(SocketAddr, u16, u128)> {
+        let p = self.peers.get(usize::from(slot))?.as_ref()?;
+        Some((
+            p.link.addr,
+            p.link.qport,
+            p.last_heard.elapsed().as_millis(),
+        ))
     }
 
     pub fn add_peer(&mut self, slot: u16, req: &ConnectRequest, name: &str) {
