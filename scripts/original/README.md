@@ -6,7 +6,7 @@ original `iw3mp.exe` through `umu-run` in the live Hyprland session, and
 sends keys/mouse (ydotool via `/dev/uinput`, ACL-granted, no root) and takes
 window screenshots (grim). Helper tools come from a temporary `nix-shell`.
 
-Environment: `ORIG_DIR` (install copy, default `~/cod4e/original`),
+Environment: `ORIG_DIR` (install copy, default `~/Projects/cod4e/original-reference/game`),
 `ORIG_PREFIX` (Wine prefix), `ORIG_OUT` (shots and logs).
 Nothing here contains game content; screenshots stay on the host and are never committed.
 

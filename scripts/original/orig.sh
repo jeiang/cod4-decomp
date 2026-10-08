@@ -4,9 +4,9 @@
 # Runs ON the host. Needs: nix-shell, hyprland session, /dev/uinput access (ACL), umu-run.
 # Contains no game content; the install path is supplied by the environment.
 set -u
-: "${ORIG_DIR:=$HOME/cod4e/original}"
-: "${ORIG_PREFIX:=$HOME/cod4e/umu-prefix}"
-: "${ORIG_OUT:=$HOME/cod4e/shots}"
+: "${ORIG_DIR:=$HOME/Projects/cod4e/original-reference/game}"
+: "${ORIG_PREFIX:=$HOME/Projects/cod4e/original-reference/umu-prefix}"
+: "${ORIG_OUT:=$HOME/Projects/cod4e/original-reference/shots}"
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
 if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then

@@ -8,7 +8,7 @@ globalThis.D = D; globalThis.ENV = ENV;
 globalThis.sh = async (c) => { const p = Bun.spawn(["ssh", HOST, "bash -s"], { stdin: new Blob([c]), stdout: "pipe", stderr: "pipe" }); const [o, e] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]); await p.exited; return (o + e).trim(); };
 globalThis.hc = (c) => sh(`${ENV} hyprctl ${c}`);
 globalThis.focus = () => hc(`dispatch 'hl.dsp.focus({window="class:iw3mp.exe"})'`);
-globalThis.S = async (n) => { await sh(`${ENV} ${G} -c -g "0,10 1920x1060" ~/cod4e/ref-shots/${n}.png`); await Bun.$`scp -q ${HOST}:cod4e/ref-shots/${n}.png ${D}${n}.png`; return D + n + ".png"; };
+globalThis.S = async (n) => { await sh(`${ENV} ${G} -c -g "0,10 1920x1060" ~/Projects/cod4e/original-reference/ref-shots/${n}.png`); await Bun.$`scp -q ${HOST}:Projects/cod4e/original-reference/ref-shots/${n}.png ${D}${n}.png`; return D + n + ".png"; };
 const mvs = (x, y) => `hyprctl dispatch 'hl.dsp.cursor.move({x=${x},y=${y + 10}})' >/dev/null; $Y mousemove -x 1 -y 0; sleep 0.1; $Y mousemove -x -1 -y 0; sleep 0.25;`;
 globalThis.mv = (x, y) => sh(`${ENV} ${mvs(x, y)}`);
 globalThis.clk = (x, y, b = "0xC0") => sh(`${ENV} ${x !== undefined ? mvs(x, y) : ""} $Y click ${b}; sleep 0.7`);
