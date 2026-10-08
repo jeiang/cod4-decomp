@@ -234,8 +234,35 @@ impl ClientSound {
                         self.play_world(&name, *origin);
                     }
                 }
+                // A player's shot is heard from the player's own events; a vehicle has none.
+                ClientEvent::WeaponFire {
+                    eye,
+                    weapon: w,
+                    shooter,
+                    vehicle: true,
+                    ..
+                } => {
+                    let def = weapon(*w);
+                    if let Some(name) = weapon_sound(def.as_deref(), ev::FIRE_WEAPON, false) {
+                        self.play(
+                            &name,
+                            Cue {
+                                origin: Some(*eye),
+                                entity: u32::from(*shooter),
+                                ..Cue::default()
+                            },
+                        );
+                    }
+                }
                 _ => {}
             }
+        }
+    }
+
+    /// The entity is at `origin` now: its loops follow it.
+    pub fn follow(&mut self, entity: u16, origin: [f32; 3]) {
+        if let Some(s) = self.ready() {
+            s.follow_entity(u32::from(entity), origin);
         }
     }
 

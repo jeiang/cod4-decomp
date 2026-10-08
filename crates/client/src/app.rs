@@ -1471,7 +1471,7 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
         "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
         "map": st.map_name,
         "load": st.load_report,
-        "objectives": {"plants": listen::objectives().0, "defuses": listen::objectives().1, "airstrikes": listen::objectives().2},
+        "objectives": {"plants": listen::objectives().0, "defuses": listen::objectives().1, "airstrikes": listen::objectives().2, "helicopters": listen::objectives().3, "heli_shots": listen::objectives().4},
     });
     let _ = std::fs::create_dir_all(&out);
     let _ = std::fs::write(
@@ -1633,6 +1633,29 @@ fn script_step(st: &mut State) -> bool {
                 done(true, sc, format!("{key} {have}"));
             } else if waited > secs {
                 done(false, sc, format!("timed out; {key} is {have:?}"));
+            }
+        }
+        // Waits until a counter of the listen server reaches a minimum: `counter=helicopters:1:60` (the name, the
+        // minimum and the seconds; names are plants, defuses, airstrikes, helicopters, heli_shots).
+        "counter" => {
+            let mut parts = arg.split(':');
+            let name = parts.next().unwrap_or("");
+            let min: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(1);
+            let secs: f32 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(30.0);
+            let o = listen::objectives();
+            let have = match name {
+                "plants" => Some(o.0),
+                "defuses" => Some(o.1),
+                "airstrikes" => Some(o.2),
+                "helicopters" => Some(o.3),
+                "heli_shots" => Some(o.4),
+                _ => None,
+            };
+            match have {
+                None => done(false, sc, format!("unknown counter {name}")),
+                Some(n) if n >= min => done(true, sc, format!("{name} {n}")),
+                Some(n) if waited > secs => done(false, sc, format!("timed out; {name} is {n}")),
+                Some(_) => {}
             }
         }
         "togglemenu" => {

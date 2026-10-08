@@ -250,6 +250,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_hardpoint::run),
     },
     StageDef {
+        name: "client-heli",
+        description: "the real client sees a helicopter: a bot calls it in, the player looks at it, the picture must differ from the same view without vehicles",
+        needs_install: false,
+        timeout: Duration::from_secs(7 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_heli::run),
+    },
+    StageDef {
         name: "client-flythrough",
         description: "client flythrough per display mode, with video",
         needs_install: false,

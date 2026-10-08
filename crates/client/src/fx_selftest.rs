@@ -137,6 +137,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             angles: [0.0, 0.0, 0.0],
             weapon: 0,
             shooter: 7,
+            vehicle: false,
         },
         &weapon,
     );

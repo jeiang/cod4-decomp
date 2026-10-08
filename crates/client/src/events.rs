@@ -61,12 +61,14 @@ pub enum ClientEvent {
         radius: f32,
         strength: f32,
     },
-    /// A weapon fired: from the shooter's `eye`, looking along `angles` (degrees).
+    /// A weapon fired: from the shooter's `eye`, looking along `angles` (degrees). A `vehicle` shooter is an entity
+    /// that is no player: `eye` is its muzzle, and its shot has no player event to make the sound.
     WeaponFire {
         eye: [f32; 3],
         angles: [f32; 3],
         weapon: u16,
         shooter: u16,
+        vehicle: bool,
     },
 }
 
@@ -128,20 +130,26 @@ impl Events {
     pub fn scan(&mut self, snap: &Snapshot) -> Vec<ClientEvent> {
         let mut out = Vec::new();
         let mut live = Vec::new();
+        let vehicles: Vec<u16> = snap
+            .entities
+            .iter()
+            .filter(|e| e.etype == etype::VEHICLE)
+            .map(|e| e.number)
+            .collect();
         for e in snap.entities.iter().filter(|e| e.etype == etype::EVENT) {
             live.push(e.number);
             if self.seen.get(&e.number) == Some(&e.event_seq) {
                 continue;
             }
             self.seen.insert(e.number, e.event_seq);
-            out.extend(self.decode(e));
+            out.extend(self.decode(e, &vehicles));
         }
         // An entity that left the snapshot starts over, so a restarted server's sequence 1 is not skipped.
         self.seen.retain(|n, _| live.contains(n));
         out
     }
 
-    fn decode(&self, e: &EntityState) -> Option<ClientEvent> {
+    fn decode(&self, e: &EntityState, vehicles: &[u16]) -> Option<ClientEvent> {
         let normal = direction(e.angles);
         Some(match e.event {
             ev::BULLET_IMPACT => ClientEvent::BulletImpact {
@@ -193,6 +201,7 @@ impl Events {
                 angles: e.angles,
                 weapon: e.weapon,
                 shooter: e.client,
+                vehicle: vehicles.contains(&e.client),
             },
             _ => return None,
         })
@@ -297,9 +306,24 @@ mod tests {
                     eye: [1.0, 2.0, 60.0],
                     angles: [5.0, 90.0, 0.0],
                     weapon: 7,
-                    shooter: 3
+                    shooter: 3,
+                    vehicle: false
                 }]
             ),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_shot_of_a_vehicle_entity_is_marked() {
+        let mut ev = Events::default();
+        let mut e = event(964, super::ev::WEAPON_FIRE, 1);
+        e.client = 70;
+        let mut v = EntityState::new(70);
+        v.etype = etype::VEHICLE;
+        let out = ev.scan(&snap(&[e, v]));
+        assert!(
+            matches!(out[..], [ClientEvent::WeaponFire { vehicle: true, .. }]),
             "{out:?}"
         );
     }

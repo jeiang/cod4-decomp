@@ -13,6 +13,7 @@ mod hud;
 use crate::crosshair::Reticle;
 use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
+use crate::helicopter::Rotors;
 use crate::input::{InputFrame, buttons};
 use crate::look::{Look, LookOut};
 use crate::models::{Library, Player, PlayerModelSet, Team};
@@ -127,6 +128,12 @@ struct Counters {
     script_models_unloaded: std::collections::BTreeSet<String>,
     /// Every model a `script_model` was drawn with at some frame.
     script_models_names: std::collections::BTreeSet<String>,
+    /// `VEHICLE` entities in the interpolated view of the newest frame and how many of them were drawn.
+    vehicles_seen: usize,
+    vehicles_drawn: usize,
+    /// Models the zones lack for a vehicle, and the most vehicles drawn at once.
+    vehicles_unloaded: std::collections::BTreeSet<String>,
+    vehicles_max: usize,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
@@ -193,6 +200,15 @@ pub struct NetPlay {
     /// The server announced a level the app has not acted on yet.
     new_level: Option<String>,
     stat_sync: crate::profile::StatSync,
+    /// The rotor rig of each helicopter model drawn (`None` when the model or its animation is missing), and the
+    /// seconds the rotors have turned.
+    rotors: HashMap<String, Option<Rotors>>,
+    rotor_clock: f32,
+    /// `drawvehicles 0` leaves the vehicles out of the picture (the harness compares a view with and without them).
+    draw_vehicles: bool,
+    /// The server's `delta_angles` of the last snapshot: when it turns the player's view (a spawn, a teleport), the
+    /// commands' angles turn with it.
+    last_delta: Option<[f32; 3]>,
 }
 
 impl NetPlay {
@@ -257,6 +273,10 @@ impl NetPlay {
             fx_demo: None,
             new_level: None,
             stat_sync: crate::profile::StatSync::default(),
+            rotors: HashMap::new(),
+            rotor_clock: 0.0,
+            draw_vehicles: true,
+            last_delta: None,
         })
     }
 
@@ -402,6 +422,14 @@ impl NetPlay {
             return None;
         };
         self.live_time = st;
+        if let Some(snap) = self.net.latest() {
+            let delta = snap.ps.delta_angles;
+            if let Some(old) = self.last_delta.replace(delta) {
+                for i in 0..2 {
+                    self.angles[i] += (delta[i] - old[i] + 180.0).rem_euclid(360.0) - 180.0;
+                }
+            }
+        }
         // Autoplay replaces the player's input with a bot's.
         let auto_input;
         let input = if self.auto.is_some() {
@@ -454,6 +482,7 @@ impl NetPlay {
             self.reticle = None;
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.script_models(&snap));
+            models.extend(self.vehicles(dt, st, ps.client_num));
             models.extend(self.view_model(dt, &ps, ps.origin));
             let (events, commands) = self.take_events(&snap);
             self.look
@@ -540,6 +569,7 @@ impl NetPlay {
         let look = self.look.frame(st);
         let mut models = self.remote_players(dt, st, own);
         models.extend(self.script_models(&snap));
+        models.extend(self.vehicles(dt, st, own));
         if !dead {
             models.extend(self.view_model(dt, &ps, feet));
         }
@@ -775,6 +805,10 @@ impl NetPlay {
             self.action_slot(arg);
             return;
         }
+        if let Some(arg) = cmd.strip_prefix("drawvehicles ") {
+            self.draw_vehicles = arg.trim() != "0";
+            return;
+        }
         let step: i32 = match cmd {
             "weapnext" => 1,
             "weapprev" => -1,
@@ -930,6 +964,50 @@ impl NetPlay {
         out
     }
 
+    /// The vehicles (helicopters), between the snapshots around the interpolation moment, with their rotors turning.
+    /// Their loops follow them.
+    fn vehicles(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
+        self.rotor_clock += dt;
+        let ents = self
+            .net
+            .snaps
+            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
+        let Some(ui) = self.net.ui() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut seen = 0;
+        self.c.vehicles_unloaded.clear();
+        for e in ents.iter().filter(|e| e.etype == etype::VEHICLE) {
+            seen += 1;
+            self.sound.follow(e.number, e.origin);
+            if !self.draw_vehicles {
+                continue;
+            }
+            let name = ui.model(e.model);
+            let Some(model) = self.lib.content.model(name) else {
+                self.c.vehicles_unloaded.insert(name.to_owned());
+                continue;
+            };
+            let rotors = self
+                .rotors
+                .entry(name.to_owned())
+                .or_insert_with(|| Rotors::new(&self.lib.content, model).ok());
+            let mut m = ModelInstance::new(model.clone(), render::ModelKind::World);
+            m.origin = e.origin;
+            m.angles = e.angles;
+            m.light_origin = e.origin;
+            if let Some(r) = rotors {
+                m.bones = r.pose(self.rotor_clock).to_vec();
+            }
+            out.push(m);
+        }
+        self.c.vehicles_seen = seen;
+        self.c.vehicles_drawn = out.len();
+        self.c.vehicles_max = self.c.vehicles_max.max(out.len());
+        out
+    }
+
     /// Models of every other player, between the snapshots around the interpolation moment.
     fn remote_players(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
         let ents = self
@@ -1059,6 +1137,10 @@ impl NetPlay {
             "script_models_drawn": self.c.script_models_drawn,
             "script_models_unloaded": self.c.script_models_unloaded,
             "script_models_names": self.c.script_models_names,
+            "vehicles_seen": self.c.vehicles_seen,
+            "vehicles_drawn": self.c.vehicles_drawn,
+            "vehicles_max_drawn": self.c.vehicles_max,
+            "vehicles_unloaded": self.c.vehicles_unloaded,
             "events": self.c.events,
             "fx": {
                 "played": self.effects.played,

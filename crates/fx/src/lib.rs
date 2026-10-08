@@ -306,7 +306,7 @@ impl Fx {
         let looping = def.looping_count as usize;
         let one_shot = def.one_shot_count as usize;
         let loop_end = if def.msec_looping_life > 0 {
-            at + def.msec_looping_life
+            at.saturating_add(def.msec_looping_life)
         } else {
             at
         };

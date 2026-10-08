@@ -723,18 +723,18 @@ impl Server {
             }
             // `clientkick <n>` and `tempBanClient <n>` (what a passed vote runs): the player is dropped;
             // a temporary ban also refuses its address for five minutes.
-            // Test hook: `devhardpoint <client|human> <weapon>` gives the player a killstreak reward as the
+            // Test hook: `devhardpoint <client|human|bot> <weapon>` gives the player a killstreak reward as the
             // scripts would (`radar_mp`, `airstrike_mp`, `helicopter_mp`).
             "devhardpoint" => {
                 let (Some(who), Some(weapon)) = (arg(1), arg(2)) else {
-                    return Err("usage: devhardpoint <client|human> <weapon>".into());
+                    return Err("usage: devhardpoint <client|human|bot> <weapon>".into());
                 };
-                let n = if who == "human" {
+                let n = if who == "human" || who == "bot" {
                     self.game
                         .connected_clients()
-                        .find(|(_, c)| !c.bot)
+                        .find(|(_, c)| c.bot == (who == "bot"))
                         .map(|(n, _)| n)
-                        .ok_or("devhardpoint: no human is connected")?
+                        .ok_or("devhardpoint: no such client is connected")?
                 } else {
                     cvar::parse_int(who) as u16
                 };
@@ -756,6 +756,53 @@ impl Server {
                     args: vec![Value::str(weapon)],
                 });
                 host.run_calls(&mut run.vm);
+            }
+            // Test hook: `devheli view <client|human> [distance]` floats the player `distance` (700) units behind the
+            // first script vehicle (where it will be in half a second), a little below it, looking at it.
+            "devheli" if arg(1) == Some("view") => {
+                let who = arg(2).ok_or("usage: devheli view <client|human> [distance]")?;
+                let distance = arg(3).map_or(700.0, cvar::parse_float);
+                let n = if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| n)
+                        .ok_or("devheli: no human is connected")?
+                } else {
+                    cvar::parse_int(who) as u16
+                };
+                let (target, yaw) = self
+                    .game
+                    .vehicles()
+                    .next()
+                    .map(|(_, e, v)| {
+                        // Where it will be when the picture is taken, half a second on.
+                        let at = [0, 1, 2].map(|i| e.origin[i] + v.vel[i] * 0.5);
+                        (at, e.angles[1])
+                    })
+                    .ok_or("devheli: no vehicle")?;
+                // Behind it: opposite its heading, so the view shows its tail and side as it flies away.
+                let (s, c) = yaw.to_radians().sin_cos();
+                let from = [
+                    target[0] - c * distance,
+                    target[1] - s * distance,
+                    target[2] - 120.0,
+                ];
+                let (dx, dy, dz) = (
+                    target[0] - from[0],
+                    target[1] - from[1],
+                    target[2] - (from[2] + 60.0),
+                );
+                let horizontal = dx.hypot(dy);
+                // Quake pitch: negative looks up. The eye is 60 units above the feet.
+                let pitch = -dz.atan2(horizontal).to_degrees();
+                self.game.teleport(n, from);
+                // Floating there: a player in the air would fall out of the picture.
+                if let Some(c) = self.game.client_mut(n) {
+                    c.noclip = true;
+                }
+                self.game
+                    .set_client_view_angle(n, [pitch, dy.atan2(dx).to_degrees(), 0.0]);
             }
             // Test hook: `devheli` prints every script vehicle: where it is, how fast, how it leans and its damage stage.
             "devheli" => {
