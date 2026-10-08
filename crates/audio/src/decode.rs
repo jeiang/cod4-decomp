@@ -176,6 +176,12 @@ impl StreamJob {
     /// Decodes while the ring has room. Returns `false` when the job is over (finished, failed or the mixer
     /// dropped the voice).
     pub fn pump(&mut self) -> bool {
+        self.pump_for(usize::MAX)
+    }
+
+    /// [`StreamJob::pump`] that stops after decoding about `budget` samples, for owners that share a thread
+    /// with the game (the browser has none to spare). A packet already begun is finished.
+    pub fn pump_for(&mut self, mut budget: usize) -> bool {
         loop {
             if self.tx.is_closed() {
                 return false;
@@ -187,11 +193,11 @@ impl StreamJob {
             self.pending.clear();
             self.at = 0;
             // A packet is at most 1152 frames of two channels.
-            if self.tx.space() < 4096 {
+            if self.tx.space() < 4096 || budget == 0 {
                 return true;
             }
             match self.dec.next(&mut self.pending) {
-                Ok(true) => {}
+                Ok(true) => budget = budget.saturating_sub(self.pending.len()),
                 Ok(false) if self.looping => match Decoder::open(self.bytes.clone(), &self.ext) {
                     Ok(d) => self.dec = d,
                     Err(_) => {
@@ -270,5 +276,25 @@ mod tests {
             );
         }
         assert!(!s.ring.is_finished());
+    }
+
+    #[test]
+    fn a_budgeted_pump_decodes_in_slices_and_ends_like_a_full_one() {
+        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 50_000), "wav", false).unwrap();
+        let mut got = 0;
+        let mut calls = 0;
+        let mut buf = vec![0.0; 50_000];
+        while job.pump_for(4096) {
+            calls += 1;
+            let n = s.ring.len();
+            assert!(n <= 8192, "a slice decoded {n} samples");
+            assert!(s.ring.pop_exact(&mut buf[..n]));
+            got += n;
+        }
+        let n = s.ring.len();
+        assert!(s.ring.pop_exact(&mut buf[..n]));
+        got += n;
+        assert!(calls > 5 && s.ring.is_finished());
+        assert_eq!(got, 50_000);
     }
 }

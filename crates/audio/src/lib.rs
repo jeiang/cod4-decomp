@@ -10,6 +10,7 @@ pub mod eq;
 pub mod mixer;
 pub mod reverb;
 pub mod ring;
+pub mod transport;
 
 pub use engine::{Cue, Sound};
 pub use mixer::NO_ENTITY;

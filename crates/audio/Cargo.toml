@@ -8,9 +8,22 @@ publish = false
 
 [dependencies]
 assets = { path = "../assets" }
-cpal = "0.18"
 crossbeam-queue = "0.3"
 symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "wav", "pcm"] }
+web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.18"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "AddEventListenerOptions", "AudioContext", "AudioNode", "BaseAudioContext", "AudioContextState", "AudioDestinationNode", "AudioWorklet",
+    "AudioWorkletNode", "AudioWorkletNodeOptions", "Blob", "BlobPropertyBag", "Document", "Event",
+    "EventTarget", "MessageEvent", "MessagePort", "Url", "Window",
+] }
 
 [lints]
 workspace = true
