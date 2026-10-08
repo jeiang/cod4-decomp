@@ -242,12 +242,8 @@ pub fn run_usercmd(
     params: &Params,
     world: &impl Collide,
 ) -> CmdOut {
-    // The weapon the player asked for: a script's `switchtoweapon`, else what it holds.
-    let want = match inv.selected() {
-        0 if inv.has(ps.weapon as u16) => ps.weapon as u16,
-        w => w,
-    };
-    cmd.weapon = u8::try_from(want).unwrap_or(0);
+    // The weapon the player asked for: a script's `switchtoweapon`, else what it holds or last held.
+    cmd.weapon = u8::try_from(inv.wanted(ps.weapon as u16)).unwrap_or(0);
     let mut pm = Pmove::new(std::mem::take(ps), params);
     pm.weapons = Some(WeaponCtx::new(table, inv));
     pm.cmd = cmd;
@@ -263,6 +259,7 @@ pub fn run_usercmd(
     let (mins, maxs) = (pm.mins, pm.maxs);
     let weapon_out = pm.weapon_out;
     *ps = pm.ps;
+    inv.remember(ps.weapon as u16);
     CmdOut {
         weapon_out,
         touched,

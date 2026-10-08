@@ -256,6 +256,15 @@ fn draw_elem(ui: &Ui, p: &mut Painter, le: &LiveElem, now: i32, color: [f32; 4])
     let (mut x, y) = position(place, e, (w, h), now);
     let align_y = ALIGN_SCALE[usize::from(e.align_y())];
     let glow = (e.glow_color[3] > 0).then(|| rgba(e.glow_color));
+    let (chars, glow, fade) = if mat.is_none() {
+        pulse(e, now, glow, text.chars().count())
+    } else {
+        (None, glow, 1.0)
+    };
+    if fade <= 0.0 {
+        return;
+    }
+    let color = [color[0], color[1], color[2], color[3] * fade];
     let draw = |p: &mut Painter, s: &str, x: f32, glow: Option<[f32; 4]>, chars: usize| {
         ui.draw_text_fx(
             p,
@@ -281,7 +290,6 @@ fn draw_elem(ui: &Ui, p: &mut Painter, le: &LiveElem, now: i32, color: [f32; 4])
     match (e.kind, mat) {
         (_, None) => {
             if !text.is_empty() {
-                let (chars, glow) = pulse(e, now, glow, text.chars().count());
                 if chars != Some(0) {
                     draw(p, &text, x, glow, chars.unwrap_or(0));
                 }
@@ -335,16 +343,18 @@ fn draw_elem(ui: &Ui, p: &mut Painter, le: &LiveElem, now: i32, color: [f32; 4])
     }
 }
 
-/// The first `fx_letter` ms per letter reveal of `setpulsefx` text, and its glow while it decays: `(letters shown,
-/// glow)`; `None` letters means all of them.
+/// `setpulsefx` text: `(letters shown, glow, opacity)`. Letters type in `fx_letter` ms apart; from `fx_decay_start` ms
+/// after the birth the text dissolves over `fx_decay_duration` ms and is gone after it (`SetupPulseFXVars`; the
+/// original drops letters at random times and scrambles each just before, this fades the whole text). `None` letters
+/// means all of them.
 fn pulse(
     e: &HudElem,
     now: i32,
     glow: Option<[f32; 4]>,
     total: usize,
-) -> (Option<usize>, Option<[f32; 4]>) {
+) -> (Option<usize>, Option<[f32; 4]>, f32) {
     if e.fx_birth == 0 || e.fx_letter <= 0 {
-        return (None, glow);
+        return (None, glow, 1.0);
     }
     let age = now.wrapping_sub(e.fx_birth).max(0);
     let shown = (age / e.fx_letter) as usize + 1;
@@ -355,7 +365,7 @@ fn pulse(
         1.0
     };
     let glow = glow.map(|g| [g[0], g[1], g[2], g[3] * faded]);
-    (Some(shown.min(total)), glow)
+    (Some(shown.min(total)), glow, faded)
 }
 
 fn named(ui: &Ui, p: &mut Painter, name: &str) -> Option<render::ui2d::UiImage> {
@@ -628,6 +638,12 @@ mod tests {
         e.fx_decay_duration = 1000;
         let glow = Some([1.0, 1.0, 1.0, 1.0]);
         assert_eq!(pulse(&e, 1000, glow, 10).0, Some(1));
+        assert_eq!(pulse(&e, 1000, glow, 10).2, 1.0, "visible while typing in");
+        assert_eq!(
+            pulse(&e, 1000 + 1000 + 1000, glow, 10).2,
+            0.0,
+            "gone once decayed"
+        );
         assert_eq!(pulse(&e, 1200, glow, 10).0, Some(5));
         assert_eq!(pulse(&e, 5000, glow, 10).0, Some(10));
         assert_eq!(pulse(&e, 1400, glow, 10).1.unwrap()[3], 1.0);

@@ -57,6 +57,9 @@ pub struct PlayerWeapons {
     /// A weapon the scripts asked the player to switch to (`switchtoweapon`); it replaces
     /// `cmd.weapon` until the player holds it or no longer owns it. 0 = none.
     selected: u16,
+    /// The weapon last held, which the player keeps asking for while the state machine has put it away (a ladder,
+    /// a mantle, disabled weapons) and gets back afterwards. 0 = none.
+    resume: u16,
 }
 
 impl Default for PlayerWeapons {
@@ -69,6 +72,7 @@ impl Default for PlayerWeapons {
             clip: [0; MAX_CLIPS],
             models: [0; MAX_WEAPONS + 1],
             selected: 0,
+            resume: 0,
         }
     }
 }
@@ -103,7 +107,7 @@ impl PlayerWeapons {
             w[i] = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
             i += 1;
         }
-        w[i] = i32::from(self.selected);
+        w[i] = i32::from(self.selected) | i32::from(self.resume) << 16;
         w
     }
 
@@ -126,6 +130,7 @@ impl PlayerWeapons {
             i += 1;
         }
         s.selected = w[i] as u16;
+        s.resume = (w[i] >> 16) as u16;
         s
     }
 
@@ -183,6 +188,21 @@ impl PlayerWeapons {
     /// The weapon the scripts asked for, if still pending.
     pub fn selected(&self) -> u16 {
         self.selected
+    }
+
+    /// The weapon to ask for when the script has not chosen one: the one in hand, else the last one held.
+    pub(crate) fn wanted(&self, held: u16) -> u16 {
+        match self.selected {
+            0 if self.has(held) => held,
+            0 if self.has(self.resume) => self.resume,
+            w => w,
+        }
+    }
+
+    pub(crate) fn remember(&mut self, held: u16) {
+        if held != 0 {
+            self.resume = held;
+        }
     }
 
     pub(crate) fn clear_selected(&mut self) {
@@ -654,6 +674,9 @@ impl PlayerWeapons {
         }
         if u32::from(index) == ps.weapon {
             ps.weapon = 0;
+        }
+        if index == self.resume {
+            self.resume = 0;
         }
         true
     }

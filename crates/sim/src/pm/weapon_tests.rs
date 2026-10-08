@@ -1136,6 +1136,46 @@ fn the_weapon_is_lowered_on_a_ladder_and_cannot_fire() {
     assert!(r.shots() <= 1, "no shooting while climbing: {}", r.shots());
 }
 
+/// Through the server's command path, which picks the weapon to ask for itself: the ladder puts the weapon away, and
+/// leaving it brings the same weapon back, ready, within a drop and a raise.
+#[test]
+fn the_weapon_comes_back_after_leaving_a_ladder() {
+    let mut r = Rig::new(vec![ak()]);
+    r.world.add(
+        [16.5, -50.0, 0.0],
+        [20.0, 50.0, 300.0],
+        contents::SOLID,
+        SURF_LADDER,
+    );
+    let held = r.hold("ak47_mp");
+    let mut old = UserCmd::default();
+    let mut cmd_at = |r: &mut Rig, buttons: i32, fwd: i8| {
+        let cmd = UserCmd {
+            buttons,
+            forwardmove: fwd,
+            server_time: r.ps.command_time + 10,
+            ..UserCmd::default()
+        };
+        run_usercmd(
+            &mut r.ps, &mut r.inv, cmd, old, 190, &r.table, &r.params, &r.world,
+        );
+        old = cmd;
+    };
+    for _ in 0..150 {
+        cmd_at(&mut r, 0, 127);
+    }
+    assert_ne!(r.ps.pm_flags & pmf::LADDER, 0, "on the ladder");
+    assert_eq!(r.ps.weapon, 0, "hands are busy");
+    cmd_at(&mut r, button::JUMP, -127);
+    assert_eq!(r.ps.pm_flags & pmf::LADDER, 0, "off the ladder");
+    let w = ak();
+    for _ in 0..(w.drop_time + w.raise_time + w.first_raise_time + 200) / 10 {
+        cmd_at(&mut r, 0, -127);
+    }
+    assert_eq!(r.ps.weapon, u32::from(held), "the weapon is back in hand");
+    assert_eq!(r.ps.weapon_state, ws::READY, "and ready");
+}
+
 #[test]
 fn firing_can_freeze_movement() {
     let mut w = ak();
