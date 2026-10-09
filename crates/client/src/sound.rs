@@ -91,6 +91,8 @@ pub struct Who<'a> {
     pub weapon_of: &'a dyn Fn(u16) -> Option<Arc<WeaponDef>>,
     /// The player has Dead Silence (`specialty_quieter`): the `q` alias families.
     pub quiet: bool,
+    /// The player is on a turret (`eFlags & EF_TURRET_ACTIVE`).
+    pub turret: bool,
 }
 
 impl ClientSound {
@@ -586,6 +588,9 @@ impl ClientSound {
             }
             return;
         }
+        if let Some(name) = goggle_sound(who, event) {
+            self.play(name, Cue::default());
+        }
         if let Some(name) = weapon_sound(who.weapon, event, who.own) {
             // A weapon change cuts a reload short (`EV_STOP_WEAPON_SOUND`).
             let stoppable = matches!(
@@ -1019,15 +1024,28 @@ fn stopped_weapon_sounds(w: Option<&WeaponDef>, state: u8, own: bool) -> Vec<Str
     }
 }
 
+/// The goggles' own sound for the own player's night vision toggle (`CG_EntityEvent`): played when the weapon has no
+/// animation of it (which would play the sound at its note) or the player is on a turret.
+fn goggle_sound(who: &Who, event: u8) -> Option<&'static str> {
+    let (slot, name) = match event {
+        ev::NIGHTVISION_WEAR => (26, "item_nightvision_on"),
+        ev::NIGHTVISION_REMOVE => (27, "item_nightvision_off"),
+        _ => return None,
+    };
+    let animated = who
+        .weapon
+        .and_then(|w| w.anims.get(slot))
+        .is_some_and(|a| a.as_deref().is_some_and(|a| !a.is_empty()));
+    (who.own && (who.turret || !animated)).then_some(name)
+}
+
 /// The weapon's sound alias for a player event, `_player` (first-person) variants for the own player.
 fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
     let s = &w?.sounds;
     let pick = |plr: &Option<Arc<str>>, other: &Option<Arc<str>>| {
-        let n = if own {
-            plr.as_ref().or(other.as_ref())
-        } else {
-            other.as_ref()
-        };
+        // The own view hears the first-person alias only: a weapon without one is silent there, its first-person
+        // notetrack sounds play instead (`CG_EntityEvent` plays `reloadSoundPlayer`, null plays nothing).
+        let n = if own { plr } else { other }.as_ref();
         n.filter(|n| !n.is_empty()).map(|n| n.to_string())
     };
     match event {
@@ -1092,6 +1110,7 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
             weapon: None,
             weapon_of: &none,
             quiet,
+            turret: false,
         };
         // The first look at an entity only learns its counter; the second delivers the event.
         if own {
@@ -1681,5 +1700,78 @@ mod tests {
     fn other_events_are_not_movement_sounds() {
         assert!(movement_sounds(ev::FIRE_WEAPON, 0, false, false).is_none());
         assert!(movement_sounds(ev::NONE, 0, false, false).is_none());
+    }
+
+    #[test]
+    fn the_own_view_hears_only_the_first_person_alias() {
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let install = server::content::Install::open(std::path::Path::new(&root)).unwrap();
+        let mut content = server::content::Content::for_client();
+        content.load_boot(&install).unwrap();
+        let ak = content.weapon("ak47_mp").unwrap().clone();
+        assert!(ak.sounds.reload_sound_player.is_none() && ak.sounds.reload_sound.is_some());
+        assert_eq!(weapon_sound(Some(&ak), ev::RELOAD, true), None);
+        assert!(weapon_sound(Some(&ak), ev::RELOAD, false).is_some());
+        // The own shot still sounds for every weapon a player can hold that has one for others.
+        let silent: Vec<_> = content
+            .weapons()
+            .iter()
+            .filter(|w| w.weap_type == 0 && w.hand_model.is_some())
+            .filter(|w| {
+                weapon_sound(Some(w), ev::FIRE_WEAPON, false).is_some()
+                    && weapon_sound(Some(w), ev::FIRE_WEAPON, true).is_none()
+            })
+            .map(|w| format!("{:?}", w.internal_name))
+            .collect();
+        assert!(silent.is_empty(), "{silent:?}");
+    }
+
+    #[test]
+    fn the_goggles_play_their_sound_in_the_own_view_unless_the_weapon_animates_them() {
+        let none = |_: u16| None;
+        let who = |own, turret, weapon| Who {
+            own,
+            entity: 1,
+            origin: [0.0; 3],
+            weapon,
+            weapon_of: &none,
+            quiet: false,
+            turret,
+        };
+        assert_eq!(
+            goggle_sound(&who(true, false, None), ev::NIGHTVISION_WEAR),
+            Some("item_nightvision_on")
+        );
+        assert_eq!(
+            goggle_sound(&who(true, false, None), ev::NIGHTVISION_REMOVE),
+            Some("item_nightvision_off")
+        );
+        assert_eq!(
+            goggle_sound(&who(false, false, None), ev::NIGHTVISION_WEAR),
+            None
+        );
+        assert_eq!(goggle_sound(&who(true, false, None), ev::RELOAD), None);
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; skipping the weapon part");
+            return;
+        };
+        let install = server::content::Install::open(std::path::Path::new(&root)).unwrap();
+        let mut content = server::content::Content::for_client();
+        content.load_boot(&install).unwrap();
+        let animated = content.weapons().into_iter().find(|w| {
+            w.anims
+                .get(26)
+                .is_some_and(|a| a.as_deref().is_some_and(|a| !a.is_empty()))
+        });
+        if let Some(w) = animated {
+            assert_eq!(
+                goggle_sound(&who(true, false, Some(&w)), ev::NIGHTVISION_WEAR),
+                None
+            );
+            assert!(goggle_sound(&who(true, true, Some(&w)), ev::NIGHTVISION_WEAR).is_some());
+        }
     }
 }

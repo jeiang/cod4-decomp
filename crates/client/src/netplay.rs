@@ -709,7 +709,7 @@ impl NetPlay {
             // The followed player's hits turn the view and show on the screen as the player's own would.
             self.damage
                 .look(&ps, st, [ps.viewangles[0], ps.viewangles[1]]);
-            let gun = self.weapons.info(ps.weapon as u16).gun;
+            let gun = self.weapons.info(sim::pm::viewmodel_weapon(&ps)).gun;
             self.fx.observe(&ps);
             let hit_view = self.fx.damage_kick(&ps, &gun);
             self.damage_hud = self.damage.hud(st, ps.viewangles[1]);
@@ -740,7 +740,7 @@ impl NetPlay {
                 weapon: self
                     .lib
                     .content
-                    .weapon(self.weapons.name(ps.weapon as u16))
+                    .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)))
                     .map(|d| crate::camera::WeaponView::from(&**d)),
                 aim,
                 step: 0.0,
@@ -812,19 +812,25 @@ impl NetPlay {
             ps.origin[2] + err[2],
         ];
         let dead = matches!(ps.pm_type, PmType::Dead | PmType::DeadLinked);
-        let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
+        let def = self
+            .lib
+            .content
+            .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)));
         if dead {
             self.kick.clear();
         } else {
-            self.kick
-                .shots(&events, &ps, self.weapons.info(ps.weapon as u16));
+            self.kick.shots(
+                &events,
+                &ps,
+                self.weapons.info(sim::pm::viewmodel_weapon(&ps)),
+            );
             self.kick.step(
                 dt,
                 ps.weapon_pos_frac,
                 def.map(|d| [d.hip_view_kick_center_speed, d.ads_view_kick_center_speed]),
             );
         }
-        let gun = self.weapons.info(ps.weapon as u16).gun;
+        let gun = self.weapons.info(sim::pm::viewmodel_weapon(&ps)).gun;
         if dead {
             self.fx.clear();
         } else {
@@ -1102,7 +1108,7 @@ impl NetPlay {
 
     /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
-        let index = ps.weapon as u16;
+        let index = sim::pm::viewmodel_weapon(&ps);
         let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
         let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &WeaponParams::default());
         Some(Reticle {
@@ -1198,6 +1204,7 @@ impl NetPlay {
                 weapon: def.map(|d| &**d),
                 weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
                 quiet: ps.perks & sim::pm::PERK_QUIETER != 0,
+                turret: ps.e_flags & sim::pm::ef::TURRET_ACTIVE != 0,
             },
             events,
         );
@@ -1717,6 +1724,7 @@ impl NetPlay {
                     weapon: def.map(|d| &**d),
                     weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
                     quiet: e.perks & sim::pm::PERK_QUIETER != 0,
+                    turret: false,
                 },
                 e.event_seq,
                 &e.recent_events(),
