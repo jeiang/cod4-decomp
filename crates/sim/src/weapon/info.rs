@@ -214,6 +214,11 @@ pub struct WeaponInfo {
     pub reload_ammo_add: i32,
     pub reload_start_add: i32,
     pub no_partial_reload: bool,
+    /// `avoidDropCleanup`: the weapon is never the one freed to make room for a newer drop.
+    pub avoid_drop_cleanup: bool,
+    /// `iDropAmmoMin` and `iDropAmmoMax`: how much a weapon dropped without an owner holds.
+    pub drop_ammo_min: i32,
+    pub drop_ammo_max: i32,
 
     // Timing (ms).
     pub fire_delay: i32,
@@ -378,6 +383,9 @@ impl Default for WeaponInfo {
             reload_ammo_add: 0,
             reload_start_add: 0,
             no_partial_reload: false,
+            avoid_drop_cleanup: false,
+            drop_ammo_min: 0,
+            drop_ammo_max: 0,
             fire_delay: 0,
             fire_time: 0,
             rechamber_time: 0,
@@ -552,6 +560,9 @@ impl WeaponInfo {
             reload_ammo_add: def.reload_ammo_add,
             reload_start_add: def.reload_start_add,
             no_partial_reload: flag(def.no_partial_reload),
+            avoid_drop_cleanup: flag(def.avoid_drop_cleanup),
+            drop_ammo_min: def.drop_ammo_min,
+            drop_ammo_max: def.drop_ammo_max,
             fire_delay: def.fire_delay,
             fire_time: def.fire_time,
             rechamber_time: def.rechamber_time,

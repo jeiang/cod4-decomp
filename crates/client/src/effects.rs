@@ -7,7 +7,7 @@
 //! surface type a column; flesh has its own four columns (body or head, fatal or not).
 
 use crate::decal::{self, Placement};
-use crate::events::ClientEvent;
+use crate::events::{ClientEvent, Events};
 use crate::viewmodel::ViewTags;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
 use assets::zone::gfx::Material;
@@ -15,6 +15,7 @@ use assets::zone::gfxworld::GfxWorld;
 use assets::zone::weapon::WeaponDef;
 use fx::{Camera, Draws, Frame, Fx, Library, SoundPlay};
 use glam::Vec3;
+use net::entity::{EntityState, etype};
 use render::{DynMesh, DynVertex, ModelInstance, ModelKind};
 use server::content::Content;
 use sim::cm::Collide;
@@ -42,7 +43,7 @@ const FLESH_BODY_FATAL: usize = 1;
 const CHEST: f32 = 40.0;
 
 /// What the world looks like to a particle: solid map geometry.
-struct Tracer<'a>(&'a dyn Collide);
+pub(crate) struct Tracer<'a>(pub(crate) &'a dyn Collide);
 
 impl fx::World for Tracer<'_> {
     fn trace(&self, a: Vec3, b: Vec3, mins: Vec3, maxs: Vec3) -> Option<(f32, Vec3)> {
@@ -76,6 +77,9 @@ pub struct Effects {
     /// The server time of the last update.
     clock: i32,
     sweep: Option<(u64, Frame, i32)>,
+    /// The script effect entities, by entity number.
+    world_fx: HashMap<u16, WorldFx>,
+    world_fx_stamp: u32,
     /// The client number of this player and the gun in their hands, for the first-person flash.
     own: u16,
     view: Option<ViewTags>,
@@ -83,6 +87,40 @@ pub struct Effects {
     pub played: BTreeMap<&'static str, u64>,
     /// Names of effects an event asked for that the content lacks.
     pub missing: HashSet<String>,
+}
+
+/// A frame at `origin` facing `forward` with `up` above it.
+fn oriented(origin: Vec3, forward: [f32; 3], up: [f32; 3]) -> Frame {
+    let (f, u) = (Vec3::from(forward), Vec3::from(up));
+    Frame {
+        origin,
+        axis: [f, u.cross(f), u],
+    }
+}
+
+/// What a script effect entity (`spawnfx`, `playloopedfx`) has done on this client.
+struct WorldFx {
+    /// The looping effect's handle.
+    handle: Option<u64>,
+    /// When a looped effect restarts next.
+    next: i32,
+    /// The last trigger of a `spawnfx` effect acted on, and the server time the pending one plays at.
+    seen: u8,
+    start: Option<i32>,
+    /// The update that last saw the entity.
+    stamp: u32,
+}
+
+/// Looping script effects do not start while this many elements are alive: the rest is for the effects of play.
+const LOOP_BUDGET: usize = 4500;
+
+/// Where and how a script effect entity plays.
+fn world_fx_frame(e: &EntityState) -> Frame {
+    let (f, r, u) = sim::pm::math::angle_vectors(&e.angles);
+    Frame {
+        origin: Vec3::from(e.origin),
+        axis: [Vec3::from(f), -Vec3::from(r), Vec3::from(u)],
+    }
 }
 
 /// What to draw this frame.
@@ -95,6 +133,8 @@ pub struct Drawn {
     pub decals: usize,
     /// How many trail strips the meshes hold.
     pub trails: usize,
+    /// How far the camera shaking turns the view (pitch, yaw, roll in degrees); set by the caller.
+    pub sway: [f32; 3],
 }
 
 impl Effects {
@@ -109,6 +149,8 @@ impl Effects {
             world,
             marks: HashMap::new(),
             missiles: HashMap::new(),
+            world_fx: HashMap::new(),
+            world_fx_stamp: 0,
             clock: 0,
             sweep: None,
             own: u16::MAX,
@@ -220,15 +262,16 @@ impl Effects {
             ClientEvent::PlayFx {
                 origin,
                 forward,
+                up,
                 name,
                 ..
             } => match self.fx.library().get(name).cloned() {
-                Some(d) => self.play(
-                    "play_fx",
-                    Some(d),
-                    Vec3::from(*origin),
-                    Vec3::from(*forward),
-                ),
+                Some(d) => {
+                    let d = self.resolve(&d);
+                    self.fx
+                        .play(&d, oriented(Vec3::from(*origin), *forward, *up));
+                    *self.played.entry("play_fx").or_default() += 1;
+                }
                 None => {
                     self.missing.insert(name.clone());
                 }
@@ -252,7 +295,7 @@ impl Effects {
                     Vec3::Z,
                 );
             }
-            ClientEvent::PhysicsExplosion { .. } => {}
+            ClientEvent::Physics { .. } | ClientEvent::Earthquake { .. } => {}
             ClientEvent::WeaponFire {
                 eye,
                 angles,
@@ -338,6 +381,115 @@ impl Effects {
             }
             flying
         });
+    }
+
+    /// Keeps the script effect entities of the newest snapshot playing (`CG_Fx`, `CG_LoopFx`): a looped effect starts
+    /// when its entity is in range of `eye` and restarts every period (it is stopped beyond its cull distance, and
+    /// not started while the effects are near their element budget); a triggered one plays once per trigger, from the
+    /// moment the trigger names even if that is already past (a client that joined late sees the end of it); an
+    /// entity that is gone stops its effect. `names` gives the effect names by index.
+    pub fn world_fx(&mut self, ents: &[EntityState], names: &Events, eye: Vec3, now: i32) {
+        self.world_fx_stamp = self.world_fx_stamp.wrapping_add(1);
+        let stamp = self.world_fx_stamp;
+        for e in ents {
+            let looped = e.etype == etype::LOOP_FX;
+            if !looped && e.etype != etype::FX {
+                continue;
+            }
+            let w = self.world_fx.entry(e.number).or_insert(WorldFx {
+                handle: None,
+                next: 0,
+                seen: 0,
+                start: None,
+                stamp,
+            });
+            w.stamp = stamp;
+            // An effect the pool evicted is not playing any more.
+            if w.handle.is_some_and(|id| !self.fx.is_live(id)) {
+                w.handle = None;
+            }
+            let origin = Vec3::from(e.origin);
+            if looped {
+                let cull = e.velocity[0];
+                if cull != 0.0 && origin.distance(eye) >= cull {
+                    if let Some(id) = w.handle.take() {
+                        self.fx.stop(id);
+                    }
+                    continue;
+                }
+                let period = i32::try_from(e.pm_flags).unwrap_or(i32::MAX).max(1);
+                match w.handle {
+                    Some(id) => {
+                        // After a stall, skip to now rather than replaying every missed period.
+                        if now.wrapping_sub(w.next) >= period.saturating_mul(4) {
+                            w.next = now;
+                        }
+                        while now >= w.next {
+                            if !self.fx.retrigger(id, w.next) {
+                                w.handle = None;
+                                break;
+                            }
+                            w.next += period;
+                        }
+                    }
+                    None if self.fx.live_elems() < LOOP_BUDGET => {
+                        let Some(def) = self.world_fx_def(names, e.model) else {
+                            continue;
+                        };
+                        let frame = world_fx_frame(e);
+                        let w = self.world_fx.get_mut(&e.number).expect("just inserted");
+                        w.handle = Some(self.fx.play_attached(&def, frame));
+                        w.next = now + period;
+                        *self.played.entry("looped_fx").or_default() += 1;
+                    }
+                    None => {}
+                }
+            } else {
+                if e.event_seq != w.seen {
+                    w.seen = e.event_seq;
+                    // The low 24 bits of the server time it plays at, read as the nearest such time to now.
+                    let d = ((e.eflags.wrapping_sub(now as u32) << 8) as i32) >> 8;
+                    w.start = Some(now.wrapping_add(d));
+                }
+                if let Some(start) = w.start.filter(|s| now >= *s) {
+                    w.start = None;
+                    if let Some(def) = self.world_fx_def(names, e.model) {
+                        self.fx.play_at(&def, world_fx_frame(e), start);
+                        *self.played.entry("triggered_fx").or_default() += 1;
+                    }
+                }
+            }
+        }
+        let fx = &mut self.fx;
+        self.world_fx.retain(|_, w| {
+            let keep = w.stamp == stamp;
+            if !keep && let Some(id) = w.handle {
+                fx.stop(id);
+            }
+            keep
+        });
+    }
+
+    /// The definition of effect `index`, noting the name when the content lacks it.
+    fn world_fx_def(&mut self, names: &Events, index: u16) -> Option<Arc<FxEffectDef>> {
+        let name = names.fx_name(usize::from(index))?;
+        match self.fx.library().get(name).cloned() {
+            Some(d) => Some(self.resolve(&d)),
+            None => {
+                if !self.missing.contains(name) {
+                    self.missing.insert(name.to_owned());
+                }
+                None
+            }
+        }
+    }
+
+    /// Looping script effects playing now.
+    pub fn looped_fx(&self) -> usize {
+        self.world_fx
+            .values()
+            .filter(|w| w.handle.is_some_and(|id| self.fx.is_live(id)))
+            .count()
     }
 
     /// Tells the effects who this player is and where the gun in their hands has its muzzle and ejection port.
@@ -522,8 +674,7 @@ impl Effects {
             let mut inst = ModelInstance::new(m.model.clone(), ModelKind::World);
             inst.origin = m.origin.to_array();
             inst.light_origin = inst.origin;
-            let f = m.axis[0];
-            inst.angles = [-f.z.asin().to_degrees(), f.y.atan2(f.x).to_degrees(), 0.0];
+            inst.angles = crate::props::angles_of(m.axis);
             out.models.push(inst);
         }
         out

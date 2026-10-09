@@ -413,6 +413,18 @@ impl Look {
         self.blend_ms = ms;
     }
 
+    /// A flash (not a blur) is on the screen at `now_ms` (`CG_Flashbanged`).
+    pub fn flashbanged(&self, now_ms: i32) -> bool {
+        self.shock.as_ref().is_some_and(|s| {
+            s.start_ms + s.duration_ms - now_ms > 0 && s.params.screen != Screen::Blurred
+        })
+    }
+
+    /// The player looks through the night vision goggles (the night set is what they show).
+    pub fn night_vision(&self) -> bool {
+        self.goggles && self.night_set.is_some()
+    }
+
     /// The night vision goggles went on or off (the player state's weapon flag); the look blends to the night set
     /// and back.
     pub fn goggles(&mut self, on: bool, now_ms: i32) {
@@ -434,6 +446,13 @@ impl Look {
             blend_glow(&self.from.0, &self.to.0, t),
             blend_film(&self.from.1, &self.to.1, t),
         )
+    }
+
+    /// `CG_Flashbanged`: a shock whose screen is not a blur is still running at `now_ms`.
+    pub fn flashed(&self, now_ms: i32) -> bool {
+        self.shock.as_ref().is_some_and(|s| {
+            s.start_ms + s.duration_ms - now_ms > 0 && s.params.screen != Screen::Blurred
+        })
     }
 
     /// The look at server time `now_ms`.

@@ -9,16 +9,18 @@
 //! the moment the server rewinds them to when it judges this client's shots.
 
 mod hud;
+mod names;
 
 use crate::crosshair::Reticle;
+use crate::damage::{DamageHud, DamageView};
 use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::helicopter::Rotors;
-use crate::input::{InputFrame, buttons};
+use crate::input::{Feedback, InputFrame, Seen, buttons, scan_own};
 use crate::kick::Kick;
 use crate::look::{Look, LookOut, cap_turn};
 use crate::models::{Library, Player, PlayerModelSet, Team};
-use crate::props::Props;
+use crate::props::{Launches, Props};
 use crate::ragdoll::Ragdoll;
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::{Sight, ViewModel};
@@ -121,6 +123,11 @@ struct Counters {
     /// How many times the view kick came back to rest after a kick.
     kick_settled: u64,
     kicked: bool,
+    /// How often the player state's `damage_event` changed while alive, the value last seen, and the most the red flash and the number of wedges showed.
+    damage_events: u64,
+    damage_event_seen: u8,
+    max_damage_flash: f32,
+    max_damage_wedges: usize,
     predictions: u64,
     max_players_seen: usize,
     /// The most other players drawn in one frame, and why the others could not be built (a model or animation the
@@ -158,6 +165,10 @@ struct Counters {
     /// Ragdolls made for players seen dying.
     ragdolls: u64,
     fx_live_max: usize,
+    /// The most script looping effects playing at once, and the strongest camera shake and sway felt.
+    looped_fx_max: usize,
+    shake_max: f32,
+    sway_max: f32,
     /// How fast the eye moved between drawn frames (units per second) while the player walked; the spread of these
     /// is what a jerky view is made of.
     eye_speeds: Vec<f32>,
@@ -177,6 +188,9 @@ pub struct NetPlay {
     angles: [f32; 2],
     /// The kick of the player's own shots; kept apart from `angles`, the player's aim.
     kick: Kick,
+    /// The screen's answer to the hits the player takes, and what the HUD draws of it this frame.
+    damage: DamageView,
+    damage_hud: DamageHud,
     pitch_limits: (f32, f32),
     cmd_time: i32,
     last_cmd: Instant,
@@ -185,6 +199,9 @@ pub struct NetPlay {
     before_slot: Option<u16>,
     /// A night-vision slot was pressed: the next command carries the button.
     nv_press: bool,
+    /// The own player's event counter last acted on, and what the input layer is yet to be told of it.
+    own_events: Seen,
+    feedback: Feedback,
     /// Where the map pick of a location selection points, 0..1 across and down the map.
     pub loc_cursor: [f32; 2],
     remotes: HashMap<u16, Remote>,
@@ -199,6 +216,8 @@ pub struct NetPlay {
     /// Events for the menu runtime (a person's menus drain them; autoplay answers them itself).
     ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
+    /// The other players as the last frame's view saw them, for overhead names and head icons.
+    scan: crate::hud::NameScan,
     /// The state the HUD shows (predicted, or the followed player's) and the view yaw in degrees, from the last frame.
     hud_view: Option<(PlayerState, f32)>,
     /// The crosshair of the held weapon from the last frame; `None` when dead, watching another player or the weapon
@@ -212,7 +231,10 @@ pub struct NetPlay {
     scores_asked: Option<Instant>,
     server_addr: String,
     effects: Effects,
+    /// Earthquakes shaking the view.
+    shakes: sim::shake::CameraShakes,
     props: Props,
+    launches: Launches,
     look: Look,
     /// What the shell shock holds the view to (`CL_CapTurnRate`, the mouse scale): pitch and yaw degrees per second.
     max_turn: [f32; 2],
@@ -232,6 +254,10 @@ pub struct NetPlay {
     /// commands' angles turn with it.
     last_delta: Option<[f32; 3]>,
 }
+
+/// Silence from the server after which the player is warned (the original's `CG_DrawDisconnect` waits for the
+/// 128th unacknowledged command, about two seconds).
+const INTERRUPTED_MS: u64 = 2000;
 
 impl NetPlay {
     pub fn connect(
@@ -264,12 +290,16 @@ impl NetPlay {
             pred: Predictor::default(),
             angles: [0.0; 2],
             kick: Kick::default(),
+            damage: DamageView::default(),
+            damage_hud: DamageHud::default(),
             pitch_limits,
             cmd_time: 0,
             last_cmd: Instant::now(),
             want_weapon: None,
             before_slot: None,
             nv_press: false,
+            own_events: Seen::default(),
+            feedback: Feedback::default(),
             loc_cursor: [0.5; 2],
             remotes: HashMap::new(),
             pushes: HashMap::new(),
@@ -280,6 +310,7 @@ impl NetPlay {
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
+            scan: crate::hud::NameScan::default(),
             hud_view: None,
             reticle: None,
             sound,
@@ -288,10 +319,12 @@ impl NetPlay {
                     .clipmap()
                     .map_or(&[][..], |c| &c.dyn_entities[..]),
             ),
+            launches: Launches::default(),
             look: Look::new((map.art.glow, map.art.film)),
             max_turn: [0.0; 2],
             shock_sensitivity: 1.0,
             effects: Effects::new(&lib.content, world),
+            shakes: Default::default(),
             lib,
             events: Events::default(),
             live_time: 0,
@@ -315,6 +348,16 @@ impl NetPlay {
 
     pub fn refused(&self) -> Option<&str> {
         self.net.refused()
+    }
+
+    /// Why the server ended the connection (a kick) or went silent: the message the player is shown.
+    pub fn dropped(&self) -> Option<&str> {
+        self.net.dropped()
+    }
+
+    /// `cl_timeout`: the silence the server may keep.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.net.set_timeout(timeout);
     }
 
     /// Answers the team and class menus with defaults (what a person's menus do when they pick the first choices).
@@ -361,12 +404,17 @@ impl NetPlay {
     /// every couple of seconds while the scoreboard is up (`live.scores_wanted`).
     pub fn fill_live(&mut self, live: &mut crate::hud::LiveUi) {
         crate::hud::fill::fill(&mut self.net, live, self.live_time, self.last_eye);
+        live.scan.clone_from(&self.scan);
         live.scope = self.sight.as_ref().and_then(|s| s.overlay.clone());
+        live.flashed = self.look.flashbanged(self.live_time);
+        live.night_vision = self.look.night_vision();
         live.reticle.clone_from(&self.reticle);
+        live.damage.clone_from(&self.damage_hud);
         if live.kill_icons.len() != self.kill_icons.len() {
             live.kill_icons.clone_from(&self.kill_icons);
         }
         live.server_addr.clone_from(&self.server_addr);
+        live.interrupted = self.net.silent_ms() > INTERRUPTED_MS;
         if !live.active || !live.scores_wanted {
             self.scores_asked = None;
         } else if self
@@ -410,7 +458,10 @@ impl NetPlay {
         self.remotes.clear();
         self.vm = None;
         self.events = Events::default();
+        self.own_events = Seen::default();
+        self.shakes.clear();
         self.last_eye = None;
+        self.scan = crate::hud::NameScan::default();
         self.c.spawned = false;
         self.c.start = None;
         Ok(())
@@ -453,6 +504,17 @@ impl NetPlay {
     /// `snd_volume`, from the cvar store each frame.
     pub fn set_volume(&mut self, volume: f32) {
         self.sound.set_volume(volume);
+    }
+
+    /// `cg_footsteps`, from the cvar store each frame.
+    pub fn set_footsteps(&mut self, on: bool) {
+        self.sound.set_footsteps(on);
+    }
+
+    /// What the player state says the input layer must change (forced stance, ADS reset, frozen); take it each
+    /// frame and give it to `Input::apply`.
+    pub fn take_input_feedback(&mut self) -> Feedback {
+        self.feedback.take()
     }
 
     /// Runs one render frame of play. `None` until the server has given the player a body.
@@ -522,6 +584,11 @@ impl NetPlay {
             // player state is theirs, so nothing is predicted; draw their view as it came.
             let ps = snap.ps.clone();
             self.kick.clear();
+            // The followed player's hits turn the view and show on the screen as the player's own would.
+            self.damage
+                .look(&ps, st, [ps.viewangles[0], ps.viewangles[1]]);
+            let hit_view = self.damage.view_angles(st, ps.weapon_pos_frac, false);
+            self.damage_hud = self.damage.hud(st, ps.viewangles[1]);
             let eye = Vec3::new(
                 ps.origin[0],
                 ps.origin[1],
@@ -531,7 +598,15 @@ impl NetPlay {
             self.hud_view = Some((ps.clone(), ps.viewangles[1]));
             self.reticle = None;
             let mut models = self.remote_players(dt, st, ps.client_num);
-            models.extend(self.script_models(&snap));
+            self.scan_names(
+                st,
+                ps.client_num,
+                eye,
+                (ps.viewangles[0], ps.viewangles[1]),
+                false,
+            );
+            models.extend(self.script_models(&snap, dt));
+            models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
             models.extend(self.view_model(
                 dt,
@@ -557,9 +632,9 @@ impl NetPlay {
             models.extend(drawn.models);
             return Some(NetFrame {
                 origin: eye,
-                yaw: yaw + look.kick[1].to_radians(),
-                pitch: pitch + look.kick[0].to_radians(),
-                roll: 0.0,
+                yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),
+                pitch: pitch + (look.kick[0] - drawn.sway[0] - hit_view[0]).to_radians(),
+                roll: (drawn.sway[2] + hit_view[1]).to_radians(),
                 models,
                 sight: self.sight.clone(),
                 meshes: drawn.meshes,
@@ -585,10 +660,10 @@ impl NetPlay {
             ps.origin[2] + err[2],
         ];
         let dead = matches!(ps.pm_type, PmType::Dead | PmType::DeadLinked);
+        let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
         if dead {
             self.kick.clear();
         } else {
-            let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
             self.kick.shots(&ps, self.weapons.info(ps.weapon as u16));
             self.kick.step(
                 dt,
@@ -596,6 +671,29 @@ impl NetPlay {
                 def.map(|d| [d.hip_view_kick_center_speed, d.ads_view_kick_center_speed]),
             );
         }
+        // A hit turns the camera but not the aim, and the HUD shows it.
+        let overlay = def.is_some_and(|d| d.overlay_reticle != 0);
+        let hit_view = if dead {
+            self.damage.clear();
+            [0.0; 2]
+        } else {
+            let view = [
+                self.angles[0] + self.kick.angles()[0],
+                self.angles[1] + self.kick.angles()[1],
+            ];
+            self.damage.look(&ps, st, view);
+            self.damage.view_angles(st, ps.weapon_pos_frac, overlay)
+        };
+        self.damage_hud = if dead {
+            DamageHud::default()
+        } else {
+            self.damage.hud(st, self.angles[1] + self.kick.angles()[1])
+        };
+        // A respawn starts the count over; only a change the player lived to see is a hit.
+        self.c.damage_events += u64::from(!dead && ps.damage_event != self.c.damage_event_seen);
+        self.c.damage_event_seen = ps.damage_event;
+        self.c.max_damage_flash = self.c.max_damage_flash.max(self.damage_hud.flash);
+        self.c.max_damage_wedges = self.c.max_damage_wedges.max(self.damage_hud.wedges.len());
         let (was_kicked, kick) = (self.c.kicked, self.kick.angles());
         self.c.kicked = kick != [0.0; 3];
         self.c.kick_settled += u64::from(was_kicked && !self.c.kicked);
@@ -636,12 +734,21 @@ impl NetPlay {
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
         self.hear(dt, eye, &ps, &snap);
+        self.feedback
+            .merge(scan_own(&mut self.own_events, &snap.ps));
 
         let (events, commands) = self.take_events(&snap);
         let look = self.look.frame(st);
         self.shock_effects(&look);
         let mut models = self.remote_players(dt, st, own);
-        models.extend(self.script_models(&snap));
+        let view = if dead {
+            (0.0, ps.viewangles[1])
+        } else {
+            (self.angles[0] + kick[0], self.angles[1] + kick[1])
+        };
+        self.scan_names(st, own, eye, view, dead);
+        models.extend(self.script_models(&snap, dt));
+        models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));
         if !dead {
             models.extend(self.view_model(
@@ -656,17 +763,25 @@ impl NetPlay {
         } else {
             self.angles[1] + kick[1]
         };
-        let pitch = if dead { 0.0 } else { self.angles[0] + kick[0] };
+        let pitch = if dead {
+            0.0
+        } else {
+            self.angles[0] + kick[0] + hit_view[0]
+        };
         let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
-        let roll = if dead { 0.0 } else { kick[2].to_radians() };
+        let roll = if dead {
+            0.0
+        } else {
+            (kick[2] + hit_view[1]).to_radians()
+        };
         let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch, roll));
         models.extend(self.props.instances());
         models.extend(drawn.models);
         Some(NetFrame {
             origin: eye,
-            yaw: yaw + look.kick[1].to_radians(),
-            pitch: pitch + look.kick[0].to_radians(),
-            roll,
+            yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),
+            pitch: pitch + (look.kick[0] - drawn.sway[0]).to_radians(),
+            roll: roll + drawn.sway[2].to_radians(),
             models,
             sight: self.sight.clone(),
             meshes: drawn.meshes,
@@ -690,6 +805,16 @@ impl NetPlay {
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         for e in events {
+            if let ClientEvent::Earthquake { origin, quake } = e {
+                self.shakes.start(
+                    st,
+                    eye.to_array(),
+                    quake.scale,
+                    quake.duration_ms,
+                    *origin,
+                    quake.radius,
+                );
+            }
             if let ClientEvent::PlayerDeath { client, push, .. } = e {
                 self.pushes.insert(*client, *push);
             }
@@ -740,12 +865,25 @@ impl NetPlay {
                 .and_then(|i| content.weapon(&i.name))
                 .cloned()
         });
+        if let Some(snap) = self.net.latest() {
+            self.effects.world_fx(&snap.entities, &self.events, eye, st);
+        }
         self.effects.update(st, self.boxes.world());
         for s in self.effects.take_sounds() {
             self.sound.play_world(&s.alias, s.origin.to_array());
         }
         self.props.update(dt, self.boxes.world());
-        let drawn = self.effects.draw(eye, yaw, pitch, roll);
+        let mut drawn = self.effects.draw(eye, yaw, pitch, roll);
+        drawn.sway = self.shakes.sway(st, eye.to_array());
+        self.c.shake_max = self
+            .c
+            .shake_max
+            .max(self.shakes.strength(st, eye.to_array()));
+        self.c.sway_max = self
+            .c
+            .sway_max
+            .max(drawn.sway.iter().fold(0.0, |m, a| m.max(a.abs())));
+        self.c.looped_fx_max = self.c.looped_fx_max.max(self.effects.looped_fx());
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
         self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
@@ -839,6 +977,8 @@ impl NetPlay {
                 entity: s.client_num,
                 origin: eye.to_array(),
                 weapon: def.map(|d| &**d),
+                weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
+                quiet: s.perks & sim::pm::PERK_QUIETER != 0,
             },
             s.event_sequence,
             &newest,
@@ -1030,7 +1170,7 @@ impl NetPlay {
 
     /// The scripted models of the level (`script_model`: props, cars, objectives), posed at the origin and angles the
     /// server gave them. They move in steps of the snapshots; the stock scripts only move them a few at a time.
-    fn script_models(&mut self, snap: &net::Snapshot) -> Vec<ModelInstance> {
+    fn script_models(&mut self, snap: &net::Snapshot, dt: f32) -> Vec<ModelInstance> {
         let Some(ui) = self.net.ui() else {
             return Vec::new();
         };
@@ -1046,10 +1186,19 @@ impl NetPlay {
             let name = ui.model(e.model);
             match self.lib.content.model(name) {
                 Some(model) => {
+                    let posed = if e.eflags & eflags::PHYSICS_LAUNCH != 0 {
+                        self.launches.pose(e, model, dt, self.boxes.world())
+                    } else {
+                        Some((e.origin, e.angles))
+                    };
+                    // A launch that was given up is not drawn.
+                    let Some((origin, angles)) = posed else {
+                        continue;
+                    };
                     let mut m = ModelInstance::new(model.clone(), render::ModelKind::World);
-                    m.origin = e.origin;
-                    m.angles = e.angles;
-                    m.light_origin = e.origin;
+                    m.origin = origin;
+                    m.angles = angles;
+                    m.light_origin = origin;
                     out.push(m);
                     if !self.c.script_models_names.contains(name) {
                         self.c.script_models_names.insert(name.to_owned());
@@ -1060,8 +1209,34 @@ impl NetPlay {
                 }
             }
         }
+        self.launches.finish_frame(dt);
         self.c.script_models_seen = seen;
         self.c.script_models_drawn = out.len();
+        out
+    }
+
+    /// The weapons lying on the floor, in the world model of their weapon and variant.
+    fn items(&self, snap: &net::Snapshot) -> Vec<ModelInstance> {
+        let mut out = Vec::new();
+        for e in snap.entities.iter().filter(|e| e.etype == etype::ITEM) {
+            let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
+                continue;
+            };
+            let Some(model) = def
+                .world_models
+                .get(usize::from(e.model))
+                .cloned()
+                .flatten()
+                .or_else(|| def.world_models.first().cloned().flatten())
+            else {
+                continue;
+            };
+            let mut m = ModelInstance::new(model, render::ModelKind::World);
+            m.origin = e.origin;
+            m.angles = e.angles;
+            m.light_origin = e.origin;
+            out.push(m);
+        }
         out
     }
 
@@ -1131,6 +1306,8 @@ impl NetPlay {
                     entity: e.number,
                     origin: e.origin,
                     weapon: def.map(|d| &**d),
+                    weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
+                    quiet: e.perks & sim::pm::PERK_QUIETER != 0,
                 },
                 e.event_seq,
                 &[(e.event, e.event_parm)],
@@ -1299,6 +1476,12 @@ impl NetPlay {
         report["view_kick_max"] = json!(self.c.max_kick_up);
         report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
         report["view_kick_settled"] = json!(self.c.kick_settled);
+        report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
+        report["fx"]["camera_shake_max"] = self.c.shake_max.into();
+        report["fx"]["camera_sway_max"] = self.c.sway_max.into();
+        report["damage_events"] = json!(self.c.damage_events);
+        report["damage_flash_max"] = json!(self.c.max_damage_flash);
+        report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
         report["player_faults"] = json!(self.c.player_faults);
         report["torso_clips"] = json!(self.c.torso_clips);

@@ -42,6 +42,8 @@ pub mod flags {
     pub const HAS_VELOCITY_LOCAL: i32 = 0x100_0000;
     /// The world velocity samples apply.
     pub const HAS_VELOCITY_WORLD: i32 = 0x200_0000;
+    /// A model element is a rigid body in the physics world (its model's PhysPreset), not a particle.
+    pub const USE_MODEL_PHYSICS: i32 = 0x800_0000;
     /// Sprites scale their two axes separately.
     pub const NONUNIFORM_SCALE: i32 = 0x1000_0000;
 }

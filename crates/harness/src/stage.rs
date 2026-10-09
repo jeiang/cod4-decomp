@@ -170,6 +170,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_rcon::run),
     },
     StageDef {
+        name: "net-items",
+        description: "two real UDP clients: one's rifle is dropped, both are shown the weapon in their snapshots, the other is hinted and takes it holding +activate and its inventory changes",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_items::run),
+    },
+    StageDef {
         name: "net-vote",
         description: "two real UDP clients vote: a kick vote drops one, a typemap vote changes the gametype and map",
         needs_install: false,

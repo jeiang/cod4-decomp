@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Key names as used in `bind` lines. Physical keys, so binds follow position, not layout.
 //!
-//! Left/right modifiers are separate keys (`shift`/`rshift`, ...). `;` is `semicolon` since it separates commands.
+//! Either physical Shift, Ctrl or Alt is the one key `shift` / `ctrl` / `alt`, as the original's window procedure maps them.
+//! `;` is `semicolon` since it separates commands.
 
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
@@ -62,12 +63,9 @@ pub fn key_name(code: KeyCode) -> Option<&'static str> {
         Escape => "escape",
         Tab => "tab",
         Backspace => "backspace",
-        ShiftLeft => "shift",
-        ShiftRight => "rshift",
-        ControlLeft => "ctrl",
-        ControlRight => "rctrl",
-        AltLeft => "alt",
-        AltRight => "ralt",
+        ShiftLeft | ShiftRight => "shift",
+        ControlLeft | ControlRight => "ctrl",
+        AltLeft | AltRight => "alt",
         SuperLeft => "super",
         SuperRight => "rsuper",
         ArrowUp => "uparrow",
@@ -81,6 +79,9 @@ pub fn key_name(code: KeyCode) -> Option<&'static str> {
         PageUp => "pgup",
         PageDown => "pgdn",
         CapsLock => "capslock",
+        Pause => "pause",
+        ScrollLock => "scrolllock",
+        NumLock => "kp_numlock",
         Minus => "-",
         Equal => "=",
         BracketLeft => "[",
@@ -108,6 +109,40 @@ pub fn key_name(code: KeyCode) -> Option<&'static str> {
         NumpadMultiply => "kp_multiply",
         NumpadDivide => "kp_slash",
         NumpadDecimal => "kp_del",
+        NumpadEqual => "kp_equals",
+        F13 => "f13",
+        F14 => "f14",
+        F15 => "f15",
+        F16 => "f16",
+        F17 => "f17",
+        F18 => "f18",
+        F19 => "f19",
+        F20 => "f20",
+        F21 => "f21",
+        F22 => "f22",
+        F23 => "f23",
+        F24 => "f24",
+        _ => return None,
+    })
+}
+
+/// The keypad key with NumLock off: the window system reports the physical key as `Numpad7` but the logical key as
+/// `Home`; the original names it `kp_home`. `None` for anything else.
+pub fn keypad_nav_name(code: KeyCode, logical: &winit::keyboard::Key) -> Option<&'static str> {
+    use winit::keyboard::{Key, NamedKey};
+    let Key::Named(n) = logical else { return None };
+    Some(match (code, n) {
+        (KeyCode::Numpad7, NamedKey::Home) => "kp_home",
+        (KeyCode::Numpad8, NamedKey::ArrowUp) => "kp_uparrow",
+        (KeyCode::Numpad9, NamedKey::PageUp) => "kp_pgup",
+        (KeyCode::Numpad4, NamedKey::ArrowLeft) => "kp_leftarrow",
+        (KeyCode::Numpad5, NamedKey::Clear) => "kp_5",
+        (KeyCode::Numpad6, NamedKey::ArrowRight) => "kp_rightarrow",
+        (KeyCode::Numpad1, NamedKey::End) => "kp_end",
+        (KeyCode::Numpad2, NamedKey::ArrowDown) => "kp_downarrow",
+        (KeyCode::Numpad3, NamedKey::PageDown) => "kp_pgdn",
+        (KeyCode::Numpad0, NamedKey::Insert) => "kp_ins",
+        (KeyCode::NumpadDecimal, NamedKey::Delete) => "kp_del",
         _ => return None,
     })
 }
@@ -170,5 +205,33 @@ mod tests {
         assert_eq!(key_id("ctrl"), "KEY_CTRL");
         assert_eq!(key_id("semicolon"), "KEY_SEMICOLON");
         assert_eq!(key_id("pad_a"), "PAD_A");
+    }
+
+    /// Either physical modifier is the one named key, so the stock sprint and stance binds answer to both.
+    #[test]
+    fn both_physical_modifiers_are_one_key() {
+        use KeyCode::*;
+        for (left, right, name) in [
+            (ShiftLeft, ShiftRight, "shift"),
+            (ControlLeft, ControlRight, "ctrl"),
+            (AltLeft, AltRight, "alt"),
+        ] {
+            assert_eq!(key_name(left), Some(name));
+            assert_eq!(key_name(right), Some(name));
+        }
+        assert_eq!(key_name(Pause), Some("pause"));
+        assert_eq!(key_name(F13), Some("f13"));
+    }
+
+    #[test]
+    fn keypad_with_numlock_off_has_the_navigation_names() {
+        use winit::keyboard::{Key, NamedKey};
+        let home = Key::Named(NamedKey::Home);
+        assert_eq!(keypad_nav_name(KeyCode::Numpad7, &home), Some("kp_home"));
+        assert_eq!(keypad_nav_name(KeyCode::Home, &home), None);
+        assert_eq!(
+            keypad_nav_name(KeyCode::Numpad7, &Key::Character("7".into())),
+            None
+        );
     }
 }

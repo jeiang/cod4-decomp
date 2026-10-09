@@ -7,7 +7,7 @@
 use crate::archive::{ArchPlayer, Archive, Frame};
 use crate::ban::BanList;
 use crate::client::{Conn, Session, Team};
-use crate::game::{EntKind, Game, SoundTo};
+use crate::game::{EntKind, Game, SoundTo, WorldFx};
 use crate::ui::Dest;
 use net::connect::{ConnectRequest, Gate, serve};
 use net::entity::{EntityState, etype};
@@ -29,22 +29,79 @@ const MAX_CMDS_PER_FRAME: usize = 24;
 /// Commands kept for a client that is ahead of the server's frames.
 const MAX_QUEUED_CMDS: usize = 64;
 
+/// Commands behind at which a client no longer gets the ones it can do without (prints, chat, kill feed): it is
+/// already struggling and each one only adds to the backlog.
+const IGNORABLE_BEHIND: usize = 64;
+
+/// What a client hears when it sends game packets to a server that has no slot for it.
+pub const NOT_CONNECTED: &str = "Not connected to the server";
+
+/// How long a client may take no commands, with a backlog, before it counts as lagging.
+const STALL: Duration = Duration::from_secs(1);
+
 /// `EntityState::eflags` bits the server sets on players.
 pub mod eflags {
     pub const TEAM_AXIS: u32 = 1 << 0;
     pub const TEAM_ALLIES: u32 = 1 << 1;
     pub const DEAD: u32 = 1 << 2;
+    /// A script model the script `physicslaunch`ed (`TR_PHYSICS`): clients simulate it as a rigid body launched from
+    /// `origin` and `angles`, struck at `launch_point` by `velocity`, and draw it where the body is.
+    pub const PHYSICS_LAUNCH: u32 = 1 << 3;
+    /// The player is speaking over voice chat (`EF_TALK`); nothing sets it while the server has no voice.
+    pub const TALKING: u32 = 1 << 4;
+    /// The server has heard nothing from the player for [`CONNECTION_INTERRUPTED_MS`] (`EF_CONNECTION_INTERRUPTED`).
+    pub const CONNECTION_INTERRUPTED: u32 = 1 << 5;
     /// The player is mounted on a turret (`EF_TURRET_ACTIVE`).
-    pub const TURRET: u32 = 1 << 3;
+    pub const TURRET: u32 = 1 << 6;
 }
+
+/// Time the server has listened to a client without hearing it, after which others are shown the
+/// connection-interrupted marker over it. Only listening counts: a long frame or a map load, during which the
+/// socket is not read, is not silence.
+const CONNECTION_INTERRUPTED_MS: u64 = 1000;
 
 pub struct Peer {
     pub link: ServerLink,
     pub cmds: VecDeque<UserCmd>,
     pub name: String,
     last_heard: Instant,
+    /// Milliseconds spent waiting for packets since this client's last one.
+    unheard_ms: u64,
+    heard_now: bool,
     /// Effect names announced so far (`fx <index> <name>` commands).
     fx_sent: usize,
+    /// A reliable command did not fit: the peer is too far behind and is dropped at the next service
+    /// ([`NetSv::overflowed`]).
+    overflowed: bool,
+    /// Newest command sequence it had acknowledged at the last flush, and since when that has not moved while
+    /// commands waited.
+    last_ack: u32,
+    ack_moved: Instant,
+    /// It has taken nothing for [`STALL`] with [`IGNORABLE_BEHIND`] commands waiting: lagging, not in a burst.
+    stalled: bool,
+}
+
+impl Peer {
+    /// Queues a reliable command. A client already [`IGNORABLE_BEHIND`] behind does not get the commands that only
+    /// inform; one that cannot take a command at all is flagged for dropping instead of carrying on desynced.
+    pub fn queue(&mut self, line: impl Into<String>) {
+        let line = line.into();
+        if self.stalled && ignorable(&line) {
+            return;
+        }
+        if self.link.command(line).is_err() {
+            self.overflowed = true;
+        }
+    }
+}
+
+/// Commands the game plays fine without: console and feed prints, chat, kill feed.
+fn ignorable(line: &str) -> bool {
+    match ServerCmd::parse(line) {
+        Some(ServerCmd::Print { kind, .. }) => kind != net::ui::PrintKind::Bold,
+        Some(ServerCmd::Chat { .. } | ServerCmd::Obituary(_)) => true,
+        _ => false,
+    }
 }
 
 pub enum Inbound {
@@ -126,6 +183,10 @@ impl NetSv {
     ) -> Vec<Inbound> {
         let mut out = Vec::new();
         let mut wait = wait;
+        let listening = Instant::now();
+        for p in self.peers.iter_mut().flatten() {
+            p.heard_now = false;
+        }
         let mut buf = std::mem::take(&mut self.buf);
         while let Ok(Some((n, from))) = self.t.recv_from(&mut buf, Some(wait)) {
             wait = Duration::ZERO;
@@ -152,20 +213,32 @@ impl NetSv {
                     Gate::Left => out.push(Inbound::Left(from)),
                     Gate::Ignore => {}
                 }
-            } else if let Some(slot) = self.slot_of(from)
-                && let Some(peer) = self.peers[usize::from(slot)].as_mut()
-                && let Some(p) = peer.link.receive(packet)
-            {
-                peer.last_heard = Instant::now();
-                for (_, c) in p.cmds {
-                    if peer.cmds.len() < MAX_QUEUED_CMDS {
-                        peer.cmds.push_back(c);
+            } else if let Some(slot) = self.slot_of(from) {
+                if let Some(peer) = self.peers[usize::from(slot)].as_mut()
+                    && let Some(p) = peer.link.receive(packet)
+                {
+                    peer.last_heard = Instant::now();
+                    peer.heard_now = true;
+                    peer.unheard_ms = 0;
+                    for (_, c) in p.cmds {
+                        if peer.cmds.len() < MAX_QUEUED_CMDS {
+                            peer.cmds.push_back(c);
+                        }
                     }
+                    self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
                 }
-                self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
+            } else {
+                // A client the server no longer has (kicked, timed out, the server restarted) is told, so it does
+                // not sit in a match that is gone.
+                self.t
+                    .send_to(from, &Oob::Error(NOT_CONNECTED.into()).encode());
             }
         }
         self.buf = buf;
+        let listened = listening.elapsed().as_millis() as u64;
+        for p in self.peers.iter_mut().flatten().filter(|p| !p.heard_now) {
+            p.unheard_ms += listened;
+        }
         out
     }
 
@@ -194,7 +267,13 @@ impl NetSv {
             cmds: VecDeque::new(),
             name: name.to_owned(),
             last_heard: Instant::now(),
+            unheard_ms: 0,
+            heard_now: false,
             fx_sent: 0,
+            overflowed: false,
+            last_ack: 0,
+            ack_moved: Instant::now(),
+            stalled: false,
         });
         self.stats.joins += 1;
         self.t.send_to(req.from, &Oob::ConnectResponse.encode());
@@ -216,13 +295,55 @@ impl NetSv {
 
     pub fn put_peer(&mut self, slot: u16, mut peer: Peer) {
         peer.last_heard = Instant::now();
+        peer.unheard_ms = 0;
         // The new level numbers its effects afresh: the client needs the names again.
         peer.fx_sent = 0;
+        peer.stalled = false;
         self.peers[usize::from(slot)] = Some(peer);
     }
 
-    pub fn remove_peer(&mut self, slot: u16) {
+    /// Frees the slot. With a `notice` the client is told why first, so it shows it instead of sitting in a match
+    /// that no longer has it (a few copies: the datagram may be lost).
+    pub fn remove_peer(&mut self, slot: u16, notice: Option<&str>) {
+        if let (Some(p), Some(why)) = (self.peers[usize::from(slot)].as_ref(), notice) {
+            self.notify(p.link.addr, why);
+        }
         self.peers[usize::from(slot)] = None;
+    }
+
+    /// Tells `addr` the connection is over, and why.
+    pub fn notify(&mut self, addr: SocketAddr, why: &str) {
+        let packet = Oob::Error(why.to_owned()).encode();
+        for _ in 0..3 {
+            self.t.send_to(addr, &packet);
+        }
+    }
+
+    /// A console print for every client but `except`.
+    pub fn print_to_others(&mut self, except: u16, text: &str) {
+        let line = ServerCmd::Print {
+            kind: net::ui::PrintKind::Normal,
+            text: text.to_owned(),
+        }
+        .encode();
+        for (slot, p) in self.peers.iter_mut().enumerate() {
+            if let Some(p) = p
+                && slot != usize::from(except)
+            {
+                p.queue(line.clone());
+            }
+        }
+    }
+
+    /// Clients that fell too far behind on reliable commands.
+    pub fn overflowed(&self) -> Vec<u16> {
+        (0..self.peers.len() as u16)
+            .filter(|n| {
+                self.peers[usize::from(*n)]
+                    .as_ref()
+                    .is_some_and(|p| p.overflowed)
+            })
+            .collect()
     }
 
     /// Clients to drop for silence.
@@ -258,7 +379,7 @@ impl NetSv {
             .get_mut(usize::from(slot))
             .and_then(Option::as_mut)
         {
-            let _ = p.link.command(line);
+            p.queue(line);
         }
     }
 
@@ -354,7 +475,7 @@ impl NetSv {
             .and_then(Option::as_mut)
         {
             for l in lines {
-                let _ = p.link.command(l.clone());
+                p.queue(l.clone());
             }
         }
     }
@@ -362,6 +483,13 @@ impl NetSv {
     /// Delivers what scripts queued since the last frame: configstring changes to everybody,
     /// then the one-shot commands to their destinations, in order.
     pub fn flush_ui(&mut self, game: &mut Game) {
+        for p in self.peers.iter_mut().flatten() {
+            let (pending, acked) = (p.link.commands_pending(), p.link.commands_acked());
+            if acked != p.last_ack || pending == 0 {
+                (p.last_ack, p.ack_moved) = (acked, Instant::now());
+            }
+            p.stalled = pending > IGNORABLE_BEHIND && p.ack_moved.elapsed() > STALL;
+        }
         game.refresh_client_info();
         for c in std::mem::take(&mut game.ui.score_requests) {
             self.send_scoreboard(c, game);
@@ -378,7 +506,7 @@ impl NetSv {
                 .collect();
             for line in config_commands(entries) {
                 for p in self.peers.iter_mut().flatten() {
-                    let _ = p.link.command(line.clone());
+                    p.queue(line.clone());
                 }
             }
         }
@@ -392,7 +520,7 @@ impl NetSv {
                     Dest::Team(t) => game.client(slot as u16).is_some_and(|c| c.team == t),
                 };
                 if wanted {
-                    let _ = p.link.command(line.clone());
+                    p.queue(line.clone());
                 }
             }
         }
@@ -417,7 +545,12 @@ impl NetSv {
     /// Builds and sends every client's snapshot for the frame at `server_time`.
     pub fn send_snapshots(&mut self, game: &Game, server_time: i32) {
         self.now = server_time;
-        let entities = world_entities(game);
+        let mut entities = world_entities(game);
+        let quiet = self.peers.iter().enumerate().filter_map(|(slot, p)| {
+            let p = p.as_ref()?;
+            (p.unheard_ms > CONNECTION_INTERRUPTED_MS).then_some(slot as u16)
+        });
+        mark_interrupted(&mut entities, quiet);
         if game.archive_enabled {
             self.archive.record(Frame {
                 time: server_time,
@@ -441,6 +574,7 @@ impl NetSv {
                 let Some(name) = game.fx.name(peer.fx_sent + 1) else {
                     break;
                 };
+                // A full window is the client catching up: the rest follows next frame.
                 if peer
                     .link
                     .command(format!("fx {} {name}", peer.fx_sent + 1))
@@ -565,6 +699,18 @@ fn config_commands(entries: Vec<(u16, String)>) -> Vec<String> {
     out
 }
 
+/// Flags the player bodies of the clients in `quiet` as having a connection problem.
+fn mark_interrupted(entities: &mut [EntityState], quiet: impl Iterator<Item = u16>) {
+    for slot in quiet {
+        if let Some(e) = entities
+            .iter_mut()
+            .find(|e| e.etype == etype::PLAYER && e.number == slot)
+        {
+            e.eflags |= eflags::CONNECTION_INTERRUPTED;
+        }
+    }
+}
+
 /// Everything a client can see, in entity-number order, already rounded as the wire rounds it.
 pub fn world_entities(game: &Game) -> Vec<EntityState> {
     let mut out = Vec::new();
@@ -606,6 +752,7 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.torso_clip = torso.clip;
                 s.torso_cap = torso.cap;
                 s.torso_seq = torso.seq;
+                s.perks = c.ps.perks & 0xf_ffff;
                 s.eflags = match c.team {
                     Team::Axis => eflags::TEAM_AXIS,
                     Team::Allies => eflags::TEAM_ALLIES,
@@ -619,6 +766,26 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 } else {
                     0
                 };
+                // The scripts' `headicon` is a precached material; one never registered has no index to show.
+                s.head_icon = game.shaders.find(&c.head_icon) as u16;
+                s.head_icon_team = Team::from_name(&c.head_icon_team).map_or(0, |t| t as u8);
+                s
+            }
+            EntKind::Item => {
+                // A weapon on the floor: the clients draw its world model from the weapon and variant.
+                let Some(item) = e.item.as_ref() else {
+                    continue;
+                };
+                if e.hidden {
+                    continue;
+                }
+                let mut s = EntityState::new(n);
+                s.etype = etype::ITEM;
+                s.origin = e.origin;
+                s.angles = e.angles;
+                s.weapon = item.weapon;
+                s.model = u16::from(item.model);
+                s.client = item.dropper.unwrap_or(1023);
                 s
             }
             EntKind::Plain if &*e.classname == "script_model" => {
@@ -633,6 +800,11 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.origin = e.origin;
                 s.angles = e.angles;
                 s.model = model as u16;
+                if let Some((point, force)) = e.x.physics_launch {
+                    s.eflags = eflags::PHYSICS_LAUNCH;
+                    s.launch_point = point;
+                    s.velocity = force;
+                }
                 s
             }
             EntKind::Plain if e.veh.is_some() => {
@@ -657,6 +829,35 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 };
                 s
             }
+            EntKind::Plain if e.world_fx.is_some() => {
+                let mut s = EntityState::new(n);
+                s.origin = e.origin;
+                s.angles = e.angles;
+                match e.world_fx {
+                    Some(WorldFx::Once {
+                        effect,
+                        triggers,
+                        start_ms,
+                    }) => {
+                        s.etype = etype::FX;
+                        s.model = effect;
+                        s.event_seq = triggers;
+                        s.eflags = start_ms as u32 & 0xff_ffff;
+                    }
+                    Some(WorldFx::Looped {
+                        effect,
+                        period_ms,
+                        cull,
+                    }) => {
+                        s.etype = etype::LOOP_FX;
+                        s.model = effect;
+                        s.pm_flags = period_ms;
+                        s.velocity[0] = cull;
+                    }
+                    None => continue,
+                }
+                s
+            }
             _ => {
                 let Some(m) = e.missile.as_ref() else {
                     continue;
@@ -674,4 +875,83 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
     }
     out.extend(game.tempev.live(game.level.time).cloned());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use net::ui::PrintKind;
+
+    fn peer() -> Peer {
+        Peer {
+            link: ServerLink::new(SocketAddr::from(([127, 0, 0, 1], 9)), 1),
+            cmds: VecDeque::new(),
+            name: String::new(),
+            last_heard: Instant::now(),
+            fx_sent: 0,
+            overflowed: false,
+            last_ack: 0,
+            ack_moved: Instant::now(),
+            stalled: false,
+            unheard_ms: 0,
+            heard_now: false,
+        }
+    }
+
+    fn print(kind: PrintKind) -> String {
+        ServerCmd::Print {
+            kind,
+            text: "x".into(),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn a_client_taking_commands_keeps_its_prints_but_a_stalled_one_loses_them() {
+        let mut p = peer();
+        let cfg = ServerCmd::ConfigStrings(vec![(1, "a".into())]).encode();
+        for _ in 0..=IGNORABLE_BEHIND * 2 {
+            p.queue(cfg.clone());
+        }
+        let n = p.link.commands_pending();
+        p.queue(print(PrintKind::Normal));
+        assert_eq!(p.link.commands_pending(), n + 1, "a burst is not lag");
+        p.stalled = true;
+        p.queue(print(PrintKind::Normal));
+        p.queue(print(PrintKind::Console));
+        assert_eq!(
+            p.link.commands_pending(),
+            n + 1,
+            "a stalled client skips prints"
+        );
+        p.queue(print(PrintKind::Bold));
+        assert_eq!(p.link.commands_pending(), n + 2, "a bold message is kept");
+    }
+
+    #[test]
+    fn a_command_that_does_not_fit_marks_the_peer_for_dropping() {
+        let mut p = peer();
+        let cfg = ServerCmd::ConfigStrings(vec![(1, "a".into())]).encode();
+        for _ in 0..net::reliable::WINDOW {
+            p.queue(cfg.clone());
+        }
+        assert!(!p.overflowed);
+        p.queue(cfg);
+        assert!(p.overflowed);
+    }
+
+    #[test]
+    fn only_the_quiet_players_are_flagged_as_interrupted() {
+        let player = |n| EntityState {
+            etype: etype::PLAYER,
+            ..EntityState::new(n)
+        };
+        let mut e = vec![player(1), player(2), EntityState::new(3)];
+        mark_interrupted(&mut e, [2u16, 3, 9].into_iter());
+        let flagged: Vec<bool> = e
+            .iter()
+            .map(|e| e.eflags & eflags::CONNECTION_INTERRUPTED != 0)
+            .collect();
+        assert_eq!(flagged, [false, true, false]);
+    }
 }

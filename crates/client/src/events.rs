@@ -8,7 +8,7 @@
 
 use net::Snapshot;
 use net::entity::{EntityState, etype};
-use server::tempev::ev;
+use server::tempev::{Earthquake, Physics, ev};
 use std::collections::HashMap;
 
 /// A happening in the world, at server time of the snapshot that first carried it.
@@ -40,6 +40,8 @@ pub enum ClientEvent {
     PlayFx {
         origin: [f32; 3],
         forward: [f32; 3],
+        /// Where the effect's up points (the roll `playfx` gave it).
+        up: [f32; 3],
         name: String,
         /// The entity the effect was played on (`playfxontag`), 1023 for none.
         entity: u16,
@@ -55,12 +57,11 @@ pub enum ClientEvent {
         client: u16,
         damage: u8,
     },
-    /// `physicsexplosionsphere`: loose bodies within `radius` are thrown from `origin`.
-    PhysicsExplosion {
-        origin: [f32; 3],
-        radius: f32,
-        strength: f32,
-    },
+    /// A physics world event (`physicsexplosionsphere`, `physicsexplosioncylinder`, `physicsjolt`, `physicsjitter`):
+    /// loose bodies near `origin` are pushed.
+    Physics { origin: [f32; 3], what: Physics },
+    /// `earthquake`: the camera shakes for whoever is within `radius` of `origin`.
+    Earthquake { origin: [f32; 3], quake: Earthquake },
     /// A weapon fired: from the shooter's `eye`, looking along `angles` (degrees). A `vehicle` shooter is an entity
     /// that is no player: `eye` is its muzzle, and its shot has no player event to make the sound.
     WeaponFire {
@@ -82,7 +83,8 @@ impl ClientEvent {
             Self::PlayFx { .. } => "play_fx",
             Self::PlayerDeath { .. } => "player_death",
             Self::PlayerPain { .. } => "player_pain",
-            Self::PhysicsExplosion { .. } => "physics_explosion",
+            Self::Physics { .. } => "physics",
+            Self::Earthquake { .. } => "earthquake",
             Self::WeaponFire { .. } => "weapon_fire",
         }
     }
@@ -175,6 +177,7 @@ impl Events {
             ev::PLAY_FX => ClientEvent::PlayFx {
                 origin: e.origin,
                 forward: normal,
+                up: sim::pm::math::angle_vectors(&e.angles).2,
                 name: self
                     .fx_name(usize::from(e.model))
                     .unwrap_or_default()
@@ -191,10 +194,16 @@ impl Events {
                 client: e.client,
                 damage: e.event_parm,
             },
-            ev::PHYSICS_EXPLOSION => ClientEvent::PhysicsExplosion {
+            ev::PHYSICS_EXPLOSION
+            | ev::PHYSICS_EXPLOSION_CYLINDER
+            | ev::PHYSICS_JOLT
+            | ev::PHYSICS_JITTER => ClientEvent::Physics {
                 origin: e.origin,
-                radius: e.velocity[0],
-                strength: f32::from(e.weapon) / 10.0,
+                what: Physics::decode(e)?,
+            },
+            ev::EARTHQUAKE => ClientEvent::Earthquake {
+                origin: e.origin,
+                quake: Earthquake::decode(e)?,
             },
             ev::WEAPON_FIRE => ClientEvent::WeaponFire {
                 eye: e.origin,
@@ -325,6 +334,40 @@ mod tests {
         assert!(
             matches!(out[..], [ClientEvent::WeaponFire { vehicle: true, .. }]),
             "{out:?}"
+        );
+    }
+
+    #[test]
+    fn earthquake_and_physics_events_arrive_with_their_parameters() {
+        let mut t = server::tempev::TempEvents::default();
+        t.add_earthquake(
+            0,
+            [1.0, 2.0, 3.0],
+            &Earthquake {
+                scale: 0.5,
+                duration_ms: 3000,
+                radius: 800.0,
+            },
+        );
+        let jolt = Physics::Jolt {
+            outer: 400.0,
+            inner: 50.0,
+            impulse: [0.0, 0.0, 2.0],
+        };
+        t.add_physics(0, [4.0, 5.0, 6.0], &jolt);
+        let states: Vec<_> = t.live(1).cloned().collect();
+        let out = Events::default().scan(&snap(&states));
+        assert!(
+            matches!(&out[0], ClientEvent::Earthquake { quake, origin }
+                if quake.duration_ms == 3000 && quake.radius == 800.0 && *origin == [1.0, 2.0, 3.0]),
+            "{out:?}"
+        );
+        assert_eq!(
+            out[1],
+            ClientEvent::Physics {
+                origin: [4.0, 5.0, 6.0],
+                what: jolt
+            }
         );
     }
 

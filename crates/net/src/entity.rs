@@ -19,6 +19,13 @@ pub mod etype {
     /// roll), interpolated between snapshots; `velocity` is its motion, `pm_type` its damage stage (3 whole, 2 light
     /// smoke, 1 heavy smoke, 0 crashing) and `client` its owner's client number.
     pub const VEHICLE: u8 = 7;
+    /// A script effect entity (`spawnFx`): an effect the scripts start with `triggerFx`. `origin` and `angles` place it,
+    /// `model` is the effect index, `event_seq` counts the triggers (0 until the first) and `eflags` is the server
+    /// time (ms, low 24 bits) the latest trigger plays at.
+    pub const FX: u8 = 8;
+    /// A looping script effect (`playLoopedFX`): `origin`, `angles` and `model` as for [`FX`], `pm_flags` the repeat
+    /// period in milliseconds and `velocity[0]` the distance beyond which it is not played (0 for always).
+    pub const LOOP_FX: u8 = 9;
 }
 
 pub const MAX_ENTITIES: usize = 1024;
@@ -61,6 +68,16 @@ pub struct EntityState {
     pub torso_clip: u8,
     pub torso_cap: u8,
     pub torso_seq: u8,
+    /// A launched script model (`eflags::PHYSICS_LAUNCH`, in `server::netsv`): where the launch struck it, in the
+    /// world. `origin` and `angles` are where it was launched from and `velocity` is the launch force.
+    pub launch_point: [f32; 3],
+    /// Perk bits (`bg_perkNames` order); remote clients pick footstep sounds by them.
+    pub perks: u32,
+    /// Player: the material index (`cs::MATERIALS`, 0 none) of the head icon the scripts set, shown over the head to
+    /// the players of `head_icon_team`.
+    pub head_icon: u16,
+    /// Who sees `head_icon`: 0 everyone, 1 axis, 2 allies, 3 spectators.
+    pub head_icon_team: u8,
 }
 
 macro_rules! int {
@@ -123,6 +140,12 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.torso_clip, Bits(8)),
         int!(s, s.torso_cap, Bits(8)),
         int!(s, s.torso_seq, Bits(8)),
+        num!(s, s.launch_point[0], pos),
+        num!(s, s.launch_point[1], pos),
+        num!(s, s.launch_point[2], pos),
+        int!(s, s.perks, Bits(20)),
+        int!(s, s.head_icon, Bits(8)),
+        int!(s, s.head_icon_team, Bits(2)),
     ]
 }
 
@@ -171,5 +194,42 @@ mod tests {
         let mut got = EntityState::new(5);
         read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
         assert_eq!(got, to);
+    }
+
+    #[test]
+    fn a_launched_models_launch_point_and_force_reach_the_client() {
+        let mut sent = EntityState::new(40);
+        sent.etype = etype::SCRIPT_MODEL;
+        sent.origin = [100.0, 200.0, 30.0];
+        sent.launch_point = [101.5, 199.25, 34.0];
+        sent.velocity = [120.0, -40.0, 300.0];
+        sent.eflags = 1 << 3;
+        let sent = sent.canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(40), &sent);
+        let bytes = w.into_bytes();
+        let mut got = EntityState::new(40);
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, sent);
+        assert_eq!(got.launch_point, [101.5, 199.25, 34.0]);
+    }
+
+    #[test]
+    fn a_head_icon_and_who_sees_it_survive_the_wire() {
+        let from = EntityState::new(5);
+        let to = EntityState {
+            etype: etype::PLAYER,
+            head_icon: 255,
+            head_icon_team: 3,
+            ..EntityState::new(5)
+        }
+        .canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &from, &to);
+        let bytes = w.into_bytes();
+        let mut got = from.clone();
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, to);
+        assert_eq!((got.head_icon, got.head_icon_team), (255, 3));
     }
 }

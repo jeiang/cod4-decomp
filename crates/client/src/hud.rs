@@ -14,6 +14,7 @@
 mod elems;
 mod feed;
 pub mod fill;
+pub mod names;
 mod scores;
 
 use crate::input::Cvars;
@@ -50,6 +51,36 @@ pub struct LiveObjective {
     pub current: bool,
 }
 
+/// Another player the view could put a name or an icon over, as the client sees them this frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NearPlayer {
+    pub client: u16,
+    /// The `j_head` bone in the world.
+    pub head: [f32; 3],
+    /// The head is in front of the eye, not behind the viewer.
+    pub ahead: bool,
+    /// The head is in front and nothing solid is between it and the eye (`CG_CanSeeFriendlyHead`'s trace). Only
+    /// worked out for players whose name or markers can be drawn.
+    pub clear: bool,
+    /// The material index the scripts' `headicon` names and who is meant to see it (0 everyone, 1 axis, 2 allies, 3
+    /// spectators).
+    pub icon: Option<(u16, u8)>,
+    pub talking: bool,
+    pub interrupted: bool,
+    /// The viewer's own body, seen in a killcam.
+    pub you: bool,
+}
+
+/// Other players as one frame of the view sees them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NameScan {
+    pub near: Vec<NearPlayer>,
+    /// The player the crosshair is on, when a name should be shown for them (`CG_ScanForCrosshairEntity`).
+    pub crosshair: Option<u16>,
+    /// A flashbang blinds the view: no names (`CG_Flashbanged`).
+    pub flashed: bool,
+}
+
 /// One scoreboard line with the client's name looked up.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScoreLine {
@@ -84,12 +115,20 @@ pub struct LiveUi {
     pub scope: Option<crate::viewmodel::Overlay>,
     /// The weapon's crosshair over the world, its field of view filled in by the app.
     pub reticle: Option<crate::crosshair::Reticle>,
+    /// The red flash and the wedges of the hits the player took.
+    pub damage: crate::damage::DamageHud,
+    /// `cg_hudDamageIconInScope`: the wedges stay while a scope is up.
+    pub damage_in_scope: bool,
     /// The client's estimate of the server clock, ms.
     pub time: i32,
     /// The clock script hud element times are read on: `time`, minus the replay offset in a killcam.
     pub hud_time: i32,
     /// A killcam or final killcam replay is on screen (what the stock `killcam` menu keys on).
     pub killcam: bool,
+    /// A flashbang is blinding the view (`CG_Flashbanged`).
+    pub flashed: bool,
+    /// The view is through night vision goggles.
+    pub night_vision: bool,
     /// Name of the player being followed live as a spectator.
     pub following: Option<String>,
     /// The view's player is dead (hud elements marked hide-when-dead stay away).
@@ -102,6 +141,12 @@ pub struct LiveUi {
     /// Client names and teams by slot.
     pub names: Vec<String>,
     pub teams: Vec<u8>,
+    /// Rank and prestige by slot (`setrank`).
+    pub ranks: Vec<(u8, u8)>,
+    /// Material names by index (`cs::MATERIALS`).
+    pub materials: Vec<String>,
+    /// What the world says about the other players this frame, for overhead names and head icons.
+    pub scan: NameScan,
     /// The keys the commands named in `[{+cmd}]` marks of the elements' text are bound to, as the player reads them.
     pub keys: HashMap<String, String>,
     pub elems: Vec<LiveElem>,
@@ -111,6 +156,8 @@ pub struct LiveUi {
     pub axis_score: i32,
     pub kill_icons: HashMap<String, KillIcon>,
     pub server_addr: String,
+    /// The server has been silent long enough to warn of it ("Connection interrupted" and the net icon).
+    pub interrupted: bool,
     /// Set by the shell: the scoreboard is up, so ask the server for fresh rows every couple of seconds.
     pub scores_wanted: bool,
     /// Eye position and clip matrix of the frame the world is drawn with, set by the app before painting.
@@ -270,6 +317,15 @@ pub struct Stats {
     pub killcam_frames: u32,
     pub intermission_frames: u32,
     pub following_frames: u32,
+    /// Most names drawn over heads in one frame, frames with the crosshair's player named, and the head icons seen.
+    pub names_max: usize,
+    pub crosshair_name_frames: u32,
+    pub head_icons_max: usize,
+    pub head_icon_materials: std::collections::BTreeSet<String>,
+    /// Frames a teammate's name could be read, and frames the crosshair was on a player a name was due for: what the
+    /// two name counts above can be held to.
+    pub friends_in_sight_frames: u32,
+    pub crosshair_due_frames: u32,
     /// The elements of the busiest frame, as the screen got them.
     sample: Vec<Value>,
 }
@@ -307,6 +363,28 @@ impl Stats {
         self.following_frames += u32::from(live.following.is_some());
     }
 
+    /// One frame of the names and icons over players' heads: how many reached the screen, and whether one was the
+    /// crosshair's.
+    pub fn names_drawn(&mut self, names: usize, crosshair: bool, icons: usize) {
+        self.names_max = self.names_max.max(names);
+        self.crosshair_name_frames += u32::from(crosshair);
+        self.head_icons_max = self.head_icons_max.max(icons);
+    }
+
+    /// A head icon was drawn.
+    pub fn head_icon(&mut self, material: &str) {
+        if !self.head_icon_materials.contains(material) {
+            self.head_icon_materials.insert(material.to_owned());
+        }
+    }
+
+    /// What the view offered the names this frame: teammates whose name could be read, and a player under the
+    /// crosshair a name was due for.
+    pub fn names_offered(&mut self, names: &names::Names, live: &LiveUi) {
+        self.friends_in_sight_frames += u32::from(names.friends_in_sight > 0);
+        self.crosshair_due_frames += u32::from(live.scan.crosshair.is_some());
+    }
+
     pub fn report(&self) -> Value {
         json!({
             "elems_max": self.elems_max,
@@ -321,6 +399,12 @@ impl Stats {
             "killcam_frames": self.killcam_frames,
             "intermission_frames": self.intermission_frames,
             "following_frames": self.following_frames,
+            "names_max": self.names_max,
+            "crosshair_name_frames": self.crosshair_name_frames,
+            "head_icons_max": self.head_icons_max,
+            "head_icon_materials": self.head_icon_materials,
+            "friends_in_sight_frames": self.friends_in_sight_frames,
+            "crosshair_due_frames": self.crosshair_due_frames,
             "sample": self.sample,
         })
     }

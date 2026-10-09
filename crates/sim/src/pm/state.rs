@@ -120,6 +120,10 @@ pub mod ev {
     pub const STANCE_FORCE_STAND: u8 = 0x06;
     pub const STANCE_FORCE_CROUCH: u8 = 0x07;
     pub const STANCE_FORCE_PRONE: u8 = 0x08;
+    /// A weapon was taken from the floor; the parm is the weapon.
+    pub const ITEM_PICKUP: u8 = 0x09;
+    /// Ammunition was taken from the floor or from a live grenade; the parm is the weapon.
+    pub const AMMO_PICKUP: u8 = 0x0A;
     pub const NOAMMO: u8 = 0x0B;
     pub const EMPTY_OFFHAND: u8 = 0x0D;
     pub const RESET_ADS: u8 = 0x0E;
@@ -215,6 +219,8 @@ pub const VIEW_DEAD: i32 = 8;
 /// `LastStand` players sit at this height.
 pub const VIEW_LASTSTAND: i32 = 22;
 
+/// Perk bit of Dead Silence (`specialty_quieter`): footsteps use the `q` sound families.
+pub const PERK_QUIETER: u32 = 0x100;
 /// Perk bit that stretches sprint time (`perk_sprintMultiplier`).
 pub const PERK_SPRINT: u32 = 0x400;
 
@@ -290,11 +296,23 @@ pub struct PlayerState {
     pub jump_time: i32,
     pub jump_origin_z: f32,
     pub damage_timer: i32,
+    /// Percent of the maximum health the last hit took (0 to 127), zeroed half a second after it
+    /// (`P_DamageFeedback`).
     pub damage_count: i32,
     /// `damageDuration`: `damage_timer` as the last hit left it; the flinch and stumble windows are the first part of it.
     pub damage_duration: i32,
     /// `flinchYawAnim`: which way the last hit pushed the body, 0 forward, 1 back, 2 left, 3 right.
     pub flinch_yaw_anim: u8,
+    /// Counts up with each hit the player's screen shows; a change is what the client reacts to.
+    pub damage_event: u8,
+    /// Where the last hit came from, in 1/256 turns of yaw and pitch; 255 and 255 for a hit from the world.
+    pub damage_yaw: u8,
+    pub damage_pitch: u8,
+    /// The weapon animation the view model plays.
+    pub weapon_anim: u16,
+    /// How steady the held breath keeps a scoped weapon (`holdBreathScale`).
+    pub hold_breath_scale: f32,
+    pub hold_breath_timer: i32,
     pub movement_dir: i8,
     pub e_flags: u32,
     pub client_num: u16,
@@ -403,6 +421,12 @@ impl Default for PlayerState {
             damage_count: 0,
             damage_duration: 0,
             flinch_yaw_anim: 0,
+            damage_event: 0,
+            damage_yaw: 0,
+            damage_pitch: 0,
+            weapon_anim: 0,
+            hold_breath_scale: 0.0,
+            hold_breath_timer: 0,
             movement_dir: 0,
             e_flags: 0,
             client_num: 0,

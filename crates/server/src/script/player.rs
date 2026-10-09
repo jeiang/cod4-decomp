@@ -125,7 +125,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("setstat", r(set_stat)),
     ("shellshock", r(shell_shock)),
     ("stopshellshock", r(stop_shell_shock)),
-    ("viewkick", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("viewkick", r(view_kick)),
     ("vibrate", r(|_, _, _, _| Ok(Value::Undefined))),
     ("setdepthoffield", r(|_, _, _, _| Ok(Value::Undefined))),
     (
@@ -321,6 +321,23 @@ fn shell_shock(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
         crate::ui::Dest::Client(n),
         net::ui::ServerCmd::ShellShock { name, ms },
     );
+    Ok(Value::Undefined)
+}
+
+/// `viewkick(force, source)`: the player's view is hit as by `force` percent of the health from `source`
+/// (`GScr_ViewKick`); the end frame shows it.
+fn view_kick(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client_of(g, e)?;
+    let force = a.int(0)?;
+    let from = a.vector(1)?;
+    let c = g.client_mut(n).expect("client");
+    c.damage_blood = (c.max_health * force + 50) / 100;
+    if c.damage_blood < 0 {
+        return Err(format!("viewkick: damage {force} < 0"));
+    }
+    for (d, (o, f)) in c.damage_from.iter_mut().zip(c.ps.origin.iter().zip(from)) {
+        *d = o - f;
+    }
     Ok(Value::Undefined)
 }
 
@@ -538,7 +555,9 @@ pub fn set_client_field(g: &mut Game, n: u16, name: &str, v: &Value) -> Option<R
                 Ok(true)
             }
             "headicon" => {
-                g.client_mut(n).expect("client").head_icon = want_str(v)?.to_owned();
+                let icon = want_str(v)?.to_owned();
+                g.precache(crate::ui::Table::Material, &icon)?;
+                g.client_mut(n).expect("client").head_icon = icon;
                 Ok(true)
             }
             "headiconteam" => {
@@ -612,6 +631,13 @@ mod tests {
     use super::*;
     use gsc::{Builtins, Options, compile};
 
+    /// Clients pick the Dead Silence sound families by this bit of the entity state's perks.
+    #[test]
+    fn the_quieter_perk_bit_is_the_one_clients_test() {
+        let i = PERK_NAMES.iter().position(|n| *n == "specialty_quieter");
+        assert_eq!(i.map(|i| 1u32 << i), Some(sim::pm::PERK_QUIETER));
+    }
+
     #[test]
     fn setrank_keeps_the_prestige_unless_given_and_rejects_a_byte_overflow() {
         let prog = compile(
@@ -637,5 +663,41 @@ mod tests {
         assert!(call(&[256]).is_err() && call(&[1, -1]).is_err());
         let c = g.client(n).unwrap();
         assert_eq!((c.rank, c.prestige), (31, 2));
+    }
+
+    #[test]
+    fn a_players_head_icon_reaches_clients_as_a_material_and_a_team() {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(prog).unwrap();
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.reset_level(4);
+        let n = g.connect_client(&mut vm, true, "Ann").unwrap();
+        let c = g.client_mut(n).unwrap();
+        c.conn = crate::client::Conn::Connected;
+        c.session = Session::Playing;
+        let shown = |g: &Game| {
+            let e = crate::netsv::world_entities(g)
+                .into_iter()
+                .find(|e| e.number == n)
+                .expect("the player is published");
+            (e.head_icon, e.head_icon_team)
+        };
+        assert_eq!(shown(&g), (0, 0), "no icon until the scripts set one");
+        for (field, v) in [("headicon", "waypoint_bomb"), ("headiconteam", "axis")] {
+            set_client_field(&mut g, n, field, &Value::str(v))
+                .unwrap()
+                .unwrap();
+        }
+        let (icon, team) = shown(&g);
+        assert_eq!(team, Team::Axis as u8);
+        assert_eq!(
+            g.configstrings[&(u32::from(net::ui::cs::MATERIALS) + u32::from(icon))],
+            "waypoint_bomb"
+        );
     }
 }

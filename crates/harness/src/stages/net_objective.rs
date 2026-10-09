@@ -25,7 +25,7 @@ pub(super) struct Human {
     join: AutoJoin,
     pub(super) own: Option<u16>,
     cmd_time: i32,
-    hold_use: bool,
+    pub(super) hold_use: bool,
     /// The hint the server's player state showed at the zone, and its text.
     hint: Option<(u16, String)>,
 }
@@ -236,6 +236,38 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             .is_some_and(|e| e.origin[2] > 5000.0);
     }
 
+    // A script's `player.headicon = ...` on the carrier (the stock S&D scripts set none at pickup, so the stage does
+    // what a script would): it has to reach the carrier's own client as a material of the server's table.
+    const ICON: &str = "waypoint_bomb";
+    let team = server.game.client(pn).map(|c| c.team.name().to_owned());
+    let Some(team) = team else {
+        return fail("the carrier vanished".into());
+    };
+    if let Err(e) = server.game.precache(server::ui::Table::Material, ICON) {
+        return fail(e);
+    }
+    if let Some(c) = server.game.client_mut(pn) {
+        c.head_icon = ICON.into();
+        c.head_icon_team = team;
+    }
+    let icon = loop {
+        if Instant::now() > deadline {
+            return fail("the bomb carrier's head icon never reached its client".into());
+        }
+        frame(&mut server, &mut people);
+        let seen = people[planter].c.latest().and_then(|s| {
+            let e = s.entity(pn)?;
+            let ui = people[planter].c.ui_ref()?;
+            (e.head_icon != 0).then(|| ui.material(e.head_icon).to_owned())
+        });
+        if let Some(name) = seen.filter(|n| !n.is_empty()) {
+            break name;
+        }
+    };
+    if icon != ICON {
+        return fail(format!("the client saw head icon {icon:?}, not {ICON:?}"));
+    }
+
     // Holding +activate in the zone until the bomb is planted.
     let Some(at) = server.game.floor_in(zone_ent) else {
         return fail("the bomb zone is not linked".into());
@@ -293,6 +325,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     report.metrics.insert("plants".into(), st.plants as f64);
     report.metrics.insert("defuses".into(), st.defuses as f64);
     report.notes.push(format!("hint at the zone: {text:?}"));
+    report.notes.push(format!("carrier head icon: {icon:?}"));
     if !server.script_errors.is_empty() {
         report.status = Status::Failed;
         report.reason = Some(format!("{:?}", server.script_errors));

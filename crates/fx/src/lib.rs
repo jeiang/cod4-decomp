@@ -12,16 +12,18 @@ use assets::zone::fx::{FxEffectDef, FxElemDef, FxVisuals, elem, flags};
 use assets::zone::gfx::Material;
 use assets::zone::xmodel::XModel;
 use glam::Vec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod rigid;
 mod rng;
+pub use rigid::{Body, GRAVITY as PHYS_GRAVITY, Mass, Shape};
 pub use rng::Rng;
 
 /// Longest single integration step.
 const STEP_MS: i32 = 16;
 /// Effects alive at once; older ones are dropped beyond this.
-const MAX_EFFECTS: usize = 400;
+const MAX_EFFECTS: usize = 1024;
 /// Elements alive at once over all effects.
 const MAX_ELEMS: usize = 6000;
 /// Gravity of a `gravity` factor of one, in units per second squared.
@@ -230,6 +232,8 @@ struct Elem {
     emit_left: f32,
     id: u64,
     trail: Option<TrailPoint>,
+    /// The rigid body of a model element with `USE_MODEL_PHYSICS`, once it has started.
+    body: Option<Body>,
 }
 
 struct Effect {
@@ -252,6 +256,8 @@ struct Effect {
 pub struct Fx {
     lib: Arc<Library>,
     effects: Vec<Effect>,
+    /// Handles of the effects that exist, for [`Fx::is_live`]; rebuilt by every update.
+    live_ids: HashSet<u64>,
     now: i32,
     rng: Rng,
     next_id: u64,
@@ -270,6 +276,7 @@ impl Fx {
         Fx {
             lib,
             effects: Vec::new(),
+            live_ids: HashSet::new(),
             now: 0,
             rng: Rng::new(0x5EED),
             next_id: 1,
@@ -299,37 +306,54 @@ impl Fx {
     /// Plays `def` at `frame`, starting `at` the given time (milliseconds on the effect clock).
     pub fn play_at(&mut self, def: &Arc<FxEffectDef>, frame: Frame, at: i32) -> u64 {
         if self.effects.len() >= MAX_EFFECTS {
-            self.effects.remove(0);
+            let old = self.effects.remove(0);
+            self.live_ids.remove(&old.id);
             self.stats.dropped += 1;
         }
         self.stats.effects_played += 1;
-        let looping = def.looping_count as usize;
-        let one_shot = def.one_shot_count as usize;
-        let loop_end = if def.msec_looping_life > 0 {
-            at.saturating_add(def.msec_looping_life)
-        } else {
-            at
-        };
         let mut e = Effect {
             def: def.clone(),
             frame,
             elems: Vec::new(),
-            next_loop: vec![at; looping],
-            loop_end,
+            next_loop: Vec::new(),
+            loop_end: at,
             id: self.next_id,
             goal: None,
             dist: 0.0,
             last_move: at,
-            spawned: vec![0; def.elems.len()],
+            spawned: Vec::new(),
         };
         self.next_id += 1;
+        self.begin(&mut e, at);
+        let id = e.id;
+        self.live_ids.insert(id);
+        self.effects.push(e);
+        id
+    }
+
+    /// Starts (or restarts) the effect's timeline at `at`: its looping elements begin their intervals, its one-shot
+    /// elements spawn, and its trails take their first point.
+    fn begin(&mut self, e: &mut Effect, at: i32) {
+        let def = e.def.clone();
+        let def = &def;
+        let looping = def.looping_count as usize;
+        let one_shot = def.one_shot_count as usize;
+        e.loop_end = if def.msec_looping_life > 0 {
+            at.saturating_add(def.msec_looping_life)
+        } else {
+            at
+        };
+        e.next_loop = vec![at; looping];
+        e.spawned = vec![0; def.elems.len()];
+        e.dist = 0.0;
+        e.last_move = at;
         for k in 0..def.elems.len() {
             if is_trail(&def.elems[k]) {
                 // Trails spawn by distance travelled, not on an interval.
                 if let Some(n) = e.next_loop.get_mut(k) {
                     *n = i32::MAX;
                 }
-                self.spawn_trail_point(&mut e, k, at, 0.0);
+                self.spawn_trail_point(e, k, at, 0.0);
             }
         }
         for k in looping..(looping + one_shot).min(def.elems.len()) {
@@ -339,12 +363,30 @@ impl Fx {
             }
             let count = d.spawn[0] as f32 + d.spawn[1] as f32 * self.rng.f();
             for _ in 0..(count as i32).max(0) {
-                self.spawn(&mut e, k, at);
+                self.spawn(e, k, at);
             }
         }
-        let id = e.id;
+    }
+
+    /// Whether effect `id` still exists (it ended, or the pool dropped it).
+    pub fn is_live(&self, id: u64) -> bool {
+        self.live_ids.contains(&id)
+    }
+
+    /// Restarts effect `id` at `at` (`FX_RetriggerEffect`): its looping elements start over and its one-shot elements
+    /// spawn again, without a second effect. Returns false if the effect is over.
+    pub fn retrigger(&mut self, id: u64, at: i32) -> bool {
+        let Some(i) = self.effects.iter().position(|e| e.id == id) else {
+            return false;
+        };
+        let mut e = self.effects.swap_remove(i);
+        let attached = e.loop_end == i32::MAX;
+        self.begin(&mut e, at);
+        if attached {
+            e.loop_end = i32::MAX;
+        }
         self.effects.push(e);
-        id
+        true
     }
 
     /// Plays `def` at `frame` as an effect that goes on until [`Fx::stop`] and follows [`Fx::move_effect`]: a missile's
@@ -431,6 +473,7 @@ impl Fx {
             emit_left: d.emit_dist.base + d.emit_dist.amplitude * r[19],
             id,
             trail: None,
+            body: None,
         });
     }
 
@@ -540,6 +583,8 @@ impl Fx {
             });
         }
         self.live_elems = effects.iter().map(|e| e.elems.len()).sum();
+        self.live_ids.clear();
+        self.live_ids.extend(effects.iter().map(|e| e.id));
         self.effects = effects;
     }
 
@@ -664,6 +709,31 @@ impl Fx {
                 }
                 el.done = true;
             }
+            (FxVisuals::Models(models), elem::MODEL) if d.flags & flags::USE_MODEL_PHYSICS != 0 => {
+                // The element is a rigid body with its model's PhysPreset, spinning as the element asks; one whose
+                // model has no preset cannot be simulated and is dropped, as in the original.
+                let preset = models
+                    .get(pick_index(el, models.len()))
+                    .and_then(|m| m.as_ref())
+                    .and_then(|m| m.phys_preset.as_ref().map(|p| (m, p)));
+                let Some((model, preset)) = preset else {
+                    el.done = true;
+                    return;
+                };
+                let spin = |k: usize| pick(el.r[3 + k], &d.angular_velocity[k]) * VELOCITY_SCALE;
+                el.body = Some(
+                    Body::new(
+                        preset,
+                        &Shape::of_model(model),
+                        el.pos,
+                        element_axis(d, el, 0.0),
+                        velocity(d, el, 0.0),
+                    )
+                    // The original's `Phys_ObjSetAngularVelocity` takes (pitch, yaw, roll) rates as the world's
+                    // (y, z, x) rotation rates.
+                    .spinning(Vec3::new(spin(2), spin(0), spin(1))),
+                );
+            }
             _ => {}
         }
     }
@@ -678,6 +748,12 @@ impl Fx {
         spawned: &mut Vec<(Arc<FxEffectDef>, Frame, i32)>,
     ) {
         let dt = ms as f32 * 0.001;
+        if let Some(b) = &mut el.body {
+            b.step(dt, world);
+            el.pos = b.origin();
+            el.at_rest = b.asleep();
+            return;
+        }
         let t = ((el.at - el.begin) as f32 / el.life).clamp(0.0, 0.999_999);
         let v = velocity(d, el, t) + el.base_vel;
         let from = el.pos;
@@ -799,11 +875,14 @@ impl Fx {
                         if scale == 0.0 {
                             continue;
                         }
-                        let a = element_axis(d, el, (self.now - el.begin) as f32);
+                        let (origin, axis) = match &el.body {
+                            Some(b) => (b.origin(), b.axes()),
+                            None => (el.pos, element_axis(d, el, (self.now - el.begin) as f32)),
+                        };
                         out.models.push(ModelDraw {
                             model: model.clone(),
-                            origin: el.pos,
-                            axis: a,
+                            origin,
+                            axis,
                             scale,
                         });
                     }
@@ -1453,6 +1532,117 @@ mod tests {
         assert_eq!(fx.live_elems(), 0);
     }
 
+    fn debris_model(preset: Option<assets::zone::phys::PhysPreset>) -> Arc<XModel> {
+        use assets::zone::xmodel::LodInfo;
+        let lod = || LodInfo {
+            dist: 0.0,
+            surf_count: 0,
+            surf_index: 0,
+            part_bits: [0; 4],
+            lod: 0,
+            smc_index_plus_one: 0,
+            smc_alloc_bits: 0,
+        };
+        Arc::new(XModel {
+            name: Some("debris".into()),
+            num_bones: 0,
+            num_root_bones: 0,
+            lod_ramp_type: 0,
+            bone_names: Arc::new([]),
+            parent_list: Arc::new([]),
+            quats: Arc::new([]),
+            trans: Arc::new([]),
+            part_classification: Arc::new([]),
+            base_mat: Arc::new([]),
+            surfs: Arc::new([]),
+            materials: Arc::new([]),
+            lod_info: [lod(), lod(), lod(), lod()],
+            coll_surfs: Arc::new([]),
+            contents: 0,
+            bone_info: Arc::new([]),
+            radius: 0.0,
+            mins: [-3.0; 3],
+            maxs: [3.0; 3],
+            num_lods: 1,
+            coll_lod: 0,
+            mem_usage: 0,
+            flags: 0,
+            bad: false,
+            phys_preset: preset.map(Arc::new),
+            phys_geoms: None,
+        })
+    }
+
+    fn preset(bounce: f32) -> assets::zone::phys::PhysPreset {
+        assets::zone::phys::PhysPreset {
+            name: None,
+            kind: 0,
+            mass: 2.0,
+            bounce,
+            friction: 0.6,
+            bullet_force_scale: 1.0,
+            explosive_force_scale: 1.0,
+            snd_alias_prefix: None,
+            pieces_spread_fraction: 0.0,
+            pieces_upward_velocity: 0.0,
+            temp_default_to_cylinder: false,
+        }
+    }
+
+    /// Where the one model of the effect is drawn at `now`.
+    fn model_at(fx: &mut Fx, now: i32, world: &dyn World) -> Option<Vec3> {
+        fx.update(now, world);
+        let mut out = Draws::default();
+        let cam = Camera {
+            origin: Vec3::ZERO,
+            axis: [Vec3::X, Vec3::Y, Vec3::Z],
+        };
+        fx.draw(&cam, &mut out);
+        out.models.first().map(|m| m.origin)
+    }
+
+    fn debris_effect(model: Arc<XModel>, flags: i32) -> Arc<FxEffectDef> {
+        let mut e = elem_def(elem::MODEL, FxVisuals::Models(Arc::from(vec![Some(model)])));
+        e.flags = flags;
+        e.life_span_msec = range(6000, 0);
+        effect("fx/debris", 0, 1, 0, vec![e])
+    }
+
+    #[test]
+    fn a_model_with_physics_falls_bounces_and_comes_to_rest_on_its_preset() {
+        let def = debris_effect(debris_model(Some(preset(0.4))), flags::USE_MODEL_PHYSICS);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
+        let start = model_at(&mut fx, 0, &Floor).unwrap();
+        assert_eq!(start.z, 100.0);
+        // A quarter second of free fall: 800 * 0.25^2 / 2 = 25 units.
+        let early = model_at(&mut fx, 250, &Floor).unwrap();
+        assert!((start.z - early.z - 25.0).abs() < 5.0, "{early}");
+        let mut lowest = f32::MAX;
+        let mut bounced = false;
+        let mut last = early;
+        for t in (300..=2500).step_by(50) {
+            let at = model_at(&mut fx, t, &Floor).unwrap();
+            lowest = lowest.min(at.z);
+            bounced |= at.z > last.z + 1.0;
+            last = at;
+        }
+        assert!(bounced, "bounce 0.4 sends it back up");
+        assert!(lowest > 2.0, "its box rests on the floor: {lowest}");
+        let a = model_at(&mut fx, 4000, &Floor).unwrap();
+        let b = model_at(&mut fx, 5000, &Floor).unwrap();
+        assert!(a.distance(b) < 0.01, "at rest: {a} {b}");
+        assert!(a.z < 10.0, "{a}");
+    }
+
+    #[test]
+    fn a_model_with_physics_but_no_preset_is_dropped() {
+        let def = debris_effect(debris_model(None), flags::USE_MODEL_PHYSICS);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
+        assert_eq!(model_at(&mut fx, 50, &Floor), None);
+    }
+
     #[test]
     fn the_landing_point_does_not_depend_on_the_frame_rate() {
         let land = |frame_ms: i32| {
@@ -1468,6 +1658,45 @@ mod tests {
         };
         let (a, b) = (land(5), land(33));
         assert!((a - b).length() < 1e-3, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn a_retriggered_effect_spawns_its_one_shots_again_without_a_second_effect() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [2, 0];
+        e.life_span_msec.base = 1000;
+        let def = effect("fx/retrigger", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        let id = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(100, &Empty);
+        assert_eq!((fx.live_effects(), fx.stats.elems_spawned), (1, 2));
+        assert!(fx.retrigger(id, 300));
+        fx.update(400, &Empty);
+        assert_eq!(
+            (fx.live_effects(), fx.stats.elems_spawned, fx.live_elems()),
+            (1, 4, 4)
+        );
+        // Stopped and played out, an effect cannot be retriggered.
+        fx.stop(id);
+        fx.update(5000, &Empty);
+        assert!(!fx.retrigger(id, 5100));
+    }
+
+    #[test]
+    fn a_handle_is_live_until_its_effect_ends_or_is_evicted() {
+        let e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        let def = effect("fx/live", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        let first = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        assert!(fx.is_live(first));
+        for _ in 0..MAX_EFFECTS {
+            fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        }
+        assert!(!fx.is_live(first));
+        let one = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.stop(one);
+        fx.update(10_000, &Empty);
+        assert!(!fx.is_live(one));
     }
 
     #[test]

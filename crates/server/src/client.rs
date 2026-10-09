@@ -13,7 +13,7 @@ use sim::Vec3;
 use sim::cm::ENTITYNUM_NONE;
 use sim::contents;
 use sim::pm::{self, PLAYER_MAXS, PLAYER_MINS, PlayerState, PmType, UserCmd, ev, pmf};
-use sim::weapon::PlayerWeapons;
+use sim::weapon::{OffhandClass, PlayerWeapons};
 
 use crate::bot::Brain;
 use crate::game::{Ent, EntKind, Game, ScriptCall, TRIGGER_HURT_CONTENTS};
@@ -164,7 +164,12 @@ pub struct Client {
     pub use_hold_time: i32,
     /// The use press was consumed; a held button is not a fresh press until released.
     pub use_button_done: bool,
-    /// Pitch/yaw/roll recoil kick applied to the view this frame (`viewkick` and weapon kick).
+    /// Damage taken since the last end frame, as health points (`damage_blood`), the way the last blow travelled and
+    /// whether it came from no direction at all.
+    pub damage_blood: i32,
+    pub damage_from: [f32; 3],
+    pub damage_from_world: bool,
+    /// When `damage_count` of the player state was last set, less 20 ms (`damageTime`).
     pub damage_time: i32,
     pub allow_ads: bool,
     pub inv: PlayerWeapons,
@@ -227,6 +232,9 @@ impl Client {
             use_hold_ent: None,
             use_hold_time: 0,
             use_button_done: false,
+            damage_blood: 0,
+            damage_from: [0.0; 3],
+            damage_from_world: false,
             damage_time: 0,
             allow_ads: true,
             inv: PlayerWeapons::new(),
@@ -415,6 +423,11 @@ impl Game {
         c.spawn_count = spawn_count;
         c.last_spawn_time = time;
         c.last_stand = false;
+        // Blood the last life's killing blow left is not the new life's.
+        c.damage_blood = 0;
+        c.damage_from = [0.0; 3];
+        c.damage_from_world = false;
+        c.damage_time = 0;
         c.noclip = false;
         c.ufo = false;
         c.buttons = c.cmd.buttons;
@@ -610,6 +623,11 @@ impl Game {
                 let name = Value::str(self.weapons.name(u16::from(parm)));
                 vm.notify_entity(n, "grenade_pullback", &[name]);
             }
+            ev::SWITCH_OFFHAND
+                if self.weapons.info(u16::from(parm)).offhand_class == OffhandClass::Frag =>
+            {
+                self.attempt_live_grenade_pickup(vm, n);
+            }
             _ => {}
         }
         if (ev::LANDING_PAIN_FIRST..ev::LANDING_PAIN_FIRST + 28).contains(&event) {
@@ -663,7 +681,15 @@ impl Game {
             let Some(le) = self.world.as_ref().and_then(|w| w.entity(t)) else {
                 continue;
             };
-            let over = (0..3).all(|i| pmin[i] <= le.abs_max[i] && pmax[i] >= le.abs_min[i]);
+            let is_item = te.item.is_some();
+            let over = if is_item {
+                sim::weapon::pickup::player_touches_item(
+                    self.client(n).map_or([0.0; 3], |c| c.ps.origin),
+                    te.origin,
+                )
+            } else {
+                (0..3).all(|i| pmin[i] <= le.abs_max[i] && pmax[i] >= le.abs_min[i])
+            };
             if !over {
                 continue;
             }
@@ -671,6 +697,10 @@ impl Game {
             let (me, other) = (self.entity_value(vm, n), self.entity_value(vm, t));
             vm.notify_entity(t, "touch", std::slice::from_ref(&me));
             vm.notify_entity(n, "touch", &[other]);
+            if is_item {
+                self.touch_item(vm, n, t, true);
+                continue;
+            }
             match &*class {
                 "trigger_hurt" => self.hurt_touch(vm, t, n),
                 "trigger_multiple" | "trigger_radius" => vm.notify_entity(t, "trigger", &[me]),
@@ -747,6 +777,7 @@ impl Game {
                 t => t,
             };
         }
+        self.damage_feedback(n);
         self.set_client_contents(n);
         self.update_cursor_hints(n);
         self.update_pose(n);

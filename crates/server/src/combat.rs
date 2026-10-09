@@ -12,6 +12,7 @@ use gsc::{Value, Vm};
 use sim::Vec3;
 use sim::cm::{ENTITYNUM_NONE, ENTITYNUM_WORLD};
 use sim::contents;
+use sim::pm::damage::{DAMAGE_COUNT_MS, direction_bytes};
 use sim::pm::{PmType, pmf};
 
 use crate::bullet::{dot, length, sub};
@@ -371,7 +372,6 @@ impl Game {
         let c = self.client_mut(target).expect("checked above");
         c.ps.damage_timer += (damage as f32 * per_point) as i32;
         c.ps.damage_timer = c.ps.damage_timer.min(max_time as i32);
-        c.ps.damage_count = c.ps.damage_timer;
         c.ps.damage_duration = c.ps.damage_timer;
         // `flinchYawAnim`: the blow's direction relative to the way the victim faces.
         c.ps.flinch_yaw_anim = d.dir.map_or(0, |v| {
@@ -379,7 +379,10 @@ impl Game {
             let facing = c.ps.viewangles[1].rem_euclid(360.0).trunc();
             flinch_yaw_anim(yaw - facing)
         });
-        c.damage_time = now;
+        // What the end frame shows the player: how much, and which way it came (`damage_blood`, `damage_from`).
+        c.damage_blood += damage;
+        c.damage_from_world = d.dir.is_none();
+        c.damage_from = dir;
         let e = self.ent_mut(target).expect("client entity");
         if e.flags & 2 != 0 && e.health - damage <= 0 {
             damage = e.health - 1;
@@ -420,6 +423,33 @@ impl Game {
         Ok(())
     }
 
+    /// `P_DamageFeedback`, each end frame: the health the player lost since the last one becomes a wider aim spread
+    /// and a hit for the client to show (`damage_event`, `damage_count`, `damage_yaw`, `damage_pitch`), and the
+    /// count of the last hit expires after half a second.
+    pub(crate) fn damage_feedback(&mut self, n: u16) {
+        let now = self.level.time;
+        let Some(c) = self.client_mut(n) else { return };
+        if c.ps.pm_type >= PmType::Dead {
+            return;
+        }
+        if now - c.damage_time > DAMAGE_COUNT_MS {
+            c.ps.damage_count = 0;
+        }
+        if c.damage_blood <= 0 || c.max_health <= 0 {
+            return;
+        }
+        let percent = (100 * c.damage_blood / c.max_health).min(127);
+        c.ps.aim_spread_scale = (c.ps.aim_spread_scale + percent as f32).min(255.0);
+        // The direction bytes name the way the blow travelled; a blow from nowhere is the pair 255, 255.
+        let from = (!c.damage_from_world).then_some(c.damage_from);
+        (c.ps.damage_pitch, c.ps.damage_yaw) = direction_bytes(from);
+        c.damage_from_world = false;
+        c.ps.damage_event = c.ps.damage_event.wrapping_add(1);
+        c.ps.damage_count = percent;
+        c.damage_time = now - 20;
+        c.damage_blood = 0;
+    }
+
     fn damage_callback_args(&mut self, vm: &mut Vm, d: &Damage, damage: i32) -> Vec<Value> {
         vec![
             self.ent_obj(vm, d.inflictor),
@@ -436,6 +466,9 @@ impl Game {
 
     /// `player_die`: notify, switch to the dead movement type and run the killed callback.
     pub fn player_die(&mut self, vm: &mut Vm, n: u16, d: &Damage, damage: i32) {
+        if self.alive_for_death(n) {
+            self.death_grenade_drop(vm, n, d.mean == MOD_SUICIDE);
+        }
         let Some(c) = self.client_mut(n) else { return };
         if c.ps.pm_type >= PmType::Noclip && c.ps.pm_type != PmType::LastStand {
             return;

@@ -179,6 +179,28 @@ pub struct Ent {
     pub owner: Option<u16>,
     /// A script vehicle's flight and turret state (`scr_vehicle`).
     pub veh: Option<Box<crate::vehicle::Vehicle>>,
+    /// A dropped or placed weapon (`ET_ITEM`).
+    pub item: Option<Box<crate::items::DroppedItem>>,
+    /// The effect this entity plays for the clients (`spawnfx`, `playloopedfx`).
+    pub world_fx: Option<WorldFx>,
+}
+
+/// What a script effect entity tells the clients to play (`ET_FX`, `ET_LOOP_FX`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WorldFx {
+    /// `spawnfx`: played once for each `triggerfx`; `triggers` counts them (wrapping, never back to 0), `start_ms`
+    /// is the level time the latest one plays at (its call plus its delay).
+    Once {
+        effect: u16,
+        triggers: u8,
+        start_ms: i32,
+    },
+    /// `playloopedfx`: restarted every `period_ms`, for whoever is within `cull` units (0 for everyone).
+    Looped {
+        effect: u16,
+        period_ms: u32,
+        cull: f32,
+    },
 }
 
 impl Ent {
@@ -210,6 +232,8 @@ impl Ent {
             missile: None,
             owner: None,
             veh: None,
+            item: None,
+            world_fx: None,
         }
     }
 }
@@ -407,6 +431,8 @@ pub struct Game {
     pub tempev: crate::tempev::TempEvents,
     /// The vision set in force (`visionsetnaked`, `visionsetnight`) as `(name)`, replayed to clients that join.
     pub vision: [Option<String>; 2],
+    /// Entities of dropped weapons, oldest first (`level.droppedWeaponCue`).
+    pub dropped: Vec<u16>,
 }
 
 /// Who hears a sound command.
@@ -464,6 +490,7 @@ impl Game {
             attractors: Attractors::default(),
             sound_out: Vec::new(),
             ambient: None,
+            dropped: Vec::new(),
         }
     }
 
@@ -487,18 +514,36 @@ impl Game {
             .filter_map(|(i, e)| e.as_ref().map(|e| (i as u16, e)))
     }
 
+    /// Tells the clients of a physics world event (`physicsexplosionsphere` and its kin).
+    pub fn physics_event(&mut self, origin: sim::Vec3, p: crate::tempev::Physics) {
+        let now = self.level.time;
+        self.tempev.add_physics(now, origin, &p);
+    }
+
+    /// `earthquake`: tells the clients to shake the cameras of whoever is near `origin`.
+    pub fn earthquake(&mut self, origin: sim::Vec3, scale: f32, duration_ms: i32, radius: f32) {
+        let now = self.level.time;
+        let q = crate::tempev::Earthquake {
+            scale,
+            duration_ms,
+            radius,
+        };
+        self.tempev.add_earthquake(now, origin, &q);
+    }
+
     /// `G_Spawn`: the lowest free slot from [`FIRST_SPAWNED`], growing the table on demand.
     pub fn spawn(&mut self, ent: Ent) -> Result<u16, String> {
         let first = FIRST_SPAWNED.max(self.max_clients);
+        // The slots from `tempev::FIRST` up carry the one-shot events in snapshots: entities stop short of them.
+        let limit = usize::from(crate::tempev::FIRST);
         let slot = (first..self.ents.len())
             .find(|&i| self.ents[i].is_none())
-            .unwrap_or_else(|| {
-                let n = self.ents.len().max(first);
-                self.ents.resize(n + 1, None);
-                n
-            });
-        if slot >= usize::from(ENTITYNUM_WORLD) {
+            .unwrap_or_else(|| self.ents.len().max(first));
+        if slot >= limit {
             return Err("G_Spawn: no free entities".into());
+        }
+        if slot >= self.ents.len() {
+            self.ents.resize(slot + 1, None);
         }
         self.ents[slot] = Some(ent);
         self.level.num_entities = self.level.num_entities.max(slot + 1);
@@ -508,6 +553,7 @@ impl Game {
     /// `G_FreeEntity`: the script object dies at the next `Scr_IncTime`.
     pub fn free_entity(&mut self, vm: &mut Vm, num: u16) {
         self.unlink_all(num);
+        self.dropped.retain(|&d| d != num);
         if let Some(slot) = self.ents.get_mut(usize::from(num))
             && let Some(e) = slot.take()
         {
@@ -545,6 +591,7 @@ impl Game {
         self.attractors = Attractors::default();
         self.tempev = Default::default();
         self.vision = [None, None];
+        self.dropped.clear();
         self.team_score = [0; 3];
         self.nav = None;
         self.nav_goals.clear();
@@ -613,6 +660,7 @@ impl Game {
         let Some(e) = self.ents.get_mut(usize::from(num)).and_then(Option::as_mut) else {
             return;
         };
+        let kind_is_item = e.kind == EntKind::Item;
         let inline = e
             .model
             .strip_prefix('*')
@@ -647,6 +695,9 @@ impl Game {
             }
             "trigger_multiple" | "trigger_once" => e.contents = sentient_trigger(e.spawnflags),
             _ => {}
+        }
+        if kind_is_item {
+            self.init_item(num);
         }
         self.relink(num);
     }
@@ -911,6 +962,32 @@ mod tests {
         );
         g.ent_mut(n).unwrap().hidden = true;
         assert!(published(&g).is_none(), "a hidden model is not drawn");
+    }
+
+    #[test]
+    fn a_launched_script_model_is_published_with_its_launch() {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        let mut e = Ent::new(EntKind::Plain, "script_model");
+        e.model = "com_barrel".into();
+        e.origin = [10.0, 20.0, 30.0];
+        let n = g.spawn(e).unwrap();
+        g.note_model("com_barrel");
+        let published = |g: &Game| {
+            crate::netsv::world_entities(g)
+                .into_iter()
+                .find(|s| s.number == n)
+                .unwrap()
+        };
+        assert_eq!(
+            published(&g).eflags & crate::netsv::eflags::PHYSICS_LAUNCH,
+            0
+        );
+        g.ent_mut(n).unwrap().x.physics_launch = Some(([11.0, 20.0, 34.0], [0.0, 50.0, 300.0]));
+        let s = published(&g);
+        assert_ne!(s.eflags & crate::netsv::eflags::PHYSICS_LAUNCH, 0);
+        assert_eq!(s.origin, [10.0, 20.0, 30.0]);
+        assert_eq!(s.launch_point, [11.0, 20.0, 34.0]);
+        assert_eq!(s.velocity, [0.0, 50.0, 300.0]);
     }
 
     #[test]

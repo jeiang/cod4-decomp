@@ -24,6 +24,7 @@
 )]
 
 mod ads;
+pub mod damage;
 mod duck;
 mod footsteps;
 mod jump;

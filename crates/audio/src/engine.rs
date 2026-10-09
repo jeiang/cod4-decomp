@@ -13,7 +13,7 @@ use crate::mixer::{
     Duck, Emitter, Handle, Listener, Mixer, NO_ENTITY, Play, Source, VoiceId, mixer,
 };
 use crate::reverb::room_index;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ pub const ENV_PRIORITIES: usize = 3;
 
 /// Secondary aliases chain at most this deep (the original stops at 10).
 const MAX_CHAIN: u32 = 10;
+/// How many voices of one entity and alias [`Sound::stop_alias`] remembers.
+const MAX_STOPPABLE: usize = 4;
 
 /// Optional parts of a play request.
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +34,8 @@ pub struct Cue {
     /// Scales the alias's rolled volume.
     pub volume: f32,
     pub fade_in_ms: u32,
+    /// A later [`Sound::stop_alias`] may cut this sound short (a reload); needs `entity`.
+    pub stoppable: bool,
 }
 
 impl Default for Cue {
@@ -41,7 +45,33 @@ impl Default for Cue {
             entity: NO_ENTITY,
             volume: 1.0,
             fade_in_ms: 0,
+            stoppable: false,
         }
+    }
+}
+
+/// The voices [`Sound::stop_alias`] can cut, by entity and lower-case alias. Only sounds asked for as
+/// [`Cue::stoppable`] are kept, so busy footsteps never push a reload out.
+#[derive(Default)]
+struct Stoppable(HashMap<(u32, String), VecDeque<VoiceId>>);
+
+impl Stoppable {
+    fn record(&mut self, entity: u32, alias: &str, id: VoiceId) {
+        let q = self
+            .0
+            .entry((entity, alias.to_ascii_lowercase()))
+            .or_default();
+        if q.len() >= MAX_STOPPABLE {
+            q.pop_front();
+        }
+        q.push_back(id);
+    }
+
+    fn take(&mut self, entity: u32, alias: &str) -> Vec<VoiceId> {
+        self.0
+            .remove(&(entity, alias.to_ascii_lowercase()))
+            .map(Vec::from)
+            .unwrap_or_default()
     }
 }
 
@@ -70,6 +100,9 @@ pub struct Sound {
     streams: Streams,
     listener: Listener,
     loops: HashMap<(u32, String), VoiceId>,
+    /// The newest one-shot voices of entities, by lower-case alias name, for [`Sound::stop_alias`]. A voice that has
+    /// ended is a harmless stop.
+    stoppable: Stoppable,
     /// Entity loops that were out of range when asked for, started by [`Sound::follow_entity`] once their entity is
     /// near enough.
     waiting: HashMap<(u32, String), Arc<Alias>>,
@@ -201,6 +234,7 @@ impl Sound {
             streams: Streams::new(),
             listener: Listener::from_yaw([0.0; 3], 0.0),
             loops: HashMap::new(),
+            stoppable: Stoppable::default(),
             waiting: HashMap::new(),
             ambient: None,
             music: None,
@@ -392,6 +426,8 @@ impl Sound {
         self.handle.play(p);
         if alias.looping && cue.entity != NO_ENTITY {
             self.loops.insert(key, id);
+        } else if cue.stoppable && cue.entity != NO_ENTITY {
+            self.stoppable.record(cue.entity, name, id);
         }
         *self.played.by_channel.entry(def.name).or_default() += 1;
         *self
@@ -411,6 +447,13 @@ impl Sound {
         let key = (entity, alias.to_ascii_lowercase());
         self.waiting.remove(&key);
         if let Some(id) = self.loops.remove(&key) {
+            self.handle.stop(id);
+        }
+    }
+
+    /// `CG_StopSoundAlias`: stops the sounds of `alias` that `entity` started.
+    pub fn stop_alias(&mut self, entity: u32, alias: &str) {
+        for id in self.stoppable.take(entity, alias) {
             self.handle.stop(id);
         }
     }
@@ -578,5 +621,30 @@ impl Sound {
         }
         self.handle.set_eq(row as u8, eq, band, set);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_recorded_voice_is_taken_once_for_its_entity_and_alias() {
+        let mut s = Stoppable::default();
+        s.record(3, "Reload_M4", 7);
+        assert!(s.take(4, "reload_m4").is_empty());
+        assert!(s.take(3, "reload_other").is_empty());
+        assert_eq!(s.take(3, "reload_m4"), [7]);
+        assert!(s.take(3, "reload_m4").is_empty());
+    }
+
+    #[test]
+    fn other_sounds_do_not_push_a_recorded_voice_out() {
+        let mut s = Stoppable::default();
+        s.record(3, "reload", 1);
+        for i in 0..500 {
+            s.record(i % 20, "step", 100 + i);
+        }
+        assert_eq!(s.take(3, "reload"), [1]);
     }
 }

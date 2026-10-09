@@ -195,6 +195,13 @@ impl Player {
         )
     }
 
+    /// Where the `j_head` bone is for a player standing at `origin` in the last [`Player::update`]'s pose.
+    pub fn head_pos(&self, origin: [f32; 3]) -> Option<[f32; 3]> {
+        let i = self.anims.rig().bone_index("j_head")?;
+        let head = self.pose.bones().get(i)?.trans;
+        Some(sim::skel::Pose::to_world(&head, &origin, self.yaw))
+    }
+
     /// The body and head as model instances for a player standing at `origin`.
     pub fn instances(&self, origin: [f32; 3]) -> Vec<ModelInstance> {
         self.instances_posed(origin, self.yaw, self.pose.bones())

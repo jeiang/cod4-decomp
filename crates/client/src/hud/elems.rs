@@ -149,6 +149,45 @@ fn draw_scope(ui: &Ui, p: &mut Painter, o: &crate::viewmodel::Overlay) {
     }
 }
 
+/// The red flash over the screen and the wedges that point at where hits came from (`CG_DrawFlashDamage`,
+/// `CG_DrawDamageDirectionIndicators`). A flashbang hides the wedges, and so does a scope unless
+/// `cg_hudDamageIconInScope` is set (they are drawn about the screen centre, where the scope's crosshair is).
+fn draw_damage(ui: &Ui, p: &mut Painter, live: &LiveUi) {
+    let (w, h) = ui.place.size;
+    let d = &live.damage;
+    if d.flash > 0.0 {
+        // A margin past every edge, so a shaken view shows no gap.
+        let m = 10.0;
+        p.fill(
+            Px {
+                x: -m,
+                y: -m,
+                w: w + 2.0 * m,
+                h: h + 2.0 * m,
+            },
+            [0.2, 0.0, 0.0, d.flash],
+        );
+    }
+    if d.wedges.is_empty() || live.flashed || (live.scope.is_some() && !live.damage_in_scope) {
+        return;
+    }
+    let unit = h / 480.0;
+    let [iw, ih] = crate::damage::ICON_SIZE.map(|v| v * unit);
+    let radius = crate::damage::ICON_OFFSET * unit;
+    let img = p.named(&ui.assets, crate::damage::ICON_MATERIAL);
+    let (cx, cy) = (w * 0.5, h * 0.5);
+    for &(degrees, alpha) in &d.wedges {
+        p.g.quad_rot(
+            &img,
+            [cx - iw * 0.5, cy + radius, iw, ih],
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, alpha],
+            degrees.to_radians(),
+            [cx, cy],
+        );
+    }
+}
+
 /// Foreground elements, the spectated player's name and the scoreboard rows, over the menus.
 pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
     let live = &st.live;
@@ -156,6 +195,10 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
         return;
     }
     draw_elems(ui, p, live, true);
+    if live.interrupted {
+        draw_interrupted(ui, p, live);
+    }
+    draw_damage(ui, p, live);
     if let Some(name) = live
         .following
         .as_deref()
@@ -192,6 +235,40 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
     }
     if st.scoreboard_shown(ui) {
         super::draw_scoreboard(ui, p, st);
+    }
+}
+
+/// `CG_DrawDisconnect`: the warning and, half of every second, the net icon.
+fn draw_interrupted(ui: &Ui, p: &mut Painter, live: &LiveUi) {
+    let text = localize(&ui.assets, "CGAME_CONNECTIONINTERUPTED");
+    let w = ui.text_width(&text, 0, 0.5);
+    ui.draw_text(
+        p,
+        &TextDraw {
+            text: &text,
+            font_enum: 0,
+            scale: 0.5,
+            style: 3,
+            color: [1.0; 4],
+            x: -w * 0.5,
+            y: 100.0,
+            horz: horz::CENTER_SAFEAREA,
+            vert: vert::TOP,
+        },
+    );
+    if (live.time >> 9) & 1 == 0 {
+        let place = &ui.place;
+        let img = p.named(&ui.assets, "net_disconnect");
+        p.pic(
+            &img,
+            Px {
+                x: place.size.0 * 0.5 - 24.0 * place.scale.0,
+                y: 320.0 * place.scale.1,
+                w: 48.0 * place.scale.0,
+                h: 48.0 * place.scale.1,
+            },
+            [1.0; 4],
+        );
     }
 }
 

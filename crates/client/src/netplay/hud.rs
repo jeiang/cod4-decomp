@@ -132,7 +132,28 @@ impl NetPlay {
         if ps.cursor_hint != 0 {
             h.cursor_hint = ps.cursor_hint;
             h.cursor_hint_time = now;
-            h.cursor_hint_text = if ps.cursor_hint_string >= 0 {
+            h.cursor_hint_extra.clear();
+            h.cursor_hint_text = if ps.cursor_hint > sim::weapon::pickup::WEAPON_HINT_OFFSET {
+                // A weapon on the floor or a live grenade (`CG_GetWeaponUseString`).
+                let w = u16::from(ps.cursor_hint - sim::weapon::pickup::WEAPON_HINT_OFFSET);
+                let info = self.weapons.info(w);
+                let key = if info.inventory_type != sim::weapon::InventoryType::Primary {
+                    if info.offhand_class == OffhandClass::Frag {
+                        "&PLATFORM_THROWBACKGRENADE"
+                    } else {
+                        h.cursor_hint_extra = self.weapon_display_name(w);
+                        "&PLATFORM_PICKUPNEWWEAPON"
+                    }
+                } else {
+                    h.cursor_hint_extra = self.weapon_display_name(w);
+                    if inv.primary_count(&self.weapons) >= 2 {
+                        "&PLATFORM_SWAPWEAPONS"
+                    } else {
+                        "&PLATFORM_PICKUPNEWWEAPON"
+                    }
+                };
+                key.to_owned()
+            } else if ps.cursor_hint_string >= 0 {
                 ui.config(cs::USE_TRIG_STRINGS + ps.cursor_hint_string as u16)
                     .to_owned()
             } else {
@@ -297,6 +318,15 @@ impl NetPlay {
                 .and_then(|m| m.name.as_deref().map(str::to_owned)),
             ammo: of_class.iter().map(|&i| inv.clip(&self.weapons, i)).sum(),
         })
+    }
+
+    /// The weapon's display name as a localize reference (`&WEAPON_AK47`), empty when it has none.
+    fn weapon_display_name(&self, index: u16) -> String {
+        self.lib
+            .content
+            .weapon(self.weapons.name(index))
+            .and_then(|d| d.display_name.as_deref().map(|n| format!("&{n}")))
+            .unwrap_or_default()
     }
 
     /// What the weapon displays need to know about weapon `index`.
