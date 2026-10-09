@@ -265,39 +265,10 @@ impl Work {
         Ok(())
     }
 
-    /// What a match draws that the map does not hold: every weapon's gun, hands and world model and the players get
-    /// their pipelines too.
     fn add_models(&mut self) -> Result<(), String> {
         let library = self.library.as_ref().ok_or("not decoded")?;
         let renderer = self.renderer.as_mut().ok_or("not built")?;
-        let mut models = Vec::new();
-        for w in library.content.weapons() {
-            models.extend(w.gun_models.iter().flatten().cloned());
-            models.extend(w.world_models.iter().flatten().cloned());
-            models.extend(w.hand_model.clone());
-        }
-        for team in [Team::Allies, Team::Axis] {
-            if let Some(set) = library.team_models(team) {
-                let names = std::iter::once(&set.body).chain(set.attach.iter().map(|(m, _)| m));
-                models.extend(names.filter_map(|n| library.content.model(n).cloned()));
-            }
-        }
-        for name in library.content.model_names("viewhands_") {
-            models.extend(library.content.model(name).cloned());
-        }
-        renderer.warm_models(&models);
-        renderer.warm_clouds(library.content.effects().iter().flat_map(|e| {
-            e.elems
-                .iter()
-                .filter(|d| d.elem_type == assets::zone::fx::elem::CLOUD)
-                .flat_map(|d| match &d.visuals {
-                    assets::zone::fx::FxVisuals::Materials(ms) => {
-                        ms.iter().flatten().cloned().collect()
-                    }
-                    _ => Vec::new(),
-                })
-                .collect::<Vec<_>>()
-        }));
+        add_match_models(renderer, library);
         Ok(())
     }
 
@@ -323,6 +294,88 @@ impl Work {
             ms: self.started.elapsed().as_secs_f64() * 1000.0,
         })
     }
+}
+
+/// What a match draws that the map does not hold: every weapon's gun, hands and world model and the players get
+/// their pipelines too.
+pub fn add_match_models(renderer: &mut Renderer, library: &Library) {
+    let mut models = Vec::new();
+    for w in library.content.weapons() {
+        models.extend(w.gun_models.iter().flatten().cloned());
+        models.extend(w.world_models.iter().flatten().cloned());
+        models.extend(w.hand_model.clone());
+    }
+    for team in [Team::Allies, Team::Axis] {
+        if let Some(set) = library.team_models(team) {
+            let names = std::iter::once(&set.body).chain(set.attach.iter().map(|(m, _)| m));
+            models.extend(names.filter_map(|n| library.content.model(n).cloned()));
+        }
+    }
+    // The scripts dress each player in a body and head of their own choosing (`_teams`): all the stock ones.
+    for prefix in ["viewhands_", "body_mp_", "head_mp_"] {
+        for name in library.content.model_names(prefix) {
+            models.extend(library.content.model(name).cloned());
+        }
+    }
+    // The props the map lets players knock about are not static models of the map.
+    for d in library
+        .content
+        .clipmap()
+        .map_or(&[][..], |c| &c.dyn_entities[..])
+        .iter()
+        .flat_map(|l| l.iter())
+    {
+        models.extend(d.model.clone());
+    }
+    // The script_models the map places (cars, props), by the `model` key of its entity string.
+    if let Some(ents) = library.content.clipmap().and_then(|c| c.map_ents.as_ref()) {
+        for name in entity_models(&ents.entity_string) {
+            models.extend(library.content.model(&name).cloned());
+        }
+    }
+    // What effects draw: clouds, sprites (quads) and models.
+    let (mut clouds, mut sprites) = (Vec::new(), Vec::new());
+    for d in library
+        .content
+        .effects()
+        .iter()
+        .flat_map(|e| e.elems.iter())
+    {
+        match &d.visuals {
+            assets::zone::fx::FxVisuals::Materials(ms) => {
+                let into = if d.elem_type == assets::zone::fx::elem::CLOUD {
+                    &mut clouds
+                } else {
+                    &mut sprites
+                };
+                into.extend(ms.iter().flatten().cloned());
+            }
+            assets::zone::fx::FxVisuals::Models(ms) => models.extend(ms.iter().flatten().cloned()),
+            assets::zone::fx::FxVisuals::Decals(ms) => {
+                sprites.extend(ms.iter().flatten().flatten().cloned());
+            }
+            _ => {}
+        }
+    }
+    renderer.warm_models(&models);
+    renderer.warm_clouds(clouds);
+    renderer.warm_sprites(sprites);
+}
+
+/// The values of the `model` keys of a map's entity string (`"model" "name"` lines).
+fn entity_models(entities: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in String::from_utf8_lossy(entities).lines() {
+        let mut q = line.split('"').skip(1).step_by(2);
+        if let (Some("model"), Some(v)) = (q.next(), q.next())
+            && !v.is_empty()
+            && !v.starts_with('*')
+            && !out.iter().any(|o| o == v)
+        {
+            out.push(v.to_owned());
+        }
+    }
+    out
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -424,4 +477,15 @@ fn draw_once(
     // The frame's timestamp read-back would still be pending: a surface cannot be reconfigured (a window resize)
     // while the queue has work in flight, so wait for it here, off the window thread.
     renderer.flush_gpu_times();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entity_models;
+
+    #[test]
+    fn the_models_of_the_entity_string_are_listed_once_without_brush_models() {
+        let ents = b"{\n\"classname\" \"script_model\"\n\"model\" \"vehicle_80s_hatch1_red\"\n}\n{\n\"model\" \"*12\"\n}\n{\n\"model\" \"vehicle_80s_hatch1_red\"\n\"modelscale\" \"2\"\n\"origin\" \"1 2 3\"\n}\0";
+        assert_eq!(entity_models(ents), ["vehicle_80s_hatch1_red"]);
+    }
 }

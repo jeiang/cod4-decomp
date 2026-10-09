@@ -12,11 +12,19 @@ const HISTORY: usize = 32;
 /// How far behind the newest server time other entities are drawn.
 pub const INTERP_DELAY_MS: i32 = 100;
 
-/// How much of the gap between a snapshot's clock reading and the running estimate the estimate takes up.
+/// How much of the gap between the clock estimate and what the snapshots read the estimate takes up per snapshot.
 const CLOCK_EASE: f64 = 0.05;
-/// A reading this far (ms) from the estimate is a different clock (a map change, a long stall), not jitter: the estimate
-/// jumps to it instead of easing.
+/// A target this far (ms) above the estimate is a different clock, not jitter: the estimate jumps to it instead of
+/// easing.
 const CLOCK_JUMP_MS: f64 = 100.0;
+/// A target this far (ms) below the estimate is a new clock (a map change): the estimate jumps to it.
+const CLOCK_RESET_MS: f64 = 1000.0;
+/// A packet only ever arrives late, never early, so the best reading of the clock is the highest one lately: a frame
+/// that stalls reads a whole queue of snapshots at once and each looks up to the stall late, but the readings of the
+/// window before it still stand, so the clock does not step back and forward again (the eye would jump); and when
+/// the latency really rises, the window holds only late readings after this long (ms) and the clock follows them at
+/// the usual rate.
+const CLOCK_WINDOW_MS: u64 = 500;
 
 #[derive(Debug, Default)]
 pub struct SnapshotBuffer {
@@ -26,6 +34,10 @@ pub struct SnapshotBuffer {
     offset: Option<f64>,
     /// The newest time handed out, so the clock never runs backwards.
     handed_out: std::cell::Cell<i32>,
+    /// `(arrival, reading)` of the snapshots of the last [`CLOCK_WINDOW_MS`].
+    window: VecDeque<(u64, f64)>,
+    /// How often the estimate jumped instead of easing: up, down.
+    pub jumps: [u32; 2],
 }
 
 impl SnapshotBuffer {
@@ -41,10 +53,27 @@ impl SnapshotBuffer {
             self.snaps.pop_front();
         }
         let reading = f64::from(snap.server_time) - recv_ms as f64;
+        self.window.push_back((recv_ms, reading));
+        while self
+            .window
+            .front()
+            .is_some_and(|(r, _)| r + CLOCK_WINDOW_MS < recv_ms)
+        {
+            self.window.pop_front();
+        }
+        let target = self.window.iter().map(|(_, r)| *r).fold(f64::MIN, f64::max);
         self.offset = Some(match self.offset {
-            Some(o) if (reading - o).abs() < CLOCK_JUMP_MS => o + (reading - o) * CLOCK_EASE,
-            _ => {
+            Some(o)
+                if (target - o).abs()
+                    < CLOCK_JUMP_MS.max(if target < o { CLOCK_RESET_MS } else { 0.0 }) =>
+            {
+                o + (target - o) * CLOCK_EASE
+            }
+            prev => {
+                self.jumps[usize::from(prev.is_some_and(|o| target < o))] += 1;
                 self.handed_out.set(i32::MIN);
+                self.window.clear();
+                self.window.push_back((recv_ms, reading));
                 reading
             }
         });
@@ -54,6 +83,7 @@ impl SnapshotBuffer {
     /// Forgets the history (a new level restarts the server clock).
     pub fn clear(&mut self) {
         self.snaps.clear();
+        self.window.clear();
     }
 
     pub fn latest(&self) -> Option<&Snapshot> {
@@ -226,6 +256,53 @@ mod tests {
         assert!(
             worst <= 1,
             "the clock stepped {worst} ms off the local rate"
+        );
+    }
+
+    /// A frame that stalls reads the snapshots that queued meanwhile all at once; each looks up to the stall late. The
+    /// clock must go on at the local rate through it, not step back by the stall and forward again.
+    #[test]
+    fn a_stalled_frame_does_not_step_the_clock() {
+        let mut b = SnapshotBuffer::default();
+        for k in 0..60u64 {
+            b.push(33 * k + 20, snap(33 * k as i32, 0.0, 0.0));
+        }
+        let before = b.server_time(33 * 59 + 40).unwrap();
+        // The next 5 snapshots (165 ms) are read only after a stall: all arrive at 33 * 64 + 20 + 150.
+        for k in 60..65u64 {
+            b.push(33 * 64 + 170, snap(33 * k as i32, 0.0, 0.0));
+        }
+        let after = b.server_time(33 * 64 + 170).unwrap();
+        let local = 33 * 64 + 170 - (33 * 59 + 40);
+        assert!(
+            (after - before - local as i32).abs() <= 8,
+            "the clock moved {} ms over {local} ms",
+            after - before
+        );
+    }
+
+    /// The latency rises by 200 ms for good: the clock follows within a couple of seconds, so bodies and the eye are
+    /// not drawn that much ahead on a network that got slower.
+    #[test]
+    fn a_lasting_latency_step_is_followed_in_a_couple_of_seconds() {
+        let mut b = SnapshotBuffer::default();
+        for k in 0..90u64 {
+            b.push(33 * k + 20, snap(33 * k as i32, 0.0, 0.0));
+        }
+        // From here every snapshot arrives 200 ms later than it did: the offset (server time less client time) is
+        // 200 lower than it was (-20).
+        let step_at = 33 * 90 + 20;
+        for k in 90..200u64 {
+            let arrive = 33 * k + 220;
+            b.push(arrive, snap(33 * k as i32, 0.0, 0.0));
+            if arrive >= step_at + 2500 {
+                let off = b.offset.unwrap();
+                assert!((off + 220.0).abs() <= 20.0, "{off} ms 2.5 s after the step");
+            }
+        }
+        assert!(
+            b.jumps == [1, 0],
+            "followed by easing, not jumping (the first reading is the one jump)"
         );
     }
 

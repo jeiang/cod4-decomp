@@ -273,6 +273,8 @@ pub struct NetPlay {
     voice_on: bool,
     muted: HashSet<u16>,
     lib: Library,
+    /// The models the server precached have had their pipelines asked for (native).
+    models_warmed: bool,
     weapons: WeaponTable,
     params: Params,
     /// The `MOVEMENT` configstring [`Self::params`] was made from.
@@ -481,6 +483,7 @@ impl NetPlay {
             tracer_material: None,
             shakes: Default::default(),
             lib,
+            models_warmed: false,
             events: Events::default(),
             live_time: 0,
             kill_icons: HashMap::new(),
@@ -544,6 +547,22 @@ impl NetPlay {
     }
 
     /// The server has put the player in the world (alive at least once).
+    /// Once the player has spawned: the models the server precached (`precachemodel`: planes, vehicles, props the
+    /// scripts make) that the loaded zones have, for the renderer to get pipelines for before they first show.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn unwarmed_models(&mut self) -> Vec<std::sync::Arc<assets::zone::xmodel::XModel>> {
+        if !self.c.spawned || std::mem::replace(&mut self.models_warmed, true) {
+            return Vec::new();
+        }
+        let Some(ui) = self.net.ui_ref() else {
+            return Vec::new();
+        };
+        (1..net::ui::cs::MODELS_COUNT)
+            .filter_map(|n| self.lib.content.model(ui.model(n)))
+            .cloned()
+            .collect()
+    }
+
     pub fn spawned(&self) -> bool {
         self.c.spawned
     }
@@ -611,6 +630,7 @@ impl NetPlay {
         if let Some((lib, map, sound)) = world {
             self.weapons = WeaponTable::new(&lib.content.weapons())
                 .map_err(|e| format!("weapon table: {e:?}"))?;
+            self.models_warmed = false;
             let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
             self.effects = Effects::new(&lib.content, map.world.clone());
             self.effects
@@ -2343,6 +2363,7 @@ impl NetPlay {
             },
             "eye": self.last_eye.map(|e| e.to_array()),
             "eye_speed": eye_speed_summary(&self.c.eye_speeds),
+            "clock_jumps": self.net.snaps.jumps,
             "sound": self.sound.report(),
         });
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
