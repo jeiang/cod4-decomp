@@ -305,7 +305,6 @@ pub struct Ragdoll {
     pairs: Vec<[usize; 2]>,
     follow: Vec<Follow>,
     alias: Vec<Option<usize>>,
-    origin: Vec3,
     yaw: Quat,
     age: f32,
     carry: f32,
@@ -493,7 +492,6 @@ impl Ragdoll {
             pairs: def.pairs.clone(),
             follow,
             alias: skel.alias.clone(),
-            origin,
             yaw,
             age: 0.0,
             carry: 0.0,
@@ -800,9 +798,17 @@ impl Ragdoll {
         self.bodies[p].w += dir * spent * (reduced / ip);
     }
 
-    /// The bones in entity space, for an entity drawn at the origin and yaw the body was made with.
+    /// The corpse's origin: the torso's centre (`Ragdoll_GetRootOrigin`). A body thrown by a blast ends up far from
+    /// where it died, so the model is drawn, culled and lit from where the body is now, with its bones relative to
+    /// that point.
+    pub fn root(&self) -> [f32; 3] {
+        self.bodies[0].x.to_array()
+    }
+
+    /// The bones for a model drawn at [`Ragdoll::root`] and the yaw the body was made with.
     pub fn bones(&self) -> Vec<BoneMat> {
         let un = self.yaw.inverse();
+        let root = self.bodies[0].x;
         (0..self.follow.len())
             .map(|i| {
                 let f = self.follow[self.alias[i]
@@ -810,7 +816,7 @@ impl Ragdoll {
                     .unwrap_or(i)];
                 let b = &self.bodies[f.body];
                 let q = un * (b.q * f.q);
-                let t = un * (b.x + b.q * f.p - self.origin);
+                let t = un * (b.x + b.q * f.p - root);
                 BoneMat {
                     quat: q.to_array(),
                     trans: t.to_array(),
@@ -1223,14 +1229,38 @@ mod tests {
         let r = make(&pose, [3.0, 4.0, 5.0], [0.0; 3]);
         let got = r.bones();
         // Only a lift clear of the floor separates it from the pose: the same offset everywhere.
-        let lift = Vec3::from(got[0].trans) - Vec3::from(pose[0].trans);
+        let root = Vec3::from(r.root());
+        let at = |i: usize| root + Vec3::from(got[i].trans);
+        let lift = at(0) - (Vec3::new(3.0, 4.0, 5.0) + Vec3::from(pose[0].trans));
         assert!(
             lift.x.abs() < 1e-3 && lift.y.abs() < 1e-3 && lift.z >= 0.0,
             "{lift}"
         );
-        for (g, w) in got.iter().zip(&pose) {
-            assert!(Vec3::from(g.trans).distance(Vec3::from(w.trans) + lift) < 1e-2);
-            assert!(Quat::from_array(g.quat).angle_between(quat_of(w)) < 1e-3);
+        for (i, w) in pose.iter().enumerate() {
+            let want = Vec3::new(3.0, 4.0, 5.0) + Vec3::from(w.trans) + lift;
+            assert!(at(i).distance(want) < 1e-2);
+            assert!(Quat::from_array(got[i].quat).angle_between(quat_of(w)) < 1e-3);
+        }
+    }
+
+    #[test]
+    fn a_body_thrown_far_keeps_its_bones_near_its_model_origin() {
+        let mut r = make(&standing(&[]), [0.0; 3], [0.0; 3]);
+        settle(&mut r, &Floor, 600);
+        r.explode(
+            r.torso() + Vec3::new(-40.0, 0.0, 0.0),
+            &Blast {
+                outer: 256.0,
+                ..Blast::default()
+            },
+        );
+        // Over the floor with nothing to stop it: it flies a long way.
+        for _ in 0..90 {
+            r.update(STEP, &Void);
+        }
+        assert!(r.torso().length() > 300.0, "thrown {}", r.torso());
+        for b in r.bones() {
+            assert!(Vec3::from(b.trans).length() < 100.0, "{:?}", b.trans);
         }
     }
 
