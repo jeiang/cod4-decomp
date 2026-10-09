@@ -151,6 +151,8 @@ pub struct Client {
     pub move_speed_scale: f32,
     pub frozen: bool,
     pub last_stand: bool,
+    /// Level time until which a player the Last Stand perk saved takes no damage (`lastStandTime`).
+    pub last_stand_time: i32,
     pub noclip: bool,
     pub ufo: bool,
     pub last_cmd_time: i32,
@@ -224,6 +226,7 @@ impl Client {
             move_speed_scale: 1.0,
             frozen: false,
             last_stand: false,
+            last_stand_time: 0,
             noclip: false,
             ufo: false,
             last_cmd_time: 0,
@@ -518,6 +521,7 @@ impl Game {
         c.spawn_count = spawn_count;
         c.last_spawn_time = time;
         c.last_stand = false;
+        c.last_stand_time = 0;
         // Blood the last life's killing blow left is not the new life's.
         c.damage_blood = 0;
         c.damage_from = [0.0; 3];

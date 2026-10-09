@@ -253,7 +253,7 @@ fn register_core_dvars(c: &mut Cvars) {
     ] {
         c.register(n, d, f);
     }
-    for (n, d) in crate::missile::JAVELIN_CVARS {
+    for (n, d) in crate::missile::MISSILE_CVARS {
         c.register(n, d, CHEAT);
     }
 }

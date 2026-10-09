@@ -132,6 +132,8 @@ impl Game {
         weapon: u16,
         hits: Vec<BulletHit>,
     ) {
+        // The shot was judged against the bodies as they were `psTimeOffset` ago; the killcam starts that much back.
+        let time_offset = self.lag_time.map_or(0, |t| self.level.time - t);
         for h in hits {
             self.check_hit_trigger_damage(vm, shooter, h.start, h.point, h.damage, h.mean);
             self.bullet_impact_event(shooter, weapon, &h);
@@ -152,6 +154,7 @@ impl Game {
             d.flags = h.flags;
             d.weapon = u32::from(weapon);
             d.hitloc = h.hitloc;
+            d.time_offset = time_offset;
             self.g_damage(vm, h.target, d);
         }
     }

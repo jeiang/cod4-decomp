@@ -1918,6 +1918,12 @@ impl PlayerPoseState {
         self.torso.map(|t| t.clip)
     }
 
+    /// How long, in milliseconds, the animation the player would die in plays; `None` when the zones lack it.
+    pub fn death_duration_ms(&self, anims: &PlayerAnims) -> Option<i32> {
+        let slot = anims.slots.get(self.input.dead_selection(&self.input))?;
+        Some((slot.info.length * 1000.0) as i32)
+    }
+
     /// The animation currently selected.
     pub fn current(&self) -> Option<&'static str> {
         self.current

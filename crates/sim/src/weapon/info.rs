@@ -337,6 +337,13 @@ pub struct WeaponInfo {
     /// `timeToAccelerate`: seconds a rocket takes to reach `projectile_speed`.
     pub time_to_accelerate: f32,
     pub projectile_curvature: f32,
+    /// `destabilizationRateTime`: seconds between a rocket's random course changes once it destabilises; 0 keeps it
+    /// stable.
+    pub destabilization_rate_time: f32,
+    /// `destabilizationCurvatureMax`: the most a destabilised rocket's heading drifts per course change.
+    pub destabilization_curvature_max: f32,
+    /// `destabilizeDistance`: how far a rocket flies before it destabilises.
+    pub destabilize_distance: i32,
     /// `guidedMissileType`: 0 none, 1 sidewinder, 2 hellfire, 3 javelin.
     pub guided_missile_type: i32,
     pub max_steering_accel: f32,
@@ -487,6 +494,9 @@ impl Default for WeaponInfo {
             proj_lifetime: 0.0,
             time_to_accelerate: 0.0,
             projectile_curvature: 0.0,
+            destabilization_rate_time: 0.0,
+            destabilization_curvature_max: 0.0,
+            destabilize_distance: 0,
             guided_missile_type: 0,
             max_steering_accel: 0.0,
             proj_ignition_delay: 0,
@@ -664,6 +674,9 @@ impl WeaponInfo {
             proj_lifetime: def.proj_lifetime,
             time_to_accelerate: def.time_to_accelerate,
             projectile_curvature: def.projectile_curvature,
+            destabilization_rate_time: def.destabilization_rate_time,
+            destabilization_curvature_max: def.destabilization_curvature_max,
+            destabilize_distance: def.destabilize_distance,
             guided_missile_type: def.guided_missile_type,
             max_steering_accel: def.max_steering_accel,
             proj_ignition_delay: def.proj_ignition_delay,
