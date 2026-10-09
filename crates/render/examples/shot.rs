@@ -9,6 +9,7 @@
 //! `GLOW=radius,intensity,cutoff,desaturation` (`GLOW=0` turns it off), `FILM=0|1|contrast,brightness,desaturation[,1 for no tint]`,
 //! `BLUR=radius` (virtual 640x480 pixels) and `SHELLSHOCK=1` (a second frame draws the overlays over the first).
 //! `TOUR=<n>` also renders n views from spawn points as `<out>-<i>.png`.
+//! `NOSUN=1` turns the sun sprite off, `SETTLE=<frames>` renders that many frames before the saved one.
 //! `TIMING=<frames>` renders that many frames and prints the mean GPU time of every pass.
 
 use assets::vfs::Vfs;
@@ -37,6 +38,7 @@ fn main() {
     }
     r.settings.fog &= std::env::var_os("NOFOG").is_none();
     r.settings.primary_lights &= std::env::var_os("NOLIGHTS").is_none();
+    r.settings.draw_sun &= std::env::var_os("NOSUN").is_none();
     set_post(&mut r);
     eprintln!(
         "loaded in {:?}; failures: {:?}",
@@ -96,6 +98,14 @@ fn main() {
             flash_screengrab: 0.3,
             flash_whiteout: 0.15,
         });
+    }
+    // `SETTLE=n`: n frames first, for the sun's fades and readback.
+    for _ in 0..std::env::var("SETTLE")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+    {
+        r.render(&view, &tv, format, (w, h));
     }
     let stats = r.render(&view, &tv, format, (w, h));
     eprintln!("{stats:?}\nimage failures: {:?}", r.textures.failed);

@@ -10,6 +10,7 @@ use crate::material::{BANK_BYTES, Materials, Prepared, SamplerKey, Target, Verte
 use crate::post::{self, PostParams};
 use crate::scene::{MapData, Mesh, Scene, model_matrix};
 use crate::skin::{self, ModelInstance, ModelKind};
+use crate::sun::{self, Sun};
 use crate::sunshadow::{self, SunShadow};
 use crate::texture::{Tex, TextureCache};
 use crate::timing::GpuTimer;
@@ -159,6 +160,8 @@ pub struct Settings {
     pub aa_samples: u32,
     /// `r_aspectRatio`: the shape of the screen when its pixels are not square; `None` takes the target's.
     pub aspect: Option<f32>,
+    /// `r_drawSun`: off, the map's sun sprite, lens flare and glare are not drawn.
+    pub draw_sun: bool,
 }
 
 impl Default for Settings {
@@ -173,6 +176,7 @@ impl Default for Settings {
             glow: true,
             aa_samples: 1,
             aspect: None,
+            draw_sun: true,
         }
     }
 }
@@ -333,6 +337,8 @@ pub struct Renderer {
     /// What the post chain does this frame; starts as the map's own glow and film.
     pub post: PostParams,
     pub(crate) post_state: post::State,
+    /// The map's sun sprite, lens flare and glare; its overlay is drawn at the end of the post chain.
+    pub(crate) sun: Sun,
     warm: Option<Warm>,
     /// Skinned models to draw in the next [`Renderer::render`]; the caller refills the list every frame.
     pub dynamic_models: Vec<ModelInstance>,
@@ -433,6 +439,7 @@ impl Renderer {
             art: data.art.clone(),
             post: PostParams::from_art(&data.art),
             post_state,
+            sun: Sun::new(&gpu_for_dyn),
             warm: None,
             lights,
             shadow: None,
@@ -1422,7 +1429,32 @@ impl Renderer {
         };
         let mut counts = BuildCounts::default();
         let insts = std::mem::take(&mut self.dynamic_models);
-        let meshes = std::mem::take(&mut self.dynamic_meshes);
+        let mut meshes = std::mem::take(&mut self.dynamic_meshes);
+        let caller_meshes = meshes.len();
+        let sun_cam = sun::Cam {
+            origin: view.origin,
+            forward: view.forward(),
+            clip: p * v,
+            size,
+            near: NEAR,
+            time_ms: (view.time * 1000.0) as i32,
+        };
+        let probe_target = sun::ProbeTarget {
+            color: format,
+            depth: DEPTH_FORMAT,
+            samples: self.samples(format),
+        };
+        let sun_quad = self.sun.begin_frame(
+            &self.gpu,
+            &world.sun,
+            self.settings.draw_sun,
+            &sun_cam,
+            self.scene.collision.as_deref(),
+            probe_target,
+        );
+        if let (Some(quad), Some(mat)) = (sun_quad, world.sun.sprite_material.clone()) {
+            meshes.push(sun::sprite_mesh(mat, quad));
+        }
         let (dynsurfs, mesh_runs) = self.prepare_dynamic(&insts, &meshes, view.origin);
 
         // The sun shadow map.
@@ -1721,7 +1753,7 @@ impl Renderer {
                     stencil_ops: None,
                 }),
                 timestamp_writes: timestamps,
-                occlusion_query_set: None,
+                occlusion_query_set: self.sun.query_set(),
                 multiview_mask: None,
             });
             record(
@@ -1732,6 +1764,7 @@ impl Renderer {
                 Some((size.0 as f32, size.1 as f32)),
                 &self.dyn_vb,
             );
+            self.sun.draw_probe(&mut rp, size);
             if !vm_draws.is_empty() {
                 rp.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, VIEWMODEL_DEPTH);
                 record(
@@ -1752,16 +1785,19 @@ impl Renderer {
             &self.ps_bg,
             self.timer.as_mut(),
         );
+        self.sun.resolve(&mut enc);
         if let Some(t) = self.timer.as_mut() {
             t.resolve(&mut enc);
         }
         self.gpu.queue.submit([enc.finish()]);
+        self.sun.submitted();
         if let Some(t) = self.timer.as_mut() {
             t.submitted();
             stats.gpu_ms = t.last_total_ms;
             stats.frame = t.frame();
         }
         self.dynamic_models = insts;
+        meshes.truncate(caller_meshes);
         self.dynamic_meshes = meshes;
         stats.cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
         stats

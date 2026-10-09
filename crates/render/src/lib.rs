@@ -14,6 +14,7 @@ mod renderer;
 pub mod scene;
 pub mod skin;
 pub mod state;
+pub mod sun;
 pub mod sunshadow;
 pub mod texture;
 pub mod timing;
