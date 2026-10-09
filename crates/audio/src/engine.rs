@@ -889,6 +889,29 @@ mod tests {
     }
 
     #[test]
+    fn music_the_mixer_refused_does_not_block_the_next_one() {
+        let mut capped = chan("capped", false);
+        capped.max_voices = 1;
+        let bank = Bank::synthetic(
+            vec![chan("flat", false), capped],
+            vec![
+                ("fill", vec![Alias::test("fill", 1, dc(300))]),
+                ("mus", vec![Alias::test("mus", 1, dc(2000))]),
+            ],
+        );
+        let mut s = Sound::new(bank, false);
+        s.play("fill", Cue::default());
+        s.music_play("mus");
+        run(&mut s, 20);
+        assert_eq!(active(&s), 1, "the music was refused");
+        run(&mut s, 400);
+        s.music_play("mus");
+        assert_eq!(s.played.music_ignored, 0);
+        run(&mut s, 20);
+        assert_eq!(active(&s), 1, "the music plays once the channel is free");
+    }
+
+    #[test]
     fn a_sound_that_runs_out_goes_on_with_its_chain_alias_but_a_stopped_one_does_not() {
         let mut first = Alias::test("first", 1, dc(50));
         first.chain = Some("second".into());

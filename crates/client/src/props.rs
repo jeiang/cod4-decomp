@@ -573,6 +573,7 @@ impl Props {
             surface: self.props[i].surface,
             weapon,
             shooter,
+            exit: false,
         });
         self.props[i].strike(|b, preset| {
             b.bullet_impact(at, f, BULLET_FORCE, preset.bullet_force_scale);

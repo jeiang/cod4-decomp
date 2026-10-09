@@ -1039,7 +1039,10 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
 fn add_loop_sounds(game: &Game, out: &mut Vec<EntityState>) {
     let mut added = false;
     for (n, e) in game.ents.iter().enumerate() {
-        let Some(e) = e.as_ref().filter(|e| e.loop_sound != 0) else {
+        let Some(e) = e
+            .as_ref()
+            .filter(|e| e.loop_sound != 0 && e.kind != EntKind::Client)
+        else {
             continue;
         };
         let n = n as u16;

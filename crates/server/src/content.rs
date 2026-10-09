@@ -391,6 +391,12 @@ impl Content {
             .insert(name.to_ascii_lowercase(), (0, text.as_bytes().into()));
     }
 
+    /// A sound alias list made up for a test.
+    #[cfg(test)]
+    pub fn add_test_sound(&mut self, name: &str) {
+        put(&mut self.base.sounds, 0, name, ());
+    }
+
     pub fn rawfile(&self, name: &str) -> Option<&[u8]> {
         get(&self.map.raw, name)
             .or_else(|| get(&self.base.raw, name))

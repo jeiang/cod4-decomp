@@ -817,6 +817,8 @@ impl Mixer {
             .count();
         if on_channel >= usize::from(info.max_voices) {
             st.refused.fetch_add(1, Ordering::Relaxed);
+            // Handed back so the engine forgets the voice it was told of.
+            let _ = self.retired.push((p.id, p.source, false));
             return;
         }
         let in_pool = |m: &Mixer| {
@@ -841,6 +843,7 @@ impl Mixer {
             victim
         } else {
             self.stats.refused.fetch_add(1, Ordering::Relaxed);
+            let _ = self.retired.push((p.id, p.source, false));
             return;
         };
         self.age += 1;

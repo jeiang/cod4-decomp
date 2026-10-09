@@ -749,8 +749,13 @@ impl ClientSound {
                 }
             }
             ("soundfade", [volume, ms]) => {
+                let (volume, ms) = (volume.parse().unwrap_or(1.0), ms.parse().unwrap_or(0));
+                // Silence at once is a stop of everything, loops and all.
+                if volume <= 0.0 && ms == 0 {
+                    self.stop_all();
+                }
                 if let Some(s) = self.ready() {
-                    s.fade_all(volume.parse().unwrap_or(1.0), ms.parse().unwrap_or(0));
+                    s.fade_all(volume, ms);
                 }
             }
             ("stopsounds", []) => self.stop_all(),

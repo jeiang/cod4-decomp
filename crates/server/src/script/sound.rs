@@ -92,7 +92,12 @@ pub fn play_sound_to_team(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
             ));
         }
     };
-    let skip = match a.entity_or_undefined(2)? {
+    let ignored = if a.len() > 2 {
+        a.entity_or_undefined(2)?
+    } else {
+        None
+    };
+    let skip = match ignored {
         Some(p) if g.is_client(p.num) => Some(p.num),
         Some(p) => return Err(format!("entity {} is not a player", p.num)),
         None => None,
@@ -125,6 +130,10 @@ pub fn stop_local_sound(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
 /// is part of the entity's state, which is what lets a late joiner hear it.
 pub fn play_loop_sound(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     let index = g.sounds.index(a.string(0)?);
+    // The wire carries ten bits of it.
+    if index > 1023 {
+        return Err("too many looped sound aliases".into());
+    }
     if let Some(ent) = g.ent_mut(e.num) {
         ent.loop_sound = u16::try_from(index).unwrap_or(0);
     }
@@ -227,4 +236,100 @@ pub fn deactivate_channel_volumes(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) 
     let line = format!("chanvoloff {prio} {}", fade_ms(&a, 1));
     g.sound_out.push((SoundTo::Client(e.num), line));
     Ok(Value::Undefined)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gsc::{Builtins, EntClass, Options, compile};
+
+    fn setup() -> (Game, Vm, u16, u16, u16) {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(prog).unwrap();
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.reset_level(4);
+        let n: Vec<u16> = ["Ann", "Bob", "Cy"]
+            .iter()
+            .map(|name| g.connect_client(&mut vm, true, name).unwrap())
+            .collect();
+        (g, vm, n[0], n[1], n[2])
+    }
+
+    fn me(n: u16) -> EntRef {
+        EntRef {
+            num: n,
+            class: EntClass::Entity,
+        }
+    }
+
+    #[test]
+    fn playsoundtoteam_skips_the_named_player_and_rejects_bad_arguments() {
+        let (mut g, mut vm, ann, bob, _) = setup();
+        let player = |vm: &mut Vm, n: u16| Value::Object(vm.entity(n, EntClass::Entity));
+        let skip = player(&mut vm, bob);
+        let args = [Value::str("snd_a"), Value::str("axis"), skip];
+        play_sound_to_team(
+            &mut g,
+            &mut vm,
+            me(ann),
+            Args::new("playsoundtoteam", &args),
+        )
+        .unwrap();
+        let (to, line) = g.sound_out.pop().unwrap();
+        assert_eq!(to, SoundTo::TeamExcept(Team::Axis, bob));
+        assert!(line.starts_with(&format!("snd {ann} ")), "{line}");
+        let args = [Value::str("snd_a"), Value::str("allies")];
+        play_sound_to_team(
+            &mut g,
+            &mut vm,
+            me(ann),
+            Args::new("playsoundtoteam", &args),
+        )
+        .unwrap();
+        assert_eq!(g.sound_out.pop().unwrap().0, SoundTo::Team(Team::Allies));
+        let args = [Value::str("snd_a"), Value::str("spectator")];
+        assert!(
+            play_sound_to_team(&mut g, &mut vm, me(ann), Args::new("x", &args)).is_err(),
+            "an unknown team"
+        );
+        let args = [
+            Value::str("snd_a"),
+            Value::str("axis"),
+            Value::Object(vm.entity(900, EntClass::Entity)),
+        ];
+        assert!(
+            play_sound_to_team(&mut g, &mut vm, me(ann), Args::new("x", &args)).is_err(),
+            "a skipped entity that is no player"
+        );
+        assert!(g.sound_out.is_empty());
+    }
+
+    #[test]
+    fn soundexists_follows_the_loaded_alias_lists() {
+        let (mut g, mut vm, ..) = setup();
+        g.content.add_test_sound("Weap_Fire");
+        let mut ask = |name: &str| {
+            let v = [Value::str(name)];
+            super::super::misc::sound_exists(&mut g, &mut vm, Args::new("soundexists", &v)).unwrap()
+        };
+        assert!(matches!(ask("weap_fire"), Value::Int(1)));
+        assert!(matches!(ask("no_such_alias"), Value::Int(0)));
+    }
+
+    #[test]
+    fn a_players_script_loop_is_not_published() {
+        let (mut g, mut vm, ann, ..) = setup();
+        let v = [Value::str("hum")];
+        play_loop_sound(&mut g, &mut vm, me(ann), Args::new("playloopsound", &v)).unwrap();
+        assert!(
+            crate::netsv::world_entities(&g)
+                .iter()
+                .all(|s| s.loop_sound == 0)
+        );
+    }
 }

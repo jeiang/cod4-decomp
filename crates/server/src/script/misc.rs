@@ -104,7 +104,7 @@ fn load_map(g: &mut Game, _: &mut Vm, a: Args) -> R {
 }
 
 /// `soundexists(alias)`: whether the loaded zones have an alias of that name.
-fn sound_exists(g: &mut Game, _: &mut Vm, a: Args) -> R {
+pub(super) fn sound_exists(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Int(i32::from(g.content.sound_exists(a.string(0)?))))
 }
 
