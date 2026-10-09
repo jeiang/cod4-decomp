@@ -626,7 +626,6 @@ mod tests {
         assert_eq!(l.0.len(), 0);
     }
 
-    #[test]
     fn woken(what: Physics, at: Vec3, props: &mut [Prop]) -> Vec<bool> {
         apply_physics(props, at, &what, &mut 1);
         props.iter().map(|p| p.body.is_some()).collect()
