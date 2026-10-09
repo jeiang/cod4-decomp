@@ -103,10 +103,9 @@ fn load_map(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
-/// `soundexists(alias)`: sound aliases are not retained from the zones (the server plays no
-/// audio), so every named alias is reported as existing.
-fn sound_exists(_: &mut Game, _: &mut Vm, a: Args) -> R {
-    Ok(Value::Int(i32::from(!a.string(0)?.is_empty())))
+/// `soundexists(alias)`: whether the loaded zones have an alias of that name.
+pub(super) fn sound_exists(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    Ok(Value::Int(i32::from(g.content.sound_exists(a.string(0)?))))
 }
 
 fn set_stable_missile(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {

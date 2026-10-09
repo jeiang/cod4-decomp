@@ -129,6 +129,10 @@ impl Game {
         // The shot was judged against the bodies as they were `psTimeOffset` ago; the killcam starts that much back.
         let time_offset = self.lag_time.map_or(0, |t| self.level.time - t);
         for h in hits {
+            if h.exit {
+                self.bullet_impact_event(shooter, weapon, &h);
+                continue;
+            }
             self.check_hit_trigger_damage(vm, shooter, h.start, h.point, h.damage, h.mean);
             self.bullet_impact_event(shooter, weapon, &h);
             if !h.damageable {
@@ -167,6 +171,11 @@ impl Game {
             s.event_parm = surface;
             s.weapon = weapon;
             s.client = shooter;
+            s.eflags = if h.exit {
+                crate::tempev::IMPACT_EXIT
+            } else {
+                0
+            };
         });
     }
 

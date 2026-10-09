@@ -72,6 +72,8 @@ pub struct Peer {
     heard_now: bool,
     /// Effect names announced so far (`fx <index> <name>` commands).
     fx_sent: usize,
+    /// How many of `Game::sounds` the client has been told the names of.
+    snd_sent: usize,
     /// A reliable command did not fit: the peer is too far behind and is dropped at the next service
     /// ([`NetSv::overflowed`]).
     overflowed: bool,
@@ -296,6 +298,7 @@ impl NetSv {
             unheard_ms: 0,
             heard_now: false,
             fx_sent: 0,
+            snd_sent: 0,
             overflowed: false,
             last_ack: 0,
             ack_moved: Instant::now(),
@@ -369,6 +372,7 @@ impl NetSv {
         peer.unheard_ms = 0;
         // The new level numbers its effects afresh: the client needs the names again.
         peer.fx_sent = 0;
+        peer.snd_sent = 0;
         peer.stalled = false;
         peer.next_snapshot = 0;
         self.peers[usize::from(slot)] = Some(peer);
@@ -606,6 +610,9 @@ impl NetSv {
                     SoundTo::All => true,
                     SoundTo::Client(n) => n == slot,
                     SoundTo::Team(t) => game.client(slot).is_some_and(|c| c.team == t),
+                    SoundTo::TeamExcept(t, skip) => {
+                        slot != skip && game.client(slot).is_some_and(|c| c.team == t)
+                    }
                 };
                 if hears {
                     self.command(slot, &line);
@@ -663,6 +670,19 @@ impl NetSv {
                     break;
                 }
                 peer.fx_sent += 1;
+            }
+            while peer.snd_sent < game.sounds.len() {
+                let Some(name) = game.sounds.name(peer.snd_sent + 1) else {
+                    break;
+                };
+                if peer
+                    .link
+                    .command(format!("sndname {} {name}", peer.snd_sent + 1))
+                    .is_err()
+                {
+                    break;
+                }
+                peer.snd_sent += 1;
             }
             let bytes = peer.link.send(&mut self.t, Some(snap.canonical()));
             peer.next_snapshot =
@@ -1009,8 +1029,38 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
         };
         out.push(state.canonical());
     }
+    add_loop_sounds(game, &mut out);
     out.extend(game.tempev.live(game.level.time).cloned());
     out
+}
+
+/// The sound each entity loops (`playloopsound`), in its state. An entity the snapshot would not otherwise carry
+/// (a `script_origin`) becomes a plain one that only has its place and its loop.
+fn add_loop_sounds(game: &Game, out: &mut Vec<EntityState>) {
+    let mut added = false;
+    for (n, e) in game.ents.iter().enumerate() {
+        let Some(e) = e
+            .as_ref()
+            .filter(|e| e.loop_sound != 0 && e.kind != EntKind::Client)
+        else {
+            continue;
+        };
+        let n = n as u16;
+        if let Some(s) = out.iter_mut().find(|s| s.number == n) {
+            s.loop_sound = e.loop_sound;
+        } else if !e.hidden {
+            let mut s = EntityState::new(n);
+            s.etype = etype::GENERAL;
+            s.origin = e.origin;
+            s.angles = e.angles;
+            s.loop_sound = e.loop_sound;
+            out.push(s.canonical());
+            added = true;
+        }
+    }
+    if added {
+        out.sort_by_key(|s| s.number);
+    }
 }
 
 #[cfg(test)]
@@ -1025,6 +1075,7 @@ mod tests {
             name: String::new(),
             last_heard: Instant::now(),
             fx_sent: 0,
+            snd_sent: 0,
             overflowed: false,
             last_ack: 0,
             ack_moved: Instant::now(),

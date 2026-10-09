@@ -34,8 +34,10 @@ pub struct Cue {
     /// Scales the alias's rolled volume.
     pub volume: f32,
     pub fade_in_ms: u32,
-    /// A later [`Sound::stop_alias`] may cut this sound short (a reload); needs `entity`.
+    /// A later [`Sound::stop_alias`] may cut this sound short (a reload, `stoplocalsound`).
     pub stoppable: bool,
+    /// Plays as a master whatever the alias says (`playSoundAsMaster`): the slaves duck while it does.
+    pub master: bool,
 }
 
 impl Default for Cue {
@@ -46,6 +48,7 @@ impl Default for Cue {
             volume: 1.0,
             fade_in_ms: 0,
             stoppable: false,
+            master: false,
         }
     }
 }
@@ -83,6 +86,8 @@ pub struct Played {
     pub out_of_range: u64,
     pub missing: BTreeMap<String, u64>,
     pub failed: Vec<String>,
+    /// Music aliases asked for while the music was still playing.
+    pub music_ignored: u64,
 }
 
 enum Out {
@@ -106,8 +111,11 @@ pub struct Sound {
     /// Entity loops that were out of range when asked for, started by [`Sound::follow_entity`] once their entity is
     /// near enough.
     waiting: HashMap<(u32, String), Arc<Alias>>,
-    ambient: Option<VoiceId>,
+    /// The map's ambience: the primary alias and its secondary, each with the voice playing it.
+    ambient: [Option<(Arc<str>, VoiceId)>; 2],
     music: Option<VoiceId>,
+    /// Where each voice with a chain alias goes on when it ends: the alias and where it plays.
+    chains: HashMap<VoiceId, (Arc<str>, Cue)>,
     pub played: Played,
     /// Why there is no device, when there is none.
     pub device_note: Option<String>,
@@ -236,8 +244,9 @@ impl Sound {
             loops: HashMap::new(),
             stoppable: Stoppable::default(),
             waiting: HashMap::new(),
-            ambient: None,
+            ambient: [None, None],
             music: None,
+            chains: HashMap::new(),
             played: Played::default(),
             device_note: note,
             scratch: vec![0.0; 4096],
@@ -292,15 +301,28 @@ impl Sound {
         let loops = &mut self.loops;
         let ambient = &mut self.ambient;
         let music = &mut self.music;
-        self.handle.reap(|id| {
+        let chains = &mut self.chains;
+        let mut chained = Vec::new();
+        self.handle.reap(|id, to_end| {
             loops.retain(|_, v| *v != id);
-            if *ambient == Some(id) {
-                *ambient = None;
+            for track in ambient.iter_mut() {
+                if track.as_ref().is_some_and(|(_, v)| *v == id) {
+                    *track = None;
+                }
             }
             if *music == Some(id) {
                 *music = None;
             }
+            // `SND_StopChannelAndPlayChainAlias`: a sound that ran out goes on with its chain alias.
+            if let Some(c) = chains.remove(&id)
+                && to_end
+            {
+                chained.push(c);
+            }
         });
+        for (name, cue) in chained {
+            self.play(&name, cue);
+        }
         if let Out::Silent(m) = &mut self.out {
             self.owed += dt.as_secs_f64() * f64::from(self.rate);
             while self.owed >= 1.0 {
@@ -337,11 +359,7 @@ impl Sound {
 
     fn play_chain(&mut self, name: &str, cue: Cue, depth: u32) -> Option<VoiceId> {
         let Some(alias) = self.bank.pick(name) else {
-            *self
-                .played
-                .missing
-                .entry(name.to_ascii_lowercase())
-                .or_default() += 1;
+            self.missing(name);
             return None;
         };
         let id = self.start(&alias, name, cue);
@@ -351,6 +369,14 @@ impl Sound {
             self.play_chain(sec, cue, depth + 1);
         }
         id
+    }
+
+    fn missing(&mut self, name: &str) {
+        *self
+            .played
+            .missing
+            .entry(name.to_ascii_lowercase())
+            .or_default() += 1;
     }
 
     fn start(&mut self, alias: &Arc<Alias>, name: &str, cue: Cue) -> Option<VoiceId> {
@@ -388,14 +414,19 @@ impl Sound {
             }
             return Some(id);
         }
+        // A looping or randomly started sound begins at a random point of its file.
+        let start = if alias.random_looping {
+            self.bank.between((0.0, 1.0))
+        } else {
+            0.0
+        };
         let (source, stereo) = match &alias.audio {
             Clip::Silent => return None,
             Clip::Loaded(p) => (Source::Loaded(p.clone()), p.channels == 2),
             Clip::Streamed(path) => {
-                let opened = self
-                    .bank
-                    .read_stream(path)
-                    .and_then(|b| StreamJob::open(b, decode::extension(path), alias.looping));
+                let opened = self.bank.read_stream(path).and_then(|b| {
+                    StreamJob::open(b, decode::extension(path), alias.looping, start)
+                });
                 match opened {
                     Ok((job, stream)) => {
                         let stereo = stream.channels == 2;
@@ -417,13 +448,11 @@ impl Sound {
         p.volume = self.bank.between(alias.volume) * cue.volume;
         p.pitch = self.bank.between(alias.pitch);
         p.looping = alias.looping;
-        if alias.random_looping {
-            p.start = self.bank.between((0.0, 1.0));
-        }
+        p.start = start;
         p.delay_ms = alias.delay_ms;
         p.fade_in_ms = cue.fade_in_ms;
         p.emitter = emitter;
-        p.duck = if alias.master {
+        p.duck = if alias.master || cue.master {
             Duck::Master
         } else if alias.slave {
             Duck::Slave(alias.slave_percentage)
@@ -435,8 +464,19 @@ impl Sound {
         self.handle.play(p);
         if alias.looping && cue.entity != NO_ENTITY {
             self.loops.insert(key, id);
-        } else if cue.stoppable && cue.entity != NO_ENTITY {
+        } else if cue.stoppable {
             self.stoppable.record(cue.entity, name, id);
+        }
+        if let Some(chain) = &alias.chain
+            && !alias.looping
+            && !chain.eq_ignore_ascii_case(&alias.name)
+        {
+            let at = Cue {
+                origin: cue.origin,
+                entity: cue.entity,
+                ..Cue::default()
+            };
+            self.chains.insert(id, (chain.clone(), at));
         }
         *self.played.by_channel.entry(def.name).or_default() += 1;
         *self
@@ -464,6 +504,22 @@ impl Sound {
     pub fn stop_alias(&mut self, entity: u32, alias: &str) {
         for id in self.stoppable.take(entity, alias) {
             self.handle.stop(id);
+        }
+    }
+
+    /// Ends the looping sounds of `entity`, and only those.
+    pub fn stop_entity_loops(&mut self, entity: u32) {
+        self.waiting.retain(|k, _| k.0 != entity);
+        let keys: Vec<_> = self
+            .loops
+            .keys()
+            .filter(|k| k.0 == entity)
+            .cloned()
+            .collect();
+        for k in keys {
+            if let Some(id) = self.loops.remove(&k) {
+                self.handle.stop(id);
+            }
         }
     }
 
@@ -503,35 +559,81 @@ impl Sound {
         self.handle.set_position(id, pos);
     }
 
-    /// `ambientPlay`: crossfades the map's ambience or music to `alias`.
+    /// `SND_PlayAmbientAlias`: crossfades the map's ambience to `alias` and its secondary layer. A layer already
+    /// playing the alias asked for carries on; one that is not wanted fades out.
     pub fn ambient_play(&mut self, alias: &str, fade_ms: u32) {
-        if let Some(old) = self.ambient.take() {
-            self.handle.fade_out(old, fade_ms);
+        let Some(primary) = self.bank.pick(alias) else {
+            self.missing(alias);
+            return;
+        };
+        let secondary = primary.secondary.as_deref().and_then(|n| self.bank.pick(n));
+        let cue = Cue {
+            fade_in_ms: fade_ms,
+            ..Cue::default()
+        };
+        for (slot, wanted) in [Some(primary), secondary].into_iter().enumerate() {
+            if let (Some(a), Some((playing, _))) = (&wanted, &self.ambient[slot])
+                && a.name.eq_ignore_ascii_case(playing)
+            {
+                continue;
+            }
+            if let Some((_, old)) = self.ambient[slot].take() {
+                self.handle.fade_out(old, fade_ms);
+            }
+            if let Some(a) = wanted {
+                self.ambient[slot] = self.start(&a, &a.name, cue).map(|id| (a.name.clone(), id));
+            }
         }
-        self.ambient = self.play(
-            alias,
-            Cue {
-                fade_in_ms: fade_ms,
-                ..Cue::default()
-            },
-        );
     }
 
+    /// `SND_StopAmbient`: both layers fade out.
     pub fn ambient_stop(&mut self, fade_ms: u32) {
-        if let Some(old) = self.ambient.take() {
+        for (_, old) in self.ambient.iter_mut().filter_map(Option::take) {
             self.handle.fade_out(old, fade_ms);
         }
     }
 
-    /// `musicPlay`: the music replaces what played before (a quick fade) and runs beside the ambience.
+    /// The voices of the ambience, primary first (none that has ended).
+    pub fn ambient_voices(&self) -> Vec<VoiceId> {
+        self.ambient.iter().flatten().map(|(_, v)| *v).collect()
+    }
+
+    /// `SND_PlayMusicAlias`: starts the music alongside the ambience, unless music is still playing (the original
+    /// refuses a new one then and says so).
     pub fn music_play(&mut self, alias: &str) {
-        self.music_stop(200);
+        if self.music.is_some() {
+            self.played.music_ignored += 1;
+            return;
+        }
         self.music = self.play(alias, Cue::default());
     }
 
     pub fn music_stop(&mut self, fade_ms: u32) {
         if let Some(old) = self.music.take() {
             self.handle.fade_out(old, fade_ms);
+        }
+    }
+
+    /// `SND_StopSounds(SND_STOP_ALL)`, for a map restart: every voice, the room effects, the channel volumes and the
+    /// EQs go back to how a new level starts.
+    pub fn stop_all(&mut self) {
+        self.handle.stop_all();
+        self.loops.clear();
+        self.waiting.clear();
+        self.stoppable = Stoppable::default();
+        self.chains.clear();
+        self.ambient = [None, None];
+        self.music = None;
+        self.shock_loops = [None; 2];
+        self.effects = [None; ENV_PRIORITIES];
+    }
+
+    /// `SND_FadeAllSounds` (`soundfade`): everything goes to `volume` times its own over `fade_ms`; with no time to
+    /// fade, silence stops the sounds outright.
+    pub fn fade_all(&mut self, volume: f32, fade_ms: u32) {
+        self.handle.fade_all(volume, fade_ms);
+        if fade_ms == 0 && volume <= 0.0 {
+            self.stop_all();
         }
     }
 
@@ -655,5 +757,234 @@ mod tests {
             s.record(i % 20, "step", 100 + i);
         }
         assert_eq!(s.take(3, "reload"), [1]);
+    }
+
+    /// Half-scale DC lasting `ms` at 48 kHz.
+    fn dc(ms: u32) -> Clip {
+        Clip::Loaded(Arc::new(crate::mixer::Pcm {
+            rate: 48_000,
+            channels: 1,
+            samples: vec![16384; (48 * ms) as usize].into(),
+        }))
+    }
+
+    fn chan(name: &str, is_3d: bool) -> crate::channels::ChannelDef {
+        crate::channels::ChannelDef {
+            name: name.into(),
+            priority: 1,
+            is_3d,
+            restricted: false,
+            pausable: true,
+            max_voices: 32,
+        }
+    }
+
+    /// A silent-device engine over the given alias lists, channel 0 flat and channel 1 positioned.
+    fn engine(lists: Vec<(&str, Vec<Alias>)>) -> Sound {
+        let bank = Bank::synthetic(vec![chan("flat", false), chan("world", true)], lists);
+        let mut s = Sound::new(bank, false);
+        s.set_listener([0.0; 3], 0.0);
+        s
+    }
+
+    fn active(s: &Sound) -> u32 {
+        s.stats().active.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Runs the mixer for `ms` and the engine's housekeeping.
+    fn run(s: &mut Sound, ms: u64) {
+        s.render(48 * ms as usize);
+        s.tick(Duration::from_millis(ms));
+    }
+
+    #[test]
+    fn stop_all_ends_loops_ambience_music_and_the_room_effect() {
+        let mut looping = Alias::test("hum", 1, dc(500));
+        looping.looping = true;
+        let mut s = engine(vec![
+            ("hum", vec![looping]),
+            ("amb", vec![Alias::test("amb", 0, dc(2000))]),
+            ("mus", vec![Alias::test("mus", 0, dc(2000))]),
+        ]);
+        s.play(
+            "hum",
+            Cue {
+                origin: Some([50.0, 0.0, 0.0]),
+                entity: 7,
+                ..Cue::default()
+            },
+        );
+        s.ambient_play("amb", 0);
+        s.music_play("mus");
+        assert!(s.set_reverb(1, "hangar", 1.0, 0));
+        s.set_channel_volumes(3, &[0.1, 0.1], 0);
+        run(&mut s, 20);
+        assert_eq!(active(&s), 3);
+        assert_eq!(s.channel_volume_priority(), 3);
+        s.stop_all();
+        run(&mut s, 20);
+        assert_eq!(active(&s), 0);
+        assert_eq!(s.channel_volume_priority(), 0);
+        assert!(s.ambient_voices().is_empty());
+        // The loop is not remembered: asking for it again starts a voice.
+        s.play(
+            "hum",
+            Cue {
+                origin: Some([50.0, 0.0, 0.0]),
+                entity: 7,
+                ..Cue::default()
+            },
+        );
+        run(&mut s, 20);
+        assert_eq!(active(&s), 1);
+        // And the music is free to play again.
+        s.music_play("mus");
+        assert_eq!(s.played.music_ignored, 0);
+        // Leftover reverb is gone: a fresh one-shot has no tail after it ends.
+        s.stop_all();
+        s.play("amb", Cue::default());
+        run(&mut s, 2100);
+        let tail: f32 = s.render(4800).iter().map(|x| x * x).sum();
+        assert!(tail < 1e-9, "a tail of {tail} after a restart");
+    }
+
+    #[test]
+    fn an_ambient_alias_asked_for_again_carries_on_and_its_secondary_fades_with_it() {
+        let mut main = Alias::test("amb", 0, dc(5000));
+        main.secondary = Some("amb_sec".into());
+        let mut s = engine(vec![
+            ("amb", vec![main]),
+            ("amb_sec", vec![Alias::test("amb_sec", 0, dc(5000))]),
+            ("other", vec![Alias::test("other", 0, dc(5000))]),
+        ]);
+        s.ambient_play("amb", 0);
+        s.ambient_play("amb", 0);
+        run(&mut s, 20);
+        assert_eq!(s.played.aliases.get("amb"), Some(&1), "restarted");
+        assert_eq!(s.played.aliases.get("amb_sec"), Some(&1));
+        assert_eq!(active(&s), 2);
+        assert_eq!(s.ambient_voices().len(), 2);
+        // Another ambience takes both layers away, the secondary too.
+        s.ambient_play("other", 10);
+        run(&mut s, 200);
+        assert_eq!(active(&s), 1);
+        s.ambient_stop(10);
+        run(&mut s, 200);
+        assert_eq!(active(&s), 0);
+    }
+
+    #[test]
+    fn a_new_music_alias_waits_for_the_music_to_end() {
+        let mut s = engine(vec![
+            ("one", vec![Alias::test("one", 0, dc(100))]),
+            ("two", vec![Alias::test("two", 0, dc(100))]),
+        ]);
+        s.music_play("one");
+        s.music_play("two");
+        assert_eq!(s.played.music_ignored, 1);
+        assert_eq!(s.played.aliases.get("two"), None);
+        run(&mut s, 300);
+        s.music_play("two");
+        assert_eq!(s.played.aliases.get("two"), Some(&1));
+    }
+
+    #[test]
+    fn music_the_mixer_refused_does_not_block_the_next_one() {
+        let mut capped = chan("capped", false);
+        capped.max_voices = 1;
+        let bank = Bank::synthetic(
+            vec![chan("flat", false), capped],
+            vec![
+                ("fill", vec![Alias::test("fill", 1, dc(300))]),
+                ("mus", vec![Alias::test("mus", 1, dc(2000))]),
+            ],
+        );
+        let mut s = Sound::new(bank, false);
+        s.play("fill", Cue::default());
+        s.music_play("mus");
+        run(&mut s, 20);
+        assert_eq!(active(&s), 1, "the music was refused");
+        run(&mut s, 400);
+        s.music_play("mus");
+        assert_eq!(s.played.music_ignored, 0);
+        run(&mut s, 20);
+        assert_eq!(active(&s), 1, "the music plays once the channel is free");
+    }
+
+    #[test]
+    fn a_sound_that_runs_out_goes_on_with_its_chain_alias_but_a_stopped_one_does_not() {
+        let mut first = Alias::test("first", 1, dc(50));
+        first.chain = Some("second".into());
+        let mut s = engine(vec![
+            ("first", vec![first]),
+            ("second", vec![Alias::test("second", 1, dc(50))]),
+        ]);
+        let at = Cue {
+            origin: Some([100.0, 0.0, 0.0]),
+            entity: 3,
+            ..Cue::default()
+        };
+        let id = s.play("first", at).unwrap();
+        s.stop(id);
+        run(&mut s, 200);
+        assert_eq!(
+            s.played.aliases.get("second"),
+            None,
+            "a stopped sound chained"
+        );
+        s.play("first", at);
+        run(&mut s, 200);
+        assert_eq!(s.played.aliases.get("second"), Some(&1));
+    }
+
+    #[test]
+    fn a_local_sound_can_be_stopped_by_alias() {
+        let mut s = engine(vec![("beep", vec![Alias::test("beep", 0, dc(2000))])]);
+        let local = Cue {
+            stoppable: true,
+            ..Cue::default()
+        };
+        s.play("beep", local);
+        s.play("beep", local);
+        run(&mut s, 20);
+        assert_eq!(active(&s), 2);
+        s.stop_alias(NO_ENTITY, "BEEP");
+        run(&mut s, 50);
+        assert_eq!(active(&s), 0);
+    }
+
+    #[test]
+    fn playing_as_master_ducks_a_slave_that_is_not_a_master_itself() {
+        let mut slave = Alias::test("slave", 0, dc(20_000));
+        slave.slave = true;
+        slave.slave_percentage = 0.25;
+        let mut s = engine(vec![
+            ("slave", vec![slave]),
+            ("voice", vec![Alias::test("voice", 0, dc(20_000))]),
+        ]);
+        s.play("slave", Cue::default());
+        let level = |s: &mut Sound| {
+            run(s, 500);
+            let out = s.render(4800);
+            out.iter().map(|x| x.abs()).sum::<f32>() / out.len() as f32
+        };
+        let open = level(&mut s);
+        s.play("voice", Cue::default());
+        let plain = level(&mut s);
+        s.stop_all();
+        s.play("slave", Cue::default());
+        s.play(
+            "voice",
+            Cue {
+                master: true,
+                ..Cue::default()
+            },
+        );
+        let ducked = level(&mut s);
+        // The same two sounds, but only the one played as a master pulls the slave down.
+        assert!(
+            ducked < plain - 0.2 * open,
+            "open {open}, plain {plain}, as master {ducked}"
+        );
     }
 }

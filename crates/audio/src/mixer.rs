@@ -175,6 +175,13 @@ enum Command {
     StopEntity(u32),
     SetPosition(VoiceId, [f32; 3]),
     SetVolume(VoiceId, f32),
+    /// `SND_StopSounds(SND_STOP_ALL)`: every voice, the room effect, the channel volume groups and the EQs.
+    StopAll,
+    /// `SND_FadeAllSounds`: the fade volume moves to `goal` over `ms` (at once for 0).
+    Fade {
+        goal: f32,
+        ms: u32,
+    },
     /// `snd_volume`.
     Master(f32),
     Listener(Listener),
@@ -231,20 +238,25 @@ impl Stats {
     }
 }
 
+/// A voice the mixer is done with: whether it played to its end (rather than being stopped or replaced), and
+/// its source, handed back so the mixer never frees memory.
+type Retired = (VoiceId, Source, bool);
+
 /// The game-thread end: sends commands to the mixer.
 pub struct Handle {
     queue: Arc<ArrayQueue<Command>>,
-    retired: Arc<ArrayQueue<(VoiceId, Source)>>,
+    retired: Arc<ArrayQueue<Retired>>,
     next_id: u32,
     pub stats: Arc<Stats>,
 }
 
 impl Handle {
-    /// Frees the sources of finished voices and tells `ended` which they were. The mixer hands sources back
-    /// instead of dropping them, so it never frees memory itself.
-    pub fn reap(&self, mut ended: impl FnMut(VoiceId)) {
-        while let Some((id, _source)) = self.retired.pop() {
-            ended(id);
+    /// Frees the sources of finished voices and tells `ended` which they were, and whether each played to its end
+    /// (a stopped or replaced voice did not). The mixer hands sources back instead of dropping them, so it never
+    /// frees memory itself.
+    pub fn reap(&self, mut ended: impl FnMut(VoiceId, bool)) {
+        while let Some((id, _source, to_end)) = self.retired.pop() {
+            ended(id, to_end);
         }
     }
 
@@ -272,6 +284,20 @@ impl Handle {
 
     pub fn fade_out(&self, id: VoiceId, ms: u32) {
         self.send(Command::FadeOut(id, ms));
+    }
+
+    /// `SND_StopSounds(SND_STOP_ALL)`: ends every voice at once and puts the room effect, the channel volumes and
+    /// the EQs back to their defaults.
+    pub fn stop_all(&self) {
+        self.send(Command::StopAll);
+    }
+
+    /// `SND_FadeAllSounds`: scales everything by `volume` from now, reached over `fade_ms`.
+    pub fn fade_all(&self, volume: f32, fade_ms: u32) {
+        self.send(Command::Fade {
+            goal: volume.max(0.0),
+            ms: fade_ms,
+        });
     }
 
     /// Stops every voice attached to `entity`.
@@ -370,6 +396,8 @@ struct Voice {
     fade_step: f32,
     /// Fading out: the voice is freed when the fade reaches zero.
     dying: bool,
+    /// The source ran out (as opposed to the voice being stopped).
+    ended: bool,
     emitter: Option<Emitter>,
     duck: Duck,
     speaker: [[f32; 2]; 2],
@@ -404,6 +432,7 @@ impl Voice {
             fade_to: 1.0,
             fade_step: 0.0,
             dying: false,
+            ended: false,
             emitter: p.emitter,
             duck: p.duck,
             speaker: p.speaker,
@@ -465,7 +494,7 @@ enum Read {
 
 pub struct Mixer {
     queue: Arc<ArrayQueue<Command>>,
-    retired: Arc<ArrayQueue<(VoiceId, Source)>>,
+    retired: Arc<ArrayQueue<Retired>>,
     stats: Arc<Stats>,
     rate: u32,
     channels: [ChannelInfo; MAX_CHANNELS],
@@ -473,6 +502,8 @@ pub struct Mixer {
     listener: Listener,
     /// The gain of everything: `snd_volume` times [`MASTER`].
     gain: f32,
+    /// `soundfade`: a second master volume, 1 unless a script fades the sound.
+    fade: Fader,
     /// 0 when no master plays, 1 when one does; slaves follow it over [`SLAVE_FADE_MS`].
     slave_lerp: f32,
     age: u64,
@@ -492,6 +523,47 @@ fn master_gain(volume: f32) -> f32 {
         0.0
     } else {
         volume.clamp(0.0, 1.0) * MASTER
+    }
+}
+
+/// A volume that moves to a goal at a constant rate.
+struct Fader {
+    volume: f32,
+    goal: f32,
+    /// Change per millisecond.
+    rate: f32,
+}
+
+impl Fader {
+    fn new() -> Self {
+        Self {
+            volume: 1.0,
+            goal: 1.0,
+            rate: 0.0,
+        }
+    }
+
+    fn to(&mut self, goal: f32, ms: u32) {
+        self.goal = goal;
+        if ms == 0 {
+            self.volume = goal;
+            self.rate = 0.0;
+        } else {
+            self.rate = (goal - self.volume) / ms as f32;
+        }
+    }
+
+    fn advance(&mut self, dt_ms: f32) {
+        if self.rate == 0.0 {
+            return;
+        }
+        self.volume += self.rate * dt_ms;
+        if (self.rate > 0.0 && self.volume >= self.goal)
+            || (self.rate < 0.0 && self.volume <= self.goal)
+        {
+            self.volume = self.goal;
+            self.rate = 0.0;
+        }
     }
 }
 
@@ -530,6 +602,7 @@ pub fn mixer(rate: u32, channels: &[ChannelDef]) -> (Handle, Mixer) {
             voices: [const { None }; MAX_VOICES],
             listener: Listener::from_yaw([0.0; 3], 0.0),
             gain: master_gain(DEFAULT_VOLUME),
+            fade: Fader::new(),
             slave_lerp: 0.0,
             age: 0,
             reverb: Reverb::new(rate),
@@ -579,6 +652,7 @@ impl Mixer {
         let mut finished = 0;
         let mut underruns = 0;
         self.chan_vol.advance(dt_ms);
+        self.fade.advance(dt_ms);
         for slot in &mut self.voices {
             let Some(v) = slot else { continue };
             let ch = usize::from(v.channel).min(MAX_CHANNELS - 1);
@@ -589,7 +663,7 @@ impl Mixer {
             underruns += starved;
             if done {
                 if let Some(v) = slot.take() {
-                    let _ = self.retired.push((v.id, v.source));
+                    let _ = self.retired.push((v.id, v.source, v.ended));
                 }
                 finished += 1;
             }
@@ -610,7 +684,7 @@ impl Mixer {
         }
         let mut peak = 0.0f32;
         for s in out.iter_mut() {
-            *s = (*s * self.gain).clamp(-1.0, 1.0);
+            *s = (*s * self.gain * self.fade.volume).clamp(-1.0, 1.0);
             peak = peak.max(s.abs());
         }
         let st = &self.stats;
@@ -646,6 +720,8 @@ impl Mixer {
                 }
             }
             Command::Master(v) => self.gain = master_gain(v),
+            Command::Fade { goal, ms } => self.fade.to(goal, ms),
+            Command::StopAll => self.stop_all(),
             Command::ChannelVolumes {
                 priority,
                 goals,
@@ -689,6 +765,22 @@ impl Mixer {
         }
     }
 
+    /// `SND_StopSounds(SND_STOP_ALL)`.
+    fn stop_all(&mut self) {
+        for slot in &mut self.voices {
+            if let Some(v) = slot.take() {
+                let _ = self.retired.push((v.id, v.source, false));
+            }
+        }
+        self.slave_lerp = 0.0;
+        self.wet = 0.0;
+        self.wet_goal = 0.0;
+        self.chan_vol = ChannelVolumes::new();
+        self.stats.channel_priority.store(0, Ordering::Relaxed);
+        self.eq = [[[None; BANDS]; EQS]; MAX_CHANNELS];
+        self.stats.active.store(0, Ordering::Relaxed);
+    }
+
     fn find(&mut self, id: VoiceId) -> Option<&mut Voice> {
         self.voices.iter_mut().flatten().find(|v| v.id == id)
     }
@@ -725,6 +817,8 @@ impl Mixer {
             .count();
         if on_channel >= usize::from(info.max_voices) {
             st.refused.fetch_add(1, Ordering::Relaxed);
+            // Handed back so the engine forgets the voice it was told of.
+            let _ = self.retired.push((p.id, p.source, false));
             return;
         }
         let in_pool = |m: &Mixer| {
@@ -743,12 +837,13 @@ impl Mixer {
             self.victim(pool, info.priority, p.emitter.map(|e| e.pos), p.volume)
         {
             if let Some(v) = self.voices[victim].take() {
-                let _ = self.retired.push((v.id, v.source));
+                let _ = self.retired.push((v.id, v.source, false));
             }
             self.stats.replaced.fetch_add(1, Ordering::Relaxed);
             victim
         } else {
             self.stats.refused.fetch_add(1, Ordering::Relaxed);
+            let _ = self.retired.push((p.id, p.source, false));
             return;
         };
         self.age += 1;
@@ -908,6 +1003,7 @@ fn mix_voice(
         match fetch(v) {
             Read::Frame(_) => {}
             Read::End => {
+                v.ended = true;
                 finished = true;
                 break;
             }
@@ -1108,6 +1204,33 @@ mod tests {
         p.emitter = at(pos, 50.0, 1050.0);
         h.play(p);
         id
+    }
+
+    #[test]
+    fn fading_all_sounds_scales_everything_and_a_timed_fade_takes_its_time() {
+        let (mut h, mut m) = mixer(RATE, &table());
+        world_play(&mut h, 1, [400.0, 0.0, 0.0]);
+        let open = level(&mut m)[0];
+        h.fade_all(0.25, 0);
+        let quiet = level(&mut m)[0];
+        assert!(
+            (quiet - 0.25 * open).abs() < 0.01 * open,
+            "{open} -> {quiet}"
+        );
+        // Back to full over 100 ms: a quarter of the way in, it is still short of full.
+        h.fade_all(1.0, 400);
+        let mut out = vec![0.0; 960];
+        m.fill(&mut out);
+        let early = out.iter().step_by(2).sum::<f32>() / (out.len() / 2) as f32;
+        assert!(
+            early > quiet && early < 0.8 * open,
+            "{quiet} {early} {open}"
+        );
+        for _ in 0..40 {
+            m.fill(&mut out);
+        }
+        let full = level(&mut m)[0];
+        assert!((full - open).abs() < 0.01 * open, "{open} -> {full}");
     }
 
     #[test]

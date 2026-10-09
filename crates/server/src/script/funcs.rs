@@ -346,7 +346,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("ambientstop", Real(super::sound::ambient_stop)),
     ("musicplay", Real(super::sound::music_play)),
     ("musicstop", Real(super::sound::music_stop)),
-    ("soundfade", Later(M7)),
+    ("soundfade", Real(super::sound::sound_fade)),
     ("playrumbleonposition", Later(M7)),
     ("playrumblelooponposition", Later(M7)),
     ("stopallrumbles", Later(M7)),

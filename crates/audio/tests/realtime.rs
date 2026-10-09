@@ -120,5 +120,5 @@ fn fill_neither_allocates_nor_frees() {
     WATCH.with(|w| w.set(false));
     assert_eq!(ALLOCS.with(Cell::get), 0);
     assert!(out.iter().any(|s| *s != 0.0));
-    h.reap(|_| {});
+    h.reap(|_, _| {});
 }

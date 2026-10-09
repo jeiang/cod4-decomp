@@ -30,6 +30,8 @@ pub enum Clip {
 pub struct Alias {
     pub name: Arc<str>,
     pub secondary: Option<Arc<str>>,
+    /// The alias that plays where this one ends (`chainAliasName`).
+    pub chain: Option<Arc<str>>,
     pub audio: Clip,
     pub volume: (f32, f32),
     pub pitch: (f32, f32),
@@ -235,6 +237,7 @@ impl Bank {
         Some(Arc::new(Alias {
             name,
             secondary: a.secondary_alias_name.clone().filter(|s| !s.is_empty()),
+            chain: a.chain_alias_name.clone().filter(|s| !s.is_empty()),
             audio,
             volume: volume_pair(a.vol_min, a.vol_max),
             pitch: volume_pair(a.pitch_min, a.pitch_max),
@@ -323,5 +326,57 @@ impl Bank {
         self.lists
             .get(&name.to_ascii_lowercase())
             .map_or(&[], |l| &l.aliases)
+    }
+}
+
+#[cfg(test)]
+impl Bank {
+    /// A bank of hand-made aliases (a list per name), for tests that need no install.
+    pub(crate) fn synthetic(channels: Vec<ChannelDef>, lists: Vec<(&str, Vec<Alias>)>) -> Self {
+        let vfs = assets::vfs::Builder::new(std::path::Path::new("."))
+            .finish(0)
+            .unwrap();
+        let mut bank = Self {
+            channels,
+            lists: HashMap::new(),
+            vfs: Arc::new(vfs),
+            seed: 1,
+            rng: 0x9e37_79b9,
+            stats: LoadStats::default(),
+        };
+        for (name, aliases) in lists {
+            let aliases: Vec<Arc<Alias>> = aliases.into_iter().map(Arc::new).collect();
+            let sequence = vec![0; aliases.len()];
+            bank.lists
+                .insert(name.to_ascii_lowercase(), List { aliases, sequence });
+        }
+        bank
+    }
+}
+
+#[cfg(test)]
+impl Alias {
+    /// A plain 2D one-shot of `audio` on channel `channel`.
+    pub(crate) fn test(name: &str, channel: u8, audio: Clip) -> Self {
+        Self {
+            name: name.into(),
+            secondary: None,
+            chain: None,
+            audio,
+            volume: (1.0, 1.0),
+            pitch: (1.0, 1.0),
+            dist: (10.0, 1000.0),
+            curve: Curve::LINEAR,
+            channel,
+            looping: false,
+            random_looping: false,
+            master: false,
+            no_wet: false,
+            slave: false,
+            slave_percentage: 1.0,
+            delay_ms: 0,
+            probability: 1.0,
+            speaker: speaker_gains(None),
+        }
     }
 }

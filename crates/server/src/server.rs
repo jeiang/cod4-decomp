@@ -1866,6 +1866,11 @@ impl Server {
                 for line in NetSv::world_commands(&mut self.game, map) {
                     peer.queue(line);
                 }
+                // The old level's sounds end, and the new level's ambience (started while nobody was attached) begins.
+                peer.queue("stopsounds");
+                if let Some(a) = &self.game.ambient {
+                    peer.queue(a.clone());
+                }
                 if let Some(net) = self.net.as_mut() {
                     net.put_peer(slot, peer);
                 }
@@ -2064,6 +2069,12 @@ impl Server {
         self.game.level.frametime = self.frame_ms;
         self.game.level.time = self.svs_time;
         self.game.publish_info(false);
+        // `G_SetClientSound` sets a player's loop afresh every frame: a script's `playloopsound` on one does not stay.
+        for e in self.game.ents.iter_mut().flatten() {
+            if e.kind == crate::game::EntKind::Client {
+                e.loop_sound = 0;
+            }
+        }
         for line in self.game.vote_frame() {
             self.cbuf.add_text(&format!("{line}\n"));
         }
