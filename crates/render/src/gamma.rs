@@ -204,9 +204,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_gamma_brightens_the_midtones_and_one_is_the_identity() {
+    fn default_gamma_darkens_the_midtones_and_one_is_the_identity() {
         let ramp = |i: f32, g: f32| i.powf(exponent(g));
-        assert!(ramp(0.5, 0.8) > 0.5 && ramp(0.5, 1.0) == 0.5 && ramp(0.5, 1.5) < 0.5);
+        assert!(ramp(0.5, 0.8) < 0.5 && ramp(0.5, 1.0) == 0.5 && ramp(0.5, 1.5) > 0.5);
         assert_eq!((ramp(0.0, 0.8), ramp(1.0, 0.8)), (0.0, 1.0));
         assert!(is_identity(1.0) && !is_identity(0.8));
     }
