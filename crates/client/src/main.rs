@@ -4,6 +4,7 @@
 
 mod app;
 mod breath;
+mod camera;
 mod compass;
 mod console;
 mod crosshair;
