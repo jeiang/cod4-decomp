@@ -248,16 +248,26 @@ pub fn skin_faults() -> u64 {
     FAULTS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Checks skinned `verts` of a model of bounding `radius`: every position finite and within a few radii (a limb is
-/// never further from the model's origin than the model is large) of the origin. Counts a fault in
+/// Checks skinned `verts` of a model of bounding `radius`: every position finite and, for a model in the world (whose
+/// bones are relative to its origin: a player, a corpse at its ragdoll's root), within a few radii of the origin (a
+/// limb is never further from the model's origin than the model is large). The first-person models are placed by the
+/// hand rig and may be anywhere, so for those the surface only must not be wider than that. Counts a fault in
 /// [`skin_faults`] and returns false otherwise.
-pub fn check_skinned(verts: &[u8], radius: f32) -> bool {
+pub fn check_skinned(verts: &[u8], radius: f32, kind: ModelKind) -> bool {
     let limit = 4.0 * radius + 256.0;
-    let ok = verts
-        .as_chunks::<VERTEX_SIZE>()
-        .0
-        .iter()
-        .all(|v| position(v).to_array().iter().all(|c| c.abs() <= limit));
+    let (mut lo, mut hi) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
+    let mut finite = true;
+    for v in verts.as_chunks::<VERTEX_SIZE>().0 {
+        let p = position(v);
+        finite &= p.is_finite();
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let ok = finite
+        && match kind {
+            ModelKind::World => lo.min_element() >= -limit && hi.max_element() <= limit,
+            ModelKind::ViewModel => (hi - lo).max_element() <= limit,
+        };
     if !ok {
         FAULTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -357,15 +367,36 @@ mod tests {
     }
 
     #[test]
-    fn skinned_vertices_far_from_the_model_or_not_finite_are_faults() {
-        let before = skin_faults();
+    fn a_stretched_or_non_finite_surface_is_a_fault() {
         let mut good = vertex([10.0, -20.0, 30.0]);
         good.extend(vertex([0.0; 3]));
-        assert!(check_skinned(&good, 40.0));
-        assert!(!check_skinned(&vertex([1.0e6, 0.0, 0.0]), 40.0));
-        assert!(!check_skinned(&vertex([f32::NAN, 0.0, 0.0]), 40.0));
-        assert!(!check_skinned(&vertex([f32::INFINITY, 0.0, 0.0]), 40.0));
-        assert_eq!(skin_faults() - before, 3);
+        assert!(check_skinned(&good, 40.0, ModelKind::World));
+        assert!(!check_skinned(
+            &vertex([1.0e6, 0.0, 0.0]),
+            40.0,
+            ModelKind::World
+        ));
+        assert!(!check_skinned(
+            &vertex([f32::NAN, 0.0, 0.0]),
+            40.0,
+            ModelKind::World
+        ));
+        assert!(!check_skinned(
+            &vertex([f32::INFINITY, 0.0, 0.0]),
+            40.0,
+            ModelKind::ViewModel
+        ));
+    }
+
+    #[test]
+    fn a_first_person_model_is_placed_by_the_hand_rig_so_only_its_width_counts() {
+        let mut carried = vertex([9000.0, -20.0, 30.0]);
+        carried.extend(vertex([9010.0, 0.0, 0.0]));
+        assert!(check_skinned(&carried, 3.0, ModelKind::ViewModel));
+        assert!(!check_skinned(&carried, 3.0, ModelKind::World));
+        let mut stretched = vertex([0.0; 3]);
+        stretched.extend(vertex([1.0e4, 0.0, 0.0]));
+        assert!(!check_skinned(&stretched, 3.0, ModelKind::ViewModel));
     }
 
     #[test]

@@ -1618,7 +1618,7 @@ impl Renderer {
                 }
                 let at = self.dyn_bytes.len() as u64;
                 skin::skin_surface(surf, &mats, &mut self.dyn_bytes);
-                if !skin::check_skinned(&self.dyn_bytes[at as usize..], model.radius) {
+                if !skin::check_skinned(&self.dyn_bytes[at as usize..], model.radius, inst.kind) {
                     eprintln!(
                         "skinning fault: surface {idx} of {} left the model",
                         model.name.as_deref().unwrap_or("?")

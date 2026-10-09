@@ -120,7 +120,7 @@ impl NetPlay {
                             &hit,
                         ));
                     }
-                    out.extend(b.player.instances_posed(b.at, r.yaw(), &r.bones()));
+                    out.extend(b.player.instances_posed(r.root(), r.yaw(), &r.bones()));
                 }
                 None => out.extend(b.player.instances(b.at)),
             }
