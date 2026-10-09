@@ -303,6 +303,40 @@ pub fn say_team(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     say(g, e, a, true)
 }
 
+/// `setexpfog(start, halfway, r, g, b, transition seconds)` (`Scr_SetExponentialFog`): the fog every client draws,
+/// which blends from the one before over the transition (the clients' `cs::FOGVARS`).
+pub fn set_exp_fog(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if a.len() != 6 {
+        return Err("Incorrect number of parameters\nUSAGE: setExpFog(<startDist>, <halfwayDist>, <red>, <green>, <blue>, <transition time>)".into());
+    }
+    let mut v = [0.0; 6];
+    for (i, x) in v.iter_mut().enumerate() {
+        *x = a.float(i)?;
+    }
+    let [start, halfway, red, green, blue, seconds] = v;
+    if start < 0.0 {
+        return Err("setExpFog: startDist must be greater or equal to 0".into());
+    }
+    if halfway <= 0.0 {
+        return Err("setExpFog: halfwayDist must be greater than 0".into());
+    }
+    if [red, green, blue].iter().any(|c| !(0.0..=1.0).contains(c)) {
+        return Err("setExpFog: red/green/blue color components must be in the range [0, 1]".into());
+    }
+    if seconds < 0.0 {
+        return Err("setExpFog: transition time must be >= 0 seconds".into());
+    }
+    let density = std::f32::consts::LN_2 / halfway;
+    g.set_configstring(
+        cs::FOGVARS,
+        &format!(
+            "{start} {density} {red} {green} {blue} {}",
+            (seconds * 1000.0).round()
+        ),
+    );
+    Ok(Value::Undefined)
+}
+
 fn set_winner(g: &mut Game, who: i32) {
     g.set_configstring(cs::MULTI_MAPWINNER, &format!("\\winner\\{who}"));
 }
@@ -480,6 +514,33 @@ pub fn objective_current(g: &mut Game, _: &mut Vm, a: Args) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setexpfog_publishes_the_fog_with_its_density_and_transition_in_milliseconds() {
+        use gsc::{Builtins, Options, compile};
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(prog).unwrap();
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        let mut fog = |args: &[f32]| {
+            let v: Vec<Value> = args.iter().map(|f| Value::Float(*f)).collect();
+            set_exp_fog(&mut g, &mut vm, Args::new("setexpfog", &v))
+        };
+        assert!(fog(&[0.0, 0.0, 0.5, 0.5, 0.5, 0.0]).is_err(), "halfway 0");
+        assert!(fog(&[0.0, 100.0, 1.5, 0.5, 0.5, 0.0]).is_err(), "colour");
+        assert!(fog(&[0.0, 100.0, 0.5, 0.5, 0.5, -1.0]).is_err(), "time");
+        assert!(fog(&[0.0, 100.0]).is_err(), "arguments");
+        fog(&[64.0, 1000.0, 0.5, 0.25, 0.0, 2.5]).unwrap();
+        let text = g.configstrings.get(&u32::from(cs::FOGVARS)).unwrap();
+        let f: Vec<f32> = text.split(' ').map(|t| t.parse().unwrap()).collect();
+        assert_eq!(f.len(), 6);
+        assert_eq!((f[0], f[2], f[3], f[4], f[5]), (64.0, 0.5, 0.25, 0.0, 2500.0));
+        assert!((f[1] - std::f32::consts::LN_2 / 1000.0).abs() < 1e-9);
+    }
 
     #[test]
     fn messages_are_marked_the_way_the_clients_read_them() {

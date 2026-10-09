@@ -322,7 +322,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("objective_team", r(uicmd::objective_team)),
     ("objective_current", r(uicmd::objective_current)),
     // world rendering, FX, audio: not a server concern until clients exist
-    ("setexpfog", Later(M8)),
+    ("setexpfog", r(uicmd::set_exp_fog)),
     ("visionsetnaked", r(|g, _, a| vision_set(g, a, false))),
     ("visionsetnight", r(|g, _, a| vision_set(g, a, true))),
     ("playfx", r(play_fx)),
