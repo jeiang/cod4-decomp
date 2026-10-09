@@ -152,6 +152,8 @@ pub struct Client {
     pub ufo: bool,
     pub last_cmd_time: i32,
     pub last_spawn_time: i32,
+    /// The level time before which this person's next client command is dropped (`sv_floodProtect`).
+    pub next_cmd_at: i32,
     pub spawn_count: i32,
     /// Shots fired and shots that hurt an enemy, for the match report.
     pub shots: u32,
@@ -223,6 +225,7 @@ impl Client {
             ufo: false,
             last_cmd_time: 0,
             last_spawn_time: 0,
+            next_cmd_at: 0,
             spawn_count: 0,
             shots: 0,
             hits: 0,
@@ -311,12 +314,18 @@ impl Game {
     /// Spectator `n` follows the next player after the one it follows whom it may watch, or
     /// nobody (`spectatorclient` -1) when there is none.
     pub fn spectate_next(&mut self, n: u16) {
+        self.spectate_cycle(n, 1);
+    }
+
+    /// `Cmd_FollowCycle_f`: like [`Self::spectate_next`], and backwards for `dir` -1. Only a spectator who is not
+    /// held on a client by the scripts steers.
+    pub fn spectate_cycle(&mut self, n: u16, dir: i32) {
         let Some(me) = self.client(n) else { return };
         let allow = me.spec_allow;
         let from = me.spectator_client;
         let count = self.clients.len() as i32;
         let pick = (1..=count)
-            .map(|i| (from + i).rem_euclid(count) as u16)
+            .map(|i| (from + i * dir).rem_euclid(count) as u16)
             .find(|&t| {
                 t != n
                     && self.client(t).is_some_and(|c| {
@@ -895,6 +904,12 @@ mod spectate_tests {
         assert_eq!(g.clients[0].spectator_client, 3);
         g.spectate_next(0);
         assert_eq!(g.clients[0].spectator_client, 4);
+        // Backwards, as `followprev` steps.
+        g.clients[0].spectator_client = 4;
+        g.spectate_cycle(0, -1);
+        assert_eq!(g.clients[0].spectator_client, 3);
+        g.spectate_cycle(0, -1);
+        assert_eq!(g.clients[0].spectator_client, 1, "skips the dead one");
         // Nothing allowed: nobody.
         g.clients[0].spec_allow = 0;
         g.spectate_next(0);

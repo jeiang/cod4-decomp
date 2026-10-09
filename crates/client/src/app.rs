@@ -829,8 +829,28 @@ impl ApplicationHandler<Ready> for Viewer {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
         let Some(st) = self.st.as_mut() else { return };
+        if let WindowEvent::KeyboardInput { event, .. } = &ev
+            && event.state == ElementState::Pressed
+            && !event.repeat
+            && event.physical_key == PhysicalKey::Code(KeyCode::Backquote)
+            && let Some(sh) = st.shell.as_mut()
+        {
+            // `~` opens and closes the console wherever the player is; its key is never typed into it.
+            sh.st.console.toggle();
+            st.input.release_all();
+            return;
+        }
+        let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
         let captured = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
-        if captured {
+        if typing {
+            if let (Some(sh), WindowEvent::KeyboardInput { event, .. }) = (st.shell.as_mut(), &ev)
+                && event.state == ElementState::Pressed
+            {
+                for k in typed_keys(event) {
+                    sh.console_key(&mut st.input, k);
+                }
+            }
+        } else if captured {
             ui_event(st, &ev);
         } else {
             st.input.window_event(&ev);
@@ -874,7 +894,10 @@ impl ApplicationHandler<Ready> for Viewer {
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, ev: DeviceEvent) {
         if let Some(st) = self.st.as_mut() {
-            st.input.device_event(&ev);
+            // A player typing is not looking around.
+            if !st.shell.as_ref().is_some_and(|s| s.st.console.active()) {
+                st.input.device_event(&ev);
+            }
         }
     }
 }
@@ -922,6 +945,13 @@ impl Viewer {
                 // purpose, a click takes it again; asking every frame would only be refused again.
                 st.gate.let_go();
                 release_pointer(st);
+                // Escape ends the lock without reaching the page's key events: a chat line open then is closed, as
+                // Escape would have closed it.
+                if let Some(sh) = st.shell.as_mut()
+                    && matches!(sh.st.console.mode, crate::console::Mode::Chat { .. })
+                {
+                    sh.st.console.close();
+                }
             }
         }
         let menu_open = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
@@ -981,8 +1011,14 @@ impl Viewer {
                 }
             } else {
                 let f = st.input.frame(dt);
-                if menu_open { InputFrame::default() } else { f }
+                let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
+                if menu_open || typing {
+                    InputFrame::default()
+                } else {
+                    f
+                }
             };
+            open_chat(st.shell.as_mut(), &mut st.input, &f);
             if f.quit() {
                 el.exit();
             }
@@ -1407,7 +1443,7 @@ impl Viewer {
                     }
                 }
                 Action::VidRestart => vid_restart(&self.cli, st),
-                Action::Console(_) => {}
+                Action::Console(line) => console_action(st, &line),
                 // Menu sounds live in the zones of the front end (`code_post_gfx`), which the match's tables
                 // do not load, so they have their own small sound system.
                 Action::Sound(alias) => {
@@ -1823,6 +1859,41 @@ fn script_step(st: &mut State) -> bool {
             st.input.exec_line(arg);
             done(true, sc, String::new());
         }
+        // A line typed at the console (`console=callvote map_restart`), as Enter sends it.
+        "console" => {
+            if let Some(sh) = st.shell.as_mut() {
+                sh.console_line(&mut st.input, arg);
+            }
+            done(true, sc, String::new());
+        }
+        // A chat line typed into the field and sent with Enter, as T or Y and the keys do it
+        // (`chat=hello`, `teamchat=hello`).
+        "chat" | "teamchat" => {
+            if let Some(sh) = st.shell.as_mut() {
+                sh.st.console.open_chat(key == "teamchat");
+                for c in arg.chars() {
+                    sh.console_key(&mut st.input, UiKey::Char(c));
+                }
+                sh.console_key(&mut st.input, UiKey::Enter);
+            }
+            done(true, sc, String::new());
+        }
+        // Waits until a line with this text is in the console's output (`saw=hello:10`, at most that many seconds):
+        // a chat line or a print the server sent.
+        "saw" => {
+            let (text, secs) = arg
+                .rsplit_once(':')
+                .map_or((arg, 10.0), |(t, s)| (t, s.parse().unwrap_or(10.0)));
+            let seen = st
+                .shell
+                .as_ref()
+                .is_some_and(|s| s.st.feed.console.iter().any(|l| l.contains(text)));
+            if seen {
+                done(true, sc, String::new());
+            } else if waited > secs {
+                done(false, sc, format!("timed out; no line with {text:?}"));
+            }
+        }
         // A line for the listen server's console, as typed there: `server=devtele human bombzone`.
         "server" => {
             listen::send(arg);
@@ -1988,9 +2059,72 @@ fn tour_step(
     t.index >= t.menus.len()
 }
 
+/// What a key press types or does in a text field: a named key, else the characters it produced.
+fn typed_keys(event: &winit::event::KeyEvent) -> Vec<UiKey> {
+    use winit::keyboard::{Key, NamedKey};
+    let named = match &event.logical_key {
+        Key::Named(NamedKey::ArrowUp) => Some(UiKey::Up),
+        Key::Named(NamedKey::ArrowDown) => Some(UiKey::Down),
+        Key::Named(NamedKey::ArrowLeft) => Some(UiKey::Left),
+        Key::Named(NamedKey::ArrowRight) => Some(UiKey::Right),
+        Key::Named(NamedKey::Enter) => Some(UiKey::Enter),
+        Key::Named(NamedKey::Escape) => Some(UiKey::Escape),
+        Key::Named(NamedKey::Tab) => Some(UiKey::Tab),
+        Key::Named(NamedKey::Backspace) => Some(UiKey::Backspace),
+        Key::Named(NamedKey::Delete) => Some(UiKey::Delete),
+        Key::Named(NamedKey::Home) => Some(UiKey::Home),
+        Key::Named(NamedKey::End) => Some(UiKey::End),
+        Key::Named(NamedKey::PageUp) => Some(UiKey::PageUp),
+        Key::Named(NamedKey::PageDown) => Some(UiKey::PageDown),
+        _ => None,
+    };
+    match (named, &event.text) {
+        (Some(k), _) => vec![k],
+        (None, Some(t)) => t.chars().map(UiKey::Char).collect(),
+        (None, None) => Vec::new(),
+    }
+}
+
+/// `chatmodepublic` and `chatmodeteam` (bound to T and Y) open the chat field; `toggleconsole` is the console's.
+fn open_chat(shell: Option<&mut Shell>, input: &mut Input, f: &InputFrame) {
+    let Some(sh) = shell else { return };
+    for c in &f.pending_commands {
+        match c.as_str() {
+            "chatmodepublic" => sh.st.console.open_chat(false),
+            "chatmodeteam" => sh.st.console.open_chat(true),
+            "toggleconsole" => sh.st.console.toggle(),
+            _ => continue,
+        }
+        input.release_all();
+    }
+}
+
+/// A console line a menu, a bind or the console itself produced. What the server carries out goes to it (without the
+/// shell's command loop, which the line may have come from); the rest is the input layer's.
+fn console_action(st: &mut State, line: &str) {
+    for cmd in crate::input::config::split_commands(line) {
+        if cmd[0].eq_ignore_ascii_case("rcon") {
+            // `rcon <command>` with the password in `rconpassword`, answered as console output.
+            let password = st.input.cvar("rconpassword").unwrap_or("").to_owned();
+            if let Some(net) = st.net.as_mut() {
+                net.send_rcon(&password, &cmd[1..].join(" "));
+            } else if let Some(sh) = st.shell.as_mut() {
+                sh.print_console("rcon: not connected to a server");
+            }
+        } else if !crate::console::is_server_verb(&cmd[0]) {
+            st.input.exec_line(&crate::input::config::join(&cmd));
+        } else if let Some(net) = st.net.as_mut() {
+            if let Some(wire) = crate::console::server_line(&cmd) {
+                net.send_command(&wire);
+            }
+        } else if let Some(sh) = st.shell.as_mut() {
+            sh.print_console(&format!("{}: not connected to a server", cmd[0]));
+        }
+    }
+}
+
 /// Routes a window event to the menus (a menu is open and owns the keyboard and mouse).
 fn ui_event(st: &mut State, ev: &WindowEvent) {
-    use winit::keyboard::{Key, NamedKey};
     let Some(sh) = st.shell.as_mut() else { return };
     // A bind item is waiting: the next key or button is the binding (Escape cancels, via the menus).
     if sh.ui.bind_pending() {
@@ -2056,28 +2190,8 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
             }
         }
         WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-            let named = match &event.logical_key {
-                Key::Named(NamedKey::ArrowUp) => Some(UiKey::Up),
-                Key::Named(NamedKey::ArrowDown) => Some(UiKey::Down),
-                Key::Named(NamedKey::ArrowLeft) => Some(UiKey::Left),
-                Key::Named(NamedKey::ArrowRight) => Some(UiKey::Right),
-                Key::Named(NamedKey::Enter) => Some(UiKey::Enter),
-                Key::Named(NamedKey::Escape) => Some(UiKey::Escape),
-                Key::Named(NamedKey::Tab) => Some(UiKey::Tab),
-                Key::Named(NamedKey::Backspace) => Some(UiKey::Backspace),
-                Key::Named(NamedKey::Delete) => Some(UiKey::Delete),
-                Key::Named(NamedKey::Home) => Some(UiKey::Home),
-                Key::Named(NamedKey::End) => Some(UiKey::End),
-                Key::Named(NamedKey::PageUp) => Some(UiKey::PageUp),
-                Key::Named(NamedKey::PageDown) => Some(UiKey::PageDown),
-                _ => None,
-            };
-            if let Some(k) = named {
+            for k in typed_keys(event) {
                 sh.key(&mut st.input, k);
-            } else if let Some(t) = &event.text {
-                for c in t.chars() {
-                    sh.key(&mut st.input, UiKey::Char(c));
-                }
             }
         }
         _ => {}

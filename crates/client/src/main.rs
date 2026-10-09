@@ -4,6 +4,7 @@
 
 mod app;
 mod compass;
+mod console;
 mod crosshair;
 mod damage;
 mod decal;

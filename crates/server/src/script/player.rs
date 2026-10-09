@@ -178,16 +178,37 @@ fn spawn(g: &mut Game, vm: &mut Vm, e: EntRef, a: Args) -> R {
 /// `PlayerCmd_Suicide`: kills a living player the way a console `kill` does.
 fn suicide(g: &mut Game, vm: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client_of(g, e)?;
-    let alive = g
-        .client(n)
-        .is_some_and(|c| c.session == Session::Playing && c.ps.pm_type == PmType::Normal);
-    if alive {
-        let mut d = Damage::new(100_000, combat::MOD_SUICIDE);
-        d.attacker = Some(n);
-        d.inflictor = Some(n);
-        g.finish_player_damage(vm, n, d)?;
-    }
+    g.kill_self(vm, n)?;
     Ok(Value::Undefined)
+}
+
+impl Game {
+    /// `Cmd_Kill_f`: a living player dies of `MOD_SUICIDE`; anyone else is left alone.
+    pub fn kill_self(&mut self, vm: &mut Vm, n: u16) -> Result<(), String> {
+        let alive = self
+            .client(n)
+            .is_some_and(|c| c.session == Session::Playing && c.ps.pm_type == PmType::Normal);
+        if alive {
+            let mut d = Damage::new(100_000, combat::MOD_SUICIDE);
+            d.attacker = Some(n);
+            d.inflictor = Some(n);
+            self.finish_player_damage(vm, n, d)?;
+        }
+        Ok(())
+    }
+
+    /// `Cmd_Where_f`: tells `n` where it stands.
+    pub fn where_am_i(&mut self, n: u16) {
+        let Some(c) = self.client(n) else { return };
+        let [x, y, z] = c.ps.origin;
+        self.send(
+            crate::ui::Dest::Client(n),
+            net::ui::ServerCmd::Print {
+                kind: net::ui::PrintKind::Console,
+                text: format!("({} {} {})\n", x as i32, y as i32, z as i32),
+            },
+        );
+    }
 }
 
 /// `PlayerCmd_finishPlayerDamage(inflictor, attacker, damage, flags, mod, weapon, point, dir,

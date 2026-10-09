@@ -165,6 +165,10 @@ impl NetSv {
         self.peers.iter().flatten().count()
     }
 
+    pub fn peer(&self, slot: u16) -> Option<&Peer> {
+        self.peers.get(usize::from(slot))?.as_ref()
+    }
+
     pub fn slot_of(&self, addr: SocketAddr) -> Option<u16> {
         self.peers
             .iter()

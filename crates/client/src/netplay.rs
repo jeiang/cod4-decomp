@@ -495,6 +495,11 @@ impl NetPlay {
         self.net.command(cmd);
     }
 
+    /// `rcon` as the console types it.
+    pub fn send_rcon(&mut self, password: &str, command: &str) {
+        self.net.rcon(password, command);
+    }
+
     pub fn disconnect(&mut self) {
         self.net.disconnect();
     }
@@ -1024,8 +1029,11 @@ impl NetPlay {
     }
 
     fn command(&mut self, cmd: &str) {
-        if cmd.starts_with("callvote ") || cmd.starts_with("vote ") {
-            self.net.command(cmd);
+        let words = crate::input::config::split_commands(cmd).into_iter().next();
+        if let Some(w) = words.filter(|w| crate::console::is_server_verb(&w[0])) {
+            if let Some(line) = crate::console::server_line(&w) {
+                self.net.command(&line);
+            }
             return;
         }
         if let Some(arg) = cmd.strip_prefix("actionslot ") {

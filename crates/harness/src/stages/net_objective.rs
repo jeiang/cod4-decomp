@@ -8,7 +8,7 @@ use crate::stage::{StageCtx, StageReport, Status};
 use net::UdpTransport;
 use net::client::NetClient;
 use net::entity::etype;
-use net::ui::{AutoJoin, cs};
+use net::ui::{AutoJoin, UiEvent, cs};
 use server::client::{Session, Team};
 use server::server::Server;
 use sim::pm::{ANGLE_UNIT, UserCmd, button};
@@ -28,6 +28,9 @@ pub(super) struct Human {
     pub(super) hold_use: bool,
     /// The hint the server's player state showed at the zone, and its text.
     hint: Option<(u16, String)>,
+    /// Chat lines and console prints the server sent, oldest first.
+    pub(super) chats: Vec<(bool, u16, String)>,
+    pub(super) prints: Vec<String>,
 }
 
 impl Human {
@@ -40,6 +43,8 @@ impl Human {
             cmd_time: 0,
             hold_use: false,
             hint: None,
+            chats: Vec::new(),
+            prints: Vec::new(),
         })
     }
 
@@ -49,6 +54,13 @@ impl Human {
         if let Some(ui) = self.c.ui() {
             let events = ui.drain_events();
             for ev in &events {
+                match ev {
+                    UiEvent::Chat {
+                        team, client, text, ..
+                    } => self.chats.push((*team, *client, text.clone())),
+                    UiEvent::Print { text, .. } => self.prints.push(text.clone()),
+                    _ => {}
+                }
                 if let Some(a) = self.join.step(ev) {
                     self.c.command(&a);
                 }

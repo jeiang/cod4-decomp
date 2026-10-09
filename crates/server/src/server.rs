@@ -24,7 +24,9 @@ use crate::game::{self, Game};
 use crate::netsv::{Inbound, NetSv};
 use crate::rcon::{self, Throttle, Verdict};
 use crate::script::{Dispatch, ScriptHost};
+use crate::ui::Dest;
 use net::Transport;
+use net::ui::{PrintKind, ServerCmd};
 
 /// Original loop time limit while scripts run (`LOOP_TIMEOUT` of the VM) applies unchanged.
 const SETTLE_FRAMES: i32 = 3;
@@ -33,6 +35,28 @@ const SETTLE_STEP_MS: i32 = 100;
 const STATS_WAIT_MS: i32 = 5000;
 /// Stat pairs one `statsync` command may carry.
 const STATSYNC_MAX_PAIRS: usize = 64;
+/// The least time between one person's client commands while `sv_floodProtect` is on.
+const FLOOD_MS: i32 = 800;
+
+/// What a person typed as the text of a chat line: no control characters, which steer the localizer.
+fn plain_text(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// `SV_ExecuteClientCommandString`'s flood check: whether a client command is dropped for coming too soon after
+/// the last one. Not for loopback, and not for what the client sends without the player acting (the team and
+/// score menus, `mr`, the profile upload, `disconnect`). `next` is when the next command is welcome.
+fn flood_drops(verb: &str, loopback: bool, enabled: bool, now: i32, next: &mut i32) -> bool {
+    if matches!(
+        verb,
+        "team" | "score" | "mr" | "statsync" | "statsdone" | "disconnect"
+    ) {
+        return false;
+    }
+    let drop = !loopback && enabled && now < *next;
+    *next = now + FLOOD_MS;
+    drop
+}
 
 /// Called after every frame with its cost.
 pub type TickHook = Box<dyn FnMut(&TickSample)>;
@@ -192,6 +216,8 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_lagcomp", "1", 0),
         ("bot_idle", "0", 0),
         ("g_allowvote", "1", 0),
+        ("g_deadChat", "0", 0),
+        ("sv_floodProtect", "1", 0),
         ("g_useholdtime", "0", 0),
         ("g_maxDroppedWeapons", "16", 0),
         ("g_dropForwardSpeed", "10", ARCHIVE),
@@ -657,13 +683,29 @@ impl Server {
     /// What a connected client may ask of the server.
     fn net_client_command(&mut self, net: &mut NetSv, slot: u16, line: &str) {
         let argv = crate::cmd::tokenize(line);
-        match argv.first().map(String::as_str) {
+        let verb = argv.first().map(|v| v.to_ascii_lowercase());
+        let loopback = net
+            .peer(slot)
+            .is_some_and(|p| p.link.addr.ip().is_loopback());
+        let flood = self.game.cvars.bool("sv_floodProtect");
+        let now = self.game.level.time;
+        if let (Some(v), Some(c)) = (verb.as_deref(), self.game.client_mut(slot))
+            && flood_drops(v, loopback, flood, now, &mut c.next_cmd_at)
+        {
+            return;
+        }
+        match verb.as_deref() {
             Some("disconnect") => self.net_drop(net, slot, DropReason::Left),
             Some(net::ui::SCORES_REQUEST) => net.send_scoreboard(slot, &self.game),
             Some("callvote") => self.game.call_vote(slot, &argv[1..]),
             Some("vote") => self
                 .game
                 .cast_vote(slot, argv.get(1).map_or("", String::as_str)),
+            Some(cmd @ ("say" | "say_team")) if argv.len() >= 2 => {
+                // What a person types is plain text: no control characters, which steer the localizer.
+                let text = plain_text(&argv[1..].join(" "));
+                self.game.chat(slot, &text, cmd == "say_team");
+            }
             Some("menuresponse") if argv.len() >= 3 => {
                 if let Some(run) = self.run.as_mut() {
                     run.vm.notify_entity(
@@ -673,6 +715,8 @@ impl Server {
                     );
                 }
             }
+            // A response without a menu and an answer is nothing to the scripts.
+            Some("menuresponse") => {}
             // The client's profile stats (`statsync <index> <value> ...`): the person's own, as the
             // original's stats file is kept on the client.
             Some("statsync") => {
@@ -689,7 +733,48 @@ impl Server {
             Some("statsdone") if self.begin_waits.iter().any(|(n, _)| *n == slot) => {
                 self.begin_client(slot);
             }
-            _ => {}
+            // The original's `Cmd_Kill_f` needs `CheatsOk`: without `sv_cheats` it says so.
+            Some("kill") if !self.game.cvars.bool("sv_cheats") => self.game.send(
+                Dest::Client(slot),
+                ServerCmd::Print {
+                    kind: PrintKind::Console,
+                    text: "GAME_CHEATSNOTENABLED\n".to_owned(),
+                },
+            ),
+            Some("kill") => {
+                if let Some(run) = self.run.as_mut() {
+                    let mut host = ScriptHost {
+                        game: &mut self.game,
+                        dispatch: &run.dispatch,
+                    };
+                    let _ = host.game.kill_self(&mut run.vm, slot);
+                    host.run_calls(&mut run.vm);
+                }
+            }
+            Some(v @ ("follownext" | "followprev")) => {
+                if self.game.client(slot).is_some_and(|c| {
+                    c.session == crate::client::Session::Spectator && c.archive_time <= 0.0
+                }) {
+                    self.game
+                        .spectate_cycle(slot, if v == "follownext" { 1 } else { -1 });
+                }
+            }
+            Some("where") => self.game.where_am_i(slot),
+            // Verbs the original's `ClientCommand` knows that are not carried out here: dropped without a word.
+            Some(
+                "statsdone" | "mr" | "give" | "take" | "god" | "demigod" | "notarget" | "noclip"
+                | "ufo" | "setviewpos" | "entitycount" | "printentities" | "visionsetnaked"
+                | "visionsetnight",
+            ) => {}
+            // What the original says to a client for a verb it does not know.
+            Some(cmd) => self.game.send(
+                Dest::Client(slot),
+                ServerCmd::Print {
+                    kind: PrintKind::Console,
+                    text: format!("GAME_UNKNOWNCLIENTCOMMAND\x15{cmd}\n"),
+                },
+            ),
+            None => {}
         }
     }
 
@@ -2049,7 +2134,37 @@ fn rss_line() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::ping_field;
+    use super::{flood_drops, ping_field, plain_text};
+
+    #[test]
+    fn a_persons_chat_text_loses_the_marks_a_script_may_use() {
+        assert_eq!(plain_text("a\x14b\x15c\nd"), "abcd");
+    }
+
+    #[test]
+    fn a_second_command_inside_800_ms_is_dropped_except_for_loopback_and_the_exempt_ones() {
+        let mut next = 0;
+        assert!(!flood_drops("say", false, true, 1000, &mut next));
+        assert!(
+            flood_drops("callvote", false, true, 1500, &mut next),
+            "any verb"
+        );
+        assert!(
+            !flood_drops("say", false, true, 2300, &mut next),
+            "800 ms after the last, which a dropped one also restarts"
+        );
+        for exempt in ["team", "score", "mr", "statsync"] {
+            assert!(
+                !flood_drops(exempt, false, true, 2301, &mut next),
+                "{exempt}"
+            );
+        }
+        assert!(!flood_drops("say", true, true, 2302, &mut next), "loopback");
+        assert!(
+            !flood_drops("say", false, false, 2303, &mut next),
+            "protection off"
+        );
+    }
 
     #[test]
     fn status_ping_shows_the_state_before_the_round_trip_and_caps_it() {

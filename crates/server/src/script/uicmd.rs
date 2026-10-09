@@ -7,7 +7,7 @@ use net::ui::{self, PrintKind, ServerCmd, cs, obj};
 
 use super::Args;
 use super::args::display;
-use crate::client::Team;
+use crate::client::{Session, Team};
 use crate::game::Game;
 use crate::ui::{Dest, ObjSlot, Table, clip};
 
@@ -243,23 +243,49 @@ pub fn client_announcement(g: &mut Game, _: &mut Vm, a: Args) -> R {
 
 fn say(g: &mut Game, e: EntRef, a: Args, team: bool) -> R {
     let n = player(g, e)?;
-    let text = joined(a, 0);
-    let c = g.client(n).expect("client");
-    let (name, side) = (c.name.clone(), c.team);
-    g.print(format!(
-        "{}: {name}: {text}\n",
-        if team { "sayteam" } else { "say" }
-    ));
-    let dest = if team { Dest::Team(side) } else { Dest::All };
-    g.send(
-        dest,
-        ServerCmd::Chat {
-            team,
-            client: n,
-            text,
-        },
-    );
+    g.chat(n, &joined(a, 0), team);
     Ok(Value::Undefined)
+}
+
+impl Game {
+    /// `G_Say`: `n` says `text` to everyone, or to their team (a player on no team speaks to everyone). A dead
+    /// player's line reaches only the others who are not playing, unless `g_deadChat`.
+    pub fn chat(&mut self, n: u16, text: &str, team: bool) {
+        let Some(c) = self.client(n) else { return };
+        let (name, side, session) = (c.name.clone(), c.team, c.session);
+        let team = team && matches!(side, Team::Axis | Team::Allies);
+        // `G_SayTo`: anyone not playing is marked, a spectator by the team they are on.
+        let tag = match (side, session) {
+            (Team::Spectator, _) => ui::chat_tag::SPECTATOR,
+            (_, Session::Playing) => ui::chat_tag::NORMAL,
+            _ => ui::chat_tag::DEAD,
+        };
+        let text: String = text.chars().take(149).collect();
+        self.print(format!(
+            "{}: {name}: {text}\n",
+            if team { "sayteam" } else { "say" }
+        ));
+        let dead_chat = self.cvars.bool("g_deadChat");
+        let hears: Vec<u16> = self
+            .connected_clients()
+            .filter(|(_, o)| !team || o.team == side)
+            .filter(|(_, o)| {
+                dead_chat || session == Session::Playing || o.session != Session::Playing
+            })
+            .map(|(k, _)| k)
+            .collect();
+        for k in hears {
+            self.send(
+                Dest::Client(k),
+                ServerCmd::Chat {
+                    team,
+                    client: n,
+                    tag,
+                    text: text.clone(),
+                },
+            );
+        }
+    }
 }
 
 pub fn say_all(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
@@ -466,5 +492,103 @@ mod tests {
         assert_eq!(construct(&[loc("A"), loc("B")]), "A\x14B");
         // A mark a script puts in its text cannot start a part.
         assert_eq!(construct(&[loc("A"), text("x\x14y")]), "A\x15x.y");
+    }
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+    use crate::client::{Client, Conn};
+    use crate::content::Content;
+    use crate::cvar::Cvars;
+
+    /// Slots 0 and 1 on the allies, 2 on the axis, 3 a spectator; all playing.
+    fn game() -> Game {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.clients = (0..4)
+            .map(|n| Client::new(n, false, format!("p{n}")))
+            .collect();
+        for (n, team) in [
+            (0, Team::Allies),
+            (1, Team::Allies),
+            (2, Team::Axis),
+            (3, Team::Spectator),
+        ] {
+            let c = &mut g.clients[n];
+            c.conn = Conn::Connected;
+            c.team = team;
+            c.session = Session::Playing;
+        }
+        g
+    }
+
+    /// Who was sent a chat line, with the line's team flag and tag.
+    fn heard(g: &mut Game) -> Vec<(u16, bool, u8, String)> {
+        std::mem::take(&mut g.ui.out)
+            .into_iter()
+            .filter_map(|o| match (o.to, o.cmd) {
+                (
+                    Dest::Client(k),
+                    ServerCmd::Chat {
+                        team, tag, text, ..
+                    },
+                ) => Some((k, team, tag, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_team_line_reaches_the_team_and_a_public_line_everyone() {
+        let mut g = game();
+        g.chat(0, "to all", false);
+        assert_eq!(
+            heard(&mut g).iter().map(|h| h.0).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        g.chat(0, "to us", true);
+        let h = heard(&mut g);
+        assert_eq!(h.iter().map(|h| h.0).collect::<Vec<_>>(), [0, 1]);
+        assert!(h.iter().all(|h| h.1), "marked as a team line");
+    }
+
+    #[test]
+    fn a_player_on_no_team_speaks_to_everyone_even_when_asking_for_the_team() {
+        let mut g = game();
+        g.chat(3, "psst", true);
+        let h = heard(&mut g);
+        assert_eq!(h.len(), 4);
+        assert!(h.iter().all(|h| !h.1 && h.2 == ui::chat_tag::SPECTATOR));
+    }
+
+    #[test]
+    fn the_dead_are_heard_only_by_those_not_playing_unless_dead_chat_is_on() {
+        let mut g = game();
+        g.clients[0].session = Session::Dead;
+        g.clients[3].session = Session::Spectator;
+        g.chat(0, "ghost", false);
+        let h = heard(&mut g);
+        assert_eq!(h.iter().map(|h| h.0).collect::<Vec<_>>(), [0, 3]);
+        assert!(h.iter().all(|h| h.2 == ui::chat_tag::DEAD));
+        g.cvars.set("g_deadChat", "1");
+        g.chat(0, "ghost", false);
+        assert_eq!(heard(&mut g).len(), 4);
+    }
+
+    #[test]
+    fn a_line_is_cut_at_149_characters_and_keeps_a_scripts_localizer_marks() {
+        let mut g = game();
+        g.chat(0, &format!("\x14KEY\x15b{}", "x".repeat(300)), false);
+        let text = heard(&mut g).remove(0).3;
+        assert!(text.starts_with("\x14KEY\x15b"), "{text:?}");
+        assert_eq!(text.chars().count(), 149);
+    }
+
+    #[test]
+    fn anyone_not_playing_is_marked_not_only_the_dead() {
+        let mut g = game();
+        g.clients[1].session = Session::Intermission;
+        g.chat(1, "gg", false);
+        assert!(heard(&mut g).iter().all(|h| h.2 == ui::chat_tag::DEAD));
     }
 }

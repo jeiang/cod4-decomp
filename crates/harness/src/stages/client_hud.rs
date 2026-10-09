@@ -4,7 +4,7 @@
 //! message window to have a line up and for a bot to kill it (the killcam), and reports what the HUD got to show
 //! (`hud_draw` of `ui-script.json`). The scoreboard must have listed the players, the message windows must have drawn
 //! lines, the script hud elements must have arrived, the killcam must have played, a teammate must have had a name
-//! over the head and the player under the crosshair a name of their own. Needs a display and the
+//! over the head and the player under the crosshair a name of their own, and a chat line typed and a vote called through the console must come back from the server. Needs a display and the
 //! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 const NAME: &str = "client-hud";
 const LIMIT: Duration = Duration::from_secs(420);
 const ARGS: &[&str] = &["--listen", "--bots", "9", "--autoplay", "--duration", "400"];
-const STEPS: &str = "ingame=120,wait=5,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
+const STEPS: &str = "ingame=120,wait=5,chat=hello from the script,saw=hello from the script:20,console=callvote kick bot5,saw=called a vote:20,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
 killcam=300,shot=killcam_first,wait=1,shot=killcam_next,wait=1,shot=killcam,respawn=120";
 
 fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String> {
@@ -89,6 +89,9 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     }
     if sum("messages") + n("obituaries") == 0 {
         bad.push("no print or kill line arrived");
+    }
+    if n("chat") == 0 {
+        bad.push("the chat line the player typed never came back");
     }
     if sum("window_lines") == 0 {
         bad.push("the message windows drew no line");
@@ -206,7 +209,7 @@ mod tests {
                 "messages": [2, 0, 0, 0], "obituaries": 3, "window_lines": [40, 0, 0, 0],
                 "killcam_frames": 120, "names_max": 3, "crosshair_name_frames": 40,
                 "friends_in_sight_frames": 50, "crosshair_due_frames": 60,
-                "head_icon_materials": ["headiconyouinkillcam"]
+                "head_icon_materials": ["headiconyouinkillcam"], "chat": 1
             }
         })
     }
@@ -245,6 +248,9 @@ mod tests {
         let mut r = good();
         r["hud_draw"]["scoreboard_rows_max"] = json!(2);
         assert!(verdict(&r).unwrap().contains("scoreboard"));
+        let mut r = good();
+        r["hud_draw"]["chat"] = json!(0);
+        assert!(verdict(&r).unwrap().contains("chat"));
         let mut r = good();
         r["steps"] = json!([{"step": "killcam=300", "ok": false, "note": "timed out"}]);
         assert!(verdict(&r).unwrap().contains("killcam=300"));
