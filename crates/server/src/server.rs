@@ -1267,6 +1267,9 @@ impl Server {
             // Test hook: `devshoot <attacker> <x0 y0 z0> <x1 y1 z1>` fires a 100 damage rifle bullet along the
             // segment through any `trigger_damage` volume on it.
             "devshoot" => {
+                if !self.game.cvars.bool("sv_cheats") {
+                    return Err("devshoot needs sv_cheats 1".into());
+                }
                 let nums: Vec<f32> = argv[1..].iter().map(|a| cvar::parse_float(a)).collect();
                 if nums.len() != 7 {
                     return Err("usage: devshoot <attacker> <x0 y0 z0> <x1 y1 z1>".into());

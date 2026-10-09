@@ -280,3 +280,45 @@ fn a_volume_that_accumulates_waits_for_enough_damage() {
     hit(&mut g, &mut vm);
     assert_eq!(pending(&g), 1);
 }
+
+/// Whether `touch` reaches a script waiting on the entity of `class` (spawned with `flags`) when a
+/// player stands in it.
+fn hears_touch(class: &str, flags: i32) -> bool {
+    use gsc::EntClass;
+    use server::script::{Dispatch, ScriptHost};
+
+    let script = r#"
+watch() { self waittill("touch", other); level.touched = 1; }
+"#;
+    let prog = compile(
+        &[("t.gsc", script)],
+        &Builtins::stock_mp(),
+        Options::default(),
+    )
+    .unwrap();
+    let watch = prog.find("t", "watch").unwrap();
+    let dispatch = Dispatch::new(&prog);
+    let mut vm = Vm::new(prog).unwrap();
+    let (mut g, _) = arena();
+    let p = add_player(&mut g, &mut vm, [0.0; 3], Team::Allies);
+    let t = trigger(&mut g, class, flags, None, 0, 0);
+    let mut host = ScriptHost {
+        game: &mut g,
+        dispatch: &dispatch,
+    };
+    let obj = vm.entity(t, EntClass::Entity);
+    vm.call(&mut host, watch, Some(obj), &[]).unwrap();
+    host.game.touch_triggers(&mut vm, p);
+    assert!(vm.run_current_threads(&mut host).is_empty());
+    vm.level().get("touched").is_some()
+}
+
+#[test]
+fn volumes_without_a_touch_handler_still_hear_touch() {
+    assert!(hears_touch("trigger_damage", 0));
+    assert!(
+        hears_touch("trigger_hurt", 1),
+        "a switched-off trigger_hurt"
+    );
+    assert!(hears_touch("trigger_multiple", 0));
+}

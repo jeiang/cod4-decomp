@@ -187,9 +187,11 @@ impl Game {
         });
         for t in list {
             let Some(te) = self.ent(t) else { continue };
-            let Some(kind) = touch_kind(te) else { continue };
+            let kind = touch_kind(te);
             let over = match kind {
-                Touch::Item => sim::weapon::pickup::player_touches_item(player_origin, te.origin),
+                Some(Touch::Item) => {
+                    sim::weapon::pickup::player_touches_item(player_origin, te.origin)
+                }
                 _ => crate::script::entity_contact(self, bmin, bmax, te),
             };
             if !over {
@@ -198,16 +200,18 @@ impl Game {
             let (me, other) = (self.entity_value(vm, n), self.entity_value(vm, t));
             vm.notify_entity(t, "touch", std::slice::from_ref(&me));
             vm.notify_entity(n, "touch", &[other]);
+            // Entities without a handler (`trigger_damage`, a switched-off `trigger_hurt`) still hear `touch`.
             match kind {
-                Touch::Item => self.touch_item(vm, n, t, true),
-                Touch::Multi => {
+                None => {}
+                Some(Touch::Item) => self.touch_item(vm, n, t, true),
+                Some(Touch::Multi) => {
                     // `Touch_Multi`.
                     self.g_trigger(vm, t, n);
                     if self.ent(t).is_some_and(|e| e.spawnflags & SPAWN_ONCE != 0) {
                         self.free_entity_delayed(t);
                     }
                 }
-                Touch::Hurt => self.hurt_touch(vm, t, n),
+                Some(Touch::Hurt) => self.hurt_touch(vm, t, n),
             }
         }
     }
