@@ -73,6 +73,8 @@ pub mod ef {
     pub const TURRET_CROUCH: u32 = 0x200;
     pub const TURRET_ACTIVE: u32 = 0x300;
     pub const MANTLE: u32 = 0x8000;
+    /// Bit 17: `WeaponCycleAllowed` refuses to cycle weapons while it is set.
+    pub const NO_WEAPON_CYCLE: u32 = 0x2_0000;
     pub const LOC_SELECTING: u32 = 0x20_0000;
 }
 

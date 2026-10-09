@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Weapon cycling and the out-of-ammo switch translated in part from KisakCOD (cgame/cg_weapons.cpp: CycleWeapPrimary,
+// CG_OutOfAmmoChange, ValidLatestPrimaryWeapIdx; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! `PlayerWeapons`: what a player owns and how much ammunition each counter holds.
 //!
 //! The original keeps this in `playerState_t` (`weapons`, `weaponold`, `weaponrechamber`,
@@ -165,6 +167,93 @@ impl PlayerWeapons {
     /// `BG_PlayerWeaponsFull_Primaries`.
     pub fn primaries_full(&self, table: &WeaponTable) -> bool {
         self.primary_count(table) >= 2
+    }
+
+    /// `ValidLatestPrimaryWeapIdx`: the weapon to remember as the player's primary when `index` is raised: itself
+    /// when it is a primary, the weapon an alt mode belongs to, else none (0).
+    pub fn latest_primary_of(table: &WeaponTable, index: u16) -> u16 {
+        if index == 0 {
+            return 0;
+        }
+        let w = table.info(index);
+        if w.inventory_type == InventoryType::Primary {
+            index
+        } else if table.info(w.alt_weapon).inventory_type == InventoryType::Primary {
+            w.alt_weapon
+        } else {
+            0
+        }
+    }
+
+    /// `CycleWeapPrimary`: the weapon `weapnext` (`forward`) or `weapprev` raises from `current`, or none. An alt
+    /// mode toggles to its other mode; an item or offhand goes back to `latest` (the last primary held, 0 = none);
+    /// otherwise the next owned primary in index order, skipping the empty ones when `ignore_empty`.
+    pub fn cycle_primary(
+        &self,
+        table: &WeaponTable,
+        current: u16,
+        latest: u16,
+        forward: bool,
+        ignore_empty: bool,
+    ) -> Option<u16> {
+        let n = table.len() as u16;
+        if n < 2 {
+            return None;
+        }
+        let held = table.info(current);
+        match held.inventory_type {
+            // `VerifyPlayerAltModeWeapon`: an alt mode without its original raises nothing (0).
+            InventoryType::AltMode => {
+                return Some(if self.has(held.alt_weapon) {
+                    held.alt_weapon
+                } else {
+                    0
+                });
+            }
+            InventoryType::Primary => {}
+            _ if self.has(latest) => return Some(latest),
+            _ => {}
+        }
+        let start = current.max(1);
+        let mut i = start;
+        loop {
+            i = if forward {
+                i % n + 1
+            } else {
+                (i + n - 2) % n + 1
+            };
+            if i == start {
+                return None;
+            }
+            if self.has(i)
+                && (!ignore_empty || self.weapon_ammo(table, i) != 0)
+                && table.info(i).inventory_type == InventoryType::Primary
+            {
+                return Some(i);
+            }
+        }
+    }
+
+    /// What `CG_OutOfAmmoChange` raises when the weapon in hand `held` has nothing left; `Some(0)` raises nothing, none
+    /// stays put. The dead and the weapons that stay up when empty (`stays`, `cancelAutoHolsterWhenEmpty`) stay put.
+    pub fn out_of_ammo_target(
+        &self,
+        table: &WeaponTable,
+        alive: bool,
+        held: u16,
+        stays: bool,
+        latest: u16,
+    ) -> Option<u16> {
+        if !alive {
+            return None;
+        }
+        if held == 0 && self.has(latest) {
+            return Some(latest);
+        }
+        if held != 0 && stays {
+            return None;
+        }
+        self.cycle_primary(table, held, latest, true, true)
     }
 
     /// `BG_PlayerHasCompatibleWeapon`: some owned weapon uses the same ammunition.
