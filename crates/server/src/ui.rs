@@ -186,6 +186,11 @@ impl Game {
         }
     }
 
+    /// `G_LogPrintf`: a line of `games_mp.log`, stamped with the level time.
+    pub fn log_print(&mut self, text: &str) {
+        self.log.print(self.level.time, text);
+    }
+
     /// Queues a command for the network layer.
     pub fn send(&mut self, to: Dest, cmd: ServerCmd) {
         self.ui.out.push(Outgoing { to, cmd });
@@ -207,6 +212,34 @@ impl Game {
                     value: value.to_owned(),
                 },
             );
+        }
+    }
+
+    /// `SV_SaveSystemInfo` and `SV_PreFrame`: the variables flagged `SERVERINFO`, `SYSTEMINFO` and `CODINFO` go to the
+    /// clients as configstrings when one of them changed (or at a level start, `force`).
+    pub fn publish_info(&mut self, force: bool) {
+        use crate::cvar::{CODINFO, SERVERINFO, SYSTEMINFO};
+        let changed = self.cvars.take_modified();
+        if force || changed & SERVERINFO != 0 {
+            let info = self.cvars.info_string(SERVERINFO);
+            self.set_configstring(cs::SERVERINFO, &info);
+        }
+        if force || changed & SYSTEMINFO != 0 {
+            let info = self.cvars.info_string(SYSTEMINFO);
+            self.set_configstring(cs::SYSTEMINFO, &info);
+        }
+        if force || changed & CODINFO != 0 {
+            let pairs: Vec<(String, String)> = self
+                .cvars
+                .info_pairs(CODINFO)
+                .take(usize::from(cs::CODINFO_COUNT))
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                .collect();
+            for i in 0..cs::CODINFO_COUNT {
+                let (k, v) = pairs.get(usize::from(i)).cloned().unwrap_or_default();
+                self.set_configstring(cs::CODINFO + i, &k);
+                self.set_configstring(cs::CODINFO_VALUE + i, &v);
+            }
         }
     }
 

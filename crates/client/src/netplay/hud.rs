@@ -315,6 +315,11 @@ impl NetPlay {
             a.perks = e.perks;
             a.yaw = e.angles[1];
             a.last_update = now;
+            // `pingPlayer`: the compass flashes the player, as for a shot, at most every three seconds.
+            if e.eflags & eflags::PING != 0 && (a.fire_time == 0 || now - a.fire_time >= 3000) {
+                a.fire_time = now;
+                a.fire_pos = a.pos;
+            }
             if e.event_seq != a.event_seq {
                 a.event_seq = e.event_seq;
                 if matches!(e.event, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT) {

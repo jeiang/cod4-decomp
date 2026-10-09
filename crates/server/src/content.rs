@@ -374,6 +374,14 @@ impl Content {
             .map(|(k, (_, v))| (k.as_str(), &v[..]))
     }
 
+    /// A rawfile made up for a test.
+    #[cfg(test)]
+    pub fn add_test_rawfile(&mut self, name: &str, text: &str) {
+        self.base
+            .raw
+            .insert(name.to_ascii_lowercase(), (0, text.as_bytes().into()));
+    }
+
     pub fn rawfile(&self, name: &str) -> Option<&[u8]> {
         get(&self.map.raw, name)
             .or_else(|| get(&self.base.raw, name))

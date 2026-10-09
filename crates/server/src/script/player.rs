@@ -134,7 +134,17 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ),
     ("playlocalsound", r(super::sound::play_local_sound)),
     ("stoplocalsound", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("pingplayer", r(|_, _, _, _| Ok(Value::Undefined))),
+    (
+        "pingplayer",
+        r(|g, _, e, _| {
+            let n = client_of(g, e)?;
+            let until = g.level.time + 3000;
+            if let Some(c) = g.client_mut(n) {
+                c.compass_ping_until = until;
+            }
+            Ok(Value::Undefined)
+        }),
+    ),
     ("istalking", r(|_, _, _, _| Ok(Value::Int(0)))),
     ("setperk", r(set_perk)),
     ("unsetperk", r(unset_perk)),

@@ -261,6 +261,11 @@ impl Game {
             _ => ui::chat_tag::DEAD,
         };
         let text: String = text.chars().take(149).collect();
+        let clean = crate::vote::clean_name(&name);
+        self.log_print(&format!(
+            "{};0;{n};{clean};{text}\n",
+            if team { "sayteam" } else { "say" }
+        ));
         self.print(format!(
             "{}: {name}: {text}\n",
             if team { "sayteam" } else { "say" }

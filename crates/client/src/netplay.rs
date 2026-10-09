@@ -503,6 +503,12 @@ impl NetPlay {
         Ok(())
     }
 
+    /// The name, rate and snapshot rate the server hears as soon as the connection is up.
+    pub fn set_userinfo(&mut self, name: &str, rate: i32, snaps: i32) {
+        self.net
+            .set_userinfo(net::client::userinfo_command(name, rate, snaps));
+    }
+
     /// The profile that goes to the server as soon as the connection is up, before the person begins: the scripts
     /// read the rank and the classes when they begin.
     pub fn set_profile(&mut self, stats: &[i32]) {

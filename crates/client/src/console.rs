@@ -236,6 +236,7 @@ const OWN_COMMANDS: &[&str] = &[
     "goprone",
     "loc_warnings",
     "map",
+    "name",
     "quit",
     "r_applypicmip",
     "rcon",

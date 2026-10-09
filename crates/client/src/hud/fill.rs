@@ -92,7 +92,10 @@ pub fn fill(net: &mut NetClient<Wire>, live: &mut LiveUi, time: i32, eye: Option
         match info {
             Some(c) => {
                 if live.names[slot] != c.name {
-                    live.names[slot] = c.name;
+                    let old = std::mem::replace(&mut live.names[slot], c.name.clone());
+                    if !old.is_empty() && !c.name.is_empty() {
+                        live.renamed.push((old, c.name));
+                    }
                 }
                 live.teams[slot] = c.team;
                 live.ranks[slot] = (c.rank, c.prestige);

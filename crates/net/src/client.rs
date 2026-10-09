@@ -44,7 +44,22 @@ pub struct NetClient<T: Transport> {
     pub commands: Vec<String>,
     /// The person's profile, sent as soon as the connection is up ([`PROFILE_DONE`] ends it).
     profile: Vec<String>,
+    /// The `userinfo` command that goes first once the connection is up (rate, snapshot rate).
+    userinfo: Option<String>,
     buf: Vec<u8>,
+}
+
+/// The `userinfo` command a client sends for its name, `rate` (bytes a second it can take) and `snaps` (snapshots a
+/// second it wants): the original's `userinfo` string, which the server reads whole each time.
+pub fn userinfo_command(name: &str, rate: i32, snaps: i32) -> String {
+    let clean = |s: &str| {
+        s.replace(['\\', '"', ';'], "")
+            .replace(char::is_control, "")
+    };
+    format!(
+        "userinfo \"\\name\\{}\\rate\\{rate}\\snaps\\{snaps}\"",
+        clean(name)
+    )
 }
 
 /// The command that ends a client's profile upload: the server holds a new person back until it arrives, as the
@@ -64,6 +79,7 @@ impl<T: Transport> NetClient<T> {
             snaps: SnapshotBuffer::default(),
             commands: Vec::new(),
             profile: Vec::new(),
+            userinfo: None,
             buf: vec![0; 2048],
         }
     }
@@ -72,6 +88,11 @@ impl<T: Transport> NetClient<T> {
     /// client with no profile sends none and still ends the upload.
     pub fn set_profile(&mut self, commands: Vec<String>) {
         self.profile = commands;
+    }
+
+    /// The `userinfo` command (see [`userinfo_command`]) to send as soon as the connection is up.
+    pub fn set_userinfo(&mut self, command: String) {
+        self.userinfo = Some(command);
     }
 
     pub fn now_ms(&self) -> u64 {
@@ -174,6 +195,9 @@ impl<T: Transport> NetClient<T> {
                     match c.state() {
                         ConnectState::Connected => {
                             let mut link = Box::new(ClientLink::new(self.server, c.qport));
+                            if let Some(line) = self.userinfo.take() {
+                                let _ = link.command(&line);
+                            }
                             for line in self.profile.drain(..) {
                                 let _ = link.command(&line);
                             }
