@@ -328,6 +328,7 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("r_rendererPreference", "dx9"),
     ("r_multiGpu", "0"),
     ("r_dlightLimit", "4"),
+    ("r_drawSun", "1"),
     ("r_zfeather", "1"),
     ("r_depthPrepassModels", "0"),
     ("r_lodScaleRigid", "1"),

@@ -47,6 +47,8 @@ pub struct Gfx {
     pub spot_fade_time: f32,
     /// `r_spotLightStartRadius`, `r_spotLightEndRadius`, `r_spotLightFovInnerFraction` and `r_spotLightBrightness`.
     pub spot: render::SpotParams,
+    /// `r_drawSun`.
+    pub draw_sun: bool,
 }
 
 /// `1920x1080` as a size.
@@ -140,6 +142,7 @@ impl Gfx {
                 .get("sm_spotShadowFadeTime")
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .map_or(1.0, |v| v.clamp(0.0, 5.0)),
+            draw_sun: on("r_drawSun"),
         }
     }
 
@@ -165,6 +168,7 @@ impl Gfx {
         base.specular = self.specular;
         base.dof = self.dof;
         base.glow = self.glow;
+        base.draw_sun = self.draw_sun;
         base.aa_samples = self.aa_samples;
         base.aspect = self.aspect;
         base.dlight_limit = self.dlight_limit;
@@ -215,6 +219,7 @@ mod tests {
             ("r_specular", "0"),
             ("r_dof_enable", "0"),
             ("r_glow_allowed", "0"),
+            ("r_drawSun", "0"),
             ("r_fullscreen", "1"),
             ("r_vsync", "1"),
         ]));
@@ -225,7 +230,7 @@ mod tests {
         assert!(g.fullscreen && g.vsync);
         let s = g.settings(render::Settings::default());
         assert_eq!(s.shadows, render::ShadowMode::Off);
-        assert!(!s.specular && !s.dof && !s.glow);
+        assert!(!s.specular && !s.dof && !s.glow && !s.draw_sun);
         assert_eq!(s.aa_samples, 4);
     }
 
@@ -234,7 +239,9 @@ mod tests {
         let g = Gfx::from_cvars(&cvars(&[("r_picmip", "3")]));
         assert_eq!(g.picmip, 0);
         let s = g.settings(render::Settings::default());
-        assert!(s.specular && s.dof && s.glow && s.shadows != render::ShadowMode::Off);
+        assert!(
+            s.specular && s.dof && s.glow && s.draw_sun && s.shadows != render::ShadowMode::Off
+        );
         assert_eq!(s.aa_samples, 1);
     }
 

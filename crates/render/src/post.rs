@@ -544,6 +544,7 @@ enum Group {
     Glow,
     Blur,
     Shock,
+    Sun,
 }
 
 impl Group {
@@ -555,6 +556,7 @@ impl Group {
             Group::Glow => "post glow",
             Group::Blur => "post blur",
             Group::Shock => "post shellshock",
+            Group::Sun => "post sun",
         }
     }
 }
@@ -605,14 +607,28 @@ impl Builder<'_> {
         color: [u8; 4],
         taps: Option<&FilterPass>,
     ) {
+        if let Some(mat) = self.r.post_state.materials.get(material).cloned() {
+            self.draw_quad(group, &mat, dest, feedback, color, taps, FULL_SCREEN);
+        }
+    }
+
+    /// [`Builder::draw`] of any `material` over the clip-space `quad`: `[x, y, u, v]` of each corner.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_quad(
+        &mut self,
+        group: Group,
+        mat: &Arc<Material>,
+        dest: Dest,
+        feedback: Option<Id>,
+        color: [u8; 4],
+        taps: Option<&FilterPass>,
+        quad: [[f32; 4]; 4],
+    ) {
         let r = &mut *self.r;
-        let Some(mat) = r.post_state.materials.get(material).cloned() else {
-            return;
-        };
         let Some(prep) = r.materials.prepare(
             &r.gpu,
             &mut r.textures,
-            &mat,
+            mat,
             &[TECH_UNLIT],
             VertexKind::Screen,
             false,
@@ -679,19 +695,13 @@ impl Builder<'_> {
                 samples: 1,
             },
         );
-        let quad = self.quads.len() as u32;
-        let v = |x: f32, y: f32, u: f32, t: f32| ScreenVertex {
+        let quad_index = self.quads.len() as u32;
+        self.quads.push(quad.map(|[x, y, u, t]| ScreenVertex {
             pos: [x, y, 0.0],
             _pad: 0.0,
             color,
             uv: [u, t],
-        };
-        self.quads.push([
-            v(-1.0, 1.0, 0.0, 0.0),
-            v(1.0, 1.0, 1.0, 0.0),
-            v(1.0, -1.0, 1.0, 1.0),
-            v(-1.0, -1.0, 0.0, 1.0),
-        ]);
+        }));
         self.passes.push(Pass {
             group,
             target,
@@ -700,7 +710,7 @@ impl Builder<'_> {
             vs,
             ps,
             tex,
-            quad,
+            quad: quad_index,
         });
     }
 
@@ -749,7 +759,16 @@ impl Builder<'_> {
     }
 }
 
+/// The overlay material of the sun's glare and blind (`rgp.glareBlindMaterial`).
+const GLARE_BLIND: &str = "$glare_blind";
 const WHITE: [u8; 4] = [255; 4];
+/// The corners of the whole screen, clockwise from the top left.
+const FULL_SCREEN: [[f32; 4]; 4] = [
+    [-1.0, 1.0, 0.0, 0.0],
+    [1.0, 1.0, 1.0, 0.0],
+    [1.0, -1.0, 1.0, 1.0],
+    [-1.0, -1.0, 0.0, 1.0],
+];
 
 /// Plan the post passes of this frame: allocate what they need, fill their constant banks and upload their quads.
 /// `target` is the frame buffer. Returns the chain; frames with nothing to do get an empty one with no offscreen
@@ -769,7 +788,8 @@ pub(crate) fn build(
             && r.post_state.saved
             && (s.blur_alpha > 0.0 || s.flash_screengrab > 0.0 || s.flash_whiteout > 0.0)
     });
-    if !offscreen && shock.is_none() {
+    let sun = r.sun.overlay;
+    if !offscreen && shock.is_none() && sun == Default::default() {
         return Chain {
             scene: None,
             passes: Vec::new(),
@@ -942,6 +962,33 @@ pub(crate) fn build(
                 [w, w, w, byte(s.flash_screengrab)],
                 None,
             );
+        }
+    }
+    if sun != Default::default() {
+        // RB_DrawSunPostEffects: the flare, then the blind and glare, over the finished picture.
+        b.frame = (target.clone(), size);
+        if let (Some(f), Some(mat)) = (sun.flare, b.r.scene.world.sun.flare_material.clone()) {
+            let [x, y] = f.center;
+            let [hw, hh] = f.half;
+            let a = f.alpha;
+            let quad = [
+                [x + hw, y + hh, 0.0, 0.0],
+                [x + hw, y - hh, 1.0, 0.0],
+                [x - hw, y - hh, 1.0, 1.0],
+                [x - hw, y + hh, 0.0, 1.0],
+            ];
+            b.draw_quad(
+                Group::Sun,
+                &mat,
+                Dest::Frame,
+                None,
+                [a, a, a, 255],
+                None,
+                quad,
+            );
+        }
+        if let Some(color) = sun.glare_blind {
+            b.draw(Group::Sun, GLARE_BLIND, Dest::Frame, None, color, None);
         }
     }
     let Builder {
