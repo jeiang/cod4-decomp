@@ -905,6 +905,10 @@ impl Ui {
             return;
         }
         self.lose_item_focus(host, m);
+        // Typing in a field ends when another item takes focus.
+        for it in &mut self.menus[m].items {
+            it.editing = false;
+        }
         self.menus[m].cursor = Some(i);
         self.menus[m].items[i].dyn_flags |= dynf::HASFOCUS;
         let d = self.menus[m].def.clone();
@@ -1372,7 +1376,25 @@ impl Ui {
         {
             return used;
         }
-        if let Some(code) = key_code(&key)
+        // The focused item's own key handling comes before the menu's `execKey` handlers (`Menu_HandleKey`).
+        let item_keys = self.menus[m].cursor.is_some_and(|i| {
+            let enter = matches!(key, UiKey::Enter | UiKey::Mouse1);
+            let arrows = matches!(key, UiKey::Left | UiKey::Right);
+            match def.items[i].ty {
+                ity::LISTBOX => {
+                    enter
+                        || matches!(
+                            key,
+                            UiKey::Up | UiKey::Down | UiKey::WheelUp | UiKey::WheelDown
+                        )
+                }
+                ity::YESNO | ity::MULTI | ity::DVARENUM | ity::SLIDER => enter || arrows,
+                ity::BIND => enter,
+                _ => false,
+            }
+        });
+        if !item_keys
+            && let Some(code) = key_code(&key)
             && self.check_on_key(host, m, code)
         {
             return true;
@@ -2230,5 +2252,40 @@ mod tests {
         ui.open_as(&mut host, "popup_leavegame", MenuKind::Ingame);
         ui.close_ingame_menu(&mut host);
         assert!(!ui.captures_input());
+    }
+
+    /// Hovering another item after a field ends the edit: Escape then leaves the menu instead of vanishing into the
+    /// field.
+    #[test]
+    fn hovering_another_item_ends_the_edit() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "createserver");
+        let m = ui.menu_index("createserver").unwrap();
+        let field = (0..ui.menus[m].items.len())
+            .find(|&i| {
+                ui.menus[m].def.items[i].ty == ity::EDITFIELD && ui.item_visible(&mut host, m, i)
+            })
+            .expect("a visible edit field");
+        let (x, y) = center(&ui, m, field);
+        ui.mouse_move(&mut host, x, y);
+        assert!(ui.menus[m].items[field].editing);
+        let other = (0..ui.menus[m].items.len())
+            .find(|&i| {
+                let (x, y) = center(&ui, m, i);
+                i != field
+                    && ui.menus[m].def.items[i].ty == ity::BUTTON
+                    && ui.item_visible(&mut host, m, i)
+                    && !ui.item_contains(m, field, x, y)
+            })
+            .expect("a button elsewhere");
+        let (x, y) = center(&ui, m, other);
+        ui.mouse_move(&mut host, x, y);
+        assert!(ui.menus[m].items.iter().all(|it| !it.editing));
+        ui.key(&mut host, UiKey::Escape);
+        assert!(!ui.is_open("createserver"), "Escape was eaten by the field");
     }
 }
