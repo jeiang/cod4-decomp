@@ -1264,6 +1264,33 @@ impl Server {
                 host.game.g_damage(&mut run.vm, v, d);
                 host.run_calls(&mut run.vm);
             }
+            // Test hook: `devshoot <attacker> <x0 y0 z0> <x1 y1 z1>` fires a 100 damage rifle bullet along the
+            // segment through any `trigger_damage` volume on it.
+            "devshoot" => {
+                if !self.game.cvars.bool("sv_cheats") {
+                    return Err("devshoot needs sv_cheats 1".into());
+                }
+                let nums: Vec<f32> = argv[1..].iter().map(|a| cvar::parse_float(a)).collect();
+                if nums.len() != 7 {
+                    return Err("usage: devshoot <attacker> <x0 y0 z0> <x1 y1 z1>".into());
+                }
+                let Some(run) = self.run.as_mut() else {
+                    return Err("Server is not running.".into());
+                };
+                let mut host = ScriptHost {
+                    game: &mut self.game,
+                    dispatch: &run.dispatch,
+                };
+                host.game.check_hit_trigger_damage(
+                    &mut run.vm,
+                    nums[0] as u16,
+                    [nums[1], nums[2], nums[3]],
+                    [nums[4], nums[5], nums[6]],
+                    100,
+                    crate::combat::MOD_RIFLE_BULLET,
+                );
+                host.run_calls(&mut run.vm);
+            }
             "serverinfo" => {
                 let s = self.game.cvars.info_string(cvar::SERVERINFO);
                 self.say(&format!("Server info settings:\n{s}\n"));
@@ -1722,9 +1749,19 @@ impl Server {
                 host.run_calls(&mut run.vm);
                 client += t.elapsed();
             }
-            // Trigger pass: the first drain of the tick's bucket.
+            // `G_TouchTriggers` for every player, then the trigger pass: each triggered entity is
+            // notified once per round, the scripts run, and touches held back get another round.
             let t = Instant::now();
-            errors.extend(run.vm.run_current_threads(&mut host));
+            host.game.touch_all_triggers(&mut run.vm);
+            host.run_calls(&mut run.vm);
+            let mut pending = std::mem::take(&mut host.game.level.pending_triggers);
+            loop {
+                let more = host.game.deliver_triggers(&mut run.vm, &mut pending);
+                errors.extend(run.vm.run_current_threads(&mut host));
+                if !more {
+                    break;
+                }
+            }
             gsc += t.elapsed();
             // G_XAnimUpdateEnt: each entity's animations advance one notetrack at a time and
             // the scripts run between notetracks.

@@ -29,6 +29,7 @@ pub mod script;
 pub mod server;
 pub mod tags;
 pub mod tempev;
+pub mod trigger;
 pub mod ui;
 pub mod vehicle;
 pub mod vote;

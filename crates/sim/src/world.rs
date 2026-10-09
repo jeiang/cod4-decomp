@@ -702,6 +702,26 @@ impl World {
         self.sight_trace(0, start, end, mins, maxs, pass0, pass1, mask) == 0
     }
 
+    /// `SV_SightTraceToEntity`: whether the line meets entity `num` alone, whether or not anything
+    /// else is in the way.
+    pub fn sight_trace_to_entity(&self, num: u16, start: Vec3, end: Vec3, mask: i32) -> bool {
+        let Some(d) = self.entity(num) else {
+            return false;
+        };
+        d.ent.contents & mask != 0
+            && self.cm.transformed_sight_trace(
+                0,
+                start,
+                end,
+                [0.0; 3],
+                [0.0; 3],
+                &d.ent.model(),
+                mask,
+                d.ent.origin,
+                d.ent.clip_angles(),
+            ) != 0
+    }
+
     /// `SV_SightTrace`: nonzero when the line is blocked. Pass the previous result back as
     /// `old_hit` for the same viewer to try the blocking brush first.
     #[allow(clippy::too_many_arguments)]

@@ -899,6 +899,9 @@ impl Game {
         if m.info.projectile_activate_dist > 0 {
             m.travel_dist += length(sub(endpos, old));
         }
+        if m.kind == MissileKind::Grenade {
+            self.grenade_touch_trigger_damage(vm, n, old, origin, m.info.explosion_inner_damage);
+        }
         if tr.fraction == 1.0 {
             if length(m.pos.delta) != 0.0 {
                 m.ground = None;
@@ -1143,6 +1146,11 @@ impl Game {
                     return;
                 }
             }
+        }
+        if damage != 0 {
+            let origin = self.ent(n).map_or(endpos, |e| e.origin);
+            let by = owner.unwrap_or(ENTITYNUM_WORLD);
+            self.check_hit_trigger_damage(vm, by, origin, endpos, damage, mean);
         }
         self.missile_set_pose(n, endpos, None);
         if explode_on_impact

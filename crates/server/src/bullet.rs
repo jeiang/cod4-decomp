@@ -7,8 +7,8 @@
 //! bone goes on. The damage a trace deals is worked out first, against shared state, and applied
 //! afterwards, so [`Game::bullet_hits`] needs nothing mutable.
 //!
-//! Ceilings: entities other than players have no locational hit parts, `trigger_damage` volumes
-//! are not notified of bullets passing through them, and impact effects are the clients' job.
+//! Ceilings: entities other than players have no locational hit parts, and impact effects are the
+//! clients' job.
 
 use sim::Vec3;
 use sim::cm::{ENTITYNUM_NONE, ENTITYNUM_WORLD, Trace};
@@ -316,6 +316,8 @@ pub struct BulletHit {
     pub surface: u8,
     /// The surface takes no marks (sky, no-impact brushes).
     pub no_impact: bool,
+    /// Where the trace that found this hit began (`bp->start`): the stretch `trigger_damage` volumes were crossed on.
+    pub start: Vec3,
     pub point: Vec3,
     pub dir: Vec3,
     pub damage: i32,
@@ -427,6 +429,7 @@ impl Game {
             normal: br.t.normal,
             surface: surface_type(br.t.surface_flags) as u8,
             no_impact: br.t.surface_flags & (SURF_NOIMPACT | SURF_SKY) != 0,
+            start: bp.start,
             point: br.hit_pos,
             dir: bp.dir,
             damage: bullet_damage(p.info, dist, bp.multiplier),
