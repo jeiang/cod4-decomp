@@ -24,6 +24,7 @@
 )]
 
 mod ads;
+pub mod bob;
 pub mod damage;
 mod duck;
 mod footsteps;
@@ -229,6 +230,10 @@ pub struct CmdOut {
     pub maxs: Vec3,
     /// Set when the command began a mantle: where it ends and how long it takes in ms.
     pub mantle: Option<(Vec3, i32)>,
+    /// The vertical distance the command stepped up or down (stairs, ledges) and the command time it happened at;
+    /// `0.0` and `0` when it did not step. The first-person camera smooths over it ([`Pmove::view_change`]).
+    pub view_change: f32,
+    pub view_change_time: i32,
 }
 
 /// Runs one user command exactly as the server does, so a client predicting its own player
@@ -264,6 +269,7 @@ pub fn run_usercmd(
     let touched = pm.touched().to_vec();
     let (mins, maxs) = (pm.mins, pm.maxs);
     let weapon_out = pm.weapon_out;
+    let (view_change, view_change_time) = (pm.view_change, pm.view_change_time);
     let mantle = pm
         .mantle_started
         .then_some((pm.mantle_end_pos, pm.mantle_duration));
@@ -275,5 +281,7 @@ pub fn run_usercmd(
         mins,
         maxs,
         mantle,
+        view_change,
+        view_change_time,
     }
 }
