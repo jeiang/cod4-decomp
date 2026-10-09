@@ -36,6 +36,57 @@ fn fail(mut r: StageReport, why: String) -> StageReport {
     r
 }
 
+/// One column of `frames.raw.csv`.
+fn column(csv: &str, i: usize) -> Vec<f64> {
+    csv.lines()
+        .skip(1)
+        .filter_map(|l| l.split(',').nth(i)?.parse().ok())
+        .collect()
+}
+
+/// A frame costing this many times the median, and at least [`SPIKE_MIN_MS`], is a hitch the player feels.
+const SPIKE_FACTOR: f64 = 5.0;
+const SPIKE_MIN_MS: f64 = 100.0;
+/// Share of the frames that may be hitches (the odd scheduler stall of a busy machine; the screenshot frame).
+const SPIKE_SHARE: f64 = 0.005;
+
+/// Why the frames hitched, if they did. `cpu_ms` is every frame's own cost; the report's `late_builds` lists what
+/// frames after the first compiled or translated themselves, as "frame what". A pipeline compiled inside a frame
+/// stalls it for up to tens of milliseconds whatever the machine, so none may be (the check does not depend on how
+/// fast the runner is); the spike count is the relative check on what that misses.
+fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
+    let mut out = Vec::new();
+    let inline: Vec<&str> = report["late_builds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|w| {
+            w.split_once(' ')
+                .is_some_and(|(_, what)| what.starts_with("pipeline "))
+        })
+        .collect();
+    if let Some(first) = inline.first() {
+        out.push(format!(
+            "{} pipelines compiled inside frames while playing (a hitch each), first: {first}",
+            inline.len()
+        ));
+    }
+    if let Some(p) = Percentiles::from_samples(cpu_ms) {
+        let limit = (p.p50 * SPIKE_FACTOR).max(SPIKE_MIN_MS);
+        let spikes = cpu_ms.iter().filter(|c| **c > limit).count();
+        if spikes as f64 > cpu_ms.len() as f64 * SPIKE_SHARE {
+            out.push(format!(
+                "{spikes} of {} frames cost over {limit:.0} ms (median {:.1} ms, worst {:.0} ms): the frames hitch",
+                cpu_ms.len(),
+                p.p50,
+                p.max
+            ));
+        }
+    }
+    out
+}
+
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
         return Ok(StageReport::new(NAME, Status::Skipped)
@@ -140,6 +191,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             jerky * 100.0
         ));
     }
+    // A frame that hitches: pipelines compiled inside a frame, or frames far over the usual cost.
+    let cpu = fs::read_to_string(dir.join("frames.raw.csv"))
+        .map(|csv| column(&csv, 0))
+        .unwrap_or_default();
+    failures.extend(hitch_failures(&json, &cpu));
     // The camera eases over stair steps: a frame that began a step on the logical eye did not jump the drawn one.
     // The match's walking decides whether a step is climbed at all; with none the stage notes it as untested.
     let (stairs, snapped) = (
@@ -379,19 +435,16 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     );
     // Frame pacing of the client while playing.
     if let Ok(csv) = fs::read_to_string(dir.join("frames.raw.csv")) {
-        let col = |i: usize| -> Vec<f64> {
-            csv.lines()
-                .skip(1)
-                .filter_map(|l| l.split(',').nth(i)?.parse().ok())
-                .collect()
-        };
+        let col = |i: usize| column(&csv, i);
         if let Some(p) = Percentiles::from_samples(&col(0)) {
             m.insert("client.cpu_ms_p50".into(), p.p50);
             m.insert("client.cpu_ms_p99".into(), p.p99);
+            m.insert("client.cpu_ms_max".into(), p.max);
         }
         if let Some(p) = Percentiles::from_samples(&col(2)) {
             m.insert("client.frame_interval_ms_p50".into(), p.p50);
             m.insert("client.frame_interval_ms_p99".into(), p.p99);
+            m.insert("client.frame_interval_ms_max".into(), p.max);
         }
     }
     report.notes.push(format!(
@@ -410,4 +463,39 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         return Ok(fail(report, failures.join("; ")));
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_pipeline_built_in_a_frame_is_a_hitch_a_pass_is_not() {
+        let steady = vec![16.0; 1000];
+        let passes = json!({"late_builds": ["7 pass wc/x tech 9 World"]});
+        assert!(hitch_failures(&passes, &steady).is_empty());
+        let pipe =
+            json!({"late_builds": ["7 pass wc/x tech 9 World", "7 pipeline wc/x Target {}"]});
+        let why = hitch_failures(&pipe, &steady);
+        assert_eq!(why.len(), 1);
+        assert!(why[0].contains("1 pipelines"), "{why:?}");
+    }
+
+    #[test]
+    fn spikes_are_counted_against_the_median_not_a_fixed_speed() {
+        let report = json!({});
+        // A slow machine: everything at 90 ms is steady, not a hitch.
+        assert!(hitch_failures(&report, &vec![90.0; 1000]).is_empty());
+        let mut frames = vec![16.0; 1000];
+        frames[10] = 300.0;
+        assert!(
+            hitch_failures(&report, &frames).is_empty(),
+            "one in a thousand is the scheduler"
+        );
+        for f in &mut frames[20..30] {
+            *f = 300.0;
+        }
+        assert_eq!(hitch_failures(&report, &frames).len(), 1);
+    }
 }

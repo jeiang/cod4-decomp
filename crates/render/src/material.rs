@@ -14,7 +14,7 @@ use crate::water::WaterSim;
 use assets::zone::gfx::{ArgValue, Material, Pass, TechniqueSet, TextureSource};
 use sm3::{Options, SamplerDim, Stage, Translation, VertexFix};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use web_time::Instant;
 
@@ -327,6 +327,14 @@ fn fill(
 /// Program address, alpha test, vertex layout (vertex shaders only).
 type ShaderKey = (usize, Option<[u32; 2]>, Option<VertexKind>, bool);
 
+/// The workers [`Materials::build_in_background`] started.
+#[cfg(not(target_arch = "wasm32"))]
+struct Background {
+    jobs: std::sync::mpsc::Sender<(Arc<Prepared>, Target)>,
+    /// Pipelines asked for and not built yet, so a frame asks once.
+    queued: Arc<Mutex<HashSet<(u32, Target)>>>,
+}
+
 /// Caches shared by all prepared passes.
 pub struct Materials {
     shaders: HashMap<ShaderKey, Option<Arc<Compiled>>>,
@@ -339,6 +347,14 @@ pub struct Materials {
     next_id: u32,
     deadline: Mutex<Option<Instant>>,
     deferred: AtomicUsize,
+    /// What a frame built itself rather than found built: pipelines and prepared passes, how many and the
+    /// microseconds they took (a late build is a hitch), see [`Materials::take_late`].
+    /// Native: compiles the pipelines a frame asks for on worker threads instead of inline, once on, see
+    /// [`Materials::build_in_background`].
+    #[cfg(not(target_arch = "wasm32"))]
+    background: Option<Background>,
+    late: [AtomicU64; 4],
+    late_names: Mutex<Vec<String>>,
     demand: Mutex<HashSet<(u32, Target)>>,
     /// Material name to why it could not be prepared.
     pub failures: BTreeMap<String, String>,
@@ -394,6 +410,10 @@ impl Materials {
             next_id: 0,
             deadline: Mutex::new(None),
             deferred: AtomicUsize::new(0),
+            #[cfg(not(target_arch = "wasm32"))]
+            background: None,
+            late: Default::default(),
+            late_names: Mutex::new(Vec::new()),
             demand: Mutex::new(HashSet::new()),
             failures: BTreeMap::new(),
             waters: HashMap::new(),
@@ -678,7 +698,11 @@ impl Materials {
             return p.clone();
         }
         let name = mat.name.as_deref().unwrap_or("?").to_owned();
+        let began = Instant::now();
         let built = self.build(gpu, textures, mat, tech, kind, hsm);
+        self.late[2].fetch_add(1, Ordering::Relaxed);
+        self.late[3].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
+        lock(&self.late_names).push(format!("pass {name} tech {tech} {kind:?}"));
         let p = match built {
             Ok(p) => Some(Arc::new(p)),
             Err(e) => {
@@ -895,7 +919,7 @@ impl Materials {
     pub fn pipeline(
         &self,
         gpu: &Gpu,
-        p: &Prepared,
+        p: &Arc<Prepared>,
         target: Target,
     ) -> Option<Arc<wgpu::RenderPipeline>> {
         if let Some(built) = lock(&p.pipelines).get(&target) {
@@ -906,7 +930,66 @@ impl Materials {
             lock(&self.demand).insert((p.id, target));
             return None;
         }
-        Some(self.pipeline_now(gpu, p, target))
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(b) = &self.background {
+            // The draw waits a few frames for its pipeline rather than the frame for the compiler.
+            if lock(&b.queued).insert((p.id, target)) {
+                let _ = b.jobs.send((p.clone(), target));
+            }
+            self.deferred.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let began = Instant::now();
+        let built = self.pipeline_now(gpu, p, target);
+        self.late[0].fetch_add(1, Ordering::Relaxed);
+        self.late[1].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
+        lock(&self.late_names).push(format!("pipeline {} {:?}", p.name, target));
+        Some(built)
+    }
+
+    /// From now on a pipeline a frame finds missing is compiled by worker threads and its draw skipped until it is
+    /// done (a shader compile takes up to tens of milliseconds: inline it is a dropped frame, see
+    /// [`Materials::take_late`]). A load keeps compiling inline, so the first frame it draws is complete.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn build_in_background(&mut self, gpu: &Gpu) {
+        if self.background.is_some() {
+            return;
+        }
+        let (jobs, rx) = std::sync::mpsc::channel::<(Arc<Prepared>, Target)>();
+        let rx = Arc::new(Mutex::new(rx));
+        let queued = Arc::new(Mutex::new(HashSet::new()));
+        // Half the cores at most: the frame and the server run beside them.
+        let workers = (std::thread::available_parallelism().map_or(2, usize::from) / 4).clamp(1, 2);
+        for _ in 0..workers {
+            let (rx, queued) = (rx.clone(), queued.clone());
+            let (device, vs, ps) = (
+                gpu.device.clone(),
+                self.vs_layout.clone(),
+                self.ps_layout.clone(),
+            );
+            std::thread::spawn(move || {
+                // The sender is dropped with the materials: the workers end with them.
+                while let Ok((p, target)) = { lock(&rx).recv() } {
+                    if !lock(&p.pipelines).contains_key(&target) {
+                        let built = build_pipeline(&device, &vs, &ps, &p, target);
+                        lock(&p.pipelines).entry(target).or_insert(built);
+                    }
+                    lock(&queued).remove(&(p.id, target));
+                }
+            });
+        }
+        self.background = Some(Background { jobs, queued });
+    }
+
+    /// What [`Materials::take_late`] counted, by name.
+    pub fn take_late_names(&self) -> Vec<String> {
+        std::mem::take(&mut *lock(&self.late_names))
+    }
+
+    /// Pipelines and prepared passes built since the last call, as (pipelines, pipeline ms, passes, pass ms).
+    pub fn take_late(&self) -> (usize, f64, usize, f64) {
+        let [a, b, c, d] = std::array::from_fn(|i| self.late[i].swap(0, Ordering::Relaxed));
+        (a as usize, b as f64 / 1000.0, c as usize, d as f64 / 1000.0)
     }
 
     /// The pipeline for `p` rendering into `target`, built now whatever the deadline.
@@ -916,75 +999,12 @@ impl Materials {
         p: &Prepared,
         target: Target,
     ) -> Arc<wgpu::RenderPipeline> {
-        let mut map = lock(&p.pipelines);
-        map.entry(target)
-            .or_insert_with(|| {
-                let layout = gpu
-                    .device
-                    .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                        label: None,
-                        bind_group_layouts: &[
-                            Some(&self.vs_layout),
-                            Some(&self.ps_layout),
-                            Some(&p.tex_layout),
-                        ],
-                        immediate_size: 0,
-                    });
-                let s = p.state;
-                Arc::new(
-                    gpu.device
-                        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                            label: Some(&p.name),
-                            layout: Some(&layout),
-                            vertex: wgpu::VertexState {
-                                module: &p.vs.module,
-                                entry_point: Some("main"),
-                                compilation_options: Default::default(),
-                                buffers: &[Some(wgpu::VertexBufferLayout {
-                                    array_stride: p.kind.stride(),
-                                    step_mode: wgpu::VertexStepMode::Vertex,
-                                    attributes: &p.attrs,
-                                })],
-                            },
-                            fragment: Some(wgpu::FragmentState {
-                                module: &p.ps.module,
-                                entry_point: Some("main"),
-                                compilation_options: Default::default(),
-                                targets: &[target.color.map(|format| wgpu::ColorTargetState {
-                                    format,
-                                    blend: s.blend(),
-                                    write_mask: s.color_write(),
-                                })],
-                            }),
-                            primitive: wgpu::PrimitiveState {
-                                topology: wgpu::PrimitiveTopology::TriangleList,
-                                front_face: wgpu::FrontFace::Cw,
-                                cull_mode: s.cull(),
-                                ..Default::default()
-                            },
-                            depth_stencil: target.depth.map(|format| wgpu::DepthStencilState {
-                                format,
-                                depth_write_enabled: Some(s.depth_write()),
-                                depth_compare: Some(s.depth_compare()),
-                                // The scene's depth buffer has no stencil; the light techniques' stencil test (they
-                                // draw only where the light's rectangle was cleared) is left to the alpha weighting.
-                                stencil: if format.has_stencil_aspect() {
-                                    s.stencil()
-                                } else {
-                                    wgpu::StencilState::default()
-                                },
-                                bias: s.depth_bias(),
-                            }),
-                            multisample: wgpu::MultisampleState {
-                                count: target.samples.max(1),
-                                ..Default::default()
-                            },
-                            multiview_mask: None,
-                            cache: None,
-                        }),
-                )
-            })
-            .clone()
+        if let Some(built) = lock(&p.pipelines).get(&target) {
+            return built.clone();
+        }
+        // Built outside the lock: a compile takes milliseconds and the frame looks pipelines of `p` up.
+        let built = build_pipeline(&gpu.device, &self.vs_layout, &self.ps_layout, p, target);
+        lock(&p.pipelines).entry(target).or_insert(built).clone()
     }
 
     /// Group 2 bind group for `p`. `code` resolves a code texture id to a texture (and sampler state) for this draw.
@@ -1038,4 +1058,71 @@ impl Materials {
             entries: &entries,
         })
     }
+}
+
+/// Compiles the pipeline of `p` into `target`.
+fn build_pipeline(
+    device: &wgpu::Device,
+    vs_layout: &wgpu::BindGroupLayout,
+    ps_layout: &wgpu::BindGroupLayout,
+    p: &Prepared,
+    target: Target,
+) -> Arc<wgpu::RenderPipeline> {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(vs_layout), Some(ps_layout), Some(&p.tex_layout)],
+        immediate_size: 0,
+    });
+    let s = p.state;
+    Arc::new(
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(&p.name),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &p.vs.module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: p.kind.stride(),
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &p.attrs,
+                })],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &p.ps.module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                targets: &[target.color.map(|format| wgpu::ColorTargetState {
+                    format,
+                    blend: s.blend(),
+                    write_mask: s.color_write(),
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: s.cull(),
+                ..Default::default()
+            },
+            depth_stencil: target.depth.map(|format| wgpu::DepthStencilState {
+                format,
+                depth_write_enabled: Some(s.depth_write()),
+                depth_compare: Some(s.depth_compare()),
+                // The scene's depth buffer has no stencil; the light techniques' stencil test (they
+                // draw only where the light's rectangle was cleared) is left to the alpha weighting.
+                stencil: if format.has_stencil_aspect() {
+                    s.stencil()
+                } else {
+                    wgpu::StencilState::default()
+                },
+                bias: s.depth_bias(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: target.samples.max(1),
+                ..Default::default()
+            },
+            multiview_mask: None,
+            cache: None,
+        }),
+    )
 }

@@ -248,7 +248,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct FrameStats {
     pub cells: usize,
     pub surfaces: usize,
@@ -261,6 +261,15 @@ pub struct FrameStats {
     /// Shadow cookies drawn.
     pub cookies: usize,
     pub pipelines_missing: usize,
+    /// Pipelines and passes this frame had to build itself (shader compiles on the frame path), count and ms.
+    /// Milliseconds since the render began at: culling, dynamic prep, sun shadow, spot shadow, main draws, lights,
+    /// draws done, post, encoded, submitted, end.
+    pub laps: [f32; 10],
+    pub late_names: Vec<String>,
+    pub late_pipelines: usize,
+    pub late_pipeline_ms: f64,
+    pub late_passes: usize,
+    pub late_pass_ms: f64,
     /// The frame drew the float-Z target (depth of field, or a z-feathered material in the scene).
     pub floatz: bool,
     /// The frame copied the scene before the emissive surfaces for distortion materials.
@@ -710,6 +719,16 @@ impl Renderer {
         self.timer
             .as_mut()
             .map_or_else(Vec::new, GpuTimer::take_finished)
+    }
+
+    /// Once the load is done: a pipeline a frame finds missing (something [`Renderer::warm`] did not list, first
+    /// drawn) is compiled on worker threads and its draw skipped meanwhile, so a shader compile never stalls a frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn build_pipelines_in_background(&mut self) {
+        self.materials.build_in_background(&self.gpu);
+        // What the load built is not a hitch.
+        self.materials.take_late();
+        self.materials.take_late_names();
     }
 
     /// Wait for the frames in flight and return their GPU times, as [`Renderer::take_gpu_times`].
@@ -2422,6 +2441,7 @@ impl Renderer {
         size: (u32, u32),
     ) -> FrameStats {
         let t0 = Instant::now();
+        let mut laps = [0.0f32; 10];
         self.ensure_depth(size);
         self.ensure_shadow();
         if self.post_state.invalidate(size, format) {
@@ -2468,6 +2488,7 @@ impl Renderer {
         let world = self.scene.world.clone();
         let frustum = Frustum::from_clip(&view.clip_from_world(aspect));
         let vis = cull::visible(&world, view.origin, &frustum);
+        laps[0] = t0.elapsed().as_secs_f32() * 1000.0;
         let mut stats = FrameStats {
             cells: vis.cells,
             surfaces: vis.surfaces.len(),
@@ -2503,6 +2524,7 @@ impl Renderer {
         }
         let (dynsurfs, mesh_runs) = self.prepare_dynamic(&insts, &meshes, view.origin, &v);
 
+        laps[1] = t0.elapsed().as_secs_f32() * 1000.0;
         // The sun shadow map.
         let has_sun = world.sun_light.is_some() && self.shadow.is_some();
         let sun = has_sun.then(|| {
@@ -2570,6 +2592,7 @@ impl Renderer {
             }
         }
 
+        laps[2] = t0.elapsed().as_secs_f32() * 1000.0;
         // The spot lights that cast a shadow this frame, and their shadow maps' casters.
         self.ensure_spot_shadow();
         let dt = self
@@ -2611,6 +2634,7 @@ impl Renderer {
             depth: Some(DEPTH_FORMAT),
             samples,
         };
+        laps[3] = t0.elapsed().as_secs_f32() * 1000.0;
         let mut draws = self.build_draws(
             PassKind::Scene,
             &frame,
@@ -2689,6 +2713,7 @@ impl Renderer {
         if !self.settings.distortion {
             vm_draws.retain(|d| d.prepared.flags & TECH_NEEDS_POST_SUN == 0);
         }
+        laps[4] = t0.elapsed().as_secs_f32() * 1000.0;
         let dlights = std::mem::take(&mut self.dynamic_lights);
         let light_passes = self.build_light_passes(
             &dlights,
@@ -2726,8 +2751,16 @@ impl Renderer {
         self.dynamic_lights = dlights;
         stats.models += insts.len();
         stats.models = counts.models;
+        laps[5] = t0.elapsed().as_secs_f32() * 1000.0;
         let (deferred, demand) = self.materials.take_deferred();
         stats.pipelines_missing = counts.missing + deferred;
+        (
+            stats.late_pipelines,
+            stats.late_pipeline_ms,
+            stats.late_passes,
+            stats.late_pass_ms,
+        ) = self.materials.take_late();
+        stats.late_names = self.materials.take_late_names();
         if let Some(w) = self.warm.as_mut() {
             w.demand.extend(demand);
         }
@@ -2774,9 +2807,11 @@ impl Renderer {
             ));
             (zview, list)
         });
+        laps[6] = t0.elapsed().as_secs_f32() * 1000.0;
         let chain = post::build(self, size, format, target, NEAR, distortion);
 
         self.upload_ring();
+        laps[7] = t0.elapsed().as_secs_f32() * 1000.0;
         let mut enc = self.gpu.device.create_command_encoder(&Default::default());
         if let (Some(ss), Some(sh)) = (&sun, &self.shadow) {
             let _ = ss;
@@ -3103,6 +3138,7 @@ impl Renderer {
         if let Some(t) = self.timer.as_mut() {
             t.resolve(&mut enc);
         }
+        laps[8] = t0.elapsed().as_secs_f32() * 1000.0;
         self.gpu.queue.submit([enc.finish()]);
         self.sun.submitted();
         if let Some(t) = self.timer.as_mut() {
@@ -3113,6 +3149,8 @@ impl Renderer {
         self.dynamic_models = insts;
         meshes.truncate(caller_meshes);
         self.dynamic_meshes = meshes;
+        laps[9] = t0.elapsed().as_secs_f32() * 1000.0;
+        stats.laps = laps;
         stats.cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
         stats
     }

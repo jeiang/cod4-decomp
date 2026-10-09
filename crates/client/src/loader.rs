@@ -265,39 +265,10 @@ impl Work {
         Ok(())
     }
 
-    /// What a match draws that the map does not hold: every weapon's gun, hands and world model and the players get
-    /// their pipelines too.
     fn add_models(&mut self) -> Result<(), String> {
         let library = self.library.as_ref().ok_or("not decoded")?;
         let renderer = self.renderer.as_mut().ok_or("not built")?;
-        let mut models = Vec::new();
-        for w in library.content.weapons() {
-            models.extend(w.gun_models.iter().flatten().cloned());
-            models.extend(w.world_models.iter().flatten().cloned());
-            models.extend(w.hand_model.clone());
-        }
-        for team in [Team::Allies, Team::Axis] {
-            if let Some(set) = library.team_models(team) {
-                let names = std::iter::once(&set.body).chain(set.attach.iter().map(|(m, _)| m));
-                models.extend(names.filter_map(|n| library.content.model(n).cloned()));
-            }
-        }
-        for name in library.content.model_names("viewhands_") {
-            models.extend(library.content.model(name).cloned());
-        }
-        renderer.warm_models(&models);
-        renderer.warm_clouds(library.content.effects().iter().flat_map(|e| {
-            e.elems
-                .iter()
-                .filter(|d| d.elem_type == assets::zone::fx::elem::CLOUD)
-                .flat_map(|d| match &d.visuals {
-                    assets::zone::fx::FxVisuals::Materials(ms) => {
-                        ms.iter().flatten().cloned().collect()
-                    }
-                    _ => Vec::new(),
-                })
-                .collect::<Vec<_>>()
-        }));
+        add_match_models(renderer, library);
         Ok(())
     }
 
@@ -323,6 +294,39 @@ impl Work {
             ms: self.started.elapsed().as_secs_f64() * 1000.0,
         })
     }
+}
+
+/// What a match draws that the map does not hold: every weapon's gun, hands and world model and the players get
+/// their pipelines too.
+pub fn add_match_models(renderer: &mut Renderer, library: &Library) {
+    let mut models = Vec::new();
+    for w in library.content.weapons() {
+        models.extend(w.gun_models.iter().flatten().cloned());
+        models.extend(w.world_models.iter().flatten().cloned());
+        models.extend(w.hand_model.clone());
+    }
+    for team in [Team::Allies, Team::Axis] {
+        if let Some(set) = library.team_models(team) {
+            let names = std::iter::once(&set.body).chain(set.attach.iter().map(|(m, _)| m));
+            models.extend(names.filter_map(|n| library.content.model(n).cloned()));
+        }
+    }
+    for name in library.content.model_names("viewhands_") {
+        models.extend(library.content.model(name).cloned());
+    }
+    renderer.warm_models(&models);
+    renderer.warm_clouds(library.content.effects().iter().flat_map(|e| {
+        e.elems
+            .iter()
+            .filter(|d| d.elem_type == assets::zone::fx::elem::CLOUD)
+            .flat_map(|d| match &d.visuals {
+                assets::zone::fx::FxVisuals::Materials(ms) => {
+                    ms.iter().flatten().cloned().collect()
+                }
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+    }));
 }
 
 #[cfg(not(target_arch = "wasm32"))]

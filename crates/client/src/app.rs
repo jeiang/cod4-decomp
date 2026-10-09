@@ -298,6 +298,13 @@ struct State {
     /// A menu was open at the last frame.
     menu_was_open: bool,
     samples: Vec<[f64; 3]>,
+    /// Per frame, parallel to `samples`: where the milliseconds went (`frames.phases.csv`), see [`PHASES`].
+    phases: Vec<[f32; 18]>,
+    /// What the last render built on the frame path: pipelines, their ms, passes, their ms.
+    late: [f32; 4],
+    laps: [f32; 10],
+    /// What frames built on the frame path: (frame, what).
+    late_names: Vec<(usize, String)>,
     /// GPU milliseconds per render call, once the timestamps come back (index = frame number - 1).
     gpu_ms: Vec<Option<f64>>,
     rss: u64,
@@ -544,7 +551,9 @@ impl Viewer {
         surface.configure(&gpu.device, &config);
         let vfs = Vfs::open_stock(&self.cli.install, 0)
             .map_err(|e| format!("cannot open the install: {e}"))?;
-        let renderer = match &self.map {
+        // Native warms it again once the library is loaded (see below); the browser builds its pipelines by frames.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut renderer = match &self.map {
             Some(map) => {
                 #[cfg(target_arch = "wasm32")]
                 crate::web::log("building the scene");
@@ -647,6 +656,14 @@ impl Viewer {
                 }
             };
             let lib = Library::load(&self.cli.install, &self.cli.map)?;
+            // What the match draws that the map does not hold (players, weapons) gets its pipelines now, not at
+            // first sight; what the scripts then dress players in is compiled beside the frames.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(r) = renderer.as_mut() {
+                crate::loader::add_match_models(r, &lib);
+                r.warm(config.format);
+                r.build_pipelines_in_background();
+            }
             let limits = Input::detached().pitch_limits();
             let mut n = NetPlay::connect(
                 lib,
@@ -759,6 +776,10 @@ impl Viewer {
             lock_seen: false,
             menu_was_open: false,
             samples: Vec::new(),
+            phases: Vec::new(),
+            late: [0.0; 4],
+            laps: [0.0; 10],
+            late_names: Vec::new(),
             gpu_ms: Vec::new(),
             rss: 0,
             recorder: None,
@@ -947,6 +968,10 @@ impl ApplicationHandler<Ready> for Viewer {
         }
     }
 }
+
+/// The columns of `frames.phases.csv`: network and prediction, surface acquire, render, present, then what the
+/// render built on the frame path (pipelines and passes: count, ms each).
+const PHASES: &str = "net_ms,acquire_ms,render_ms,present_ms,late_pipelines,late_pipeline_ms,late_passes,late_pass_ms,r_setup,r_dynamic,r_sun_shadow,r_spot_shadow,r_main_draws,r_lights,r_floatz,r_post_upload,r_encode,r_submit";
 
 impl Viewer {
     fn frame(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
@@ -1405,6 +1430,19 @@ impl Viewer {
             {
                 st.pipelines_missing = stats.pipelines_missing;
             }
+            st.late = [
+                stats.late_pipelines as f32,
+                stats.late_pipeline_ms as f32,
+                stats.late_passes as f32,
+                stats.late_pass_ms as f32,
+            ];
+            st.laps = stats.laps;
+            let n = st.samples.len();
+            // The first frame holds what the load built; later ones are hitches. A cap keeps the report small.
+            if n > 0 && st.late_names.len() < 256 {
+                st.late_names
+                    .extend(stats.late_names.iter().map(|w| (n, w.clone())));
+            }
             st.surfaces_drawn.push(stats.surfaces as f64);
             st.lights_drawn = stats.lights;
             st.distortion_now = stats.distortion_copy;
@@ -1579,6 +1617,35 @@ impl Viewer {
             st.rss = rss();
         }
         st.samples.push([cpu_ms, interval, st.rss as f64]);
+        let c = st.prev_cost;
+        let l = st.laps;
+        let lap = |i: usize| {
+            if i == 0 {
+                l[0]
+            } else {
+                (l[i] - l[i - 1]).max(0.0)
+            }
+        };
+        st.phases.push([
+            c[0] as f32,
+            c[2] as f32,
+            c[1] as f32,
+            c[3] as f32,
+            st.late[0],
+            st.late[1],
+            st.late[2],
+            st.late[3],
+            lap(0),
+            lap(1),
+            lap(2),
+            lap(3),
+            lap(4),
+            lap(5),
+            lap(6),
+            lap(7),
+            lap(8),
+            lap(9),
+        ]);
         #[cfg(target_arch = "wasm32")]
         if st.overlay_at.elapsed() >= Duration::from_millis(500) {
             st.overlay_at = Instant::now();
@@ -1745,6 +1812,16 @@ impl Viewer {
                 .map_err(|e| e.to_string())?;
         }
         csv.flush().map_err(|e| e.to_string())?;
+        // Where each frame's time went, to tell a hitch's cause: same rows as `frames.raw.csv` (the first dropped).
+        let mut ph = std::io::BufWriter::new(
+            std::fs::File::create(out.join("frames.phases.csv")).map_err(|e| e.to_string())?,
+        );
+        writeln!(ph, "{PHASES}").map_err(|e| e.to_string())?;
+        for p in st.phases.iter().skip(1) {
+            let row: Vec<String> = p.iter().map(|v| format!("{v:.3}")).collect();
+            writeln!(ph, "{}", row.join(",")).map_err(|e| e.to_string())?;
+        }
+        ph.flush().map_err(|e| e.to_string())?;
         let video = match st.recorder.take() {
             Some(r) => {
                 let s = r.finish(&st.gpu.device).map_err(|e| e.to_string())?;
@@ -1786,6 +1863,7 @@ impl Viewer {
                 "present_mode": format!("{:?}", st.present_mode).to_lowercase(),
             },
             "frames": st.samples.len(),
+            "late_builds": st.late_names.iter().map(|(n, w)| format!("{n} {w}")).collect::<Vec<_>>(),
             "video": video,
             "screenshot": st.shot_ok.then_some("screenshot.png"),
             "zone_load_ms": self.load_ms,
@@ -2879,6 +2957,10 @@ fn finish_load(
             sh.close_all(&mut st.input);
         }
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut renderer = renderer;
+    #[cfg(not(target_arch = "wasm32"))]
+    renderer.build_pipelines_in_background();
     st.renderer = Some(renderer);
     *map_slot = Some(data);
     st.map_name = map.to_owned();

@@ -81,7 +81,7 @@ usage: cod4e [options]
   --flythrough           fly the scripted path, then exit
   --duration <secs>      flythrough length (default 12)
   --fly-at <secs>        hold the flythrough at this time of its path (the same picture every run, for comparing renders)
-  --out <dir>            flythrough output: frames.raw.csv, client.json, flythrough.mp4, screenshot.png
+  --out <dir>            flythrough output: frames.raw.csv, frames.phases.csv (where each frame went), client.json, flythrough.mp4, screenshot.png
   --show-models          smoke scene: stock player models in different poses and the first-person weapon in
                          front of a fixed camera (--model-count N sets the number of players, default 7)
   --video / --screenshot record a video / save a screenshot during the flythrough
