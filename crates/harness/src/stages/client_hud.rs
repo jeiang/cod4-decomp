@@ -99,8 +99,9 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     if n("killcam_frames") == 0 {
         bad.push("no killcam frame");
     }
-    // The dead see their body from behind, and the scripts' depth of field (`setDepthOfField` at every spawn) blurs
-    // the picture; a killcam of the kill needs the death first.
+    // The dead see their body from behind, and the picture is blurred by depth of field at some point (the sights'
+    // blur, or the dead view's, which eases to a focus; the stock spawn call of `setDepthOfField` asks for nothing).
+    // A killcam of the kill needs the death first.
     let view = &report["net"]["view"];
     let v = |k: &str| view[k].as_u64().unwrap_or(0);
     if n("killcam_frames") > 0 && v("death_view_frames") == 0 {
@@ -110,7 +111,7 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
         bad.push("the death camera hung at the head instead of behind it");
     }
     if v("dof_frames") == 0 {
-        bad.push("the scripts' depth of field never blurred a frame");
+        bad.push("depth of field never blurred a frame");
     }
     // A name is held to account only when the match gave the HUD something to name; `untested` says when not.
     if n("friends_in_sight_frames") > 0 && n("names_max") == 0 {
