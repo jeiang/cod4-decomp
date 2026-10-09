@@ -31,6 +31,15 @@ fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
+/// Whether a vehicle owned by `owner` with team flags `eflags` is the viewer's enemy: another team's, or with no
+/// teams anyone's but the viewer's own (`CG_CompassDrawVehicles`).
+fn vehicle_is_enemy(own_team: u8, own: u16, owner: u16, eflags: u32) -> bool {
+    if own_team == 0 {
+        return owner != own;
+    }
+    team_of(eflags).map(|t| if t == Team::Axis { 1 } else { 2 }) != Some(own_team)
+}
+
 impl NetPlay {
     /// Updates `g` for the frame at shell time `now` (ms). With no player state yet the HUD is marked not live.
     pub fn fill_game_facts(&mut self, g: &mut GameFacts, now: i32) {
@@ -303,12 +312,7 @@ impl NetPlay {
             .iter()
             .filter(|e| matches!(e.etype, etype::VEHICLE | etype::PLANE))
         {
-            // With no teams a vehicle is the viewer's only when the viewer owns it.
-            let enemy = if own_team == 0 {
-                e.client != own
-            } else {
-                team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 }) != Some(own_team)
-            };
+            let enemy = vehicle_is_enemy(own_team, own, e.client, e.eflags);
             h.vehicles.push(CompassVehicle {
                 plane: e.etype == etype::PLANE,
                 pos: [e.origin[0], e.origin[1]],
@@ -316,6 +320,10 @@ impl NetPlay {
                 enemy,
             });
         }
+        h.vehicles_max = h.vehicles_max.max(h.vehicles.len() as u32);
+        h.enemy_vehicles_max = h
+            .enemy_vehicles_max
+            .max(h.vehicles.iter().filter(|v| v.enemy).count() as u32);
     }
 
     /// The best grenade of a class to show: one with rounds left, else any carried.
@@ -441,5 +449,22 @@ impl NetPlay {
             hide_warning: reloading || ps.e_flags & sim::pm::ef::TURRET_ACTIVE != 0,
             blocks_prone: info.blocks_prone,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_vehicle_is_the_enemys_by_team_or_in_free_for_all_by_owner() {
+        // Allies (2) viewing: an axis helicopter is an enemy, an allied one is not.
+        assert!(vehicle_is_enemy(2, 0, 5, eflags::TEAM_AXIS));
+        assert!(!vehicle_is_enemy(2, 0, 5, eflags::TEAM_ALLIES));
+        // A vehicle with no team is nobody's friend in a team match.
+        assert!(vehicle_is_enemy(1, 0, 5, 0));
+        // Free for all: only the viewer's own.
+        assert!(vehicle_is_enemy(0, 0, 5, 0));
+        assert!(!vehicle_is_enemy(0, 5, 5, 0));
     }
 }

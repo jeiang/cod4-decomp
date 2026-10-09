@@ -394,6 +394,9 @@ pub struct HudFacts {
     pub radar_pings: u32,
     pub radar_lines: u32,
     pub vehicle_marks: u32,
+    /// The most helicopters and planes the compass knew of at once, and how many of them were enemies.
+    pub vehicles_max: u32,
+    pub enemy_vehicles_max: u32,
     // Fade starts, the shell's clock; 0 is "not shown yet".
     pub health_fade: i32,
     pub stance_fade: i32,
@@ -505,6 +508,8 @@ impl HudFacts {
             "radar_marks": self.radar_marks,
             "radar_lines": self.radar_lines,
             "vehicle_marks": self.vehicle_marks,
+            "vehicles_max": self.vehicles_max,
+            "enemy_vehicles_max": self.enemy_vehicles_max,
             "objectives_listed": self.objectives_listed,
             "objectives_alpha": self.objectives_alpha,
         })
