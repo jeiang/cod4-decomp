@@ -906,7 +906,7 @@ impl NetPlay {
             let def = self
                 .lib
                 .content
-                .weapon(self.weapons.name(ps.weapon as u16))
+                .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)))
                 .cloned();
             let aim = [ps.viewangles[0], ps.viewangles[1]];
             let (seen, render, kill_fov, view_model) = if let Some((k, _)) = &kill {
@@ -1002,7 +1002,10 @@ impl NetPlay {
             ps.origin[2] + err[2],
         ];
         let dead = matches!(ps.pm_type, PmType::Dead | PmType::DeadLinked);
-        let def = self.lib.content.weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)));
+        let def = self
+            .lib
+            .content
+            .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)));
         let ads_dof = def.map(|d| (d.ads_dof_start, d.ads_dof_end));
         if dead {
             self.kick.clear();
