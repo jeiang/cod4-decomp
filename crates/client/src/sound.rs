@@ -418,7 +418,12 @@ impl ClientSound {
             return;
         }
         if let Some(name) = weapon_sound(who.weapon, event, who.own) {
-            self.play(&name, cue);
+            // A weapon change cuts a reload short (`EV_STOP_WEAPON_SOUND`).
+            let stoppable = matches!(
+                event,
+                ev::RELOAD | ev::RELOAD_FROM_EMPTY | ev::RELOAD_START | ev::RELOAD_END
+            );
+            self.play(&name, Cue { stoppable, ..cue });
             return;
         }
         match event {
@@ -435,7 +440,7 @@ impl ClientSound {
                     return;
                 };
                 for (i, names) in sounds.iter().enumerate() {
-                    // The first group is the step, landing or jump; `cg_footsteps` mutes it, not the rattle.
+                    // The first group is the step, landing or jump; `cg_footsteps` mutes footsteps only, not the rattle.
                     if i == 0 && !self.footsteps && is_step(e) {
                         continue;
                     }
@@ -684,11 +689,11 @@ fn pickup_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
     n.as_ref().filter(|n| !n.is_empty()).map(|n| n.to_string())
 }
 
-/// The movement event is a footstep or a jump, the sounds `cg_footsteps` governs.
+/// The movement event is a footstep, the sounds `cg_footsteps` governs (a jump is not).
 fn is_step(event: u8) -> bool {
     matches!(
         event,
-        ev::FOOTSTEP_SPRINT | ev::FOOTSTEP_RUN | ev::FOOTSTEP_WALK | ev::FOOTSTEP_PRONE | ev::JUMP
+        ev::FOOTSTEP_SPRINT | ev::FOOTSTEP_RUN | ev::FOOTSTEP_WALK | ev::FOOTSTEP_PRONE
     )
 }
 
