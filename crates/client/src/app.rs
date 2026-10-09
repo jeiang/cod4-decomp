@@ -692,6 +692,12 @@ impl Viewer {
         let (profiles, stats) = Profiles::open(&install.root, input.config_dir(), "default");
         let (read, write) = profiles.config_paths();
         input.use_profile(read, write);
+        // A bare `--listen` started its server before the config was read: it learns `bot_count` now.
+        if listen.is_some() {
+            for line in saved_bot_count_lines(self.cli.bots, &input) {
+                listen::send(&line);
+            }
+        }
         if let Some(n) = net.as_mut() {
             n.set_profile(&stats);
         }
@@ -2535,6 +2541,15 @@ fn bot_count(input: &Input) -> usize {
         .min(64)
 }
 
+/// What a listen server started before the config was read is told of `bot_count`: nothing when `--bots` was given.
+fn saved_bot_count_lines(bots_flag: Option<usize>, input: &Input) -> Vec<String> {
+    let n = bot_count(input);
+    if bots_flag.is_some() || n == 0 {
+        return Vec::new();
+    }
+    vec![format!("set bot_count {n}"), format!("bots {n}")]
+}
+
 fn console_action(st: &mut State, line: &str) {
     for cmd in crate::input::config::split_commands(line) {
         if cmd[0].eq_ignore_ascii_case("bots") {
@@ -2543,7 +2558,11 @@ fn console_action(st: &mut State, line: &str) {
                 cmd.get(1).and_then(|n| n.parse::<usize>().ok()),
                 st.listen.is_some(),
             ) {
-                (Some(n), true) => listen::send(&format!("bots {n}")),
+                (Some(n), true) => {
+                    // The count is the player's setting too: the next map start keeps it.
+                    st.input.exec_line(&format!("seta bot_count {}", n.min(64)));
+                    listen::send(&format!("bots {n}"));
+                }
                 (None, true) => say(st, "usage: bots <count>"),
                 (_, false) => say(st, "bots: only on a server started from this client"),
             }
@@ -3200,5 +3219,23 @@ mod fullscreen_tests {
         let on = next_fullscreen(None);
         assert!(matches!(on, Some(Fullscreen::Borderless(None))));
         assert!(next_fullscreen(on).is_none());
+    }
+}
+
+#[cfg(test)]
+mod bot_count_tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_bot_count_reaches_a_bare_listen_server_and_the_flag_wins() {
+        let mut input = Input::detached();
+        input.exec_line("seta bot_count 4");
+        assert_eq!(
+            saved_bot_count_lines(None, &input),
+            ["set bot_count 4", "bots 4"]
+        );
+        assert!(saved_bot_count_lines(Some(0), &input).is_empty());
+        input.exec_line("seta bot_count 0");
+        assert!(saved_bot_count_lines(None, &input).is_empty());
     }
 }
