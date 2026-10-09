@@ -8,7 +8,10 @@ use crate::cull::{self, Frustum};
 use crate::dlight::{self, DynLight};
 use crate::dynmesh::{self, DynMesh};
 use crate::gpu::Gpu;
-use crate::material::{BANK_BYTES, Materials, Prepared, SamplerKey, Target, VertexKind};
+use crate::material::{
+    BANK_BYTES, Materials, Prepared, SamplerKey, TECH_NEEDS_POST_SUN, TECH_Z_FEATHER, Target,
+    VertexKind,
+};
 use crate::post::{self, PostParams};
 use crate::scene::{MapData, Mesh, Scene, model_matrix};
 use crate::skin::{self, ModelInstance, ModelKind};
@@ -38,6 +41,8 @@ const VIEWMODEL_DEPTH: f32 = 0.05;
 /// Linear filtering, linear mips, clamped.
 const CODE_SAMPLER: u8 = 0x72;
 const TECH_BUILD_FLOATZ: usize = 1;
+// Surfaces without a lit technique draw with the emissive one, as the original's emissive list does; the unlit
+// technique is only its fullbright debug view.
 const TECH_BUILD_SHADOWMAP_DEPTH: usize = 2;
 const TECH_BUILD_SHADOWMAP_COLOR: usize = 3;
 const TECH_UNLIT: usize = 4;
@@ -60,8 +65,8 @@ const SPOT_SHADOW_TECHS: [usize; 5] = [
     TECH_LIT_SPOT_SHADOW,
     TECH_LIT_SPOT,
     TECH_LIT,
-    TECH_UNLIT,
     TECH_EMISSIVE,
+    TECH_UNLIT,
 ];
 const LIGHT_SPOT_SHADOW_TECHS: [usize; 2] = [TECH_LIGHT_SPOT_SHADOW, TECH_LIGHT_SPOT];
 /// The `light omni` and `light spot` techniques: what a dynamic light adds to a surface, on top of what was drawn.
@@ -77,13 +82,13 @@ const SUN_SHADOW_TECHS: [usize; 5] = [
     TECH_LIT_SUN_SHADOW,
     TECH_LIT_SUN,
     TECH_LIT,
-    TECH_UNLIT,
     TECH_EMISSIVE,
+    TECH_UNLIT,
 ];
-const SUN_TECHS: [usize; 4] = [TECH_LIT_SUN, TECH_LIT, TECH_UNLIT, TECH_EMISSIVE];
-const SPOT_TECHS: [usize; 4] = [TECH_LIT_SPOT, TECH_LIT, TECH_UNLIT, TECH_EMISSIVE];
-const OMNI_TECHS: [usize; 4] = [TECH_LIT_OMNI, TECH_LIT, TECH_UNLIT, TECH_EMISSIVE];
-const LIT: [usize; 3] = [TECH_LIT, TECH_UNLIT, TECH_EMISSIVE];
+const SUN_TECHS: [usize; 4] = [TECH_LIT_SUN, TECH_LIT, TECH_EMISSIVE, TECH_UNLIT];
+const SPOT_TECHS: [usize; 4] = [TECH_LIT_SPOT, TECH_LIT, TECH_EMISSIVE, TECH_UNLIT];
+const OMNI_TECHS: [usize; 4] = [TECH_LIT_OMNI, TECH_LIT, TECH_EMISSIVE, TECH_UNLIT];
+const LIT: [usize; 3] = [TECH_LIT, TECH_EMISSIVE, TECH_UNLIT];
 /// Surface flag: casts a shadow into the sun shadow map.
 const SURFACE_CASTS_SUN_SHADOW: u8 = 1;
 
@@ -203,6 +208,8 @@ pub struct Settings {
     pub max_shadow_lights: usize,
     /// `sm_spotShadowFadeTime`: seconds a spot shadow takes to fade in or out.
     pub spot_fade_time: f32,
+    /// `r_distortion`: off, the heat haze and shockwave materials are not drawn and the scene is not copied for them.
+    pub distortion: bool,
     /// `r_drawSun`: off, the map's sun sprite, lens flare and glare are not drawn.
     pub draw_sun: bool,
 }
@@ -228,6 +235,7 @@ impl Default for Settings {
             max_shadow_lights: spotshadow::TILES as usize,
             spot_fade_time: 1.0,
             draw_sun: true,
+            distortion: true,
         }
     }
 }
@@ -245,6 +253,10 @@ pub struct FrameStats {
     /// Shadow cookies drawn.
     pub cookies: usize,
     pub pipelines_missing: usize,
+    /// The frame drew the float-Z target (depth of field, or a z-feathered material in the scene).
+    pub floatz: bool,
+    /// The frame copied the scene before the emissive surfaces for distortion materials.
+    pub distortion_copy: bool,
     pub cpu_ms: f64,
     /// GPU time of the most recent frame whose timestamps have come back (a few frames behind), if the device can
     /// time passes.
@@ -479,6 +491,8 @@ pub struct Renderer {
     /// What the post chain does this frame; starts as the map's own glow and film.
     pub post: PostParams,
     pub(crate) post_state: post::State,
+    /// Size and format of the frame being drawn, for the code images that are frame-sized targets.
+    frame_target: ((u32, u32), wgpu::TextureFormat),
     /// The map's sun sprite, lens flare and glare; its overlay is drawn at the end of the post chain.
     pub(crate) sun: Sun,
     warm: Option<Warm>,
@@ -605,6 +619,7 @@ impl Renderer {
             art: data.art.clone(),
             post: PostParams::from_art(&data.art),
             post_state,
+            frame_target: ((1, 1), wgpu::TextureFormat::Rgba8Unorm),
             sun: Sun::new(&gpu_for_dyn),
             warm: None,
             lights,
@@ -1198,6 +1213,20 @@ impl Renderer {
                     .cookie
                     .as_ref()
                     .map(|c| (c.tex.clone(), CODE_SAMPLER.into())),
+                (ctex::FLOATZ, _) => {
+                    let (size, format) = self.frame_target;
+                    Some((
+                        self.post_state.floatz_tex(&self.gpu, size, format),
+                        SamplerKey::ShadowRaw,
+                    ))
+                }
+                (ctex::RESOLVED_POST_SUN, _) => {
+                    let (size, format) = self.frame_target;
+                    Some((
+                        self.post_state.post_sun_tex(&self.gpu, size, format),
+                        CODE_SAMPLER.into(),
+                    ))
+                }
                 (ctex::WHITE, _) => Some((
                     self.textures.solid(&self.gpu, SamplerDim::D2, [255; 4]),
                     CODE_SAMPLER.into(),
@@ -2275,6 +2304,10 @@ impl Renderer {
         let t0 = Instant::now();
         self.ensure_depth(size);
         self.ensure_shadow();
+        if self.post_state.invalidate(size, format) {
+            self.tex_bgs.clear();
+        }
+        self.frame_target = (size, format);
         self.ring.clear();
         if let Some(t) = self.timer.as_mut() {
             t.begin_frame(&self.gpu);
@@ -2486,6 +2519,23 @@ impl Renderer {
             sun.is_some(),
         ));
         draws.sort_by_key(|d| (!d.sky, d.order, d.prepared.id()));
+        if !self.settings.distortion {
+            draws.retain(|d| d.prepared.flags & TECH_NEEDS_POST_SUN == 0);
+        }
+        // Distortion materials sample the scene as it stood before the emissive surfaces: with any in the frame, the
+        // emissive draws wait for a second half of the scene pass and a copy of the first.
+        let distortion = draws
+            .iter()
+            .any(|d| d.prepared.flags & TECH_NEEDS_POST_SUN != 0);
+        let late: Vec<Draw> = if distortion {
+            let (late, early) = draws
+                .into_iter()
+                .partition(|d| d.prepared.technique == TECH_EMISSIVE);
+            draws = early;
+            late
+        } else {
+            Vec::new()
+        };
         // The view model has its own projection; its depth range is squeezed in front of the world's.
         let vm_fov = self.viewmodel_fov_x.unwrap_or(view.fov_x);
         let vm_proj = View {
@@ -2556,10 +2606,18 @@ impl Renderer {
         if let Some(w) = self.warm.as_mut() {
             w.demand.extend(demand);
         }
-        stats.draws += draws.len();
+        stats.draws += draws.len() + late.len();
 
         // The post chain: depth of field wants the scene's depth as a second list of the same surfaces.
-        let floatz = self.post_params().dof_active().then(|| {
+        // Soft particles read it too: any draw of the scene whose technique is z-feathered.
+        let z_feathered = draws
+            .iter()
+            .chain(&late)
+            .chain(&vm_draws)
+            .any(|d| d.prepared.flags & TECH_Z_FEATHER != 0);
+        stats.floatz = z_feathered || self.post_params().dof_active();
+        stats.distortion_copy = distortion;
+        let floatz = stats.floatz.then(|| {
             let mut zf = frame.clone();
             zf.vec[codeconst::DEPTH_FROM_CLIP as usize] = [0.0, 0.0, 0.0, 1.0];
             let zview = self.post_state.floatz_view(&self.gpu, size, format);
@@ -2593,7 +2651,7 @@ impl Renderer {
             ));
             (zview, list)
         });
-        let chain = post::build(self, size, format, target, NEAR);
+        let chain = post::build(self, size, format, target, NEAR, distortion);
 
         self.upload_ring();
         let mut enc = self.gpu.device.create_command_encoder(&Default::default());
@@ -2759,7 +2817,7 @@ impl Renderer {
                             b: self.clear[2],
                             a: 1.0,
                         }),
-                        store: if resolve.is_some() {
+                        store: if resolve.is_some() && !distortion {
                             wgpu::StoreOp::Discard
                         } else {
                             wgpu::StoreOp::Store
@@ -2770,7 +2828,11 @@ impl Renderer {
                     view: depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Discard,
+                        store: if distortion {
+                            wgpu::StoreOp::Store
+                        } else {
+                            wgpu::StoreOp::Discard
+                        },
                     }),
                     stencil_ops: None,
                 }),
@@ -2854,6 +2916,57 @@ impl Renderer {
                 }
                 rp.set_scissor_rect(0, 0, size.0, size.1);
             }
+        }
+        if distortion {
+            post::record_postsun(
+                &mut enc,
+                &chain,
+                &self.post_state,
+                &self.vs_bg,
+                &self.ps_bg,
+                self.timer.as_mut(),
+            );
+            // The emissive half of the scene, over the first.
+            let final_view = chain.scene.as_ref().unwrap_or(target);
+            let (depth, color, resolve) = match &self.msaa {
+                Some(m) => (&m.depth, &m.color, Some(final_view)),
+                None => (&self.depth.as_ref().expect("depth").0, final_view, None),
+            };
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene emissive"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    depth_slice: None,
+                    resolve_target: resolve,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: if resolve.is_some() {
+                            wgpu::StoreOp::Discard
+                        } else {
+                            wgpu::StoreOp::Store
+                        },
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            record(
+                &mut rp,
+                &late,
+                &self.vs_bg,
+                &self.ps_bg,
+                Some((size.0 as f32, size.1 as f32)),
+                &self.dyn_vb,
+            );
         }
         post::record(
             &mut enc,

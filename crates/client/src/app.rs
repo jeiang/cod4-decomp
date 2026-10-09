@@ -275,6 +275,8 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     gpu: Arc<Gpu>,
     renderer: Option<Renderer>,
+    /// The offscreen frame and pass of `r_gamma`.
+    gamma: render::gamma::Gamma,
     shell: Option<Shell>,
     started: Instant,
     last_frame: Instant,
@@ -707,6 +709,7 @@ impl Viewer {
             input.cvars.set("cg_fov", &self.cli.fov.to_string(), false);
         }
         let fov_x = hor_plus(cg_fov(&input), aspect);
+        let gamma = render::gamma::Gamma::new(&gpu, config.format);
         Ok(State {
             tour,
             window,
@@ -714,6 +717,7 @@ impl Viewer {
             config,
             gpu,
             renderer,
+            gamma,
             shell,
             started: now,
             last_frame: now,
@@ -1261,8 +1265,21 @@ impl Viewer {
             fov_x,
             time: t,
         };
-        let target = frame.texture.create_view(&Default::default());
+        let surface_view = frame.texture.create_view(&Default::default());
         let size = (st.config.width, st.config.height);
+        // `r_gamma` maps the whole picture: the frame is drawn offscreen and copied through the ramp at the end.
+        let r_gamma = st
+            .input
+            .cvars
+            .get("r_gamma")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(render::gamma::DEFAULT);
+        let gamma = !render::gamma::is_identity(r_gamma);
+        let target = if gamma {
+            st.gamma.target(&st.gpu, size).clone()
+        } else {
+            surface_view.clone()
+        };
         if let Some(r) = st.renderer.as_mut() {
             r.viewmodel_fov_x = Some(st.fov_x);
             #[cfg(target_arch = "wasm32")]
@@ -1293,6 +1310,9 @@ impl Viewer {
             let clear = st.renderer.is_none().then_some(wgpu::Color::BLACK);
             sh.st.live.clip = Some(view.clip_from_world(size.0 as f32 / size.1.max(1) as f32));
             sh.paint(&mut st.input, &target, size, clear);
+        }
+        if gamma {
+            st.gamma.apply(&st.gpu, &surface_view, r_gamma);
         }
         if st.want_video && st.recorder.is_none() {
             let size = (frame.texture.width(), frame.texture.height());

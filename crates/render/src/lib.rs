@@ -8,6 +8,7 @@ pub mod cookie;
 pub mod cull;
 pub mod dlight;
 pub mod dynmesh;
+pub mod gamma;
 pub mod gpu;
 pub mod lightgrid;
 pub mod material;
