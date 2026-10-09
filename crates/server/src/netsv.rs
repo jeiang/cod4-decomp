@@ -31,6 +31,13 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CMDS_PER_FRAME: usize = 24;
 /// Voice frames kept between two services of the network (a service is a server frame; a talker sends 50 a second).
 const MAX_VOICE_IN: usize = 512;
+/// Voice frames a speaker may send a second (a talker sends 50) and the burst allowed on top.
+const VOICE_PER_SEC: f32 = 60.0;
+const VOICE_BURST: f32 = 12.0;
+/// `getfile` requests one address may make a second, and the burst; each is answered with a window of 32 KiB.
+const FILE_PER_SEC: f32 = 20.0;
+const FILE_BURST: f32 = 40.0;
+
 /// How long after a relayed frame a player still counts as talking (`istalking`, the talk balloon over their head).
 pub const TALKING_MS: i32 = 300;
 
@@ -101,6 +108,12 @@ pub struct Peer {
     next_snapshot: i32,
     /// Players this client muted (`mute <n>`), by bit: their voice is not relayed to it.
     muted: u64,
+    /// The speaker's voice frames allowed now (a token bucket of [`VOICE_BURST`], refilled at [`VOICE_PER_SEC`]) and when
+    /// it was last filled.
+    voice_tokens: f32,
+    voice_at: Instant,
+    /// Bytes of voice queued for this client since its last snapshot, counted against its rate.
+    voice_bytes: usize,
 }
 
 impl Peer {
@@ -177,6 +190,8 @@ pub struct NetSv {
     pub bans: BanList,
     /// Voice frames clients sent since the last [`NetSv::take_voice`]: `(speaker slot, sequence, frame)`.
     voice_in: Vec<(u16, u16, voice::Frame)>,
+    /// `getfile` budgets by address.
+    file_budget: std::collections::HashMap<std::net::IpAddr, (f32, Instant)>,
 }
 
 impl NetSv {
@@ -193,6 +208,7 @@ impl NetSv {
             buf: vec![0; MAX_MESSAGE],
             bans: BanList::default(),
             voice_in: Vec::new(),
+            file_budget: std::collections::HashMap::new(),
         }
     }
 
@@ -260,7 +276,9 @@ impl NetSv {
                     Gate::Reply(r) => self.t.send_to(from, &r.encode()),
                     Gate::Accept(req) => out.push(Inbound::Connect(req)),
                     Gate::File { from, name, offset } => {
-                        out.push(Inbound::GetFile { from, name, offset });
+                        if self.file_allowed(from) {
+                            out.push(Inbound::GetFile { from, name, offset });
+                        }
                     }
                     Gate::Left => out.push(Inbound::Left(from)),
                     Gate::Ignore => {}
@@ -278,8 +296,14 @@ impl NetSv {
                         }
                     }
                     self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
+                    let now = Instant::now();
+                    peer.voice_tokens = (peer.voice_tokens
+                        + now.duration_since(peer.voice_at).as_secs_f32() * VOICE_PER_SEC)
+                        .min(VOICE_BURST);
+                    peer.voice_at = now;
                     for (seq, frame) in p.voice {
-                        if self.voice_in.len() < MAX_VOICE_IN {
+                        if peer.voice_tokens >= 1.0 && self.voice_in.len() < MAX_VOICE_IN {
+                            peer.voice_tokens -= 1.0;
                             self.voice_in.push((slot, seq, frame));
                         }
                     }
@@ -297,6 +321,28 @@ impl NetSv {
             p.unheard_ms += listened;
         }
         out
+    }
+
+    /// Whether `from` may have a file window now: not banned, and within its request budget.
+    fn file_allowed(&mut self, from: SocketAddr) -> bool {
+        let now = Instant::now();
+        if self.bans.is_banned(from.ip(), now) {
+            return false;
+        }
+        if self.file_budget.len() > 1024 {
+            self.file_budget.clear();
+        }
+        let (tokens, at) = self
+            .file_budget
+            .entry(from.ip())
+            .or_insert((FILE_BURST, now));
+        *tokens = (*tokens + now.duration_since(*at).as_secs_f32() * FILE_PER_SEC).min(FILE_BURST);
+        *at = now;
+        if *tokens < 1.0 {
+            return false;
+        }
+        *tokens -= 1.0;
+        true
     }
 
     /// Takes the voice frames received since the last call.
@@ -318,6 +364,7 @@ impl NetSv {
             if slot == usize::from(speaker) || p.muted & bit != 0 || !hears(slot as u16) {
                 continue;
             }
+            p.voice_bytes += voice::FRAME_BYTES + 3;
             p.link.push_voice(Voice {
                 speaker: speaker as u8,
                 seq,
@@ -401,6 +448,9 @@ impl NetSv {
             snapshot_msec: 0,
             next_snapshot: 0,
             muted: 0,
+            voice_tokens: VOICE_BURST,
+            voice_at: Instant::now(),
+            voice_bytes: 0,
         });
         // The slot may have held someone a client muted: the new person starts unmuted.
         for p in self.peers.iter_mut().flatten() {
@@ -783,7 +833,8 @@ impl NetSv {
                 }
                 peer.snd_sent += 1;
             }
-            let bytes = peer.link.send(&mut self.t, Some(snap.canonical()));
+            let bytes = peer.link.send(&mut self.t, Some(snap.canonical()))
+                + std::mem::take(&mut peer.voice_bytes);
             peer.next_snapshot =
                 server_time + snapshot_delay(peer.rate, peer.snapshot_msec, bytes, max_rate);
             self.stats.snapshots_out += 1;
@@ -1379,6 +1430,9 @@ mod tests {
             snapshot_msec: 0,
             next_snapshot: 0,
             muted: 0,
+            voice_tokens: VOICE_BURST,
+            voice_at: Instant::now(),
+            voice_bytes: 0,
         }
     }
 
@@ -1465,6 +1519,29 @@ mod tests {
         joined(&mut n, 0, 11);
         n.relay_voice(0, 9, frame, |_| true);
         assert_eq!(heard(&mut n, 1, &mut c2, &mut w2), [0]);
+    }
+
+    #[test]
+    fn a_speaker_flooding_voice_is_cut_to_the_allowed_rate_and_a_file_flood_is_cut_too() {
+        let mem = net::MemNet::new();
+        let mut n = NetSv::new(Box::new(mem.endpoint(addr(1))), 2);
+        joined(&mut n, 0, 11);
+        let mut cli = net::session::ClientLink::new(addr(1), 11);
+        let mut wire = mem.endpoint(addr(11));
+        for _ in 0..200 {
+            cli.push_voice([1; voice::FRAME_BYTES]);
+            cli.push_cmd(UserCmd::default());
+            cli.send(&mut wire);
+        }
+        n.poll(Duration::ZERO, &|| Vec::new(), &|| Status {
+            info: Vec::new(),
+            players: Vec::new(),
+        });
+        // The burst, plus what a few ms of refill allows, and no more.
+        assert!(n.take_voice().len() <= VOICE_BURST as usize + 2);
+        let ip = addr(50);
+        let served = (0..200).filter(|_| n.file_allowed(ip)).count();
+        assert!(served <= FILE_BURST as usize + 2, "{served}");
     }
 
     #[test]

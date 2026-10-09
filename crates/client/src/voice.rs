@@ -75,6 +75,8 @@ const PREBUFFER_FRAMES: usize = 4;
 const UTTERANCE_GAP: Duration = Duration::from_millis(400);
 /// A speaker silent this long gives up their voice in the mixer.
 const SPEAKER_IDLE: Duration = Duration::from_secs(4);
+/// Most speakers heard at once: a server naming more is not given more mixer voices.
+const MAX_SPEAKERS: usize = 16;
 /// Most frames of lost audio replaced by silence (a longer gap is a new burst).
 const MAX_FILL: u16 = 5;
 
@@ -106,8 +108,12 @@ impl Hearing {
         let Some(pcm) = voice::decode(&v.frame) else {
             return;
         };
+        let full = self.speakers.len() >= MAX_SPEAKERS;
         let sp = match self.speakers.entry(v.speaker) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(_) if full => {
+                return;
+            }
             std::collections::hash_map::Entry::Vacant(e) => {
                 let Some(pipe) = open() else { return };
                 e.insert(Speaker {
@@ -158,8 +164,10 @@ impl Hearing {
         }
     }
 
-    /// Forgets every voice (the sound system they belong to is gone).
-    pub fn clear(&mut self) {
-        self.speakers.clear();
+    /// Ends every voice; `close` takes each pipe.
+    pub fn close_all(&mut self, mut close: impl FnMut(audio::engine::Pipe)) {
+        for (_, s) in self.speakers.drain() {
+            close(s.pipe);
+        }
     }
 }

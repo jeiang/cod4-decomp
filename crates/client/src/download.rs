@@ -24,6 +24,7 @@ pub struct Download {
 /// Whether the install at `root` lacks the zone of `map` (and could take it: it has a zone folder).
 pub fn missing(root: &std::path::Path, map: &str) -> bool {
     net::download::valid_name(map)
+        && map.starts_with("mp_")
         && server::content::zone_file(root, map).is_none()
         && server::content::zone_dir(root).is_some()
 }

@@ -135,6 +135,13 @@ pub struct Pipe {
     tx: Producer,
 }
 
+impl Drop for Pipe {
+    /// A pipe that is dropped ends its voice (what it holds plays out): no mixer voice is left starved.
+    fn drop(&mut self) {
+        self.tx.finish();
+    }
+}
+
 impl Pipe {
     /// Queues samples (`-1..1`); returns how many fit.
     pub fn push(&mut self, samples: &[f32]) -> usize {
@@ -527,7 +534,7 @@ impl Sound {
 
     /// Ends a [`Pipe`]: what it still holds plays out, then the voice is gone.
     pub fn close_pipe(&mut self, pipe: Pipe) {
-        pipe.tx.finish();
+        drop(pipe);
     }
 
     pub fn stop(&mut self, id: VoiceId) {
@@ -804,6 +811,14 @@ mod tests {
         s.close_pipe(pipe);
         run(&mut s, 300);
         assert_eq!(active(&s), 0, "the voice is gone once the audio played out");
+        // Dropping the pipe does the same: no starved voice stays in the mixer.
+        let mut pipe = s.open_pipe(8000, "flat").unwrap();
+        pipe.push(&vec![0.5; 80]);
+        run(&mut s, 20);
+        assert_eq!(active(&s), 1);
+        drop(pipe);
+        run(&mut s, 300);
+        assert_eq!(active(&s), 0, "a dropped pipe frees its voice");
     }
 
     #[test]

@@ -545,7 +545,10 @@ impl NetPlay {
             self.boxes = PlayerBoxes::new(clipmap);
             self.sound = sound;
         }
-        self.hearing.clear();
+        {
+            let sound = &mut self.sound;
+            self.hearing.close_all(|p| sound.close_voice_pipe(p));
+        }
         self.pred = Predictor::default();
         self.cmd_time = 0;
         self.want_weapon = None;

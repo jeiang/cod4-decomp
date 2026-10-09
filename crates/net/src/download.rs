@@ -33,6 +33,9 @@ const WINDOW_SILENCE: Duration = Duration::from_millis(200);
 /// Windows asked for in a row without a byte arriving before the download is given up.
 const MAX_RETRIES: u32 = 25;
 
+/// Largest file a client accepts: above any stock zone, below what a hostile server could use to fill a disk or memory.
+pub const MAX_TOTAL: u64 = 256 << 20;
+
 /// A map name a client may ask for: lower-case letters, digits and `_`, so it cannot name a path.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -235,6 +238,10 @@ fn fetch_into(
                         return Step::Done;
                     }
                     if total.is_none() {
+                        if tot > MAX_TOTAL {
+                            failed = Some("The file is too large".to_owned());
+                            return Step::Done;
+                        }
                         total = Some(tot);
                         have = vec![false; (tot as usize).div_ceil(CHUNK)];
                         progress.total.store(tot, Ordering::Relaxed);
@@ -380,6 +387,61 @@ mod tests {
         let err = fetch(&mut ct, server, "mp_y", &nope, &progress, &cancel).unwrap_err();
         assert_eq!(err, NOT_AVAILABLE);
         assert!(!nope.exists() && !nope.with_extension("ff.part").exists());
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_server_claiming_an_absurd_size_is_refused_without_allocating() {
+        use crate::connect::{Gate, serve};
+        use crate::oob::Challenger;
+        use crate::transport::MemNet;
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!("cod4e-dl-hostile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let net = MemNet::new();
+        let server = SocketAddr::from(([127, 0, 0, 1], 1));
+        let mut st = net.endpoint(server);
+        let mut ct = net.endpoint(SocketAddr::from(([127, 0, 0, 1], 2)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let ch = Challenger::new();
+            let mut buf = [0u8; 2048];
+            while !flag.load(Ordering::Relaxed) {
+                let Ok(Some((n, from))) = st.recv_from(&mut buf, Some(Duration::from_millis(10)))
+                else {
+                    continue;
+                };
+                match serve(&ch, 0, from, Oob::parse(&buf[..n]).unwrap(), Vec::new) {
+                    Gate::Reply(r) => st.send_to(from, &r.encode()),
+                    Gate::File { from, .. } => st.send_to(
+                        from,
+                        &Oob::FileChunk {
+                            total: 1 << 56,
+                            offset: 0,
+                            data: vec![0; CHUNK],
+                        }
+                        .encode(),
+                    ),
+                    _ => {}
+                }
+            }
+        });
+        let dest = dir.join("mp_big.ff");
+        let err = fetch(
+            &mut ct,
+            server,
+            "mp_big",
+            &dest,
+            &Progress::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(err, "The file is too large");
+        assert!(!dest.exists());
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
         let _ = std::fs::remove_dir_all(dir);

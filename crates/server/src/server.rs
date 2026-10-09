@@ -675,7 +675,13 @@ impl Server {
         }
         let time = self.game.level.time;
         for (speaker, seq, frame) in frames {
-            let Some(team) = self.game.client(speaker).map(|c| c.team) else {
+            // Only a person who has joined talks: not a bot, not a slot still connecting.
+            let Some(team) = self
+                .game
+                .client(speaker)
+                .filter(|c| c.conn == Conn::Connected && !c.bot)
+                .map(|c| c.team)
+            else {
                 continue;
             };
             if let Some(c) = self.game.client_mut(speaker) {
