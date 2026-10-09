@@ -70,7 +70,7 @@ const LIGHT_SPOT_TECHS: [usize; 1] = [TECH_LIGHT_SPOT];
 /// The `light` key of the texture groups of dynamic lights: past every primary light's index.
 const DLIGHT_KEY: u16 = 0x100;
 /// The most world surfaces and static models one dynamic light draws; the original keeps 512 per light.
-const MAX_LIGHT_SURFACES: usize = 1024;
+const MAX_LIGHT_SURFACES: usize = 512;
 const LIGHT_KIND_OMNI: u8 = 2;
 const LIGHT_KIND_SPOT: u8 = 3;
 const SUN_SHADOW_TECHS: [usize; 5] = [
@@ -1099,7 +1099,16 @@ impl Renderer {
     /// The spot light shadow atlas for the current mode, created on first use.
     fn ensure_spot_shadow(&mut self) {
         let mode = self.settings.shadows;
-        if mode == ShadowMode::Off || self.spot_shadow.as_ref().is_some_and(|s| s.mode == mode) {
+        if mode == ShadowMode::Off {
+            if self.spot_shadow.take().is_some() {
+                self.spot_history.clear();
+                self.spot_in_use.clear();
+                self.spot_tiles.clear();
+                self.tex_bgs.clear();
+            }
+            return;
+        }
+        if self.spot_shadow.as_ref().is_some_and(|s| s.mode == mode) {
             return;
         }
         self.spot_shadow = Some(shadow_targets(
@@ -1888,7 +1897,7 @@ impl Renderer {
             return Vec::new();
         }
         let casting: Vec<usize> = (0..insts.len())
-            .filter(|&i| insts[i].kind == ModelKind::World && insts[i].model.radius > 0.0)
+            .filter(|&i| insts[i].casts_cookie && insts[i].model.radius > 0.0)
             .collect();
         let casters: Vec<cookie::Caster> = casting
             .iter()
@@ -1937,7 +1946,7 @@ impl Renderer {
                 c.centre - Vec3::splat(c.radius * 2.0),
                 c.centre + Vec3::splat(c.radius * 2.0),
             );
-            let surfaces: Vec<u32> = vis
+            let mut surfaces: Vec<u32> = vis
                 .surfaces
                 .iter()
                 .copied()
@@ -1947,9 +1956,12 @@ impl Renderer {
                         a.cmple(hi).all() && b.cmpge(lo).all()
                     })
                 })
-                .take(MAX_LIGHT_SURFACES)
                 .collect();
-            let smodels: Vec<u32> = vis
+            nearest(&mut surfaces, c.centre, |i| {
+                Vec3::from(world.dpvs.surfaces[i as usize].bounds[0])
+                    .midpoint(Vec3::from(world.dpvs.surfaces[i as usize].bounds[1]))
+            });
+            let mut smodels: Vec<u32> = vis
                 .smodels
                 .iter()
                 .copied()
@@ -1965,14 +1977,17 @@ impl Renderer {
                                 && (o + Vec3::splat(r)).cmpge(lo).all()
                         })
                 })
-                .take(MAX_LIGHT_SURFACES)
                 .collect();
+            nearest(&mut smodels, c.centre, |i| {
+                Vec3::from(world.dpvs.smodel_draw_insts[i as usize].origin)
+            });
             let others: Vec<DynSurf> = dynsurfs
                 .iter()
                 .copied()
                 .filter(|d| {
                     let i = &insts[d.inst];
                     d.inst != inst
+                        && i.casts_cookie
                         && (Vec3::from(i.origin) - Vec3::splat(i.model.radius))
                             .cmple(hi)
                             .all()
@@ -2118,7 +2133,7 @@ impl Renderer {
             let consts = l.consts(self.dlight_def.width, self.dlight_def.lookup_start);
             let mut lf = frame.clone();
             lf.set_light(&consts);
-            let surfaces: Vec<u32> = vis
+            let mut surfaces: Vec<u32> = vis
                 .surfaces
                 .iter()
                 .copied()
@@ -2127,9 +2142,12 @@ impl Renderer {
                         l.reaches_box(Vec3::from(s.bounds[0]), Vec3::from(s.bounds[1]))
                     })
                 })
-                .take(MAX_LIGHT_SURFACES)
                 .collect();
-            let smodels: Vec<u32> = vis
+            nearest(&mut surfaces, l.origin, |i| {
+                Vec3::from(world.dpvs.surfaces[i as usize].bounds[0])
+                    .midpoint(Vec3::from(world.dpvs.surfaces[i as usize].bounds[1]))
+            });
+            let mut smodels: Vec<u32> = vis
                 .smodels
                 .iter()
                 .copied()
@@ -2143,8 +2161,10 @@ impl Renderer {
                             l.reaches_sphere(Vec3::from(m.origin), r)
                         })
                 })
-                .take(MAX_LIGHT_SURFACES)
                 .collect();
+            nearest(&mut smodels, l.origin, |i| {
+                Vec3::from(world.dpvs.smodel_draw_insts[i as usize].origin)
+            });
             let near: Vec<DynSurf> = dynsurfs
                 .iter()
                 .copied()
@@ -3198,5 +3218,18 @@ fn shadow_targets(gpu: &Gpu, mode: ShadowMode, size: (u32, u32), label: &str) ->
             dim: SamplerDim::D2,
             width: size.0,
         }),
+    }
+}
+
+/// Keeps the [`MAX_LIGHT_SURFACES`] items nearest `centre` (by `at`), so a light's list does not depend on the order the
+/// visible set came in.
+fn nearest(items: &mut Vec<u32>, centre: Vec3, at: impl Fn(u32) -> Vec3) {
+    if items.len() > MAX_LIGHT_SURFACES {
+        items.sort_by(|&a, &b| {
+            at(a)
+                .distance_squared(centre)
+                .total_cmp(&at(b).distance_squared(centre))
+        });
+        items.truncate(MAX_LIGHT_SURFACES);
     }
 }

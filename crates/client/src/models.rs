@@ -218,6 +218,7 @@ impl Player {
         let mut out = Vec::with_capacity(2);
         let mut push = |model: &Arc<XModel>, bones: &[sim::skel::BoneMat]| {
             let mut m = ModelInstance::new(model.clone(), ModelKind::World);
+            m.casts_cookie = true;
             m.origin = origin;
             m.angles = [0.0, yaw, 0.0];
             m.bones = bones.to_vec();

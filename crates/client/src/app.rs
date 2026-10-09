@@ -1984,8 +1984,8 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| u8::from(r.settings.shadows != render::ShadowMode::Off).to_string()),
-                // 1 when at least one dynamic light was drawn.
-                "dlights" => Some(st.lights_drawn.min(1).to_string()),
+                // How many dynamic lights the last frame drew.
+                "dlights" => Some(st.lights_drawn.to_string()),
                 "aspect" => Some(format!("{:.2}", st.aspect.unwrap_or(0.0))),
                 "fullscreen" => Some(u8::from(st.window.fullscreen().is_some()).to_string()),
                 // 1 when the surface does not wait for the display, or has no mode that does not.

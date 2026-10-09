@@ -1524,6 +1524,32 @@ mod tests {
     }
 
     #[test]
+    fn a_light_keeps_the_effects_red_green_blue_order() {
+        use assets::zone::fx::{VisSample, VisState};
+        // The zone stores colours blue first: this is an orange (255, 128, 0).
+        let st = |color| VisState {
+            color,
+            rotation_delta: 0.0,
+            rotation_total: 0.0,
+            size: [50.0, 50.0],
+            scale: 1.0,
+        };
+        let sample = || VisSample {
+            base: st([0, 128, 255, 255]),
+            amplitude: st([0, 128, 255, 255]),
+        };
+        let mut e = elem_def(elem::OMNI_LIGHT, FxVisuals::None);
+        e.vis_samples = Arc::from(vec![sample(), sample()]);
+        let def = effect("fx/flash", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(10, &Empty);
+        let mut d = Draws::default();
+        fx.draw(&trail_cam(), &mut d);
+        assert_eq!(d.lights[0].color, [255, 128, 0]);
+    }
+
+    #[test]
     fn a_runner_starts_the_effect_it_names() {
         let child = effect("fx/child", 0, 1, 0, vec![sound("child_sound")]);
         let runner = elem_def(
