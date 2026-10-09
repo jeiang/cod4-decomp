@@ -47,13 +47,25 @@ pub mod eflags {
     /// A script model the script `physicslaunch`ed (`TR_PHYSICS`): clients simulate it as a rigid body launched from
     /// `origin` and `angles`, struck at `launch_point` by `velocity`, and draw it where the body is.
     pub const PHYSICS_LAUNCH: u32 = 1 << 3;
+    /// The player is speaking over voice chat (`EF_TALK`); nothing sets it while the server has no voice.
+    pub const TALKING: u32 = 1 << 4;
+    /// The server has heard nothing from the player for [`CONNECTION_INTERRUPTED_MS`] (`EF_CONNECTION_INTERRUPTED`).
+    pub const CONNECTION_INTERRUPTED: u32 = 1 << 5;
 }
+
+/// Time the server has listened to a client without hearing it, after which others are shown the
+/// connection-interrupted marker over it. Only listening counts: a long frame or a map load, during which the
+/// socket is not read, is not silence.
+const CONNECTION_INTERRUPTED_MS: u64 = 1000;
 
 pub struct Peer {
     pub link: ServerLink,
     pub cmds: VecDeque<UserCmd>,
     pub name: String,
     last_heard: Instant,
+    /// Milliseconds spent waiting for packets since this client's last one.
+    unheard_ms: u64,
+    heard_now: bool,
     /// Effect names announced so far (`fx <index> <name>` commands).
     fx_sent: usize,
     /// A reliable command did not fit: the peer is too far behind and is dropped at the next service
@@ -169,6 +181,10 @@ impl NetSv {
     ) -> Vec<Inbound> {
         let mut out = Vec::new();
         let mut wait = wait;
+        let listening = Instant::now();
+        for p in self.peers.iter_mut().flatten() {
+            p.heard_now = false;
+        }
         let mut buf = std::mem::take(&mut self.buf);
         while let Ok(Some((n, from))) = self.t.recv_from(&mut buf, Some(wait)) {
             wait = Duration::ZERO;
@@ -200,6 +216,8 @@ impl NetSv {
                     && let Some(p) = peer.link.receive(packet)
                 {
                     peer.last_heard = Instant::now();
+                    peer.heard_now = true;
+                    peer.unheard_ms = 0;
                     for (_, c) in p.cmds {
                         if peer.cmds.len() < MAX_QUEUED_CMDS {
                             peer.cmds.push_back(c);
@@ -215,6 +233,10 @@ impl NetSv {
             }
         }
         self.buf = buf;
+        let listened = listening.elapsed().as_millis() as u64;
+        for p in self.peers.iter_mut().flatten().filter(|p| !p.heard_now) {
+            p.unheard_ms += listened;
+        }
         out
     }
 
@@ -243,6 +265,8 @@ impl NetSv {
             cmds: VecDeque::new(),
             name: name.to_owned(),
             last_heard: Instant::now(),
+            unheard_ms: 0,
+            heard_now: false,
             fx_sent: 0,
             overflowed: false,
             last_ack: 0,
@@ -269,6 +293,7 @@ impl NetSv {
 
     pub fn put_peer(&mut self, slot: u16, mut peer: Peer) {
         peer.last_heard = Instant::now();
+        peer.unheard_ms = 0;
         // The new level numbers its effects afresh: the client needs the names again.
         peer.fx_sent = 0;
         peer.stalled = false;
@@ -518,7 +543,12 @@ impl NetSv {
     /// Builds and sends every client's snapshot for the frame at `server_time`.
     pub fn send_snapshots(&mut self, game: &Game, server_time: i32) {
         self.now = server_time;
-        let entities = world_entities(game);
+        let mut entities = world_entities(game);
+        let quiet = self.peers.iter().enumerate().filter_map(|(slot, p)| {
+            let p = p.as_ref()?;
+            (p.unheard_ms > CONNECTION_INTERRUPTED_MS).then_some(slot as u16)
+        });
+        mark_interrupted(&mut entities, quiet);
         if game.archive_enabled {
             self.archive.record(Frame {
                 time: server_time,
@@ -667,6 +697,18 @@ fn config_commands(entries: Vec<(u16, String)>) -> Vec<String> {
     out
 }
 
+/// Flags the player bodies of the clients in `quiet` as having a connection problem.
+fn mark_interrupted(entities: &mut [EntityState], quiet: impl Iterator<Item = u16>) {
+    for slot in quiet {
+        if let Some(e) = entities
+            .iter_mut()
+            .find(|e| e.etype == etype::PLAYER && e.number == slot)
+        {
+            e.eflags |= eflags::CONNECTION_INTERRUPTED;
+        }
+    }
+}
+
 /// Everything a client can see, in entity-number order, already rounded as the wire rounds it.
 pub fn world_entities(game: &Game) -> Vec<EntityState> {
     let mut out = Vec::new();
@@ -710,6 +752,9 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 } else {
                     0
                 };
+                // The scripts' `headicon` is a precached material; one never registered has no index to show.
+                s.head_icon = game.shaders.find(&c.head_icon) as u16;
+                s.head_icon_team = Team::from_name(&c.head_icon_team).map_or(0, |t| t as u8);
                 s
             }
             EntKind::Item => {
@@ -834,6 +879,8 @@ mod tests {
             last_ack: 0,
             ack_moved: Instant::now(),
             stalled: false,
+            unheard_ms: 0,
+            heard_now: false,
         }
     }
 
@@ -877,5 +924,20 @@ mod tests {
         assert!(!p.overflowed);
         p.queue(cfg);
         assert!(p.overflowed);
+    }
+
+    #[test]
+    fn only_the_quiet_players_are_flagged_as_interrupted() {
+        let player = |n| EntityState {
+            etype: etype::PLAYER,
+            ..EntityState::new(n)
+        };
+        let mut e = vec![player(1), player(2), EntityState::new(3)];
+        mark_interrupted(&mut e, [2u16, 3, 9].into_iter());
+        let flagged: Vec<bool> = e
+            .iter()
+            .map(|e| e.eflags & eflags::CONNECTION_INTERRUPTED != 0)
+            .collect();
+        assert_eq!(flagged, [false, true, false]);
     }
 }

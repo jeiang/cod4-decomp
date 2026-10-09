@@ -9,6 +9,7 @@
 //! the moment the server rewinds them to when it judges this client's shots.
 
 mod hud;
+mod names;
 
 use crate::crosshair::Reticle;
 use crate::damage::{DamageHud, DamageView};
@@ -213,6 +214,8 @@ pub struct NetPlay {
     /// Events for the menu runtime (a person's menus drain them; autoplay answers them itself).
     ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
+    /// The other players as the last frame's view saw them, for overhead names and head icons.
+    scan: crate::hud::NameScan,
     /// The state the HUD shows (predicted, or the followed player's) and the view yaw in degrees, from the last frame.
     hud_view: Option<(PlayerState, f32)>,
     /// The crosshair of the held weapon from the last frame; `None` when dead, watching another player or the weapon
@@ -305,6 +308,7 @@ impl NetPlay {
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
+            scan: crate::hud::NameScan::default(),
             hud_view: None,
             reticle: None,
             sound,
@@ -398,6 +402,7 @@ impl NetPlay {
     /// every couple of seconds while the scoreboard is up (`live.scores_wanted`).
     pub fn fill_live(&mut self, live: &mut crate::hud::LiveUi) {
         crate::hud::fill::fill(&mut self.net, live, self.live_time, self.last_eye);
+        live.scan.clone_from(&self.scan);
         live.scope = self.sight.as_ref().and_then(|s| s.overlay.clone());
         live.flashed = self.look.flashbanged(self.live_time);
         live.night_vision = self.look.night_vision();
@@ -454,6 +459,7 @@ impl NetPlay {
         self.own_events = Seen::default();
         self.shakes.clear();
         self.last_eye = None;
+        self.scan = crate::hud::NameScan::default();
         self.c.spawned = false;
         self.c.start = None;
         Ok(())
@@ -590,6 +596,13 @@ impl NetPlay {
             self.hud_view = Some((ps.clone(), ps.viewangles[1]));
             self.reticle = None;
             let mut models = self.remote_players(dt, st, ps.client_num);
+            self.scan_names(
+                st,
+                ps.client_num,
+                eye,
+                (ps.viewangles[0], ps.viewangles[1]),
+                false,
+            );
             models.extend(self.script_models(&snap, dt));
             models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
@@ -726,6 +739,12 @@ impl NetPlay {
         let look = self.look.frame(st);
         self.shock_effects(&look);
         let mut models = self.remote_players(dt, st, own);
+        let view = if dead {
+            (0.0, ps.viewangles[1])
+        } else {
+            (self.angles[0] + kick[0], self.angles[1] + kick[1])
+        };
+        self.scan_names(st, own, eye, view, dead);
         models.extend(self.script_models(&snap, dt));
         models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));

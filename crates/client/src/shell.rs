@@ -93,6 +93,9 @@ pub struct ShellState {
     /// The scoreboard held up by a script step instead of the key (the `--ui-script` `scores` step).
     pub scores_forced: bool,
     pub hud_stats: hud::Stats,
+    /// The names and icons over other players, and the dvars that shape them.
+    pub names: hud::names::Names,
+    pub names_cfg: hud::names::Cfg,
     was_active: bool,
     /// The join menu's server lists (LAN discovery, favorites).
     pub servers: crate::serverlist::ServerList,
@@ -234,6 +237,8 @@ impl ShellState {
             scores_top: 1,
             scores_forced: false,
             hud_stats: hud::Stats::default(),
+            names: hud::names::Names::default(),
+            names_cfg: hud::names::Cfg::read(&crate::input::Cvars::default()),
             was_active: false,
             servers: Default::default(),
             vfs: ::assets::vfs::Vfs::open_stock(&install.root, 0).ok(),
@@ -630,6 +635,13 @@ impl Shell {
                 .scores_wanted
                 .then(|| hud::rows_shown(&st.live.scores, st.live.own_team, st.scores_top));
             st.hud_stats.frame(&st.live, rows);
+            st.names_cfg = hud::names::Cfg::read(&input.cvars);
+            st.names
+                .update(&st.live, &st.names_cfg, hud::team_colors(&input.cvars));
+            st.hud_stats.names_offered(&st.names, &st.live);
+        } else {
+            let st = &mut self.st;
+            st.names.update(&st.live, &st.names_cfg, [[1.0; 4]; 2]);
         }
         if !self.st.live.scores_wanted {
             self.st.scores_top = 1;
@@ -662,6 +674,14 @@ impl Shell {
             let in_game = self.st.in_game;
             if in_game {
                 hud::draw_under(&self.ui, &mut p, &self.st);
+                hud::names::draw(
+                    &self.ui,
+                    &mut p,
+                    &self.st.live,
+                    &self.st.names,
+                    &self.st.names_cfg,
+                    &mut self.st.hud_stats,
+                );
             }
             let mut h = Self::host(&mut self.st, input);
             self.ui.paint(&mut h, &mut p, in_game);

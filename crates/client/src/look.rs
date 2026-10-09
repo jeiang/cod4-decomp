@@ -448,6 +448,13 @@ impl Look {
         )
     }
 
+    /// `CG_Flashbanged`: a shock whose screen is not a blur is still running at `now_ms`.
+    pub fn flashed(&self, now_ms: i32) -> bool {
+        self.shock.as_ref().is_some_and(|s| {
+            s.start_ms + s.duration_ms - now_ms > 0 && s.params.screen != Screen::Blurred
+        })
+    }
+
     /// The look at server time `now_ms`.
     pub fn frame(&mut self, now_ms: i32) -> LookOut {
         let (glow, film) = self.current(now_ms);
