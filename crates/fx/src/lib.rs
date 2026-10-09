@@ -12,7 +12,7 @@ use assets::zone::fx::{FxEffectDef, FxElemDef, FxVisuals, elem, flags};
 use assets::zone::gfx::Material;
 use assets::zone::xmodel::XModel;
 use glam::Vec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod rng;
@@ -252,6 +252,8 @@ struct Effect {
 pub struct Fx {
     lib: Arc<Library>,
     effects: Vec<Effect>,
+    /// Handles of the effects that exist, for [`Fx::is_live`]; rebuilt by every update.
+    live_ids: HashSet<u64>,
     now: i32,
     rng: Rng,
     next_id: u64,
@@ -270,6 +272,7 @@ impl Fx {
         Fx {
             lib,
             effects: Vec::new(),
+            live_ids: HashSet::new(),
             now: 0,
             rng: Rng::new(0x5EED),
             next_id: 1,
@@ -299,7 +302,8 @@ impl Fx {
     /// Plays `def` at `frame`, starting `at` the given time (milliseconds on the effect clock).
     pub fn play_at(&mut self, def: &Arc<FxEffectDef>, frame: Frame, at: i32) -> u64 {
         if self.effects.len() >= MAX_EFFECTS {
-            self.effects.remove(0);
+            let old = self.effects.remove(0);
+            self.live_ids.remove(&old.id);
             self.stats.dropped += 1;
         }
         self.stats.effects_played += 1;
@@ -318,6 +322,7 @@ impl Fx {
         self.next_id += 1;
         self.begin(&mut e, at);
         let id = e.id;
+        self.live_ids.insert(id);
         self.effects.push(e);
         id
     }
@@ -361,7 +366,7 @@ impl Fx {
 
     /// Whether effect `id` still exists (it ended, or the pool dropped it).
     pub fn is_live(&self, id: u64) -> bool {
-        self.effects.iter().any(|e| e.id == id)
+        self.live_ids.contains(&id)
     }
 
     /// Restarts effect `id` at `at` (`FX_RetriggerEffect`): its looping elements start over and its one-shot elements
@@ -573,6 +578,8 @@ impl Fx {
             });
         }
         self.live_elems = effects.iter().map(|e| e.elems.len()).sum();
+        self.live_ids.clear();
+        self.live_ids.extend(effects.iter().map(|e| e.id));
         self.effects = effects;
     }
 
@@ -1523,6 +1530,23 @@ mod tests {
         fx.stop(id);
         fx.update(5000, &Empty);
         assert!(!fx.retrigger(id, 5100));
+    }
+
+    #[test]
+    fn a_handle_is_live_until_its_effect_ends_or_is_evicted() {
+        let e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        let def = effect("fx/live", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        let first = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        assert!(fx.is_live(first));
+        for _ in 0..MAX_EFFECTS {
+            fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        }
+        assert!(!fx.is_live(first));
+        let one = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.stop(one);
+        fx.update(10_000, &Empty);
+        assert!(!fx.is_live(one));
     }
 
     #[test]
