@@ -879,6 +879,8 @@ mod tests {
             last_ack: 0,
             ack_moved: Instant::now(),
             stalled: false,
+            unheard_ms: 0,
+            heard_now: false,
         }
     }
 
