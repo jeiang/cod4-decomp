@@ -1,16 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (GPL-3.0, KisakCOD contributors and Activision): `DynEntity/DynEntity_client.cpp`
+// (`DynEntCl_ExplosionEvent`, `DynEntCl_DynEntImpactEvent`, `DynEntCl_Damage`) and `DynEntity/DynEntity_pieces.cpp`.
 //! The map's loose props (the clipmap's clutter and destructible dynamic entities: crates, barrels, bottles). The
 //! server does not simulate them, so each client draws them where the map puts them and, when a shot, a blast or a
 //! physics explosion reaches one, lets it fall as a rigid body with its PhysPreset (mass, bounce, friction, and the
 //! model's physics geometry and mass distribution; see [`fx::Body`]) that collides with the map. What a client does to
 //! a prop is not shared; it does not hurt anyone.
+//!
+//! A destructible prop (`kind` 2) has health: shots and blasts hurt it, and when it is spent it vanishes, plays its
+//! destroy effect and throws its destroy pieces as rigid bodies (`DynEntCl_Damage`). Bodies that hit hard enough are
+//! heard ([`Collision`]).
 
 use crate::effects::Tracer;
 use crate::events::ClientEvent;
-use assets::zone::clipmap::DynEntityDef;
+use assets::zone::clipmap::{DynEntityDef, XModelPieces};
+use assets::zone::fx::FxEffectDef;
 use assets::zone::phys::PhysPreset;
+use assets::zone::weapon::WeaponDef;
 use assets::zone::xmodel::XModel;
-use fx::{Body, Mass, Shape};
+use fx::{Body, Frame, Impact, Mass, Shape};
 use glam::Vec3;
 use render::{ModelInstance, ModelKind};
 use server::tempev::Physics;
@@ -21,8 +29,6 @@ use std::sync::Arc;
 const STEP: f32 = 1.0 / 60.0;
 /// A prop that has not settled this long is put to sleep where it is.
 const LIFE: f32 = 12.0;
-/// How far from a prop's bounds an impact still strikes it.
-const IMPACT_REACH: f32 = 10.0;
 /// `dynEnt_bulletForce`: the speed of the bullet that strikes a prop.
 const BULLET_FORCE: f32 = 1000.0;
 /// `dynEnt_explodeForce`: the momentum a blast gives a prop at its centre, times the preset's explosive force scale.
@@ -30,14 +36,17 @@ const EXPLODE_FORCE: f32 = 12500.0;
 /// `dynEnt_explodeUpbias` and `dynEnt_explodeSpinScale` (the random offset of the push from the centre of mass).
 const EXPLODE_UP_BIAS: f32 = 0.5;
 const EXPLODE_SPIN_SCALE: f32 = 3.0;
-const BLAST_REACH: f32 = 220.0;
-/// Speed a jolt gives a prop at its centre, and the upward speed a jitter of one unit gives, units per second.
-const JOLT_KICK: f32 = 700.0;
+/// The upward speed a jitter of one unit gives, units per second.
 const JITTER_KICK: f32 = 120.0;
-/// Props with a side shorter than this are too small to bother (they are decoration).
-const MIN_SIZE: f32 = 2.0;
-/// Props this heavy in bounds-volume terms (cubic units) shrug off a bullet.
-const BULLET_MAX_VOLUME: f32 = 60.0 * 60.0 * 60.0;
+/// `dynEnt_explodeMinForce`: a blast gives a prop less than this momentum does not even wake it.
+const EXPLODE_MIN_FORCE: f32 = 40.0;
+/// `dynEnt_explodeMaxEnts`: the most props one blast wakes (the nearest).
+const EXPLODE_MAX_ENTS: usize = 20;
+/// `dynEntPieces_impactForce`, and the most pieces alive.
+const PIECES_FORCE: f32 = 1000.0;
+const MAX_PIECES: usize = 100;
+/// The most collision sounds one frame starts (`SND_MAX_PHYSICS`).
+pub const MAX_COLLISION_SOUNDS: usize = 32;
 
 /// Corner `i` of a box is at `mins` where bit `k` is clear and at `maxs` where it is set.
 fn corner(i: usize, mins: Vec3, maxs: Vec3) -> Vec3 {
@@ -72,14 +81,17 @@ struct Prop {
     body: Option<Body>,
     carry: f32,
     age: f32,
+    /// A destructible prop's health, and what it does when it breaks.
+    destructible: bool,
+    health: i32,
+    destroy_fx: Option<Arc<FxEffectDef>>,
+    destroy_pieces: Option<Arc<XModelPieces>>,
+    gone: bool,
+    /// The surface type (`SURF_TYPEINDEX`) its shots land on.
+    surface: u8,
 }
 
 impl Prop {
-    fn volume(&self) -> f32 {
-        let d = Vec3::from(self.model.maxs) - Vec3::from(self.model.mins);
-        d.x * d.y * d.z
-    }
-
     fn axes(&self) -> [Vec3; 3] {
         self.body.as_ref().map_or(self.axes, Body::axes)
     }
@@ -142,6 +154,19 @@ impl Prop {
         }
     }
 
+    /// Hurts a destructible prop; `true` when this breaks it.
+    fn hurt(&mut self, damage: i32) -> bool {
+        if !self.destructible || self.gone || damage <= 0 {
+            return false;
+        }
+        self.health -= damage;
+        self.gone = self.health <= 0;
+        if self.gone {
+            self.body = None;
+        }
+        self.gone
+    }
+
     fn instance(&self) -> ModelInstance {
         let origin = self.origin().to_array();
         let mut m = ModelInstance::new(self.model.clone(), ModelKind::World);
@@ -159,6 +184,106 @@ pub struct Props {
     pub woken: u64,
     /// Where the next random spin offset of a blast comes from.
     seed: u32,
+    /// What broke props threw.
+    pieces: Vec<Piece>,
+    out: Happened,
+}
+
+/// What a frame of prop interaction asks the rest of the client to play.
+#[derive(Default)]
+pub struct Happened {
+    /// Bullets that struck a prop, for the impact effect and sound of their weapon.
+    pub impacts: Vec<ClientEvent>,
+    /// Destroy effects of broken props.
+    pub fx: Vec<(Arc<FxEffectDef>, Frame)>,
+    /// Bodies that hit hard enough to be heard.
+    pub collisions: Vec<Collision>,
+}
+
+/// A body hit something hard enough to be heard: the preset's sound prefix, where, and the surface hit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Collision {
+    pub prefix: Arc<str>,
+    pub origin: [f32; 3],
+    pub surface: u8,
+}
+
+/// The surface type under a hit (`SURF_TYPEINDEX` of the contact), found by looking through the surface.
+pub fn heard(world: &dyn Collide, prefix: Arc<str>, hit: &Impact) -> Collision {
+    let t = world.trace(
+        (hit.at + hit.normal * 2.0).to_array(),
+        (hit.at - hit.normal * 2.0).to_array(),
+        [0.0; 3],
+        [0.0; 3],
+        sim::cm::ENTITYNUM_NONE,
+        sim::contents::SOLID,
+    );
+    Collision {
+        prefix,
+        origin: hit.at.to_array(),
+        surface: surface_type(t.surface_flags),
+    }
+}
+
+/// `SURF_TYPEINDEX`.
+fn surface_type(flags: i32) -> u8 {
+    ((flags & 0x01F0_0000) >> 20) as u8
+}
+
+/// A piece a broken prop threw.
+struct Piece {
+    model: Arc<XModel>,
+    body: Body,
+    carry: f32,
+}
+
+impl Piece {
+    fn advance(&mut self, dt: f32, world: &dyn fx::World) -> Option<Impact> {
+        if self.body.asleep() {
+            return None;
+        }
+        self.carry += dt.min(0.1);
+        let mut loud = None;
+        while self.carry >= STEP {
+            self.carry -= STEP;
+            self.body.step(STEP, world);
+            loud = loud.or(self.body.take_impact());
+        }
+        loud
+    }
+}
+
+/// `DynEntPieces_SpawnPieces`: each piece with a PhysPreset falls from where it sat in the broken prop, struck at
+/// the hit along a direction spread by the preset's `piecesSpreadFraction`.
+fn spawn_pieces(
+    out: &mut Vec<Piece>,
+    pieces: &XModelPieces,
+    (origin, axes): (Vec3, [Vec3; 3]),
+    hit: Vec3,
+    dir: Vec3,
+    seed: &mut u32,
+) {
+    for piece in pieces.pieces.iter() {
+        let Some(model) = &piece.model else { continue };
+        let Some(preset) = &model.phys_preset else {
+            continue;
+        };
+        if out.len() >= MAX_PIECES {
+            break;
+        }
+        let o = Vec3::from(piece.offset);
+        let at = origin + axes[0] * o.x - axes[1] * o.y + axes[2] * o.z;
+        let up = Vec3::Z * preset.pieces_upward_velocity;
+        let mut body = Body::new(preset, &Shape::of_model(model), at, axes, up);
+        let noise = Vec3::new(random(seed), random(seed), random(seed));
+        let force = dir.lerp(noise, preset.pieces_spread_fraction.clamp(0.0, 1.0));
+        body.bullet_impact(hit, force, PIECES_FORCE, preset.bullet_force_scale);
+        out.push(Piece {
+            model: model.clone(),
+            body,
+            carry: 0.0,
+        });
+    }
 }
 
 impl Props {
@@ -169,7 +294,7 @@ impl Props {
                 continue;
             };
             let (mins, maxs) = (Vec3::from(model.mins), Vec3::from(model.maxs));
-            if (maxs - mins).min_element() < MIN_SIZE {
+            if (maxs - mins).min_element() <= 0.0 {
                 continue;
             }
             // The map stores the pose as a quaternion; its forward, left and up are these.
@@ -186,6 +311,10 @@ impl Props {
                 moments: Vec3::from(d.moments_of_inertia),
                 products: Vec3::from(d.products_of_inertia),
             };
+            let surface = model
+                .coll_surfs
+                .first()
+                .map_or(0, |c| surface_type(c.surface_flags));
             props.push(Prop {
                 shape: Shape::of_model(&model).with_mass(mass),
                 model,
@@ -195,12 +324,20 @@ impl Props {
                 body: None,
                 carry: 0.0,
                 age: 0.0,
+                destructible: d.kind == 2,
+                health: d.health,
+                destroy_fx: d.destroy_fx.clone(),
+                destroy_pieces: d.destroy_pieces.clone(),
+                gone: false,
+                surface,
             });
         }
         Self {
             props,
             woken: 0,
             seed: 0x9E37_79B9,
+            pieces: Vec::new(),
+            out: Happened::default(),
         }
     }
 
@@ -208,38 +345,197 @@ impl Props {
         self.props.len()
     }
 
-    /// Reacts to `ev`: impacts near a prop, blasts, and shots that would hit one.
-    pub fn event(&mut self, ev: &ClientEvent, hitscan: &dyn Fn(u16) -> bool, world: &dyn Collide) {
+    /// Reacts to `ev`: blasts and physics events near a prop, and shots that would hit one. `weapon` resolves a weapon
+    /// index to its definition (radii, damage, impact type).
+    pub fn event(
+        &mut self,
+        ev: &ClientEvent,
+        weapon: &dyn Fn(u16) -> Option<Arc<WeaponDef>>,
+        world: &dyn Collide,
+    ) {
         let before = self.props.iter().filter(|p| p.body.is_some()).count();
         match ev {
-            ClientEvent::Explosion { origin, .. } => {
-                let blast = Physics::Explosion {
-                    cylinder: false,
-                    outer: BLAST_REACH,
-                    inner: 0.0,
-                    magnitude: 1.0,
-                };
-                apply_physics(&mut self.props, Vec3::from(*origin), &blast, &mut self.seed);
+            ClientEvent::Explosion {
+                origin, weapon: w, ..
+            } => {
+                if let Some(d) = weapon(*w) {
+                    // A rocket's blast is full strength out to its radius; a grenade's falls off from the centre.
+                    let radius = d.explosion_radius as f32;
+                    self.blast(
+                        Vec3::from(*origin),
+                        Blast {
+                            inner: if d.impact_type == IMPACT_ROCKET_EXPLODE {
+                                radius
+                            } else {
+                                0.0
+                            },
+                            outer: radius,
+                            damage: (d.explosion_inner_damage, d.explosion_outer_damage),
+                            ..Blast::default()
+                        },
+                    );
+                }
             }
-            ClientEvent::Physics { origin, what } => {
-                apply_physics(&mut self.props, Vec3::from(*origin), what, &mut self.seed)
-            }
+            ClientEvent::Physics { origin, what } => self.physics(Vec3::from(*origin), what),
             ClientEvent::WeaponFire {
                 eye,
                 angles,
-                weapon,
+                weapon: w,
+                shooter,
                 ..
-            } if hitscan(*weapon) => self.shot(Vec3::from(*eye), *angles, world),
+            } => {
+                if let Some(d) = weapon(*w).filter(|d| {
+                    sim::weapon::WeaponType::from_raw(d.weap_type)
+                        == sim::weapon::WeaponType::Bullet
+                }) {
+                    self.shot(Vec3::from(*eye), *angles, (*w, *shooter, d.damage), world);
+                }
+            }
             _ => {}
         }
         self.woken += (self.props.iter().filter(|p| p.body.is_some()).count() - before) as u64;
     }
 
-    /// A bullet leaving `eye` along `angles` hits the first prop on its way, if the map does not stop it first.
-    fn shot(&mut self, eye: Vec3, angles: [f32; 3], world: &dyn Collide) {
+    /// What the props asked the client to play since the last call.
+    pub fn take(&mut self) -> Happened {
+        std::mem::take(&mut self.out)
+    }
+
+    fn physics(&mut self, at: Vec3, what: &Physics) {
+        match *what {
+            Physics::Explosion {
+                cylinder,
+                outer,
+                inner,
+                magnitude,
+            } => self.blast(
+                at,
+                Blast {
+                    cylinder,
+                    inner,
+                    outer,
+                    scale: magnitude,
+                    ..Blast::default()
+                },
+            ),
+            Physics::Jolt {
+                outer,
+                inner,
+                impulse,
+            } => self.blast(
+                at,
+                Blast {
+                    cylinder: true,
+                    inner,
+                    outer,
+                    impulse: Vec3::from(impulse),
+                    ..Blast::default()
+                },
+            ),
+            Physics::Jitter {
+                outer,
+                inner,
+                min,
+                max,
+            } => jitter(
+                &mut self.props,
+                at,
+                (outer, inner),
+                (min + max) * 0.5,
+                &mut self.seed,
+            ),
+        }
+    }
+
+    /// `DynEntCl_ExplosionEvent` and `DynEntCl_GetClosestEntities`: the nearest few props within the outer radius are
+    /// pushed and hurt by how far they are.
+    fn blast(&mut self, at: Vec3, b: Blast) {
+        if b.outer <= 0.0 {
+            return;
+        }
+        let mut near: Vec<(f32, usize)> = self
+            .props
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.gone)
+            .filter_map(|(i, p)| {
+                let (lo, hi) = p.bounds();
+                let (lo, hi, at) = if b.cylinder {
+                    (lo.with_z(0.0), hi.with_z(0.0), at.with_z(0.0))
+                } else {
+                    (lo, hi, at)
+                };
+                let d = at.clamp(lo, hi).distance(at);
+                (d < b.outer).then_some((d, i))
+            })
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        near.truncate(EXPLODE_MAX_ENTS);
+        for (dist, i) in near {
+            let scale = b.falloff(dist);
+            let p = &mut self.props[i];
+            let (lo, hi) = p.bounds();
+            let centre = (lo + hi) / 2.0;
+            let spin = Vec3::new(
+                random(&mut self.seed),
+                random(&mut self.seed),
+                random(&mut self.seed),
+            ) * EXPLODE_SPIN_SCALE;
+            let force =
+                scale * p.preset.as_ref().map_or(1.0, |q| q.explosive_force_scale) * EXPLODE_FORCE;
+            let dir = if b.impulse != Vec3::ZERO {
+                b.impulse
+            } else if force < EXPLODE_MIN_FORCE {
+                continue;
+            } else {
+                let away = if b.cylinder {
+                    (centre - at).with_z(0.0)
+                } else {
+                    centre - at
+                };
+                (away.normalize_or(Vec3::Z) + Vec3::Z * EXPLODE_UP_BIAS).normalize()
+            };
+            let mut point = centre;
+            p.strike(|body, _| {
+                point = body.center_of_mass() + spin;
+                body.impulse(point, dir * force);
+            });
+            let damage = ((b.damage.0 - b.damage.1) as f32 * scale + b.damage.1 as f32) as i32;
+            self.hurt(i, point, dir.normalize_or(Vec3::Z), damage);
+        }
+    }
+
+    /// `DynEntCl_Damage`: breaks the prop when its health is spent, which plays its destroy effect and throws its pieces.
+    fn hurt(&mut self, i: usize, hit: Vec3, dir: Vec3, damage: i32) {
+        let p = &mut self.props[i];
+        let pose = (p.origin(), p.axes());
+        if !p.hurt(damage) {
+            return;
+        }
+        if let Some(def) = p.destroy_fx.clone() {
+            let frame = Frame {
+                origin: pose.0,
+                axis: pose.1,
+            };
+            self.out.fx.push((def, frame));
+        }
+        if let Some(pieces) = p.destroy_pieces.clone() {
+            spawn_pieces(&mut self.pieces, &pieces, pose, hit, dir, &mut self.seed);
+        }
+    }
+
+    /// `DynEntCl_DynEntImpactEvent`: a bullet leaving `eye` along `angles` hits the first prop on its way, if the map
+    /// does not stop it first. The prop is struck, hurt by the weapon's damage, and the weapon's impact plays on it.
+    fn shot(
+        &mut self,
+        eye: Vec3,
+        angles: [f32; 3],
+        (weapon, shooter, damage): (u16, u16, i32),
+        world: &dyn Collide,
+    ) {
         let (f, _, _) = sim::pm::math::angle_vectors(&angles);
         let f = Vec3::from(f);
-        let end = eye + f * 4000.0;
+        let end = eye + f * SHOT_RANGE;
         let wall = world
             .trace(
                 eye.to_array(),
@@ -250,43 +546,109 @@ impl Props {
                 sim::contents::SOLID,
             )
             .fraction
-            * 4000.0;
-        let mut best: Option<(f32, usize)> = None;
-        for (i, p) in self.props.iter().enumerate() {
-            if p.preset.is_none() || p.volume() > BULLET_MAX_VOLUME {
-                continue;
-            }
-            let (lo, hi) = p.bounds();
-            if let Some(t) = ray_box(
-                eye,
-                f,
-                lo - Vec3::splat(IMPACT_REACH / 5.0),
-                hi + Vec3::splat(IMPACT_REACH / 5.0),
-            ) && t < wall
-                && best.is_none_or(|(b, _)| t < b)
+            * SHOT_RANGE;
+        let mut best: Option<(f32, usize, Vec3)> = None;
+        for (i, p) in self.props.iter().enumerate().filter(|(_, p)| !p.gone) {
+            if let Some((t, n)) = ray_prop(p, eye, f)
+                && t < wall
+                && best.is_none_or(|(b, _, _)| t < b)
             {
-                best = Some((t, i));
+                best = Some((t, i, n));
             }
         }
-        if let Some((t, i)) = best {
-            let at = eye + f * t;
-            self.props[i].strike(|b, preset| {
-                b.bullet_impact(at, f, BULLET_FORCE, preset.bullet_force_scale);
-            });
-        }
+        let Some((t, i, normal)) = best else { return };
+        let at = eye + f * t;
+        self.out.impacts.push(ClientEvent::BulletImpact {
+            origin: at.to_array(),
+            normal: normal.to_array(),
+            surface: self.props[i].surface,
+            weapon,
+            shooter,
+        });
+        self.props[i].strike(|b, preset| {
+            b.bullet_impact(at, f, BULLET_FORCE, preset.bullet_force_scale);
+        });
+        self.hurt(i, at, f, damage);
     }
 
-    /// Advances the falling props to the end of this frame.
+    /// Advances the falling props and pieces to the end of this frame.
     pub fn update(&mut self, dt: f32, world: &dyn Collide) {
-        let world = Tracer(world);
+        let tracer = Tracer(world);
         for p in &mut self.props {
-            p.advance(dt, &world);
+            p.advance(dt, &tracer);
+            if let Some(b) = &mut p.body
+                && let Some(hit) = b.take_impact()
+                && let Some(prefix) = b.sound_prefix()
+            {
+                self.out.collisions.push(heard(world, prefix.clone(), &hit));
+            }
+        }
+        for p in &mut self.pieces {
+            if let Some(hit) = p.advance(dt, &tracer)
+                && let Some(prefix) = p.body.sound_prefix()
+            {
+                self.out.collisions.push(heard(world, prefix.clone(), &hit));
+            }
         }
     }
 
-    /// Every prop as a model to draw.
+    /// Every prop and piece as a model to draw.
     pub fn instances(&self) -> impl Iterator<Item = ModelInstance> + '_ {
-        self.props.iter().map(Prop::instance)
+        let pieces = self.pieces.iter().map(|p| {
+            let origin = p.body.origin().to_array();
+            let mut m = ModelInstance::new(p.model.clone(), ModelKind::World);
+            m.origin = origin;
+            m.angles = angles_of(p.body.axes());
+            m.light_origin = origin;
+            m
+        });
+        self.props
+            .iter()
+            .filter(|p| !p.gone)
+            .map(Prop::instance)
+            .chain(pieces)
+    }
+}
+
+/// `weapImpactType_t` of a rocket's explosion: its blast is full strength out to the radius.
+const IMPACT_ROCKET_EXPLODE: i32 = 7;
+/// How far a bullet flies.
+const SHOT_RANGE: f32 = 4000.0;
+
+/// An explosion's reach and strength.
+struct Blast {
+    cylinder: bool,
+    inner: f32,
+    outer: f32,
+    /// `inScale`: the strength at the inner radius.
+    scale: f32,
+    /// The push direction a physics jolt forces; zero for away from the centre.
+    impulse: Vec3,
+    /// Damage at the inner and at the outer radius.
+    damage: (i32, i32),
+}
+
+impl Default for Blast {
+    fn default() -> Self {
+        Blast {
+            cylinder: false,
+            inner: 0.0,
+            outer: 0.0,
+            scale: 1.0,
+            impulse: Vec3::ZERO,
+            damage: (0, 0),
+        }
+    }
+}
+
+impl Blast {
+    /// The strength at `dist`: full inside the inner radius, falling linearly to nothing at the outer.
+    fn falloff(&self, dist: f32) -> f32 {
+        if dist <= self.inner || self.outer <= self.inner {
+            self.scale
+        } else {
+            (self.outer - dist) / (self.outer - self.inner) * self.scale
+        }
     }
 }
 
@@ -399,29 +761,17 @@ fn random(seed: &mut u32) -> f32 {
     *seed as f32 / u32::MAX as f32 * 2.0 - 1.0
 }
 
-/// A physics world event (`DynEntCl_ExplosionEvent`): props within the outer radius are pushed, fully inside the inner
-/// radius and less out to the outer. Explosions throw them away from `at` and a little up (a cylinder ignores height)
-/// with `dynEnt_explodeForce` from a point a little off their centre of mass, jolts push along their impulse, jitters
-/// hop them.
-fn apply_physics(props: &mut [Prop], at: Vec3, what: &Physics, seed: &mut u32) {
-    let (outer, inner) = match *what {
-        Physics::Explosion { outer, inner, .. }
-        | Physics::Jolt { outer, inner, .. }
-        | Physics::Jitter { outer, inner, .. } => (outer, inner),
-    };
+/// `physicsjitter`: props within the outer radius hop up, the harder the nearer, in proportion to `amount`.
+fn jitter(props: &mut [Prop], at: Vec3, (outer, inner): (f32, f32), amount: f32, seed: &mut u32) {
     if outer <= 0.0 {
         return;
     }
-    let flat = matches!(what, Physics::Explosion { cylinder: true, .. })
-        || matches!(what, Physics::Jitter { .. });
-    for p in props {
+    for p in props.iter_mut().filter(|p| !p.gone) {
         let (lo, hi) = p.bounds();
-        let (lo, hi, at) = if flat {
-            (lo.with_z(0.0), hi.with_z(0.0), at.with_z(0.0))
-        } else {
-            (lo, hi, at)
-        };
-        let dist = at.clamp(lo, hi).distance(at);
+        let dist = at
+            .with_z(0.0)
+            .clamp(lo.with_z(0.0), hi.with_z(0.0))
+            .distance(at.with_z(0.0));
         if dist > outer {
             continue;
         }
@@ -430,38 +780,59 @@ fn apply_physics(props: &mut [Prop], at: Vec3, what: &Physics, seed: &mut u32) {
         } else {
             1.0 - (dist - inner) / (outer - inner)
         };
-        let centre = (lo + hi) / 2.0;
         let spin = Vec3::new(random(seed), random(seed), random(seed)) * EXPLODE_SPIN_SCALE;
-        p.strike(|b, preset| {
-            let scale = if preset.explosive_force_scale > 0.0 {
-                preset.explosive_force_scale
-            } else {
-                1.0
-            };
-            let push = match *what {
-                Physics::Explosion { magnitude, .. } => {
-                    let away = (centre - at).with_z(if flat { 0.0 } else { centre.z - at.z });
-                    (away.normalize_or(Vec3::Z) + Vec3::Z * EXPLODE_UP_BIAS).normalize()
-                        * (EXPLODE_FORCE * magnitude.max(0.1) * scale)
-                }
-                Physics::Jolt { impulse, .. } => {
-                    Vec3::from(impulse).normalize_or_zero() * (b.mass() * JOLT_KICK)
-                }
-                Physics::Jitter { min, max, .. } => {
-                    Vec3::Z * (b.mass() * (min + max) * 0.5 * JITTER_KICK)
-                }
-            };
-            b.impulse(b.center_of_mass() + spin, push * fall);
+        p.strike(|b, _| {
+            b.impulse(
+                b.center_of_mass() + spin,
+                Vec3::Z * (b.mass() * amount * JITTER_KICK * fall),
+            );
         });
     }
 }
 
-/// Distance along a ray from `o` along unit `d` to the box, if it hits.
-fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<f32> {
-    let inv = Vec3::ONE / d;
-    let (a, b) = ((lo - o) * inv, (hi - o) * inv);
-    let (near, far) = (a.min(b).max_element(), a.max(b).min_element());
-    (far >= near.max(0.0)).then_some(near.max(0.0))
+/// Where a ray from `o` along unit `d` enters the prop's oriented bounds, and the face's normal.
+fn ray_prop(p: &Prop, o: Vec3, d: Vec3) -> Option<(f32, Vec3)> {
+    // The model's axes are forward, minus left and up.
+    let a = p.axes();
+    let axes = [a[0], -a[1], a[2]];
+    let local = |v: Vec3| Vec3::new(v.dot(axes[0]), v.dot(axes[1]), v.dot(axes[2]));
+    let (t, n) = ray_box(
+        local(o - p.origin()),
+        local(d),
+        Vec3::from(p.model.mins),
+        Vec3::from(p.model.maxs),
+    )?;
+    let n = axes[0] * n.x + axes[1] * n.y + axes[2] * n.z;
+    Some((t, if n == Vec3::ZERO { -d } else { n }))
+}
+
+/// Where a ray from `o` along unit `d` first meets the box, and the normal of the face it enters by (zero when the
+/// ray starts inside).
+fn ray_box(o: Vec3, d: Vec3, lo: Vec3, hi: Vec3) -> Option<(f32, Vec3)> {
+    let (mut near, mut far, mut normal) = (0.0f32, f32::MAX, Vec3::ZERO);
+    for k in 0..3 {
+        if d[k].abs() < 1e-9 {
+            if o[k] < lo[k] || o[k] > hi[k] {
+                return None;
+            }
+            continue;
+        }
+        let (mut t0, mut t1, mut side) = ((lo[k] - o[k]) / d[k], (hi[k] - o[k]) / d[k], -1.0);
+        if t0 > t1 {
+            std::mem::swap(&mut t0, &mut t1);
+            side = 1.0;
+        }
+        if t0 > near {
+            near = t0;
+            normal = Vec3::ZERO;
+            normal[k] = side;
+        }
+        far = far.min(t1);
+        if far < near {
+            return None;
+        }
+    }
+    Some((near, normal))
 }
 
 #[cfg(test)]
@@ -528,6 +899,12 @@ mod tests {
             body: None,
             carry: 0.0,
             age: 0.0,
+            destructible: false,
+            health: 0,
+            destroy_fx: None,
+            destroy_pieces: None,
+            gone: false,
+            surface: 0,
         }
     }
 
@@ -626,44 +1003,225 @@ mod tests {
         assert_eq!(l.0.len(), 0);
     }
 
-    fn woken(what: Physics, at: Vec3, props: &mut [Prop]) -> Vec<bool> {
-        apply_physics(props, at, &what, &mut 1);
-        props.iter().map(|p| p.body.is_some()).collect()
+    fn props_of(ps: Vec<Prop>) -> Props {
+        Props {
+            props: ps,
+            woken: 0,
+            seed: 1,
+            pieces: Vec::new(),
+            out: Happened::default(),
+        }
+    }
+
+    fn woken(what: Physics, at: Vec3, ps: Vec<Prop>) -> Vec<bool> {
+        let mut props = props_of(ps);
+        props.physics(at, &what);
+        props.props.iter().map(|p| p.body.is_some()).collect()
+    }
+
+    fn at_x(x: f32) -> Prop {
+        let mut p = prop(Some(preset()));
+        p.origin = Vec3::new(x, 0.0, 0.5);
+        p
     }
 
     #[test]
     fn a_physics_event_moves_the_props_inside_its_radius_only() {
-        let mk = || {
-            let mut a = prop(Some(preset()));
-            a.origin = Vec3::new(100.0, 0.0, 0.5);
-            let mut b = prop(Some(preset()));
-            b.origin = Vec3::new(900.0, 0.0, 0.5);
-            vec![a, b]
-        };
+        let mk = || vec![at_x(100.0), at_x(900.0)];
         let cyl = Physics::Explosion {
             cylinder: true,
             outer: 300.0,
             inner: 100.0,
             magnitude: 1.0,
         };
-        assert_eq!(woken(cyl, Vec3::ZERO, &mut mk()), [true, false]);
+        assert_eq!(woken(cyl, Vec3::ZERO, mk()), [true, false]);
         // A cylinder reaches any height; a sphere does not.
         let high = Vec3::new(0.0, 0.0, 2000.0);
-        assert_eq!(woken(cyl, high, &mut mk()), [true, false]);
+        assert_eq!(woken(cyl, high, mk()), [true, false]);
         let sphere = Physics::Explosion {
             cylinder: false,
             outer: 300.0,
             inner: 100.0,
             magnitude: 1.0,
         };
-        assert_eq!(woken(sphere, high, &mut mk()), [false, false]);
+        assert_eq!(woken(sphere, high, mk()), [false, false]);
         let jitter = Physics::Jitter {
             outer: 300.0,
             inner: 100.0,
             min: 0.5,
             max: 1.0,
         };
-        assert_eq!(woken(jitter, Vec3::ZERO, &mut mk()), [true, false]);
+        assert_eq!(woken(jitter, Vec3::ZERO, mk()), [true, false]);
+    }
+
+    #[test]
+    fn a_blast_pushes_by_its_radii_and_wakes_only_the_nearest_few() {
+        let speed = |x: f32, inner: f32, outer: f32| {
+            let mut p = props_of(vec![at_x(x)]);
+            p.blast(
+                Vec3::ZERO,
+                Blast {
+                    inner,
+                    outer,
+                    ..Blast::default()
+                },
+            );
+            p.props[0]
+                .body
+                .as_ref()
+                .map_or(0.0, |b| b.velocity().length())
+        };
+        let (full, half, out) = (
+            speed(30.0, 50.0, 250.0),
+            speed(150.0, 50.0, 250.0),
+            speed(400.0, 50.0, 250.0),
+        );
+        assert!(full > 0.0 && out == 0.0);
+        assert!(half < full * 0.8 && half > full * 0.2, "{half} vs {full}");
+        // The same blast with a larger outer radius reaches the far prop; one with a larger inner radius is stronger.
+        assert!(speed(400.0, 50.0, 800.0) > 0.0);
+        assert!(speed(150.0, 200.0, 250.0) > half);
+
+        let mut crowd = props_of((0..30).map(|i| at_x(20.0 + i as f32 * 5.0)).collect());
+        crowd.blast(
+            Vec3::ZERO,
+            Blast {
+                outer: 500.0,
+                ..Blast::default()
+            },
+        );
+        let woken: Vec<_> = crowd.props.iter().map(|p| p.body.is_some()).collect();
+        assert_eq!(woken.iter().filter(|w| **w).count(), EXPLODE_MAX_ENTS);
+        assert!(
+            woken[..EXPLODE_MAX_ENTS].iter().all(|w| *w),
+            "the nearest wake"
+        );
+    }
+
+    fn barrel(health: i32) -> Prop {
+        let mut p = prop(Some(preset()));
+        p.destructible = true;
+        p.health = health;
+        p.destroy_fx = Some(Arc::new(FxEffectDef {
+            name: None,
+            flags: 0,
+            total_size: 0,
+            msec_looping_life: 0,
+            looping_count: 0,
+            one_shot_count: 0,
+            emission_count: 0,
+            elems: Arc::from(Vec::new()),
+        }));
+        p
+    }
+
+    #[test]
+    fn a_destructible_prop_breaks_when_its_health_is_spent_and_plays_its_effect_once() {
+        let mut props = props_of(vec![barrel(30), prop(Some(preset()))]);
+        props.hurt(0, Vec3::ZERO, Vec3::X, 20);
+        assert!(
+            !props.props[0].gone && props.out.fx.is_empty(),
+            "wounded, not broken"
+        );
+        props.hurt(0, Vec3::ZERO, Vec3::X, 20);
+        assert!(props.props[0].gone);
+        assert_eq!(props.out.fx.len(), 1);
+        props.hurt(0, Vec3::ZERO, Vec3::X, 50);
+        assert_eq!(props.out.fx.len(), 1, "a broken prop does not break again");
+        assert_eq!(props.instances().count(), 1, "it is no longer drawn");
+        props.hurt(1, Vec3::ZERO, Vec3::X, 5000);
+        assert!(!props.props[1].gone, "clutter has no health");
+    }
+
+    #[test]
+    fn a_blast_damages_by_distance_between_its_inner_and_outer_damage() {
+        let hurt_at = |x: f32| {
+            let mut p = props_of(vec![{
+                let mut b = barrel(100);
+                b.origin.x = x;
+                b
+            }]);
+            p.blast(
+                Vec3::ZERO,
+                Blast {
+                    inner: 0.0,
+                    outer: 200.0,
+                    damage: (100, 0),
+                    ..Blast::default()
+                },
+            );
+            p.props[0].health
+        };
+        assert!(hurt_at(20.0) < 40, "near: {}", hurt_at(20.0));
+        assert!(hurt_at(150.0) > 60, "far: {}", hurt_at(150.0));
+        assert_eq!(hurt_at(500.0), 100);
+    }
+
+    #[test]
+    fn a_shot_hits_the_nearest_prop_by_its_turned_bounds_and_the_map_covers_what_is_behind() {
+        let mut props = props_of(vec![barrel(100), at_x(300.0)]);
+        // The first crate sits at the origin: 10 half-width, so a ray along +x from -100 meets it at 90.
+        let eye = Vec3::new(-100.0, 0.0, 10.0);
+        props.shot(eye, [0.0, 0.0, 0.0], (3, 7, 60), &Void);
+        let Some(ClientEvent::BulletImpact {
+            origin,
+            normal,
+            shooter,
+            weapon,
+            ..
+        }) = props.out.impacts.first().cloned()
+        else {
+            panic!("no impact");
+        };
+        assert!(
+            (origin[0] + 10.0).abs() < 0.01
+                && normal == [-1.0, 0.0, 0.0]
+                && (shooter, weapon) == (7, 3)
+        );
+        assert_eq!(props.props[0].health, 40, "hurt by the weapon's damage");
+        assert!(
+            props.props[0].body.is_some() && props.props[1].body.is_none(),
+            "only the first"
+        );
+        // A shot that misses the box to the side hits nothing.
+        let mut miss = props_of(vec![barrel(100)]);
+        miss.shot(Vec3::new(-100.0, 50.0, 10.0), [0.0; 3], (3, 7, 60), &Void);
+        assert!(miss.out.impacts.is_empty());
+    }
+
+    #[test]
+    fn a_broken_prop_throws_its_pieces_and_a_hard_landing_is_heard() {
+        let mut preset = preset();
+        preset.snd_alias_prefix = Some("physics_wood".into());
+        preset.pieces_upward_velocity = 100.0;
+        let model = crate_model(Some(preset));
+        let pieces = XModelPieces {
+            name: None,
+            pieces: Arc::from(vec![assets::zone::clipmap::XModelPiece {
+                model: Some(model),
+                offset: [0.0, 0.0, 5.0],
+            }]),
+        };
+        let mut props = props_of(vec![]);
+        spawn_pieces(
+            &mut props.pieces,
+            &pieces,
+            (Vec3::new(0.0, 0.0, 100.0), [Vec3::X, Vec3::Y, Vec3::Z]),
+            Vec3::new(0.0, 0.0, 100.0),
+            Vec3::X,
+            &mut 1,
+        );
+        assert_eq!(props.pieces.len(), 1);
+        assert_eq!(props.instances().count(), 1);
+        let mut loud = None;
+        for _ in 0..300 {
+            loud = loud.or(props.pieces[0].advance(1.0 / 60.0, &Floor));
+        }
+        assert!(loud.is_some(), "it landed hard enough to hear");
+        assert_eq!(
+            props.pieces[0].body.sound_prefix().map(|p| &**p),
+            Some("physics_wood")
+        );
     }
 
     #[test]
@@ -690,8 +1248,12 @@ mod tests {
     #[test]
     fn a_ray_hits_the_nearer_face_and_misses_to_the_side() {
         let (lo, hi) = (Vec3::new(10.0, -5.0, -5.0), Vec3::new(20.0, 5.0, 5.0));
-        assert_eq!(ray_box(Vec3::ZERO, Vec3::X, lo, hi), Some(10.0));
+        assert_eq!(ray_box(Vec3::ZERO, Vec3::X, lo, hi), Some((10.0, -Vec3::X)));
         assert_eq!(ray_box(Vec3::ZERO, Vec3::Y, lo, hi), None);
         assert_eq!(ray_box(Vec3::ZERO, -Vec3::X, lo, hi), None);
+        assert_eq!(
+            ray_box(Vec3::new(30.0, 0.0, 0.0), -Vec3::X, lo, hi),
+            Some((10.0, Vec3::X))
+        );
     }
 }

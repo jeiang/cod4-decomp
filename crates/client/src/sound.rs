@@ -457,6 +457,13 @@ impl ClientSound {
         }
     }
 
+    /// Body hits (`Phys_PlayCollisionSound`): `<prefix>_<surface>` at the hit, at most [`MAX_COLLISION_SOUNDS`] a frame.
+    pub fn collisions(&mut self, hits: &[crate::props::Collision]) {
+        for h in hits.iter().take(crate::props::MAX_COLLISION_SOUNDS) {
+            self.surface_sound(&h.prefix, h.surface, h.origin);
+        }
+    }
+
     /// The entity is at `origin` now: its loops follow it.
     pub fn follow(&mut self, entity: u16, origin: [f32; 3]) {
         if let Some(s) = self.ready() {

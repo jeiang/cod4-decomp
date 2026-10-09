@@ -290,6 +290,8 @@ pub struct NetPlay {
     /// Earthquakes shaking the view.
     shakes: sim::shake::CameraShakes,
     props: Props,
+    /// Ragdoll hits of this frame, heard with the props'.
+    ragdoll_hits: Vec<crate::props::Collision>,
     launches: Launches,
     look: Look,
     /// What the shell shock holds the view to (`CL_CapTurnRate`, the mouse scale): pitch and yaw degrees per second.
@@ -379,6 +381,7 @@ impl NetPlay {
                     .map_or(&[][..], |c| &c.dyn_entities[..]),
             ),
             launches: Launches::default(),
+            ragdoll_hits: Vec::new(),
             look: Look::new((map.art.glow, map.art.film)),
             max_turn: [0.0; 2],
             shock_sensitivity: 1.0,
@@ -913,6 +916,31 @@ impl NetPlay {
         })
     }
 
+    /// Plays what the props did this frame (bullet impacts, destroy effects) and every body hit loud enough to hear.
+    fn prop_effects(&mut self) {
+        let mut h = self.props.take();
+        let (weapons, content) = (&self.weapons, &self.lib.content);
+        let def = |w: u16| {
+            weapons
+                .get(w)
+                .and_then(|i| content.weapon(&i.name))
+                .cloned()
+        };
+        for e in &h.impacts {
+            self.effects.event(e, &def);
+        }
+        self.sound.world_events(&h.impacts, &def, &|_| None);
+        for (fx, frame) in &h.fx {
+            self.effects.play_frame("dynent_destroy", fx, *frame);
+        }
+        for c in self.effects.take_collisions() {
+            h.collisions
+                .push(crate::props::heard(self.boxes.world(), c.prefix, &c.impact));
+        }
+        h.collisions.append(&mut self.ragdoll_hits);
+        self.sound.collisions(&h.collisions);
+    }
+
     /// Plays what `events` start and advances the effects and the props to `st`; returns what to draw from `eye`
     /// looking along `(yaw, pitch, roll)` radians. `own` is whose gun the first-person flash comes from.
     fn fx_frame(
@@ -941,22 +969,15 @@ impl NetPlay {
                 self.pushes.insert(*client, *push);
             }
             let weapons = &self.weapons;
-            self.props.event(
-                e,
-                &|w| {
-                    weapons
-                        .get(w)
-                        .is_some_and(|i| i.weap_type == sim::weapon::WeaponType::Bullet)
-                },
-                self.boxes.world(),
-            );
             let content = &self.lib.content;
-            self.effects.event(e, &|w| {
+            let def = |w: u16| {
                 weapons
                     .get(w)
                     .and_then(|i| content.weapon(&i.name))
                     .cloned()
-            });
+            };
+            self.props.event(e, &def, self.boxes.world());
+            self.effects.event(e, &def);
         }
         if let Some((name, last)) = &mut self.fx_demo
             && last.is_none_or(|l| st.wrapping_sub(l) >= 1500)
@@ -999,6 +1020,7 @@ impl NetPlay {
             self.sound.play_world(&s.alias, s.origin.to_array());
         }
         self.props.update(dt, self.boxes.world());
+        self.prop_effects();
         let mut drawn = self.effects.draw(eye, yaw, pitch, roll);
         drawn.models.extend(projectiles);
         drawn.sway = self.shakes.sway(st, eye.to_array());
@@ -1709,6 +1731,13 @@ impl NetPlay {
             match &mut r.ragdoll {
                 Some((at, yaw, body)) => {
                     body.update(dt, self.boxes.world());
+                    if let Some(hit) = body.take_impact() {
+                        self.ragdoll_hits.push(crate::props::heard(
+                            self.boxes.world(),
+                            crate::ragdoll::SOUND.into(),
+                            &hit,
+                        ));
+                    }
                     out.extend(r.player.instances_posed(*at, *yaw, &body.bones()));
                 }
                 None => out.extend(r.player.instances(e.origin)),

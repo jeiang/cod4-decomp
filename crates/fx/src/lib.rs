@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 mod rigid;
 mod rng;
-pub use rigid::{Body, GRAVITY as PHYS_GRAVITY, Mass, Shape};
+pub use rigid::{Body, GRAVITY as PHYS_GRAVITY, Impact, MIN_IMPACT_MOMENTUM, Mass, Shape};
 pub use rng::Rng;
 
 /// Longest single integration step.
@@ -178,6 +178,13 @@ pub struct SoundPlay {
     pub origin: Vec3,
 }
 
+/// A model element's body hit something hard enough to be heard: its preset's sound prefix and the hit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Collision {
+    pub prefix: Arc<str>,
+    pub impact: Impact,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Light {
     pub origin: Vec3,
@@ -267,6 +274,8 @@ pub struct Fx {
     pub stats: Stats,
     /// Sounds started since the last [`Fx::take_sounds`].
     sounds: Vec<SoundPlay>,
+    /// Loud body hits since the last [`Fx::take_collisions`].
+    collisions: Vec<Collision>,
 }
 
 fn pick(r: f32, range: &assets::zone::fx::Range<f32>) -> f32 {
@@ -285,6 +294,7 @@ impl Fx {
             live_elems: 0,
             stats: Stats::default(),
             sounds: Vec::new(),
+            collisions: Vec::new(),
         }
     }
 
@@ -303,6 +313,11 @@ impl Fx {
 
     pub fn take_sounds(&mut self) -> Vec<SoundPlay> {
         std::mem::take(&mut self.sounds)
+    }
+
+    /// The loud hits of physics models (shell casings, debris) since the last call.
+    pub fn take_collisions(&mut self) -> Vec<Collision> {
+        std::mem::take(&mut self.collisions)
     }
 
     /// Plays `def` at `frame`, starting `at` the given time (milliseconds on the effect clock).
@@ -752,6 +767,14 @@ impl Fx {
         let dt = ms as f32 * 0.001;
         if let Some(b) = &mut el.body {
             b.step(dt, world);
+            if let Some(impact) = b.take_impact()
+                && let Some(prefix) = b.sound_prefix()
+            {
+                self.collisions.push(Collision {
+                    prefix: prefix.clone(),
+                    impact,
+                });
+            }
             el.pos = b.origin();
             el.at_rest = b.asleep();
             return;

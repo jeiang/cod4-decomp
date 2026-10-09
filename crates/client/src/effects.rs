@@ -211,6 +211,18 @@ impl Effects {
         }
     }
 
+    /// Plays `def` oriented by `frame` (a broken prop's destroy effect).
+    pub fn play_frame(&mut self, kind: &'static str, def: &Arc<FxEffectDef>, frame: Frame) {
+        let d = self.resolve(def);
+        self.fx.play(&d, frame);
+        *self.played.entry(kind).or_default() += 1;
+    }
+
+    /// The loud hits of physics models (shell casings, debris) since the last call.
+    pub fn take_collisions(&mut self) -> Vec<fx::Collision> {
+        self.fx.take_collisions()
+    }
+
     /// Starts what `ev` shows. `weapon` resolves a weapon index to its definition.
     pub fn event(&mut self, ev: &ClientEvent, weapon: &dyn Fn(u16) -> Option<Arc<WeaponDef>>) {
         match ev {

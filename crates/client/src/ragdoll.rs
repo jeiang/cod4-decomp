@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Collision sounds follow KisakCOD (GPL-3.0, KisakCOD contributors and Activision) `physics/phys_ode.cpp` (`Phys_PlayCollisionSound`).
 //! A dead player's body as a Verlet ragdoll: every bone is a point, every bone-to-parent link a fixed-length
 //! constraint, and the points fall and slide on the map's solid geometry. It is the client's own simulation (the
 //! server's body stays the death animation's box); the bones it hands back replace the animated pose.
@@ -6,6 +7,7 @@
 //! A bone's matrix is rebuilt from its points: the rest rotation turned by the shortest arc from where the bone's first
 //! child was (in the pose at death) to where it is now. Twist about the bone is not simulated.
 
+use fx::{Impact, MIN_IMPACT_MOMENTUM};
 use glam::{Quat, Vec3};
 use sim::cm::Collide;
 use sim::skel::BoneMat;
@@ -25,6 +27,16 @@ const LIFE: f32 = 8.0;
 const REST: f32 = 0.02;
 /// Links shorter than this are welds: the two bones are one point.
 const WELD: f32 = 0.01;
+
+/// The collision sound of a body hitting the map. The original gives a ragdoll bone a preset with no sound prefix,
+/// whose class is 0: the first class its stock presets register; this is the stock wood.
+pub const SOUND: &str = "physics_wood";
+/// What one hit of a body weighs, for `phys_minImpactMomentum` (the sum of the original's bone masses).
+const BODY_MASS: f32 = 10.0;
+/// Approach speeds under this are sliding and resting, not hits (the rigid bodies' bounce threshold).
+const HIT_SPEED: f32 = 30.0;
+/// Seconds between two hits a body is heard making.
+const HIT_GAP: f32 = 0.25;
 
 struct Link {
     a: usize,
@@ -51,6 +63,9 @@ pub struct Ragdoll {
     age: f32,
     carry: f32,
     asleep: bool,
+    /// The hardest unheard hit, and the time before another may be heard.
+    impact: Option<Impact>,
+    quiet: f32,
 }
 
 fn quat_of(b: &BoneMat) -> Quat {
@@ -119,7 +134,14 @@ impl Ragdoll {
             age: 0.0,
             carry: 0.0,
             asleep: false,
+            impact: None,
+            quiet: 0.0,
         }
+    }
+
+    /// The hit to make a sound for, once.
+    pub fn take_impact(&mut self) -> Option<Impact> {
+        self.impact.take()
     }
 
     #[cfg(test)]
@@ -147,6 +169,7 @@ impl Ragdoll {
             self.carry -= STEP;
             self.step(world);
             self.age += STEP;
+            self.quiet -= STEP;
         }
     }
 
@@ -190,11 +213,28 @@ impl Ragdoll {
                 let rest = self.pos[i] - hit;
                 let slide = rest - n * rest.dot(n);
                 let v = self.pos[i] - from;
+                let approach = -v.dot(n) / STEP;
+                if approach > HIT_SPEED
+                    && self.quiet <= 0.0
+                    && approach * BODY_MASS >= MIN_IMPACT_MOMENTUM
+                    && self
+                        .impact
+                        .is_none_or(|h| h.momentum < approach * BODY_MASS)
+                {
+                    self.impact = Some(Impact {
+                        at: hit,
+                        normal: n,
+                        momentum: approach * BODY_MASS,
+                    });
+                }
                 let vt = v - n * v.dot(n);
                 self.pos[i] = hit + slide * FRICTION;
                 self.prev[i] = self.pos[i] - vt * FRICTION;
             }
             moved = moved.max((self.pos[i] - self.prev[i]).length());
+        }
+        if self.impact.is_some() {
+            self.quiet = HIT_GAP;
         }
         if moved < REST || self.age >= LIFE {
             self.asleep = true;
@@ -356,5 +396,34 @@ mod tests {
             assert!(g.distance(w) < 1e-3, "{g} {w}");
             assert!(Quat::from_array(got.quat).angle_between(quat_of(&want)) < 1e-3);
         }
+    }
+
+    #[test]
+    fn a_body_is_heard_landing_but_not_lying_still() {
+        let mut r = Ragdoll::new(
+            &standing(),
+            chain,
+            |_| None,
+            [0.0, 0.0, 30.0],
+            0.0,
+            [0.0; 3],
+        );
+        let (mut early, mut late) = (Vec::new(), Vec::new());
+        for k in 0..600 {
+            r.update(STEP, &Floor);
+            let hit = r.take_impact();
+            if k < 120 {
+                early.extend(hit)
+            } else {
+                late.extend(hit)
+            }
+        }
+        assert!(!early.is_empty(), "it fell from 30 units onto the floor");
+        assert!(
+            early
+                .iter()
+                .all(|h| h.normal == Vec3::Z && h.momentum >= MIN_IMPACT_MOMENTUM)
+        );
+        assert!(late.is_empty(), "lying still makes no sound: {late:?}");
     }
 }
