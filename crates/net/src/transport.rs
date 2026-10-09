@@ -40,6 +40,12 @@ pub trait Transport {
     fn carries(&self, _peer: SocketAddr) -> bool {
         false
     }
+
+    /// Peers whose session ended (a tab closed, a connection lost) since the last call, so the server frees their
+    /// slots at once. Only transports with sessions of their own report any.
+    fn take_closed(&mut self) -> Vec<SocketAddr> {
+        Vec::new()
+    }
 }
 
 impl<T: Transport + ?Sized> Transport for Box<T> {
@@ -61,6 +67,10 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
 
     fn carries(&self, peer: SocketAddr) -> bool {
         (**self).carries(peer)
+    }
+
+    fn take_closed(&mut self) -> Vec<SocketAddr> {
+        (**self).take_closed()
     }
 }
 
@@ -271,6 +281,13 @@ impl Transport for Joined {
 
     fn carries(&self, peer: SocketAddr) -> bool {
         self.others.iter().any(|t| t.carries(peer))
+    }
+
+    fn take_closed(&mut self) -> Vec<SocketAddr> {
+        self.others
+            .iter_mut()
+            .flat_map(|t| t.take_closed())
+            .collect()
     }
 }
 

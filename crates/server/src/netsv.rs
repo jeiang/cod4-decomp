@@ -21,12 +21,30 @@ use net::ui::ServerCmd;
 use net::voice::{self, Voice};
 use net::{ServerLink, Snapshot};
 use sim::pm::{PmType, UserCmd};
-use std::collections::VecDeque;
-use std::net::SocketAddr;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-/// A client that has said nothing for this long is dropped.
-const TIMEOUT: Duration = Duration::from_secs(15);
+/// Silence after which a client that has been heard from is dropped (`sv_timeout`'s default).
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(240);
+/// Silence after which a client that never sent anything since it connected is dropped (`sv_connectTimeout`).
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
+/// Datagrams one [`NetSv::poll`] reads at most. What is left waits in the socket for the next frame, so a flood
+/// cannot starve the game frame.
+const MAX_PACKETS_PER_POLL: usize = 1024;
+/// Challenge times remembered for the ping limits.
+const MAX_CHALLENGES: usize = 1024;
+/// How long a challenge time is worth keeping.
+const CHALLENGE_KEEP: Duration = Duration::from_secs(30);
+/// Addresses the query limiter tracks at once.
+const MAX_TRACKED_IPS: usize = 4096;
+/// Queries (`getchallenge`, `getinfo`, `getstatus`) one address outside the local network may make in a burst and
+/// then every second: room for several players behind one NAT joining together.
+const QUERY_BURST: f32 = 16.0;
+const QUERY_PER_SEC: f32 = 8.0;
+/// The same for all addresses together, so a flood from many spoofed sources cannot make the server a reflector.
+const QUERY_BURST_ALL: f32 = 256.0;
+const QUERY_PER_SEC_ALL: f32 = 128.0;
 /// Usercmds taken from one client per server frame; a client cannot run faster than real time.
 const MAX_CMDS_PER_FRAME: usize = 24;
 /// Voice frames kept between two services of the network (a service is a server frame; a talker sends 50 a second).
@@ -114,9 +132,24 @@ pub struct Peer {
     voice_at: Instant,
     /// Bytes of voice queued for this client since its last snapshot, counted against its rate.
     voice_bytes: usize,
+    /// It gave the private password (or was kept from a map in a private slot): it may take a private slot.
+    pub privileged: bool,
+    /// A client packet has arrived since it connected.
+    heard_any: bool,
+    connected_at: Instant,
 }
 
 impl Peer {
+    /// Whether any packet has arrived from the client since it connected.
+    pub fn heard(&self) -> bool {
+        self.heard_any
+    }
+
+    /// How long the client has been connected.
+    pub fn age(&self) -> Duration {
+        self.connected_at.elapsed()
+    }
+
     /// Queues a reliable command. A client already [`IGNORABLE_BEHIND`] behind does not get the commands that only
     /// inform; one that cannot take a command at all is flagged for dropping instead of carrying on desynced.
     pub fn queue(&mut self, line: impl Into<String>) {
@@ -140,8 +173,9 @@ fn ignorable(line: &str) -> bool {
 }
 
 pub enum Inbound {
-    Connect(ConnectRequest),
-    Left(SocketAddr),
+    /// A `connect` that passed the challenge, and the milliseconds since that sender asked for the challenge when
+    /// the server keeps track of them (see [`NetSv::track_ping`]).
+    Connect(ConnectRequest, Option<u32>),
     /// A `getfile` with a good challenge: whether to serve it is the server's to judge.
     GetFile {
         from: SocketAddr,
@@ -170,6 +204,8 @@ pub struct NetStats {
     pub bytes_in: u64,
     pub joins: u64,
     pub timeouts: u64,
+    /// Queries dropped by the rate limit.
+    pub queries_limited: u64,
 }
 
 pub struct NetSv {
@@ -192,6 +228,72 @@ pub struct NetSv {
     voice_in: Vec<(u16, u16, voice::Frame)>,
     /// `getfile` budgets by address.
     file_budget: std::collections::HashMap<std::net::IpAddr, (f32, Instant)>,
+    /// Silence that drops a client ([`Self::timed_out`]); the server sets them from `sv_timeout` and
+    /// `sv_connectTimeout`.
+    pub timeout: Duration,
+    pub connect_timeout: Duration,
+    /// Remember when each sender asked for its challenge, for `sv_minPing`/`sv_maxPing`.
+    pub track_ping: bool,
+    challenged: HashMap<SocketAddr, Instant>,
+    query_limit: QueryLimit,
+}
+
+/// Whether `ip` is on the local network (or this machine): exempt from the ping limits and the per-address
+/// connection cap, and given a fast rate.
+pub fn is_lan(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(i) => i.is_loopback() || i.is_private() || i.is_link_local(),
+        IpAddr::V6(i) => i.is_loopback(),
+    }
+}
+
+/// Token buckets for connectionless queries: one per address and one for all, so neither a single client nor a
+/// crowd of spoofed sources can make the server answer without bound. Not applied to `connect` (a client repeats
+/// it until answered) or `rcon` (it has its own limit).
+#[derive(Default)]
+struct QueryLimit {
+    per_ip: HashMap<IpAddr, (f32, Instant)>,
+    all: Option<(f32, Instant)>,
+}
+
+fn refill(bucket: &mut (f32, Instant), now: Instant, burst: f32, per_sec: f32) {
+    let dt = now.saturating_duration_since(bucket.1).as_secs_f32();
+    bucket.0 = (bucket.0 + dt * per_sec).min(burst);
+    bucket.1 = now;
+}
+
+impl QueryLimit {
+    fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
+        let all = self.all.get_or_insert((QUERY_BURST_ALL, now));
+        refill(all, now, QUERY_BURST_ALL, QUERY_PER_SEC_ALL);
+        if all.0 < 1.0 {
+            return false;
+        }
+        if self.per_ip.len() >= MAX_TRACKED_IPS {
+            // An address idle long enough to have refilled is the same as one never seen.
+            self.per_ip
+                .retain(|_, (_, t)| now.saturating_duration_since(*t) < Duration::from_secs(10));
+        }
+        let full = self.per_ip.len() >= MAX_TRACKED_IPS;
+        let bucket = if full || is_lan(ip) {
+            // No room to track this address, or a local one: only the global limit applies to it.
+            None
+        } else {
+            let b = self.per_ip.entry(ip).or_insert((QUERY_BURST, now));
+            refill(b, now, QUERY_BURST, QUERY_PER_SEC);
+            Some(b)
+        };
+        if let Some(b) = bucket {
+            if b.0 < 1.0 {
+                return false;
+            }
+            b.0 -= 1.0;
+        }
+        if let Some(all) = self.all.as_mut() {
+            all.0 -= 1.0;
+        }
+        true
+    }
 }
 
 impl NetSv {
@@ -209,6 +311,11 @@ impl NetSv {
             bans: BanList::default(),
             voice_in: Vec::new(),
             file_budget: std::collections::HashMap::new(),
+            timeout: DEFAULT_TIMEOUT,
+            connect_timeout: DEFAULT_CONNECT_TIMEOUT,
+            track_ping: false,
+            challenged: HashMap::new(),
+            query_limit: QueryLimit::default(),
         }
     }
 
@@ -231,6 +338,90 @@ impl NetSv {
             .map(|n| n as u16)
     }
 
+    /// The client at `ip` that said it was `qport` when it connected: the same session after a NAT gave it another
+    /// port, or one that reconnects.
+    pub fn session_of(&self, ip: IpAddr, qport: u16) -> Option<u16> {
+        self.peers
+            .iter()
+            .position(|p| {
+                p.as_ref()
+                    .is_some_and(|p| p.link.addr.ip() == ip && p.link.qport == qport)
+            })
+            .map(|n| n as u16)
+    }
+
+    /// Clients connected from `ip`.
+    pub fn clients_from(&self, ip: IpAddr) -> usize {
+        self.peers
+            .iter()
+            .flatten()
+            .filter(|p| p.link.addr.ip() == ip)
+            .count()
+    }
+
+    /// Makes room for `max` clients (`SV_ChangeMaxClients`). Every slot must be free: a map change takes the peers
+    /// first ([`Self::take_peers`]).
+    pub fn resize(&mut self, max: usize) {
+        debug_assert!(self.peers.iter().all(Option::is_none));
+        self.peers.resize_with(max, || None);
+    }
+
+    /// Files a client packet with the peer in `slot`. False when the session did not accept it (old, forged or
+    /// for another qport).
+    fn deliver(&mut self, slot: u16, packet: &[u8]) -> bool {
+        let Some(peer) = self.peers[usize::from(slot)].as_mut() else {
+            return false;
+        };
+        let Some(p) = peer.link.receive(packet) else {
+            return false;
+        };
+        peer.last_heard = Instant::now();
+        peer.heard_now = true;
+        peer.heard_any = true;
+        peer.unheard_ms = 0;
+        for (_, c) in p.cmds {
+            if peer.cmds.len() < MAX_QUEUED_CMDS {
+                peer.cmds.push_back(c);
+            }
+        }
+        self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
+        let now = Instant::now();
+        peer.voice_tokens = (peer.voice_tokens
+            + now.duration_since(peer.voice_at).as_secs_f32() * VOICE_PER_SEC)
+            .min(VOICE_BURST);
+        peer.voice_at = now;
+        for (seq, frame) in p.voice {
+            if peer.voice_tokens >= 1.0 && self.voice_in.len() < MAX_VOICE_IN {
+                peer.voice_tokens -= 1.0;
+                self.voice_in.push((slot, seq, frame));
+            }
+        }
+        true
+    }
+
+    /// A packet from an address no client has, but with the qport of one at the same IP: that client's NAT gave it
+    /// another port. The session takes the new address when the packet is one it accepts (the netchan sequence
+    /// and the qport both check out), so a replayed or forged packet moves nothing.
+    fn deliver_moved(&mut self, from: SocketAddr, packet: &[u8]) -> bool {
+        let Some(qport) = net::packet_qport(packet) else {
+            return false;
+        };
+        let Some(slot) = self.session_of(from.ip(), qport) else {
+            return false;
+        };
+        let Some(peer) = self.peers[usize::from(slot)].as_mut() else {
+            return false;
+        };
+        let old = std::mem::replace(&mut peer.link.addr, from);
+        if self.deliver(slot, packet) {
+            return true;
+        }
+        if let Some(peer) = self.peers[usize::from(slot)].as_mut() {
+            peer.link.addr = old;
+        }
+        false
+    }
+
     /// Reads datagrams for up to `wait` (until none is waiting after the first), files client
     /// traffic with its peer and returns what needs the game: connects and leaves.
     pub fn poll(
@@ -246,7 +437,11 @@ impl NetSv {
             p.heard_now = false;
         }
         let mut buf = std::mem::take(&mut self.buf);
-        while let Ok(Some((n, from))) = self.t.recv_from(&mut buf, Some(wait)) {
+        let mut read = 0;
+        while read < MAX_PACKETS_PER_POLL
+            && let Ok(Some((n, from))) = self.t.recv_from(&mut buf, Some(wait))
+        {
+            read += 1;
             wait = Duration::ZERO;
             let packet = &buf[..n];
             self.stats.bytes_in += n as u64;
@@ -259,12 +454,20 @@ impl NetSv {
                     });
                     continue;
                 }
+                let query = matches!(o, Oob::GetChallenge | Oob::GetInfo(_) | Oob::GetStatus(_));
+                if query && !self.query_limit.allow(from.ip(), Instant::now()) {
+                    self.stats.queries_limited += 1;
+                    continue;
+                }
                 if let Oob::GetStatus(c) = o {
                     let Status { mut info, players } = status();
                     info.push(("challenge".into(), c.to_string()));
                     self.t
                         .send_to(from, &Oob::StatusResponse { info, players }.encode());
                     continue;
+                }
+                if self.track_ping && matches!(o, Oob::GetChallenge) {
+                    self.note_challenge(from);
                 }
                 match serve(
                     &self.challenger,
@@ -274,41 +477,23 @@ impl NetSv {
                     info,
                 ) {
                     Gate::Reply(r) => self.t.send_to(from, &r.encode()),
-                    Gate::Accept(req) => out.push(Inbound::Connect(req)),
+                    Gate::Accept(req) => {
+                        let ping = self
+                            .challenged
+                            .remove(&from)
+                            .map(|t| t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32);
+                        out.push(Inbound::Connect(req, ping));
+                    }
                     Gate::File { from, name, offset } => {
                         if self.file_allowed(from) {
                             out.push(Inbound::GetFile { from, name, offset });
                         }
                     }
-                    Gate::Left => out.push(Inbound::Left(from)),
                     Gate::Ignore => {}
                 }
             } else if let Some(slot) = self.slot_of(from) {
-                if let Some(peer) = self.peers[usize::from(slot)].as_mut()
-                    && let Some(p) = peer.link.receive(packet)
-                {
-                    peer.last_heard = Instant::now();
-                    peer.heard_now = true;
-                    peer.unheard_ms = 0;
-                    for (_, c) in p.cmds {
-                        if peer.cmds.len() < MAX_QUEUED_CMDS {
-                            peer.cmds.push_back(c);
-                        }
-                    }
-                    self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
-                    let now = Instant::now();
-                    peer.voice_tokens = (peer.voice_tokens
-                        + now.duration_since(peer.voice_at).as_secs_f32() * VOICE_PER_SEC)
-                        .min(VOICE_BURST);
-                    peer.voice_at = now;
-                    for (seq, frame) in p.voice {
-                        if peer.voice_tokens >= 1.0 && self.voice_in.len() < MAX_VOICE_IN {
-                            peer.voice_tokens -= 1.0;
-                            self.voice_in.push((slot, seq, frame));
-                        }
-                    }
-                }
-            } else {
+                self.deliver(slot, packet);
+            } else if !self.deliver_moved(from, packet) {
                 // A client the server no longer has (kicked, timed out, the server restarted) is told, so it does
                 // not sit in a match that is gone.
                 self.t
@@ -411,6 +596,16 @@ impl NetSv {
         self.t.send_to(to, &Oob::Error(why.to_owned()).encode());
     }
 
+    /// Remembers that `from` asked for a challenge now.
+    fn note_challenge(&mut self, from: SocketAddr) {
+        if self.challenged.len() >= MAX_CHALLENGES {
+            self.challenged.retain(|_, t| t.elapsed() < CHALLENGE_KEEP);
+        }
+        if self.challenged.len() < MAX_CHALLENGES {
+            self.challenged.insert(from, Instant::now());
+        }
+    }
+
     /// The measured round trip of a connected client in ms, once it has acknowledged a snapshot.
     pub fn ping_of(&self, slot: u16) -> Option<i32> {
         self.peers
@@ -451,6 +646,9 @@ impl NetSv {
             voice_tokens: VOICE_BURST,
             voice_at: Instant::now(),
             voice_bytes: 0,
+            privileged: false,
+            heard_any: false,
+            connected_at: Instant::now(),
         });
         // The slot may have held someone a client muted: the new person starts unmuted.
         for p in self.peers.iter_mut().flatten() {
@@ -482,10 +680,7 @@ impl NetSv {
         else {
             return;
         };
-        let local = match p.link.addr.ip() {
-            std::net::IpAddr::V4(i) => i.is_loopback() || i.is_private() || i.is_link_local(),
-            std::net::IpAddr::V6(i) => i.is_loopback(),
-        };
+        let local = is_lan(p.link.addr.ip());
         let rate = info_value(info, "rate");
         p.rate = if local {
             99_999
@@ -571,13 +766,31 @@ impl NetSv {
             .collect()
     }
 
-    /// Clients to drop for silence.
+    /// Clients whose session the transport reports closed (a browser tab closed or reloaded): their slots are freed
+    /// at once, not after the silence timeout.
+    pub fn closed(&mut self) -> Vec<u16> {
+        let gone = self.t.take_closed();
+        gone.into_iter().filter_map(|a| self.slot_of(a)).collect()
+    }
+
+    /// Clients to drop for silence: [`Self::timeout`] since the last packet, or [`Self::connect_timeout`] for one
+    /// that never sent any since it connected.
     pub fn timed_out(&mut self) -> Vec<u16> {
+        let (timeout, connect_timeout) = (self.timeout, self.connect_timeout);
         let gone: Vec<u16> = self
             .peers
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.as_ref().is_some_and(|p| p.last_heard.elapsed() > TIMEOUT))
+            .filter(|(_, p)| {
+                p.as_ref().is_some_and(|p| {
+                    p.last_heard.elapsed()
+                        > if p.heard_any {
+                            timeout
+                        } else {
+                            connect_timeout
+                        }
+                })
+            })
             .map(|(n, _)| n as u16)
             .collect();
         self.stats.timeouts += gone.len() as u64;
@@ -1433,6 +1646,9 @@ mod tests {
             voice_tokens: VOICE_BURST,
             voice_at: Instant::now(),
             voice_bytes: 0,
+            privileged: false,
+            heard_any: false,
+            connected_at: Instant::now(),
         }
     }
 
@@ -1652,5 +1868,162 @@ mod tests {
             .map(|e| e.state.eflags & eflags::CONNECTION_INTERRUPTED != 0)
             .collect();
         assert_eq!(flagged, [false, true, false]);
+    }
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::from([8, 8, 8, last])
+    }
+
+    fn net_sv(max: usize) -> (NetSv, net::transport::MemNet) {
+        let mem = net::MemNet::new();
+        let n = NetSv::new(
+            Box::new(mem.endpoint(SocketAddr::from(([127, 0, 0, 1], 1)))),
+            max,
+        );
+        (n, mem)
+    }
+
+    fn poll(n: &mut NetSv) -> Vec<Inbound> {
+        n.poll(Duration::ZERO, &Vec::new, &|| Status {
+            info: Vec::new(),
+            players: Vec::new(),
+        })
+    }
+
+    fn request(from: SocketAddr, qport: u16) -> ConnectRequest {
+        ConnectRequest {
+            from,
+            qport,
+            name: String::new(),
+            password: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_peer_table_grows_to_a_larger_sv_maxclients() {
+        let (mut n, _) = net_sv(2);
+        n.resize(40);
+        assert_eq!(n.peers.len(), 40);
+        n.add_peer(39, &request(SocketAddr::from(([8, 8, 8, 8], 5)), 1), "last");
+        assert_eq!(n.peer_count(), 1);
+        n.take_peers();
+        n.resize(4);
+        assert_eq!(n.peers.len(), 4);
+    }
+
+    #[test]
+    fn queries_from_one_address_are_limited_and_another_address_is_not_affected() {
+        let mut l = QueryLimit::default();
+        let t0 = Instant::now();
+        let allowed = (0..20).filter(|_| l.allow(ip(1), t0)).count();
+        assert_eq!(allowed, QUERY_BURST as usize);
+        assert!(l.allow(ip(2), t0), "another address has its own bucket");
+        // The bucket refills with time (explicit instants: no dependence on how fast the test runs).
+        assert!(!l.allow(ip(1), t0 + Duration::from_millis(100)));
+        assert!(l.allow(ip(1), t0 + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn queries_from_many_addresses_share_a_global_limit() {
+        let mut l = QueryLimit::default();
+        let t0 = Instant::now();
+        let allowed = (0..=255u32)
+            .flat_map(|a| (0..4).map(move |b| IpAddr::from([20, 1, b, a as u8])))
+            .filter(|ip| l.allow(*ip, t0))
+            .count();
+        assert_eq!(allowed, QUERY_BURST_ALL as usize);
+    }
+
+    #[test]
+    fn a_poll_reads_a_bounded_number_of_datagrams_and_leaves_the_rest_for_the_next() {
+        let (mut n, mem) = net_sv(2);
+        let mut stranger = mem.endpoint(SocketAddr::from(([127, 0, 0, 1], 7)));
+        let server = n.local_addr();
+        for _ in 0..MAX_PACKETS_PER_POLL + 5 {
+            stranger.send_to(server, b"x");
+        }
+        // Each stranger's datagram is answered with "not connected": count the answers per poll.
+        poll(&mut n);
+        assert_eq!(answers(&mut stranger), MAX_PACKETS_PER_POLL);
+        poll(&mut n);
+        assert_eq!(answers(&mut stranger), 5);
+    }
+
+    #[test]
+    fn a_client_whose_port_changed_keeps_its_slot_but_another_qport_does_not() {
+        let (mut n, mem) = net_sv(2);
+        let server = n.local_addr();
+        let old = SocketAddr::from(([127, 0, 0, 1], 5));
+        let moved = SocketAddr::from(([127, 0, 0, 1], 6));
+        n.add_peer(0, &request(old, 7), "ann");
+        let mut from_moved = mem.endpoint(moved);
+        let mut link = net::ClientLink::new(server, 7);
+        link.command("say hi").unwrap();
+        link.send(&mut from_moved);
+        poll(&mut n);
+        assert_eq!(
+            n.slot_of(moved),
+            Some(0),
+            "the session follows the new port"
+        );
+        assert_eq!(n.slot_of(old), None);
+        assert_eq!(n.inbox, [(0, "say hi".to_owned())]);
+        // A client with another qport at the same IP is a stranger, not the same session.
+        let other_addr = SocketAddr::from(([127, 0, 0, 1], 9));
+        let mut stranger = mem.endpoint(other_addr);
+        let mut other = net::ClientLink::new(server, 8);
+        other.command("kill").unwrap();
+        other.send(&mut stranger);
+        poll(&mut n);
+        assert_eq!(n.slot_of(other_addr), None);
+        assert_eq!(n.inbox.len(), 1);
+    }
+
+    #[test]
+    fn silence_drops_a_client_by_whether_it_was_ever_heard() {
+        let (mut n, _) = net_sv(2);
+        let addr = |port| SocketAddr::from(([8, 8, 8, 8], port));
+        n.add_peer(0, &request(addr(1), 1), "heard");
+        n.add_peer(1, &request(addr(2), 1), "never");
+        for p in n.peers.iter_mut().flatten() {
+            p.last_heard = Instant::now() - Duration::from_secs(1);
+        }
+        n.peers[0].as_mut().unwrap().heard_any = true;
+        n.timeout = Duration::from_secs(60);
+        n.connect_timeout = Duration::from_millis(500);
+        assert_eq!(n.timed_out(), [1]);
+        n.timeout = Duration::from_millis(500);
+        assert_eq!(n.timed_out(), [0, 1]);
+    }
+
+    fn answers(s: &mut net::transport::MemTransport) -> usize {
+        let mut buf = [0u8; 2000];
+        std::iter::from_fn(|| s.recv_from(&mut buf, None).unwrap()).count()
+    }
+
+    #[test]
+    fn a_flood_of_queries_is_answered_only_up_to_the_limit() {
+        let (mut n, mem) = net_sv(2);
+        let server = n.local_addr();
+        let mut far = mem.endpoint(SocketAddr::from(([8, 8, 8, 8], 7)));
+        for _ in 0..100 {
+            far.send_to(server, &Oob::GetInfo(1).encode());
+        }
+        poll(&mut n);
+        let got = answers(&mut far);
+        assert!(got >= 1 && got <= QUERY_BURST as usize + 2, "{got} answers");
+        assert!(n.stats.queries_limited >= 100 - QUERY_BURST as u64 - 2);
+    }
+
+    #[test]
+    fn a_disconnect_forged_with_a_players_address_does_not_drop_them() {
+        let (mut n, mem) = net_sv(2);
+        let server = n.local_addr();
+        let player = SocketAddr::from(([8, 8, 8, 8], 5));
+        n.add_peer(0, &request(player, 1), "ann");
+        let mut spoof = mem.endpoint(player);
+        spoof.send_to(server, &Oob::Disconnect.encode());
+        assert!(poll(&mut n).is_empty());
+        assert_eq!(n.slot_of(player), Some(0));
     }
 }

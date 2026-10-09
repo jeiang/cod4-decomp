@@ -35,9 +35,14 @@ pub(super) struct Human {
 
 impl Human {
     pub(super) fn new(addr: SocketAddr, id: u16) -> io::Result<Self> {
+        Self::with_password(addr, id, "")
+    }
+
+    /// A person who gives `password` at connect.
+    pub(super) fn with_password(addr: SocketAddr, id: u16, password: &str) -> io::Result<Self> {
         let t = UdpTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
         Ok(Self {
-            c: NetClient::new(t, addr, &format!("human{id}"), "", 6000 + id),
+            c: NetClient::new(t, addr, &format!("human{id}"), password, 6000 + id),
             join: AutoJoin::default(),
             own: None,
             cmd_time: 0,

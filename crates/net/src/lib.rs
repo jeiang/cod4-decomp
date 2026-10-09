@@ -32,6 +32,6 @@ pub use bits::{BitReader, BitWriter, Overflow};
 pub use entity::EntityState;
 pub use netchan::Netchan;
 pub use oob::Oob;
-pub use session::{ClientLink, ServerLink};
+pub use session::{ClientLink, ServerLink, packet_qport};
 pub use snapshot::Snapshot;
 pub use transport::{MemNet, Transport, UdpTransport};

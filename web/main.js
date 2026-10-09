@@ -62,6 +62,8 @@ const fromInput = (files) =>
 
 const bridge = createBridge();
 const wire = createTransport();
+// A closed or reloaded tab ends its session at once; the server frees the player's slot when it sees it close.
+addEventListener("pagehide", () => wire.close());
 let reader = null;
 let copier = null;
 let install = null; // [[path, size], ...] once a reader is ready

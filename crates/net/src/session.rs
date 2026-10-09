@@ -57,6 +57,16 @@ pub struct ClientPacket {
     pub voice: Vec<(u16, voice::Frame)>,
 }
 
+/// The `qport` a whole (unfragmented) client packet claims, without touching any session: how the server tells a
+/// known client whose source port changed (a NAT remapped it) from a stranger. `None` for a fragment or a stub.
+pub fn packet_qport(packet: &[u8]) -> Option<u16> {
+    let seq = u32::from_le_bytes(packet.get(..4)?.try_into().ok()?);
+    if seq & (1 << 31) != 0 {
+        return None;
+    }
+    BitReader::new(&packet[4..]).read_u16().ok()
+}
+
 pub struct ServerLink {
     pub addr: SocketAddr,
     pub qport: u16,
