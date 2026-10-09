@@ -761,6 +761,11 @@ impl Shell {
         if !self.st.live.scores_wanted {
             self.st.scores_top = 1;
         }
+        // The join list's highlight follows the selected server as rows come, go and re-sort.
+        if self.ui.is_open("pc_join_unranked") {
+            let row = Self::host(&mut self.st, input).selected_server_row();
+            self.ui.sync_feeder_cursor(2, row);
+        }
         if let Some(row) = self.st.reselect_map.take() {
             let mut h = Self::host(&mut self.st, input);
             self.ui.select_feeder_row(&mut h, 4, row);
@@ -1093,16 +1098,31 @@ impl HostCx<'_> {
             .collect()
     }
 
-    /// Starts the list again (`UI_StartServerRefresh`): `full` forgets what was found, otherwise the servers are asked
-    /// again in place. The time is kept for the "Refresh time" line of the source.
+    /// Starts the list the join menu shows again (`UI_StartServerRefresh`): `full` forgets what a LAN scan found,
+    /// otherwise the servers are asked again in place. The time is kept for the "Refresh time" line of the source.
+    /// A list that is already being refreshed is left to finish.
     fn start_refresh(&mut self, ui: &Ui, full: bool) {
-        self.st.servers.refresh(full);
+        let source = self.net_source();
+        if !self.st.servers.refresh(source, full) {
+            return;
+        }
         self.st.servers.select(None);
         let n = atoi(&self.dvar_get("ui_netSource")).clamp(0, 2);
         let stamp = refresh_stamp(ui);
         self.input
             .cvars
             .set(&format!("ui_lastServerRefresh_{n}"), &stamp, false);
+    }
+
+    /// The row of the selected server in the join list, or -1: where the list's highlight belongs.
+    fn selected_server_row(&self) -> i32 {
+        let Some(sel) = self.st.servers.selected() else {
+            return -1;
+        };
+        self.server_rows()
+            .iter()
+            .position(|e| e.addr == sel)
+            .map_or(-1, |i| i as i32)
     }
 
     /// Takes in what the network brought: server answers and a status answer, which becomes the Server Info lines.
@@ -1500,7 +1520,7 @@ impl Host for HostCx<'_> {
             }
             // Back out of a refresh before leaving the menu: the list stays as far as it got.
             "closejoin" => {
-                if self.st.servers.refreshing() {
+                if self.st.servers.refreshing(self.net_source()) {
                     self.st.servers.stop_refresh();
                     self.st.servers.select(None);
                 }
@@ -1867,9 +1887,13 @@ impl Host for HostCx<'_> {
             247 => {
                 // While the list is being collected the line says how far it got, pulsing; after, when it was made.
                 let source = self.net_source();
-                if self.st.servers.refreshing() && source != crate::serverlist::Source::Internet {
+                if self.st.servers.refreshing(source) {
                     let n = self.st.servers.rows(source).len();
-                    let text = loc_with(ui, "EXE_GETTINGINFOFORSERVERS", &n.to_string());
+                    let text = if source == crate::serverlist::Source::Internet {
+                        translate(ui, "EXE_WAITINGFORMASTERSERVERRESPONSE")
+                    } else {
+                        loc_with(ui, "EXE_GETTINGINFOFORSERVERS", &n.to_string())
+                    };
                     let t = ((self.time_ms() / 75) as f32).sin() * 0.5 + 0.5;
                     let pulse = color.map(|c| c + (c * 0.8 - c) * t);
                     ui_text(ui, p, d, rect, pulse, &text);
@@ -2034,7 +2058,7 @@ fn ui_text(ui: &Ui, p: &mut Painter, d: &ItemDef, rect: Px, color: [f32; 4], tex
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serverlist::Entry;
+    use crate::serverlist::{Entry, Source};
 
     #[test]
     fn server_list_cells_follow_the_stock_columns() {
@@ -2580,15 +2604,15 @@ mod tests {
         };
         h.st.servers.take(lan_server("192.168.1.5:28960", "dm"));
         assert!(h.ui_script(&mut ui, "RefreshFilter", &[]));
-        assert!(h.st.servers.refreshing());
+        assert!(h.st.servers.refreshing(Source::Lan));
         assert_eq!(h.feeder_count(2), 1, "a quick refresh keeps what it found");
         assert!(h.ui_script(&mut ui, "closeJoin", &[]));
-        assert!(!h.st.servers.refreshing());
+        assert!(!h.st.servers.refreshing(Source::Lan));
         assert!(h.ui_script(&mut ui, "RefreshServers", &[]));
-        assert!(h.st.servers.refreshing());
+        assert!(h.st.servers.refreshing(Source::Lan));
         assert_eq!(h.feeder_count(2), 0, "a full refresh starts the list over");
         assert!(h.ui_script(&mut ui, "StopRefresh", &[]));
-        assert!(!h.st.servers.refreshing());
+        assert!(!h.st.servers.refreshing(Source::Lan));
         // The time of the refresh is kept for the "Refresh time" line of its source.
         assert!(!h.dvar("ui_lastServerRefresh_0").is_empty());
     }

@@ -1879,17 +1879,23 @@ fn script_step(st: &mut State) -> bool {
             let have = st.input.cvar(name).unwrap_or("").to_owned();
             done(have == want, sc, format!("{name} is {have:?}"));
         }
-        // The rows a list shows (`rows=2 1`: the join menu's server list has one row), for the join menu's checks.
+        // The rows a list shows: `rows=2 1` is exactly one, `rows=2 +1` at least one; a list may take up to the
+        // seconds after the colon (`rows=2 +1:15`, default 5) to get there, as a refresh takes its time.
         "rows" => {
-            let (feeder, want) = arg.split_once(' ').unwrap_or((arg, "0"));
+            let (feeder, rest) = arg.split_once(' ').unwrap_or((arg, "0"));
+            let (want, secs) = rest
+                .split_once(':')
+                .map_or((rest, 5.0), |(w, s)| (w, s.parse().unwrap_or(5.0)));
             let have = st.shell.as_mut().map_or(0, |sh| {
                 sh.feeder_rows(&mut st.input, feeder.parse().unwrap_or(0))
             });
-            done(
-                have.to_string() == want,
-                sc,
-                format!("feeder {feeder} has {have} rows"),
-            );
+            let ok = match want.strip_prefix('+') {
+                Some(n) => have >= n.parse().unwrap_or(1),
+                None => have.to_string() == want,
+            };
+            if ok || waited > secs {
+                done(ok, sc, format!("feeder {feeder} has {have} rows"));
+            }
         }
         // A server added to the favorites (`favorite=127.0.0.1:28999`), as the join menu's New Favorite does.
         "favorite" => {

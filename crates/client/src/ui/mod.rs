@@ -1671,6 +1671,19 @@ impl Ui {
         host.feeder_select(feeder, row);
     }
 
+    /// Moves the highlight of every open list that shows `feeder` to `row` (-1: none) without telling the host: for a
+    /// list whose selection the host keeps itself and whose rows move under it.
+    pub fn sync_feeder_cursor(&mut self, feeder: i32, row: i32) {
+        for m in self.stack.clone() {
+            let def = self.menus[m].def.clone();
+            for (i, d) in def.items.iter().enumerate() {
+                if d.ty == ity::LISTBOX && d.special as i32 == feeder {
+                    self.menus[m].items[i].list_cursor = row;
+                }
+            }
+        }
+    }
+
     fn list_scroll(&mut self, host: &mut dyn Host, m: usize, i: usize, dir: i32) {
         let feeder = self.menus[m].def.items[i].special as i32;
         let n = host.feeder_count(feeder) as i32;

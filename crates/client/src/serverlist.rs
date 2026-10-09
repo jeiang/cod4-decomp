@@ -13,7 +13,8 @@ use net::oob::{Oob, StatusPlayer};
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::ToSocketAddrs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Ports a server is looked for on: the original's default and the next three (a few servers on one host).
 pub const PORTS: [u16; 4] = [28960, 28961, 28962, 28963];
@@ -420,8 +421,8 @@ pub struct ServerList {
     /// Column the list is sorted by and whether it runs downwards.
     sort: Option<(usize, bool)>,
     selected: Option<SocketAddr>,
-    /// When the running refresh started; it counts as running for [`REFRESH_WINDOW`].
-    refresh_started: Option<Instant>,
+    /// When the running refresh started and which list it is for; it counts as running for [`REFRESH_WINDOW`].
+    refresh_started: Option<(Instant, Source)>,
     /// The server a `getstatus` is out to, when it was last sent and how often.
     status_req: Option<(SocketAddr, Instant, u32)>,
     /// An answer that arrived and has not been taken yet.
@@ -429,29 +430,42 @@ pub struct ServerList {
 }
 
 impl ServerList {
-    /// Scans again, favorites included; `full` first forgets the LAN list, otherwise the answers update it in place.
-    pub fn refresh(&mut self, full: bool) {
+    /// Scans again for the list `source` shows: the LAN (`full` first forgets what it found, otherwise the answers
+    /// update it in place) or the favorites. The internet list has no master server to ask. A refresh of a list that
+    /// is already being refreshed is ignored (`false`), so a button held down does not flood the network.
+    pub fn refresh(&mut self, source: Source, full: bool) -> bool {
+        if self.refreshing(source) {
+            return false;
+        }
+        self.refresh_started = Some((Instant::now(), source));
+        if source == Source::Internet {
+            return true;
+        }
         if self.browser.is_none() {
             self.browser = Browser::new().ok();
         }
-        if full {
+        if full && source == Source::Lan {
             self.lan.clear();
         }
-        self.refresh_started = Some(Instant::now());
         let Some(b) = self.browser.as_mut() else {
-            return;
+            return true;
         };
         b.restart();
-        b.ask_lan();
-        for f in &self.favorites {
-            b.ask(f.addr);
+        match source {
+            Source::Lan => b.ask_lan(),
+            _ => {
+                for f in &self.favorites {
+                    b.ask(f.addr);
+                }
+            }
         }
+        true
     }
 
-    /// Whether a refresh is still collecting answers (the join menu then shows how many servers it has).
-    pub fn refreshing(&self) -> bool {
+    /// Whether a refresh of `source` is still collecting answers (the join menu then shows how far it got).
+    pub fn refreshing(&self, source: Source) -> bool {
         self.refresh_started
-            .is_some_and(|t| t.elapsed() < REFRESH_WINDOW)
+            .is_some_and(|(t, s)| s == source && t.elapsed() < REFRESH_WINDOW)
     }
 
     /// Ends the running refresh (`StopRefresh`); answers that come later still land in the lists.
@@ -834,10 +848,20 @@ mod tests {
     #[test]
     fn a_refresh_runs_until_stopped() {
         let mut l = ServerList::default();
-        assert!(!l.refreshing());
-        l.refresh(true);
-        assert!(l.refreshing());
+        assert!(!l.refreshing(Source::Lan));
+        l.refresh(Source::Lan, true);
+        assert!(l.refreshing(Source::Lan));
+        assert!(!l.refreshing(Source::Favorites), "each list has its own");
+        // A second request for the same list is ignored: what the list holds now is kept.
+        l.take(entry("192.168.1.9:28960", "Me", "mp_crash", 2));
+        l.refresh(Source::Lan, true);
+        assert_eq!(l.rows(Source::Lan).len(), 1);
         l.stop_refresh();
-        assert!(!l.refreshing());
+        assert!(!l.refreshing(Source::Lan));
+        // A favorites refresh leaves the LAN list alone; the internet one has nothing to ask but still takes its time.
+        l.refresh(Source::Favorites, true);
+        assert_eq!(l.rows(Source::Lan).len(), 1);
+        l.refresh(Source::Internet, true);
+        assert!(l.refreshing(Source::Internet));
     }
 }
