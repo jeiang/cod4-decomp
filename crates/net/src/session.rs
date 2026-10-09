@@ -90,6 +90,11 @@ impl ServerLink {
         self.rel_out.pending()
     }
 
+    /// Sequence of the newest command the client has acknowledged.
+    pub fn commands_acked(&self) -> u32 {
+        self.rel_out.acked()
+    }
+
     pub fn dropped(&self) -> u32 {
         self.chan.dropped
     }

@@ -240,6 +240,10 @@ pub struct NetPlay {
     last_delta: Option<[f32; 3]>,
 }
 
+/// Silence from the server after which the player is warned (the original's `CG_DrawDisconnect` waits for the
+/// 128th unacknowledged command, about two seconds).
+const INTERRUPTED_MS: u64 = 2000;
+
 impl NetPlay {
     pub fn connect(
         lib: Library,
@@ -327,6 +331,16 @@ impl NetPlay {
         self.net.refused()
     }
 
+    /// Why the server ended the connection (a kick) or went silent: the message the player is shown.
+    pub fn dropped(&self) -> Option<&str> {
+        self.net.dropped()
+    }
+
+    /// `cl_timeout`: the silence the server may keep.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.net.set_timeout(timeout);
+    }
+
     /// Answers the team and class menus with defaults (what a person's menus do when they pick the first choices).
     pub fn set_autojoin(&mut self, on: bool) {
         self.auto_join = on.then(net::ui::AutoJoin::default);
@@ -379,6 +393,7 @@ impl NetPlay {
             live.kill_icons.clone_from(&self.kill_icons);
         }
         live.server_addr.clone_from(&self.server_addr);
+        live.interrupted = self.net.silent_ms() > INTERRUPTED_MS;
         if !live.active || !live.scores_wanted {
             self.scores_asked = None;
         } else if self

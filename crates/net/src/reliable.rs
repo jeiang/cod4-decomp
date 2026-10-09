@@ -35,6 +35,10 @@ impl ReliableOut {
         Ok(())
     }
 
+    pub fn acked(&self) -> u32 {
+        self.acked
+    }
+
     pub fn pending(&self) -> usize {
         self.pending.len()
     }

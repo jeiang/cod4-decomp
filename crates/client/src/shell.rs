@@ -33,6 +33,8 @@ pub enum Action {
     },
     /// Connect to `host:port`.
     Join(String),
+    /// Join the server last joined again (`reconnect`).
+    Reconnect,
     Disconnect,
     Quit,
     /// Tell the server's scripts a script menu answer.
@@ -987,6 +989,7 @@ impl HostCx<'_> {
                 "quit" => self.st.actions.push(Action::Quit),
                 "disconnect" => self.st.actions.push(Action::Disconnect),
                 "connect" => self.st.actions.push(Action::Join(a(1).to_owned())),
+                "reconnect" => self.st.actions.push(Action::Reconnect),
                 "map" | "devmap" => self.st.actions.push(Action::StartServer {
                     map: a(1).to_owned(),
                     gametype: self.dvar_get("g_gametype"),

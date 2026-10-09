@@ -450,7 +450,7 @@ impl Server {
                 Inbound::Connect(req) => self.net_accept(&mut net, &req),
                 Inbound::Left(addr) => {
                     if let Some(slot) = net.slot_of(addr) {
-                        self.net_drop(&mut net, slot);
+                        self.net_drop(&mut net, slot, DropReason::Left);
                     }
                 }
             }
@@ -459,7 +459,10 @@ impl Server {
             self.net_client_command(&mut net, slot, &line);
         }
         for slot in net.timed_out() {
-            self.net_drop(&mut net, slot);
+            self.net_drop(&mut net, slot, DropReason::TimedOut);
+        }
+        for slot in net.overflowed() {
+            self.net_drop(&mut net, slot, DropReason::Overflow);
         }
         let now = self.game.level.time;
         let late: Vec<u16> = self
@@ -632,8 +635,14 @@ impl Server {
         host.run_calls(&mut run.vm);
     }
 
-    fn net_drop(&mut self, net: &mut NetSv, slot: u16) {
+    /// Takes a client out of the match: the others and the console hear why, the client is told (`SV_DropClient`).
+    fn net_drop(&mut self, net: &mut NetSv, slot: u16, why: DropReason) {
         self.begin_waits.retain(|(n, _)| *n != slot);
+        if let Some(c) = self.game.client(slot).filter(|c| c.connected()) {
+            let text = format!("{}^7 {}", c.name, why.text());
+            net.print_to_others(slot, &text);
+            self.say(&format!("{slot}:{}\n", crate::vote::clean_name(&text)));
+        }
         if let Some(run) = self.run.as_mut() {
             let mut host = ScriptHost {
                 game: &mut self.game,
@@ -642,14 +651,14 @@ impl Server {
             host.game.disconnect_client(&mut run.vm, slot);
             host.run_calls(&mut run.vm);
         }
-        net.remove_peer(slot);
+        net.remove_peer(slot, why.notice());
     }
 
     /// What a connected client may ask of the server.
     fn net_client_command(&mut self, net: &mut NetSv, slot: u16, line: &str) {
         let argv = crate::cmd::tokenize(line);
         match argv.first().map(String::as_str) {
-            Some("disconnect") => self.net_drop(net, slot),
+            Some("disconnect") => self.net_drop(net, slot, DropReason::Left),
             Some(net::ui::SCORES_REQUEST) => net.send_scoreboard(slot, &self.game),
             Some("callvote") => self.game.call_vote(slot, &argv[1..]),
             Some("vote") => self
@@ -1239,7 +1248,6 @@ impl Server {
         let Some(mut net) = self.net.take() else {
             return Err("There is no network.".into());
         };
-        let name = self.game.clients[usize::from(slot)].name.clone();
         if let Some((addr, ..)) = net.peer_line(slot) {
             let ip = addr.ip();
             match penalty {
@@ -1257,9 +1265,8 @@ impl Server {
                 }
             }
         }
-        self.net_drop(&mut net, slot);
+        self.net_drop(&mut net, slot, DropReason::Kicked);
         self.net = Some(net);
-        self.say(&format!("{name} was removed from the server\n"));
         Ok(())
     }
 
@@ -1369,11 +1376,13 @@ impl Server {
             let j = self.join_human(&name, Some(stats));
             if let Ok(slot) = j {
                 for line in NetSv::world_commands(&mut self.game, map) {
-                    let _ = peer.link.command(line);
+                    peer.queue(line);
                 }
                 if let Some(net) = self.net.as_mut() {
                     net.put_peer(slot, peer);
                 }
+            } else if let (Err(why), Some(net)) = (j, self.net.as_mut()) {
+                net.notify(peer.link.addr, why);
             }
         }
         if self.bot_target > 0 {
@@ -1600,11 +1609,24 @@ impl Server {
             host.game.finish_disconnects(&mut run.vm);
         }
         let t = Instant::now();
+        let mut gone_lines = Vec::new();
         if let Some(net) = self.net.as_mut() {
+            // A script dropped these clients (`kick`): they never sent a leave.
+            let mut gone = Vec::new();
             for (n, c) in self.game.clients.iter().enumerate() {
-                if c.conn == Conn::Free && net.peers.get(n).is_some_and(Option::is_some) {
-                    net.remove_peer(n as u16);
+                if c.conn == Conn::Free
+                    && let Some(p) = net.peers.get(n).and_then(Option::as_ref)
+                {
+                    gone.push((
+                        n as u16,
+                        format!("{}^7 {}", p.name, DropReason::Kicked.text()),
+                    ));
                 }
+            }
+            for (n, text) in &gone {
+                net.remove_peer(*n, DropReason::Kicked.notice());
+                net.print_to_others(*n, text);
+                gone_lines.push(format!("{n}:{}\n", crate::vote::clean_name(text)));
             }
             net.flush_ui(&mut self.game);
             net.send_snapshots(&self.game, self.svs_time);
@@ -1615,6 +1637,9 @@ impl Server {
             self.game.sound_out.clear();
         }
         let net_t = t.elapsed();
+        for line in gone_lines {
+            self.say(&line);
+        }
         self.record_errors(errors);
         if self.game.level.exit_requested {
             self.game.level.exit_requested = false;
@@ -1868,6 +1893,39 @@ impl Server {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+/// Why a client left the match.
+#[derive(Clone, Copy)]
+enum DropReason {
+    /// It said so.
+    Left,
+    Kicked,
+    TimedOut,
+    /// It fell too far behind on reliable commands.
+    Overflow,
+}
+
+impl DropReason {
+    /// What the others read after the player's name.
+    fn text(self) -> &'static str {
+        match self {
+            Self::Left => "left the game",
+            Self::Kicked => "was kicked",
+            Self::TimedOut => "timed out",
+            Self::Overflow => "overflowed its reliable commands",
+        }
+    }
+
+    /// What the client itself is told, when it did not choose to go.
+    fn notice(self) -> Option<&'static str> {
+        match self {
+            Self::Left => None,
+            Self::Kicked => Some("Player kicked"),
+            Self::TimedOut => Some("Server timed out your connection"),
+            Self::Overflow => Some("Server command overflow"),
+        }
     }
 }
 
