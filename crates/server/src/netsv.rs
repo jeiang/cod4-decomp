@@ -766,6 +766,13 @@ impl NetSv {
             .collect()
     }
 
+    /// Clients whose session the transport reports closed (a browser tab closed or reloaded): their slots are freed
+    /// at once, not after the silence timeout.
+    pub fn closed(&mut self) -> Vec<u16> {
+        let gone = self.t.take_closed();
+        gone.into_iter().filter_map(|a| self.slot_of(a)).collect()
+    }
+
     /// Clients to drop for silence: [`Self::timeout`] since the last packet, or [`Self::connect_timeout`] for one
     /// that never sent any since it connected.
     pub fn timed_out(&mut self) -> Vec<u16> {

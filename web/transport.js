@@ -13,6 +13,8 @@ const fromBase64 = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 export function createTransport() {
   let session = null;
   let writer = null;
+  // The newest datagram write: the session is closed after it, so a final `disconnect` still goes out.
+  let lastWrite = Promise.resolve();
   let state = "idle"; // idle, connecting, open, closed
   let error = "";
   const inbox = [];
@@ -97,9 +99,13 @@ export function createTransport() {
       });
     },
     close() {
-      session?.close();
+      const s = session;
       session = null;
       state = "closed";
+      if (!s) return;
+      // Let the queued datagrams (the client's `disconnect`) leave first, but never hold the session open for long.
+      const done = () => s.close();
+      Promise.race([lastWrite, new Promise((r) => setTimeout(r, 250))]).then(done, done);
     },
     state: () => state,
     error: () => error,
@@ -108,7 +114,7 @@ export function createTransport() {
       if (state !== "open" || !session) return;
       stats.sent++;
       if (bytes.length <= limit) {
-        writer.write(bytes.slice()).catch(() => {});
+        lastWrite = writer.write(bytes.slice()).catch(() => {});
       } else if (bytes.length <= MAX_MESSAGE) {
         stats.streamsOut++;
         session.createUnidirectionalStream().then(async (stream) => {

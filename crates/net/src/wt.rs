@@ -82,10 +82,13 @@ struct Session {
 }
 
 type Sessions = Arc<Mutex<HashMap<SocketAddr, Session>>>;
+/// Peers whose session ended since the server last asked ([`Transport::take_closed`]).
+type Closed = Arc<Mutex<Vec<SocketAddr>>>;
 
 pub struct WtTransport {
     local: SocketAddr,
     sessions: Sessions,
+    closed: Closed,
     inbox: Inbox,
     /// Dropping this stops the endpoint's thread.
     _stop: tokio::sync::oneshot::Sender<()>,
@@ -105,7 +108,8 @@ impl WtTransport {
         let sessions = Sessions::default();
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (s2, q2) = (sessions.clone(), inbox.clone());
+        let closed = Closed::default();
+        let (s2, q2, c2) = (sessions.clone(), inbox.clone(), closed.clone());
         std::thread::Builder::new()
             .name("webtransport".into())
             .spawn(move || {
@@ -124,7 +128,7 @@ impl WtTransport {
                 let _ = ready_tx.send(Ok(started));
                 rt.block_on(async {
                     tokio::select! {
-                        () = accept_loop(endpoint, s2, q2) => {}
+                        () = accept_loop(endpoint, s2, q2, c2) => {}
                         _ = stopped => {}
                     }
                 });
@@ -135,6 +139,7 @@ impl WtTransport {
         let t = Self {
             local: started.addr,
             sessions,
+            closed,
             inbox,
             _stop: stop,
         };
@@ -217,10 +222,16 @@ async fn accept_loop(
     endpoint: Endpoint<wtransport::endpoint::endpoint_side::Server>,
     sessions: Sessions,
     inbox: Inbox,
+    closed: Closed,
 ) {
     loop {
         let incoming = endpoint.accept().await;
-        tokio::spawn(session(incoming, sessions.clone(), inbox.clone()));
+        tokio::spawn(session(
+            incoming,
+            sessions.clone(),
+            inbox.clone(),
+            closed.clone(),
+        ));
     }
 }
 
@@ -228,6 +239,7 @@ async fn session(
     incoming: wtransport::endpoint::IncomingSession,
     sessions: Sessions,
     inbox: Inbox,
+    closed: Closed,
 ) {
     let Ok(request) = incoming.await else { return };
     let Ok(conn) = request.accept().await else {
@@ -254,6 +266,7 @@ async fn session(
         .is_some_and(|c| c.conn.stable_id() == conn.stable_id())
     {
         s.remove(&peer);
+        closed.lock().unwrap().push(peer);
     }
 }
 
@@ -337,6 +350,10 @@ impl Transport for WtTransport {
 
     fn carries(&self, peer: SocketAddr) -> bool {
         self.sessions.lock().unwrap().contains_key(&peer)
+    }
+
+    fn take_closed(&mut self) -> Vec<SocketAddr> {
+        std::mem::take(&mut self.closed.lock().unwrap())
     }
 }
 

@@ -280,7 +280,7 @@ fn register_core_dvars(c: &mut Cvars) {
         // A `connect` giving this password may take the first `sv_privateClients` slots, and skips `g_password`.
         ("sv_privatePassword", "", 0),
         // Clients one address outside the local network may have at once (0: no limit).
-        ("sv_maxClientsPerIP", "8", 0),
+        ("sv_maxClientsPerIP", "0", 0),
         // Most bytes a second one client is sent (0: what the client asks for).
         ("sv_maxRate", "0", ARCHIVE | SERVERINFO),
         // Remote console: empty switches `rcon` off.
@@ -666,6 +666,9 @@ impl Server {
         self.relay_voice(&mut net);
         for (slot, line) in std::mem::take(&mut net.inbox) {
             self.net_client_command(&mut net, slot, &line);
+        }
+        for slot in net.closed() {
+            self.net_drop(&mut net, slot, DropReason::Left);
         }
         for slot in net.timed_out() {
             self.net_drop(&mut net, slot, DropReason::TimedOut);

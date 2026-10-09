@@ -347,6 +347,8 @@ struct Frames {
     lines: mpsc::Receiver<(u16, String)>,
     cmds: mpsc::Receiver<(u16, usize)>,
     slots: mpsc::Receiver<(u16, SocketAddr)>,
+    /// Slots freed because their session closed.
+    freed: mpsc::Receiver<u16>,
 }
 
 impl Frames {
@@ -355,6 +357,7 @@ impl Frames {
         let (ltx, lines) = mpsc::channel();
         let (ctx, cmds) = mpsc::channel();
         let (stx, slots) = mpsc::channel();
+        let (ftx, freed) = mpsc::channel();
         let flag = stop.clone();
         let join = std::thread::spawn(move || {
             let info = || vec![("hostname".into(), "wt-test".into())];
@@ -374,6 +377,10 @@ impl Frames {
                         net.add_peer(slot, &req, &req.name);
                         let _ = stx.send((slot, req.from));
                     }
+                }
+                for slot in net.closed() {
+                    net.remove_peer(slot, None);
+                    let _ = ftx.send(slot);
                 }
                 for l in std::mem::take(&mut net.inbox) {
                     let _ = ltx.send(l);
@@ -402,6 +409,7 @@ impl Frames {
             lines,
             cmds,
             slots,
+            freed,
         }
     }
 }
@@ -491,6 +499,34 @@ fn a_browser_client_and_a_udp_client_join_and_play_through_the_connect_path() {
             .is_ok_and(|(_, l)| l == "say hello from the browser")
     });
     assert!(frames.cmds.try_iter().count() > 0);
+}
+
+#[test]
+fn a_closed_browser_session_frees_its_slot_at_once() {
+    let e = endpoints();
+    let (udp, wt, hash) = (e.udp, e.wt, e.hash);
+    let frames = Frames::run(NetSv::new(Box::new(e.joined), 4));
+    let t = WtClient::connect(wt, hash).unwrap();
+    let tab_port = t.local_addr().port();
+    let mut b = NetClient::new(t, wt, "tab", "", 7004);
+    let mut u = NetClient::new(UdpTransport::bind(lo(0)).unwrap(), udp, "native", "", 7005);
+    play(&mut b, "browser joins", |c| c.latest().is_some());
+    play(&mut u, "udp joins", |c| c.latest().is_some());
+    let browser_slot = frames
+        .slots
+        .try_iter()
+        .find(|(_, a)| a.port() == tab_port)
+        .map(|(s, _)| s);
+    drop(b);
+    let freed = frames.freed.recv_timeout(Duration::from_secs(10));
+    assert_eq!(freed.ok(), browser_slot, "the closed tab's slot is freed");
+    // The UDP client is not a session of the transport and stays.
+    assert!(
+        frames
+            .freed
+            .recv_timeout(Duration::from_millis(500))
+            .is_err()
+    );
 }
 
 #[test]
@@ -592,7 +628,8 @@ fn a_client_joins_a_booted_server_using_only_the_info_file() {
         s.run_for(Duration::from_millis(100));
     }
     assert!(client.join().unwrap());
-    assert_eq!(s.net_clients(), 1);
+    // It joined (and its slot went when the client's session closed).
+    assert_eq!(s.net_stats().unwrap().joins, 1);
 }
 
 #[test]
