@@ -3,7 +3,8 @@
 //! deathmatch against bots on its own listen server with the scripted player, holds the scoreboard up, waits for a
 //! message window to have a line up and for a bot to kill it (the killcam), and reports what the HUD got to show
 //! (`hud_draw` of `ui-script.json`). The scoreboard must have listed the players, the message windows must have drawn
-//! lines, the script hud elements must have arrived and the killcam must have played. Needs a display and the
+//! lines, the script hud elements must have arrived, the killcam must have played, a teammate must have had a name
+//! over the head and the player under the crosshair a name of their own. Needs a display and the
 //! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
@@ -95,6 +96,12 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     if n("killcam_frames") == 0 {
         bad.push("no killcam frame");
     }
+    if n("names_max") == 0 {
+        bad.push("no overhead name drawn for a visible teammate");
+    }
+    if n("crosshair_name_frames") == 0 {
+        bad.push("the player under the crosshair was never named");
+    }
     // The grenade and d-pad icons are weapon materials; one that is missing draws as a white square.
     let icons: Vec<&str> = report["missing_images"]
         .as_array()
@@ -173,7 +180,7 @@ mod tests {
             "hud_draw": {
                 "elems_max": 12, "scoreboard_frames": 90, "scoreboard_rows_max": 10,
                 "messages": [2, 0, 0, 0], "obituaries": 3, "window_lines": [40, 0, 0, 0],
-                "killcam_frames": 120
+                "killcam_frames": 120, "names_max": 3, "crosshair_name_frames": 40
             }
         })
     }
@@ -191,6 +198,14 @@ mod tests {
         let why = verdict(&r).unwrap();
         assert!(
             why.contains("message windows") && why.contains("killcam"),
+            "{why}"
+        );
+        let mut r = good();
+        r["hud_draw"]["names_max"] = json!(0);
+        r["hud_draw"]["crosshair_name_frames"] = json!(0);
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("overhead name") && why.contains("crosshair"),
             "{why}"
         );
         let mut r = good();

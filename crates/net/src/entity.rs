@@ -61,6 +61,11 @@ pub struct EntityState {
     pub launch_point: [f32; 3],
     /// Perk bits (`bg_perkNames` order); remote clients pick footstep sounds by them.
     pub perks: u32,
+    /// Player: the material index (`cs::MATERIALS`, 0 none) of the head icon the scripts set, shown over the head to
+    /// the players of `head_icon_team`.
+    pub head_icon: u16,
+    /// Who sees `head_icon`: 0 everyone, 1 axis, 2 allies, 3 spectators.
+    pub head_icon_team: u8,
 }
 
 macro_rules! int {
@@ -120,6 +125,8 @@ fn table() -> Vec<Field<EntityState>> {
         num!(s, s.launch_point[1], pos),
         num!(s, s.launch_point[2], pos),
         int!(s, s.perks, Bits(20)),
+        int!(s, s.head_icon, Bits(8)),
+        int!(s, s.head_icon_team, Bits(2)),
     ]
 }
 
@@ -165,5 +172,24 @@ mod tests {
         read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
         assert_eq!(got, sent);
         assert_eq!(got.launch_point, [101.5, 199.25, 34.0]);
+    }
+
+    #[test]
+    fn a_head_icon_and_who_sees_it_survive_the_wire() {
+        let from = EntityState::new(5);
+        let to = EntityState {
+            etype: etype::PLAYER,
+            head_icon: 255,
+            head_icon_team: 3,
+            ..EntityState::new(5)
+        }
+        .canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &from, &to);
+        let bytes = w.into_bytes();
+        let mut got = from.clone();
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, to);
+        assert_eq!((got.head_icon, got.head_icon_team), (255, 3));
     }
 }

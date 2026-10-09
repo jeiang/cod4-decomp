@@ -47,7 +47,14 @@ pub mod eflags {
     /// A script model the script `physicslaunch`ed (`TR_PHYSICS`): clients simulate it as a rigid body launched from
     /// `origin` and `angles`, struck at `launch_point` by `velocity`, and draw it where the body is.
     pub const PHYSICS_LAUNCH: u32 = 1 << 3;
+    /// The player is speaking over voice chat (`EF_TALK`); nothing sets it while the server has no voice.
+    pub const TALKING: u32 = 1 << 4;
+    /// The server has heard nothing from the player for [`CONNECTION_INTERRUPTED_MS`] (`EF_CONNECTION_INTERRUPTED`).
+    pub const CONNECTION_INTERRUPTED: u32 = 1 << 5;
 }
+
+/// Silence after which players are shown the connection-interrupted marker over the quiet player.
+const CONNECTION_INTERRUPTED_MS: u128 = 1000;
 
 pub struct Peer {
     pub link: ServerLink,
@@ -518,7 +525,12 @@ impl NetSv {
     /// Builds and sends every client's snapshot for the frame at `server_time`.
     pub fn send_snapshots(&mut self, game: &Game, server_time: i32) {
         self.now = server_time;
-        let entities = world_entities(game);
+        let mut entities = world_entities(game);
+        let quiet = self.peers.iter().enumerate().filter_map(|(slot, p)| {
+            let p = p.as_ref()?;
+            (p.last_heard.elapsed().as_millis() > CONNECTION_INTERRUPTED_MS).then_some(slot as u16)
+        });
+        mark_interrupted(&mut entities, quiet);
         if game.archive_enabled {
             self.archive.record(Frame {
                 time: server_time,
@@ -667,6 +679,18 @@ fn config_commands(entries: Vec<(u16, String)>) -> Vec<String> {
     out
 }
 
+/// Flags the player bodies of the clients in `quiet` as having a connection problem.
+fn mark_interrupted(entities: &mut [EntityState], quiet: impl Iterator<Item = u16>) {
+    for slot in quiet {
+        if let Some(e) = entities
+            .iter_mut()
+            .find(|e| e.etype == etype::PLAYER && e.number == slot)
+        {
+            e.eflags |= eflags::CONNECTION_INTERRUPTED;
+        }
+    }
+}
+
 /// Everything a client can see, in entity-number order, already rounded as the wire rounds it.
 pub fn world_entities(game: &Game) -> Vec<EntityState> {
     let mut out = Vec::new();
@@ -710,6 +734,9 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 } else {
                     0
                 };
+                // The scripts' `headicon` is a precached material; one never registered has no index to show.
+                s.head_icon = game.shaders.find(&c.head_icon) as u16;
+                s.head_icon_team = Team::from_name(&c.head_icon_team).map_or(0, |t| t as u8);
                 s
             }
             EntKind::Item => {
@@ -877,5 +904,20 @@ mod tests {
         assert!(!p.overflowed);
         p.queue(cfg);
         assert!(p.overflowed);
+    }
+
+    #[test]
+    fn only_the_quiet_players_are_flagged_as_interrupted() {
+        let player = |n| EntityState {
+            etype: etype::PLAYER,
+            ..EntityState::new(n)
+        };
+        let mut e = vec![player(1), player(2), EntityState::new(3)];
+        mark_interrupted(&mut e, [2u16, 3, 9].into_iter());
+        let flagged: Vec<bool> = e
+            .iter()
+            .map(|e| e.eflags & eflags::CONNECTION_INTERRUPTED != 0)
+            .collect();
+        assert_eq!(flagged, [false, true, false]);
     }
 }

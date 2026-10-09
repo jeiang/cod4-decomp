@@ -14,6 +14,7 @@
 mod elems;
 mod feed;
 pub mod fill;
+pub mod names;
 mod scores;
 
 use crate::input::Cvars;
@@ -48,6 +49,33 @@ pub struct LiveObjective {
     pub pos: [f32; 3],
     pub icon: String,
     pub current: bool,
+}
+
+/// Another player the view could put a name or an icon over, as the client sees them this frame.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NearPlayer {
+    pub client: u16,
+    /// The `j_head` bone in the world.
+    pub head: [f32; 3],
+    /// Nothing solid between the eye and the head (`CG_CanSeeFriendlyHead`'s trace).
+    pub clear: bool,
+    /// The material the scripts' `headicon` names and who is meant to see it (0 everyone, 1 axis, 2 allies, 3
+    /// spectators).
+    pub icon: Option<(String, u8)>,
+    pub talking: bool,
+    pub interrupted: bool,
+    /// The viewer's own body, seen in a killcam.
+    pub you: bool,
+}
+
+/// Other players as one frame of the view sees them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NameScan {
+    pub near: Vec<NearPlayer>,
+    /// The player the crosshair is on, when a name should be shown for them (`CG_ScanForCrosshairEntity`).
+    pub crosshair: Option<u16>,
+    /// A flashbang blinds the view: no names (`CG_Flashbanged`).
+    pub flashed: bool,
 }
 
 /// One scoreboard line with the client's name looked up.
@@ -110,6 +138,10 @@ pub struct LiveUi {
     /// Client names and teams by slot.
     pub names: Vec<String>,
     pub teams: Vec<u8>,
+    /// Rank and prestige by slot (`setrank`).
+    pub ranks: Vec<(u8, u8)>,
+    /// What the world says about the other players this frame, for overhead names and head icons.
+    pub scan: NameScan,
     /// The keys the commands named in `[{+cmd}]` marks of the elements' text are bound to, as the player reads them.
     pub keys: HashMap<String, String>,
     pub elems: Vec<LiveElem>,
@@ -280,6 +312,11 @@ pub struct Stats {
     pub killcam_frames: u32,
     pub intermission_frames: u32,
     pub following_frames: u32,
+    /// Most names drawn over heads in one frame, frames with the crosshair's player named, and the head icons seen.
+    pub names_max: usize,
+    pub crosshair_name_frames: u32,
+    pub head_icons_max: usize,
+    pub head_icon_materials: std::collections::BTreeSet<String>,
     /// The elements of the busiest frame, as the screen got them.
     sample: Vec<Value>,
 }
@@ -317,6 +354,18 @@ impl Stats {
         self.following_frames += u32::from(live.following.is_some());
     }
 
+    /// One frame of the names and icons over players' heads.
+    pub fn names(&mut self, names: &names::Names) {
+        self.names_max = self.names_max.max(names.names.len());
+        self.crosshair_name_frames += u32::from(names.crosshair_drawn);
+        self.head_icons_max = self.head_icons_max.max(names.icons.len());
+        for i in &names.icons {
+            if !self.head_icon_materials.contains(&i.material) {
+                self.head_icon_materials.insert(i.material.clone());
+            }
+        }
+    }
+
     pub fn report(&self) -> Value {
         json!({
             "elems_max": self.elems_max,
@@ -331,6 +380,10 @@ impl Stats {
             "killcam_frames": self.killcam_frames,
             "intermission_frames": self.intermission_frames,
             "following_frames": self.following_frames,
+            "names_max": self.names_max,
+            "crosshair_name_frames": self.crosshair_name_frames,
+            "head_icons_max": self.head_icons_max,
+            "head_icon_materials": self.head_icon_materials,
             "sample": self.sample,
         })
     }
