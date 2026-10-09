@@ -15,7 +15,8 @@ pub struct Listen {
 #[derive(Clone)]
 pub struct Config {
     pub map: String,
-    pub bots: usize,
+    pub bots: Option<usize>,
+    pub bot_count: usize,
     pub gametype: Option<String>,
     pub rotation: Option<String>,
     pub port: u16,

@@ -63,7 +63,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         install,
         &ctx.dir,
         &ctx.dir.join("config"),
-        &[],
+        &["--bots", "9"],
         STEPS,
         std::time::Duration::from_secs(240),
     ) {

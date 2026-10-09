@@ -629,6 +629,7 @@ impl Viewer {
                         listen::Config {
                             map: self.cli.map.clone(),
                             bots: self.cli.bots,
+                            bot_count: 0,
                             gametype: self.cli.gametype.clone(),
                             rotation: None,
                             port: 0,
@@ -638,7 +639,7 @@ impl Viewer {
                     let a = l.addr;
                     notes.push(format!(
                         "listen server with {} bots up in {:.0} ms",
-                        self.cli.bots,
+                        self.cli.bots.unwrap_or(0),
                         t.elapsed().as_secs_f64() * 1000.0
                     ));
                     listen = Some(l);
@@ -2525,9 +2526,28 @@ fn netplay_rates(input: &Input) -> (i32, i32) {
     (get("rate", 90_000), get("snaps", 30))
 }
 
+/// The `bot_count` setting (archived): the bots a menu-started server plays with on every map.
+fn bot_count(input: &Input) -> usize {
+    input
+        .cvar("bot_count")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(64)
+}
+
 fn console_action(st: &mut State, line: &str) {
     for cmd in crate::input::config::split_commands(line) {
-        if cmd[0].eq_ignore_ascii_case("rcon") {
+        if cmd[0].eq_ignore_ascii_case("bots") {
+            // `bots <n>` brings the listen server's bots to n at once (the command is the listen server's console's).
+            match (
+                cmd.get(1).and_then(|n| n.parse::<usize>().ok()),
+                st.listen.is_some(),
+            ) {
+                (Some(n), true) => listen::send(&format!("bots {n}")),
+                (None, true) => say(st, "usage: bots <count>"),
+                (_, false) => say(st, "bots: only on a server started from this client"),
+            }
+        } else if cmd[0].eq_ignore_ascii_case("rcon") {
             // `rcon <command>` with the password in `rconpassword`, answered as console output.
             let password = st.input.cvar("rconpassword").unwrap_or("").to_owned();
             if let Some(net) = st.net.as_mut() {
@@ -2570,6 +2590,10 @@ fn console_action(st: &mut State, line: &str) {
         } else if let Some(sh) = st.shell.as_mut() {
             sh.print_console(&format!("{}: not connected to a server", cmd[0]));
         }
+    }
+    // The server of this process reads `bot_count` at its next map start.
+    if st.listen.is_some() {
+        listen::send(&format!("set bot_count {}", bot_count(&st.input)));
     }
 }
 
@@ -2845,7 +2869,7 @@ fn finish_load(
 
 /// The menu-started server: the chosen map then the other stock maps in turn, the dvars the player set (time and score
 /// limits), on a standard port when one is free so the LAN list finds it.
-fn listen_config(st: &State, map: &str, gametype: &str, bots: usize) -> listen::Config {
+fn listen_config(st: &State, map: &str, gametype: &str, bots: Option<usize>) -> listen::Config {
     let maps: Vec<String> = st
         .shell
         .as_ref()
@@ -2854,6 +2878,7 @@ fn listen_config(st: &State, map: &str, gametype: &str, bots: usize) -> listen::
     listen::Config {
         map: map.to_owned(),
         bots,
+        bot_count: bot_count(&st.input),
         gametype: Some(gametype.to_owned()),
         rotation: Some(rotation(gametype, &maps, map)),
         port: listen::free_standard_port(),

@@ -25,7 +25,10 @@ pub struct Listen {
 #[derive(Clone)]
 pub struct Config {
     pub map: String,
-    pub bots: usize,
+    /// `--bots`: the count that overrides `bot_count`.
+    pub bots: Option<usize>,
+    /// The player's `bot_count` setting: the server keeps it for every map it loads.
+    pub bot_count: usize,
     /// `None` is the harness's unlimited team deathmatch; `Some(id)` plays that gametype with its stock time and score
     /// limits (a menu-started match that ends).
     pub gametype: Option<String>,
@@ -165,8 +168,15 @@ fn run(
         // The spawn logic scores one spawn point per frame from the first frame on; a player placed before its
         // first sweep reads an unset field and the gametype's spawn script fails (koth does on every map).
         s.run_for(Duration::from_secs(SPAWN_SETTLE_SECS));
-        let bots = format!("bots {}", cfg.bots);
-        s.exec_line(&bots).map_err(|e| format!("{bots}: {e}"))?;
+        // Set after the settle, so the first map's bots join once the spawn points are scored; the server reads it again
+        // at every later map start.
+        let lines = [
+            format!("set bot_count {}", cfg.bot_count),
+            format!("bots {}", cfg.bots.unwrap_or(cfg.bot_count)),
+        ];
+        for line in lines {
+            s.exec_line(&line).map_err(|e| format!("{line}: {e}"))?;
+        }
         Ok((s, SocketAddr::from(([127, 0, 0, 1], addr.port()))))
     };
     let (mut server, addr) = match started() {
@@ -232,7 +242,7 @@ fn run(
         "snapshots_out": stats.snapshots_out,
         "bytes_out": stats.bytes_out,
         "bytes_in": stats.bytes_in,
-        "bots": cfg.bots,
+        "bots": cfg.bots.unwrap_or(cfg.bot_count),
         "script_errors": server.all_script_errors.len(),
         "level_time_ms": server.level_time(),
         "stats": {

@@ -379,6 +379,8 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("ai_corpseCount", "10"),
     ("cl_freelook", "1"),
     ("m_filter", "0"),
+    // Not a stock dvar: the bots a server started from the menus plays with, on every map.
+    ("bot_count", "0"),
 ];
 
 /// Gives every dvar the menus read its stock value unless the config set it.

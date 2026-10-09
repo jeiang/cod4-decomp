@@ -228,6 +228,7 @@ const SERVER_VERBS: &[&str] = &[
 const OWN_COMMANDS: &[&str] = &[
     "actionslot",
     "bind",
+    "bots",
     "chatmodepublic",
     "chatmodeteam",
     "connect",
