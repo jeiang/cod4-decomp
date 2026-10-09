@@ -113,13 +113,14 @@ fn players_problem(net: &Value) -> Option<String> {
         .then(|| format!("{seen} other players were announced and none was ever drawn"))
 }
 
-/// Why the bots' weapon handling never showed on their bodies, or `None`: other players were drawn for a whole run in
-/// which bots fire and reload, so some upper-body clip (`pt_*`, or the whole-body throw) must have played on one.
+/// Why the bots' weapon handling never showed on their bodies, or `None`: when another player was seen reloading,
+/// swinging the knife or throwing a grenade, some upper-body clip must have played on one. A run in which nobody did
+/// (a scene without fighting) is untested, not failed.
 fn torso_problem(net: &Value) -> Option<String> {
-    let drawn = net["players_drawn_max"].as_u64().unwrap_or(0);
+    let acted = net["remote_weapon_frames"].as_u64().unwrap_or(0);
     let clips = net["torso_clips"].as_array()?;
-    (drawn > 0 && clips.is_empty())
-        .then(|| "other players were drawn but none ever played a torso animation".to_owned())
+    (acted > 0 && clips.is_empty())
+        .then(|| format!("other players handled weapons for {acted} frames but none ever played a torso animation"))
 }
 
 /// What a spawned player's HUD must have: health replicated from the server, the weapon's ammunition, the map
@@ -237,27 +238,20 @@ mod tests {
     }
 
     #[test]
-    fn a_run_where_nobody_fired_or_reloaded_on_screen_is_named() {
-        assert_eq!(
-            torso_problem(&json!({})),
-            None,
-            "reports without the field are not judged"
-        );
-        assert_eq!(
+    fn a_torso_clip_is_required_only_where_weapons_were_handled() {
+        assert_eq!(torso_problem(&json!({})), None);
+        let seen = |frames: u64, clips: Value| {
             torso_problem(
-                &json!({"players_drawn_max": 2, "torso_clips": ["pt_reload_stand_rifle"]})
-            ),
-            None
-        );
-        assert!(
-            torso_problem(&json!({"players_drawn_max": 2, "torso_clips": []}))
-                .unwrap()
-                .contains("torso")
-        );
+                &json!({"players_drawn_max": 2, "remote_weapon_frames": frames, "torso_clips": clips}),
+            )
+        };
         assert_eq!(
-            torso_problem(&json!({"players_drawn_max": 0, "torso_clips": []})),
-            None
+            seen(0, json!([])),
+            None,
+            "a scene without fighting is untested"
         );
+        assert_eq!(seen(5, json!(["pt_reload_stand_rifle"])), None);
+        assert!(seen(5, json!([])).unwrap().contains("torso"));
     }
 
     #[test]
