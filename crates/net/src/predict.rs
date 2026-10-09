@@ -153,14 +153,6 @@ pub struct Predicted {
     pub events: Vec<(u8, u8)>,
 }
 
-/// One pass's own event ring, to tell which events the next pass raises anew.
-#[derive(Clone, Copy)]
-struct EventRing {
-    spawn: u16,
-    seq: u8,
-    events: [u8; 4],
-}
-
 #[derive(Default)]
 pub struct Predictor {
     cmds: VecDeque<UserCmd>,
@@ -171,8 +163,10 @@ pub struct Predictor {
     error_from: i32,
     /// The server's teleport bit as the previous pass's snapshot had it.
     tele_bit: Option<u32>,
-    /// The own events delivered up to the previous pass.
-    ring: Option<EventRing>,
+    /// The server's own event counter and spawn count as the last snapshot had them, `None` until the first pass.
+    server_events: Option<(u8, u16)>,
+    /// The predicted events (by event number) delivered and not yet confirmed by a snapshot's own events.
+    pending: Vec<u8>,
     /// The eye's lag behind the steps taken.
     step: StepView,
     /// Prediction passes whose result differed from the previous pass, beyond rounding.
@@ -291,7 +285,7 @@ impl Predictor {
         let began = self.step.start != before;
         self.steps += u64::from(began);
         self.step_taken = if began { view_change } else { 0.0 };
-        let events = self.fresh_events(&ps);
+        let events = self.fresh_events(&snap.ps, &ps);
         Predicted {
             ps,
             inv,
@@ -314,50 +308,81 @@ impl Predictor {
         self.error.map(|e| e * k)
     }
 
-    /// Forgets which own events were delivered: the next pass only learns the counter. For after the player state
+    /// Forgets which own events were delivered: the next pass only learns the counters. For after the player state
     /// was someone else's (a followed player), whose event ring says nothing about the player's own.
     pub fn resync_events(&mut self) {
-        self.ring = None;
+        self.server_events = None;
+        self.pending.clear();
     }
 
-    /// The events `ps` carries that no earlier pass delivered, oldest first (`CG_CheckPlayerstateEvents`): those
-    /// past the previous pass's counter, and those a correction changed in a slot already delivered. A replay that
-    /// raises an event again does not deliver it again; one the server raised beyond what was predicted is.
-    fn fresh_events(&mut self, ps: &PlayerState) -> Vec<(u8, u8)> {
-        let now = EventRing {
-            spawn: ps.spawn_count,
-            seq: ps.event_sequence,
-            events: ps.events,
+    /// The own events no earlier pass delivered, oldest first (`CG_CheckPlayerstateEvents`). `server` is the
+    /// snapshot's state, `ps` the replayed one: the events the server raised since the last snapshot, and the ones
+    /// the replay raised beyond them.
+    ///
+    /// An event is identified by its number alone (its parameter, a fall depth, may differ between replays). A
+    /// server event that a delivered predicted one stands for is its confirmation and plays nothing; any other
+    /// (a pickup the client could not predict) plays, whatever its place among the predicted ones. A predicted
+    /// event a replay raises again plays nothing; one the replay no longer raises is forgotten, so it cannot
+    /// swallow a later event of its kind.
+    fn fresh_events(&mut self, server: &PlayerState, ps: &PlayerState) -> Vec<(u8, u8)> {
+        let ring = |ps: &PlayerState, from: u8, to: u8| -> Vec<(u8, u8)> {
+            let n = to.wrapping_sub(from).min(4);
+            (1..=n)
+                .rev()
+                .map(|back| usize::from(to.wrapping_sub(back) & 3))
+                .map(|slot| (ps.events[slot], ps.event_parms[slot]))
+                .filter(|(e, _)| *e != ev::NONE)
+                .collect()
         };
-        let Some(mut old) = self.ring else {
-            self.ring = Some(now);
+        let (seq, spawn) = (server.event_sequence, server.spawn_count);
+        let predicted = ring(ps, seq, ps.event_sequence);
+        let known = match self.server_events.replace((seq, spawn)) {
+            Some((_, old_spawn)) if old_spawn != spawn => {
+                // A new life counts from zero.
+                self.pending.clear();
+                Some(0)
+            }
+            Some((old, _)) => Some(old),
+            None => None,
+        };
+        let Some(old) = known else {
+            // The first pass only learns.
+            self.pending = predicted.iter().map(|(e, _)| *e).collect();
             return Vec::new();
         };
-        if old.spawn != now.spawn {
-            // A new life counts from zero.
-            old = EventRing {
-                spawn: now.spawn,
-                seq: 0,
-                events: [0; 4],
-            };
+        let mut out = Vec::new();
+        // A counter that went backwards (a snapshot out of order) only resyncs.
+        let behind = seq.wrapping_sub(old) > 128;
+        if !behind {
+            for (event, parm) in ring(server, old, seq) {
+                match self.pending.iter().position(|p| *p == event) {
+                    Some(i) => {
+                        self.pending.remove(i);
+                    }
+                    None => out.push((event, parm)),
+                }
+            }
         }
-        let ahead = i32::from(now.seq.wrapping_sub(old.seq) as i8);
-        if ahead < 0 {
-            // A pass that stopped short of the events delivered (a replay shorter than the last one): it delivers
-            // nothing and the ring stays, so the replay catching up again is not new.
-            self.ring = Some(old);
-            return Vec::new();
+        // What is left of the old prediction is a prefix of the new one, less the part that scrolled out of the
+        // four slots: the smallest cut that leaves the rest in order among the new events.
+        let ids: Vec<u8> = predicted.iter().map(|(e, _)| *e).collect();
+        let covered = |cut: usize| {
+            let mut next = ids.iter();
+            self.pending[cut..].iter().all(|p| next.any(|e| e == p))
+        };
+        let cut = (0..=self.pending.len())
+            .find(|&c| covered(c))
+            .unwrap_or(self.pending.len());
+        let mut old_events = self.pending[cut..].iter().peekable();
+        for &(event, parm) in &predicted {
+            if old_events.peek() == Some(&&event) {
+                old_events.next();
+            } else {
+                out.push((event, parm));
+            }
         }
-        self.ring = Some(now);
-        (1..=4i32)
-            .rev()
-            .filter_map(|back| {
-                let slot = usize::from(now.seq.wrapping_sub(back as u8) & 3);
-                let event = now.events[slot];
-                let new = back <= ahead || (back < ahead + 4 && event != old.events[slot]);
-                (new && event != ev::NONE).then_some((event, ps.event_parms[slot]))
-            })
-            .collect()
+        self.pending = ids;
+        out
     }
 }
 
@@ -585,48 +610,82 @@ mod tests {
         assert_eq!(pr.corrections, 0);
     }
 
-    #[test]
-    fn an_event_replayed_every_pass_is_delivered_once() {
-        let mut pr = Predictor::default();
-        let mut base = start();
-        assert!(
-            pr.fresh_events(&base).is_empty(),
-            "the first pass learns the counter"
-        );
-        // Passes replay the same jump from the same snapshot, as the server has not caught up.
-        base.add_event(ev::JUMP, 5);
-        assert_eq!(pr.fresh_events(&base), [(ev::JUMP, 5)]);
-        for _ in 0..3 {
-            assert!(pr.fresh_events(&base).is_empty());
+    /// The server's state with `events` in its ring, and the replayed state with `more` on top.
+    fn states(events: &[(u8, u8)], more: &[(u8, u8)]) -> (PlayerState, PlayerState) {
+        let mut server = start();
+        for &(e, p) in events {
+            server.add_event(e, u32::from(p));
         }
-        // A later pass stops short of the jump (fewer commands replayed) and then replays it again.
-        let short = start();
-        assert!(pr.fresh_events(&short).is_empty());
-        assert!(
-            pr.fresh_events(&base).is_empty(),
-            "the replay catching up is not new"
-        );
-        // A new event is.
-        base.add_event(ev::FIRE_WEAPON, 0);
-        assert_eq!(pr.fresh_events(&base), [(ev::FIRE_WEAPON, 0)]);
+        let mut ps = server.clone();
+        for &(e, p) in more {
+            ps.add_event(e, u32::from(p));
+        }
+        (server, ps)
+    }
+
+    fn pass(pr: &mut Predictor, events: &[(u8, u8)], more: &[(u8, u8)]) -> Vec<(u8, u8)> {
+        let (server, ps) = states(events, more);
+        pr.fresh_events(&server, &ps)
     }
 
     #[test]
-    fn an_event_the_server_adds_is_delivered_and_a_changed_prediction_is_too() {
+    fn an_event_replayed_every_pass_is_delivered_once() {
         let mut pr = Predictor::default();
-        let mut ps = start();
-        pr.fresh_events(&ps);
-        ps.add_event(ev::JUMP, 1);
-        assert_eq!(pr.fresh_events(&ps).len(), 1);
-        // The server's snapshot has a different event in the slot the prediction used, same counter.
-        let mut other = start();
-        other.add_event(ev::ITEM_PICKUP, 2);
-        assert_eq!(pr.fresh_events(&other), [(ev::ITEM_PICKUP, 2)]);
-        // A new life starts over: its first events count.
+        assert!(pass(&mut pr, &[], &[]).is_empty(), "the first pass learns");
+        // Passes replay the same jump from the same snapshot, as the server has not caught up.
+        assert_eq!(pass(&mut pr, &[], &[(ev::JUMP, 5)]), [(ev::JUMP, 5)]);
+        for _ in 0..3 {
+            assert!(pass(&mut pr, &[], &[(ev::JUMP, 5)]).is_empty());
+        }
+        // The server catches up and raises the same jump: a confirmation, not a second jump.
+        assert!(pass(&mut pr, &[(ev::JUMP, 6)], &[]).is_empty());
+        // A new event is delivered.
+        assert_eq!(
+            pass(&mut pr, &[(ev::JUMP, 6)], &[(ev::FIRE_WEAPON, 0)]),
+            [(ev::FIRE_WEAPON, 0)]
+        );
+    }
+
+    /// A pickup only the server knows of lands before a predicted jump in the same window.
+    #[test]
+    fn an_unpredicted_server_event_before_a_predicted_one_does_not_replay_it() {
+        let mut pr = Predictor::default();
+        pass(&mut pr, &[], &[]);
+        assert_eq!(pass(&mut pr, &[], &[(ev::JUMP, 0)]), [(ev::JUMP, 0)]);
+        // The next snapshot: the server raised the pickup, then the jump the client already played.
+        let got = pass(&mut pr, &[(ev::ITEM_PICKUP, 2), (ev::JUMP, 0)], &[]);
+        assert_eq!(got, [(ev::ITEM_PICKUP, 2)], "the jump is not played twice");
+        assert!(pass(&mut pr, &[(ev::ITEM_PICKUP, 2), (ev::JUMP, 0)], &[]).is_empty());
+    }
+
+    /// The prediction raised an event the server never did (a mispredict); the same kind later is not swallowed.
+    #[test]
+    fn a_mispredicted_event_does_not_hide_the_real_one() {
+        let mut pr = Predictor::default();
+        pass(&mut pr, &[], &[]);
+        assert_eq!(pass(&mut pr, &[], &[(ev::JUMP, 0)]), [(ev::JUMP, 0)]);
+        // The replay no longer raises it (the server disagreed and ran on without a jump).
+        assert!(pass(&mut pr, &[], &[]).is_empty());
+        // A real jump later plays, from the prediction and then once only.
+        assert_eq!(pass(&mut pr, &[], &[(ev::JUMP, 0)]), [(ev::JUMP, 0)]);
+        assert!(pass(&mut pr, &[(ev::JUMP, 0)], &[]).is_empty());
+        // A server counter that went backwards resyncs without delivering the old events again.
+        assert!(pass(&mut pr, &[], &[]).is_empty());
+        assert_eq!(
+            pass(&mut pr, &[(ev::FOLIAGE_SOUND, 0)], &[]),
+            [(ev::FOLIAGE_SOUND, 0)]
+        );
+    }
+
+    #[test]
+    fn a_new_life_delivers_its_first_events() {
+        let mut pr = Predictor::default();
+        pass(&mut pr, &[(ev::JUMP, 0)], &[]);
         let mut life = start();
         life.spawn_count = 1;
         life.add_event(ev::JUMP, 0);
-        assert_eq!(pr.fresh_events(&life), [(ev::JUMP, 0)]);
+        let ps = life.clone();
+        assert_eq!(pr.fresh_events(&life, &ps), [(ev::JUMP, 0)]);
     }
 
     #[test]

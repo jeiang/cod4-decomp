@@ -757,8 +757,6 @@ impl NetPlay {
             let (events, commands) = self.take_events(&snap);
             self.look
                 .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
-            self.look
-                .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
             let look = self.look.frame(st);
             self.shock_effects(&look);
             let (yaw, pitch) = (seen[1].to_radians(), -seen[0].to_radians());
