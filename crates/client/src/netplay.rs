@@ -32,7 +32,7 @@ use net::predict::{Env, PlayerBoxes, Predictor};
 use render::ModelInstance;
 use serde_json::{Value, json};
 use server::netsv::eflags;
-use server::playeranim::{PlayerPoseInput, TorsoWire};
+use server::playeranim::{LegsWire, PlayerPoseInput, TorsoWire};
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
 use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
@@ -1467,8 +1467,10 @@ impl NetPlay {
                 .get(e.weapon)
                 .and_then(|i| self.lib.content.weapon(&i.name))
                 .cloned();
+            // A gunner on a turret holds nothing: the weapon leaves the body.
             let held = weapon
                 .as_ref()
+                .filter(|_| e.eflags & eflags::TURRET == 0)
                 .and_then(|w| w.world_models.first().cloned().flatten())
                 .and_then(|m| m.name.as_deref().map(str::to_owned));
             // The body the scripts gave the player; failing that, the stock body of the team's faction.
@@ -1694,6 +1696,11 @@ fn pose_input(
         cap: e.torso_cap,
         seq: e.torso_seq,
     });
+    i.legs_wire = Some(LegsWire {
+        clip: e.legs_clip,
+        seq: e.legs_seq,
+    });
+    i.seed = u32::from(e.event_seq) << 16 | u32::from(e.damage_duration);
     i
 }
 

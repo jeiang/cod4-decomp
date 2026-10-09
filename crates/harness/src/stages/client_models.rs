@@ -2,9 +2,11 @@
 //! `client-models`: the client's `--show-models` scene (stock player models posed in a row, the first-person
 //! hands and weapon in front) is rendered twice from the same camera, once with players and once without. The
 //! stage passes only if the player rows change a meaningful share of the upper part of the picture: skinned
-//! models are drawn, with textures, at the right place. Needs a display and the install; skips cleanly without.
+//! models are drawn, with textures, at the right place. The scene's two scripted players (a jump, a stance change)
+//! must also have played the legs clips the script calls for, which the client reports. Needs a display and the install; skips cleanly without.
 use super::client_flythrough::locate_client;
 use crate::stage::{StageCtx, StageReport, Status};
+use serde_json::Value;
 use std::fs::{self, File};
 use std::io;
 use std::path::Path;
@@ -12,12 +14,50 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const NAME: &str = "client-models";
-const PLAYERS: usize = 7;
+/// The seven static poses and the two scripted ones.
+const PLAYERS: usize = 9;
 const SECS: u64 = 3;
 const LIMIT: Duration = Duration::from_secs(180);
 /// Share of upper-picture pixels that must differ, and by how much per channel.
 const MIN_CHANGED: f64 = 0.01;
 const CHANNEL_DELTA: i32 = 32;
+
+/// The legs clips the showcase's scripted players must have played, in order: a run with a jump and a landing, and
+/// leaving prone for a moving crouch.
+const SCRIPTED_CLIPS: [(&str, &[&str]); 2] = [
+    (
+        "jump",
+        &[
+            "pb_combatrun_forward_loop",
+            "pb_runjump_takeoff",
+            "pb_runjump_land",
+            "pb_combatrun_forward_loop",
+        ],
+    ),
+    (
+        "stance change",
+        &[
+            "pb_prone_crawl",
+            "pb_prone2crouchrun",
+            "pb_crouch_run_forward",
+        ],
+    ),
+];
+
+/// Why the scripted players' clips are not the ones the script calls for, or `None`.
+fn scripted_clips_problem(client: &Value) -> Option<String> {
+    let played = &client["showcase"]["clips"];
+    for (label, want) in SCRIPTED_CLIPS {
+        let got: Vec<&str> = played[label]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if got != want {
+            return Some(format!("the {label} player played {got:?}, not {want:?}"));
+        }
+    }
+    None
+}
 
 pub fn decode(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let dec = png::Decoder::new(io::BufReader::new(
@@ -135,6 +175,18 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     };
     let mut report = StageReport::new(NAME, Status::Passed);
+    let client: Value = match fs::read(ctx.dir.join("players").join("client.json"))
+        .map_err(|e| e.to_string())
+        .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()))
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(report_fail(report, &format!("no client report: {e}")));
+        }
+    };
+    if let Some(why) = scripted_clips_problem(&client) {
+        return Ok(report_fail(report, &why));
+    }
     if (a.0, a.1) != (b.0, b.1) {
         return Ok(report_fail(report, "the two screenshots differ in size"));
     }
@@ -180,4 +232,34 @@ fn report_fail(mut r: StageReport, why: &str) -> StageReport {
     r.status = Status::Failed;
     r.reason = Some(why.to_owned());
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn good() -> Value {
+        json!({"showcase": {"clips": {
+            "jump": ["pb_combatrun_forward_loop", "pb_runjump_takeoff", "pb_runjump_land", "pb_combatrun_forward_loop"],
+            "stance change": ["pb_prone_crawl", "pb_prone2crouchrun", "pb_crouch_run_forward"],
+        }}})
+    }
+
+    #[test]
+    fn a_run_whose_players_never_jumped_or_changed_stance_is_named() {
+        assert_eq!(scripted_clips_problem(&good()), None);
+        let mut c = good();
+        c["showcase"]["clips"]["jump"] = json!(["pb_combatrun_forward_loop"]);
+        assert!(scripted_clips_problem(&c).unwrap().contains("jump"));
+        let mut c = good();
+        c["showcase"]["clips"]["stance change"] =
+            json!(["pb_prone_crawl", "pb_crouch_run_forward"]);
+        assert!(
+            scripted_clips_problem(&c)
+                .unwrap()
+                .contains("stance change")
+        );
+        assert!(scripted_clips_problem(&json!({})).is_some());
+    }
 }

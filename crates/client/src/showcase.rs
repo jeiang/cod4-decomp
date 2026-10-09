@@ -8,24 +8,84 @@ use crate::viewmodel::ViewModel;
 use glam::Vec3;
 use render::ModelInstance;
 use render::lightgrid::SightTrace;
-use server::playeranim::{PlayerPoseInput, StanceInput};
-use sim::pm::{PlayerState, weapon_state};
+use serde_json::{Value, json};
+use server::playeranim::{PlayerPoseInput, StanceInput, anim_type};
+use sim::pm::{PlayerState, ev, weapon_state};
 
 /// What a showcase player does.
 #[derive(Clone, Copy, Debug)]
 pub struct Pose {
     pub label: &'static str,
     pub input: PlayerPoseInput,
+    /// The input a scripted pose has `t` seconds in (replacing `input`), stepped at [`SCRIPT_STEP`].
+    pub script: Option<fn(f32) -> PlayerPoseInput>,
+}
+
+/// Fixed step of a scripted pose, seconds: what it plays does not depend on the frame rate.
+pub const SCRIPT_STEP: f32 = 1.0 / 30.0;
+
+/// A player holding a rifle: the stock weapon sets are the rifle's.
+fn rifle() -> PlayerPoseInput {
+    PlayerPoseInput {
+        anim_type: anim_type::AUTORIFLE,
+        ..PlayerPoseInput::default()
+    }
 }
 
 fn pose(label: &'static str, f: impl FnOnce(&mut PlayerPoseInput)) -> Pose {
-    let mut input = PlayerPoseInput::default();
+    let mut input = rifle();
     f(&mut input);
-    Pose { label, input }
+    Pose {
+        label,
+        input,
+        script: None,
+    }
+}
+
+fn scripted(label: &'static str, script: fn(f32) -> PlayerPoseInput) -> Pose {
+    Pose {
+        label,
+        input: script(0.0),
+        script: Some(script),
+    }
+}
+
+/// Running, a jump at half a second, a landing at 1.1: the clips `pb_runjump_takeoff` and `pb_runjump_land` play.
+fn jump_script(t: f32) -> PlayerPoseInput {
+    let run = PlayerPoseInput {
+        speed: 190.0,
+        trying_to_move: true,
+        ..rifle()
+    };
+    let (event_seq, code, airborne) = match t {
+        t if t < 0.5 => (0, 0, false),
+        t if t < 1.1 => (1, ev::JUMP, true),
+        _ => (2, ev::LANDING_FIRST + 5, false),
+    };
+    PlayerPoseInput {
+        event_seq,
+        events: [code; 4],
+        airborne,
+        ..run
+    }
+}
+
+/// Crawling prone, then standing up to a crouch run at 0.4 s: `pb_prone2crouchrun` plays between.
+fn stance_script(t: f32) -> PlayerPoseInput {
+    PlayerPoseInput {
+        stance: if t < 0.4 {
+            StanceInput::Prone
+        } else {
+            StanceInput::Crouch
+        },
+        speed: 100.0,
+        trying_to_move: true,
+        ..rifle()
+    }
 }
 
 /// The poses the row cycles through.
-pub fn poses() -> [Pose; 7] {
+pub fn poses() -> [Pose; 9] {
     [
         pose("stand idle", |_| {}),
         pose("run", |i| {
@@ -46,6 +106,8 @@ pub fn poses() -> [Pose; 7] {
             i.walking = true;
         }),
         pose("death", |i| i.dead = true),
+        scripted("jump", jump_script),
+        scripted("stance change", stance_script),
     ]
 }
 
@@ -55,6 +117,11 @@ struct Actor {
     origin: [f32; 3],
     yaw: f32,
     started: bool,
+    /// Scripted poses: seconds into the script and seconds not yet stepped.
+    t: f32,
+    owed: f32,
+    /// The clips the legs played, in order.
+    clips: Vec<&'static str>,
 }
 
 pub struct Showcase {
@@ -121,7 +188,7 @@ fn find_camera(
 }
 
 impl Showcase {
-    /// `count` players (the 7 poses, cycling) at `reach` units from the camera, and the view model of `weapon`.
+    /// `count` players (the poses, cycling) at `reach` units from the camera, and the view model of `weapon`.
     pub fn new(
         lib: &mut Library,
         world: &dyn SightTrace,
@@ -178,6 +245,9 @@ impl Showcase {
                 // Face the camera.
                 yaw: yaw.to_degrees() + 180.0 + (col as f32 - 3.0) * 6.0,
                 started: false,
+                t: 0.0,
+                owed: 0.0,
+                clips: Vec::new(),
             });
         }
         let vm = ViewModel::new(&lib.content, &def, None)?;
@@ -203,6 +273,17 @@ impl Showcase {
         self.camera
     }
 
+    /// What the scripted poses played so far: the legs clips of each, in order.
+    pub fn report(&self) -> Value {
+        let clips: serde_json::Map<String, Value> = self
+            .actors
+            .iter()
+            .filter(|a| a.pose.script.is_some())
+            .map(|a| (a.pose.label.to_owned(), json!(a.clips)))
+            .collect();
+        json!({ "clips": clips })
+    }
+
     /// `label: animation` of every actor and the view model's animation slot, for the run log.
     pub fn describe(&self) -> Vec<String> {
         let mut v: Vec<String> = self
@@ -222,6 +303,25 @@ impl Showcase {
         for a in &mut self.actors {
             let mut input = a.pose.input;
             input.yaw = a.yaw;
+            if let Some(script) = a.pose.script {
+                a.owed += dt;
+                while a.owed >= SCRIPT_STEP {
+                    a.owed -= SCRIPT_STEP;
+                    let step = PlayerPoseInput {
+                        yaw: a.yaw,
+                        ..script(a.t)
+                    };
+                    a.t += SCRIPT_STEP;
+                    a.player.update(SCRIPT_STEP, &step);
+                    if let Some(c) = a.player.animation()
+                        && a.clips.last() != Some(&c)
+                    {
+                        a.clips.push(c);
+                    }
+                }
+                out.extend(a.player.instances(a.origin));
+                continue;
+            }
             if input.dead && !a.started {
                 // A death is chosen from the frame before: stand first.
                 a.player.update(
