@@ -12,7 +12,7 @@
 use fx::Rng;
 use sim::pm::PlayerState;
 use sim::pm::damage::{VIEW_KICK_MS, direction_of, view_kick};
-use sim::pm::math::{angle_normalize_360, get_lean_fraction, vec_to_yaw};
+use sim::pm::math::{angle_normalize_360, vec_to_yaw};
 
 /// Hits whose wedges can be on screen at once.
 const SLOTS: usize = 8;
@@ -38,9 +38,8 @@ pub struct DamageView {
     seen: Option<u8>,
     /// Whose state was looked at last: another player's events are not this one's to compare with.
     who: u16,
-    /// The kick of the last hit: pitch and roll in degrees at full strength.
+    /// The kick of the last hit, degrees at full strength: how strong the red flash is.
     pitch: f32,
-    roll: f32,
     /// The server time the red flash ends at, and the server time of the last hit (0: none yet).
     flash_end: i32,
     hit_time: i32,
@@ -54,7 +53,6 @@ impl Default for DamageView {
             seen: None,
             who: u16::MAX,
             pitch: 0.0,
-            roll: 0.0,
             flash_end: 0,
             hit_time: 0,
             wedges: [Wedge::default(); SLOTS],
@@ -101,13 +99,11 @@ impl DamageView {
         let kick = view_kick(ps.damage_count);
         match direction_of(ps.damage_pitch, ps.damage_yaw) {
             None => {
-                self.roll = 0.0;
                 self.pitch = -kick;
             }
             Some(dir) => {
-                let (forward, right, _) = sim::pm::math::angle_vectors(&[view[0], view[1], 0.0]);
+                let (forward, _, _) = sim::pm::math::angle_vectors(&[view[0], view[1], 0.0]);
                 let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-                self.roll = -kick * dot(dir, right);
                 self.pitch = kick * dot(dir, forward);
                 // The oldest slot is the one given up.
                 let slot = (0..SLOTS).min_by_key(|&i| self.wedges[i].time).unwrap_or(0);
@@ -120,25 +116,6 @@ impl DamageView {
         }
         self.flash_end = now + VIEW_KICK_MS;
         self.hit_time = now;
-    }
-
-    /// The last hit as the gun feels it: when, and the kick at full strength.
-    pub fn hit(&self) -> crate::viewmodel::Hit {
-        crate::viewmodel::Hit {
-            time: self.hit_time,
-            pitch: self.pitch,
-            roll: self.roll,
-        }
-    }
-
-    /// The view's turn from the last hit, degrees pitch (positive down) and roll, for the weapon at `ads` aimed
-    /// (`overlay`: through a scope).
-    pub fn view_angles(&self, now: i32, ads: f32, overlay: bool) -> [f32; 2] {
-        if self.hit_time == 0 {
-            return [0.0; 2];
-        }
-        let f = kick_fraction((now - self.hit_time) as f32, ads, overlay);
-        [self.pitch * f, self.roll * f]
     }
 
     /// The flash and the wedges at `now` for a view looking along `view_yaw` degrees.
@@ -158,24 +135,6 @@ impl DamageView {
             }
         }
         out
-    }
-}
-
-/// How much of a hit's kick the view shows `since` ms after it: up over 100 ms, back down over the next 400.
-fn kick_fraction(since: f32, ads: f32, overlay: bool) -> f32 {
-    let mut scale = 1.0 - ads * 0.5;
-    if ads != 0.0 && overlay {
-        scale *= 1.0 + ads * 0.5;
-    }
-    if since < 100.0 {
-        get_lean_fraction(since * 0.01) * scale
-    } else {
-        let t = (since - 100.0) * 0.0025;
-        if t < 1.0 {
-            (1.0 - get_lean_fraction(t)) * scale
-        } else {
-            0.0
-        }
     }
 }
 
@@ -199,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hit_from_the_right_draws_the_wedge_on_the_right_and_rolls_the_view_to_it() {
+    fn a_hit_from_the_right_draws_the_wedge_on_the_right() {
         let mut d = DamageView::default();
         let mut ps = PlayerState::default();
         // Looking along +x (yaw 0); the shooter on the right (-y) drives the blow towards +y.
@@ -218,8 +177,6 @@ mod tests {
         e.look(&ps, 1000, [0.0, 0.0]);
         let [x, y] = wedge_at(e.hud(1100, 0.0).wedges[0].0);
         assert!(y > 50.0 && x.abs() < 40.0, "wedge at {x}, {y}");
-        // Rolls, as a blow along +y does: right is -y, the dot is negative, the roll positive.
-        assert!(d.view_angles(1010, 0.0, false)[1] > 0.0);
     }
 
     #[test]
@@ -235,9 +192,6 @@ mod tests {
         assert!(d.hud(600, 0.0).flash > 0.0);
         assert_eq!(d.hud(1100, 0.0).flash, 0.0);
         assert_eq!(d.hud(500 + ICON_MS, 0.0).wedges.len(), 0);
-        assert_eq!(d.view_angles(500 + 600, 0.0, false), [0.0; 2]);
-        // The kick is up at 100 ms and gone by 500 ms.
-        assert!(d.view_angles(600, 0.0, false)[0].abs() > 1.0);
     }
 
     #[test]
@@ -248,7 +202,6 @@ mod tests {
         hit(&mut ps, 50, None);
         d.look(&ps, 100, [0.0; 2]);
         assert!(d.hud(200, 0.0).wedges.is_empty());
-        assert!(d.view_angles(200, 0.0, false)[0] < 0.0);
     }
 
     #[test]

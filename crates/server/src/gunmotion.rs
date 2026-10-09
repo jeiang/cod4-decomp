@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Translated in part from KisakCOD (GPL-3.0, KisakCOD contributors): `game_mp/g_active_mp.cpp`
 // (`ClientThink_real`) and `game/g_weapon.cpp` (`CalcMuzzlePoints`).
-//! Where a player's shots go: the view's own effects (a hit's kick, a scope's sway) and, aimed down sights, the gun's
-//! angles (idle breathing, bob, damage kick, the recoil spring, view-delta sway) composed into the player's angles.
-//! The springs advance once per usercmd on the server with the same arithmetic the client draws the gun with.
+//! Where a player's shots go: the view's own effects (a hit's kick, a scope's sway and bob) and, aimed down sights,
+//! the gun's angles (idle breathing, bob, damage kick, the recoil spring, view-delta sway) composed into the
+//! player's angles. The springs advance once per usercmd, before the movement, like the original; the view effects
+//! are [`sim::weapon::gun::ViewFx`], the same the client draws its camera with.
+//!
+//! The gun's recoil spring is rolled separately on the server and on the client, as in the original, so the gun the
+//! server aims an aimed shot along kicks in its own direction after each shot.
 
 use sim::Vec3;
 use sim::pm::bob::bob_speed;
-use sim::weapon::gun::{GunFrame, GunParams, GunState};
+use sim::weapon::WeaponInfo;
+use sim::weapon::gun::{GunFrame, GunState, ViewFx, shell_shock_sway_scale};
 
 use crate::client::Client;
 use crate::tags::{angles_to_axis, axis_to_angles, mul3};
@@ -15,46 +20,58 @@ use crate::tags::{angles_to_axis, axis_to_angles, mul3};
 #[derive(Debug, Clone, Default)]
 pub struct GunMotion {
     pub state: GunState,
-    /// What the view adds to the player's angles, degrees.
-    pub view: Vec3,
-    /// The gun's angles relative to the view, when the shot follows the gun (aimed, no scope overlay).
-    pub gun: Option<Vec3>,
+    pub fx: ViewFx,
+    /// The level time the shell shock ends at, 0 for none.
+    pub shock_end: i32,
+    /// The angles of the shots of the command being run (`fGunPitch`, `fGunYaw`); `None` before the first.
+    aim: Option<Vec3>,
 }
 
 impl Client {
-    /// Advances the gun's springs for one usercmd of `msec` and works out the aim of the shots it fires.
-    pub fn gun_step(&mut self, p: &GunParams, time: i32, msec: i32) {
+    /// Advances the gun's springs and the view's effects for one usercmd of `msec`, from the state before the
+    /// command's movement, and works out the aim of the shots it fires.
+    pub fn gun_step(&mut self, info: Option<&WeaponInfo>, msec: i32) {
         let ps = &self.ps;
-        let f = GunFrame {
+        let m = &mut self.gun;
+        let Some(info) = info else {
+            m.aim = None;
+            return;
+        };
+        let p = &info.gun;
+        m.fx.observe(ps);
+        m.fx.step(ps, p);
+        let time = ps.command_time;
+        let xyspeed = bob_speed(ps, time);
+        let view = compose_view(ps.viewangles, m.fx.view_angles(ps, p, xyspeed));
+        let ss = shell_shock_sway_scale(p.sway_shell_shock_scale, m.shock_end - time);
+        m.state.sway(ps, p, ss, msec);
+        let angles = m.state.weapon_angles(&GunFrame {
             ps,
             p,
-            xyspeed: bob_speed(ps, time),
+            xyspeed,
             frametime: msec as f32 * 0.001,
             time,
-            damage_time: self.damage_time,
-            v_dmg_pitch: self.v_dmg[0],
-            v_dmg_roll: self.v_dmg[1],
-        };
-        let m = &mut self.gun;
-        m.view = m.state.view_angles(&f);
-        m.state.sway(ps, p, 1.0, msec);
-        let angles = m.state.weapon_angles(&f);
-        m.gun =
-            (p.aim_down_sight && ps.weapon_pos_frac != 0.0 && !p.overlay_reticle).then_some(angles);
+            hit: m.fx.hit,
+        });
+        let follows_gun = p.aim_down_sight && ps.weapon_pos_frac != 0.0 && !p.overlay_reticle;
+        m.aim = Some(compose(view, follows_gun.then_some(angles)));
     }
 
-    /// `client->fGunPitch`/`fGunYaw`: the angles shots leave along, from the player's angles after this
-    /// command's movement.
+    /// `client->fGunPitch`/`fGunYaw`: the angles shots leave along.
     pub fn fire_angles(&self) -> Vec3 {
-        compose(self.ps.viewangles, self.gun.view, self.gun.gun)
+        self.gun.aim.unwrap_or(self.ps.viewangles)
     }
 }
 
-/// The player's angles plus the view's effects, turned by the gun's angles when the shot follows the gun.
-fn compose(mut view: Vec3, effects: Vec3, gun: Option<Vec3>) -> Vec3 {
+fn compose_view(mut view: Vec3, effects: Vec3) -> Vec3 {
     for (a, v) in view.iter_mut().zip(effects) {
         *a += v;
     }
+    view
+}
+
+/// The view turned by the gun's angles when the shot follows the gun.
+fn compose(view: Vec3, gun: Option<Vec3>) -> Vec3 {
     match gun {
         Some(g) => axis_to_angles(&mul3(&angles_to_axis(g), &angles_to_axis(view))),
         None => view,
@@ -64,19 +81,78 @@ fn compose(mut view: Vec3, effects: Vec3, gun: Option<Vec3>) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sim::pm::PlayerState;
+    use sim::weapon::fire::AimBasis;
+    use sim::weapon::gun::GunParams;
+
+    fn client(ads: f32) -> Client {
+        let mut c = Client::new(0, false, "t".into());
+        c.ps = PlayerState {
+            viewangles: [10.0, 90.0, 0.0],
+            weapon_pos_frac: ads,
+            command_time: 1000,
+            ..PlayerState::default()
+        };
+        c
+    }
+
+    fn rifle() -> WeaponInfo {
+        WeaponInfo {
+            gun: GunParams {
+                aim_down_sight: true,
+                gun_max_pitch: 8.0,
+                gun_max_yaw: 8.0,
+                gun_kick_accel: [50.0; 2],
+                gun_kick_speed_max: [400.0; 2],
+                gun_kick_speed_decay: [3.0; 2],
+                gun_kick_static_decay: [20.0; 2],
+                ..GunParams::default()
+            },
+            ..WeaponInfo::default()
+        }
+    }
+
+    fn forward(c: &Client) -> [f32; 3] {
+        AimBasis::from_angles([0.0; 3], &c.fire_angles()).forward
+    }
 
     #[test]
-    fn a_shot_follows_the_view_and_its_effects_and_when_aimed_the_gun() {
+    fn an_aimed_shot_follows_the_gun_while_the_spring_is_kicked_and_a_hip_shot_does_not() {
+        let info = rifle();
+        let mut still = client(1.0);
+        still.gun_step(Some(&info), 8);
+        let rest = forward(&still);
+        let mut kicked = client(1.0);
+        kicked.gun.state.kick([-300.0, 0.0]);
+        kicked.gun_step(Some(&info), 8);
+        let moved = forward(&kicked);
+        let dot: f32 = rest.iter().zip(moved).map(|(a, b)| a * b).sum();
+        assert!(dot < 0.9999, "the kicked gun moved the shot: {dot}");
+        let mut hip = client(0.0);
+        hip.gun.state.kick([-300.0, 0.0]);
+        hip.gun_step(Some(&info), 8);
+        assert_eq!(
+            hip.fire_angles(),
+            hip.ps.viewangles,
+            "the hip shot is along the view"
+        );
+    }
+
+    #[test]
+    fn a_weapon_without_info_shoots_along_the_view() {
+        let mut c = client(1.0);
+        c.gun_step(None, 8);
+        assert_eq!(c.fire_angles(), c.ps.viewangles);
+    }
+
+    #[test]
+    fn composing_the_gun_into_the_view_turns_the_shot_by_the_gun_angles() {
         let view = [10.0, 90.0, 0.0];
-        assert_eq!(compose(view, [0.0; 3], None), view);
-        assert_eq!(compose(view, [2.0, 0.0, 0.0], None), [12.0, 90.0, 0.0]);
-        // The gun kicked up 3 degrees of pitch: the shot is 3 degrees above the view, along the same yaw.
-        let a = compose(view, [0.0; 3], Some([-3.0, 0.0, 0.0]));
+        assert_eq!(compose(view, None), view);
+        let a = compose(view, Some([-3.0, 0.0, 0.0]));
         assert!(
             (a[0] - 7.0).abs() < 1e-3 && (a[1] - 90.0).abs() < 1e-3,
             "{a:?}"
         );
-        let a = compose(view, [0.0; 3], Some([0.0, 4.0, 0.0]));
-        assert!((a[1] - 94.0).abs() < 0.2, "{a:?}");
     }
 }

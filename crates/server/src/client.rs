@@ -181,8 +181,6 @@ pub struct Client {
     pub damage_from_world: bool,
     /// When `damage_count` of the player state was last set, less 20 ms (`damageTime`).
     pub damage_time: i32,
-    /// The kick the last hit gave the view (`v_dmg_pitch`, `v_dmg_roll`), degrees.
-    pub v_dmg: [f32; 2],
     /// The gun's springs and clocks, advanced once per usercmd, and what the last one made of the aim.
     pub gun: GunMotion,
     pub allow_ads: bool,
@@ -261,7 +259,6 @@ impl Client {
             damage_from: [0.0; 3],
             damage_from_world: false,
             damage_time: 0,
-            v_dmg: [0.0; 2],
             gun: GunMotion::default(),
             allow_ads: true,
             inv: PlayerWeapons::new(),
@@ -588,7 +585,6 @@ impl Game {
         c.damage_from = [0.0; 3];
         c.damage_from_world = false;
         c.damage_time = 0;
-        c.v_dmg = [0.0; 2];
         c.gun = GunMotion::default();
         c.noclip = false;
         c.ufo = false;
@@ -677,9 +673,9 @@ impl Game {
         c.latched_buttons = c.buttons & !c.old_buttons;
         let old_events = c.ps.event_sequence;
         c.ps.speed = self.cvars.int("g_speed");
-        if let Some(info) = self.weapons.get(c.ps.weapon as u16) {
-            c.gun_step(&info.gun, level_time, msec.min(200));
-        }
+        // `ClientThink_real` works out the aim of this command's shots before `Pmove`, from the state as the last
+        // command left it, and caps the step at 200 ms.
+        c.gun_step(self.weapons.get(c.ps.weapon as u16), msec.min(200));
         let Some(world) = self.world.as_ref() else {
             return;
         };

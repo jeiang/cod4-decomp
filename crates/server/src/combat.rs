@@ -533,15 +533,6 @@ impl Game {
         c.ps.aim_spread_scale = (c.ps.aim_spread_scale + percent as f32).min(255.0);
         // The direction bytes name the way the blow travelled; a blow from nowhere is the pair 255, 255.
         let from = (!c.damage_from_world).then_some(c.damage_from);
-        let kick = sim::pm::damage::view_kick(percent);
-        c.v_dmg = match from {
-            None => [-kick, 0.0],
-            Some(d) => {
-                let (fwd, right, _) = sim::pm::math::angle_vectors(&c.ps.viewangles);
-                let dot = |v: [f32; 3]| d[0] * v[0] + d[1] * v[1] + d[2] * v[2];
-                [dot(fwd) * kick, dot(right) * -kick]
-            }
-        };
         (c.ps.damage_pitch, c.ps.damage_yaw) = direction_bytes(from);
         c.damage_from_world = false;
         c.ps.damage_event = c.ps.damage_event.wrapping_add(1);

@@ -17,7 +17,7 @@ use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::helicopter::Rotors;
 use crate::input::{Feedback, InputFrame, Seen, buttons, scan_own};
-use crate::kick::{Kick, Scope};
+use crate::kick::Kick;
 use crate::look::{Look, LookOut, cap_turn};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::{Launches, Props};
@@ -37,6 +37,7 @@ use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
 use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
 use sim::weapon::fire::aim_spread_degrees;
+use sim::weapon::gun::ViewFx;
 use sim::weapon::{PlayerWeapons, WeaponParams, WeaponTable};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -246,6 +247,8 @@ pub struct NetPlay {
     angles: [f32; 2],
     /// The kick of the player's own shots; kept apart from `angles`, the player's aim.
     kick: Kick,
+    /// The view's hit kick and scope sway, the same the server aims shots with.
+    fx: ViewFx,
     /// The screen's answer to the hits the player takes, and what the HUD draws of it this frame.
     damage: DamageView,
     damage_hud: DamageHud,
@@ -356,6 +359,7 @@ impl NetPlay {
             pred: Predictor::default(),
             angles: [0.0; 2],
             kick: Kick::default(),
+            fx: ViewFx::default(),
             damage: DamageView::default(),
             damage_hud: DamageHud::default(),
             pitch_limits,
@@ -677,7 +681,9 @@ impl NetPlay {
             // The followed player's hits turn the view and show on the screen as the player's own would.
             self.damage
                 .look(&ps, st, [ps.viewangles[0], ps.viewangles[1]]);
-            let hit_view = self.damage.view_angles(st, ps.weapon_pos_frac, false);
+            let gun = self.weapons.info(ps.weapon as u16).gun;
+            self.fx.observe(&ps);
+            let hit_view = self.fx.damage_kick(&ps, &gun);
             self.damage_hud = self.damage.hud(st, ps.viewangles[1]);
             let eye = Vec3::new(
                 ps.origin[0],
@@ -787,11 +793,16 @@ impl NetPlay {
                 ps.weapon_pos_frac,
                 def.map(|d| [d.hip_view_kick_center_speed, d.ads_view_kick_center_speed]),
             );
-            self.kick
-                .idle(dt, &ps, def.and_then(|d| Scope::of(d)).as_ref());
+        }
+        let gun = self.weapons.info(ps.weapon as u16).gun;
+        if dead {
+            self.fx.clear();
+        } else {
+            // A hit shows in the snapshot's state at the time the server's next command saw it.
+            self.fx.observe(&snap.ps);
+            self.fx.step(&ps, &gun);
         }
         // A hit turns the camera but not the aim, and the HUD shows it.
-        let overlay = def.is_some_and(|d| d.overlay_reticle != 0);
         let hit_view = if dead {
             self.damage.clear();
             [0.0; 2]
@@ -801,7 +812,7 @@ impl NetPlay {
                 self.angles[1] + self.kick.angles()[1],
             ];
             self.damage.look(&ps, st, view);
-            self.damage.view_angles(st, ps.weapon_pos_frac, overlay)
+            self.fx.damage_kick(&ps, &gun)
         };
         self.damage_hud = if dead {
             DamageHud::default()
@@ -814,10 +825,9 @@ impl NetPlay {
         self.c.max_damage_flash = self.c.max_damage_flash.max(self.damage_hud.flash);
         self.c.max_damage_wedges = self.c.max_damage_wedges.max(self.damage_hud.wedges.len());
         let (was_kicked, kick) = (self.c.kicked, self.kick.angles());
-        let spring = self.kick.spring();
-        self.c.kicked = spring != [0.0; 3];
+        self.c.kicked = kick != [0.0; 3];
         self.c.kick_settled += u64::from(was_kicked && !self.c.kicked);
-        self.c.max_kick_up = self.c.max_kick_up.max(-spring[0]);
+        self.c.max_kick_up = self.c.max_kick_up.max(-kick[0]);
         // Alive in the world: a spectator (before the team and class are chosen) has a view but no body.
         self.c.spawned |= matches!(
             ps.pm_type,
@@ -836,7 +846,17 @@ impl NetPlay {
         // The logical eye is where shots start, sound is heard and the harness measures; the camera draws from the
         // render eye, which the stair smoothing, bob, lean and landing move.
         let eye = Vec3::new(feet[0], feet[1], feet[2] + ps.view_height_current);
-        let aim = [self.angles[0] + kick[0], self.angles[1] + kick[1]];
+        // The scope's sway moves the view like the kick does, but only the kick goes to the server with the aim: the
+        // server adds the same sway itself.
+        let idle = if dead {
+            [0.0; 2]
+        } else {
+            self.fx.idle(&ps, &gun)
+        };
+        let aim = [
+            self.angles[0] + kick[0] + idle[0],
+            self.angles[1] + kick[1] + idle[1],
+        ];
         let cam = self.camera.view(&crate::camera::Frame {
             ps: &ps,
             now: st,
@@ -1294,7 +1314,7 @@ impl NetPlay {
         }
         // The kick of the player's shots goes to the server with the aim (`CL_FinishMove`); the scope's sway only
         // moves the camera.
-        let kick = self.kick.spring();
+        let kick = self.kick.angles();
         let cmd = UserCmd {
             selected_location,
             server_time: self.cmd_time,
@@ -1451,7 +1471,7 @@ impl NetPlay {
         let speed = self.kick.take_gun_speed();
         self.c.gun_speed_given += speed[0].abs() + speed[1].abs();
         vm.kick_gun(speed);
-        vm.set_clock(self.live_time, self.damage.hit());
+        vm.set_felt(self.fx.hit, self.look.shock_end());
         let models = vm.update(&shown, dt);
         let g = vm.gun_state();
         let recoil = g.offset[0].abs().max(g.offset[1].abs());

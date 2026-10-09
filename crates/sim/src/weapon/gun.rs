@@ -128,10 +128,8 @@ pub struct GunFrame<'a> {
     pub xyspeed: f32,
     pub frametime: f32,
     pub time: i32,
-    /// When the last hit landed (0: none yet) and the kick it gave the view, degrees.
-    pub damage_time: i32,
-    pub v_dmg_pitch: f32,
-    pub v_dmg_roll: f32,
+    /// The last hit (see [`ViewFx::hit`]).
+    pub hit: Hit,
 }
 
 /// A player's gun springs and clocks.
@@ -305,7 +303,7 @@ impl GunState {
 
     /// `BG_CalculateWeaponPosition_DamageKick`: a hit throws the gun a little the way it throws the view.
     fn damage_kick(&self, f: &GunFrame<'_>, a: &mut Vec3) {
-        if f.damage_time == 0 {
+        if f.hit.time == 0 {
             return;
         }
         let (ps, p) = (f.ps, f.p);
@@ -315,7 +313,7 @@ impl GunState {
         if ads != 0.0 && p.overlay_reticle {
             factor *= 1.0 - ads * 0.75;
         }
-        let since = (f.time - f.damage_time) as f32;
+        let since = (f.time - f.hit.time) as f32;
         let k = if since >= deflect {
             let left = 1.0 - (since - deflect) / back;
             if left <= 0.0 {
@@ -325,9 +323,9 @@ impl GunState {
         } else {
             get_lean_fraction(since / deflect) * factor
         };
-        a[0] += k * f.v_dmg_pitch * 0.5;
-        a[1] -= k * f.v_dmg_roll;
-        a[2] += k * f.v_dmg_roll * 0.5;
+        a[0] += k * f.hit.pitch * 0.5;
+        a[1] -= k * f.hit.roll;
+        a[2] += k * f.hit.roll * 0.5;
     }
 
     /// `BG_CalculateWeaponPosition_GunRecoil`: steps the spring over the frame and adds its offset. A weapon that
@@ -466,78 +464,193 @@ impl GunState {
             *o += k * m;
         }
     }
+}
 
-    /// `BG_CalculateViewAngles`: what the view adds to the player's angles, degrees: the hit's kick, a scoped
-    /// weapon's idle sway and bob, and the steps of an aimed weapon. Shots leave along the player's angles plus
-    /// these.
-    pub fn view_angles(&mut self, f: &GunFrame<'_>) -> Vec3 {
-        let (ps, p) = (f.ps, f.p);
-        let mut a = [0.0; 3];
-        self.view_damage_kick(f, &mut a);
-        if p.overlay_reticle {
-            self.view_idle_angles(f, &mut a);
-            let ads = ps.weapon_pos_frac;
-            let mut bob = bob_angles(ps, f.xyspeed, p, false);
-            for b in &mut bob {
-                *b *= ads;
-            }
-            add_to(&mut a, &bob);
-        }
-        let ads = ps.weapon_pos_frac;
-        if ps.e_flags & ef::TURRET_ACTIVE == 0 && ads != 0.0 && p.ads_view_bob_mult != 0.0 {
-            let cycle = bob_cycle(ps);
-            let k = ads * p.ads_view_bob_mult;
-            a[0] -= k * vertical_bob(ps, cycle, f.xyspeed, ADS_VIEW_BOB_MAX);
-            a[1] -= k * horizontal_bob(ps, cycle, f.xyspeed, ADS_VIEW_BOB_MAX);
-        }
-        a
+/// The last hit the view felt: when (the player state's `command_time` it was first seen at, 0 for none) and the kick
+/// at full strength, degrees.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Hit {
+    pub time: i32,
+    pub pitch: f32,
+    pub roll: f32,
+}
+
+/// The longest step the view effects take in one go, seconds (`ClientThink_real` caps `msec` at 200).
+const MAX_STEP: f32 = 0.2;
+/// How long a shell shock takes to fade the sway's scale back, ms (`ClientThink_real`).
+const SHOCK_FADE_MS: i32 = 3000;
+
+/// `ssSwayScale`: how much the gun sways more under a shell shock with `left` ms still to run.
+pub fn shell_shock_sway_scale(sway_shell_shock_scale: f32, left: i32) -> f32 {
+    if left <= 0 {
+        return 1.0;
     }
+    let t = (left as f32 / SHOCK_FADE_MS as f32).min(1.0);
+    let t = (3.0 - t * 2.0) * t * t;
+    (sway_shell_shock_scale - 1.0) * t + 1.0
+}
 
-    fn view_damage_kick(&self, f: &GunFrame<'_>, a: &mut Vec3) {
-        if f.damage_time == 0 {
+/// What the view does besides the aim (`BG_CalculateViewAngles`): the kick of a hit and a scope's idle sway, whose
+/// clocks follow the player state's `command_time`. The server steps one per player by each usercmd and the client
+/// one by each predicted state, so given the same commands both come to the same offset: shots leave along the view
+/// plus these, and the client draws the camera with them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewFx {
+    seen_event: Option<u8>,
+    who: u16,
+    pub hit: Hit,
+    last_time: Option<i32>,
+    idle_time: f64,
+    idle_factor: f32,
+}
+
+impl Default for ViewFx {
+    fn default() -> Self {
+        Self {
+            seen_event: None,
+            who: u16::MAX,
+            hit: Hit::default(),
+            last_time: None,
+            idle_time: 0.0,
+            idle_factor: 1.0,
+        }
+    }
+}
+
+impl ViewFx {
+    /// Takes in a hit `ps` newly shows (`P_DamageFeedback`, `CG_DamageFeedback`): each change of `damage_event` is
+    /// seen once, and the first look only learns the count. The kick is the hit's percent of the health pushed along
+    /// the direction the state tells, against the state's view.
+    pub fn observe(&mut self, ps: &PlayerState) {
+        if self.who != ps.client_num {
+            // Another player's state: learn it, do not kick for it.
+            *self = Self {
+                who: ps.client_num,
+                ..Self::default()
+            };
+        }
+        let Some(last) = self.seen_event.replace(ps.damage_event) else {
+            return;
+        };
+        if last == ps.damage_event || ps.damage_count == 0 {
             return;
         }
-        let (ps, p) = (f.ps, f.p);
+        let kick = crate::pm::damage::view_kick(ps.damage_count);
+        let (pitch, roll) = match crate::pm::damage::direction_of(ps.damage_pitch, ps.damage_yaw) {
+            None => (-kick, 0.0),
+            Some(dir) => {
+                let (forward, right, _) = angle_vectors(&ps.viewangles);
+                (
+                    crate::pm::math::dot(&dir, &forward) * kick,
+                    crate::pm::math::dot(&dir, &right) * -kick,
+                )
+            }
+        };
+        self.hit = Hit {
+            time: ps.command_time.max(1),
+            pitch,
+            roll,
+        };
+    }
+
+    /// Advances the scope's idle clock to `ps.command_time`. A state that is not later than the last one moves
+    /// nothing.
+    pub fn step(&mut self, ps: &PlayerState, p: &GunParams) {
+        let dt = match self.last_time {
+            Some(t) if ps.command_time > t => ((ps.command_time - t) as f32 * 0.001).min(MAX_STEP),
+            _ => 0.0,
+        };
+        if self.last_time.is_none_or(|t| ps.command_time > t) {
+            self.last_time = Some(ps.command_time);
+        }
+        if !p.overlay_reticle {
+            return;
+        }
+        let ads = ps.weapon_pos_frac;
+        let target = idle_stance_factor(ps, p);
+        if ads != 0.0 && self.idle_factor != target {
+            self.idle_factor = approach(self.idle_factor, target, dt * IDLE_FACTOR_SPEED);
+        }
+        let (_, speed) = idle_amount_speed(p, ads);
+        self.idle_time += f64::from(ps.hold_breath_scale * dt * 1000.0 * speed);
+    }
+
+    /// Forgets the hit and the clock (a new life, a view that is not the player's).
+    pub fn clear(&mut self) {
+        *self = Self {
+            who: self.who,
+            ..Self::default()
+        };
+    }
+
+    /// The hit's kick on the view now, pitch and roll degrees (`BG_CalculateView_DamageKick`).
+    pub fn damage_kick(&self, ps: &PlayerState, p: &GunParams) -> [f32; 2] {
+        if self.hit.time == 0 {
+            return [0.0; 2];
+        }
         let ads = ps.weapon_pos_frac;
         let mut factor = 1.0 - ads * 0.5;
         if ads != 0.0 && p.overlay_reticle {
             factor *= ads * 0.5 + 1.0;
         }
-        let since = (f.time - f.damage_time) as f32;
+        let since = (ps.command_time - self.hit.time) as f32;
         let k = if since >= 100.0 {
             let left = 1.0 - (since - 100.0) / 400.0;
             if left <= 0.0 {
-                return;
+                return [0.0; 2];
             }
             (1.0 - get_lean_fraction(1.0 - left)) * factor
         } else {
             get_lean_fraction(since / 100.0) * factor
         };
-        a[0] += k * f.v_dmg_pitch;
-        a[2] += k * f.v_dmg_roll;
+        [k * self.hit.pitch, k * self.hit.roll]
     }
 
-    /// `BG_CalculateView_IdleAngles`: the scoped weapon's sway, still while the breath is held.
-    fn view_idle_angles(&mut self, f: &GunFrame<'_>, a: &mut Vec3) {
-        let (ps, p) = (f.ps, f.p);
-        let ads = ps.weapon_pos_frac;
-        let (amount, speed) = idle_amount_speed(p, ads);
-        let target = idle_stance_factor(ps, p);
-        if ads != 0.0 && self.last_idle_factor != target {
-            self.last_idle_factor = approach(
-                self.last_idle_factor,
-                target,
-                f.frametime * IDLE_FACTOR_SPEED,
-            );
+    /// A scope's idle sway (`BG_CalculateView_IdleAngles`), still while the breath is held: pitch and yaw, degrees.
+    pub fn idle(&self, ps: &PlayerState, p: &GunParams) -> [f32; 2] {
+        if !p.overlay_reticle {
+            return [0.0; 2];
         }
-        let size = amount * self.last_idle_factor * ads * ps.hold_breath_scale;
-        self.idle_time = self
-            .idle_time
-            .wrapping_add((ps.hold_breath_scale * f.frametime * 1000.0 * speed) as i32);
-        let t = f64::from(self.idle_time);
-        a[1] += (t * 0.0007).sin() as f32 * size * 0.01;
-        a[0] += (t * 0.001).sin() as f32 * size * 0.01;
+        let ads = ps.weapon_pos_frac;
+        let (amount, _) = idle_amount_speed(p, ads);
+        let size = amount * self.idle_factor * ads * ps.hold_breath_scale * 0.01;
+        [
+            (self.idle_time * 0.001).sin() as f32 * size,
+            (self.idle_time * 0.0007).sin() as f32 * size,
+        ]
     }
+
+    /// The stateful part of `BG_CalculateViewAngles`: the hit's kick and the idle sway, pitch, yaw, roll degrees.
+    pub fn angles(&self, ps: &PlayerState, p: &GunParams) -> Vec3 {
+        let [pitch, roll] = self.damage_kick(ps, p);
+        let [ip, iy] = self.idle(ps, p);
+        [pitch + ip, iy, roll]
+    }
+
+    /// All of `BG_CalculateViewAngles`: [`angles`](Self::angles) and the bob of the view ([`view_bob`]). Shots leave
+    /// along the player's angles plus these.
+    pub fn view_angles(&self, ps: &PlayerState, p: &GunParams, xyspeed: f32) -> Vec3 {
+        let mut a = self.angles(ps, p);
+        add_to(&mut a, &view_bob(ps, xyspeed, p));
+        a
+    }
+}
+
+/// The bob of the view (`BG_CalculateView_BobAngles`, `BG_CalculateView_Velocity`): a scoped weapon bobs by angle
+/// while aimed, and an aimed weapon with an `adsViewBobMult` moves with the steps. Degrees.
+pub fn view_bob(ps: &PlayerState, xyspeed: f32, p: &GunParams) -> Vec3 {
+    let ads = ps.weapon_pos_frac;
+    let mut a = [0.0; 3];
+    if p.overlay_reticle && ads != 0.0 {
+        a = bob_angles(ps, xyspeed, p, false).map(|v| v * ads);
+    }
+    if ps.e_flags & ef::TURRET_ACTIVE == 0 && ads != 0.0 && p.ads_view_bob_mult != 0.0 {
+        let cycle = bob_cycle(ps);
+        let k = ads * p.ads_view_bob_mult;
+        a[0] -= k * vertical_bob(ps, cycle, xyspeed, ADS_VIEW_BOB_MAX);
+        a[1] -= k * horizontal_bob(ps, cycle, xyspeed, ADS_VIEW_BOB_MAX);
+    }
+    a
 }
 
 /// The weapon's idle amount and speed at `ads` aimed.
@@ -681,9 +794,7 @@ mod tests {
             xyspeed: 0.0,
             frametime: 0.016,
             time: 1000,
-            damage_time: 0,
-            v_dmg_pitch: 0.0,
-            v_dmg_roll: 0.0,
+            hit: Hit::default(),
         }
     }
 
@@ -841,25 +952,23 @@ mod tests {
     }
 
     #[test]
-    fn a_hit_turns_the_gun_and_the_view_then_lets_go() {
+    fn a_hit_turns_the_gun_then_lets_go() {
         let (p, ps) = (rifle(), PlayerState::default());
         let hit = |time: i32| GunFrame {
             time,
-            damage_time: 1000,
-            v_dmg_pitch: 10.0,
-            v_dmg_roll: 6.0,
+            hit: Hit {
+                time: 1000,
+                pitch: 10.0,
+                roll: 6.0,
+            },
             ..frame(&ps, &p)
         };
         let g = GunState::default();
         let mut gun = [0.0; 3];
         g.damage_kick(&hit(1050), &mut gun);
         assert!(gun[0] > 0.0 && gun[1] < 0.0 && gun[2] > 0.0, "{gun:?}");
-        let mut view = [0.0; 3];
-        g.view_damage_kick(&hit(1050), &mut view);
-        assert!(view[0] > gun[0] && view[2] > 0.0, "{view:?}");
         for time in [999 + 600, 5000] {
             let mut v = [0.0; 3];
-            g.view_damage_kick(&hit(time), &mut v);
             g.damage_kick(&hit(time), &mut v);
             assert_eq!(v, [0.0; 3], "{time}");
         }
@@ -912,31 +1021,113 @@ mod tests {
         assert_eq!(at[2], -2.0);
     }
 
-    #[test]
-    fn a_scoped_view_sways_unless_the_breath_is_held_and_a_plain_one_does_not() {
-        let scoped = GunParams {
+    fn scoped() -> GunParams {
+        GunParams {
             overlay_reticle: true,
             ..rifle()
-        };
-        let ps = |breath: f32| PlayerState {
+        }
+    }
+
+    fn aimed(time: i32, breath: f32) -> PlayerState {
+        PlayerState {
+            command_time: time,
             weapon_pos_frac: 1.0,
             hold_breath_scale: breath,
             ..PlayerState::default()
-        };
-        let mut g = GunState::default();
+        }
+    }
+
+    #[test]
+    fn a_scoped_view_sways_unless_the_breath_is_held_and_a_plain_one_does_not() {
+        let (p, plain) = (scoped(), rifle());
+        let mut fx = ViewFx::default();
         let mut widest = 0.0f32;
-        for _ in 0..600 {
-            let a = g.view_angles(&frame(&ps(1.0), &scoped));
+        for i in 0..600 {
+            let ps = aimed(i * 16, 1.0);
+            fx.step(&ps, &p);
+            let a = fx.angles(&ps, &p);
             widest = widest.max(a[0].abs()).max(a[1].abs());
         }
         assert!(widest > 0.1, "{widest}");
+        let held = aimed(9600, 0.0);
+        assert_eq!(fx.angles(&held, &p), [0.0; 3]);
+        assert_eq!(fx.angles(&aimed(9600, 1.0), &plain), [0.0; 3]);
+    }
+
+    fn hit_ps(time: i32, event: u8) -> PlayerState {
+        PlayerState {
+            command_time: time,
+            damage_event: event,
+            damage_count: 40,
+            // From straight ahead: the yaw and pitch of -x, 1/255 turns.
+            damage_pitch: 0,
+            damage_yaw: 128,
+            ..PlayerState::default()
+        }
+    }
+
+    #[test]
+    fn a_hit_is_seen_once_kicks_the_view_and_lets_go() {
+        let p = rifle();
+        let mut fx = ViewFx::default();
+        fx.observe(&hit_ps(1000, 3));
         assert_eq!(
-            GunState::default().view_angles(&frame(&ps(0.0), &scoped)),
-            [0.0; 3]
+            fx.hit,
+            Hit::default(),
+            "the first look only learns the count"
         );
-        assert_eq!(
-            GunState::default().view_angles(&frame(&ps(1.0), &rifle())),
-            [0.0; 3]
-        );
+        fx.observe(&hit_ps(2000, 4));
+        let time = fx.hit.time;
+        assert_eq!(time, 2000);
+        fx.observe(&hit_ps(2100, 4));
+        assert_eq!(fx.hit.time, time, "the same hit again is not a new one");
+        let mid = fx.damage_kick(&hit_ps(2050, 4), &p);
+        assert!(mid[0] != 0.0, "{mid:?}");
+        assert_eq!(fx.damage_kick(&hit_ps(2700, 4), &p), [0.0; 2]);
+    }
+
+    /// The server steps by every command, the client by the states it predicts or is told: the same commands make
+    /// the same offset.
+    #[test]
+    fn the_server_and_the_client_come_to_the_same_view_offset() {
+        let p = scoped();
+        let states: Vec<PlayerState> = (0..120)
+            .map(|i| {
+                let mut ps = aimed(i * 8, 0.8);
+                ps.damage_event = u8::from(i >= 40);
+                ps.damage_count = 30;
+                ps.damage_pitch = 0;
+                ps.damage_yaw = 64;
+                ps
+            })
+            .collect();
+        let (mut server, mut client) = (ViewFx::default(), ViewFx::default());
+        for (i, ps) in states.iter().enumerate() {
+            server.observe(ps);
+            server.step(ps, &p);
+            // The client sees every third state, and the one the hit first shows in.
+            if i % 3 == 0 || i == 40 {
+                client.observe(ps);
+                client.step(ps, &p);
+                if i % 3 == 0 {
+                    let (a, b) = (
+                        server.view_angles(ps, &p, 0.0),
+                        client.view_angles(ps, &p, 0.0),
+                    );
+                    for k in 0..3 {
+                        assert!((a[k] - b[k]).abs() < 1e-4, "{i}: {a:?} {b:?}");
+                    }
+                }
+            }
+        }
+        assert!(server.hit.time != 0);
+    }
+
+    #[test]
+    fn a_shell_shock_swings_the_gun_more_and_fades() {
+        assert_eq!(shell_shock_sway_scale(3.0, 0), 1.0);
+        assert_eq!(shell_shock_sway_scale(3.0, 5000), 3.0);
+        let mid = shell_shock_sway_scale(3.0, 1500);
+        assert!(mid > 1.0 && mid < 3.0, "{mid}");
     }
 }

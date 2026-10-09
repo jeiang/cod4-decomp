@@ -19,7 +19,7 @@ use server::content::{Content, PlayerAnim};
 use server::tags::{angles_to_axis, axis_to_angles, mul3, transform3};
 use sim::pm::{PlayerState, weapon_state as ws};
 use sim::skel::{AnimBinding, AnimLayer, Controllers, Pose, Rig, RigModel};
-use sim::weapon::gun::{GunFrame, GunParams, GunState};
+use sim::weapon::gun::{GunFrame, GunParams, GunState, Hit, shell_shock_sway_scale};
 use std::sync::Arc;
 
 /// `weapAnimFiles_t`: indices into [`WeaponDef::anims`].
@@ -163,16 +163,9 @@ pub struct ViewModel {
     /// the last hit's kick.
     motion: GunState,
     params: GunParams,
-    now: i32,
     hit: Hit,
-}
-
-/// The last hit as the gun feels it: when (server time, 0 for none) and the view kick, degrees.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Hit {
-    pub time: i32,
-    pub pitch: f32,
-    pub roll: f32,
+    /// The server time the shell shock ends at, 0 for none.
+    shock_end: i32,
 }
 
 /// Where the gun's muzzle and ejection port are in the world.
@@ -289,8 +282,8 @@ impl ViewModel {
             sprint_clock: 0.0,
             motion: GunState::default(),
             params: GunParams::from_def(weapon),
-            now: 0,
             hit: Hit::default(),
+            shock_end: 0,
             playing: Playing {
                 slot: slot::IDLE,
                 time: 0.0,
@@ -341,9 +334,10 @@ impl ViewModel {
         self.motion.kick(speed);
     }
 
-    /// The server time and the last hit, which the bob's ladder case and the damage kick are timed by.
-    pub fn set_clock(&mut self, now: i32, hit: Hit) {
-        (self.now, self.hit) = (now, hit);
+    /// The last hit the view felt and when the shell shock ends (0 for none): what the gun's damage kick and sway are
+    /// given.
+    pub fn set_felt(&mut self, hit: Hit, shock_end: i32) {
+        (self.hit, self.shock_end) = (hit, shock_end);
     }
 
     /// The weapon has a recoil spring (it can aim down sights).
@@ -410,15 +404,17 @@ impl ViewModel {
         let frame = GunFrame {
             ps,
             p: &self.params,
-            xyspeed: sim::pm::bob::bob_speed(ps, self.now),
+            xyspeed: sim::pm::bob::bob_speed(ps, ps.command_time),
             frametime: dt,
-            time: self.now,
-            damage_time: self.hit.time,
-            v_dmg_pitch: self.hit.pitch,
-            v_dmg_roll: self.hit.roll,
+            time: ps.command_time,
+            hit: self.hit,
         };
+        let ss = shell_shock_sway_scale(
+            self.params.sway_shell_shock_scale,
+            self.shock_end - ps.command_time,
+        );
         self.motion
-            .sway(ps, &self.params, 1.0, (dt * 1000.0).round() as i32);
+            .sway(ps, &self.params, ss, (dt * 1000.0).round() as i32);
         let gun_angles = self.motion.weapon_angles(&frame);
         let shift = self.motion.position(&frame);
         let view = angles_to_axis(ps.viewangles);
