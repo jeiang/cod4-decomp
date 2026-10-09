@@ -32,8 +32,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // Voice chat sends the microphone while `+talk` is held; a missing map is fetched from the server that plays it;
     // `cl_freezeDemo` holds a playing demo.
     ("cl_voice", "1", true),
-    ("cl_allowDownload", "1", true),
-    ("cl_freezeDemo", "0", false),
+    ("cl_allowdownload", "1", true),
+    ("cl_freezedemo", "0", false),
     ("in_gamepad_deadzone", "0.2", true),
     ("in_gamepad_yawrate", "140", true),
     ("in_gamepad_pitchrate", "100", true),

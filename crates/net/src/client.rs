@@ -118,7 +118,7 @@ impl<T: Transport> NetClient<T> {
     /// Plays `reader` in place of a server: its commands and snapshots arrive on the recorded clock. The connection
     /// attempt, if any, is given up.
     pub fn play_demo(&mut self, mut reader: DemoReader) -> Result<(), String> {
-        let next = reader.next().map_err(|e| e.to_string())?;
+        let next = reader.read_record().map_err(|e| e.to_string())?;
         self.recorder = None;
         self.snaps.clear();
         self.phase = Phase::Demo(Box::new(DemoPlayer {
@@ -225,7 +225,7 @@ impl<T: Transport> NetClient<T> {
                     self.snaps.push(now, *s);
                 }
             }
-            match d.reader.next() {
+            match d.reader.read_record() {
                 Ok(n) => d.next = n,
                 Err(e) => {
                     ended = Some(format!("The demo is damaged: {e}"));

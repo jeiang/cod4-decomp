@@ -98,7 +98,7 @@ impl Encoder {
         let mut out = [0u8; FRAME_BYTES];
         out[..2].copy_from_slice(&(self.0.pred as i16).to_le_bytes());
         out[2] = self.0.index as u8;
-        for (i, pair) in pcm.chunks_exact(2).enumerate() {
+        for (i, pair) in pcm.as_chunks::<2>().0.iter().enumerate() {
             let lo = self.0.code(pair[0]);
             let hi = self.0.code(pair[1]);
             out[3 + i] = lo | hi << 4;

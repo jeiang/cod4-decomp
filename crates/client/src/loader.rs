@@ -30,6 +30,7 @@ pub enum Server {
     Keep,
     /// Play a recorded demo: there is no server, and the address handed back is only a stand-in the net layer names the
     /// peer by.
+    #[cfg(not(target_arch = "wasm32"))]
     Demo,
 }
 
@@ -306,6 +307,7 @@ impl Work {
         progress.set(3, 0.9);
         let server = match (&self.req.server, self.booting) {
             (Server::Join(addr), _) => Some((*addr, None)),
+            #[cfg(not(target_arch = "wasm32"))]
             (Server::Demo, _) => Some((std::net::SocketAddr::from(([127, 0, 0, 1], 9)), None)),
             (_, Some(b)) => {
                 let l = b.wait()?;

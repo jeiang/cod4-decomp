@@ -358,7 +358,7 @@ fn demo_check(
 ) -> Result<(), String> {
     let mut r = DemoReader::open(path).map_err(|e| e.to_string())?;
     let (mut snaps, mut lines) = (Vec::new(), Vec::new());
-    while let Some((_, rec)) = r.next().map_err(|e| e.to_string())? {
+    while let Some((_, rec)) = r.read_record().map_err(|e| e.to_string())? {
         match rec {
             Record::Snapshot(s) => snaps.push(*s),
             Record::Command(l) => lines.push(l),

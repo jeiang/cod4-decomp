@@ -121,7 +121,7 @@ impl DemoReader {
 
     /// The next record and its time; `Ok(None)` at the end. A cut-off last record ends the demo like the end of the
     /// file (a recording that was killed mid-write still plays).
-    pub fn next(&mut self) -> io::Result<Option<(u64, Record)>> {
+    pub fn read_record(&mut self) -> io::Result<Option<(u64, Record)>> {
         let mut head = [0u8; 9];
         if let Err(e) = self.input.read_exact(&mut head) {
             return if e.kind() == io::ErrorKind::UnexpectedEof {
@@ -169,7 +169,7 @@ impl DemoReader {
 /// The level a demo was recorded on: the first `map` command it holds.
 pub fn map_of(path: &Path) -> io::Result<String> {
     let mut r = DemoReader::open(path)?;
-    while let Some((_, rec)) = r.next()? {
+    while let Some((_, rec)) = r.read_record()? {
         if let Record::Command(line) = rec
             && let Some(crate::ui::ServerCmd::Map { name }) = crate::ui::ServerCmd::parse(&line)
         {
@@ -226,21 +226,21 @@ mod tests {
 
         let mut r = DemoReader::open(&path).unwrap();
         assert_eq!(
-            r.next().unwrap(),
+            r.read_record().unwrap(),
             Some((0, Record::Command("map \"mp_x\"".into())))
         );
         for (i, n) in nums.iter().enumerate() {
             assert_eq!(
-                r.next().unwrap(),
+                r.read_record().unwrap(),
                 Some((i as u64 * 50, Record::Snapshot(Box::new(snap(*n)))))
             );
         }
-        assert_eq!(r.next().unwrap(), Some((300, Record::NewMap)));
+        assert_eq!(r.read_record().unwrap(), Some((300, Record::NewMap)));
         assert_eq!(
-            r.next().unwrap(),
+            r.read_record().unwrap(),
             Some((350, Record::Snapshot(Box::new(snap(1)))))
         );
-        assert_eq!(r.next().unwrap(), None);
+        assert_eq!(r.read_record().unwrap(), None);
         assert_eq!(map_of(&path).unwrap(), "mp_x");
         let _ = std::fs::remove_file(path);
     }
@@ -256,8 +256,11 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         std::fs::write(&path, &bytes[..bytes.len() - 3]).unwrap();
         let mut r = DemoReader::open(&path).unwrap();
-        assert!(matches!(r.next().unwrap(), Some((0, Record::Snapshot(_)))));
-        assert_eq!(r.next().unwrap(), None);
+        assert!(matches!(
+            r.read_record().unwrap(),
+            Some((0, Record::Snapshot(_)))
+        ));
+        assert_eq!(r.read_record().unwrap(), None);
 
         let junk = d.join("c.demo");
         std::fs::write(&junk, b"definitely not a demo").unwrap();
