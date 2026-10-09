@@ -135,6 +135,10 @@ pub const COLOR_TINT_DELTA: u32 = 0x2F;
 pub const DEPTH_FROM_CLIP: u32 = 0x36;
 pub const OUTDOOR_FEATHER_PARMS: u32 = 0x30;
 pub const ENVMAP_PARMS: u32 = 0x31;
+pub const CLIP_SPACE_LOOKUP_SCALE: u32 = 0x33;
+pub const CLIP_SPACE_LOOKUP_OFFSET: u32 = 0x34;
+/// `r_outdoorFeather`'s default: the units the outdoor lookup blends over.
+pub const OUTDOOR_FEATHER: f32 = 8.0;
 pub const BASE_LIGHTING_COORDS: u32 = 0x39;
 pub const SHADOWMAP_SWITCH_PARTITION: u32 = 0x20;
 pub const SHADOWMAP_SCALE: u32 = 0x21;
@@ -190,6 +194,7 @@ pub mod tex {
     pub const SKY: u32 = 14;
     pub const OUTDOOR: u32 = 17;
     pub const FLOATZ: u32 = 18;
+    pub const RESOLVED_POST_SUN: u32 = 10;
     pub const LIGHT_ATTENUATION: u32 = 15;
     pub const REFLECTION_PROBE: u32 = 26;
 }
@@ -277,6 +282,14 @@ impl FrameConsts {
         vec[SHADOWMAP_SWITCH_PARTITION as usize] = [1.0e9, 0.0, 0.0, 0.0];
         vec[SHADOWMAP_SCALE as usize] = [0.0, 0.0, 1.0, 1.0];
         vec[FOG as usize] = crate::art::Fog::OFF;
+        vec[OUTDOOR_FEATHER_PARMS as usize] = [OUTDOOR_FEATHER; 4];
+        // Depth of a position is its view-space w, as `rb_depthprepass.cpp` leaves it after the float-Z pass: the
+        // z-feathered scene shaders compare their own depth with the float-Z image's.
+        vec[DEPTH_FROM_CLIP as usize] = [0.0, 0.0, 0.0, 1.0];
+        // Clip space (x right, y up) to the UV of the same pixel in a full-target image, as `R_UpdateViewport` sets it
+        // for a viewport covering the target; no half-texel shift, unlike D3D9, which wgpu does not need.
+        vec[CLIP_SPACE_LOOKUP_SCALE as usize] = [0.5, -0.5, 0.0, 1.0];
+        vec[CLIP_SPACE_LOOKUP_OFFSET as usize] = [0.5, 0.5, 0.0, 0.0];
         // Colour matrix passthrough rows used by post shaders.
         vec[0x1D] = [1.0, 0.0, 0.0, 0.0];
         vec[0x1E] = [0.0, 1.0, 0.0, 0.0];
@@ -400,6 +413,22 @@ mod tests {
             texture_from_ctab_name("modelLightingSampler"),
             Some(tex::MODEL_LIGHTING)
         );
+    }
+
+    #[test]
+    fn frames_carry_feather_and_clip_space_lookup_constants() {
+        let f = FrameConsts::new(Mat4::IDENTITY, Mat4::IDENTITY, Vec3::ZERO);
+        let o = Object::default();
+        assert_eq!(f.value(OUTDOOR_FEATHER_PARMS, 0, &o), [8.0; 4]);
+        assert_eq!(f.value(DEPTH_FROM_CLIP, 0, &o), [0.0, 0.0, 0.0, 1.0]);
+        // The clip-space corners land on the corners of the image: top left is (0, 0), bottom right (1, 1).
+        let uv = |x: f32, y: f32| {
+            let s = f.value(CLIP_SPACE_LOOKUP_SCALE, 0, &o);
+            let t = f.value(CLIP_SPACE_LOOKUP_OFFSET, 0, &o);
+            [x * s[0] + t[0], y * s[1] + t[1]]
+        };
+        assert_eq!(uv(-1.0, 1.0), [0.0, 0.0]);
+        assert_eq!(uv(1.0, -1.0), [1.0, 1.0]);
     }
 
     #[test]

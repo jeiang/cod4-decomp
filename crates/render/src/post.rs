@@ -400,9 +400,11 @@ enum Id {
     Post1,
     Ping0,
     Ping1,
+    /// The scene as it stood before the emissive surfaces, for the distortion materials.
+    PostSun,
 }
 
-const IDS: usize = 7;
+const IDS: usize = 8;
 
 struct Targets {
     size: (u32, u32),
@@ -415,7 +417,7 @@ struct Targets {
 impl Targets {
     fn size_of(&self, id: Id) -> (u32, u32) {
         match id {
-            Id::Scene | Id::FloatZ | Id::Saved => self.size,
+            Id::Scene | Id::FloatZ | Id::Saved | Id::PostSun => self.size,
             _ => ((self.size.0 >> 2).max(1), (self.size.1 >> 2).max(1)),
         }
     }
@@ -511,10 +513,41 @@ impl State {
         size: (u32, u32),
         format: wgpu::TextureFormat,
     ) -> wgpu::TextureView {
-        self.ensure_targets(size, format)
-            .get(gpu, Id::FloatZ)
-            .view
-            .clone()
+        self.floatz_tex(gpu, size, format).view.clone()
+    }
+
+    /// The float-Z image the scene's `FLOATZ` sampler reads.
+    pub(crate) fn floatz_tex(
+        &mut self,
+        gpu: &Gpu,
+        size: (u32, u32),
+        format: wgpu::TextureFormat,
+    ) -> Arc<Tex> {
+        self.ensure_targets(size, format).get(gpu, Id::FloatZ)
+    }
+
+    /// The copy of the scene the distortion materials' `RESOLVED_POST_SUN` sampler reads.
+    pub(crate) fn post_sun_tex(
+        &mut self,
+        gpu: &Gpu,
+        size: (u32, u32),
+        format: wgpu::TextureFormat,
+    ) -> Arc<Tex> {
+        self.ensure_targets(size, format).get(gpu, Id::PostSun)
+    }
+
+    /// Drop the targets when the frame size or format changed; `true` when something was dropped, so that bind
+    /// groups made from them must go too.
+    pub(crate) fn invalidate(&mut self, size: (u32, u32), format: wgpu::TextureFormat) -> bool {
+        let stale = self
+            .targets
+            .as_ref()
+            .is_some_and(|t| t.size != size || t.format != format);
+        if stale {
+            self.targets = None;
+            self.saved = false;
+        }
+        stale
     }
 
     fn ensure_targets(&mut self, size: (u32, u32), format: wgpu::TextureFormat) -> &mut Targets {
@@ -577,6 +610,8 @@ struct Pass {
 pub(crate) struct Chain {
     /// The scene's target, when it is not the frame buffer.
     pub scene: Option<wgpu::TextureView>,
+    /// The copy of the scene before the emissive surfaces, recorded between the two halves of the scene.
+    postsun: Vec<Pass>,
     passes: Vec<Pass>,
 }
 
@@ -772,16 +807,18 @@ const FULL_SCREEN: [[f32; 4]; 4] = [
 
 /// Plan the post passes of this frame: allocate what they need, fill their constant banks and upload their quads.
 /// `target` is the frame buffer. Returns the chain; frames with nothing to do get an empty one with no offscreen
-/// scene target.
+/// scene target. `distortion` asks for the copy of the scene the distortion materials sample, which needs the scene in
+/// an offscreen target.
 pub(crate) fn build(
     r: &mut Renderer,
     size: (u32, u32),
     format: wgpu::TextureFormat,
     target: &wgpu::TextureView,
     z_near: f32,
+    distortion: bool,
 ) -> Chain {
     let p = r.post_params();
-    let offscreen = p.offscreen();
+    let offscreen = p.offscreen() || distortion;
     let save = p.save_screen;
     let shock = p.shell_shock.filter(|s| {
         !save
@@ -792,6 +829,7 @@ pub(crate) fn build(
     if !offscreen && shock.is_none() && sun == Default::default() {
         return Chain {
             scene: None,
+            postsun: Vec::new(),
             passes: Vec::new(),
         };
     }
@@ -823,6 +861,18 @@ pub(crate) fn build(
         passes: Vec::new(),
         quads: Vec::new(),
     };
+    let mut postsun = Vec::new();
+    if distortion {
+        b.draw(
+            Group::Copy,
+            "feedbackreplace",
+            Dest::Img(Id::PostSun),
+            Some(Id::Scene),
+            WHITE,
+            None,
+        );
+        postsun = std::mem::take(&mut b.passes);
+    }
     let dof = p.dof.filter(Dof::active);
     let film = p.film.active();
     let h = size.1;
@@ -1010,22 +1060,50 @@ pub(crate) fn build(
         r.post_state.saved = true;
     }
     r.post_state.targets = Some(targets);
-    Chain { scene, passes }
+    Chain {
+        scene,
+        postsun,
+        passes,
+    }
 }
 
-/// Record the chain's passes, each group under one timestamp span.
+/// Record the chain's passes, each group under one timestamp span: `postsun` is the scene copy, between the halves of
+/// the scene.
+pub(crate) fn record_postsun(
+    enc: &mut wgpu::CommandEncoder,
+    chain: &Chain,
+    state: &State,
+    vs_bg: &wgpu::BindGroup,
+    ps_bg: &wgpu::BindGroup,
+    timer: Option<&mut GpuTimer>,
+) {
+    record_passes(enc, &chain.postsun, state, vs_bg, ps_bg, timer);
+}
+
+/// The rest of the chain, after the scene.
 pub(crate) fn record(
     enc: &mut wgpu::CommandEncoder,
     chain: &Chain,
     state: &State,
     vs_bg: &wgpu::BindGroup,
     ps_bg: &wgpu::BindGroup,
+    timer: Option<&mut GpuTimer>,
+) {
+    record_passes(enc, &chain.passes, state, vs_bg, ps_bg, timer);
+}
+
+fn record_passes(
+    enc: &mut wgpu::CommandEncoder,
+    passes: &[Pass],
+    state: &State,
+    vs_bg: &wgpu::BindGroup,
+    ps_bg: &wgpu::BindGroup,
     mut timer: Option<&mut GpuTimer>,
 ) {
     let mut span: Option<Span> = None;
-    for (i, p) in chain.passes.iter().enumerate() {
-        let first = i == 0 || chain.passes[i - 1].group != p.group;
-        let last = chain.passes.get(i + 1).is_none_or(|n| n.group != p.group);
+    for (i, p) in passes.iter().enumerate() {
+        let first = i == 0 || passes[i - 1].group != p.group;
+        let last = passes.get(i + 1).is_none_or(|n| n.group != p.group);
         if first {
             span = timer.as_deref_mut().and_then(|t| t.span(p.group.name()));
         }

@@ -49,6 +49,8 @@ pub struct Gfx {
     pub spot: render::SpotParams,
     /// `r_drawSun`.
     pub draw_sun: bool,
+    /// `r_distortion`.
+    pub distortion: bool,
 }
 
 /// `1920x1080` as a size.
@@ -148,6 +150,7 @@ impl Gfx {
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .map_or(1.0, |v| v.clamp(0.0, 5.0)),
             draw_sun: on("r_drawSun"),
+            distortion: on("r_distortion"),
         }
     }
 
@@ -174,6 +177,7 @@ impl Gfx {
         base.dof = self.dof;
         base.glow = self.glow;
         base.draw_sun = self.draw_sun;
+        base.distortion = self.distortion;
         base.aa_samples = self.aa_samples;
         base.aspect = self.aspect;
         base.dlight_limit = self.dlight_limit;
@@ -225,6 +229,7 @@ mod tests {
             ("r_dof_enable", "0"),
             ("r_glow_allowed", "0"),
             ("r_drawSun", "0"),
+            ("r_distortion", "0"),
             ("r_fullscreen", "1"),
             ("r_vsync", "1"),
         ]));
@@ -235,7 +240,7 @@ mod tests {
         assert!(g.fullscreen && g.vsync);
         let s = g.settings(render::Settings::default());
         assert_eq!(s.shadows, render::ShadowMode::Off);
-        assert!(!s.specular && !s.dof && !s.glow && !s.draw_sun);
+        assert!(!s.specular && !s.dof && !s.glow && !s.draw_sun && !s.distortion);
         assert_eq!(s.aa_samples, 4);
     }
 
@@ -245,7 +250,12 @@ mod tests {
         assert_eq!(g.picmip, 0);
         let s = g.settings(render::Settings::default());
         assert!(
-            s.specular && s.dof && s.glow && s.draw_sun && s.shadows != render::ShadowMode::Off
+            s.specular
+                && s.dof
+                && s.glow
+                && s.draw_sun
+                && s.distortion
+                && s.shadows != render::ShadowMode::Off
         );
         assert_eq!(s.aa_samples, 1);
     }

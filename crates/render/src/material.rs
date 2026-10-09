@@ -152,9 +152,16 @@ pub struct Target {
     pub samples: u32,
 }
 
+/// Technique flag: the shader samples `RESOLVED_POST_SUN` (heat haze, shockwaves); drawn only with distortion on.
+pub const TECH_NEEDS_POST_SUN: u16 = 0x1;
+/// Technique flag: the shader samples `FLOATZ` to fade where it meets geometry (soft particles).
+pub const TECH_Z_FEATHER: u16 = 0x20;
+
 pub struct Prepared {
     pub name: String,
     pub technique: usize,
+    /// The technique's flags: see [`TECH_NEEDS_POST_SUN`] and [`TECH_Z_FEATHER`].
+    pub flags: u16,
     pub vs: Arc<Compiled>,
     pub ps: Arc<Compiled>,
     pub state: StateBits,
@@ -837,6 +844,7 @@ impl Materials {
         Ok(Prepared {
             name: mat.name.as_deref().unwrap_or("?").to_owned(),
             technique: tech,
+            flags: technique.flags,
             vs,
             ps,
             state,

@@ -21,6 +21,11 @@ vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
 menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\
 gfxis=aa 4,gfxis=specular 0,gfxis=dof 0,gfxis=glow 0,gfxis=shadows 0,shot=gfx-on,\
+set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
+set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
+set=set r_fullscreen 0,vidrestart,wait=2,gfxis=fullscreen 0,\
+fxdemo=distortion/distortion_tank_muzzleflash,wait=2,shotd=distort-on,\
+set=set r_distortion 0,vidrestart,wait=2,shot=distort-off,set=set r_distortion 1,vidrestart,wait=2,fxdemo=off,\
 dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1,shot=dlight-on,dlight=0,\
 set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\
 set=set r_aspectRatio auto,vidrestart,wait=2,\
@@ -29,6 +34,11 @@ gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=glow 1,gfxis=shadows 1,gfxis=aspec
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
 const LIT_SHARE: f64 = 0.05;
 const LIT_STEP: i32 = 24;
+/// How much brighter (in luma) the picture at `r_gamma` 2 must be than at 0.5.
+const GAMMA_STEP: f64 = 20.0;
+/// Channel value from which a pixel counts as white, and how much whiter the middle may get with distortion on.
+const WHITE: u8 = 250;
+const WHITE_MARGIN: f64 = 0.15;
 
 /// Share of pixels of `on` whose luma is more than [`LIT_STEP`] above that of `off` (same size).
 fn brightened_share(off: &[u8], on: &[u8]) -> f64 {
@@ -64,6 +74,68 @@ fn dynamic_light_lit(dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Mean luma (0..255) of packed RGB pixels.
+fn mean_luma(px: &[u8]) -> f64 {
+    let n = px.len() / 3;
+    let sum: u64 = px
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|p| (u64::from(p[0]) * 77 + u64::from(p[1]) * 150 + u64::from(p[2]) * 29) >> 8)
+        .sum();
+    sum as f64 / n.max(1) as f64
+}
+
+/// Brightness is `r_gamma`'s to change: the same view at 2.0 is clearly brighter than at 0.5.
+fn gamma_moves_brightness(dir: &std::path::Path) -> Result<(), String> {
+    use super::client_models::decode;
+    let (_, _, lo) = decode(&dir.join("gamma-lo.png"))?;
+    let (_, _, hi) = decode(&dir.join("gamma-hi.png"))?;
+    let (lo, hi) = (mean_luma(&lo), mean_luma(&hi));
+    if hi < lo + GAMMA_STEP {
+        return Err(format!(
+            "r_gamma 2.0 gave mean luma {hi:.1} against {lo:.1} at 0.5 (need {GAMMA_STEP} more)"
+        ));
+    }
+    Ok(())
+}
+
+/// Share of the middle third of an RGB picture whose pixels are (nearly) white.
+fn white_share(w: usize, h: usize, px: &[u8]) -> f64 {
+    let (mut white, mut n) = (0usize, 0usize);
+    for y in h / 3..2 * h / 3 {
+        for x in w / 3..2 * w / 3 {
+            let p = &px[(y * w + x) * 3..][..3];
+            white += usize::from(p.iter().all(|&c| c >= WHITE));
+            n += 1;
+        }
+    }
+    white as f64 / n.max(1) as f64
+}
+
+/// A heat-haze effect drawn with distortion on shows the scene through it, not the white a material gets when the
+/// scene was never copied: the middle of the picture is no whiter than the same effect with distortion off.
+fn distortion_samples_the_scene(dir: &std::path::Path) -> Result<(), String> {
+    use super::client_models::decode;
+    let (w, h, on) = decode(&dir.join("distort-on.png"))?;
+    let (w2, h2, off) = decode(&dir.join("distort-off.png"))?;
+    if (w, h) != (w2, h2) {
+        return Err("distortion screenshots differ in size".into());
+    }
+    let (on, off) = (
+        white_share(w as usize, h as usize, &on),
+        white_share(w as usize, h as usize, &off),
+    );
+    if on > off + WHITE_MARGIN {
+        return Err(format!(
+            "a distortion material drew white: {:.0}% of the middle is white against {:.0}% without distortion",
+            on * 100.0,
+            off * 100.0
+        ));
+    }
+    Ok(())
+}
+
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
         return Ok(StageReport::new(NAME, Status::Skipped)
@@ -92,12 +164,18 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 "gfx-off.png",
                 "dlight-off.png",
                 "dlight-on.png",
+                "gamma-lo.png",
+                "gamma-hi.png",
+                "distort-on.png",
+                "distort-off.png",
             ] {
                 out.files.push(f.into());
             }
             let problems: Vec<String> = verdict(&report)
                 .into_iter()
                 .chain(dynamic_light_lit(&ctx.dir).err())
+                .chain(gamma_moves_brightness(&ctx.dir).err())
+                .chain(distortion_samples_the_scene(&ctx.dir).err())
                 .collect();
             if !problems.is_empty() {
                 out.status = Status::Failed;
@@ -118,7 +196,21 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
 #[cfg(test)]
 mod tests {
-    use super::brightened_share;
+    use super::{brightened_share, mean_luma, white_share};
+
+    #[test]
+    fn white_share_counts_the_middle_third_only() {
+        // 3x3 pixels: only the middle one is looked at.
+        let mut px = vec![255u8; 27];
+        assert_eq!(white_share(3, 3, &px), 1.0);
+        px[12..15].copy_from_slice(&[10, 255, 255]);
+        assert_eq!(white_share(3, 3, &px), 0.0);
+    }
+
+    #[test]
+    fn mean_luma_weighs_green_most() {
+        assert_eq!(mean_luma(&[0, 255, 0, 0, 0, 0]), 74.5);
+    }
 
     #[test]
     fn counts_only_pixels_that_got_clearly_brighter() {
