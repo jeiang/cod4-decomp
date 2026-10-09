@@ -14,9 +14,16 @@ pub const INTERP_DELAY_MS: i32 = 100;
 
 /// How much of the gap between a snapshot's clock reading and the running estimate the estimate takes up.
 const CLOCK_EASE: f64 = 0.05;
-/// A reading this far (ms) from the estimate is a different clock (a map change, a long stall), not jitter: the estimate
-/// jumps to it instead of easing.
+/// A reading this far (ms) above the estimate is a different clock, not jitter: the estimate jumps to it instead of
+/// easing.
 const CLOCK_JUMP_MS: f64 = 100.0;
+/// A packet only ever arrives late, never early, so a reading below the estimate is a late arrival: a frame that
+/// stalled for a hundred milliseconds reads a whole queue of snapshots at once and every one of them looks that late.
+/// Such a reading moves the estimate only a little, so the clock does not step back and then forward again (the eye
+/// would jump); one this far below (ms) is a new clock (a map change, a long stall), which the estimate jumps to.
+const CLOCK_RESET_MS: f64 = 1000.0;
+/// The share of a late reading's gap the estimate takes up.
+const CLOCK_EASE_LATE: f64 = 0.005;
 
 #[derive(Debug, Default)]
 pub struct SnapshotBuffer {
@@ -26,6 +33,8 @@ pub struct SnapshotBuffer {
     offset: Option<f64>,
     /// The newest time handed out, so the clock never runs backwards.
     handed_out: std::cell::Cell<i32>,
+    /// How often the estimate jumped instead of easing: up, down.
+    pub jumps: [u32; 2],
 }
 
 impl SnapshotBuffer {
@@ -42,8 +51,14 @@ impl SnapshotBuffer {
         }
         let reading = f64::from(snap.server_time) - recv_ms as f64;
         self.offset = Some(match self.offset {
-            Some(o) if (reading - o).abs() < CLOCK_JUMP_MS => o + (reading - o) * CLOCK_EASE,
-            _ => {
+            Some(o) if reading >= o && reading - o < CLOCK_JUMP_MS => {
+                o + (reading - o) * CLOCK_EASE
+            }
+            Some(o) if reading < o && o - reading < CLOCK_RESET_MS => {
+                o + (reading - o) * CLOCK_EASE_LATE
+            }
+            prev => {
+                self.jumps[usize::from(prev.is_some_and(|o| reading < o))] += 1;
                 self.handed_out.set(i32::MIN);
                 reading
             }
@@ -226,6 +241,28 @@ mod tests {
         assert!(
             worst <= 1,
             "the clock stepped {worst} ms off the local rate"
+        );
+    }
+
+    /// A frame that stalls reads the snapshots that queued meanwhile all at once; each looks up to the stall late. The
+    /// clock must go on at the local rate through it, not step back by the stall and forward again.
+    #[test]
+    fn a_stalled_frame_does_not_step_the_clock() {
+        let mut b = SnapshotBuffer::default();
+        for k in 0..60u64 {
+            b.push(33 * k + 20, snap(33 * k as i32, 0.0, 0.0));
+        }
+        let before = b.server_time(33 * 59 + 40).unwrap();
+        // The next 5 snapshots (165 ms) are read only after a stall: all arrive at 33 * 64 + 20 + 150.
+        for k in 60..65u64 {
+            b.push(33 * 64 + 170, snap(33 * k as i32, 0.0, 0.0));
+        }
+        let after = b.server_time(33 * 64 + 170).unwrap();
+        let local = 33 * 64 + 170 - (33 * 59 + 40);
+        assert!(
+            (after - before - local as i32).abs() <= 8,
+            "the clock moved {} ms over {local} ms",
+            after - before
         );
     }
 

@@ -331,8 +331,8 @@ type ShaderKey = (usize, Option<[u32; 2]>, Option<VertexKind>, bool);
 #[cfg(not(target_arch = "wasm32"))]
 struct Background {
     jobs: std::sync::mpsc::Sender<(Arc<Prepared>, Target)>,
-    /// Pipelines asked for and not built yet, so a frame asks once.
-    queued: Arc<Mutex<HashSet<(u32, Target)>>>,
+    /// Pipelines asked for and not built yet, so a frame asks once; whether a draw is waiting for each.
+    queued: Arc<Mutex<HashMap<(u32, Target), bool>>>,
 }
 
 /// Caches shared by all prepared passes.
@@ -353,8 +353,8 @@ pub struct Materials {
     /// [`Materials::build_in_background`].
     #[cfg(not(target_arch = "wasm32"))]
     background: Option<Background>,
-    late: [AtomicU64; 4],
-    late_names: Mutex<Vec<String>>,
+    late: Arc<[AtomicU64; 4]>,
+    late_names: Arc<Mutex<Vec<String>>>,
     demand: Mutex<HashSet<(u32, Target)>>,
     /// Material name to why it could not be prepared.
     pub failures: BTreeMap<String, String>,
@@ -412,8 +412,8 @@ impl Materials {
             deferred: AtomicUsize::new(0),
             #[cfg(not(target_arch = "wasm32"))]
             background: None,
-            late: Default::default(),
-            late_names: Mutex::new(Vec::new()),
+            late: Arc::default(),
+            late_names: Arc::default(),
             demand: Mutex::new(HashSet::new()),
             failures: BTreeMap::new(),
             waters: HashMap::new(),
@@ -931,11 +931,9 @@ impl Materials {
             return None;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(b) = &self.background {
+        if self.background.is_some() {
             // The draw waits a few frames for its pipeline rather than the frame for the compiler.
-            if lock(&b.queued).insert((p.id, target)) {
-                let _ = b.jobs.send((p.clone(), target));
-            }
+            self.request(p, target, true);
             self.deferred.fetch_add(1, Ordering::Relaxed);
             return None;
         }
@@ -957,11 +955,12 @@ impl Materials {
         }
         let (jobs, rx) = std::sync::mpsc::channel::<(Arc<Prepared>, Target)>();
         let rx = Arc::new(Mutex::new(rx));
-        let queued = Arc::new(Mutex::new(HashSet::new()));
+        let queued = Arc::new(Mutex::new(HashMap::new()));
         // Half the cores at most: the frame and the server run beside them.
         let workers = (std::thread::available_parallelism().map_or(2, usize::from) / 4).clamp(1, 2);
         for _ in 0..workers {
             let (rx, queued) = (rx.clone(), queued.clone());
+            let (late, names) = (self.late.clone(), self.late_names.clone());
             let (device, vs, ps) = (
                 gpu.device.clone(),
                 self.vs_layout.clone(),
@@ -970,15 +969,45 @@ impl Materials {
             std::thread::spawn(move || {
                 // The sender is dropped with the materials: the workers end with them.
                 while let Ok((p, target)) = { lock(&rx).recv() } {
-                    if !lock(&p.pipelines).contains_key(&target) {
-                        let built = build_pipeline(&device, &vs, &ps, &p, target);
+                    // A panicking compile must neither end the worker nor leave the pipeline queued for good.
+                    let began = Instant::now();
+                    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (!lock(&p.pipelines).contains_key(&target))
+                            .then(|| build_pipeline(&device, &vs, &ps, &p, target))
+                    }));
+                    if let Ok(Some(built)) = built {
                         lock(&p.pipelines).entry(target).or_insert(built);
+                        // Only a pipeline a draw waited for was missed; one warmed ahead is the warm-up working.
+                        if lock(&queued).get(&(p.id, target)).copied().unwrap_or(false) {
+                            late[0].fetch_add(1, Ordering::Relaxed);
+                            late[1]
+                                .fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
+                            lock(&names).push(format!("pipeline {} {:?}", p.name, target));
+                        }
                     }
                     lock(&queued).remove(&(p.id, target));
                 }
             });
         }
         self.background = Some(Background { jobs, queued });
+    }
+
+    /// Asks the workers of [`Materials::build_in_background`] for the pipeline of `p` into `target`, once. `demanded`:
+    /// a draw is waiting for it, which makes it a late one (see [`Materials::take_late`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn request(&self, p: &Arc<Prepared>, target: Target, demanded: bool) {
+        let Some(b) = &self.background else { return };
+        if lock(&p.pipelines).contains_key(&target) {
+            return;
+        }
+        let mut queued = lock(&b.queued);
+        match queued.entry((p.id, target)) {
+            std::collections::hash_map::Entry::Occupied(mut e) => *e.get_mut() |= demanded,
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(demanded);
+                let _ = b.jobs.send((p.clone(), target));
+            }
+        }
     }
 
     /// What [`Materials::take_late`] counted, by name.

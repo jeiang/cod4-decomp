@@ -1218,6 +1218,19 @@ impl Viewer {
                     "slow_gaps_ms": g.slow,
                 }));
             }
+            // What the server precached beyond what the load warmed (planes, vehicles the scripts call in): its
+            // pipelines are built beside the frames now rather than at first sight.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let models = net.unwarmed_models();
+                if let (false, Some(r)) = (models.is_empty(), st.renderer.as_mut()) {
+                    r.warm_models(&models);
+                    if let Some(sh) = st.shell.as_ref() {
+                        r.warm_sprites(sh.ui.assets.material("gfx_tracer").cloned());
+                    }
+                    r.warm_in_background(st.config.format);
+                }
+            }
             new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {
                 net.fill_live(&mut sh.st.live);

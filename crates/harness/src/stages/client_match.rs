@@ -44,19 +44,24 @@ fn column(csv: &str, i: usize) -> Vec<f64> {
         .collect()
 }
 
-/// A frame costing this many times the median, and at least [`SPIKE_MIN_MS`], is a hitch the player feels.
-const SPIKE_FACTOR: f64 = 5.0;
-const SPIKE_MIN_MS: f64 = 100.0;
+/// A frame costing this many times the median and this much more (ms) is a hitch the player feels: a frame of a
+/// 60 Hz game is 16 ms, so tens of milliseconds over the usual is a dropped frame, however fast or slow the machine.
+const SPIKE_FACTOR: f64 = 2.5;
+const SPIKE_EXTRA_MS: f64 = 25.0;
 /// Share of the frames that may be hitches (the odd scheduler stall of a busy machine; the screenshot frame).
-const SPIKE_SHARE: f64 = 0.005;
+const SPIKE_SHARE: f64 = 0.01;
+/// The client's clock may jump to the server's this often (the first reading, a level change); every other
+/// jump moves everything it drives by up to the snapshot gap at once.
+const MAX_CLOCK_JUMPS: u64 = 3;
 
-/// Why the frames hitched, if they did. `cpu_ms` is every frame's own cost; the report's `late_builds` lists what
-/// frames after the first compiled or translated themselves, as "frame what". A pipeline compiled inside a frame
-/// stalls it for up to tens of milliseconds whatever the machine, so none may be (the check does not depend on how
-/// fast the runner is); the spike count is the relative check on what that misses.
+/// Why the frames hitched, if they did. `cpu_ms` is every frame's own cost. The report's `late_builds` lists what
+/// was built after the load, as "frame what": a pipeline listed was missing when a frame drew (its draws were
+/// skipped for the frames the compile took), so the load's warm-up missed it. None may be, whatever the runner's
+/// speed; the spike share is the relative check on what that misses. `clock_jumps` counts how often the clock the
+/// view follows jumped (a server running at the wrong pace does it every few seconds).
 fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
     let mut out = Vec::new();
-    let inline: Vec<&str> = report["late_builds"]
+    let late: Vec<&str> = report["late_builds"]
         .as_array()
         .into_iter()
         .flatten()
@@ -66,14 +71,25 @@ fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
                 .is_some_and(|(_, what)| what.starts_with("pipeline "))
         })
         .collect();
-    if let Some(first) = inline.first() {
+    if let Some(first) = late.first() {
         out.push(format!(
-            "{} pipelines compiled inside frames while playing (a hitch each), first: {first}",
-            inline.len()
+            "{} pipelines were missing while playing (their draws were skipped, or a frame compiled them), first: {first}",
+            late.len()
+        ));
+    }
+    let jumps: u64 = report["net"]["clock_jumps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .sum();
+    if jumps > MAX_CLOCK_JUMPS {
+        out.push(format!(
+            "the view's clock jumped {jumps} times to catch up with the server's: the server runs off the client's pace"
         ));
     }
     if let Some(p) = Percentiles::from_samples(cpu_ms) {
-        let limit = (p.p50 * SPIKE_FACTOR).max(SPIKE_MIN_MS);
+        let limit = (p.p50 * SPIKE_FACTOR).max(p.p50 + SPIKE_EXTRA_MS);
         let spikes = cpu_ms.iter().filter(|c| **c > limit).count();
         if spikes as f64 > cpu_ms.len() as f64 * SPIKE_SHARE {
             out.push(format!(
@@ -471,7 +487,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_pipeline_built_in_a_frame_is_a_hitch_a_pass_is_not() {
+    fn a_pipeline_missing_while_playing_is_a_hitch_a_pass_is_not() {
         let steady = vec![16.0; 1000];
         let passes = json!({"late_builds": ["7 pass wc/x tech 9 World"]});
         assert!(hitch_failures(&passes, &steady).is_empty());
@@ -480,6 +496,16 @@ mod tests {
         let why = hitch_failures(&pipe, &steady);
         assert_eq!(why.len(), 1);
         assert!(why[0].contains("1 pipelines"), "{why:?}");
+    }
+
+    #[test]
+    fn a_clock_that_keeps_jumping_is_a_hitch_the_first_reading_is_not() {
+        let steady = vec![16.0; 1000];
+        assert!(hitch_failures(&json!({"net": {"clock_jumps": [1, 0]}}), &steady).is_empty());
+        assert_eq!(
+            hitch_failures(&json!({"net": {"clock_jumps": [36, 0]}}), &steady).len(),
+            1
+        );
     }
 
     #[test]
@@ -493,8 +519,9 @@ mod tests {
             hitch_failures(&report, &frames).is_empty(),
             "one in a thousand is the scheduler"
         );
-        for f in &mut frames[20..30] {
-            *f = 300.0;
+        // Tens of milliseconds over the usual, a few times a second: dropped frames.
+        for f in frames.iter_mut().step_by(50) {
+            *f = 60.0;
         }
         assert_eq!(hitch_failures(&report, &frames).len(), 1);
     }

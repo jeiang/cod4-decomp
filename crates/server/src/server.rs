@@ -167,6 +167,9 @@ pub struct Server {
     /// Server time in milliseconds.
     svs_time: i32,
     frame_ms: i32,
+    /// When the next frame is due: kept between [`Server::run_for`] calls, so running in slices keeps the pace (a
+    /// slice that began its own schedule ran a frame at its start and the server ran fast).
+    next_frame: Option<Instant>,
     pub quit: bool,
     /// Script runtime errors seen on the current map, in the original's printed form.
     pub script_errors: Vec<String>,
@@ -468,6 +471,7 @@ impl Server {
             cfg_from_zone: false,
             svs_time: 0,
             frame_ms: 33,
+            next_frame: None,
             quit: false,
             script_errors: Vec::new(),
             all_script_errors: Vec::new(),
@@ -2522,7 +2526,7 @@ impl Server {
 
     fn run_until(&mut self, end: Option<Instant>) {
         let frame = Duration::from_millis(self.frame_ms.max(1) as u64);
-        let mut next = Instant::now();
+        let mut next = self.next_frame.unwrap_or_else(Instant::now);
         while !self.quit {
             let now = Instant::now();
             if end.is_some_and(|e| now >= e) {
@@ -2573,6 +2577,7 @@ impl Server {
             }
             self.net_service(wait);
         }
+        self.next_frame = Some(next);
         self.flush_game_output();
     }
 
