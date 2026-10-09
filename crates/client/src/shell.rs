@@ -638,7 +638,7 @@ impl Shell {
             st.names_cfg = hud::names::Cfg::read(&input.cvars);
             st.names
                 .update(&st.live, &st.names_cfg, hud::team_colors(&input.cvars));
-            st.hud_stats.names(&st.names);
+            st.hud_stats.names_offered(&st.names, &st.live);
         } else {
             let st = &mut self.st;
             st.names.update(&st.live, &st.names_cfg, [[1.0; 4]; 2]);
@@ -680,6 +680,7 @@ impl Shell {
                     &self.st.live,
                     &self.st.names,
                     &self.st.names_cfg,
+                    &mut self.st.hud_stats,
                 );
             }
             let mut h = Self::host(&mut self.st, input);

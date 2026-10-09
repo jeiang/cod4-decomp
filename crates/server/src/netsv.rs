@@ -53,14 +53,19 @@ pub mod eflags {
     pub const CONNECTION_INTERRUPTED: u32 = 1 << 5;
 }
 
-/// Silence after which players are shown the connection-interrupted marker over the quiet player.
-const CONNECTION_INTERRUPTED_MS: u128 = 1000;
+/// Time the server has listened to a client without hearing it, after which others are shown the
+/// connection-interrupted marker over it. Only listening counts: a long frame or a map load, during which the
+/// socket is not read, is not silence.
+const CONNECTION_INTERRUPTED_MS: u64 = 1000;
 
 pub struct Peer {
     pub link: ServerLink,
     pub cmds: VecDeque<UserCmd>,
     pub name: String,
     last_heard: Instant,
+    /// Milliseconds spent waiting for packets since this client's last one.
+    unheard_ms: u64,
+    heard_now: bool,
     /// Effect names announced so far (`fx <index> <name>` commands).
     fx_sent: usize,
     /// A reliable command did not fit: the peer is too far behind and is dropped at the next service
@@ -176,6 +181,10 @@ impl NetSv {
     ) -> Vec<Inbound> {
         let mut out = Vec::new();
         let mut wait = wait;
+        let listening = Instant::now();
+        for p in self.peers.iter_mut().flatten() {
+            p.heard_now = false;
+        }
         let mut buf = std::mem::take(&mut self.buf);
         while let Ok(Some((n, from))) = self.t.recv_from(&mut buf, Some(wait)) {
             wait = Duration::ZERO;
@@ -207,6 +216,8 @@ impl NetSv {
                     && let Some(p) = peer.link.receive(packet)
                 {
                     peer.last_heard = Instant::now();
+                    peer.heard_now = true;
+                    peer.unheard_ms = 0;
                     for (_, c) in p.cmds {
                         if peer.cmds.len() < MAX_QUEUED_CMDS {
                             peer.cmds.push_back(c);
@@ -222,6 +233,10 @@ impl NetSv {
             }
         }
         self.buf = buf;
+        let listened = listening.elapsed().as_millis() as u64;
+        for p in self.peers.iter_mut().flatten().filter(|p| !p.heard_now) {
+            p.unheard_ms += listened;
+        }
         out
     }
 
@@ -250,6 +265,8 @@ impl NetSv {
             cmds: VecDeque::new(),
             name: name.to_owned(),
             last_heard: Instant::now(),
+            unheard_ms: 0,
+            heard_now: false,
             fx_sent: 0,
             overflowed: false,
             last_ack: 0,
@@ -276,6 +293,7 @@ impl NetSv {
 
     pub fn put_peer(&mut self, slot: u16, mut peer: Peer) {
         peer.last_heard = Instant::now();
+        peer.unheard_ms = 0;
         // The new level numbers its effects afresh: the client needs the names again.
         peer.fx_sent = 0;
         peer.stalled = false;
@@ -528,7 +546,7 @@ impl NetSv {
         let mut entities = world_entities(game);
         let quiet = self.peers.iter().enumerate().filter_map(|(slot, p)| {
             let p = p.as_ref()?;
-            (p.last_heard.elapsed().as_millis() > CONNECTION_INTERRUPTED_MS).then_some(slot as u16)
+            (p.unheard_ms > CONNECTION_INTERRUPTED_MS).then_some(slot as u16)
         });
         mark_interrupted(&mut entities, quiet);
         if game.archive_enabled {

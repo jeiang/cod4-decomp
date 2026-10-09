@@ -96,11 +96,19 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     if n("killcam_frames") == 0 {
         bad.push("no killcam frame");
     }
-    if n("names_max") == 0 {
-        bad.push("no overhead name drawn for a visible teammate");
+    // A name is held to account only when the match gave the HUD something to name; `untested` says when not.
+    if n("friends_in_sight_frames") > 0 && n("names_max") == 0 {
+        bad.push("a teammate was in sight but no overhead name was drawn");
     }
-    if n("crosshair_name_frames") == 0 {
-        bad.push("the player under the crosshair was never named");
+    if n("crosshair_due_frames") > 0 && n("crosshair_name_frames") == 0 {
+        bad.push("the crosshair was on a player but never named them");
+    }
+    // The killcam shows the viewer's own body, which carries the "you" marker over its head.
+    let marked = h["head_icon_materials"]
+        .as_array()
+        .is_some_and(|m| m.iter().any(|v| v == "headiconyouinkillcam"));
+    if n("killcam_frames") > 0 && !marked {
+        bad.push("the killcam drew no head icon over the viewer's body");
     }
     // The grenade and d-pad icons are weapon materials; one that is missing draws as a white square.
     let icons: Vec<&str> = report["missing_images"]
@@ -115,6 +123,20 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
         bad.push(&missing);
     }
     (!bad.is_empty()).then(|| bad.join(", "))
+}
+
+/// What the run gave the names nothing to do with, so those checks said nothing.
+pub(crate) fn untested(report: &Value) -> Vec<&'static str> {
+    let h = &report["hud_draw"];
+    let n = |k: &str| h[k].as_u64().unwrap_or(0);
+    let mut out = Vec::new();
+    if n("friends_in_sight_frames") == 0 {
+        out.push("overhead names untested: no teammate was in sight");
+    }
+    if n("crosshair_due_frames") == 0 {
+        out.push("crosshair names untested: the crosshair was never on a player in range");
+    }
+    out
 }
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -153,6 +175,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     out.metrics.insert(format!("hud.{k}"), v);
                 }
             }
+            out.notes
+                .extend(untested(&report).into_iter().map(String::from));
             if let Some(why) = verdict(&report) {
                 out.status = Status::Failed;
                 out.reason = Some(why);
@@ -180,7 +204,9 @@ mod tests {
             "hud_draw": {
                 "elems_max": 12, "scoreboard_frames": 90, "scoreboard_rows_max": 10,
                 "messages": [2, 0, 0, 0], "obituaries": 3, "window_lines": [40, 0, 0, 0],
-                "killcam_frames": 120, "names_max": 3, "crosshair_name_frames": 40
+                "killcam_frames": 120, "names_max": 3, "crosshair_name_frames": 40,
+                "friends_in_sight_frames": 50, "crosshair_due_frames": 60,
+                "head_icon_materials": ["headiconyouinkillcam"]
             }
         })
     }
@@ -208,6 +234,14 @@ mod tests {
             why.contains("overhead name") && why.contains("crosshair"),
             "{why}"
         );
+        // Nothing in sight to name: not a failure, but said to be untested.
+        r["hud_draw"]["friends_in_sight_frames"] = json!(0);
+        r["hud_draw"]["crosshair_due_frames"] = json!(0);
+        assert_eq!(verdict(&r), None);
+        assert_eq!(untested(&r).len(), 2);
+        let mut r = good();
+        r["hud_draw"]["head_icon_materials"] = json!([]);
+        assert!(verdict(&r).unwrap().contains("head icon"));
         let mut r = good();
         r["hud_draw"]["scoreboard_rows_max"] = json!(2);
         assert!(verdict(&r).unwrap().contains("scoreboard"));

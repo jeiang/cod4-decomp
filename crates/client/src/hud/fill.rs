@@ -72,6 +72,14 @@ pub fn fill(net: &mut NetClient<Wire>, live: &mut LiveUi, time: i32, eye: Option
     live.names.resize(n, String::new());
     live.teams.resize(n, 0);
     live.ranks.resize(n, (0, 0));
+    live.materials
+        .resize(usize::from(cs::MATERIALS_COUNT), String::new());
+    for (i, m) in live.materials.iter_mut().enumerate() {
+        let name = ui.material(i as u16);
+        if m != name {
+            name.clone_into(m);
+        }
+    }
     for i in 0..cs::CLIENTINFO_COUNT {
         let info = ui.client(i);
         let slot = usize::from(i);

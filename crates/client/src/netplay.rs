@@ -596,7 +596,13 @@ impl NetPlay {
             self.hud_view = Some((ps.clone(), ps.viewangles[1]));
             self.reticle = None;
             let mut models = self.remote_players(dt, st, ps.client_num);
-            self.scan_names(st, ps.client_num, eye, (ps.viewangles[0], ps.viewangles[1]));
+            self.scan_names(
+                st,
+                ps.client_num,
+                eye,
+                (ps.viewangles[0], ps.viewangles[1]),
+                false,
+            );
             models.extend(self.script_models(&snap, dt));
             models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
@@ -738,7 +744,7 @@ impl NetPlay {
         } else {
             (self.angles[0] + kick[0], self.angles[1] + kick[1])
         };
-        self.scan_names(st, own, eye, view);
+        self.scan_names(st, own, eye, view, dead);
         models.extend(self.script_models(&snap, dt));
         models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));

@@ -27,7 +27,14 @@ const MAX_CLIENTS: u16 = 64;
 impl NetPlay {
     /// The players around the viewer at `eye` looking along `(pitch, yaw)` degrees, for this frame's HUD. `st` is
     /// the shell time of the frame, `own` the viewer.
-    pub(super) fn scan_names(&mut self, st: i32, own: u16, eye: Vec3, (pitch, yaw): (f32, f32)) {
+    pub(super) fn scan_names(
+        &mut self,
+        st: i32,
+        own: u16,
+        eye: Vec3,
+        (pitch, yaw): (f32, f32),
+        dead: bool,
+    ) {
         let mut scan = NameScan {
             flashed: self.look.flashed(st),
             ..NameScan::default()
@@ -47,6 +54,10 @@ impl NetPlay {
             self.scan = scan;
             return;
         };
+        let (p, y) = (pitch.to_radians(), yaw.to_radians());
+        let dir = Vec3::new(p.cos() * y.cos(), p.cos() * y.sin(), -p.sin());
+        let team_of = |c: u16| ui.client(c).map_or(0, |i| i.team);
+        let mine = team_of(viewer);
         for e in ents
             .iter()
             .filter(|e| e.etype == net::entity::etype::PLAYER)
@@ -60,7 +71,13 @@ impl NetPlay {
                 .get(&e.client)
                 .and_then(|r| r.player.head_pos(e.origin))
                 .unwrap_or([e.origin[0], e.origin[1], e.origin[2] + HEAD_HEIGHT]);
-            let clear = {
+            let marked = e.head_icon != 0
+                || e.eflags & (eflags::TALKING | eflags::CONNECTION_INTERRUPTED) != 0
+                || you;
+            // Only what could be drawn is traced to: teammates' names and the markers over anyone.
+            let named = mine == 3 || (mine != 0 && team_of(e.client) == mine);
+            let ahead = (Vec3::from(head) - eye).dot(dir) >= 0.0;
+            let clear = (named || marked) && ahead && {
                 let t = self.boxes.world().trace(
                     eye.to_array(),
                     head,
@@ -74,25 +91,20 @@ impl NetPlay {
             scan.near.push(NearPlayer {
                 client: e.client,
                 head,
+                ahead,
                 clear,
-                icon: Some(e.head_icon)
-                    .filter(|i| *i != 0)
-                    .map(|i| (ui.material(i).to_owned(), e.head_icon_team))
-                    .filter(|(name, _)| !name.is_empty()),
+                icon: (e.head_icon != 0).then_some((e.head_icon, e.head_icon_team)),
                 talking: e.eflags & eflags::TALKING != 0,
                 interrupted: e.eflags & eflags::CONNECTION_INTERRUPTED != 0,
                 you,
             });
         }
-        if !scan.flashed {
-            let team_of = |c: u16| ui.client(c).map_or(0, |i| i.team);
+        if !scan.flashed && !dead {
             let range = self
                 .lib
                 .content
                 .weapon(self.weapons.name(weapon))
                 .map_or(0.0, |d| d.enemy_crosshair_range);
-            let (p, y) = (pitch.to_radians(), yaw.to_radians());
-            let dir = Vec3::new(p.cos() * y.cos(), p.cos() * y.sin(), -p.sin());
             let end = eye + dir * CROSSHAIR_REACH;
             let hit = self
                 .boxes
@@ -111,7 +123,6 @@ impl NetPlay {
                     .iter()
                     .find(|e| e.client == hit && e.etype == net::entity::etype::PLAYER)
             {
-                let mine = team_of(viewer);
                 // A spectator sees every name; a player on a side sees friends always and enemies in the weapon's
                 // enemy range.
                 let friend = mine != 0 && team_of(hit) == mine;

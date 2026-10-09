@@ -9,7 +9,7 @@
 
 use super::elems::{Screen, project};
 use super::scores::rank_cell;
-use super::{LiveUi, NearPlayer};
+use super::{LiveUi, NearPlayer, Stats};
 use crate::input::Cvars;
 use crate::ui::Ui;
 use crate::ui::paint::{Painter, TextDraw};
@@ -106,12 +106,21 @@ pub struct NameDraw {
     pub pos: [f32; 3],
     /// Team colour with the fade in its alpha.
     pub color: [f32; 4],
+    /// Shown because the crosshair is on this player (as well as, maybe, over the head).
+    pub crosshair: bool,
+}
+
+/// The picture of a head icon: a material the scripts precached, or one of the engine's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IconMat {
+    Script(u16),
+    Fixed(&'static str),
 }
 
 /// A head icon to draw.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IconDraw {
-    pub material: String,
+    pub material: IconMat,
     pub pos: [f32; 3],
     /// World units added to the icon's radius, or its size on screen when `constant`.
     pub size: f32,
@@ -140,8 +149,8 @@ pub struct Names {
     cross: Cross,
     pub names: Vec<NameDraw>,
     pub icons: Vec<IconDraw>,
-    /// The crosshair's player is among `names` this frame.
-    pub crosshair_drawn: bool,
+    /// Teammates whose name the viewer could read this frame, drawn or not.
+    pub friends_in_sight: usize,
 }
 
 impl Default for Names {
@@ -155,7 +164,7 @@ impl Default for Names {
             },
             names: Vec::new(),
             icons: Vec::new(),
-            crosshair_drawn: false,
+            friends_in_sight: 0,
         }
     }
 }
@@ -188,6 +197,9 @@ fn sees_head(p: &NearPlayer, eye: [f32; 3], cfg: &Cfg) -> bool {
     if cfg.through_walls {
         return true;
     }
+    if !p.ahead {
+        return false;
+    }
     let d = [p.head[0] - eye[0], p.head[1] - eye[1], p.head[2] - eye[2]];
     p.clear && d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= cfg.max_dist * cfg.max_dist
 }
@@ -197,7 +209,7 @@ impl Names {
     pub fn update(&mut self, live: &LiveUi, cfg: &Cfg, colors: [[f32; 4]; 2]) {
         self.names.clear();
         self.icons.clear();
-        self.crosshair_drawn = false;
+        self.friends_in_sight = 0;
         if !live.active {
             self.overhead.clear();
             return;
@@ -206,7 +218,7 @@ impl Names {
         // A spectator sees every name; a player sees their own side's; with no sides there are none.
         let friendly = |team: u8| mine == 3 || (mine != 0 && team == mine);
         let color = |team: u8| colors[usize::from(team != mine)];
-        let put = |names: &mut Vec<NameDraw>, p: &NearPlayer, alpha: f32| {
+        let put = |names: &mut Vec<NameDraw>, p: &NearPlayer, alpha: f32, crosshair: bool| {
             let name = live.name(p.client);
             if alpha <= EPSILON || name.is_empty() {
                 return;
@@ -225,20 +237,29 @@ impl Names {
                 prestige,
                 pos: [p.head[0], p.head[1], p.head[2] + NAME_HEIGHT],
                 color: c,
+                crosshair,
             };
             match names.iter_mut().find(|n| n.client == p.client) {
-                Some(n) => n.color[3] = n.color[3].max(alpha),
+                Some(n) => {
+                    n.color[3] = n.color[3].max(alpha);
+                    n.crosshair |= crosshair;
+                }
                 None => names.push(draw),
             }
         };
         if cfg.draw_friendly {
+            // A player who left the view starts over when they are back.
+            self.overhead
+                .retain(|c, _| live.scan.near.iter().any(|p| p.client == *c));
             for p in &live.scan.near {
                 if !friendly(live.team(p.client)) {
                     self.overhead.remove(&p.client);
                     continue;
                 }
                 let f = self.overhead.entry(p.client).or_default();
-                if !live.scan.flashed && sees_head(p, live.eye, cfg) {
+                let sees = !live.scan.flashed && sees_head(p, live.eye, cfg);
+                self.friends_in_sight += usize::from(sees);
+                if sees {
                     if !f.visible {
                         f.visible = true;
                         f.start = now;
@@ -256,7 +277,7 @@ impl Names {
                     cfg.friendly_fade_in,
                     cfg.friendly_fade_out,
                 );
-                put(&mut self.names, p, alpha);
+                put(&mut self.names, p, alpha, false);
             }
         }
         // The crosshair's player: its timers run whether or not the name is drawn, as in the original.
@@ -288,8 +309,7 @@ impl Names {
                 (cfg.enemy_fade_in, cfg.enemy_fade_out)
             };
             let alpha = fade_alpha(now, self.cross.start, self.cross.last, fade_in, fade_out);
-            put(&mut self.names, p, alpha);
-            self.crosshair_drawn = self.names.iter().any(|n| n.client == p.client);
+            put(&mut self.names, p, alpha, true);
         }
         for p in &live.scan.near {
             self.icons_of(p, live, cfg);
@@ -298,23 +318,25 @@ impl Names {
 
     /// The head icon the scripts gave `p`, and the one status marker above it (`CG_AddPlayerSpriteDrawSurfs`).
     fn icons_of(&mut self, p: &NearPlayer, live: &LiveUi, cfg: &Cfg) {
+        // Upstream draws these as depth-tested sprites: one behind a wall is not seen.
+        if !p.clear && !cfg.through_walls {
+            return;
+        }
         let mine = live.own_team;
         let mut above = 0.0;
-        let add =
-            |icons: &mut Vec<IconDraw>, material: &str, size: f32, stack: f32, constant: bool| {
-                icons.push(IconDraw {
-                    material: material.to_owned(),
-                    pos: [p.head[0], p.head[1], p.head[2] + stack + ICON_HEIGHT],
-                    size,
-                    constant,
-                });
-            };
-        if let Some((material, team)) = &p.icon
-            && (*team == 0 || mine == 3 || *team == mine)
+        let mut add = |material: IconMat, size: f32, stack: f32, constant: bool| {
+            self.icons.push(IconDraw {
+                material,
+                pos: [p.head[0], p.head[1], p.head[2] + stack + ICON_HEIGHT],
+                size,
+                constant,
+            });
+        };
+        if let Some((material, team)) = p.icon
+            && (team == 0 || mine == 3 || team == mine)
         {
             add(
-                &mut self.icons,
-                material,
+                IconMat::Script(material),
                 cfg.script_icon_size,
                 0.0,
                 cfg.constant_size_icons,
@@ -323,24 +345,21 @@ impl Names {
         }
         if p.you {
             add(
-                &mut self.icons,
-                KILLCAM_YOU,
+                IconMat::Fixed(KILLCAM_YOU),
                 cfg.killcam_icon_size,
                 above,
                 true,
             );
         } else if p.interrupted {
             add(
-                &mut self.icons,
-                DISCONNECTED,
+                IconMat::Fixed(DISCONNECTED),
                 cfg.connection_icon_size,
                 above,
                 false,
             );
         } else if p.talking && (mine == 3 || live.team(p.client) == mine) {
             add(
-                &mut self.icons,
-                TALKING,
+                IconMat::Fixed(TALKING),
                 cfg.voice_icon_size,
                 above - 5.0,
                 false,
@@ -361,8 +380,8 @@ pub fn icon_radius_px(icon: &IconDraw, depth: f32, focal: f32, height: f32, cfg:
     px.max(cfg.icon_min_radius * height * 0.5)
 }
 
-/// Draws the frame's names and icons over the world.
-pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, names: &Names, cfg: &Cfg) {
+/// Draws the frame's names and icons over the world and tells `stats` what reached the screen.
+pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, names: &Names, cfg: &Cfg, stats: &mut Stats) {
     let Some(clip) = live.clip.as_ref().filter(|_| live.active) else {
         return;
     };
@@ -370,17 +389,30 @@ pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, names: &Names, cfg: &Cfg) {
     let eye = glam::Vec3::from(live.eye);
     // Vertical focal scale of the view: the length of the clip matrix's y row.
     let focal = glam::Vec3::new(clip.x_axis.y, clip.y_axis.y, clip.z_axis.y).length();
+    let (mut icons, mut named, mut cross) = (0, 0, false);
     for icon in &names.icons {
         let Screen::Front(x, y) = project(clip, icon.pos, size) else {
             continue;
         };
+        let material = match icon.material {
+            IconMat::Script(i) => live
+                .materials
+                .get(usize::from(i))
+                .map_or("", String::as_str),
+            IconMat::Fixed(n) => n,
+        };
+        if material.is_empty() {
+            continue;
+        }
+        icons += 1;
+        stats.head_icon(material);
         let depth = (clip.x_axis.w * icon.pos[0]
             + clip.y_axis.w * icon.pos[1]
             + clip.z_axis.w * icon.pos[2]
             + clip.w_axis.w)
             .abs();
         let r = icon_radius_px(icon, depth, focal, size.1, cfg);
-        let img = p.named(&ui.assets, &icon.material);
+        let img = p.named(&ui.assets, material);
         p.pic(
             &img,
             Px {
@@ -396,6 +428,8 @@ pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, names: &Names, cfg: &Cfg) {
         let Screen::Front(x, y) = project(clip, n.pos, size) else {
             continue;
         };
+        named += 1;
+        cross |= n.crosshair;
         let dist = (glam::Vec3::from(n.pos) - eye).length();
         let scale = distance_scale(dist, cfg);
         let text_size = cfg.size * scale;
@@ -453,6 +487,7 @@ pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, names: &Names, cfg: &Cfg) {
             },
         );
     }
+    stats.names_drawn(named, cross, icons);
 }
 
 #[cfg(test)]
@@ -490,6 +525,7 @@ mod tests {
         NearPlayer {
             client,
             head: [500.0, 0.0, 60.0],
+            ahead: true,
             clear: true,
             ..NearPlayer::default()
         }
@@ -594,13 +630,13 @@ mod tests {
         let mut n = Names::default();
         let c = cfg();
         let mut carrier = near(1);
-        carrier.icon = Some(("waypoint_bomb".into(), 2));
+        carrier.icon = Some((7, 2));
         carrier.interrupted = true;
         let mut other = near(2);
-        other.icon = Some(("waypoint_defend".into(), 1));
+        other.icon = Some((8, 1));
         n.update(&live(vec![carrier, other], None), &c, COLORS);
-        let mats: Vec<_> = n.icons.iter().map(|i| i.material.as_str()).collect();
-        assert_eq!(mats, ["waypoint_bomb", DISCONNECTED]);
+        let mats: Vec<_> = n.icons.iter().map(|i| i.material).collect();
+        assert_eq!(mats, [IconMat::Script(7), IconMat::Fixed(DISCONNECTED)]);
         // The marker sits higher than the icon by the icon's size and a gap.
         assert_eq!(
             n.icons[1].pos[2] - n.icons[0].pos[2],
@@ -612,9 +648,9 @@ mod tests {
     fn head_icons_without_a_team_show_to_everyone_and_to_spectators() {
         let c = cfg();
         let mut p = near(2);
-        p.icon = Some(("hud_icon".into(), 0));
+        p.icon = Some((9, 0));
         let mut q = near(2);
-        q.icon = Some(("hud_axis".into(), 1));
+        q.icon = Some((10, 1));
         for (team, want) in [(2u8, 1usize), (3, 2)] {
             let mut l = live(vec![p.clone(), q.clone()], None);
             l.own_team = team;
@@ -634,15 +670,39 @@ mod tests {
         let mut foe = near(2);
         foe.talking = true;
         n.update(&live(vec![me, friend, foe], None), &cfg(), COLORS);
-        let mats: Vec<_> = n.icons.iter().map(|i| i.material.as_str()).collect();
-        assert_eq!(mats, [KILLCAM_YOU, TALKING]);
+        let mats: Vec<_> = n.icons.iter().map(|i| i.material).collect();
+        assert_eq!(mats, [IconMat::Fixed(KILLCAM_YOU), IconMat::Fixed(TALKING)]);
+    }
+
+    #[test]
+    fn markers_behind_a_wall_are_not_shown_to_anyone() {
+        let mut foe = near(2);
+        foe.interrupted = true;
+        foe.icon = Some((9, 0));
+        foe.clear = false;
+        let mut n = Names::default();
+        n.update(&live(vec![foe.clone()], None), &cfg(), COLORS);
+        assert!(n.icons.is_empty());
+        foe.clear = true;
+        n.update(&live(vec![foe], None), &cfg(), COLORS);
+        assert_eq!(n.icons.len(), 2);
+    }
+
+    #[test]
+    fn a_teammate_behind_the_viewer_is_not_in_sight() {
+        let mut back = near(1);
+        back.ahead = false;
+        let mut n = Names::default();
+        n.update(&live(vec![back, near(3)], None), &cfg(), COLORS);
+        assert_eq!(n.friends_in_sight, 1);
+        assert_eq!(drawn(&n), [3]);
     }
 
     #[test]
     fn a_small_or_far_icon_keeps_a_minimum_size_and_a_constant_one_ignores_distance() {
         let c = cfg();
         let mut icon = IconDraw {
-            material: String::new(),
+            material: IconMat::Script(0),
             pos: [0.0; 3],
             size: 0.0,
             constant: false,
