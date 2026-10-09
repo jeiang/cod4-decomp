@@ -125,7 +125,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("setstat", r(set_stat)),
     ("shellshock", r(shell_shock)),
     ("stopshellshock", r(stop_shell_shock)),
-    ("viewkick", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("viewkick", r(view_kick)),
     ("vibrate", r(|_, _, _, _| Ok(Value::Undefined))),
     ("setdepthoffield", r(|_, _, _, _| Ok(Value::Undefined))),
     (
@@ -321,6 +321,23 @@ fn shell_shock(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
         crate::ui::Dest::Client(n),
         net::ui::ServerCmd::ShellShock { name, ms },
     );
+    Ok(Value::Undefined)
+}
+
+/// `viewkick(force, source)`: the player's view is hit as by `force` percent of the health from `source`
+/// (`GScr_ViewKick`); the end frame shows it.
+fn view_kick(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client_of(g, e)?;
+    let force = a.int(0)?;
+    let from = a.vector(1)?;
+    let c = g.client_mut(n).expect("client");
+    c.damage_blood = (c.max_health * force + 50) / 100;
+    if c.damage_blood < 0 {
+        return Err(format!("viewkick: damage {force} < 0"));
+    }
+    for (d, (o, f)) in c.damage_from.iter_mut().zip(c.ps.origin.iter().zip(from)) {
+        *d = o - f;
+    }
     Ok(Value::Undefined)
 }
 

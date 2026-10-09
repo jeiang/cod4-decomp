@@ -84,6 +84,10 @@ pub struct LiveUi {
     pub scope: Option<crate::viewmodel::Overlay>,
     /// The weapon's crosshair over the world, its field of view filled in by the app.
     pub reticle: Option<crate::crosshair::Reticle>,
+    /// The red flash and the wedges of the hits the player took.
+    pub damage: crate::damage::DamageHud,
+    /// `cg_hudDamageIconInScope`: the wedges stay while a scope is up.
+    pub damage_in_scope: bool,
     /// The client's estimate of the server clock, ms.
     pub time: i32,
     /// The clock script hud element times are read on: `time`, minus the replay offset in a killcam.

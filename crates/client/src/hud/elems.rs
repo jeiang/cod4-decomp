@@ -149,6 +149,45 @@ fn draw_scope(ui: &Ui, p: &mut Painter, o: &crate::viewmodel::Overlay) {
     }
 }
 
+/// The red flash over the screen and the wedges that point at where hits came from (`CG_DrawFlashDamage`,
+/// `CG_DrawDamageDirectionIndicators`). A flashbang hides the wedges, and so does a scope unless
+/// `cg_hudDamageIconInScope` is set (they are drawn about the screen centre, where the scope's crosshair is).
+fn draw_damage(ui: &Ui, p: &mut Painter, live: &LiveUi) {
+    let (w, h) = ui.place.size;
+    let d = &live.damage;
+    if d.flash > 0.0 {
+        // A margin past every edge, so a shaken view shows no gap.
+        let m = 10.0;
+        p.fill(
+            Px {
+                x: -m,
+                y: -m,
+                w: w + 2.0 * m,
+                h: h + 2.0 * m,
+            },
+            [0.2, 0.0, 0.0, d.flash],
+        );
+    }
+    if d.wedges.is_empty() || live.flashed || (live.scope.is_some() && !live.damage_in_scope) {
+        return;
+    }
+    let unit = h / 480.0;
+    let [iw, ih] = crate::damage::ICON_SIZE.map(|v| v * unit);
+    let radius = crate::damage::ICON_OFFSET * unit;
+    let img = p.named(&ui.assets, crate::damage::ICON_MATERIAL);
+    let (cx, cy) = (w * 0.5, h * 0.5);
+    for &(degrees, alpha) in &d.wedges {
+        p.g.quad_rot(
+            &img,
+            [cx - iw * 0.5, cy + radius, iw, ih],
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, alpha],
+            degrees.to_radians(),
+            [cx, cy],
+        );
+    }
+}
+
 /// Foreground elements, the spectated player's name and the scoreboard rows, over the menus.
 pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
     let live = &st.live;
@@ -159,6 +198,7 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
     if live.interrupted {
         draw_interrupted(ui, p, live);
     }
+    draw_damage(ui, p, live);
     if let Some(name) = live
         .following
         .as_deref()

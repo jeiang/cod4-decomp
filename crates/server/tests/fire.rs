@@ -1084,3 +1084,72 @@ fn a_flashbang_of_the_free_team_says_free() {
     let (slots, Flashed(told)) = flash_round(Team::Free);
     assert_eq!(told[&slots[1]].3, "free");
 }
+
+#[test]
+fn a_hit_the_script_accepted_shows_in_the_end_frame_and_wears_off() {
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let victim = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Axis);
+    g.level.time = 1000;
+    g.client_mut(victim).unwrap().ps.aim_spread_scale = 10.0;
+    // 25 of 100 health, driven towards +y (the shooter is on the victim's right).
+    let mut d = server::combat::Damage::new(25, server::combat::MOD_RIFLE_BULLET);
+    d.dir = Some([0.0, 1.0, 0.0]);
+    g.finish_player_damage(&mut vm, victim, d).unwrap();
+    // Nothing is shown before the end frame.
+    assert_eq!(g.client(victim).unwrap().ps.damage_event, 0);
+    g.client_end_frame(&mut vm, victim);
+    let ps = &g.client(victim).unwrap().ps;
+    assert_eq!(ps.damage_event, 1);
+    assert_eq!(ps.damage_count, 25);
+    assert_eq!(
+        ps.aim_spread_scale, 35.0,
+        "the spread widens by the percent"
+    );
+    let (pitch, yaw) = sim::pm::damage::direction_bytes(Some([0.0, 1.0, 0.0]));
+    assert_eq!((ps.damage_pitch, ps.damage_yaw), (pitch, yaw));
+    // A frame with no new hit neither repeats it nor widens the spread again.
+    g.level.time = 1100;
+    g.client_end_frame(&mut vm, victim);
+    let ps = &g.client(victim).unwrap().ps;
+    assert_eq!((ps.damage_event, ps.damage_count), (1, 25));
+    assert_eq!(ps.aim_spread_scale, 35.0);
+    // The count expires; the event stays.
+    g.level.time = 1700;
+    g.client_end_frame(&mut vm, victim);
+    let ps = &g.client(victim).unwrap().ps;
+    assert_eq!((ps.damage_event, ps.damage_count), (1, 0));
+    // Damage from the world has no direction, and a huge blow caps at 127 percent.
+    g.level.time = 2000;
+    g.finish_player_damage(
+        &mut vm,
+        victim,
+        server::combat::Damage::new(30, server::combat::MOD_FALLING),
+    )
+    .unwrap();
+    g.client_end_frame(&mut vm, victim);
+    let ps = &g.client(victim).unwrap().ps;
+    assert_eq!((ps.damage_event, ps.damage_count), (2, 30));
+    assert_eq!((ps.damage_pitch, ps.damage_yaw), (255, 255));
+}
+
+#[test]
+fn the_blow_that_killed_shows_nothing_on_the_next_life() {
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let victim = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Axis);
+    g.level.time = 1000;
+    let mut d = server::combat::Damage::new(400, server::combat::MOD_RIFLE_BULLET);
+    d.dir = Some([1.0, 0.0, 0.0]);
+    g.finish_player_damage(&mut vm, victim, d).unwrap();
+    assert_eq!(g.client(victim).unwrap().ps.pm_type, PmType::Dead);
+    // Dead: no feedback, and the blood stays unspent until the respawn.
+    g.client_end_frame(&mut vm, victim);
+    assert_eq!(g.client(victim).unwrap().ps.damage_event, 0);
+    g.level.time = 5000;
+    g.client_spawn(&mut vm, victim, [0.0; 3], [0.0; 3]);
+    g.ent_mut(victim).unwrap().health = 100;
+    g.client_mut(victim).unwrap().session = Session::Playing;
+    g.client_end_frame(&mut vm, victim);
+    let ps = &g.client(victim).unwrap().ps;
+    assert_eq!((ps.damage_event, ps.damage_count), (0, 0));
+    assert_eq!(ps.aim_spread_scale, 0.0);
+}

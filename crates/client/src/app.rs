@@ -1034,6 +1034,11 @@ impl Viewer {
             new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {
                 net.fill_live(&mut sh.st.live);
+                sh.st.live.damage_in_scope = st
+                    .input
+                    .cvars
+                    .get("cg_hudDamageIconInScope")
+                    .is_some_and(|v| v.trim().parse::<f32>().is_ok_and(|v| v != 0.0));
                 let aspect = st.config.height as f32 / st.config.width as f32;
                 if let Some(r) = sh.st.live.reticle.as_mut() {
                     r.tan_half_fov_y = (st.fov_x * 0.5).tan() * aspect;

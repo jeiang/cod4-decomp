@@ -184,6 +184,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if shots >= 1.0 && num(net, &["view_kick_settled"]) < 1.0 {
         failures.push("the view kicked but never came back to rest".into());
     }
+    // A hit the player took (the match is bots shooting back) showed on the screen: the red flash and a wedge.
+    // Whether a bot lands one within the run is up to the match, with no hit the stage notes it as untested.
+    let taken = num(net, &["damage_events"]);
+    if taken >= 1.0
+        && num(net, &["damage_flash_max"]) <= 0.0
+        && num(net, &["damage_wedges_max"]) < 1.0
+    {
+        failures.push(format!(
+            "the player state counted {taken} hits but the HUD showed neither a flash nor a damage wedge"
+        ));
+    }
     let snd = &net["sound"];
     let heard = |names: &[&str]| -> f64 {
         names
@@ -344,6 +355,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         num(srv, &["tick_ms_p50"]),
         num(srv, &["tick_ms_p99"]),
     ));
+    if taken < 1.0 {
+        report
+            .notes
+            .push("damage feedback on screen untested: no bot hit the player".into());
+    }
     if !failures.is_empty() {
         return Ok(fail(report, failures.join("; ")));
     }

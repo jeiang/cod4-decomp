@@ -164,7 +164,12 @@ pub struct Client {
     pub use_hold_time: i32,
     /// The use press was consumed; a held button is not a fresh press until released.
     pub use_button_done: bool,
-    /// Pitch/yaw/roll recoil kick applied to the view this frame (`viewkick` and weapon kick).
+    /// Damage taken since the last end frame, as health points (`damage_blood`), the way the last blow travelled and
+    /// whether it came from no direction at all.
+    pub damage_blood: i32,
+    pub damage_from: [f32; 3],
+    pub damage_from_world: bool,
+    /// When `damage_count` of the player state was last set, less 20 ms (`damageTime`).
     pub damage_time: i32,
     pub allow_ads: bool,
     pub inv: PlayerWeapons,
@@ -227,6 +232,9 @@ impl Client {
             use_hold_ent: None,
             use_hold_time: 0,
             use_button_done: false,
+            damage_blood: 0,
+            damage_from: [0.0; 3],
+            damage_from_world: false,
             damage_time: 0,
             allow_ads: true,
             inv: PlayerWeapons::new(),
@@ -415,6 +423,11 @@ impl Game {
         c.spawn_count = spawn_count;
         c.last_spawn_time = time;
         c.last_stand = false;
+        // Blood the last life's killing blow left is not the new life's.
+        c.damage_blood = 0;
+        c.damage_from = [0.0; 3];
+        c.damage_from_world = false;
+        c.damage_time = 0;
         c.noclip = false;
         c.ufo = false;
         c.buttons = c.cmd.buttons;
@@ -764,6 +777,7 @@ impl Game {
                 t => t,
             };
         }
+        self.damage_feedback(n);
         self.set_client_contents(n);
         self.update_cursor_hints(n);
         self.update_pose(n);
