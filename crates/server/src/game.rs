@@ -179,6 +179,8 @@ pub struct Ent {
     pub owner: Option<u16>,
     /// A script vehicle's flight and turret state (`scr_vehicle`).
     pub veh: Option<Box<crate::vehicle::Vehicle>>,
+    /// A dropped or placed weapon (`ET_ITEM`).
+    pub item: Option<Box<crate::items::DroppedItem>>,
 }
 
 impl Ent {
@@ -210,6 +212,7 @@ impl Ent {
             missile: None,
             owner: None,
             veh: None,
+            item: None,
         }
     }
 }
@@ -407,6 +410,8 @@ pub struct Game {
     pub tempev: crate::tempev::TempEvents,
     /// The vision set in force (`visionsetnaked`, `visionsetnight`) as `(name)`, replayed to clients that join.
     pub vision: [Option<String>; 2],
+    /// Entities of dropped weapons, oldest first (`level.droppedWeaponCue`).
+    pub dropped: Vec<u16>,
 }
 
 /// Who hears a sound command.
@@ -464,6 +469,7 @@ impl Game {
             attractors: Attractors::default(),
             sound_out: Vec::new(),
             ambient: None,
+            dropped: Vec::new(),
         }
     }
 
@@ -545,6 +551,7 @@ impl Game {
         self.attractors = Attractors::default();
         self.tempev = Default::default();
         self.vision = [None, None];
+        self.dropped.clear();
         self.team_score = [0; 3];
         self.nav = None;
         self.nav_goals.clear();
@@ -613,6 +620,7 @@ impl Game {
         let Some(e) = self.ents.get_mut(usize::from(num)).and_then(Option::as_mut) else {
             return;
         };
+        let kind_is_item = e.kind == EntKind::Item;
         let inline = e
             .model
             .strip_prefix('*')
@@ -647,6 +655,9 @@ impl Game {
             }
             "trigger_multiple" | "trigger_once" => e.contents = sentient_trigger(e.spawnflags),
             _ => {}
+        }
+        if kind_is_item {
+            self.init_item(num);
         }
         self.relink(num);
     }

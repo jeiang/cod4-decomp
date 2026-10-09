@@ -135,7 +135,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ),
     ("getviewmodel", m(get_view_model)),
     ("setviewmodel", m(set_view_model)),
-    ("itemweaponsetammo", m(|_, _, _, _| Ok(Value::Undefined))),
+    ("itemweaponsetammo", m(item_weapon_set_ammo)),
 ];
 
 pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
@@ -480,4 +480,33 @@ fn weapons_enabled(g: &mut Game, e: EntRef, on: bool) -> R {
 fn player_ads(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client(g, e)?;
     Ok(Value::Float(g.clients[usize::from(n)].ps.weapon_pos_frac))
+}
+
+/// `ScrCmd_ItemWeaponSetAmmo`: what a dropped weapon holds: magazine, reserve and, for the
+/// alternate fire mode, a third argument of 1.
+fn item_weapon_set_ammo(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    if e.class != EntClass::Entity {
+        return Err("not an entity".into());
+    }
+    let n = e.num;
+    let item = g.ent(n).filter(|e| e.kind == crate::game::EntKind::Item);
+    if item.is_none() {
+        return Err("Entity is not an item.".into());
+    }
+    if item.is_some_and(|e| e.item.is_none()) {
+        return Err("Item entity is not a weapon.".into());
+    }
+    let (clip, stock) = (a.int(0)?, a.int(1)?);
+    if clip < 0 {
+        return Err("parameter 1: Ammo count must not be negative".into());
+    }
+    if stock < 0 {
+        return Err("parameter 2: Ammo count must not be negative".into());
+    }
+    let alt = if a.len() > 2 { a.int(2)? } else { 0 };
+    if !(0..2).contains(&alt) {
+        return Err("parameter 3: Value out of range.  Allowed values: 0 to 2".into());
+    }
+    g.item_set_ammo(n, clip, stock, alt as usize)?;
+    Ok(Value::Undefined)
 }

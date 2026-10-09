@@ -356,6 +356,10 @@ impl Game {
                     info.fuse_time
                 };
         }
+        if fuse_left < 0 {
+            // A grenade that cooked off in the hand goes off at once.
+            next_think = now - 1;
+        }
         if next_think == 0 {
             next_think = now + 30_000;
         }
@@ -504,8 +508,8 @@ impl Game {
             self.free_entity(vm, n);
         } else if e.missile.is_some() {
             self.run_missile(vm, n);
-        } else if e.kind == EntKind::Item && e.mv.pos.tr.kind == TrType::Gravity {
-            self.run_item(n);
+        } else if e.kind == EntKind::Item {
+            self.run_item(vm, n);
         } else if e.veh.is_some() {
             self.run_vehicle(vm, n);
         } else {
@@ -1274,15 +1278,19 @@ impl Game {
     }
 
     /// A dropped weapon falls until it lands.
-    fn run_item(&mut self, n: u16) {
+    fn run_item(&mut self, vm: &mut Vm, n: u16) {
+        self.item_think(n);
         let now = self.level.time;
         let Some(e) = self.ent(n) else { return };
+        if e.mv.pos.tr.kind != TrType::Gravity {
+            return;
+        }
         let (tr, origin, mins, maxs) = (e.mv.pos.tr, e.origin, e.mins, e.maxs);
         let next = tr.evaluate(now);
         let Some(world) = self.world.as_ref() else {
             return;
         };
-        let t = world.trace(origin, next, mins, maxs, n, contents::MASK_SOLID);
+        let t = world.trace(origin, next, mins, maxs, n, Game::item_clipmask());
         let at = if t.fraction < 1.0 {
             lerp(origin, next, t.fraction)
         } else {
@@ -1293,6 +1301,12 @@ impl Game {
             if t.fraction < 1.0 {
                 e.mv.pos.tr = Trajectory::stationary(at);
             }
+        }
+        // It landed on something it cannot rest on (a wall or ceiling): gone.
+        if t.fraction < 1.0 && t.normal[2] <= 0.0 {
+            self.dropped.retain(|&d| d != n);
+            self.free_entity(vm, n);
+            return;
         }
         self.relink(n);
     }

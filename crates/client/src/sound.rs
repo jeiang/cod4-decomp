@@ -66,6 +66,8 @@ pub struct Who<'a> {
     pub entity: u16,
     pub origin: [f32; 3],
     pub weapon: Option<&'a WeaponDef>,
+    /// The definition of a weapon by index, for events that name one (a pickup).
+    pub weapon_of: &'a dyn Fn(u16) -> Option<Arc<WeaponDef>>,
 }
 
 impl ClientSound {
@@ -395,6 +397,13 @@ impl ClientSound {
             }
         };
         let plr = if who.own { "_plr" } else { "" };
+        if matches!(event, ev::ITEM_PICKUP | ev::AMMO_PICKUP) {
+            let def = (who.weapon_of)(u16::from(parm));
+            if let Some(name) = pickup_sound(def.as_deref(), event, who.own) {
+                self.play(&name, cue);
+            }
+            return;
+        }
         if let Some(name) = weapon_sound(who.weapon, event, who.own) {
             self.play(&name, cue);
             return;
@@ -652,6 +661,18 @@ fn load(install: &Path, map: &str) -> Result<Bank, String> {
     Bank::load(vfs, &zones)
 }
 
+/// The sound of picking up a weapon (`pickupSound`) or ammunition (`ammoPickupSound`).
+fn pickup_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
+    let s = &w?.sounds;
+    let (plr, other) = if event == ev::ITEM_PICKUP {
+        (&s.pickup_sound_player, &s.pickup_sound)
+    } else {
+        (&s.ammo_pickup_sound_player, &s.ammo_pickup_sound)
+    };
+    let n = if own { plr } else { other };
+    n.as_ref().filter(|n| !n.is_empty()).map(|n| n.to_string())
+}
+
 /// The weapon's sound alias for a player event, `_player` (first-person) variants for the own player.
 fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
     let s = &w?.sounds;
@@ -667,6 +688,8 @@ fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
         ev::FIRE_WEAPON => pick(&s.fire_sound_player, &s.fire_sound),
         ev::FIRE_WEAPON_LASTSHOT => pick(&s.fire_last_sound_player, &s.fire_last_sound)
             .or_else(|| pick(&s.fire_sound_player, &s.fire_sound)),
+        // A clip-only weapon, or one that stays up when empty, does not click.
+        ev::NOAMMO if w?.clip_only != 0 || w?.cancel_auto_holster_when_empty != 0 => None,
         ev::NOAMMO => pick(&s.empty_fire_sound_player, &s.empty_fire_sound),
         ev::RELOAD => pick(&s.reload_sound_player, &s.reload_sound),
         ev::RELOAD_FROM_EMPTY => pick(&s.reload_empty_sound_player, &s.reload_empty_sound),

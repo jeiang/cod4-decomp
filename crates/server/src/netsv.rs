@@ -607,6 +607,23 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 };
                 s
             }
+            EntKind::Item => {
+                // A weapon on the floor: the clients draw its world model from the weapon and variant.
+                let Some(item) = e.item.as_ref() else {
+                    continue;
+                };
+                if e.hidden {
+                    continue;
+                }
+                let mut s = EntityState::new(n);
+                s.etype = etype::ITEM;
+                s.origin = e.origin;
+                s.angles = e.angles;
+                s.weapon = item.weapon;
+                s.model = u16::from(item.model);
+                s.client = item.dropper.unwrap_or(1023);
+                s
+            }
             EntKind::Plain if &*e.classname == "script_model" => {
                 // The index names the model in the clients' configstrings; one that was never registered cannot be
                 // drawn.

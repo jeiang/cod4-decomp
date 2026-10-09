@@ -12,6 +12,7 @@ use sim::Vec3;
 use sim::cm::ENTITYNUM_NONE;
 use sim::contents;
 use sim::pm::{PLAYER_MAXS, PLAYER_MINS, PmType, button, pmf, weapon_state, wf};
+use sim::weapon::pickup;
 
 /// Farthest a use trigger is picked from the eye, and how far the hint scan reaches.
 const USE_RADIUS: f32 = 128.0;
@@ -56,6 +57,13 @@ impl Game {
             near.push(t);
             true
         });
+        let prev_hint = c.ps.cursor_hint_ent_index;
+        let own_origin = c.ps.origin;
+        let (inner, outer) = (
+            self.cvars.float("player_throwbackInnerRadius"),
+            self.cvars.float("player_throwbackOuterRadius"),
+        );
+        let max_speed = self.cvars.float("bg_maxGrenadeIndicatorSpeed");
         let mut scored: Vec<(f32, u16)> = Vec::new();
         for t in near {
             let (Some(te), Some(le)) = (self.ent(t), world.entity(t)) else {
@@ -75,7 +83,19 @@ impl Game {
             let mid: Vec3 = std::array::from_fn(|i| (le.abs_min[i] + le.abs_max[i]) * 0.5);
             let mut d: Vec3 = std::array::from_fn(|i| mid[i] - eye[i]);
             let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            if dist > USE_RADIUS {
+            let missile = te.missile.as_deref();
+            if let Some(m) = missile {
+                // A live grenade: close at first (the outer ring keeps it once it was in sight), and
+                // nearly at rest.
+                let flat =
+                    (te.origin[0] - own_origin[0]).powi(2) + (te.origin[1] - own_origin[1]).powi(2);
+                let v = m.pos.evaluate_delta(self.level.time);
+                let speed2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+                if !(prev_hint == t || inner * inner >= flat) || speed2 > max_speed * max_speed {
+                    continue;
+                }
+            }
+            if dist > if missile.is_some() { outer } else { USE_RADIUS } {
                 continue;
             }
             if dist > 0.0 {
@@ -85,8 +105,27 @@ impl Game {
             if te.x.require_look_at && dot < LOOK_AT_DOT {
                 continue;
             }
-            // A look-at trigger beats a touch one the view is not on.
-            let score = (1.0 - (dot + 1.0) * 0.5) * SCORE_SPAN - SCORE_SPAN + dist;
+            if let Some(item) = te.item.as_ref()
+                && !sim::weapon::pickup::can_item_be_grabbed(
+                    &c.inv,
+                    &self.weapons,
+                    &c.ps,
+                    sim::weapon::pickup::Pickup::Dropped,
+                    item.weapon,
+                    item.dropper,
+                    false,
+                )
+            {
+                continue;
+            }
+            // A look-at trigger beats a touch one the view is not on; a live grenade beats both.
+            let mut score = (1.0 - (dot + 1.0) * 0.5) * SCORE_SPAN + dist;
+            if missile.is_some() {
+                score -= 2.0 * SCORE_SPAN;
+            }
+            if &*te.classname == "trigger_use" {
+                score -= SCORE_SPAN;
+            }
             scored.push((score, t));
         }
         scored.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -119,12 +158,34 @@ impl Game {
             || ps.pm_type == PmType::LastStand
             || c.frozen;
         let mut hint = (0u8, -1i8, ENTITYNUM_NONE);
+        let mut throw_back_left = 0;
         if !blocked {
             for t in self.use_list(n) {
                 let Some(te) = self.ent(t) else { continue };
-                // Something else in reach that is not a use trigger shows no hint.
-                if !matches!(&*te.classname, "trigger_use" | "trigger_use_touch") {
+                if let Some(item) = te.item.as_ref() {
+                    let h = pickup::item_cursor_hint(
+                        &c.inv,
+                        &self.weapons,
+                        c.ps.weapon as u16,
+                        item.weapon,
+                    );
+                    if h == 0 {
+                        continue;
+                    }
+                    hint = (h, -1, t);
                     break;
+                }
+                if let Some(m) = te.missile.as_ref() {
+                    hint = (
+                        (m.weapon as u8).saturating_add(pickup::WEAPON_HINT_OFFSET),
+                        -1,
+                        t,
+                    );
+                    throw_back_left = m.next_think - self.level.time;
+                    break;
+                }
+                if !matches!(&*te.classname, "trigger_use" | "trigger_use_touch") {
+                    continue;
                 }
                 if te.x.trigger_team != Team::Free && te.x.trigger_team != c.team {
                     continue;
@@ -143,6 +204,9 @@ impl Game {
             c.ps.cursor_hint = hint.0;
             c.ps.cursor_hint_string = hint.1;
             c.ps.cursor_hint_ent_index = hint.2;
+            if c.ps.throw_back_grenade_owner == ENTITYNUM_NONE {
+                c.ps.throw_back_grenade_time_left = throw_back_left;
+            }
         }
     }
 
@@ -182,7 +246,12 @@ impl Game {
                 && time - c.use_hold_time >= hold_ms
             {
                 c.use_hold_ent = None;
-                if self.ent(t).is_some() {
+                if self.ent(t).is_some_and(|e| e.item.is_some()) {
+                    // A weapon on the floor: using it is touching it without walking over.
+                    let who = self.entity_value(vm, n);
+                    vm.notify_entity(t, "touch", &[who]);
+                    self.touch_item(vm, n, t, false);
+                } else if self.ent(t).is_some() {
                     let who = self.entity_value(vm, n);
                     vm.notify_entity(t, "trigger", &[who]);
                 }

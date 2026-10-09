@@ -231,6 +231,7 @@ pub fn draw(
         .find(|k| k != "KEY_UNBOUND")
         .map_or_else(|| ui.localize_key("KEY_UNBOUND"), |k| ui.localize_key(&k));
     let use_key = ui.localize_key(&cx.key_binding("+activate"));
+    let frag_key = ui.localize_key(&cx.key_binding("+frag"));
     let objectives = cx.st.live.objectives.clone();
     let h = &mut cx.st.game.hud;
     if id != 72 {
@@ -277,7 +278,7 @@ pub fn draw(
         185 => compass_friendlies(&mut dc, h, true),
         188 => compass_enemies(&mut dc, h, true),
         187 => map_border(&mut dc, h),
-        72 => cursor_hint(&mut dc, h, &use_key),
+        72 => cursor_hint(&mut dc, h, &use_key, &frag_key),
         165 => dpad_back(&mut dc, h),
         186 => location_selector(&mut dc, h),
         166..=169 => action_slot(&mut dc, h, (id - 166) as usize),
@@ -818,7 +819,7 @@ fn mantle_hint(dc: &mut Dc, h: &mut HudFacts, key: &str) {
 
 /// `CG_DrawCursorhint`: the use hint under the crosshair (icon and text), for as long as the server's player state
 /// names a use trigger and 100 ms after.
-fn cursor_hint(dc: &mut Dc, h: &mut HudFacts, key: &str) {
+fn cursor_hint(dc: &mut Dc, h: &mut HudFacts, key: &str, frag_key: &str) {
     const HINT_NOICON: u8 = 1;
     let mode = dc.cfg.cursor_hints;
     if mode == 0 || h.cursor_hint == 0 {
@@ -845,10 +846,22 @@ fn cursor_hint(dc: &mut Dc, h: &mut HudFacts, key: &str) {
     } else {
         h.cursor_hint_text.as_str()
     };
+    // Throwing a live grenade back is the grenade key, not the use key.
+    let key = if raw == "&PLATFORM_THROWBACKGRENADE" {
+        frag_key
+    } else {
+        key
+    };
     let mut keys = std::collections::HashMap::new();
     keys.insert("+activate".to_owned(), key.to_owned());
-    let text = crate::hud::expand_keys(&crate::hud::localize(&dc.ui.assets, raw), &keys)
+    let mut text = crate::hud::expand_keys(&crate::hud::localize(&dc.ui.assets, raw), &keys)
         .replace("&&1", key);
+    if !h.cursor_hint_extra.is_empty() {
+        text = format!(
+            "{text} {}",
+            crate::hud::localize(&dc.ui.assets, &h.cursor_hint_extra)
+        );
+    }
     let r = dc.r;
     let len = dc.tw(&text);
     let y = dc.text_h() * 0.5 + r.y;

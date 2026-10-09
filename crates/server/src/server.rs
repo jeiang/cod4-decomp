@@ -193,6 +193,16 @@ fn register_core_dvars(c: &mut Cvars) {
         ("bot_idle", "0", 0),
         ("g_allowvote", "1", 0),
         ("g_useholdtime", "0", 0),
+        ("g_maxDroppedWeapons", "16", 0),
+        ("g_dropForwardSpeed", "10", ARCHIVE),
+        ("g_dropUpSpeedBase", "10", ARCHIVE),
+        ("g_dropUpSpeedRand", "5", ARCHIVE),
+        ("g_dropHorzSpeedRand", "100", ARCHIVE),
+        ("pickupPrints", "0", CHEAT),
+        ("player_throwbackInnerRadius", "90", CHEAT),
+        ("player_throwbackOuterRadius", "160", CHEAT),
+        ("bg_maxGrenadeIndicatorSpeed", "20", CHEAT),
+        ("perk_grenadeDeath", "frag_grenade_short_mp", 0),
         ("g_useholdspawndelay", "500", 0),
         ("g_gravity", "800", 0),
         ("g_knockback", "1000", 0),
@@ -725,6 +735,13 @@ impl Server {
                 break;
             }
         }
+    }
+
+    /// Test hook: player `n` drops `weapon` as `dropitem` does; the item entity, if one was left.
+    pub fn drop_weapon(&mut self, n: u16, weapon: u16) -> Option<u16> {
+        let run = self.run.as_mut()?;
+        let model = self.game.client(n)?.inv.model(weapon);
+        self.game.drop_weapon(&mut run.vm, n, weapon, model)
     }
 
     /// Runs one console line now (`harness` scenarios), returning its error.

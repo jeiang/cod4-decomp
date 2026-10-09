@@ -340,6 +340,8 @@ pub struct HudFacts {
     /// The crosshair hint (`cursorHint`), its raw text from the use-trigger strings, and when it was last on.
     pub cursor_hint: u8,
     pub cursor_hint_text: String,
+    /// A weapon hint's weapon name (raw, localized when drawn), shown after the text.
+    pub cursor_hint_extra: String,
     pub cursor_hint_time: i32,
     /// "No ammo" style hint: the localize key and when it appeared.
     pub invalid_cmd: Option<(&'static str, i32)>,

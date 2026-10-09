@@ -25,7 +25,7 @@ pub(super) struct Human {
     join: AutoJoin,
     pub(super) own: Option<u16>,
     cmd_time: i32,
-    hold_use: bool,
+    pub(super) hold_use: bool,
     /// The hint the server's player state showed at the zone, and its text.
     hint: Option<(u16, String)>,
 }

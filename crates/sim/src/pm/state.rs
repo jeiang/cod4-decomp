@@ -103,6 +103,10 @@ pub mod ev {
     pub const STANCE_FORCE_STAND: u8 = 0x06;
     pub const STANCE_FORCE_CROUCH: u8 = 0x07;
     pub const STANCE_FORCE_PRONE: u8 = 0x08;
+    /// A weapon was taken from the floor; the parm is the weapon.
+    pub const ITEM_PICKUP: u8 = 0x09;
+    /// Ammunition was taken from the floor or from a live grenade; the parm is the weapon.
+    pub const AMMO_PICKUP: u8 = 0x0A;
     pub const NOAMMO: u8 = 0x0B;
     pub const EMPTY_OFFHAND: u8 = 0x0D;
     pub const RESET_ADS: u8 = 0x0E;

@@ -9,13 +9,11 @@
 
 use gsc::{EntClass, EntRef, Value, Vm};
 use sim::cm::{ENTITYNUM_NONE, ENTITYNUM_WORLD};
-use sim::contents;
-use sim::traj::{TrType, Trajectory};
-use sim::weapon::{InventoryType, WeaponType};
+use sim::weapon::WeaponType;
 
 use super::Impl::{self, Real};
 use super::{Args, FuncFn, MethFn};
-use crate::game::{Ent, EntKind, Game};
+use crate::game::Game;
 use crate::missile::{Attractor, Attractors, FL_GRENADE_TOUCH_DAMAGE};
 
 type R = Result<Value, String>;
@@ -138,83 +136,15 @@ fn drop_item(g: &mut Game, vm: &mut Vm, e: EntRef, a: Args) -> R {
     if !g.is_client(n) {
         return Err(format!("entity {n} is not a player"));
     }
-    let name = a.string(0)?;
-    let mut weapon = g.weapons.index(name);
+    let weapon = g.weapons.index(a.string(0)?);
     if weapon == 0 {
         return Ok(Value::Undefined);
     }
-    if let Some(info) = g.weapons.get(weapon)
-        && info.inventory_type == InventoryType::AltMode
-    {
-        let alt = info.alt_weapon;
-        if alt == 0 {
-            g.print(format!(
-                "Drop_Weapon(): Trying to drop alt-type weapon, \"{name}\", but it has no corresponding altWeapon set.\n"
-            ));
-            return Ok(Value::Undefined);
-        }
-        weapon = alt;
-    }
-    let (clip, stock, has) = {
-        let c = &g.clients[usize::from(n)];
-        (
-            c.inv.get_clip(&g.weapons, weapon),
-            c.inv.get_stock(&g.weapons, weapon),
-            c.inv.has(weapon),
-        )
-    };
-    let clip_only = g.weapons.info(weapon).clip_only;
-    let take = |g: &mut Game| {
-        let c = &mut g.clients[usize::from(n)];
-        c.inv.take(&g.weapons, &mut c.ps, weapon, true);
-    };
-    if !has || clip + stock == 0 || (clip_only && clip == 0) {
-        take(g);
-        return Ok(Value::Undefined);
-    }
-    take(g);
-
-    let item_name = format!("weapon_{}", g.weapons.name(weapon));
-    let mut item = Ent::new(EntKind::Item, &item_name);
-    if let Some(m) = g
-        .content
-        .weapon(g.weapons.name(weapon))
-        .and_then(|d| d.world_models.first().cloned().flatten())
-    {
-        item.model = m.name.as_deref().unwrap_or("").into();
-    }
-    let player = g.ent(n).ok_or("not an entity")?;
-    let (po, pa, height) = (
-        player.origin,
-        player.angles,
-        player.maxs[2] - player.mins[2],
-    );
-    let origin = [po[0], po[1], po[2] + height * 0.5];
-    // `g_dropForwardSpeed`, `g_dropUpSpeedBase`, `g_dropUpSpeedRand`, `g_dropHorzSpeedRand`.
-    let yaw = pa[1].to_radians();
-    let mut crandom = || g.random_f32() * 2.0 - 1.0;
-    let velocity = [
-        yaw.cos() * 10.0 + crandom() * 5.0,
-        yaw.sin() * 10.0 + crandom() * 5.0,
-        10.0 + crandom() * 5.0,
-    ];
-    item.origin = origin;
-    item.angles = [0.0, pa[1], 0.0];
-    item.mins = [-15.0; 3];
-    item.maxs = [15.0; 3];
-    item.contents = contents::ITEM;
-    item.count = clip;
-    item.owner = Some(n);
-    item.mv.pos.tr = Trajectory {
-        kind: TrType::Gravity,
-        time: g.level.time,
-        duration: 0,
-        base: origin,
-        delta: velocity,
-    };
-    let num = g.spawn(item)?;
-    g.relink(num);
-    Ok(g.entity_value(vm, num))
+    let model = g.clients[usize::from(n)].inv.model(weapon);
+    Ok(match g.drop_weapon(vm, n, weapon, model) {
+        Some(item) => g.entity_value(vm, item),
+        None => Value::Undefined,
+    })
 }
 
 fn create(g: &mut Game, a: &Args, attractor: bool, by_entity: bool) -> R {

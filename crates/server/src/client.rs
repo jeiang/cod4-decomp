@@ -13,7 +13,7 @@ use sim::Vec3;
 use sim::cm::ENTITYNUM_NONE;
 use sim::contents;
 use sim::pm::{self, PLAYER_MAXS, PLAYER_MINS, PlayerState, PmType, UserCmd, ev, pmf};
-use sim::weapon::PlayerWeapons;
+use sim::weapon::{OffhandClass, PlayerWeapons};
 
 use crate::bot::Brain;
 use crate::game::{Ent, EntKind, Game, ScriptCall, TRIGGER_HURT_CONTENTS};
@@ -610,6 +610,11 @@ impl Game {
                 let name = Value::str(self.weapons.name(u16::from(parm)));
                 vm.notify_entity(n, "grenade_pullback", &[name]);
             }
+            ev::SWITCH_OFFHAND
+                if self.weapons.info(u16::from(parm)).offhand_class == OffhandClass::Frag =>
+            {
+                self.attempt_live_grenade_pickup(vm, n);
+            }
             _ => {}
         }
         if (ev::LANDING_PAIN_FIRST..ev::LANDING_PAIN_FIRST + 28).contains(&event) {
@@ -663,7 +668,15 @@ impl Game {
             let Some(le) = self.world.as_ref().and_then(|w| w.entity(t)) else {
                 continue;
             };
-            let over = (0..3).all(|i| pmin[i] <= le.abs_max[i] && pmax[i] >= le.abs_min[i]);
+            let is_item = te.item.is_some();
+            let over = if is_item {
+                sim::weapon::pickup::player_touches_item(
+                    self.client(n).map_or([0.0; 3], |c| c.ps.origin),
+                    te.origin,
+                )
+            } else {
+                (0..3).all(|i| pmin[i] <= le.abs_max[i] && pmax[i] >= le.abs_min[i])
+            };
             if !over {
                 continue;
             }
@@ -671,6 +684,10 @@ impl Game {
             let (me, other) = (self.entity_value(vm, n), self.entity_value(vm, t));
             vm.notify_entity(t, "touch", std::slice::from_ref(&me));
             vm.notify_entity(n, "touch", &[other]);
+            if is_item {
+                self.touch_item(vm, n, t, true);
+                continue;
+            }
             match &*class {
                 "trigger_hurt" => self.hurt_touch(vm, t, n),
                 "trigger_multiple" | "trigger_radius" => vm.notify_entity(t, "trigger", &[me]),
