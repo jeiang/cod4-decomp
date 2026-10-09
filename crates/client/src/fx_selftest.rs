@@ -23,6 +23,8 @@ const EXPLOSION: &str = "explosions/grenadeexp_dirt_1";
 const VISION: &str = "mp_crash";
 /// A stock map whose puddles use the water simulation.
 const WATER_MAP: &str = "mp_farm";
+/// A stock map with destructible props.
+const PROPS_MAP: &str = "mp_bog";
 const SHOCK: &str = "concussion_grenade_mp";
 
 /// Plays `effects` from `from_ms` for `secs` seconds in 50 ms steps and returns (most sprites in one frame, most
@@ -456,11 +458,103 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     }
 
     water(install, &mut report, &mut bad);
+    destructible(install, &mut report, &mut bad);
 
     if bad.is_empty() {
         Ok(Value::Object(report))
     } else {
         Err(bad)
+    }
+}
+
+/// A stock map's destructible prop breaks under rifle fire and plays its destroy effect.
+fn destructible(
+    install: &Path,
+    report: &mut serde_json::Map<String, Value>,
+    bad: &mut Vec<String>,
+) {
+    use crate::props::Props;
+    use glam::{Quat, Vec3};
+    let lib = match Library::load(install, PROPS_MAP) {
+        Ok(l) => l,
+        Err(e) => return bad.push(format!("{PROPS_MAP}: {e}")),
+    };
+    let (Some(clipmap), Some(gun)) = (lib.content.clipmap(), lib.content.weapon(GUN).cloned())
+    else {
+        return bad.push(format!("{PROPS_MAP}: no collision data or {GUN}"));
+    };
+    let Some(def) = clipmap
+        .dyn_entities
+        .iter()
+        .flat_map(|l| l.iter())
+        .find(|d| d.kind == 2 && d.health > 0 && d.destroy_fx.is_some() && d.model.is_some())
+    else {
+        return bad.push(format!("{PROPS_MAP} has no destructible prop"));
+    };
+    let model = def.model.as_ref().expect("filtered");
+    let q = Quat::from_array(def.pose.quat).normalize();
+    let centre = (Vec3::from(model.mins) + Vec3::from(model.maxs)) / 2.0;
+    let target = Vec3::from(def.pose.origin) + q * centre;
+    let shots = (def.health / gun.damage.max(1) + 1) as usize;
+    // Another prop may stand in the way from one side: shoot from each of five sides until one clear one breaks it.
+    let mut happened = crate::props::Happened::default();
+    for (dir, angles) in [
+        (Vec3::X, [0.0, 0.0, 0.0]),
+        (Vec3::NEG_X, [0.0, 180.0, 0.0]),
+        (Vec3::Y, [0.0, 90.0, 0.0]),
+        (Vec3::NEG_Y, [0.0, 270.0, 0.0]),
+        (Vec3::Z, [89.0, 0.0, 0.0]),
+    ] {
+        let mut props = Props::new(&clipmap.dyn_entities);
+        for _ in 0..shots {
+            props.event(
+                &ClientEvent::WeaponFire {
+                    eye: (target - dir * 60.0).to_array(),
+                    angles,
+                    weapon: 1,
+                    shooter: 0,
+                    vehicle: false,
+                },
+                &|_| Some(gun.clone()),
+                &Open,
+            );
+        }
+        happened = props.take();
+        if !happened.fx.is_empty() {
+            break;
+        }
+    }
+    report.insert("props_destroy_fx".into(), json!(happened.fx.len()));
+    report.insert("props_impacts".into(), json!(happened.impacts.len()));
+    if happened.fx.is_empty() || happened.impacts.is_empty() {
+        bad.push(format!(
+            "shooting a {PROPS_MAP} destructible ({} health, {} damage) did not break it: {} impacts, {} destroy effects",
+            def.health,
+            gun.damage,
+            happened.impacts.len(),
+            happened.fx.len()
+        ));
+    }
+}
+
+/// A world with nothing in it.
+struct Open;
+
+impl Collide for Open {
+    fn trace(
+        &self,
+        _: [f32; 3],
+        _: [f32; 3],
+        _: [f32; 3],
+        _: [f32; 3],
+        _: u16,
+        _: i32,
+    ) -> sim::cm::Trace {
+        sim::cm::Trace::MISS
+    }
+
+    fn point_contents(&self, _: [f32; 3], _: u16, _: i32) -> i32 {
+        0
     }
 }
 

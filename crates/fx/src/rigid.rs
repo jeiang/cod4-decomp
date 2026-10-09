@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Parts translated from KisakCOD (physics/phys_ode.cpp: Phys_ObjCreate, Phys_ObjSetCollisionFromXModel, Phys_ObjBulletImpact,
-// Phys_TweakBulletImpact, the auto-disable thresholds; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Phys_TweakBulletImpact, Phys_PlayCollisionSound (the impact momentum), the auto-disable thresholds; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The PhysPreset rigid body the client simulates for effect models with `USE_MODEL_PHYSICS`, for the map's dynamic
 //! entities and for script models the server launched with `physicslaunch`. The original runs ODE; this is a small
 //! impulse solver with the same inputs: the preset's mass, bounce and friction, the model's physics geometry (its
@@ -30,6 +30,8 @@ const ITERATIONS: usize = 4;
 const MAX_ESCAPE: f32 = 64.0;
 /// Points on each rim of a cylinder.
 const RIM_POINTS: usize = 16;
+/// `phys_minImpactMomentum`: a hit with less momentum than this makes no sound.
+pub const MIN_IMPACT_MOMENTUM: f32 = 250.0;
 const BULLET_MASS: f32 = 0.5;
 /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
 const BULLET_UP_BIAS: f32 = 0.5;
@@ -164,14 +166,41 @@ fn escape_up(world: &dyn World, p: Vec3) -> Vec3 {
     p + Vec3::Z * MAX_ESCAPE
 }
 
+/// A hit hard enough to be heard (`Phys_PlayCollisionSound`): where, off which surface normal, and with what momentum.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Impact {
+    pub at: Vec3,
+    pub normal: Vec3,
+    pub momentum: f32,
+}
+
 struct Contact {
     n: Vec3,
     /// From the centre of mass to the point after the push out of the surface.
     r: Vec3,
     /// How fast the point was moving into the surface when it hit.
     approach: f32,
+    /// Where it touched the surface.
+    hit: Vec3,
     jn: f32,
     jt: f32,
+}
+
+/// `Phys_PlayCollisionSound`'s momentum test, plus one gate of ours: the hardest contact must approach faster than the
+/// bounce threshold, because this solver's resting contacts re-approach under gravity every step and would otherwise
+/// rattle (the original's contact velocities settle to zero).
+fn hit_of(contacts: &[Contact], mass: f32) -> Option<Impact> {
+    let loudest = contacts.iter().map(|c| c.approach).fold(0.0, f32::max);
+    if loudest <= BOUNCE_MIN_SPEED {
+        return None;
+    }
+    let n = contacts.len() as f32;
+    let momentum = contacts.iter().map(|c| c.approach).sum::<f32>() / n * mass;
+    (momentum >= MIN_IMPACT_MOMENTUM).then(|| Impact {
+        at: contacts.iter().map(|c| c.hit).sum::<Vec3>() / n,
+        normal: contacts[0].n,
+        momentum,
+    })
 }
 
 /// One simulated body.
@@ -194,6 +223,9 @@ pub struct Body {
     idle: f32,
     asleep: bool,
     contacts: Vec<Contact>,
+    /// The preset's `sndAliasPrefix`, which names the collision sounds.
+    sound: Option<Arc<str>>,
+    impact: Option<Impact>,
 }
 
 impl Body {
@@ -241,7 +273,21 @@ impl Body {
             idle: 0.0,
             asleep: false,
             contacts: Vec::new(),
+            sound: preset.snd_alias_prefix.clone().filter(|p| !p.is_empty()),
+            impact: None,
         }
+    }
+
+    /// The preset's collision sound prefix (`physics_wood`), if it has one.
+    pub fn sound_prefix(&self) -> Option<&Arc<str>> {
+        self.sound.as_ref()
+    }
+
+    /// The loud hit of the latest step, once: the average speed into the surfaces over the contacts, times the mass,
+    /// at least [`MIN_IMPACT_MOMENTUM`]. A body resting under gravity alone never qualifies (it is not approaching
+    /// faster than it bounces).
+    pub fn take_impact(&mut self) -> Option<Impact> {
+        self.impact.take()
     }
 
     /// The same body, spinning at `ang` radians per second about the world's axes.
@@ -364,17 +410,19 @@ impl Body {
             }
         }
         self.pos += shift;
-        for &(w1, _, n) in &hits {
+        for &(w1, hit, n) in &hits {
             let r = w1 + shift - self.pos;
             let approach = -(self.vel + self.ang.cross(r)).dot(n);
             contacts.push(Contact {
                 n,
                 r,
                 approach,
+                hit,
                 jn: 0.0,
                 jt: 0.0,
             });
         }
+        self.impact = hit_of(&contacts, self.mass);
         self.solve(&mut contacts);
         self.contacts = contacts;
 
@@ -607,5 +655,32 @@ mod tests {
         assert!((4.5..5.5).contains(&boxed), "{boxed}");
         let rolled = rest(geom(4, [12.0, 4.0, 4.0]));
         assert!((3.5..4.5).contains(&rolled), "{rolled}");
+    }
+    #[test]
+    fn only_a_hard_heavy_hit_is_loud_and_resting_is_silent() {
+        let loud = |mass: f32, drop: f32| {
+            let s = shape([-5.0; 3], [5.0; 3], None);
+            let mut b = Body::new(
+                &preset(mass, 0.0, 0.5),
+                &s,
+                Vec3::new(0.0, 0.0, drop),
+                AXES,
+                Vec3::ZERO,
+            );
+            let mut heard = Vec::new();
+            for _ in 0..180 {
+                b.step(1.0 / 60.0, &Floor);
+                heard.extend(b.take_impact());
+            }
+            heard
+        };
+        let heavy = loud(20.0, 100.0);
+        assert_eq!(heavy.len(), 1, "one landing, then rest: {heavy:?}");
+        assert!(heavy[0].momentum > MIN_IMPACT_MOMENTUM && heavy[0].normal == Vec3::Z);
+        assert!(loud(0.1, 100.0).is_empty(), "too light to hear");
+        assert!(
+            loud(20.0, 5.6).is_empty(),
+            "a body that is barely falling lands silently"
+        );
     }
 }
