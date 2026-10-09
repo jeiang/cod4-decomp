@@ -2408,6 +2408,27 @@ fn tour_step(
     let Some(sh) = shell else { return true };
     if t.frames == 0 {
         sh.close_all(input);
+        // The tour has no match, so the scoreboard would draw only its header: hold it up over synthetic rows.
+        sh.st.scores_forced = t.menus.get(t.index) == Some(&"scoreboard");
+        sh.st.live.own_team = 2;
+        sh.st.live.active = sh.st.scores_forced;
+        sh.st.in_game = sh.st.scores_forced;
+        sh.st.live.scores = if sh.st.scores_forced {
+            (0..12)
+                .map(|i| crate::hud::ScoreLine {
+                    client: i,
+                    name: format!("Player{i}"),
+                    team: if i % 2 == 0 { 2 } else { 1 },
+                    score: 100 - i32::from(i) * 7,
+                    kills: 10 - i32::from(i) / 2,
+                    deaths: i32::from(i) / 3,
+                    ping: 30 + i32::from(i),
+                    ..Default::default()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         match t.menus.get(t.index) {
             Some(m) => sh.open(input, m),
             None => return true,
