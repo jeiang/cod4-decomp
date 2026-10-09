@@ -884,6 +884,7 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
         pending: Vec::new(),
         eye: [0.0; 3],
         footsteps: true,
+        missile_loops: HashSet::new(),
     };
     let none = |_: u16| None;
     let mut seq = 0u8;
