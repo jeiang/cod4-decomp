@@ -106,6 +106,12 @@ impl NetPlay {
         h.now = now;
         h.own_client = own;
         h.team_known = matches!(team, 1 | 2);
+        h.team_spectator = team == 3;
+        // Nothing says what team the player is on yet: not even "no team", so nobody is an enemy.
+        h.team_valid = snap
+            .entity(own)
+            .is_some_and(|e| team_of(e.eflags).is_some())
+            || ui.client(own).is_some();
         h.pm_dead = dead;
         h.radar_enabled = ps.radar_enabled;
         h.spectator = ps.pm_type == PmType::Spectator;
@@ -282,7 +288,18 @@ impl NetPlay {
             .snaps
             .interpolate(server_time - net::view::INTERP_DELAY_MS, Some(own));
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
+            // The dead are not on the radar; they leave the compass at once.
             if e.eflags & eflags::DEAD != 0 {
+                h.actors.remove(&e.client);
+                continue;
+            }
+            if self
+                .net
+                .ui_ref()
+                .and_then(|ui| ui.client(e.client))
+                .is_some_and(|c| c.team == 3)
+            {
+                h.actors.remove(&e.client);
                 continue;
             }
             let theirs = team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 });

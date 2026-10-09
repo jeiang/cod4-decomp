@@ -368,8 +368,8 @@ pub struct MatchStats {
 pub struct Game {
     /// `setMiniMap`: the map's world size along its axes, north's direction and the upper left corner (location picks).
     pub compass: Option<[f32; 6]>,
-    /// `setteamradar`: whether the axis and the allies have radar (`level.teamHasRadar`).
-    pub team_radar: [bool; 2],
+    /// `setteamradar`: whether the players with no team, the axis and the allies have radar (`level.teamHasRadar`).
+    pub team_radar: [bool; 3],
     pub vote: crate::vote::VoteState,
     pub cvars: Cvars,
     pub content: Content,
@@ -482,7 +482,7 @@ impl Game {
             nav_goals: Vec::new(),
             vote: Default::default(),
             compass: None,
-            team_radar: [false; 2],
+            team_radar: [false; 3],
             nav_loads: Vec::new(),
             hitloc_table: default_hitloc_table(),
             weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),

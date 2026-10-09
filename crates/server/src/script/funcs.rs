@@ -1357,13 +1357,23 @@ fn set_team_score(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
+/// The index into `Game::team_radar`: `none` (free-for-all players), `axis` or `allies`.
+fn radar_team(a: Args) -> Result<usize, String> {
+    match a.string(0)? {
+        "none" => Ok(0),
+        "axis" => Ok(1),
+        "allies" => Ok(2),
+        t => Err(format!("team '{t}' is not none, allies or axis")),
+    }
+}
+
 fn set_team_radar(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    g.team_radar[team_index(a)? - 1] = a.int(1)? != 0;
+    g.team_radar[radar_team(a)?] = a.int(1)? != 0;
     Ok(Value::Undefined)
 }
 
 fn get_team_radar(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    Ok(Value::Int(i32::from(g.team_radar[team_index(a)? - 1])))
+    Ok(Value::Int(i32::from(g.team_radar[radar_team(a)?])))
 }
 
 #[cfg(test)]

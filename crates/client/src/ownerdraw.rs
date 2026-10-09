@@ -1306,7 +1306,11 @@ fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
 /// `g_compassShowEnemies`.
 fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
     let a = if full { 1.0 } else { compass_alpha(dc, h) };
-    let Some(map) = h.map.clone().filter(|_| a > 0.0 && !h.spectator) else {
+    let Some(map) = h
+        .map
+        .clone()
+        .filter(|_| a > 0.0 && !h.spectator && !h.team_spectator && h.team_valid)
+    else {
         return;
     };
     let fade_ms = dc.cfg.radar_ping_fade * 1000.0;

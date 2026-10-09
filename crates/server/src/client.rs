@@ -888,9 +888,10 @@ impl Game {
         self.client(n).is_some_and(|c| {
             c.has_radar
                 || match c.team {
-                    Team::Axis => self.team_radar[0],
-                    Team::Allies => self.team_radar[1],
-                    _ => false,
+                    Team::Free => self.team_radar[0],
+                    Team::Axis => self.team_radar[1],
+                    Team::Allies => self.team_radar[2],
+                    Team::Spectator => false,
                 }
         })
     }
@@ -1088,7 +1089,7 @@ mod spectate_tests {
     fn radar_follows_the_team_flag_or_the_players_own() {
         let mut g = game();
         assert!(!(0..5).any(|n| g.client_radar(n)));
-        g.team_radar[0] = true;
+        g.team_radar[1] = true;
         // Axis: clients 2 and 4.
         assert_eq!(
             (0..5).filter(|&n| g.client_radar(n)).collect::<Vec<_>>(),
@@ -1096,10 +1097,23 @@ mod spectate_tests {
         );
         g.clients[1].has_radar = true;
         assert!(g.client_radar(1), "a player's own radar needs no team flag");
-        g.team_radar[0] = false;
+        g.team_radar[1] = false;
         assert_eq!(
             (0..5).filter(|&n| g.client_radar(n)).collect::<Vec<_>>(),
             [1]
+        );
+    }
+
+    #[test]
+    fn the_no_team_radar_covers_free_players_but_not_spectators() {
+        let mut g = game();
+        g.clients[1].team = Team::Free;
+        g.clients[3].team = Team::Spectator;
+        g.team_radar[0] = true;
+        assert_eq!(
+            (0..5).filter(|&n| g.client_radar(n)).collect::<Vec<_>>(),
+            [0, 1],
+            "client 0 has no team yet"
         );
     }
 

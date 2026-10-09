@@ -378,6 +378,9 @@ pub struct HudFacts {
     /// The player's own client number, and whether their team is known (a spectator has no friends).
     pub own_client: u16,
     pub team_known: bool,
+    /// The player is on the spectator team; and whether any team (or none) is known for them at all.
+    pub team_spectator: bool,
+    pub team_valid: bool,
     pub origin: [f32; 3],
     /// View yaw in degrees.
     pub yaw: f32,
