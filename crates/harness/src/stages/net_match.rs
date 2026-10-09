@@ -44,7 +44,6 @@ struct Rules {
     clipmap: Arc<assets::zone::clipmap::Clipmap>,
     weapons: WeaponTable,
     params: Params,
-    speed: i32,
 }
 
 #[derive(Default)]
@@ -193,7 +192,6 @@ fn client(
                 world: boxes.world(),
                 weapons: &rules.weapons,
                 params: &rules.params,
-                speed: rules.speed,
                 time: cmd.server_time,
             };
             let before = pred.corrections;
@@ -343,6 +341,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         "set g_gametype war",
         "set scr_war_timelimit 0",
         "set scr_war_scorelimit 0",
+        // Movement rules other than the stock ones: a client that assumed g_speed 190 or the stock jump and
+        // friction would be corrected on every snapshot, which the corrections check below catches.
+        "set g_speed 250",
+        "set jump_height 45",
+        "set friction 6",
         "set sv_mapRotation \"gametype war map mp_crash\"",
         "map mp_crash",
     ] {
@@ -363,7 +366,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         clipmap,
         weapons: server.game.weapons.clone(),
         params: server.game.pm_params.clone(),
-        speed: server.game.cvars.int("g_speed"),
     };
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicUsize::new(0));

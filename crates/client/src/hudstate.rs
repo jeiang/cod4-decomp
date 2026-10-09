@@ -418,7 +418,6 @@ pub struct HudFacts {
     pub prev_health: i32,
     pub prev_stance: Option<Stance>,
     pub prev_weapon: u16,
-    pub prev_event_seq: u8,
     pub prev_sprint_left: i32,
     /// Weapon, magazine and reserve.
     pub prev_ammo: (u16, i32, i32),

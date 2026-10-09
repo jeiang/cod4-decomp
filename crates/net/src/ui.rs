@@ -41,6 +41,9 @@ pub mod cs {
     pub const SERVERINFO: u16 = 0;
     /// The variables flagged `SYSTEMINFO` (`sv_cheats`, `sv_serverid`, ...).
     pub const SYSTEMINFO: u16 = 1;
+    /// The movement tunables that are not stock, as an info string (`sim::pm::Params::info_diff`), so the client's
+    /// prediction moves as the server does.
+    pub const MOVEMENT: u16 = 2;
     /// Names of the variables flagged `CODINFO` and, from [`CODINFO_VALUE`], their values.
     pub const CODINFO: u16 = 20;
     pub const CODINFO_COUNT: u16 = 128;

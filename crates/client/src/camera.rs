@@ -52,6 +52,8 @@ impl From<&WeaponDef> for WeaponView {
 pub struct Frame<'a> {
     /// The predicted state, its origin the feet (the prediction error already added).
     pub ps: &'a PlayerState,
+    /// The own events no earlier frame delivered ([`net::predict::Predicted::events`]), oldest first.
+    pub events: &'a [(u8, u8)],
     /// Milliseconds on the client's clock.
     pub now: i32,
     pub weapon: Option<WeaponView>,
@@ -84,8 +86,6 @@ struct Dip {
 #[derive(Debug, Clone, Default)]
 pub struct Camera {
     dip: Option<Dip>,
-    /// `event_sequence` already looked at; `None` until the first state.
-    seen: Option<u8>,
     /// Landings that started a dip, for the report.
     pub landings: u64,
 }
@@ -99,16 +99,11 @@ impl Camera {
         };
     }
 
-    /// The views of the effect of the landings the state has had since the last call: `LANDING` events start a dip
-    /// of the event's depth, and a hard landing (`LANDING_PAIN`) one by the height fallen.
-    fn landings(&mut self, ps: &PlayerState, now: i32, params: &Params) {
-        let seen = self.seen.replace(ps.event_sequence);
-        let Some(seen) = seen else { return };
-        // Of the four the state keeps, those since `seen`.
-        let new = ps.event_sequence.wrapping_sub(seen).min(4);
-        for k in (1..=new).rev() {
-            let n = usize::from(ps.event_sequence.wrapping_sub(k) & 3);
-            let (event, parm) = (ps.events[n], f32::from(ps.event_parms[n]));
+    /// The effect of the landings among `events` on the view: `LANDING` events start a dip of the event's depth,
+    /// and a hard landing (`LANDING_PAIN`) one by the height fallen.
+    fn landings(&mut self, events: &[(u8, u8)], now: i32, params: &Params) {
+        for &(event, parm) in events {
+            let parm = f32::from(parm);
             let soft = (ev::LANDING_FIRST + 1..=ev::LANDING_FIRST + 28).contains(&event);
             let hard = (ev::LANDING_PAIN_FIRST + 1..=ev::LANDING_PAIN_FIRST + 28).contains(&event);
             if soft {
@@ -169,14 +164,13 @@ impl Camera {
     /// `CG_OffsetFirstPersonView` for one frame. Nothing changes for a dead player, in a turret or at the
     /// intermission, and the landings still count then.
     pub fn view(&mut self, f: &Frame<'_>) -> View {
-        self.landings(f.ps, f.now, f.params);
+        self.landings(f.events, f.now, f.params);
         self.offsets(f)
     }
 
-    /// The same for the view of a player being watched: their state is the snapshot's, so no landing is read from
-    /// its events (and the ones on the ring when the watching ends are not mistaken for new).
+    /// The same for the view of a player being watched: their state is the snapshot's, so no landing is read and
+    /// the own dip is dropped.
     pub fn follow(&mut self, f: &Frame<'_>) -> View {
-        self.seen = None;
         self.dip = None;
         self.offsets(f)
     }
@@ -254,6 +248,7 @@ mod tests {
     fn frame<'a>(ps: &'a PlayerState, params: &'a Params) -> Frame<'a> {
         Frame {
             ps,
+            events: &[],
             now: 1000,
             weapon: None,
             aim: [0.0, 0.0],
@@ -359,14 +354,6 @@ mod tests {
         assert_eq!(Camera::default().view(&f).offset[2], MIN_EYE - 11.0);
     }
 
-    fn with_event(ps: &PlayerState, seq: u8, event: u8, parm: u8) -> PlayerState {
-        let mut p = ps.clone();
-        p.events[usize::from(seq & 3)] = event;
-        p.event_parms[usize::from(seq & 3)] = parm;
-        p.event_sequence = seq.wrapping_add(1);
-        p
-    }
-
     #[test]
     fn a_landing_dips_the_view_and_brings_it_back() {
         let params = Params::default();
@@ -376,11 +363,12 @@ mod tests {
         };
         let mut cam = Camera::default();
         let mut f = frame(&calm, &params);
-        assert_eq!(cam.view(&f).dip, 0.0, "old events are not landings");
-        let landed = with_event(&calm, 0, ev::LANDING_FIRST + 5, 8);
-        f.ps = &landed;
+        assert_eq!(cam.view(&f).dip, 0.0);
+        let landing = [(ev::LANDING_FIRST + 5, 8)];
+        f.events = &landing;
         f.now = 1000;
         assert_eq!(cam.view(&f).dip, 0.0);
+        f.events = &[];
         f.now = 1075;
         assert!((cam.view(&f).dip + 4.0).abs() < 1e-4);
         f.now = 1150;
@@ -389,9 +377,7 @@ mod tests {
         assert!((cam.view(&f).dip + 4.0).abs() < 1e-4);
         f.now = 1450;
         assert_eq!(cam.view(&f).dip, 0.0);
-        // The same state again is not a second landing.
-        f.now = 1460;
-        assert_eq!(cam.view(&f).dip, 0.0);
+        assert_eq!(cam.landings, 1, "one landing, one dip");
     }
 
     #[test]
@@ -403,11 +389,11 @@ mod tests {
         };
         let mut cam = Camera::default();
         let mut f = frame(&calm, &params);
-        cam.view(&f);
-        let hurt = with_event(&calm, 0, ev::LANDING_PAIN_FIRST + 5, 100);
-        f.ps = &hurt;
+        let hurt = [(ev::LANDING_PAIN_FIRST + 5, 100)];
+        f.events = &hurt;
         f.now = 2000;
         cam.view(&f);
+        f.events = &[];
         // 300 units fallen: (300 - 12) / 26 * 4 + 4 = 48, capped at 24.
         f.now = 2000 + DIP_DOWN_MS;
         assert_eq!(cam.view(&f).dip, -24.0);
@@ -467,20 +453,22 @@ mod tests {
     }
 
     #[test]
-    fn a_landing_before_a_follow_is_not_a_new_one_after_it() {
+    fn a_watched_players_view_drops_the_dip_and_reads_no_events() {
         let params = Params::default();
         let calm = PlayerState {
             velocity: [0.0; 3],
             ..walking()
         };
         let mut cam = Camera::default();
+        let landing = [(ev::LANDING_FIRST + 5, 8)];
         let mut f = frame(&calm, &params);
+        f.events = &landing;
         cam.view(&f);
-        let landed = with_event(&calm, 0, ev::LANDING_FIRST + 5, 8);
-        f.ps = &landed;
+        f.events = &[];
+        f.now = 1075;
+        assert!(cam.view(&f).dip < 0.0);
         cam.follow(&f);
-        f.now = 1100;
-        assert_eq!(cam.view(&f).dip, 0.0, "the watched landing replayed");
+        assert_eq!(cam.view(&f).dip, 0.0, "the dip belongs to the own view");
     }
 
     #[test]

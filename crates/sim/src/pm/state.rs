@@ -66,6 +66,9 @@ pub mod pmf {
 
 /// `eFlags` bits player movement reads or writes.
 pub mod ef {
+    /// `EF_TELEPORT_BIT`: flipped each time the server moves the player (a spawn, `setorigin`), so the client
+    /// shows the move as a jump instead of sliding to it.
+    pub const TELEPORT_BIT: u32 = 0x2;
     pub const CROUCH: u32 = 0x4;
     pub const PRONE: u32 = 0x8;
     pub const FIRING: u32 = 0x40;

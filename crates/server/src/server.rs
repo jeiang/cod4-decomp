@@ -300,6 +300,10 @@ fn register_core_dvars(c: &mut Cvars) {
     for (n, d) in crate::missile::MISSILE_CVARS {
         c.register(n, d, CHEAT);
     }
+    // The movement dvars (`jump_height`, `friction`, ...): cheat protected, replicated to the clients.
+    for (n, d) in sim::pm::Params::dvars() {
+        c.register(n, &d, CHEAT);
+    }
 }
 
 /// What one `map_rotate` does with the rotation.
