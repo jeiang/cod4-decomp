@@ -187,8 +187,6 @@ pub struct Server {
     pub level_loads: u32,
     pub boot_ms: f64,
     pub ticks: u64,
-    /// Bots wanted on every map (`bots N`); they join again after a map change.
-    bot_target: usize,
     bot_serial: u32,
     bot_shared: BotShared,
     /// While set, console output is collected here instead of printed (`rcon` replies).
@@ -230,6 +228,8 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_mantleBlockTimeBuffer", "500", 0),
         ("g_lagcomp", "1", 0),
         ("bot_idle", "0", 0),
+        // Bots on every map; the listen server's player sets it, and a `bots` command sets it too.
+        ("bot_count", "0", 0),
         ("g_allowvote", "1", 0),
         ("g_deadChat", "0", 0),
         ("sv_floodProtect", "1", 0),
@@ -481,7 +481,6 @@ impl Server {
             level_loads: 0,
             boot_ms: 0.0,
             ticks: 0,
-            bot_target: 0,
             bot_serial: 0,
             bot_shared: BotShared::default(),
             redirect: None,
@@ -1644,8 +1643,9 @@ impl Server {
                     .map(cvar::parse_int)
                     .ok_or("usage: bots <count>")?
                     .clamp(0, 64) as usize;
-                self.bot_target = self.bot_target.max(n);
-                self.add_bots(n)?;
+                // The variable is the one count: the map starts that follow read it.
+                self.game.cvars.set("bot_count", &n.to_string());
+                self.set_bots(n)?;
             }
             // Test hook: `devkill <victim> <attacker>` has the attacker's rifle kill the victim.
             "devkill" => {
@@ -2014,8 +2014,9 @@ impl Server {
                 net.notify(peer.link.addr, why);
             }
         }
-        if self.bot_target > 0 {
-            self.add_bots(self.bot_target)?;
+        let wanted = self.game.cvars.int("bot_count").clamp(0, 64) as usize;
+        if wanted > 0 {
+            self.set_bots(wanted)?;
         }
         self.map_load_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let errs = self.script_errors.len();
@@ -2361,7 +2362,33 @@ impl Server {
         s
     }
 
-    /// `bots N`: joins `n` test clients. Each connects, begins, and a script thread picks
+    /// `bots N`: brings the bots on the server to `n`, kicking the last ones that joined or adding more.
+    fn set_bots(&mut self, n: usize) -> Result<(), String> {
+        let bots: Vec<u16> = self
+            .game
+            .connected_clients()
+            .filter(|(s, c)| c.bot && !self.game.pending_free.contains(s))
+            .map(|(s, _)| s)
+            .collect();
+        if bots.len() < n {
+            return self.add_bots(n - bots.len());
+        }
+        let Some(run) = self.run.as_mut() else {
+            return Err("Server is not running.".into());
+        };
+        let mut host = ScriptHost {
+            game: &mut self.game,
+            dispatch: &run.dispatch,
+        };
+        for slot in bots.into_iter().skip(n) {
+            host.game.disconnect_client(&mut run.vm, slot);
+            host.run_calls(&mut run.vm);
+        }
+        self.flush_game_output();
+        Ok(())
+    }
+
+    /// Joins `n` test clients. Each connects, begins, and a script thread picks
     /// the team and class like a player at the menus.
     fn add_bots(&mut self, n: usize) -> Result<(), String> {
         let Some(run) = self.run.as_mut() else {

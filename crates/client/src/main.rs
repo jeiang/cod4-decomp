@@ -92,7 +92,7 @@ usage: cod4e [options]
   --input-selftest       check key binds, mouse look and the config file without a window, then exit (harness stage)
   --listen               play a team deathmatch against bots on a server started inside this process
   --gametype <name>      gametype of the --listen server (war, dm, dom, koth, sab, sd; default war with no limits)
-  --bots <n>             bots on the listen server (default 9)
+  --bots <n>             bots on the listen server (default none; the bot_count setting says when this is not given)
   --connect <host:port>  play on a server (see cod4e-server)
   --name <name>          player name on the server
   --no-sound             mix the sound without opening a sound card
@@ -143,7 +143,7 @@ pub struct Cli {
     pub connect: Option<String>,
     /// Play on a server started inside this process.
     pub listen: bool,
-    pub bots: usize,
+    pub bots: Option<usize>,
     pub gametype: Option<String>,
     pub name: String,
     /// A scripted player instead of the keyboard (harness): walks, aims at and shoots enemies for `--duration`.
@@ -207,7 +207,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         show_models: None,
         connect: None,
         listen: false,
-        bots: 9,
+        bots: None,
         gametype: None,
         name: "player".into(),
         autoplay: false,
@@ -281,7 +281,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             }
             "--connect" => c.connect = Some(val(a)?),
             "--listen" => c.listen = true,
-            "--bots" => c.bots = val(a)?.parse().map_err(|_| "bad bot count")?,
+            "--bots" => c.bots = Some(val(a)?.parse().map_err(|_| "bad bot count")?),
             "--name" => c.name = val(a)?,
             "--autoplay" => c.autoplay = true,
             "--fx-demo" => c.fx_demo = Some(val(a)?),
@@ -411,6 +411,12 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn a_listen_server_has_no_bots_unless_asked() {
+        assert_eq!(parse(&args("--listen")).unwrap().bots, None);
+        assert_eq!(parse(&args("--listen --bots 4")).unwrap().bots, Some(4));
     }
 
     #[test]

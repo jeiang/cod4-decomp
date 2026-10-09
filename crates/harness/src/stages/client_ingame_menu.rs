@@ -44,7 +44,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         install,
         &ctx.dir,
         &ctx.dir.join("config"),
-        &[],
+        &["--bots", "9"],
         STEPS,
         Duration::from_secs(300),
     ) {
