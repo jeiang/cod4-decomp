@@ -7,7 +7,7 @@
 //! surface type a column; flesh has its own four columns (body or head, fatal or not).
 
 use crate::decal::{self, Placement};
-use crate::events::ClientEvent;
+use crate::events::{ClientEvent, Events};
 use crate::viewmodel::ViewTags;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
 use assets::zone::gfx::Material;
@@ -79,6 +79,7 @@ pub struct Effects {
     sweep: Option<(u64, Frame, i32)>,
     /// The script effect entities, by entity number.
     world_fx: HashMap<u16, WorldFx>,
+    world_fx_stamp: u32,
     /// The client number of this player and the gun in their hands, for the first-person flash.
     own: u16,
     view: Option<ViewTags>,
@@ -103,9 +104,23 @@ struct WorldFx {
     handle: Option<u64>,
     /// When a looped effect restarts next.
     next: i32,
-    /// The last trigger of a `spawnfx` effect acted on, and the time a trigger waits for.
+    /// The last trigger of a `spawnfx` effect acted on, and the server time the pending one plays at.
     seen: u8,
-    due: Option<i32>,
+    start: Option<i32>,
+    /// The update that last saw the entity.
+    stamp: u32,
+}
+
+/// Looping script effects do not start while this many elements are alive: the rest is for the effects of play.
+const LOOP_BUDGET: usize = 4500;
+
+/// Where and how a script effect entity plays.
+fn world_fx_frame(e: &EntityState) -> Frame {
+    let (f, r, u) = sim::pm::math::angle_vectors(&e.angles);
+    Frame {
+        origin: Vec3::from(e.origin),
+        axis: [Vec3::from(f), -Vec3::from(r), Vec3::from(u)],
+    }
 }
 
 /// What to draw this frame.
@@ -135,6 +150,7 @@ impl Effects {
             marks: HashMap::new(),
             missiles: HashMap::new(),
             world_fx: HashMap::new(),
+            world_fx_stamp: 0,
             clock: 0,
             sweep: None,
             own: u16::MAX,
@@ -368,78 +384,85 @@ impl Effects {
     }
 
     /// Keeps the script effect entities of the newest snapshot playing (`CG_Fx`, `CG_LoopFx`): a looped effect starts
-    /// when its entity is first seen near `eye` and restarts every period; a triggered one plays once per trigger,
-    /// after the trigger's delay; an entity that is gone stops its effect. `name` gives the name of an effect index.
-    pub fn world_fx(
-        &mut self,
-        ents: &[EntityState],
-        name: &dyn Fn(u16) -> Option<String>,
-        eye: Vec3,
-        now: i32,
-    ) {
-        let mut present = HashSet::new();
+    /// when its entity is in range of `eye` and restarts every period (it is stopped beyond its cull distance, and
+    /// not started while the effects are near their element budget); a triggered one plays once per trigger, from the
+    /// moment the trigger names even if that is already past (a client that joined late sees the end of it); an
+    /// entity that is gone stops its effect. `names` gives the effect names by index.
+    pub fn world_fx(&mut self, ents: &[EntityState], names: &Events, eye: Vec3, now: i32) {
+        self.world_fx_stamp = self.world_fx_stamp.wrapping_add(1);
+        let stamp = self.world_fx_stamp;
         for e in ents {
             let looped = e.etype == etype::LOOP_FX;
             if !looped && e.etype != etype::FX {
                 continue;
             }
-            present.insert(e.number);
-            let Some(def) = name(e.model)
-                .and_then(|n| self.fx.library().get(&n).cloned())
-                .map(|d| self.resolve(&d))
-            else {
-                if let Some(n) = name(e.model) {
-                    self.missing.insert(n);
-                }
-                continue;
-            };
-            let (f, r, u) = sim::pm::math::angle_vectors(&e.angles);
-            let frame = Frame {
-                origin: Vec3::from(e.origin),
-                axis: [Vec3::from(f), -Vec3::from(r), Vec3::from(u)],
-            };
             let w = self.world_fx.entry(e.number).or_insert(WorldFx {
                 handle: None,
                 next: 0,
                 seen: 0,
-                due: None,
+                start: None,
+                stamp,
             });
+            w.stamp = stamp;
+            // An effect the pool evicted is not playing any more.
+            if w.handle.is_some_and(|id| !self.fx.is_live(id)) {
+                w.handle = None;
+            }
+            let origin = Vec3::from(e.origin);
             if looped {
                 let cull = e.velocity[0];
-                if cull != 0.0 && Vec3::from(e.origin).distance(eye) >= cull {
+                if cull != 0.0 && origin.distance(eye) >= cull {
+                    if let Some(id) = w.handle.take() {
+                        self.fx.stop(id);
+                    }
                     continue;
                 }
                 let period = i32::try_from(e.pm_flags).unwrap_or(i32::MAX).max(1);
                 match w.handle {
                     Some(id) => {
+                        // After a stall, skip to now rather than replaying every missed period.
+                        if now.wrapping_sub(w.next) >= period.saturating_mul(4) {
+                            w.next = now;
+                        }
                         while now >= w.next {
                             if !self.fx.retrigger(id, w.next) {
+                                w.handle = None;
                                 break;
                             }
                             w.next += period;
                         }
                     }
-                    None => {
+                    None if self.fx.live_elems() < LOOP_BUDGET => {
+                        let Some(def) = self.world_fx_def(names, e.model) else {
+                            continue;
+                        };
+                        let frame = world_fx_frame(e);
+                        let w = self.world_fx.get_mut(&e.number).expect("just inserted");
                         w.handle = Some(self.fx.play_attached(&def, frame));
                         w.next = now + period;
                         *self.played.entry("looped_fx").or_default() += 1;
                     }
+                    None => {}
                 }
             } else {
                 if e.event_seq != w.seen {
                     w.seen = e.event_seq;
-                    w.due = Some(now + i32::try_from(e.pm_flags).unwrap_or(0));
+                    // The low 24 bits of the server time it plays at, read as the nearest such time to now.
+                    let d = ((e.eflags.wrapping_sub(now as u32) << 8) as i32) >> 8;
+                    w.start = Some(now.wrapping_add(d));
                 }
-                if w.due.is_some_and(|d| now >= d) {
-                    w.due = None;
-                    self.fx.play(&def, frame);
-                    *self.played.entry("triggered_fx").or_default() += 1;
+                if let Some(start) = w.start.filter(|s| now >= *s) {
+                    w.start = None;
+                    if let Some(def) = self.world_fx_def(names, e.model) {
+                        self.fx.play_at(&def, world_fx_frame(e), start);
+                        *self.played.entry("triggered_fx").or_default() += 1;
+                    }
                 }
             }
         }
         let fx = &mut self.fx;
-        self.world_fx.retain(|n, w| {
-            let keep = present.contains(n);
+        self.world_fx.retain(|_, w| {
+            let keep = w.stamp == stamp;
             if !keep && let Some(id) = w.handle {
                 fx.stop(id);
             }
@@ -447,11 +470,25 @@ impl Effects {
         });
     }
 
+    /// The definition of effect `index`, noting the name when the content lacks it.
+    fn world_fx_def(&mut self, names: &Events, index: u16) -> Option<Arc<FxEffectDef>> {
+        let name = names.fx_name(usize::from(index))?;
+        match self.fx.library().get(name).cloned() {
+            Some(d) => Some(self.resolve(&d)),
+            None => {
+                if !self.missing.contains(name) {
+                    self.missing.insert(name.to_owned());
+                }
+                None
+            }
+        }
+    }
+
     /// Looping script effects playing now.
     pub fn looped_fx(&self) -> usize {
         self.world_fx
             .values()
-            .filter(|w| w.handle.is_some())
+            .filter(|w| w.handle.is_some_and(|id| self.fx.is_live(id)))
             .count()
     }
 

@@ -668,12 +668,12 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                     Some(WorldFx::Once {
                         effect,
                         triggers,
-                        delay_ms,
+                        start_ms,
                     }) => {
                         s.etype = etype::FX;
                         s.model = effect;
                         s.event_seq = triggers;
-                        s.pm_flags = delay_ms;
+                        s.eflags = start_ms as u32 & 0xff_ffff;
                     }
                     Some(WorldFx::Looped {
                         effect,

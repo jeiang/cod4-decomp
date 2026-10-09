@@ -188,12 +188,12 @@ pub struct Ent {
 /// What a script effect entity tells the clients to play (`ET_FX`, `ET_LOOP_FX`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WorldFx {
-    /// `spawnfx`: played once for each `triggerfx`; `triggers` counts them (wrapping, never back to 0), `delay_ms` is
-    /// the latest one's delay.
+    /// `spawnfx`: played once for each `triggerfx`; `triggers` counts them (wrapping, never back to 0), `start_ms`
+    /// is the level time the latest one plays at (its call plus its delay).
     Once {
         effect: u16,
         triggers: u8,
-        delay_ms: u32,
+        start_ms: i32,
     },
     /// `playloopedfx`: restarted every `period_ms`, for whoever is within `cull` units (0 for everyone).
     Looped {
@@ -534,15 +534,16 @@ impl Game {
     /// `G_Spawn`: the lowest free slot from [`FIRST_SPAWNED`], growing the table on demand.
     pub fn spawn(&mut self, ent: Ent) -> Result<u16, String> {
         let first = FIRST_SPAWNED.max(self.max_clients);
+        // The slots from `tempev::FIRST` up carry the one-shot events in snapshots: entities stop short of them.
+        let limit = usize::from(crate::tempev::FIRST);
         let slot = (first..self.ents.len())
             .find(|&i| self.ents[i].is_none())
-            .unwrap_or_else(|| {
-                let n = self.ents.len().max(first);
-                self.ents.resize(n + 1, None);
-                n
-            });
-        if slot >= usize::from(ENTITYNUM_WORLD) {
+            .unwrap_or_else(|| self.ents.len().max(first));
+        if slot >= limit {
             return Err("G_Spawn: no free entities".into());
+        }
+        if slot >= self.ents.len() {
+            self.ents.resize(slot + 1, None);
         }
         self.ents[slot] = Some(ent);
         self.level.num_entities = self.level.num_entities.max(slot + 1);

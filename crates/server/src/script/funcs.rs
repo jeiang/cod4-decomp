@@ -988,7 +988,7 @@ fn spawn_fx(g: &mut Game, vm: &mut Vm, a: Args) -> R {
     e.world_fx = Some(WorldFx::Once {
         effect: index.clamp(0, 1023) as u16,
         triggers: 0,
-        delay_ms: 0,
+        start_ms: 0,
     });
     let n = g.spawn(e)?;
     Ok(g.entity_value(vm, n))
@@ -1031,16 +1031,17 @@ fn trigger_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
     }
     let n = a.entity(0)?.num;
     let delay = if a.len() == 2 {
-        sim::pm::math::snap_to_int(a.float(1)? * 1000.0).clamp(0, (1 << 21) - 1) as u32
+        sim::pm::math::snap_to_int(a.float(1)? * 1000.0).clamp(0, 1 << 22)
     } else {
         0
     };
+    let now = g.level.time;
     match g.ent_mut(n).map(|e| &mut e.world_fx) {
         Some(Some(WorldFx::Once {
-            triggers, delay_ms, ..
+            triggers, start_ms, ..
         })) => {
             *triggers = triggers.wrapping_add(1).max(1);
-            *delay_ms = delay;
+            *start_ms = now + delay;
             Ok(Value::Undefined)
         }
         _ => Err("entity wasn't created with 'newFx'".into()),
@@ -1484,7 +1485,7 @@ mod world_fx_tests {
             trigger_fx(&mut g, &mut vm, Args::new("triggerfx", &a)).unwrap();
             assert_eq!(triggers(&g), [i as u8 + 1]);
         }
-        assert_eq!(fx_states(&g)[0].pm_flags, 1500);
+        assert_eq!(fx_states(&g)[0].eflags, 1500);
 
         g.free_entity(&mut vm, n);
         assert!(fx_states(&g).is_empty());
@@ -1628,5 +1629,49 @@ mod world_fx_tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn entities_never_reach_the_event_slots_even_when_the_table_is_full() {
+        let (mut g, mut vm) = setup();
+        let args = [Value::Int(1), Value::Float(1.0), v(0.0, 0.0, 0.0)];
+        let mut made = 0;
+        while play_looped_fx(&mut g, &mut vm, Args::new("playloopedfx", &args)).is_ok() {
+            made += 1;
+            assert!(made < 2000);
+        }
+        assert!(made > 800);
+        // Events of every kind still fit beside them: strictly ascending numbers, none dropped.
+        for _ in 0..70 {
+            let a = [
+                Value::Float(0.4),
+                Value::Int(2),
+                v(0.0, 0.0, 0.0),
+                Value::Int(100),
+            ];
+            earthquake(&mut g, &mut vm, Args::new("earthquake", &a)).unwrap();
+        }
+        let all = world_entities(&g);
+        assert!(all.windows(2).all(|w| w[0].number < w[1].number));
+        assert_eq!(
+            all.iter().filter(|e| e.etype == etype::LOOP_FX).count(),
+            made
+        );
+        assert_eq!(all.iter().filter(|e| e.etype == etype::EVENT).count(), 62);
+        assert!(all.iter().all(|e| e.number < 1022));
+    }
+
+    #[test]
+    fn an_earthquake_longer_or_wider_than_the_wire_holds_is_clamped_not_wrapped() {
+        let (mut g, mut vm) = setup();
+        let a = [
+            Value::Float(0.4),
+            Value::Int(60),
+            v(0.0, 0.0, 0.0),
+            Value::Int(50000),
+        ];
+        earthquake(&mut g, &mut vm, Args::new("earthquake", &a)).unwrap();
+        let q = Earthquake::decode(g.tempev.live(g.level.time).last().unwrap()).unwrap();
+        assert_eq!((q.duration_ms, q.radius), (16383, 16383.0));
     }
 }

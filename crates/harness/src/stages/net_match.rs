@@ -290,7 +290,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 .map(|(_, c)| c.ps.origin);
             if let Some(at) = at {
                 quaked = true;
-                server.game.earthquake(at, 0.6, 20_000, 20_000.0);
+                server.game.earthquake(at, 0.6, 15_000, 16_000.0);
             }
         }
         peers.set(server.net_clients());

@@ -775,13 +775,7 @@ impl NetPlay {
                 .cloned()
         });
         if let Some(snap) = self.net.latest() {
-            let events = &self.events;
-            self.effects.world_fx(
-                &snap.entities,
-                &|i| events.fx_name(usize::from(i)).map(str::to_owned),
-                eye,
-                st,
-            );
+            self.effects.world_fx(&snap.entities, &self.events, eye, st);
         }
         self.effects.update(st, self.boxes.world());
         for s in self.effects.take_sounds() {

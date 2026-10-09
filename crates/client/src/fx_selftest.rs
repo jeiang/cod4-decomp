@@ -211,16 +211,40 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             e.angles = [270.0, 0.0, 0.0];
             e.model = 1;
             e.pm_flags = 1000;
-            let nm = name.clone();
-            let names = move |_: u16| Some(nm.clone());
+            let mut names = crate::events::Events::default();
+            names.take_commands(&mut vec![format!("fx 1 {name}")]);
+            let names = &names;
             let (mut live_max, mut played) = (0, 0);
             for step in 1..=60 {
-                fx.world_fx(std::slice::from_ref(&e), &names, eye, step * 50);
+                fx.world_fx(std::slice::from_ref(&e), names, eye, step * 50);
                 fx.update(step * 50, world);
                 live_max = live_max.max(fx.live_elems());
                 played = played.max(fx.looped_fx());
             }
-            fx.world_fx(&[], &names, eye, 3050);
+            // Out of range of its cull distance the effect is stopped; it starts again when back in range.
+            e.velocity[0] = 100.0;
+            fx.world_fx(std::slice::from_ref(&e), names, eye, 3000);
+            let culled = fx.looped_fx();
+            e.velocity[0] = 1000.0;
+            fx.world_fx(std::slice::from_ref(&e), names, eye, 3050);
+            let back = fx.looped_fx();
+            if culled != 0 || back != 1 {
+                bad.push(format!(
+                    "looped effect cull: {culled} playing out of range, {back} back in range"
+                ));
+            }
+            // A client joining long after a trigger still plays the effect, from the trigger's time.
+            let mut once = net::entity::EntityState::new(101);
+            once.etype = net::entity::etype::FX;
+            once.origin = e.origin;
+            once.model = 1;
+            once.event_seq = 1;
+            once.eflags = 1000;
+            fx.world_fx(&[once], names, eye, 60_000);
+            if fx.played.get("triggered_fx") != Some(&1) {
+                bad.push("a triggered effect seen long after its trigger was not played".into());
+            }
+            fx.world_fx(&[], names, eye, 3050);
             report.insert("looped_fx_active_max".into(), played.into());
             report.insert("looped_fx_live_elems_max".into(), live_max.into());
             if played == 0 || live_max == 0 {

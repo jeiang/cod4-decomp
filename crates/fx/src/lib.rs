@@ -359,6 +359,11 @@ impl Fx {
         }
     }
 
+    /// Whether effect `id` still exists (it ended, or the pool dropped it).
+    pub fn is_live(&self, id: u64) -> bool {
+        self.effects.iter().any(|e| e.id == id)
+    }
+
     /// Restarts effect `id` at `at` (`FX_RetriggerEffect`): its looping elements start over and its one-shot elements
     /// spawn again, without a second effect. Returns false if the effect is over.
     pub fn retrigger(&mut self, id: u64, at: i32) -> bool {

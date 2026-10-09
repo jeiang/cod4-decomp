@@ -38,7 +38,7 @@ pub mod ev {
 /// Script numbers that travel in a velocity component, which the wire keeps to a quarter unit: scaled up to keep the
 /// precision scripts use (0.4 of an earthquake, a jitter of 0.05).
 const PARAM: f32 = 16.0;
-/// Radii travel as 12 bits each in `eflags`.
+/// Radii travel as 12 bits each in `eflags`: physics radii beyond 4095 units are clamped to it.
 const RADIUS_BITS: u32 = 12;
 const RADIUS_MAX: f32 = ((1 << RADIUS_BITS) - 1) as f32;
 
@@ -152,7 +152,8 @@ impl Physics {
 
 /// `earthquake`: the camera of anyone within `radius` of the origin shakes, harder the nearer, for `duration_ms`.
 ///
-/// Fields: `velocity` holds the scale times 16, the duration in milliseconds and the radius.
+/// Fields: `velocity` holds the scale times 16, the duration in milliseconds and the radius. The wire keeps velocity to
+/// +-16383, so a duration beyond 16.383 s or a radius beyond 16383 units is clamped to it ([`Earthquake::MAX`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Earthquake {
     pub scale: f32,
@@ -161,8 +162,15 @@ pub struct Earthquake {
 }
 
 impl Earthquake {
+    /// The largest duration (ms) and radius (units) that reach the clients.
+    pub const MAX: f32 = 16383.0;
+
     fn fill(&self, s: &mut EntityState) {
-        s.velocity = [self.scale * PARAM, self.duration_ms as f32, self.radius];
+        s.velocity = [
+            (self.scale * PARAM).min(Self::MAX),
+            (self.duration_ms as f32).min(Self::MAX),
+            self.radius.min(Self::MAX),
+        ];
     }
 
     /// The earthquake `s` carries, if it is one.
@@ -177,7 +185,7 @@ impl Earthquake {
 
 pub const LIFETIME_MS: i32 = 300;
 /// Entity numbers events use, above anything the game allocates.
-const FIRST: u16 = 960;
+pub const FIRST: u16 = 960;
 /// Entity numbers 960 to 1021; 1022 and 1023 mean the world and none.
 const SLOTS: u16 = 62;
 

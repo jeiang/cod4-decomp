@@ -20,8 +20,8 @@ pub mod etype {
     /// smoke, 1 heavy smoke, 0 crashing) and `client` its owner's client number.
     pub const VEHICLE: u8 = 7;
     /// A script effect entity (`spawnFx`): an effect the scripts start with `triggerFx`. `origin` and `angles` place it,
-    /// `model` is the effect index, `event_seq` counts the triggers (0 until the first) and `pm_flags` is the delay
-    /// of the latest trigger in milliseconds.
+    /// `model` is the effect index, `event_seq` counts the triggers (0 until the first) and `eflags` is the server
+    /// time (ms, low 24 bits) the latest trigger plays at.
     pub const FX: u8 = 8;
     /// A looping script effect (`playLoopedFX`): `origin`, `angles` and `model` as for [`FX`], `pm_flags` the repeat
     /// period in milliseconds and `velocity[0]` the distance beyond which it is not played (0 for always).
