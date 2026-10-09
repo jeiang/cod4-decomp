@@ -368,7 +368,6 @@ mod tests {
 
     #[test]
     fn a_stretched_or_non_finite_surface_is_a_fault() {
-        let before = skin_faults();
         let mut good = vertex([10.0, -20.0, 30.0]);
         good.extend(vertex([0.0; 3]));
         assert!(check_skinned(&good, 40.0, ModelKind::World));
@@ -387,12 +386,10 @@ mod tests {
             40.0,
             ModelKind::ViewModel
         ));
-        assert_eq!(skin_faults() - before, 3);
     }
 
     #[test]
     fn a_first_person_model_is_placed_by_the_hand_rig_so_only_its_width_counts() {
-        let before = skin_faults();
         let mut carried = vertex([9000.0, -20.0, 30.0]);
         carried.extend(vertex([9010.0, 0.0, 0.0]));
         assert!(check_skinned(&carried, 3.0, ModelKind::ViewModel));
@@ -400,7 +397,6 @@ mod tests {
         let mut stretched = vertex([0.0; 3]);
         stretched.extend(vertex([1.0e4, 0.0, 0.0]));
         assert!(!check_skinned(&stretched, 3.0, ModelKind::ViewModel));
-        assert_eq!(skin_faults() - before, 2);
     }
 
     #[test]

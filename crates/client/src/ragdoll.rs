@@ -798,17 +798,22 @@ impl Ragdoll {
         self.bodies[p].w += dir * spent * (reduced / ip);
     }
 
-    /// The corpse's origin: the torso's centre (`Ragdoll_GetRootOrigin`). A body thrown by a blast ends up far from
+    /// The corpse's origin: where the root bone (`j_mainroot`, the first bone's start) is (`Ragdoll_GetRootOrigin`). A body thrown by a blast ends up far from
     /// where it died, so the model is drawn, culled and lit from where the body is now, with its bones relative to
     /// that point.
     pub fn root(&self) -> [f32; 3] {
-        self.bodies[0].x.to_array()
+        self.root_point().to_array()
+    }
+
+    fn root_point(&self) -> Vec3 {
+        let b = &self.bodies[0];
+        b.at(b.ends[0])
     }
 
     /// The bones for a model drawn at [`Ragdoll::root`] and the yaw the body was made with.
     pub fn bones(&self) -> Vec<BoneMat> {
         let un = self.yaw.inverse();
-        let root = self.bodies[0].x;
+        let root = self.root_point();
         (0..self.follow.len())
             .map(|i| {
                 let f = self.follow[self.alias[i]
