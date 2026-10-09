@@ -16,6 +16,7 @@ pub mod hitloc;
 pub mod quat;
 pub mod rig;
 pub mod trace;
+pub mod turret;
 
 pub use hitloc::{HitLocation, Stance, box_hit_location};
 pub use rig::{

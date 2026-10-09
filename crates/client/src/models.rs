@@ -98,7 +98,7 @@ impl Held {
 pub struct RestPose {
     models: Vec<Arc<XModel>>,
     bones: Vec<Vec<sim::skel::BoneMat>>,
-    rig: Rig,
+    rig: Arc<Rig>,
 }
 
 /// The bits of `bits` (bone `n` is the `n`-th most significant over four words) that belong to the `count` bones from
@@ -115,6 +115,11 @@ pub fn part_bits_of(bits: [u32; 4], base: usize, count: usize) -> [u32; 4] {
 }
 
 impl RestPose {
+    /// The rig of the models, for placing a turret's gunner.
+    pub fn rig(&self) -> &Arc<Rig> {
+        &self.rig
+    }
+
     /// The models as instances for an entity at `origin` facing `angles`, hiding the bones of `hidden`.
     pub fn instances(
         &self,
@@ -375,7 +380,11 @@ impl Library {
                 b
             })
             .collect();
-        let r = Arc::new(RestPose { models, bones, rig });
+        let r = Arc::new(RestPose {
+            models,
+            bones,
+            rig: Arc::new(rig),
+        });
         self.rests.insert(key, r.clone());
         Ok(r)
     }

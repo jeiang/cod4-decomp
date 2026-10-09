@@ -15,14 +15,12 @@
 use crate::bullet::normalized;
 use crate::fire::view_origin;
 use crate::game::{Ent, Game, SpawnVars, spawn_var};
-use crate::tags;
 use gsc::vm::Vm;
 use sim::Vec3;
-use sim::cm::{Collide, ENTITYNUM_NONE};
+use sim::cm::ENTITYNUM_NONE;
 use sim::contents;
-use sim::pm::math::angle_delta;
 use sim::pm::{PmType, VIEW_CROUCH, VIEW_PRONE, VIEW_STAND, button, ef, ev, pmf};
-use sim::skel::{Controllers, Pose, Rig, RigModel};
+use sim::skel::turret::{gun_angles, gunner_feet, tag_point};
 use sim::weapon::fire::AimBasis;
 use sim::weapon::{FireType, WeaponClass, WeaponType};
 
@@ -295,60 +293,29 @@ impl Game {
         };
         let (view, angles) = (c.ps.viewangles, e.angles);
         if let Some(tu) = self.ent_mut(t).and_then(|e| e.turret.as_deref_mut()) {
-            let swing =
-                |i: usize| angle_delta(view[i], angles[i]).clamp(tu.arc_min[i], tu.arc_max[i]);
-            tu.gun_angles = [swing(0), swing(1), 0.0];
+            tu.gun_angles = gun_angles(view, angles, tu.arc_min, tu.arc_max);
         }
     }
 
-    /// `G_DObjGetWorldTagMatrix` with the gun swung (`turret_controller` has run): the turret's own tag, the one
-    /// the gunner and the shots follow.
-    pub fn swung_tag(&self, t: u16, tag: &str) -> Option<tags::Mat43> {
+    /// `G_DObjGetWorldTagMatrix`'s position with the gun swung (`turret_controller` has run): where the turret's own
+    /// tag is, the one the gunner and the shots follow.
+    pub fn swung_point(&self, t: u16, tag: &str) -> Option<Vec3> {
         let e = self.ent(t)?;
         let gun = e.turret.as_deref()?.gun_angles;
-        let model = self.content.model(&e.model)?;
-        let names: Vec<&str> = self
-            .content
-            .model_bone_names(&e.model)?
-            .iter()
-            .map(|n| &**n)
-            .collect();
-        let rig = Rig::new(&[RigModel {
-            model: model.clone(),
-            bone_names: &names,
-            attach: None,
-        }])
-        .ok()?;
-        let mut pose = Pose::default();
-        let ctl = Controllers {
-            turret: Some(gun),
-            ..Controllers::NONE
-        };
-        rig.pose(&[], &ctl, &mut pose);
-        let b = pose.bones().get(rig.bone_index(tag)?)?;
-        let a = sim::skel::quat::axes(&b.quat);
-        Some(tags::mul43(
-            &[a[0], a[1], a[2], b.trans],
-            &tags::frame(e.origin, e.angles),
-        ))
+        let rig = self.content.skeleton(&e.model)?.turret_rig()?;
+        tag_point(rig, gun, tag, e.origin, e.angles)
     }
 
     /// Puts the gunner behind the gun: their eye at the swung turret's `tag_player`, the feet on the floor under it.
+    /// The predicting client does the same from its own view (`sim::skel::turret`).
     fn place_gunner(&mut self, t: u16, n: u16) {
-        let Some(tag) = self.swung_tag(t, "tag_player") else {
+        let Some(eye) = self.swung_point(t, "tag_player") else {
             return;
         };
         let (Some(c), Some(w)) = (self.client(n), self.world.as_ref()) else {
             return;
         };
-        let eye = tag[3];
-        let mut origin = [eye[0], eye[1], eye[2] - c.ps.view_height_current];
-        let start = [origin[0], origin[1], origin[2] + c.ps.view_height_current];
-        let end = [start[0], start[1], start[2] - 60.0];
-        let tr = w.trace(start, end, [0.0; 3], [0.0; 3], n, contents::MASK_DEADSOLID);
-        if tr.fraction < 1.0 {
-            origin[2] = start[2] + (end[2] - start[2]) * tr.fraction;
-        }
+        let origin = gunner_feet(w, eye, c.ps.view_height_current, n);
         if let Some(c) = self.client_mut(n) {
             c.ps.origin = origin;
             c.ps.velocity = [0.0; 3];
@@ -395,7 +362,7 @@ impl Game {
         if !shoot {
             return;
         }
-        let Some(flash) = self.swung_tag(t, "tag_flash").map(|m| m[3]) else {
+        let Some(flash) = self.swung_point(t, "tag_flash") else {
             return;
         };
         let dist = crate::bullet::length(crate::bullet::sub(flash, eye));

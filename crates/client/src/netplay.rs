@@ -1007,6 +1007,7 @@ impl NetPlay {
         }
         self.follow_movement_dvars();
         self.boxes.sync(&snap);
+        self.pred.seat = self.turret_seat(&snap);
         let env = Env {
             world: self.boxes.world(),
             weapons: &self.weapons,
@@ -1871,6 +1872,23 @@ impl NetPlay {
         let scoped = sight.overlay.is_some();
         self.sight = Some(sight);
         if scoped { Vec::new() } else { models }
+    }
+
+    /// The turret the own player is mounted on, as `snap` has it: the entity the server marked with the own client number
+    /// and the mounted flag.
+    fn turret_seat(&mut self, snap: &net::snapshot::Snapshot) -> Option<sim::skel::turret::Seat> {
+        let e = snap.entities.iter().find(|e| {
+            e.etype == etype::SCRIPT_MODEL
+                && e.eflags & eflags::TURRET != 0
+                && e.client == snap.ps.client_num
+        })?;
+        let name = self.net.ui()?.model(e.model).to_owned();
+        let rest = self.lib.rest_pose(&name, &[]).ok()?;
+        Some(sim::skel::turret::Seat {
+            rig: rest.rig().clone(),
+            origin: e.origin,
+            angles: e.angles,
+        })
     }
 
     /// The scripted models of the level (`script_model`: props, cars, objectives), posed at the origin and angles the

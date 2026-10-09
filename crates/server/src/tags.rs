@@ -155,13 +155,15 @@ fn quat_axis(q: [f32; 4], tw: f32) -> Axis {
 pub struct Skeleton {
     names: Vec<Arc<str>>,
     rest: Vec<Mat43>,
+    /// A turret model (one with a `tag_aim`): its rig, to swing the gun by its gun angles.
+    turret: Option<Arc<sim::skel::Rig>>,
 }
 
 impl Skeleton {
     /// `strings` resolves the zone's script-string indices that name the bones.
-    pub fn new(m: &XModel, strings: &[Option<Arc<str>>]) -> Self {
+    pub fn new(m: &Arc<XModel>, strings: &[Option<Arc<str>>]) -> Self {
         let n = usize::from(m.num_bones);
-        let names = (0..n)
+        let names: Vec<Arc<str>> = (0..n)
             .map(|i| {
                 m.bone_names
                     .get(i)
@@ -178,7 +180,30 @@ impl Skeleton {
                 [a[0], a[1], a[2], b.trans]
             })
             .collect();
-        Self { names, rest }
+        let turret = names
+            .iter()
+            .any(|n: &Arc<str>| n.eq_ignore_ascii_case("tag_aim"))
+            .then(|| {
+                let text: Vec<&str> = names.iter().map(|n| &**n).collect();
+                sim::skel::Rig::new(&[sim::skel::RigModel {
+                    model: m.clone(),
+                    bone_names: &text,
+                    attach: None,
+                }])
+                .ok()
+                .map(Arc::new)
+            })
+            .flatten();
+        Self {
+            names,
+            rest,
+            turret,
+        }
+    }
+
+    /// The rig of a turret model, which swings its gun by gun angles.
+    pub fn turret_rig(&self) -> Option<&Arc<sim::skel::Rig>> {
+        self.turret.as_ref()
     }
 
     pub fn len(&self) -> usize {
