@@ -725,9 +725,24 @@ impl Game {
     }
 }
 
+/// `flinchYawAnim` from the blow's yaw relative to the victim's facing, degrees: 0 forward (pushed along the view),
+/// 1 back, 2 left, 3 right.
+fn flinch_yaw_anim(relative: f32) -> u8 {
+    let r = relative.rem_euclid(360.0);
+    if !(45.0..315.0).contains(&r) {
+        0
+    } else if (135.0..225.0).contains(&r) {
+        1
+    } else if r < 135.0 {
+        2
+    } else {
+        3
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::flashbang_percents;
+    use super::{flashbang_percents, flinch_yaw_anim};
 
     #[test]
     fn a_flashbang_dose_falls_with_distance_and_with_looking_away() {
@@ -743,19 +758,12 @@ mod tests {
             flashbang_percents(600.0, 200.0, 600.0, [0.0; 3], eye, [0.0, 400.0, 0.0]);
         assert!(edge.abs() < 1e-6 && (side - 0.5).abs() < 1e-6);
     }
-}
 
-/// `flinchYawAnim` from the blow's yaw relative to the victim's facing, degrees: 0 forward (pushed along the view),
-/// 1 back, 2 left, 3 right.
-fn flinch_yaw_anim(relative: f32) -> u8 {
-    let r = relative.rem_euclid(360.0);
-    if !(45.0..315.0).contains(&r) {
-        0
-    } else if (135.0..225.0).contains(&r) {
-        1
-    } else if r < 135.0 {
-        2
-    } else {
-        3
+    #[test]
+    fn a_hit_flinches_toward_where_it_came_from() {
+        assert_eq!(flinch_yaw_anim(0.0), 0);
+        assert_eq!(flinch_yaw_anim(90.0), 2);
+        assert_eq!(flinch_yaw_anim(180.0), 1);
+        assert_eq!(flinch_yaw_anim(-90.0), 3);
     }
 }
