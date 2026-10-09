@@ -54,6 +54,11 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("playsoundtoplayer", r(super::sound::play_sound_to_player)),
     ("setreverb", r(super::sound::set_reverb)),
     ("deactivatereverb", r(super::sound::deactivate_reverb)),
+    ("setchannelvolumes", r(super::sound::set_channel_volumes)),
+    (
+        "deactivatechannelvolumes",
+        r(super::sound::deactivate_channel_volumes),
+    ),
     (
         "logstring",
         r(|g, vm, _, a| super::funcs::log_string(g, vm, a)),

@@ -16,7 +16,7 @@ use crate::events::{ClientEvent, Events};
 use crate::helicopter::Rotors;
 use crate::input::{InputFrame, buttons};
 use crate::kick::Kick;
-use crate::look::{Look, LookOut};
+use crate::look::{Look, LookOut, cap_turn};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::Props;
 use crate::ragdoll::Ragdoll;
@@ -212,6 +212,9 @@ pub struct NetPlay {
     effects: Effects,
     props: Props,
     look: Look,
+    /// What the shell shock holds the view to (`CL_CapTurnRate`, the mouse scale): pitch and yaw degrees per second.
+    max_turn: [f32; 2],
+    shock_sensitivity: f32,
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
     /// The server announced a level the app has not acted on yet.
@@ -284,6 +287,8 @@ impl NetPlay {
                     .map_or(&[][..], |c| &c.dyn_entities[..]),
             ),
             look: Look::new((map.art.glow, map.art.film)),
+            max_turn: [0.0; 2],
+            shock_sensitivity: 1.0,
             effects: Effects::new(&lib.content, world),
             lib,
             events: Events::default(),
@@ -493,9 +498,11 @@ impl NetPlay {
                 (self.loc_cursor[1] + input.look_delta_pitch * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
         } else {
             self.loc_cursor = [0.5; 2];
-            self.angles[1] += input.look_delta_yaw;
-            self.angles[0] = (self.angles[0] + input.look_delta_pitch)
-                .clamp(self.pitch_limits.0, self.pitch_limits.1);
+            let scale = self.shock_sensitivity;
+            self.angles[1] += cap_turn(input.look_delta_yaw * scale, self.max_turn[1], dt);
+            self.angles[0] = (self.angles[0]
+                + cap_turn(input.look_delta_pitch * scale, self.max_turn[0], dt))
+            .clamp(self.pitch_limits.0, self.pitch_limits.1);
         }
         for c in &input.pending_commands {
             self.command(c);
@@ -536,6 +543,7 @@ impl NetPlay {
             self.look
                 .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
             let look = self.look.frame(st);
+            self.shock_effects(&look);
             let (yaw, pitch) = (
                 ps.viewangles[1].to_radians(),
                 -ps.viewangles[0].to_radians(),
@@ -629,6 +637,7 @@ impl NetPlay {
 
         let (events, commands) = self.take_events(&snap);
         let look = self.look.frame(st);
+        self.shock_effects(&look);
         let mut models = self.remote_players(dt, st, own);
         models.extend(self.script_models(&snap));
         models.extend(self.vehicles(dt, st, own));
@@ -765,8 +774,10 @@ impl NetPlay {
                 String::from_utf8_lossy(&b[..end]).into_owned()
             })
         };
+        let sound = &mut self.sound;
         self.net.commands.retain(|c| {
-            !net::ui::ServerCmd::parse(c).is_some_and(|c| look.command(&c, now, &file))
+            !channel_volume_command(c, sound, &file)
+                && !net::ui::ServerCmd::parse(c).is_some_and(|c| look.command(&c, now, &file))
         });
         let commands = self.events.take_commands(&mut self.net.commands);
         let events = self.events.scan(snap);
@@ -788,6 +799,13 @@ impl NetPlay {
             },
         );
         (events, commands)
+    }
+
+    /// The shell shock's hold on the view and its sounds for this frame.
+    fn shock_effects(&mut self, look: &LookOut) {
+        self.max_turn = look.max_turn;
+        self.shock_sensitivity = look.sensitivity;
+        self.sound.shock(&look.sound);
     }
 
     /// Feeds the sound system: the listener, the server's sound commands, and the own player's events.
@@ -1514,4 +1532,30 @@ mod tests {
         follow_server_turn(&mut angles, &mut last, [0.0, 120.0, 0.0], false);
         assert_eq!(angles, [10.0, 120.0]);
     }
+}
+
+/// The server's `setchannelvolumes` (`chanvol <priority> <shock> <fade ms>`) and `deactivatechannelvolumes`
+/// (`chanvoloff <priority> <fade ms>`); true if `line` was one.
+fn channel_volume_command(
+    line: &str,
+    sound: &mut ClientSound,
+    file: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    let mut w = line.split_whitespace();
+    let word = w.next();
+    let (prio, rest): (u8, Vec<&str>) = match (word, w.next().and_then(|p| p.parse().ok())) {
+        (Some("chanvol" | "chanvoloff"), Some(p)) => (p, w.collect()),
+        _ => return false,
+    };
+    let fade = |s: Option<&&str>| s.and_then(|f| f.parse().ok()).unwrap_or(0);
+    if word == Some("chanvoloff") {
+        sound.clear_channel_volumes(prio, fade(rest.first()));
+    } else if let Some(name) = rest.first() {
+        let text = file(&format!("shock/{name}.shock")).or_else(|| file("shock/default.shock"));
+        if let Some(t) = text {
+            let p = crate::look::ShockParams::parse(&t);
+            sound.set_channel_volumes(prio, p.volumes(), fade(rest.get(1)));
+        }
+    }
+    true
 }

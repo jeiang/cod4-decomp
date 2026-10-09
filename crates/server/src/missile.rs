@@ -12,7 +12,7 @@
 //! Guided missiles (`guidedMissileType` 1 to 3) steer toward the target a script gave them with
 //! `missile_settarget`. Ceilings: attractors and repulsors, the top-attack flight mode (no
 //! multiplayer script can select it), rocket destabilisation, water splashes, `trigger_damage` volumes touched by grenades, glass
-//! entities and flashbang blinding are not simulated; impact and explosion effects and sounds
+//! entities are not simulated; impact and explosion effects and sounds
 //! belong to the clients.
 
 use gsc::{Value, Vm};
@@ -958,8 +958,23 @@ impl Game {
         if m.info.explosion_inner_damage != 0 {
             self.missile_blast(vm, n, m, origin, math::angle_vectors(&angles).0, None);
         }
+        self.missile_flash(vm, m, origin);
         vm.notify_entity(n, "death", &[]);
         self.free_entity(vm, n);
+    }
+
+    /// The flash of a `WEAPPROJEXP_FLASHBANG` weapon's explosion (`G_FlashbangBlast`), credited to the parent
+    /// and its team.
+    fn missile_flash(&mut self, vm: &mut Vm, m: &Missile, origin: Vec3) {
+        if m.info.proj_explosion == ProjExplosion::Flashbang {
+            let parent = m.parent.filter(|p| self.ent(*p).is_some());
+            let info = &m.info;
+            let (max, min) = (
+                info.explosion_radius as f32,
+                info.explosion_radius_min as f32,
+            );
+            self.flashbang_blast(vm, origin, max, min, parent, m.team);
+        }
     }
 
     /// The radius damage of a missile's explosion (`G_RadiusDamage` with the weapon's values),
@@ -1105,6 +1120,10 @@ impl Game {
                 Value::Int(m.info.explosion_radius),
             ];
             vm.notify_entity(parent, "projectile_impact", &args);
+        }
+        // A dud (a grenade not yet armed) does not go off.
+        if !dud {
+            self.missile_flash(vm, m, endpos);
         }
         vm.notify_entity(n, "death", &[]);
         self.free_entity(vm, n);

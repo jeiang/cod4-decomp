@@ -951,3 +951,136 @@ fn stock_shotgun_fires_its_pellets() {
         "{hits} of {pellets}"
     );
 }
+
+fn flashbang() -> WeaponInfo {
+    WeaponInfo {
+        name: "flash_grenade_mp".into(),
+        offhand_class: OffhandClass::Flash,
+        proj_explosion: sim::weapon::ProjExplosion::Flashbang,
+        explosion_radius: 600,
+        explosion_radius_min: 200,
+        explosion_inner_damage: 0,
+        explosion_outer_damage: 0,
+        ..frag()
+    }
+}
+
+/// What the players of a flashbang test were told: `flashbang(distance, angle, attacker, team)` per player.
+struct Flashed(std::collections::HashMap<u16, (f32, f32, bool, String)>);
+
+/// A flashbang thrown by a player of `team` at the origin, a wall behind them, and the players named in the
+/// result: `[thrower, facing, away, far, hidden, dead, spectator]`.
+fn flash_round(team: Team) -> ([u16; 7], Flashed) {
+    use gsc::{CallOutcome, EntClass, Key};
+    use server::script::{Dispatch, ScriptHost};
+
+    let script = r#"
+init() { level.d = []; level.a = []; level.t = []; level.by = []; }
+watch(slot)
+{
+	self waittill("flashbang", d, a, att, t);
+	level.d[slot] = d;
+	level.a[slot] = a;
+	level.t[slot] = t;
+	level.by[slot] = isdefined(att);
+}
+"#;
+    let wall = ([-52.0, -2000.0, 0.0], [-48.0, 2000.0, 1000.0]);
+    let (mut g, _) = arena(&[wall], 0, vec![flashbang()]);
+    let prog = compile(
+        &[("t.gsc", script)],
+        &Builtins::stock_mp(),
+        Options::default(),
+    )
+    .unwrap();
+    let (init, watch) = (
+        prog.find("t", "init").unwrap(),
+        prog.find("t", "watch").unwrap(),
+    );
+    let dispatch = Dispatch::new(&prog);
+    let mut vm = Vm::new(prog).unwrap();
+    let thrower = add_player(&mut g, &mut vm, [0.0; 3], 0.0, team);
+    let facing = add_player(&mut g, &mut vm, [150.0, 0.0, 0.0], 180.0, Team::Axis);
+    let away = add_player(&mut g, &mut vm, [150.0, 100.0, 0.0], 0.0, Team::Axis);
+    let far = add_player(&mut g, &mut vm, [3000.0, 0.0, 0.0], 180.0, Team::Axis);
+    let hidden = add_player(&mut g, &mut vm, [-100.0, 0.0, 0.0], 0.0, Team::Axis);
+    let dead = add_player(&mut g, &mut vm, [150.0, -100.0, 0.0], 180.0, Team::Axis);
+    g.ent_mut(dead).unwrap().health = 0;
+    let spectator = add_player(&mut g, &mut vm, [150.0, 200.0, 0.0], 180.0, Team::Spectator);
+    g.client_mut(spectator).unwrap().session = Session::Spectator;
+    let slots = [thrower, facing, away, far, hidden, dead, spectator];
+    {
+        let mut host = ScriptHost {
+            game: &mut g,
+            dispatch: &dispatch,
+        };
+        vm.call(&mut host, init, None, &[]).unwrap();
+        for n in slots {
+            let obj = vm.entity(n, EntClass::Entity);
+            let out = vm.call(&mut host, watch, Some(obj), &[Value::Int(i32::from(n))]);
+            assert!(matches!(out, Ok(CallOutcome::Pending)));
+        }
+    }
+    g.level.time = 1000;
+    let weapon = g.weapons.index("flash_grenade_mp");
+    fire(
+        &mut g,
+        &mut vm,
+        thrower,
+        WeaponEvent::OffhandThrow {
+            weapon,
+            fuse_left: 3500,
+            cooked: 0,
+        },
+    );
+    let grenade = server_first_missile(&g);
+    g.detonate_missile(&mut vm, grenade);
+    let mut host = ScriptHost {
+        game: &mut g,
+        dispatch: &dispatch,
+    };
+    assert!(vm.run_current_threads(&mut host).is_empty());
+    let level = vm.level();
+    let got = |field: &str, n: u16| match level.get(field) {
+        Some(Value::Array(a)) => a.get(&Key::Int(i32::from(n))).cloned(),
+        other => panic!("level.{field} is {other:?}"),
+    };
+    let mut told = std::collections::HashMap::new();
+    for n in slots {
+        let (
+            Some(Value::Float(d)),
+            Some(Value::Float(a)),
+            Some(Value::Int(by)),
+            Some(Value::Str(t)),
+        ) = (got("d", n), got("a", n), got("by", n), got("t", n))
+        else {
+            continue;
+        };
+        told.insert(n, (d, a, by == 1, t.to_string()));
+    }
+    (slots, Flashed(told))
+}
+
+#[test]
+fn a_flashbang_tells_the_players_that_can_see_it_how_hard_they_were_hit() {
+    let (slots, Flashed(told)) = flash_round(Team::Allies);
+    let [thrower, facing, away, far, hidden, dead, spectator] = slots;
+    // Heard, the thrower included: a full distance dose inside the inner radius, the thrower's name and team.
+    for n in [thrower, facing, away] {
+        let (d, _, by, team) = &told[&n];
+        assert_eq!((*d, *by, team.as_str()), (1.0, true, "allies"));
+    }
+    // The player facing the blast takes the larger angle dose, the one turned away the smaller.
+    assert!(told[&facing].1 > 0.9);
+    assert!(told[&away].1 < 0.1);
+    // Out of range, out of sight, dead and not playing hear nothing.
+    for n in [far, hidden, dead, spectator] {
+        assert!(!told.contains_key(&n), "{n} was flashed");
+    }
+}
+
+#[test]
+fn a_flashbang_of_the_free_team_says_free() {
+    let (slots, Flashed(told)) = flash_round(Team::Free);
+    assert_eq!(told[&slots[1]].3, "free");
+}

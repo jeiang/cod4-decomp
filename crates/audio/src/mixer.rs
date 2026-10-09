@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Parts of the audio channel volume groups and shell shock timeline are translated from KisakCOD (sound/snd.cpp, cgame/cg_shellshock.cpp, client_mp/cl_input.cpp; GPL-3.0).
 //! The mixer: voices in, interleaved stereo `f32` out.
 //!
 //! [`Mixer::fill`] is the whole audio callback. It never locks, allocates or blocks: voices live in a fixed
@@ -190,6 +191,15 @@ enum Command {
         band: u8,
         set: Option<Band>,
     },
+    ChannelVolumes {
+        priority: u8,
+        goals: [f32; MAX_CHANNELS],
+        fade_ms: u32,
+    },
+    DeactivateChannelVolumes {
+        priority: u8,
+        fade_ms: u32,
+    },
 }
 
 /// What the mixer has done, readable from any thread.
@@ -205,6 +215,8 @@ pub struct Stats {
     /// A stream had nothing to play when its frame came due.
     pub underruns: AtomicU64,
     pub active: AtomicU32,
+    /// The priority of the channel volume group in force (0 when none is).
+    pub channel_priority: AtomicU32,
     /// Largest output sample seen, as `f32` bits.
     peak: AtomicU32,
 }
@@ -297,6 +309,21 @@ impl Handle {
     /// The master volume, `snd_volume`: 0 to 1, scaling everything that plays.
     pub fn set_master_volume(&self, volume: f32) -> bool {
         self.send(Command::Master(volume))
+    }
+
+    /// `SND_SetChannelVolumes`: group `priority` (1 hold breath, 2 pain, 3 shell shock) takes `goals` (a volume per
+    /// entity channel) over `fade_ms`.
+    pub fn set_channel_volumes(&self, priority: u8, goals: [f32; MAX_CHANNELS], fade_ms: u32) {
+        self.send(Command::ChannelVolumes {
+            priority,
+            goals,
+            fade_ms,
+        });
+    }
+
+    /// `SND_DeactivateChannelVolumes`.
+    pub fn deactivate_channel_volumes(&self, priority: u8, fade_ms: u32) {
+        self.send(Command::DeactivateChannelVolumes { priority, fade_ms });
     }
 
     pub fn set_listener(&self, l: Listener) {
@@ -454,6 +481,7 @@ pub struct Mixer {
     wet_goal: f32,
     wet_step: f32,
     eq: [ChannelEq; MAX_CHANNELS],
+    chan_vol: ChannelVolumes,
     /// The mono sum of the sounds that feed the reverb, one chunk.
     send: Vec<f32>,
 }
@@ -509,6 +537,7 @@ pub fn mixer(rate: u32, channels: &[ChannelDef]) -> (Handle, Mixer) {
             wet_goal: 0.0,
             wet_step: 0.0,
             eq: [[[None; BANDS]; EQS]; MAX_CHANNELS],
+            chan_vol: ChannelVolumes::new(),
             send: vec![0.0; CHUNK],
         },
     )
@@ -549,10 +578,14 @@ impl Mixer {
         let (listener, lerp) = (self.listener, self.slave_lerp);
         let mut finished = 0;
         let mut underruns = 0;
+        self.chan_vol.advance(dt_ms);
         for slot in &mut self.voices {
             let Some(v) = slot else { continue };
-            let eq = &self.eq[usize::from(v.channel).min(MAX_CHANNELS - 1)];
-            let (done, starved) = mix_voice(v, out, &mut self.send[..frames], eq, &listener, lerp);
+            let ch = usize::from(v.channel).min(MAX_CHANNELS - 1);
+            let eq = &self.eq[ch];
+            let cv = self.chan_vol.groups[self.chan_vol.current][ch].volume;
+            let (done, starved) =
+                mix_voice(v, out, &mut self.send[..frames], eq, &listener, lerp, cv);
             underruns += starved;
             if done {
                 if let Some(v) = slot.take() {
@@ -613,6 +646,22 @@ impl Mixer {
                 }
             }
             Command::Master(v) => self.gain = master_gain(v),
+            Command::ChannelVolumes {
+                priority,
+                goals,
+                fade_ms,
+            } => {
+                self.chan_vol.set(usize::from(priority), &goals, fade_ms);
+                self.stats
+                    .channel_priority
+                    .store(self.chan_vol.current as u32, Ordering::Relaxed);
+            }
+            Command::DeactivateChannelVolumes { priority, fade_ms } => {
+                self.chan_vol.deactivate(usize::from(priority), fade_ms);
+                self.stats
+                    .channel_priority
+                    .store(self.chan_vol.current as u32, Ordering::Relaxed);
+            }
             Command::Listener(l) => self.listener = l,
             Command::Reverb { room, wet, fade_ms } => {
                 if room != self.reverb.room() {
@@ -782,11 +831,12 @@ fn mix_voice(
     eq: &ChannelEq,
     l: &Listener,
     slave_lerp: f32,
+    chan_volume: f32,
 ) -> (bool, u64) {
     let filtered = eq.iter().flatten().any(Option::is_some);
     let frames = out.len() / 2;
     let src_ch = v.source.channels().clamp(1, 2);
-    let mut level = v.volume;
+    let mut level = v.volume * chan_volume;
     if let Duck::Slave(pct) = v.duck {
         level *= 1.0 - (1.0 - pct) * slave_lerp;
     }
@@ -905,6 +955,94 @@ fn mix_voice(
     (finished, starved)
 }
 
+/// How many channel volume groups there are: the base (always on) and priorities 1 to 3 (hold breath, pain,
+/// shell shock).
+pub const CHANNEL_GROUPS: usize = 4;
+
+/// One channel's volume of a group, easing to its goal.
+#[derive(Clone, Copy)]
+struct ChanVol {
+    volume: f32,
+    goal: f32,
+    /// Change per millisecond.
+    rate: f32,
+}
+
+/// `snd_channelvolgroup`s: the highest-priority active group sets the volume of every entity channel.
+struct ChannelVolumes {
+    groups: [[ChanVol; MAX_CHANNELS]; CHANNEL_GROUPS],
+    active: [bool; CHANNEL_GROUPS],
+    current: usize,
+}
+
+impl ChannelVolumes {
+    fn new() -> Self {
+        let one = ChanVol {
+            volume: 1.0,
+            goal: 1.0,
+            rate: 0.0,
+        };
+        let mut active = [false; CHANNEL_GROUPS];
+        active[0] = true;
+        Self {
+            groups: [[one; MAX_CHANNELS]; CHANNEL_GROUPS],
+            active,
+            current: 0,
+        }
+    }
+
+    /// `SND_SetChannelVolumes`.
+    fn set(&mut self, priority: usize, goals: &[f32; MAX_CHANNELS], fade_ms: u32) {
+        if !(1..CHANNEL_GROUPS).contains(&priority) {
+            return;
+        }
+        self.active[priority] = true;
+        let fade = fade_ms.max(1) as f32;
+        let from = self.groups[self.current];
+        for ((c, goal), from) in self.groups[priority].iter_mut().zip(goals).zip(from) {
+            let goal = goal.clamp(0.0, 1.0);
+            c.goal = goal;
+            c.volume = from.volume;
+            c.rate = (goal - from.volume) / fade;
+        }
+        if priority != self.current && !self.active[priority + 1..].iter().any(|a| *a) {
+            self.current = priority;
+        }
+    }
+
+    /// `SND_DeactivateChannelVolumes`: falls back to the next lower active group, fading from where this one was.
+    fn deactivate(&mut self, priority: usize, fade_ms: u32) {
+        if !(1..CHANNEL_GROUPS).contains(&priority) {
+            return;
+        }
+        self.active[priority] = false;
+        if priority != self.current {
+            return;
+        }
+        let fade = fade_ms.max(1) as f32;
+        let from = self.groups[priority];
+        self.current = (0..priority).rev().find(|i| self.active[*i]).unwrap_or(0);
+        for (c, from) in self.groups[self.current].iter_mut().zip(from) {
+            c.volume = from.volume;
+            c.rate = (c.goal - from.volume) / fade;
+        }
+    }
+
+    /// `SND_UpdateVolume` for every channel of the current group.
+    fn advance(&mut self, dt_ms: f32) {
+        for c in &mut self.groups[self.current] {
+            if c.rate == 0.0 {
+                continue;
+            }
+            c.volume += dt_ms * c.rate;
+            if (c.rate > 0.0 && c.volume > c.goal) || (c.rate < 0.0 && c.volume < c.goal) {
+                c.volume = c.goal;
+                c.rate = 0.0;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,6 +1108,47 @@ mod tests {
         p.emitter = at(pos, 50.0, 1050.0);
         h.play(p);
         id
+    }
+
+    #[test]
+    fn a_channel_volume_group_ducks_its_channels_and_clearing_it_restores_them() {
+        let (mut h, mut m) = mixer(RATE, &table());
+        world_play(&mut h, 1, [400.0, 0.0, 0.0]);
+        let open = level(&mut m)[0];
+        // Priority 3 quiets channel 1 only; the group in force is 3 until it is cleared.
+        let mut goals = [1.0; MAX_CHANNELS];
+        goals[1] = 0.1;
+        h.set_channel_volumes(3, goals, 0);
+        let ducked = level(&mut m)[0];
+        assert_eq!(h.stats.channel_priority.load(Ordering::Relaxed), 3);
+        assert!(
+            (ducked - 0.1 * open).abs() < 0.01 * open,
+            "{open} -> {ducked}"
+        );
+        // A lower priority does not take over from the active higher one.
+        h.set_channel_volumes(1, [1.0; MAX_CHANNELS], 0);
+        assert_eq!(level(&mut m)[0] / ducked, 1.0);
+        assert_eq!(h.stats.channel_priority.load(Ordering::Relaxed), 3);
+        h.deactivate_channel_volumes(3, 0);
+        let back = level(&mut m)[0];
+        assert_eq!(h.stats.channel_priority.load(Ordering::Relaxed), 1);
+        assert!((back - open).abs() < 0.01 * open, "{open} -> {back}");
+        h.deactivate_channel_volumes(1, 0);
+        level(&mut m);
+        assert_eq!(h.stats.channel_priority.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_channel_volume_fade_takes_its_time() {
+        let (mut h, mut m) = mixer(RATE, &table());
+        world_play(&mut h, 1, [400.0, 0.0, 0.0]);
+        let open = level(&mut m)[0];
+        let mut goals = [1.0; MAX_CHANNELS];
+        goals[1] = 0.0;
+        h.set_channel_volumes(3, goals, 2000);
+        // 4 chunks of 480 frames at 48 kHz is 40 ms of a 2 s fade.
+        let part = level(&mut m)[0];
+        assert!(part > 0.9 * open && part < open, "{open} -> {part}");
     }
 
     #[test]
