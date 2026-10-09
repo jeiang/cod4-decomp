@@ -148,7 +148,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     );
     if snapped > 0.0 {
         failures.push(format!(
-            "{snapped} of {stairs} stair steps jumped the drawn eye instead of easing it"
+            "{snapped} of {stairs} stair steps jumped the drawn eye instead of easing it (last: logical jump, drawn jump, offset, dt = {})",
+            net["view"]["stair_last_snap"]
         ));
     }
     if num(net, &["view", "steps"]) >= 1.0 && num(net, &["view", "step_max"]) <= 0.0 {
