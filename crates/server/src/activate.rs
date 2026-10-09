@@ -353,16 +353,15 @@ impl Game {
     }
 
     /// What the gametype asks bot `n` to walk to: the use triggers it may use now and the
-    /// pickup triggers (`*pickup*` targetnames) of carried objectives; the count is how many
-    /// leading entries the bots should favour and which entries are triggers made for the
-    /// bot's team.
-    pub fn bot_objectives(&self, n: u16) -> (Vec<(u16, Vec3)>, usize, std::ops::Range<usize>) {
+    /// pickup triggers (`*pickup*` targetnames) of carried objectives.
+    pub fn bot_objectives(&self, n: u16) -> BotObjectives {
         let Some(team) = self.client(n).map(|c| c.team) else {
-            return (Vec::new(), 0, 0..0);
+            return BotObjectives::default();
         };
         let mut out = Vec::new();
         let mut pickups = Vec::new();
         let mut mine = Vec::new();
+        let mut carried = 0usize;
         for (i, e) in self.ents.iter().enumerate() {
             let Some(e) = e else { continue };
             let t = i as u16;
@@ -375,7 +374,13 @@ impl Game {
                 }
                 _ => false,
             };
-            if !wanted || e.hidden {
+            if !wanted {
+                continue;
+            }
+            let is_pickup = matches!(&*e.classname, "trigger_multiple" | "trigger_radius");
+            if e.hidden {
+                // A carried object may hide its pickup trigger instead of parking it.
+                carried += usize::from(is_pickup);
                 continue;
             }
             // A trigger the script parked far below the map is switched off.
@@ -388,9 +393,14 @@ impl Game {
                 } else if e.classname.starts_with("trigger_use") {
                     out.push((t, mid));
                 } else if e.origin[2] < 5000.0 {
-                    // A carried object parks its trigger 10000 units up.
                     pickups.push((t, mid));
+                } else {
+                    // A carried object parks its trigger 10000 units up.
+                    carried += 1;
                 }
+            } else {
+                // ... or far below the map.
+                carried += usize::from(is_pickup);
             }
         }
         // A pickup lying free comes first (nobody can plant without the bomb), then the triggers
@@ -398,9 +408,43 @@ impl Game {
         let n_pickups = pickups.len();
         let team = n_pickups..n_pickups + mine.len();
         let n_first = if n_pickups > 0 { n_pickups } else { mine.len() };
+        let bomb = match (n_pickups, carried) {
+            (0, 0) => BombState::None,
+            (0, _) => BombState::Carried,
+            _ => BombState::Free,
+        };
         pickups.extend(mine);
-        let mut mine = pickups;
-        mine.extend(out);
-        (mine, n_first, team)
+        let mut list = pickups;
+        list.extend(out);
+        BotObjectives {
+            list,
+            n_first,
+            team,
+            bomb,
+        }
     }
+}
+
+/// Whether the level has a carried objective (the S&D and Sabotage bomb) and where it is.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum BombState {
+    /// No pickup trigger in the level (domination, deathmatch).
+    #[default]
+    None,
+    /// A pickup lies free.
+    Free,
+    /// Every pickup is parked: someone carries the bomb.
+    Carried,
+}
+
+/// What [`Game::bot_objectives`] offers a bot.
+#[derive(Default)]
+pub struct BotObjectives {
+    /// Free pickups, then triggers made for the bot's team, then the other use triggers.
+    pub list: Vec<(u16, Vec3)>,
+    /// How many leading entries the bots should favour.
+    pub n_first: usize,
+    /// Which entries of `list` are triggers made for the bot's team alone.
+    pub team: std::ops::Range<usize>,
+    pub bomb: BombState,
 }
