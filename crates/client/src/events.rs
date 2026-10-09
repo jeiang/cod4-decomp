@@ -21,6 +21,8 @@ pub enum ClientEvent {
         surface: u8,
         weapon: u16,
         shooter: u16,
+        /// A penetrating bullet came out of a wall here.
+        exit: bool,
     },
     /// A missile blew up; `owner` is 1023 when it had none.
     Explosion {
@@ -173,6 +175,7 @@ impl Events {
                 surface: e.event_parm,
                 weapon: e.weapon,
                 shooter: e.client,
+                exit: e.eflags & server::tempev::IMPACT_EXIT != 0,
             },
             ev::EXPLOSION => ClientEvent::Explosion {
                 origin: e.origin,

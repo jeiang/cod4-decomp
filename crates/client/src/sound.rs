@@ -69,6 +69,10 @@ pub struct ClientSound {
     footsteps: bool,
     /// The missiles whose flight loop is playing.
     missile_loops: HashSet<u16>,
+    /// The names of the alias indices entities loop (`sndname` commands), 1-based.
+    names: Vec<String>,
+    /// The entities looping a sound now, and the alias index each plays.
+    entity_loops: HashMap<u16, u16>,
     /// The held breath's sounds and channel dip.
     breath: crate::breath::Breath,
     /// What the held breath dips each channel to, by channel name; others take the stock 0.5.
@@ -102,6 +106,8 @@ impl ClientSound {
             eye: [0.0; 3],
             footsteps: true,
             missile_loops: HashSet::new(),
+            names: Vec::new(),
+            entity_loops: HashMap::new(),
             breath: crate::breath::Breath::default(),
             breath_volumes: Vec::new(),
         }
@@ -363,6 +369,7 @@ impl ClientSound {
                     surface,
                     weapon: w,
                     shooter,
+                    exit,
                     ..
                 } => {
                     let def = weapon(*w);
@@ -373,6 +380,11 @@ impl ClientSound {
                         Some(IMPACT_SHOTGUN) => "bulletspray_small",
                         _ => continue,
                     };
+                    // A bullet coming out of a wall has its own `_exit` sounds and no whiz-by.
+                    if *exit {
+                        self.surface_sound(&format!("{prefix}_exit"), *surface, *origin);
+                        continue;
+                    }
                     self.surface_sound(prefix, *surface, *origin);
                     if let Some(start) = muzzle(*shooter) {
                         self.whizby(start, *origin);
@@ -595,15 +607,71 @@ impl ClientSound {
         }
     }
 
+    /// `SND_StopSounds(SND_STOP_ALL)` for a restarted level: every sound ends and the entity loops start over from the
+    /// next snapshot. The mixer's other state (the sound fade, the master volume) is left alone.
+    pub fn stop_all(&mut self) {
+        self.entity_loops.clear();
+        self.missile_loops.clear();
+        if let Some(s) = self.ready() {
+            s.stop_all();
+            s.fade_all(1.0, 0);
+        }
+    }
+
+    /// `CG_AddEntityLoopSound`: the entities that loop a sound this frame, as (entity, alias index, origin). Each
+    /// plays from where it is; one not listed any more (freed, or its loop stopped) falls silent.
+    pub fn entity_loops(&mut self, now: &[(u16, u16, [f32; 3])]) {
+        let gone: Vec<u16> = self
+            .entity_loops
+            .iter()
+            .filter(|(e, i)| {
+                !now.iter()
+                    .any(|(n, idx, _)| n == *e && idx == *i)
+            })
+            .map(|(e, _)| *e)
+            .collect();
+        for e in gone {
+            self.entity_loops.remove(&e);
+            if let Some(s) = self.ready() {
+                s.stop_entity_loops(u32::from(e));
+            }
+        }
+        for &(entity, index, origin) in now {
+            let Some(alias) = self
+                .names
+                .get(usize::from(index).wrapping_sub(1))
+                .filter(|n| !n.is_empty())
+                .cloned()
+            else {
+                continue;
+            };
+            if self.entity_loops.insert(entity, index) == Some(index) {
+                self.follow(entity, origin);
+            } else {
+                self.play(
+                    &alias,
+                    Cue {
+                        origin: Some(origin),
+                        entity: u32::from(entity),
+                        ..Cue::default()
+                    },
+                );
+            }
+        }
+    }
+
     /// Whether a server console line is one of the sound commands.
     pub fn is_command(line: &str) -> bool {
         matches!(
             line.split_whitespace().next(),
             Some(
                 "snd"
+                    | "msnd"
                     | "lsnd"
-                    | "loop"
-                    | "stoploop"
+                    | "stoplsnd"
+                    | "soundfade"
+                    | "stopsounds"
+                    | "sndname"
                     | "ambient"
                     | "ambientstop"
                     | "music"
@@ -616,6 +684,19 @@ impl ClientSound {
 
     /// A console command from the server (see `server::script::sound`). Ambience and music wait for the tables.
     pub fn command(&mut self, line: &str) {
+        // The names of looped aliases are needed whenever the entities arrive, ready or not.
+        if let Some(rest) = line.strip_prefix("sndname ") {
+            if let Some((i, name)) = rest.split_once(' ')
+                && let Ok(i) = i.parse::<usize>()
+                && i >= 1
+            {
+                if self.names.len() < i {
+                    self.names.resize(i, String::new());
+                }
+                self.names[i - 1] = name.to_owned();
+            }
+            return;
+        }
         if self.ready().is_none() {
             if self.pending.len() < 64 {
                 self.pending.push(line.to_owned());
@@ -646,27 +727,36 @@ impl ClientSound {
                     },
                 );
             }
-            ("loop", [ent, _, _, _, alias]) => {
+            ("msnd", [ent, _, _, _, alias]) => {
                 let entity = ent.parse().unwrap_or(NO_ENTITY);
                 self.play(
                     alias,
                     Cue {
                         origin: pos(),
                         entity,
+                        master: true,
                         ..Cue::default()
                     },
                 );
             }
-            ("stoploop", [ent, alias]) => {
-                if let (Some(s), Ok(e)) = (self.ready(), ent.parse::<u32>()) {
-                    if *alias == "*" {
-                        s.stop_entity(e);
-                    } else {
-                        s.stop_loop(e, alias);
-                    }
+            ("lsnd", [alias]) => self.play(
+                alias,
+                Cue {
+                    stoppable: true,
+                    ..Cue::default()
+                },
+            ),
+            ("stoplsnd", [alias]) => {
+                if let Some(s) = self.ready() {
+                    s.stop_alias(NO_ENTITY, alias);
                 }
             }
-            ("lsnd", [alias]) => self.play(alias, Cue::default()),
+            ("soundfade", [volume, ms]) => {
+                if let Some(s) = self.ready() {
+                    s.fade_all(volume.parse().unwrap_or(1.0), ms.parse().unwrap_or(0));
+                }
+            }
+            ("stopsounds", []) => self.stop_all(),
             ("ambient", [fade, alias]) => {
                 let fade = fade.parse().unwrap_or(0);
                 match self.ready() {
@@ -769,7 +859,8 @@ fn surface_names(s: u8) -> Vec<String> {
     v
 }
 
-/// `WhizbySound`: a bullet passing within 140 units of the listener, at least 64 past its start, makes
+/// `WhizbySound`: a bullet passing within 140 units of the listener, at least 64 past its start and ending at
+/// least 64 beyond the listener, makes
 /// the `whizby` sound at the nearest point of its path, 16 units back.
 fn whizby_at(eye: [f32; 3], start: [f32; 3], end: [f32; 3]) -> Option<[f32; 3]> {
     let d = sub(end, start);
@@ -779,7 +870,8 @@ fn whizby_at(eye: [f32; 3], start: [f32; 3], end: [f32; 3]) -> Option<[f32; 3]> 
     }
     let dir = [d[0] / len, d[1] / len, d[2] / len];
     let along = dot(sub(eye, start), dir);
-    if along < 64.0 || len < along {
+    // The shot must go on at least 64 units past the listener's place along it.
+    if along < 64.0 || len < along + 64.0 {
         return None;
     }
     let at = [
@@ -966,6 +1058,8 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
         eye: [0.0; 3],
         footsteps: true,
         missile_loops: HashSet::new(),
+        names: Vec::new(),
+        entity_loops: HashMap::new(),
         breath: crate::breath::Breath::default(),
         breath_volumes: Vec::new(),
     };
@@ -1048,6 +1142,51 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
     if sound.bank.has("land_plr_concrete") && played.contains_key("land_plr_dirt") {
         out.push(("a concrete landing played dirt".into(), false));
     }
+    out.extend(loop_selftest(&mut cs));
+    out
+}
+
+/// Entity loops come from the snapshots' entity state: a looping entity is heard, follows nothing it is not, and
+/// falls silent when it leaves the snapshot; a restart ends it, and it comes back with the next snapshot.
+#[cfg(not(target_arch = "wasm32"))]
+fn loop_selftest(cs: &mut ClientSound) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let Some(name) = cs.ready().and_then(|s| {
+        s.bank
+            .names()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .find(|n| {
+                s.bank.aliases_of(n).first().is_some_and(|a| {
+                    a.looping
+                        && matches!(a.audio, audio::bank::Clip::Loaded(_))
+                        && s.bank.channels[usize::from(a.channel)].is_3d
+                        && a.dist.1 > 300.0
+                })
+            })
+    }) else {
+        return out;
+    };
+    let active = |cs: &mut ClientSound| {
+        let s = cs.ready().expect("ready");
+        s.render(960);
+        s.tick(Duration::from_millis(20));
+        s.stats().active.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    cs.command(&format!("sndname 1 {name}"));
+    let here = [(5u16, 1u16, [10.0f32, 0.0, 0.0])];
+    cs.entity_loops(&here);
+    cs.entity_loops(&here);
+    out.push((format!("{name} loops on its entity"), active(cs) == 1));
+    cs.entity_loops(&[]);
+    out.push(("the loop ends with its entity".into(), active(cs) == 0));
+    cs.entity_loops(&here);
+    active(cs);
+    cs.command("stopsounds");
+    out.push(("a restart ends the loop".into(), active(cs) == 0));
+    cs.entity_loops(&here);
+    out.push(("the loop returns with the next snapshot".into(), active(cs) == 1));
     out
 }
 
@@ -1228,6 +1367,10 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         whizby_at([0.0; 3], [-20.0, 60.0, 0.0], [500.0, 60.0, 0.0]).is_none(),
         "a bullet starting beside the listener whizzed".into(),
     );
+    check(
+        whizby_at([0.0; 3], [-500.0, 60.0, 0.0], [30.0, 60.0, 0.0]).is_none(),
+        "a bullet that stopped within 64 units past the listener whizzed".into(),
+    );
     if let Some(p) = near_miss {
         let w = s.play(
             "whizby",
@@ -1346,6 +1489,31 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         m.insert("shock_duck_ratio".into(), (ducked / open.max(1e-9)).into());
     }
 
+    // A map restart ends everything that played: no voice is left, whatever was looping, ringing or playing.
+    s.play(
+        shot,
+        Cue {
+            origin: Some([300.0, 0.0, 0.0]),
+            ..Cue::default()
+        },
+    );
+    s.set_reverb(1, "hangar", 1.0, 0);
+    let _ = energy(&mut s, 480);
+    check(
+        s.stats().active.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "nothing playing before the restart".into(),
+    );
+    s.stop_all();
+    let _ = energy(&mut s, 480);
+    let left = s.stats().active.load(std::sync::atomic::Ordering::Relaxed);
+    check(left == 0, format!("{left} voices after a restart"));
+    m.insert("voices_after_restart".into(), left.into());
+    let tail = energy(&mut s, 24_000);
+    check(
+        tail[0] + tail[1] < 1e-9,
+        format!("sound after a restart: {tail:?}"),
+    );
+
     // Streamed ambience and music play out of the IWDs.
     let streamed = |channel: &str, s: &mut Sound| -> Option<String> {
         s.bank
@@ -1424,6 +1592,14 @@ mod tests {
             let g = movement_sounds(ev::LANDING_FIRST + surface, 0, true, false).unwrap();
             assert_eq!(first(&g, 0), format!("land_plr_{name}"));
         }
+    }
+
+    #[test]
+    fn a_shot_must_end_well_past_the_listener_to_whiz() {
+        let eye = [0.0; 3];
+        assert!(whizby_at(eye, [-500.0, 60.0, 0.0], [100.0, 60.0, 0.0]).is_some());
+        assert!(whizby_at(eye, [-500.0, 60.0, 0.0], [63.0, 60.0, 0.0]).is_none());
+        assert!(whizby_at(eye, [-500.0, 60.0, 0.0], [20.0, 60.0, 0.0]).is_none());
     }
 
     #[test]

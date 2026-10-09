@@ -166,6 +166,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 surface,
                 weapon: 0,
                 shooter: 0,
+                exit: false,
             },
             &weapon,
         );

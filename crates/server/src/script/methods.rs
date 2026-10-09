@@ -49,7 +49,7 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("playsound", r(super::sound::play_sound)),
     ("playloopsound", r(super::sound::play_loop_sound)),
     ("stoploopsound", r(super::sound::stop_loop_sound)),
-    ("playsoundasmaster", r(super::sound::play_sound)),
+    ("playsoundasmaster", r(super::sound::play_sound_as_master)),
     ("playsoundtoteam", r(super::sound::play_sound_to_team)),
     ("playsoundtoplayer", r(super::sound::play_sound_to_player)),
     ("setreverb", r(super::sound::set_reverb)),

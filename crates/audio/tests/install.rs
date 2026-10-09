@@ -90,7 +90,7 @@ fn every_streamed_alias_names_a_decodable_file() {
             Ok(bytes) => {
                 let ext = decode::extension(p);
                 mp3 += usize::from(ext == "mp3");
-                if let Err(e) = StreamJob::open(bytes, ext, false) {
+                if let Err(e) = StreamJob::open(bytes, ext, false, 0.0) {
                     missing.push(format!("{p}: {e}"));
                 }
             }

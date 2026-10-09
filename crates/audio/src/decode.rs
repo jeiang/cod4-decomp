@@ -11,9 +11,10 @@ use std::sync::Arc;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::units::Time;
 
 /// A file being decoded one packet at a time, as interleaved `f32` of at most two channels.
 pub struct Decoder {
@@ -24,6 +25,8 @@ pub struct Decoder {
     pub channels: u8,
     /// The first packet, decoded to learn the format, not yet handed out.
     first: Option<Vec<f32>>,
+    /// The file's length in frames and its sample rate, when the container says.
+    length: Option<(u64, u32)>,
 }
 
 impl Decoder {
@@ -50,6 +53,10 @@ impl Decoder {
         let decoder = symphonia::default::get_codecs()
             .make_audio_decoder(params, &AudioDecoderOptions::default())
             .map_err(|e| format!("unsupported codec: {e}"))?;
+        let length = track
+            .num_frames
+            .zip(params.sample_rate)
+            .filter(|(f, r)| *f > 0 && *r > 0);
         let track = track.id;
         let mut d = Self {
             format,
@@ -58,6 +65,7 @@ impl Decoder {
             rate: 0,
             channels: 0,
             first: None,
+            length,
         };
         let mut buf = Vec::new();
         if !d.decode_packet(&mut buf)? {
@@ -65,6 +73,26 @@ impl Decoder {
         }
         d.first = Some(buf);
         Ok(d)
+    }
+
+    /// Skips to `fraction` (0 to 1) of the file's length, when the container tells its length and can seek; the
+    /// file plays from the start otherwise.
+    pub fn seek_fraction(&mut self, fraction: f32) {
+        let Some((frames, rate)) = self.length else {
+            return;
+        };
+        let secs = frames as f64 * f64::from(fraction.clamp(0.0, 0.99)) / f64::from(rate);
+        let Some(time) = Time::try_new(secs as i64, (secs.fract() * 1e9) as u32) else {
+            return;
+        };
+        let to = SeekTo::Time {
+            time,
+            track_id: Some(self.track),
+        };
+        if self.format.seek(SeekMode::Coarse, to).is_ok() {
+            self.decoder.reset();
+            self.first = None;
+        }
     }
 
     /// Appends the next packet's samples to `out`; `false` at the end of the file.
@@ -151,8 +179,12 @@ impl StreamJob {
         bytes: Arc<[u8]>,
         ext: &str,
         looping: bool,
+        start: f32,
     ) -> Result<(Self, crate::mixer::Stream), String> {
-        let dec = Decoder::open(bytes.clone(), ext)?;
+        let mut dec = Decoder::open(bytes.clone(), ext)?;
+        if start > 0.0 {
+            dec.seek_fraction(start);
+        }
         let (tx, rx) = crate::ring::ring(RING);
         let stream = crate::mixer::Stream {
             ring: rx,
@@ -256,7 +288,7 @@ mod tests {
 
     #[test]
     fn a_stream_job_fills_the_ring_and_finishes_it() {
-        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 5000), "wav", false).unwrap();
+        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 5000), "wav", false, 0.0).unwrap();
         assert!(!job.pump());
         let mut all = vec![0.0; 5000];
         assert!(s.ring.pop_exact(&mut all));
@@ -264,8 +296,19 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_can_start_part_way_through() {
+        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 20_000), "wav", false, 0.5).unwrap();
+        assert!(!job.pump());
+        let n = s.ring.len();
+        assert!(
+            (9_000..=11_000).contains(&n),
+            "started half way but {n} of 20000 samples remain"
+        );
+    }
+
+    #[test]
     fn a_looping_stream_job_never_finishes() {
-        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 5000), "wav", true).unwrap();
+        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 5000), "wav", true, 0.0).unwrap();
         for _ in 0..4 {
             assert!(job.pump());
             let mut drain = vec![0.0; s.ring.len()];
@@ -280,7 +323,7 @@ mod tests {
 
     #[test]
     fn a_budgeted_pump_decodes_in_slices_and_ends_like_a_full_one() {
-        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 50_000), "wav", false).unwrap();
+        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 50_000), "wav", false, 0.0).unwrap();
         let mut got = 0;
         let mut calls = 0;
         let mut buf = vec![0.0; 50_000];

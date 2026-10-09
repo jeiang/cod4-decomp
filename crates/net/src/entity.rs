@@ -88,6 +88,8 @@ pub struct EntityState {
     pub head_icon: u16,
     /// Who sees `head_icon`: 0 everyone, 1 axis, 2 allies, 3 spectators.
     pub head_icon_team: u8,
+    /// The sound alias the entity loops: an index of the `sndname` commands the server sent, 0 for none.
+    pub loop_sound: u16,
 }
 
 macro_rules! int {
@@ -158,6 +160,7 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.perks, Bits(20)),
         int!(s, s.head_icon, Bits(8)),
         int!(s, s.head_icon_team, Bits(2)),
+        int!(s, s.loop_sound, Bits(10)),
     ]
 }
 
@@ -245,5 +248,24 @@ mod tests {
         read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
         assert_eq!(got, to);
         assert_eq!((got.head_icon, got.head_icon_team), (255, 3));
+    }
+
+    #[test]
+    fn a_loop_sound_survives_the_wire_and_ends_when_cleared() {
+        let from = EntityState::new(9);
+        let on = EntityState {
+            loop_sound: 700,
+            ..EntityState::new(9)
+        }
+        .canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &from, &on);
+        let mut got = from.clone();
+        read_delta(&mut BitReader::new(&w.into_bytes()), fields(), &mut got).unwrap();
+        assert_eq!(got.loop_sound, 700);
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &on, &from);
+        read_delta(&mut BitReader::new(&w.into_bytes()), fields(), &mut got).unwrap();
+        assert_eq!(got.loop_sound, 0);
     }
 }

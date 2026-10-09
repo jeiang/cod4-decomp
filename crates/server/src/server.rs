@@ -1866,6 +1866,11 @@ impl Server {
                 for line in NetSv::world_commands(&mut self.game, map) {
                     peer.queue(line);
                 }
+                // The old level's sounds end, and the new level's ambience (started while nobody was attached) begins.
+                peer.queue("stopsounds");
+                if let Some(a) = &self.game.ambient {
+                    peer.queue(a.clone());
+                }
                 if let Some(net) = self.net.as_mut() {
                     net.put_peer(slot, peer);
                 }

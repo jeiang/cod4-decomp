@@ -231,8 +231,13 @@ impl Effects {
                 normal,
                 surface,
                 weapon: w,
+                exit,
                 ..
             } => {
+                // The exit wound's marks are not drawn (only its sound is played).
+                if *exit {
+                    return;
+                }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
                 let def = self.impact_effect(t, *surface, false);
                 self.play(

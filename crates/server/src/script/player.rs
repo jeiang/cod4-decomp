@@ -133,7 +133,7 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
         r(|_, _, _, _| Ok(Value::Undefined)),
     ),
     ("playlocalsound", r(super::sound::play_local_sound)),
-    ("stoplocalsound", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("stoplocalsound", r(super::sound::stop_local_sound)),
     (
         "pingplayer",
         r(|g, _, e, _| {

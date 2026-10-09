@@ -316,6 +316,8 @@ pub struct BulletHit {
     pub surface: u8,
     /// The surface takes no marks (sky, no-impact brushes).
     pub no_impact: bool,
+    /// Where a penetrating bullet left a wall: an impact for the sound and marks only, with no damage to deal.
+    pub exit: bool,
     /// Where the trace that found this hit began (`bp->start`): the stretch `trigger_damage` volumes were crossed on.
     pub start: Vec3,
     pub point: Vec3,
@@ -429,6 +431,7 @@ impl Game {
             normal: br.t.normal,
             surface: surface_type(br.t.surface_flags) as u8,
             no_impact: br.t.surface_flags & (SURF_NOIMPACT | SURF_SKY) != 0,
+            exit: false,
             start: bp.start,
             point: br.hit_pos,
             dir: bp.dir,
@@ -437,6 +440,19 @@ impl Game {
             mean: bp.mean,
             hitloc: br.t.hitloc,
         });
+    }
+
+    /// The exit impact of a penetrating bullet at `br`, found by tracing back through the wall from `bp`.
+    fn bullet_exit(&self, bp: &Bp, br: &Br, p: &BulletParams, out: &mut Vec<BulletHit>) {
+        let before = out.len();
+        self.bullet_process(bp, br, p, 0, out);
+        // Only the impact: no damage, and the shot's own direction rather than the reverse trace's.
+        for h in &mut out[before..] {
+            h.exit = true;
+            h.damageable = false;
+            h.damage = 0;
+            h.dir = [-h.dir[0], -h.dir[1], -h.dir[2]];
+        }
     }
 
     /// `Bullet_FireExtended`: a bullet that does not penetrate passes through glass, and
@@ -524,6 +540,10 @@ impl Game {
                 bp.multiplier = penetrate_multiplier(bp.multiplier, depth, max_depth);
                 if bp.multiplier <= 0.0 {
                     return;
+                }
+                // `Bullet_ImpactEffect(.. impactFlags | 4)`: where the bullet came out of the wall.
+                if !all_solid && (!trace_hit || br.t.surface_flags & SURF_SKY == 0) {
+                    self.bullet_exit(&rev_bp, &rev_br, p, out);
                 }
                 if !all_solid && trace_hit {
                     self.bullet_process(bp, &br, p, dflags::PENETRATION, out);

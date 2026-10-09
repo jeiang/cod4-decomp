@@ -186,6 +186,9 @@ pub struct Ent {
     pub item: Option<Box<crate::items::DroppedItem>>,
     /// The effect this entity plays for the clients (`spawnfx`, `playloopedfx`).
     pub world_fx: Option<WorldFx>,
+    /// `playloopsound`: the sound alias (`Game::sounds` index) this entity loops, 0 for none. It travels in the
+    /// entity's state, so late joiners hear it and it ends with the entity.
+    pub loop_sound: u16,
 }
 
 /// What a script effect entity tells the clients to play (`ET_FX`, `ET_LOOP_FX`).
@@ -238,6 +241,7 @@ impl Ent {
             veh: None,
             item: None,
             world_fx: None,
+            loop_sound: 0,
         }
     }
 }
@@ -402,6 +406,8 @@ pub struct Game {
     pub shaders: Precache,
     pub strings: Precache,
     pub fx: Precache,
+    /// Sound aliases named by `playloopsound`; clients learn the names in `sndname` commands.
+    pub sounds: Precache,
     pub items: Precache,
     pub menus: Precache,
     pub configstrings: HashMap<u32, String>,
@@ -460,6 +466,8 @@ pub enum SoundTo {
     All,
     Client(u16),
     Team(crate::client::Team),
+    /// A team but one client (`playsoundtoteam`'s third argument).
+    TeamExcept(crate::client::Team, u16),
 }
 
 impl Game {
@@ -477,6 +485,7 @@ impl Game {
             shaders: Precache::default(),
             strings: Precache::default(),
             fx: Precache::default(),
+            sounds: Precache::default(),
             items: Precache::default(),
             menus: Precache::default(),
             configstrings: HashMap::new(),
@@ -580,13 +589,8 @@ impl Game {
         self.unlink_all(num);
         self.dropped.retain(|&d| d != num);
         if let Some(slot) = self.ents.get_mut(usize::from(num))
-            && let Some(e) = slot.take()
+            && let Some(_) = slot.take()
         {
-            if e.veh.is_some() {
-                // The engine hum on the vehicle ends with it.
-                self.sound_out
-                    .push((SoundTo::All, format!("stoploop {num} *")));
-            }
             self.attractors.free_entity(num);
             if let Some(w) = self.world.as_mut() {
                 w.unlink(num);
@@ -609,6 +613,7 @@ impl Game {
         self.shaders = Precache::default();
         self.strings = Precache::default();
         self.fx = Precache::default();
+        self.sounds = Precache::default();
         self.items = Precache::default();
         self.menus = Precache::default();
         self.configstrings.clear();
@@ -1019,6 +1024,38 @@ mod tests {
         );
         g.ent_mut(n).unwrap().hidden = true;
         assert!(published(&g).is_none(), "a hidden model is not drawn");
+    }
+
+    #[test]
+    fn an_entity_loop_is_in_its_state_and_ends_with_the_entity() {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        let mut e = Ent::new(EntKind::Plain, "script_origin");
+        e.origin = [5.0, 6.0, 7.0];
+        let n = g.spawn(e).unwrap();
+        let state = |g: &Game| {
+            crate::netsv::world_entities(g)
+                .into_iter()
+                .find(|s| s.number == n)
+        };
+        assert!(state(&g).is_none(), "a silent script_origin is not sent");
+        let index = g.sounds.index("hum") as u16;
+        g.ent_mut(n).unwrap().loop_sound = index;
+        let s = state(&g).expect("a looping entity is sent so late joiners hear it");
+        assert_eq!((s.loop_sound, s.origin), (index, [5.0, 6.0, 7.0]));
+        g.ent_mut(n).unwrap().origin = [9.0, 6.0, 7.0];
+        assert_eq!(state(&g).unwrap().origin[0], 9.0, "the loop follows it");
+        g.ent_mut(n).unwrap().loop_sound = 0;
+        assert!(state(&g).is_none());
+        g.ent_mut(n).unwrap().loop_sound = index;
+        let prog = gsc::compile(
+            &[("t.gsc", "main() {}")],
+            &gsc::Builtins::stock_mp(),
+            gsc::Options::default(),
+        )
+        .unwrap();
+        let mut vm = gsc::Vm::new(prog).unwrap();
+        g.free_entity(&mut vm, n);
+        assert!(state(&g).is_none(), "a freed entity stops looping");
     }
 
     #[test]

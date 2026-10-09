@@ -171,6 +171,8 @@ impl DecodeFilter for ContentFilter {
     fn keep(&self, ty: XAssetType) -> bool {
         // A client draws effects; the server only needs the weapons that name them.
         (self.presentation && matches!(ty, XAssetType::Fx | XAssetType::ImpactFx))
+            // The alias names, for `soundexists`; the samples are presentation data and stay out.
+            || ty == XAssetType::Sound
             || Consumer::Server.keep(ty)
     }
 
@@ -199,6 +201,8 @@ struct Layer {
     /// Effects by lowercase name (client content only).
     fx: HashMap<String, (u8, Arc<FxEffectDef>)>,
     impact: Option<(u8, Arc<FxImpactTable>)>,
+    /// Lowercase names of the sound alias lists.
+    sounds: HashMap<String, (u8, ())>,
 }
 
 fn resolve(strings: &[Option<Arc<str>>], i: u16) -> Arc<str> {
@@ -328,6 +332,11 @@ impl Content {
             Asset::ImpactFx(t) if layer.impact.as_ref().is_none_or(|(g, _)| *g <= tag) => {
                 layer.impact = Some((tag, t));
             }
+            Asset::Sound(l) => {
+                if let Some(n) = &l.name {
+                    put(&mut layer.sounds, tag, n, ());
+                }
+            }
             Asset::Localize(l) => {
                 if let (Some(n), Some(v)) = (&l.name, &l.value) {
                     put(&mut layer.localize, tag, n, v.clone());
@@ -386,6 +395,13 @@ impl Content {
         get(&self.map.raw, name)
             .or_else(|| get(&self.base.raw, name))
             .map(|v| &v[..])
+    }
+
+    /// Whether a sound alias list of this name is in the loaded zones (`soundexists`).
+    pub fn sound_exists(&self, name: &str) -> bool {
+        get(&self.map.sounds, name)
+            .or_else(|| get(&self.base.sounds, name))
+            .is_some()
     }
 
     pub fn string_table(&self, name: &str) -> Option<&Arc<StringTable>> {

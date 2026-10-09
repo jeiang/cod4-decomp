@@ -1101,6 +1101,13 @@ impl NetPlay {
     fn hear(&mut self, dt: f32, eye: Vec3, ps: &PlayerState, snap: &net::Snapshot) {
         let yaw = self.angles[1].to_radians();
         self.sound.frame(eye.to_array(), yaw, dt);
+        let loops: Vec<_> = snap
+            .entities
+            .iter()
+            .filter(|e| e.loop_sound != 0)
+            .map(|e| (e.number, e.loop_sound, e.origin))
+            .collect();
+        self.sound.entity_loops(&loops);
         // Only the sound commands; the rest belong to other systems.
         let (mine, rest): (Vec<String>, Vec<String>) = std::mem::take(&mut self.net.commands)
             .into_iter()
@@ -1556,7 +1563,6 @@ impl NetPlay {
     }
 
     /// The vehicles (helicopters), between the snapshots around the interpolation moment, with their rotors turning.
-    /// Their loops follow them.
     fn vehicles(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
         self.rotor_clock += dt;
         let ents = self
@@ -1571,7 +1577,6 @@ impl NetPlay {
         self.c.vehicles_unloaded.clear();
         for e in ents.iter().filter(|e| e.etype == etype::VEHICLE) {
             seen += 1;
-            self.sound.follow(e.number, e.origin);
             if !self.draw_vehicles {
                 continue;
             }
