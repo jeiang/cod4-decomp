@@ -165,6 +165,9 @@ struct Counters {
     player_faults: std::collections::BTreeSet<String>,
     /// Names of the torso clips (`pt_*`) seen playing on other players: fire, reload, melee, throw, pullout, flinch.
     torso_clips: std::collections::BTreeSet<&'static str>,
+    /// Frames in which another player was reloading, swinging the knife or throwing a grenade: weapon handling that
+    /// always has a torso clip, so a run with some must have shown one.
+    remote_weapon_frames: u64,
     spawned: bool,
     start: Option<[f32; 3]>,
     end: [f32; 3],
@@ -1559,6 +1562,16 @@ impl NetPlay {
             }
             r.dead = Some(dead);
             r.player.update(dt, &input);
+            if matches!(
+                e.weapon_state,
+                sim::pm::weapon_state::RELOADING
+                    | sim::pm::weapon_state::RELOAD_START
+                    | sim::pm::weapon_state::MELEE_INIT
+                    | sim::pm::weapon_state::OFFHAND_HOLD
+            ) && !dead
+            {
+                self.c.remote_weapon_frames += 1;
+            }
             if let Some(c) = r.player.torso_animation() {
                 self.c.torso_clips.insert(c);
             }
@@ -1648,6 +1661,7 @@ impl NetPlay {
         report["players_drawn_max"] = self.c.max_players_drawn.into();
         report["player_faults"] = json!(self.c.player_faults);
         report["torso_clips"] = json!(self.c.torso_clips);
+        report["remote_weapon_frames"] = self.c.remote_weapon_frames.into();
         report
     }
 
