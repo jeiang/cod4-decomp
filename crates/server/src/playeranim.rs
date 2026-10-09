@@ -14,20 +14,29 @@
 //! * four weapon families chosen from the weapon's player anim type and class: pistol,
 //!   rocket launcher, "hold" (carrying the bomb/briefcase) and everything else as a two-handed
 //!   rifle;
-//! * ladder climbing, the laststand idle, and death animations by what the player was doing.
+//! * ladder climbing, the laststand idle, and death animations by what the player was doing;
+//! * the damage stumble: a player who is moving when hit plays `pb_stumble_*` for the stumble window
+//!   (`player_dmgtimer_stumbleTime`), by weapon family and strafe direction.
 //!
-//! What it drops: the `torso` partial animations (`pt_*` fire, reload, melee, pain, flinch),
-//! turn-in-place animations, jump/land/shellshock blends, the grenade-specific, SMG-crouch and
-//! unarmed variants (they use the rifle set), mantle animations (`mp_mantle_*`, not `pb_*`;
-//! a mantling player holds its idle pose), and the random choice among several death
-//! animations (the first listed is used). Animations cross-fade over 100 ms when the selection
-//! changes, which is the script's default `blendtime`.
+//! On top of the legs clip runs the torso channel, the script's `torso` entries (`pt_*`): the clip a weapon
+//! event selects (fire, reload, melee, grenade throw, weapon pullout, flinch) plays over the bones it names and
+//! leaves the legs to the locomotion clip. Events come from what a snapshot carries of a player: the weapon
+//! state's edges, the player event ring, and the damage timer. Each event picks its clip the way the script's
+//! `EVENTS` block orders its conditions (weapon class and player anim type, stance, moving or not, ADS,
+//! last stand).
+//!
+//! What it drops: turn-in-place animations, jump/land/shellshock blends, the SMG-crouch and unarmed variants
+//! (they use the rifle set), mantle animations (`mp_mantle_*`, not `pb_*`; a mantling player holds its idle
+//! pose), the random choice among several death animations (the first listed is used; melee variants cycle
+//! instead of being random so every machine shows the same one) and the `knife_melee` event (the knife swing
+//! plays the `meleeattack` clips). Animations cross-fade over 100 ms when the selection changes, which is the
+//! script's default `blendtime`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use assets::zone::weapon::WeaponDef;
-use sim::pm::{PlayerState, PmType, ef, pmf};
+use sim::pm::{PlayerState, PmType, ef, ev, pmf, weapon_state as ws};
 use sim::skel::controllers::{self, ControllerInput};
 use sim::skel::hitloc::{BULLET_PRIORITY, RIFLE_PRIORITY};
 use sim::skel::{AnimBinding, AnimLayer, LocHit, Placement, Pose, Rig, RigModel, Stance};
@@ -42,17 +51,31 @@ pub const BLEND_SECONDS: f32 = 0.1;
 /// `playeranimtypes.txt` indices the selection uses.
 pub mod anim_type {
     pub const NONE: i32 = 0;
+    pub const OTHER: i32 = 1;
     pub const PISTOL: i32 = 2;
+    pub const SMG: i32 = 3;
+    pub const AUTORIFLE: i32 = 4;
+    pub const SNIPER: i32 = 6;
     pub const ROCKETLAUNCHER: i32 = 7;
+    pub const M203: i32 = 12;
     pub const HOLD: i32 = 13;
     pub const BRIEFCASE: i32 = 14;
 }
 
 /// `weaponClass_t` values the selection uses.
 pub mod weap_class {
+    pub const RIFLE: i32 = 0;
+    pub const MG: i32 = 1;
+    pub const SMG: i32 = 2;
     pub const PISTOL: i32 = 4;
+    pub const GRENADE: i32 = 5;
     pub const ROCKETLAUNCHER: i32 = 6;
 }
+
+/// `player_dmgtimer_flinchTime` and `player_dmgtimer_stumbleTime` defaults, milliseconds: how long after a hit the
+/// flinch and stumble animations play.
+pub const FLINCH_MS: i32 = 500;
+pub const STUMBLE_MS: i32 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Family {
@@ -253,6 +276,113 @@ const DEATH_RUN: Dirs = [
 ];
 const DEATH_CROUCH_RUN: &str = "pb_crouchrun_death_drop";
 
+/// Stumble animations by weapon family (rifle, pistol, grenade) and direction slot (forward, back, left, right).
+const STUMBLE_RUN: [Dirs; 3] = [
+    [
+        "pb_stumble_forward",
+        "pb_stumble_back",
+        "pb_stumble_left",
+        "pb_stumble_right",
+    ],
+    [
+        "pb_stumble_pistol_forward",
+        "pb_stumble_pistol_back",
+        "pb_stumble_pistol_left",
+        "pb_stumble_pistol_right",
+    ],
+    [
+        "pb_stumble_grenade_forward",
+        "pb_stumble_grenade_back",
+        "pb_stumble_grenade_left",
+        "pb_stumble_grenade_right",
+    ],
+];
+/// Walking stumbles: rifle, then pistol and grenade alike.
+const STUMBLE_WALK: [Dirs; 2] = [
+    [
+        "pb_stumble_walk_forward",
+        "pb_stumble_walk_back",
+        "pb_stumble_walk_left",
+        "pb_stumble_walk_right",
+    ],
+    [
+        "pb_stumble_pistol_walk_forward",
+        "pb_stumble_pistol_walk_back",
+        "pb_stumble_pistol_walk_left",
+        "pb_stumble_pistol_walk_right",
+    ],
+];
+const STUMBLE_SPRINT: &str = "pb_stumble_forward";
+
+/// `pb_*` animations the torso channel plays as a whole-body (`both`) entry.
+const TORSO_BODY_CLIPS: &[&str] = &["pb_crouch_grenade_throw", "pb_stand_grenade_throw"];
+
+/// Every `pt_*` animation the torso channel can select.
+const TORSO_CLIPS: &[&str] = &[
+    "pt_laststand_fire",
+    "pt_prone_shoot_pistol",
+    "pt_crouch_shoot_ads_pistol",
+    "pt_crouch_shoot_pistol",
+    "pt_stand_shoot_pistol",
+    "pt_prone_shoot_auto",
+    "pt_crouch_shoot_auto_ads",
+    "pt_crouch_shoot_auto",
+    "pt_stand_shoot_auto_ads",
+    "pt_stand_shoot_auto",
+    "pt_crouch_shoot_ads",
+    "pt_prone_shoot_RPG",
+    "pt_stand_shoot_RPG",
+    "pt_hold_prone_throw",
+    "pt_hold_throw",
+    "pt_prone_grenade_throw",
+    "pt_crouch_grenade_throw",
+    "pt_stand_grenade_throw",
+    "pt_crouch_shoot",
+    "pt_rifle_fire_ads",
+    "pt_rifle_fire",
+    "pt_stand_shoot_shotgun",
+    "pt_stand_shoot_ads",
+    "pt_stand_shoot",
+    "pt_melee_prone_pistol",
+    "pt_melee_prone",
+    "pt_melee_crouch_left2left",
+    "pt_melee_crouch_left2right",
+    "pt_melee_crouch_right2left",
+    "pt_melee_right2right_1",
+    "pt_melee_right2right_2",
+    "pt_melee_right2left",
+    "pt_melee_left2left_1",
+    "pt_melee_left2right",
+    "pt_prone_pullout_pose",
+    "pt_crouch_pullout_pose",
+    "pt_stand_pullout_pose",
+    "pt_laststand_reload",
+    "pt_reload_crouch_pistol",
+    "pt_reload_crouchwalk_pistol",
+    "pt_reload_prone_pistol",
+    "pt_reload_prone_RPG",
+    "pt_reload_stand_RPG",
+    "pt_reload_stand_pistol",
+    "pt_reload_prone_auto",
+    "pt_reload_stand_auto_mp40",
+    "pt_reload_crouchwalk",
+    "pt_reload_crouch_rifle",
+    "pt_reload_stand_auto",
+    "pt_reload_stand_rifle",
+    "pt_flinch_pistol_forward",
+    "pt_flinch_pistol_back",
+    "pt_flinch_pistol_left",
+    "pt_flinch_pistol_right",
+    "pt_flinch_grenade_forward",
+    "pt_flinch_grenade_back",
+    "pt_flinch_grenade_left",
+    "pt_flinch_grenade_right",
+    "pt_flinch_forward",
+    "pt_flinch_back",
+    "pt_flinch_left",
+    "pt_flinch_right",
+];
+
 fn set(f: Family) -> &'static Set {
     SETS.iter()
         .find(|(g, _)| *g == f)
@@ -282,6 +412,10 @@ fn all_names() -> Vec<&'static str> {
         DEATH_CROUCH_RUN,
     ]);
     v.extend(DEATH_RUN);
+    v.extend(STUMBLE_RUN.iter().flatten());
+    v.extend(STUMBLE_WALK.iter().flatten());
+    v.extend(TORSO_BODY_CLIPS.iter().copied());
+    v.extend(TORSO_CLIPS.iter().copied());
     v.sort_unstable();
     v.dedup();
     v
@@ -359,6 +493,16 @@ pub struct PlayerPoseInput {
     pub waist_pitch: f32,
     /// Mounted on a turret: the aim controllers stay at rest.
     pub turret: bool,
+    /// `ps.weapon_state` (`sim::pm::weapon_state`): its edges start the fire, reload, melee, throw and pullout clips.
+    pub weapon_state: u8,
+    /// The newest entry of the player event ring and its sequence number; a new sequence with a fire event starts
+    /// another fire clip while the weapon state stays in `FIRING`.
+    pub event: u8,
+    pub event_seq: u8,
+    /// `ps.damage_timer` and `ps.damage_duration`, milliseconds, and `ps.flinch_yaw_anim`.
+    pub damage_timer: i32,
+    pub damage_duration: i32,
+    pub flinch_dir: u8,
 }
 
 /// [`Stance`] with a `Default`.
@@ -415,7 +559,258 @@ impl PlayerPoseInput {
             torso_pitch: ps.torso_pitch,
             waist_pitch: ps.waist_pitch,
             turret: ps.e_flags & ef::TURRET_ACTIVE != 0,
+            weapon_state: ps.weapon_state,
+            event: ps.events[usize::from(ps.event_sequence.wrapping_sub(1) & 3)],
+            event_seq: ps.event_sequence,
+            damage_timer: ps.damage_timer,
+            damage_duration: ps.damage_duration,
+            flinch_dir: ps.flinch_yaw_anim,
         }
+    }
+
+    /// Inside the window after a hit in which the last `window` milliseconds of the damage timer still run
+    /// (`PM_ShouldFlinch`, and the stumble test of `PM_GetMoveAnim`).
+    fn recently_hit(&self, window: i32) -> bool {
+        self.damage_timer > (self.damage_duration - window).max(0)
+    }
+
+    fn pistol_or_grenade(&self) -> bool {
+        self.weap_class == weap_class::PISTOL || self.throws_grenade()
+    }
+
+    /// A grenade class weapon that is not an M203 launcher: the script's `weaponclass grenade, playerAnimType all
+    /// NOT m203`.
+    fn throws_grenade(&self) -> bool {
+        self.weap_class == weap_class::GRENADE && self.anim_type != anim_type::M203
+    }
+
+    /// The `pb_stumble_*` animation of a moving player who was just hit.
+    fn stumble(&self) -> Option<&'static str> {
+        if !self.recently_hit(STUMBLE_MS) || self.stance == StanceInput::Prone || self.mantle {
+            return None;
+        }
+        let dir = Dir::from_degrees(self.move_dir).slot();
+        let pg = usize::from(self.pistol_or_grenade());
+        Some(match self.motion() {
+            Motion::Idle => return None,
+            Motion::Sprint => STUMBLE_SPRINT,
+            Motion::Walk => STUMBLE_WALK[pg][dir],
+            Motion::Run => {
+                let family = if self.stance != StanceInput::Stand {
+                    pg
+                } else if self.weap_class == weap_class::PISTOL {
+                    1
+                } else if self.throws_grenade() {
+                    2
+                } else {
+                    0
+                };
+                STUMBLE_RUN[family][dir]
+            }
+        })
+    }
+
+    /// `movetype prone`, `crouching` (any crouched movement), `idlecr`, and `moving` of the script's conditions.
+    fn prone(&self) -> bool {
+        self.stance == StanceInput::Prone
+    }
+
+    fn crouching(&self) -> bool {
+        self.stance == StanceInput::Crouch
+    }
+
+    fn moving(&self) -> bool {
+        self.motion() != Motion::Idle
+    }
+
+    /// The script's `fireweapon` event: the torso clip and the cap on how long it plays (`duration`, seconds).
+    fn fire_clip(&self) -> Option<(&'static str, Option<f32>)> {
+        if self.turret {
+            return None;
+        }
+        if self.laststand {
+            return Some(("pt_laststand_fire", None));
+        }
+        if self.throws_grenade() {
+            return self.throw_clip(self.anim_type == anim_type::HOLD);
+        }
+        let (prone, mv, crouch, ads) = (self.prone(), self.moving(), self.crouching(), self.ads);
+        let auto = matches!(self.weap_class, weap_class::MG | weap_class::SMG);
+        let clip = if self.weap_class == weap_class::PISTOL {
+            match () {
+                _ if prone => "pt_prone_shoot_pistol",
+                _ if mv => return None,
+                _ if crouch && ads => "pt_crouch_shoot_ads_pistol",
+                _ if crouch => "pt_crouch_shoot_pistol",
+                _ => "pt_stand_shoot_pistol",
+            }
+        } else if auto {
+            match () {
+                _ if prone => "pt_prone_shoot_auto",
+                _ if mv => return None,
+                _ if crouch && ads => "pt_crouch_shoot_auto_ads",
+                _ if crouch => "pt_crouch_shoot_auto",
+                _ if ads => "pt_stand_shoot_auto_ads",
+                _ => "pt_stand_shoot_auto",
+            }
+        } else if self.weap_class == weap_class::ROCKETLAUNCHER {
+            match () {
+                _ if mv => return None,
+                _ if crouch => "pt_crouch_shoot_ads",
+                _ if prone => "pt_prone_shoot_RPG",
+                _ => "pt_stand_shoot_RPG",
+            }
+        } else if self.anim_type == anim_type::SNIPER {
+            match () {
+                _ if prone => "pt_prone_shoot_auto",
+                _ if mv => return None,
+                _ if crouch && ads => "pt_crouch_shoot_ads",
+                _ if crouch => "pt_crouch_shoot",
+                _ if ads => "pt_rifle_fire_ads",
+                _ => "pt_rifle_fire",
+            }
+        } else if self.anim_type == anim_type::OTHER && prone {
+            "pt_prone_shoot_auto"
+        } else if self.anim_type == anim_type::OTHER {
+            "pt_stand_shoot_shotgun"
+        } else {
+            match () {
+                _ if prone => "pt_prone_shoot_auto",
+                _ if mv => return None,
+                _ if crouch && ads => "pt_crouch_shoot_ads",
+                _ if crouch => "pt_crouch_shoot",
+                _ if ads => "pt_stand_shoot_ads",
+                _ => "pt_stand_shoot",
+            }
+        };
+        Some((clip, auto.then_some(0.15)))
+    }
+
+    /// The grenade throw of `fireweapon`; `hold` is the carried-object (bomb) throw.
+    fn throw_clip(&self, hold: bool) -> Option<(&'static str, Option<f32>)> {
+        let clip = match (hold, self.stance, self.moving()) {
+            (true, StanceInput::Prone, _) => "pt_hold_prone_throw",
+            (true, ..) => "pt_hold_throw",
+            (_, StanceInput::Prone, _) => "pt_prone_grenade_throw",
+            (_, StanceInput::Crouch, false) => "pb_crouch_grenade_throw",
+            (_, StanceInput::Crouch, true) => "pt_crouch_grenade_throw",
+            (_, StanceInput::Stand, false) => "pb_stand_grenade_throw",
+            (_, StanceInput::Stand, true) => "pt_stand_grenade_throw",
+        };
+        Some((clip, None))
+    }
+
+    /// The script's `reload` event.
+    fn reload_clip(&self) -> &'static str {
+        let (prone, crouch, mv) = (self.prone(), self.crouching(), self.moving());
+        if self.laststand {
+            "pt_laststand_reload"
+        } else if self.weap_class == weap_class::PISTOL && crouch {
+            if mv {
+                "pt_reload_crouchwalk_pistol"
+            } else {
+                "pt_reload_crouch_pistol"
+            }
+        } else if self.weap_class == weap_class::PISTOL && prone {
+            "pt_reload_prone_pistol"
+        } else if self.weap_class == weap_class::ROCKETLAUNCHER {
+            if prone {
+                "pt_reload_prone_RPG"
+            } else {
+                "pt_reload_stand_RPG"
+            }
+        } else if self.weap_class == weap_class::PISTOL {
+            "pt_reload_stand_pistol"
+        } else if self.anim_type == anim_type::SMG {
+            match () {
+                _ if prone => "pt_reload_prone_auto",
+                _ if crouch && mv => "pt_reload_crouchwalk",
+                _ => "pt_reload_stand_auto_mp40",
+            }
+        } else if self.anim_type == anim_type::AUTORIFLE {
+            match () {
+                _ if prone => "pt_reload_prone_auto",
+                _ if crouch && mv => "pt_reload_crouchwalk",
+                _ if crouch => "pt_reload_crouch_rifle",
+                _ => "pt_reload_stand_auto",
+            }
+        } else if crouch {
+            "pt_reload_crouch_rifle"
+        } else if prone {
+            "pt_reload_prone_auto"
+        } else {
+            "pt_reload_stand_rifle"
+        }
+    }
+
+    /// The script's `meleeattack` event; `n` counts swings so the variants take turns (the script picks at random).
+    fn melee_clip(&self, n: u32) -> (&'static str, Option<f32>) {
+        const CROUCH: [&str; 3] = [
+            "pt_melee_crouch_left2left",
+            "pt_melee_crouch_left2right",
+            "pt_melee_crouch_right2left",
+        ];
+        const STAND: [(&str, f32); 5] = [
+            ("pt_melee_right2right_1", 0.4),
+            ("pt_melee_right2right_2", 0.4),
+            ("pt_melee_right2left", 0.3),
+            ("pt_melee_left2left_1", 0.4),
+            ("pt_melee_left2right", 0.3),
+        ];
+        if self.pistol_or_grenade() && self.anim_type != anim_type::M203 {
+            ("pt_melee_prone_pistol", None)
+        } else if self.prone() {
+            ("pt_melee_prone", None)
+        } else if self.crouching() {
+            (CROUCH[n as usize % CROUCH.len()], None)
+        } else {
+            let (c, d) = STAND[n as usize % STAND.len()];
+            (c, Some(d))
+        }
+    }
+
+    /// The script's `dropweapon` event (the weapon pullout pose).
+    fn pullout_clip(&self) -> &'static str {
+        match self.stance {
+            StanceInput::Prone => "pt_prone_pullout_pose",
+            StanceInput::Crouch => "pt_crouch_pullout_pose",
+            StanceInput::Stand => "pt_stand_pullout_pose",
+        }
+    }
+
+    /// The script's `flinch_*` entries: by hit direction, for a pistol, a grenade, or any other weapon.
+    fn flinch_clip(&self) -> &'static str {
+        const RIFLE: [&str; 4] = [
+            "pt_flinch_forward",
+            "pt_flinch_back",
+            "pt_flinch_left",
+            "pt_flinch_right",
+        ];
+        const PISTOL: [&str; 4] = [
+            "pt_flinch_pistol_forward",
+            "pt_flinch_pistol_back",
+            "pt_flinch_pistol_left",
+            "pt_flinch_pistol_right",
+        ];
+        const GRENADE: [&str; 4] = [
+            "pt_flinch_grenade_forward",
+            "pt_flinch_grenade_back",
+            "pt_flinch_grenade_left",
+            "pt_flinch_grenade_right",
+        ];
+        let table = if self.weap_class == weap_class::PISTOL {
+            &PISTOL
+        } else if self.throws_grenade() {
+            &GRENADE
+        } else {
+            &RIFLE
+        };
+        table[usize::from(self.flinch_dir & 3)]
+    }
+
+    /// A standing, still player inside the flinch window (`PM_Footsteps_NotMoving`).
+    fn flinching(&self) -> bool {
+        self.recently_hit(FLINCH_MS) && self.stance == StanceInput::Stand && !self.moving()
     }
 
     fn family(&self) -> Family {
@@ -458,6 +853,9 @@ impl PlayerPoseInput {
             } else {
                 CLIMB_UP
             };
+        }
+        if let Some(stumble) = self.stumble() {
+            return stumble;
         }
         let s = set(self.family());
         let st = self.stance.index();
@@ -625,6 +1023,20 @@ pub struct PlayerPoseState {
     previous: Option<(&'static str, f32)>,
     /// Seconds of cross-fade left.
     blend: f32,
+    torso: Option<Torso>,
+    /// Swings so far, to take turns among the melee clips.
+    swings: u32,
+    seen: bool,
+    flinching: bool,
+}
+
+/// The torso clip playing over the legs.
+#[derive(Debug, Clone, Copy)]
+struct Torso {
+    clip: &'static str,
+    seconds: f32,
+    /// The script's `duration`: stop this early.
+    cap: Option<f32>,
 }
 
 impl PlayerPoseState {
@@ -659,7 +1071,83 @@ impl PlayerPoseState {
         if self.blend == 0.0 {
             self.previous = None;
         }
+        if let Some(t) = &mut self.torso {
+            t.seconds += dt;
+        }
+        self.start_torso(input);
         self.input = *input;
+    }
+
+    /// Starts the torso clip the change from the last input to `input` calls for (the script's `EVENTS`): weapon
+    /// state edges for reload, melee, offhand throw and pullout, the weapon state or a new fire event for firing,
+    /// and the flinch window opening on a still standing player. The first input only seeds the edges.
+    fn start_torso(&mut self, input: &PlayerPoseInput) {
+        let flinching = input.flinching();
+        let was = (
+            self.input.weapon_state,
+            self.input.event_seq,
+            self.flinching,
+        );
+        let seen = std::mem::replace(&mut self.seen, true);
+        self.flinching = flinching;
+        if input.dead {
+            self.torso = None;
+            return;
+        }
+        if !seen {
+            return;
+        }
+        let state_edge = input.weapon_state != was.0;
+        let clip = match input.weapon_state {
+            ws::FIRING if state_edge => input.fire_clip(),
+            ws::RELOADING | ws::RELOAD_START if state_edge => Some((input.reload_clip(), None)),
+            ws::MELEE_INIT if state_edge => {
+                self.swings = self.swings.wrapping_add(1);
+                Some(input.melee_clip(self.swings))
+            }
+            ws::OFFHAND_HOLD if state_edge => PlayerPoseInput {
+                weap_class: weap_class::GRENADE,
+                anim_type: anim_type::NONE,
+                ..*input
+            }
+            .throw_clip(false),
+            ws::DROPPING | ws::DROPPING_QUICK if state_edge && !input.mantle => {
+                Some((input.pullout_clip(), None))
+            }
+            _ => None,
+        }
+        .or_else(|| {
+            let fired = input.event_seq != was.1
+                && matches!(input.event, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT);
+            fired.then(|| input.fire_clip()).flatten()
+        })
+        .or_else(|| (flinching && !was.2).then(|| (input.flinch_clip(), None)));
+        if let Some((clip, cap)) = clip {
+            self.torso = Some(Torso {
+                clip,
+                seconds: 0.0,
+                cap,
+            });
+        }
+    }
+
+    /// The torso clip still playing for `anims`' lengths, and its blend weight.
+    fn torso_layer<'a>(&self, anims: &'a PlayerAnims) -> Option<AnimLayer<'a>> {
+        let t = self.torso?;
+        let length = anims.slots.get(t.clip)?.length;
+        let end = t.cap.map_or(length, |c| c.min(length));
+        if t.seconds >= end {
+            return None;
+        }
+        let weight = (t.seconds / BLEND_SECONDS)
+            .min((end - t.seconds) / BLEND_SECONDS)
+            .clamp(0.0, 1.0);
+        anims.layer(t.clip, t.seconds, weight)
+    }
+
+    /// The torso clip playing over `anims`' legs, if any.
+    pub fn torso(&self, anims: &PlayerAnims) -> Option<&'static str> {
+        self.torso_layer(anims).and(self.torso.map(|t| t.clip))
     }
 
     /// The animation currently selected.
@@ -670,6 +1158,16 @@ impl PlayerPoseState {
     /// Poses `anims`' rig for the last input into `out` (entity space; see
     /// [`sim::skel::Pose::to_world`]).
     pub fn pose(&self, anims: &PlayerAnims, out: &mut Pose) {
+        self.pose_with(anims, true, out);
+    }
+
+    /// The body as the server's hit volumes see it: the legs clip alone, without the torso channel, so locational
+    /// damage does not shift with a player's firing or reloading (the torso clips are presentation).
+    pub fn hit_pose(&self, anims: &PlayerAnims, out: &mut Pose) {
+        self.pose_with(anims, false, out);
+    }
+
+    fn pose_with(&self, anims: &PlayerAnims, with_torso: bool, out: &mut Pose) {
         let ctl = self.input.controllers();
         let w_prev = if self.previous.is_some() {
             self.blend / BLEND_SECONDS
@@ -683,13 +1181,17 @@ impl PlayerPoseState {
         if let Some((p, t)) = self.previous {
             layers[1] = anims.layer(p, t, w_prev);
         }
+        let torso = with_torso.then(|| self.torso_layer(anims)).flatten();
+        let torso: &[AnimLayer] = torso.as_slice();
         let [a, b] = layers;
         match (a, b) {
-            (Some(a), Some(b)) => anims.rig.pose(&[a, b], &ctl, out),
+            (Some(a), Some(b)) => anims.rig.pose_overlay(&[a, b], torso, &ctl, out),
             (Some(l), None) | (None, Some(l)) => {
-                anims.rig.pose(&[AnimLayer { weight: 1.0, ..l }], &ctl, out)
+                anims
+                    .rig
+                    .pose_overlay(&[AnimLayer { weight: 1.0, ..l }], torso, &ctl, out)
             }
-            (None, None) => anims.rig.pose(&[], &ctl, out),
+            (None, None) => anims.rig.pose_overlay(&[], torso, &ctl, out),
         }
     }
 
@@ -707,7 +1209,7 @@ impl PlayerPoseState {
         max_fraction: f32,
     ) -> Option<LocHit> {
         let mut pose = Pose::default();
-        self.pose(anims, &mut pose);
+        self.hit_pose(anims, &mut pose);
         sim::skel::trace_player(
             &anims.rig,
             &pose,
@@ -929,5 +1431,305 @@ mod tests {
         }
         assert!(s.previous.is_none(), "fade is over after {BLEND_SECONDS} s");
         assert!((s.seconds - 0.165).abs() < 1e-5);
+    }
+
+    fn at(ws: u8) -> PlayerPoseInput {
+        PlayerPoseInput {
+            weapon_state: ws,
+            ..Default::default()
+        }
+    }
+
+    /// The torso clip a weapon-state edge from rest starts.
+    fn torso_after(rest: PlayerPoseInput, ws: u8) -> Option<&'static str> {
+        let mut s = PlayerPoseState::default();
+        s.update(0.033, &rest);
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws,
+                ..rest
+            },
+        );
+        s.torso.map(|t| t.clip)
+    }
+
+    #[test]
+    fn fire_clip_follows_weapon_class_stance_and_motion() {
+        let rifle = PlayerPoseInput::default();
+        let with =
+            |f: &dyn Fn(PlayerPoseInput) -> PlayerPoseInput| f(rifle).fire_clip().map(|c| c.0);
+        assert_eq!(with(&|i| i), Some("pt_stand_shoot"));
+        assert_eq!(
+            with(&|i| PlayerPoseInput { ads: true, ..i }),
+            Some("pt_stand_shoot_ads")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                stance: StanceInput::Crouch,
+                ..i
+            }),
+            Some("pt_crouch_shoot")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                stance: StanceInput::Prone,
+                ..i
+            }),
+            Some("pt_prone_shoot_auto")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                speed: 190.0,
+                trying_to_move: true,
+                ..i
+            }),
+            None,
+            "no firing clip while moving"
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                laststand: true,
+                ..i
+            }),
+            Some("pt_laststand_fire")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                weap_class: weap_class::PISTOL,
+                stance: StanceInput::Crouch,
+                ads: true,
+                ..i
+            }),
+            Some("pt_crouch_shoot_ads_pistol")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                weap_class: weap_class::SMG,
+                ..i
+            }),
+            Some("pt_stand_shoot_auto")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                weap_class: weap_class::ROCKETLAUNCHER,
+                ..i
+            }),
+            Some("pt_stand_shoot_RPG")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                anim_type: anim_type::SNIPER,
+                ads: true,
+                ..i
+            }),
+            Some("pt_rifle_fire_ads")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                weap_class: weap_class::GRENADE,
+                ..i
+            }),
+            Some("pb_stand_grenade_throw")
+        );
+        assert_eq!(
+            with(&|i| PlayerPoseInput {
+                weap_class: weap_class::GRENADE,
+                stance: StanceInput::Prone,
+                ..i
+            }),
+            Some("pt_prone_grenade_throw")
+        );
+    }
+
+    #[test]
+    fn reload_clip_follows_class_and_stance() {
+        let i = PlayerPoseInput::default();
+        assert_eq!(i.reload_clip(), "pt_reload_stand_rifle");
+        let crouch = PlayerPoseInput {
+            stance: StanceInput::Crouch,
+            ..i
+        };
+        assert_eq!(crouch.reload_clip(), "pt_reload_crouch_rifle");
+        assert_eq!(
+            PlayerPoseInput {
+                weap_class: weap_class::PISTOL,
+                ..crouch
+            }
+            .reload_clip(),
+            "pt_reload_crouch_pistol"
+        );
+        assert_eq!(
+            PlayerPoseInput {
+                anim_type: anim_type::SMG,
+                ..i
+            }
+            .reload_clip(),
+            "pt_reload_stand_auto_mp40"
+        );
+        assert_eq!(
+            PlayerPoseInput {
+                anim_type: anim_type::AUTORIFLE,
+                ..i
+            }
+            .reload_clip(),
+            "pt_reload_stand_auto"
+        );
+        assert_eq!(
+            PlayerPoseInput {
+                laststand: true,
+                ..i
+            }
+            .reload_clip(),
+            "pt_laststand_reload"
+        );
+        assert_eq!(
+            PlayerPoseInput {
+                weap_class: weap_class::ROCKETLAUNCHER,
+                stance: StanceInput::Prone,
+                ..i
+            }
+            .reload_clip(),
+            "pt_reload_prone_RPG"
+        );
+    }
+
+    #[test]
+    fn weapon_state_edges_start_the_matching_torso_clip() {
+        let rest = PlayerPoseInput::default();
+        assert_eq!(torso_after(rest, ws::FIRING), Some("pt_stand_shoot"));
+        assert_eq!(
+            torso_after(rest, ws::RELOADING),
+            Some("pt_reload_stand_rifle")
+        );
+        assert_eq!(
+            torso_after(rest, ws::RELOAD_START),
+            Some("pt_reload_stand_rifle")
+        );
+        assert_eq!(
+            torso_after(rest, ws::DROPPING),
+            Some("pt_stand_pullout_pose")
+        );
+        assert_eq!(
+            torso_after(rest, ws::OFFHAND_HOLD),
+            Some("pb_stand_grenade_throw")
+        );
+        assert!(
+            torso_after(rest, ws::MELEE_INIT)
+                .unwrap()
+                .starts_with("pt_melee_")
+        );
+        assert_eq!(torso_after(rest, ws::RAISING), None);
+        assert_eq!(
+            torso_after(
+                PlayerPoseInput {
+                    stance: StanceInput::Prone,
+                    ..rest
+                },
+                ws::DROPPING_QUICK
+            ),
+            Some("pt_prone_pullout_pose")
+        );
+    }
+
+    #[test]
+    fn a_player_first_seen_mid_reload_does_not_start_a_clip_and_death_clears_it() {
+        let mut s = PlayerPoseState::default();
+        s.update(0.033, &at(ws::RELOADING));
+        assert!(s.torso.is_none());
+        s.update(0.033, &at(ws::READY));
+        s.update(0.033, &at(ws::FIRING));
+        assert!(s.torso.is_some());
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                dead: true,
+                ..at(ws::FIRING)
+            },
+        );
+        assert!(s.torso.is_none());
+    }
+
+    #[test]
+    fn a_new_fire_event_refires_while_the_state_stays_firing() {
+        let mut s = PlayerPoseState::default();
+        let firing = at(ws::FIRING);
+        s.update(0.033, &at(ws::READY));
+        s.update(0.033, &firing);
+        s.update(0.2, &firing);
+        let t = s.torso.unwrap().seconds;
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                event: ev::FIRE_WEAPON,
+                event_seq: 1,
+                ..firing
+            },
+        );
+        assert!(s.torso.unwrap().seconds < t, "the clip restarted");
+    }
+
+    #[test]
+    fn a_still_standing_player_flinches_and_a_moving_one_stumbles() {
+        let hit = PlayerPoseInput {
+            damage_timer: 400,
+            damage_duration: 400,
+            flinch_dir: 2,
+            ..Default::default()
+        };
+        let mut s = PlayerPoseState::default();
+        s.update(0.033, &PlayerPoseInput::default());
+        s.update(0.033, &hit);
+        assert_eq!(s.torso.map(|t| t.clip), Some("pt_flinch_left"));
+        let pistol = PlayerPoseInput {
+            weap_class: weap_class::PISTOL,
+            ..hit
+        };
+        assert_eq!(pistol.flinch_clip(), "pt_flinch_pistol_left");
+        // Past the window the legs go back to their normal clip.
+        let late = PlayerPoseInput {
+            damage_timer: 10,
+            damage_duration: 900,
+            ..running()
+        };
+        assert_eq!(late.select(), "pb_combatrun_forward_loop");
+        let moving = PlayerPoseInput {
+            damage_timer: 300,
+            damage_duration: 300,
+            ..running()
+        };
+        assert_eq!(moving.select(), "pb_stumble_forward");
+        assert_eq!(
+            PlayerPoseInput {
+                move_dir: 90.0,
+                ..moving
+            }
+            .select(),
+            "pb_stumble_left"
+        );
+        assert_eq!(
+            PlayerPoseInput {
+                walking: true,
+                ..moving
+            }
+            .select(),
+            "pb_stumble_walk_forward"
+        );
+        assert_eq!(
+            PlayerPoseInput {
+                sprinting: true,
+                ..moving
+            }
+            .select(),
+            "pb_stumble_forward"
+        );
+        assert_eq!(
+            PlayerPoseInput {
+                weap_class: weap_class::PISTOL,
+                ..moving
+            }
+            .select(),
+            "pb_stumble_pistol_forward"
+        );
     }
 }

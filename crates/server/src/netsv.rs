@@ -34,6 +34,8 @@ pub mod eflags {
     pub const TEAM_AXIS: u32 = 1 << 0;
     pub const TEAM_ALLIES: u32 = 1 << 1;
     pub const DEAD: u32 = 1 << 2;
+    /// The player is mounted on a turret (`EF_TURRET_ACTIVE`).
+    pub const TURRET: u32 = 1 << 3;
 }
 
 pub struct Peer {
@@ -596,12 +598,21 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.event_parm =
                     c.ps.event_parms[usize::from(c.ps.event_sequence.wrapping_sub(1) & 3)];
                 s.event_seq = c.ps.event_sequence;
+                s.torso_pitch = c.ps.torso_pitch;
+                s.waist_pitch = c.ps.waist_pitch;
+                s.damage_timer = c.ps.damage_timer.clamp(0, i32::from(u16::MAX)) as u16;
+                s.damage_duration = c.ps.damage_duration.clamp(0, i32::from(u16::MAX)) as u16;
+                s.flinch_dir = c.ps.flinch_yaw_anim & 3;
                 s.eflags = match c.team {
                     Team::Axis => eflags::TEAM_AXIS,
                     Team::Allies => eflags::TEAM_ALLIES,
                     _ => 0,
                 } | if c.ps.pm_type >= PmType::Dead {
                     eflags::DEAD
+                } else {
+                    0
+                } | if c.ps.e_flags & sim::pm::ef::TURRET_ACTIVE != 0 {
+                    eflags::TURRET
                 } else {
                     0
                 };

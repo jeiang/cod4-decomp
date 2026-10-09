@@ -319,11 +319,41 @@ impl Rig {
     /// Poses the rig into `out`: blends `layers`, applies `ctl`, composes down the hierarchy.
     /// Bones no layer drives stay at the model's rest pose. Allocation-free.
     pub fn pose(&self, layers: &[AnimLayer], ctl: &Controllers, out: &mut Pose) {
+        self.pose_overlay(layers, &[], ctl, out);
+    }
+
+    /// [`Rig::pose`] with partial animations laid over the blend: on every bone a layer of `overlay` animates, the
+    /// result is `layers`' blend mixed with the overlay by the overlay's total weight (capped at 1), so a weight-1
+    /// upper-body clip replaces the body animation there and leaves the legs to it. This is how the torso channel
+    /// (`pt_*` clips, which name only the bones they move) rides on the legs' `pb_*` clip.
+    pub fn pose_overlay(
+        &self,
+        layers: &[AnimLayer],
+        overlay: &[AnimLayer],
+        ctl: &Controllers,
+        out: &mut Pose,
+    ) {
         let n = self.bones.len();
         let mut acc = [Accum::ZERO; MAX_BONES];
         for l in layers {
             if l.weight > 0.0 {
                 anim::accumulate(l.anim, l.bind.as_slice(), l.time, l.weight, &mut acc[..n]);
+            }
+        }
+        let over_weight: f32 = overlay
+            .iter()
+            .map(|l| l.weight.max(0.0))
+            .sum::<f32>()
+            .min(1.0);
+        if over_weight > 0.0 {
+            let mut over = [Accum::ZERO; MAX_BONES];
+            for l in overlay {
+                if l.weight > 0.0 {
+                    anim::accumulate(l.anim, l.bind.as_slice(), l.time, l.weight, &mut over[..n]);
+                }
+            }
+            for (a, o) in acc[..n].iter_mut().zip(&over[..n]) {
+                *a = a.overlaid(o, over_weight);
             }
         }
         out.len = n;

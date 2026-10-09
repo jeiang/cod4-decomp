@@ -127,6 +127,8 @@ struct Counters {
     /// zones lack): a player the snapshot has but the picture does not.
     max_players_drawn: usize,
     player_faults: std::collections::BTreeSet<String>,
+    /// Names of the torso clips (`pt_*`) seen playing on other players: fire, reload, melee, throw, pullout, flinch.
+    torso_clips: std::collections::BTreeSet<&'static str>,
     spawned: bool,
     start: Option<[f32; 3]>,
     end: [f32; 3],
@@ -1218,6 +1220,9 @@ impl NetPlay {
             }
             r.dead = Some(dead);
             r.player.update(dt, &input);
+            if let Some(c) = r.player.torso_animation() {
+                self.c.torso_clips.insert(c);
+            }
             drawn += 1;
             match &mut r.ragdoll {
                 Some((at, yaw, body)) => {
@@ -1296,6 +1301,7 @@ impl NetPlay {
         report["view_kick_settled"] = json!(self.c.kick_settled);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
         report["player_faults"] = json!(self.c.player_faults);
+        report["torso_clips"] = json!(self.c.torso_clips);
         report
     }
 
@@ -1321,13 +1327,32 @@ fn pose_input(
     weapon: Option<&assets::zone::weapon::WeaponDef>,
     dead: bool,
 ) -> PlayerPoseInput {
+    let pm_type = PmType::from_u8(e.pm_type);
     let ps = PlayerState {
         pm_flags: e.pm_flags,
-        pm_type: if dead { PmType::Dead } else { PmType::Normal },
+        pm_type: if dead && pm_type < PmType::Dead {
+            PmType::Dead
+        } else {
+            pm_type
+        },
         velocity: e.velocity,
         viewangles: e.angles,
+        leanf: e.angles[2] / 45.0,
         movement_dir: e.move_dir,
         weapon_pos_frac: f32::from(e.ads) / 255.0,
+        weapon_state: e.weapon_state,
+        torso_pitch: e.torso_pitch,
+        waist_pitch: e.waist_pitch,
+        damage_timer: i32::from(e.damage_timer),
+        damage_duration: i32::from(e.damage_duration),
+        flinch_yaw_anim: e.flinch_dir,
+        e_flags: if e.eflags & eflags::TURRET != 0 {
+            sim::pm::ef::TURRET_ACTIVE
+        } else {
+            0
+        },
+        event_sequence: e.event_seq,
+        events: [e.event; 4],
         ..PlayerState::default()
     };
     let moving = e.velocity[0].hypot(e.velocity[1]) > 10.0;

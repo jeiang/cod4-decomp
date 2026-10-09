@@ -372,6 +372,13 @@ impl Game {
         c.ps.damage_timer += (damage as f32 * per_point) as i32;
         c.ps.damage_timer = c.ps.damage_timer.min(max_time as i32);
         c.ps.damage_count = c.ps.damage_timer;
+        c.ps.damage_duration = c.ps.damage_timer;
+        // `flinchYawAnim`: the blow's direction relative to the way the victim faces.
+        c.ps.flinch_yaw_anim = d.dir.map_or(0, |v| {
+            let yaw = sim::pm::math::vec_to_yaw(&v);
+            let facing = c.ps.viewangles[1].rem_euclid(360.0).trunc();
+            flinch_yaw_anim(yaw - facing)
+        });
         c.damage_time = now;
         let e = self.ent_mut(target).expect("client entity");
         if e.flags & 2 != 0 && e.health - damage <= 0 {
@@ -735,5 +742,20 @@ mod tests {
         let (edge, side) =
             flashbang_percents(600.0, 200.0, 600.0, [0.0; 3], eye, [0.0, 400.0, 0.0]);
         assert!(edge.abs() < 1e-6 && (side - 0.5).abs() < 1e-6);
+    }
+}
+
+/// `flinchYawAnim` from the blow's yaw relative to the victim's facing, degrees: 0 forward (pushed along the view),
+/// 1 back, 2 left, 3 right.
+fn flinch_yaw_anim(relative: f32) -> u8 {
+    let r = relative.rem_euclid(360.0);
+    if !(45.0..315.0).contains(&r) {
+        0
+    } else if (135.0..225.0).contains(&r) {
+        1
+    } else if r < 135.0 {
+        2
+    } else {
+        3
     }
 }

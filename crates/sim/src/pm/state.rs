@@ -22,6 +22,23 @@ pub enum PmType {
     DeadLinked,
 }
 
+impl PmType {
+    /// The type a wire byte names; an unknown byte reads as [`PmType::Normal`].
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::NormalLinked,
+            2 => Self::Noclip,
+            3 => Self::Ufo,
+            4 => Self::Spectator,
+            5 => Self::Intermission,
+            6 => Self::LastStand,
+            7 => Self::Dead,
+            8 => Self::DeadLinked,
+            _ => Self::Normal,
+        }
+    }
+}
+
 /// `pm_flags` bits.
 pub mod pmf {
     pub const PRONE: u32 = 1 << 0;
@@ -274,6 +291,10 @@ pub struct PlayerState {
     pub jump_origin_z: f32,
     pub damage_timer: i32,
     pub damage_count: i32,
+    /// `damageDuration`: `damage_timer` as the last hit left it; the flinch and stumble windows are the first part of it.
+    pub damage_duration: i32,
+    /// `flinchYawAnim`: which way the last hit pushed the body, 0 forward, 1 back, 2 left, 3 right.
+    pub flinch_yaw_anim: u8,
     pub movement_dir: i8,
     pub e_flags: u32,
     pub client_num: u16,
@@ -380,6 +401,8 @@ impl Default for PlayerState {
             jump_origin_z: 0.0,
             damage_timer: 0,
             damage_count: 0,
+            damage_duration: 0,
+            flinch_yaw_anim: 0,
             movement_dir: 0,
             e_flags: 0,
             client_num: 0,

@@ -171,3 +171,61 @@ fn a_played_through_round_of_stances_and_a_death() {
 fn rig_name(anims: &PlayerAnims, bone: usize) -> &str {
     anims.rig().bone_name(bone)
 }
+
+#[test]
+fn a_torso_clip_moves_the_arms_and_leaves_the_legs() {
+    let Some(c) = content() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let anims = PlayerAnims::new(
+        &c,
+        "body_mp_usmc_assault",
+        Some("head_mp_usmc_tactical_mich"),
+    )
+    .unwrap();
+    let bone = |p: &Pose, n: &str| p.bones[anims.rig().bone_index(n).unwrap()].trans;
+    let play = |ws: u8, frames: u32| {
+        let mut s = PlayerPoseState::default();
+        let rest = PlayerPoseInput::default();
+        s.update(1.0 / 30.0, &rest);
+        s.update(
+            1.0 / 30.0,
+            &PlayerPoseInput {
+                weapon_state: ws,
+                ..rest
+            },
+        );
+        for _ in 0..frames {
+            s.update(
+                1.0 / 30.0,
+                &PlayerPoseInput {
+                    weapon_state: ws,
+                    ..rest
+                },
+            );
+        }
+        let mut p = Pose::default();
+        s.pose(&anims, &mut p);
+        (s.torso(&anims), p)
+    };
+    let (none, base) = play(0, 5);
+    assert_eq!(none, None);
+    for (ws, clip) in [
+        (5u8, "pt_stand_shoot"),
+        (7, "pt_reload_stand_rifle"),
+        (12, "pt_melee_right2right_1"),
+    ] {
+        let (name, p) = play(ws, 5);
+        assert!(name.is_some(), "{clip}: no torso clip playing");
+        let d = |n: &str| {
+            let (a, b) = (bone(&p, n), bone(&base, n));
+            (0..3).map(|k| (a[k] - b[k]).abs()).sum::<f32>()
+        };
+        assert!(
+            d("j_wrist_ri") > 0.5 || d("j_wrist_le") > 0.5,
+            "{clip}: hands did not move"
+        );
+        assert!(d("j_ankle_le") < 0.01, "{clip}: the legs moved");
+    }
+}

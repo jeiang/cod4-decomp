@@ -49,6 +49,15 @@ pub struct EntityState {
     pub event: u8,
     pub event_parm: u8,
     pub event_seq: u8,
+    /// Player: the prone-on-a-slope body tilt (`ps.torso_pitch`, `ps.waist_pitch`), degrees.
+    pub torso_pitch: f32,
+    pub waist_pitch: f32,
+    /// Player: `ps.damage_timer` and `ps.damage_duration`, milliseconds; the hit's flinch and stumble windows are the
+    /// first part of the duration.
+    pub damage_timer: u16,
+    pub damage_duration: u16,
+    /// Player: `ps.flinch_yaw_anim` (0 forward, 1 back, 2 left, 3 right).
+    pub flinch_dir: u8,
 }
 
 macro_rules! int {
@@ -104,6 +113,11 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.event, Bits(8)),
         int!(s, s.event_parm, Bits(8)),
         int!(s, s.event_seq, Bits(8)),
+        num!(s, s.torso_pitch, Angle16),
+        num!(s, s.waist_pitch, Angle16),
+        int!(s, s.damage_timer, Bits(16)),
+        int!(s, s.damage_duration, Bits(16)),
+        int!(s, s.flinch_dir, Bits(2)),
     ]
 }
 
@@ -124,5 +138,31 @@ impl EntityState {
     pub fn canonical(mut self) -> Self {
         crate::field::canonicalize(fields(), &mut self);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bits::{BitReader, BitWriter};
+    use crate::field::{read_delta, write_delta};
+
+    #[test]
+    fn the_animation_fields_survive_the_wire() {
+        let to = EntityState {
+            torso_pitch: 30.0,
+            waist_pitch: 200.0,
+            damage_timer: 750,
+            damage_duration: 900,
+            flinch_dir: 3,
+            ..EntityState::new(5)
+        }
+        .canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(5), &to);
+        let bytes = w.into_bytes();
+        let mut got = EntityState::new(5);
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, to);
     }
 }
