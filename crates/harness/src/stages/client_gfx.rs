@@ -35,9 +35,11 @@ fn brightened_share(off: &[u8], on: &[u8]) -> f64 {
         |p: &[u8]| (i32::from(p[0]) * 77 + i32::from(p[1]) * 150 + i32::from(p[2]) * 29) >> 8;
     let n = off.len() / 3;
     let lit = off
-        .chunks_exact(3)
-        .zip(on.chunks_exact(3))
-        .filter(|(a, b)| luma(b) - luma(a) > LIT_STEP)
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(on.as_chunks::<3>().0)
+        .filter(|(a, b)| luma(&b[..]) - luma(&a[..]) > LIT_STEP)
         .count();
     lit as f64 / n.max(1) as f64
 }

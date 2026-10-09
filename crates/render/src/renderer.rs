@@ -761,12 +761,12 @@ impl Renderer {
                     &SPOT_TECHS,
                     &OMNI_TECHS,
                 ] {
-                    if let Some(p) = self.prepare(&m, techs, kind, hsm) {
+                    if let Some(p) = self.prepare(m, techs, kind, hsm) {
                         jobs.push((p, scene));
                     }
                 }
                 if self.settings.shadows != ShadowMode::Off
-                    && let Some(p) = self.prepare(&m, &[self.shadow_tech()], kind, hsm)
+                    && let Some(p) = self.prepare(m, &[self.shadow_tech()], kind, hsm)
                 {
                     jobs.push((p, self.shadow_target()));
                 }
