@@ -367,7 +367,7 @@ impl Frames {
                         players: Vec::new(),
                     }
                 }) {
-                    if let Inbound::Connect(req) = i
+                    if let Inbound::Connect(req, _) = i
                         && net.slot_of(req.from).is_none()
                     {
                         let slot = net.peers.iter().position(Option::is_none).unwrap() as u16;

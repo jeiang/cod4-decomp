@@ -477,15 +477,19 @@ impl<T: Transport> NetClient<T> {
         self.snaps.latest()
     }
 
-    /// Leaves politely; the server frees the slot at once instead of after its timeout.
+    /// Leaves politely: the reliable `disconnect` command, which the server only believes from the sequence-checked
+    /// session, so it frees the slot at once instead of after its timeout. Sent a few times: a datagram may be lost
+    /// (the server ignores the repeats). Before the connection is up there is no slot to free.
     pub fn disconnect(&mut self) {
         self.stop_record();
         if self.playing_demo() {
             return;
         }
-        let server = self.server;
-        for _ in 0..3 {
-            self.t.send_to(server, &Oob::Disconnect.encode());
+        if let Phase::Playing(l) = &mut self.phase {
+            let _ = l.command("disconnect");
+            for _ in 0..3 {
+                l.send(&mut self.t);
+            }
         }
     }
 }

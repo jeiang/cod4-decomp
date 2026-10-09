@@ -28,8 +28,8 @@ pub enum Gate {
         name: String,
         offset: u64,
     },
-    /// A client left.
-    Left,
+    /// Nothing to do. A connectionless `disconnect` is one of these: anybody can forge a source address, so only
+    /// the sequence-checked reliable `disconnect` of a connected client ends a session.
     Ignore,
 }
 
@@ -81,7 +81,7 @@ pub fn serve(
                 Gate::Reply(Oob::Error(crate::download::BAD_CHALLENGE.into()))
             }
         }
-        Oob::Disconnect => Gate::Left,
+        // No `Oob::Disconnect` arm: see `Gate::Ignore`.
         _ => Gate::Ignore,
     }
 }
@@ -267,5 +267,14 @@ mod tests {
         let mut c = Connector::new(addr(1), 1, "n", "");
         c.handle(addr(9), Oob::Challenge(5));
         assert_eq!(c.state(), &ConnectState::Challenging);
+    }
+
+    #[test]
+    fn a_forged_disconnect_changes_nothing() {
+        let ch = Challenger::new();
+        assert!(matches!(
+            serve(&ch, 0, addr(5), Oob::Disconnect, Vec::new),
+            Gate::Ignore
+        ));
     }
 }

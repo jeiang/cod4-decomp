@@ -21,7 +21,7 @@ use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
 use crate::cvar::{self, Cvars};
 use crate::game::{self, Game};
-use crate::netsv::{Inbound, NetSv};
+use crate::netsv::{Inbound, NetSv, is_lan};
 use crate::rcon::{self, Throttle, Verdict};
 use crate::script::{Dispatch, ScriptHost};
 use crate::ui::Dest;
@@ -41,6 +41,14 @@ const FLOOD_MS: i32 = 800;
 /// What a person typed as the text of a chat line: no control characters, which steer the localizer.
 fn plain_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// The password a `connect` must give (`g_password`); the literal `none` means no password, as at the original.
+fn join_password(c: &Cvars) -> &str {
+    match c.string("g_password") {
+        "none" => "",
+        p => p,
+    }
 }
 
 /// `SV_ExecuteClientCommandString`'s flood check: whether a client command is dropped for coming too soon after
@@ -200,6 +208,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("dedicated", "2", LATCH),
         ("developer", "0", 0),
         ("developer_script", "0", 0),
+        // The stock server runs 20; this one deliberately keeps 30 (README: the game runs at 30 Hz).
         ("sv_fps", "30", 0),
         ("sv_maxclients", "32", ARCHIVE | SERVERINFO | LATCH),
         ("ui_maxclients", "32", ARCHIVE | SERVERINFO | LATCH),
@@ -261,6 +270,17 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_disableClientConsole", "0", SERVERINFO),
         ("sv_minPing", "0", ARCHIVE | SERVERINFO),
         ("sv_maxPing", "0", ARCHIVE | SERVERINFO),
+        // Seconds of silence after which a client is dropped (`sv_timeout`), and for one that has not sent a packet
+        // since it connected (`sv_connectTimeout`).
+        ("sv_timeout", "240", 0),
+        ("sv_connectTimeout", "45", 0),
+        // Seconds a connected client must have been in before the same address and qport may connect again
+        // (`sv_reconnectlimit`).
+        ("sv_reconnectlimit", "3", 0),
+        // A `connect` giving this password may take the first `sv_privateClients` slots, and skips `g_password`.
+        ("sv_privatePassword", "", 0),
+        // Clients one address outside the local network may have at once (0: no limit).
+        ("sv_maxClientsPerIP", "8", 0),
         // Most bytes a second one client is sent (0: what the client asks for).
         ("sv_maxRate", "0", ARCHIVE | SERVERINFO),
         // Remote console: empty switches `rcon` off.
@@ -289,6 +309,10 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_maxRate", 0, 25_000),
         ("sv_minPing", 0, 999),
         ("sv_maxPing", 0, 999),
+        ("sv_timeout", 1, 3600),
+        ("sv_connectTimeout", 1, 3600),
+        ("sv_reconnectlimit", 0, 12),
+        ("sv_maxClientsPerIP", 0, 64),
         ("g_maxDroppedWeapons", 2, 32),
         ("g_inactivity", 0, i32::MAX),
         ("g_playerCollisionEjectSpeed", 0, 32_000),
@@ -621,6 +645,11 @@ impl Server {
             info: status.0.clone(),
             players: status.1.clone(),
         };
+        let secs = |name: &str| Duration::from_secs(self.game.cvars.int(name).max(1) as u64);
+        net.timeout = secs("sv_timeout");
+        net.connect_timeout = secs("sv_connectTimeout");
+        net.track_ping =
+            self.game.cvars.int("sv_minPing") != 0 || self.game.cvars.int("sv_maxPing") != 0;
         for i in net.poll(wait, &|| info.clone(), &answer) {
             match i {
                 Inbound::Rcon {
@@ -628,14 +657,9 @@ impl Server {
                     password,
                     command,
                 } => remote.push((from, password, command)),
-                Inbound::Connect(req) => self.net_accept(&mut net, &req),
+                Inbound::Connect(req, ping) => self.net_accept(&mut net, &req, ping),
                 Inbound::GetFile { from, name, offset } => {
                     self.net_file(&mut net, from, &name, offset);
-                }
-                Inbound::Left(addr) => {
-                    if let Some(slot) = net.slot_of(addr) {
-                        self.net_drop(&mut net, slot, DropReason::Left);
-                    }
                 }
             }
         }
@@ -805,7 +829,7 @@ impl Server {
         if c.bool("sv_disableClientConsole") {
             put("con_disabled", "1".into());
         }
-        if !c.string("g_password").is_empty() {
+        if !join_password(c).is_empty() {
             put("pswrd", "1".into());
         }
         for (key, cvar) in [("ff", "scr_team_fftype"), ("kc", "scr_game_allowkillcam")] {
@@ -835,10 +859,7 @@ impl Server {
                 Some(e) => e.1 = v,
                 None => info.push((k.to_owned(), v)),
             };
-        set(
-            "pswrd",
-            u8::from(!c.string("g_password").is_empty()).to_string(),
-        );
+        set("pswrd", u8::from(!join_password(c).is_empty()).to_string());
         set("mod", u8::from(!c.string("fs_game").is_empty()).to_string());
         let players = self
             .game
@@ -860,33 +881,75 @@ impl Server {
     }
 
     /// A `connect` that passed the challenge: gives the sender a slot like a bot gets one, and
-    /// tells the scripts.
-    fn net_accept(&mut self, net: &mut NetSv, req: &net::connect::ConnectRequest) {
+    /// tells the scripts. `challenge_ping` is the time since the sender asked for its challenge, when known.
+    fn net_accept(
+        &mut self,
+        net: &mut NetSv,
+        req: &net::connect::ConnectRequest,
+        challenge_ping: Option<u32>,
+    ) {
         let refuse = |net: &mut NetSv, why: &str| {
             net.t
                 .send_to(req.from, &net::Oob::Error(why.into()).encode());
         };
-        if net.slot_of(req.from).is_some() {
-            // The response was lost: say it again.
-            net.t.send_to(req.from, &net::Oob::ConnectResponse.encode());
-            return;
+        let ip = req.from.ip();
+        let local = is_lan(ip);
+        // A client already here with this address and qport: either its `connect` repeated because the response was
+        // lost, or it is back (after a crash or a new port), and the old session is a ghost to free first. The
+        // original's slot for it is reused; here it is freed and the lowest free slot taken.
+        if let Some(slot) = net.session_of(ip, req.qport)
+            && let Some(p) = net.peer(slot)
+        {
+            if p.link.addr == req.from && !p.heard() {
+                net.t.send_to(req.from, &net::Oob::ConnectResponse.encode());
+                return;
+            }
+            let limit = Duration::from_secs(self.game.cvars.int("sv_reconnectlimit").max(0) as u64);
+            if p.age() < limit {
+                return refuse(net, "Reconnecting too soon.");
+            }
+            self.net_drop(net, slot, DropReason::Left);
         }
-        if net.bans.is_banned(req.from.ip(), Instant::now()) {
+        if net.bans.is_banned(ip, Instant::now()) {
             return refuse(net, "You are banned from this server.");
         }
-        let pw = self.game.cvars.string("g_password");
-        if !pw.is_empty() && pw != req.password {
+        let given = req.password.as_str();
+        let private = self.game.cvars.string("sv_privatePassword");
+        let privileged = !private.is_empty() && private == given;
+        let pw = join_password(&self.game.cvars);
+        if !privileged && !pw.is_empty() && pw != given {
             return refuse(net, "Invalid password.");
         }
+        // The ping the sender's challenge round trip showed; the local network is exempt.
+        if !local && let Some(ping) = challenge_ping {
+            let (min, max) = (
+                self.game.cvars.int("sv_minPing"),
+                self.game.cvars.int("sv_maxPing"),
+            );
+            let ping = i64::from(ping);
+            if min > 0 && ping < i64::from(min) {
+                return refuse(net, "Server is for high pings only.");
+            }
+            if max > 0 && ping > i64::from(max) {
+                return refuse(net, "Server is for low pings only.");
+            }
+        }
+        let per_ip = usize::try_from(self.game.cvars.int("sv_maxClientsPerIP")).unwrap_or(0);
+        if per_ip > 0 && !local && net.clients_from(ip) >= per_ip {
+            return refuse(net, "Too many connections from your address.");
+        }
         let name = crate::client::clean_client_name(&req.name);
-        let slot = match self.join_human(&name, None) {
+        let slot = match self.join_human(&name, None, privileged) {
             Ok(n) => n,
             Err(why) => return refuse(net, why),
         };
         if let Some(c) = self.game.client_mut(slot) {
-            c.local = req.from.ip().is_loopback();
+            c.local = ip.is_loopback();
         }
         net.add_peer(slot, req, &name);
+        if let Some(p) = net.peers[usize::from(slot)].as_mut() {
+            p.privileged = privileged;
+        }
         let map = self.map_name().unwrap_or("").to_owned();
         for line in NetSv::world_commands(&mut self.game, &map) {
             net.command(slot, &line);
@@ -906,6 +969,7 @@ impl Server {
         &mut self,
         name: &str,
         stats: Option<std::collections::HashMap<i32, i32>>,
+        privileged: bool,
     ) -> Result<u16, &'static str> {
         let Some(run) = self.run.as_mut() else {
             return Err("No map is loaded.");
@@ -914,7 +978,13 @@ impl Server {
             game: &mut self.game,
             dispatch: &run.dispatch,
         };
-        let Some(slot) = host.game.connect_client(&mut run.vm, false, name) else {
+        // A person who gave the private password may take a private slot, which the others may not.
+        let joined = if privileged {
+            host.game.connect_client_from(&mut run.vm, false, name, 0)
+        } else {
+            host.game.connect_client(&mut run.vm, false, name)
+        };
+        let Some(slot) = joined else {
             return Err("Server is full.");
         };
         let known = stats.is_some();
@@ -1906,8 +1976,12 @@ impl Server {
         let fps = self.game.cvars.int("sv_fps").clamp(10, 1000);
         self.frame_ms = 1000 / fps;
         self.svs_time = 0;
-        self.game
-            .reset_level(self.game.cvars.int("sv_maxclients").clamp(1, 64) as usize);
+        let max = self.game.cvars.int("sv_maxclients").clamp(1, 64) as usize;
+        self.game.reset_level(max);
+        // The peer table follows `sv_maxclients`, which a map change applies (`SV_ChangeMaxClients`).
+        if let Some(net) = self.net.as_mut() {
+            net.resize(max);
+        }
         self.game.publish_info(true);
         self.init_game(map, game_var)?;
         for _ in 0..SETTLE_FRAMES {
@@ -1916,7 +1990,7 @@ impl Server {
         }
         self.flush_game_output();
         for (mut peer, name, stats) in humans {
-            let j = self.join_human(&name, Some(stats));
+            let j = self.join_human(&name, Some(stats), peer.privileged);
             if let Ok(slot) = j {
                 if let Some(c) = self.game.client_mut(slot) {
                     c.local = peer.link.addr.ip().is_loopback();

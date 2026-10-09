@@ -348,14 +348,29 @@ impl Game {
             .map(|(i, c)| (i as u16, c))
     }
 
-    /// `ClientConnect` for the lowest free slot: creates the entity and queues
+    /// `ClientConnect` for the lowest free public slot (those past `sv_privateClients`): creates the entity and queues
     /// `CodeCallback_PlayerConnect`. The caller runs the queued call, then [`Game::client_begin`].
     pub fn connect_client(&mut self, vm: &mut Vm, bot: bool, name: &str) -> Option<u16> {
+        let private = usize::try_from(self.cvars.int("sv_privateClients")).unwrap_or(0);
+        self.connect_client_from(vm, bot, name, private)
+    }
+
+    /// [`Self::connect_client`] for the lowest free slot from `first` up: 0 for a person who may use the private
+    /// slots.
+    pub fn connect_client_from(
+        &mut self,
+        vm: &mut Vm,
+        bot: bool,
+        name: &str,
+        first: usize,
+    ) -> Option<u16> {
         let n = self
             .clients
             .iter()
-            .position(|c| c.conn == Conn::Free)
-            .filter(|n| *n < self.max_clients)? as u16;
+            .enumerate()
+            .skip(first)
+            .find(|(n, c)| c.conn == Conn::Free && *n < self.max_clients)?
+            .0 as u16;
         let mut e = Ent::new(EntKind::Client, "player");
         e.mins = PLAYER_MINS;
         e.maxs = PLAYER_MAXS;

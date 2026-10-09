@@ -162,6 +162,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_objective::run),
     },
     StageDef {
+        name: "net-hardening",
+        description: "34 real UDP clients join a server whose sv_maxclients 40 was latched after boot, getinfo counts them, a client's disconnect frees its slot at once, and private slots keep public clients out and refuse the next as full",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_hardening::run),
+    },
+    StageDef {
         name: "net-rcon",
         description: "a UDP socket administers the server with rcon: bad password refused, status/set/say/kick/unbanUser/banClient run and answered in print packets, rate limited, bans enforced at connect and persisted",
         needs_install: false,
