@@ -737,13 +737,6 @@ impl Server {
         }
     }
 
-    /// Test hook: player `n` drops `weapon` as `dropitem` does; the item entity, if one was left.
-    pub fn drop_weapon(&mut self, n: u16, weapon: u16) -> Option<u16> {
-        let run = self.run.as_mut()?;
-        let model = self.game.client(n)?.inv.model(weapon);
-        self.game.drop_weapon(&mut run.vm, n, weapon, model)
-    }
-
     /// Runs one console line now (`harness` scenarios), returning its error.
     pub fn exec_line(&mut self, line: &str) -> Result<(), String> {
         for l in split_commands(line) {

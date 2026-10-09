@@ -514,6 +514,7 @@ impl Game {
     /// `G_FreeEntity`: the script object dies at the next `Scr_IncTime`.
     pub fn free_entity(&mut self, vm: &mut Vm, num: u16) {
         self.unlink_all(num);
+        self.dropped.retain(|&d| d != num);
         if let Some(slot) = self.ents.get_mut(usize::from(num))
             && let Some(e) = slot.take()
         {

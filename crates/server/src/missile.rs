@@ -1304,7 +1304,6 @@ impl Game {
         }
         // It landed on something it cannot rest on (a wall or ceiling): gone.
         if t.fraction < 1.0 && t.normal[2] <= 0.0 {
-            self.dropped.retain(|&d| d != n);
             self.free_entity(vm, n);
             return;
         }

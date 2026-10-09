@@ -11,7 +11,7 @@ use server::game::{EntKind, Game};
 use sim::cm::ENTITYNUM_NONE;
 use sim::cm::test_support::{BrushSpec, MapSpec};
 use sim::contents::{self, SOLID};
-use sim::pm::{PLAYER_MAXS, PLAYER_MINS, PmType, ev, wf};
+use sim::pm::{PLAYER_MAXS, PLAYER_MINS, PmType, UserCmd, button, ev, wf};
 use sim::traj::Trajectory;
 use sim::weapon::pickup::ItemAmmo;
 use sim::weapon::{InventoryType, OffhandClass, WeaponClass, WeaponInfo, WeaponTable, WeaponType};
@@ -86,7 +86,14 @@ fn arena() -> (Game, Vm) {
     let mut g = Game::new(cvars, Content::default());
     g.reset_level(8);
     g.world = Some(World::new(map.build()));
+    let mut m16 = rifle("m16_mp", "ar");
+    m16.alt_weapon_name = "gl_mp".into();
+    let mut gl = rifle("gl_mp", "gl");
+    gl.inventory_type = InventoryType::AltMode;
+    gl.alt_weapon_name = "m16_mp".into();
     g.weapons = WeaponTable::from_infos(vec![
+        m16,
+        gl,
         rifle("ak47_mp", "ar"),
         rifle("m4_mp", "ar2"),
         rifle("g3_mp", "ar3"),
@@ -412,4 +419,148 @@ fn martyrdom_leaves_a_grenade_unless_the_player_killed_themselves() {
         let after = missiles(&g).len();
         assert_eq!(after - before, usize::from(!suicide), "suicide {suicide}");
     }
+}
+
+fn drop_at(g: &mut Game, vm: &mut Vm, weapon: u16, x: f32, ammo: ItemAmmo) -> u16 {
+    g.launch_item(
+        vm,
+        weapon,
+        0,
+        [ammo, ItemAmmo::NONE],
+        [x, 0.0, 2.0],
+        [0.0; 3],
+        [0.0; 3],
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn using_a_weapon_with_both_primaries_full_swaps_it_for_the_one_in_hand_alt_mode_and_all() {
+    let (mut g, mut vm) = arena();
+    let a = add_player(&mut g, &mut vm, [0.0; 3], Team::Allies);
+    let m16 = give(&mut g, a, "m16_mp");
+    let ak = give(&mut g, a, "ak47_mp");
+    let gl = g.weapons.index("gl_mp");
+    let g3 = g.weapons.index("g3_mp");
+    assert!(
+        g.client(a).unwrap().inv.has(gl),
+        "the launcher comes with the rifle"
+    );
+    // Holding the launcher mode of the rifle.
+    g.client_mut(a).unwrap().ps.weapon = u32::from(gl);
+    let stock_before = {
+        let c = g.client(a).unwrap();
+        c.inv.stock(&g.weapons, m16)
+    };
+    let item = drop_at(
+        &mut g,
+        &mut vm,
+        g3,
+        50.0,
+        ItemAmmo {
+            weapon: g3,
+            clip: 10,
+            stock: 50,
+        },
+    );
+    g.level.time += 2000;
+    g.touch_item(&mut vm, a, item, false);
+    assert!(g.ent(item).is_none(), "the weapon on the floor was taken");
+    let c = g.client(a).unwrap();
+    assert!(c.inv.has(g3) && c.inv.has(ak));
+    assert!(
+        !c.inv.has(m16) && !c.inv.has(gl),
+        "the rifle and its launcher were put down"
+    );
+    assert_eq!(
+        (c.inv.clip(&g.weapons, g3), c.inv.stock(&g.weapons, g3)),
+        (10, 50)
+    );
+    assert_eq!(c.inv.selected(), g3, "the new weapon is raised");
+    let swapped = items(&g);
+    assert_eq!(swapped.len(), 1, "{swapped:?}");
+    let left = g.ent(swapped[0]).unwrap().item.as_ref().unwrap();
+    assert_eq!(left.weapon, m16);
+    assert_eq!(left.ammo[1].weapon, gl, "the alternate mode goes with it");
+    // The ammunition that does not fit the player's other weapons stayed on the dropped one;
+    // none was made or lost.
+    let c = g.client(a).unwrap();
+    assert_eq!(
+        c.inv.stock(&g.weapons, ak) + left.ammo[0].stock,
+        stock_before,
+        "the shared reserve is split between the player and the floor"
+    );
+}
+
+#[test]
+fn walking_over_a_weapon_in_a_player_frame_feeds_the_owned_one() {
+    let (mut g, mut vm) = arena();
+    let a = add_player(&mut g, &mut vm, [0.0; 3], Team::Allies);
+    let ak = give(&mut g, a, "ak47_mp");
+    {
+        let c = &mut g.clients[usize::from(a)];
+        c.inv.set_stock(&g.weapons, ak, 10);
+    }
+    let item = drop_at(
+        &mut g,
+        &mut vm,
+        ak,
+        10.0,
+        ItemAmmo {
+            weapon: ak,
+            clip: 0,
+            stock: 40,
+        },
+    );
+    let cmd = UserCmd {
+        server_time: g.level.time + 50,
+        ..UserCmd::default()
+    };
+    g.client_think(&mut vm, a, cmd);
+    let c = g.client(a).unwrap();
+    assert_eq!(c.inv.stock(&g.weapons, ak), 50);
+    assert!(g.ent(item).is_none(), "the weapon on the floor was used up");
+}
+
+#[test]
+fn the_use_key_takes_the_weapon_the_hint_names() {
+    let (mut g, mut vm) = arena();
+    let b = add_player(&mut g, &mut vm, [0.0; 3], Team::Allies);
+    let g3 = g.weapons.index("g3_mp");
+    let item = drop_at(
+        &mut g,
+        &mut vm,
+        g3,
+        50.0,
+        ItemAmmo {
+            weapon: g3,
+            clip: 12,
+            stock: 34,
+        },
+    );
+    g.update_cursor_hints(b);
+    assert_eq!(g.client(b).unwrap().ps.cursor_hint_ent_index, item);
+    let cmd = UserCmd {
+        server_time: g.level.time + 50,
+        buttons: button::USE,
+        ..UserCmd::default()
+    };
+    g.client_think(&mut vm, b, cmd);
+    assert!(g.ent(item).is_none());
+    let c = g.client(b).unwrap();
+    assert_eq!(
+        (c.inv.clip(&g.weapons, g3), c.inv.stock(&g.weapons, g3)),
+        (12, 34)
+    );
+}
+
+#[test]
+fn a_freed_item_leaves_the_drop_cue() {
+    let (mut g, mut vm) = arena();
+    let ak = g.weapons.index("ak47_mp");
+    let item = drop_at(&mut g, &mut vm, ak, 50.0, ItemAmmo::NONE);
+    assert_eq!(g.dropped, vec![item]);
+    g.free_entity(&mut vm, item);
+    assert!(g.dropped.is_empty());
 }

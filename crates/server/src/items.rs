@@ -11,7 +11,7 @@ use crate::game::{Ent, EntKind, Game, TRIGGER_HURT_CONTENTS};
 use gsc::{Value, Vm};
 use net::ui::{PrintKind, ServerCmd};
 use sim::Vec3;
-use sim::cm::{ENTITYNUM_NONE, ENTITYNUM_WORLD};
+use sim::cm::{Collide, ENTITYNUM_NONE, ENTITYNUM_WORLD};
 use sim::contents;
 use sim::pm::{PmType, ev, wf};
 use sim::traj::{TrType, Trajectory};
@@ -184,6 +184,7 @@ impl Game {
             take(self);
             return None;
         }
+        // The weapon only leaves the player if the item could be made.
         let player = self.ent(n)?;
         let (po, yaw, height) = (
             player.origin,
@@ -205,20 +206,26 @@ impl Game {
             self.crandom() * horz + s * fwd,
             self.crandom() * up_rand + up,
         ];
-        let item = self
-            .launch_item(
-                vm,
-                weapon,
-                model,
-                ammo,
-                origin,
-                [0.0, yaw, 0.0],
-                velocity,
-                Some(n),
-            )
-            .ok();
-        take(self);
-        item
+        // The weapon only leaves the player if the item could be made.
+        match self.launch_item(
+            vm,
+            weapon,
+            model,
+            ammo,
+            origin,
+            [0.0, yaw, 0.0],
+            velocity,
+            Some(n),
+        ) {
+            Ok(item) => {
+                take(self);
+                Some(item)
+            }
+            Err(e) => {
+                self.print(format!("Drop_Weapon: {e}\n"));
+                None
+            }
+        }
     }
 
     /// `G_SpawnItem`: a `weapon_*` entity of the map or of `spawn()` holds what such a weapon
@@ -231,7 +238,13 @@ impl Game {
         if weapon == 0 {
             return;
         }
-        let rolls: [i32; 4] = std::array::from_fn(|_| (self.rand() & 0x7FFF) as i32);
+        // What a placed weapon holds is rolled from its own number, so map items do not shift the
+        // game's random stream.
+        let mut seed = u32::from(n).wrapping_mul(2_654_435_761) ^ 0x9E37_79B9;
+        let rolls: [i32; 4] = std::array::from_fn(|_| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            ((seed >> 16) & 0x7FFF) as i32
+        });
         let mut rolls = rolls.into_iter();
         let ammo = pickup::transfer_random(&self.weapons, weapon, || rolls.next().unwrap_or(0));
         let model = self.weapon_world_model(weapon, 0);
@@ -274,10 +287,11 @@ impl Game {
             .weapon(self.weapons.name(weapon))
             .and_then(|d| d.display_name.as_deref().map(str::to_owned))
             .unwrap_or_default();
+        // The name is another string key (`\x14` turns localizing back on), as the game messages are.
         let text = if name.is_empty() {
             key.to_owned()
         } else {
-            format!("{key}\x15{name}")
+            format!("{key}\x14{name}")
         };
         self.send(
             crate::ui::Dest::Client(n),
@@ -422,10 +436,11 @@ impl Game {
                 let model = c.inv.model(cur);
                 dropped = self.drop_weapon(vm, n, cur, model);
                 if let Some(d) = dropped {
-                    // The old weapon lies where the new one did.
+                    // The old weapon lies where the new one did, lifted clear of the floor.
                     let (at, angles, flags) = self.ent(t).map_or(([0.0; 3], [0.0; 3], 0), |e| {
                         (e.origin, e.angles, e.spawnflags)
                     });
+                    let at = self.settle_swapped_item(d, at);
                     if let Some(de) = self.ent_mut(d) {
                         de.origin = at;
                         de.angles = angles;
@@ -463,6 +478,23 @@ impl Game {
             self.clients[usize::from(n)].inv.select(weapon);
         }
         self.grab_done(t, true)
+    }
+
+    /// Where a weapon swapped out for the one at `at` lies: up two units if there is room, then
+    /// back down onto the floor (`WeaponPickup_AddWeapon`).
+    fn settle_swapped_item(&self, d: u16, at: Vec3) -> Vec3 {
+        let (Some(world), Some(e)) = (self.world.as_ref(), self.ent(d)) else {
+            return at;
+        };
+        let (mins, maxs) = (e.mins, e.maxs);
+        let up = [at[0], at[1], at[2] + 2.0];
+        let t = world.trace(at, up, mins, maxs, ENTITYNUM_NONE, ITEM_CLIPMASK);
+        if t.all_solid {
+            return at;
+        }
+        let lifted: Vec3 = std::array::from_fn(|i| at[i] + (up[i] - at[i]) * t.fraction);
+        let t = world.trace(lifted, at, mins, maxs, ENTITYNUM_NONE, ITEM_CLIPMASK);
+        std::array::from_fn(|i| lifted[i] + (at[i] - lifted[i]) * t.fraction)
     }
 
     fn grab_done(&mut self, t: u16, taken: bool) -> (bool, u8) {
