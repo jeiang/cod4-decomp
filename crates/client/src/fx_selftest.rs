@@ -16,6 +16,8 @@ use std::path::Path;
 
 const GUN: &str = "ak47_mp";
 const ROCKET: &str = "rpg_mp";
+/// A stock explosion whose chunks are physics models.
+const DEBRIS: &str = "explosions/grenadeexp_wood";
 const EXPLOSION: &str = "explosions/grenadeexp_dirt_1";
 const VISION: &str = "mp_crash";
 /// A stock map whose puddles use the water simulation.
@@ -42,6 +44,52 @@ fn run_for(
         last = (d.quads, effects.live_elems());
     }
     (quads, decals, last.0, last.1)
+}
+
+/// A point 60 units above a flat floor that has more floor, within 20 units of its height, 200 units around it in
+/// every direction: somewhere a shell that is ejected and rolls a little does not fall off an edge.
+fn wide_floor(world: &dyn Collide, lo: [f32; 3], hi: [f32; 3]) -> Option<glam::Vec3> {
+    // The first upward-facing surface below `from`, skipping ceilings and walls on the way down.
+    let down = |x: f32, y: f32, from: f32| {
+        let mut top = from;
+        for _ in 0..8 {
+            let t = world.trace(
+                [x, y, top],
+                [x, y, lo[2]],
+                [0.0; 3],
+                [0.0; 3],
+                sim::cm::ENTITYNUM_NONE,
+                sim::contents::SOLID,
+            );
+            if t.fraction >= 1.0 {
+                return None;
+            }
+            let z = top + (lo[2] - top) * t.fraction;
+            if !t.start_solid && t.normal[2] > 0.9 {
+                return Some(z);
+            }
+            top = z - 1.0;
+        }
+        None
+    };
+    for i in 0..60 {
+        for j in 0..60 {
+            let x = lo[0] + (hi[0] - lo[0]) * (i as f32 + 0.5) / 60.0;
+            let y = lo[1] + (hi[1] - lo[1]) * (j as f32 + 0.5) / 60.0;
+            let Some(z) = down(x, y, hi[2]) else {
+                continue;
+            };
+            let flat = (0..8).all(|k| {
+                let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                down(x + a.cos() * 200.0, y + a.sin() * 200.0, z + 40.0)
+                    .is_some_and(|z2| (z2 - z).abs() < 20.0)
+            });
+            if flat {
+                return Some(glam::Vec3::new(x, y, z + 60.0));
+            }
+        }
+    }
+    None
 }
 
 pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
@@ -152,6 +200,64 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     }
     if flash_quads == 0 {
         bad.push("the muzzle flash drew no sprite".into());
+    }
+
+    // The debris of an explosion are PhysPreset rigid bodies: chunks come down from where they were thrown, stay
+    // above the floor they land on and come to rest; they do not hang in the air or fall through the map.
+    let Some(spot) = wide_floor(world, lo, hi) else {
+        return Err(vec!["no wide floor found to throw debris on".into()]);
+    };
+    let mut fx = Effects::new(&lib.content, data.world.clone());
+    fx.demo(DEBRIS, spot, 0.0, std::f32::consts::FRAC_PI_2);
+    if !fx.missing.is_empty() {
+        bad.push(format!("effect {DEBRIS} is missing: {:?}", fx.missing));
+    }
+    let mut track: Vec<Vec<glam::Vec3>> = Vec::new();
+    for step in 1..=160 {
+        fx.update(step * 50, world);
+        let d = fx.draw(spot, 0.0, 0.0, 0.0);
+        track.push(
+            d.models
+                .iter()
+                .map(|m| glam::Vec3::from(m.origin))
+                .collect(),
+        );
+    }
+    let floor_z = spot.z - 60.0;
+    let highest = track.iter().flatten().map(|p| p.z).fold(f32::MIN, f32::max);
+    let alive = track.iter().rposition(|f| !f.is_empty());
+    match alive.filter(|&i| i >= 10) {
+        None => bad.push(format!("{DEBRIS} threw no debris models")),
+        Some(i) => {
+            let (now, before) = (&track[i], &track[i - 10]);
+            let moving = now
+                .iter()
+                .map(|p| {
+                    before
+                        .iter()
+                        .map(|q| q.distance(*p))
+                        .fold(f32::MAX, f32::min)
+                })
+                .fold(0.0f32, f32::max);
+            let lowest = now.iter().map(|p| p.z).fold(f32::MAX, f32::min);
+            report.insert("debris_drop".into(), (highest - lowest).into());
+            report.insert("debris_movement_last_half_second".into(), moving.into());
+            if highest - lowest < 10.0 {
+                bad.push(format!(
+                    "the debris hung in the air: z {highest} down to {lowest}"
+                ));
+            }
+            if lowest < floor_z - 20.0 {
+                bad.push(format!(
+                    "the debris fell through the floor at z {floor_z}: {lowest}"
+                ));
+            }
+            if moving > 0.5 {
+                bad.push(format!(
+                    "the debris had not come to rest (moved {moving} in its last half second)"
+                ));
+            }
+        }
     }
 
     // A rocket in flight leaves a smoke trail behind it: a strip through the points it passed, which ends once the

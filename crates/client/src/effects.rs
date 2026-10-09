@@ -43,7 +43,7 @@ const FLESH_BODY_FATAL: usize = 1;
 const CHEST: f32 = 40.0;
 
 /// What the world looks like to a particle: solid map geometry.
-struct Tracer<'a>(&'a dyn Collide);
+pub(crate) struct Tracer<'a>(pub(crate) &'a dyn Collide);
 
 impl fx::World for Tracer<'_> {
     fn trace(&self, a: Vec3, b: Vec3, mins: Vec3, maxs: Vec3) -> Option<(f32, Vec3)> {
@@ -674,8 +674,7 @@ impl Effects {
             let mut inst = ModelInstance::new(m.model.clone(), ModelKind::World);
             inst.origin = m.origin.to_array();
             inst.light_origin = inst.origin;
-            let f = m.axis[0];
-            inst.angles = [-f.z.asin().to_degrees(), f.y.atan2(f.x).to_degrees(), 0.0];
+            inst.angles = crate::props::angles_of(m.axis);
             out.models.push(inst);
         }
         out

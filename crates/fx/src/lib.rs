@@ -15,7 +15,9 @@ use glam::Vec3;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+mod rigid;
 mod rng;
+pub use rigid::{Body, GRAVITY as PHYS_GRAVITY, Mass, Shape};
 pub use rng::Rng;
 
 /// Longest single integration step.
@@ -230,6 +232,8 @@ struct Elem {
     emit_left: f32,
     id: u64,
     trail: Option<TrailPoint>,
+    /// The rigid body of a model element with `USE_MODEL_PHYSICS`, once it has started.
+    body: Option<Body>,
 }
 
 struct Effect {
@@ -469,6 +473,7 @@ impl Fx {
             emit_left: d.emit_dist.base + d.emit_dist.amplitude * r[19],
             id,
             trail: None,
+            body: None,
         });
     }
 
@@ -704,6 +709,31 @@ impl Fx {
                 }
                 el.done = true;
             }
+            (FxVisuals::Models(models), elem::MODEL) if d.flags & flags::USE_MODEL_PHYSICS != 0 => {
+                // The element is a rigid body with its model's PhysPreset, spinning as the element asks; one whose
+                // model has no preset cannot be simulated and is dropped, as in the original.
+                let preset = models
+                    .get(pick_index(el, models.len()))
+                    .and_then(|m| m.as_ref())
+                    .and_then(|m| m.phys_preset.as_ref().map(|p| (m, p)));
+                let Some((model, preset)) = preset else {
+                    el.done = true;
+                    return;
+                };
+                let spin = |k: usize| pick(el.r[3 + k], &d.angular_velocity[k]) * VELOCITY_SCALE;
+                el.body = Some(
+                    Body::new(
+                        preset,
+                        &Shape::of_model(model),
+                        el.pos,
+                        element_axis(d, el, 0.0),
+                        velocity(d, el, 0.0),
+                    )
+                    // The original's `Phys_ObjSetAngularVelocity` takes (pitch, yaw, roll) rates as the world's
+                    // (y, z, x) rotation rates.
+                    .spinning(Vec3::new(spin(2), spin(0), spin(1))),
+                );
+            }
             _ => {}
         }
     }
@@ -718,6 +748,12 @@ impl Fx {
         spawned: &mut Vec<(Arc<FxEffectDef>, Frame, i32)>,
     ) {
         let dt = ms as f32 * 0.001;
+        if let Some(b) = &mut el.body {
+            b.step(dt, world);
+            el.pos = b.origin();
+            el.at_rest = b.asleep();
+            return;
+        }
         let t = ((el.at - el.begin) as f32 / el.life).clamp(0.0, 0.999_999);
         let v = velocity(d, el, t) + el.base_vel;
         let from = el.pos;
@@ -839,11 +875,14 @@ impl Fx {
                         if scale == 0.0 {
                             continue;
                         }
-                        let a = element_axis(d, el, (self.now - el.begin) as f32);
+                        let (origin, axis) = match &el.body {
+                            Some(b) => (b.origin(), b.axes()),
+                            None => (el.pos, element_axis(d, el, (self.now - el.begin) as f32)),
+                        };
                         out.models.push(ModelDraw {
                             model: model.clone(),
-                            origin: el.pos,
-                            axis: a,
+                            origin,
+                            axis,
                             scale,
                         });
                     }
@@ -1491,6 +1530,117 @@ mod tests {
         assert_eq!(s[0].alias, "thud");
         assert!(s[0].origin.z.abs() < 0.5, "{:?}", s[0].origin);
         assert_eq!(fx.live_elems(), 0);
+    }
+
+    fn debris_model(preset: Option<assets::zone::phys::PhysPreset>) -> Arc<XModel> {
+        use assets::zone::xmodel::LodInfo;
+        let lod = || LodInfo {
+            dist: 0.0,
+            surf_count: 0,
+            surf_index: 0,
+            part_bits: [0; 4],
+            lod: 0,
+            smc_index_plus_one: 0,
+            smc_alloc_bits: 0,
+        };
+        Arc::new(XModel {
+            name: Some("debris".into()),
+            num_bones: 0,
+            num_root_bones: 0,
+            lod_ramp_type: 0,
+            bone_names: Arc::new([]),
+            parent_list: Arc::new([]),
+            quats: Arc::new([]),
+            trans: Arc::new([]),
+            part_classification: Arc::new([]),
+            base_mat: Arc::new([]),
+            surfs: Arc::new([]),
+            materials: Arc::new([]),
+            lod_info: [lod(), lod(), lod(), lod()],
+            coll_surfs: Arc::new([]),
+            contents: 0,
+            bone_info: Arc::new([]),
+            radius: 0.0,
+            mins: [-3.0; 3],
+            maxs: [3.0; 3],
+            num_lods: 1,
+            coll_lod: 0,
+            mem_usage: 0,
+            flags: 0,
+            bad: false,
+            phys_preset: preset.map(Arc::new),
+            phys_geoms: None,
+        })
+    }
+
+    fn preset(bounce: f32) -> assets::zone::phys::PhysPreset {
+        assets::zone::phys::PhysPreset {
+            name: None,
+            kind: 0,
+            mass: 2.0,
+            bounce,
+            friction: 0.6,
+            bullet_force_scale: 1.0,
+            explosive_force_scale: 1.0,
+            snd_alias_prefix: None,
+            pieces_spread_fraction: 0.0,
+            pieces_upward_velocity: 0.0,
+            temp_default_to_cylinder: false,
+        }
+    }
+
+    /// Where the one model of the effect is drawn at `now`.
+    fn model_at(fx: &mut Fx, now: i32, world: &dyn World) -> Option<Vec3> {
+        fx.update(now, world);
+        let mut out = Draws::default();
+        let cam = Camera {
+            origin: Vec3::ZERO,
+            axis: [Vec3::X, Vec3::Y, Vec3::Z],
+        };
+        fx.draw(&cam, &mut out);
+        out.models.first().map(|m| m.origin)
+    }
+
+    fn debris_effect(model: Arc<XModel>, flags: i32) -> Arc<FxEffectDef> {
+        let mut e = elem_def(elem::MODEL, FxVisuals::Models(Arc::from(vec![Some(model)])));
+        e.flags = flags;
+        e.life_span_msec = range(6000, 0);
+        effect("fx/debris", 0, 1, 0, vec![e])
+    }
+
+    #[test]
+    fn a_model_with_physics_falls_bounces_and_comes_to_rest_on_its_preset() {
+        let def = debris_effect(debris_model(Some(preset(0.4))), flags::USE_MODEL_PHYSICS);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
+        let start = model_at(&mut fx, 0, &Floor).unwrap();
+        assert_eq!(start.z, 100.0);
+        // A quarter second of free fall: 800 * 0.25^2 / 2 = 25 units.
+        let early = model_at(&mut fx, 250, &Floor).unwrap();
+        assert!((start.z - early.z - 25.0).abs() < 5.0, "{early}");
+        let mut lowest = f32::MAX;
+        let mut bounced = false;
+        let mut last = early;
+        for t in (300..=2500).step_by(50) {
+            let at = model_at(&mut fx, t, &Floor).unwrap();
+            lowest = lowest.min(at.z);
+            bounced |= at.z > last.z + 1.0;
+            last = at;
+        }
+        assert!(bounced, "bounce 0.4 sends it back up");
+        assert!(lowest > 2.0, "its box rests on the floor: {lowest}");
+        let a = model_at(&mut fx, 4000, &Floor).unwrap();
+        let b = model_at(&mut fx, 5000, &Floor).unwrap();
+        assert!(a.distance(b) < 0.01, "at rest: {a} {b}");
+        assert!(a.z < 10.0, "{a}");
+    }
+
+    #[test]
+    fn a_model_with_physics_but_no_preset_is_dropped() {
+        let def = debris_effect(debris_model(None), flags::USE_MODEL_PHYSICS);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
+        assert_eq!(model_at(&mut fx, 50, &Floor), None);
     }
 
     #[test]

@@ -44,6 +44,9 @@ pub mod eflags {
     pub const TEAM_AXIS: u32 = 1 << 0;
     pub const TEAM_ALLIES: u32 = 1 << 1;
     pub const DEAD: u32 = 1 << 2;
+    /// A script model the script `physicslaunch`ed (`TR_PHYSICS`): clients simulate it as a rigid body launched from
+    /// `origin` and `angles`, struck at `launch_point` by `velocity`, and draw it where the body is.
+    pub const PHYSICS_LAUNCH: u32 = 1 << 3;
 }
 
 pub struct Peer {
@@ -737,6 +740,11 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.origin = e.origin;
                 s.angles = e.angles;
                 s.model = model as u16;
+                if let Some((point, force)) = e.x.physics_launch {
+                    s.eflags = eflags::PHYSICS_LAUNCH;
+                    s.launch_point = point;
+                    s.velocity = force;
+                }
                 s
             }
             EntKind::Plain if e.veh.is_some() => {

@@ -18,7 +18,7 @@ use crate::input::{Feedback, InputFrame, Seen, buttons, scan_own};
 use crate::kick::Kick;
 use crate::look::{Look, LookOut, cap_turn};
 use crate::models::{Library, Player, PlayerModelSet, Team};
-use crate::props::Props;
+use crate::props::{Launches, Props};
 use crate::ragdoll::Ragdoll;
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::{Sight, ViewModel};
@@ -220,6 +220,7 @@ pub struct NetPlay {
     /// Earthquakes shaking the view.
     shakes: sim::shake::CameraShakes,
     props: Props,
+    launches: Launches,
     look: Look,
     /// What the shell shock holds the view to (`CL_CapTurnRate`, the mouse scale): pitch and yaw degrees per second.
     max_turn: [f32; 2],
@@ -301,6 +302,7 @@ impl NetPlay {
                     .clipmap()
                     .map_or(&[][..], |c| &c.dyn_entities[..]),
             ),
+            launches: Launches::default(),
             look: Look::new((map.art.glow, map.art.film)),
             max_turn: [0.0; 2],
             shock_sensitivity: 1.0,
@@ -566,7 +568,7 @@ impl NetPlay {
             self.hud_view = Some((ps.clone(), ps.viewangles[1]));
             self.reticle = None;
             let mut models = self.remote_players(dt, st, ps.client_num);
-            models.extend(self.script_models(&snap));
+            models.extend(self.script_models(&snap, dt));
             models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
             models.extend(self.view_model(
@@ -679,7 +681,7 @@ impl NetPlay {
         let look = self.look.frame(st);
         self.shock_effects(&look);
         let mut models = self.remote_players(dt, st, own);
-        models.extend(self.script_models(&snap));
+        models.extend(self.script_models(&snap, dt));
         models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));
         if !dead {
@@ -1093,7 +1095,7 @@ impl NetPlay {
 
     /// The scripted models of the level (`script_model`: props, cars, objectives), posed at the origin and angles the
     /// server gave them. They move in steps of the snapshots; the stock scripts only move them a few at a time.
-    fn script_models(&mut self, snap: &net::Snapshot) -> Vec<ModelInstance> {
+    fn script_models(&mut self, snap: &net::Snapshot, dt: f32) -> Vec<ModelInstance> {
         let Some(ui) = self.net.ui() else {
             return Vec::new();
         };
@@ -1109,10 +1111,19 @@ impl NetPlay {
             let name = ui.model(e.model);
             match self.lib.content.model(name) {
                 Some(model) => {
+                    let posed = if e.eflags & eflags::PHYSICS_LAUNCH != 0 {
+                        self.launches.pose(e, model, dt, self.boxes.world())
+                    } else {
+                        Some((e.origin, e.angles))
+                    };
+                    // A launch that was given up is not drawn.
+                    let Some((origin, angles)) = posed else {
+                        continue;
+                    };
                     let mut m = ModelInstance::new(model.clone(), render::ModelKind::World);
-                    m.origin = e.origin;
-                    m.angles = e.angles;
-                    m.light_origin = e.origin;
+                    m.origin = origin;
+                    m.angles = angles;
+                    m.light_origin = origin;
                     out.push(m);
                     if !self.c.script_models_names.contains(name) {
                         self.c.script_models_names.insert(name.to_owned());
@@ -1123,6 +1134,7 @@ impl NetPlay {
                 }
             }
         }
+        self.launches.finish_frame(dt);
         self.c.script_models_seen = seen;
         self.c.script_models_drawn = out.len();
         out

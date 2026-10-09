@@ -56,6 +56,9 @@ pub struct EntityState {
     pub event: u8,
     pub event_parm: u8,
     pub event_seq: u8,
+    /// A launched script model (`eflags::PHYSICS_LAUNCH`, in `server::netsv`): where the launch struck it, in the
+    /// world. `origin` and `angles` are where it was launched from and `velocity` is the launch force.
+    pub launch_point: [f32; 3],
 }
 
 macro_rules! int {
@@ -111,6 +114,9 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.event, Bits(8)),
         int!(s, s.event_parm, Bits(8)),
         int!(s, s.event_seq, Bits(8)),
+        num!(s, s.launch_point[0], pos),
+        num!(s, s.launch_point[1], pos),
+        num!(s, s.launch_point[2], pos),
     ]
 }
 
@@ -131,5 +137,30 @@ impl EntityState {
     pub fn canonical(mut self) -> Self {
         crate::field::canonicalize(fields(), &mut self);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bits::{BitReader, BitWriter};
+    use crate::field::{read_delta, write_delta};
+
+    #[test]
+    fn a_launched_models_launch_point_and_force_reach_the_client() {
+        let mut sent = EntityState::new(40);
+        sent.etype = etype::SCRIPT_MODEL;
+        sent.origin = [100.0, 200.0, 30.0];
+        sent.launch_point = [101.5, 199.25, 34.0];
+        sent.velocity = [120.0, -40.0, 300.0];
+        sent.eflags = 1 << 3;
+        let sent = sent.canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(40), &sent);
+        let bytes = w.into_bytes();
+        let mut got = EntityState::new(40);
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, sent);
+        assert_eq!(got.launch_point, [101.5, 199.25, 34.0]);
     }
 }
