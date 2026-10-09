@@ -22,6 +22,14 @@ pub struct Config {
     pub dvars: Vec<(String, String)>,
 }
 
+/// No listen server, so no objective counters: bombs planted, defused, airstrikes, helicopters, helicopter shots.
+pub fn objectives() -> (u64, u64, u64, u64, u64) {
+    (0, 0, 0, 0, 0)
+}
+
+/// No listen server console to queue `_line` for.
+pub fn send(_line: &str) {}
+
 pub fn free_standard_port() -> u16 {
     0
 }

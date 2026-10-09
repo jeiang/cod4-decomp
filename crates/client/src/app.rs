@@ -2355,6 +2355,7 @@ fn vid_restart(cli: &Cli, st: &mut State) {
     }
     let (w, h) = (st.config.width, st.config.height);
     if let Some(r) = st.renderer.as_mut() {
+        #[cfg(not(target_arch = "wasm32"))]
         let before = r.samples(st.config.format);
         r.settings = g.settings(cli.settings);
         #[cfg(not(target_arch = "wasm32"))]
