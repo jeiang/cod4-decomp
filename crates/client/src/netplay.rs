@@ -1814,6 +1814,12 @@ impl NetPlay {
                 None => out.extend(r.player.instances(e.origin)),
             }
         }
+        let present: Vec<u16> = ents
+            .iter()
+            .filter(|e| e.etype == etype::PLAYER)
+            .map(|e| e.number)
+            .collect();
+        self.sound.forget_absent(&present);
         self.c.max_players_seen = self.c.max_players_seen.max(players);
         self.c.max_players_drawn = self.c.max_players_drawn.max(drawn);
         self.remotes.retain(|_, r| now - r.seen < GONE_AFTER);

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (server_mp/sv_snapshot_mp.cpp SV_AddEntitiesVisibleFromPoint; game_mp/g_scr_main_mp.cpp ScrCmd_Hide, ScrCmd_ShowToPlayer; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The server's network side: accepts connecting clients, collects their usercmds and console
 //! commands, and builds and sends each client's snapshot every frame. The game state it reads
 //! lives in [`crate::game::Game`]; joining and leaving go through the same slot calls the bots
@@ -804,11 +805,32 @@ fn tell(
             };
         if in_sight {
             seen.push(s.state.clone());
-        } else if with_actors && s.state.etype == etype::PLAYER {
-            actors.push(compass_state(&s.state));
+        } else if with_actors
+            && s.state.etype == etype::PLAYER
+            && let Some(shot) = compass_shows(game, viewer, &s.state)
+        {
+            actors.push(compass_state(&s.state, shot));
         }
     }
     (seen, actors)
+}
+
+/// How long after a shot the enemies' compasses still show where it came from.
+const FIRE_SHOWN_MS: i32 = 2500;
+
+/// Whether the compass of `viewer` may know where the player `p` is, beyond its sight, and if so whether as one
+/// who just fired. Friends always; enemies only as far as the radar legitimately shows them (a UAV, a ping, a
+/// shot), so a wall hides them (upstream sends such entities by `broadcastTime`, never all).
+fn compass_shows(game: &Game, viewer: u16, p: &EntityState) -> Option<bool> {
+    let me = game.client(viewer)?;
+    let theirs = game.client(p.client)?;
+    let shot = game.level.time - theirs.last_fire_time <= FIRE_SHOWN_MS;
+    let friend = matches!(me.team, Team::Axis | Team::Allies) && me.team == theirs.team;
+    let all_seen = me.team == Team::Spectator
+        || friend
+        || me.ps.radar_enabled
+        || game.cvars.bool("g_compassShowEnemies");
+    (all_seen || shot || p.eflags & eflags::PING != 0).then_some(shot && !friend)
 }
 
 /// What client `viewer` is sent at this moment: the entities it may see and the players beyond its sight the
@@ -818,16 +840,18 @@ pub fn visible_to(game: &Game, viewer: u16) -> (Vec<EntityState>, Vec<EntityStat
     tell(game, &world_snapshot(game), viewer, eye, &[], true)
 }
 
-/// The part of a player the compass reads: where, which way, which side, whether dead or pinged, and the events
-/// that show a shot.
-fn compass_state(p: &EntityState) -> EntityState {
+/// The part of a player the compass and the names over heads read: where, which way, which side, whether dead or
+/// pinged (`shot` flags a recent shot as a ping), the markers and head icon, and the events that show a shot.
+fn compass_state(p: &EntityState, shot: bool) -> EntityState {
     let mut a = EntityState::new(p.number);
     a.etype = p.etype;
     a.client = p.client;
     a.origin = p.origin;
     a.angles = [0.0, p.angles[1], 0.0];
-    a.eflags = p.eflags;
+    a.eflags = p.eflags | if shot { eflags::PING } else { 0 };
     a.perks = p.perks;
+    a.head_icon = p.head_icon;
+    a.head_icon_team = p.head_icon_team;
     (a.event, a.prior_events) = (p.event, p.prior_events);
     a.event_seq = p.event_seq;
     a.canonical()
@@ -1072,6 +1096,8 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 }
                 if let Some(owner) = e.x.plane_owner {
                     s.etype = etype::PLANE;
+                    // A plane shows on every compass, so it is sent to everyone.
+                    reach = None;
                     s.client = owner;
                     s.eflags |= owner_team_flags(game, owner);
                 }
@@ -1084,7 +1110,7 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 if e.hidden || model == 0 {
                     continue;
                 }
-                reach = Some(model_reach(game, &e.model));
+                // Helicopters show on every compass whatever the walls: sent to everyone.
                 let mut s = EntityState::new(n);
                 s.etype = etype::VEHICLE;
                 s.origin = e.origin;

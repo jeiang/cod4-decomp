@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (server_mp/sv_snapshot_mp.cpp SV_AddEntitiesVisibleFromPoint, qcommon/cm_test_mp.cpp CM_ClusterPVS; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Swept traces against the world or one model, and the point/area queries.
 
 use assets::zone::clipmap::Leaf;

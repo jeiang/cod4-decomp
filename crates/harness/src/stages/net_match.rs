@@ -67,6 +67,10 @@ struct Result {
     seen_max: usize,
     /// Entities a snapshot listed both as visible and as a compass actor.
     overlap: u64,
+    /// Players the snapshot's entities held although the viewer's visibility does not reach them.
+    beyond_pvs: u64,
+    /// Snapshots that lacked a player this client had met (one behind a wall).
+    withheld: u64,
     steps: u64,
     snaps: u64,
     max_step: f32,
@@ -115,6 +119,9 @@ fn client(
 ) -> Result {
     let mut r = Result::default();
     let mut boxes = PlayerBoxes::new(rules.clipmap.clone());
+    let world = sim::cm::CollisionWorld::new(rules.clipmap.clone());
+    let mut checked: Option<u32> = None;
+    let mut ever = std::collections::BTreeSet::new();
     let mut pred = Predictor::default();
     let Ok(t) = UdpTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0))) else {
         return r;
@@ -228,6 +235,39 @@ fn client(
             }
             r.shake_max = r.shake_max.max(shakes.strength(st, s.ps.origin));
         }
+        if let Some(s) = c.latest()
+            && checked != Some(s.num)
+        {
+            checked = Some(s.num);
+            // Nobody in the snapshot's entities may be beyond the viewer's visibility, and a player this client
+            // has met must at some time be withheld from it (a wall-separated one).
+            let eye = [
+                s.ps.origin[0],
+                s.ps.origin[1],
+                s.ps.origin[2] + s.ps.view_height_current,
+            ];
+            let sees = |p: [f32; 3], reach: f32| {
+                let clusters = world
+                    .box_clusters(p.map(|v| v - reach), p.map(|v| v + reach))
+                    .unwrap_or_default();
+                // Either end of the body may be what the server measured from.
+                [eye, s.ps.origin].into_iter().any(|at| {
+                    world
+                        .pvs_at(at)
+                        .is_some_and(|v| clusters.is_empty() || clusters.iter().any(|&c| v.sees(c)))
+                })
+            };
+            let others: Vec<_> = s
+                .entities
+                .iter()
+                .filter(|e| e.etype == etype::PLAYER && e.number != own)
+                .collect();
+            r.beyond_pvs += others.iter().filter(|e| !sees(e.origin, 48.0)).count() as u64;
+            ever.extend(others.iter().map(|e| e.number));
+            if others.len() < ever.len() {
+                r.withheld += 1;
+            }
+        }
         // Players beyond the client's sight come as compass actors, never in both lists.
         if let Some(s) = c.latest() {
             r.overlap += s
@@ -238,7 +278,7 @@ fn client(
         }
         let ents = c
             .snaps
-            .interpolate_with_actors(st - net::view::INTERP_DELAY_MS, Some(own));
+            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
         r.seen_max = r
             .seen_max
             .max(ents.iter().filter(|e| e.etype == etype::PLAYER).count());
@@ -456,6 +496,26 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     report
         .metrics
         .insert("spectator.flown_units".into(), flown as f64);
+    let withheld: u64 = results.iter().map(|r| r.withheld).sum();
+    report
+        .metrics
+        .insert("client.withheld_snapshots".into(), withheld as f64);
+    // The stock maps carry no visibility data (one cluster, `vised` 0: the original's PVS then shows everything), so
+    // there the culling cannot be exercised; the hand-built two-room map of the server's `snapshot_pvs` tests does it.
+    let vised = rules.clipmap.vised != 0 && rules.clipmap.num_clusters > 1;
+    report
+        .metrics
+        .insert("map.has_visibility".into(), f64::from(u8::from(vised)));
+    if !vised {
+        report
+            .notes
+            .push("culling untested: the map has no visibility data".to_owned());
+    } else if results.iter().any(|r| r.spawned) && withheld == 0 {
+        failures.push(
+            "no client was ever denied a player: the wall-separated ones were still sent"
+                .to_owned(),
+        );
+    }
     for (i, r) in results.iter().enumerate() {
         if let Some(why) = &r.refused {
             failures.push(format!("client {i} refused: {why}"));
@@ -479,6 +539,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             if moved < 50.0 {
                 failures.push(format!(
                     "client {i}: the server did not move it ({moved:.0} units in {FRAMES} frames)"
+                ));
+            }
+            if r.beyond_pvs > 0 {
+                failures.push(format!(
+                    "client {i}: {} players were sent from beyond its visibility",
+                    r.beyond_pvs
                 ));
             }
             if r.overlap > 0 {

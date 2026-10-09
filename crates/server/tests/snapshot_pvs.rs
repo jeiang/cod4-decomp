@@ -115,3 +115,38 @@ fn every_event_a_frame_raised_reaches_the_entity_and_a_script_move_flags_a_telep
     let after = seen.iter().find(|e| e.number == b).unwrap().eflags & net::entity::TELEPORT_BIT;
     assert_ne!(before, after);
 }
+
+#[test]
+fn an_enemy_behind_a_wall_reaches_the_compass_only_as_far_as_the_radar_shows_it() {
+    let (mut g, mut vm) = rooms();
+    let a = join(&mut g, &mut vm, [100.0, 0.0, 10.0]);
+    let b = join(&mut g, &mut vm, [-100.0, 0.0, 10.0]);
+    g.client_mut(b).unwrap().team = Team::Allies;
+    let actors = |g: &Game| numbers(&visible_to(g, a).1);
+    assert!(actors(&g).is_empty(), "nothing of an enemy beyond the wall");
+    assert!(!numbers(&visible_to(&g, a).0).contains(&b));
+    g.client_mut(a).unwrap().ps.radar_enabled = true;
+    assert_eq!(actors(&g), [b], "a UAV shows it");
+    g.client_mut(a).unwrap().ps.radar_enabled = false;
+    g.level.time = 10_000;
+    g.client_mut(b).unwrap().last_fire_time = 9_000;
+    let (_, shown) = visible_to(&g, a);
+    assert_eq!(numbers(&shown), [b], "a shot shows it for a moment");
+    assert_ne!(shown[0].eflags & server::netsv::eflags::PING, 0);
+    g.level.time = 20_000;
+    assert!(actors(&g).is_empty());
+}
+
+#[test]
+fn a_plane_is_sent_to_everyone_wherever_it_flies() {
+    let (mut g, mut vm) = rooms();
+    let a = join(&mut g, &mut vm, [100.0, 0.0, 10.0]);
+    let mut e = Ent::new(EntKind::Plain, "script_model");
+    e.model = "plane".into();
+    e.origin = [-500.0, 0.0, 10.0];
+    e.x.plane_owner = Some(a);
+    let m = g.spawn(e).unwrap();
+    g.note_model("plane");
+    g.relink(m);
+    assert!(numbers(&visible_to(&g, a).0).contains(&m));
+}

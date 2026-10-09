@@ -49,7 +49,7 @@ impl NetPlay {
         let ents = self
             .net
             .snaps
-            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
+            .interpolate_with_actors(st - net::view::INTERP_DELAY_MS, Some(own));
         let Some(ui) = self.net.ui_ref() else {
             self.scan = scan;
             return;

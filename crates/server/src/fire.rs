@@ -64,6 +64,10 @@ impl Game {
     /// `FireWeapon`.
     fn fire_weapon(&mut self, vm: &mut Vm, n: u16, weapon: u16) {
         vm.notify_entity(n, "weapon_fired", &[]);
+        let time = self.level.time;
+        if let Some(c) = self.client_mut(n) {
+            c.last_fire_time = time;
+        }
         let Some(info) = self.weapons.get(weapon) else {
             return;
         };
