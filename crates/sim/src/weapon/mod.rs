@@ -15,6 +15,7 @@ pub mod damage;
 pub mod fire;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod gun;
 mod info;
 mod inventory;
 mod params;

@@ -348,6 +348,14 @@ fn shell_shock(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     let n = client_of(g, e)?;
     let name = a.string(0)?.to_owned();
     let ms = (a.float(1)? * 1000.0).round() as i32;
+    let end = if name.is_empty() {
+        0
+    } else {
+        g.level.time + ms
+    };
+    if let Some(c) = g.client_mut(n) {
+        c.gun.shock_end = end;
+    }
     g.send(
         crate::ui::Dest::Client(n),
         net::ui::ServerCmd::ShellShock { name, ms },
@@ -374,6 +382,9 @@ fn view_kick(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
 
 fn stop_shell_shock(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client_of(g, e)?;
+    if let Some(c) = g.client_mut(n) {
+        c.gun.shock_end = 0;
+    }
     g.send(
         crate::ui::Dest::Client(n),
         net::ui::ServerCmd::ShellShock {

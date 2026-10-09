@@ -206,6 +206,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if shots >= 1.0 && num(net, &["view_kick_settled"]) < 1.0 {
         failures.push("the view kicked but never came back to rest".into());
     }
+    // The shots' kick moves the gun and the gun comes back. A weapon that cannot aim down sights has no recoil
+    // spring, and a weapon whose file gives the gun no kick has nothing to move: both are untested, not failed.
+    if num(net, &["gun_speed_given"]) > 0.0 && net["gun_has_spring"].as_bool() == Some(true) {
+        if num(net, &["gun_recoil_max"]) <= 0.0 {
+            failures.push("shots kicked the gun but its recoil never moved".into());
+        } else if num(net, &["gun_recoil_settled"]) < 1.0 {
+            failures.push("the gun recoiled but never came back to rest".into());
+        }
+    }
     // A hit the player took (the match is bots shooting back) showed on the screen: the red flash and a wedge.
     // Whether a bot lands one within the run is up to the match, with no hit the stage notes it as untested.
     let taken = num(net, &["damage_events"]);

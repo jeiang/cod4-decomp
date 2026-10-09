@@ -16,6 +16,7 @@ pub mod delta;
 pub mod fire;
 pub mod game;
 pub mod gamelog;
+pub mod gunmotion;
 pub mod items;
 pub mod lagcomp;
 pub mod link;

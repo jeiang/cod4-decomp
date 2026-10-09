@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Translated in part from KisakCOD (GPL-3.0, KisakCOD contributors): `cgame_mp/cg_view_mp.cpp` (`CG_KickAngles`) and
-// `cgame/cg_weapons.cpp` (`CG_FireWeapon`), `cgame/cg_view.cpp` (`CG_CalculateView_IdleAngles`).
+// `cgame/cg_weapons.cpp` (`CG_FireWeapon`).
 //! The kick of the player's own shots: the view kick angles (`cg_s::kickAVel`, `kickAngles`) and the speed the gun
 //! model's recoil spring is given (`vGunSpeed`, spent by `viewmodel`).
 //!
@@ -8,13 +8,8 @@
 //! the angles it integrates to spring back towards zero at the weapon file's centering speed. The kick angles are
 //! added to the angles of the command sent to the server, so recoil moves where shots land and the server agrees
 //! with the prediction, and to the camera. They never enter the player's own look angles.
-//!
-//! A scoped weapon also sways ([`Kick::idle`]): the view wavers while aimed, as steadily as the player state's
-//! `hold_breath_scale` allows, and the wavering moves where shots land the same way the kick does.
 
-use assets::zone::weapon::WeaponDef;
 use fx::Rng;
-use sim::pm::ef;
 use sim::pm::{PlayerState, ev};
 use sim::weapon::WeaponInfo;
 use sim::weapon::fire::fire_recoil;
@@ -25,32 +20,6 @@ const STEP: f32 = 0.005;
 const NO_WEAPON_CENTER: f32 = 2400.0;
 /// The largest kick angle on any axis, degrees.
 const MAX_KICK: f32 = 10.0;
-
-/// What a scoped weapon's sway is made of (the `WeaponDef` idle fields).
-pub struct Scope {
-    aim_down_sight: bool,
-    ads_idle_amount: f32,
-    hip_idle_amount: f32,
-    ads_idle_speed: f32,
-    hip_idle_speed: f32,
-    idle_crouch_factor: f32,
-    idle_prone_factor: f32,
-}
-
-impl Scope {
-    /// `None` for a weapon without a scope overlay: only those sway.
-    pub fn of(d: &WeaponDef) -> Option<Self> {
-        (d.overlay_reticle != 0).then_some(Self {
-            aim_down_sight: d.aim_down_sight != 0,
-            ads_idle_amount: d.ads_idle_amount,
-            hip_idle_amount: d.hip_idle_amount,
-            ads_idle_speed: d.ads_idle_speed,
-            hip_idle_speed: d.hip_idle_speed,
-            idle_crouch_factor: d.idle_crouch_factor,
-            idle_prone_factor: d.idle_prone_factor,
-        })
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Kick {
@@ -63,11 +32,6 @@ pub struct Kick {
     /// The event sequence of the player state as of the last look; `None` before the first.
     seen: Option<u8>,
     rng: Rng,
-    /// The scope's sway: its clock (ms), how much of the stance's steadiness it has reached, and the angles
-    /// it adds (pitch, yaw), degrees.
-    idle_time: f64,
-    idle_factor: f32,
-    idle: [f32; 2],
 }
 
 impl Default for Kick {
@@ -78,25 +42,13 @@ impl Default for Kick {
             gun: [0.0; 2],
             seen: None,
             rng: Rng::new(0x4B1C),
-            idle_time: 0.0,
-            idle_factor: 1.0,
-            idle: [0.0; 2],
         }
     }
 }
 
 impl Kick {
-    /// What is added to the cmd angles and the camera, degrees: the view kick and the scope's sway.
+    /// The view kick, degrees: added to the cmd angles and the camera.
     pub fn angles(&self) -> [f32; 3] {
-        [
-            self.angles[0] + self.idle[0],
-            self.angles[1] + self.idle[1],
-            self.angles[2],
-        ]
-    }
-
-    /// The view kick alone, degrees.
-    pub fn spring(&self) -> [f32; 3] {
         self.angles
     }
 
@@ -110,7 +62,6 @@ impl Kick {
         self.vel = [0.0; 3];
         self.angles = [0.0; 3];
         self.gun = [0.0; 2];
-        self.idle = [0.0; 2];
         // Whatever shots the state shows next are learnt, not kicked for.
         self.seen = None;
     }
@@ -152,49 +103,6 @@ impl Kick {
                 self.step_axis(i, ft, ads, center);
             }
         }
-    }
-
-    /// `CG_CalculateView_IdleAngles`: a weapon with a scope overlay wavers in a slow Lissajous figure, wider
-    /// the more it is aimed, the weapon's amount and speed blending from hip to ADS, scaled by the stance's factor
-    /// and by the player state's `hold_breath_scale` (zero while the breath is held), which also slows its clock.
-    pub fn idle(&mut self, dt: f32, ps: &PlayerState, scope: Option<&Scope>) {
-        let Some(d) = scope else {
-            self.idle = [0.0; 2];
-            return;
-        };
-        let ads = ps.weapon_pos_frac;
-        let (amount, speed) = if d.aim_down_sight {
-            (
-                (d.ads_idle_amount - d.hip_idle_amount) * ads + d.hip_idle_amount,
-                (d.ads_idle_speed - d.hip_idle_speed) * ads + d.hip_idle_speed,
-            )
-        } else if d.hip_idle_amount == 0.0 {
-            (80.0, 1.0)
-        } else {
-            (d.hip_idle_amount, d.hip_idle_speed)
-        };
-        let target = if ps.e_flags & ef::PRONE != 0 {
-            d.idle_prone_factor
-        } else if ps.e_flags & ef::CROUCH != 0 {
-            d.idle_crouch_factor
-        } else {
-            1.0
-        };
-        if ads != 0.0 && self.idle_factor != target {
-            let step = dt * 0.5;
-            self.idle_factor = if self.idle_factor > target {
-                (self.idle_factor - step).max(target)
-            } else {
-                (self.idle_factor + step).min(target)
-            };
-        }
-        let scale = ps.hold_breath_scale;
-        let size = self.idle_factor * amount * ads * scale * 0.01;
-        self.idle_time += f64::from(scale * dt * 1000.0 * speed);
-        self.idle = [
-            ((self.idle_time * 0.001).sin() as f32) * size,
-            ((self.idle_time * 0.0007).sin() as f32) * size,
-        ];
     }
 
     fn step_axis(&mut self, i: usize, ft: f32, ads: f32, center: Option<[f32; 2]>) {
@@ -275,47 +183,6 @@ mod tests {
             k.step(0.016, 0.0, d);
         }
         assert_eq!(k.angles(), [0.0; 3], "and recovered");
-    }
-
-    fn sniper() -> Scope {
-        Scope {
-            aim_down_sight: true,
-            ads_idle_amount: 40.0,
-            hip_idle_amount: 80.0,
-            ads_idle_speed: 100.0,
-            hip_idle_speed: 100.0,
-            idle_crouch_factor: 0.5,
-            idle_prone_factor: 0.2,
-        }
-    }
-
-    #[test]
-    fn a_scope_sways_while_aimed_and_holding_the_breath_steadies_it() {
-        let scope = sniper();
-        let aimed = |scale| PlayerState {
-            weapon_pos_frac: 1.0,
-            hold_breath_scale: scale,
-            ..PlayerState::default()
-        };
-        let mut k = Kick::default();
-        let mut widest = 0.0f32;
-        for _ in 0..600 {
-            k.idle(0.016, &aimed(1.0), Some(&scope));
-            widest = widest.max(k.angles()[0].abs().max(k.angles()[1].abs()));
-        }
-        assert!(widest > 0.1, "sways: {widest}");
-        // The sway only moves the camera: what goes to the server with the aim is the kick.
-        assert_eq!(k.spring(), [0.0; 3]);
-        k.idle(0.016, &aimed(0.0), Some(&scope));
-        assert_eq!(k.angles(), [0.0; 3], "held breath: still");
-        k.idle(0.016, &aimed(1.0), None);
-        assert_eq!(k.angles(), [0.0; 3], "no scope, no sway");
-        let hip = PlayerState {
-            hold_breath_scale: 1.0,
-            ..PlayerState::default()
-        };
-        k.idle(0.016, &hip, Some(&scope));
-        assert_eq!(k.angles(), [0.0; 3], "not aimed, no sway");
     }
 
     #[test]

@@ -413,6 +413,13 @@ impl Look {
         self.blend_ms = ms;
     }
 
+    /// When the shell shock now on ends, server ms (0 for none): what the gun's sway is scaled by.
+    pub fn shock_end(&self) -> i32 {
+        self.shock
+            .as_ref()
+            .map_or(0, |s| s.start_ms + s.duration_ms)
+    }
+
     /// A flash (not a blur) is on the screen at `now_ms` (`CG_Flashbanged`).
     pub fn flashbanged(&self, now_ms: i32) -> bool {
         self.shock.as_ref().is_some_and(|s| {

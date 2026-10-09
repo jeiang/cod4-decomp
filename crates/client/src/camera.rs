@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Translated in part from KisakCOD (GPL-3.0, KisakCOD contributors): `cgame_mp/cg_view_mp.cpp`
 // (`CG_OffsetFirstPersonView`, `CG_SmoothCameraZ`), `bgame/bg_weapons.cpp` (`BG_GetVerticalBobFactor`,
-// `BG_GetHorizontalBobFactor`, `BG_CalculateView_IdleAngles`, `BG_CalculateView_BobAngles`,
+// `BG_GetHorizontalBobFactor`, `BG_CalculateView_BobAngles`,
 // `BG_CalculateView_Velocity`) and `cgame/cg_event.cpp` (the landing dip).
 //! The first-person camera layer: what the original's `CG_OffsetFirstPersonView` does to the eye on top of the
 //! predicted player.
@@ -11,18 +11,15 @@
 //! [`View::angles`], and is only what is drawn: the stair smoothing (the eye lags the body's step, see
 //! [`net::predict::StepView`]), the walk, run and sprint bob, the lean shift, the dip of a landing, and the
 //! eye never lower than 8 units over the feet. A scoped weapon bobs the view by angle while aimed and moving, and any
-//! weapon with an `adsViewBobMult` moves it with the steps while aimed. The scoped idle sway is [`crate::kick::Kick::idle`]'s,
-//! in the aim this layer offsets along.
+//! weapon with an `adsViewBobMult` moves it with the steps while aimed. The scoped idle sway and the kick of a hit are
+//! [`sim::weapon::gun::ViewFx`]'s, in the aim this layer offsets along.
 
 use assets::zone::weapon::WeaponDef;
 use sim::pm::bob::{BOB_MAX, MIN_EYE, bob_cycle, bob_speed, horizontal_bob, vertical_bob};
 use sim::pm::math::{add_lean_to_position, angle_vectors};
 use sim::pm::{Params, PlayerState, ef, ev};
+use sim::weapon::gun::{GunParams, view_bob};
 
-/// Scoped bob angles are capped at this, degrees.
-const SCOPE_BOB_MAX: f32 = 10.0;
-/// The aimed view bob of any weapon is capped at this, degrees.
-const ADS_BOB_MAX: f32 = 45.0;
 /// How far a full lean moves the eye sideways, units, and the roll `AddLeanToPosition` pivots it by, degrees
 /// (`AddLeanToPosition(.., 16, 20)`). The original's view itself takes no lean roll.
 const LEAN_DIST: f32 = 20.0;
@@ -31,7 +28,7 @@ const LEAN_ROLL: f32 = 16.0;
 const DIP_DOWN_MS: i32 = 150;
 const DIP_UP_MS: i32 = 300;
 
-/// The numbers of a weapon file the camera reads. The scoped idle sway is not here: [`crate::kick::Kick::idle`]
+/// The numbers of a weapon file the camera reads. The scoped idle sway is not here: [`sim::weapon::gun::ViewFx`]
 /// has it, in the aim the camera is offset along.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WeaponView {
@@ -156,36 +153,17 @@ impl Camera {
         }
     }
 
-    /// The scoped bob and the aimed view bob (`BG_CalculateView_BobAngles`, `BG_CalculateView_Velocity`), degrees.
+    /// The scoped bob and the aimed view bob (`BG_CalculateView_BobAngles`, `BG_CalculateView_Velocity`), degrees:
+    /// the same [`view_bob`] the server aims shots with.
     fn angles(f: &Frame<'_>) -> [f32; 3] {
-        let (ps, mut a) = (f.ps, [0.0f32; 3]);
-        let Some(w) = f.weapon else { return a };
-        let ads = ps.weapon_pos_frac;
-        if w.scoped {
-            // The scoped bob: the stance's bob as angles, faded in by the aim.
-            if ads != 0.0 {
-                let cycle = bob_cycle(ps) + std::f32::consts::FRAC_PI_4 + std::f32::consts::TAU;
-                let speed = bob_speed(ps, f.now) * 0.16;
-                let mut ofs = [
-                    -vertical_bob(ps, cycle, speed, SCOPE_BOB_MAX),
-                    -horizontal_bob(ps, cycle, speed, SCOPE_BOB_MAX),
-                    horizontal_bob(ps, cycle - 0.471_238_9, speed * 1.5, SCOPE_BOB_MAX).min(0.0),
-                ];
-                let scale = 1.0 - (1.0 - w.ads_bob_factor) * ads;
-                for (a, o) in a.iter_mut().zip(&mut ofs) {
-                    *a += *o * scale * ads;
-                }
-            }
-        }
-        // Aimed, every weapon with a view bob multiplier moves the view with the steps.
-        if ps.e_flags & ef::TURRET_ACTIVE == 0 && ads != 0.0 && w.ads_view_bob_mult != 0.0 {
-            let cycle = bob_cycle(ps);
-            let speed = bob_speed(ps, f.now);
-            let k = ads * w.ads_view_bob_mult;
-            a[0] -= k * vertical_bob(ps, cycle, speed, ADS_BOB_MAX);
-            a[1] -= k * horizontal_bob(ps, cycle, speed, ADS_BOB_MAX);
-        }
-        a
+        let Some(w) = f.weapon else { return [0.0; 3] };
+        let p = GunParams {
+            overlay_reticle: w.scoped,
+            ads_bob_factor: w.ads_bob_factor,
+            ads_view_bob_mult: w.ads_view_bob_mult,
+            ..GunParams::default()
+        };
+        view_bob(f.ps, bob_speed(f.ps, f.now), &p)
     }
 
     /// `CG_OffsetFirstPersonView` for one frame. Nothing changes for a dead player, in a turret or at the
