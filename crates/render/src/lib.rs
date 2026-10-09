@@ -26,7 +26,7 @@ pub mod ui2d;
 pub mod water;
 
 pub use dlight::{DynLight, SpotCone, SpotParams};
-pub use dynmesh::{DynMesh, DynVertex};
+pub use dynmesh::{Cloud, DynMesh, DynVertex};
 pub use gpu::{Gpu, GpuError, GpuInfo};
 pub use post::{Dof, PostParams, ShellShock};
 pub use renderer::{FrameStats, Progress, Renderer, Settings, ShadowMode, View};

@@ -62,6 +62,8 @@ pub enum VertexKind {
     Model,
     /// 28-byte full-screen quad vertex: position at 0, colour at 16, texture coordinates at 20.
     Screen,
+    /// 20-byte `GfxPosTexVertex` (a particle cloud's sprites): position at 0, texture coordinates at 12.
+    Cloud,
 }
 
 impl VertexKind {
@@ -70,6 +72,7 @@ impl VertexKind {
             VertexKind::World => 44,
             VertexKind::Model => 32,
             VertexKind::Screen => 28,
+            VertexKind::Cloud => 20,
         }
     }
 
@@ -94,6 +97,8 @@ impl VertexKind {
         use wgpu::VertexFormat as F;
         Some(match (self, src) {
             (_, 0) => (F::Float32x3, 0),
+            (VertexKind::Cloud, 1) => return None,
+            (VertexKind::Cloud, 2) => (F::Float32x2, 12),
             (_, 1) => (F::Unorm8x4, 16),
             (VertexKind::World, 2) => (F::Float32x4, 20),
             (VertexKind::World, 3) => (F::Unorm8x4, 36),
@@ -204,7 +209,13 @@ impl Prepared {
 
     fn object_dependent(code: &[(u32, u32, u32)]) -> bool {
         code.iter().any(|&(_, id, _)| {
-            id >= codeconst::FIRST_MATRIX || id == codeconst::BASE_LIGHTING_COORDS
+            id >= codeconst::FIRST_MATRIX
+                || matches!(
+                    id,
+                    codeconst::BASE_LIGHTING_COORDS
+                        | codeconst::PARTICLE_CLOUD_MATRIX
+                        | codeconst::PARTICLE_CLOUD_COLOR
+                )
         })
     }
 

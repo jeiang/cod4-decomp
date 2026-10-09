@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Decals: an effect's decal element is a box on a surface; the picture is the part of the world's triangles inside
-//! it, clipped to the box and textured by projecting along the surface normal (the original's `FX_GenerateMark`).
+// Translated in part from KisakCOD (gfx_d3d/r_marks.cpp: R_Mark_MaterialAllowsMarks, R_MarkFragment_IsTriangleRejected; GPL-3.0, copyright the KisakCOD contributors and Activision).
+//! Decals: an effect's decal element is a box on a surface; the picture is the part of the triangles of the world's
+//! surfaces and static models inside it, clipped to the box and textured by projecting along the surface normal (the
+//! original's `FX_GenerateMark`). Only surfaces whose material takes marks of the decal's kind receive it.
 
+use assets::zone::gfx::Material;
 use assets::zone::gfxworld::GfxWorld;
-use glam::Vec3;
+use assets::zone::xmodel::Surface;
+use glam::{Mat4, Vec3};
 use render::DynVertex;
 
 /// A box placed on a surface.
@@ -18,8 +22,9 @@ pub struct Placement {
     pub half_size: [f32; 2],
 }
 
-/// Steepest the surface may be to the decal's normal, as a cosine, before the triangle is skipped.
-const MIN_FACING: f32 = 0.3;
+/// Steepest the surface may be to the decal's normal, as a cosine, before the triangle is skipped
+/// (`R_MarkFragment_IsTriangleRejected`: more than 60 degrees off).
+const MIN_FACING: f32 = 0.5;
 /// How far in front of the surface the decal is drawn, against depth-buffer fighting.
 const LIFT: f32 = 0.1;
 
@@ -92,17 +97,41 @@ pub fn clip(tris: impl IntoIterator<Item = [Vec3; 3]>, p: &Placement) -> Vec<Dyn
     out
 }
 
-/// The world's triangles whose surface bounds overlap `[mins, maxs]`, counter-clockwise seen from outside.
+/// Whether a surface of material `receiver` takes a mark of material `mark` (`R_Mark_MaterialAllowsMarks`): not when it
+/// refuses marks, and only when it is made of every kind of surface the mark is for.
+pub fn receives(receiver: &Material, mark: &Material) -> bool {
+    receiver.state_flags & 4 == 0
+        && receiver.game_flags & 4 == 0
+        && receiver.surface_type_bits & mark.surface_type_bits == mark.surface_type_bits
+}
+
+/// The triangles that can take a mark in `[mins, maxs]`: the map's surfaces for `world_mark`'s kind of surface and
+/// its static models for `model_mark`'s, counter-clockwise seen from outside.
+pub fn receivers<'a>(
+    w: &'a GfxWorld,
+    mins: Vec3,
+    maxs: Vec3,
+    world_mark: &'a Material,
+    model_mark: &'a Material,
+) -> impl Iterator<Item = [Vec3; 3]> + 'a {
+    world_triangles(w, mins, maxs, world_mark).chain(model_triangles(w, mins, maxs, model_mark))
+}
+
+/// The world's triangles whose surface bounds overlap `[mins, maxs]` and whose material takes `mark`, counter-clockwise
+/// seen from outside.
 pub fn world_triangles<'a>(
     w: &'a GfxWorld,
     mins: Vec3,
     maxs: Vec3,
+    mark: &'a Material,
 ) -> impl Iterator<Item = [Vec3; 3]> + 'a {
     w.dpvs
         .surfaces
         .iter()
         .filter(move |s| {
-            Vec3::from(s.bounds[0]).cmple(maxs).all() && Vec3::from(s.bounds[1]).cmpge(mins).all()
+            Vec3::from(s.bounds[0]).cmple(maxs).all()
+                && Vec3::from(s.bounds[1]).cmpge(mins).all()
+                && s.material.as_ref().is_some_and(|m| receives(m, mark))
         })
         .flat_map(move |s| {
             let vert = move |i: u16| -> Vec3 {
@@ -126,9 +155,53 @@ pub fn world_triangles<'a>(
         })
 }
 
+/// The triangles of the static models whose bounds overlap `[mins, maxs]`, in their most detailed level, for the
+/// surfaces whose material takes `mark`; counter-clockwise seen from outside.
+pub fn model_triangles(w: &GfxWorld, mins: Vec3, maxs: Vec3, mark: &Material) -> Vec<[Vec3; 3]> {
+    let mut out = Vec::new();
+    for (inst, draw) in w.dpvs.smodel_insts.iter().zip(&w.dpvs.smodel_draw_insts) {
+        let (Some(model), true) = (
+            draw.model.as_ref(),
+            Vec3::from(inst.mins).cmple(maxs).all() && Vec3::from(inst.maxs).cmpge(mins).all(),
+        ) else {
+            continue;
+        };
+        let place = render::scene::model_matrix(draw);
+        let lod = &model.lod_info[0];
+        for idx in
+            usize::from(lod.surf_index)..usize::from(lod.surf_index) + usize::from(lod.surf_count)
+        {
+            let (Some(surf), Some(Some(mat))) = (model.surfs.get(idx), model.materials.get(idx))
+            else {
+                continue;
+            };
+            if receives(mat, mark) {
+                out.extend(surface_triangles(surf, &place));
+            }
+        }
+    }
+    out
+}
+
+/// The triangles of a model surface placed by `place`, counter-clockwise seen from outside.
+fn surface_triangles<'a>(s: &'a Surface, place: &'a Mat4) -> impl Iterator<Item = [Vec3; 3]> + 'a {
+    let vert = move |i: u16| -> Option<Vec3> {
+        let b = s.verts.get(usize::from(i) * 32..usize::from(i) * 32 + 12)?;
+        let f = |k: usize| f32::from_le_bytes(b[k * 4..k * 4 + 4].try_into().unwrap());
+        Some(place.transform_point3(Vec3::new(f(0), f(1), f(2))))
+    };
+    s.tri_indices
+        .as_chunks::<3>()
+        .0
+        .iter()
+        // Clockwise seen from outside, like the map's.
+        .filter_map(move |t| Some([vert(t[0])?, vert(t[2])?, vert(t[1])?]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn area(v: &[DynVertex]) -> f32 {
         v.chunks(3)
@@ -196,5 +269,107 @@ mod tests {
             Vec3::new(0.0, 0.0, 10.0),
         ]];
         assert!(clip(wall, &on_floor([5.0, 5.0], Vec3::ZERO)).is_empty());
+    }
+
+    #[test]
+    fn a_slope_takes_the_decal_up_to_sixty_degrees_off_and_no_further() {
+        let tilted = |degrees: f32| -> Vec<[Vec3; 3]> {
+            let q = glam::Quat::from_rotation_y(degrees.to_radians());
+            floor()
+                .into_iter()
+                .map(|t| t.map(|v| q * v))
+                .collect::<Vec<_>>()
+        };
+        let at = on_floor([5.0, 5.0], Vec3::ZERO);
+        assert!(!clip(tilted(50.0), &at).is_empty());
+        assert!(clip(tilted(65.0), &at).is_empty());
+    }
+
+    fn material(surface_type_bits: u32, state_flags: u8, game_flags: u8) -> Material {
+        Material {
+            name: None,
+            game_flags,
+            sort_key: 0,
+            atlas_rows: 1,
+            atlas_columns: 1,
+            draw_surf: 0,
+            surface_type_bits,
+            hash_index: 0,
+            state_bits_entry: [0; 34],
+            state_flags,
+            camera_region: 0,
+            technique_set: None,
+            textures: Arc::from(Vec::new()),
+            constants: Arc::from(Vec::new()),
+            state_bits: Arc::from(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_surface_takes_a_mark_only_if_it_allows_marks_and_is_every_kind_the_mark_is_for() {
+        let mark = material(0b0110, 0, 0);
+        assert!(receives(&material(0b0111, 0, 0), &mark));
+        assert!(receives(&material(0b0110, 0, 0), &mark));
+        assert!(
+            !receives(&material(0b0100, 0, 0), &mark),
+            "only one of the two kinds"
+        );
+        assert!(
+            !receives(&material(0b0111, 4, 0), &mark),
+            "state flag 4 refuses marks"
+        );
+        assert!(
+            !receives(&material(0b0111, 0, 4), &mark),
+            "game flag 4 refuses marks"
+        );
+        assert!(
+            receives(&material(0, 0, 0), &material(0, 0, 0)),
+            "a mark for no kind goes anywhere"
+        );
+    }
+
+    #[test]
+    fn a_model_surface_is_placed_and_wound_like_the_maps() {
+        let verts: Vec<u8> = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+            .iter()
+            .flat_map(|p| {
+                let mut v = [0u8; 32];
+                for (i, c) in p.iter().enumerate() {
+                    v[i * 4..i * 4 + 4].copy_from_slice(&c.to_le_bytes());
+                }
+                v
+            })
+            .collect();
+        let surf = Surface {
+            tile_mode: 0,
+            deformed: false,
+            vert_count: 3,
+            tri_count: 1,
+            zone_handle: 0,
+            base_tri_index: 0,
+            base_vert_index: 0,
+            blend_counts: [0; 4],
+            blends: Arc::from(Vec::new()),
+            vert_list: Arc::from(Vec::new()),
+            part_bits: [0; 4],
+            verts: Arc::from(verts),
+            tri_indices: Arc::from(vec![0u16, 1, 2]),
+        };
+        // Ten times the size, 100 units up.
+        let place = Mat4::from_translation(Vec3::Z * 100.0) * Mat4::from_scale(Vec3::splat(10.0));
+        let tris: Vec<_> = surface_triangles(&surf, &place).collect();
+        assert_eq!(tris.len(), 1);
+        let [a, b, c] = tris[0];
+        assert_eq!(
+            (a, b, c),
+            (
+                Vec3::Z * 100.0,
+                Vec3::new(0.0, 10.0, 100.0),
+                Vec3::new(10.0, 0.0, 100.0)
+            )
+        );
+        // Indices 0, 1, 2 run counter-clockwise seen from above, so in the map's convention (clockwise seen from
+        // outside) the outside is below, and the triangle comes out counter-clockwise seen from there: normal down.
+        assert!((b - a).cross(c - a).z < 0.0);
     }
 }

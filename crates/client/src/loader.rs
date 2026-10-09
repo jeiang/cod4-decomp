@@ -283,6 +283,18 @@ impl Work {
             models.extend(library.content.model(name).cloned());
         }
         renderer.warm_models(&models);
+        renderer.warm_clouds(library.content.effects().iter().flat_map(|e| {
+            e.elems
+                .iter()
+                .filter(|d| d.elem_type == assets::zone::fx::elem::CLOUD)
+                .flat_map(|d| match &d.visuals {
+                    assets::zone::fx::FxVisuals::Materials(ms) => {
+                        ms.iter().flatten().cloned().collect()
+                    }
+                    _ => Vec::new(),
+                })
+                .collect::<Vec<_>>()
+        }));
         Ok(())
     }
 
