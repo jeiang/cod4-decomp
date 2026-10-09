@@ -3,6 +3,9 @@
 //! disconnect (`ClientConnect`, `ClientBegin`, `ClientSpawn`, `ClientThink_real`,
 //! `ClientEndFrame`, `ClientDisconnect` of the original).
 //!
+//! Spectator movement and following (`SpectatorThink`, `StopFollowing`, `SpectatorClientEndFrame`) translated in part from
+//! KisakCOD (game_mp/g_active_mp.cpp, game_mp/g_cmds_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+//!
 //! A client's entity number is its slot. The entity exists while the slot is connected; the
 //! player state, the session fields scripts read (`sessionstate`, `score`, ...) and the last
 //! command live in [`Client`]. Bots and network clients differ only in where their commands
@@ -421,6 +424,12 @@ impl Game {
             self.free_entity(vm, n);
             self.clients[usize::from(n)] = Client::new(n, false, String::new());
             self.clients[usize::from(n)].conn = Conn::Free;
+            // Nobody keeps watching the slot, which a newcomer may take.
+            for c in &mut self.clients {
+                if c.spectator_client == i32::from(n) && c.archive_time <= 0.0 {
+                    c.spectator_client = -1;
+                }
+            }
         }
     }
 
@@ -442,6 +451,45 @@ impl Game {
         let solid = !c.noclip && !c.ufo && matches!(c.session, Session::Playing);
         if let Some(e) = self.ent_mut(n) {
             e.contents = if solid { contents::PLAYER } else { 0 };
+        }
+        // A spectator or a player at the scoreboard is nowhere in the world.
+        if self
+            .client(n)
+            .is_some_and(|c| matches!(c.session, Session::Spectator | Session::Intermission))
+            && let Some(w) = self.world.as_mut()
+        {
+            w.unlink(n);
+        }
+    }
+
+    /// `SpectatorClientEndFrame`'s follow upkeep: a watched player who is gone (or may no longer be watched) ends the
+    /// following, and a spectator barred from free flight who watches nobody is put on the next player.
+    fn spectator_upkeep(&mut self, n: u16) {
+        let Some(c) = self.client(n) else { return };
+        if c.session != Session::Spectator || c.archive_time > 0.0 {
+            return;
+        }
+        if let Ok(t) = u16::try_from(c.spectator_client) {
+            let allow = c.spec_allow;
+            let watchable = t != n
+                && self.client(t).is_some_and(|w| {
+                    w.connected()
+                        && w.session == Session::Playing
+                        && allow
+                            & match w.team {
+                                Team::Allies => spec::ALLIES,
+                                Team::Axis => spec::AXIS,
+                                _ => spec::NONE,
+                            }
+                            != 0
+                });
+            if !watchable {
+                self.stop_following(n);
+            }
+        }
+        let Some(c) = self.client(n) else { return };
+        if c.spectator_client < 0 && c.spec_allow & spec::FREELOOK == 0 {
+            self.spectate_cycle(n, 1);
         }
     }
 
@@ -837,6 +885,7 @@ impl Game {
 
     /// `ClientEndFrame`: state that follows from the session after scripts ran.
     pub fn client_end_frame(&mut self, _vm: &mut Vm, n: u16) {
+        self.spectator_upkeep(n);
         let gravity = self.cvars.int("g_gravity");
         let Some(c) = self.clients.get_mut(usize::from(n)) else {
             return;

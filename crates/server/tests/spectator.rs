@@ -90,14 +90,44 @@ fn a_free_spectator_flies_where_it_may_and_stays_put_where_it_may_not() {
 #[test]
 fn a_flying_spectator_is_stopped_by_the_world() {
     let (mut g, mut vm) = arena();
-    let flier = join(&mut g, &mut vm, [0.0, 0.0, 30.0], Session::Spectator);
+    let flier = join(&mut g, &mut vm, [0.0, 0.0, 60.0], Session::Spectator);
     g.client_mut(flier).unwrap().spec_allow = spec::FREELOOK;
-    // Flying down into the floor stops at it.
-    let c = g.client_mut(flier).unwrap();
-    c.ps.viewangles = [89.0, 0.0, 0.0];
-    think(&mut g, &mut vm, flier, 0, 30);
+    // Leaning left sinks the spectator: it comes down and rests on the floor instead of passing through.
+    think(&mut g, &mut vm, flier, button::LEAN_LEFT, 40);
     let z = g.client(flier).unwrap().ps.origin[2];
+    assert!(z < 40.0, "it sank: z = {z}");
     assert!(z > -1.0, "stopped by the floor: z = {z}");
+}
+
+#[test]
+fn a_spectator_whose_player_leaves_stops_following_and_can_fly() {
+    let (mut g, mut vm) = arena();
+    let target = join(&mut g, &mut vm, [500.0, 0.0, 0.0], Session::Playing);
+    let n = join(&mut g, &mut vm, [0.0, 0.0, 200.0], Session::Spectator);
+    g.client_mut(n).unwrap().spec_allow = spec::FREELOOK | spec::AXIS;
+    g.client_mut(n).unwrap().spectator_client = i32::from(target);
+    g.client_end_frame(&mut vm, n);
+    assert_eq!(
+        g.client(n).unwrap().ps.other_flags & other::FOLLOWING,
+        other::FOLLOWING
+    );
+    g.disconnect_client(&mut vm, target);
+    g.finish_disconnects(&mut vm);
+    g.client_end_frame(&mut vm, n);
+    assert_eq!(g.client(n).unwrap().spectator_client, -1);
+    assert_eq!(g.client(n).unwrap().ps.other_flags & other::FOLLOWING, 0);
+    think(&mut g, &mut vm, n, 0, 10);
+    assert!(g.client(n).unwrap().ps.origin[0] > 100.0, "flies again");
+}
+
+#[test]
+fn a_spectator_barred_from_free_flight_is_put_on_a_player() {
+    let (mut g, mut vm) = arena();
+    let target = join(&mut g, &mut vm, [500.0, 0.0, 0.0], Session::Playing);
+    let n = join(&mut g, &mut vm, [0.0, 0.0, 200.0], Session::Spectator);
+    g.client_mut(n).unwrap().spec_allow = spec::AXIS;
+    g.client_end_frame(&mut vm, n);
+    assert_eq!(g.client(n).unwrap().spectator_client, i32::from(target));
 }
 
 #[test]
