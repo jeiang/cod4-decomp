@@ -202,6 +202,8 @@ pub const VIEW_DEAD: i32 = 8;
 /// `LastStand` players sit at this height.
 pub const VIEW_LASTSTAND: i32 = 22;
 
+/// Perk bit of Dead Silence (`specialty_quieter`): footsteps use the `q` sound families.
+pub const PERK_QUIETER: u32 = 0x100;
 /// Perk bit that stretches sprint time (`perk_sprintMultiplier`).
 pub const PERK_SPRINT: u32 = 0x400;
 

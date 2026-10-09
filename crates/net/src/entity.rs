@@ -59,6 +59,8 @@ pub struct EntityState {
     /// A launched script model (`eflags::PHYSICS_LAUNCH`, in `server::netsv`): where the launch struck it, in the
     /// world. `origin` and `angles` are where it was launched from and `velocity` is the launch force.
     pub launch_point: [f32; 3],
+    /// Perk bits (`bg_perkNames` order); remote clients pick footstep sounds by them.
+    pub perks: u32,
 }
 
 macro_rules! int {
@@ -117,6 +119,7 @@ fn table() -> Vec<Field<EntityState>> {
         num!(s, s.launch_point[0], pos),
         num!(s, s.launch_point[1], pos),
         num!(s, s.launch_point[2], pos),
+        int!(s, s.perks, Bits(20)),
     ]
 }
 

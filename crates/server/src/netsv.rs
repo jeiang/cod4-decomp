@@ -700,6 +700,7 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.event_parm =
                     c.ps.event_parms[usize::from(c.ps.event_sequence.wrapping_sub(1) & 3)];
                 s.event_seq = c.ps.event_sequence;
+                s.perks = c.ps.perks & 0xf_ffff;
                 s.eflags = match c.team {
                     Team::Axis => eflags::TEAM_AXIS,
                     Team::Allies => eflags::TEAM_ALLIES,

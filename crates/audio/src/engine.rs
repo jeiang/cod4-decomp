@@ -13,7 +13,7 @@ use crate::mixer::{
     Duck, Emitter, Handle, Listener, Mixer, NO_ENTITY, Play, Source, VoiceId, mixer,
 };
 use crate::reverb::room_index;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +22,8 @@ pub const ENV_PRIORITIES: usize = 3;
 
 /// Secondary aliases chain at most this deep (the original stops at 10).
 const MAX_CHAIN: u32 = 10;
+/// How many one-shot voices [`Sound::stop_alias`] remembers.
+const MAX_STARTED: usize = 64;
 
 /// Optional parts of a play request.
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +72,9 @@ pub struct Sound {
     streams: Streams,
     listener: Listener,
     loops: HashMap<(u32, String), VoiceId>,
+    /// The newest one-shot voices of entities, by lower-case alias name, for [`Sound::stop_alias`]. A voice that has
+    /// ended is a harmless stop.
+    started: VecDeque<(u32, String, VoiceId)>,
     /// Entity loops that were out of range when asked for, started by [`Sound::follow_entity`] once their entity is
     /// near enough.
     waiting: HashMap<(u32, String), Arc<Alias>>,
@@ -201,6 +206,7 @@ impl Sound {
             streams: Streams::new(),
             listener: Listener::from_yaw([0.0; 3], 0.0),
             loops: HashMap::new(),
+            started: VecDeque::new(),
             waiting: HashMap::new(),
             ambient: None,
             music: None,
@@ -392,6 +398,12 @@ impl Sound {
         self.handle.play(p);
         if alias.looping && cue.entity != NO_ENTITY {
             self.loops.insert(key, id);
+        } else if cue.entity != NO_ENTITY {
+            if self.started.len() >= MAX_STARTED {
+                self.started.pop_front();
+            }
+            self.started
+                .push_back((cue.entity, name.to_ascii_lowercase(), id));
         }
         *self.played.by_channel.entry(def.name).or_default() += 1;
         *self
@@ -413,6 +425,19 @@ impl Sound {
         if let Some(id) = self.loops.remove(&key) {
             self.handle.stop(id);
         }
+    }
+
+    /// `CG_StopSoundAlias`: stops the sounds of `alias` that `entity` started.
+    pub fn stop_alias(&mut self, entity: u32, alias: &str) {
+        let alias = alias.to_ascii_lowercase();
+        let handle = &self.handle;
+        self.started.retain(|(e, a, id)| {
+            let hit = *e == entity && *a == alias;
+            if hit {
+                handle.stop(*id);
+            }
+            !hit
+        });
     }
 
     pub fn stop_entity(&mut self, entity: u32) {

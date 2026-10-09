@@ -305,6 +305,11 @@ mod tests {
                     origin: [k as f32 * 100.3 + t as f32 * 0.5, -(k as f32) * 20.1, 40.0],
                     angles: [0.0, (k * 17 + t as usize) as f32 % 360.0, 0.0],
                     model: (k % 40) as u16,
+                    perks: if k % 2 == 0 {
+                        0x100 | (k as u32) << 10
+                    } else {
+                        0
+                    },
                     ..EntityState::default()
                 }
                 .canonical(),
