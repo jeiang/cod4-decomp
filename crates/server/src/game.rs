@@ -965,6 +965,32 @@ mod tests {
     }
 
     #[test]
+    fn a_launched_script_model_is_published_with_its_launch() {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        let mut e = Ent::new(EntKind::Plain, "script_model");
+        e.model = "com_barrel".into();
+        e.origin = [10.0, 20.0, 30.0];
+        let n = g.spawn(e).unwrap();
+        g.note_model("com_barrel");
+        let published = |g: &Game| {
+            crate::netsv::world_entities(g)
+                .into_iter()
+                .find(|s| s.number == n)
+                .unwrap()
+        };
+        assert_eq!(
+            published(&g).eflags & crate::netsv::eflags::PHYSICS_LAUNCH,
+            0
+        );
+        g.ent_mut(n).unwrap().x.physics_launch = Some(([11.0, 20.0, 34.0], [0.0, 50.0, 300.0]));
+        let s = published(&g);
+        assert_ne!(s.eflags & crate::netsv::eflags::PHYSICS_LAUNCH, 0);
+        assert_eq!(s.origin, [10.0, 20.0, 30.0]);
+        assert_eq!(s.launch_point, [11.0, 20.0, 34.0]);
+        assert_eq!(s.velocity, [0.0, 50.0, 300.0]);
+    }
+
+    #[test]
     fn field_types_ignore_comments() {
         let m = parse_field_types(
             "// x\nvector\torigin\nfloat script_wait // c\nint  \tscript_cheap\nbad x\n",
