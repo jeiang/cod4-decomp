@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (EffectsCore/fx_draw.cpp: FX_EvaluateDistanceFade, FX_EvaluateVisualState_DoLighting, FX_DrawElem_Cloud, FX_AddVisBlocker; fx_system.cpp: FX_SpawnEffect, FX_CullElemForSpawn, FX_CullTrailElem, FX_GetClientVisibility; fx_update.cpp: FX_ProcessEmitting, FX_TraceHitSomething; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Effect playback. An [`Fx`] runs [`FxEffectDef`]s: each effect spawns its elements (looping ones at an interval,
 //! one-shot ones at once, runners that start further effects), and every element lives for its lifespan moving by
 //! its velocity samples and gravity, bouncing off the world when it collides, and reads its colour, size and

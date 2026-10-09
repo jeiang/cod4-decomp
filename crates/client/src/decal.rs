@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (gfx_d3d/r_marks.cpp: R_Mark_MaterialAllowsMarks, R_MarkFragment_IsTriangleRejected; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Decals: an effect's decal element is a box on a surface; the picture is the part of the triangles of the world's
 //! surfaces and static models inside it, clipped to the box and textured by projecting along the surface normal (the
 //! original's `FX_GenerateMark`). Only surfaces whose material takes marks of the decal's kind receive it.

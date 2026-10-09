@@ -184,9 +184,10 @@ struct WorldFx {
     stamp: u32,
 }
 
-/// Looping script effects do not start while this many elements are alive: the rest is for the effects of play. A
-/// share of the pool of elements (`fx::MAX_ELEMS`, the original's 2048).
-const LOOP_BUDGET: usize = 1500;
+/// Looping script effects do not start while this many elements are alive: the rest is for the effects of play. About
+/// half of the pool of elements (`fx::MAX_ELEMS`, the original's 2048): the other half is for impacts, explosions and
+/// muzzle flashes.
+const LOOP_BUDGET: usize = 1000;
 
 /// Particle clouds drawn at once (`R_AddParticleCloudToScene`'s 256); the farthest ones are the ones left out.
 const MAX_CLOUDS: usize = 256;

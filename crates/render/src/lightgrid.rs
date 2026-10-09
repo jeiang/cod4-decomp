@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (gfx_d3d/rb_light.cpp: R_GetAverageLightingAtPoint; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The `modelLightingSampler` volume: a CPU-built 3D texture holding one 4x4x4
 //! block of light-grid colours per lit model.
 //!

@@ -114,6 +114,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     // A spot on the floor of the map to shoot at, found by dropping a line from above on a grid.
     let (lo, hi) = (data.world.mins, data.world.maxs);
     let mut floor = None;
+    let any = any_mark();
     'find: for i in 0..40 {
         for j in 0..40 {
             let x = lo[0] + (hi[0] - lo[0]) * (i as f32 + 0.5) / 40.0;
@@ -127,8 +128,16 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 sim::contents::SOLID,
             );
             if t.fraction < 1.0 && !t.start_solid && t.normal[2] > 0.9 {
-                floor = Some(([x, y, hi[2] + (lo[2] - hi[2]) * t.fraction], t.normal));
-                break 'find;
+                let z = hi[2] + (lo[2] - hi[2]) * t.fraction;
+                // Some floors refuse marks; shoot at one that takes them.
+                let p = glam::Vec3::new(x, y, z);
+                let takes = crate::decal::world_triangles(&data.world, p - 2.0, p + 2.0, &any)
+                    .next()
+                    .is_some();
+                if takes {
+                    floor = Some(([x, y, z], t.normal));
+                    break 'find;
+                }
             }
         }
     }

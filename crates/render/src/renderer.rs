@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (gfx_d3d/r_scene.cpp: R_UpdateLodParms; xanim/xmodel_utils.cpp: XModelGetLodForDist; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The frame: cull, build the draw lists, fill constant banks, record the sun shadow pass and the scene pass.
 
 use crate::art::MapArt;
@@ -510,6 +511,8 @@ pub struct Renderer {
     pub dynamic_models: Vec<ModelInstance>,
     /// Materials of models the map does not contain but a match draws (players, weapons), warmed with the map's.
     warm_extra: Vec<Arc<Material>>,
+    /// Materials of the effects' particle clouds, which have pipelines of their own vertex layout.
+    warm_clouds: Vec<Arc<Material>>,
     /// Sprites and decals to draw in the next [`Renderer::render`], in drawing order within a material.
     pub dynamic_meshes: Vec<DynMesh>,
     /// An index buffer that counts up from zero, for draws of unindexed dynamic triangles.
@@ -649,6 +652,7 @@ impl Renderer {
             timer,
             dynamic_models: Vec::new(),
             warm_extra: Vec::new(),
+            warm_clouds: Vec::new(),
             dynamic_meshes: Vec::new(),
             count_mesh: Arc::new(counting_mesh(&gpu_for_dyn)),
             viewmodel_fov_x: None,
@@ -739,6 +743,11 @@ impl Renderer {
                 .any(|l| l.kind == LIGHT_KIND_SPOT && l.can_shadow)
     }
 
+    /// Cloud materials the match will draw: their pipelines are built with [`Renderer::warm`].
+    pub fn warm_clouds(&mut self, materials: impl IntoIterator<Item = Arc<Material>>) {
+        self.warm_clouds = materials.into_iter().collect();
+    }
+
     fn shadow_tech(&self) -> usize {
         if self.settings.shadows == ShadowMode::Color {
             TECH_BUILD_SHADOWMAP_COLOR
@@ -796,6 +805,14 @@ impl Renderer {
                     && let Some(p) = self.prepare(m, &[self.shadow_tech()], kind, hsm)
                 {
                     jobs.push((p, self.shadow_target()));
+                }
+            }
+        }
+        let clouds = self.warm_clouds.clone();
+        for m in &clouds {
+            for techs in [&SUN_TECHS[..], &LIT] {
+                if let Some(p) = self.prepare(m, techs, VertexKind::Cloud, hsm) {
+                    jobs.push((p, scene));
                 }
             }
         }
@@ -1399,7 +1416,8 @@ impl Renderer {
             };
             let origin = Vec3::from(inst.origin);
             let dist = origin.distance(eye);
-            let adjusted = self.lod.adjusted(&model, dist);
+            // Static models always use the rigid ramp, and a scaled model is judged at its unscaled distance.
+            let adjusted = self.lod.scaled(false, dist / inst.scale.max(f32::EPSILON));
             if inst.cull_dist > 0.0 && adjusted >= inst.cull_dist {
                 continue;
             }
@@ -1514,7 +1532,11 @@ impl Renderer {
             let dist = Vec3::from(inst.origin).distance(eye);
             let lod = match inst.lod {
                 Some(l) => l.min(3),
-                None => match pick_lod(model, self.lod.adjusted(model, dist)) {
+                None => match pick_lod(
+                    model,
+                    self.lod
+                        .adjusted(model, dist / inst.scale.max(f32::EPSILON)),
+                ) {
                     Some(l) => l,
                     None => continue,
                 },
