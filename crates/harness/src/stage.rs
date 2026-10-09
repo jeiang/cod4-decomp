@@ -227,7 +227,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "headless-sd-objective",
-        description: "headless server, 12 bots plant the Search and Destroy bomb and the other team defuses it",
+        description: "headless server, 8 bots plant the Search and Destroy bomb and the other team defuses it",
         needs_install: false,
         timeout: Duration::from_secs(5 * MINUTES),
         default: true,

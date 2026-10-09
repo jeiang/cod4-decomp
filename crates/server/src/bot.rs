@@ -14,6 +14,7 @@ use sim::contents;
 use sim::pm::{ANGLE_UNIT, UserCmd, button, pmf};
 use sim::weapon::OffhandClass;
 
+use crate::activate::{BombState, BotObjectives};
 use crate::client::{Session, Team};
 use crate::game::Game;
 use crate::nav::{NavMesh, NodeId, PathScratch, Steer};
@@ -68,6 +69,15 @@ pub struct Brain {
     using: Option<(u16, i32)>,
     /// A trigger the bot gave up on (it did nothing for the bot) and until when.
     gave_up: Option<(u16, i32)>,
+    /// The triggers made for the bot's team it last saw; one that is new (a planted bomb's
+    /// defuse trigger) sends the bot there at once, wherever it was heading.
+    team_triggers: Option<Vec<u16>>,
+    /// Until when a trigger that just came on for the bot's team is hurried to.
+    rush_until: i32,
+    /// The bomb's state when the bot last looked, and whether the level ever had one (the
+    /// carried bomb's pickup may be removed instead of parked).
+    bomb: BombState,
+    bomb_level: bool,
 }
 
 fn xorshift(s: &mut u32) -> u32 {
@@ -133,6 +143,10 @@ impl Brain {
             spawn_time: -1,
             obj: None,
             using: None,
+            team_triggers: None,
+            rush_until: 0,
+            bomb: BombState::None,
+            bomb_level: false,
             gave_up: None,
         }
     }
@@ -192,12 +206,26 @@ impl Brain {
         // What to look at and where to walk.
         let mut want_dir = [0.0f32; 3];
         let mut sprint = false;
-        let engaged = self.enemy.is_some() && time - self.enemy_seen < 400;
+        // In a bomb level with the bomb carried (no pickup lying free) a bot on its way to a zone made for its
+        // team, or a defender sent to a bomb that just went on, does not stop for enemies
+        // still far off.
+        let hurrying = self.bomb_level
+            && (self.bomb != BombState::Free || time < self.rush_until)
+            && self.obj.is_some_and(|o| {
+                g.ent(o).is_some_and(|e| {
+                    e.classname.starts_with("trigger_use") && e.x.trigger_team == c.team
+                })
+            });
+        let far = self
+            .enemy
+            .and_then(|e| g.ent(e))
+            .is_some_and(|e| dist3(e.origin, c.ps.origin) > HURRY_FIGHT_DIST);
+        let engaged = self.enemy.is_some() && time - self.enemy_seen < 400 && !(hurrying && far);
         let mut aim: Option<(f32, f32, f32)> = None; // pitch, yaw, distance
         // Standing in a use trigger the player's hint names: hold +activate, and stay on it
         // once begun, as a planter must.
-        let holding =
-            (!engaged || self.using.is_some()) && self.hold_use(c.ps.cursor_hint_ent_index, time);
+        let hint = use_trigger_hint(g, c.ps.cursor_hint_ent_index);
+        let holding = (!engaged || self.using.is_some()) && self.hold_use(hint, time);
         if holding {
             cmd.buttons |= button::USE;
         } else if let (Some(e), true) = (self.enemy, engaged)
@@ -283,7 +311,7 @@ impl Brain {
         let r = want_dir[0] * right[0] + want_dir[1] * right[1];
         cmd.forwardmove = (f * 127.0).clamp(-127.0, 127.0) as i8;
         cmd.rightmove = (r * 127.0).clamp(-127.0, 127.0) as i8;
-        if sprint && f > 0.9 && !engaged {
+        if sprint_wanted(sprint, f, engaged, holding) {
             cmd.buttons |= button::SPRINT;
         }
         if time < self.jump_until {
@@ -470,8 +498,12 @@ impl Brain {
             // A bot that is only roaming looks again for an objective now and then, so a
             // trigger that just came on for its team (a planted bomb) draws it.
             let reroll = self.obj.is_none() && frac(&mut self.rng) < 0.3;
-            if self.path.is_empty() || reroll || self.steer_arrived(&mesh, pos) {
-                self.pick_goal(g, &mesh, scratch, pos, time);
+            let fresh = self.new_team_trigger(g);
+            if self.path.is_empty() || reroll || fresh.is_some() || self.steer_arrived(&mesh, pos) {
+                if fresh.is_some() {
+                    self.rush_until = time + RUSH_MS;
+                }
+                self.pick_goal(g, &mesh, scratch, pos, time, fresh);
                 self.steer.reset();
             }
         }
@@ -542,6 +574,22 @@ impl Brain {
         })
     }
 
+    /// The use trigger that came on for the bot's team since it last looked, if any.
+    fn new_team_trigger(&mut self, g: &Game) -> Option<u16> {
+        let objs = g.bot_objectives(self.num);
+        self.bomb = objs.bomb;
+        self.bomb_level |= objs.bomb != BombState::None;
+        let now: Vec<u16> = objs.list[objs.team].iter().map(|(t, _)| *t).collect();
+        // The first look only learns what is there.
+        let fresh = self
+            .team_triggers
+            .as_ref()
+            .and_then(|before| now.iter().find(|t| !before.contains(t)).copied());
+        self.team_triggers = Some(now);
+        fresh
+    }
+
+    /// Picks where to go next; `urgent` names a trigger to go to.
     fn pick_goal(
         &mut self,
         g: &Game,
@@ -549,15 +597,26 @@ impl Brain {
         scratch: &mut PathScratch,
         pos: Vec3,
         time: i32,
+        urgent: Option<u16>,
     ) {
         let Some(from) = mesh.nearest_node(pos) else {
             self.path.clear();
             return;
         };
-        let (objectives, n_use) = g.bot_objectives(self.num);
+        let BotObjectives {
+            list: objectives,
+            n_first: n_use,
+            ..
+        } = g.bot_objectives(self.num);
         for _ in 0..4 {
             self.obj = None;
-            let to = if let Some(p) = self.last_known.take() {
+            let to = if let Some(p) = urgent
+                .and_then(|u| objectives.iter().find(|o| o.0 == u))
+                .map(|o| o.1)
+            {
+                self.obj = urgent;
+                mesh.nearest_node(p)
+            } else if let Some(p) = self.last_known.take() {
                 mesh.nearest_node(p)
             } else if !objectives.is_empty() && frac(&mut self.rng) < 0.85 {
                 // Use triggers first: a team rushes the zones its carrier needs.
@@ -597,6 +656,30 @@ impl Brain {
     }
 }
 
+/// The hinted entity, when it is a use trigger. A weapon or grenade on the floor is hinted
+/// too, but holding the button for it only wastes the bot's time.
+fn use_trigger_hint(g: &Game, hint: u16) -> u16 {
+    if g.ent(hint)
+        .is_some_and(|e| e.classname.starts_with("trigger_use"))
+    {
+        hint
+    } else {
+        sim::cm::ENTITYNUM_NONE
+    }
+}
+
+/// Whether the sprint button goes down. Not while holding +activate: the server takes a use
+/// press only when the player is not sprinting, and a held button is not fresh again.
+fn sprint_wanted(sprint: bool, forward: f32, engaged: bool, holding: bool) -> bool {
+    sprint && forward > 0.9 && !engaged && !holding
+}
+
+/// How long a bot hurries to a trigger that just came on for its team (a bomb ticks).
+const RUSH_MS: i32 = 20_000;
+
+/// How close an enemy must be to stop a bot that is hurrying to a use trigger.
+const HURRY_FIGHT_DIST: f32 = 300.0;
+
 /// What the world offers bots to walk to: every spawn point and objective origin.
 pub fn goals_from_map(entity_string: &[u8]) -> Vec<Vec3> {
     crate::nav::spawn_points(entity_string)
@@ -607,3 +690,39 @@ pub fn goals_from_map(entity_string: &[u8]) -> Vec<Vec3> {
 
 #[allow(dead_code)]
 const _: i32 = contents::PLAYER;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::Content;
+    use crate::cvar::Cvars;
+    use crate::game::{Ent, EntKind};
+
+    fn game() -> Game {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.reset_level(8);
+        g
+    }
+
+    #[test]
+    fn only_a_use_trigger_is_held_for() {
+        let mut g = game();
+        let trig = g
+            .spawn(Ent::new(EntKind::Trigger, "trigger_use_touch"))
+            .unwrap();
+        let item = g.spawn(Ent::new(EntKind::Item, "weapon_ak47_mp")).unwrap();
+        assert_eq!(use_trigger_hint(&g, trig), trig);
+        assert_eq!(use_trigger_hint(&g, item), sim::cm::ENTITYNUM_NONE);
+        assert_eq!(
+            use_trigger_hint(&g, sim::cm::ENTITYNUM_NONE),
+            sim::cm::ENTITYNUM_NONE
+        );
+    }
+
+    #[test]
+    fn a_bot_holding_use_does_not_sprint() {
+        assert!(sprint_wanted(true, 1.0, false, false));
+        assert!(!sprint_wanted(true, 1.0, false, true));
+        assert!(!sprint_wanted(true, 1.0, true, false));
+    }
+}
