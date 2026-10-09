@@ -617,6 +617,15 @@ impl Materials {
         }
     }
 
+    /// Whether the material's techset has technique `tech`.
+    pub fn has_technique(&self, mat: &Material, tech: usize, hsm: bool) -> bool {
+        self.techset(mat, hsm).is_some_and(|set| {
+            set.techniques
+                .get(tech)
+                .is_some_and(|x| x.as_ref().is_some_and(|x| !x.passes.is_empty()))
+        })
+    }
+
     /// The first technique of `techs` the material's techset has, as a drawable pass. Cached per material.
     pub fn prepare(
         &mut self,
@@ -938,7 +947,13 @@ impl Materials {
                                 format,
                                 depth_write_enabled: Some(s.depth_write()),
                                 depth_compare: Some(s.depth_compare()),
-                                stencil: s.stencil(),
+                                // The scene's depth buffer has no stencil; the light techniques' stencil test (they
+                                // draw only where the light's rectangle was cleared) is left to the alpha weighting.
+                                stencil: if format.has_stencil_aspect() {
+                                    s.stencil()
+                                } else {
+                                    wgpu::StencilState::default()
+                                },
                                 bias: s.depth_bias(),
                             }),
                             multisample: wgpu::MultisampleState {

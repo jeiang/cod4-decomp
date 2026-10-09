@@ -163,8 +163,14 @@ struct Keep<'a>(&'a str);
 impl DecodeFilter for Keep<'_> {
     fn keep(&self, ty: XAssetType) -> bool {
         match self.0 {
-            "code_post_gfx_mp" => matches!(ty, XAssetType::TechniqueSet | XAssetType::Material),
-            "common_mp" => matches!(ty, XAssetType::TechniqueSet | XAssetType::RawFile),
+            "code_post_gfx_mp" => matches!(
+                ty,
+                XAssetType::TechniqueSet | XAssetType::Material | XAssetType::LightDef
+            ),
+            "common_mp" => matches!(
+                ty,
+                XAssetType::TechniqueSet | XAssetType::RawFile | XAssetType::LightDef
+            ),
             _ => true,
         }
     }

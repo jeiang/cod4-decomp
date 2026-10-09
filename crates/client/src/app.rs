@@ -333,6 +333,10 @@ struct State {
     script: Option<UiScript>,
     /// A screenshot to take after the next paint (name without extension).
     shot_request: Option<String>,
+    /// `dlight=1`: a bright light a little way in front of the camera, for the harness.
+    test_light: bool,
+    /// Dynamic lights the last frame drew.
+    lights_drawn: usize,
     /// The sound system of the menus when no match is running (started by the first menu sound).
     menu_sound: Option<crate::sound::ClientSound>,
     /// The map being loaded in the background (the loading screen shows meanwhile).
@@ -764,6 +768,8 @@ impl Viewer {
                 results: Vec::new(),
             }),
             shot_request: None,
+            test_light: false,
+            lights_drawn: 0,
             menu_sound: None,
             loading: None,
             load_gaps: None,
@@ -1151,6 +1157,27 @@ impl Viewer {
                 if let Some(r) = st.renderer.as_mut() {
                     r.dynamic_models = nf.models;
                     r.dynamic_meshes = nf.meshes;
+                    r.dynamic_lights = nf
+                        .lights
+                        .iter()
+                        .filter_map(|l| dynamic_light(l, &r.settings.spot))
+                        .collect();
+                    if st.test_light {
+                        let fwd = View {
+                            origin: nf.origin,
+                            yaw: nf.yaw,
+                            pitch: nf.pitch,
+                            roll: 0.0,
+                            fov_x: 1.0,
+                            time: 0.0,
+                        }
+                        .forward();
+                        r.dynamic_lights.extend(render::DynLight::omni(
+                            nf.origin + fwd * 120.0,
+                            300.0,
+                            glam::Vec3::new(3.0, 2.5, 1.5),
+                        ));
+                    }
                     if let Some((glow, film)) = nf.look.vision {
                         (r.post.glow, r.post.film) = (glow, film);
                     }
@@ -1252,6 +1279,7 @@ impl Viewer {
                 st.pipelines_missing = stats.pipelines_missing;
             }
             st.surfaces_drawn.push(stats.surfaces as f64);
+            st.lights_drawn = stats.lights;
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
         if let (Some(sh), Some(l)) = (st.shell.as_mut(), st.loading.as_ref()) {
@@ -1955,6 +1983,8 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| u8::from(r.settings.shadows != render::ShadowMode::Off).to_string()),
+                // 1 when at least one dynamic light was drawn.
+                "dlights" => Some(st.lights_drawn.min(1).to_string()),
                 "aspect" => Some(format!("{:.2}", st.aspect.unwrap_or(0.0))),
                 "fullscreen" => Some(u8::from(st.window.fullscreen().is_some()).to_string()),
                 // 1 when the surface does not wait for the display, or has no mode that does not.
@@ -2030,6 +2060,11 @@ fn script_step(st: &mut State) -> bool {
                 sc.marker = None;
                 done(false, sc, format!("timed out; still in {from}"));
             }
+        }
+        // `dlight=1` adds a bright light in front of the camera each frame, `dlight=0` removes it.
+        "dlight" => {
+            st.test_light = arg.trim() != "0";
+            done(true, sc, String::new());
         }
         "shot" => {
             if st.shot_request.is_none() {
@@ -2229,6 +2264,16 @@ fn reconfigure(st: &mut State) {
         record_gpu(&mut st.gpu_ms, r.flush_gpu_times());
     }
     st.surface.configure(&st.gpu.device, &st.config);
+}
+
+/// What the renderer draws for a light an effect added: colour is bytes there, and an element with a direction is a
+/// spot light.
+fn dynamic_light(l: &fx::Light, spot: &render::SpotParams) -> Option<render::DynLight> {
+    let color = glam::Vec3::from(l.color.map(|c| f32::from(c) / 255.0));
+    match l.dir {
+        Some(dir) => render::DynLight::spot(l.origin, dir, l.radius, color, spot),
+        None => render::DynLight::omni(l.origin, l.radius, color),
+    }
 }
 
 /// `vid_restart`: the window, the present mode and the aspect take the graphics settings now; a running match's

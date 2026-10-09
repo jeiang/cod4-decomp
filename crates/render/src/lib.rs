@@ -4,7 +4,9 @@
 
 pub mod art;
 pub mod codeconst;
+pub mod cookie;
 pub mod cull;
+pub mod dlight;
 pub mod dynmesh;
 pub mod gpu;
 pub mod lightgrid;
@@ -13,6 +15,7 @@ pub mod post;
 mod renderer;
 pub mod scene;
 pub mod skin;
+pub mod spotshadow;
 pub mod state;
 pub mod sunshadow;
 pub mod texture;
@@ -20,6 +23,7 @@ pub mod timing;
 pub mod ui2d;
 pub mod water;
 
+pub use dlight::{DynLight, SpotCone, SpotParams};
 pub use dynmesh::{DynMesh, DynVertex};
 pub use gpu::{Gpu, GpuError, GpuInfo};
 pub use post::{Dof, PostParams, ShellShock};

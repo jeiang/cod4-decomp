@@ -34,6 +34,19 @@ pub struct Gfx {
     pub dof: bool,
     /// `r_glow_allowed`.
     pub glow: bool,
+    /// `r_dlightLimit`, at most four.
+    pub dlight_limit: usize,
+    /// `sc_enable` and `sc_count`.
+    pub cookies: bool,
+    pub cookie_count: usize,
+    /// `sm_spotEnable` and `r_spotLightShadows`.
+    pub spot_shadows: bool,
+    pub dynamic_spot_shadows: bool,
+    /// `sm_maxLights`, at most four, and `sm_spotShadowFadeTime` in seconds.
+    pub max_shadow_lights: usize,
+    pub spot_fade_time: f32,
+    /// `r_spotLightStartRadius`, `r_spotLightEndRadius`, `r_spotLightFovInnerFraction` and `r_spotLightBrightness`.
+    pub spot: render::SpotParams,
 }
 
 /// `1920x1080` as a size.
@@ -65,6 +78,22 @@ fn parse_aspect(s: &str) -> Option<f32> {
     }
 }
 
+/// The spot light dvars, each within the range the engine registers it with.
+fn spot_params(c: &Cvars) -> render::SpotParams {
+    let d = render::SpotParams::default();
+    let value = |n: &str, min: f32, max: f32, default: f32| {
+        c.get(n)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .map_or(default, |v| v.clamp(min, max))
+    };
+    render::SpotParams {
+        start_radius: value("r_spotLightStartRadius", 0.0, 1200.0, d.start_radius),
+        end_radius: value("r_spotLightEndRadius", 1.0, 1200.0, d.end_radius),
+        fov_inner_fraction: value("r_spotLightFovInnerFraction", 0.0, 0.99, d.fov_inner_fraction),
+        brightness: value("r_spotLightBrightness", 0.0, 16.0, d.brightness),
+    }
+}
+
 impl Gfx {
     pub fn from_cvars(c: &Cvars) -> Gfx {
         let text = |n: &str| c.get(n).unwrap_or("");
@@ -87,6 +116,30 @@ impl Gfx {
             specular: on("r_specular"),
             dof: on("r_dof_enable"),
             glow: on("r_glow_allowed"),
+            dlight_limit: c
+                .get("r_dlightLimit")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .map_or(render::dlight::MAX_VISIBLE, |n| {
+                    n.min(render::dlight::MAX_VISIBLE)
+                }),
+            spot: spot_params(c),
+            cookies: on("sc_enable"),
+            cookie_count: c
+                .get("sc_count")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .map_or(24, |n| n.min(24)),
+            spot_shadows: on("sm_spotEnable"),
+            dynamic_spot_shadows: on("r_spotLightShadows"),
+            max_shadow_lights: c
+                .get("sm_maxLights")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .map_or(render::spotshadow::TILES as usize, |n| {
+                    n.min(render::spotshadow::TILES as usize)
+                }),
+            spot_fade_time: c
+                .get("sm_spotShadowFadeTime")
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .map_or(1.0, |v| v.clamp(0.0, 5.0)),
         }
     }
 
@@ -114,6 +167,14 @@ impl Gfx {
         base.glow = self.glow;
         base.aa_samples = self.aa_samples;
         base.aspect = self.aspect;
+        base.dlight_limit = self.dlight_limit;
+        base.spot = self.spot;
+        base.cookies = self.cookies;
+        base.cookie_count = self.cookie_count;
+        base.spot_shadows = self.spot_shadows;
+        base.dynamic_spot_shadows = self.dynamic_spot_shadows;
+        base.max_shadow_lights = self.max_shadow_lights;
+        base.spot_fade_time = self.spot_fade_time;
         base
     }
 

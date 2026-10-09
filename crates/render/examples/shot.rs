@@ -8,6 +8,8 @@
 //! Post effects, each overriding the map's own values: `DOF=near_start,near_end,far_start,far_end,near_blur,far_blur`,
 //! `GLOW=radius,intensity,cutoff,desaturation` (`GLOW=0` turns it off), `FILM=0|1|contrast,brightness,desaturation[,1 for no tint]`,
 //! `BLUR=radius` (virtual 640x480 pixels) and `SHELLSHOCK=1` (a second frame draws the overlays over the first).
+//! `DLIGHT=x,y,z,radius,r,g,b[;...]` adds omni lights and `SPOTLIGHT=x,y,z,dx,dy,dz,radius,r,g,b[;...]` spot lights, as
+//! the effects would, to the frame.
 //! `TOUR=<n>` also renders n views from spawn points as `<out>-<i>.png`.
 //! `TIMING=<frames>` renders that many frames and prints the mean GPU time of every pass.
 
@@ -97,6 +99,7 @@ fn main() {
             flash_whiteout: 0.15,
         });
     }
+    r.dynamic_lights = dynamic_lights();
     let stats = r.render(&view, &tv, format, (w, h));
     eprintln!("{stats:?}\nimage failures: {:?}", r.textures.failed);
     if let Some(n) = std::env::var("TIMING")
@@ -245,4 +248,32 @@ fn set_post(r: &mut Renderer) {
     if let Some(n) = nums("BLUR") {
         r.post.blur_radius = n[0];
     }
+}
+
+/// The lights `DLIGHT` and `SPOTLIGHT` name.
+fn dynamic_lights() -> Vec<render::DynLight> {
+    let list = |name: &str| -> Vec<Vec<f32>> {
+        std::env::var(name)
+            .map(|v| {
+                v.split(';')
+                    .map(|l| l.split(',').map(|n| n.trim().parse().unwrap()).collect())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let v = |n: &[f32]| glam::Vec3::new(n[0], n[1], n[2]);
+    let mut out = Vec::new();
+    for n in list("DLIGHT") {
+        out.extend(render::DynLight::omni(v(&n), n[3], v(&n[4..])));
+    }
+    for n in list("SPOTLIGHT") {
+        out.extend(render::DynLight::spot(
+            v(&n),
+            v(&n[3..]),
+            n[6],
+            v(&n[7..]),
+            &render::SpotParams::default(),
+        ));
+    }
+    out
 }

@@ -79,6 +79,8 @@ pub struct NetFrame {
     pub fixed_fov: Option<f32>,
     /// Effect sprites and decals.
     pub meshes: Vec<render::DynMesh>,
+    /// The lights the effects add: muzzle flashes, explosions, fire.
+    pub lights: Vec<fx::Light>,
     /// Happenings new this frame; see [`crate::events`].
     #[expect(dead_code, reason = "read by effects, audio and the interface")]
     pub events: Vec<ClientEvent>,
@@ -664,6 +666,7 @@ impl NetPlay {
                 sight: self.sight.clone(),
                 fixed_fov: fixed_fov(&ps),
                 meshes: drawn.meshes,
+                lights: drawn.lights,
                 events,
                 commands,
                 look,
@@ -815,6 +818,7 @@ impl NetPlay {
             sight: self.sight.clone(),
             fixed_fov: fixed_fov(&ps),
             meshes: drawn.meshes,
+            lights: drawn.lights,
             events,
             commands,
             look,

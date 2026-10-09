@@ -4,12 +4,15 @@
 use crate::art::MapArt;
 use crate::codeconst::{self, FrameConsts, LightConsts, Object, tex as ctex};
 use crate::cull::{self, Frustum};
+use crate::cookie;
+use crate::dlight::{self, DynLight};
 use crate::dynmesh::{self, DynMesh};
 use crate::gpu::Gpu;
 use crate::material::{BANK_BYTES, Materials, Prepared, SamplerKey, Target, VertexKind};
 use crate::post::{self, PostParams};
 use crate::scene::{MapData, Mesh, Scene, model_matrix};
 use crate::skin::{self, ModelInstance, ModelKind};
+use crate::spotshadow;
 use crate::sunshadow::{self, SunShadow};
 use crate::texture::{Tex, TextureCache};
 use crate::timing::GpuTimer;
@@ -43,6 +46,30 @@ const TECH_LIT_SUN: usize = 8;
 const TECH_LIT_SUN_SHADOW: usize = 9;
 const TECH_LIT_SPOT: usize = 10;
 const TECH_LIT_OMNI: usize = 12;
+const TECH_COOKIE_CASTER: usize = 30;
+const TECH_COOKIE_RECEIVER: usize = 31;
+const COOKIE_CASTER_TECHS: [usize; 1] = [TECH_COOKIE_CASTER];
+const COOKIE_RECEIVER_TECHS: [usize; 1] = [TECH_COOKIE_RECEIVER];
+const COOKIE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const TECH_LIT_SPOT_SHADOW: usize = 11;
+const TECH_LIGHT_SPOT: usize = 21;
+const TECH_LIGHT_OMNI: usize = 22;
+const TECH_LIGHT_SPOT_SHADOW: usize = 23;
+const SPOT_SHADOW_TECHS: [usize; 5] = [
+    TECH_LIT_SPOT_SHADOW,
+    TECH_LIT_SPOT,
+    TECH_LIT,
+    TECH_UNLIT,
+    TECH_EMISSIVE,
+];
+const LIGHT_SPOT_SHADOW_TECHS: [usize; 2] = [TECH_LIGHT_SPOT_SHADOW, TECH_LIGHT_SPOT];
+/// The `light omni` and `light spot` techniques: what a dynamic light adds to a surface, on top of what was drawn.
+const LIGHT_OMNI_TECHS: [usize; 1] = [TECH_LIGHT_OMNI];
+const LIGHT_SPOT_TECHS: [usize; 1] = [TECH_LIGHT_SPOT];
+/// The `light` key of the texture groups of dynamic lights: past every primary light's index.
+const DLIGHT_KEY: u16 = 0x100;
+/// The most world surfaces and static models one dynamic light draws; the original keeps 512 per light.
+const MAX_LIGHT_SURFACES: usize = 1024;
 const LIGHT_KIND_OMNI: u8 = 2;
 const LIGHT_KIND_SPOT: u8 = 3;
 const SUN_SHADOW_TECHS: [usize; 5] = [
@@ -159,6 +186,22 @@ pub struct Settings {
     pub aa_samples: u32,
     /// `r_aspectRatio`: the shape of the screen when its pixels are not square; `None` takes the target's.
     pub aspect: Option<f32>,
+    /// `r_dlightLimit`: the most dynamic lights drawn at once (at most four); zero draws none.
+    pub dlight_limit: usize,
+    /// The `r_spotLight*` dvars, which shape the spot lights the effects add.
+    pub spot: dlight::SpotParams,
+    /// `sc_enable`: with shadow maps off, dynamic models cast shadow cookies.
+    pub cookies: bool,
+    /// `sc_count`: the most cookies per frame (the renderer draws at most [`cookie::MAX`]).
+    pub cookie_count: usize,
+    /// `sm_spotEnable`: the map's spot lights that can cast shadows get shadow maps (with `shadows` on).
+    pub spot_shadows: bool,
+    /// `r_spotLightShadows`: so does a spot light an effect adds.
+    pub dynamic_spot_shadows: bool,
+    /// `sm_maxLights`: the most spot lights with a shadow map at once (at most four).
+    pub max_shadow_lights: usize,
+    /// `sm_spotShadowFadeTime`: seconds a spot shadow takes to fade in or out.
+    pub spot_fade_time: f32,
 }
 
 impl Default for Settings {
@@ -173,6 +216,14 @@ impl Default for Settings {
             glow: true,
             aa_samples: 1,
             aspect: None,
+            dlight_limit: dlight::MAX_VISIBLE,
+            spot: dlight::SpotParams::default(),
+            cookies: true,
+            cookie_count: 24,
+            spot_shadows: true,
+            dynamic_spot_shadows: true,
+            max_shadow_lights: spotshadow::TILES as usize,
+            spot_fade_time: 1.0,
         }
     }
 }
@@ -184,6 +235,11 @@ pub struct FrameStats {
     pub models: usize,
     pub draws: usize,
     pub shadow_draws: usize,
+    /// Dynamic lights drawn, and the draws they added to the scene pass.
+    pub lights: usize,
+    pub light_draws: usize,
+    /// Shadow cookies drawn.
+    pub cookies: usize,
     pub pipelines_missing: usize,
     pub cpu_ms: f64,
     /// GPU time of the most recent frame whose timestamps have come back (a few frames behind), if the device can
@@ -241,8 +297,48 @@ struct Draw {
 /// A spot or omni primary light, ready for the constant banks.
 struct PrimaryLight {
     kind: u8,
+    can_shadow: bool,
+    cos_outer: f32,
+    cos_inner: f32,
     consts: LightConsts,
     attenuation: Option<(Arc<Tex>, u8)>,
+}
+
+/// The `light_dynamic` definition the effects' lights take their attenuation ramp from.
+struct DlightDef {
+    attenuation: Option<(Arc<Tex>, u8)>,
+    width: f32,
+    lookup_start: i32,
+}
+
+/// The pipelines that write one alpha value over a rectangle of the scene: before a dynamic light draws, its surfaces
+/// weigh themselves by the destination alpha so overlapping triangles light a pixel once.
+struct AlphaFill {
+    key: (wgpu::TextureFormat, u32),
+    zero: wgpu::RenderPipeline,
+    one: wgpu::RenderPipeline,
+}
+
+/// The atlas of shadow cookies: one square tile of a stack for each caster.
+struct CookieAtlas {
+    color: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    tex: Arc<Tex>,
+}
+
+/// One cookie of a frame: its tile, the caster's draws into it and the draws of the surfaces it darkens.
+struct CookiePass {
+    tile: u32,
+    casters: Vec<Draw>,
+    receivers: Vec<Draw>,
+}
+
+/// A spot light that casts a shadow this frame.
+#[derive(Clone, Copy)]
+struct SpotTile {
+    fade: f32,
+    /// World position to `(u, v, depth, w)` of the light's tile of the atlas.
+    lookup: Mat4,
 }
 
 /// The sun shadow map and its stand-ins for frames without one.
@@ -261,16 +357,34 @@ struct TexKey {
     prep: u32,
     lightmap: u8,
     probe: u8,
-    light: u8,
+    light: u16,
 }
 
 /// Which list of draws a pass builds.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PassKind {
     Scene,
-    SunShadow,
+    /// A shadow map's casters: the sun's partitions and the spot lights' tiles.
+    ShadowMap,
     /// The scene's view-space depth for the post chain's depth of field.
     FloatZ,
+    /// A shadow cookie's caster, drawn from the sun into a tile of the cookie atlas.
+    CookieCaster,
+    /// The surfaces a shadow cookie darkens.
+    CookieReceiver,
+    /// What a dynamic light adds: its spot (`true`) or omni technique, over the surfaces it reaches.
+    DynLight { spot: bool, shadow: bool },
+}
+
+impl PassKind {
+    fn is_light(self) -> bool {
+        matches!(self, PassKind::DynLight { .. })
+    }
+
+    /// Passes of techniques that a material may lack (the others fall back to simpler ones, or are the lit pass).
+    fn optional_tech(self) -> bool {
+        !matches!(self, PassKind::Scene | PassKind::FloatZ)
+    }
 }
 
 /// Visible geometry to draw.
@@ -280,6 +394,7 @@ struct Items<'a> {
 }
 
 /// One skinned surface of a dynamic model, skinned into the frame's vertex buffer.
+#[derive(Clone, Copy)]
 struct DynSurf {
     inst: usize,
     surf: usize,
@@ -295,6 +410,15 @@ struct MeshDraw {
     count: u32,
     light: u8,
     obj: Object,
+}
+
+/// What one dynamic light draws over the scene.
+struct LightPass {
+    /// `(x, y, width, height)` in pixels: the part of the target the light can reach.
+    rect: [u32; 4],
+    draws: Vec<Draw>,
+    /// The same for the view model, which has its own projection and depth range.
+    vm_draws: Vec<Draw>,
 }
 
 /// Object-independent banks by (prepared pass, light): the vertex and the pixel bank offsets.
@@ -326,7 +450,22 @@ pub struct Renderer {
     /// Fog, glow and film of the map.
     pub art: MapArt,
     lights: Vec<Option<PrimaryLight>>,
+    dlight_def: DlightDef,
+    alpha_fill: Option<AlphaFill>,
+    /// The lights the effects add; the caller refills the list every frame.
+    pub dynamic_lights: Vec<DynLight>,
     shadow: Option<ShadowTargets>,
+    /// The shadow cookie atlas, made when a frame first needs it.
+    cookie: Option<CookieAtlas>,
+    /// The depth atlas of the spot light shadows.
+    spot_shadow: Option<ShadowTargets>,
+    /// The spot lights with a shadow map, or fading out of having one; an entry's tile is its position.
+    spot_history: Vec<spotshadow::Entry>,
+    /// This frame's shadowed spot lights, by primary light index.
+    spot_tiles: HashMap<u8, SpotTile>,
+    /// The spot lights that could cast a shadow last frame.
+    spot_in_use: Vec<u32>,
+    last_time: Option<f32>,
     /// Stand-in shadow textures for passes that bind a shadow slot while the map is off.
     shadow_dummy: (Arc<Tex>, Arc<Tex>),
     pub timer: Option<GpuTimer>,
@@ -393,6 +532,9 @@ impl Renderer {
                 };
                 Some(PrimaryLight {
                     kind: l.kind,
+                    can_shadow: l.can_use_shadow_map,
+                    cos_outer: l.cos_half_fov_outer,
+                    cos_inner: l.cos_half_fov_inner,
                     attenuation,
                     consts: LightConsts {
                         origin: Vec3::from(l.origin),
@@ -410,6 +552,27 @@ impl Renderer {
                 })
             })
             .collect();
+        let dlight_def = data
+            .light_defs
+            .iter()
+            .find(|d| d.name.as_deref() == Some("light_dynamic"))
+            .map_or(
+                DlightDef {
+                    attenuation: None,
+                    width: 32.0,
+                    lookup_start: 0,
+                },
+                |d| {
+                    let attenuation = d.attenuation_image.as_ref().and_then(|img| {
+                        Some((textures.image(&gpu, img)?, d.attenuation_sampler_state))
+                    });
+                    DlightDef {
+                        width: attenuation.as_ref().map_or(32.0, |(t, _)| t.width as f32),
+                        attenuation,
+                        lookup_start: d.lmap_lookup_start,
+                    }
+                },
+            );
         let gpu_for_dyn = gpu.clone();
         let shadow_dummy = dummy_shadow(&gpu);
         let timer = GpuTimer::new(&gpu);
@@ -435,7 +598,16 @@ impl Renderer {
             post_state,
             warm: None,
             lights,
+            dlight_def,
+            alpha_fill: None,
+            dynamic_lights: Vec::new(),
             shadow: None,
+            cookie: None,
+            spot_shadow: None,
+            spot_history: Vec::new(),
+            spot_tiles: HashMap::new(),
+            spot_in_use: Vec::new(),
+            last_time: None,
             shadow_dummy,
             timer,
             dynamic_models: Vec::new(),
@@ -491,6 +663,43 @@ impl Renderer {
                 self.prepare(&m, &[self.shadow_tech()], kind, hsm);
             }
         }
+        if self.cookies_possible() {
+            for m in self.scene.materials() {
+                self.prepare(&m, &COOKIE_CASTER_TECHS, VertexKind::Model, hsm);
+                for kind in [VertexKind::World, VertexKind::Model] {
+                    self.prepare(&m, &COOKIE_RECEIVER_TECHS, kind, hsm);
+                }
+            }
+        }
+        if self.spot_shadows_possible() {
+            for m in self.scene.materials() {
+                for kind in [VertexKind::World, VertexKind::Model] {
+                    self.prepare(&m, &SPOT_SHADOW_TECHS, kind, hsm);
+                }
+            }
+        }
+        // The light pass of the effects' omni lights, after everything a frame without them draws.
+        if self.settings.dlight_limit > 0 {
+            for m in self.scene.materials() {
+                for kind in [VertexKind::World, VertexKind::Model] {
+                    if self.materials.has_technique(&m, TECH_LIGHT_OMNI, hsm) {
+                        self.prepare(&m, &LIGHT_OMNI_TECHS, kind, hsm);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether this map has a spot light that can cast a shadow and the settings let it.
+    fn spot_shadows_possible(&self) -> bool {
+        self.settings.shadows != ShadowMode::Off
+            && self.settings.spot_shadows
+            && self.settings.primary_lights
+            && self
+                .lights
+                .iter()
+                .flatten()
+                .any(|l| l.kind == LIGHT_KIND_SPOT && l.can_shadow)
     }
 
     fn shadow_tech(&self) -> usize {
@@ -533,7 +742,7 @@ impl Renderer {
             .into_iter()
             .chain(self.warm_extra.iter().cloned())
             .collect();
-        for m in materials {
+        for m in &materials {
             for kind in [VertexKind::World, VertexKind::Model] {
                 for techs in [
                     &SUN_SHADOW_TECHS[..],
@@ -550,6 +759,41 @@ impl Renderer {
                     && let Some(p) = self.prepare(&m, &[self.shadow_tech()], kind, hsm)
                 {
                     jobs.push((p, self.shadow_target()));
+                }
+            }
+        }
+        // The shadowed spot techniques of a map that has spot lights that can cast one.
+        if self.spot_shadows_possible() {
+            for m in &materials {
+                for kind in [VertexKind::World, VertexKind::Model] {
+                    if let Some(p) = self.prepare(m, &SPOT_SHADOW_TECHS, kind, hsm) {
+                        jobs.push((p, scene));
+                    }
+                }
+            }
+        }
+        // The shadow cookies of a frame without shadow maps.
+        if self.cookies_possible() {
+            for m in &materials {
+                if let Some(p) = self.prepare(m, &COOKIE_CASTER_TECHS, VertexKind::Model, hsm) {
+                    jobs.push((p, Self::cookie_target()));
+                }
+                for kind in [VertexKind::World, VertexKind::Model] {
+                    if let Some(p) = self.prepare(m, &COOKIE_RECEIVER_TECHS, kind, hsm) {
+                        jobs.push((p, scene));
+                    }
+                }
+            }
+        }
+        // The effects' omni lights come last: a load that stops early still draws everything else.
+        if self.settings.dlight_limit > 0 {
+            for m in &materials {
+                for kind in [VertexKind::World, VertexKind::Model] {
+                    if self.materials.has_technique(m, TECH_LIGHT_OMNI, hsm)
+                        && let Some(p) = self.prepare(m, &LIGHT_OMNI_TECHS, kind, hsm)
+                    {
+                        jobs.push((p, scene));
+                    }
                 }
             }
         }
@@ -775,46 +1019,85 @@ impl Renderer {
         if mode == ShadowMode::Off || self.shadow.as_ref().is_some_and(|s| s.mode == mode) {
             return;
         }
-        let dev = &self.gpu.device;
+        self.shadow = Some(shadow_targets(
+            &self.gpu,
+            mode,
+            (sunshadow::SIZE, sunshadow::HEIGHT),
+            "sun shadow",
+        ));
+        self.tex_bgs.clear();
+    }
+
+    /// Whether frames draw shadow cookies: shadow maps are off and the settings and the map (a sun) allow them.
+    fn cookies_possible(&self) -> bool {
+        self.settings.shadows == ShadowMode::Off
+            && self.settings.cookies
+            && self.settings.cookie_count > 0
+            && self.scene.world.sun_light.is_some()
+    }
+
+    fn cookie_target() -> Target {
+        Target {
+            color: Some(COOKIE_FORMAT),
+            depth: Some(DEPTH_FORMAT),
+            samples: 1,
+        }
+    }
+
+    fn ensure_cookie_atlas(&mut self) {
+        if self.cookie.is_some() {
+            return;
+        }
         let size = wgpu::Extent3d {
-            width: sunshadow::SIZE,
-            height: sunshadow::HEIGHT,
+            width: cookie::TILE,
+            height: cookie::TILE * cookie::MAX as u32,
             depth_or_array_layers: 1,
         };
         let make = |label, format, usage| {
-            dev.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage,
-                view_formats: &[],
-            })
+            self.gpu
+                .device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default())
         };
         let attach = wgpu::TextureUsages::RENDER_ATTACHMENT;
-        let bind = wgpu::TextureUsages::TEXTURE_BINDING;
-        let (depth, color, sampled) = if mode == ShadowMode::Depth {
-            let t = make("sun shadow depth", DEPTH_FORMAT, attach | bind);
-            let v = t.create_view(&Default::default());
-            (v.clone(), None, v)
-        } else {
-            let d = make("sun shadow z", DEPTH_FORMAT, attach);
-            let c = make("sun shadow color", SHADOW_COLOR_FORMAT, attach | bind);
-            let cv = c.create_view(&Default::default());
-            (d.create_view(&Default::default()), Some(cv.clone()), cv)
-        };
-        self.shadow = Some(ShadowTargets {
-            mode,
-            depth,
-            color,
+        let color = make(
+            "shadow cookies",
+            COOKIE_FORMAT,
+            attach | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        self.cookie = Some(CookieAtlas {
             tex: Arc::new(Tex {
-                view: sampled,
+                view: color.clone(),
                 dim: SamplerDim::D2,
-                width: sunshadow::SIZE,
+                width: cookie::TILE,
             }),
+            color,
+            depth: make("shadow cookie depth", DEPTH_FORMAT, attach),
         });
+        self.tex_bgs.clear();
+    }
+
+    /// The spot light shadow atlas for the current mode, created on first use.
+    fn ensure_spot_shadow(&mut self) {
+        let mode = self.settings.shadows;
+        if mode == ShadowMode::Off || self.spot_shadow.as_ref().is_some_and(|s| s.mode == mode) {
+            return;
+        }
+        self.spot_shadow = Some(shadow_targets(
+            &self.gpu,
+            mode,
+            (spotshadow::TILE, spotshadow::TILE * spotshadow::TILES),
+            "spot shadow",
+        ));
         self.tex_bgs.clear();
     }
 
@@ -825,7 +1108,7 @@ impl Renderer {
         p: &Arc<Prepared>,
         lm: u8,
         probe: u8,
-        light: u8,
+        light: u16,
     ) -> Arc<wgpu::BindGroup> {
         let key = TexKey {
             prep: p.id(),
@@ -865,9 +1148,12 @@ impl Renderer {
                         matches!(s.source, crate::material::TexSource::Code(c) if c == id)
                             && s.fetch == crate::material::Fetch::Compare
                     });
-                    let real = self.shadow.as_ref().filter(|s| {
-                        id == ctex::SHADOWMAP_SUN && (s.mode == ShadowMode::Depth) == compare
-                    });
+                    let map = if id == ctex::SHADOWMAP_SUN {
+                        self.shadow.as_ref()
+                    } else {
+                        self.spot_shadow.as_ref()
+                    };
+                    let real = map.filter(|s| (s.mode == ShadowMode::Depth) == compare);
                     Some(match real {
                         Some(s) => (s.tex.clone(), shadow_sampler(compare)),
                         None => {
@@ -880,12 +1166,19 @@ impl Renderer {
                         }
                     })
                 }
-                (ctex::LIGHT_ATTENUATION, _) => self
-                    .lights
-                    .get(usize::from(light))
-                    .and_then(Option::as_ref)
-                    .and_then(|l| l.attenuation.clone())
-                    .map(|(t, st)| (t, SamplerKey::State(st))),
+                (ctex::LIGHT_ATTENUATION, _) => if light == DLIGHT_KEY {
+                    self.dlight_def.attenuation.clone()
+                } else {
+                    self.lights
+                        .get(usize::from(light))
+                        .and_then(Option::as_ref)
+                        .and_then(|l| l.attenuation.clone())
+                }
+                .map(|(t, st)| (t, SamplerKey::State(st))),
+                (ctex::SHADOWCOOKIE, _) => self
+                    .cookie
+                    .as_ref()
+                    .map(|c| (c.tex.clone(), CODE_SAMPLER.into())),
                 (ctex::WHITE, _) => Some((
                     self.textures.solid(&self.gpu, SamplerDim::D2, [255; 4]),
                     CODE_SAMPLER.into(),
@@ -941,7 +1234,13 @@ impl Renderer {
             };
         }
         match self.lights.get(usize::from(light)).and_then(Option::as_ref) {
-            Some(l) if self.settings.primary_lights && l.kind == LIGHT_KIND_SPOT => &SPOT_TECHS,
+            Some(l) if self.settings.primary_lights && l.kind == LIGHT_KIND_SPOT => {
+                if self.spot_tiles.contains_key(&light) {
+                    &SPOT_SHADOW_TECHS
+                } else {
+                    &SPOT_TECHS
+                }
+            }
             Some(l) if self.settings.primary_lights && l.kind == LIGHT_KIND_OMNI => &OMNI_TECHS,
             _ => &LIT,
         }
@@ -980,9 +1279,15 @@ impl Renderer {
             };
             let techs: &[usize] = match kind {
                 PassKind::Scene => self.scene_techs(light, sun_shadows),
-                PassKind::SunShadow => &shadow_tech,
+                PassKind::ShadowMap => &shadow_tech,
                 PassKind::FloatZ => &floatz_tech,
+                PassKind::DynLight { spot, shadow } => light_techs(spot, shadow),
+                PassKind::CookieCaster => &COOKIE_CASTER_TECHS,
+                PassKind::CookieReceiver => &COOKIE_RECEIVER_TECHS,
             };
+            if kind.optional_tech() && !self.materials.has_technique(mat, techs[0], hsm) {
+                continue;
+            }
             let Some(prep) = self.prepare(mat, techs, VertexKind::World, hsm) else {
                 if kind == PassKind::Scene {
                     counts.missing += 1;
@@ -998,7 +1303,7 @@ impl Renderer {
                 &prep,
                 surf.lightmap_index,
                 surf.reflection_probe_index,
-                light,
+                tex_light(kind, light),
             );
             draws.push(Draw {
                 sky: kind == PassKind::Scene && is_sky(mat),
@@ -1053,8 +1358,11 @@ impl Renderer {
             };
             let techs: &[usize] = match kind {
                 PassKind::Scene => self.scene_techs(light, sun_shadows),
-                PassKind::SunShadow => &shadow_tech,
+                PassKind::ShadowMap => &shadow_tech,
                 PassKind::FloatZ => &floatz_tech,
+                PassKind::DynLight { spot, shadow } => light_techs(spot, shadow),
+                PassKind::CookieCaster => &COOKIE_CASTER_TECHS,
+                PassKind::CookieReceiver => &COOKIE_RECEIVER_TECHS,
             };
             let fc = light_frames.get(&light).unwrap_or(frame);
             let mut counted = false;
@@ -1063,6 +1371,9 @@ impl Renderer {
                 let Some(Some(mat)) = model.materials.get(idx) else {
                     continue;
                 };
+                if kind.optional_tech() && !self.materials.has_technique(mat, techs[0], hsm) {
+                    continue;
+                }
                 let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {
                     continue;
                 };
@@ -1073,7 +1384,7 @@ impl Renderer {
                 let Some(pipeline) = self.materials.pipeline(&self.gpu, &prep, target) else {
                     continue;
                 };
-                let tex_bg = self.tex_group(&prep, 0, inst.reflection_probe_index, light);
+                let tex_bg = self.tex_group(&prep, 0, inst.reflection_probe_index, tex_light(kind, light));
                 let tris = u32::from(model.surfs[idx].tri_count) * 3;
                 draws.push(Draw {
                     sky: false,
@@ -1250,7 +1561,7 @@ impl Renderer {
             let probe = meshes[d.mesh]
                 .light_origin
                 .map_or(0, |o| self.nearest_probe(o));
-            let tex_bg = self.tex_group(&prep, 0, probe, d.light);
+            let tex_bg = self.tex_group(&prep, 0, probe, u16::from(d.light));
             draws.push(Draw {
                 sky: false,
                 order: (false, mat.sort_key, 1 << 30 | n as u32),
@@ -1299,9 +1610,15 @@ impl Renderer {
             let light = if kind == PassKind::Scene { d.light } else { 0 };
             let techs: &[usize] = match kind {
                 PassKind::Scene => self.scene_techs(light, sun_shadows && want == ModelKind::World),
-                PassKind::SunShadow => &shadow_tech,
+                PassKind::ShadowMap => &shadow_tech,
                 PassKind::FloatZ => &floatz_tech,
+                PassKind::DynLight { spot, shadow } => light_techs(spot, shadow),
+                PassKind::CookieCaster => &COOKIE_CASTER_TECHS,
+                PassKind::CookieReceiver => &COOKIE_RECEIVER_TECHS,
             };
+            if kind.optional_tech() && !self.materials.has_technique(mat, techs[0], hsm) {
+                continue;
+            }
             let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {
                 continue;
             };
@@ -1314,7 +1631,7 @@ impl Renderer {
                 continue;
             };
             let probe = self.nearest_probe(inst.light_origin);
-            let tex_bg = self.tex_group(&prep, 0, probe, light);
+            let tex_bg = self.tex_group(&prep, 0, probe, tex_light(kind, light));
             draws.push(Draw {
                 sky: false,
                 order: (false, mat.sort_key, 1 << 30 | n as u32),
@@ -1363,6 +1680,544 @@ impl Renderer {
         };
         shared.insert(key, (Some(vs), Some(ps)));
         (vs, ps)
+    }
+
+    /// The frame constants a spot shadow map is built with: `view_proj` takes world positions to the tile's clip space.
+    fn spot_build_frame(&self, view_proj: &Mat4, zf: f32, eye: Vec3) -> FrameConsts {
+        let mut pf = FrameConsts::new(
+            *view_proj * Mat4::from_translation(eye),
+            Mat4::IDENTITY,
+            eye,
+        );
+        pf.vec[codeconst::SHADOWMAP_POLYGON_OFFSET as usize] =
+            if self.settings.shadows == ShadowMode::Color {
+                [2.0 * zf / (zf - 1.0), 0.0, 0.0, 0.0]
+            } else {
+                spotshadow::POLYGON_OFFSET
+            };
+        pf
+    }
+
+    /// Chooses the map's spot lights that get a shadow map this frame (the best scoring of those the visible geometry
+    /// is lit by, held for a while by the fade history) and builds their casters' draws: the geometry the map's shadow
+    /// lists name inside the cone, and the dynamic models in it. Returns the draws by tile.
+    fn build_spot_shadows(
+        &mut self,
+        view: &View,
+        vis: &cull::Visible,
+        insts: &[ModelInstance],
+        dynsurfs: &[DynSurf],
+        dt: f32,
+        counts: &mut BuildCounts,
+    ) -> Vec<(u32, Vec<Draw>)> {
+        self.spot_tiles.clear();
+        if self.spot_shadow.is_none()
+            || !self.settings.spot_shadows
+            || !self.settings.primary_lights
+        {
+            self.spot_history.clear();
+            self.spot_in_use.clear();
+            return Vec::new();
+        }
+        let world = self.scene.world.clone();
+        let mut used: HashSet<u8> = vis
+            .surfaces
+            .iter()
+            .filter_map(|&si| world.dpvs.surfaces.get(si as usize))
+            .map(|s| s.primary_light_index)
+            .collect();
+        used.extend(
+            vis.smodels
+                .iter()
+                .filter_map(|&mi| world.dpvs.smodel_draw_insts.get(mi as usize))
+                .map(|m| m.primary_light_index),
+        );
+        let forward = view.forward();
+        let mut scored: Vec<(f32, u8)> = used
+            .into_iter()
+            .filter_map(|i| {
+                let l = self.lights.get(usize::from(i))?.as_ref()?;
+                (l.kind == LIGHT_KIND_SPOT && l.can_shadow).then(|| {
+                    let c = spotshadow::Candidate {
+                        origin: l.consts.origin,
+                        dir: l.consts.dir,
+                        radius: l.consts.radius,
+                        color: l.consts.color,
+                    };
+                    (spotshadow::score(view.origin, forward, &c), i)
+                })
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let wanted: Vec<u32> = scored.iter().map(|s| u32::from(s.1)).collect();
+        let in_use: Vec<u32> = scored.iter().map(|s| u32::from(s.1)).collect();
+        spotshadow::update(
+            &mut self.spot_history,
+            &wanted,
+            &self.spot_in_use,
+            dt,
+            self.settings.spot_fade_time,
+            self.settings.max_shadow_lights,
+        );
+        self.spot_in_use = in_use;
+        let target = self.shadow_target();
+        let mut out = Vec::new();
+        for (index, entry) in self.spot_history.clone().iter().enumerate() {
+            let id = entry.id as u8;
+            let Some(l) = self.lights.get(usize::from(id)).and_then(Option::as_ref) else {
+                continue;
+            };
+            let (c, cos_inner, cos_outer) = (l.consts, l.cos_inner, l.cos_outer);
+            let vp = spotshadow::view_proj(c.origin, c.dir, cos_outer, c.radius, 0.0);
+            let index = index as u32;
+            self.spot_tiles.insert(
+                id,
+                SpotTile {
+                    fade: entry.fade,
+                    lookup: spotshadow::lookup(&vp, index),
+                },
+            );
+            let pf = self.spot_build_frame(&vp, c.radius, view.origin);
+            let f = Frustum::from_clip(&vp);
+            let casters = world.shadow_geometry.get(usize::from(id));
+            let surfaces: Vec<u32> = casters
+                .map(|g| g.sorted_surf_index.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .map(|&i| u32::from(i))
+                .filter(|&si| {
+                    world
+                        .dpvs
+                        .surfaces
+                        .get(si as usize)
+                        .is_some_and(|s| !f.culls(Vec3::from(s.bounds[0]), Vec3::from(s.bounds[1])))
+                })
+                .collect();
+            let smodels: Vec<u32> = casters
+                .map(|g| g.smodel_index.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .map(|&i| u32::from(i))
+                .filter(|&mi| {
+                    world
+                        .dpvs
+                        .smodel_draw_insts
+                        .get(mi as usize)
+                        .is_some_and(|m| {
+                            let r = m.model.as_ref().map_or(0.0, |m| m.radius) * m.scale;
+                            let o = Vec3::from(m.origin);
+                            !f.culls(o - Vec3::splat(r), o + Vec3::splat(r))
+                        })
+                })
+                .collect();
+            let cone = DynLight {
+                origin: c.origin,
+                color: c.color,
+                radius: c.radius,
+                spot: Some(dlight::SpotCone {
+                    dir: c.dir,
+                    cos_inner,
+                    cos_outer,
+                    near: 0.0,
+                }),
+            };
+            let near: Vec<DynSurf> = dynsurfs
+                .iter()
+                .copied()
+                .filter(|d| {
+                    let inst = &insts[d.inst];
+                    cone.reaches_sphere(Vec3::from(inst.origin), inst.model.radius)
+                })
+                .collect();
+            let mut list = self.build_draws(
+                PassKind::ShadowMap,
+                &pf,
+                &HashMap::new(),
+                &Items {
+                    surfaces: &surfaces,
+                    smodels: &smodels,
+                },
+                target,
+                false,
+                counts,
+                view.origin,
+            );
+            list.extend(self.build_dynamic(
+                PassKind::ShadowMap,
+                &pf,
+                &HashMap::new(),
+                insts,
+                &near,
+                ModelKind::World,
+                target,
+                false,
+            ));
+            out.push((index, list));
+        }
+        out
+    }
+
+    /// The shadow cookies of this frame, when shadow maps are off: the dynamic models nearest the eye cast one each, as a
+    /// silhouette seen from the sun, onto the surfaces and the other models around them.
+    #[allow(clippy::too_many_arguments)]
+    fn build_cookies(
+        &mut self,
+        view: &View,
+        frame: &FrameConsts,
+        vis: &cull::Visible,
+        insts: &[ModelInstance],
+        dynsurfs: &[DynSurf],
+        scene_target: Target,
+        counts: &mut BuildCounts,
+    ) -> Vec<CookiePass> {
+        if !self.cookies_possible() {
+            return Vec::new();
+        }
+        let casting: Vec<usize> = (0..insts.len())
+            .filter(|&i| insts[i].kind == ModelKind::World && insts[i].model.radius > 0.0)
+            .collect();
+        let casters: Vec<cookie::Caster> = casting
+            .iter()
+            .map(|&i| cookie::Caster {
+                origin: Vec3::from(insts[i].origin),
+                radius: insts[i].model.radius,
+            })
+            .collect();
+        let planned = cookie::plan(
+            &casters,
+            view.origin,
+            self.scene.sun_dir,
+            self.settings.cookie_count,
+        );
+        if planned.is_empty() {
+            return Vec::new();
+        }
+        self.ensure_cookie_atlas();
+        let world = self.scene.world.clone();
+        let mut out = Vec::new();
+        for (tile, c) in planned.iter().enumerate() {
+            let inst = casting[c.caster];
+            let mut cf = FrameConsts::new(
+                c.view_proj * Mat4::from_translation(view.origin),
+                Mat4::IDENTITY,
+                view.origin,
+            );
+            cf.shadow_lookup = c.lookup;
+            let own: Vec<DynSurf> = dynsurfs
+                .iter()
+                .copied()
+                .filter(|d| d.inst == inst)
+                .collect();
+            let casters = self.build_dynamic(
+                PassKind::CookieCaster,
+                &cf,
+                &HashMap::new(),
+                insts,
+                &own,
+                ModelKind::World,
+                Self::cookie_target(),
+                false,
+            );
+            // The shadow falls on what is near the caster: a box around it, twice its size.
+            let (lo, hi) = (c.centre - Vec3::splat(c.radius * 2.0), c.centre + Vec3::splat(c.radius * 2.0));
+            let surfaces: Vec<u32> = vis
+                .surfaces
+                .iter()
+                .copied()
+                .filter(|&si| {
+                    world.dpvs.surfaces.get(si as usize).is_some_and(|s| {
+                        let (a, b) = (Vec3::from(s.bounds[0]), Vec3::from(s.bounds[1]));
+                        a.cmple(hi).all() && b.cmpge(lo).all()
+                    })
+                })
+                .take(MAX_LIGHT_SURFACES)
+                .collect();
+            let smodels: Vec<u32> = vis
+                .smodels
+                .iter()
+                .copied()
+                .filter(|&mi| {
+                    world.dpvs.smodel_draw_insts.get(mi as usize).is_some_and(|m| {
+                        let r = m.model.as_ref().map_or(0.0, |m| m.radius) * m.scale;
+                        let o = Vec3::from(m.origin);
+                        (o - Vec3::splat(r)).cmple(hi).all() && (o + Vec3::splat(r)).cmpge(lo).all()
+                    })
+                })
+                .take(MAX_LIGHT_SURFACES)
+                .collect();
+            let others: Vec<DynSurf> = dynsurfs
+                .iter()
+                .copied()
+                .filter(|d| {
+                    let i = &insts[d.inst];
+                    d.inst != inst
+                        && (Vec3::from(i.origin) - Vec3::splat(i.model.radius)).cmple(hi).all()
+                        && (Vec3::from(i.origin) + Vec3::splat(i.model.radius)).cmpge(lo).all()
+                })
+                .collect();
+            let mut rf = frame.clone();
+            rf.shadow_lookup = c.lookup;
+            rf.vec[codeconst::SHADOW_PARMS as usize] = [0.0, 0.0, 0.0, 1.0];
+            let mut receivers = self.build_draws(
+                PassKind::CookieReceiver,
+                &rf,
+                &HashMap::new(),
+                &Items {
+                    surfaces: &surfaces,
+                    smodels: &smodels,
+                },
+                scene_target,
+                false,
+                counts,
+                view.origin,
+            );
+            receivers.extend(self.build_dynamic(
+                PassKind::CookieReceiver,
+                &rf,
+                &HashMap::new(),
+                insts,
+                &others,
+                ModelKind::World,
+                scene_target,
+                false,
+            ));
+            receivers.sort_by_key(|d| (d.order, d.prepared.id()));
+            out.push(CookiePass {
+                tile: tile as u32,
+                casters,
+                receivers,
+            });
+        }
+        out
+    }
+
+    /// The pipelines that write alpha 0 or 1 over a scissor rectangle of a scene pass into `format` with `samples`.
+    fn ensure_alpha_fill(&mut self, format: wgpu::TextureFormat, samples: u32) {
+        let key = (format, samples);
+        if self.alpha_fill.as_ref().is_some_and(|f| f.key == key) {
+            return;
+        }
+        let dev = &self.gpu.device;
+        let make = |alpha: &str| {
+            let module = dev.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("alpha fill"),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!(
+                        "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {{
+    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+    return vec4<f32>(p[i], 0.0, 1.0);
+}}
+@fragment fn fs() -> @location(0) vec4<f32> {{ return vec4<f32>(0.0, 0.0, 0.0, {alpha}); }}"
+                    )
+                    .into(),
+                ),
+            });
+            dev.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("alpha fill"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALPHA,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: samples.max(1),
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        self.alpha_fill = Some(AlphaFill {
+            key,
+            zero: make("0.0"),
+            one: make("1.0"),
+        });
+    }
+
+    /// The draws of the dynamic lights worth drawing this frame: the surfaces, static models and dynamic models each
+    /// reaches, with its technique (`light omni` or `light spot`) and its constants.
+    #[allow(clippy::too_many_arguments)]
+    fn build_light_passes(
+        &mut self,
+        lights: &[DynLight],
+        frame: &FrameConsts,
+        vm_proj: &Mat4,
+        vis: &cull::Visible,
+        frustum: &Frustum,
+        insts: &[ModelInstance],
+        dynsurfs: &[DynSurf],
+        clip_from_eye: &Mat4,
+        eye: Vec3,
+        size: (u32, u32),
+        target: Target,
+        spot_lists: &mut Vec<(u32, Vec<Draw>)>,
+        counts: &mut BuildCounts,
+    ) -> Vec<LightPass> {
+        if lights.is_empty() || self.settings.dlight_limit == 0 {
+            return Vec::new();
+        }
+        let chosen = dlight::select(lights, eye, frustum, self.settings.dlight_limit);
+        if chosen.is_empty() {
+            return Vec::new();
+        }
+        self.ensure_alpha_fill(target.color.expect("scene colour"), target.samples);
+        let world = self.scene.world.clone();
+        let mut out = Vec::new();
+        for i in chosen {
+            let l = &lights[i];
+            let Some(rect) = dlight::screen_rect(clip_from_eye, l.origin - eye, l.radius, size)
+            else {
+                continue;
+            };
+            let consts = l.consts(self.dlight_def.width, self.dlight_def.lookup_start);
+            let mut lf = frame.clone();
+            lf.set_light(&consts);
+            let surfaces: Vec<u32> = vis
+                .surfaces
+                .iter()
+                .copied()
+                .filter(|&si| {
+                    world
+                        .dpvs
+                        .surfaces
+                        .get(si as usize)
+                        .is_some_and(|s| l.reaches_box(Vec3::from(s.bounds[0]), Vec3::from(s.bounds[1])))
+                })
+                .take(MAX_LIGHT_SURFACES)
+                .collect();
+            let smodels: Vec<u32> = vis
+                .smodels
+                .iter()
+                .copied()
+                .filter(|&mi| {
+                    world
+                        .dpvs
+                        .smodel_draw_insts
+                        .get(mi as usize)
+                        .is_some_and(|m| {
+                            let r = m.model.as_ref().map_or(0.0, |m| m.radius) * m.scale;
+                            l.reaches_sphere(Vec3::from(m.origin), r)
+                        })
+                })
+                .take(MAX_LIGHT_SURFACES)
+                .collect();
+            let near: Vec<DynSurf> = dynsurfs
+                .iter()
+                .copied()
+                .filter(|d| {
+                    let inst = &insts[d.inst];
+                    l.reaches_sphere(Vec3::from(inst.origin), inst.model.radius)
+                })
+                .collect();
+            // A spot light of an effect takes a free tile of the shadow atlas, if shadows are on.
+            let tile = (self.spot_shadow.is_some()
+                && self.settings.dynamic_spot_shadows
+                && spot_lists.len() < spotshadow::TILES as usize)
+                .then_some(l.spot.as_ref())
+                .flatten()
+                .map(|c| {
+                    let index = spot_lists.len() as u32;
+                    let vp = spotshadow::view_proj(l.origin, c.dir, c.cos_outer, l.radius, c.near);
+                    (index, vp)
+                });
+            if let Some((index, vp)) = tile {
+                let lookup = spotshadow::lookup(&vp, index);
+                lf.shadow_lookup = lookup;
+                lf.vec[codeconst::SPOT_SHADOWMAP_PIXEL_ADJUST as usize] = spotshadow::PIXEL_ADJUST;
+                lf.vec[codeconst::LIGHT_SPOTFACTORS as usize][3] = 1.0;
+                let pf = self.spot_build_frame(&vp, l.radius, eye);
+                let mut list = self.build_draws(
+                    PassKind::ShadowMap,
+                    &pf,
+                    &HashMap::new(),
+                    &Items {
+                        surfaces: &surfaces,
+                        smodels: &smodels,
+                    },
+                    self.shadow_target(),
+                    false,
+                    counts,
+                    eye,
+                );
+                list.extend(self.build_dynamic(
+                    PassKind::ShadowMap,
+                    &pf,
+                    &HashMap::new(),
+                    insts,
+                    &near,
+                    ModelKind::World,
+                    self.shadow_target(),
+                    false,
+                ));
+                spot_lists.push((index, list));
+            }
+            let kind = PassKind::DynLight {
+                spot: l.spot.is_some(),
+                shadow: tile.is_some(),
+            };
+            let mut draws = self.build_draws(
+                kind,
+                &lf,
+                &HashMap::new(),
+                &Items {
+                    surfaces: &surfaces,
+                    smodels: &smodels,
+                },
+                target,
+                false,
+                counts,
+                eye,
+            );
+            draws.extend(self.build_dynamic(
+                kind,
+                &lf,
+                &HashMap::new(),
+                insts,
+                &near,
+                ModelKind::World,
+                target,
+                false,
+            ));
+            let mut vm_frame = lf.clone();
+            vm_frame.proj = *vm_proj;
+            let vm_draws = self.build_dynamic(
+                kind,
+                &vm_frame,
+                &HashMap::new(),
+                insts,
+                &near,
+                ModelKind::ViewModel,
+                target,
+                false,
+            );
+            draws.sort_by_key(|d| (d.order, d.prepared.id()));
+            out.push(LightPass {
+                rect,
+                draws,
+                vm_draws,
+            });
+        }
+        out
     }
 
     /// Draw the world seen from `view` into `target`.
@@ -1468,7 +2323,7 @@ impl Renderer {
                     smodels: &smodels,
                 };
                 let mut list = self.build_draws(
-                    PassKind::SunShadow,
+                    PassKind::ShadowMap,
                     &pf,
                     &HashMap::new(),
                     &items,
@@ -1478,7 +2333,7 @@ impl Renderer {
                     view.origin,
                 );
                 list.extend(self.build_dynamic(
-                    PassKind::SunShadow,
+                    PassKind::ShadowMap,
                     &pf,
                     &HashMap::new(),
                     &insts,
@@ -1492,13 +2347,31 @@ impl Renderer {
             }
         }
 
+        // The spot lights that cast a shadow this frame, and their shadow maps' casters.
+        self.ensure_spot_shadow();
+        let dt = self
+            .last_time
+            .map_or(0.0, |t| (view.time - t).clamp(0.0, 0.1));
+        self.last_time = Some(view.time);
+        let mut spot_lists = self.build_spot_shadows(view, &vis, &insts, &dynsurfs, dt, &mut counts);
+        let spot_primary_draws: usize = spot_lists.iter().map(|l| l.1.len()).sum();
+        stats.shadow_draws += spot_primary_draws;
+
         // Frames of the lights that have spot or omni constants.
         let mut light_frames: HashMap<u8, FrameConsts> = HashMap::new();
         if self.settings.primary_lights {
             for (i, l) in self.lights.iter().enumerate() {
                 if let Some(l) = l {
                     let mut f = frame.clone();
-                    f.set_light(&l.consts);
+                    let mut consts = l.consts;
+                    let tile = self.spot_tiles.get(&(i as u8));
+                    if let Some(t) = tile {
+                        consts.spot_factors[3] = t.fade;
+                        f.shadow_lookup = t.lookup;
+                        f.vec[codeconst::SPOT_SHADOWMAP_PIXEL_ADJUST as usize] =
+                            spotshadow::PIXEL_ADJUST;
+                    }
+                    f.set_light(&consts);
                     light_frames.insert(i as u8, f);
                 }
             }
@@ -1571,6 +2444,40 @@ impl Renderer {
             scene_target,
             false,
         );
+        let dlights = std::mem::take(&mut self.dynamic_lights);
+        let light_passes = self.build_light_passes(
+            &dlights,
+            &frame,
+            &vm_proj,
+            &vis,
+            &frustum,
+            &insts,
+            &dynsurfs,
+            &(p * v),
+            view.origin,
+            size,
+            scene_target,
+            &mut spot_lists,
+            &mut counts,
+        );
+        let cookies = self.build_cookies(
+            view,
+            &frame,
+            &vis,
+            &insts,
+            &dynsurfs,
+            scene_target,
+            &mut counts,
+        );
+        stats.cookies = cookies.len();
+        stats.draws += cookies.iter().map(|c| c.receivers.len()).sum::<usize>();
+        stats.light_draws = light_passes
+            .iter()
+            .map(|l| l.draws.len() + l.vm_draws.len())
+            .sum();
+        stats.lights = light_passes.len();
+        stats.shadow_draws += spot_lists.iter().map(|l| l.1.len()).sum::<usize>() - spot_primary_draws;
+        self.dynamic_lights = dlights;
         stats.models += insts.len();
         stats.models = counts.models;
         let (deferred, demand) = self.materials.take_deferred();
@@ -1578,7 +2485,7 @@ impl Renderer {
         if let Some(w) = self.warm.as_mut() {
             w.demand.extend(demand);
         }
-        stats.draws = draws.len();
+        stats.draws += draws.len();
 
         // The post chain: depth of field wants the scene's depth as a second list of the same surfaces.
         let floatz = self.post_params().dof_active().then(|| {
@@ -1648,6 +2555,75 @@ impl Renderer {
             });
             for (k, list) in shadow_lists.iter().enumerate() {
                 let vp = SunShadow::viewport(k);
+                rp.set_viewport(vp[0], vp[1], vp[2], vp[3], 0.0, 1.0);
+                record(&mut rp, list, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+            }
+        }
+        if let (false, Some(atlas)) = (cookies.is_empty(), &self.cookie) {
+            let timestamps = self.timer.as_mut().and_then(|t| t.pass("shadow cookies"));
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("shadow cookies"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &atlas.color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Grey: no shadow where nothing was drawn.
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.5,
+                            g: 0.5,
+                            b: 0.5,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &atlas.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: timestamps,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            for c in &cookies {
+                let vp = cookie::viewport(c.tile);
+                rp.set_viewport(vp[0], vp[1], vp[2], vp[3], 0.0, 1.0);
+                record(&mut rp, &c.casters, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+            }
+        }
+        if let (false, Some(sh)) = (spot_lists.is_empty(), &self.spot_shadow) {
+            let color_att = sh.color.as_ref().map(|v| wgpu::RenderPassColorAttachment {
+                view: v,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    store: wgpu::StoreOp::Store,
+                },
+            });
+            let timestamps = self.timer.as_mut().and_then(|t| t.pass("spot shadow"));
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("spot shadow"),
+                color_attachments: &[color_att],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &sh.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: timestamps,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            for (tile, list) in &spot_lists {
+                let vp = spotshadow::viewport(*tile);
                 rp.set_viewport(vp[0], vp[1], vp[2], vp[3], 0.0, 1.0);
                 record(&mut rp, list, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
             }
@@ -1742,6 +2718,37 @@ impl Renderer {
                     None,
                     &self.dyn_vb,
                 );
+            }
+            if !cookies.is_empty() {
+                rp.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
+                for c in &cookies {
+                    record(&mut rp, &c.receivers, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+                }
+            }
+            if let Some(fill) = self.alpha_fill.as_ref().filter(|_| !light_passes.is_empty()) {
+                for lp in &light_passes {
+                    let [x, y, w, h] = lp.rect;
+                    rp.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
+                    rp.set_scissor_rect(x, y, w, h);
+                    rp.set_pipeline(&fill.zero);
+                    rp.draw(0..3, 0..1);
+                    record(&mut rp, &lp.draws, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+                    if !lp.vm_draws.is_empty() {
+                        rp.set_viewport(
+                            0.0,
+                            0.0,
+                            size.0 as f32,
+                            size.1 as f32,
+                            0.0,
+                            VIEWMODEL_DEPTH,
+                        );
+                        record(&mut rp, &lp.vm_draws, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+                        rp.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
+                    }
+                    rp.set_pipeline(&fill.one);
+                    rp.draw(0..3, 0..1);
+                }
+                rp.set_scissor_rect(0, 0, size.0, size.1);
             }
         }
         post::record(
@@ -2043,4 +3050,66 @@ fn is_sky(m: &Material) -> bool {
         .as_ref()
         .and_then(|t| t.name.as_deref())
         .is_some_and(|n| n.trim_start_matches(',').contains("sky"))
+}
+
+/// The techniques of a dynamic light's pass.
+fn light_techs(spot: bool, shadow: bool) -> &'static [usize] {
+    match (spot, shadow) {
+        (false, _) => &LIGHT_OMNI_TECHS,
+        (true, false) => &LIGHT_SPOT_TECHS,
+        (true, true) => &LIGHT_SPOT_SHADOW_TECHS,
+    }
+}
+
+/// The `light` key of the texture group of a draw in pass `kind` of a surface lit by primary light `light`.
+fn tex_light(kind: PassKind, light: u8) -> u16 {
+    if kind.is_light() {
+        DLIGHT_KEY
+    } else {
+        u16::from(light)
+    }
+}
+
+/// A shadow map of `size` texels for `mode`: a depth texture the shaders compare against, or a depth buffer and a
+/// float colour texture that carries the depth.
+fn shadow_targets(gpu: &Gpu, mode: ShadowMode, size: (u32, u32), label: &str) -> ShadowTargets {
+    let extent = wgpu::Extent3d {
+        width: size.0,
+        height: size.1,
+        depth_or_array_layers: 1,
+    };
+    let make = |name: &str, format, usage| {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("{label} {name}")),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let attach = wgpu::TextureUsages::RENDER_ATTACHMENT;
+    let bind = wgpu::TextureUsages::TEXTURE_BINDING;
+    let (depth, color, sampled) = if mode == ShadowMode::Depth {
+        let t = make("depth", DEPTH_FORMAT, attach | bind);
+        let v = t.create_view(&Default::default());
+        (v.clone(), None, v)
+    } else {
+        let d = make("z", DEPTH_FORMAT, attach);
+        let c = make("color", SHADOW_COLOR_FORMAT, attach | bind);
+        let cv = c.create_view(&Default::default());
+        (d.create_view(&Default::default()), Some(cv.clone()), cv)
+    };
+    ShadowTargets {
+        mode,
+        depth,
+        color,
+        tex: Arc::new(Tex {
+            view: sampled,
+            dim: SamplerDim::D2,
+            width: size.0,
+        }),
+    }
 }
