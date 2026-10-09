@@ -68,6 +68,13 @@ pub struct Brain {
     using: Option<(u16, i32)>,
     /// A trigger the bot gave up on (it did nothing for the bot) and until when.
     gave_up: Option<(u16, i32)>,
+    /// The triggers made for the bot's team it last saw; one that is new (a planted bomb's
+    /// defuse trigger) sends the bot there at once, wherever it was heading.
+    team_triggers: Option<Vec<u16>>,
+    /// Until when a trigger that just came on for the bot's team is hurried to.
+    rush_until: i32,
+    /// Whether a pickup lay free when the bot last looked.
+    pickups_free: Option<bool>,
 }
 
 fn xorshift(s: &mut u32) -> u32 {
@@ -133,6 +140,9 @@ impl Brain {
             spawn_time: -1,
             obj: None,
             using: None,
+            team_triggers: None,
+            rush_until: 0,
+            pickups_free: None,
             gave_up: None,
         }
     }
@@ -192,12 +202,35 @@ impl Brain {
         // What to look at and where to walk.
         let mut want_dir = [0.0f32; 3];
         let mut sprint = false;
-        let engaged = self.enemy.is_some() && time - self.enemy_seen < 400;
+        // With the bomb carried (no pickup lying free) a bot on its way to a zone made for its
+        // team, or a defender sent to a bomb that just went on, does not stop for enemies
+        // still far off.
+        let hurrying = (self.pickups_free == Some(false) || time < self.rush_until)
+            && self.obj.is_some_and(|o| {
+                g.ent(o).is_some_and(|e| {
+                    e.classname.starts_with("trigger_use") && e.x.trigger_team == c.team
+                })
+            });
+        let far = self
+            .enemy
+            .and_then(|e| g.ent(e))
+            .is_some_and(|e| dist3(e.origin, c.ps.origin) > HURRY_FIGHT_DIST);
+        let engaged = self.enemy.is_some() && time - self.enemy_seen < 400 && !(hurrying && far);
         let mut aim: Option<(f32, f32, f32)> = None; // pitch, yaw, distance
         // Standing in a use trigger the player's hint names: hold +activate, and stay on it
         // once begun, as a planter must.
-        let holding =
-            (!engaged || self.using.is_some()) && self.hold_use(c.ps.cursor_hint_ent_index, time);
+        // Only a use trigger is worth holding for: a weapon or grenade on the floor is hinted
+        // too, and the bot would hold the button 9 s at every one it passes.
+        let hint = c.ps.cursor_hint_ent_index;
+        let hint = if g
+            .ent(hint)
+            .is_some_and(|e| e.classname.starts_with("trigger_use"))
+        {
+            hint
+        } else {
+            sim::cm::ENTITYNUM_NONE
+        };
+        let holding = (!engaged || self.using.is_some()) && self.hold_use(hint, time);
         if holding {
             cmd.buttons |= button::USE;
         } else if let (Some(e), true) = (self.enemy, engaged)
@@ -283,7 +316,8 @@ impl Brain {
         let r = want_dir[0] * right[0] + want_dir[1] * right[1];
         cmd.forwardmove = (f * 127.0).clamp(-127.0, 127.0) as i8;
         cmd.rightmove = (r * 127.0).clamp(-127.0, 127.0) as i8;
-        if sprint && f > 0.9 && !engaged {
+        // Sprinting spends the press the server takes +activate from, and the hold with it.
+        if sprint && f > 0.9 && !engaged && !holding {
             cmd.buttons |= button::SPRINT;
         }
         if time < self.jump_until {
@@ -470,8 +504,12 @@ impl Brain {
             // A bot that is only roaming looks again for an objective now and then, so a
             // trigger that just came on for its team (a planted bomb) draws it.
             let reroll = self.obj.is_none() && frac(&mut self.rng) < 0.3;
-            if self.path.is_empty() || reroll || self.steer_arrived(&mesh, pos) {
-                self.pick_goal(g, &mesh, scratch, pos, time);
+            let fresh = self.new_team_trigger(g);
+            if self.path.is_empty() || reroll || fresh.is_some() || self.steer_arrived(&mesh, pos) {
+                if fresh.is_some() {
+                    self.rush_until = time + RUSH_MS;
+                }
+                self.pick_goal(g, &mesh, scratch, pos, time, fresh);
                 self.steer.reset();
             }
         }
@@ -542,6 +580,21 @@ impl Brain {
         })
     }
 
+    /// The use trigger that came on for the bot's team since it last looked, if any.
+    fn new_team_trigger(&mut self, g: &Game) -> Option<u16> {
+        let (objs, _, team) = g.bot_objectives(self.num);
+        self.pickups_free = Some(team.start > 0);
+        let now: Vec<u16> = objs[team].iter().map(|(t, _)| *t).collect();
+        // The first look only learns what is there.
+        let fresh = self
+            .team_triggers
+            .as_ref()
+            .and_then(|before| now.iter().find(|t| !before.contains(t)).copied());
+        self.team_triggers = Some(now);
+        fresh
+    }
+
+    /// Picks where to go next; `urgent` names a trigger to go to.
     fn pick_goal(
         &mut self,
         g: &Game,
@@ -549,15 +602,22 @@ impl Brain {
         scratch: &mut PathScratch,
         pos: Vec3,
         time: i32,
+        urgent: Option<u16>,
     ) {
         let Some(from) = mesh.nearest_node(pos) else {
             self.path.clear();
             return;
         };
-        let (objectives, n_use) = g.bot_objectives(self.num);
+        let (objectives, n_use, _) = g.bot_objectives(self.num);
         for _ in 0..4 {
             self.obj = None;
-            let to = if let Some(p) = self.last_known.take() {
+            let to = if let Some(p) = urgent
+                .and_then(|u| objectives.iter().find(|o| o.0 == u))
+                .map(|o| o.1)
+            {
+                self.obj = urgent;
+                mesh.nearest_node(p)
+            } else if let Some(p) = self.last_known.take() {
                 mesh.nearest_node(p)
             } else if !objectives.is_empty() && frac(&mut self.rng) < 0.85 {
                 // Use triggers first: a team rushes the zones its carrier needs.
@@ -596,6 +656,12 @@ impl Brain {
         self.path.clear();
     }
 }
+
+/// How long a bot hurries to a trigger that just came on for its team (a bomb ticks).
+const RUSH_MS: i32 = 20_000;
+
+/// How close an enemy must be to stop a bot that is hurrying to a use trigger.
+const HURRY_FIGHT_DIST: f32 = 300.0;
 
 /// What the world offers bots to walk to: every spawn point and objective origin.
 pub fn goals_from_map(entity_string: &[u8]) -> Vec<Vec3> {

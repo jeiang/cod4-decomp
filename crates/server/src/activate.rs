@@ -354,10 +354,11 @@ impl Game {
 
     /// What the gametype asks bot `n` to walk to: the use triggers it may use now and the
     /// pickup triggers (`*pickup*` targetnames) of carried objectives; the count is how many
-    /// leading entries the bots should favour.
-    pub fn bot_objectives(&self, n: u16) -> (Vec<(u16, Vec3)>, usize) {
+    /// leading entries the bots should favour and which entries are triggers made for the
+    /// bot's team.
+    pub fn bot_objectives(&self, n: u16) -> (Vec<(u16, Vec3)>, usize, std::ops::Range<usize>) {
         let Some(team) = self.client(n).map(|c| c.team) else {
-            return (Vec::new(), 0);
+            return (Vec::new(), 0, 0..0);
         };
         let mut out = Vec::new();
         let mut pickups = Vec::new();
@@ -392,14 +393,14 @@ impl Game {
                 }
             }
         }
-        // Triggers made for this team come first, then a pickup lying free, then the rest.
-        let n_first = if mine.is_empty() {
-            pickups.len()
-        } else {
-            mine.len()
-        };
-        mine.extend(pickups);
+        // A pickup lying free comes first (nobody can plant without the bomb), then the triggers
+        // made for this team, then the rest; a free pickup is the one to favour while there is one.
+        let n_pickups = pickups.len();
+        let team = n_pickups..n_pickups + mine.len();
+        let n_first = if n_pickups > 0 { n_pickups } else { mine.len() };
+        pickups.extend(mine);
+        let mut mine = pickups;
         mine.extend(out);
-        (mine, n_first)
+        (mine, n_first, team)
     }
 }
