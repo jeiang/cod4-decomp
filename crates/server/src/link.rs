@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gsc::Vm;
+use net::entity::EntityState;
 use sim::Vec3;
 use sim::cm::Collide;
 use sim::contents;
@@ -18,6 +19,7 @@ use sim::pm::{PLAYER_MAXS, PLAYER_MINS, PmType};
 use sim::traj::Trajectory;
 
 use crate::client::{Conn, Session, Team};
+use crate::content::Content;
 use crate::delta;
 use crate::game::{Ent, EntKind, Game};
 use crate::playeranim::LegsWire;
@@ -27,10 +29,47 @@ use sim::pm::math;
 /// `FL_SUPPORTS_LINKTO` in `ent->flags`.
 pub const FL_SUPPORTS_LINKTO: i32 = 0x1000;
 /// Models one entity can carry (`attachModelNames`).
-pub const MAX_ATTACH: usize = 19;
+pub const MAX_ATTACH: usize = net::entity::MAX_ATTACH;
 /// First entity number of the player corpse ring and its size (`G_SpawnPlayerClone`).
 pub const CORPSE_BASE: usize = 64;
 pub const CORPSES: usize = 8;
+
+/// Where a tag is in the bones of `models`, the model of an entity followed by the attachments before the one that
+/// hangs from it, as an [`EntityState::attach`] tag: 0 for no tag (the model's origin), else the index of the last bone
+/// of that name, plus one (the bone a `Rig` hangs the attachment from). A tag no model has hangs from the origin too.
+pub fn tag_wire(content: &Content, models: &[&str], tag: &str) -> u16 {
+    if tag.is_empty() {
+        return 0;
+    }
+    let names = || {
+        models.iter().flat_map(|m| {
+            content
+                .model_bone_names(m)
+                .into_iter()
+                .flat_map(|b| b.iter())
+        })
+    };
+    names()
+        .enumerate()
+        .filter(|(_, n)| n.eq_ignore_ascii_case(tag))
+        .last()
+        .map_or(0, |(i, _)| (i + 1).min(255) as u16)
+}
+
+/// The tag name a [`tag_wire`] value stands for among the bones of `models`; `None` for the model's origin.
+pub fn tag_name(content: &Content, models: &[&str], wire: u16) -> Option<Arc<str>> {
+    let i = usize::from(wire.checked_sub(1)?);
+    models
+        .iter()
+        .flat_map(|m| {
+            content
+                .model_bone_names(m)
+                .into_iter()
+                .flat_map(|b| b.iter())
+        })
+        .nth(i)
+        .cloned()
+}
 
 #[derive(Debug, Clone)]
 pub struct Link {
@@ -386,6 +425,23 @@ impl Game {
         self.relink(n);
     }
 
+    /// Fills the attachments and hidden bones of `s`, the state of entity `n`: what a client needs to build the entity's
+    /// model from its own copy of the zones. A model the clients were never told of cannot be drawn and is left out.
+    pub fn net_attachments(&self, n: u16, s: &mut EntityState) {
+        let Some(e) = self.ent(n) else { return };
+        s.part_bits = e.x.hide_bits;
+        let mut models: Vec<&str> = vec![&e.model];
+        let mut slot = 0;
+        for a in &e.x.attached {
+            let index = self.models.find(&a.model);
+            if index != 0 {
+                s.set_attach(slot, index as u16, tag_wire(&self.content, &models, &a.tag));
+                slot += 1;
+                models.push(&a.model);
+            }
+        }
+    }
+
     /// `G_EntAttach`; `false` when the table is full or the model is unknown.
     pub fn attach_model(&mut self, n: u16, model: &str, tag: &str, ignore_collision: bool) -> bool {
         if self.content.model(model).is_none() {
@@ -468,6 +524,7 @@ impl Game {
         e.maxs = src.maxs;
         e.contents = contents::CORPSE | contents::ACTOR;
         e.x.attached = src.x.attached.clone();
+        e.x.hide_bits = src.x.hide_bits;
         let max = self
             .cvars
             .get("g_clonePlayerMaxVelocity")

@@ -39,6 +39,9 @@ pub mod etype {
 
 pub const MAX_ENTITIES: usize = 1024;
 
+/// Models one entity can carry on the wire (`attachModelNames`): the most `attach` can hold.
+pub const MAX_ATTACH: usize = 19;
+
 /// `EntityState::eflags` bit the server flips whenever it moves an entity by fiat (a respawn, a script's `origin`):
 /// the client does not slide the entity from where it was to where it is (`EF_TELEPORT_BIT`).
 pub const TELEPORT_BIT: u32 = 1 << 8;
@@ -103,7 +106,18 @@ pub struct EntityState {
     pub head_icon_team: u8,
     /// The sound alias the entity loops: an index of the `sndname` commands the server sent, 0 for none.
     pub loop_sound: u16,
+    /// Script model, corpse and player: the models the scripts `attach`ed, in order, as [`EntityState::set_attach`]
+    /// packs them (0 for an empty slot, which ends the list).
+    pub attach: [u32; MAX_ATTACH],
+    /// Script model, corpse and player: the hidden bones (`hidepart`), by bone of the model followed by the bones of
+    /// each attachment, most significant bit first.
+    pub part_bits: [u32; 4],
+    /// Player: which world model of the held weapon is drawn (`ps.weaponmodels`: the camouflage or attachment variant).
+    pub weapon_model: u8,
 }
+
+/// Bits of an [`EntityState::attach`] word that name the model; the tag takes the rest.
+const ATTACH_MODEL_BITS: u32 = 10;
 
 macro_rules! int {
     ($s:ident, $place:expr, $k:expr) => {
@@ -180,6 +194,30 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.head_icon, Bits(8)),
         int!(s, s.head_icon_team, Bits(2)),
         int!(s, s.loop_sound, Bits(10)),
+        int!(s, s.weapon_model, Bits(4)),
+        int!(s, s.part_bits[0], Bits(32)),
+        int!(s, s.part_bits[1], Bits(32)),
+        int!(s, s.part_bits[2], Bits(32)),
+        int!(s, s.part_bits[3], Bits(32)),
+        int!(s, s.attach[0], Bits(18)),
+        int!(s, s.attach[1], Bits(18)),
+        int!(s, s.attach[2], Bits(18)),
+        int!(s, s.attach[3], Bits(18)),
+        int!(s, s.attach[4], Bits(18)),
+        int!(s, s.attach[5], Bits(18)),
+        int!(s, s.attach[6], Bits(18)),
+        int!(s, s.attach[7], Bits(18)),
+        int!(s, s.attach[8], Bits(18)),
+        int!(s, s.attach[9], Bits(18)),
+        int!(s, s.attach[10], Bits(18)),
+        int!(s, s.attach[11], Bits(18)),
+        int!(s, s.attach[12], Bits(18)),
+        int!(s, s.attach[13], Bits(18)),
+        int!(s, s.attach[14], Bits(18)),
+        int!(s, s.attach[15], Bits(18)),
+        int!(s, s.attach[16], Bits(18)),
+        int!(s, s.attach[17], Bits(18)),
+        int!(s, s.attach[18], Bits(18)),
     ]
 }
 
@@ -210,6 +248,29 @@ impl EntityState {
         self.prior_events = [c.0, b.0, a.0];
         self.prior_parms = [c.1, b.1, a.1];
         (self.event, self.event_parm) = d;
+    }
+
+    /// Puts `model` (a model index, 1..1024) in attachment slot `slot`, hanging from `tag`: 0 for the model's origin,
+    /// else one more than the index of the bone in the entity's bones (its model, then the attachments before this
+    /// one). A slot out of range, or a model or tag the wire cannot hold, is left empty.
+    pub fn set_attach(&mut self, slot: usize, model: u16, tag: u16) {
+        if let Some(w) = self.attach.get_mut(slot)
+            && model != 0
+            && u32::from(model) < 1 << ATTACH_MODEL_BITS
+            && tag < 256
+        {
+            *w = u32::from(model) | u32::from(tag) << ATTACH_MODEL_BITS;
+        }
+    }
+
+    /// The attachments, in order, as `(model index, tag)` (see [`EntityState::set_attach`]).
+    pub fn attachments(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.attach.iter().take_while(|w| **w != 0).map(|w| {
+            (
+                (w & ((1 << ATTACH_MODEL_BITS) - 1)) as u16,
+                (w >> ATTACH_MODEL_BITS) as u16,
+            )
+        })
     }
 
     /// Rounds every quantized field the way the wire does.
@@ -281,6 +342,28 @@ mod tests {
         read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
         assert_eq!(got, sent);
         assert_eq!(got.launch_point, [101.5, 199.25, 34.0]);
+    }
+
+    #[test]
+    fn attachments_and_hidden_parts_survive_the_wire() {
+        let mut sent = EntityState::new(12);
+        sent.etype = etype::SCRIPT_MODEL;
+        sent.set_attach(0, 513, 0);
+        sent.set_attach(1, 7, 41);
+        sent.set_attach(MAX_ATTACH - 1, 1023, 255);
+        sent.part_bits = [0x8000_0000, 0, 3, 0x0100_0000];
+        sent.weapon_model = 5;
+        let sent = sent.canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(12), &sent);
+        let mut got = EntityState::new(12);
+        read_delta(&mut BitReader::new(&w.into_bytes()), fields(), &mut got).unwrap();
+        assert_eq!(got, sent);
+        assert_eq!(
+            got.attachments().take(2).collect::<Vec<_>>(),
+            [(513, 0), (7, 41)]
+        );
+        assert_eq!(got.attachments().count(), 2, "an empty slot ends the list");
     }
 
     #[test]

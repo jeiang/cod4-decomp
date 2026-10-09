@@ -278,13 +278,8 @@ impl Work {
         }
         for team in [Team::Allies, Team::Axis] {
             if let Some(set) = library.team_models(team) {
-                let names = [Some(&set.body), set.head.as_ref()];
-                models.extend(
-                    names
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|n| library.content.model(n).cloned()),
-                );
+                let names = std::iter::once(&set.body).chain(set.attach.iter().map(|(m, _)| m));
+                models.extend(names.filter_map(|n| library.content.model(n).cloned()));
             }
         }
         for name in library.content.model_names("viewhands_") {

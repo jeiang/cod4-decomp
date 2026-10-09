@@ -8,6 +8,7 @@
 //! [`net::view::INTERP_DELAY_MS`] behind the server clock between the two snapshots around that moment, which is also
 //! the moment the server rewinds them to when it judges this client's shots.
 
+mod attach;
 mod corpses;
 mod hud;
 mod melee;
@@ -21,7 +22,7 @@ use crate::helicopter::Rotors;
 use crate::input::{Feedback, InputFrame, Seen, buttons, scan_own};
 use crate::kick::Kick;
 use crate::look::{Look, LookOut, cap_turn};
-use crate::models::{Library, Player, PlayerModelSet, Team};
+use crate::models::{Attachment, Library, Player, Team};
 use crate::props::{Launches, Props};
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::{Sight, ViewModel, ViewTags};
@@ -125,8 +126,12 @@ struct Remote {
     player: Player,
     /// The body model the player is drawn with.
     body: String,
-    /// World model of the weapon the player holds.
-    weapon: Option<String>,
+    /// The models the scripts attached to the body the rig was built with.
+    attach: Vec<Attachment>,
+    /// The weapon and knife the player holds, changed in place on the player.
+    hand: Vec<Attachment>,
+    /// The held weapon runs into a wall and is not drawn (`CG_UpdateWeaponVisibility`).
+    weapon_hidden: bool,
     seen: Instant,
 }
 
@@ -225,6 +230,10 @@ struct Counters {
     /// `BRUSH` entities with surfaces in the newest snapshot (each is handed to the renderer), and the most at once.
     brush_models_seen: usize,
     brush_models_max: usize,
+    /// The most models (the model and what is attached to it) one drawn script model was made of.
+    script_model_parts_max: usize,
+    /// The models the scripts attached to the players drawn (their heads): one name each.
+    player_attachments: std::collections::BTreeSet<String>,
     script_models_unloaded: std::collections::BTreeSet<String>,
     /// Every model a `script_model` was drawn with at some frame.
     script_models_names: std::collections::BTreeSet<String>,
@@ -1876,6 +1885,7 @@ impl NetPlay {
         };
         let mut out = Vec::new();
         let mut seen = 0;
+        let mut drawn = 0;
         self.c.script_models_unloaded.clear();
         for e in ents
             .iter()
@@ -1883,10 +1893,10 @@ impl NetPlay {
         {
             seen += 1;
             let name = ui.model(e.model);
-            match self.lib.content.model(name) {
+            match self.lib.content.model(name).cloned() {
                 Some(model) => {
                     let posed = if e.eflags & eflags::PHYSICS_LAUNCH != 0 {
-                        self.launches.pose(e, model, dt, self.boxes.world())
+                        self.launches.pose(e, &model, dt, self.boxes.world())
                     } else {
                         Some((e.origin, e.angles))
                     };
@@ -1894,11 +1904,25 @@ impl NetPlay {
                     let Some((origin, angles)) = posed else {
                         continue;
                     };
-                    let mut m = ModelInstance::new(model.clone(), render::ModelKind::World);
-                    m.origin = origin;
-                    m.angles = angles;
-                    m.light_origin = origin;
-                    out.push(m);
+                    // What the scripts attached rides on the model, at the tags they named.
+                    let attached = attach::attachments_of(ui, &self.lib.content, e, name);
+                    let before = out.len();
+                    match self.lib.rest_pose(name, &attached) {
+                        Ok(rest) if !attached.is_empty() => {
+                            out.extend(rest.instances(origin, angles, e.part_bits));
+                        }
+                        _ => {
+                            let mut m = ModelInstance::new(model, render::ModelKind::World);
+                            m.origin = origin;
+                            m.angles = angles;
+                            m.light_origin = origin;
+                            m.hidden_parts = e.part_bits;
+                            out.push(m);
+                        }
+                    }
+                    drawn += 1;
+                    self.c.script_model_parts_max =
+                        self.c.script_model_parts_max.max(out.len() - before);
                     if !self.c.script_models_names.contains(name) {
                         self.c.script_models_names.insert(name.to_owned());
                     }
@@ -1910,7 +1934,7 @@ impl NetPlay {
         }
         self.launches.finish_frame(dt);
         self.c.script_models_seen = seen;
-        self.c.script_models_drawn = out.len();
+        self.c.script_models_drawn = drawn;
         out
     }
 
@@ -2091,19 +2115,43 @@ impl NetPlay {
                 .get(e.weapon)
                 .and_then(|i| self.lib.content.weapon(&i.name))
                 .cloned();
-            // A gunner on a turret holds nothing: the weapon leaves the body.
-            let held = weapon
+            // What the player does with the gun this frame follows from the pose of the last one.
+            let (left, knifing, clipped) =
+                self.remotes
+                    .get(&e.client)
+                    .map_or((false, false, false), |r| {
+                        (
+                            r.player.gun_in_left_hand(&self.lib.content),
+                            r.player.is_knifing(),
+                            r.weapon_hidden,
+                        )
+                    });
+            let grenade = self
+                .weapons
+                .get(e.weapon)
+                .is_some_and(|w| w.weap_type == sim::weapon::WeaponType::Grenade);
+            let tag = attach::weapon_tag(grenade, left);
+            let variant = weapon
                 .as_ref()
-                .filter(|_| e.eflags & eflags::TURRET == 0)
-                .and_then(|w| w.world_models.first().cloned().flatten())
+                .and_then(|w| attach::held_model(w, e.weapon_model));
+            // A gunner on a turret holds nothing: the weapon leaves the body, as it does when it runs into a wall.
+            let held = variant
+                .clone()
+                .filter(|_| e.eflags & eflags::TURRET == 0 && !clipped)
+                .map(|m| (m, tag.to_owned()));
+            let knife = weapon
+                .as_ref()
+                .filter(|_| knifing)
+                .and_then(|w| w.world_knife_model.as_ref())
                 .and_then(|m| m.name.as_deref().map(str::to_owned));
             // A player the scripts have not given a model yet (just joined) is not drawn.
-            let Some(set) = self.body_set(e.model, e.eflags).map(|set| PlayerModelSet {
-                weapon: held.clone(),
-                ..set
-            }) else {
+            let Some(dressed) = self.body_set(e) else {
                 continue;
             };
+            self.c
+                .player_attachments
+                .extend(dressed.attach.iter().map(|(m, _)| m.clone()));
+            let set = dressed.armed(held, knife);
             match self.remotes.get_mut(&e.client) {
                 Some(r) if r.body != set.body => {
                     // A new class: another body.
@@ -2111,7 +2159,8 @@ impl NetPlay {
                         Ok(p) => {
                             r.player = p;
                             r.body.clone_from(&set.body);
-                            r.weapon = held;
+                            r.attach.clone_from(&set.attach);
+                            r.hand.clone_from(&set.hand);
                         }
                         Err(e) => {
                             self.c.player_faults.insert(e);
@@ -2125,7 +2174,9 @@ impl NetPlay {
                             Remote {
                                 player,
                                 body: set.body.clone(),
-                                weapon: held,
+                                attach: set.attach.clone(),
+                                hand: set.hand.clone(),
+                                weapon_hidden: false,
                                 seen: now,
                             },
                         );
@@ -2134,10 +2185,20 @@ impl NetPlay {
                         self.c.player_faults.insert(e);
                     }
                 },
-                Some(r) if r.weapon != held => match self.lib.player(&set) {
+                Some(r) if r.attach != set.attach => match self.lib.player(&set) {
                     Ok(p) => {
-                        r.player.rearm(p);
-                        r.weapon = held;
+                        r.player = p;
+                        r.attach.clone_from(&set.attach);
+                        r.hand.clone_from(&set.hand);
+                    }
+                    Err(e) => {
+                        self.c.player_faults.insert(e);
+                    }
+                },
+                Some(r) if r.hand != set.hand => match self.lib.hand(&set.hand) {
+                    Ok(h) => {
+                        r.player.set_hand(h);
+                        r.hand.clone_from(&set.hand);
                     }
                     Err(e) => {
                         self.c.player_faults.insert(e);
@@ -2160,6 +2221,21 @@ impl NetPlay {
                     camera: None,
                 },
             );
+            r.player.hide_parts(e.part_bits);
+            // A gun whose barrel is in a wall is taken off the body, unless the viewer sees where it starts.
+            if let Some(model) = variant
+                .as_deref()
+                .filter(|_| e.eflags & eflags::TURRET == 0)
+                .and_then(|m| self.lib.content.model(m))
+            {
+                r.weapon_hidden = !attach::weapon_visible(
+                    self.boxes.world(),
+                    self.last_eye.map(|v| v.to_array()),
+                    e.number,
+                    r.player.tag_frame(tag, e.origin),
+                    attach::barrel_of(model),
+                );
+            }
             if matches!(
                 e.weapon_state,
                 sim::pm::weapon_state::RELOADING
@@ -2248,6 +2324,8 @@ impl NetPlay {
             "sound": self.sound.report(),
         });
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
+        report["script_model_parts_max"] = self.c.script_model_parts_max.into();
+        report["player_attachments"] = json!(self.c.player_attachments);
         report["gun_speed_given"] = json!(self.c.gun_speed_given);
         report["gun_recoil_max"] = json!(self.c.max_gun_recoil);
         report["gun_sway_max"] = json!(self.c.max_gun_sway);

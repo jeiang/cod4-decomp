@@ -187,6 +187,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             net["script_models_unloaded"]
         ));
     }
+    // The scripts dress each player (`_teams` attaches a head to the body): the models they attached reach the client
+    // and are drawn, not a head the client picked by faction.
+    if num(net, &["players_seen_max"]) >= 1.0
+        && net["player_attachments"]
+            .as_array()
+            .is_none_or(|a| a.is_empty())
+    {
+        failures.push("players were drawn but none carried a model the scripts attached".into());
+    }
     if num(srv, &["script_errors"]) > 0.0 {
         failures.push(format!(
             "{} script runtime errors on the server",
@@ -328,6 +337,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     m.insert("sound.impacts_heard".into(), heard(&["bulletimpact"]));
     m.insert("fx.ragdolls".into(), num(fx, &["ragdolls"]));
     m.insert("client.script_models_drawn".into(), drawn);
+    m.insert(
+        "client.player_attachment_models".into(),
+        net["player_attachments"]
+            .as_array()
+            .map_or(0.0, |a| a.len() as f64),
+    );
     m.insert("fx.quads_max".into(), num(fx, &["quads_max"]));
     m.insert("fx.decals_max".into(), num(fx, &["decals_max"]));
     m.insert("fx.live_elems_max".into(), num(fx, &["live_elems_max"]));
