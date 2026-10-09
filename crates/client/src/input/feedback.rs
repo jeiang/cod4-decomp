@@ -16,6 +16,14 @@ pub struct Seen {
     spawn: Option<u16>,
 }
 
+impl Seen {
+    /// Forgets the event counter: the next [`scan_own`] only learns it. For after the player state was someone
+    /// else's (a followed player, a killcam), whose event ring says nothing about the player's own.
+    pub fn resync_events(&mut self) {
+        self.events = None;
+    }
+}
+
 /// What to tell [`super::Input::apply`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Feedback {
@@ -77,6 +85,8 @@ pub fn scan_own(seen: &mut Seen, ps: &PlayerState) -> Feedback {
         .is_some_and(|n| n != ps.spawn_count)
     {
         fb.stances.push(0);
+        // What the last life left in the ring must not switch the new life's weapon.
+        fb.out_of_ammo = false;
     }
     fb
 }

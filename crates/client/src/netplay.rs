@@ -220,6 +220,8 @@ pub struct NetPlay {
     want_weapon: Option<u16>,
     /// The last primary weapon held (`weaponLatestPrimaryIdx`): where cycling from an item or offhand returns to.
     latest_primary: u16,
+    /// The spawn count last seen on the player's own state: a new life drops the weapon asked for.
+    last_spawn: u16,
     /// The weapon held before an action slot picked another, for the slot's second press.
     before_slot: Option<u16>,
     /// A night-vision slot was pressed: the next command carries the button.
@@ -322,6 +324,7 @@ impl NetPlay {
             last_cmd: Instant::now(),
             want_weapon: None,
             latest_primary: 0,
+            last_spawn: 0,
             before_slot: None,
             nv_press: false,
             own_events: Seen::default(),
@@ -619,6 +622,7 @@ impl NetPlay {
         if snap.follow.is_some() {
             // Watching another player (a killcam or a followed spectator): the snapshot's
             // player state is theirs, so nothing is predicted; draw their view as it came.
+            self.own_events.resync_events();
             let ps = snap.ps.clone();
             self.kick.clear();
             // The followed player's hits turn the view and show on the screen as the player's own would.
@@ -775,7 +779,9 @@ impl NetPlay {
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
         self.hear(dt, eye, &ps, &snap);
-        self.note_latest_primary(ps.weapon as u16);
+        if std::mem::replace(&mut self.last_spawn, ps.spawn_count) != ps.spawn_count {
+            self.want_weapon = None;
+        }
         let mut fb = scan_own(&mut self.own_events, &snap.ps);
         if std::mem::take(&mut fb.out_of_ammo) {
             self.out_of_ammo_change(&snap.ps, &PlayerWeapons::from_words(&snap.inv));
@@ -1067,13 +1073,13 @@ impl NetPlay {
                     self.want_weapon = self.before_slot.filter(|w| inv.has(*w));
                 } else {
                     self.before_slot = Some(cur);
-                    self.want_weapon = Some(param);
+                    self.select_weapon(param);
                 }
             }
             at::ALT_MODE => {
                 let alt = self.weapons.info(cur).alt_weapon;
                 if alt != 0 && inv.has(alt) {
-                    self.want_weapon = Some(alt);
+                    self.select_weapon(alt);
                 }
             }
             at::NIGHT_VISION => self.nv_press = true,
@@ -1149,10 +1155,9 @@ impl NetPlay {
             .content
             .weapon(self.weapons.name(held))
             .is_some_and(|d| d.cancel_auto_holster_when_empty != 0);
-        if !alive(ps) || held != 0 && stays {
-            return;
-        }
-        if let Some(w) = inv.out_of_ammo_target(&self.weapons, held, self.latest_primary) {
+        if let Some(w) =
+            inv.out_of_ammo_target(&self.weapons, alive(ps), held, stays, self.latest_primary)
+        {
             self.select_weapon(w);
         }
     }

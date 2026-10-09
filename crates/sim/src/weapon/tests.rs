@@ -386,13 +386,13 @@ fn manual_cycling_selects_empty_weapons_but_the_out_of_ammo_path_skips_them() {
     assert_eq!(s.inv.cycle_primary(&s.table, de, 0, true, false), Some(m4));
     assert_eq!(s.inv.cycle_primary(&s.table, de, 0, true, true), None);
     assert_eq!(
-        s.inv.out_of_ammo_target(&s.table, ak, 0),
+        s.inv.out_of_ammo_target(&s.table, true, ak, false, 0),
         Some(de),
         "the empty rifle gives way to the sidearm that has rounds"
     );
     s.inv.set_clip(&s.table, de, 0);
     s.inv.set_stock(&s.table, de, 0);
-    assert_eq!(s.inv.out_of_ammo_target(&s.table, ak, 0), None);
+    assert_eq!(s.inv.out_of_ammo_target(&s.table, true, ak, false, 0), None);
 }
 
 #[test]
@@ -403,7 +403,10 @@ fn cycling_from_an_offhand_returns_to_the_latest_primary() {
         s.inv.cycle_primary(&s.table, frag, m4, true, false),
         Some(m4)
     );
-    assert_eq!(s.inv.out_of_ammo_target(&s.table, 0, m4), Some(m4));
+    assert_eq!(
+        s.inv.out_of_ammo_target(&s.table, true, 0, false, m4),
+        Some(m4)
+    );
 }
 
 #[test]
@@ -425,4 +428,50 @@ fn cycling_toggles_an_alt_mode_and_the_alt_remembers_its_primary() {
     assert_eq!(PlayerWeapons::latest_primary_of(&s.table, gl), m4);
     assert_eq!(PlayerWeapons::latest_primary_of(&s.table, m4), m4);
     assert_eq!(PlayerWeapons::latest_primary_of(&s.table, 0), 0);
+}
+
+#[test]
+fn running_dry_stays_put_when_dead_or_when_the_weapon_stays_up() {
+    let mut s = cycling();
+    let (ak, de) = (s.idx("ak47_mp"), s.idx("deserteagle_mp"));
+    s.inv.set_clip(&s.table, ak, 0);
+    s.inv.set_stock(&s.table, ak, 0);
+    let go = |alive, held, stays, latest| {
+        s.inv
+            .out_of_ammo_target(&s.table, alive, held, stays, latest)
+    };
+    assert_eq!(go(true, ak, false, 0), Some(de));
+    assert_eq!(
+        go(false, ak, false, 0),
+        None,
+        "the dead keep what they hold"
+    );
+    assert_eq!(
+        go(true, ak, true, 0),
+        None,
+        "cancelAutoHolsterWhenEmpty stays up"
+    );
+    assert_eq!(
+        go(true, 0, true, ak),
+        Some(ak),
+        "nothing in hand raises the latest primary"
+    );
+    assert_eq!(go(false, 0, false, ak), None);
+}
+
+#[test]
+fn an_alt_mode_without_its_original_raises_nothing() {
+    let mut gl = rifle("gl_mp", "gl");
+    gl.inventory_type = InventoryType::AltMode;
+    let mut m4 = rifle("m4_gl_mp", "ar");
+    m4.alt_weapon_name = "gl_mp".into();
+    let s = Setup::new(vec![m4, gl, rifle("deserteagle_mp", "pistol")]);
+    let mut inv = PlayerWeapons::new();
+    let mut ps = PlayerState::default();
+    inv.give_raw(&s.table, &mut ps, s.idx("gl_mp"), 0);
+    assert!(inv.has(s.idx("gl_mp")) && !inv.has(s.idx("m4_gl_mp")));
+    assert_eq!(
+        inv.cycle_primary(&s.table, s.idx("gl_mp"), 0, true, false),
+        Some(0)
+    );
 }

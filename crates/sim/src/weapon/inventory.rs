@@ -202,7 +202,14 @@ impl PlayerWeapons {
         }
         let held = table.info(current);
         match held.inventory_type {
-            InventoryType::AltMode => return self.has(held.alt_weapon).then_some(held.alt_weapon),
+            // `VerifyPlayerAltModeWeapon`: an alt mode without its original raises nothing (0).
+            InventoryType::AltMode => {
+                return Some(if self.has(held.alt_weapon) {
+                    held.alt_weapon
+                } else {
+                    0
+                });
+            }
             InventoryType::Primary => {}
             _ if self.has(latest) => return Some(latest),
             _ => {}
@@ -227,13 +234,25 @@ impl PlayerWeapons {
         }
     }
 
-    /// What `CG_OutOfAmmoChange` raises when the weapon in hand `held` has nothing left, or none to stay put. The
-    /// caller has already excluded the dead and the weapons that stay up when empty (`cancelAutoHolsterWhenEmpty`).
-    pub fn out_of_ammo_target(&self, table: &WeaponTable, held: u16, latest: u16) -> Option<u16> {
+    /// What `CG_OutOfAmmoChange` raises when the weapon in hand `held` has nothing left; `Some(0)` raises nothing, none
+    /// stays put. The dead and the weapons that stay up when empty (`stays`, `cancelAutoHolsterWhenEmpty`) stay put.
+    pub fn out_of_ammo_target(
+        &self,
+        table: &WeaponTable,
+        alive: bool,
+        held: u16,
+        stays: bool,
+        latest: u16,
+    ) -> Option<u16> {
+        if !alive {
+            return None;
+        }
         if held == 0 && self.has(latest) {
             return Some(latest);
         }
-        // An alt mode toggles to its other mode, empty or not.
+        if held != 0 && stays {
+            return None;
+        }
         self.cycle_primary(table, held, latest, true, true)
     }
 
