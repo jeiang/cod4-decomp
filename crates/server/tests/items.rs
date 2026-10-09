@@ -494,7 +494,7 @@ fn using_a_weapon_with_both_primaries_full_swaps_it_for_the_one_in_hand_alt_mode
 }
 
 #[test]
-fn walking_over_a_weapon_in_a_player_frame_feeds_the_owned_one() {
+fn walking_over_a_weapon_in_the_frame_feeds_the_owned_one() {
     let (mut g, mut vm) = arena();
     let a = add_player(&mut g, &mut vm, [0.0; 3], Team::Allies);
     let ak = give(&mut g, a, "ak47_mp");
@@ -518,6 +518,7 @@ fn walking_over_a_weapon_in_a_player_frame_feeds_the_owned_one() {
         ..UserCmd::default()
     };
     g.client_think(&mut vm, a, cmd);
+    g.touch_triggers(&mut vm, a);
     let c = g.client(a).unwrap();
     assert_eq!(c.inv.stock(&g.weapons, ak), 50);
     assert!(g.ent(item).is_none(), "the weapon on the floor was used up");

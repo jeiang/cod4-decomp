@@ -32,7 +32,7 @@ use net::predict::{Env, PlayerBoxes, Predictor};
 use render::ModelInstance;
 use serde_json::{Value, json};
 use server::netsv::eflags;
-use server::playeranim::{PlayerPoseInput, TorsoWire};
+use server::playeranim::{LegsWire, PlayerPoseInput, TorsoWire};
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
 use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
@@ -49,6 +49,19 @@ const CMD_INTERVAL: Duration = Duration::from_millis(8);
 const SCORES_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
+
+/// Whether `spawn` starts a life the client has not seen yet (the first snapshot counts), remembering it in `last`.
+fn new_life(last: &mut Option<u16>, spawn: u16) -> bool {
+    last.replace(spawn) != Some(spawn)
+}
+
+/// Alive in the world: the weapon switching of the original (`pm_type < PM_DEAD`) leaves spectators and the dead alone.
+fn alive(ps: &PlayerState) -> bool {
+    matches!(
+        ps.pm_type,
+        PmType::Normal | PmType::NormalLinked | PmType::LastStand
+    )
+}
 
 /// The field of view the original forces for a turret user (55) and for the intermission (90), whatever the weapon
 /// (`CG_GetViewFov`).
@@ -212,6 +225,10 @@ pub struct NetPlay {
     cmd_time: i32,
     last_cmd: Instant,
     want_weapon: Option<u16>,
+    /// The last primary weapon held (`weaponLatestPrimaryIdx`): where cycling from an item or offhand returns to.
+    latest_primary: u16,
+    /// The spawn count last seen on the player's own state: a new life drops the weapon asked for.
+    last_spawn: Option<u16>,
     /// The weapon held before an action slot picked another, for the slot's second press.
     before_slot: Option<u16>,
     /// A night-vision slot was pressed: the next command carries the button.
@@ -313,6 +330,8 @@ impl NetPlay {
             cmd_time: 0,
             last_cmd: Instant::now(),
             want_weapon: None,
+            latest_primary: 0,
+            last_spawn: None,
             before_slot: None,
             nv_press: false,
             own_events: Seen::default(),
@@ -472,6 +491,8 @@ impl NetPlay {
         self.pred = Predictor::default();
         self.cmd_time = 0;
         self.want_weapon = None;
+        self.latest_primary = 0;
+        self.last_spawn = None;
         self.remotes.clear();
         self.vm = None;
         self.events = Events::default();
@@ -609,6 +630,7 @@ impl NetPlay {
         if snap.follow.is_some() {
             // Watching another player (a killcam or a followed spectator): the snapshot's
             // player state is theirs, so nothing is predicted; draw their view as it came.
+            self.own_events.resync_events();
             let ps = snap.ps.clone();
             self.kick.clear();
             // The followed player's hits turn the view and show on the screen as the player's own would.
@@ -766,8 +788,16 @@ impl NetPlay {
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
         self.hear(dt, eye, &ps, &snap);
-        self.feedback
-            .merge(scan_own(&mut self.own_events, &snap.ps));
+        if new_life(&mut self.last_spawn, ps.spawn_count) {
+            // `CG_Respawn`: the weapon in hand is the selected one.
+            self.want_weapon = None;
+            self.note_latest_primary(ps.weapon as u16);
+        }
+        let mut fb = scan_own(&mut self.own_events, &snap.ps);
+        if std::mem::take(&mut fb.out_of_ammo) {
+            self.out_of_ammo_change(&snap.ps, &PlayerWeapons::from_words(&snap.inv));
+        }
+        self.feedback.merge(fb);
 
         let (events, commands) = self.take_events(&snap);
         let look = self.look.frame(st);
@@ -1055,13 +1085,13 @@ impl NetPlay {
                     self.want_weapon = self.before_slot.filter(|w| inv.has(*w));
                 } else {
                     self.before_slot = Some(cur);
-                    self.want_weapon = Some(param);
+                    self.select_weapon(param);
                 }
             }
             at::ALT_MODE => {
                 let alt = self.weapons.info(cur).alt_weapon;
                 if alt != 0 && inv.has(alt) {
-                    self.want_weapon = Some(alt);
+                    self.select_weapon(alt);
                 }
             }
             at::NIGHT_VISION => self.nv_press = true,
@@ -1085,20 +1115,62 @@ impl NetPlay {
             self.draw_vehicles = arg.trim() != "0";
             return;
         }
-        let step: i32 = match cmd {
-            "weapnext" => 1,
-            "weapprev" => -1,
+        let forward = match cmd {
+            "weapnext" => true,
+            "weapprev" => false,
             _ => return,
         };
         let Some(snap) = self.net.latest() else {
             return;
         };
+        // `WeaponCycleAllowed`, `CycleWeapPrimary`: not while dead, frozen or with the weapons disabled.
+        let ps = &snap.ps;
+        if !alive(ps)
+            || ps.pm_flags & pmf::FROZEN != 0
+            || ps.weapon_flags & sim::pm::wf::DISABLED != 0
+        {
+            return;
+        }
         let inv = PlayerWeapons::from_words(&snap.inv);
-        let list: Vec<u16> = inv.list(&self.weapons).collect();
-        let cur = self.want_weapon.unwrap_or_else(|| inv.selected());
-        if let Some(i) = list.iter().position(|w| *w == cur) {
-            let n = list.len() as i32;
-            self.want_weapon = Some(list[(i as i32 + step).rem_euclid(n) as usize]);
+        let cur = self.selected_weapon(&inv, ps);
+        if let Some(w) = inv.cycle_primary(&self.weapons, cur, self.latest_primary, forward, false)
+        {
+            self.select_weapon(w);
+        }
+    }
+
+    /// The weapon the player has asked for, else the one the scripts did, else the one in hand.
+    fn selected_weapon(&self, inv: &PlayerWeapons, ps: &PlayerState) -> u16 {
+        self.want_weapon.unwrap_or(match inv.selected() {
+            0 => ps.weapon as u16,
+            w => w,
+        })
+    }
+
+    fn select_weapon(&mut self, w: u16) {
+        self.want_weapon = Some(w);
+        self.note_latest_primary(w);
+    }
+
+    fn note_latest_primary(&mut self, w: u16) {
+        let primary = PlayerWeapons::latest_primary_of(&self.weapons, w);
+        if primary != 0 {
+            self.latest_primary = primary;
+        }
+    }
+
+    /// `CG_OutOfAmmoChange`: the weapon in hand ran dry, so raise another unless it is one that stays up when empty.
+    fn out_of_ammo_change(&mut self, ps: &PlayerState, inv: &PlayerWeapons) {
+        let held = ps.weapon as u16;
+        let stays = self
+            .lib
+            .content
+            .weapon(self.weapons.name(held))
+            .is_some_and(|d| d.cancel_auto_holster_when_empty != 0);
+        if let Some(w) =
+            inv.out_of_ammo_target(&self.weapons, alive(ps), held, stays, self.latest_primary)
+        {
+            self.select_weapon(w);
         }
     }
 
@@ -1399,8 +1471,10 @@ impl NetPlay {
                 .get(e.weapon)
                 .and_then(|i| self.lib.content.weapon(&i.name))
                 .cloned();
+            // A gunner on a turret holds nothing: the weapon leaves the body.
             let held = weapon
                 .as_ref()
+                .filter(|_| e.eflags & eflags::TURRET == 0)
                 .and_then(|w| w.world_models.first().cloned().flatten())
                 .and_then(|m| m.name.as_deref().map(str::to_owned));
             // The body the scripts gave the player; failing that, the stock body of the team's faction.
@@ -1626,6 +1700,11 @@ fn pose_input(
         cap: e.torso_cap,
         seq: e.torso_seq,
     });
+    i.legs_wire = Some(LegsWire {
+        clip: e.legs_clip,
+        seq: e.legs_seq,
+    });
+    i.seed = u32::from(e.event_seq) << 16 | u32::from(e.damage_duration);
     i
 }
 
@@ -1813,6 +1892,18 @@ fn follow_server_turn(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_first_snapshot_and_every_respawn_start_a_life() {
+        let mut last = None;
+        assert!(
+            new_life(&mut last, 0),
+            "the first snapshot, even with spawn count 0"
+        );
+        assert!(!new_life(&mut last, 0));
+        assert!(new_life(&mut last, 1));
+        assert!(!new_life(&mut last, 1));
+    }
+
     use super::*;
 
     fn remote(f: impl FnOnce(&mut EntityState)) -> PlayerPoseInput {

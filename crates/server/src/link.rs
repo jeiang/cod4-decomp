@@ -78,6 +78,13 @@ pub struct EntExtra {
     pub physics_launch: Option<(Vec3, Vec3)>,
     /// `spawnplane`: the player the plane belongs to; the clients mark it on the compass.
     pub plane_owner: Option<u16>,
+    /// `trigger_hurt`: not hurting (`START_OFF`, a spent `ONCE`, or toggled by `useby`) and the level
+    /// time before which it hurts nobody again (`item[0].index`).
+    pub hurt_off: bool,
+    pub hurt_next: i32,
+    /// `trigger_damage`: `accumulate` and `threshold` of the map.
+    pub damage_accumulate: i32,
+    pub damage_threshold: i32,
 }
 
 impl Default for EntExtra {
@@ -95,6 +102,10 @@ impl Default for EntExtra {
             ragdoll: false,
             physics_launch: None,
             plane_owner: None,
+            hurt_off: false,
+            hurt_next: 0,
+            damage_accumulate: 0,
+            damage_threshold: 0,
         }
     }
 }

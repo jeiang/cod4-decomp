@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Rocket destabilisation, attractors and repulsors, water splash and explosion depth, and glass penetration translated in part from KisakCOD (game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Grenades and rockets (`ET_MISSILE`): `G_FireGrenade`, `G_FireRocket`, `G_RunMissile`,
 //! `MissileImpact`, `BounceMissile` and `G_ExplodeMissile`, plus the dropped weapons that fall
 //! to the floor.
@@ -10,10 +11,12 @@
 //! and the entity is freed.
 //!
 //! Guided missiles (`guidedMissileType` 1 to 3) steer toward the target a script gave them with
-//! `missile_settarget`. Ceilings: attractors and repulsors, the top-attack flight mode (no
-//! multiplayer script can select it), rocket destabilisation, water splashes, `trigger_damage` volumes touched by grenades, glass
-//! entities are not simulated; impact and explosion effects and sounds
-//! belong to the clients.
+//! `missile_settarget`. An unguided rocket that flies far enough destabilises: its heading drifts in random
+//! course changes, bent toward the attractors and away from the repulsors scripts placed. A missile crossing
+//! water splashes, one blowing up deeper under it than `missileWaterMaxDepth` makes no explosion event, and a
+//! damageable glass entity is hurt and flown through. Ceilings: the top-attack flight mode (no multiplayer
+//! script can select it) and `trigger_damage` volumes touched by grenades are not simulated; impact and
+//! explosion effects and sounds belong to the clients.
 
 use gsc::{Value, Vm};
 use sim::Vec3;
@@ -24,7 +27,8 @@ use sim::traj::{TrType, Trajectory};
 use sim::weapon::{OffhandClass, ProjExplosion, WeaponInfo, WeaponType};
 
 use crate::bullet::{
-    SURF_SKY, SURF_TYPE_FLESH, ShotTrace, dot, length, lerp, mad, normalized, sub, surface_type,
+    SURF_SKY, SURF_TYPE_FLESH, SURF_TYPE_WATER, ShotTrace, dot, length, lerp, mad, normalized, sub,
+    surface_type,
 };
 use crate::client::Team;
 use crate::combat::{
@@ -39,6 +43,12 @@ pub const MISSILE_CLIPMASK: i32 = 0x0280_6891;
 const GRENADE_CONTENTS: i32 = 0x2100;
 /// `FL_GRENADE_TOUCH_DAMAGE`.
 pub const FL_GRENADE_TOUCH_DAMAGE: i32 = 0x4000;
+/// `FL_MISSILE_DESTABILIZED`: the rocket has begun its random course changes.
+const FL_MISSILE_DESTABILIZED: i32 = 0x1_0000;
+/// `FL_STABLE_MISSILES`: the rocket never destabilises.
+pub const FL_STABLE_MISSILES: i32 = 0x2_0000;
+/// `SURF_TYPE_GLASS`.
+const SURF_TYPE_GLASS: usize = 9;
 /// `MOD_EXPLOSIVE`, the splash of a heavy explosive on the grenade handler.
 const MOD_EXPLOSIVE: u8 = 14;
 const MOD_IMPACT: u8 = 15;
@@ -95,7 +105,10 @@ pub struct Missile {
     /// `groundEntityNum`: what the missile rests on.
     pub ground: Option<u16>,
     pub clipmask: i32,
+    /// `missile.curvature`: a curving rocket's sideways drift, then (once destabilised) its heading change per frame.
     pub curvature: Vec3,
+    /// `missile.time`: milliseconds after `pos.time` the rocket destabilises, then the time between course changes.
+    pub destabilize_ms: i32,
     pub spawn_time: i32,
     /// `time_to_accelerate` of the weapon, `rotate` of the grenade.
     pub time_to_accelerate: f32,
@@ -121,8 +134,8 @@ const GUIDED_JAVELIN: i32 = 3;
 const HELLFIRE_MAX_SLOPE: f32 = 0.5;
 const HELLFIRE_UP_ACCEL: f32 = 1000.0;
 
-/// The javelin's tuning dvars (`missileJav*`), with the defaults the multiplayer binary registers.
-pub const JAVELIN_CVARS: &[(&str, &str)] = &[
+/// The missile tuning dvars (`missileJav*`, `missileWaterMaxDepth`), with the defaults the multiplayer binary registers.
+pub const MISSILE_CVARS: &[(&str, &str)] = &[
     ("missileJavClimbHeightDirect", "10000"),
     ("missileJavClimbAngleDirect", "85"),
     ("missileJavClimbCeilingDirect", "0"),
@@ -133,6 +146,7 @@ pub const JAVELIN_CVARS: &[(&str, &str)] = &[
     ("missileJavSpeedLimitDescend", "6000"),
     ("missileJavTurnDecel", "0.05"),
     ("missileJavClimbToOwner", "700"),
+    ("missileWaterMaxDepth", "60"),
 ];
 
 /// `VecToQuat`: the orientation looking along `dir`, as `[x, y, z, w]`.
@@ -388,6 +402,7 @@ impl Game {
             ground: None,
             clipmask: MISSILE_CLIPMASK,
             curvature: [0.0; 3],
+            destabilize_ms: 0,
             spawn_time: now,
             time_to_accelerate: 0.0,
             stage: JavelinStage::SoftLaunch,
@@ -461,7 +476,9 @@ impl Game {
             let (s, c) = math::sincos_deg(theta);
             curvature = mad(mad([0.0; 3], r * c, right), r * s, up);
         }
+        let mut apos = Trajectory::stationary(angles);
         if info.guided_missile_type != 0 {
+            apos.kind = TrType::Interpolate;
             pos.kind = TrType::Interpolate;
             pos.duration = 0;
             if info.guided_missile_type == GUIDED_JAVELIN {
@@ -471,6 +488,18 @@ impl Game {
             }
         }
         let life = ((info.proj_lifetime * 1000.0) as i32).min(60_000);
+        let destabilize_ms = if speed > 0.0 {
+            (info.destabilize_distance as f32 / speed * 1000.0) as i32
+        } else {
+            0
+        };
+        // A rocket with no `destabilizationRateTime` is stable, as is one fired by a stable parent.
+        let parent_flags = self.ent(parent).map_or(0, |p| p.flags);
+        e.flags |= if info.destabilization_rate_time == 0.0 {
+            FL_STABLE_MISSILES
+        } else {
+            parent_flags & FL_STABLE_MISSILES
+        };
         // A vehicle's missiles belong to the team of the player it was called in for.
         let credit = self
             .ent(parent)
@@ -483,7 +512,7 @@ impl Game {
             parent: Some(parent),
             team,
             pos,
-            apos: Trajectory::stationary(angles),
+            apos,
             bounces: false,
             next_think: now + life,
             launch_time: now + no_draw_time(speed),
@@ -493,6 +522,7 @@ impl Game {
             ground: None,
             clipmask: MISSILE_CLIPMASK,
             curvature,
+            destabilize_ms,
             spawn_time: now,
             time_to_accelerate: tta,
             stage: JavelinStage::SoftLaunch,
@@ -540,12 +570,233 @@ impl Game {
 
     /// A trace the way missiles fly: a point, ignoring the thrower and what it owns.
     fn missile_trace(&self, m: &Missile, owner: u16, start: Vec3, end: Vec3) -> ShotTrace {
-        let mut t = self.shot_trace(start, end, owner, ENTITYNUM_NONE, m.clipmask, false);
+        self.missile_trace_mask(m.clipmask, owner, start, end)
+    }
+
+    fn missile_trace_mask(&self, mask: i32, owner: u16, start: Vec3, end: Vec3) -> ShotTrace {
+        let mut t = self.shot_trace(start, end, owner, ENTITYNUM_NONE, mask, false);
         if t.start_solid {
             t.fraction = 0.0;
             t.normal = normalized(sub(start, end));
         }
         t
+    }
+
+    fn in_water(&self, p: Vec3) -> bool {
+        use sim::cm::Collide;
+        self.world
+            .as_ref()
+            .is_some_and(|w| w.point_contents(p, ENTITYNUM_NONE, contents::WATER) != 0)
+    }
+
+    /// The trace of one frame of flight. A missile falling or climbing fast splashes where it crosses the surface
+    /// of water (the splash is the bounce event on water) and flies on through; one already in the water, or flying
+    /// level, does not see it.
+    fn flight_trace(&mut self, m: &Missile, owner: u16, start: Vec3, end: Vec3) -> ShotTrace {
+        let through = if m.pos.delta[2].abs() <= 30.0 || self.in_water(start) {
+            m.clipmask
+        } else {
+            m.clipmask | contents::WATER
+        };
+        let tr = self.missile_trace_mask(through, owner, start, end);
+        if surface_type(tr.surface_flags) != SURF_TYPE_WATER {
+            return tr;
+        }
+        self.missile_bounce_event(m, start, tr.normal, SURF_TYPE_WATER);
+        self.missile_trace(m, owner, start, end)
+    }
+
+    /// `EV_GRENADE_BOUNCE`: a bounce, or a splash, for the clients to show.
+    fn missile_bounce_event(&mut self, m: &Missile, origin: Vec3, normal: Vec3, surface: usize) {
+        let now = self.level.time;
+        let (weapon, owner) = (m.weapon, m.parent.unwrap_or(1023));
+        self.tempev
+            .add(now, crate::tempev::ev::MISSILE_BOUNCE, |s| {
+                s.origin = origin;
+                s.angles = crate::tempev::dir_to_angles(normal);
+                s.event_parm = surface as u8;
+                s.weapon = weapon;
+                s.client = owner;
+            });
+    }
+
+    /// `Missile_PenetrateGlass`: a missile that strikes a damageable entity of glass hurts it (`MOD_IMPACT`) and
+    /// flies on through it; glass that belongs to the map stops it like any wall.
+    fn penetrate_glass(
+        &mut self,
+        vm: &mut Vm,
+        n: u16,
+        m: &Missile,
+        tr: &mut ShotTrace,
+        (owner, start, end): (u16, Vec3, Vec3),
+    ) {
+        let glass = tr.hit;
+        let velocity = m.pos.evaluate_delta(self.level.time);
+        if glass >= ENTITYNUM_WORLD
+            || !self.ent(glass).is_some_and(|e| e.takedamage)
+            || m.info.damage == 0
+            || dot(velocity, velocity) < 1.0
+        {
+            return;
+        }
+        let mut d = Damage::new(m.info.damage, MOD_IMPACT);
+        d.inflictor = Some(n);
+        d.attacker = (owner != ENTITYNUM_NONE).then_some(owner);
+        d.dir = Some(velocity);
+        d.point = self.ent(n).map(|e| e.origin);
+        d.weapon = u32::from(m.weapon);
+        d.hitloc = tr.hitloc;
+        self.g_damage(vm, glass, d);
+        // Look again with the pane out of the way.
+        let Some(e) = self.ent_mut(glass) else { return };
+        let contents = std::mem::take(&mut e.contents);
+        self.relink(glass);
+        *tr = self.missile_trace(m, owner, start, end);
+        if let Some(e) = self.ent_mut(glass) {
+            e.contents = contents;
+            self.relink(glass);
+        }
+    }
+
+    /// `RunMissile_Destabilize`: after `destabilize_distance` of flight an unguided rocket's heading starts to drift,
+    /// by an angular rate it draws at random every `destabilizationRateTime`, and attractors and repulsors bend it.
+    fn destabilize(&mut self, n: u16, m: &mut Missile) {
+        let now = self.level.time;
+        let Some(e) = self.ent(n) else { return };
+        let (origin, started) = (e.origin, e.flags & FL_MISSILE_DESTABILIZED != 0);
+        if m.pos.time + m.destabilize_ms >= now {
+            if !started {
+                return;
+            }
+        } else {
+            let max = m.info.destabilization_curvature_max;
+            m.curvature = if started {
+                // Later changes keep turning the same way round as the last.
+                let mut rate = [0.0; 3].map(|_| self.flrand(0.0, 1.0) * max);
+                if m.curvature[1] < 0.0 {
+                    rate[0] = -rate[0];
+                }
+                if m.curvature[0] > 0.0 {
+                    rate[1] = -rate[1];
+                }
+                rate
+            } else {
+                [0.0; 3].map(|_| self.flrand(-1.0, 1.0) * max)
+            };
+            m.pos.time = now;
+            m.destabilize_ms = (m.info.destabilization_rate_time * 1000.0) as i32;
+            if let Some(e) = self.ent_mut(n) {
+                e.flags |= FL_MISSILE_DESTABILIZED;
+            }
+        }
+        let angles = mad(m.apos.base, 0.05, m.curvature);
+        m.apos.base = angles;
+        m.apos.kind = TrType::Interpolate;
+        if let Some(e) = self.ent_mut(n) {
+            e.angles = angles;
+        }
+        let heading = math::angle_vectors(&angles).0;
+        m.pos.delta = mad([0.0; 3], m.info.projectile_speed as f32, heading);
+        m.pos.base = origin;
+        m.pos.kind = TrType::Interpolate;
+        self.apply_attractors(m, 0.05);
+    }
+
+    /// `Missile_ApplyAttractorsRepulsors`: every slot in front of the missile and within its `maxDist` pulls the
+    /// heading sideways toward it (an attractor, no more than the sideways speed that would take the missile there)
+    /// or pushes it away (a repulsor), more the nearer it is and the more nearly it lies along the flight line.
+    fn apply_attractors(&self, m: &mut Missile, dt: f32) {
+        let speed = length(m.pos.delta);
+        if speed < 1e-5 {
+            return;
+        }
+        let forward = mad([0.0; 3], 1.0 / speed, m.pos.delta);
+        let mut push = [0.0f32; 3];
+        for i in 0..Attractors::MAX {
+            let Some(a) = self.attractors.get(i) else {
+                continue;
+            };
+            let at = a
+                .entity
+                .and_then(|n| self.ent(n))
+                .map_or(a.origin, |e| e.origin);
+            let delta = sub(at, m.pos.base);
+            let ahead = dot(delta, forward);
+            if ahead <= 0.0 {
+                continue;
+            }
+            let aside = mad(delta, -ahead, forward);
+            let mut aside_dist = length(aside);
+            let mut aside_dir = if aside_dist < 1e-5 {
+                [0.0; 3]
+            } else {
+                mad([0.0; 3], 1.0 / aside_dist, aside)
+            };
+            if aside_dist < 1e-5 {
+                if a.attractor {
+                    continue;
+                }
+                aside_dir = [0.0, 0.0, -1.0];
+            }
+            if !a.attractor && aside_dir[2] > 0.0 {
+                aside_dir = [0.0, 0.0, -1.0];
+                aside_dist = 0.0;
+            }
+            let total = length(delta);
+            if a.max_dist < total {
+                continue;
+            }
+            let mut force = (1.0 - total / a.max_dist) * a.strength;
+            // Of the way round to facing it: 0 straight ahead, 1 at right angles.
+            let angle = (aside_dist.abs() / ahead).atan() * (2.0 / std::f32::consts::PI);
+            force *= if a.attractor { angle } else { angle - 1.0 };
+            if a.attractor {
+                let max_correcting_accel =
+                    m.info.projectile_speed as f32 * aside_dist / ahead * 20.0;
+                if force - max_correcting_accel >= 0.0 {
+                    force = max_correcting_accel;
+                }
+            }
+            push = mad(push, force, aside_dir);
+        }
+        if push != [0.0; 3] {
+            let heading = normalized(mad(m.pos.delta, dt, push));
+            m.pos.delta = mad([0.0; 3], m.info.projectile_speed as f32, heading);
+            m.apos.base = [
+                math::vec_to_pitch(&heading),
+                math::vec_to_yaw(&heading),
+                0.0,
+            ];
+        }
+    }
+
+    /// Where a missile that goes off at `origin` shows its explosion. Under water it is on the surface, with the
+    /// water's normal; deeper under than `missileWaterMaxDepth` there is none (`None`).
+    fn explosion_site(
+        &self,
+        n: u16,
+        origin: Vec3,
+        normal: Vec3,
+        surface: u8,
+    ) -> Option<(Vec3, Vec3, u8)> {
+        use sim::cm::Collide;
+        if !self.in_water(origin) {
+            return Some((origin, normal, surface));
+        }
+        let top = [
+            origin[0],
+            origin[1],
+            origin[2] + self.cvars.float("missileWaterMaxDepth"),
+        ];
+        let w = self.world.as_ref()?;
+        let t = w.trace(top, origin, [0.0; 3], [0.0; 3], n, contents::WATER);
+        (!t.start_solid && t.fraction < 1.0).then(|| {
+            (
+                lerp(top, origin, t.fraction),
+                t.normal,
+                SURF_TYPE_WATER as u8,
+            )
+        })
     }
 
     /// `MissileIsReadyForSteering`: the motor has finished spooling up.
@@ -787,7 +1038,7 @@ impl Game {
                     m.pos.delta = mad(m.pos.delta, speed - forward, dir);
                 }
             }
-            if m.curvature != [0.0; 3] {
+            if m.info.projectile_curvature > 0.0 {
                 m.pos.delta = mad(m.pos.delta, dt, m.curvature);
             }
             let origin = self.ent(n).map_or(m.pos.base, |e| e.origin);
@@ -800,17 +1051,20 @@ impl Game {
                 m.pos.base = mad(m.pos.base, dt, m.pos.delta);
                 m.pos.base
             };
-            if m.info.guided_missile_type != 0
+            if m.apos.kind == TrType::Interpolate
                 && Self::ready_for_steering(m, now)
                 && length(m.pos.delta) > 1.0
-                && let Some(e) = self.ent_mut(n)
             {
-                // A guided rocket points where it flies.
-                e.angles = [
+                // A rocket that steers or has destabilised points where it flies.
+                let angles = [
                     math::vec_to_pitch(&m.pos.delta),
                     math::vec_to_yaw(&m.pos.delta),
                     0.0,
                 ];
+                m.apos.base = angles;
+                if let Some(e) = self.ent_mut(n) {
+                    e.angles = angles;
+                }
             }
             next
         } else {
@@ -862,7 +1116,10 @@ impl Game {
             self.missile_think(vm, n, m);
             return;
         }
-        let mut tr = self.missile_trace(m, owner, origin, next);
+        let mut tr = self.flight_trace(m, owner, origin, next);
+        if surface_type(tr.surface_flags) == SURF_TYPE_GLASS {
+            self.penetrate_glass(vm, n, m, &mut tr, (owner, origin, next));
+        }
         let mut endpos = lerp(origin, next, tr.fraction);
         origin = endpos;
         if m.bounces {
@@ -899,9 +1156,20 @@ impl Game {
         if m.info.projectile_activate_dist > 0 {
             m.travel_dist += length(sub(endpos, old));
         }
+        if m.kind == MissileKind::Grenade {
+            self.grenade_touch_trigger_damage(vm, n, old, origin, m.info.explosion_inner_damage);
+        }
         if tr.fraction == 1.0 {
             if length(m.pos.delta) != 0.0 {
                 m.ground = None;
+                let flags = self.ent(n).map_or(0, |e| e.flags);
+                if m.kind == MissileKind::Rocket
+                    && m.info.weap_type == WeaponType::Projectile
+                    && m.info.guided_missile_type == 0
+                    && flags & FL_STABLE_MISSILES == 0
+                {
+                    self.destabilize(n, m);
+                }
             }
             self.missile_think(vm, n, m);
             return;
@@ -955,7 +1223,10 @@ impl Game {
         } else {
             m.surface_normal
         };
-        self.explosion_event(m, origin, normal, m.surface);
+        // Under water the explosion shows on the surface; too deep under it, not at all.
+        if let Some((at, normal, surface)) = self.explosion_site(n, origin, normal, m.surface) {
+            self.explosion_event(m, at, normal, surface);
+        }
         if m.info.explosion_inner_damage != 0 {
             self.missile_blast(vm, n, m, origin, math::angle_vectors(&angles).0, None);
         }
@@ -1039,6 +1310,7 @@ impl Game {
                 inflictor: Some(n),
                 cone,
                 ignore,
+                skip_clients: false,
                 mean: m.kind.splash_mean(info),
                 weapon: u32::from(m.weapon),
             },
@@ -1144,6 +1416,11 @@ impl Game {
                 }
             }
         }
+        if damage != 0 {
+            let origin = self.ent(n).map_or(endpos, |e| e.origin);
+            let by = owner.unwrap_or(ENTITYNUM_WORLD);
+            self.check_hit_trigger_damage(vm, by, origin, endpos, damage, mean);
+        }
         self.missile_set_pose(n, endpos, None);
         if explode_on_impact
             && m.info.explosion_inner_damage != 0
@@ -1186,16 +1463,8 @@ impl Game {
             m.ground = Some(tr.hit);
         }
         let origin = self.ent(n).map_or([0.0; 3], |e| e.origin);
-        let (weapon, owner) = (m.weapon, m.parent.unwrap_or(1023));
         m.surface = surf as u8;
-        self.tempev
-            .add(now, crate::tempev::ev::MISSILE_BOUNCE, |s| {
-                s.origin = origin;
-                s.angles = crate::tempev::dir_to_angles(tr.normal);
-                s.event_parm = surf as u8;
-                s.weapon = weapon;
-                s.client = owner;
-            });
+        self.missile_bounce_event(m, origin, tr.normal, surf);
         if m.bounces {
             let speed = length(velocity);
             if speed > 0.0 && d <= 0.0 {

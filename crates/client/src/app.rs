@@ -1580,6 +1580,7 @@ impl Viewer {
             "screenshot": st.shot_ok.then_some("screenshot.png"),
             "zone_load_ms": self.load_ms,
             "world": {"surfaces_drawn_p50": drawn.get(drawn.len() / 2)},
+            "showcase": st.showcase.as_ref().map(Showcase::report),
             "notes": st.notes,
         });
         std::fs::write(

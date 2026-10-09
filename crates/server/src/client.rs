@@ -19,7 +19,7 @@ use sim::pm::{self, PLAYER_MAXS, PLAYER_MINS, PlayerState, PmType, UserCmd, ev, 
 use sim::weapon::{OffhandClass, PlayerWeapons};
 
 use crate::bot::Brain;
-use crate::game::{Ent, EntKind, Game, ScriptCall, TRIGGER_HURT_CONTENTS};
+use crate::game::{Ent, EntKind, Game, ScriptCall};
 use crate::playeranim::{PlayerPoseInput, PlayerPoseState};
 
 /// [`Client::spec_allow`] bits (`allowspectateteam`).
@@ -151,6 +151,8 @@ pub struct Client {
     pub move_speed_scale: f32,
     pub frozen: bool,
     pub last_stand: bool,
+    /// Level time until which a player the Last Stand perk saved takes no damage (`lastStandTime`).
+    pub last_stand_time: i32,
     pub noclip: bool,
     pub ufo: bool,
     pub last_cmd_time: i32,
@@ -224,6 +226,7 @@ impl Client {
             move_speed_scale: 1.0,
             frozen: false,
             last_stand: false,
+            last_stand_time: 0,
             noclip: false,
             ufo: false,
             last_cmd_time: 0,
@@ -518,6 +521,7 @@ impl Game {
         c.spawn_count = spawn_count;
         c.last_spawn_time = time;
         c.last_stand = false;
+        c.last_stand_time = 0;
         // Blood the last life's killing blow left is not the new life's.
         c.damage_blood = 0;
         c.damage_from = [0.0; 3];
@@ -647,7 +651,6 @@ impl Game {
             vm.notify_entity(n, "touch", &[other]);
             vm.notify_entity(t, "touch", &[me]);
         }
-        self.touch_triggers(vm, n);
         self.update_activate(vm, n);
         self.location_input(vm, n, &cmd);
     }
@@ -788,71 +791,6 @@ impl Game {
         }
     }
 
-    /// `G_TouchTriggers`: triggers the player's box overlaps hear `touch`; damage volumes
-    /// hurt.
-    fn touch_triggers(&mut self, vm: &mut Vm, n: u16) {
-        let Some(c) = self.client(n) else { return };
-        if c.ps.pm_type > PmType::NormalLinked {
-            return;
-        }
-        let Some(e) = self.ent(n) else { return };
-        let (lo, hi) = (
-            [
-                e.origin[0] + e.mins[0] - 20.0,
-                e.origin[1] + e.mins[1] - 20.0,
-                e.origin[2] + e.mins[2] - 20.0,
-            ],
-            [
-                e.origin[0] + e.maxs[0] + 20.0,
-                e.origin[1] + e.maxs[1] + 20.0,
-                e.origin[2] + e.maxs[2] + 20.0,
-            ],
-        );
-        let Some(world) = self.world.as_ref() else {
-            return;
-        };
-        let mut list = Vec::new();
-        world.area_entities(lo, hi, TRIGGER_HURT_CONTENTS, |t| {
-            list.push(t);
-            true
-        });
-        let (pmin, pmax) = (
-            [e.origin[0] - 15.0, e.origin[1] - 15.0, e.origin[2]],
-            [e.origin[0] + 15.0, e.origin[1] + 15.0, e.origin[2] + 70.0],
-        );
-        for t in list {
-            let Some(te) = self.ent(t) else { continue };
-            let Some(le) = self.world.as_ref().and_then(|w| w.entity(t)) else {
-                continue;
-            };
-            let is_item = te.item.is_some();
-            let over = if is_item {
-                sim::weapon::pickup::player_touches_item(
-                    self.client(n).map_or([0.0; 3], |c| c.ps.origin),
-                    te.origin,
-                )
-            } else {
-                (0..3).all(|i| pmin[i] <= le.abs_max[i] && pmax[i] >= le.abs_min[i])
-            };
-            if !over {
-                continue;
-            }
-            let class = te.classname.clone();
-            let (me, other) = (self.entity_value(vm, n), self.entity_value(vm, t));
-            vm.notify_entity(t, "touch", std::slice::from_ref(&me));
-            vm.notify_entity(n, "touch", &[other]);
-            if is_item {
-                self.touch_item(vm, n, t, true);
-                continue;
-            }
-            match &*class {
-                "trigger_hurt" => self.hurt_touch(vm, t, n),
-                "trigger_multiple" | "trigger_radius" => vm.notify_entity(t, "trigger", &[me]),
-                _ => {}
-            }
-        }
-    }
-
     /// The script value for entity `n`.
     pub fn entity_value(&self, vm: &mut Vm, n: u16) -> Value {
         Value::Object(vm.entity(n, EntClass::Entity))
@@ -969,7 +907,12 @@ impl Game {
         let trying = c.cmd.forwardmove != 0 || c.cmd.rightmove != 0;
         let input = PlayerPoseInput::from_ps(&c.ps, trying, weapon.map(|w| &**w));
         let dt = self.level.frametime as f32 * 0.001;
-        self.clients[usize::from(n)].pose.update(dt, &input);
+        let anims = self.player_anims.clone();
+        let clips: &dyn crate::playeranim::Clips = match &anims {
+            Some(a) => &**a,
+            None => &crate::playeranim::NoClips,
+        };
+        self.clients[usize::from(n)].pose.update(clips, dt, &input);
     }
 
     /// `G_ClientDoPerFrameNotifies`: weapon change, firing and sprint edges.

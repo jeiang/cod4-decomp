@@ -178,6 +178,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_items::run),
     },
     StageDef {
+        name: "net-triggers",
+        description: "a bot is held in spawned volumes on mp_crash: a trigger_hurt wears its health down, a trigger_once is freed after the first touch, a bullet through a one-shot trigger_damage sets it off",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_triggers::run),
+    },
+    StageDef {
         name: "net-vote",
         description: "two real UDP clients chat and vote: say and say_team reach the right people, an unknown verb is answered, a clientkick vote drops a bot by slot, a kick vote drops one client, a typemap vote changes the gametype and map",
         needs_install: false,

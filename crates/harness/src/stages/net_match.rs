@@ -27,6 +27,10 @@ const BOTS: usize = 12;
 /// Client frames recorded after spawning.
 const FRAMES: usize = 300;
 const FRAME: Duration = Duration::from_millis(33);
+/// Horizontal distance under which another player counts as touching: a player is about 30 units wide.
+const CROWD: f32 = 40.0;
+/// Uncrowded prediction passes a client must make for the corrections check to mean anything.
+const MIN_COUNTED: u64 = FRAMES as u64 / 3;
 /// Longest a step of an interpolated player may be between two client frames before it counts
 /// as a snap: sprinting is about 9 units a frame, so this is generous.
 const SMOOTH_STEP: f32 = 40.0;
@@ -45,14 +49,22 @@ struct Rules {
 
 #[derive(Default)]
 struct Result {
+    /// Prediction passes made, and the ones that disagreed with the last, counting only passes with no other player
+    /// within `CROWD` of the client: the server shoves players apart between a client's commands from where the
+    /// others are now, which a snapshot's older positions cannot reproduce, so a crowded pass says nothing about
+    /// the prediction code.
     predictions: u64,
     corrections: u64,
+    /// Passes skipped because another player was within `CROWD`.
+    crowded: u64,
     max_ahead: usize,
     connected: bool,
     refused: Option<String>,
     spawned: bool,
     start: [f32; 3],
-    end: [f32; 3],
+    /// The farthest the server's own snapshots placed the client from where it spawned (horizontal). The walk turns a
+    /// quarter every second, so it loops back on itself and its end point says nothing about whether it moved.
+    reach: f32,
     seen_max: usize,
     steps: u64,
     snaps: u64,
@@ -120,7 +132,9 @@ fn client(
         if let Some(s) = c.latest() {
             r.connected = true;
             let n = s.ps.client_num;
-            if s.entity(n).is_some_and(|e| e.etype == etype::PLAYER) {
+            // Before the game gives the client a body its player state is blank (`client_num` 0 or stale, a bot's
+            // entity). The bots took the first slots, so a real client's number is at least `BOTS`.
+            if usize::from(n) >= BOTS && s.entity(n).is_some_and(|e| e.etype == etype::PLAYER) {
                 own = Some(n);
             }
         }
@@ -181,10 +195,25 @@ fn client(
                 params: &rules.params,
                 speed: rules.speed,
             };
+            let before = pred.corrections;
             let p = pred.predict(s, &env);
-            r.predictions += 1;
+            let crowd = s
+                .entities
+                .iter()
+                .filter(|e| e.etype == etype::PLAYER && e.number != own)
+                .any(|e| {
+                    (e.origin[0] - p.ps.origin[0]).hypot(e.origin[1] - p.ps.origin[1]) < CROWD
+                });
+            if crowd {
+                r.crowded += 1;
+            } else {
+                r.predictions += 1;
+                r.corrections += pred.corrections - before;
+            }
             r.max_ahead = r.max_ahead.max(p.replayed);
-            r.end = p.ps.origin;
+            r.reach = r
+                .reach
+                .max((s.ps.origin[0] - r.start[0]).hypot(s.ps.origin[1] - r.start[1]));
         }
         if let Some(s) = c.latest() {
             for e in s.entities.iter().filter(|e| e.etype == etype::EVENT) {
@@ -225,7 +254,6 @@ fn client(
         r.bytes_out = s.bytes_out;
     }
     r.unusable = c.unusable();
-    r.corrections = pred.corrections;
     c.disconnect();
     r
 }
@@ -434,7 +462,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             if r.materials == 0 {
                 failures.push(format!("client {i} was told no materials"));
             }
-            let moved = ((r.end[0] - r.start[0]).powi(2) + (r.end[1] - r.start[1]).powi(2)).sqrt();
+            let moved = r.reach;
             if moved < 50.0 {
                 failures.push(format!(
                     "client {i}: the server did not move it ({moved:.0} units in {FRAMES} frames)"
@@ -452,8 +480,16 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     "client {i}: prediction never ran ahead of the server"
                 ));
             }
-            // Players push on each other and the server moves the others between a client's
-            // commands, so some passes disagree; walking alone they would not.
+            // Walking clear of other players the server and the replay agree; passes beside another player are
+            // not counted (see `Result::predictions`).
+            if r.predictions < MIN_COUNTED {
+                failures.push(format!(
+                    "client {i}: only {} of {} prediction passes were clear of other players ({} crowded)",
+                    r.predictions,
+                    r.predictions + r.crowded,
+                    r.crowded
+                ));
+            }
             if r.corrections * 7 > r.predictions {
                 failures.push(format!(
                     "client {i}: the server corrected {} of {} predictions",
@@ -499,6 +535,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         report.metrics.insert(
             "client.snapshots_per_sec".into(),
             mean(|r| r.snapshots as f64) / secs,
+        );
+        report.metrics.insert(
+            "client.crowded_passes".into(),
+            live.iter().map(|r| r.crowded as f64).sum(),
         );
         let wounds: u64 = live.iter().map(|r| r.hits).sum();
         report.metrics.insert("client.wounds".into(), wounds as f64);

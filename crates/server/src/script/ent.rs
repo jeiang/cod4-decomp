@@ -426,6 +426,12 @@ fn is_touching(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
         mins[i] = boxed.origin[i] + boxed.mins[i];
         maxs[i] = boxed.origin[i] + boxed.maxs[i];
     }
+    expand_bounds_to_width(&mut mins, &mut maxs);
+    Ok(bool_v(entity_contact(g, mins, maxs, shaped)))
+}
+
+/// `ExpandBoundsToWidth`: a box shorter than it is wide grows taller, evenly up and down.
+pub(crate) fn expand_bounds_to_width(mins: &mut [f32; 3], maxs: &mut [f32; 3]) {
     let wide = (maxs[0] - mins[0]).max(maxs[1] - mins[1]);
     let tall = maxs[2] - mins[2];
     if tall < wide {
@@ -433,7 +439,6 @@ fn is_touching(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
         mins[2] -= d;
         maxs[2] += d;
     }
-    Ok(bool_v(entity_contact(g, mins, maxs, shaped)))
 }
 
 // ---- tags ----
@@ -610,7 +615,7 @@ fn require_use_trigger(g: &Game, e: EntRef, who: &str) -> Result<(), String> {
     }
 }
 
-/// `useby(player)`: the trigger's `trigger` notify with the user.
+/// `useby(player)`: the trigger's `trigger` notify with the user, then what using that kind of entity does.
 fn use_by(g: &mut Game, vm: &mut Vm, e: EntRef, a: Args) -> R {
     live(g, e)?;
     let other = a.entity(0)?;
@@ -619,6 +624,7 @@ fn use_by(g: &mut Game, vm: &mut Vm, e: EntRef, a: Args) -> R {
     }
     let who = g.entity_value(vm, other.num);
     vm.notify_entity(e.num, "trigger", &[who]);
+    g.use_trigger(vm, e.num, other.num);
     Ok(Value::Undefined)
 }
 

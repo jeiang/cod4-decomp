@@ -3,13 +3,13 @@
 //! `obituary` and the player counts.
 
 use gsc::{EntRef, Value, Vm};
-use sim::cm::{Collide, ENTITYNUM_NONE};
+use sim::cm::{ENTITYNUM_NONE, ENTITYNUM_WORLD};
 use sim::contents;
 
 use super::Impl::{self, Real};
 use super::{Args, FuncFn, MethFn};
 use crate::client::{Session, Team};
-use crate::combat::{MOD_UNKNOWN, mod_from_name};
+use crate::combat::{Blast, MOD_UNKNOWN, RADIUS_DAMAGE_MASK, mod_from_name};
 use crate::game::Game;
 
 type R = Result<Value, String>;
@@ -20,7 +20,7 @@ pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
         Real(|g, vm, a| radius_damage(g, vm, a, None)),
     ),
     ("positionwouldtelefrag", Real(position_would_telefrag)),
-    ("obituary", Real(|_, _, _| Ok(Value::Undefined))),
+    ("obituary", Real(obituary)),
     (
         "setplayerignoreradiusdamage",
         Real(|g, _, a| {
@@ -39,11 +39,11 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("setcandamage", Real(set_can_damage)),
     (
         "damageconetrace",
-        Real(|g, _, e, a| cone_trace(g, e, a, contents::MASK_SOLID)),
+        Real(|g, _, e, a| cone_trace(g, e, a, RADIUS_DAMAGE_MASK)),
     ),
     (
         "sightconetrace",
-        Real(|g, _, e, a| cone_trace(g, e, a, contents::MASK_SOLID | contents::FOLIAGE)),
+        Real(|g, _, e, a| cone_trace(g, e, a, contents::SOLID | contents::SKY)),
     ),
 ];
 
@@ -54,20 +54,58 @@ fn entity_num(v: Option<&Value>) -> Option<u16> {
     }
 }
 
-/// `radiusDamage(origin, range, maxDamage, minDamage[, attacker[, mod]])`.
+/// `radiusDamage(origin, range, maxDamage, minDamage[, attacker[, mod[, weapon]]])`; the attacker is the world
+/// when none is given. `setplayerignoreradiusdamage` spares players from it.
 fn radius_damage(g: &mut Game, vm: &mut Vm, a: Args, inflictor: Option<u16>) -> R {
     let origin = a.vector(0)?;
-    let (range, max, min) = (a.float(1)?, a.float(2)?, a.float(3)?);
-    let attacker = entity_num(a.opt(4));
+    let (radius, inner, outer) = (a.float(1)?, a.float(2)?, a.float(3)?);
+    let attacker = entity_num(a.opt(4)).or(Some(ENTITYNUM_WORLD));
     let mean = match a.opt(5) {
         Some(Value::Str(s)) => mod_from_name(s).unwrap_or(MOD_UNKNOWN),
         _ => crate::combat::MOD_EXPLOSIVE,
     };
-    if g.level.ignore_radius_damage {
-        return Ok(Value::Undefined);
-    }
-    g.radius_damage(
-        vm, origin, range, max as i32, min as i32, attacker, inflictor, mean, 0,
+    let weapon = match a.opt(6) {
+        Some(Value::Str(s)) => g.weapon_index(s),
+        _ => 0,
+    };
+    g.blast(
+        vm,
+        &Blast {
+            origin,
+            radius,
+            inner,
+            outer,
+            attacker,
+            inflictor,
+            cone: None,
+            ignore: inflictor,
+            skip_clients: g.level.ignore_radius_damage,
+            mean,
+            weapon,
+        },
+    );
+    Ok(Value::Undefined)
+}
+
+/// `obituary(victim, attacker, weapon, mod)`: one line of the kill feed, with the arguments the script chose (it
+/// may name another attacker, or the victim itself, and a means of death the engine did not see).
+fn obituary(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let victim = entity_num(a.opt(0)).ok_or("not an entity")?;
+    let killer = entity_num(a.opt(1))
+        .filter(|k| g.is_client(*k))
+        .unwrap_or(net::ui::NO_ENTITY);
+    let weapon = g.weapon_name(g.weapon_index(a.string(2)?)).to_owned();
+    let mean = a.string(3)?;
+    mod_from_name(mean).ok_or_else(|| format!("Unknown means of death \"{mean}\"\n"))?;
+    g.send(
+        crate::ui::Dest::All,
+        net::ui::ServerCmd::Obituary(net::ui::Obituary {
+            killer,
+            victim,
+            weapon,
+            headshot: mean == "MOD_HEAD_SHOT",
+            mean: mean.to_owned(),
+        }),
     );
     Ok(Value::Undefined)
 }
@@ -110,36 +148,14 @@ fn team_players_alive(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Int(n as i32))
 }
 
-/// The fraction of five sample points of the target (centre and four corners of its box)
-/// the origin sees; `damageConeTrace(origin[, entity])` with the player as the target.
+/// How much of the entity the origin reaches (`CanDamage`): `damageConeTrace(origin[, ignored entity])`.
 fn cone_trace(g: &mut Game, e: EntRef, a: Args, mask: i32) -> R {
     let origin = a.vector(0)?;
     let ignore = entity_num(a.opt(1)).unwrap_or(ENTITYNUM_NONE);
-    let Some(w) = g.world.as_ref() else {
-        return Ok(Value::Float(0.0));
-    };
-    let Some(t) = g.ent(e.num) else {
+    if g.ent(e.num).is_none() {
         return Err("not an entity".into());
-    };
-    let c = [
-        t.origin[0] + (t.mins[0] + t.maxs[0]) * 0.5,
-        t.origin[1] + (t.mins[1] + t.maxs[1]) * 0.5,
-        t.origin[2] + (t.mins[2] + t.maxs[2]) * 0.5,
-    ];
-    let pts = [
-        c,
-        [c[0] + 12.0, c[1], c[2]],
-        [c[0] - 12.0, c[1], c[2]],
-        [c[0], c[1] + 12.0, c[2]],
-        [c[0], c[1] - 12.0, c[2]],
-    ];
-    let seen = pts
-        .iter()
-        .filter(|p| {
-            w.trace(origin, **p, [0.0; 3], [0.0; 3], ignore, mask)
-                .fraction
-                >= 1.0
-        })
-        .count();
-    Ok(Value::Float(seen as f32 / pts.len() as f32))
+    }
+    Ok(Value::Float(
+        g.damage_coverage(e.num, origin, None, ignore, mask),
+    ))
 }

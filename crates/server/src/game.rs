@@ -167,6 +167,9 @@ pub struct Ent {
     pub free_time: i32,
     /// Level time at which the engine frees the entity (`nextthink` of a mantle blocker).
     pub free_at: Option<i32>,
+    /// `useCount`: differs for every entity that ever held the slot, so a queued trigger can tell its
+    /// entity was freed. Players keep 0.
+    pub use_count: u32,
     /// `takedamage`: damage reaches the entity's scripts (`setcandamage`, living players).
     pub takedamage: bool,
     /// `ent->flags`: 1 invulnerable, 2 cannot die, 8 takes no knockback.
@@ -226,6 +229,7 @@ impl Ent {
             anim: None,
             free_time: 0,
             free_at: None,
+            use_count: 0,
             takedamage: false,
             flags: 0,
             x: crate::link::EntExtra::default(),
@@ -334,6 +338,10 @@ pub struct Level {
     pub next_corpse: usize,
     /// `map(name)` was called: the server changes to this map after the frame.
     pub map_requested: Option<String>,
+    /// Entities spawned so far (`useCount` of the next one).
+    pub spawn_serial: u32,
+    /// `level.pendingTriggerList`: touches the next trigger pass delivers.
+    pub pending_triggers: Vec<crate::trigger::PendingTrigger>,
 }
 
 /// What happened in play since boot, for harness reports.
@@ -535,7 +543,7 @@ impl Game {
     }
 
     /// `G_Spawn`: the lowest free slot from [`FIRST_SPAWNED`], growing the table on demand.
-    pub fn spawn(&mut self, ent: Ent) -> Result<u16, String> {
+    pub fn spawn(&mut self, mut ent: Ent) -> Result<u16, String> {
         let first = FIRST_SPAWNED.max(self.max_clients);
         // The slots from `tempev::FIRST` up carry the one-shot events in snapshots: entities stop short of them.
         let limit = usize::from(crate::tempev::FIRST);
@@ -548,6 +556,8 @@ impl Game {
         if slot >= self.ents.len() {
             self.ents.resize(slot + 1, None);
         }
+        self.level.spawn_serial += 1;
+        ent.use_count = self.level.spawn_serial;
         self.ents[slot] = Some(ent);
         self.level.num_entities = self.level.num_entities.max(slot + 1);
         Ok(slot as u16)
@@ -689,14 +699,30 @@ impl Game {
                 // `trigger_use`: HINT_NOICON until a script or the map says otherwise.
                 e.x.cursor_hint = 1;
             }
-            "trigger_radius" | "trigger_disk" => {
+            "trigger_radius" => {
                 if let Some((r, h)) = radius_height {
                     e.mins = [-r, -r, 0.0];
                     e.maxs = [r, r, h];
                 }
                 e.contents = sentient_trigger(e.spawnflags);
             }
+            "trigger_disk" => {
+                // `SP_trigger_disk`: a column 64 wider than the radius, as tall as the world.
+                if let Some((r, _)) = radius_height {
+                    let r = r + 64.0;
+                    e.mins = [-r, -r, -100_000.0];
+                    e.maxs = [r, r, 100_000.0];
+                }
+                e.contents = sentient_trigger(e.spawnflags);
+            }
             "trigger_multiple" | "trigger_once" => e.contents = sentient_trigger(e.spawnflags),
+            "trigger_damage" => {
+                e.contents = TRIGGER_HURT_CONTENTS;
+                e.takedamage = true;
+                e.health = 32000;
+            }
+            // `SP_trigger_lookat`: nothing touches it; scripts trace for it.
+            "trigger_lookat" => e.contents = contents::TRANSLUCENT,
             _ => {}
         }
         if kind_is_item {
@@ -784,7 +810,22 @@ impl Game {
             self.note_model(&model);
             let radius = get(vars, "radius").map(cvar::parse_float);
             let height = get(vars, "height").map(cvar::parse_float);
-            self.init_clip(num, radius.zip(height));
+            // A disk has no height of its own.
+            let extent = if class == "trigger_disk" {
+                radius.map(|r| (r, 0.0))
+            } else {
+                radius.zip(height)
+            };
+            self.init_clip(num, extent);
+            if class.starts_with("trigger_") {
+                let int = |k| get(vars, k).map_or(0, cvar::parse_int);
+                self.init_trigger_spawn(
+                    num,
+                    get(vars, "wait").map(cvar::parse_float),
+                    int("accumulate"),
+                    int("threshold"),
+                );
+            }
             if class.starts_with("trigger_use") {
                 if let Some(h) =
                     get(vars, "cursorhint").and_then(|h| crate::script::hint_value(h, true))

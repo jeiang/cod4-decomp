@@ -73,6 +73,11 @@ pub struct EntityState {
     pub torso_clip: u8,
     pub torso_cap: u8,
     pub torso_seq: u8,
+    /// Player: the legs animation the server forced over the ground selection (a jump, landing, mantle or stance
+    /// change): the clip (0 none) and a counter that changes whenever one starts or ends. See
+    /// `server::playeranim::LegsWire`.
+    pub legs_clip: u8,
+    pub legs_seq: u8,
     /// A launched script model (`eflags::PHYSICS_LAUNCH`, in `server::netsv`): where the launch struck it, in the
     /// world. `origin` and `angles` are where it was launched from and `velocity` is the launch force.
     pub launch_point: [f32; 3],
@@ -145,6 +150,8 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.torso_clip, Bits(8)),
         int!(s, s.torso_cap, Bits(8)),
         int!(s, s.torso_seq, Bits(8)),
+        int!(s, s.legs_clip, Bits(8)),
+        int!(s, s.legs_seq, Bits(8)),
         num!(s, s.launch_point[0], pos),
         num!(s, s.launch_point[1], pos),
         num!(s, s.launch_point[2], pos),
@@ -190,6 +197,8 @@ mod tests {
             torso_clip: 12,
             torso_cap: 40,
             torso_seq: 200,
+            legs_clip: 9,
+            legs_seq: 77,
             ..EntityState::new(5)
         }
         .canonical();
