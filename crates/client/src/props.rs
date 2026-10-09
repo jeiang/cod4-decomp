@@ -107,7 +107,8 @@ impl Prop {
         (0..8).map(|i| corner(i, mins, maxs)).fold(
             (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
             |(lo, hi), c| {
-                let w = o + a[0] * c.x + a[1] * c.y + a[2] * c.z;
+                // The model's Y points away from the left axis.
+                let w = o + a[0] * c.x - a[1] * c.y + a[2] * c.z;
                 (lo.min(w), hi.max(w))
             },
         )
@@ -138,20 +139,28 @@ impl Prop {
         true
     }
 
-    fn advance(&mut self, dt: f32, world: &dyn fx::World) {
-        let Some(b) = &mut self.body else { return };
+    /// Steps the body to the end of `dt`; the first loud hit of any step is returned with the sound prefix.
+    fn advance(&mut self, dt: f32, world: &dyn fx::World) -> Option<(Arc<str>, Impact)> {
+        let b = self.body.as_mut()?;
         if b.asleep() {
-            return;
+            return None;
         }
+        let mut loud = None;
         self.carry += dt.min(0.1);
         while self.carry >= STEP {
             self.carry -= STEP;
             b.step(STEP, world);
+            if loud.is_none()
+                && let (Some(hit), Some(prefix)) = (b.take_impact(), b.sound_prefix())
+            {
+                loud = Some((prefix.clone(), hit));
+            }
             self.age += STEP;
             if self.age >= LIFE {
                 b.sleep();
             }
         }
+        loud
     }
 
     /// Hurts a destructible prop; `true` when this breaks it.
@@ -364,10 +373,10 @@ impl Props {
                     self.blast(
                         Vec3::from(*origin),
                         Blast {
-                            inner: if d.impact_type == IMPACT_ROCKET_EXPLODE {
-                                radius
-                            } else {
+                            inner: if d.impact_type == IMPACT_GRENADE_EXPLODE {
                                 0.0
+                            } else {
+                                radius
                             },
                             outer: radius,
                             damage: (d.explosion_inner_damage, d.explosion_outer_damage),
@@ -535,28 +544,28 @@ impl Props {
     ) {
         let (f, _, _) = sim::pm::math::angle_vectors(&angles);
         let f = Vec3::from(f);
-        let end = eye + f * SHOT_RANGE;
-        let wall = world
-            .trace(
-                eye.to_array(),
-                end.to_array(),
-                [0.0; 3],
-                [0.0; 3],
-                sim::cm::ENTITYNUM_NONE,
-                sim::contents::SOLID,
-            )
-            .fraction
-            * SHOT_RANGE;
         let mut best: Option<(f32, usize, Vec3)> = None;
         for (i, p) in self.props.iter().enumerate().filter(|(_, p)| !p.gone) {
             if let Some((t, n)) = ray_prop(p, eye, f)
-                && t < wall
+                && t < SHOT_RANGE
                 && best.is_none_or(|(b, _, _)| t < b)
             {
                 best = Some((t, i, n));
             }
         }
         let Some((t, i, normal)) = best else { return };
+        // The map stops the bullet first if it is nearer.
+        let wall = world.trace(
+            eye.to_array(),
+            (eye + f * (t - 1.0).max(0.0)).to_array(),
+            [0.0; 3],
+            [0.0; 3],
+            sim::cm::ENTITYNUM_NONE,
+            sim::contents::SOLID,
+        );
+        if wall.fraction < 1.0 {
+            return;
+        }
         let at = eye + f * t;
         self.out.impacts.push(ClientEvent::BulletImpact {
             origin: at.to_array(),
@@ -575,12 +584,8 @@ impl Props {
     pub fn update(&mut self, dt: f32, world: &dyn Collide) {
         let tracer = Tracer(world);
         for p in &mut self.props {
-            p.advance(dt, &tracer);
-            if let Some(b) = &mut p.body
-                && let Some(hit) = b.take_impact()
-                && let Some(prefix) = b.sound_prefix()
-            {
-                self.out.collisions.push(heard(world, prefix.clone(), &hit));
+            if let Some((prefix, hit)) = p.advance(dt, &tracer) {
+                self.out.collisions.push(heard(world, prefix, &hit));
             }
         }
         for p in &mut self.pieces {
@@ -610,8 +615,9 @@ impl Props {
     }
 }
 
-/// `weapImpactType_t` of a rocket's explosion: its blast is full strength out to the radius.
-const IMPACT_ROCKET_EXPLODE: i32 = 7;
+/// `weapImpactType_t` of a grenade's explosion: its blast falls off from the centre; rockets' and custom
+/// explosions are full strength out to the radius.
+const IMPACT_GRENADE_EXPLODE: i32 = 6;
 /// How far a bullet flies.
 const SHOT_RANGE: f32 = 4000.0;
 
@@ -1243,6 +1249,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_landing_inside_a_long_frame_is_still_heard() {
+        let mut preset = preset();
+        preset.snd_alias_prefix = Some("physics_wood".into());
+        let mut p = prop(Some(preset));
+        p.origin = Vec3::new(0.0, 0.0, 40.0);
+        p.strike(|b, _| b.impulse(b.center_of_mass(), Vec3::new(0.0, 0.0, -9000.0)));
+        // One 0.1 s frame holds six steps: the fall, the landing and the rest of the settling.
+        let heard = p.advance(0.1, &Floor);
+        assert!(heard.is_some_and(|(prefix, _)| &*prefix == "physics_wood"));
+    }
+
+    #[test]
+    fn the_bounds_follow_the_models_y_axis_not_the_left_axis() {
+        let mut p = prop(None);
+        let model = crate_model(None);
+        // A model 0..20 wide in y, turned a quarter so its y runs along world x.
+        p.model = Arc::new(XModel {
+            mins: [-5.0, 0.0, 0.0],
+            maxs: [5.0, 20.0, 10.0],
+            ..Arc::try_unwrap(model).ok().expect("one owner")
+        });
+        p.origin = Vec3::ZERO;
+        p.axes = [Vec3::Y, Vec3::NEG_X, Vec3::Z];
+        // Model y is -left = +x.
+        let (lo, hi) = p.bounds();
+        assert!(
+            (lo.x + 0.0).abs() < 1e-4 && (hi.x - 20.0).abs() < 1e-4,
+            "{lo} {hi}"
+        );
+        // The ray test agrees: a ray down +x from the left meets the box at x = 0.
+        let hit = ray_prop(&p, Vec3::new(-30.0, 0.0, 5.0), Vec3::X).map(|h| h.0);
+        assert_eq!(hit, Some(30.0));
     }
 
     #[test]

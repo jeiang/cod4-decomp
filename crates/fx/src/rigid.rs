@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Parts translated from KisakCOD (physics/phys_ode.cpp: Phys_ObjCreate, Phys_ObjSetCollisionFromXModel, Phys_ObjBulletImpact,
-// Phys_TweakBulletImpact, the auto-disable thresholds; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Phys_TweakBulletImpact, Phys_PlayCollisionSound (the impact momentum), the auto-disable thresholds; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The PhysPreset rigid body the client simulates for effect models with `USE_MODEL_PHYSICS`, for the map's dynamic
 //! entities and for script models the server launched with `physicslaunch`. The original runs ODE; this is a small
 //! impulse solver with the same inputs: the preset's mass, bounce and friction, the model's physics geometry (its
@@ -186,6 +186,9 @@ struct Contact {
     jt: f32,
 }
 
+/// `Phys_PlayCollisionSound`'s momentum test, plus one gate of ours: the hardest contact must approach faster than the
+/// bounce threshold, because this solver's resting contacts re-approach under gravity every step and would otherwise
+/// rattle (the original's contact velocities settle to zero).
 fn hit_of(contacts: &[Contact], mass: f32) -> Option<Impact> {
     let loudest = contacts.iter().map(|c| c.approach).fold(0.0, f32::max);
     if loudest <= BOUNCE_MIN_SPEED {
