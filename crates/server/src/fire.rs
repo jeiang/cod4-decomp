@@ -133,6 +133,7 @@ impl Game {
         hits: Vec<BulletHit>,
     ) {
         for h in hits {
+            self.check_hit_trigger_damage(vm, shooter, h.start, h.point, h.damage, h.mean);
             self.bullet_impact_event(shooter, weapon, &h);
             if !h.damageable {
                 continue;
@@ -254,9 +255,13 @@ impl Game {
         };
         let count = if width > 0.0 || height > 0.0 { 5 } else { 1 };
         let mut found: Option<(ShotTrace, Vec3)> = None;
-        for o in &MELEE_OFFSETS[..count] {
+        let mut centre_line = None;
+        for (i, o) in MELEE_OFFSETS[..count].iter().enumerate() {
             let end = at(*o, reach);
             let t = trace(self, origin, end);
+            if i == 0 {
+                centre_line = Some(lerp(origin, end, t.fraction));
+            }
             if t.surface_flags & SURF_NOIMPACT == 0 && t.fraction != 1.0 {
                 found = Some((t, lerp(origin, end, t.fraction)));
                 break;
@@ -275,13 +280,18 @@ impl Game {
                 }
             }
         }
+        // `G_CheckHitTriggerDamage` along the centre line, hit or not.
+        let rand = self.rand();
+        let info = self.weapons.get(weapon).expect("weapon looked up above");
+        let damage = melee_damage(info, rand);
+        if let Some(end) = centre_line {
+            self.check_hit_trigger_damage(vm, n, origin, end, damage, MOD_MELEE);
+        }
         let Some((t, point)) = found else { return };
         if t.hit == ENTITYNUM_WORLD || !self.ent(t.hit).is_some_and(|e| e.takedamage) {
             return;
         }
-        let rand = self.rand();
-        let info = self.weapons.get(weapon).expect("weapon looked up above");
-        let mut d = Damage::new(melee_damage(info, rand), MOD_MELEE);
+        let mut d = Damage::new(damage, MOD_MELEE);
         d.inflictor = Some(n);
         d.attacker = Some(n);
         d.dir = Some(aim.forward);

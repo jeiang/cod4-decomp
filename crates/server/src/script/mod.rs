@@ -12,7 +12,7 @@ use crate::game::{self, Game};
 mod args;
 mod combat;
 mod ent;
-pub(crate) use ent::{entity_contact, hint_value};
+pub(crate) use ent::{entity_contact, expand_bounds_to_width, hint_value};
 mod funcs;
 mod hud;
 mod methods;

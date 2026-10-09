@@ -19,7 +19,7 @@ use sim::pm::{self, PLAYER_MAXS, PLAYER_MINS, PlayerState, PmType, UserCmd, ev, 
 use sim::weapon::{OffhandClass, PlayerWeapons};
 
 use crate::bot::Brain;
-use crate::game::{Ent, EntKind, Game, ScriptCall, TRIGGER_HURT_CONTENTS};
+use crate::game::{Ent, EntKind, Game, ScriptCall};
 use crate::playeranim::{PlayerPoseInput, PlayerPoseState};
 
 /// [`Client::spec_allow`] bits (`allowspectateteam`).
@@ -647,7 +647,6 @@ impl Game {
             vm.notify_entity(n, "touch", &[other]);
             vm.notify_entity(t, "touch", &[me]);
         }
-        self.touch_triggers(vm, n);
         self.update_activate(vm, n);
         self.location_input(vm, n, &cmd);
     }
@@ -784,71 +783,6 @@ impl Game {
                 let max = self.client(n).map_or(100, |c| c.max_health);
                 let damage = (max as f32 * frac) as i32;
                 self.damage_fall(vm, n, damage);
-            }
-        }
-    }
-
-    /// `G_TouchTriggers`: triggers the player's box overlaps hear `touch`; damage volumes
-    /// hurt.
-    fn touch_triggers(&mut self, vm: &mut Vm, n: u16) {
-        let Some(c) = self.client(n) else { return };
-        if c.ps.pm_type > PmType::NormalLinked {
-            return;
-        }
-        let Some(e) = self.ent(n) else { return };
-        let (lo, hi) = (
-            [
-                e.origin[0] + e.mins[0] - 20.0,
-                e.origin[1] + e.mins[1] - 20.0,
-                e.origin[2] + e.mins[2] - 20.0,
-            ],
-            [
-                e.origin[0] + e.maxs[0] + 20.0,
-                e.origin[1] + e.maxs[1] + 20.0,
-                e.origin[2] + e.maxs[2] + 20.0,
-            ],
-        );
-        let Some(world) = self.world.as_ref() else {
-            return;
-        };
-        let mut list = Vec::new();
-        world.area_entities(lo, hi, TRIGGER_HURT_CONTENTS, |t| {
-            list.push(t);
-            true
-        });
-        let (pmin, pmax) = (
-            [e.origin[0] - 15.0, e.origin[1] - 15.0, e.origin[2]],
-            [e.origin[0] + 15.0, e.origin[1] + 15.0, e.origin[2] + 70.0],
-        );
-        for t in list {
-            let Some(te) = self.ent(t) else { continue };
-            let Some(le) = self.world.as_ref().and_then(|w| w.entity(t)) else {
-                continue;
-            };
-            let is_item = te.item.is_some();
-            let over = if is_item {
-                sim::weapon::pickup::player_touches_item(
-                    self.client(n).map_or([0.0; 3], |c| c.ps.origin),
-                    te.origin,
-                )
-            } else {
-                (0..3).all(|i| pmin[i] <= le.abs_max[i] && pmax[i] >= le.abs_min[i])
-            };
-            if !over {
-                continue;
-            }
-            let class = te.classname.clone();
-            let (me, other) = (self.entity_value(vm, n), self.entity_value(vm, t));
-            vm.notify_entity(t, "touch", std::slice::from_ref(&me));
-            vm.notify_entity(n, "touch", &[other]);
-            if is_item {
-                self.touch_item(vm, n, t, true);
-                continue;
-            }
-            match &*class {
-                "trigger_hurt" => self.hurt_touch(vm, t, n),
-                "trigger_multiple" | "trigger_radius" => vm.notify_entity(t, "trigger", &[me]),
-                _ => {}
             }
         }
     }

@@ -29,6 +29,7 @@ pub mod net_mantle;
 pub mod net_match;
 pub mod net_objective;
 pub mod net_rcon;
+pub mod net_triggers;
 pub mod net_ui;
 pub mod net_vote;
 pub mod script_pool;

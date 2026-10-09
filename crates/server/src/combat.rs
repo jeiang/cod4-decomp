@@ -239,6 +239,13 @@ impl Game {
         if health <= 0 {
             vm.notify_entity(target, "death", &[attacker]);
         }
+        if self
+            .ent(target)
+            .is_some_and(|e| &*e.classname == "trigger_damage")
+        {
+            let by = d.attacker.unwrap_or(ENTITYNUM_WORLD);
+            self.trigger_damage_hit(vm, target, by, damage, d.mean);
+        }
     }
 
     /// `G_DamageClient`: scale by the hit location and hand to the script.
@@ -294,25 +301,6 @@ impl Game {
     /// Falling: no weapon, no attacker.
     pub fn damage_fall(&mut self, vm: &mut Vm, n: u16, damage: i32) {
         self.g_damage(vm, n, Damage::new(damage, MOD_FALLING));
-    }
-
-    /// `hurt_touch`: a damage volume hurts whoever stands in it.
-    pub fn hurt_touch(&mut self, vm: &mut Vm, trigger: u16, who: u16) {
-        let Some(t) = self.ent(trigger) else { return };
-        // Spawnflag 1 keeps the volume off until a script triggers it.
-        if t.spawnflags & 1 != 0 {
-            return;
-        }
-        let dmg = if t.dmg > 0 { t.dmg } else { 5 };
-        let mut d = Damage::new(dmg, MOD_TRIGGER_HURT);
-        d.attacker = Some(ENTITYNUM_WORLD);
-        d.inflictor = Some(ENTITYNUM_WORLD);
-        let dmg_flags = t.spawnflags;
-        // `dmg` of a volume that kills outright (spawnflag 0x100: instant kill).
-        if dmg_flags & 0x100 != 0 {
-            d.damage = 100_000;
-        }
-        self.g_damage(vm, who, d);
     }
 
     /// `PlayerCmd_finishPlayerDamage`: applies one damage event the script accepted.
