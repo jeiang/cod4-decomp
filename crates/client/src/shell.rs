@@ -708,6 +708,15 @@ impl Shell {
             let mut h = Self::host(&mut self.st, input);
             self.ui.check_waiting_menu(&mut h);
         }
+        for (old, new) in std::mem::take(&mut self.st.live.renamed) {
+            let verb = hud::localize(&self.ui.assets, "&CGAME_PLAYERRENAMES");
+            let verb = if verb == "CGAME_PLAYERRENAMES" {
+                "renamed to".to_owned()
+            } else {
+                verb
+            };
+            self.print(net::ui::PrintKind::Normal, &format!("{old}^7 {verb} {new}"));
+        }
         let live_now = self.st.live.active;
         if live_now != self.st.was_active {
             self.st.was_active = live_now;
@@ -1133,10 +1142,16 @@ impl HostCx<'_> {
                     gametype: self.dvar_get("g_gametype"),
                 }),
                 // The server's, or the app's own: not for the input layer, whose `pending_commands` a menu drops.
-                n if n == "togglemenu" || n == "rcon" || crate::console::is_server_verb(n) => self
-                    .st
-                    .actions
-                    .push(Action::Console(crate::input::config::join(&cmd))),
+                n if n == "togglemenu"
+                    || n == "rcon"
+                    || n == "name"
+                    || crate::console::is_server_verb(n) =>
+                {
+                    self
+                        .st
+                        .actions
+                        .push(Action::Console(crate::input::config::join(&cmd)))
+                }
                 _ => self.input.exec_line(&crate::input::config::join(&cmd)),
             }
         }
@@ -1657,6 +1672,7 @@ fn server_cell(
     gametypes: &[GameTypeEntry],
 ) -> String {
     match col {
+        0 => mark(e.password),
         2 if e.ping > 0 => e.hostname.chars().take(38).collect(),
         2 => e.addr.to_string(),
         3 => maps
@@ -1669,10 +1685,20 @@ fn server_cell(
             .iter()
             .find(|g| g.id == e.gametype)
             .map_or_else(|| e.gametype.clone(), |g| g.title.clone()),
+        6 => mark(e.voice),
+        7 => mark(e.pure),
+        // The original marks the servers that are not modified.
+        8 => mark(!e.modded),
+        9 => mark(e.punkbuster),
         10 if e.ping > 0 => e.ping.to_string(),
         10 => "...".into(),
         _ => String::new(),
     }
+}
+
+/// A yes/no column of the server list.
+fn mark(on: bool) -> String {
+    if on { "X" } else { "" }.into()
 }
 
 /// Draws text for an owner-draw item with no text of its own: the baseline is the item's text offset below the top of its

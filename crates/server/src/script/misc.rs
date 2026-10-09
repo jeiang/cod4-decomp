@@ -98,9 +98,7 @@ fn load_map(g: &mut Game, _: &mut Vm, a: Args) -> R {
     if g.level.map_requested.is_some() {
         return Err("map already called".into());
     }
-    if a.len() > 1 {
-        a.int(1)?;
-    }
+    g.level.save_persist = a.len() > 1 && a.int(1)? != 0;
     g.level.map_requested = Some(name.to_owned());
     Ok(Value::Undefined)
 }

@@ -8,7 +8,7 @@ use std::hash::BuildHasher;
 use std::net::SocketAddr;
 
 /// Bumped when the wire format changes; a server refuses other versions.
-pub const PROTOCOL: u32 = 8;
+pub const PROTOCOL: u32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Oob {
@@ -28,6 +28,13 @@ pub enum Oob {
     GetInfo(u32),
     /// `\key\value` pairs.
     InfoResponse(Vec<(String, String)>),
+    /// `getstatus`: the server's settings and its players, for monitors; reply with [`Oob::StatusResponse`].
+    GetStatus(u32),
+    /// `statusResponse`: the server info as `\key\value` pairs, then a line of score, ping and name per player.
+    StatusResponse {
+        info: Vec<(String, String)>,
+        players: Vec<StatusPlayer>,
+    },
     Disconnect,
     Error(String),
     /// `rcon <password> <command>`: run a console command on the server (see the server's
@@ -38,6 +45,14 @@ pub enum Oob {
     },
     /// `print\n<text>`: console output the server redirected to the sender of an `rcon`.
     Print(String),
+}
+
+/// One player of a [`Oob::StatusResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusPlayer {
+    pub score: i32,
+    pub ping: i32,
+    pub name: String,
 }
 
 /// Most text one [`Oob::Print`] carries (`SV_FlushRedirect`); longer output is sent in pieces.
@@ -61,6 +76,26 @@ impl Oob {
         out.push(Oob::Print(rest.to_owned()));
         out
     }
+}
+
+fn info_string(kv: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (k, v) in kv {
+        s.push('\\');
+        s.push_str(&k.replace('\\', "/"));
+        s.push('\\');
+        s.push_str(&v.replace('\\', "/"));
+    }
+    s
+}
+
+fn parse_info(s: &str) -> Vec<(String, String)> {
+    let mut it = s.split('\\').skip(1);
+    let mut kv = Vec::new();
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        kv.push((k.to_owned(), v.to_owned()));
+    }
+    kv
 }
 
 fn quote(s: &str) -> String {
@@ -114,13 +149,12 @@ impl Oob {
             ),
             Oob::ConnectResponse => "connectResponse".to_owned(),
             Oob::GetInfo(c) => format!("getinfo {c}"),
-            Oob::InfoResponse(kv) => {
-                let mut s = String::from("infoResponse ");
-                for (k, v) in kv {
-                    s.push('\\');
-                    s.push_str(&k.replace('\\', "/"));
-                    s.push('\\');
-                    s.push_str(&v.replace('\\', "/"));
+            Oob::InfoResponse(kv) => format!("infoResponse {}", info_string(kv)),
+            Oob::GetStatus(c) => format!("getstatus {c}"),
+            Oob::StatusResponse { info, players } => {
+                let mut s = format!("statusResponse\n{}\n", info_string(info));
+                for p in players {
+                    s.push_str(&format!("{} {} {}\n", p.score, p.ping, quote(&p.name)));
                 }
                 s
             }
@@ -145,6 +179,24 @@ impl Oob {
             return Some(Oob::Print(t.trim_end_matches('\0').to_owned()));
         }
         let text = text.trim_end_matches(['\0', '\n']);
+        if let Some(body) = text.strip_prefix("statusResponse\n") {
+            let (info, players) = body.split_once('\n').unwrap_or((body, ""));
+            let players = players
+                .lines()
+                .filter_map(|l| {
+                    let mut w = unquote_words(l).into_iter();
+                    Some(StatusPlayer {
+                        score: w.next()?.parse().ok()?,
+                        ping: w.next()?.parse().ok()?,
+                        name: w.next().unwrap_or_default(),
+                    })
+                })
+                .collect();
+            return Some(Oob::StatusResponse {
+                info: parse_info(info),
+                players,
+            });
+        }
         let (cmd, rest) = text.split_once(' ').unwrap_or((text, ""));
         Some(match cmd {
             "getchallenge" => Oob::GetChallenge,
@@ -161,14 +213,8 @@ impl Oob {
             }
             "connectResponse" => Oob::ConnectResponse,
             "getinfo" => Oob::GetInfo(rest.trim().parse().ok()?),
-            "infoResponse" => {
-                let mut it = rest.split('\\').skip(1);
-                let mut kv = Vec::new();
-                while let (Some(k), Some(v)) = (it.next(), it.next()) {
-                    kv.push((k.to_owned(), v.to_owned()));
-                }
-                Oob::InfoResponse(kv)
-            }
+            "infoResponse" => Oob::InfoResponse(parse_info(rest)),
+            "getstatus" => Oob::GetStatus(rest.trim().parse().ok()?),
             "disconnect" => Oob::Disconnect,
             "error" => Oob::Error(rest.to_owned()),
             "rcon" => {
@@ -251,6 +297,26 @@ mod tests {
                 ("hostname".into(), "My Server".into()),
                 ("clients".into(), "3".into()),
             ]),
+            Oob::GetStatus(11),
+            Oob::StatusResponse {
+                info: vec![("mapname".into(), "mp_crash".into())],
+                players: vec![
+                    StatusPlayer {
+                        score: 12,
+                        ping: 40,
+                        name: "Ann Lee".into(),
+                    },
+                    StatusPlayer {
+                        score: -3,
+                        ping: 0,
+                        name: String::new(),
+                    },
+                ],
+            },
+            Oob::StatusResponse {
+                info: vec![("mapname".into(), "mp_crash".into())],
+                players: Vec::new(),
+            },
             Oob::Disconnect,
             Oob::Error("Server is full.".into()),
             Oob::Rcon {

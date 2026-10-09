@@ -361,7 +361,12 @@ impl Frames {
             let mut tick = 0u32;
             let mut next = Instant::now();
             while !flag.load(Ordering::Relaxed) {
-                for i in net.poll(Duration::from_millis(20), &info) {
+                for i in net.poll(Duration::from_millis(20), &info, &|| {
+                    server::netsv::Status {
+                        info: Vec::new(),
+                        players: Vec::new(),
+                    }
+                }) {
                     if let Inbound::Connect(req) = i
                         && net.slot_of(req.from).is_none()
                     {

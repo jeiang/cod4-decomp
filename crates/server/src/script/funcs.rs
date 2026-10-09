@@ -23,7 +23,6 @@ const fn r(f: FuncFn) -> Impl<FuncFn> {
 }
 
 const M3: &str = "M3 bots, pmove, traces, weapons";
-const M5: &str = "M5 connect and play";
 const M7: &str = "M7 audio";
 const M8: &str = "M8 FX, decals, post";
 
@@ -251,23 +250,57 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("endlobby", r(|_, _, _| Ok(Value::Undefined))),
     ("setteamradar", r(set_team_radar)),
     ("getteamradar", r(get_team_radar)),
-    ("setvotestring", Later(M5)),
-    ("setvotetime", Later(M5)),
-    ("setvoteyescount", Later(M5)),
-    ("setvotenocount", Later(M5)),
+    (
+        "setvotestring",
+        r(|g, _, a| {
+            if !a.is_empty() {
+                g.script_vote_string(a.string(0)?);
+            }
+            Ok(Value::Undefined)
+        }),
+    ),
+    (
+        "setvotetime",
+        r(|g, _, a| {
+            if !a.is_empty() {
+                g.script_vote_time(a.int(0)?);
+            }
+            Ok(Value::Undefined)
+        }),
+    ),
+    (
+        "setvoteyescount",
+        r(|g, _, a| {
+            if !a.is_empty() {
+                g.script_vote_yes(a.int(0)?);
+            }
+            Ok(Value::Undefined)
+        }),
+    ),
+    (
+        "setvotenocount",
+        r(|g, _, a| {
+            if !a.is_empty() {
+                g.script_vote_no(a.int(0)?);
+            }
+            Ok(Value::Undefined)
+        }),
+    ),
     ("setwinningplayer", r(uicmd::set_winning_player)),
     ("setwinningteam", r(uicmd::set_winning_team)),
     (
         "exitlevel",
-        r(|g, _, _| {
+        r(|g, _, a| {
             g.level.exit_requested = true;
+            g.level.save_persist = !a.is_empty() && a.int(0)? != 0;
             Ok(Value::Undefined)
         }),
     ),
     (
         "map_restart",
-        r(|g, _, _| {
+        r(|g, _, a| {
             g.level.map_restart_requested = true;
+            g.level.save_persist = !a.is_empty() && a.int(0)? != 0;
             Ok(Value::Undefined)
         }),
     ),
@@ -616,7 +649,17 @@ pub(super) fn log_string(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
-fn log_print(_: &mut Game, _: &mut Vm, _: Args) -> R {
+/// `logPrint(text, ...)`: the parameters joined (up to 1023 bytes) as one line of the game log.
+fn log_print(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let mut line = String::new();
+    for i in 0..a.len() {
+        let part = a.display(i)?;
+        if line.len() + part.len() >= 1024 {
+            break;
+        }
+        line.push_str(&part);
+    }
+    g.log_print(&line);
     Ok(Value::Undefined)
 }
 

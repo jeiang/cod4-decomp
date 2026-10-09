@@ -32,6 +32,24 @@ pub struct Entry {
     pub max_clients: i32,
     /// Milliseconds; 0 until the server has answered.
     pub ping: i32,
+    /// `pswrd`: joining needs a password.
+    pub password: bool,
+    /// `voice`, `pure`, `pb`: the server's voice chat, pure IWD and PunkBuster settings.
+    pub voice: bool,
+    pub pure: bool,
+    pub punkbuster: bool,
+    /// `mod`: the server runs modified content (the original's list marks the others).
+    pub modded: bool,
+    /// `hw`: what the server runs on (the original's hardware icon).
+    pub hardware: i32,
+    /// `ff` and `kc`: `scr_team_fftype` and `scr_game_allowkillcam`.
+    pub friendly_fire: i32,
+    pub killcam: bool,
+    /// `minPing` and `maxPing` the server lets in (0: no limit).
+    pub min_ping: i32,
+    pub max_ping: i32,
+    /// `game`: the server's `fs_game` directory, empty for stock.
+    pub game: String,
 }
 
 impl Entry {
@@ -45,6 +63,17 @@ impl Entry {
             clients: 0,
             max_clients: 0,
             ping: 0,
+            password: false,
+            voice: false,
+            pure: false,
+            punkbuster: false,
+            modded: false,
+            hardware: 0,
+            friendly_fire: 0,
+            killcam: false,
+            min_ping: 0,
+            max_ping: 0,
+            game: String::new(),
         }
     }
 
@@ -68,6 +97,17 @@ impl Entry {
             clients: num("clients"),
             max_clients: num("sv_maxclients"),
             ping: ping_ms.max(1),
+            password: num("pswrd") != 0,
+            voice: num("voice") != 0,
+            pure: num("pure") != 0,
+            punkbuster: num("pb") != 0,
+            modded: num("mod") != 0,
+            hardware: num("hw"),
+            friendly_fire: num("ff"),
+            killcam: num("kc") != 0,
+            min_ping: num("minPing"),
+            max_ping: num("maxPing"),
+            game: get("game").to_owned(),
         })
     }
 }
@@ -364,6 +404,7 @@ mod tests {
             clients: 1,
             max_clients: 18,
             ping,
+            ..Entry::unanswered(addr(a))
         }
     }
 

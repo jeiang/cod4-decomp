@@ -2220,6 +2220,17 @@ fn open_chat(shell: Option<&mut Shell>, input: &mut Input, f: &InputFrame) {
 
 /// A console line a menu, a bind or the console itself produced. What the server carries out goes to it (without the
 /// shell's command loop, which the line may have come from); the rest is the input layer's.
+/// The `rate` (bytes a second) and `snaps` (snapshots a second) the player's cvars ask the server for.
+fn netplay_rates(input: &Input) -> (i32, i32) {
+    let get = |n: &str, d: i32| {
+        input
+            .cvar(n)
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(d)
+    };
+    (get("rate", 25_000), get("snaps", 30))
+}
+
 fn console_action(st: &mut State, line: &str) {
     for cmd in crate::input::config::split_commands(line) {
         if cmd[0].eq_ignore_ascii_case("rcon") {
@@ -2229,6 +2240,20 @@ fn console_action(st: &mut State, line: &str) {
                 net.send_rcon(&password, &cmd[1..].join(" "));
             } else if let Some(sh) = st.shell.as_mut() {
                 sh.print_console("rcon: not connected to a server");
+            }
+        } else if cmd[0].eq_ignore_ascii_case("name") {
+            // `name <text>`: the server reads the new name from the userinfo, with the rate and snapshot rate.
+            let Some(new) = cmd.get(1) else {
+                if let Some(sh) = st.shell.as_mut() {
+                    let n = st.input.cvar("name").unwrap_or("").to_owned();
+                    sh.print_console(&format!("\"name\" is \"{n}\""));
+                }
+                continue;
+            };
+            st.input.exec_line(&format!("set name \"{new}\""));
+            let (rate, snaps) = netplay_rates(&st.input);
+            if let Some(net) = st.net.as_mut() {
+                net.send_command(&net::client::userinfo_command(new, rate, snaps));
             }
         } else if !crate::console::is_server_verb(&cmd[0]) {
             st.input.exec_line(&crate::input::config::join(&cmd));
@@ -2481,6 +2506,8 @@ fn finish_load(
         let limits = st.input.pitch_limits();
         let mut net = NetPlay::connect(library, &data, addr, &cli.name, limits, false, sound)?;
         net.set_autojoin(std::mem::take(&mut st.autojoin_next));
+        let (rate, snaps) = netplay_rates(&st.input);
+        net.set_userinfo(&cli.name, rate, snaps);
         if let Some(sh) = st.shell.as_ref() {
             net.set_profile(&sh.st.stats);
         }

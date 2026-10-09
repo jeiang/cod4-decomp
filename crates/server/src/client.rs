@@ -21,6 +21,8 @@ use sim::weapon::{OffhandClass, PlayerWeapons};
 use crate::bot::Brain;
 use crate::game::{Ent, EntKind, Game, ScriptCall};
 use crate::playeranim::{PlayerPoseInput, PlayerPoseState};
+use crate::ui::Dest;
+use net::ui::ServerCmd;
 
 /// [`Client::spec_allow`] bits (`allowspectateteam`).
 pub mod spec {
@@ -184,6 +186,13 @@ pub struct Client {
     pub last_weapon: u32,
     pub prev_firing: bool,
     pub prev_sprinting: bool,
+    pub prev_night_vision: bool,
+    /// The level time after which a player who has not moved or fired is dropped (`g_inactivity`), and whether the
+    /// warning went out.
+    pub inactivity_at: i32,
+    pub inactivity_warned: bool,
+    /// `pingPlayer`: until when the enemies' compasses show this player (0: not pinged).
+    pub compass_ping_until: i32,
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
@@ -250,6 +259,10 @@ impl Client {
             last_weapon: 0,
             prev_firing: false,
             prev_sprinting: false,
+            prev_night_vision: false,
+            inactivity_at: 60_000,
+            inactivity_warned: false,
+            compass_ping_until: 0,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
             pose: PlayerPoseState::default(),
@@ -258,6 +271,42 @@ impl Client {
 
     pub fn connected(&self) -> bool {
         self.conn == Conn::Connected
+    }
+}
+
+/// `ClientCleanName`: what a name is made of once the colour codes (`^` and the character after it) and the leading
+/// spaces are gone and a run of more than three spaces is cut to three, at most 15 characters; a name with nothing
+/// left is `UnnamedPlayer`.
+pub fn clean_client_name(name: &str) -> String {
+    const MAX: usize = 15;
+    let mut out = String::new();
+    let mut spaces = 0;
+    let mut chars = name.chars();
+    while let Some(c) = chars.next() {
+        if out.is_empty() && c == ' ' {
+            continue;
+        }
+        if c == '^' {
+            chars.next();
+            continue;
+        }
+        if c == ' ' {
+            spaces += 1;
+            if spaces > 3 {
+                continue;
+            }
+        } else {
+            spaces = 0;
+        }
+        if out.chars().count() >= MAX {
+            break;
+        }
+        out.push(c);
+    }
+    if out.is_empty() {
+        "UnnamedPlayer".into()
+    } else {
+        out
     }
 }
 
@@ -520,6 +569,7 @@ impl Game {
         c.last_weapon = 0;
         c.spawn_count = spawn_count;
         c.last_spawn_time = time;
+        (c.inactivity_at, c.inactivity_warned) = (time + 60_000, false);
         c.last_stand = false;
         c.last_stand_time = 0;
         // Blood the last life's killing blow left is not the new life's.
@@ -560,6 +610,9 @@ impl Game {
 
     /// `ClientThink_real`: one usercmd through movement, then what the movement caused.
     pub fn client_think(&mut self, vm: &mut Vm, n: u16, mut cmd: UserCmd) {
+        if !self.inactivity_timer(vm, n, &cmd) {
+            return;
+        }
         let level_time = self.level.time;
         let Some(c) = self.clients.get_mut(usize::from(n)) else {
             return;
@@ -653,6 +706,106 @@ impl Game {
         }
         self.update_activate(vm, n);
         self.location_input(vm, n, &cmd);
+    }
+
+    /// `ClientInactivityTimer`: a player who neither moves nor shoots nor jumps for `g_inactivity` seconds is warned
+    /// ten seconds before and then dropped. False when the player went.
+    fn inactivity_timer(&mut self, vm: &mut Vm, n: u16, cmd: &UserCmd) -> bool {
+        let (time, limit) = (self.level.time, self.cvars.int("g_inactivity"));
+        let Some(c) = self.clients.get_mut(usize::from(n)) else {
+            return true;
+        };
+        if !c.connected()
+            || c.bot
+            || matches!(c.session, Session::Spectator | Session::Intermission)
+        {
+            return true;
+        }
+        if limit == 0 {
+            (c.inactivity_at, c.inactivity_warned) = (time + 60_000, false);
+        } else if cmd.forwardmove != 0
+            || cmd.rightmove != 0
+            || cmd.buttons & (pm::button::ATTACK | pm::button::JUMP) != 0
+        {
+            (c.inactivity_at, c.inactivity_warned) =
+                (time.saturating_add(limit.saturating_mul(1000)), false);
+        } else if time > c.inactivity_at {
+            self.inactive.push(n);
+            self.disconnect_client(vm, n);
+            return false;
+        } else if time > c.inactivity_at - 10_000 && !c.inactivity_warned {
+            c.inactivity_warned = true;
+            self.send(
+                Dest::Client(n),
+                ServerCmd::Announce {
+                    text: "&GAME_INACTIVEDROPWARNING".into(),
+                },
+            );
+        }
+        true
+    }
+
+    /// `StuckInClient`: a living player whose body overlaps another living player's (they were spawned or pushed
+    /// together) is shoved apart from it, both along the line between them, at `g_playerCollisionEjectSpeed`.
+    fn stuck_in_client(&mut self, n: u16) {
+        let playing = |g: &Game, k: u16| {
+            g.client(k)
+                .is_some_and(|c| c.connected() && c.session == Session::Playing)
+                && g.ent(k).is_some_and(|e| {
+                    e.health > 0 && e.contents & (contents::PLAYER | contents::CORPSE) != 0
+                })
+        };
+        if !playing(self, n) {
+            return;
+        }
+        let Some(me) = self.ent(n) else { return };
+        let (o, mins, maxs) = (me.origin, me.mins, me.maxs);
+        let touching = (0..self.max_clients as u16).find(|&k| {
+            k != n
+                && playing(self, k)
+                && self.ent(k).is_some_and(|h| {
+                    let overlap = (0..3).all(|a| {
+                        o[a] + maxs[a] >= h.origin[a] + h.mins[a]
+                            && o[a] + mins[a] <= h.origin[a] + h.maxs[a]
+                    });
+                    let d = [h.origin[0] - o[0], h.origin[1] - o[1]];
+                    let reach = maxs[0] + h.maxs[0];
+                    overlap && d[0] * d[0] + d[1] * d[1] <= reach * reach
+                })
+        });
+        let Some(k) = touching else { return };
+        let ho = self.ent(k).map_or(o, |h| h.origin);
+        let jitter = |g: &mut Game| (g.rand() as f32 / u32::MAX as f32).mul_add(2.0, -1.0);
+        let mut d = [ho[0] - o[0] + jitter(self), ho[1] - o[1] + jitter(self)];
+        let len = d[0].hypot(d[1]);
+        if len > 0.0 {
+            d = [d[0] / len, d[1] / len];
+        }
+        let eject = self.cvars.int("g_playerCollisionEjectSpeed") as f32;
+        let moving = |c: &Client| {
+            if c.ps.velocity[0].hypot(c.ps.velocity[1]) > 0.0 {
+                eject
+            } else {
+                0.0
+            }
+        };
+        let (Some(mine), Some(theirs)) = (self.client(n), self.client(k)) else {
+            return;
+        };
+        let (mut self_speed, mut hit_speed) = (moving(mine), moving(theirs));
+        if self_speed < 0.0001 && hit_speed < 0.0001 {
+            (self_speed, hit_speed) = (mine.ps.speed as f32, theirs.ps.speed as f32);
+        }
+        if let Some(h) = self.client_mut(k) {
+            (h.ps.velocity[0], h.ps.velocity[1]) = (hit_speed * d[0], hit_speed * d[1]);
+            h.ps.pm_time = 300;
+            h.ps.pm_flags |= pmf::TIME_HARDLANDING;
+        }
+        if let Some(m) = self.client_mut(n) {
+            (m.ps.velocity[0], m.ps.velocity[1]) = (-self_speed * d[0], -self_speed * d[1]);
+            m.ps.pm_time = 300;
+            m.ps.pm_flags |= pmf::TIME_HARDLANDING;
+        }
     }
 
     /// `SpectatorThink`: attack and ads step through the players that may be watched, melee leaves the one
@@ -897,7 +1050,15 @@ impl Game {
         self.set_client_contents(n);
         self.update_cursor_hints(n);
         self.update_pose(n);
+        self.stuck_in_client(n);
         self.per_frame_notifies(_vm, n);
+        let time = self.level.time;
+        if let Some(c) = self.client_mut(n)
+            && c.compass_ping_until != 0
+            && time >= c.compass_ping_until
+        {
+            c.compass_ping_until = 0;
+        }
     }
 
     /// Advances the player's body animation by one server frame.
@@ -928,7 +1089,14 @@ impl Game {
         c.last_weapon = weapon;
         let firing = c.ps.weapon_state == pm::weapon_state::FIRING && c.ps.pm_type < PmType::Dead;
         let sprinting = c.ps.pm_flags & pmf::SPRINTING != 0;
+        let night_vision = c.ps.weapon_flags & pm::wf::NIGHTVISION != 0;
         let edges = [
+            (
+                night_vision,
+                std::mem::replace(&mut c.prev_night_vision, night_vision),
+                "night_vision_on",
+                "night_vision_off",
+            ),
             (
                 firing,
                 std::mem::replace(&mut c.prev_firing, firing),
@@ -971,6 +1139,34 @@ impl Game {
 /// `Key` for an integer index, for building arrays.
 pub fn int_key(i: usize) -> Key {
     Key::Int(i as i32)
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::clean_client_name;
+
+    #[test]
+    fn colour_codes_and_leading_spaces_go_and_a_long_run_of_spaces_is_cut() {
+        assert_eq!(clean_client_name("^1Red^7Dead"), "RedDead");
+        assert_eq!(clean_client_name("   Ann"), "Ann");
+        assert_eq!(clean_client_name("a      b"), "a   b");
+        assert_eq!(clean_client_name("trailing^"), "trailing");
+    }
+
+    #[test]
+    fn a_name_is_at_most_15_characters_and_an_empty_one_is_unnamed() {
+        assert_eq!(
+            clean_client_name("abcdefghijklmnopqrstuvwxyz"),
+            "abcdefghijklmno"
+        );
+        // The colour codes do not count toward the 15.
+        assert_eq!(
+            clean_client_name("^1abcdefghij^2klmnopqrst"),
+            "abcdefghijklmno"
+        );
+        assert_eq!(clean_client_name(""), "UnnamedPlayer");
+        assert_eq!(clean_client_name("   ^1^2 "), "UnnamedPlayer");
+    }
 }
 
 #[cfg(test)]

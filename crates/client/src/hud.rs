@@ -146,6 +146,8 @@ pub struct LiveUi {
     pub own_team: u8,
     /// Client names and teams by slot.
     pub names: Vec<String>,
+    /// `(old, new)` for each player who changed their name since the shell last took them (`CGAME_PLAYERRENAMES`).
+    pub renamed: Vec<(String, String)>,
     pub teams: Vec<u8>,
     /// Rank and prestige by slot (`setrank`).
     pub ranks: Vec<(u8, u8)>,

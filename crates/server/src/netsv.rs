@@ -11,7 +11,7 @@ use crate::game::{EntKind, Game, SoundTo, WorldFx};
 use crate::ui::Dest;
 use net::connect::{ConnectRequest, Gate, serve};
 use net::entity::{EntityState, etype};
-use net::oob::{Challenger, Oob};
+use net::oob::{Challenger, Oob, StatusPlayer};
 use net::snapshot::Follow;
 use net::transport::{MAX_MESSAGE, Transport};
 use net::ui::HudElem;
@@ -53,6 +53,8 @@ pub mod eflags {
     pub const CONNECTION_INTERRUPTED: u32 = 1 << 5;
     /// The player is mounted on a turret (`EF_TURRET_ACTIVE`).
     pub const TURRET: u32 = 1 << 6;
+    /// A script pinged the player (`pingPlayer`): the other team's compass shows them for a moment.
+    pub const PING: u32 = 1 << 7;
 }
 
 /// Time the server has listened to a client without hearing it, after which others are shown the
@@ -79,6 +81,12 @@ pub struct Peer {
     ack_moved: Instant,
     /// It has taken nothing for [`STALL`] with [`IGNORABLE_BEHIND`] commands waiting: lagging, not in a burst.
     stalled: bool,
+    /// The bytes a second it asked to be sent (`rate` of its userinfo), 0 when it named none.
+    rate: i32,
+    /// Milliseconds between the snapshots it asked for (`snaps`), 0 when it named none: one every server frame.
+    snapshot_msec: i32,
+    /// Server time before which no snapshot goes out (the rate and `snaps` pacing).
+    next_snapshot: i32,
 }
 
 impl Peer {
@@ -113,6 +121,12 @@ pub enum Inbound {
         password: String,
         command: String,
     },
+}
+
+/// What a `getstatus` is answered with: the server info settings and the players.
+pub struct Status {
+    pub info: Vec<(String, String)>,
+    pub players: Vec<StatusPlayer>,
 }
 
 /// Counters for the report.
@@ -184,6 +198,7 @@ impl NetSv {
         &mut self,
         wait: Duration,
         info: &dyn Fn() -> Vec<(String, String)>,
+        status: &dyn Fn() -> Status,
     ) -> Vec<Inbound> {
         let mut out = Vec::new();
         let mut wait = wait;
@@ -203,6 +218,13 @@ impl NetSv {
                         password,
                         command,
                     });
+                    continue;
+                }
+                if let Oob::GetStatus(c) = o {
+                    let Status { mut info, players } = status();
+                    info.push(("challenge".into(), c.to_string()));
+                    self.t
+                        .send_to(from, &Oob::StatusResponse { info, players }.encode());
                     continue;
                 }
                 match serve(
@@ -278,9 +300,54 @@ impl NetSv {
             last_ack: 0,
             ack_moved: Instant::now(),
             stalled: false,
+            rate: 0,
+            snapshot_msec: 0,
+            next_snapshot: 0,
         });
         self.stats.joins += 1;
         self.t.send_to(req.from, &Oob::ConnectResponse.encode());
+    }
+
+    /// The name a person's peer carries across a map change.
+    pub fn rename(&mut self, slot: u16, name: &str) {
+        if let Some(p) = self
+            .peers
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
+            name.clone_into(&mut p.name);
+        }
+    }
+
+    /// `SV_UserinfoChanged`: what a client's userinfo asks for. The rate is kept within 1000 to 90000 bytes a second
+    /// (a client on the local network gets 99999); `snaps` within 1 to 30 a second. Asking for neither leaves the
+    /// client with a snapshot every server frame, which is the original's behaviour only above 20 frames a second.
+    pub fn set_userinfo(&mut self, slot: u16, info: &str) {
+        let Some(p) = self
+            .peers
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        else {
+            return;
+        };
+        let local = match p.link.addr.ip() {
+            std::net::IpAddr::V4(i) => i.is_loopback() || i.is_private() || i.is_link_local(),
+            std::net::IpAddr::V6(i) => i.is_loopback(),
+        };
+        let rate = info_value(info, "rate");
+        p.rate = if local {
+            99_999
+        } else if rate.is_empty() {
+            0
+        } else {
+            crate::cvar::parse_int(rate).clamp(1000, 90_000)
+        };
+        let snaps = info_value(info, "snaps");
+        p.snapshot_msec = if snaps.is_empty() {
+            0
+        } else {
+            1000 / crate::cvar::parse_int(snaps).clamp(1, 30)
+        };
     }
 
     /// Every connected client, for a map change; they rejoin with [`Self::put_peer`].
@@ -303,6 +370,7 @@ impl NetSv {
         // The new level numbers its effects afresh: the client needs the names again.
         peer.fx_sent = 0;
         peer.stalled = false;
+        peer.next_snapshot = 0;
         self.peers[usize::from(slot)] = Some(peer);
     }
 
@@ -566,8 +634,16 @@ impl NetSv {
         } else if !self.archive.is_empty() {
             self.archive.clear();
         }
+        let max_rate = game.cvars.int("sv_maxRate");
         for slot in 0..self.peers.len() {
-            if self.peers[slot].is_none() {
+            let Some(peer) = self.peers[slot].as_mut() else {
+                continue;
+            };
+            if server_time < peer.next_snapshot {
+                // Not its turn: the reliable commands still go out, which a snapshot would have carried.
+                if peer.link.commands_pending() > 0 {
+                    peer.link.send(&mut self.t, None);
+                }
                 continue;
             }
             let Some(snap) = self.snapshot_for(game, slot as u16, server_time, &entities) else {
@@ -589,6 +665,8 @@ impl NetSv {
                 peer.fx_sent += 1;
             }
             let bytes = peer.link.send(&mut self.t, Some(snap.canonical()));
+            peer.next_snapshot =
+                server_time + snapshot_delay(peer.rate, peer.snapshot_msec, bytes, max_rate);
             self.stats.snapshots_out += 1;
             self.stats.bytes_out += bytes as u64;
         }
@@ -665,6 +743,32 @@ impl NetSv {
         snap.follow = Some(follow);
         Some(snap)
     }
+}
+
+/// Milliseconds until the next snapshot of a client with `rate` and `snapshot_msec` after one of `bytes` (`SV_RateMsec`): its `snaps` interval, or
+/// the time its rate (at most `max_rate` when that is set, at least 1000) takes to carry the message if longer.
+fn snapshot_delay(rate: i32, snapshot_msec: i32, bytes: usize, max_rate: i32) -> i32 {
+    let mut rate = rate;
+    if max_rate > 0 {
+        let cap = max_rate.max(1000);
+        rate = if rate > 0 { rate.min(cap) } else { cap };
+    }
+    if rate <= 0 {
+        return snapshot_msec;
+    }
+    let size = bytes.min(1500) as i32;
+    (1000 * (size + 48) / rate).max(snapshot_msec)
+}
+
+/// The value of `key` in a `\key\value` string, `""` when it has none.
+pub fn info_value<'a>(info: &'a str, key: &str) -> &'a str {
+    let mut it = info.split('\\').skip(1);
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        if k.eq_ignore_ascii_case(key) {
+            return v;
+        }
+    }
+    ""
 }
 
 /// One player's screen for the archive, `None` when they are not in the match.
@@ -781,6 +885,10 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                     0
                 } | if c.ps.e_flags & sim::pm::ef::TURRET_ACTIVE != 0 {
                     eflags::TURRET
+                } else {
+                    0
+                } | if c.compass_ping_until != 0 {
+                    eflags::PING
                 } else {
                     0
                 };
@@ -917,7 +1025,52 @@ mod tests {
             stalled: false,
             unheard_ms: 0,
             heard_now: false,
+            rate: 0,
+            snapshot_msec: 0,
+            next_snapshot: 0,
         }
+    }
+
+    #[test]
+    fn a_snapshot_waits_for_the_snaps_interval_and_for_what_the_rate_takes_to_send() {
+        // No rate and no snaps asked for: every frame.
+        assert_eq!(snapshot_delay(0, 0, 1200, 0), 0);
+        // 20 snapshots a second.
+        assert_eq!(snapshot_delay(0, 50, 100, 0), 50);
+        // 1500 bytes and the 48 of header at 5000 bytes a second take 309 ms.
+        assert_eq!(snapshot_delay(5000, 50, 1500, 0), 309);
+        // A message is counted at most 1500 bytes.
+        assert_eq!(snapshot_delay(5000, 50, 9000, 0), 309);
+        // The server's cap beats a higher rate, and is never below 1000.
+        assert_eq!(snapshot_delay(90_000, 0, 1500, 5000), 309);
+        assert_eq!(snapshot_delay(90_000, 0, 1500, 10), 1548);
+        // Fast enough: the interval is what counts.
+        assert_eq!(snapshot_delay(90_000, 50, 500, 0), 50);
+    }
+
+    #[test]
+    fn userinfo_values_are_read_by_key_and_a_peer_off_the_local_network_keeps_the_rate_in_range() {
+        assert_eq!(info_value("\\name\\Ann\\rate\\25000", "rate"), "25000");
+        assert_eq!(info_value("\\name\\Ann", "RATE"), "");
+        let mut net = NetSv::new(
+            Box::new(net::MemNet::new().endpoint(SocketAddr::from(([127, 0, 0, 1], 1)))),
+            2,
+        );
+        let req = |ip: [u8; 4]| ConnectRequest {
+            from: SocketAddr::from((ip, 5)),
+            qport: 1,
+            name: String::new(),
+            password: String::new(),
+        };
+        net.add_peer(0, &req([8, 8, 8, 8]), "far");
+        net.add_peer(1, &req([192, 168, 1, 4]), "near");
+        net.set_userinfo(0, "\\rate\\5\\snaps\\100");
+        net.set_userinfo(1, "\\rate\\5\\snaps\\10");
+        let (far, near) = (net.peer(0).unwrap(), net.peer(1).unwrap());
+        assert_eq!((far.rate, far.snapshot_msec), (1000, 33));
+        assert_eq!((near.rate, near.snapshot_msec), (99_999, 100));
+        net.set_userinfo(0, "\\rate\\900000");
+        assert_eq!(net.peer(0).unwrap().rate, 90_000);
     }
 
     fn print(kind: PrintKind) -> String {
