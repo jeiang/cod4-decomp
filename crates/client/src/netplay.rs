@@ -917,7 +917,7 @@ impl NetPlay {
             render += self.hands_camera(&ps, &mut seen);
         }
         // The listener hears from the drawn eye (`SND_SetListener(.., refdef.vieworg, ..)`).
-        self.hear(dt, render, &ps, &events);
+        self.hear(dt, render, &ps, &events, &snap);
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
@@ -1152,7 +1152,14 @@ impl NetPlay {
     }
 
     /// Feeds the sound system: the listener, the server's sound commands, and the own player's events.
-    fn hear(&mut self, dt: f32, eye: Vec3, ps: &PlayerState, events: &[(u8, u8)]) {
+    fn hear(
+        &mut self,
+        dt: f32,
+        eye: Vec3,
+        ps: &PlayerState,
+        events: &[(u8, u8)],
+        snap: &net::Snapshot,
+    ) {
         let yaw = self.angles[1].to_radians();
         self.sound.frame(eye.to_array(), yaw, dt);
         let loops: Vec<_> = snap
