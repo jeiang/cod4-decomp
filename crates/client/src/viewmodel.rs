@@ -650,6 +650,10 @@ mod tests {
             let Some(mut vm) = build(&content, name) else {
                 continue;
             };
+            // Weapons that cannot aim (C4, grenades, claymores) never reach a full aim.
+            if vm.slots[slot::ADS_UP].is_none() {
+                continue;
+            }
             checked += 1;
             let mut ps = PlayerState {
                 view_height_current: 60.0,
