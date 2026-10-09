@@ -65,13 +65,22 @@ pub fn plan(casters: &[Caster], eye: Vec3, to_sun: Vec3, max: usize) -> Vec<Cook
 /// Orthographic projection along the light, `2 * radius` wide around `centre`; depth runs `radius` either side.
 pub fn view_proj(centre: Vec3, radius: f32, to_sun: Vec3) -> Mat4 {
     let along = -to_sun.normalize();
-    let up = if along.z.abs() > 0.99 { Vec3::X } else { Vec3::Z };
+    let up = if along.z.abs() > 0.99 {
+        Vec3::X
+    } else {
+        Vec3::Z
+    };
     let right = along.cross(up).normalize();
     let up = right.cross(along);
     let k = 1.0 / radius;
     // clip.x = (p - c) . right / r; clip.y = (p - c) . up / r; depth = ((p - c) . along + r) / 2r.
     let rows = [
-        Vec4::new(right.x * k, right.y * k, right.z * k, -centre.dot(right) * k),
+        Vec4::new(
+            right.x * k,
+            right.y * k,
+            right.z * k,
+            -centre.dot(right) * k,
+        ),
         Vec4::new(up.x * k, up.y * k, up.z * k, -centre.dot(up) * k),
         Vec4::new(
             along.x * k * 0.5,
@@ -136,7 +145,10 @@ mod tests {
     fn the_nearest_casters_get_the_tiles_in_order() {
         let casters = [caster(900.0), caster(100.0), caster(500.0), caster(-300.0)];
         let got = plan(&casters, Vec3::ZERO, Vec3::new(0.3, 0.2, 1.0), 3);
-        assert_eq!(got.iter().map(|c| c.caster).collect::<Vec<_>>(), vec![1, 3, 2]);
+        assert_eq!(
+            got.iter().map(|c| c.caster).collect::<Vec<_>>(),
+            vec![1, 3, 2]
+        );
         assert_eq!(plan(&casters, Vec3::ZERO, Vec3::Z, 0).len(), 0);
         let many: Vec<Caster> = (0..30).map(|i| caster(i as f32 * 10.0)).collect();
         assert_eq!(plan(&many, Vec3::ZERO, Vec3::Z, 99).len(), MAX);
@@ -146,7 +158,10 @@ mod tests {
     fn a_casters_centre_is_the_middle_of_its_tile_and_its_shadow_falls_along_the_light() {
         let sun = Vec3::new(0.4, -0.3, 0.8).normalize();
         let c = caster(100.0);
-        for (tile, cookie) in plan(&[c, caster(200.0)], Vec3::ZERO, sun, 2).iter().enumerate() {
+        for (tile, cookie) in plan(&[c, caster(200.0)], Vec3::ZERO, sun, 2)
+            .iter()
+            .enumerate()
+        {
             let at = project(&cookie.lookup, cookie.centre);
             assert!((at.x - 0.5).abs() < 1e-4, "{at:?}");
             let mid = (tile as f32 + 0.5) / MAX as f32;
@@ -165,7 +180,10 @@ mod tests {
         let cookie = plan(&[caster(0.0)], Vec3::ZERO, sun, 1)[0];
         let edge = project(&cookie.lookup, cookie.centre + Vec3::Y * cookie.radius);
         let inner = (TILE as f32 - 2.0) / TILE as f32;
-        assert!(((edge.x - 0.5).abs() - 0.5 * inner).abs() < 1e-4, "{edge:?}");
+        assert!(
+            ((edge.x - 0.5).abs() - 0.5 * inner).abs() < 1e-4,
+            "{edge:?}"
+        );
         let vp = viewport(1);
         assert_eq!(vp, [1.0, 129.0, 126.0, 126.0]);
     }

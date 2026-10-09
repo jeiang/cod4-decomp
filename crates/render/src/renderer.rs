@@ -3,8 +3,8 @@
 
 use crate::art::MapArt;
 use crate::codeconst::{self, FrameConsts, LightConsts, Object, tex as ctex};
-use crate::cull::{self, Frustum};
 use crate::cookie;
+use crate::cull::{self, Frustum};
 use crate::dlight::{self, DynLight};
 use crate::dynmesh::{self, DynMesh};
 use crate::gpu::Gpu;
@@ -377,7 +377,10 @@ enum PassKind {
     /// The surfaces a shadow cookie darkens.
     CookieReceiver,
     /// What a dynamic light adds: its spot (`true`) or omni technique, over the surfaces it reaches.
-    DynLight { spot: bool, shadow: bool },
+    DynLight {
+        spot: bool,
+        shadow: bool,
+    },
 }
 
 impl PassKind {
@@ -1391,7 +1394,12 @@ impl Renderer {
                 let Some(pipeline) = self.materials.pipeline(&self.gpu, &prep, target) else {
                     continue;
                 };
-                let tex_bg = self.tex_group(&prep, 0, inst.reflection_probe_index, tex_light(kind, light));
+                let tex_bg = self.tex_group(
+                    &prep,
+                    0,
+                    inst.reflection_probe_index,
+                    tex_light(kind, light),
+                );
                 let tris = u32::from(model.surfs[idx].tri_count) * 3;
                 draws.push(Draw {
                     sky: false,
@@ -1787,19 +1795,18 @@ impl Renderer {
             let pf = self.spot_build_frame(&vp, c.radius, view.origin);
             let f = Frustum::from_clip(&vp);
             let casters = world.shadow_geometry.get(usize::from(id));
-            let surfaces: Vec<u32> = casters
-                .map(|g| g.sorted_surf_index.as_slice())
-                .unwrap_or_default()
-                .iter()
-                .map(|&i| u32::from(i))
-                .filter(|&si| {
-                    world
-                        .dpvs
-                        .surfaces
-                        .get(si as usize)
-                        .is_some_and(|s| !f.culls(Vec3::from(s.bounds[0]), Vec3::from(s.bounds[1])))
-                })
-                .collect();
+            let surfaces: Vec<u32> =
+                casters
+                    .map(|g| g.sorted_surf_index.as_slice())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|&i| u32::from(i))
+                    .filter(|&si| {
+                        world.dpvs.surfaces.get(si as usize).is_some_and(|s| {
+                            !f.culls(Vec3::from(s.bounds[0]), Vec3::from(s.bounds[1]))
+                        })
+                    })
+                    .collect();
             let smodels: Vec<u32> = casters
                 .map(|g| g.smodel_index.as_slice())
                 .unwrap_or_default()
@@ -1926,7 +1933,10 @@ impl Renderer {
                 false,
             );
             // The shadow falls on what is near the caster: a box around it, twice its size.
-            let (lo, hi) = (c.centre - Vec3::splat(c.radius * 2.0), c.centre + Vec3::splat(c.radius * 2.0));
+            let (lo, hi) = (
+                c.centre - Vec3::splat(c.radius * 2.0),
+                c.centre + Vec3::splat(c.radius * 2.0),
+            );
             let surfaces: Vec<u32> = vis
                 .surfaces
                 .iter()
@@ -1944,11 +1954,16 @@ impl Renderer {
                 .iter()
                 .copied()
                 .filter(|&mi| {
-                    world.dpvs.smodel_draw_insts.get(mi as usize).is_some_and(|m| {
-                        let r = m.model.as_ref().map_or(0.0, |m| m.radius) * m.scale;
-                        let o = Vec3::from(m.origin);
-                        (o - Vec3::splat(r)).cmple(hi).all() && (o + Vec3::splat(r)).cmpge(lo).all()
-                    })
+                    world
+                        .dpvs
+                        .smodel_draw_insts
+                        .get(mi as usize)
+                        .is_some_and(|m| {
+                            let r = m.model.as_ref().map_or(0.0, |m| m.radius) * m.scale;
+                            let o = Vec3::from(m.origin);
+                            (o - Vec3::splat(r)).cmple(hi).all()
+                                && (o + Vec3::splat(r)).cmpge(lo).all()
+                        })
                 })
                 .take(MAX_LIGHT_SURFACES)
                 .collect();
@@ -1958,8 +1973,12 @@ impl Renderer {
                 .filter(|d| {
                     let i = &insts[d.inst];
                     d.inst != inst
-                        && (Vec3::from(i.origin) - Vec3::splat(i.model.radius)).cmple(hi).all()
-                        && (Vec3::from(i.origin) + Vec3::splat(i.model.radius)).cmpge(lo).all()
+                        && (Vec3::from(i.origin) - Vec3::splat(i.model.radius))
+                            .cmple(hi)
+                            .all()
+                        && (Vec3::from(i.origin) + Vec3::splat(i.model.radius))
+                            .cmpge(lo)
+                            .all()
                 })
                 .collect();
             let mut rf = frame.clone();
@@ -2104,11 +2123,9 @@ impl Renderer {
                 .iter()
                 .copied()
                 .filter(|&si| {
-                    world
-                        .dpvs
-                        .surfaces
-                        .get(si as usize)
-                        .is_some_and(|s| l.reaches_box(Vec3::from(s.bounds[0]), Vec3::from(s.bounds[1])))
+                    world.dpvs.surfaces.get(si as usize).is_some_and(|s| {
+                        l.reaches_box(Vec3::from(s.bounds[0]), Vec3::from(s.bounds[1]))
+                    })
                 })
                 .take(MAX_LIGHT_SURFACES)
                 .collect();
@@ -2385,7 +2402,8 @@ impl Renderer {
             .last_time
             .map_or(0.0, |t| (view.time - t).clamp(0.0, 0.1));
         self.last_time = Some(view.time);
-        let mut spot_lists = self.build_spot_shadows(view, &vis, &insts, &dynsurfs, dt, &mut counts);
+        let mut spot_lists =
+            self.build_spot_shadows(view, &vis, &insts, &dynsurfs, dt, &mut counts);
         let spot_primary_draws: usize = spot_lists.iter().map(|l| l.1.len()).sum();
         stats.shadow_draws += spot_primary_draws;
 
@@ -2508,7 +2526,8 @@ impl Renderer {
             .map(|l| l.draws.len() + l.vm_draws.len())
             .sum();
         stats.lights = light_passes.len();
-        stats.shadow_draws += spot_lists.iter().map(|l| l.1.len()).sum::<usize>() - spot_primary_draws;
+        stats.shadow_draws +=
+            spot_lists.iter().map(|l| l.1.len()).sum::<usize>() - spot_primary_draws;
         self.dynamic_lights = dlights;
         stats.models += insts.len();
         stats.models = counts.models;
@@ -2625,7 +2644,14 @@ impl Renderer {
             for c in &cookies {
                 let vp = cookie::viewport(c.tile);
                 rp.set_viewport(vp[0], vp[1], vp[2], vp[3], 0.0, 1.0);
-                record(&mut rp, &c.casters, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+                record(
+                    &mut rp,
+                    &c.casters,
+                    &self.vs_bg,
+                    &self.ps_bg,
+                    None,
+                    &self.dyn_vb,
+                );
             }
         }
         if let (false, Some(sh)) = (spot_lists.is_empty(), &self.spot_shadow) {
@@ -2755,17 +2781,35 @@ impl Renderer {
             if !cookies.is_empty() {
                 rp.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
                 for c in &cookies {
-                    record(&mut rp, &c.receivers, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+                    record(
+                        &mut rp,
+                        &c.receivers,
+                        &self.vs_bg,
+                        &self.ps_bg,
+                        None,
+                        &self.dyn_vb,
+                    );
                 }
             }
-            if let Some(fill) = self.alpha_fill.as_ref().filter(|_| !light_passes.is_empty()) {
+            if let Some(fill) = self
+                .alpha_fill
+                .as_ref()
+                .filter(|_| !light_passes.is_empty())
+            {
                 for lp in &light_passes {
                     let [x, y, w, h] = lp.rect;
                     rp.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
                     rp.set_scissor_rect(x, y, w, h);
                     rp.set_pipeline(&fill.zero);
                     rp.draw(0..3, 0..1);
-                    record(&mut rp, &lp.draws, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+                    record(
+                        &mut rp,
+                        &lp.draws,
+                        &self.vs_bg,
+                        &self.ps_bg,
+                        None,
+                        &self.dyn_vb,
+                    );
                     if !lp.vm_draws.is_empty() {
                         rp.set_viewport(
                             0.0,
@@ -2775,7 +2819,14 @@ impl Renderer {
                             0.0,
                             VIEWMODEL_DEPTH,
                         );
-                        record(&mut rp, &lp.vm_draws, &self.vs_bg, &self.ps_bg, None, &self.dyn_vb);
+                        record(
+                            &mut rp,
+                            &lp.vm_draws,
+                            &self.vs_bg,
+                            &self.ps_bg,
+                            None,
+                            &self.dyn_vb,
+                        );
                         rp.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
                     }
                     rp.set_pipeline(&fill.one);

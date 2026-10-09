@@ -91,7 +91,12 @@ fn spot_params(c: &Cvars) -> render::SpotParams {
     render::SpotParams {
         start_radius: value("r_spotLightStartRadius", 0.0, 1200.0, d.start_radius),
         end_radius: value("r_spotLightEndRadius", 1.0, 1200.0, d.end_radius),
-        fov_inner_fraction: value("r_spotLightFovInnerFraction", 0.0, 0.99, d.fov_inner_fraction),
+        fov_inner_fraction: value(
+            "r_spotLightFovInnerFraction",
+            0.0,
+            0.99,
+            d.fov_inner_fraction,
+        ),
         brightness: value("r_spotLightBrightness", 0.0, 16.0, d.brightness),
     }
 }

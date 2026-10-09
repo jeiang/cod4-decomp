@@ -1509,10 +1509,7 @@ mod tests {
             0,
             2,
             0,
-            vec![
-                elem_def(elem::OMNI_LIGHT, FxVisuals::None),
-                spot_elem,
-            ],
+            vec![elem_def(elem::OMNI_LIGHT, FxVisuals::None), spot_elem],
         );
         let mut fx = Fx::new(lib(vec![def.clone()]));
         fx.play(&def, Frame::facing(Vec3::new(10.0, 0.0, 0.0), Vec3::Y));

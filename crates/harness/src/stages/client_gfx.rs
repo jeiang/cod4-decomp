@@ -31,7 +31,8 @@ const LIT_STEP: i32 = 24;
 
 /// Share of pixels of `on` whose luma is more than [`LIT_STEP`] above that of `off` (same size).
 fn brightened_share(off: &[u8], on: &[u8]) -> f64 {
-    let luma = |p: &[u8]| (i32::from(p[0]) * 77 + i32::from(p[1]) * 150 + i32::from(p[2]) * 29) >> 8;
+    let luma =
+        |p: &[u8]| (i32::from(p[0]) * 77 + i32::from(p[1]) * 150 + i32::from(p[2]) * 29) >> 8;
     let n = off.len() / 3;
     let lit = off
         .chunks_exact(3)

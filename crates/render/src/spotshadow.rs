@@ -43,7 +43,11 @@ pub fn score(eye: Vec3, forward: Vec3, l: &Candidate) -> f32 {
 /// outer cone, from `1 + near_bias` to the light's radius. `dir` points back at the light, like the light's constant.
 pub fn view_proj(origin: Vec3, dir: Vec3, cos_outer: f32, radius: f32, near_bias: f32) -> Mat4 {
     let forward = -dir.normalize();
-    let up = if forward.z.abs() > 0.99 { Vec3::X } else { Vec3::Z };
+    let up = if forward.z.abs() > 0.99 {
+        Vec3::X
+    } else {
+        Vec3::Z
+    };
     // Game space: x forward, y left, z up. The camera's x is to the right, y up and z forward.
     let cx = forward.cross(up).normalize();
     let cy = cx.cross(forward);
@@ -152,7 +156,13 @@ mod tests {
 
     #[test]
     fn a_point_on_the_axis_lands_in_the_middle_of_its_tile_for_every_direction() {
-        for dir in [Vec3::X, Vec3::Y, -Vec3::Z, Vec3::Z, Vec3::new(1.0, 1.0, 0.3).normalize()] {
+        for dir in [
+            Vec3::X,
+            Vec3::Y,
+            -Vec3::Z,
+            Vec3::Z,
+            Vec3::new(1.0, 1.0, 0.3).normalize(),
+        ] {
             // `dir` points back at the light, so the light shines along -dir.
             let origin = Vec3::new(100.0, -50.0, 20.0);
             let vp = view_proj(origin, dir, cos(30.0), 400.0, 0.0);
@@ -174,10 +184,16 @@ mod tests {
         let m = lookup(&vp, 1);
         // On the cone's edge, 100 along: 100 * tan(30) to the side.
         let side = project(&m, Vec3::new(100.0, 100.0 * 30f32.to_radians().tan(), 0.0));
-        assert!((side.x - 0.0).abs() < 1e-4 || (side.x - 1.0).abs() < 1e-4, "{side:?}");
+        assert!(
+            (side.x - 0.0).abs() < 1e-4 || (side.x - 1.0).abs() < 1e-4,
+            "{side:?}"
+        );
         let near = project(&m, Vec3::new(1.0, 0.0, 0.0));
         let far = project(&m, Vec3::new(500.0, 0.0, 0.0));
-        assert!(near.z.abs() < 1e-4 && (far.z - 1.0).abs() < 1e-4, "{near:?} {far:?}");
+        assert!(
+            near.z.abs() < 1e-4 && (far.z - 1.0).abs() < 1e-4,
+            "{near:?} {far:?}"
+        );
         // Outside the cone the lookup leaves the tile.
         let out = project(&m, Vec3::new(100.0, 90.0, 0.0));
         assert!(out.x < 0.0 || out.x > 1.0);

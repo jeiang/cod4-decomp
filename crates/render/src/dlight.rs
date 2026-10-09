@@ -224,7 +224,10 @@ fn importance_ge(a: &DynLight, b: &DynLight, eye: Vec3) -> bool {
         return a.spot.is_some();
     }
     let (ra, rb) = (a.radius * a.radius, b.radius * b.radius);
-    let (da, db) = (eye.distance_squared(a.origin), eye.distance_squared(b.origin));
+    let (da, db) = (
+        eye.distance_squared(a.origin),
+        eye.distance_squared(b.origin),
+    );
     rb * da <= ra * db
 }
 
@@ -238,15 +241,16 @@ pub fn select(lights: &[DynLight], eye: Vec3, frustum: &Frustum, limit: usize) -
     let mut visible: Vec<usize> = (0..lights.len().min(MAX_ADDED))
         .filter(|&i| {
             let l = &lights[i];
-            !frustum.culls(l.origin - Vec3::splat(l.radius), l.origin + Vec3::splat(l.radius))
+            !frustum.culls(
+                l.origin - Vec3::splat(l.radius),
+                l.origin + Vec3::splat(l.radius),
+            )
         })
         .collect();
     // A stable insertion sort by the pairwise importance: at most 32 lights.
     for i in 1..visible.len() {
         let mut j = i;
-        while j > 0
-            && !importance_ge(&lights[visible[j - 1]], &lights[visible[j]], eye)
-        {
+        while j > 0 && !importance_ge(&lights[visible[j - 1]], &lights[visible[j]], eye) {
             visible.swap(j - 1, j);
             j -= 1;
         }
@@ -262,7 +266,10 @@ mod tests {
 
     /// A frustum of everything with `x < 1000` in front of the eye at the origin looking along +x.
     fn view() -> Frustum {
-        let near_far = [Vec4::new(1.0, 0.0, 0.0, 0.0), Vec4::new(-1.0, 0.0, 0.0, 1000.0)];
+        let near_far = [
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
+            Vec4::new(-1.0, 0.0, 0.0, 1000.0),
+        ];
         let sides = [
             Vec4::new(1.0, 1.0, 0.0, 0.0),
             Vec4::new(1.0, -1.0, 0.0, 0.0),
@@ -285,17 +292,19 @@ mod tests {
     #[test]
     fn a_light_with_no_radius_is_not_a_light() {
         assert!(DynLight::omni(Vec3::ZERO, 0.0, Vec3::ONE).is_none());
-        assert!(DynLight::spot(Vec3::ZERO, Vec3::X, 0.0, Vec3::ONE, &SpotParams::default()).is_none());
+        assert!(
+            DynLight::spot(Vec3::ZERO, Vec3::X, 0.0, Vec3::ONE, &SpotParams::default()).is_none()
+        );
     }
 
     #[test]
     fn lights_out_of_view_are_dropped_and_the_rest_ordered_by_how_much_of_the_view_they_cover() {
         let lights = [
-            omni([100.0, 0.0, 0.0], 50.0),    // close, small
-            omni([-500.0, 0.0, 0.0], 100.0),  // behind the eye
-            omni([400.0, 0.0, 0.0], 400.0),   // far, big: radius/dist = 1
-            omni([200.0, 0.0, 0.0], 50.0),    // radius/dist = 0.25
-            omni([100.0, 0.0, 0.0], 120.0),   // radius/dist = 1.2
+            omni([100.0, 0.0, 0.0], 50.0),   // close, small
+            omni([-500.0, 0.0, 0.0], 100.0), // behind the eye
+            omni([400.0, 0.0, 0.0], 400.0),  // far, big: radius/dist = 1
+            omni([200.0, 0.0, 0.0], 50.0),   // radius/dist = 0.25
+            omni([100.0, 0.0, 0.0], 120.0),  // radius/dist = 1.2
         ];
         let got = select(&lights, Vec3::ZERO, &view(), 4);
         assert_eq!(got, vec![4, 2, 0, 3]);
@@ -312,7 +321,9 @@ mod tests {
         assert_eq!(select(&lights, Vec3::ZERO, &view(), 2), vec![1, 0]);
         assert!(select(&lights, Vec3::ZERO, &view(), 0).is_empty());
         // Whatever r_dlightLimit says, four is the most.
-        let many: Vec<DynLight> = (0..10).map(|i| omni([100.0 + i as f32, 0.0, 0.0], 50.0)).collect();
+        let many: Vec<DynLight> = (0..10)
+            .map(|i| omni([100.0 + i as f32, 0.0, 0.0], 50.0))
+            .collect();
         assert_eq!(select(&many, Vec3::ZERO, &view(), 99).len(), MAX_VISIBLE);
     }
 
@@ -400,7 +411,10 @@ mod tests {
     fn an_omni_light_reaches_what_is_within_its_radius() {
         let l = omni([0.0, 0.0, 0.0], 100.0);
         assert!(l.reaches_box(Vec3::new(50.0, -5.0, -5.0), Vec3::new(60.0, 5.0, 5.0)));
-        assert!(l.reaches_box(Vec3::new(99.0, -500.0, -500.0), Vec3::new(300.0, 500.0, 500.0)));
+        assert!(l.reaches_box(
+            Vec3::new(99.0, -500.0, -500.0),
+            Vec3::new(300.0, 500.0, 500.0)
+        ));
         assert!(!l.reaches_box(Vec3::new(101.0, -5.0, -5.0), Vec3::new(160.0, 5.0, 5.0)));
         // A box containing the light is reached.
         assert!(l.reaches_box(Vec3::splat(-1.0), Vec3::splat(1.0)));
@@ -408,7 +422,14 @@ mod tests {
 
     #[test]
     fn a_spot_light_reaches_only_what_is_inside_its_cone() {
-        let l = DynLight::spot(Vec3::ZERO, Vec3::X, 300.0, Vec3::ONE, &SpotParams::default()).unwrap();
+        let l = DynLight::spot(
+            Vec3::ZERO,
+            Vec3::X,
+            300.0,
+            Vec3::ONE,
+            &SpotParams::default(),
+        )
+        .unwrap();
         let along = (Vec3::new(150.0, -5.0, -5.0), Vec3::new(160.0, 5.0, 5.0));
         let beside = (Vec3::new(10.0, 180.0, -5.0), Vec3::new(20.0, 190.0, 5.0));
         let behind = (Vec3::new(-100.0, -5.0, -5.0), Vec3::new(-90.0, 5.0, 5.0));
@@ -419,7 +440,14 @@ mod tests {
 
     #[test]
     fn spot_constants_scale_the_cone_edge_to_zero_and_the_core_to_one() {
-        let l = DynLight::spot(Vec3::ZERO, Vec3::X, 300.0, Vec3::ONE, &SpotParams::default()).unwrap();
+        let l = DynLight::spot(
+            Vec3::ZERO,
+            Vec3::X,
+            300.0,
+            Vec3::ONE,
+            &SpotParams::default(),
+        )
+        .unwrap();
         let c = l.consts(32.0, 0);
         let c0 = l.spot.unwrap();
         let at = |cos: f32| cos * c.spot_factors[0] + c.spot_factors[1];
