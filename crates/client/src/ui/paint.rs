@@ -60,6 +60,9 @@ impl Painter<'_> {
 }
 
 /// Fonts by the menu font number (`font_enum`) and the size the text will have in pixels per virtual unit.
+/// Gap between a text field's label and its value when the item has label text (`Item_TextField_Paint`).
+const FIELD_GAP: f32 = 8.0;
+
 pub fn pick_font(assets: &UiAssets, font_enum: i32, scale: f32, unit: f32) -> Option<&Arc<Font>> {
     // `ui_smallFont`, `ui_bigFont` and `ui_extraBigFont` default to these.
     const SMALL: f32 = 0.25;
@@ -596,7 +599,7 @@ impl Ui {
                         if self.overstrike { '_' } else { '|' },
                     )
                 });
-                self.paint_item_text_caret(host, p, m, i, d, Some(&shown), caret);
+                self.paint_text_field(host, p, m, i, d, &shown, caret);
             }
             ity::YESNO => {
                 let on = host
@@ -714,6 +717,104 @@ impl Ui {
         }
     }
 
+    /// Where a label of width `w` starts in the item's rect (`Item_SetTextExtents`). `field_w` is the width of the
+    /// dvar text a text field shows after its label: a centred or right-aligned label leaves room for it.
+    pub(super) fn text_origin(
+        &self,
+        d: &ItemDef,
+        r: &Rect,
+        w: f32,
+        h: f32,
+        field_w: f32,
+    ) -> (f32, f32) {
+        let bsz = if d.window.border != 0 {
+            d.window.border_size
+        } else {
+            0.0
+        };
+        let mode = d.text_align_mode;
+        let mut x = d.text_align_x;
+        let free = r.w - w - field_w;
+        match mode & 3 {
+            1 => x += free * 0.5,
+            2 => x += free,
+            _ => {}
+        }
+        let y = d.text_align_y + self.text_y(mode & 0xC, r.h, h);
+        (x + bsz + r.x, y + bsz + r.y)
+    }
+
+    /// Where a text field's label (`.0`, `.1`) and value (`.2`) start, the label's text and its width
+    /// (`Item_TextField_Paint`): the value follows the label, 8 units on when the item has label text of its own.
+    pub(super) fn text_field_layout(
+        &self,
+        host: &dyn Host,
+        m: usize,
+        i: usize,
+        d: &ItemDef,
+    ) -> (f32, f32, f32, String, f32) {
+        let label = self.item_text(host, m, i, d);
+        let r = self.menus[m].items[i].rect;
+        let h = self.text_height(d.font_enum, d.text_scale);
+        let label_w = self.text_width(&label, d.font_enum, d.text_scale);
+        let dvar = host.dvar(d.dvar.as_deref().unwrap_or(""));
+        let field_w = self.text_width(&dvar, d.font_enum, d.text_scale);
+        let (x, y) = self.text_origin(d, &r, label_w, h, field_w);
+        let gap = if d.text.as_deref().is_some_and(|t| !t.is_empty()) {
+            FIELD_GAP
+        } else {
+            0.0
+        };
+        (x, y, x + label_w + gap, label, label_w)
+    }
+
+    /// A text field: its label drawn as for any text, then the value after it.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_text_field(
+        &self,
+        host: &dyn Host,
+        p: &mut Painter,
+        m: usize,
+        i: usize,
+        d: &ItemDef,
+        value: &str,
+        caret: Option<(usize, char)>,
+    ) {
+        let (x, y, vx, label, _) = self.text_field_layout(host, m, i, d);
+        let r = self.menus[m].items[i].rect;
+        let color = self.text_color(m, i, d, host);
+        let mut draw = |text: &str, x: f32| {
+            self.draw_text(
+                p,
+                &TextDraw {
+                    text,
+                    font_enum: d.font_enum,
+                    scale: d.text_scale,
+                    style: d.text_style,
+                    color,
+                    x,
+                    y,
+                    horz: r.horz_align,
+                    vert: r.vert_align,
+                },
+            );
+        };
+        if !label.is_empty() {
+            draw(&label, x);
+        }
+        if !value.is_empty() {
+            draw(value, vx);
+        }
+        if let Some((at, c)) = caret {
+            let before: String = value.chars().take(at).collect();
+            draw(
+                &c.to_string(),
+                vx + self.text_width(&before, d.font_enum, d.text_scale),
+            );
+        }
+    }
+
+    /// Draws the item's own text (or `over`) placed by its text alignment.
     fn paint_item_text(
         &self,
         host: &dyn Host,
@@ -723,48 +824,20 @@ impl Ui {
         d: &ItemDef,
         over: Option<&str>,
     ) {
-        self.paint_item_text_caret(host, p, m, i, d, over, None);
-    }
-
-    /// Like [`Ui::paint_item_text`], with a caret character drawn over the text before its `.0`th character.
-    #[allow(clippy::too_many_arguments)]
-    fn paint_item_text_caret(
-        &self,
-        host: &dyn Host,
-        p: &mut Painter,
-        m: usize,
-        i: usize,
-        d: &ItemDef,
-        over: Option<&str>,
-        caret: Option<(usize, char)>,
-    ) {
         let text = match over {
             Some(t) => t.to_owned(),
             None => self.item_text(host, m, i, d),
         };
-        if text.is_empty() && caret.is_none() {
+        if text.is_empty() {
             return;
         }
         let r = self.menus[m].items[i].rect;
         let color = self.text_color(m, i, d, host);
         let h = self.text_height(d.font_enum, d.text_scale);
         let w = self.text_width(&text, d.font_enum, d.text_scale);
-        let bsz = if d.window.border != 0 {
-            d.window.border_size
-        } else {
-            0.0
-        };
-        let mode = d.text_align_mode;
-        let mut x = d.text_align_x;
-        match mode & 3 {
-            1 => x += (r.w - w) * 0.5,
-            2 => x += r.w - w,
-            _ => {}
-        }
-        let y = d.text_align_y + self.text_y(mode & 0xC, r.h, h);
-        let (x, y) = (x + bsz + r.x, y + bsz + r.y);
+        let (x, y) = self.text_origin(d, &r, w, h, 0.0);
         if d.window.static_flags & statf::AUTOWRAPPED != 0 && r.w > 0.0 {
-            self.paint_wrapped(p, d, &text, color, x, y, r, mode);
+            self.paint_wrapped(p, d, &text, color, x, y, r, d.text_align_mode);
             return;
         }
         self.draw_text(
@@ -781,24 +854,6 @@ impl Ui {
                 vert: r.vert_align,
             },
         );
-        if let Some((at, c)) = caret {
-            let before: String = text.chars().take(at).collect();
-            let cx = x + self.text_width(&before, d.font_enum, d.text_scale);
-            self.draw_text(
-                p,
-                &TextDraw {
-                    text: &c.to_string(),
-                    font_enum: d.font_enum,
-                    scale: d.text_scale,
-                    style: d.text_style,
-                    color,
-                    x: cx,
-                    y,
-                    horz: r.horz_align,
-                    vert: r.vert_align,
-                },
-            );
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
