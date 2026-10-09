@@ -564,3 +564,39 @@ fn a_freed_item_leaves_the_drop_cue() {
     g.free_entity(&mut vm, item);
     assert!(g.dropped.is_empty());
 }
+
+#[test]
+fn a_flying_frag_is_networked_with_its_weapon_and_heading_and_its_blast_with_the_weapon() {
+    let (mut g, mut vm) = arena();
+    let thrower = add_player(&mut g, &mut vm, [-300.0, 0.0, 0.0], Team::Axis);
+    let frag_w = g.weapons.index("frag_grenade_mp");
+    let nade = g
+        .launch_grenade(
+            &mut vm,
+            thrower,
+            frag_w,
+            [0.0, 0.0, 50.0],
+            [300.0, 0.0, 0.0],
+            [0.0; 3],
+            false,
+            3000,
+        )
+        .unwrap();
+    let state = server::netsv::world_entities(&g)
+        .into_iter()
+        .find(|s| s.number == nade)
+        .unwrap();
+    assert_eq!(state.etype, net::entity::etype::MISSILE);
+    assert_eq!(state.weapon, frag_w);
+    assert!(state.velocity[0] > 200.0, "heading: {:?}", state.velocity);
+
+    g.detonate_missile(&mut vm, nade);
+    let blasts: Vec<_> = server::netsv::world_entities(&g)
+        .into_iter()
+        .filter(|s| {
+            s.etype == net::entity::etype::EVENT && s.event == server::tempev::ev::EXPLOSION
+        })
+        .collect();
+    assert_eq!(blasts.len(), 1);
+    assert_eq!(blasts[0].weapon, frag_w);
+}

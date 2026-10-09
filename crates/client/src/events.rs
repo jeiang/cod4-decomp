@@ -26,6 +26,16 @@ pub enum ClientEvent {
     Explosion {
         origin: [f32; 3],
         normal: [f32; 3],
+        /// The surface type the blast sat on.
+        surface: u8,
+        weapon: u16,
+        owner: u16,
+    },
+    /// A missile that will not go off hit or settled on a surface (a grenade that never armed, a `dud` explosion).
+    Dud {
+        origin: [f32; 3],
+        normal: [f32; 3],
+        surface: u8,
         weapon: u16,
         owner: u16,
     },
@@ -80,6 +90,7 @@ impl ClientEvent {
             Self::BulletImpact { .. } => "bullet_impact",
             Self::Explosion { .. } => "explosion",
             Self::MissileBounce { .. } => "missile_bounce",
+            Self::Dud { .. } => "dud",
             Self::PlayFx { .. } => "play_fx",
             Self::PlayerDeath { .. } => "player_death",
             Self::PlayerPain { .. } => "player_pain",
@@ -164,6 +175,14 @@ impl Events {
             ev::EXPLOSION => ClientEvent::Explosion {
                 origin: e.origin,
                 normal,
+                surface: e.event_parm,
+                weapon: e.weapon,
+                owner: e.client,
+            },
+            ev::DUD => ClientEvent::Dud {
+                origin: e.origin,
+                normal,
+                surface: e.event_parm,
                 weapon: e.weapon,
                 owner: e.client,
             },
@@ -380,5 +399,25 @@ mod tests {
         p.event_seq = 9;
         let unknown = event(963, 0x7f, 1);
         assert!(ev.scan(&snap(&[p, unknown])).is_empty());
+    }
+
+    #[test]
+    fn a_blast_and_a_dud_carry_the_surface_they_were_on() {
+        let mut ev = Events::default();
+        let mut blast = event(960, super::ev::EXPLOSION, 1);
+        blast.event_parm = 5;
+        blast.weapon = 3;
+        let mut dud = event(961, super::ev::DUD, 1);
+        dud.event_parm = 9;
+        let out = ev.scan(&snap(&[blast, dud]));
+        assert!(matches!(
+            out[0],
+            ClientEvent::Explosion {
+                surface: 5,
+                weapon: 3,
+                ..
+            }
+        ));
+        assert!(matches!(out[1], ClientEvent::Dud { surface: 9, .. }));
     }
 }

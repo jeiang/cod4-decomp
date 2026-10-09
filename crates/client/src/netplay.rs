@@ -158,6 +158,7 @@ struct Counters {
     /// Models the zones lack for a vehicle, and the most vehicles drawn at once.
     vehicles_unloaded: std::collections::BTreeSet<String>,
     vehicles_max: usize,
+    projectiles_max: usize,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
@@ -848,12 +849,15 @@ impl NetPlay {
             let (yaw, pitch) = (self.angles[1].to_radians(), -self.angles[0].to_radians());
             self.effects.demo(name, eye, yaw, pitch);
         }
-        let missiles: Vec<_> = self
+        let flying: Vec<_> = self
             .net
             .snaps
             .interpolate(st - net::view::INTERP_DELAY_MS, Some(own))
-            .iter()
+            .into_iter()
             .filter(|e| e.etype == etype::MISSILE)
+            .collect();
+        let missiles: Vec<_> = flying
+            .iter()
             .map(|e| {
                 (
                     e.number,
@@ -870,6 +874,7 @@ impl NetPlay {
                 .and_then(|i| content.weapon(&i.name))
                 .cloned()
         });
+        let projectiles = self.projectiles(&flying);
         if let Some(snap) = self.net.latest() {
             self.effects.world_fx(&snap.entities, &self.events, eye, st);
         }
@@ -879,6 +884,7 @@ impl NetPlay {
         }
         self.props.update(dt, self.boxes.world());
         let mut drawn = self.effects.draw(eye, yaw, pitch, roll);
+        drawn.models.extend(projectiles);
         drawn.sway = self.shakes.sway(st, eye.to_array());
         self.c.shake_max = self
             .c
@@ -1248,6 +1254,38 @@ impl NetPlay {
         out
     }
 
+    /// The grenades, rockets and other projectiles in flight or at rest (`CG_Missile`): the weapon's projectile model
+    /// along the entity's angles, and the flight loop of weapons that have one following it.
+    fn projectiles(&mut self, flying: &[EntityState]) -> Vec<ModelInstance> {
+        let mut out = Vec::new();
+        let mut looping = Vec::new();
+        for e in flying {
+            let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
+                continue;
+            };
+            if let Some(alias) = def
+                .sounds
+                .projectile_sound
+                .as_deref()
+                .filter(|a| !a.is_empty())
+            {
+                self.sound.missile_loop(e.number, alias, e.origin);
+                looping.push(e.number);
+            }
+            let Some(model) = def.projectile_model.clone() else {
+                continue;
+            };
+            let mut m = ModelInstance::new(model, render::ModelKind::World);
+            m.origin = e.origin;
+            m.angles = e.angles;
+            m.light_origin = e.origin;
+            out.push(m);
+        }
+        self.sound.missile_loops_end(&looping);
+        self.c.projectiles_max = self.c.projectiles_max.max(out.len());
+        out
+    }
+
     /// The vehicles (helicopters), between the snapshots around the interpolation moment, with their rotors turning.
     /// Their loops follow them.
     fn vehicles(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
@@ -1484,6 +1522,7 @@ impl NetPlay {
         report["view_kick_max"] = json!(self.c.max_kick_up);
         report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
         report["view_kick_settled"] = json!(self.c.kick_settled);
+        report["net"]["projectiles_max_drawn"] = self.c.projectiles_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
         report["fx"]["camera_sway_max"] = self.c.sway_max.into();

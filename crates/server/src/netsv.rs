@@ -870,6 +870,7 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.etype = etype::MISSILE;
                 s.origin = e.origin;
                 s.angles = e.angles;
+                s.velocity = m.pos.evaluate_delta(game.level.time);
                 s.weapon = m.weapon;
                 s.client = m.parent.unwrap_or(1023);
                 s
