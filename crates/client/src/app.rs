@@ -2006,6 +2006,11 @@ fn script_step(st: &mut State) -> bool {
             }
             done(arg == "escape", sc, format!("key {arg}"));
         }
+        // Presses and releases a key as a player's hand does (`holdkey=mouse2` aims down the sights).
+        "holdkey" | "releasekey" => {
+            st.input.key(arg, key == "holdkey");
+            done(true, sc, format!("{key} {arg}"));
+        }
         // Holds a key down until the grenade count of the HUD drops (`throw=g:10`: the key, at most that many
         // seconds): the bind, the button and the server's throw as a player's key press goes through them.
         "throw" => {
