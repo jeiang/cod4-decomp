@@ -322,6 +322,15 @@ impl Sound {
         out
     }
 
+    /// `SND_GetKnownLength`: how long the first variant of `alias` plays, in milliseconds, when its samples are in
+    /// the tables (a streamed file's length is not known before it plays).
+    pub fn known_length_ms(&self, alias: &str) -> Option<u32> {
+        match &self.bank.aliases_of(alias).first()?.audio {
+            Clip::Loaded(p) => Some((p.frames() as u64 * 1000 / u64::from(p.rate.max(1))) as u32),
+            _ => None,
+        }
+    }
+
     pub fn play(&mut self, alias: &str, cue: Cue) -> Option<VoiceId> {
         self.play_chain(alias, cue, 0)
     }

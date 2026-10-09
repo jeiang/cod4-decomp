@@ -14,6 +14,7 @@ mod events;
 mod flythrough;
 #[cfg(not(target_arch = "wasm32"))]
 mod fx_selftest;
+mod breath;
 mod gfx;
 mod helicopter;
 mod hud;

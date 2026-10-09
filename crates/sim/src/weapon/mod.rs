@@ -8,9 +8,8 @@
 //! not allocate per tick (tables allocate once, at build time).
 //!
 //! Fact source: `iw3mp.exe` 1.7 (`bg_weapons.cpp`, `g_weapon.cpp`, `bullet.cpp`,
-//! `g_client_script_cmd_mp.cpp`, `g_items.cpp`). Known ceilings: breath holding (sniper scope
-//! sway damping) and animation script events are not modelled; they do not change when, whether
-//! or how a shot, reload, switch or throw happens.
+//! `g_client_script_cmd_mp.cpp`, `g_items.cpp`). Known ceiling: animation script events are not
+//! modelled; they do not change when, whether or how a shot, reload, switch or throw happens.
 
 pub mod damage;
 pub mod fire;

@@ -881,6 +881,87 @@ fn ads_blends_in_and_out_at_the_weapon_rate() {
     assert_eq!(r.ps.weapon_pos_frac, 0.0);
 }
 
+fn sniper() -> WeaponInfo {
+    WeaponInfo {
+        overlay_reticle: true,
+        ..bolt()
+    }
+}
+
+/// A scoped sniper fully aimed, the sway scale settled at 1.
+fn aimed_sniper() -> Rig {
+    let mut r = Rig::new(vec![sniper()]);
+    r.hold("remington700_mp");
+    r.ps.hold_breath_scale = 1.0;
+    r.run(button::ADS, 25);
+    assert_eq!(r.ps.weapon_pos_frac, 1.0);
+    r
+}
+
+const AIMED_BREATH: i32 = button::ADS | button::BREATH;
+
+#[test]
+fn holding_breath_steadies_the_scope_for_the_hold_time_then_gasps() {
+    let mut r = aimed_sniper();
+    r.run(AIMED_BREATH, 100);
+    assert_ne!(r.ps.weapon_flags & wf::HOLD_BREATH, 0);
+    assert_eq!(r.ps.hold_breath_timer, 1000);
+    assert!(r.ps.hold_breath_scale < 0.5, "{}", r.ps.hold_breath_scale);
+    // 4.5 s of breath: still held at 4.5 s, out right after, with the gasp time on the clock.
+    r.run(AIMED_BREATH, 350);
+    assert_ne!(r.ps.weapon_flags & wf::HOLD_BREATH, 0);
+    assert!(r.ps.hold_breath_scale < 0.02, "{}", r.ps.hold_breath_scale);
+    r.run(AIMED_BREATH, 1);
+    assert_eq!(r.ps.weapon_flags & wf::HOLD_BREATH, 0);
+    assert_eq!(r.ps.hold_breath_timer, 5500);
+    // The button is still down but the timer has to run out before the breath is taken again; the sway comes back
+    // stronger than normal meanwhile.
+    r.run(AIMED_BREATH, 30);
+    assert_eq!(r.ps.weapon_flags & wf::HOLD_BREATH, 0);
+    assert!(r.ps.hold_breath_scale > 2.0, "{}", r.ps.hold_breath_scale);
+}
+
+#[test]
+fn releasing_the_button_lets_the_breath_out_and_the_scale_recover() {
+    let mut r = aimed_sniper();
+    r.run(AIMED_BREATH, 50);
+    r.run(button::ADS, 1);
+    assert_eq!(r.ps.weapon_flags & wf::HOLD_BREATH, 0);
+    r.run(button::ADS, 1000);
+    assert_eq!(r.ps.hold_breath_timer, 0);
+    assert!((r.ps.hold_breath_scale - 1.0).abs() < 0.01);
+}
+
+#[test]
+fn breath_is_only_held_on_a_fully_aimed_scope() {
+    let mut r = Rig::new(vec![sniper()]);
+    r.hold("remington700_mp");
+    r.ps.hold_breath_scale = 1.0;
+    r.run(button::BREATH, 10);
+    assert_eq!(r.ps.weapon_flags & wf::HOLD_BREATH, 0, "hip");
+    let mut r = Rig::new(vec![bolt()]);
+    r.hold("remington700_mp");
+    r.run(AIMED_BREATH, 40);
+    assert_eq!(r.ps.weapon_flags & wf::HOLD_BREATH, 0, "no scope overlay");
+}
+
+#[test]
+fn a_shot_lets_the_breath_out_and_the_extra_breath_perk_lengthens_the_hold() {
+    let mut r = aimed_sniper();
+    r.run(AIMED_BREATH, 5);
+    assert_ne!(r.ps.weapon_flags & wf::HOLD_BREATH, 0);
+    r.run(AIMED_BREATH | ATTACK, 1);
+    assert_eq!(r.shots(), 1);
+    assert_eq!(r.ps.weapon_flags & wf::HOLD_BREATH, 0);
+
+    let mut r = aimed_sniper();
+    r.ps.perks |= crate::weapon::perk::EXTRA_BREATH;
+    r.run(AIMED_BREATH, 950);
+    assert_ne!(r.ps.weapon_flags & wf::HOLD_BREATH, 0, "9.5 s of breath");
+    r.run(AIMED_BREATH, 1);
+    assert_eq!(r.ps.weapon_flags & wf::HOLD_BREATH, 0);
+}
+
 #[test]
 fn rechambering_drops_ads_unless_the_weapon_allows_it() {
     for allowed in [false, true] {

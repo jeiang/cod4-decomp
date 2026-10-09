@@ -219,6 +219,8 @@ pub struct Input {
     config_path: Option<PathBuf>,
     dirty: bool,
     debug: Option<DebugCounter>,
+    /// See [`Input::set_fov_sensitivity_scale`].
+    fov_sensitivity_scale: f32,
 }
 
 const MAX_EXEC_DEPTH: u32 = 8;
@@ -320,7 +322,14 @@ impl Input {
             config_path: None,
             dirty: false,
             debug: None,
+            fov_sensitivity_scale: 1.0,
         }
+    }
+
+    /// `CL_SetFOVSensitivityScale`: the mouse turns the view by this much less (or more) than the hip rate, since
+    /// the view's field of view is that much narrower (or wider) than `cg_fov`. Gamepad and key turning ignore it.
+    pub fn set_fov_sensitivity_scale(&mut self, scale: f32) {
+        self.fov_sensitivity_scale = scale;
     }
 
     /// Tell the input whether the cursor is grabbed. Mouse look only applies while it is.
@@ -495,7 +504,7 @@ impl Input {
             }
             let msec = dt * 1000.0;
             let rate = if msec > 0.0 { mx.hypot(my) / msec } else { 0.0 };
-            let sens = rate * cv.f32("cl_mouseaccel") + sens;
+            let sens = (rate * cv.f32("cl_mouseaccel") + sens) * self.fov_sensitivity_scale;
             let snap = |f: f32| f.round() as i32;
             if strafe {
                 side += snap(mx * sens * cv.f32("m_side"));
@@ -1252,6 +1261,16 @@ mod tests {
             ..Feedback::default()
         });
         assert_eq!(frame(&mut i).buttons, 0);
+    }
+
+    #[test]
+    fn fov_sensitivity_scale_slows_mouse_look() {
+        let mut i = Input::detached();
+        i.exec_line("set sensitivity 2; set m_yaw 0.5; set m_pitch 0.25");
+        i.set_fov_sensitivity_scale(0.5);
+        i.mouse.winit_motion((10.0, 4.0));
+        let f = frame(&mut i);
+        assert_eq!((f.look_delta_yaw, f.look_delta_pitch), (-5.0, 1.0));
     }
 
     #[test]
