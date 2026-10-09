@@ -398,6 +398,8 @@ pub struct PlayerState {
     /// `beginLocationSelection`: the selector's material index (0 when not selecting) and its radius as 1/63 of the map.
     pub loc_selection: u16,
     pub loc_radius: u8,
+    /// The player's team or the player has radar (`radarEnabled`): the minimap sweeps for enemies.
+    pub radar_enabled: bool,
 }
 
 /// `spreadOverrideState_t`.
@@ -495,6 +497,7 @@ impl Default for PlayerState {
             action_slot_param: [0; 4],
             loc_selection: 0,
             loc_radius: 0,
+            radar_enabled: false,
         }
     }
 }

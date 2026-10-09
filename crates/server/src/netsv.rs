@@ -717,6 +717,15 @@ fn mark_interrupted(entities: &mut [EntityState], quiet: impl Iterator<Item = u1
     }
 }
 
+/// The team flags of an entity's owner, so the compass can tell a friendly vehicle from an enemy one.
+fn owner_team_flags(game: &Game, owner: u16) -> u32 {
+    match game.client(owner).map(|c| c.team) {
+        Some(Team::Axis) => eflags::TEAM_AXIS,
+        Some(Team::Allies) => eflags::TEAM_ALLIES,
+        _ => 0,
+    }
+}
+
 /// Everything a client can see, in entity-number order, already rounded as the wire rounds it.
 pub fn world_entities(game: &Game) -> Vec<EntityState> {
     let mut out = Vec::new();
@@ -811,6 +820,11 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                     s.launch_point = point;
                     s.velocity = force;
                 }
+                if let Some(owner) = e.x.plane_owner {
+                    s.etype = etype::PLANE;
+                    s.client = owner;
+                    s.eflags |= owner_team_flags(game, owner);
+                }
                 s
             }
             EntKind::Plain if e.veh.is_some() => {
@@ -828,11 +842,7 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.model = model as u16;
                 s.client = v.owner;
                 s.pm_type = v.stage;
-                s.eflags = match game.client(v.owner).map(|c| c.team) {
-                    Some(Team::Axis) => eflags::TEAM_AXIS,
-                    Some(Team::Allies) => eflags::TEAM_ALLIES,
-                    _ => 0,
-                };
+                s.eflags = owner_team_flags(game, v.owner);
                 s
             }
             EntKind::Plain if e.world_fx.is_some() => {

@@ -37,6 +37,9 @@ struct Cfg {
     max_range: f32,
     rotation: bool,
     show_enemies: bool,
+    radar_ping_fade: f32,
+    radar_line_thickness: f32,
+    map_radar_line_thickness: f32,
 }
 
 impl Cfg {
@@ -59,7 +62,22 @@ impl Cfg {
             max_range: f("compassMaxRange", 3500.0).max(0.0001),
             rotation: b("compassRotation", true),
             show_enemies: b("g_compassShowEnemies", false),
+            radar_ping_fade: f("compassRadarPingFadeTime", 4.0).clamp(0.01, 60.0),
+            radar_line_thickness: f("compassRadarLineThickness", 0.4).clamp(0.01, 10.0),
+            map_radar_line_thickness: f("cg_hudMapRadarLineThickness", 0.15).clamp(0.01, 10.0),
         }
+    }
+}
+
+/// The radar sweep's dvars, for the frame's step of the sweep.
+pub fn radar_cfg(c: &crate::input::Cvars) -> hudstate::RadarCfg {
+    let cfg = Cfg::read(c);
+    let f = |n: &str, d: f32| c.get(n).and_then(|v| v.trim().parse().ok()).unwrap_or(d);
+    hudstate::RadarCfg {
+        update_secs: f("compassRadarUpdateTime", 4.0_f32).clamp(0.01, 60.0),
+        max_range: cfg.max_range,
+        line_thickness: cfg.radar_line_thickness,
+        map_line_thickness: cfg.map_radar_line_thickness,
     }
 }
 
@@ -271,6 +289,8 @@ pub fn draw(
         159 => compass_map(&mut dc, h),
         152 => compass_objectives(&mut dc, h, false, &objectives),
         182 => compass_objectives(&mut dc, h, true, &objectives),
+        155 => compass_vehicles(&mut dc, h, false),
+        156 => compass_vehicles(&mut dc, h, true),
         158 => compass_friendlies(&mut dc, h, false),
         170 => compass_enemies(&mut dc, h, false),
         183 => compass_player(&mut dc, h, true),
@@ -1038,6 +1058,7 @@ fn compass_map(dc: &mut Dc, h: &mut HudFacts) {
     let Some(map) = h.map.as_ref().filter(|_| a > 0.0) else {
         return;
     };
+    let radar = h.radar_enabled.then_some(h.radar_progress);
     let r = dc.r;
     let (w, ht) = (r.w * dc.cfg.compass_size, r.h * dc.cfg.compass_size);
     let per_inch = ht / dc.cfg.max_range;
@@ -1063,6 +1084,30 @@ fn compass_map(dc: &mut Dc, h: &mut HudFacts) {
         rot,
         [cx, cy],
     );
+    if let Some(progress) = radar {
+        // The sweep's line, as far from the player as it is from the line (`CG_CompassDrawRadarEffects`, partial).
+        let cfg = dc.cfg;
+        let margin = compass::radar_margin(
+            map.world_size[0],
+            cfg.max_range,
+            cfg.radar_line_thickness,
+            cfg.map_radar_line_thickness,
+        );
+        let line = compass::radar_line(map, margin, progress);
+        let away = (h.origin[0] * line[0] + h.origin[1] * line[1] - line[2]) / cfg.max_range;
+        let thick = cfg.radar_line_thickness;
+        let left = 0.5 - away - thick * 0.5;
+        let beam = dc.p.named(&dc.ui.assets, "compass_radarline");
+        dc.p.g.quad_rot(
+            &beam,
+            [cx - w * 0.5 + left * w, cy - ht * 0.5, thick * w, ht],
+            [0.0, 0.0, 1.0, 1.0],
+            with_alpha(dc.color, a),
+            rot,
+            [cx, cy],
+        );
+        h.radar_lines += 1;
+    }
     dc.p.g.scissor(None);
 }
 
@@ -1119,6 +1164,19 @@ struct Mark {
 }
 
 fn draw_marks(dc: &mut Dc, h: &HudFacts, map: &MapInfo, full: bool, icon: &str, marks: &[Mark]) {
+    draw_marks_sized(dc, h, map, full, icon, marks, 18.75);
+}
+
+/// [`draw_marks`] with the minimap icon's size in virtual units (before `compassSize`).
+fn draw_marks_sized(
+    dc: &mut Dc,
+    h: &HudFacts,
+    map: &MapInfo,
+    full: bool,
+    icon: &str,
+    marks: &[Mark],
+    mini_size: f32,
+) {
     if marks.is_empty() {
         return;
     }
@@ -1132,7 +1190,7 @@ fn draw_marks(dc: &mut Dc, h: &HudFacts, map: &MapInfo, full: bool, icon: &str, 
         let k = dc.cfg.compass_size;
         (
             [r.x + r.w * k * 0.5, r.y + r.h * k * 0.5],
-            18.75 * k * u,
+            mini_size * k * u,
             (r.w * k, r.h * k),
         )
     };
@@ -1244,19 +1302,29 @@ fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
     draw_marks(dc, h, &map, full, "compassping_friendlyfiring_mp", &firing);
 }
 
-/// Enemies show where they last fired (or everywhere with `g_compassShowEnemies`).
+/// Enemies show where they last fired, where the radar's sweep last caught them (with radar), or everywhere with
+/// `g_compassShowEnemies`.
 fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
     let a = if full { 1.0 } else { compass_alpha(dc, h) };
-    let Some(map) = h.map.clone().filter(|_| a > 0.0 && h.team_known) else {
+    let Some(map) = h.map.clone().filter(|_| a > 0.0 && !h.spectator) else {
         return;
     };
+    let fade_ms = dc.cfg.radar_ping_fade * 1000.0;
     let (mut seen, mut firing) = (Vec::new(), Vec::new());
     for ac in h.actors.values().filter(|ac| !ac.friendly) {
-        if dc.cfg.show_enemies && ac.last_update >= h.now - FRIEND_RANGE_MS {
+        if dc.cfg.show_enemies {
+            if ac.last_update >= h.now - FRIEND_RANGE_MS {
+                seen.push(Mark {
+                    pos: ac.pos,
+                    angle: 0.0,
+                    alpha: a,
+                });
+            }
+        } else if ac.radar_time != 0 && (h.now - ac.radar_time) as f32 <= fade_ms {
             seen.push(Mark {
-                pos: ac.pos,
+                pos: ac.radar_pos,
                 angle: 0.0,
-                alpha: a,
+                alpha: a * (1.0 - (h.now - ac.radar_time).max(0) as f32 / fade_ms),
             });
         }
         if ac.fire_time != 0 && h.now - ac.fire_time <= PING_MS {
@@ -1267,8 +1335,48 @@ fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
             });
         }
     }
+    if !dc.cfg.show_enemies {
+        h.radar_marks += seen.len() as u32;
+    }
     draw_marks(dc, h, &map, full, "compassping_enemy", &seen);
     draw_marks(dc, h, &map, full, "compassping_enemyfiring", &firing);
+}
+
+/// Helicopters (`plane` false, 40 wide) and airstrike planes (20 wide) on the minimap, friendly or enemy by the team
+/// of whoever called them in (`CG_CompassDrawVehicles`).
+fn compass_vehicles(dc: &mut Dc, h: &mut HudFacts, planes: bool) {
+    let a = compass_alpha(dc, h).min(dc.color[3]);
+    let Some(map) = h.map.clone().filter(|_| a > 0.0) else {
+        return;
+    };
+    let (enemy_icon, friendly_icon, size) = if planes {
+        (
+            "compass_objpoint_airstrike_busy",
+            "compass_objpoint_airstrike_friendly",
+            20.0,
+        )
+    } else {
+        (
+            "compass_objpoint_helicopter_busy",
+            "compass_objpoint_helicopter_friendly",
+            40.0,
+        )
+    };
+    let rot = dc.cfg.rotation;
+    for (enemy, icon) in [(true, enemy_icon), (false, friendly_icon)] {
+        let marks: Vec<Mark> = h
+            .vehicles
+            .iter()
+            .filter(|v| v.plane == planes && v.enemy == enemy)
+            .map(|v| Mark {
+                pos: v.pos,
+                angle: mark_angle(rot, h.yaw, map.north_yaw, v.yaw),
+                alpha: a,
+            })
+            .collect();
+        h.vehicle_marks += marks.len() as u32;
+        draw_marks_sized(dc, h, &map, false, icon, &marks, size);
+    }
 }
 
 // ---- full-screen map -----------------------------------------------------------------------------------------------
@@ -1285,6 +1393,30 @@ fn map_image(dc: &mut Dc, h: &mut HudFacts) {
     let m = full_rect(dc, map);
     let img = dc.p.named(&dc.ui.assets, &map.material);
     dc.p.pic(&img, m, dc.color);
+    if h.radar_enabled {
+        // The sweep's line, as wide as a tenth or so of the map and tiled down it (`CG_CompassDrawRadarEffects`, full).
+        let cfg = dc.cfg;
+        let margin = compass::radar_margin(
+            map.world_size[0],
+            cfg.max_range,
+            cfg.radar_line_thickness,
+            cfg.map_radar_line_thickness,
+        ) / map.world_size[0];
+        let east = (margin * 2.0 + 1.0) * h.radar_progress - margin;
+        let side = cfg.map_radar_line_thickness * m.w;
+        let x = m.x + east * m.w - side * 0.5;
+        let beam = dc.p.named(&dc.ui.assets, "compass_radarline");
+        let color = with_alpha(dc.color, dc.color[3]);
+        dc.p.g.scissor(Some([m.x, m.y, m.w, m.h]));
+        let mut y = m.y;
+        while side > 0.0 && y < m.y + m.h {
+            dc.p.g
+                .quad(&beam, [x, y, side, side], [0.0, 0.0, 1.0, 1.0], color);
+            y += side;
+        }
+        dc.p.g.scissor(None);
+        h.radar_lines += 1;
+    }
 }
 
 /// The frame around the full map: the border image is a two by two grid of corner pieces and edge slices.

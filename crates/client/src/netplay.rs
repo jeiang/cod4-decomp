@@ -1224,7 +1224,7 @@ impl NetPlay {
         for e in snap
             .entities
             .iter()
-            .filter(|e| e.etype == etype::SCRIPT_MODEL)
+            .filter(|e| matches!(e.etype, etype::SCRIPT_MODEL | etype::PLANE))
         {
             seen += 1;
             let name = ui.model(e.model);

@@ -6,7 +6,7 @@
 //! [`crate::shell::GameFacts`], so the drawing never reaches into the network layer. Times are the shell's
 //! millisecond clock.
 
-use crate::compass::MapInfo;
+use crate::compass::{self, MapInfo};
 use std::collections::HashMap;
 
 /// `CG_FadeColor`: alpha of something shown at `start` for `total` ms that fades out over the last `fade` ms;
@@ -287,6 +287,36 @@ pub struct Actor {
     pub fire_time: i32,
     pub fire_pos: [f32; 2],
     pub event_seq: u8,
+    /// Where it was before the last update, for a move across the radar's sweep.
+    pub prev_pos: [f32; 2],
+    /// Perk bits (`specialty_gpsjammer` is bit 0: radar does not show the player).
+    pub perks: u32,
+    /// When the radar sweep last caught it (an enemy is shown at that spot for a while), 0 if never.
+    pub radar_time: i32,
+    pub radar_pos: [f32; 2],
+}
+
+/// How long after the entity last came in a snapshot the radar still catches an enemy.
+const RADAR_KEEP_MS: i32 = 1500;
+
+/// The dvars of the radar sweep (`compassRadarUpdateTime`, `compassMaxRange`, `compassRadarLineThickness`,
+/// `cg_hudMapRadarLineThickness`).
+#[derive(Clone, Copy, Debug)]
+pub struct RadarCfg {
+    pub update_secs: f32,
+    pub max_range: f32,
+    pub line_thickness: f32,
+    pub map_line_thickness: f32,
+}
+
+/// A helicopter or an airstrike plane the compass marks.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CompassVehicle {
+    pub plane: bool,
+    pub pos: [f32; 2],
+    pub yaw: f32,
+    /// Not the viewer's team (or, with no teams, not the viewer's own).
+    pub enemy: bool,
 }
 
 /// Everything the owner-draws read.
@@ -353,6 +383,17 @@ pub struct HudFacts {
     pub yaw: f32,
     pub map: Option<MapInfo>,
     pub actors: HashMap<u16, Actor>,
+    pub vehicles: Vec<CompassVehicle>,
+    /// The player's team or the player has radar (`ps.radarEnabled`), how far the sweep has gone (0 to 1, west to east
+    /// across the map) and the clock it was last stepped at.
+    pub radar_enabled: bool,
+    pub radar_progress: f32,
+    pub radar_clock: i32,
+    /// What the compass drew: enemies the radar showed, enemies its sweep caught, sweep lines and vehicle marks.
+    pub radar_marks: u32,
+    pub radar_pings: u32,
+    pub radar_lines: u32,
+    pub vehicle_marks: u32,
     // Fade starts, the shell's clock; 0 is "not shown yet".
     pub health_fade: i32,
     pub stance_fade: i32,
@@ -394,6 +435,42 @@ impl HudFacts {
         self.prev_spawn = None;
     }
 
+    /// `CG_CompassIncreaseRadarTime`: moves the sweep on to `now` and pings the enemies it passed over. With no
+    /// radar the sweep starts over.
+    pub fn step_radar(&mut self, now: i32, cfg: &RadarCfg) {
+        let dt = (now - std::mem::replace(&mut self.radar_clock, now)).clamp(0, 250);
+        let Some(map) = self
+            .map
+            .as_ref()
+            .filter(|_| self.live && self.radar_enabled)
+        else {
+            self.radar_progress = 0.0;
+            return;
+        };
+        let old = self.radar_progress;
+        let new = (old + dt as f32 / (cfg.update_secs * 1000.0)).fract();
+        self.radar_progress = new;
+        let margin = compass::radar_margin(
+            map.world_size[0],
+            cfg.max_range,
+            cfg.line_thickness,
+            cfg.map_line_thickness,
+        );
+        let (l_old, l_new) = (
+            compass::radar_line(map, margin, old),
+            compass::radar_line(map, margin, new),
+        );
+        for a in self.actors.values_mut().filter(|a| !a.friendly) {
+            // The sweep went over it, or it walked across the sweep (`ActorUpdatePos`); not once it has wrapped.
+            let passed = new >= old && compass::sweep_crossed(&l_old, &l_new, a.pos);
+            let walked = compass::move_crossed(&l_old, a.prev_pos, a.pos);
+            if (passed || walked) && a.last_update >= now - RADAR_KEEP_MS && a.perks & 1 == 0 {
+                (a.radar_time, a.radar_pos) = (now, a.pos);
+                self.radar_pings += 1;
+            }
+        }
+    }
+
     /// `CG_Respawn`'s low-health part, keyed on the player whose state is shown (`ps.client_num`, which follows a
     /// killcam or followed player; not the own client): a first snapshot, another viewed client or a changed spawn
     /// count starts the overlay over, whether or not a dead player state was ever seen in between.
@@ -424,6 +501,10 @@ impl HudFacts {
             "overlay_alpha": self.overlay.alpha(self.now),
             "drawn": self.drawn,
             "objective_marks": self.objective_marks,
+            "radar_pings": self.radar_pings,
+            "radar_marks": self.radar_marks,
+            "radar_lines": self.radar_lines,
+            "vehicle_marks": self.vehicle_marks,
             "objectives_listed": self.objectives_listed,
             "objectives_alpha": self.objectives_alpha,
         })
@@ -433,6 +514,86 @@ impl HudFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RADAR: RadarCfg = RadarCfg {
+        update_secs: 4.0,
+        max_range: 100.0,
+        line_thickness: 0.1,
+        map_line_thickness: 0.01,
+    };
+
+    /// A live HUD on a map 1000 wide (east is -y) with an enemy 500 east of its west edge and a friend there too.
+    fn radar_hud(enabled: bool) -> HudFacts {
+        let mut h = HudFacts {
+            live: true,
+            radar_enabled: enabled,
+            radar_progress: 0.45,
+            map: MapInfo::parse("\"m\" 0 0 -2000 -1000", "0"),
+            ..HudFacts::default()
+        };
+        for (c, friendly) in [(1, false), (2, true)] {
+            let pos = [0.0, -500.0];
+            h.actors.insert(
+                c,
+                Actor {
+                    friendly,
+                    pos,
+                    prev_pos: pos,
+                    last_update: 250,
+                    ..Actor::default()
+                },
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn the_radar_sweep_catches_the_enemy_it_passes_over() {
+        let mut h = radar_hud(true);
+        h.step_radar(250, &RADAR);
+        assert!(h.radar_progress > 0.5, "{}", h.radar_progress);
+        assert_eq!(h.actors[&1].radar_time, 250);
+        assert_eq!(h.actors[&1].radar_pos, [0.0, -500.0]);
+        assert_eq!(h.actors[&2].radar_time, 0, "a friend is not pinged");
+    }
+
+    #[test]
+    fn without_radar_nothing_is_caught_and_the_sweep_starts_over() {
+        let mut h = radar_hud(false);
+        h.step_radar(250, &RADAR);
+        assert_eq!(h.radar_progress, 0.0);
+        assert_eq!(h.actors[&1].radar_time, 0);
+    }
+
+    #[test]
+    fn a_jammed_enemy_and_a_sweep_that_has_not_reached_it_stay_hidden() {
+        let mut h = radar_hud(true);
+        h.actors.get_mut(&1).unwrap().perks = 1;
+        h.step_radar(250, &RADAR);
+        assert_eq!(h.actors[&1].radar_time, 0);
+        let mut h = radar_hud(true);
+        h.radar_progress = 0.1;
+        h.step_radar(250, &RADAR);
+        assert_eq!(h.actors[&1].radar_time, 0);
+    }
+
+    #[test]
+    fn an_enemy_walking_across_the_line_is_caught() {
+        let mut h = radar_hud(true);
+        // The sweep stands at 500 east; the enemy steps over it between two frames.
+        (h.radar_progress, h.radar_clock) = (0.5, 300);
+        let a = h.actors.get_mut(&1).unwrap();
+        (a.prev_pos, a.pos) = ([0.0, -400.0], [0.0, -600.0]);
+        h.step_radar(300, &RADAR);
+        assert_eq!(h.actors[&1].radar_time, 300);
+        assert_eq!(h.actors[&1].radar_pos, [0.0, -600.0]);
+        let mut h = radar_hud(true);
+        (h.radar_progress, h.radar_clock) = (0.5, 300);
+        let a = h.actors.get_mut(&1).unwrap();
+        (a.prev_pos, a.pos) = ([0.0, -600.0], [0.0, -700.0]);
+        h.step_radar(300, &RADAR);
+        assert_eq!(h.actors[&1].radar_time, 0, "it stayed on one side");
+    }
 
     #[test]
     fn a_fade_holds_then_ramps_down_over_its_last_700_ms() {

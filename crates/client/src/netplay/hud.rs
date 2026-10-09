@@ -4,7 +4,9 @@
 
 use super::{NetPlay, team_of};
 use crate::compass::MapInfo;
-use crate::hudstate::{self, Actor, Counter, HudFacts, OffhandFacts, Stance, WeaponFacts};
+use crate::hudstate::{
+    self, Actor, CompassVehicle, Counter, HudFacts, OffhandFacts, Stance, WeaponFacts,
+};
 use crate::models::Team;
 use crate::shell::GameFacts;
 use net::entity::etype;
@@ -96,6 +98,7 @@ impl NetPlay {
         h.own_client = own;
         h.team_known = matches!(team, 1 | 2);
         h.pm_dead = dead;
+        h.radar_enabled = ps.radar_enabled;
         h.spectator = ps.pm_type == PmType::Spectator;
         h.health = ps.health;
         h.max_health = ps.max_health;
@@ -279,7 +282,11 @@ impl NetPlay {
                 ..Actor::default()
             });
             a.friendly = own_team != 0 && theirs == Some(own_team);
-            a.pos = [e.origin[0], e.origin[1]];
+            a.prev_pos = std::mem::replace(&mut a.pos, [e.origin[0], e.origin[1]]);
+            if a.last_update == 0 {
+                a.prev_pos = a.pos;
+            }
+            a.perks = e.perks;
             a.yaw = e.angles[1];
             a.last_update = now;
             if e.event_seq != a.event_seq {
@@ -291,6 +298,24 @@ impl NetPlay {
             }
         }
         h.actors.retain(|_, a| now - a.last_update < ACTOR_KEEP_MS);
+        h.vehicles.clear();
+        for e in ents
+            .iter()
+            .filter(|e| matches!(e.etype, etype::VEHICLE | etype::PLANE))
+        {
+            // With no teams a vehicle is the viewer's only when the viewer owns it.
+            let enemy = if own_team == 0 {
+                e.client != own
+            } else {
+                team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 }) != Some(own_team)
+            };
+            h.vehicles.push(CompassVehicle {
+                plane: e.etype == etype::PLANE,
+                pos: [e.origin[0], e.origin[1]],
+                yaw: e.angles[1],
+                enemy,
+            });
+        }
     }
 
     /// The best grenade of a class to show: one with rounds left, else any carried.
