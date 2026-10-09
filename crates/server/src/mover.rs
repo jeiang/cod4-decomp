@@ -485,7 +485,13 @@ impl Game {
     /// it runs into. A player that cannot be moved blocks the mover: everything it moved goes back and the player is
     /// returned, unless the mover swings on a sine (a crusher), which kills the player instead. Only players are
     /// pushed; no stock mover carries a missile or an item.
-    pub fn mover_push(&mut self, vm: &mut Vm, pusher: u16, mv: Vec3, amove: Vec3) -> Result<(), u16> {
+    pub fn mover_push(
+        &mut self,
+        vm: &mut Vm,
+        pusher: u16,
+        mv: Vec3,
+        amove: Vec3,
+    ) -> Result<(), u16> {
         let mask = contents::MASK_DEADSOLID;
         let Some(before) = self
             .world
@@ -528,9 +534,9 @@ impl Game {
                 movers.push(n);
             }
         }
-        let sine = self.ent(pusher).is_some_and(|e| {
-            e.mv.pos.tr.kind == TrType::Sine || e.mv.ang.tr.kind == TrType::Sine
-        });
+        let sine = self
+            .ent(pusher)
+            .is_some_and(|e| e.mv.pos.tr.kind == TrType::Sine || e.mv.ang.tr.kind == TrType::Sine);
         let mut done: Vec<Pushed> = Vec::new();
         let mut obstacle = None;
         for &n in &movers {
@@ -616,7 +622,9 @@ impl Game {
                 .map(|d| [to[0] + d[0], to[1] + d[1], to[2] + d[2]])
                 .find(|&at| free(self, at));
         }
-        let ground = self.client(n).map_or(ENTITYNUM_NONE, |c| c.ps.ground_entity_num);
+        let ground = self
+            .client(n)
+            .map_or(ENTITYNUM_NONE, |c| c.ps.ground_entity_num);
         match spot {
             Some(at) => {
                 self.put_player(n, at, amove[1]);

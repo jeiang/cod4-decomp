@@ -179,6 +179,43 @@ fn a_mover_goes_to_the_clients_as_a_brush_entity_with_its_velocity() {
         .state;
     assert_eq!(sent.etype, net::entity::etype::BRUSH);
     assert_eq!(sent.model, 2);
-    assert!((sent.velocity[0] - 100.0).abs() < 0.5, "{:?}", sent.velocity);
+    assert!(
+        (sent.velocity[0] - 100.0).abs() < 0.5,
+        "{:?}",
+        sent.velocity
+    );
     assert_ne!(sent.eflags & SOLID as u32, 0);
+}
+
+/// The map's own `script_brushmodel`s reach the snapshot. Skips without `COD4_PATH`.
+#[test]
+fn a_stock_maps_brush_models_are_in_the_world_snapshot() {
+    let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let args: Vec<String> = [
+        "+set",
+        "net_port",
+        "0",
+        "+set",
+        "g_gametype",
+        "war",
+        "+map",
+        "mp_cargoship",
+    ]
+    .map(String::from)
+    .to_vec();
+    let s = server::server::Server::boot(&root, &args, false).expect("boot");
+    let sent = world_snapshot(&s.game)
+        .into_iter()
+        .filter(|e| e.state.etype == net::entity::etype::BRUSH)
+        .count();
+    let made = s
+        .game
+        .in_use()
+        .filter(|(_, e)| e.kind == EntKind::Brush && e.brush_model.is_some() && !e.hidden)
+        .count();
+    assert!(made >= 10, "the map spawns brush models: {made}");
+    assert_eq!(sent, made);
 }
