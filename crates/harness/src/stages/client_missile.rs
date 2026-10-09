@@ -46,8 +46,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let count = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
     let drawn = count(&report["net"]["projectiles_max_drawn"]);
     let blasts = count(&report["net"]["events"]["explosion"]);
-    let sound_ready = report["sound"]["ready"] == serde_json::Value::Bool(true);
-    let cues = count(&report["sound"]["explosion_cues"]);
+    let sound_ready = report["net"]["sound"]["ready"] == serde_json::Value::Bool(true);
+    let cues = count(&report["net"]["sound"]["explosion_cues"]);
     out.metrics.insert("projectiles_drawn".into(), drawn as f64);
     out.metrics.insert("explosion_events".into(), blasts as f64);
     out.metrics.insert("explosion_cues".into(), cues as f64);

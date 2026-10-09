@@ -1522,7 +1522,7 @@ impl NetPlay {
         report["view_kick_max"] = json!(self.c.max_kick_up);
         report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
         report["view_kick_settled"] = json!(self.c.kick_settled);
-        report["net"]["projectiles_max_drawn"] = self.c.projectiles_max.into();
+        report["projectiles_max_drawn"] = self.c.projectiles_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
         report["fx"]["camera_sway_max"] = self.c.sway_max.into();
