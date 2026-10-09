@@ -6,7 +6,8 @@
 //! snapshots turn into a follow view of the killer ([`net::snapshot::Follow`]) that is a replay
 //! (the archived player state is seconds older than the server time, the client is still told
 //! who it is), that the killcam's own hud text arrives, that the view ends, and that the client
-//! respawns afterwards.
+//! respawns afterwards, and that the body it left (`clonePlayer`) is a corpse entity in the snapshots while it is
+//! dead and still after it respawned.
 use crate::stage::{StageCtx, StageReport, Status};
 use net::UdpTransport;
 use net::client::NetClient;
@@ -23,6 +24,8 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = "net-killcam";
 const BOTS: usize = 6;
+/// Server time a dead player may go without a corpse entity (the script clones the body a moment after the death).
+const GRACE_MS: i32 = 1500;
 const FRAME: Duration = Duration::from_millis(33);
 /// Frames after spawning before the kill, so the ring holds a second of history.
 const LIVE_FRAMES: usize = 90;
@@ -42,6 +45,12 @@ struct Seen {
     skip_text: bool,
     ended: bool,
     respawned: bool,
+    /// A corpse entity of the client's own body was in a snapshot while it was dead, and in the one where it was
+    /// alive again.
+    corpse_dead: bool,
+    /// Snapshots where a player had been dead longer than [`GRACE_MS`] with no corpse of theirs.
+    missing_corpse: u32,
+    corpse_respawned: bool,
 }
 
 fn client(
@@ -61,6 +70,7 @@ fn client(
     let mut join = AutoJoin::default();
     let deadline = Instant::now() + LIMIT;
     let mut live = 0;
+    let mut dead_since: std::collections::HashMap<u16, i32> = Default::default();
     while Instant::now() < deadline && !stop.load(Ordering::Relaxed) && !s.respawned {
         c.pump(FRAME);
         if c.refused().is_some() {
@@ -82,11 +92,30 @@ fn client(
         let Some(snap) = c.latest().cloned() else {
             continue;
         };
+        for e in snap.entities.iter().filter(|e| e.etype == etype::PLAYER) {
+            if e.eflags & server::netsv::eflags::DEAD == 0 {
+                dead_since.remove(&e.client);
+                continue;
+            }
+            let since = *dead_since.entry(e.client).or_insert(snap.server_time);
+            let has = snap
+                .entities
+                .iter()
+                .any(|c| c.etype == etype::CORPSE && c.client == e.client);
+            if !has && snap.server_time - since > GRACE_MS {
+                s.missing_corpse += 1;
+            }
+        }
+        let own_corpse = snap
+            .entities
+            .iter()
+            .any(|e| e.etype == etype::CORPSE && e.client == s.own);
         let alive = snap
             .entity(snap.own())
             .is_some_and(|e| e.etype == etype::PLAYER);
         if let Some(f) = snap.follow {
             if f.archive_ms > 0 {
+                s.corpse_dead |= own_corpse;
                 s.killcam_snaps += 1;
                 s.max_archive_ms = s.max_archive_ms.max(f.archive_ms);
                 s.min_ps_age = s.min_ps_age.min(snap.server_time - snap.ps.command_time);
@@ -105,6 +134,7 @@ fn client(
             s.ended = true;
             if alive && snap.ps.pm_type == PmType::Normal {
                 s.respawned = true;
+                s.corpse_respawned = own_corpse;
             }
         } else if alive {
             if !s.spawned {
@@ -216,7 +246,23 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             failures.push("the killcam never ended".to_owned());
         } else if !seen.respawned {
             failures.push("the client did not respawn after the killcam".to_owned());
+        } else {
+            if !seen.corpse_dead {
+                failures.push("no corpse entity of the client's body while it was dead".to_owned());
+            }
+            if !seen.corpse_respawned {
+                failures.push(
+                    "the client's body did not persist in the snapshot after it respawned"
+                        .to_owned(),
+                );
+            }
         }
+    }
+    if seen.missing_corpse > 0 {
+        failures.push(format!(
+            "{} snapshots showed a dead player with no corpse after {GRACE_MS} ms",
+            seen.missing_corpse
+        ));
     }
     let mut report = StageReport::new(
         NAME,

@@ -363,44 +363,42 @@ impl Props {
         world: &dyn Collide,
     ) {
         let before = self.props.iter().filter(|p| p.body.is_some()).count();
-        match ev {
-            ClientEvent::Explosion {
-                origin, weapon: w, ..
-            } => {
-                if let Some(d) = weapon(*w) {
-                    // A rocket's blast is full strength out to its radius; a grenade's falls off from the centre.
-                    let radius = d.explosion_radius as f32;
-                    self.blast(
-                        Vec3::from(*origin),
-                        Blast {
-                            inner: if d.impact_type == IMPACT_GRENADE_EXPLODE {
-                                0.0
-                            } else {
-                                radius
-                            },
-                            outer: radius,
-                            damage: (d.explosion_inner_damage, d.explosion_outer_damage),
-                            ..Blast::default()
+        if let Some((at, blast)) = blast_of(ev, weapon) {
+            self.blast(at, blast);
+        } else {
+            match ev {
+                ClientEvent::Physics {
+                    origin,
+                    what:
+                        Physics::Jitter {
+                            outer,
+                            inner,
+                            min,
+                            max,
                         },
-                    );
+                } => jitter(
+                    &mut self.props,
+                    Vec3::from(*origin),
+                    (*outer, *inner),
+                    (min + max) * 0.5,
+                    &mut self.seed,
+                ),
+                ClientEvent::WeaponFire {
+                    eye,
+                    angles,
+                    weapon: w,
+                    shooter,
+                    ..
+                } => {
+                    if let Some(d) = weapon(*w).filter(|d| {
+                        sim::weapon::WeaponType::from_raw(d.weap_type)
+                            == sim::weapon::WeaponType::Bullet
+                    }) {
+                        self.shot(Vec3::from(*eye), *angles, (*w, *shooter, d.damage), world);
+                    }
                 }
+                _ => {}
             }
-            ClientEvent::Physics { origin, what } => self.physics(Vec3::from(*origin), what),
-            ClientEvent::WeaponFire {
-                eye,
-                angles,
-                weapon: w,
-                shooter,
-                ..
-            } => {
-                if let Some(d) = weapon(*w).filter(|d| {
-                    sim::weapon::WeaponType::from_raw(d.weap_type)
-                        == sim::weapon::WeaponType::Bullet
-                }) {
-                    self.shot(Vec3::from(*eye), *angles, (*w, *shooter, d.damage), world);
-                }
-            }
-            _ => {}
         }
         self.woken += (self.props.iter().filter(|p| p.body.is_some()).count() - before) as u64;
     }
@@ -408,52 +406,6 @@ impl Props {
     /// What the props asked the client to play since the last call.
     pub fn take(&mut self) -> Happened {
         std::mem::take(&mut self.out)
-    }
-
-    fn physics(&mut self, at: Vec3, what: &Physics) {
-        match *what {
-            Physics::Explosion {
-                cylinder,
-                outer,
-                inner,
-                magnitude,
-            } => self.blast(
-                at,
-                Blast {
-                    cylinder,
-                    inner,
-                    outer,
-                    scale: magnitude,
-                    ..Blast::default()
-                },
-            ),
-            Physics::Jolt {
-                outer,
-                inner,
-                impulse,
-            } => self.blast(
-                at,
-                Blast {
-                    cylinder: true,
-                    inner,
-                    outer,
-                    impulse: Vec3::from(impulse),
-                    ..Blast::default()
-                },
-            ),
-            Physics::Jitter {
-                outer,
-                inner,
-                min,
-                max,
-            } => jitter(
-                &mut self.props,
-                at,
-                (outer, inner),
-                (min + max) * 0.5,
-                &mut self.seed,
-            ),
-        }
     }
 
     /// `DynEntCl_ExplosionEvent` and `DynEntCl_GetClosestEntities`: the nearest few props within the outer radius are
@@ -623,16 +575,84 @@ const IMPACT_GRENADE_EXPLODE: i32 = 6;
 const SHOT_RANGE: f32 = 4000.0;
 
 /// An explosion's reach and strength.
-struct Blast {
-    cylinder: bool,
-    inner: f32,
-    outer: f32,
+pub struct Blast {
+    pub cylinder: bool,
+    pub inner: f32,
+    pub outer: f32,
     /// `inScale`: the strength at the inner radius.
-    scale: f32,
+    pub scale: f32,
     /// The push direction a physics jolt forces; zero for away from the centre.
-    impulse: Vec3,
+    pub impulse: Vec3,
     /// Damage at the inner and at the outer radius.
-    damage: (i32, i32),
+    pub damage: (i32, i32),
+}
+
+/// The blast a missile's explosion or a physics explosion or jolt makes, and where: what the loose bodies of the
+/// map and the ragdolls both react to (`DynEntCl_ExplosionEvent`). `weapon` resolves a weapon index.
+pub fn blast_of(
+    ev: &ClientEvent,
+    weapon: &dyn Fn(u16) -> Option<Arc<WeaponDef>>,
+) -> Option<(Vec3, Blast)> {
+    Some(match ev {
+        ClientEvent::Explosion {
+            origin, weapon: w, ..
+        } => {
+            let d = weapon(*w)?;
+            // A rocket's blast is full strength out to its radius; a grenade's falls off from the centre.
+            let radius = d.explosion_radius as f32;
+            (
+                Vec3::from(*origin),
+                Blast {
+                    inner: if d.impact_type == IMPACT_GRENADE_EXPLODE {
+                        0.0
+                    } else {
+                        radius
+                    },
+                    outer: radius,
+                    damage: (d.explosion_inner_damage, d.explosion_outer_damage),
+                    ..Blast::default()
+                },
+            )
+        }
+        ClientEvent::Physics {
+            origin,
+            what:
+                Physics::Explosion {
+                    cylinder,
+                    outer,
+                    inner,
+                    magnitude,
+                },
+        } => (
+            Vec3::from(*origin),
+            Blast {
+                cylinder: *cylinder,
+                inner: *inner,
+                outer: *outer,
+                scale: *magnitude,
+                ..Blast::default()
+            },
+        ),
+        ClientEvent::Physics {
+            origin,
+            what:
+                Physics::Jolt {
+                    outer,
+                    inner,
+                    impulse,
+                },
+        } => (
+            Vec3::from(*origin),
+            Blast {
+                cylinder: true,
+                inner: *inner,
+                outer: *outer,
+                impulse: Vec3::from(*impulse),
+                ..Blast::default()
+            },
+        ),
+        _ => return None,
+    })
 }
 
 impl Default for Blast {
@@ -1022,7 +1042,11 @@ mod tests {
 
     fn woken(what: Physics, at: Vec3, ps: Vec<Prop>) -> Vec<bool> {
         let mut props = props_of(ps);
-        props.physics(at, &what);
+        let ev = ClientEvent::Physics {
+            origin: at.to_array(),
+            what,
+        };
+        props.event(&ev, &|_| None, &Void);
         props.props.iter().map(|p| p.body.is_some()).collect()
     }
 

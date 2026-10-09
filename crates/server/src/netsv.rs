@@ -1073,6 +1073,31 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.client = item.dropper.unwrap_or(1023);
                 s
             }
+            EntKind::Plain if e.x.corpse.is_some() => {
+                // A player's body (`clonePlayer`): the clients ragdoll it from the pose of the death clip. `event_seq`
+                // counts the bodies made, so a reused slot is told from the body that was in it.
+                let Some(c) = e.x.corpse.as_ref() else {
+                    continue;
+                };
+                let mut s = EntityState::new(n);
+                s.etype = etype::CORPSE;
+                s.client = c.client;
+                s.model = game.models.find(&e.model) as u16;
+                s.origin = e.origin;
+                s.angles = e.angles;
+                s.pm_type = PmType::Dead as u8;
+                s.legs_clip = c.legs.clip;
+                s.legs_seq = c.legs.seq;
+                s.event_seq = c.serial;
+                s.eflags = eflags::DEAD
+                    | match c.team {
+                        Team::Axis => eflags::TEAM_AXIS,
+                        Team::Allies => eflags::TEAM_ALLIES,
+                        _ => 0,
+                    };
+                reach = Some(48.0);
+                s
+            }
             EntKind::Plain if &*e.classname == "script_model" => {
                 // The index names the model in the clients' configstrings; one that was never registered cannot be
                 // drawn.
