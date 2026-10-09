@@ -76,6 +76,16 @@ pub mod ef {
     pub const LOC_SELECTING: u32 = 0x20_0000;
 }
 
+/// `playerState_t.otherFlags` bits a spectator's state carries.
+pub mod other {
+    /// Watching another player: the state shown is theirs and the spectator does not move.
+    pub const FOLLOWING: u8 = 1 << 1;
+    /// The spectator may step to another player (attack, ads).
+    pub const CAN_CYCLE: u8 = 1 << 3;
+    /// The spectator may drop out of following into free flight (melee).
+    pub const CAN_STOP: u8 = 1 << 4;
+}
+
 /// `usercmd_t.buttons` bits.
 pub mod button {
     pub const ATTACK: i32 = 1 << 0;
@@ -315,6 +325,8 @@ pub struct PlayerState {
     pub hold_breath_timer: i32,
     pub movement_dir: i8,
     pub e_flags: u32,
+    /// `otherFlags`: what a spectator is doing (see [`other`]).
+    pub other_flags: u8,
     pub client_num: u16,
     /// Predictable event ring (`events[eventSequence & 3]`).
     pub event_sequence: u8,
@@ -429,6 +441,7 @@ impl Default for PlayerState {
             hold_breath_timer: 0,
             movement_dir: 0,
             e_flags: 0,
+            other_flags: 0,
             client_num: 0,
             event_sequence: 0,
             events: [0; 4],

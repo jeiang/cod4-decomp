@@ -101,6 +101,7 @@ fn table() -> Vec<Field<PlayerState>> {
         int!(s, s.hold_breath_timer, Bits(16)),
         int!(s, s.movement_dir, SBits(8)),
         int!(s, s.e_flags, Bits(32)),
+        int!(s, s.other_flags, Bits(5)),
         int!(s, s.client_num, Bits(10)),
         int!(s, s.event_sequence, Bits(8)),
         int!(s, s.events[0], Bits(8)),

@@ -3,6 +3,9 @@
 //! disconnect (`ClientConnect`, `ClientBegin`, `ClientSpawn`, `ClientThink_real`,
 //! `ClientEndFrame`, `ClientDisconnect` of the original).
 //!
+//! Spectator movement and following (`SpectatorThink`, `StopFollowing`, `SpectatorClientEndFrame`) translated in part from
+//! KisakCOD (game_mp/g_active_mp.cpp, game_mp/g_cmds_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+//!
 //! A client's entity number is its slot. The entity exists while the slot is connected; the
 //! player state, the session fields scripts read (`sessionstate`, `score`, ...) and the last
 //! command live in [`Client`]. Bots and network clients differ only in where their commands
@@ -345,6 +348,44 @@ impl Game {
         }
     }
 
+    /// `StopFollowing`: the spectator leaves the player it watched and flies from just behind and above where that
+    /// player's eyes were, looking the way they did (a little lower).
+    pub fn stop_following(&mut self, n: u16) {
+        let Some(c) = self.client_mut(n) else { return };
+        let target = u16::try_from(std::mem::replace(&mut c.spectator_client, -1)).ok();
+        c.kill_cam_entity = -1;
+        c.archive_time = 0.0;
+        let Some(seen) = target.and_then(|t| self.client(t)).map(|t| t.ps.clone()) else {
+            return;
+        };
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        let eye = crate::fire::view_origin(&seen);
+        let (forward, _, up) = pm::math::angle_vectors(&seen.viewangles);
+        let end: Vec3 = std::array::from_fn(|i| eye[i] - 40.0 * forward[i] + 10.0 * up[i]);
+        let t = sim::cm::Collide::trace(
+            world,
+            eye,
+            end,
+            [-8.0; 3],
+            [8.0; 3],
+            sim::cm::ENTITYNUM_NONE,
+            sim::contents::MASK_DEADSOLID,
+        );
+        let at: Vec3 = std::array::from_fn(|i| eye[i] + (end[i] - eye[i]) * t.fraction);
+        let mut look = seen.viewangles;
+        look[0] += 15.0;
+        if let Some(e) = self.ent_mut(n) {
+            e.origin = at;
+        }
+        if let Some(c) = self.client_mut(n) {
+            c.ps.origin = at;
+            c.ps.velocity = [0.0; 3];
+        }
+        self.set_client_view_angle(n, look);
+    }
+
     /// `ClientBegin`: the connect callback waits for this.
     pub fn client_begin(&mut self, vm: &mut Vm, n: u16) {
         let level_time = self.level.time;
@@ -383,6 +424,12 @@ impl Game {
             self.free_entity(vm, n);
             self.clients[usize::from(n)] = Client::new(n, false, String::new());
             self.clients[usize::from(n)].conn = Conn::Free;
+            // Nobody keeps watching the slot, which a newcomer may take.
+            for c in &mut self.clients {
+                if c.spectator_client == i32::from(n) && c.archive_time <= 0.0 {
+                    c.spectator_client = -1;
+                }
+            }
         }
     }
 
@@ -401,9 +448,48 @@ impl Game {
     /// `G_SetClientContents`.
     pub fn set_client_contents(&mut self, n: u16) {
         let Some(c) = self.client(n) else { return };
-        let solid = !c.noclip && !c.ufo && c.session != Session::Dead;
+        let solid = !c.noclip && !c.ufo && matches!(c.session, Session::Playing);
         if let Some(e) = self.ent_mut(n) {
             e.contents = if solid { contents::PLAYER } else { 0 };
+        }
+        // A spectator or a player at the scoreboard is nowhere in the world.
+        if self
+            .client(n)
+            .is_some_and(|c| matches!(c.session, Session::Spectator | Session::Intermission))
+            && let Some(w) = self.world.as_mut()
+        {
+            w.unlink(n);
+        }
+    }
+
+    /// `SpectatorClientEndFrame`'s follow upkeep: a watched player who is gone (or may no longer be watched) ends the
+    /// following, and a spectator barred from free flight who watches nobody is put on the next player.
+    fn spectator_upkeep(&mut self, n: u16) {
+        let Some(c) = self.client(n) else { return };
+        if c.session != Session::Spectator || c.archive_time > 0.0 {
+            return;
+        }
+        if let Ok(t) = u16::try_from(c.spectator_client) {
+            let allow = c.spec_allow;
+            let watchable = t != n
+                && self.client(t).is_some_and(|w| {
+                    w.connected()
+                        && w.session == Session::Playing
+                        && allow
+                            & match w.team {
+                                Team::Allies => spec::ALLIES,
+                                Team::Axis => spec::AXIS,
+                                _ => spec::NONE,
+                            }
+                            != 0
+                });
+            if !watchable {
+                self.stop_following(n);
+            }
+        }
+        let Some(c) = self.client(n) else { return };
+        if c.spectator_client < 0 && c.spec_allow & spec::FREELOOK == 0 {
+            self.spectate_cycle(n, 1);
         }
     }
 
@@ -497,19 +583,15 @@ impl Game {
         c.old_cmd = c.cmd;
         c.cmd = cmd;
         match c.session {
-            Session::Intermission | Session::Spectator => {
+            Session::Intermission => {
                 c.ps.command_time = cmd.server_time;
                 c.old_buttons = c.buttons;
                 c.buttons = cmd.buttons;
                 c.latched_buttons = c.buttons & !c.old_buttons;
-                // Attack steps to the next player a spectator may follow; a killcam
-                // (`archivetime` set) is not the player's to steer.
-                if c.session == Session::Spectator
-                    && c.archive_time <= 0.0
-                    && c.latched_buttons & pm::button::ATTACK != 0
-                {
-                    self.spectate_next(n);
-                }
+                return;
+            }
+            Session::Spectator => {
+                self.spectator_think(n, cmd);
                 return;
             }
             _ => {}
@@ -568,6 +650,59 @@ impl Game {
         self.touch_triggers(vm, n);
         self.update_activate(vm, n);
         self.location_input(vm, n, &cmd);
+    }
+
+    /// `SpectatorThink`: attack and ads step through the players that may be watched, melee leaves the one
+    /// watched, and a spectator who watches nobody (and is not in a killcam) flies with the movement code.
+    fn spectator_think(&mut self, n: u16, cmd: UserCmd) {
+        let Some(c) = self.clients.get_mut(usize::from(n)) else {
+            return;
+        };
+        c.old_buttons = c.buttons;
+        c.buttons = cmd.buttons;
+        c.latched_buttons = c.buttons & !c.old_buttons;
+        let (pressed, changed) = (c.latched_buttons, c.buttons ^ c.old_buttons);
+        let held = c.archive_time > 0.0;
+        let freelook = c.spec_allow & spec::FREELOOK != 0;
+        if !held {
+            if c.spectator_client >= 0 && freelook && changed & pm::button::MELEE != 0 {
+                self.stop_following(n);
+            }
+            if pressed & pm::button::ATTACK != 0 {
+                self.spectate_cycle(n, 1);
+            } else if pressed & pm::button::ADS != 0 {
+                self.spectate_cycle(n, -1);
+            }
+        }
+        let c = &mut self.clients[usize::from(n)];
+        if held || c.spectator_client >= 0 {
+            c.ps.command_time = cmd.server_time;
+            return;
+        }
+        c.ps.pm_type = PmType::Spectator;
+        c.ps.speed = if freelook { 400 } else { 0 };
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        pm::run_usercmd(
+            &mut c.ps,
+            &mut c.inv,
+            cmd,
+            c.old_cmd,
+            0,
+            &self.weapons,
+            &self.pm_params,
+            world,
+        );
+        let (origin, yaw) = (c.ps.origin, c.ps.viewangles[1]);
+        if let Some(e) = self.ent_mut(n) {
+            e.origin = origin;
+            e.angles = [0.0, yaw, 0.0];
+        }
+        // A spectator is nowhere in the world.
+        if let Some(w) = self.world.as_mut() {
+            w.unlink(n);
+        }
     }
 
     /// `G_AddPlayerMantleBlockage`: an invisible player-sized box at the end of a mantle keeps
@@ -750,6 +885,7 @@ impl Game {
 
     /// `ClientEndFrame`: state that follows from the session after scripts ran.
     pub fn client_end_frame(&mut self, _vm: &mut Vm, n: u16) {
+        self.spectator_upkeep(n);
         let gravity = self.cvars.int("g_gravity");
         let Some(c) = self.clients.get_mut(usize::from(n)) else {
             return;
@@ -778,6 +914,24 @@ impl Game {
             Session::Playing if health <= 0 => PmType::Dead,
             Session::Playing if c.last_stand => PmType::LastStand,
             Session::Playing => PmType::Normal,
+        };
+        c.ps.other_flags = if c.session == Session::Spectator {
+            let following = c.spectator_client >= 0;
+            let held = c.archive_time > 0.0;
+            let any_team = c.spec_allow & (spec::ALLIES | spec::AXIS | spec::NONE) != 0;
+            let mut f = 0;
+            if following {
+                f |= pm::other::FOLLOWING;
+            }
+            if !held && (following || any_team) {
+                f |= pm::other::CAN_CYCLE;
+            }
+            if !held && following && c.spec_allow & spec::FREELOOK != 0 {
+                f |= pm::other::CAN_STOP;
+            }
+            f
+        } else {
+            0
         };
         if linked {
             c.ps.pm_type = match c.ps.pm_type {

@@ -35,8 +35,13 @@ pub fn fill(net: &mut NetClient<Wire>, live: &mut LiveUi, time: i32, eye: Option
         live.active = false;
         return;
     };
-    let (follow, pm, own, server_time) =
-        (snap.follow, snap.ps.pm_type, snap.own(), snap.server_time);
+    let (follow, pm, own, server_time, other_flags) = (
+        snap.follow,
+        snap.ps.pm_type,
+        snap.own(),
+        snap.server_time,
+        snap.ps.other_flags,
+    );
     // Entities a waypoint can follow, by number, with their feet.
     let mut targets: Vec<(u16, [f32; 3], bool)> = Vec::new();
     let mut wanted: Vec<u16> = Vec::new();
@@ -67,6 +72,7 @@ pub fn fill(net: &mut NetClient<Wire>, live: &mut LiveUi, time: i32, eye: Option
     live.dead = matches!(pm, PmType::Dead | PmType::DeadLinked);
     live.intermission = pm == PmType::Intermission;
     live.own = own;
+    live.spectator_flags = other_flags;
     live.eye = eye.map_or(live.eye, |e| e.to_array());
     let n = usize::from(cs::CLIENTINFO_COUNT);
     live.names.resize(n, String::new());

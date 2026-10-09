@@ -23,7 +23,7 @@ use crate::ui::assets::UiAssets;
 use net::ui::HudElem;
 use std::collections::HashMap;
 
-pub use elems::{SPECTATE_PROMPTS, draw_over, draw_under};
+pub use elems::{draw_over, draw_under, spectator_commands};
 pub use feed::{BOLD, Feed, NOTIFY, WINDOWS};
 pub use prompt::{LiveVote, draw_typing, draw_vote};
 pub use scores::{ScoreView, draw_scoreboard, rows_shown, scoreboard_lines};
@@ -121,6 +121,10 @@ pub struct LiveUi {
     pub damage: crate::damage::DamageHud,
     /// `cg_hudDamageIconInScope`: the wedges stay while a scope is up.
     pub damage_in_scope: bool,
+    /// `cg_descriptiveText`: spectators are told what the keys do.
+    pub descriptive_text: bool,
+    /// The spectator's own `otherFlags` (what the server lets them do), which pick the help lines.
+    pub spectator_flags: u8,
     /// The client's estimate of the server clock, ms.
     pub time: i32,
     /// The clock script hud element times are read on: `time`, minus the replay offset in a killcam.

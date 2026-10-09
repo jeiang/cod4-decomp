@@ -787,17 +787,24 @@ impl Shell {
                 marks.extend(hud::key_marks(&text).into_iter().map(str::to_owned));
             }
         }
-        if self.st.live.following.is_some() {
-            marks.extend(
-                hud::SPECTATE_PROMPTS
-                    .iter()
-                    .map(|(_, cmd)| (*cmd).to_owned()),
-            );
-        }
         if self.st.live.vote.is_some() {
             marks.extend(["vote yes".to_owned(), "vote no".to_owned()]);
         }
         self.st.live.keys.clear();
+        // The spectator's help names the first of several commands that has a key.
+        for cmd in hud::spectator_commands(self.st.live.spectator_flags) {
+            if let Some(key) = input
+                .binding_keys(cmd)
+                .into_iter()
+                .map(crate::input::key_id)
+                .next()
+            {
+                self.st
+                    .live
+                    .keys
+                    .insert(cmd.to_owned(), self.ui.localize_key(&key));
+            }
+        }
         for cmd in marks {
             let key = input
                 .binding_keys(&cmd)
