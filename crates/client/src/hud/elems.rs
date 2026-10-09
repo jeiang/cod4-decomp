@@ -156,6 +156,9 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
         return;
     }
     draw_elems(ui, p, live, true);
+    if live.interrupted {
+        draw_interrupted(ui, p, live);
+    }
     if let Some(name) = live
         .following
         .as_deref()
@@ -192,6 +195,40 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
     }
     if st.scoreboard_shown(ui) {
         super::draw_scoreboard(ui, p, st);
+    }
+}
+
+/// `CG_DrawDisconnect`: the warning and, half of every second, the net icon.
+fn draw_interrupted(ui: &Ui, p: &mut Painter, live: &LiveUi) {
+    let text = localize(&ui.assets, "CGAME_CONNECTIONINTERUPTED");
+    let w = ui.text_width(&text, 0, 0.5);
+    ui.draw_text(
+        p,
+        &TextDraw {
+            text: &text,
+            font_enum: 0,
+            scale: 0.5,
+            style: 3,
+            color: [1.0; 4],
+            x: -w * 0.5,
+            y: 100.0,
+            horz: horz::CENTER_SAFEAREA,
+            vert: vert::TOP,
+        },
+    );
+    if (live.time >> 9) & 1 == 0 {
+        let place = &ui.place;
+        let img = p.named(&ui.assets, "net_disconnect");
+        p.pic(
+            &img,
+            Px {
+                x: place.size.0 * 0.5 - 24.0 * place.scale.0,
+                y: 320.0 * place.scale.1,
+                w: 48.0 * place.scale.0,
+                h: 48.0 * place.scale.1,
+            },
+            [1.0; 4],
+        );
     }
 }
 

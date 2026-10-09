@@ -1011,8 +1011,10 @@ impl Viewer {
                 .input
                 .cvar("cl_timeout")
                 .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite())
             {
-                net.set_timeout(Duration::from_secs_f32(secs.max(1.0)));
+                // The original's range is 0 to 3600 s; a timeout of 0 would drop the client at once.
+                net.set_timeout(Duration::from_secs_f32(secs.clamp(1.0, 3600.0)));
             }
             let frame_out = net.frame(dt, &f);
             st.input.apply(&net.take_input_feedback());

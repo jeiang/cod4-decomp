@@ -641,7 +641,7 @@ impl Server {
         if let Some(c) = self.game.client(slot).filter(|c| c.connected()) {
             let text = format!("{}^7 {}", c.name, why.text());
             net.print_to_others(slot, &text);
-            self.say(&format!("{slot}:{}\n", text.replace("^7", "")));
+            self.say(&format!("{slot}:{}\n", crate::vote::clean_name(&text)));
         }
         if let Some(run) = self.run.as_mut() {
             let mut host = ScriptHost {
@@ -1626,7 +1626,7 @@ impl Server {
             for (n, text) in &gone {
                 net.remove_peer(*n, DropReason::Kicked.notice());
                 net.print_to_others(*n, text);
-                gone_lines.push(format!("{n}:{}\n", text.replace("^7", "")));
+                gone_lines.push(format!("{n}:{}\n", crate::vote::clean_name(text)));
             }
             net.flush_ui(&mut self.game);
             net.send_snapshots(&self.game, self.svs_time);

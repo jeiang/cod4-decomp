@@ -36,6 +36,9 @@ const IGNORABLE_BEHIND: usize = 64;
 /// What a client hears when it sends game packets to a server that has no slot for it.
 pub const NOT_CONNECTED: &str = "Not connected to the server";
 
+/// How long a client may take no commands, with a backlog, before it counts as lagging.
+const STALL: Duration = Duration::from_secs(1);
+
 /// `EntityState::eflags` bits the server sets on players.
 pub mod eflags {
     pub const TEAM_AXIS: u32 = 1 << 0;
@@ -53,6 +56,12 @@ pub struct Peer {
     /// A reliable command did not fit: the peer is too far behind and is dropped at the next service
     /// ([`NetSv::overflowed`]).
     overflowed: bool,
+    /// Newest command sequence it had acknowledged at the last flush, and since when that has not moved while
+    /// commands waited.
+    last_ack: u32,
+    ack_moved: Instant,
+    /// It has taken nothing for [`STALL`] with [`IGNORABLE_BEHIND`] commands waiting: lagging, not in a burst.
+    stalled: bool,
 }
 
 impl Peer {
@@ -60,7 +69,7 @@ impl Peer {
     /// inform; one that cannot take a command at all is flagged for dropping instead of carrying on desynced.
     pub fn queue(&mut self, line: impl Into<String>) {
         let line = line.into();
-        if self.link.commands_pending() > IGNORABLE_BEHIND && ignorable(&line) {
+        if self.stalled && ignorable(&line) {
             return;
         }
         if self.link.command(line).is_err() {
@@ -233,6 +242,9 @@ impl NetSv {
             last_heard: Instant::now(),
             fx_sent: 0,
             overflowed: false,
+            last_ack: 0,
+            ack_moved: Instant::now(),
+            stalled: false,
         });
         self.stats.joins += 1;
         self.t.send_to(req.from, &Oob::ConnectResponse.encode());
@@ -256,6 +268,7 @@ impl NetSv {
         peer.last_heard = Instant::now();
         // The new level numbers its effects afresh: the client needs the names again.
         peer.fx_sent = 0;
+        peer.stalled = false;
         self.peers[usize::from(slot)] = Some(peer);
     }
 
@@ -440,6 +453,13 @@ impl NetSv {
     /// Delivers what scripts queued since the last frame: configstring changes to everybody,
     /// then the one-shot commands to their destinations, in order.
     pub fn flush_ui(&mut self, game: &mut Game) {
+        for p in self.peers.iter_mut().flatten() {
+            let (pending, acked) = (p.link.commands_pending(), p.link.commands_acked());
+            if acked != p.last_ack || pending == 0 {
+                (p.last_ack, p.ack_moved) = (acked, Instant::now());
+            }
+            p.stalled = pending > IGNORABLE_BEHIND && p.ack_moved.elapsed() > STALL;
+        }
         game.refresh_client_info();
         for c in std::mem::take(&mut game.ui.score_requests) {
             self.send_scoreboard(c, game);
@@ -519,8 +539,12 @@ impl NetSv {
                 let Some(name) = game.fx.name(peer.fx_sent + 1) else {
                     break;
                 };
-                peer.queue(format!("fx {} {name}", peer.fx_sent + 1));
-                if peer.overflowed {
+                // A full window is the client catching up: the rest follows next frame.
+                if peer
+                    .link
+                    .command(format!("fx {} {name}", peer.fx_sent + 1))
+                    .is_err()
+                {
                     break;
                 }
                 peer.fx_sent += 1;
@@ -769,6 +793,9 @@ mod tests {
             last_heard: Instant::now(),
             fx_sent: 0,
             overflowed: false,
+            last_ack: 0,
+            ack_moved: Instant::now(),
+            stalled: false,
         }
     }
 
@@ -781,29 +808,36 @@ mod tests {
     }
 
     #[test]
-    fn a_client_too_far_behind_is_flagged_but_one_merely_late_just_misses_prints() {
+    fn a_client_taking_commands_keeps_its_prints_but_a_stalled_one_loses_them() {
         let mut p = peer();
         let cfg = ServerCmd::ConfigStrings(vec![(1, "a".into())]).encode();
-        for _ in 0..=IGNORABLE_BEHIND {
+        for _ in 0..=IGNORABLE_BEHIND * 2 {
             p.queue(cfg.clone());
         }
         let n = p.link.commands_pending();
         p.queue(print(PrintKind::Normal));
+        assert_eq!(p.link.commands_pending(), n + 1, "a burst is not lag");
+        p.stalled = true;
+        p.queue(print(PrintKind::Normal));
         p.queue(print(PrintKind::Console));
         assert_eq!(
             p.link.commands_pending(),
-            n,
-            "prints are culled while behind"
+            n + 1,
+            "a stalled client skips prints"
         );
         p.queue(print(PrintKind::Bold));
-        assert_eq!(p.link.commands_pending(), n + 1, "a bold message is kept");
-        assert!(!p.overflowed);
+        assert_eq!(p.link.commands_pending(), n + 2, "a bold message is kept");
+    }
+
+    #[test]
+    fn a_command_that_does_not_fit_marks_the_peer_for_dropping() {
+        let mut p = peer();
+        let cfg = ServerCmd::ConfigStrings(vec![(1, "a".into())]).encode();
         for _ in 0..net::reliable::WINDOW {
             p.queue(cfg.clone());
         }
-        assert!(
-            p.overflowed,
-            "a command that does not fit marks the peer for dropping"
-        );
+        assert!(!p.overflowed);
+        p.queue(cfg);
+        assert!(p.overflowed);
     }
 }

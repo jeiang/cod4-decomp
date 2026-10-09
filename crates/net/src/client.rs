@@ -140,6 +140,16 @@ impl<T: Transport> NetClient<T> {
     pub fn pump(&mut self, wait: Duration) {
         let now = self.now_ms();
         self.pump_at(wait, now);
+        // The wait inside is the server's silence, not the caller being away: the gap is counted from here.
+        self.pumped_ms = self.now_ms();
+    }
+
+    /// Milliseconds since the server last sent a packet; 0 before the connection is up.
+    pub fn silent_ms(&self) -> u64 {
+        match self.phase {
+            Phase::Playing(_) => self.pumped_ms.saturating_sub(self.heard_ms),
+            _ => 0,
+        }
     }
 
     fn pump_at(&mut self, wait: Duration, now: u64) {

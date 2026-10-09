@@ -115,6 +115,8 @@ pub struct LiveUi {
     pub axis_score: i32,
     pub kill_icons: HashMap<String, KillIcon>,
     pub server_addr: String,
+    /// The server has been silent long enough to warn of it ("Connection interrupted" and the net icon).
+    pub interrupted: bool,
     /// Set by the shell: the scoreboard is up, so ask the server for fresh rows every couple of seconds.
     pub scores_wanted: bool,
     /// Eye position and clip matrix of the frame the world is drawn with, set by the app before painting.
