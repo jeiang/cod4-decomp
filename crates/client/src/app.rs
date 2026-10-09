@@ -699,6 +699,10 @@ impl Viewer {
         let want_video = want_video && copy_src;
         let aspect = config.width as f32 / config.height as f32;
         let now = Instant::now();
+        if self.cli.fov_given {
+            input.cvars.set("cg_fov", &self.cli.fov.to_string(), false);
+        }
+        let fov_x = hor_plus(cg_fov(&input), aspect);
         Ok(State {
             tour,
             window,
@@ -735,7 +739,7 @@ impl Viewer {
             present_mode,
             aspect: None,
             video_pending: !self.cli.video_given && !self.cli.flythrough,
-            fov_x: hor_plus(self.cli.fov, aspect),
+            fov_x,
             aim_zoom: None,
             fixed_fov: None,
             surfaces_drawn: Vec::new(),
@@ -868,7 +872,7 @@ impl ApplicationHandler<Ready> for Viewer {
                 if st.loading.is_some() {
                     st.pending_resize = Some((s.width, s.height));
                 } else {
-                    apply_resize(st, self.cli.fov, (s.width, s.height));
+                    apply_resize(st, (s.width, s.height));
                 }
             }
             WindowEvent::MouseInput {
@@ -1043,6 +1047,19 @@ impl Viewer {
             }
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
+            net.set_breath_volumes(
+                st.input
+                    .cvars
+                    .with_prefix("bg_shock_volume_")
+                    .into_iter()
+                    .filter_map(|(n, v)| {
+                        Some((
+                            n.strip_prefix("bg_shock_volume_")?.to_owned(),
+                            v.trim().parse().ok()?,
+                        ))
+                    })
+                    .collect(),
+            );
             net.set_footsteps(
                 st.input
                     .cvar("cg_footsteps")
@@ -1120,9 +1137,9 @@ impl Viewer {
                 (st.pos, st.yaw, st.pitch, st.roll) = (nf.origin, nf.yaw, nf.pitch, nf.roll);
                 st.aim_zoom = nf.sight.as_ref().map(|s| (s.zoom_fov, s.zoom));
                 st.fixed_fov = nf.fixed_fov;
-                let fov = view_fov_4_3(st, self.cli.fov);
+                let fov = view_fov_4_3(st);
                 st.input
-                    .set_fov_sensitivity_scale(zoom_sensitivity(fov, self.cli.fov));
+                    .set_fov_sensitivity_scale(zoom_sensitivity(fov, cg_fov(&st.input)));
                 st.fx_in_view = nf.meshes.len();
                 if let Some(r) = st.renderer.as_mut() {
                     r.dynamic_models = nf.models;
@@ -1180,7 +1197,7 @@ impl Viewer {
         if st.loading.is_none()
             && let Some(size) = st.pending_resize.take()
         {
-            apply_resize(st, self.cli.fov, size);
+            apply_resize(st, size);
         }
         let t_acquire = Instant::now();
         let frame = match st.surface.get_current_texture() {
@@ -1196,12 +1213,12 @@ impl Viewer {
         };
         st.prev_cost[2] = t_acquire.elapsed().as_secs_f64() * 1000.0;
         let cpu_start = Instant::now();
+        let aspect = st
+            .aspect
+            .unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32);
+        st.fov_x = hor_plus(cg_fov(&st.input), aspect);
         // Aiming zooms the world to the weapon's zoom field of view; the gun keeps the unzoomed one.
-        let fov_x = hor_plus(
-            view_fov_4_3(st, self.cli.fov),
-            st.aspect
-                .unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
-        );
+        let fov_x = hor_plus(view_fov_4_3(st), aspect);
         let view = View {
             origin: st.pos,
             yaw: st.yaw,
@@ -2243,11 +2260,16 @@ fn vid_restart(cli: &Cli, st: &mut State) {
 ///
 /// Never while a map loads: reconfiguring a surface fails (a panic) when another thread submits to the queue at the
 /// same moment, and the loader does. The size is kept in `pending_resize` until the load is done.
+/// `cg_fov` in degrees at 4:3, within the original's 1 to 160.
+fn cg_fov(input: &Input) -> f32 {
+    input.cvars.f32("cg_fov").clamp(1.0, 160.0)
+}
+
 /// The world's field of view in degrees at 4:3 (`CG_GetViewFov`).
-fn view_fov_4_3(st: &State, cg_fov: f32) -> f32 {
+fn view_fov_4_3(st: &State) -> f32 {
     let cv = &st.input.cvars;
     view_fov(
-        cg_fov,
+        cg_fov(&st.input),
         st.fixed_fov,
         st.aim_zoom,
         cv.f32("cg_fovscale"),
@@ -2255,11 +2277,11 @@ fn view_fov_4_3(st: &State, cg_fov: f32) -> f32 {
     )
 }
 
-fn apply_resize(st: &mut State, fov: f32, (w, h): (u32, u32)) {
+fn apply_resize(st: &mut State, (w, h): (u32, u32)) {
     st.config.width = w;
     st.config.height = h;
     reconfigure(st);
-    st.fov_x = hor_plus(fov, st.aspect.unwrap_or(w as f32 / h as f32));
+    st.fov_x = hor_plus(cg_fov(&st.input), st.aspect.unwrap_or(w as f32 / h as f32));
     if let Some(sh) = st.shell.as_mut() {
         sh.resize(w, h);
     }
@@ -2430,6 +2452,7 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
         n.disconnect();
     }
     st.net = None;
+    st.input.set_fov_sensitivity_scale(1.0);
     st.roll = 0.0;
     st.loading = None;
     st.load_gaps = None;

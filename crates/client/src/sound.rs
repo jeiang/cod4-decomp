@@ -46,8 +46,8 @@ pub fn volume_of(cvars: &crate::input::Cvars) -> f32 {
 /// `snd_enveffectsprio_shellshock`, and the channel volume priority of `snd_channelvolprio_shellshock`.
 const SHOCK_REVERB: usize = 2;
 const SHOCK_VOLUMES: u8 = 3;
-/// The channel volume priority of a held breath (`snd_channelvolprio_holdbreath`), and the volume it dips every
-/// channel to (`bg_shock_volume_*` at their stock 0.5).
+/// The channel volume priority of a held breath (`snd_channelvolprio_holdbreath`), and the volume it dips a channel
+/// to when `bg_shock_volume_<channel>` is not set (the stock 0.5).
 const BREATH_VOLUMES: u8 = 1;
 const BREATH_VOLUME: f32 = 0.5;
 /// The entity the heartbeat is started for, so a looping one is started once however often it is asked for.
@@ -71,8 +71,8 @@ pub struct ClientSound {
     missile_loops: HashSet<u16>,
     /// The held breath's sounds and channel dip.
     breath: crate::breath::Breath,
-    /// The channels are dipped for the held breath.
-    ducked: bool,
+    /// What the held breath dips each channel to, by channel name; others take the stock 0.5.
+    breath_volumes: Vec<(String, f32)>,
 }
 
 /// Who an event belongs to.
@@ -103,7 +103,7 @@ impl ClientSound {
             footsteps: true,
             missile_loops: HashSet::new(),
             breath: crate::breath::Breath::default(),
-            ducked: false,
+            breath_volumes: Vec::new(),
         }
     }
 
@@ -249,6 +249,11 @@ impl ClientSound {
         }
     }
 
+    /// The `bg_shock_volume_<channel>` cvars (channel, volume) the held breath dips the channels to.
+    pub fn set_breath_volumes(&mut self, volumes: Vec<(String, f32)>) {
+        self.breath_volumes = volumes;
+    }
+
     /// `HoldBreathUpdate`: the sounds of holding the breath on a scoped weapon for a frame of `dt_ms`, and the dip of
     /// the channel volumes while it is held. `hold_ms` is the longest the breath can be held.
     pub fn hold_breath(&mut self, dt_ms: i32, holding: bool, hold_ms: i32) {
@@ -259,7 +264,11 @@ impl ClientSound {
             .map_or(0, |ms| ms as i32);
         let cue = self.breath.step(dt_ms, holding, hold_ms, in_ms);
         let duck = self.breath.duck();
-        let was_ducked = std::mem::replace(&mut self.ducked, duck != 0.0);
+        let volumes = if duck != 0.0 {
+            self.breath_volumes.clone()
+        } else {
+            Vec::new()
+        };
         let Some(s) = self.ready() else { return };
         if let Some(cue) = cue {
             let looping = s
@@ -277,10 +286,21 @@ impl ClientSound {
             );
         }
         if duck != 0.0 {
-            let level = (BREATH_VOLUME - 1.0) * duck + 1.0;
-            let channels = s.bank.channels.len();
-            s.set_channel_volumes(BREATH_VOLUMES, &vec![level; channels], 0);
-        } else if was_ducked {
+            // `HoldBreathSoundLerp`: each channel moves from full towards its `bg_shock_volume_<channel>`.
+            let levels: Vec<f32> = s
+                .bank
+                .channels
+                .iter()
+                .map(|c| {
+                    let goal = volumes
+                        .iter()
+                        .find(|(n, _)| c.name.eq_ignore_ascii_case(n))
+                        .map_or(BREATH_VOLUME, |(_, v)| v.clamp(0.0, 1.0));
+                    (goal - 1.0) * duck + 1.0
+                })
+                .collect();
+            s.set_channel_volumes(BREATH_VOLUMES, &levels, 0);
+        } else {
             // The breath is out: the heartbeat loop stops with the dip.
             s.stop_loop(BREATH_ENTITY, crate::breath::Cue::Heartbeat.alias());
             s.deactivate_channel_volumes(BREATH_VOLUMES, 0);
@@ -940,7 +960,7 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
         footsteps: true,
         missile_loops: HashSet::new(),
         breath: crate::breath::Breath::default(),
-        ducked: false,
+        breath_volumes: Vec::new(),
     };
     let none = |_: u16| None;
     let mut seq = 0u8;

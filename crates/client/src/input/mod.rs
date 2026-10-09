@@ -77,6 +77,10 @@ pub struct InputFrame {
     pub look_delta_yaw: f32,
     /// Degrees, positive = look down.
     pub look_delta_pitch: f32,
+    /// The same turning as the look deltas but without the FOV sensitivity scale of the mouse: what moves a cursor
+    /// (the location selection) rather than the view.
+    pub cursor_yaw: f32,
+    pub cursor_pitch: f32,
     /// [`buttons`] held this frame.
     pub buttons: u32,
     /// Bits that went from up to down since the previous frame.
@@ -489,6 +493,8 @@ impl Input {
                 1.0
             };
         let (mut yaw, mut pitch) = (0.0, 0.0);
+        // The mouse's share of the turning at the FOV-scaled sensitivity.
+        let (mut mouse_yaw, mut mouse_pitch) = (0.0, 0.0);
         // The filter's sample buffer rotates every frame, frozen or not.
         let (mut mx, mut my) = (mdx as f32, mdy as f32);
         let (px, py) = std::mem::replace(&mut self.prev_mouse, (mx, my));
@@ -509,20 +515,29 @@ impl Input {
             if strafe {
                 side += snap(mx * sens * cv.f32("m_side"));
             } else {
-                yaw -= mx * sens * cv.f32("m_yaw");
+                mouse_yaw -= mx * sens * cv.f32("m_yaw");
             }
             if (mlook || cv.bool("cl_freelook")) && !strafe {
-                pitch += my * sens * cv.f32("m_pitch") * invert;
+                mouse_pitch += my * sens * cv.f32("m_pitch") * invert;
             } else {
                 forward -= snap(my * sens * cv.f32("m_forward"));
             }
         }
 
+        yaw += mouse_yaw;
+        pitch += mouse_pitch;
+        let unscale = 1.0 / self.fov_sensitivity_scale.max(1e-6) - 1.0;
+        let (cursor_yaw, cursor_pitch) = (yaw + mouse_yaw * unscale, pitch + mouse_pitch * unscale);
+
         let dz = cv.f32("in_gamepad_deadzone");
         let (lx, ly) = pad::radial_deadzone(self.pad.left.0, self.pad.left.1, dz);
         let (rx, ry) = pad::radial_deadzone(self.pad.right.0, self.pad.right.1, dz);
-        yaw -= rx * cv.f32("in_gamepad_yawrate") * dt;
-        pitch -= ry * cv.f32("in_gamepad_pitchrate") * dt * invert;
+        let (pad_yaw, pad_pitch) = (
+            -rx * cv.f32("in_gamepad_yawrate") * dt,
+            -ry * cv.f32("in_gamepad_pitchrate") * dt * invert,
+        );
+        yaw += pad_yaw;
+        pitch += pad_pitch;
 
         let walk = if cv.bool("cl_run") { 1.0 } else { 0.5 };
         let axis = |v: i32| (v.clamp(-127, 127) as f32 / 127.0 * walk).clamp(-1.0, 1.0);
@@ -532,6 +547,8 @@ impl Input {
             up,
             look_delta_yaw: yaw,
             look_delta_pitch: pitch,
+            cursor_yaw: cursor_yaw + pad_yaw,
+            cursor_pitch: cursor_pitch + pad_pitch,
             buttons,
             pressed: buttons & !self.prev_buttons,
             released: self.prev_buttons & !buttons,
@@ -1271,6 +1288,10 @@ mod tests {
         i.mouse.winit_motion((10.0, 4.0));
         let f = frame(&mut i);
         assert_eq!((f.look_delta_yaw, f.look_delta_pitch), (-5.0, 1.0));
+        // A cursor ignores the zoom.
+        i.mouse.winit_motion((10.0, 4.0));
+        let f = frame(&mut i);
+        assert_eq!((f.cursor_yaw, f.cursor_pitch), (-10.0, 2.0));
     }
 
     #[test]

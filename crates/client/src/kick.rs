@@ -304,6 +304,8 @@ mod tests {
             widest = widest.max(k.angles()[0].abs().max(k.angles()[1].abs()));
         }
         assert!(widest > 0.1, "sways: {widest}");
+        // The sway only moves the camera: what goes to the server with the aim is the kick.
+        assert_eq!(k.spring(), [0.0; 3]);
         k.idle(0.016, &aimed(0.0), Some(&scope));
         assert_eq!(k.angles(), [0.0; 3], "held breath: still");
         k.idle(0.016, &aimed(1.0), None);

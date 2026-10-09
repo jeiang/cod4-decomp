@@ -527,6 +527,11 @@ impl NetPlay {
     }
 
     /// `cg_footsteps`, from the cvar store each frame.
+    /// The `bg_shock_volume_<channel>` cvars: what a held breath dips the channels to.
+    pub fn set_breath_volumes(&mut self, volumes: Vec<(String, f32)>) {
+        self.sound.set_breath_volumes(volumes);
+    }
+
     pub fn set_footsteps(&mut self, on: bool) {
         self.sound.set_footsteps(on);
     }
@@ -577,9 +582,9 @@ impl NetPlay {
         if picking {
             // The mouse moves the point on the map, not the view.
             self.loc_cursor[0] =
-                (self.loc_cursor[0] - input.look_delta_yaw * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
+                (self.loc_cursor[0] - input.cursor_yaw * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
             self.loc_cursor[1] =
-                (self.loc_cursor[1] + input.look_delta_pitch * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
+                (self.loc_cursor[1] + input.cursor_pitch * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
         } else {
             self.loc_cursor = [0.5; 2];
             let scale = self.shock_sensitivity;
@@ -1123,8 +1128,9 @@ impl NetPlay {
                 buttons |= b::LOC_CANCEL;
             }
         }
-        // The kick of the player's shots goes to the server with the aim (`CL_FinishMove`).
-        let kick = self.kick.angles();
+        // The kick of the player's shots goes to the server with the aim (`CL_FinishMove`); the scope's sway only
+        // moves the camera.
+        let kick = self.kick.spring();
         let cmd = UserCmd {
             selected_location,
             server_time: self.cmd_time,
@@ -1777,6 +1783,7 @@ impl NetPlay {
             f.buttons |= buttons::RELOAD;
         }
         self.auto = Some(a);
+        (f.cursor_yaw, f.cursor_pitch) = (f.look_delta_yaw, f.look_delta_pitch);
         f
     }
 }
