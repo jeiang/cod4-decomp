@@ -18,7 +18,7 @@ fn a_called_in_helicopter_flies_fires_and_is_shot_down() {
         "set scr_war_timelimit 0",
         "set scr_war_scorelimit 0",
         // Frail enough for a few bots to bring down.
-        "set scr_heli_maxhealth 60",
+        "set scr_heli_maxhealth 120",
         "set scr_heli_armor 20",
         "map mp_crash",
         "bots 8",

@@ -767,6 +767,9 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.torso_clip = torso.clip;
                 s.torso_cap = torso.cap;
                 s.torso_seq = torso.seq;
+                let legs = c.pose.legs_wire();
+                s.legs_clip = legs.clip;
+                s.legs_seq = legs.seq;
                 s.perks = c.ps.perks & 0xf_ffff;
                 s.eflags = match c.team {
                     Team::Axis => eflags::TEAM_AXIS,

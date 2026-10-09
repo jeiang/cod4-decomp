@@ -156,7 +156,7 @@ pub struct Player {
 impl Player {
     /// Advances the animation by `dt` seconds for `input` and poses the skeleton.
     pub fn update(&mut self, dt: f32, input: &PlayerPoseInput) {
-        self.state.update(dt, input);
+        self.state.update(&*self.anims, dt, input);
         self.state.pose(&self.anims, &mut self.pose);
         self.yaw = input.yaw;
     }

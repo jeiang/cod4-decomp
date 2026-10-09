@@ -969,7 +969,12 @@ impl Game {
         let trying = c.cmd.forwardmove != 0 || c.cmd.rightmove != 0;
         let input = PlayerPoseInput::from_ps(&c.ps, trying, weapon.map(|w| &**w));
         let dt = self.level.frametime as f32 * 0.001;
-        self.clients[usize::from(n)].pose.update(dt, &input);
+        let anims = self.player_anims.clone();
+        let clips: &dyn crate::playeranim::Clips = match &anims {
+            Some(a) => &**a,
+            None => &crate::playeranim::NoClips,
+        };
+        self.clients[usize::from(n)].pose.update(clips, dt, &input);
     }
 
     /// `G_ClientDoPerFrameNotifies`: weapon change, firing and sprint edges.
