@@ -183,6 +183,8 @@ pub struct Light {
     pub origin: Vec3,
     pub color: [u8; 3],
     pub radius: f32,
+    /// The direction a spot light shines in; `None` for an omni light.
+    pub dir: Option<Vec3>,
 }
 
 /// What [`Fx::draw`] produces for one frame.
@@ -909,6 +911,19 @@ impl Fx {
                             origin: el.pos,
                             color: [vis.color[0], vis.color[1], vis.color[2]],
                             radius: vis.size[0],
+                            dir: None,
+                        });
+                    }
+                    (_, elem::SPOT_LIGHT) => {
+                        let axis = match &el.body {
+                            Some(b) => b.axes(),
+                            None => element_axis(d, el, (self.now - el.begin) as f32),
+                        };
+                        out.lights.push(Light {
+                            origin: el.pos,
+                            color: [vis.color[0], vis.color[1], vis.color[2]],
+                            radius: vis.size[0],
+                            dir: Some(axis[0]),
                         });
                     }
                     _ => {}
@@ -1483,6 +1498,55 @@ mod tests {
         let mut d = Draws::default();
         fx.draw(&trail_cam(), &mut d);
         assert!(d.trails.is_empty());
+    }
+
+    #[test]
+    fn light_elements_become_omni_and_spot_lights_that_shine_along_the_effect() {
+        let mut spot_elem = elem_def(elem::SPOT_LIGHT, FxVisuals::None);
+        spot_elem.flags = flags::RUN_RELATIVE_TO_EFFECT;
+        let def = effect(
+            "fx/lights",
+            0,
+            2,
+            0,
+            vec![elem_def(elem::OMNI_LIGHT, FxVisuals::None), spot_elem],
+        );
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::new(10.0, 0.0, 0.0), Vec3::Y));
+        fx.update(10, &Empty);
+        let mut d = Draws::default();
+        fx.draw(&trail_cam(), &mut d);
+        assert_eq!(d.lights.len(), 2);
+        let omni = d.lights.iter().find(|l| l.dir.is_none()).expect("omni");
+        let spot = d.lights.iter().find(|l| l.dir.is_some()).expect("spot");
+        assert_eq!(omni.origin, spot.origin);
+        assert!(spot.dir.unwrap().abs_diff_eq(Vec3::Y, 1e-5));
+    }
+
+    #[test]
+    fn a_light_keeps_the_effects_red_green_blue_order() {
+        use assets::zone::fx::{VisSample, VisState};
+        // The zone stores colours blue first: this is an orange (255, 128, 0).
+        let st = |color| VisState {
+            color,
+            rotation_delta: 0.0,
+            rotation_total: 0.0,
+            size: [50.0, 50.0],
+            scale: 1.0,
+        };
+        let sample = || VisSample {
+            base: st([0, 128, 255, 255]),
+            amplitude: st([0, 128, 255, 255]),
+        };
+        let mut e = elem_def(elem::OMNI_LIGHT, FxVisuals::None);
+        e.vis_samples = Arc::from(vec![sample(), sample()]);
+        let def = effect("fx/flash", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(10, &Empty);
+        let mut d = Draws::default();
+        fx.draw(&trail_cam(), &mut d);
+        assert_eq!(d.lights[0].color, [255, 128, 0]);
     }
 
     #[test]

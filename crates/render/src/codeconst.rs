@@ -124,6 +124,8 @@ pub const LIGHT_SPOTDIR: u32 = 0x03;
 pub const LIGHT_SPOTFACTORS: u32 = 0x04;
 pub const LIGHT_FALLOFF_PLACEMENT: u32 = 0x0B;
 pub const SHADOWMAP_POLYGON_OFFSET: u32 = 0x09;
+pub const SPOT_SHADOWMAP_PIXEL_ADJUST: u32 = 0x32;
+pub const SHADOW_PARMS: u32 = 0x08;
 pub const MATERIAL_COLOR: u32 = 0x28;
 pub const FOG: u32 = 0x29;
 pub const FOG_COLOR: u32 = 0x2A;
@@ -182,6 +184,7 @@ pub mod tex {
     pub const RESOLVED_SCENE: u32 = 11;
     pub const POST_EFFECT_0: u32 = 12;
     pub const POST_EFFECT_1: u32 = 13;
+    pub const SHADOWCOOKIE: u32 = 6;
     pub const SHADOWMAP_SUN: u32 = 7;
     pub const SHADOWMAP_SPOT: u32 = 8;
     pub const SKY: u32 = 14;

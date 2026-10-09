@@ -53,6 +53,8 @@ pub struct ModelInstance {
     pub hidden_parts: [u32; 4],
     /// Where the model-lighting volume is sampled.
     pub light_origin: [f32; 3],
+    /// Casts and receives a shadow cookie (the original's render flag 0x100: players).
+    pub casts_cookie: bool,
 }
 
 impl ModelInstance {
@@ -66,6 +68,7 @@ impl ModelInstance {
             lod: None,
             hidden_parts: [0; 4],
             light_origin: [0.0; 3],
+            casts_cookie: false,
         }
     }
 

@@ -8,7 +8,10 @@
 //! Post effects, each overriding the map's own values: `DOF=near_start,near_end,far_start,far_end,near_blur,far_blur`,
 //! `GLOW=radius,intensity,cutoff,desaturation` (`GLOW=0` turns it off), `FILM=0|1|contrast,brightness,desaturation[,1 for no tint]`,
 //! `BLUR=radius` (virtual 640x480 pixels) and `SHELLSHOCK=1` (a second frame draws the overlays over the first).
+//! `DLIGHT=x,y,z,radius,r,g,b[;...]` adds omni lights and `SPOTLIGHT=x,y,z,dx,dy,dz,radius,r,g,b[;...]` spot lights, as
+//! the effects would, to the frame.
 //! `TOUR=<n>` also renders n views from spawn points as `<out>-<i>.png`.
+//! `NOSUN=1` turns the sun sprite off, `SETTLE=<frames>` renders that many frames before the saved one.
 //! `TIMING=<frames>` renders that many frames and prints the mean GPU time of every pass.
 
 use assets::vfs::Vfs;
@@ -37,6 +40,7 @@ fn main() {
     }
     r.settings.fog &= std::env::var_os("NOFOG").is_none();
     r.settings.primary_lights &= std::env::var_os("NOLIGHTS").is_none();
+    r.settings.draw_sun &= std::env::var_os("NOSUN").is_none();
     set_post(&mut r);
     eprintln!(
         "loaded in {:?}; failures: {:?}",
@@ -96,6 +100,15 @@ fn main() {
             flash_screengrab: 0.3,
             flash_whiteout: 0.15,
         });
+    }
+    r.dynamic_lights = dynamic_lights();
+    // `SETTLE=n`: n frames first, for the sun's fades and readback.
+    for _ in 0..std::env::var("SETTLE")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+    {
+        r.render(&view, &tv, format, (w, h));
     }
     let stats = r.render(&view, &tv, format, (w, h));
     eprintln!("{stats:?}\nimage failures: {:?}", r.textures.failed);
@@ -245,4 +258,32 @@ fn set_post(r: &mut Renderer) {
     if let Some(n) = nums("BLUR") {
         r.post.blur_radius = n[0];
     }
+}
+
+/// The lights `DLIGHT` and `SPOTLIGHT` name.
+fn dynamic_lights() -> Vec<render::DynLight> {
+    let list = |name: &str| -> Vec<Vec<f32>> {
+        std::env::var(name)
+            .map(|v| {
+                v.split(';')
+                    .map(|l| l.split(',').map(|n| n.trim().parse().unwrap()).collect())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let v = |n: &[f32]| glam::Vec3::new(n[0], n[1], n[2]);
+    let mut out = Vec::new();
+    for n in list("DLIGHT") {
+        out.extend(render::DynLight::omni(v(&n), n[3], v(&n[4..])));
+    }
+    for n in list("SPOTLIGHT") {
+        out.extend(render::DynLight::spot(
+            v(&n),
+            v(&n[3..]),
+            n[6],
+            v(&n[7..]),
+            &render::SpotParams::default(),
+        ));
+    }
+    out
 }

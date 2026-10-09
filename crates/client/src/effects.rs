@@ -136,6 +136,8 @@ fn world_fx_frame(e: &EntityState) -> Frame {
 pub struct Drawn {
     pub meshes: Vec<DynMesh>,
     pub models: Vec<ModelInstance>,
+    /// The omni and spot lights the effects add.
+    pub lights: Vec<fx::Light>,
     /// How many sprites and decals the meshes hold.
     pub quads: usize,
     pub decals: usize,
@@ -604,6 +606,7 @@ impl Effects {
         self.fx.draw(&cam, &mut d);
         let mut out = Drawn {
             quads: d.quads.len(),
+            lights: std::mem::take(&mut d.lights),
             ..Drawn::default()
         };
 
