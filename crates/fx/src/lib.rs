@@ -21,7 +21,7 @@ pub use rng::Rng;
 /// Longest single integration step.
 const STEP_MS: i32 = 16;
 /// Effects alive at once; older ones are dropped beyond this.
-const MAX_EFFECTS: usize = 400;
+const MAX_EFFECTS: usize = 1024;
 /// Elements alive at once over all effects.
 const MAX_ELEMS: usize = 6000;
 /// Gravity of a `gravity` factor of one, in units per second squared.
@@ -303,33 +303,48 @@ impl Fx {
             self.stats.dropped += 1;
         }
         self.stats.effects_played += 1;
-        let looping = def.looping_count as usize;
-        let one_shot = def.one_shot_count as usize;
-        let loop_end = if def.msec_looping_life > 0 {
-            at.saturating_add(def.msec_looping_life)
-        } else {
-            at
-        };
         let mut e = Effect {
             def: def.clone(),
             frame,
             elems: Vec::new(),
-            next_loop: vec![at; looping],
-            loop_end,
+            next_loop: Vec::new(),
+            loop_end: at,
             id: self.next_id,
             goal: None,
             dist: 0.0,
             last_move: at,
-            spawned: vec![0; def.elems.len()],
+            spawned: Vec::new(),
         };
         self.next_id += 1;
+        self.begin(&mut e, at);
+        let id = e.id;
+        self.effects.push(e);
+        id
+    }
+
+    /// Starts (or restarts) the effect's timeline at `at`: its looping elements begin their intervals, its one-shot
+    /// elements spawn, and its trails take their first point.
+    fn begin(&mut self, e: &mut Effect, at: i32) {
+        let def = e.def.clone();
+        let def = &def;
+        let looping = def.looping_count as usize;
+        let one_shot = def.one_shot_count as usize;
+        e.loop_end = if def.msec_looping_life > 0 {
+            at.saturating_add(def.msec_looping_life)
+        } else {
+            at
+        };
+        e.next_loop = vec![at; looping];
+        e.spawned = vec![0; def.elems.len()];
+        e.dist = 0.0;
+        e.last_move = at;
         for k in 0..def.elems.len() {
             if is_trail(&def.elems[k]) {
                 // Trails spawn by distance travelled, not on an interval.
                 if let Some(n) = e.next_loop.get_mut(k) {
                     *n = i32::MAX;
                 }
-                self.spawn_trail_point(&mut e, k, at, 0.0);
+                self.spawn_trail_point(e, k, at, 0.0);
             }
         }
         for k in looping..(looping + one_shot).min(def.elems.len()) {
@@ -339,12 +354,25 @@ impl Fx {
             }
             let count = d.spawn[0] as f32 + d.spawn[1] as f32 * self.rng.f();
             for _ in 0..(count as i32).max(0) {
-                self.spawn(&mut e, k, at);
+                self.spawn(e, k, at);
             }
         }
-        let id = e.id;
+    }
+
+    /// Restarts effect `id` at `at` (`FX_RetriggerEffect`): its looping elements start over and its one-shot elements
+    /// spawn again, without a second effect. Returns false if the effect is over.
+    pub fn retrigger(&mut self, id: u64, at: i32) -> bool {
+        let Some(i) = self.effects.iter().position(|e| e.id == id) else {
+            return false;
+        };
+        let mut e = self.effects.swap_remove(i);
+        let attached = e.loop_end == i32::MAX;
+        self.begin(&mut e, at);
+        if attached {
+            e.loop_end = i32::MAX;
+        }
         self.effects.push(e);
-        id
+        true
     }
 
     /// Plays `def` at `frame` as an effect that goes on until [`Fx::stop`] and follows [`Fx::move_effect`]: a missile's
@@ -1468,6 +1496,28 @@ mod tests {
         };
         let (a, b) = (land(5), land(33));
         assert!((a - b).length() < 1e-3, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn a_retriggered_effect_spawns_its_one_shots_again_without_a_second_effect() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [2, 0];
+        e.life_span_msec.base = 1000;
+        let def = effect("fx/retrigger", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        let id = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(100, &Empty);
+        assert_eq!((fx.live_effects(), fx.stats.elems_spawned), (1, 2));
+        assert!(fx.retrigger(id, 300));
+        fx.update(400, &Empty);
+        assert_eq!(
+            (fx.live_effects(), fx.stats.elems_spawned, fx.live_elems()),
+            (1, 4, 4)
+        );
+        // Stopped and played out, an effect cannot be retriggered.
+        fx.stop(id);
+        fx.update(5000, &Empty);
+        assert!(!fx.retrigger(id, 5100));
     }
 
     #[test]

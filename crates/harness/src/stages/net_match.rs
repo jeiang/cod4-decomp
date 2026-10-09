@@ -67,6 +67,9 @@ struct Result {
     /// The most hud elements one snapshot listed, and configstrings the table held.
     max_hud: usize,
     materials: usize,
+    /// Earthquake events that reached the client, and the strongest camera shake its view felt.
+    quakes: u64,
+    shake_max: f32,
 }
 
 /// What a person at the menus does: takes what the server opens and answers it.
@@ -130,6 +133,8 @@ fn client(
     let began = Instant::now();
     let mut last: HashMap<u16, [f32; 3]> = HashMap::new();
     let mut cmd_time = 0;
+    let mut shakes = sim::shake::CameraShakes::default();
+    let mut quake_seq = None;
     let mut next = Instant::now();
     for frame in 0..FRAMES {
         next += FRAME;
@@ -168,6 +173,18 @@ fn client(
             r.predictions += 1;
             r.max_ahead = r.max_ahead.max(p.replayed);
             r.end = p.ps.origin;
+        }
+        if let Some(s) = c.latest() {
+            for e in s.entities.iter().filter(|e| e.etype == etype::EVENT) {
+                if let Some(q) = server::tempev::Earthquake::decode(e)
+                    && quake_seq != Some((e.number, e.event_seq))
+                {
+                    quake_seq = Some((e.number, e.event_seq));
+                    r.quakes += 1;
+                    shakes.start(st, s.ps.origin, q.scale, q.duration_ms, e.origin, q.radius);
+                }
+            }
+            r.shake_max = r.shake_max.max(shakes.strength(st, s.ps.origin));
         }
         let ents = c
             .snaps
@@ -261,8 +278,21 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         })
         .collect();
     // The server runs in this thread until every client thread has finished.
+    let mut quaked = false;
     while !handles.iter().all(|h| h.is_finished()) {
         server.run_for(Duration::from_millis(100));
+        // Once everyone has a body, an earthquake from the first client's position: every client is inside its radius.
+        if !quaked && ready.load(Ordering::SeqCst) == CLIENTS {
+            let at = server
+                .game
+                .connected_clients()
+                .next()
+                .map(|(_, c)| c.ps.origin);
+            if let Some(at) = at {
+                quaked = true;
+                server.game.earthquake(at, 0.6, 20_000, 20_000.0);
+            }
+        }
         peers.set(server.net_clients());
     }
     let results: Vec<Result> = handles
@@ -343,6 +373,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     r.corrections, r.predictions
                 ));
             }
+            if r.quakes == 0 {
+                failures.push(format!("client {i} was never told of the earthquake"));
+            } else if r.shake_max <= 0.0 {
+                failures.push(format!(
+                    "client {i}'s camera did not shake in the earthquake"
+                ));
+            }
             if r.steps == 0 || r.snaps * 100 > r.steps {
                 failures.push(format!("client {i}: {} of {} interpolated steps jumped over {SMOOTH_STEP} units (max {:.0})", r.snaps, r.steps, r.max_step));
             }
@@ -371,6 +408,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         report.metrics.insert(
             "client.max_hud_elems".into(),
             live.iter().map(|r| r.max_hud as f64).fold(0.0, f64::max),
+        );
+        report.metrics.insert(
+            "client.camera_shake_max".into(),
+            live.iter().map(|r| r.shake_max as f64).fold(0.0, f64::max),
         );
         report.metrics.insert(
             "client.max_players_seen".into(),

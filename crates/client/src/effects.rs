@@ -15,6 +15,7 @@ use assets::zone::gfxworld::GfxWorld;
 use assets::zone::weapon::WeaponDef;
 use fx::{Camera, Draws, Frame, Fx, Library, SoundPlay};
 use glam::Vec3;
+use net::entity::{EntityState, etype};
 use render::{DynMesh, DynVertex, ModelInstance, ModelKind};
 use server::content::Content;
 use sim::cm::Collide;
@@ -76,6 +77,8 @@ pub struct Effects {
     /// The server time of the last update.
     clock: i32,
     sweep: Option<(u64, Frame, i32)>,
+    /// The script effect entities, by entity number.
+    world_fx: HashMap<u16, WorldFx>,
     /// The client number of this player and the gun in their hands, for the first-person flash.
     own: u16,
     view: Option<ViewTags>,
@@ -83,6 +86,26 @@ pub struct Effects {
     pub played: BTreeMap<&'static str, u64>,
     /// Names of effects an event asked for that the content lacks.
     pub missing: HashSet<String>,
+}
+
+/// A frame at `origin` facing `forward` with `up` above it.
+fn oriented(origin: Vec3, forward: [f32; 3], up: [f32; 3]) -> Frame {
+    let (f, u) = (Vec3::from(forward), Vec3::from(up));
+    Frame {
+        origin,
+        axis: [f, u.cross(f), u],
+    }
+}
+
+/// What a script effect entity (`spawnfx`, `playloopedfx`) has done on this client.
+struct WorldFx {
+    /// The looping effect's handle.
+    handle: Option<u64>,
+    /// When a looped effect restarts next.
+    next: i32,
+    /// The last trigger of a `spawnfx` effect acted on, and the time a trigger waits for.
+    seen: u8,
+    due: Option<i32>,
 }
 
 /// What to draw this frame.
@@ -95,6 +118,8 @@ pub struct Drawn {
     pub decals: usize,
     /// How many trail strips the meshes hold.
     pub trails: usize,
+    /// How far the camera shaking turns the view (pitch, yaw, roll in degrees); set by the caller.
+    pub sway: [f32; 3],
 }
 
 impl Effects {
@@ -109,6 +134,7 @@ impl Effects {
             world,
             marks: HashMap::new(),
             missiles: HashMap::new(),
+            world_fx: HashMap::new(),
             clock: 0,
             sweep: None,
             own: u16::MAX,
@@ -220,15 +246,16 @@ impl Effects {
             ClientEvent::PlayFx {
                 origin,
                 forward,
+                up,
                 name,
                 ..
             } => match self.fx.library().get(name).cloned() {
-                Some(d) => self.play(
-                    "play_fx",
-                    Some(d),
-                    Vec3::from(*origin),
-                    Vec3::from(*forward),
-                ),
+                Some(d) => {
+                    let d = self.resolve(&d);
+                    self.fx
+                        .play(&d, oriented(Vec3::from(*origin), *forward, *up));
+                    *self.played.entry("play_fx").or_default() += 1;
+                }
                 None => {
                     self.missing.insert(name.clone());
                 }
@@ -252,7 +279,7 @@ impl Effects {
                     Vec3::Z,
                 );
             }
-            ClientEvent::PhysicsExplosion { .. } => {}
+            ClientEvent::Physics { .. } | ClientEvent::Earthquake { .. } => {}
             ClientEvent::WeaponFire {
                 eye,
                 angles,
@@ -338,6 +365,94 @@ impl Effects {
             }
             flying
         });
+    }
+
+    /// Keeps the script effect entities of the newest snapshot playing (`CG_Fx`, `CG_LoopFx`): a looped effect starts
+    /// when its entity is first seen near `eye` and restarts every period; a triggered one plays once per trigger,
+    /// after the trigger's delay; an entity that is gone stops its effect. `name` gives the name of an effect index.
+    pub fn world_fx(
+        &mut self,
+        ents: &[EntityState],
+        name: &dyn Fn(u16) -> Option<String>,
+        eye: Vec3,
+        now: i32,
+    ) {
+        let mut present = HashSet::new();
+        for e in ents {
+            let looped = e.etype == etype::LOOP_FX;
+            if !looped && e.etype != etype::FX {
+                continue;
+            }
+            present.insert(e.number);
+            let Some(def) = name(e.model)
+                .and_then(|n| self.fx.library().get(&n).cloned())
+                .map(|d| self.resolve(&d))
+            else {
+                if let Some(n) = name(e.model) {
+                    self.missing.insert(n);
+                }
+                continue;
+            };
+            let (f, r, u) = sim::pm::math::angle_vectors(&e.angles);
+            let frame = Frame {
+                origin: Vec3::from(e.origin),
+                axis: [Vec3::from(f), -Vec3::from(r), Vec3::from(u)],
+            };
+            let w = self.world_fx.entry(e.number).or_insert(WorldFx {
+                handle: None,
+                next: 0,
+                seen: 0,
+                due: None,
+            });
+            if looped {
+                let cull = e.velocity[0];
+                if cull != 0.0 && Vec3::from(e.origin).distance(eye) >= cull {
+                    continue;
+                }
+                let period = i32::try_from(e.pm_flags).unwrap_or(i32::MAX).max(1);
+                match w.handle {
+                    Some(id) => {
+                        while now >= w.next {
+                            if !self.fx.retrigger(id, w.next) {
+                                break;
+                            }
+                            w.next += period;
+                        }
+                    }
+                    None => {
+                        w.handle = Some(self.fx.play_attached(&def, frame));
+                        w.next = now + period;
+                        *self.played.entry("looped_fx").or_default() += 1;
+                    }
+                }
+            } else {
+                if e.event_seq != w.seen {
+                    w.seen = e.event_seq;
+                    w.due = Some(now + i32::try_from(e.pm_flags).unwrap_or(0));
+                }
+                if w.due.is_some_and(|d| now >= d) {
+                    w.due = None;
+                    self.fx.play(&def, frame);
+                    *self.played.entry("triggered_fx").or_default() += 1;
+                }
+            }
+        }
+        let fx = &mut self.fx;
+        self.world_fx.retain(|n, w| {
+            let keep = present.contains(n);
+            if !keep && let Some(id) = w.handle {
+                fx.stop(id);
+            }
+            keep
+        });
+    }
+
+    /// Looping script effects playing now.
+    pub fn looped_fx(&self) -> usize {
+        self.world_fx
+            .values()
+            .filter(|w| w.handle.is_some())
+            .count()
     }
 
     /// Tells the effects who this player is and where the gun in their hands has its muzzle and ejection port.

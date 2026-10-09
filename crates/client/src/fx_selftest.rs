@@ -192,6 +192,56 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         _ => bad.push(format!("weapon {ROCKET} has no projectile trail effect")),
     }
 
+    // A looped script effect (`playloopedfx`) keeps spawning for as long as its entity is in the snapshot, and stops once
+    // the entity is gone; a camera shake from an earthquake sways the near view and not the far one.
+    let effects = lib.content.effects();
+    let looped = effects
+        .iter()
+        .filter(|d| d.looping_count > 0)
+        .filter_map(|d| d.name.as_deref())
+        .filter(|n| n.contains("fire/") || n.contains("smoke"))
+        .min()
+        .map(str::to_owned);
+    match looped {
+        Some(name) => {
+            let mut fx = Effects::new(&lib.content, data.world.clone());
+            let mut e = net::entity::EntityState::new(100);
+            e.etype = net::entity::etype::LOOP_FX;
+            e.origin = [eye.x, eye.y, eye.z + 200.0];
+            e.angles = [270.0, 0.0, 0.0];
+            e.model = 1;
+            e.pm_flags = 1000;
+            let nm = name.clone();
+            let names = move |_: u16| Some(nm.clone());
+            let (mut live_max, mut played) = (0, 0);
+            for step in 1..=60 {
+                fx.world_fx(std::slice::from_ref(&e), &names, eye, step * 50);
+                fx.update(step * 50, world);
+                live_max = live_max.max(fx.live_elems());
+                played = played.max(fx.looped_fx());
+            }
+            fx.world_fx(&[], &names, eye, 3050);
+            report.insert("looped_fx_active_max".into(), played.into());
+            report.insert("looped_fx_live_elems_max".into(), live_max.into());
+            if played == 0 || live_max == 0 {
+                bad.push(format!("looped effect {name} never spawned anything"));
+            }
+            if fx.looped_fx() != 0 {
+                bad.push("a looped effect kept playing after its entity was gone".into());
+            }
+        }
+        None => bad.push("the content has no looping fire or smoke effect".into()),
+    }
+    let mut shakes = sim::shake::CameraShakes::default();
+    let src = [eye.x, eye.y, eye.z];
+    shakes.start(0, src, 0.5, 2000, src, 1000.0);
+    let near = shakes.sway(100, src).iter().any(|a| a.abs() > 0.1);
+    let far = shakes.sway(100, [src[0] + 5000.0, src[1], src[2]]);
+    report.insert("camera_shake_near".into(), u8::from(near).into());
+    if !near || far != [0.0; 3] {
+        bad.push(format!("camera shake: near {near}, far {far:?}"));
+    }
+
     // The stock scripts' vision and shock files are there and do something.
     let file = |n: &str| {
         lib.content.rawfile(n).map(|b| {
