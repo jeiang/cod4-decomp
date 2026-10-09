@@ -600,7 +600,8 @@ impl PlayerPoseInput {
             Motion::Idle => return None,
             Motion::Sprint => STUMBLE_SPRINT,
             Motion::Walk if self.stance == StanceInput::Stand => STUMBLE_WALK[pg][dir],
-            // Crouched, walking and running share `stumble_crouch_*`.
+            // Crouched walking and running are the script's `stumble_crouch_*` move types, whose entries
+            // play the standing `pb_stumble_*` (rifle) and `pb_stumble_pistol_*` (pistol or grenade) clips.
             Motion::Walk | Motion::Run => {
                 let family = if self.stance != StanceInput::Stand {
                     pg
