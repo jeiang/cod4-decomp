@@ -27,10 +27,12 @@ const BOTS: usize = 12;
 /// Client frames recorded after spawning.
 const FRAMES: usize = 300;
 const FRAME: Duration = Duration::from_millis(33);
+/// Horizontal distance under which another player counts as touching: a player is about 30 units wide.
+const CROWD: f32 = 40.0;
+/// Uncrowded prediction passes a client must make for the corrections check to mean anything.
+const MIN_COUNTED: u64 = FRAMES as u64 / 3;
 /// Longest a step of an interpolated player may be between two client frames before it counts
 /// as a snap: sprinting is about 9 units a frame, so this is generous.
-/// Horizontal distance under which another player counts as touching: a player is about 30 units wide.
-const CROWD: f32 = 60.0;
 const SMOOTH_STEP: f32 = 40.0;
 /// Waiting for the game to give a client a body depends on the match start, not the runner; the
 /// limit only stops a hung run.
@@ -130,7 +132,9 @@ fn client(
         if let Some(s) = c.latest() {
             r.connected = true;
             let n = s.ps.client_num;
-            if s.entity(n).is_some_and(|e| e.etype == etype::PLAYER) {
+            // Before the game gives the client a body its player state is blank (`client_num` 0 or stale, a bot's
+            // entity). The bots took the first slots, so a real client's number is at least `BOTS`.
+            if usize::from(n) >= BOTS && s.entity(n).is_some_and(|e| e.etype == etype::PLAYER) {
                 own = Some(n);
             }
         }
@@ -478,6 +482,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             }
             // Walking clear of other players the server and the replay agree; passes beside another player are
             // not counted (see `Result::predictions`).
+            if r.predictions < MIN_COUNTED {
+                failures.push(format!(
+                    "client {i}: only {} of {} prediction passes were clear of other players ({} crowded)",
+                    r.predictions,
+                    r.predictions + r.crowded,
+                    r.crowded
+                ));
+            }
             if r.corrections * 7 > r.predictions {
                 failures.push(format!(
                     "client {i}: the server corrected {} of {} predictions",
@@ -523,6 +535,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         report.metrics.insert(
             "client.snapshots_per_sec".into(),
             mean(|r| r.snapshots as f64) / secs,
+        );
+        report.metrics.insert(
+            "client.crowded_passes".into(),
+            live.iter().map(|r| r.crowded as f64).sum(),
         );
         let wounds: u64 = live.iter().map(|r| r.hits).sum();
         report.metrics.insert("client.wounds".into(), wounds as f64);
