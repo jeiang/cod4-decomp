@@ -165,20 +165,32 @@ fn map_rotate_skips_unknown_words_and_wraps_to_the_start() {
 
 #[test]
 fn the_game_log_records_the_game_start_chat_script_lines_and_the_end() {
-    let path = std::env::temp_dir().join(format!("cod4e-boot-games-{}.log", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cod4e-boot-games-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("games_mp.log");
     let _ = std::fs::remove_file(&path);
-    let p = path.to_str().unwrap();
-    let Some(mut s) = boot(&[
-        "+set", "net_port", "0", "+set", "g_log", p, "+map", "mp_crash",
-    ]) else {
+    let Some(root) = std::env::var_os("COD4_PATH").map(PathBuf::from) else {
         eprintln!("COD4_PATH not set; skipping");
         return;
     };
+    let args: Vec<String> = [
+        "+set",
+        "net_port",
+        "0",
+        "+set",
+        "g_log",
+        "games_mp.log",
+        "+map",
+        "mp_crash",
+    ]
+    .map(String::from)
+    .to_vec();
+    let mut s = Server::boot_in(&root, &args, false, dir.clone()).expect("boot");
     s.run_frames(10);
     s.game.log_print("J;0;1;Ann\n");
     s.exec_line("map mp_backlot").unwrap();
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(text.contains(" InitGame: \\"), "{text}");
     assert!(text.contains(" J;0;1;Ann\n"), "{text}");
     assert!(text.contains(" ShutdownGame:\n"), "{text}");

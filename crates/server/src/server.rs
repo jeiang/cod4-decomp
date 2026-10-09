@@ -190,6 +190,8 @@ pub struct Server {
     console: Option<std::sync::mpsc::Receiver<String>>,
     /// The game type the running level was started with (`sv.gametype`).
     gametype: String,
+    /// The directory `g_log` names a file in.
+    log_dir: PathBuf,
 }
 
 fn register_core_dvars(c: &mut Cvars) {
@@ -270,7 +272,8 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_mapRotationCurrent", "", 0),
         ("nextmap", "map_restart", 0),
         ("gamename", "Call of Duty 4", SERVERINFO | ROM),
-        ("g_log", "games_mp.log", ARCHIVE),
+        // The log file name (empty: no log); `cod4e-server` asks for `games_mp.log`.
+        ("g_log", "", ARCHIVE),
         ("loc_language", "0", ARCHIVE),
     ] {
         c.register(n, d, f);
@@ -394,6 +397,16 @@ impl Server {
     /// Boots a dedicated server on the install at `root`. `cmdline` is the program's
     /// arguments after the executable name (`+set a b +exec server.cfg +map mp_crash`).
     pub fn boot(root: &Path, cmdline: &[String], echo: bool) -> Result<Self, String> {
+        Self::boot_in(root, cmdline, echo, PathBuf::from("."))
+    }
+
+    /// [`Self::boot`] with the directory the game log (`g_log`) is written in.
+    pub fn boot_in(
+        root: &Path,
+        cmdline: &[String],
+        echo: bool,
+        log_dir: PathBuf,
+    ) -> Result<Self, String> {
         let t0 = Instant::now();
         let install =
             Install::open(root).map_err(|e| format!("{}: {}", root.display(), io_err(e)))?;
@@ -445,6 +458,7 @@ impl Server {
             rcon_throttle: Throttle::default(),
             console: None,
             gametype: String::new(),
+            log_dir,
         };
         s.say("CoD4 MP headless server (cod4e)\n");
         s.say(&format!(
@@ -816,6 +830,9 @@ impl Server {
             Ok(n) => n,
             Err(why) => return refuse(net, why),
         };
+        if let Some(c) = self.game.client_mut(slot) {
+            c.local = req.from.ip().is_loopback();
+        }
         net.add_peer(slot, req, &name);
         let map = self.map_name().unwrap_or("").to_owned();
         for line in NetSv::world_commands(&mut self.game, &map) {
@@ -1843,6 +1860,9 @@ impl Server {
         for (mut peer, name, stats) in humans {
             let j = self.join_human(&name, Some(stats));
             if let Ok(slot) = j {
+                if let Some(c) = self.game.client_mut(slot) {
+                    c.local = peer.link.addr.ip().is_loopback();
+                }
                 for line in NetSv::world_commands(&mut self.game, map) {
                     peer.queue(line);
                 }
@@ -1991,7 +2011,15 @@ impl Server {
             self.say("Not logging to disk.\n");
             return;
         }
-        match crate::gamelog::GameLog::open(&path, sync) {
+        // A file name in the working directory, never a path out of it.
+        if path.contains(['/', '\\', ':']) || path.contains("..") {
+            self.say(&format!(
+                "WARNING: Couldn't open logfile: {path}: not a plain file name\n"
+            ));
+            return;
+        }
+        let file = self.log_dir.join(&path);
+        match crate::gamelog::GameLog::open(&file.to_string_lossy(), sync) {
             Ok(log) => {
                 self.game.log = log;
                 let info = self.game.cvars.info_string(cvar::SERVERINFO);

@@ -191,6 +191,8 @@ pub struct Client {
     /// warning went out.
     pub inactivity_at: i32,
     pub inactivity_warned: bool,
+    /// A person on this machine (a loopback connection): never dropped for inactivity (`sess.localClient`).
+    pub local: bool,
     /// `pingPlayer`: until when the enemies' compasses show this player (0: not pinged).
     pub compass_ping_until: i32,
     /// `setstat`/`getstat` values.
@@ -262,6 +264,7 @@ impl Client {
             prev_night_vision: false,
             inactivity_at: 60_000,
             inactivity_warned: false,
+            local: false,
             compass_ping_until: 0,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
@@ -283,7 +286,8 @@ pub fn clean_client_name(name: &str) -> String {
     let mut spaces = 0;
     let mut chars = name.chars();
     while let Some(c) = chars.next() {
-        if out.is_empty() && c == ' ' {
+        // Control characters would forge lines of the log and the console, and steer the localizer.
+        if c.is_control() || (out.is_empty() && c == ' ') {
             continue;
         }
         if c == '^' {
@@ -729,6 +733,8 @@ impl Game {
         {
             (c.inactivity_at, c.inactivity_warned) =
                 (time.saturating_add(limit.saturating_mul(1000)), false);
+        } else if c.local {
+            // A person on this machine is never dropped or warned.
         } else if time > c.inactivity_at {
             self.inactive.push(n);
             self.disconnect_client(vm, n);
@@ -1151,6 +1157,8 @@ mod name_tests {
         assert_eq!(clean_client_name("   Ann"), "Ann");
         assert_eq!(clean_client_name("a      b"), "a   b");
         assert_eq!(clean_client_name("trailing^"), "trailing");
+        assert_eq!(clean_client_name("a\n  9:99 K;x\x15"), "a  9:99 K;x");
+        assert_eq!(clean_client_name("a\n  9:99 K;x\x15"), "a  9:99 K;x");
     }
 
     #[test]

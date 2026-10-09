@@ -2228,7 +2228,7 @@ fn netplay_rates(input: &Input) -> (i32, i32) {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(d)
     };
-    (get("rate", 25_000), get("snaps", 30))
+    (get("rate", 90_000), get("snaps", 30))
 }
 
 fn console_action(st: &mut State, line: &str) {

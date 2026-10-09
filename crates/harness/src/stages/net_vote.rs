@@ -41,17 +41,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     };
     let log = ctx.dir.join("games_mp.log");
     let _ = std::fs::remove_file(&log);
-    let args: Vec<String> = [
-        "+set",
-        "net_port",
-        "0",
-        "+set",
-        "g_log",
-        &log.to_string_lossy(),
-    ]
-    .map(String::from)
-    .to_vec();
-    let mut server = match Server::boot(install, &args, false) {
+    let args: Vec<String> = ["+set", "net_port", "0", "+set", "g_log", "games_mp.log"]
+        .map(String::from)
+        .to_vec();
+    let mut server = match Server::boot_in(install, &args, false, ctx.dir.clone()) {
         Ok(s) => s,
         Err(e) => return Ok(StageReport::new(NAME, Status::Failed).with_reason(e)),
     };
