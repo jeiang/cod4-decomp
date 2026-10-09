@@ -24,7 +24,7 @@ pub mod uicmd;
 mod vehicle;
 mod weapons;
 
-pub use args::Args;
+pub use args::{Args, format_float};
 
 pub use hud::free_client_elems as free_client_hud_elems;
 

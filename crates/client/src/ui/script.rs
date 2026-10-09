@@ -28,7 +28,9 @@ fn arity(name: &str) -> Option<usize> {
         | "scriptmenurespondondvarstringvalue"
         | "scriptmenurespondondvarintvalue"
         | "scriptmenurespondondvarfloatvalue" => 3,
-        "setcolor" | "setitemcolor" => 6,
+        // `setcolor <name> r g b a` colours the running item, `setitemcolor <group> <name> r g b a` a group.
+        "setcolor" => 5,
+        "setitemcolor" => 6,
         _ => return None,
     })
 }
@@ -165,5 +167,16 @@ mod tests {
                 ")"
             ]
         );
+    }
+
+    #[test]
+    fn setcolor_takes_a_name_and_four_numbers_setitemcolor_a_group_too() {
+        let c = parse(
+            "setcolor backcolor 1 0 0 1 open x setitemcolor g bordercolor 0 0 0 1 close self",
+        );
+        assert_eq!(c[0].len(), 6);
+        assert_eq!(c[1], ["open", "x"]);
+        assert_eq!(c[2].len(), 7);
+        assert_eq!(c[3], ["close", "self"]);
     }
 }

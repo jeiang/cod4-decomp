@@ -20,6 +20,7 @@ use assets::UiAssets;
 #[allow(unused_imports)]
 use env::World;
 use expr::Compiled;
+use server::script::format_float;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -45,6 +46,8 @@ pub mod dynf {
     pub const FADINGIN: u32 = 0x20;
     /// The pointer is over the item's text: `mouseEnterText` has run and `mouseExitText` is owed.
     pub const MOUSEOVER_TEXT: u32 = 0x40;
+    /// `setcolor ... backcolor` ran on the item.
+    pub const BACKCOLOR_SET: u32 = 0x8000;
     pub const FORECOLOR_SET: u32 = 0x10000;
 }
 
@@ -140,6 +143,197 @@ pub(crate) fn enum_index(list: &[String], cur: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Item types the keyboard types into (`Item_IsTextField`).
+fn is_text_field(ty: i32) -> bool {
+    matches!(
+        ty,
+        ity::EDITFIELD
+            | ity::NUMERICFIELD
+            | ity::VALIDFILEFIELD
+            | ity::DECIMALFIELD
+            | ity::UPREDITFIELD
+    )
+}
+
+/// What an edit field is allowed to hold (`editFieldDef`): 0 means no limit.
+struct EditSpec {
+    ty: i32,
+    max_chars: usize,
+    goto_next: bool,
+    max_paint: usize,
+}
+
+/// What a key did to an edit field.
+#[derive(Debug, PartialEq)]
+enum EditResult {
+    /// Taken; the field goes on being edited.
+    Used,
+    /// Taken, and the edit is over (Enter, Escape, a key the field refuses).
+    End(bool),
+    /// The field is full: focus moves on (`maxCharsGotoNext`).
+    Next,
+    /// Not for the field: the usual handling goes on.
+    Pass,
+}
+
+fn is_colour_code(text: &[char], at: usize) -> bool {
+    text.get(at) == Some(&'^') && text.get(at + 1).is_some_and(|c| c.is_ascii_digit())
+}
+
+/// `Item_GetCursorPosOffset`: the caret `delta` characters on, hopping over `^1` colour codes.
+fn cursor_step(text: &[char], mut pos: usize, delta: i32) -> usize {
+    if delta > 0 {
+        let mut left = delta;
+        loop {
+            while is_colour_code(text, pos) {
+                pos += 2;
+            }
+            if pos >= text.len() || left == 0 {
+                break;
+            }
+            pos += 1;
+            left -= 1;
+        }
+    } else {
+        let mut left = delta;
+        while pos > 0 && left < 0 {
+            if pos >= 2 && is_colour_code(text, pos - 2) {
+                pos -= 2;
+            } else {
+                pos -= 1;
+            }
+            left += 1;
+        }
+    }
+    pos.min(text.len())
+}
+
+/// `Item_TextField_EnsureCursorVisible`: scrolls the painted window so the caret is in it.
+fn keep_caret_visible(spec: &EditSpec, text: &[char], cursor: usize, paint: &mut usize) {
+    if *paint > cursor {
+        *paint = cursor;
+    } else if spec.max_paint > 0 {
+        let min = cursor_step(text, cursor, -(spec.max_paint as i32));
+        *paint = (*paint).max(min);
+    }
+}
+
+/// `Item_TextField_HandleKey` on the field's text, caret and first painted character.
+fn edit_field_key(
+    spec: &EditSpec,
+    text: &mut String,
+    cursor: &mut usize,
+    paint: &mut usize,
+    overstrike: &mut bool,
+    key: &UiKey,
+) -> EditResult {
+    let mut chars: Vec<char> = text.chars().collect();
+    if spec.max_chars > 0 && chars.len() > spec.max_chars {
+        chars.truncate(spec.max_chars);
+    }
+    let mut cur = (*cursor).min(chars.len());
+    let result = match key {
+        UiKey::Char(c) => {
+            let mut c = *c;
+            if c.is_control() || c == '@' {
+                return EditResult::Used;
+            }
+            let refused = match spec.ty {
+                ity::VALIDFILEFIELD => {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        None
+                    } else {
+                        return EditResult::Used;
+                    }
+                }
+                ity::NUMERICFIELD => Some(!c.is_ascii_digit()),
+                ity::DECIMALFIELD => {
+                    if c == ',' {
+                        c = '.';
+                    }
+                    Some(!(c.is_ascii_digit() || c == '.'))
+                }
+                _ => None,
+            };
+            if refused == Some(true) {
+                return EditResult::End(true);
+            }
+            if spec.ty == ity::UPREDITFIELD {
+                c = c.to_ascii_uppercase();
+            }
+            let full = spec.max_chars > 0 && chars.len() >= spec.max_chars;
+            if *overstrike {
+                if spec.max_chars > 0 && cur >= spec.max_chars {
+                    return if spec.goto_next {
+                        EditResult::Next
+                    } else {
+                        EditResult::Used
+                    };
+                }
+                if cur < chars.len() {
+                    chars[cur] = c;
+                } else if chars.len() < 255 {
+                    chars.push(c);
+                } else {
+                    return EditResult::Used;
+                }
+            } else {
+                if chars.len() >= 255 || full {
+                    return EditResult::Used;
+                }
+                chars.insert(cur, c);
+            }
+            cur = cursor_step(&chars, cur, 1);
+            if spec.max_chars > 0 && cur >= spec.max_chars && spec.goto_next {
+                EditResult::Next
+            } else {
+                EditResult::Used
+            }
+        }
+        UiKey::Backspace => {
+            if cur > 0 {
+                let to = cursor_step(&chars, cur, -1);
+                chars.drain(to..cur);
+                cur = to;
+            }
+            EditResult::Used
+        }
+        UiKey::Delete => {
+            if cur < chars.len() {
+                chars.remove(cur);
+            }
+            EditResult::Used
+        }
+        UiKey::Left => {
+            cur = cursor_step(&chars, cur, -1);
+            EditResult::Used
+        }
+        UiKey::Right => {
+            cur = cursor_step(&chars, cur, 1);
+            EditResult::Used
+        }
+        UiKey::Home => {
+            cur = 0;
+            *paint = 0;
+            EditResult::Used
+        }
+        UiKey::End => {
+            cur = chars.len();
+            EditResult::Used
+        }
+        UiKey::Insert => {
+            *overstrike = !*overstrike;
+            EditResult::Used
+        }
+        UiKey::Enter | UiKey::Escape => EditResult::End(true),
+        _ => return EditResult::Pass,
+    };
+    *text = chars.iter().collect();
+    *cursor = cur;
+    keep_caret_visible(spec, &chars, cur, paint);
+    result
+}
+
 /// Keys the menus react to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiKey {
@@ -152,6 +346,7 @@ pub enum UiKey {
     Tab,
     Backspace,
     Delete,
+    Insert,
     Home,
     End,
     PageUp,
@@ -194,6 +389,8 @@ pub trait Host: env::World {
     fn exec(&mut self, ui: &Ui, text: &str);
     /// Plays a UI sound alias.
     fn play(&mut self, alias: &str);
+    /// The `soundLoop` aliases of the menus painted this frame: a loop that is not listed any more stops.
+    fn menu_loops(&mut self, _aliases: &[String]) {}
     /// `scriptMenuResponse`: tells the server's scripts what was chosen in a script menu.
     fn menu_response(&mut self, menu: &str, response: &str);
     /// Runs one `uiScript` (server list, start server, profiles, ...). `false` if unknown.
@@ -241,6 +438,11 @@ pub trait Host: env::World {
 struct ItemRt {
     dyn_flags: u32,
     fore: [f32; 4],
+    /// `setitemcolor backcolor` / `bordercolor` and the fade of the back alpha.
+    back: [f32; 4],
+    border: [f32; 4],
+    /// When the fade steps next (`window.nextTime`).
+    next_time: i32,
     rect: Rect,
     visible: Option<Compiled>,
     text: Option<Compiled>,
@@ -256,6 +458,9 @@ struct ItemRt {
     /// Edit field text and caret (characters).
     edit: String,
     editing: bool,
+    /// Caret (characters into `edit`) and the first character painted (`cursorPos`, `paintOffset`).
+    edit_cursor: usize,
+    paint_offset: usize,
 }
 
 struct MenuRt {
@@ -284,6 +489,9 @@ impl ItemRt {
         ItemRt {
             dyn_flags: d.window.dynamic_flags,
             fore: d.window.fore_color,
+            back: d.window.back_color,
+            border: d.window.border_color,
+            next_time: 0,
             rect: d.window.rect,
             visible: compile(&d.visible_exp),
             text: compile(&d.text_exp),
@@ -297,6 +505,8 @@ impl ItemRt {
             list_start: 0,
             edit: String::new(),
             editing: false,
+            edit_cursor: 0,
+            paint_offset: 0,
         }
     }
 }
@@ -321,6 +531,39 @@ impl MenuRt {
         }
     }
 }
+
+/// What a held mouse button drags (`itemCapture`): a list's scroll arrow (repeating), its thumb, or a slider's thumb.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CaptureKind {
+    ListArrow { up: bool },
+    ListThumb,
+    Slider,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Capture {
+    menu: usize,
+    item: usize,
+    kind: CaptureKind,
+    /// Arrow repeat: when the next step is due, and the delay after it (shrinks every 150 ms down to 20).
+    next_scroll: i32,
+    next_adjust: i32,
+    adjust: i32,
+}
+
+/// A list's parts under the pointer (`Item_ListBox_OverLB`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum ListZone {
+    None,
+    ArrowUp,
+    ArrowDown,
+    Thumb,
+    PageUp,
+    PageDown,
+}
+
+/// Width of a list's scroll bar and the height of its arrows, in virtual units.
+pub(crate) const SCROLL_W: f32 = 16.0;
 
 /// The menu system.
 pub struct Ui {
@@ -350,6 +593,18 @@ pub struct Ui {
     pub menu_kind: MenuKind,
     /// A server menu that came while another had focus: it opens when that one closes (`cg_waitingScriptMenu`).
     waiting_menu: Option<(String, bool)>,
+    /// The mouse button holds a scroll bar or slider thumb.
+    capture: Option<Capture>,
+    /// Until when a second click on a list row counts as a double click.
+    last_list_click: i32,
+    /// The blur radius the menus painted last (`blurRadiusOut`): the square root of the sum of their squares.
+    pub blur_radius: f32,
+    /// Text fields type over the character at the caret (the original's overstrike mode, on when editing begins).
+    overstrike: bool,
+    /// `ui_borderLowLightScale`: the shade of the dark sides of a bevelled border.
+    border_low_scale: f32,
+    /// The `soundLoop` aliases of the menus painted this frame.
+    sound_loops: Vec<String>,
 }
 
 impl Ui {
@@ -393,6 +648,12 @@ impl Ui {
             allow_menu_response: true,
             menu_kind: MenuKind::Other,
             waiting_menu: None,
+            capture: None,
+            last_list_click: 0,
+            blur_radius: 0.0,
+            overstrike: true,
+            border_low_scale: 0.6,
+            sound_loops: Vec::new(),
         }
     }
 
@@ -450,7 +711,7 @@ impl Ui {
         &mut self,
         host: &mut dyn Host,
         menu: Option<usize>,
-        _item: Option<usize>,
+        item: Option<usize>,
         cmd: &[String],
     ) {
         let Some(name) = cmd.first() else { return };
@@ -516,17 +777,24 @@ impl Ui {
                     }
                 }
             }
+            // setcolor <name> r g b a: the item running the script; setitemcolor <group> <name> r g b a: a group of
+            // them. `<name>` is forecolor, backcolor or bordercolor (`Script_SetColor`, `Script_SetItemColor`).
             "setcolor" | "setitemcolor" => {
-                // setitemcolor <group> <forecolor|backcolor|bordercolor> r g b a
+                let group = name.eq_ignore_ascii_case("setitemcolor");
                 if let Some(m) = menu {
-                    let which = arg(1);
-                    let rgba: Vec<f32> = (2..6).map(|i| arg(i).parse().unwrap_or(0.0)).collect();
-                    if which.eq_ignore_ascii_case("forecolor") && rgba.len() == 4 {
-                        for i in self.items_in_group(m, &arg(0)) {
-                            let it = &mut self.menus[m].items[i];
-                            it.fore = [rgba[0], rgba[1], rgba[2], rgba[3]];
-                            it.dyn_flags |= dynf::FORECOLOR_SET;
-                        }
+                    let o = usize::from(group);
+                    let which = arg(o);
+                    let mut rgba = [0.0f32; 4];
+                    for (k, c) in rgba.iter_mut().enumerate() {
+                        *c = arg(o + 1 + k).trim().parse().unwrap_or(0.0);
+                    }
+                    let targets = if group {
+                        self.items_in_group(m, &arg(0))
+                    } else {
+                        item.into_iter().collect()
+                    };
+                    for i in targets {
+                        self.set_item_color(m, i, &which, rgba, !group);
                     }
                 }
             }
@@ -658,6 +926,26 @@ impl Ui {
         }
     }
 
+    /// Sets one colour of an item. `setcolor` also marks the fore and back colours as set; `setitemcolor` marks only the
+    /// fore colour.
+    fn set_item_color(&mut self, m: usize, i: usize, which: &str, rgba: [f32; 4], mark_back: bool) {
+        let it = &mut self.menus[m].items[i];
+        match which.to_ascii_lowercase().as_str() {
+            "forecolor" => {
+                it.fore = rgba;
+                it.dyn_flags |= dynf::FORECOLOR_SET;
+            }
+            "backcolor" => {
+                it.back = rgba;
+                if mark_back {
+                    it.dyn_flags |= dynf::BACKCOLOR_SET;
+                }
+            }
+            "bordercolor" => it.border = rgba,
+            _ => {}
+        }
+    }
+
     fn items_in_group(&self, menu: usize, group: &str) -> Vec<usize> {
         let g = group.to_ascii_lowercase();
         self.menus[menu]
@@ -732,9 +1020,6 @@ impl Ui {
         self.gain_focus(host, m);
         if let Some(src) = self.menus[m].def.on_open.clone() {
             self.run_script(host, Some(m), None, &src);
-        }
-        if let Some(s) = self.menus[m].def.sound_name.clone() {
-            host.play(&s);
         }
     }
 
@@ -895,6 +1180,9 @@ impl Ui {
         for i in 0..self.menus[m].items.len() {
             if self.selectable(host, m, i) {
                 self.set_focus(host, m, i);
+                if is_text_field(self.menus[m].def.items[i].ty) {
+                    self.begin_edit(host, m, i);
+                }
                 return;
             }
         }
@@ -918,9 +1206,6 @@ impl Ui {
         {
             self.run_script(host, Some(m), Some(i), s);
         }
-        if d.items[i].ty == ity::EDITFIELD {
-            self.begin_edit(host, m, i);
-        }
     }
 
     fn move_focus(&mut self, host: &mut dyn Host, m: usize, dir: i32) {
@@ -941,12 +1226,19 @@ impl Ui {
         }
     }
 
+    /// `Item_TextField_BeginEdit`: typing goes into the field, the caret after its text.
     fn begin_edit(&mut self, host: &mut dyn Host, m: usize, i: usize) {
         let dv = self.menus[m].def.items[i].dvar.clone().unwrap_or_default();
         let v = host.dvar(&dv);
+        for other in &mut self.menus[m].items {
+            other.editing = false;
+        }
         let it = &mut self.menus[m].items[i];
+        it.edit_cursor = v.chars().count();
+        it.paint_offset = 0;
         it.edit = v;
         it.editing = true;
+        self.overstrike = true;
     }
 
     // ---- visibility and layout ------------------------------------------------------------------------------
@@ -1311,50 +1603,86 @@ impl Ui {
         true
     }
 
+    /// After focus moved from an edit field: a field that took it carries on the edit.
+    fn resume_edit(&mut self, host: &mut dyn Host, m: usize, caret_at_start: bool) {
+        if let Some(i) = self.menus[m].cursor
+            && is_text_field(self.menus[m].def.items[i].ty)
+        {
+            self.begin_edit(host, m, i);
+            if caret_at_start {
+                self.menus[m].items[i].edit_cursor = 0;
+            }
+        }
+    }
+
     /// Keys for the edit field `i` being typed in: `Some(used)` when it took the key, `None` when it ended the edit
     /// and the key goes on to the usual handling.
     fn edit_key(&mut self, host: &mut dyn Host, m: usize, i: usize, key: &UiKey) -> Option<bool> {
+        use ::assets::zone::menu::ItemData;
         let def = self.menus[m].def.clone();
         let d = &def.items[i];
         match key {
-            UiKey::Char(c) if !c.is_control() => {
-                let max = match &d.data {
-                    ::assets::zone::menu::ItemData::EditField(Some(e)) if e.max_chars > 0 => {
-                        e.max_chars as usize
-                    }
-                    _ => 256,
-                };
-                let it = &mut self.menus[m].items[i];
-                if it.edit.chars().count() < max {
-                    it.edit.push(*c);
-                }
-                self.commit_edit(host, m, i);
-                Some(true)
-            }
-            UiKey::Backspace => {
-                self.menus[m].items[i].edit.pop();
-                self.commit_edit(host, m, i);
-                Some(true)
-            }
-            UiKey::Enter => {
+            UiKey::Mouse1 | UiKey::Mouse2 => {
                 self.menus[m].items[i].editing = false;
-                self.commit_edit(host, m, i);
-                if let Some(s) = &d.on_accept {
+                return None;
+            }
+            UiKey::Tab | UiKey::Down | UiKey::Up => {
+                self.move_focus(host, m, if *key == UiKey::Up { -1 } else { 1 });
+                self.resume_edit(host, m, false);
+                return Some(true);
+            }
+            _ => {}
+        }
+        let spec = match &d.data {
+            ItemData::EditField(Some(e)) => EditSpec {
+                ty: d.ty,
+                max_chars: e.max_chars.max(0) as usize,
+                goto_next: e.max_chars_goto_next != 0,
+                max_paint: e.max_paint_chars.max(0) as usize,
+            },
+            _ => EditSpec {
+                ty: d.ty,
+                max_chars: 0,
+                goto_next: false,
+                max_paint: 0,
+            },
+        };
+        let it = &mut self.menus[m].items[i];
+        let (mut text, mut cursor, mut paint) = (
+            std::mem::take(&mut it.edit),
+            it.edit_cursor,
+            it.paint_offset,
+        );
+        let result = edit_field_key(
+            &spec,
+            &mut text,
+            &mut cursor,
+            &mut paint,
+            &mut self.overstrike,
+            key,
+        );
+        let it = &mut self.menus[m].items[i];
+        (it.edit, it.edit_cursor, it.paint_offset) = (text, cursor, paint);
+        if result == EditResult::Pass {
+            return None;
+        }
+        self.commit_edit(host, m, i);
+        match result {
+            EditResult::End(_) => {
+                self.menus[m].items[i].editing = false;
+                if *key == UiKey::Enter
+                    && let Some(s) = &d.on_accept
+                {
                     self.run_script(host, Some(m), Some(i), s);
                 }
+            }
+            EditResult::Next => {
                 self.move_focus(host, m, 1);
-                Some(true)
+                self.resume_edit(host, m, true);
             }
-            UiKey::Escape => {
-                self.menus[m].items[i].editing = false;
-                Some(true)
-            }
-            UiKey::Mouse1 | UiKey::Mouse2 | UiKey::Tab => {
-                self.menus[m].items[i].editing = false;
-                None
-            }
-            _ => None,
+            EditResult::Used | EditResult::Pass => {}
         }
+        Some(true)
     }
 
     fn key_in(&mut self, host: &mut dyn Host, m: usize, key: UiKey, oob: bool) -> bool {
@@ -1384,16 +1712,27 @@ impl Ui {
         // The focused item's own key handling comes before the menu's `execKey` handlers (`Menu_HandleKey`).
         let item_keys = self.menus[m].cursor.is_some_and(|i| {
             let enter = matches!(key, UiKey::Enter | UiKey::Mouse1);
-            let arrows = matches!(key, UiKey::Left | UiKey::Right);
+            let steps = matches!(
+                key,
+                UiKey::Left | UiKey::Right | UiKey::PageUp | UiKey::PageDown | UiKey::Mouse2
+            );
             match def.items[i].ty {
                 ity::LISTBOX => {
                     enter
                         || matches!(
                             key,
-                            UiKey::Up | UiKey::Down | UiKey::WheelUp | UiKey::WheelDown
+                            UiKey::Up
+                                | UiKey::Down
+                                | UiKey::WheelUp
+                                | UiKey::WheelDown
+                                | UiKey::PageUp
+                                | UiKey::PageDown
+                                | UiKey::Home
+                                | UiKey::End
+                                | UiKey::Mouse2
                         )
                 }
-                ity::YESNO | ity::MULTI | ity::DVARENUM | ity::SLIDER => enter || arrows,
+                ity::YESNO | ity::MULTI | ity::DVARENUM | ity::SLIDER => enter || steps,
                 ity::BIND => enter,
                 _ => false,
             }
@@ -1428,7 +1767,12 @@ impl Ui {
         }
         let Some(i) = self.menus[m].cursor else {
             return match key {
-                UiKey::Up | UiKey::Down | UiKey::Tab | UiKey::Enter => {
+                UiKey::Up
+                | UiKey::Down
+                | UiKey::Tab
+                | UiKey::Enter
+                | UiKey::Left
+                | UiKey::Right => {
                     self.move_focus(host, m, 1);
                     true
                 }
@@ -1436,6 +1780,7 @@ impl Ui {
             };
         };
         let d = &def.items[i];
+        let adjustable = matches!(d.ty, ity::SLIDER | ity::MULTI | ity::DVARENUM | ity::YESNO);
         match key {
             UiKey::Up => {
                 if d.ty == ity::LISTBOX {
@@ -1466,23 +1811,40 @@ impl Ui {
                     .find(|&j| def.items[j].ty == ity::LISTBOX && self.item_contains(m, j, cx, cy))
                     .or((d.ty == ity::LISTBOX).then_some(i));
                 if let Some(j) = target {
-                    self.list_scroll(host, m, j, dir);
+                    self.list_step(host, m, j, dir);
                 }
+                true
+            }
+            UiKey::PageUp | UiKey::PageDown => {
+                let dir = if key == UiKey::PageUp { -1 } else { 1 };
+                if d.ty == ity::LISTBOX {
+                    self.list_page(host, m, i, dir);
+                } else if adjustable {
+                    self.item_adjust(host, m, i, dir);
+                } else {
+                    return def.window.static_flags & statf::POPUP != 0;
+                }
+                true
+            }
+            UiKey::Home | UiKey::End if d.ty == ity::LISTBOX => {
+                self.list_end(host, m, i, key == UiKey::End);
                 true
             }
             UiKey::Left | UiKey::Right => {
                 let dir = if key == UiKey::Left { -1 } else { 1 };
-                match d.ty {
-                    ity::SLIDER | ity::MULTI | ity::DVARENUM | ity::YESNO => {
-                        self.item_adjust(host, m, i, dir);
-                        true
-                    }
-                    ity::OWNERDRAW => host.owner_key(&*self, d.window.owner_draw, &key),
-                    _ => false,
+                if adjustable {
+                    self.item_adjust(host, m, i, dir);
+                } else if d.ty != ity::OWNERDRAW
+                    || !host.owner_key(&*self, d.window.owner_draw, &key)
+                {
+                    // What no item takes moves the focus (`Menu_HandleKey`).
+                    self.move_focus(host, m, dir);
                 }
+                true
             }
-            UiKey::Enter | UiKey::Mouse1 => {
-                if key == UiKey::Mouse1 {
+            UiKey::Enter | UiKey::Mouse1 | UiKey::Mouse2 => {
+                let mouse = key != UiKey::Enter;
+                if mouse {
                     let (cx, cy) = self.cursor;
                     if !self.item_contains(m, i, cx, cy) {
                         // A click outside any item: popups close on an outside click.
@@ -1493,13 +1855,23 @@ impl Ui {
                     }
                 }
                 if d.ty == ity::OWNERDRAW {
-                    host.owner_key(&*self, d.window.owner_draw, &key);
+                    let used = host.owner_key(&*self, d.window.owner_draw, &key);
+                    if key == UiKey::Mouse2 {
+                        return used;
+                    }
+                } else if key == UiKey::Mouse2 {
+                    match d.ty {
+                        // The right button steps these back; lists and sliders take it like the left one.
+                        ity::MULTI | ity::DVARENUM | ity::YESNO => {
+                            self.item_adjust(host, m, i, -1);
+                            return true;
+                        }
+                        ity::LISTBOX | ity::SLIDER => {}
+                        _ => return def.window.static_flags & statf::POPUP != 0,
+                    }
                 }
-                self.activate(host, m, i, key == UiKey::Mouse1);
+                self.activate(host, m, i, mouse);
                 true
-            }
-            UiKey::Mouse2 if d.ty == ity::OWNERDRAW => {
-                host.owner_key(&*self, d.window.owner_draw, &key)
             }
             _ => def.window.static_flags & statf::POPUP != 0,
         }
@@ -1525,7 +1897,7 @@ impl Ui {
             }
             ity::YESNO | ity::MULTI | ity::DVARENUM | ity::SLIDER => {
                 if d.ty == ity::SLIDER && mouse {
-                    self.slider_click(host, m, i);
+                    self.slider_press(host, m, i);
                 } else {
                     self.item_adjust(host, m, i, 1);
                 }
@@ -1541,7 +1913,6 @@ impl Ui {
             ity::BIND => self.bind_pending = Some((m, i)),
             _ => {
                 if let Some(s) = &d.action {
-                    host.play("mouse_click");
                     self.run_script(host, Some(m), Some(i), s);
                 }
             }
@@ -1575,7 +1946,7 @@ impl Ui {
                 } else {
                     host.set_dvar(
                         &dv,
-                        &format!("{}", mu.dvar_value.get(next).copied().unwrap_or(0.0)),
+                        &format_float(mu.dvar_value.get(next).copied().unwrap_or(0.0)),
                     );
                 }
             }
@@ -1583,7 +1954,7 @@ impl Ui {
                 let step = (e.max_val - e.min_val) / 20.0;
                 let v = (cur.trim().parse::<f32>().unwrap_or(e.def_val) + dir as f32 * step)
                     .clamp(e.min_val, e.max_val);
-                host.set_dvar(&dv, &format!("{v}"));
+                host.set_dvar(&dv, &format_float(v));
             }
             (ItemData::EnumDvarName(name), ity::DVARENUM) => {
                 let list = host.dvar_enum(name.as_deref().unwrap_or(""));
@@ -1600,6 +1971,7 @@ impl Ui {
         }
     }
 
+    /// `Scroll_Slider_SetThumbPos`: the value under the pointer.
     fn slider_click(&mut self, host: &mut dyn Host, m: usize, i: usize) {
         use ::assets::zone::menu::ItemData;
         let def = self.menus[m].def.clone();
@@ -1618,40 +1990,226 @@ impl Ui {
             r.vert_align,
         );
         let v = slider_value_at(e, (self.cursor.0 - travel.x) / travel.w.max(1.0));
-        host.set_dvar(&dv, &format!("{v}"));
+        host.set_dvar(&dv, &format_float(v));
+    }
+
+    /// A mouse press on a slider: the thumb under the pointer is dragged until the button comes up, and the value
+    /// follows the pointer (`Item_StartCapture`, `Item_Slider_HandleKey`).
+    fn slider_press(&mut self, host: &mut dyn Host, m: usize, i: usize) {
+        use ::assets::zone::menu::ItemData;
+        let d = &self.menus[m].def.items[i];
+        if let ItemData::EditField(Some(e)) = &d.data {
+            let v = host
+                .dvar(d.dvar.as_deref().unwrap_or(""))
+                .trim()
+                .parse::<f32>()
+                .unwrap_or(0.0);
+            let r = self.menus[m].items[i].rect;
+            let thumb = self.place.rect(
+                slider_thumb_x(slider_bar_x(&r, d), e, v) - 5.0,
+                r.y - 2.0,
+                10.0,
+                20.0,
+                r.horz_align,
+                r.vert_align,
+            );
+            if thumb.contains(self.cursor.0, self.cursor.1) {
+                self.capture = Some(Capture {
+                    menu: m,
+                    item: i,
+                    kind: CaptureKind::Slider,
+                    next_scroll: 0,
+                    next_adjust: 0,
+                    adjust: 0,
+                });
+            }
+        }
+        self.slider_click(host, m, i);
+    }
+
+    /// The mouse button came up: whatever it held is let go.
+    pub fn key_up(&mut self, key: &UiKey) {
+        if matches!(key, UiKey::Mouse1 | UiKey::Mouse2) {
+            self.capture = None;
+        }
+    }
+
+    /// Once a frame: a held scroll arrow repeats (faster the longer it is held), a held thumb follows the pointer
+    /// (`captureFunc`).
+    pub fn tick_capture(&mut self, host: &mut dyn Host) {
+        let Some(mut c) = self.capture else { return };
+        let (m, i) = (c.menu, c.item);
+        if m >= self.menus.len() || !self.stack.contains(&m) {
+            self.capture = None;
+            return;
+        }
+        let now = host.time_ms();
+        match c.kind {
+            CaptureKind::Slider => self.slider_click(host, m, i),
+            CaptureKind::ListThumb => {
+                if self.cursor_visible {
+                    let max = self.list_max_scroll(host, m, i);
+                    let r = self.menus[m].items[i].rect;
+                    let px = self.item_pixels(m, i);
+                    let sy = self.place.scale.1;
+                    let span = ((r.h - 34.0 - SCROLL_W) * sy).max(1.0);
+                    let pos = ((self.cursor.1 - (px.y + 17.0 * sy) - 8.0 * sy) * max as f32 / span)
+                        as i32;
+                    self.menus[m].items[i].list_start = pos.clamp(0, max);
+                }
+            }
+            CaptureKind::ListArrow { up } => {
+                if now > c.next_scroll {
+                    let max = self.list_max_scroll(host, m, i);
+                    let over = self.list_zone(m, i, max, self.cursor.0, self.cursor.1);
+                    if over
+                        == if up {
+                            ListZone::ArrowUp
+                        } else {
+                            ListZone::ArrowDown
+                        }
+                    {
+                        let it = &mut self.menus[m].items[i];
+                        it.list_start = (it.list_start + if up { -1 } else { 1 }).clamp(0, max);
+                    }
+                    c.next_scroll = now + c.adjust;
+                }
+                if now > c.next_adjust {
+                    c.next_adjust = now + 150;
+                    if c.adjust > 20 {
+                        c.adjust -= 40;
+                    }
+                }
+                self.capture = Some(c);
+            }
+        }
     }
 
     // ---- list boxes ------------------------------------------------------------------------------------------
 
-    fn list_rows_visible(&self, m: usize, i: usize) -> i32 {
+    /// How many rows fit (`Item_ListBox_Viewmax`).
+    fn list_viewmax(&self, m: usize, i: usize) -> i32 {
         use ::assets::zone::menu::ItemData;
         let d = &self.menus[m].def.items[i];
-        let (eh, horizontal) = match &d.data {
-            ItemData::ListBox(Some(l)) => (l.element_height.max(1.0), l.element_style != 0),
-            _ => (16.0, false),
+        let eh = match &d.data {
+            ItemData::ListBox(Some(l)) => l.element_height.max(1.0),
+            _ => 16.0,
         };
-        if horizontal {
-            return 1;
-        }
-        (self.menus[m].items[i].rect.h / eh).floor().max(1.0) as i32
+        ((self.menus[m].items[i].rect.h - 2.0).max(0.0) / eh) as i32
     }
 
-    fn list_step(&mut self, host: &mut dyn Host, m: usize, i: usize, dir: i32) {
+    /// The first row the view can start at (`Item_ListBox_MaxScroll`).
+    fn list_max_scroll(&mut self, host: &mut dyn Host, m: usize, i: usize) -> i32 {
+        let n = host.feeder_count(self.menus[m].def.items[i].special as i32) as i32;
+        (n - self.list_viewmax(m, i) + 1).max(0)
+    }
+
+    fn list_no_scroll_bars(&self, m: usize, i: usize) -> bool {
+        use ::assets::zone::menu::ItemData;
+        matches!(&self.menus[m].def.items[i].data, ItemData::ListBox(Some(l)) if l.no_scroll_bars != 0)
+    }
+
+    fn list_not_selectable(&self, m: usize, i: usize) -> bool {
+        use ::assets::zone::menu::ItemData;
+        matches!(&self.menus[m].def.items[i].data, ItemData::ListBox(Some(l)) if l.not_selectable != 0)
+    }
+
+    /// Where the thumb's top sits, in virtual units (`Item_ListBox_ThumbPosition`).
+    pub(crate) fn list_thumb_y(&self, m: usize, i: usize, max: i32) -> f32 {
+        let it = &self.menus[m].items[i];
+        let step = if max > 0 {
+            (it.rect.h - 34.0 - SCROLL_W) / max as f32
+        } else {
+            0.0
+        };
+        it.rect.y + 1.0 + SCROLL_W + it.list_start as f32 * step
+    }
+
+    /// The part of the list's scroll bar at pixel `(x, y)` (`Item_ListBox_OverLB`).
+    fn list_zone(&self, m: usize, i: usize, max: i32, x: f32, y: f32) -> ListZone {
+        if self.list_no_scroll_bars(m, i) {
+            return ListZone::None;
+        }
+        let r = self.menus[m].items[i].rect;
+        let thumb = self.list_thumb_y(m, i, max);
+        let bar = r.x + r.w - SCROLL_W;
+        let hit = |ry: f32, rh: f32| {
+            self.place
+                .rect(bar, ry, SCROLL_W, rh, r.horz_align, r.vert_align)
+                .contains(x, y)
+        };
+        if hit(r.y, SCROLL_W) {
+            ListZone::ArrowUp
+        } else if hit(r.y + r.h - SCROLL_W, SCROLL_W) {
+            ListZone::ArrowDown
+        } else if hit(thumb, SCROLL_W) {
+            ListZone::Thumb
+        } else if hit(r.y + SCROLL_W, thumb - (r.y + SCROLL_W)) {
+            ListZone::PageUp
+        } else if hit(thumb + SCROLL_W, r.y + r.h - SCROLL_W - (thumb + SCROLL_W)) {
+            ListZone::PageDown
+        } else {
+            ListZone::None
+        }
+    }
+
+    /// `Item_ListBox_SetCursorPos`: selects `row`, scrolls it into view and tells the host.
+    fn list_set_cursor(&mut self, host: &mut dyn Host, m: usize, i: usize, row: i32) {
+        let viewmax = self.list_viewmax(m, i).max(1);
         let feeder = self.menus[m].def.items[i].special as i32;
-        let n = host.feeder_count(feeder) as i32;
+        let it = &mut self.menus[m].items[i];
+        it.list_cursor = row;
+        if it.list_start > row {
+            it.list_start = row;
+        }
+        if it.list_start <= row - viewmax {
+            it.list_start = row - viewmax + 1;
+        }
+        host.feeder_select(feeder, row.max(0) as usize);
+    }
+
+    /// `Item_ListBox_Scroll`: one row on (the wheel and Up/Down): the selection moves; a list that cannot be selected
+    /// scrolls its view.
+    fn list_step(&mut self, host: &mut dyn Host, m: usize, i: usize, delta: i32) {
+        let n = host.feeder_count(self.menus[m].def.items[i].special as i32) as i32;
         if n == 0 {
             return;
         }
-        let vis = self.list_rows_visible(m, i);
-        let it = &mut self.menus[m].items[i];
-        it.list_cursor = (it.list_cursor + dir).clamp(0, n - 1);
-        if it.list_cursor < it.list_start {
-            it.list_start = it.list_cursor;
-        } else if it.list_cursor >= it.list_start + vis {
-            it.list_start = it.list_cursor - vis + 1;
+        if self.list_not_selectable(m, i) {
+            let max = self.list_max_scroll(host, m, i);
+            let it = &mut self.menus[m].items[i];
+            it.list_start = (it.list_start + delta).clamp(0, max);
+        } else {
+            let row = (self.menus[m].items[i].list_cursor + delta).clamp(0, n - 1);
+            self.list_set_cursor(host, m, i, row);
         }
-        let row = it.list_cursor as usize;
-        host.feeder_select(feeder, row);
+    }
+
+    /// `Item_ListBox_Page`: a page on (PageUp/PageDown, a click on the track).
+    fn list_page(&mut self, host: &mut dyn Host, m: usize, i: usize, dir: i32) {
+        let n = host.feeder_count(self.menus[m].def.items[i].special as i32) as i32;
+        let delta = dir * self.list_viewmax(m, i);
+        let max = self.list_max_scroll(host, m, i);
+        let it = &mut self.menus[m].items[i];
+        it.list_start = (it.list_start + delta).clamp(0, max);
+        if n > 0 && !self.list_not_selectable(m, i) {
+            let row = (self.menus[m].items[i].list_cursor + delta).clamp(0, n - 1);
+            self.list_set_cursor(host, m, i, row);
+        }
+    }
+
+    /// Home and End: the first or last row.
+    fn list_end(&mut self, host: &mut dyn Host, m: usize, i: usize, last: bool) {
+        let n = host.feeder_count(self.menus[m].def.items[i].special as i32) as i32;
+        if n == 0 {
+            return;
+        }
+        if self.list_not_selectable(m, i) {
+            let max = self.list_max_scroll(host, m, i);
+            self.menus[m].items[i].list_start = if last { max } else { 0 };
+        } else {
+            self.list_set_cursor(host, m, i, if last { n - 1 } else { 0 });
+        }
     }
 
     /// Picks `row` in every open list that shows `feeder`, scrolling it into view, and tells the host (the original's
@@ -1663,7 +2221,7 @@ impl Ui {
                 if d.ty != ity::LISTBOX || d.special as i32 != feeder {
                     continue;
                 }
-                let vis = self.list_rows_visible(m, i);
+                let vis = self.list_viewmax(m, i).max(1);
                 let it = &mut self.menus[m].items[i];
                 it.list_cursor = row as i32;
                 if it.list_cursor < it.list_start {
@@ -1689,31 +2247,75 @@ impl Ui {
         }
     }
 
-    fn list_scroll(&mut self, host: &mut dyn Host, m: usize, i: usize, dir: i32) {
-        let feeder = self.menus[m].def.items[i].special as i32;
-        let n = host.feeder_count(feeder) as i32;
-        let vis = self.list_rows_visible(m, i);
-        let it = &mut self.menus[m].items[i];
-        it.list_start = (it.list_start + dir * 3).clamp(0, (n - vis).max(0));
-    }
-
+    /// A mouse press on a list (`Item_ListBox_HandleKey`, `Item_StartCapture`): the scroll arrows step (and repeat while
+    /// held), the track pages, the thumb is dragged, a row is selected, and a second click on the selected row within
+    /// 300 ms runs `doubleClick`.
     fn list_click(&mut self, host: &mut dyn Host, m: usize, i: usize) {
         use ::assets::zone::menu::ItemData;
         let def = self.menus[m].def.clone();
         let d = &def.items[i];
         let feeder = d.special as i32;
         let n = host.feeder_count(feeder) as i32;
-        let eh = match &d.data {
-            ItemData::ListBox(Some(l)) => l.element_height.max(1.0),
-            _ => 16.0,
+        let max = self.list_max_scroll(host, m, i);
+        let viewmax = self.list_viewmax(m, i);
+        let now = host.time_ms();
+        let (cx, cy) = self.cursor;
+        let zone = self.list_zone(m, i, max, cx, cy);
+        let start = self.menus[m].items[i].list_start;
+        let arrow = |up| Capture {
+            menu: m,
+            item: i,
+            kind: CaptureKind::ListArrow { up },
+            next_scroll: now + 500,
+            next_adjust: now + 150,
+            adjust: 500,
         };
-        let p = self.item_pixels(m, i);
-        let row_h = eh * self.place.scale.1;
-        let rel = ((self.cursor.1 - p.y) / row_h).floor() as i32;
-        let row = self.menus[m].items[i].list_start + rel;
-        if rel >= 0 && row < n {
-            self.menus[m].items[i].list_cursor = row;
-            host.feeder_select(feeder, row as usize);
+        match zone {
+            ListZone::ArrowUp => {
+                self.menus[m].items[i].list_start = (start - 1).max(0);
+                self.capture = Some(arrow(true));
+            }
+            ListZone::ArrowDown => {
+                self.menus[m].items[i].list_start = (start + 1).min(max);
+                self.capture = Some(arrow(false));
+            }
+            ListZone::PageUp => self.menus[m].items[i].list_start = (start - viewmax).max(0),
+            ListZone::PageDown => self.menus[m].items[i].list_start = (start + viewmax).min(max),
+            ListZone::Thumb => {
+                self.capture = Some(Capture {
+                    menu: m,
+                    item: i,
+                    kind: CaptureKind::ListThumb,
+                    next_scroll: 0,
+                    next_adjust: 0,
+                    adjust: 0,
+                });
+            }
+            ListZone::None => {
+                let eh = match &d.data {
+                    ItemData::ListBox(Some(l)) => l.element_height.max(1.0),
+                    _ => 16.0,
+                };
+                let p = self.item_pixels(m, i);
+                let row_h = eh * self.place.scale.1;
+                let rel = ((cy - p.y) / row_h).floor() as i32;
+                let row = start + rel;
+                if rel >= 0 && rel < viewmax.max(1) && row < n {
+                    let it = &self.menus[m].items[i];
+                    let again =
+                        now < self.last_list_click && it.list_cursor == row && row >= it.list_start;
+                    let double = match &d.data {
+                        ItemData::ListBox(Some(l)) => l.on_double_click.clone(),
+                        _ => None,
+                    };
+                    if again && let Some(s) = double {
+                        self.run_script(host, Some(m), Some(i), &s);
+                    }
+                    self.last_list_click = now + 300;
+                    self.menus[m].items[i].list_cursor = row;
+                    host.feeder_select(feeder, row as usize);
+                }
+            }
         }
     }
 
@@ -1781,6 +2383,25 @@ impl Ui {
         true
     }
 
+    /// Runs a menu script as one of the menu's items would (the harness's colour probe).
+    pub fn run_menu_script(&mut self, host: &mut dyn Host, menu: &str, src: &str) {
+        if let Some(m) = self.menu_index(menu) {
+            self.run_script(host, Some(m), None, src);
+        }
+    }
+
+    /// The back colours of the items of `group` in `menu` as they stand now (`setitemcolor ... backcolor`).
+    pub fn item_back_colors(&self, menu: &str, group: &str) -> Vec<[f32; 4]> {
+        self.menu_index(menu)
+            .map(|m| {
+                self.items_in_group(m, group)
+                    .into_iter()
+                    .map(|i| self.menus[m].items[i].back)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     // ---- accessors for painting ---------------------------------------------------------------------------------
 }
 
@@ -1798,6 +2419,11 @@ mod tests {
         responses: Vec<(String, String)>,
         /// The UI sounds played.
         played: Vec<String>,
+        dvars: HashMap<String, String>,
+        /// Rows every list feeder has.
+        rows: usize,
+        now: i32,
+        selected: Vec<(i32, usize)>,
     }
     impl env::World for Dummy {
         fn key_bindings(&self, c: &str) -> Vec<String> {
@@ -1809,10 +2435,12 @@ mod tests {
         }
     }
     impl Host for Dummy {
-        fn dvar(&self, _: &str) -> String {
-            String::new()
+        fn dvar(&self, n: &str) -> String {
+            self.dvars.get(n).cloned().unwrap_or_default()
         }
-        fn set_dvar(&mut self, _: &str, _: &str) {}
+        fn set_dvar(&mut self, n: &str, v: &str) {
+            self.dvars.insert(n.into(), v.into());
+        }
         fn exec(&mut self, _: &Ui, _: &str) {}
         fn play(&mut self, a: &str) {
             self.played.push(a.into());
@@ -1833,15 +2461,17 @@ mod tests {
             true
         }
         fn time_ms(&self) -> i32 {
-            0
+            self.now
         }
         fn feeder_count(&mut self, _: i32) -> usize {
-            0
+            self.rows
         }
         fn feeder_text(&mut self, _: i32, _: usize, _: usize) -> String {
             String::new()
         }
-        fn feeder_select(&mut self, _: i32, _: usize) {}
+        fn feeder_select(&mut self, f: i32, row: usize) {
+            self.selected.push((f, row));
+        }
         fn feeder_image(&mut self, _: i32, _: usize, _: usize) -> String {
             String::new()
         }
@@ -2182,9 +2812,11 @@ mod tests {
         let (x, y) = center(&ui, m, i);
         ui.mouse_move(&mut host, x, y);
         assert!(
-            ui.menus[m].items[i].editing,
-            "hovering the field starts the edit"
+            !ui.menus[m].items[i].editing,
+            "hovering the field does not start the edit"
         );
+        ui.key(&mut host, UiKey::Mouse1);
+        assert!(ui.menus[m].items[i].editing, "a click does");
         ui.mouse_move(&mut host, 2.0, 2.0);
         assert!(ui.key(&mut host, UiKey::Char('x')));
         assert_eq!(ui.menus[m].items[i].edit, "x");
@@ -2290,6 +2922,7 @@ mod tests {
             .expect("a visible edit field");
         let (x, y) = center(&ui, m, field);
         ui.mouse_move(&mut host, x, y);
+        ui.key(&mut host, UiKey::Mouse1);
         assert!(ui.menus[m].items[field].editing);
         let other = (0..ui.menus[m].items.len())
             .find(|&i| {
@@ -2305,5 +2938,469 @@ mod tests {
         assert!(ui.menus[m].items.iter().all(|it| !it.editing));
         ui.key(&mut host, UiKey::Escape);
         assert!(!ui.is_open("createserver"), "Escape was eaten by the field");
+    }
+
+    fn field(ty: i32, max_chars: usize) -> EditSpec {
+        EditSpec {
+            ty,
+            max_chars,
+            goto_next: false,
+            max_paint: 0,
+        }
+    }
+
+    /// Types `keys` into a field holding `text` with the caret at the end; returns the text and the caret.
+    fn typed(spec: &EditSpec, text: &str, keys: &[UiKey], overstrike: bool) -> (String, usize) {
+        let mut text = text.to_owned();
+        let (mut cursor, mut paint, mut over) = (text.chars().count(), 0, overstrike);
+        for k in keys {
+            edit_field_key(spec, &mut text, &mut cursor, &mut paint, &mut over, k);
+        }
+        (text, cursor)
+    }
+
+    #[test]
+    fn the_caret_moves_and_edits_in_the_middle_of_the_text() {
+        let f = field(ity::EDITFIELD, 0);
+        use UiKey::*;
+        // Insert mode: typed characters push the rest along.
+        assert_eq!(
+            typed(&f, "abcd", &[Left, Left, Char('X')], false),
+            ("abXcd".into(), 3)
+        );
+        // Overstrike (the mode editing begins in) replaces the character at the caret.
+        assert_eq!(
+            typed(&f, "abcd", &[Left, Left, Char('X')], true),
+            ("abXd".into(), 3)
+        );
+        assert_eq!(typed(&f, "abcd", &[Home, Delete], true), ("bcd".into(), 0));
+        assert_eq!(
+            typed(&f, "abcd", &[Left, Backspace], true),
+            ("abd".into(), 2)
+        );
+        assert_eq!(
+            typed(&f, "abcd", &[Home, Right, End, Char('e')], true),
+            ("abcde".into(), 5)
+        );
+        assert_eq!(
+            typed(&f, "abcd", &[Left, Insert, Char('X')], true),
+            ("abcXd".into(), 4),
+            "Insert switches to insert mode"
+        );
+        // The caret stops at both ends.
+        assert_eq!(typed(&f, "ab", &[Right, Right], true).1, 2);
+        assert_eq!(
+            typed(&f, "ab", &[Home, Left, Backspace], true),
+            ("ab".into(), 0)
+        );
+    }
+
+    #[test]
+    fn edit_fields_filter_what_they_take() {
+        use UiKey::*;
+        let keys = [Char('a'), Char('7'), Char('.'), Char('@'), Char('-')];
+        assert_eq!(
+            typed(&field(ity::EDITFIELD, 0), "", &keys, true).0,
+            "a7.-",
+            "'@' is never taken"
+        );
+        assert_eq!(
+            typed(&field(ity::VALIDFILEFIELD, 0), "", &keys, true).0,
+            "a7-",
+            "file names: letters, digits, _ and -"
+        );
+        // A numeric field ends the edit at a character it refuses: later keys are not its.
+        let mut n = String::new();
+        let (mut c, mut p, mut o) = (0, 0, true);
+        let spec = field(ity::NUMERICFIELD, 0);
+        assert_eq!(
+            edit_field_key(&spec, &mut n, &mut c, &mut p, &mut o, &Char('4')),
+            EditResult::Used
+        );
+        assert_eq!(
+            edit_field_key(&spec, &mut n, &mut c, &mut p, &mut o, &Char('x')),
+            EditResult::End(true)
+        );
+        assert_eq!(n, "4");
+        assert_eq!(
+            typed(
+                &field(ity::DECIMALFIELD, 0),
+                "",
+                &[Char('1'), Char(','), Char('5')],
+                true
+            )
+            .0,
+            "1.5"
+        );
+        assert_eq!(
+            typed(
+                &field(ity::UPREDITFIELD, 0),
+                "",
+                &[Char('a'), Char('b')],
+                true
+            )
+            .0,
+            "AB"
+        );
+    }
+
+    #[test]
+    fn a_full_edit_field_stops_or_moves_on() {
+        use UiKey::*;
+        let f = field(ity::EDITFIELD, 3);
+        assert_eq!(
+            typed(&f, "", &[Char('a'), Char('b'), Char('c'), Char('d')], true).0,
+            "abc"
+        );
+        assert_eq!(typed(&f, "abc", &[Char('d')], false).0, "abc");
+        let next = EditSpec {
+            goto_next: true,
+            ..field(ity::EDITFIELD, 2)
+        };
+        let mut t = "a".to_owned();
+        let (mut c, mut p, mut o) = (1, 0, true);
+        assert_eq!(
+            edit_field_key(&next, &mut t, &mut c, &mut p, &mut o, &Char('b')),
+            EditResult::Next,
+            "the last character fills the field"
+        );
+        assert_eq!(t, "ab");
+    }
+
+    #[test]
+    fn a_long_field_scrolls_to_keep_the_caret_in_view() {
+        let spec = EditSpec {
+            max_paint: 4,
+            ..field(ity::EDITFIELD, 0)
+        };
+        let mut t = String::new();
+        let (mut c, mut p, mut o) = (0, 0, true);
+        for ch in "abcdefg".chars() {
+            edit_field_key(&spec, &mut t, &mut c, &mut p, &mut o, &UiKey::Char(ch));
+        }
+        assert_eq!((c, p), (7, 3), "the last four characters show");
+        for _ in 0..7 {
+            edit_field_key(&spec, &mut t, &mut c, &mut p, &mut o, &UiKey::Left);
+        }
+        assert_eq!((c, p), (0, 0));
+        // Colour codes are one step.
+        let t: Vec<char> = "a^1b".chars().collect();
+        assert_eq!(cursor_step(&t, 3, -1), 1);
+        assert_eq!(cursor_step(&t, 1, 1), 4);
+    }
+
+    fn group_items(ui: &Ui, m: usize, group: &str) -> Vec<usize> {
+        ui.items_in_group(m, group)
+    }
+
+    /// `setitemcolor` sets the back, border and fore colours of the items of a group; `setcolor` those of the item
+    /// that runs it.
+    #[test]
+    fn setitemcolor_sets_back_and_border_colours() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "pc_join_unranked");
+        let m = ui.menu_index("pc_join_unranked").unwrap();
+        let tabs = group_items(&ui, m, "grpTabs");
+        assert!(!tabs.is_empty(), "the join menu has tab items");
+        let before = ui.menus[m].items[tabs[0]].back;
+        ui.run_script(
+            &mut host,
+            Some(m),
+            None,
+            "setitemcolor grpTabs backcolor 0.1 0.2 0.3 0.4",
+        );
+        for &i in &tabs {
+            assert_eq!(ui.menus[m].items[i].back, [0.1, 0.2, 0.3, 0.4]);
+        }
+        assert_ne!(before, [0.1, 0.2, 0.3, 0.4]);
+        ui.run_script(
+            &mut host,
+            Some(m),
+            None,
+            "setitemcolor maplist bordercolor 1 1 1 0.55",
+        );
+        for i in group_items(&ui, m, "maplist") {
+            assert_eq!(ui.menus[m].items[i].border, [1.0, 1.0, 1.0, 0.55]);
+        }
+        ui.run_script(
+            &mut host,
+            Some(m),
+            None,
+            "setitemcolor grpTabs forecolor 0 1 0 1",
+        );
+        let it = &ui.menus[m].items[tabs[0]];
+        assert_eq!(it.fore, [0.0, 1.0, 0.0, 1.0]);
+        assert_ne!(it.dyn_flags & dynf::FORECOLOR_SET, 0);
+        // `setcolor`: the running item only.
+        ui.run_script(
+            &mut host,
+            Some(m),
+            Some(tabs[0]),
+            "setcolor backcolor 1 0 0 1",
+        );
+        assert_eq!(ui.menus[m].items[tabs[0]].back, [1.0, 0.0, 0.0, 1.0]);
+        assert_ne!(
+            ui.menus[m].items[tabs[0]].dyn_flags & dynf::BACKCOLOR_SET,
+            0
+        );
+        if tabs.len() > 1 {
+            assert_eq!(ui.menus[m].items[tabs[1]].back, [0.1, 0.2, 0.3, 0.4]);
+        }
+    }
+
+    /// A list over `rows` rows, with the focus: `(menu, item)` of the first stock list whose scroll bar and rows fit.
+    fn focused_list(ui: &mut Ui, host: &mut Dummy, rows: usize) -> Option<(usize, usize)> {
+        host.rows = rows;
+        for m in 0..ui.menus.len() {
+            let def = ui.menus[m].def.clone();
+            for (i, d) in def.items.iter().enumerate() {
+                let ItemData::ListBox(Some(l)) = &d.data else {
+                    continue;
+                };
+                if d.ty != ity::LISTBOX
+                    || l.not_selectable != 0
+                    || l.no_scroll_bars != 0
+                    || l.on_double_click.is_some()
+                {
+                    continue;
+                }
+                let name = ui.menus[m].name.clone();
+                ui.close_all(host);
+                ui.open_by_name(host, &name);
+                if ui.item_visible(host, m, i) && ui.list_viewmax(m, i) >= 3 {
+                    ui.set_focus(host, m, i);
+                    return Some((m, i));
+                }
+            }
+        }
+        None
+    }
+
+    use ::assets::zone::menu::ItemData;
+
+    #[test]
+    fn list_keys_move_the_selection_and_scroll_the_view() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        let Some((m, i)) = focused_list(&mut ui, &mut host, 100) else {
+            eprintln!("no stock list; skipping");
+            return;
+        };
+        let vis = ui.list_viewmax(m, i);
+        ui.key(&mut host, UiKey::Down);
+        ui.key(&mut host, UiKey::WheelDown);
+        assert_eq!(
+            ui.menus[m].items[i].list_cursor, 2,
+            "Down and the wheel step the selection by one row"
+        );
+        assert_eq!(host.selected.last().map(|s| s.1), Some(2));
+        ui.key(&mut host, UiKey::PageDown);
+        assert_eq!(ui.menus[m].items[i].list_cursor, 2 + vis);
+        let start = ui.menus[m].items[i].list_start;
+        assert!(start > 0 && start <= ui.menus[m].items[i].list_cursor);
+        ui.key(&mut host, UiKey::End);
+        assert_eq!(ui.menus[m].items[i].list_cursor, 99);
+        assert!(ui.menus[m].items[i].list_start > 90 - vis);
+        ui.key(&mut host, UiKey::Home);
+        assert_eq!(
+            (
+                ui.menus[m].items[i].list_cursor,
+                ui.menus[m].items[i].list_start
+            ),
+            (0, 0)
+        );
+        ui.key(&mut host, UiKey::PageUp);
+        assert_eq!(ui.menus[m].items[i].list_cursor, 0, "stops at the top");
+    }
+
+    /// The scroll bar: an arrow steps one row and repeats while held (faster the longer), the track pages, the thumb is
+    /// dragged; letting go ends it.
+    #[test]
+    fn a_list_scroll_bar_steps_pages_and_drags() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        let Some((m, i)) = focused_list(&mut ui, &mut host, 100) else {
+            eprintln!("no stock list; skipping");
+            return;
+        };
+        let max = ui.list_max_scroll(&mut host, m, i);
+        let vis = ui.list_viewmax(m, i);
+        let r = ui.menus[m].items[i].rect;
+        let at = |ui: &Ui, x: f32, y: f32| {
+            let p = ui.place.rect(x, y, 1.0, 1.0, r.horz_align, r.vert_align);
+            (p.x, p.y)
+        };
+        let bar_x = r.x + r.w - SCROLL_W * 0.5;
+        // The down arrow.
+        ui.cursor = at(&ui, bar_x, r.y + r.h - SCROLL_W * 0.5);
+        assert_eq!(
+            ui.list_zone(m, i, max, ui.cursor.0, ui.cursor.1),
+            ListZone::ArrowDown
+        );
+        ui.key(&mut host, UiKey::Mouse1);
+        assert_eq!(ui.menus[m].items[i].list_start, 1);
+        assert_eq!(
+            ui.menus[m].items[i].list_cursor, 0,
+            "the arrow scrolls, it does not select"
+        );
+        // Held: nothing before the first delay, then a step, then quicker ones.
+        host.now = 400;
+        ui.tick_capture(&mut host);
+        assert_eq!(ui.menus[m].items[i].list_start, 1);
+        host.now = 600;
+        ui.tick_capture(&mut host);
+        assert_eq!(ui.menus[m].items[i].list_start, 2);
+        ui.key_up(&UiKey::Mouse1);
+        host.now = 5000;
+        ui.tick_capture(&mut host);
+        assert_eq!(ui.menus[m].items[i].list_start, 2, "let go: no more steps");
+        // The track below the thumb pages.
+        let thumb = ui.list_thumb_y(m, i, max);
+        ui.cursor = at(&ui, bar_x, thumb + SCROLL_W + 2.0);
+        assert_eq!(
+            ui.list_zone(m, i, max, ui.cursor.0, ui.cursor.1),
+            ListZone::PageDown
+        );
+        ui.key(&mut host, UiKey::Mouse1);
+        assert_eq!(ui.menus[m].items[i].list_start, (2 + vis).min(max));
+        ui.key_up(&UiKey::Mouse1);
+        // The thumb follows the pointer.
+        let thumb = ui.list_thumb_y(m, i, max);
+        ui.cursor = at(&ui, bar_x, thumb + 2.0);
+        assert_eq!(
+            ui.list_zone(m, i, max, ui.cursor.0, ui.cursor.1),
+            ListZone::Thumb
+        );
+        ui.key(&mut host, UiKey::Mouse1);
+        ui.cursor.1 = at(&ui, 0.0, r.y + r.h - SCROLL_W - 9.0).1;
+        ui.tick_capture(&mut host);
+        assert_eq!(
+            ui.menus[m].items[i].list_start, max,
+            "dragged to the bottom"
+        );
+        ui.cursor.1 = at(&ui, 0.0, r.y).1;
+        ui.tick_capture(&mut host);
+        assert_eq!(ui.menus[m].items[i].list_start, 0, "and back to the top");
+    }
+
+    /// A second click on the selected row within 300 ms runs the list's `doubleClick` script.
+    #[test]
+    fn a_double_click_runs_the_lists_script_only_when_quick() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy {
+            rows: 10,
+            ..Dummy::default()
+        };
+        let found = (0..ui.menus.len()).find_map(|m| {
+            ui.menus[m].def.items.iter().position(|d| {
+                matches!(&d.data, ItemData::ListBox(Some(l)) if l.on_double_click.as_deref().is_some_and(|s| s.contains("play")))
+            }).map(|i| (m, i))
+        });
+        let Some((m, i)) = found else {
+            eprintln!("no stock list with a double click; skipping");
+            return;
+        };
+        let name = ui.menus[m].name.clone();
+        ui.open_by_name(&mut host, &name);
+        ui.set_focus(&mut host, m, i);
+        let p = ui.item_pixels(m, i);
+        ui.cursor = (p.x + 4.0, p.y + 4.0);
+        let plays = |h: &Dummy| h.played.iter().filter(|s| *s == "mouse_click").count();
+        let click = |ui: &mut Ui, h: &mut Dummy, at: i32| {
+            h.now = at;
+            ui.key(h, UiKey::Mouse1);
+        };
+        click(&mut ui, &mut host, 1000);
+        let single = plays(&host);
+        click(&mut ui, &mut host, 1100);
+        let quick = plays(&host) - single;
+        click(&mut ui, &mut host, 3000);
+        click(&mut ui, &mut host, 4000);
+        let slow = plays(&host) - single - quick;
+        assert!(quick > single, "the quick second click ran the script");
+        assert_eq!(
+            slow,
+            2 * single,
+            "clicks a second apart are two single clicks"
+        );
+    }
+
+    /// A slider is dragged while the button is held; it follows the pointer and stops when released.
+    #[test]
+    fn a_slider_thumb_follows_the_pointer_while_held() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        let found = (0..ui.menus.len()).find_map(|m| {
+            ui.menus[m]
+                .def
+                .items
+                .iter()
+                .position(|d| {
+                    d.ty == ity::SLIDER
+                        && d.dvar.is_some()
+                        && matches!(&d.data, ItemData::EditField(Some(e)) if e.max_val > e.min_val)
+                })
+                .map(|i| (m, i))
+        });
+        let Some((m, i)) = found else {
+            eprintln!("no stock slider; skipping");
+            return;
+        };
+        let name = ui.menus[m].name.clone();
+        ui.open_by_name(&mut host, &name);
+        let def = ui.menus[m].def.clone();
+        let d = &def.items[i];
+        let ItemData::EditField(Some(e)) = &d.data else {
+            unreachable!()
+        };
+        let dv = d.dvar.clone().unwrap();
+        host.dvars.insert(dv.to_string(), format_float(e.min_val));
+        let r = ui.menus[m].items[i].rect;
+        let bar = slider_bar_x(&r, d);
+        let thumb_at = |ui: &Ui, v: f32| {
+            let x = slider_thumb_x(bar, e, v);
+            let p = ui
+                .place
+                .rect(x, r.y + 5.0, 0.0, 0.0, r.horz_align, r.vert_align);
+            (p.x, p.y)
+        };
+        ui.set_focus(&mut host, m, i);
+        ui.cursor = thumb_at(&ui, e.min_val);
+        ui.key(&mut host, UiKey::Mouse1);
+        assert!(ui.capture.is_some(), "the press on the thumb holds it");
+        ui.cursor = thumb_at(&ui, e.max_val);
+        ui.tick_capture(&mut host);
+        let v: f32 = host.dvar(&dv).parse().unwrap();
+        assert!(
+            (v - e.max_val).abs() < 1e-3 * (e.max_val - e.min_val).max(1.0),
+            "dragged to the end: {v}"
+        );
+        ui.key_up(&UiKey::Mouse1);
+        ui.cursor = thumb_at(&ui, e.min_val);
+        ui.tick_capture(&mut host);
+        assert_eq!(
+            host.dvar(&dv).parse::<f32>().unwrap(),
+            v,
+            "let go: it stays"
+        );
+        // PageUp / PageDown step like Left / Right.
+        ui.key(&mut host, UiKey::PageUp);
+        assert!(host.dvar(&dv).parse::<f32>().unwrap() < v);
     }
 }
