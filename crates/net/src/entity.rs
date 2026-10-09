@@ -114,6 +114,10 @@ pub struct EntityState {
     pub part_bits: [u32; 4],
     /// Player: which world model of the held weapon is drawn (`ps.weaponmodels`: the camouflage or attachment variant).
     pub weapon_model: u8,
+    /// A mounted turret (`gunAngles`): how far the gun has swung from the way it faces, pitch and yaw in degrees (a
+    /// positive pitch looks down, a positive yaw to the left), and the third angle the muzzle bone pitches by. The
+    /// client turns the model's `tag_aim`, `tag_aim_animated` and `tag_flash` by them.
+    pub gun_angles: [f32; 3],
 }
 
 /// Bits of an [`EntityState::attach`] word that name the model; the tag takes the rest.
@@ -218,6 +222,9 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.attach[16], Bits(18)),
         int!(s, s.attach[17], Bits(18)),
         int!(s, s.attach[18], Bits(18)),
+        num!(s, s.gun_angles[0], Angle16),
+        num!(s, s.gun_angles[1], Angle16),
+        num!(s, s.gun_angles[2], Angle16),
     ]
 }
 
@@ -307,6 +314,26 @@ mod tests {
         let mut got = EntityState::new(5);
         read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
         assert_eq!(got, to);
+    }
+
+    #[test]
+    fn a_turrets_gun_angles_survive_the_wire() {
+        let to = EntityState {
+            etype: etype::SCRIPT_MODEL,
+            gun_angles: [-12.5, 44.0, 0.0],
+            ..EntityState::new(9)
+        }
+        .canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(9), &to);
+        let bytes = w.into_bytes();
+        let mut got = EntityState::new(9);
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, to);
+        assert!(
+            (got.gun_angles[0] - 347.5).abs() < 0.01,
+            "wrapped to 0..360"
+        );
     }
 
     #[test]

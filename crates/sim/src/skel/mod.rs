@@ -16,9 +16,12 @@ pub mod hitloc;
 pub mod quat;
 pub mod rig;
 pub mod trace;
+pub mod turret;
 
 pub use hitloc::{HitLocation, Stance, box_hit_location};
-pub use rig::{AnimBinding, AnimLayer, BoneMat, Controllers, MAX_BONES, Pose, Rig, RigModel};
+pub use rig::{
+    AnimBinding, AnimLayer, BoneMat, Controllers, MAX_BONES, Pose, Rig, RigModel, TURRET_BONES,
+};
 pub use trace::{LocHit, Placement, locational_trace, trace_player};
 
 #[cfg(test)]

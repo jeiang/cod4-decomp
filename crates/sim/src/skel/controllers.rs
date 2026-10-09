@@ -295,6 +295,7 @@ pub fn goal(i: &ControllerInput, s: &Swing) -> Controllers {
         angles: a,
         tag_origin_angles: tag_angles,
         tag_origin_offset: tag_offset,
+        turret: None,
     }
 }
 
@@ -415,6 +416,7 @@ mod tests {
             angles: [[90.0; 3]; 6],
             tag_origin_angles: [10.0; 3],
             tag_origin_offset: [30.0, 0.0, 0.0],
+            turret: None,
         };
         let mut c = Controllers::NONE;
         ease(&mut c, &goal, 10.0);

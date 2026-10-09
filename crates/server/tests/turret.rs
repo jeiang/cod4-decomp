@@ -5,11 +5,14 @@
 use std::path::PathBuf;
 
 use gsc::{Builtins, Options, Vm, compile};
+use net::predict::{Env, Predictor};
+use net::snapshot::Snapshot;
 use server::client::{Session, Team};
 use server::game::Game;
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents::MASK_PLAYERSOLID;
 use sim::pm::{PLAYER_MAXS, PLAYER_MINS, PmType, UserCmd, button, ef};
+use sim::skel::turret::Seat;
 use sim::weapon::pickup::WEAPON_HINT_OFFSET;
 
 fn vm() -> Vm {
@@ -45,7 +48,7 @@ fn add_player(g: &mut Game, vm: &mut Vm, origin: [f32; 3], yaw: f32) -> u16 {
 }
 
 /// One 50 ms server frame: a usercmd with `buttons` and `yaw`, then the end of the frame.
-fn frame(g: &mut Game, vm: &mut Vm, n: u16, buttons: i32, yaw: f32) {
+fn frame(g: &mut Game, vm: &mut Vm, n: u16, buttons: i32, yaw: f32) -> UserCmd {
     let t = g.client(n).unwrap().ps.command_time + 50;
     g.level.time = t;
     let cmd = UserCmd {
@@ -56,6 +59,7 @@ fn frame(g: &mut Game, vm: &mut Vm, n: u16, buttons: i32, yaw: f32) {
     };
     g.client_think(vm, n, cmd);
     g.client_end_frame(vm, n);
+    cmd
 }
 
 /// A spot to stand `back` units behind a turret that faces `yaw`, on the floor, with room for a player.
@@ -124,6 +128,16 @@ fn a_player_behind_a_stock_turret_mounts_aims_fires_and_dismounts() {
     let ground = g.client(n).unwrap().ps.ground_entity_num;
     assert_ne!(ground, ENTITYNUM_NONE, "the player never reached the floor");
 
+    // With the gun at rest the swung tag is the model's tag.
+    let (rest, swung) = (
+        g.world_tag(t, "tag_flash").unwrap()[3],
+        g.swung_point(t, "tag_flash").unwrap(),
+    );
+    assert!(
+        (0..3).all(|i| (rest[i] - swung[i]).abs() < 0.01),
+        "{rest:?} vs {swung:?}"
+    );
+
     // Usable from behind, not from in front of the gun.
     assert!(
         g.turret_usable(t, n),
@@ -158,11 +172,52 @@ fn a_player_behind_a_stock_turret_mounts_aims_fires_and_dismounts() {
     let mounted_at = g.client(n).unwrap().ps.origin;
 
     // Turned hard away, the view stays inside the 45 degrees each way.
+    // The gunner's own client predicts the sweep, with the gunner carried on the swinging gun: it lands where the
+    // server put them every frame, so the view is never corrected.
+    let model = g.ent(t).unwrap().model.clone();
+    let mut pred = Predictor::default();
+    pred.seat = Some(Seat {
+        rig: g
+            .content
+            .skeleton(&model)
+            .unwrap()
+            .turret_rig()
+            .unwrap()
+            .clone(),
+        origin: g.ent(t).unwrap().origin,
+        angles: g.ent(t).unwrap().angles,
+    });
+    let params = sim::pm::Params::default();
     let mut turn = yaw;
-    for _ in 0..20 {
+    let mut known = g.client(n).unwrap().ps.clone();
+    let mut worst = 0.0f32;
+    for i in 0..20 {
         turn += 20.0;
-        frame(g, &mut vm, n, 0, turn);
+        let cmd = frame(g, &mut vm, n, 0, turn);
+        pred.push(cmd);
+        let mut snap = Snapshot::empty();
+        snap.ps = known;
+        let env = Env {
+            world: g.world.as_ref().unwrap(),
+            weapons: &g.weapons,
+            params: &params,
+            time: cmd.server_time,
+        };
+        let out = pred.predict(&snap, &env);
+        let truth = g.client(n).unwrap().ps.clone();
+        if i > 0 {
+            let d: f32 = (0..3)
+                .map(|k| (out.ps.origin[k] - truth.origin[k]).powi(2))
+                .sum();
+            worst = worst.max(d.sqrt());
+        }
+        known = truth;
     }
+    assert!(
+        worst < 0.1,
+        "the predicted gunner is {worst} off the server's"
+    );
+    assert_eq!(pred.corrections, 0, "the sweep was corrected");
     let c = g.client(n).unwrap();
     let off = yaw_delta(c.ps.viewangles[1], yaw);
     assert!(
@@ -173,12 +228,33 @@ fn a_player_behind_a_stock_turret_mounts_aims_fires_and_dismounts() {
         (off.abs() - 45.0).abs() < 1.0,
         "the view should be held at the arc's edge, is {off}"
     );
-    // The gunner stays at the mount while looking about.
-    let held = c.ps.origin;
+    // The gun swings to the view: held at the arc's edge it is that far off the turret's line, and the muzzle tag
+    // moves with it.
+    let gun = g.ent(t).unwrap().turret.as_ref().unwrap().gun_angles;
     assert!(
-        (0..3).all(|i| (held[i] - mounted_at[i]).abs() < 1.0),
-        "the gunner walked off the turret: {mounted_at:?} to {held:?}"
+        (gun[1].abs() - 45.0).abs() < 1.0,
+        "the gun is {gun:?} off its line with the view at the arc's edge"
     );
+    let rest_flash = g.world_tag(t, "tag_flash").unwrap()[3];
+    let swung_flash = g.swung_point(t, "tag_flash").unwrap();
+    let moved: f32 = (0..3)
+        .map(|i| (rest_flash[i] - swung_flash[i]).powi(2))
+        .sum();
+    assert!(moved.sqrt() > 5.0, "tag_flash did not move with the gun");
+    // The gunner stays at the mount while looking about: their eye follows the swung `tag_player`, which turns
+    // with the gun about its pivot, so they are neither left at the rest pose nor carried off.
+    let held = c.ps.origin;
+    let seat = g.swung_point(t, "tag_player").unwrap();
+    assert!(
+        (0..2).all(|i| (held[i] - seat[i]).abs() < 1.0),
+        "the gunner is not at the swung seat: {seat:?}, is {held:?}"
+    );
+    assert!(
+        (0..2).any(|i| (held[i] - mounted_at[i]).abs() > 1.0),
+        "the gunner did not follow the swung gun"
+    );
+    let reach: f32 = (0..2).map(|i| (held[i] - mounted_at[i]).powi(2)).sum();
+    assert!(reach.sqrt() < 40.0, "the gunner walked off the turret");
 
     // Back on the line, the attack button fires bullets.
     for _ in 0..6 {
@@ -196,6 +272,11 @@ fn a_player_behind_a_stock_turret_mounts_aims_fires_and_dismounts() {
     assert_eq!(c.turret, None, "use did not dismount");
     assert_eq!(c.ps.e_flags & ef::TURRET_ACTIVE, 0);
     assert!(g.ent(t).unwrap().turret.as_ref().unwrap().gunner.is_none());
+    assert_eq!(
+        g.ent(t).unwrap().turret.as_ref().unwrap().gun_angles,
+        [0.0; 3],
+        "the gun stayed swung with no one on it"
+    );
     let back = c.ps.origin;
     assert!(
         (0..2).all(|i| (back[i] - spot[i]).abs() < 2.0),

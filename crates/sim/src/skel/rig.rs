@@ -45,6 +45,10 @@ pub const MAX_BONES: usize = 255;
 pub const CONTROLLER_BONES: [&str; 6] =
     ["back_low", "back_mid", "back_up", "neck", "head", "pelvis"];
 
+/// The bones a turret's gun angles drive (`turret_controller`): `tag_aim` and `tag_aim_animated` take the gun's pitch and
+/// yaw, `tag_flash` its third angle.
+pub const TURRET_BONES: [&str; 3] = ["tag_aim", "tag_aim_animated", "tag_flash"];
+
 /// One model of a rig.
 pub struct RigModel<'a> {
     pub model: Arc<XModel>,
@@ -77,6 +81,7 @@ pub struct Rig {
     bones: Vec<Bone>,
     names: Vec<Box<str>>,
     control: [u8; 6],
+    turret: [u8; 3],
 }
 
 /// Anim part index to rig bone index; build with [`Rig::bind`].
@@ -110,6 +115,10 @@ pub struct Controllers {
     pub angles: [Vec3; 6],
     pub tag_origin_angles: Vec3,
     pub tag_origin_offset: Vec3,
+    /// A turret's gun angles (`gunAngles`: pitch and yaw from the way it faces, then the third), which turn
+    /// [`TURRET_BONES`]; `None` leaves them as the model has them. Weapon models have a `tag_flash` too, so a pose only
+    /// drives these bones when asked.
+    pub turret: Option<Vec3>,
 }
 
 impl Controllers {
@@ -117,6 +126,7 @@ impl Controllers {
         angles: [[0.0; 3]; 6],
         tag_origin_angles: [0.0; 3],
         tag_origin_offset: [0.0; 3],
+        turret: None,
     };
 }
 
@@ -235,11 +245,18 @@ impl Rig {
                 .position(|n| n.eq_ignore_ascii_case(c))
                 .map_or(NO_BONE, |i| i as u8)
         });
+        let turret = TURRET_BONES.map(|c| {
+            names
+                .iter()
+                .position(|n| n.eq_ignore_ascii_case(c))
+                .map_or(NO_BONE, |i| i as u8)
+        });
         Ok(Rig {
             models: models.iter().map(|m| m.model.clone()).collect(),
             bones,
             names,
             control,
+            turret,
         })
     }
 
@@ -384,27 +401,41 @@ impl Rig {
                     let model = &self.models[usize::from(b.model)];
                     let local = usize::from(b.local) - usize::from(model.num_root_bones);
                     let (aq, at) = acc_i.finish();
-                    let control = self.control.iter().position(|c| usize::from(*c) == i);
-                    let lq = if let Some(c) = control {
-                        quat::normalize(&quat::from_angles(&ctl.angles[c]))
-                    } else {
-                        aq.unwrap_or_else(|| {
+                    let angles = self
+                        .control
+                        .iter()
+                        .position(|c| usize::from(*c) == i)
+                        .map(|c| ctl.angles[c])
+                        .or_else(|| {
+                            let g = ctl.turret?;
+                            let which = self.turret.iter().position(|c| usize::from(*c) == i)?;
+                            // `tag_flash` pitches by the third angle alone.
+                            Some(if which == 2 {
+                                [g[2], 0.0, 0.0]
+                            } else {
+                                [g[0], g[1], 0.0]
+                            })
+                        });
+                    let control = angles.is_some();
+                    let lq = match angles {
+                        Some(a) => quat::normalize(&quat::from_angles(&a)),
+                        None => aq.unwrap_or_else(|| {
                             quat::normalize(&model.quats[local].map(|c| f32::from(c) / 32767.0))
-                        })
+                        }),
                     };
                     let rest = [
                         model.trans[3 * local],
                         model.trans[3 * local + 1],
                         model.trans[3 * local + 2],
                     ];
-                    let at = if control.is_some() {
+                    let at = if control {
                         [0.0; 3]
                     } else {
                         at.unwrap_or([0.0; 3])
                     };
                     let lt = [at[0] + rest[0], at[1] + rest[1], at[2] + rest[2]];
                     let p = out.bones[usize::from(b.parent)];
-                    if control.is_some() {
+                    if control {
                         let root = out.bones[0].quat;
                         let q = quat::mul(
                             &quat::mul(&root, &lq),

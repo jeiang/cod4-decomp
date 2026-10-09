@@ -1007,6 +1007,7 @@ impl NetPlay {
         }
         self.follow_movement_dvars();
         self.boxes.sync(&snap);
+        self.pred.seat = self.turret_seat(&snap);
         let env = Env {
             world: self.boxes.world(),
             weapons: &self.weapons,
@@ -1873,6 +1874,23 @@ impl NetPlay {
         if scoped { Vec::new() } else { models }
     }
 
+    /// The turret the own player is mounted on, as `snap` has it: the entity the server marked with the own client number
+    /// and the mounted flag.
+    fn turret_seat(&mut self, snap: &net::snapshot::Snapshot) -> Option<sim::skel::turret::Seat> {
+        let e = snap.entities.iter().find(|e| {
+            e.etype == etype::SCRIPT_MODEL
+                && e.eflags & eflags::TURRET != 0
+                && e.client == snap.ps.client_num
+        })?;
+        let name = self.net.ui()?.model(e.model).to_owned();
+        let rest = self.lib.rest_pose(&name, &[]).ok()?;
+        Some(sim::skel::turret::Seat {
+            rig: rest.rig().clone(),
+            origin: e.origin,
+            angles: e.angles,
+        })
+    }
+
     /// The scripted models of the level (`script_model`: props, cars, objectives), posed at the origin and angles the
     /// server gave them, between the snapshots around the interpolation moment like the players they move with.
     fn script_models(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
@@ -1908,6 +1926,10 @@ impl NetPlay {
                     let attached = attach::attachments_of(ui, &self.lib.content, e, name);
                     let before = out.len();
                     match self.lib.rest_pose(name, &attached) {
+                        // A turret's gun swings with its gunner's view.
+                        Ok(rest) if e.gun_angles != [0.0; 3] => {
+                            out.extend(rest.swung(e.gun_angles, origin, angles, e.part_bits));
+                        }
                         Ok(rest) if !attached.is_empty() => {
                             out.extend(rest.instances(origin, angles, e.part_bits));
                         }

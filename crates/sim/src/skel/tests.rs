@@ -404,6 +404,33 @@ fn controller_bones_rotate_in_the_root_frame() {
 }
 
 #[test]
+fn gun_angles_turn_the_turret_bones_and_what_hangs_from_them() {
+    let (m, names) = model(
+        "gun",
+        &[
+            bone("tag_origin", None, [0.0; 3]),
+            bone("tag_aim", Some(0), [0.0, 0.0, 10.0]),
+            bone("tag_player", Some(1), [-4.0, 0.0, 0.0]),
+        ],
+    );
+    let rig = rig_of(&[(&m, &names, None)]);
+    // Without gun angles the bones stay as the model has them, as a weapon model's `tag_flash` must.
+    let rest = pose_of(&rig, &[], &Controllers::NONE);
+    assert!(near3(rest.bones[2].trans, [-4.0, 0.0, 10.0]));
+    // Yawed 90 degrees to the left, the tag behind the aim bone swings from -x to -y.
+    let ctl = Controllers {
+        turret: Some([0.0, 90.0, 0.0]),
+        ..Controllers::NONE
+    };
+    let p = pose_of(&rig, &[], &ctl);
+    assert!(
+        near3(p.bones[2].trans, [0.0, -4.0, 10.0]),
+        "{:?}",
+        p.bones[2].trans
+    );
+}
+
+#[test]
 fn melded_model_bones_copy_the_matching_body_bone() {
     let (body, bn) = model(
         "body",

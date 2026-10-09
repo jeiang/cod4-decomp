@@ -3,7 +3,7 @@
 //! stands behind a turret and holds +activate until it is mounted, aims past its arc, fires and lets go; the other
 //! watches. Asserts that the gunner's player state carries the turret flag, the drop hint and a view held inside the
 //! arc, that the server's shot count rises while the attack button is down, that the other client is shown the
-//! turret model and the gunner mounted on it, and that using again puts the gunner back on their feet.
+//! turret model and the gunner mounted on it with the gun swung off its rest pose by the gunner's aim, and that using again puts the gunner back on their feet.
 use super::net_objective::Human;
 use crate::stage::{StageCtx, StageReport, Status};
 use net::entity::etype;
@@ -163,6 +163,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     people[0].attack = true;
     let shots = server.game.stats.shots;
     let mut seen_by_b = (false, false);
+    let mut swung = false;
     let (mut flagged, mut dropped, mut held) = (false, false, false);
     for _ in 0..200 {
         frame(&mut server, &mut people);
@@ -185,6 +186,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             (models, gunner)
         });
         seen_by_b.1 |= gunner;
+        // The aim is off the gun's line, so the gun the other client is shown has swung.
+        swung |= people[1].c.latest().is_some_and(|s| {
+            s.entities.iter().any(|e| {
+                e.number == turret
+                    && e.etype == etype::SCRIPT_MODEL
+                    && yaw_delta(e.gun_angles[1], 0.0).abs() > 1.0
+            })
+        });
         if let Some(ui) = people[1].c.ui() {
             seen_by_b.0 |= models.iter().any(|&m| ui.model(m) == model);
         }
@@ -194,6 +203,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             && held
             && seen_by_b.0
             && seen_by_b.1
+            && swung
         {
             break;
         }
@@ -245,6 +255,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         (
             seen_by_b.1,
             "the other client was never shown the gunner on the turret",
+        ),
+        (
+            swung,
+            "the other client was never shown the gun swung toward the gunner's aim",
         ),
         (
             off,

@@ -168,6 +168,7 @@ fn lerp(a: &EntityState, b: &EntityState, f: f32) -> EntityState {
         e.origin[i] = a.origin[i] + (b.origin[i] - a.origin[i]) * f;
         e.angles[i] = lerp_angle(a.angles[i], b.angles[i], f);
         e.velocity[i] = a.velocity[i] + (b.velocity[i] - a.velocity[i]) * f;
+        e.gun_angles[i] = lerp_angle(a.gun_angles[i], b.gun_angles[i], f);
     }
     e
 }

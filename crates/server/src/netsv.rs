@@ -1503,6 +1503,14 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.origin = e.origin;
                 s.angles = e.angles;
                 s.model = model as u16;
+                if let Some(t) = e.turret.as_deref() {
+                    s.gun_angles = t.gun_angles;
+                    // The gunner's own client places them on the gun, so it is told which gun that is.
+                    if let Some(gunner) = t.gunner {
+                        s.eflags |= eflags::TURRET;
+                        s.client = gunner;
+                    }
+                }
                 if let Some((point, force)) = e.x.physics_launch {
                     s.eflags = eflags::PHYSICS_LAUNCH;
                     s.launch_point = point;

@@ -186,6 +186,9 @@ pub struct Predictor {
     pending: Vec<u8>,
     /// The eye's lag behind the steps taken.
     step: StepView,
+    /// The turret the player is mounted on, as the newest snapshot has it: the replay puts the gunner where the server
+    /// does, at the swung turret's `tag_player`.
+    pub seat: Option<sim::skel::turret::Seat>,
     /// Prediction passes whose result differed from the previous pass, beyond rounding.
     pub corrections: u64,
     /// Steps up or down the eye began easing over.
@@ -275,6 +278,20 @@ impl Predictor {
                 env.params,
                 env.world,
             );
+            if ps.e_flags & ef::TURRET_ACTIVE != 0
+                && let Some(feet) = self.seat.as_ref().and_then(|s| {
+                    s.feet(
+                        env.world,
+                        ps.viewangles,
+                        ps.view_angle_clamp_base,
+                        ps.view_angle_clamp_range,
+                        ps.view_height_current,
+                        ps.client_num,
+                    )
+                })
+            {
+                ps.origin = feet;
+            }
             if out.view_change != 0.0 && view_change_time < out.view_change_time {
                 view_change += out.view_change;
                 view_change_time = out.view_change_time;
