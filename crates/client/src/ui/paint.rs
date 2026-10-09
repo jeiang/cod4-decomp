@@ -741,7 +741,12 @@ impl Ui {
                     .collect()
             };
             for (ci, (pos, width, max_chars, align)) in cols.iter().enumerate() {
-                let img = host.feeder_image(feeder, idx, ci);
+                // Only a list of pictures asks for them; the others show the text.
+                let img = if l.element_style == 1 {
+                    host.feeder_image(feeder, idx, ci)
+                } else {
+                    String::new()
+                };
                 if !img.is_empty() {
                     let px = self
                         .place

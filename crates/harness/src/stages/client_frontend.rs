@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-frontend`: the front end as a player meets it, with the install's own player profile. The main menu lists
 //! every stock row, Select Profile opens the profile list, the profile's unlocks make Create a Class open its
-//! menu, and Start New Server's game mode chooser steps through the modes in the original's order. The install's
+//! menu, the join menu cycles its server source and game mode (a favorite shows until a game mode is chosen, and the
+//! internet list is empty), and Start New Server's game mode chooser steps through the modes in the original's order. The install's
 //! `players/` folder must be exactly as it was after the run. Needs a display and an install that has a
 //! `players/profiles/` folder with an unlocked profile; skips without.
 use super::client_flythrough::locate_client;
@@ -18,6 +19,12 @@ const NAME: &str = "client-frontend";
 const STEPS: &str = "wait=2,see=Join Game+Start New Server+Select Profile+Rank & Challenges+Controls+Options+Mods+Single Player+Quit,shot=main,\
 mouse=Select Profile,menu=player_profile:5,wait=1,shot=profile,key=escape,wait=1,\
 mouse=Create a Class,menu=pc_cac_popup:5,wait=1,shot=cac,key=escape,wait=1,\
+mouse=Join Game,menu=pc_join_unranked:5,wait=1,shot=join,\
+set=set ui_netSource 2,favorite=127.0.0.1:28999,rows=2 1,\
+mouse=#220,cvaris=ui_netSource 0,mouse=#253,cvaris=ui_joinGameType 1,set=set ui_joinGameType 0,\
+mouse=#220,cvaris=ui_netSource 1,rows=2 0,mouse=#220,cvaris=ui_netSource 2,rows=2 1,\
+set=set ui_joinGameType 1,rows=2 0,set=set ui_joinGameType 0,rows=2 1,\
+key=escape,wait=1,\
 set=set ui_netGametypeName war,mouse=Start New Server,menu=createserver:10,wait=1,shot=mode_war,\
 mouse=#245,cvaris=ui_netGametypeName koth,mouse=#245,cvaris=ui_netGametypeName dm,shot=mode_dm,\
 mouse=#245,cvaris=ui_netGametypeName dom,mouse=#245,cvaris=ui_netGametypeName sd,\

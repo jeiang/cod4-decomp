@@ -37,6 +37,29 @@ pub struct UiAssets {
     pub tables: HashMap<String, Arc<StringTable>>,
     /// Lower-case material name, without a leading `,`.
     pub materials: HashMap<String, Arc<Material>>,
+    /// Lower-case map name to the game modes its `.arena` file allows (lower case); a map without an entry or with
+    /// none listed allows every mode.
+    pub arenas: HashMap<String, Vec<String>>,
+}
+
+/// The maps of an `.arena` file (blocks of `key value` lines) and the game modes each names.
+fn parse_arenas(text: &str) -> Vec<(String, Vec<String>)> {
+    text.split('}')
+        .filter_map(|block| {
+            let get = |key: &str| {
+                block.lines().find_map(|l| {
+                    let (k, v) = l.trim().split_once(char::is_whitespace)?;
+                    k.eq_ignore_ascii_case(key)
+                        .then(|| v.trim().trim_matches('"').to_ascii_lowercase())
+                })
+            };
+            let modes = get("gametype").unwrap_or_default();
+            Some((
+                get("map")?,
+                modes.split_whitespace().map(str::to_owned).collect(),
+            ))
+        })
+        .collect()
 }
 
 /// The asset kinds the UI keeps from a zone.
@@ -45,7 +68,10 @@ struct UiFilter;
 impl assets::zone::DecodeFilter for UiFilter {
     fn keep(&self, ty: XAssetType) -> bool {
         use XAssetType::*;
-        matches!(ty, MenuList | Font | Localize | StringTable | Material)
+        matches!(
+            ty,
+            MenuList | Font | Localize | StringTable | Material | RawFile
+        )
     }
 }
 
@@ -127,6 +153,10 @@ impl UiAssets {
                 }
             }
             Asset::Material(m) => self.add_material(m),
+            Asset::RawFile(r) if r.name.as_deref().is_some_and(|n| n.ends_with(".arena")) => {
+                self.arenas
+                    .extend(parse_arenas(&String::from_utf8_lossy(&r.data)));
+            }
             _ => {}
         }
     }
