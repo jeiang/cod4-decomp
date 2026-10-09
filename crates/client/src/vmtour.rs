@@ -186,7 +186,6 @@ pub fn run(
             let without = read(&gpu, &tex)?;
             let (share, mean, tinted) = viewmodel_colour(&with, &without);
             if let Some(dir) = out {
-                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
                 save(&dir.join(format!("{map}-{i}-{heading}.png")), &with)?;
             }
             let spawn = i < n;

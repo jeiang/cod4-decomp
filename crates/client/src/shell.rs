@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The server browser's owner-draws and keys, the map list's game-mode filter and the Server Info list are translated in
+// part from KisakCOD (ui_mp/ui_main_mp.cpp: UI_OwnerDraw, UI_OwnerDrawHandleKey, UI_BuildServerStatus,
+// UI_MapCountByGameType; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The menu shell: owns the menu system and its drawing state, and answers what the menus ask of the client.
 //!
 //! [`Shell`] is the player-facing front end. The menus run scripts that read and write dvars, run console text, start
@@ -54,6 +57,8 @@ pub struct MapEntry {
     pub name: String,
     pub title: String,
     pub image: String,
+    /// The game modes its `.arena` file allows; empty when it names none, which allows every mode.
+    pub modes: Vec<String>,
 }
 
 pub struct GameTypeEntry {
@@ -101,6 +106,10 @@ pub struct ShellState {
     was_active: bool,
     /// The join menu's server lists (LAN discovery, favorites).
     pub servers: crate::serverlist::ServerList,
+    /// The Server Info popup's lines (feeder 13).
+    pub status_rows: Vec<[String; 4]>,
+    /// A map list row the lists are to scroll to on the next frame (the game mode changed under them).
+    pub reselect_map: Option<usize>,
     /// The install's files, for `exec <file>.cfg` from a menu script.
     vfs: Option<::assets::vfs::Vfs>,
     exec_depth: u32,
@@ -172,6 +181,11 @@ impl ShellState {
                 }
                 let title = cell(3);
                 maps.push(MapEntry {
+                    modes: assets
+                        .arenas
+                        .get(&name.to_ascii_lowercase())
+                        .cloned()
+                        .unwrap_or_default(),
                     name,
                     title: assets.translate(&title).map_or(title, |t| t.to_string()),
                     image: cell(4),
@@ -244,6 +258,8 @@ impl ShellState {
             console: crate::console::Console::default(),
             was_active: false,
             servers: Default::default(),
+            status_rows: Vec::new(),
+            reselect_map: None,
             vfs: ::assets::vfs::Vfs::open_stock(&install.root, 0).ok(),
             exec_depth: 0,
             video_modes: STOCK_MODES.to_vec(),
@@ -291,6 +307,11 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("ui_showEndOfGame", "0"),
     ("ui_netGametype", "4"),
     ("ui_netGametypeName", "war"),
+    ("ui_netSource", "0"),
+    ("ui_joinGameType", "0"),
+    ("ui_gametype", "0"),
+    ("ui_currentMap", "0"),
+    ("ui_currentNetMap", "0"),
     ("ui_dedicated", "0"),
     ("onlinegame", "1"),
     ("ui_scorelimit", "0"),
@@ -757,6 +778,15 @@ impl Shell {
         if !self.st.live.scores_wanted {
             self.st.scores_top = 1;
         }
+        // The join list's highlight follows the selected server as rows come, go and re-sort.
+        if self.ui.is_open("pc_join_unranked") {
+            let row = Self::host(&mut self.st, input).selected_server_row();
+            self.ui.sync_feeder_cursor(2, row);
+        }
+        if let Some(row) = self.st.reselect_map.take() {
+            let mut h = Self::host(&mut self.st, input);
+            self.ui.select_feeder_row(&mut h, 4, row);
+        }
     }
 
     pub fn mouse_move(&mut self, input: &mut Input, x: f32, y: f32) {
@@ -875,6 +905,11 @@ impl Shell {
         &self.ui2d.missing
     }
 
+    /// How many rows the list of `feeder` shows now.
+    pub fn feeder_rows(&mut self, input: &mut Input, feeder: i32) -> usize {
+        Self::host(&mut self.st, input).feeder_count(feeder)
+    }
+
     pub fn drain_actions(&mut self) -> Vec<Action> {
         std::mem::take(&mut self.st.actions)
     }
@@ -919,7 +954,7 @@ impl HostCx<'_> {
             .iter()
             .enumerate()
             .filter(|(n, name)| !name.is_empty() && *n != usize::from(live.own))
-            .map(|(n, name)| (n as u16, name.clone()))
+            .map(|(n, name)| (n as u16, clean_str(name)))
             .collect()
     }
 
@@ -1069,6 +1104,107 @@ impl HostCx<'_> {
     /// The list the join menu shows (`ui_netSource`).
     fn net_source(&self) -> crate::serverlist::Source {
         crate::serverlist::Source::from_dvar(&self.dvar_get("ui_netSource"))
+    }
+
+    /// The game mode the join list is cut to (`ui_joinGameType`: 0 is every mode, `n` the `n`th mode of the table).
+    fn join_gametype(&self) -> Option<&GameTypeEntry> {
+        let n = usize::try_from(atoi(&self.dvar_get("ui_joinGameType"))).ok()?;
+        self.st.gametypes.get(n.checked_sub(1)?)
+    }
+
+    /// The join list as shown: the servers of the chosen source that run the chosen game mode (a server that has not
+    /// answered does not say, so a chosen mode hides it).
+    fn server_rows(&self) -> Vec<&crate::serverlist::Entry> {
+        let mode = self.join_gametype().map(|g| g.id.as_str());
+        self.st
+            .servers
+            .rows(self.net_source())
+            .iter()
+            .filter(|e| mode.is_none_or(|m| e.gametype == m))
+            .collect()
+    }
+
+    /// Starts the list the join menu shows again (`UI_StartServerRefresh`): `full` forgets what a LAN scan found,
+    /// otherwise the servers are asked again in place. The time is kept for the "Refresh time" line of the source.
+    /// A list that is already being refreshed is left to finish.
+    fn start_refresh(&mut self, ui: &Ui, full: bool) {
+        let source = self.net_source();
+        if !self.st.servers.refresh(source, full) {
+            return;
+        }
+        self.st.servers.select(None);
+        let n = atoi(&self.dvar_get("ui_netSource")).clamp(0, 2);
+        let stamp = refresh_stamp(ui);
+        self.input
+            .cvars
+            .set(&format!("ui_lastServerRefresh_{n}"), &stamp, false);
+    }
+
+    /// The row of the selected server in the join list, or -1: where the list's highlight belongs.
+    fn selected_server_row(&self) -> i32 {
+        let Some(sel) = self.st.servers.selected() else {
+            return -1;
+        };
+        self.server_rows()
+            .iter()
+            .position(|e| e.addr == sel)
+            .map_or(-1, |i| i as i32)
+    }
+
+    /// Takes in what the network brought: server answers and a status answer, which becomes the Server Info lines.
+    fn poll_servers(&mut self) {
+        self.st.servers.poll();
+        if let Some(status) = self.st.servers.take_status() {
+            let st = &*self.st;
+            let mode = |id: &str| {
+                st.gametypes
+                    .iter()
+                    .find(|g| g.id == id)
+                    .map_or_else(|| id.to_owned(), |g| g.title.clone())
+            };
+            let map = |id: &str| {
+                st.maps
+                    .iter()
+                    .find(|m| m.name == id)
+                    .map_or_else(|| id.to_owned(), |m| m.title.clone())
+            };
+            self.st.status_rows = crate::serverlist::status_rows(&status, &mode, &map);
+        }
+    }
+
+    /// The maps the chosen game mode (`ui_netGametypeName`) can be played on, as indices of the map table: the rows of
+    /// the map list (`UI_MapCountByGameType`).
+    fn mode_maps(&self) -> Vec<usize> {
+        let mode = self
+            .st
+            .gametypes
+            .get(self.gametype_sel())
+            .map_or("", |g| g.id.as_str());
+        (0..self.st.maps.len())
+            .filter(|&i| {
+                let m = &self.st.maps[i].modes;
+                m.is_empty() || m.iter().any(|x| x == mode)
+            })
+            .collect()
+    }
+
+    /// After the game mode changed: keeps the selected map if the new mode has it, else takes the first, and has the
+    /// lists show the choice.
+    fn reselect_map(&mut self) {
+        let maps = self.mode_maps();
+        let row = maps.iter().position(|&i| i == self.st.map_sel).unwrap_or(0);
+        if let Some(&i) = maps.get(row) {
+            self.st.map_sel = i;
+            self.set_current_map(i);
+        }
+        self.st.reselect_map = Some(row);
+    }
+
+    /// The map index the menus and the preview read (`ui_currentMap`, `ui_currentNetMap`).
+    fn set_current_map(&mut self, index: usize) {
+        let i = index.to_string();
+        self.input.cvars.set("ui_currentMap", &i, false);
+        self.input.cvars.set("ui_currentNetMap", &i, false);
     }
 
     /// One console command the shell understands; `false` if it is not one of its own.
@@ -1389,8 +1525,39 @@ impl Host for HostCx<'_> {
                 self.st.actions.push(Action::StartServer { map, gametype });
                 true
             }
-            "refreshservers" | "refreshfilter" | "updatefilter" => {
-                self.st.servers.refresh();
+            // The list is made again; a quick refresh asks the servers it has again without forgetting them. Opening the
+            // join menu scans the LAN afresh and only asks the other sources' servers.
+            "refreshservers" => {
+                self.start_refresh(ui, true);
+                true
+            }
+            "refreshfilter" => {
+                self.start_refresh(ui, false);
+                true
+            }
+            "updatefilter" => {
+                let lan = self.net_source() == crate::serverlist::Source::Lan;
+                self.start_refresh(ui, lan);
+                true
+            }
+            "stoprefresh" => {
+                self.st.servers.stop_refresh();
+                true
+            }
+            // Back out of a refresh before leaving the menu: the list stays as far as it got.
+            "closejoin" => {
+                if self.st.servers.refreshing(self.net_source()) {
+                    self.st.servers.stop_refresh();
+                    self.st.servers.select(None);
+                }
+                true
+            }
+            // The Server Info popup: asks the selected server for its status; the lines fill in when it answers.
+            "serverstatus" => {
+                self.st.status_rows.clear();
+                if let Some(addr) = self.st.servers.selected() {
+                    self.st.servers.request_status(addr);
+                }
                 true
             }
             "serversort" => {
@@ -1425,13 +1592,16 @@ impl Host for HostCx<'_> {
             }
             // The server settings open on the selected map, the list scrolled to it.
             "loadarenas" => {
-                let row = self.st.map_sel;
+                let row = self
+                    .mode_maps()
+                    .iter()
+                    .position(|&i| i == self.st.map_sel)
+                    .unwrap_or(0);
                 ui.select_feeder_row(self, 4, row);
                 true
             }
-            "stoprefresh" | "setpbclstatus" | "getlanguage" | "verifylanguage"
-            | "setrecommended" | "closejoin" | "getcdkey" | "verifycdkey" | "clearmods"
-            | "loadmods" | "serverstatus" => true,
+            "setpbclstatus" | "getlanguage" | "verifylanguage" | "setrecommended" | "getcdkey"
+            | "verifycdkey" | "clearmods" | "loadmods" => true,
             "quit" => {
                 self.st.actions.push(Action::Quit);
                 true
@@ -1508,11 +1678,14 @@ impl Host for HostCx<'_> {
     fn feeder_count(&mut self, feeder: i32) -> usize {
         match feeder {
             2 => {
-                self.st.servers.poll();
-                let src = self.net_source();
-                self.st.servers.rows(src).len()
+                self.poll_servers();
+                self.server_rows().len()
             }
-            4 => self.st.maps.len(),
+            4 => self.mode_maps().len(),
+            13 => {
+                self.poll_servers();
+                self.st.status_rows.len()
+            }
             24 => self.st.profile_names.len(),
             7 | 20 => self.players().len(),
             _ => 0,
@@ -1521,15 +1694,18 @@ impl Host for HostCx<'_> {
 
     fn feeder_text(&mut self, feeder: i32, row: usize, col: usize) -> String {
         match (feeder, col) {
-            (2, _) => {
-                let src = self.net_source();
-                self.st
-                    .servers
-                    .rows(src)
-                    .get(row)
-                    .map(|e| server_cell(e, col, &self.st.maps, &self.st.gametypes))
-                    .unwrap_or_default()
-            }
+            (2, _) => self
+                .server_rows()
+                .get(row)
+                .map(|e| server_cell(e, col, &self.st.maps, &self.st.gametypes))
+                .unwrap_or_default(),
+            (13, _) => self
+                .st
+                .status_rows
+                .get(row)
+                .and_then(|r| r.get(col))
+                .cloned()
+                .unwrap_or_default(),
             (7, _) => self
                 .players()
                 .get(row)
@@ -1548,10 +1724,9 @@ impl Host for HostCx<'_> {
                 .unwrap_or_default(),
             (24, _) => self.st.profile_names.get(row).cloned().unwrap_or_default(),
             (4, _) => self
-                .st
-                .maps
+                .mode_maps()
                 .get(row)
-                .map(|m| m.title.clone())
+                .map(|&i| self.st.maps[i].title.clone())
                 .unwrap_or_default(),
             _ => String::new(),
         }
@@ -1559,8 +1734,8 @@ impl Host for HostCx<'_> {
 
     fn feeder_select(&mut self, feeder: i32, row: usize) {
         if feeder == 2 {
-            let src = self.net_source();
-            self.st.servers.select(src, row);
+            let addr = self.server_rows().get(row).map(|e| e.addr);
+            self.st.servers.select(addr);
         }
         if feeder == 7 {
             self.st.player_sel = row;
@@ -1573,42 +1748,91 @@ impl Host for HostCx<'_> {
         {
             self.input.cvars.set("ui_playerProfileSelected", &n, false);
         }
-        if feeder == 4 {
-            self.st.map_sel = row;
-            if let Some(m) = self.st.maps.get(row) {
-                let n = m.name.clone();
-                self.input.cvars.set("ui_mapname", &n, false);
-            }
+        if feeder == 4
+            && let Some(&i) = self.mode_maps().get(row)
+        {
+            self.st.map_sel = i;
+            self.set_current_map(i);
         }
     }
 
-    fn feeder_image(&mut self, _feeder: i32, _row: usize, _col: usize) -> String {
-        String::new()
+    /// The level shot of a map list row, for a list that shows pictures.
+    fn feeder_image(&mut self, feeder: i32, row: usize, col: usize) -> String {
+        match (feeder, col) {
+            (4, 0) => self
+                .mode_maps()
+                .get(row)
+                .map(|&i| self.st.maps[i].image.clone())
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
     }
 
-    fn owner_key(&mut self, _ui: &Ui, id: i32, key: &UiKey) -> bool {
-        // 245: the gametype chooser of the server settings. A click or Enter steps on, the right button back (the
-        // arrow keys do nothing, as in the original); the map list and the settings menu follow `ui_netGametypeName`.
-        if id == 245 {
-            let n = self.st.gametypes.len();
-            let back = matches!(key, UiKey::Left | UiKey::Mouse2);
-            let step = matches!(
-                key,
-                UiKey::Left | UiKey::Right | UiKey::Mouse1 | UiKey::Mouse2 | UiKey::Enter
-            );
-            if n > 0 && step {
-                let d = if back { n - 1 } else { 1 };
-                let sel = (self.gametype_sel() + d) % n;
-                let id = self.st.gametypes[sel].id.clone();
+    fn owner_key(&mut self, ui: &Ui, id: i32, key: &UiKey) -> bool {
+        // The pickers below step on a click or Enter, the right button back.
+        let pick = matches!(key, UiKey::Mouse1 | UiKey::Mouse2 | UiKey::Enter);
+        let back = *key == UiKey::Mouse2;
+        // `i` stepped through `n` entries, wrapping.
+        let next = |i: usize, n: usize| if back { (i + n - 1) % n } else { (i + 1) % n };
+        match id {
+            // 245: the gametype chooser of the server settings. A click or Enter steps on, the right button back (the
+            // arrow keys do nothing, as in the original); the map list and the settings menu follow `ui_netGametypeName`.
+            245 => {
+                let n = self.st.gametypes.len();
+                let back = matches!(key, UiKey::Left | UiKey::Mouse2);
+                let step = matches!(
+                    key,
+                    UiKey::Left | UiKey::Right | UiKey::Mouse1 | UiKey::Mouse2 | UiKey::Enter
+                );
+                if n > 0 && step {
+                    let d = if back { n - 1 } else { 1 };
+                    let sel = (self.gametype_sel() + d) % n;
+                    let id = self.st.gametypes[sel].id.clone();
+                    self.input
+                        .cvars
+                        .set("ui_netGametype", &sel.to_string(), false);
+                    self.input.cvars.set("ui_netGametypeName", &id, false);
+                    self.input.cvars.set("g_gametype", &id, false);
+                    self.reselect_map();
+                }
+                step
+            }
+            // 205: the game mode of a list of modes (`ui_gametype`).
+            205 if pick && !self.st.gametypes.is_empty() => {
+                let at = usize::try_from(atoi(&self.dvar_get("ui_gametype"))).unwrap_or(0);
+                let to = next(at, self.st.gametypes.len());
+                self.input.cvars.set("ui_gametype", &to.to_string(), false);
+                true
+            }
+            // 220: the list to browse; the lists but the internet one (which needs a master server) scan again.
+            220 if pick => {
+                let at =
+                    usize::try_from(atoi(&self.dvar_get("ui_netSource")).clamp(0, 2)).unwrap_or(0);
+                let to = next(at, 3);
+                self.input.cvars.set("ui_netSource", &to.to_string(), false);
+                if to != 1 {
+                    self.start_refresh(ui, true);
+                }
+                self.st.servers.select(None);
+                true
+            }
+            // 222: the server filter; the only filter there is shows every server.
+            222 if pick => {
+                self.st.servers.select(None);
+                true
+            }
+            // 253: the game mode the join list is cut to; 0 is every mode.
+            253 if pick => {
+                let at = usize::try_from(atoi(&self.dvar_get("ui_joinGameType"))).unwrap_or(0);
+                let to = next(at, self.st.gametypes.len() + 1);
                 self.input
                     .cvars
-                    .set("ui_netGametype", &sel.to_string(), false);
-                self.input.cvars.set("ui_netGametypeName", &id, false);
-                self.input.cvars.set("g_gametype", &id, false);
+                    .set("ui_joinGameType", &to.to_string(), false);
+                self.st.servers.select(None);
+                true
             }
-            return step;
+            _ => false,
         }
-        false
     }
 
     fn game_message_window(
@@ -1654,6 +1878,64 @@ impl Host for HostCx<'_> {
                 let t = ui.assets.translate(&t).map_or(t.clone(), |s| s.to_string());
                 ui_text(ui, p, d, rect, color, &t);
             }
+            205 => {
+                let at = usize::try_from(atoi(&self.dvar_get("ui_gametype"))).unwrap_or(0);
+                let t = self
+                    .st
+                    .gametypes
+                    .get(at)
+                    .map_or_else(|| translate(ui, "EXE_ALL"), |g| g.title.clone());
+                ui_text(ui, p, d, rect, color, &t);
+            }
+            220 => {
+                let at =
+                    usize::try_from(atoi(&self.dvar_get("ui_netSource")).clamp(0, 2)).unwrap_or(0);
+                let src = translate(ui, ["EXE_LOCAL", "EXE_INTERNET", "EXE_FAVORITES"][at]);
+                ui_text(ui, p, d, rect, color, &loc_with(ui, "EXE_NETSOURCE", &src));
+            }
+            222 => {
+                let all = translate(ui, "EXE_ALL");
+                ui_text(
+                    ui,
+                    p,
+                    d,
+                    rect,
+                    color,
+                    &loc_with(ui, "EXE_SERVERFILTER", &all),
+                );
+            }
+            253 => {
+                let t = self
+                    .join_gametype()
+                    .map_or_else(|| translate(ui, "EXE_ALL"), |g| g.title.clone());
+                ui_text(ui, p, d, rect, color, &t);
+            }
+            247 => {
+                // While the list is being collected the line says how far it got, pulsing; after, when it was made.
+                let source = self.net_source();
+                if self.st.servers.refreshing(source) {
+                    let n = self.st.servers.rows(source).len();
+                    let text = if source == crate::serverlist::Source::Internet {
+                        translate(ui, "EXE_WAITINGFORMASTERSERVERRESPONSE")
+                    } else {
+                        loc_with(ui, "EXE_GETTINGINFOFORSERVERS", &n.to_string())
+                    };
+                    let t = ((self.time_ms() / 75) as f32).sin() * 0.5 + 0.5;
+                    let pulse = color.map(|c| c + (c * 0.8 - c) * t);
+                    ui_text(ui, p, d, rect, pulse, &text);
+                } else {
+                    let at = atoi(&self.dvar_get("ui_netSource")).clamp(0, 2);
+                    let when = self.dvar_get(&format!("ui_lastServerRefresh_{at}"));
+                    ui_text(
+                        ui,
+                        p,
+                        d,
+                        rect,
+                        color,
+                        &loc_with(ui, "EXE_REFRESHTIME", &when),
+                    );
+                }
+            }
             254 => {
                 // Map preview: the loading-screen image of the selected map.
                 if let Some(m) = self.st.maps.get(self.st.map_sel) {
@@ -1666,6 +1948,80 @@ impl Host for HostCx<'_> {
             }
         }
     }
+}
+
+/// A name without its `^n` colour codes (`I_CleanStr`): the lists show names plain.
+fn clean_str(name: &str) -> String {
+    let mut out = String::new();
+    let mut it = name.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '^' && it.peek().is_some_and(char::is_ascii_digit) {
+            it.next();
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The text of a localize key, or the key itself when it has none.
+fn translate(ui: &Ui, key: &str) -> String {
+    ui.assets
+        .translate(key)
+        .map_or_else(|| key.to_owned(), |t| t.to_string())
+}
+
+/// A localize string with its `&&1` filled in.
+fn loc_with(ui: &Ui, key: &str, arg: &str) -> String {
+    translate(ui, key).replace("&&1", arg)
+}
+
+/// The date and time as the server list shows when it was made: `Oct 9, 2026   14:05`. UTC, as the client has no
+/// source for the zone.
+fn refresh_stamp(ui: &Ui) -> String {
+    let secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let (year, month, day, hour, minute) = civil(i64::try_from(secs).unwrap_or(0));
+    const MONTHS: [&str; 12] = [
+        "EXE_MONTH_ABV_JANUARY",
+        "EXE_MONTH_ABV_FEBRUARY",
+        "EXE_MONTH_ABV_MARCH",
+        "EXE_MONTH_ABV_APRIL",
+        "EXE_MONTH_ABV_MAY",
+        "EXE_MONTH_ABV_JUN",
+        "EXE_MONTH_ABV_JULY",
+        "EXE_MONTH_ABV_AUGUST",
+        "EXE_MONTH_ABV_SEPTEMBER",
+        "EXE_MONTH_ABV_OCTOBER",
+        "EXE_MONTH_ABV_NOVEMBER",
+        "EXE_MONTH_ABV_DECEMBER",
+    ];
+    let name = translate(ui, MONTHS[(month - 1) as usize]);
+    format!("{name} {day}, {year}   {hour}:{minute:02}")
+}
+
+/// Year, month (1-12), day, hour and minute of `secs` since the Unix epoch.
+fn civil(secs: i64) -> (i64, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Days to a calendar date (Howard Hinnant's `civil_from_days`).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (
+        year,
+        month,
+        day,
+        (rem / 3600) as u32,
+        (rem % 3600 / 60) as u32,
+    )
 }
 
 /// One cell of the stock server list (the columns of the original's join menu).
@@ -1728,7 +2084,7 @@ fn ui_text(ui: &Ui, p: &mut Painter, d: &ItemDef, rect: Px, color: [f32; 4], tex
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serverlist::Entry;
+    use crate::serverlist::{Entry, Source};
 
     #[test]
     fn server_list_cells_follow_the_stock_columns() {
@@ -1736,6 +2092,7 @@ mod tests {
             name: "mp_crash".into(),
             title: "MPUI_CRASH".into(),
             image: String::new(),
+            modes: Vec::new(),
         }];
         let types = vec![GameTypeEntry {
             id: "war".into(),
@@ -1945,7 +2302,7 @@ mod tests {
         let mut ui = Ui::new(assets, (1280, 720));
         let mut input = Input::detached();
         st.live.own = 1;
-        st.live.names = ["Ann", "Me", "", "Bo"].map(String::from).to_vec();
+        st.live.names = ["Ann", "Me", "", "^2Bo^7x"].map(String::from).to_vec();
         let mut h = HostCx {
             st: &mut st,
             input: &mut input,
@@ -1953,7 +2310,11 @@ mod tests {
         for feeder in [7, 20] {
             assert_eq!(h.feeder_count(feeder), 2, "not me, not the empty slot");
         }
-        assert_eq!(h.feeder_text(7, 1, 0), "Bo");
+        assert_eq!(
+            h.feeder_text(7, 1, 0),
+            "Box",
+            "names are listed without colour codes"
+        );
         assert_eq!(h.feeder_text(20, 0, 1), "Ann");
         h.feeder_select(7, 1);
         assert!(h.ui_script(&mut ui, "voteKick", &[]));
@@ -2175,5 +2536,227 @@ mod tests {
             !st.scroll_scores(&ui, &UiKey::Tab),
             "other keys are not its own"
         );
+    }
+
+    /// A shell with the install's menus and no match, or `None` when there is no install.
+    fn shell_env() -> Option<(ShellState, Ui, Input)> {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return None;
+        };
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let st = ShellState::new(&assets, &install);
+        let mut input = Input::detached();
+        register_defaults(&mut input);
+        Some((st, Ui::new(assets, (1280, 720)), input))
+    }
+
+    fn lan_server(addr: &str, mode: &str) -> Entry {
+        Entry {
+            addr: addr.parse().unwrap(),
+            hostname: addr.into(),
+            map: "mp_crash".into(),
+            gametype: mode.into(),
+            clients: 1,
+            max_clients: 18,
+            ping: 5,
+            ..Entry::unanswered(addr.parse().unwrap())
+        }
+    }
+
+    /// The join menu's source picker steps local, internet, favorites on a click and back on the right button, the
+    /// game mode picker cuts the list to one mode (and its first stop is every mode), and each list shows its own rows.
+    #[test]
+    fn the_join_menu_cycles_its_source_and_cuts_the_list_to_a_game_mode() {
+        let Some((mut st, ui, mut input)) = shell_env() else {
+            return;
+        };
+        let modes = st.gametypes.len();
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        h.st.servers.take(lan_server("192.168.1.5:28960", "dm"));
+        h.st.servers.take(lan_server("192.168.1.6:28960", "war"));
+        h.st.servers.add_favorite("10.9.8.7:28960".parse().unwrap());
+        assert_eq!(h.feeder_count(2), 2, "the local network is the first list");
+        // The mode picker: every mode, then each of the table's modes in turn; the right button goes back round.
+        assert!(h.owner_key(&ui, 253, &UiKey::Mouse1));
+        assert_eq!(h.dvar("ui_joinGameType"), "1");
+        let first = h.st.gametypes[0].id.clone();
+        assert_eq!(first, "dm");
+        assert_eq!(h.feeder_count(2), 1);
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.5:28960");
+        assert!(h.owner_key(&ui, 253, &UiKey::Mouse2));
+        assert!(h.owner_key(&ui, 253, &UiKey::Mouse2));
+        assert_eq!(h.dvar("ui_joinGameType"), modes.to_string());
+        assert!(h.owner_key(&ui, 253, &UiKey::Enter));
+        assert_eq!(h.dvar("ui_joinGameType"), "0");
+        assert!(
+            !h.owner_key(&ui, 253, &UiKey::Left),
+            "arrows are not its keys"
+        );
+        // The source picker: local, internet (nothing to list), favorites (the one added, unanswered) and round.
+        assert!(h.owner_key(&ui, 220, &UiKey::Mouse1));
+        assert_eq!((h.dvar("ui_netSource"), h.feeder_count(2)), ("1".into(), 0));
+        assert!(h.owner_key(&ui, 220, &UiKey::Mouse1));
+        assert_eq!((h.dvar("ui_netSource"), h.feeder_count(2)), ("2".into(), 1));
+        assert_eq!(h.feeder_text(2, 0, 2), "10.9.8.7:28960");
+        // A mode hides a server that has not said which it runs.
+        h.set_dvar("ui_joinGameType", "1");
+        assert_eq!(h.feeder_count(2), 0);
+        h.set_dvar("ui_joinGameType", "0");
+        assert!(h.owner_key(&ui, 220, &UiKey::Mouse1));
+        assert_eq!(h.dvar("ui_netSource"), "0");
+        assert!(h.owner_key(&ui, 220, &UiKey::Mouse2));
+        assert_eq!(h.dvar("ui_netSource"), "2");
+        assert!(!h.owner_key(&ui, 220, &UiKey::Up));
+    }
+
+    /// A refresh runs until it is stopped, and leaving the join menu while one runs stops it first (the list stays).
+    #[test]
+    fn closing_the_join_menu_during_a_refresh_stops_it_and_a_quick_refresh_keeps_the_list() {
+        let Some((mut st, mut ui, mut input)) = shell_env() else {
+            return;
+        };
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        h.st.servers.take(lan_server("192.168.1.5:28960", "dm"));
+        assert!(h.ui_script(&mut ui, "RefreshFilter", &[]));
+        assert!(h.st.servers.refreshing(Source::Lan));
+        assert_eq!(h.feeder_count(2), 1, "a quick refresh keeps what it found");
+        assert!(h.ui_script(&mut ui, "closeJoin", &[]));
+        assert!(!h.st.servers.refreshing(Source::Lan));
+        assert!(h.ui_script(&mut ui, "RefreshServers", &[]));
+        assert!(h.st.servers.refreshing(Source::Lan));
+        assert_eq!(h.feeder_count(2), 0, "a full refresh starts the list over");
+        assert!(h.ui_script(&mut ui, "StopRefresh", &[]));
+        assert!(!h.st.servers.refreshing(Source::Lan));
+        // The time of the refresh is kept for the "Refresh time" line of its source.
+        assert!(!h.dvar("ui_lastServerRefresh_0").is_empty());
+    }
+
+    /// The map list shows the maps the game mode can be played on, with the level shot of each row, and a pick sets
+    /// the map index the menus and the preview read.
+    #[test]
+    fn the_map_list_is_cut_to_the_game_mode() {
+        let Some((mut st, ui, mut input)) = shell_env() else {
+            return;
+        };
+        let all = st.maps.len();
+        assert!(all >= 2, "the install has maps");
+        // The first map is for Deathmatch only.
+        st.maps[0].modes = vec!["dm".into()];
+        st.map_sel = 0;
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        h.set_dvar("ui_netGametypeName", "dm");
+        assert_eq!(h.feeder_count(4), all);
+        h.set_dvar("ui_netGametypeName", "war");
+        assert_eq!(h.feeder_count(4), all - 1);
+        let second = h.st.maps[1].title.clone();
+        assert_eq!(h.feeder_text(4, 0, 0), second);
+        assert_eq!(h.feeder_image(4, 0, 0), h.st.maps[1].image);
+        assert_eq!(
+            h.feeder_image(4, 0, 1),
+            "",
+            "only the first column is a picture"
+        );
+        h.feeder_select(4, 0);
+        assert_eq!(h.st.map_sel, 1, "the pick is a place in the whole table");
+        assert_eq!(
+            (h.dvar("ui_currentMap"), h.dvar("ui_currentNetMap")),
+            ("1".into(), "1".into())
+        );
+        // Going to a mode the chosen map is not for moves the choice to the first map that is.
+        h.st.map_sel = 0;
+        h.set_dvar("ui_netGametypeName", "dm");
+        assert!(h.owner_key(&ui, 245, &UiKey::Mouse1));
+        assert_eq!(h.dvar("ui_netGametypeName"), "dom");
+        assert_eq!(h.st.map_sel, 1);
+        assert_eq!(h.st.reselect_map, Some(0));
+        assert_eq!(h.dvar("ui_currentNetMap"), "1");
+    }
+
+    /// Server Info asks the selected server for its status and lists the answer.
+    #[test]
+    fn server_info_lists_what_the_selected_server_answers() {
+        let Some((mut st, mut ui, mut input)) = shell_env() else {
+            return;
+        };
+        let srv = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = srv.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            let mut buf = [0u8; 256];
+            let (n, from) = srv.recv_from(&mut buf).unwrap();
+            let Some(net::Oob::GetStatus(c)) = net::Oob::parse(&buf[..n]) else {
+                panic!("not a getstatus")
+            };
+            let reply = net::Oob::StatusResponse {
+                info: vec![
+                    ("sv_hostname".into(), "Fun".into()),
+                    ("g_gametype".into(), "war".into()),
+                    ("challenge".into(), c.to_string()),
+                ],
+                players: vec![net::oob::StatusPlayer {
+                    score: 4,
+                    ping: 20,
+                    name: "Ann".into(),
+                }],
+            };
+            srv.send_to(&reply.encode(), from).unwrap();
+        });
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        assert_eq!(h.feeder_count(13), 0, "nothing before a server is asked");
+        h.st.servers.select(Some(addr));
+        assert!(h.ui_script(&mut ui, "ServerStatus", &[]));
+        let end = Instant::now() + std::time::Duration::from_secs(10);
+        while h.feeder_count(13) == 0 {
+            assert!(Instant::now() < end, "the server did not answer");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        t.join().unwrap();
+        let rows: Vec<[String; 4]> = (0..h.feeder_count(13))
+            .map(|r| std::array::from_fn(|c| h.feeder_text(13, r, c)))
+            .collect();
+        assert_eq!(rows[0][0], "@EXE_SV_INFO_SERVERNAME");
+        assert_eq!(rows[0][3], "Fun");
+        let war =
+            h.st.gametypes
+                .iter()
+                .find(|g| g.id == "war")
+                .unwrap()
+                .title
+                .clone();
+        assert!(
+            rows.iter()
+                .any(|r| r[0] == "@EXE_SV_INFO_GAMETYPE" && r[3] == war)
+        );
+        assert_eq!(
+            rows.last().unwrap(),
+            &["0", "4", "20", "Ann"].map(str::to_owned)
+        );
+        // Asking again empties the list until the answer comes.
+        assert!(h.ui_script(&mut ui, "ServerStatus", &[]));
+        assert_eq!(h.feeder_count(13), 0);
+    }
+
+    #[test]
+    fn the_refresh_time_is_a_calendar_date_in_utc() {
+        assert_eq!(civil(0), (1970, 1, 1, 0, 0));
+        assert_eq!(civil(951_868_740), (2000, 2, 29, 23, 59));
+        assert_eq!(civil(1_791_554_700), (2026, 10, 9, 14, 5));
     }
 }
