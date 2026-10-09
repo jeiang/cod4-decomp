@@ -223,7 +223,8 @@ impl ClientSound {
     /// `SND_SetChannelVolumes`: priority 1 hold breath, 2 pain, 3 shell shock; `volumes` by channel name.
     pub fn set_channel_volumes(&mut self, priority: u8, volumes: &[(String, f32)], fade_ms: u32) {
         let Some(s) = self.ready() else { return };
-        let mut goals = vec![1.0; s.bank.channels.len()];
+        // Channels a shock file does not list keep the `bg_shock_volume_*` default of 0.5.
+        let mut goals = vec![0.5; s.bank.channels.len()];
         for (name, v) in volumes {
             if let Some(i) = s
                 .bank

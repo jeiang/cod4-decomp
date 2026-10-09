@@ -100,6 +100,9 @@ fn fill_neither_allocates_nor_frees() {
         if i % 50 == 0 {
             // Changing the room retunes in place; the EQ and the reverb are part of the busy mix.
             h.set_reverb((i / 50 % 26) as u8, 0.6, 100);
+            // Channel volume groups come and go while it mixes.
+            h.set_channel_volumes(1 + (i / 50 % 3) as u8, [0.25; 64], 100);
+            h.deactivate_channel_volumes(1 + ((i / 50 + 1) % 3) as u8, 100);
             h.set_eq(
                 (i / 50 % 4) as u8,
                 0,

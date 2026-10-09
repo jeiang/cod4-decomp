@@ -457,8 +457,15 @@ impl Look {
         let left = s.duration_ms - time;
         let p = &s.params;
         if left < -p.sound_tail() {
+            // Even after a hitch that skipped the fade window: nothing the shock set may stay on.
+            if s.phase != 0 && s.phase != 3 {
+                out.sound.push(ShockSound::Leave { fade_ms: 0 });
+            }
             if s.looping {
                 out.sound.push(ShockSound::LoopStop);
+            }
+            if let (false, Some(sp)) = (s.ended, &p.sound) {
+                out.sound.push(ShockSound::Play(sp.end.clone()));
             }
             self.shock = None;
             return out;
@@ -783,6 +790,18 @@ mod tests {
         assert!(l.frame(8100).sound.contains(&ShockSound::LoopStop));
         assert!(l.frame(8200).sound.is_empty());
         assert!(l.frame(20_000).sound.is_empty());
+    }
+
+    #[test]
+    fn a_frame_hitch_past_the_end_still_releases_the_ducking_and_plays_the_sting() {
+        let mut l = flash(4000);
+        l.frame(10);
+        l.frame(1000);
+        let late = l.frame(20_000).sound;
+        assert!(late.contains(&ShockSound::Leave { fade_ms: 0 }));
+        assert!(late.contains(&ShockSound::LoopStop));
+        assert!(late.contains(&ShockSound::Play("end".into())));
+        assert!(l.frame(20_100).sound.is_empty());
     }
 
     #[test]

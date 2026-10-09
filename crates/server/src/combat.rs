@@ -503,6 +503,17 @@ impl Game {
     /// `CanDamage`: the blast reaches `target` when a line from `origin` to the entity's
     /// centre (or one of its offsets) is clear.
     pub fn can_damage(&self, target: u16, origin: Vec3, inflictor: u16) -> Option<Vec3> {
+        self.can_damage_through(target, origin, inflictor, contents::MASK_SOLID)
+    }
+
+    /// `CanDamage` with the contents the line of sight is blocked by.
+    pub fn can_damage_through(
+        &self,
+        target: u16,
+        origin: Vec3,
+        inflictor: u16,
+        mask: i32,
+    ) -> Option<Vec3> {
         let w = self.world.as_ref()?;
         let e = self.ent(target)?;
         let mid = [
@@ -510,7 +521,6 @@ impl Game {
             e.origin[1] + (e.mins[1] + e.maxs[1]) * 0.5,
             e.origin[2] + (e.mins[2] + e.maxs[2]) * 0.5,
         ];
-        let mask = contents::MASK_SOLID;
         let clear = |to: Vec3| {
             let t = w.trace(origin, to, [0.0; 3], [0.0; 3], inflictor, mask);
             t.fraction >= 1.0 || t.hit_id == target
@@ -647,7 +657,6 @@ impl Game {
         radius_min: f32,
         attacker: Option<u16>,
         team: Team,
-        inflictor: u16,
     ) {
         let radius_min = radius_min.max(1.0);
         let radius_max = radius_max.max(radius_min);
@@ -663,7 +672,10 @@ impl Game {
             }
             let Some(e) = self.ent(n) else { continue };
             let dist = length(sub(e.origin, origin));
-            if dist > radius_max || self.can_damage(n, origin, inflictor).is_none() {
+            // The thrower is not in the way, and sky blocks the flash as well as walls (mask 2049).
+            let ignore = attacker.unwrap_or(ENTITYNUM_NONE);
+            let mask = contents::SOLID | contents::SKY;
+            if dist > radius_max || self.can_damage_through(n, origin, ignore, mask).is_none() {
                 continue;
             }
             let eye = [
@@ -677,7 +689,12 @@ impl Game {
                 Value::Float(distance),
                 Value::Float(angle),
                 self.ent_obj(vm, attacker),
-                Value::str(team.name()),
+                // `AddScrTeamName`: the free team is "free" here, not "none" as `team` reads.
+                Value::str(if team == Team::Free {
+                    "free"
+                } else {
+                    team.name()
+                }),
             ];
             vm.notify_entity(n, "flashbang", &args);
         }

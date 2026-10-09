@@ -958,14 +958,14 @@ impl Game {
         if m.info.explosion_inner_damage != 0 {
             self.missile_blast(vm, n, m, origin, math::angle_vectors(&angles).0, None);
         }
-        self.missile_flash(vm, n, m, origin);
+        self.missile_flash(vm, m, origin);
         vm.notify_entity(n, "death", &[]);
         self.free_entity(vm, n);
     }
 
     /// The flash of a `WEAPPROJEXP_FLASHBANG` weapon's explosion (`G_FlashbangBlast`), credited to the parent
     /// and its team.
-    fn missile_flash(&mut self, vm: &mut Vm, n: u16, m: &Missile, origin: Vec3) {
+    fn missile_flash(&mut self, vm: &mut Vm, m: &Missile, origin: Vec3) {
         if m.info.proj_explosion == ProjExplosion::Flashbang {
             let parent = m.parent.filter(|p| self.ent(*p).is_some());
             let info = &m.info;
@@ -973,7 +973,7 @@ impl Game {
                 info.explosion_radius as f32,
                 info.explosion_radius_min as f32,
             );
-            self.flashbang_blast(vm, origin, max, min, parent, m.team, n);
+            self.flashbang_blast(vm, origin, max, min, parent, m.team);
         }
     }
 
@@ -1121,7 +1121,10 @@ impl Game {
             ];
             vm.notify_entity(parent, "projectile_impact", &args);
         }
-        self.missile_flash(vm, n, m, endpos);
+        // A dud (a grenade not yet armed) does not go off.
+        if !dud {
+            self.missile_flash(vm, m, endpos);
+        }
         vm.notify_entity(n, "death", &[]);
         self.free_entity(vm, n);
     }

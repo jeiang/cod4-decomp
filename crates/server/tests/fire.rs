@@ -965,8 +965,12 @@ fn flashbang() -> WeaponInfo {
     }
 }
 
-#[test]
-fn a_flashbang_tells_the_players_that_can_see_it_how_hard_they_were_hit() {
+/// What the players of a flashbang test were told: `flashbang(distance, angle, attacker, team)` per player.
+struct Flashed(std::collections::HashMap<u16, (f32, f32, bool, String)>);
+
+/// A flashbang thrown by a player of `team` at the origin, a wall behind them, and the players named in the
+/// result: `[thrower, facing, away, far, hidden, dead, spectator]`.
+fn flash_round(team: Team) -> ([u16; 7], Flashed) {
     use gsc::{CallOutcome, EntClass, Key};
     use server::script::{Dispatch, ScriptHost};
 
@@ -981,7 +985,6 @@ watch(slot)
 	level.by[slot] = isdefined(att);
 }
 "#;
-    // A wall behind the thrower shields the player on its far side.
     let wall = ([-52.0, -2000.0, 0.0], [-48.0, 2000.0, 1000.0]);
     let (mut g, _) = arena(&[wall], 0, vec![flashbang()]);
     let prog = compile(
@@ -996,13 +999,16 @@ watch(slot)
     );
     let dispatch = Dispatch::new(&prog);
     let mut vm = Vm::new(prog).unwrap();
-    let thrower = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
-    // Facing the blast, with their back to it, in the open but past the radius, behind the wall.
+    let thrower = add_player(&mut g, &mut vm, [0.0; 3], 0.0, team);
     let facing = add_player(&mut g, &mut vm, [150.0, 0.0, 0.0], 180.0, Team::Axis);
     let away = add_player(&mut g, &mut vm, [150.0, 100.0, 0.0], 0.0, Team::Axis);
     let far = add_player(&mut g, &mut vm, [3000.0, 0.0, 0.0], 180.0, Team::Axis);
     let hidden = add_player(&mut g, &mut vm, [-100.0, 0.0, 0.0], 0.0, Team::Axis);
-    let slots = [thrower, facing, away, far, hidden];
+    let dead = add_player(&mut g, &mut vm, [150.0, -100.0, 0.0], 180.0, Team::Axis);
+    g.ent_mut(dead).unwrap().health = 0;
+    let spectator = add_player(&mut g, &mut vm, [150.0, 200.0, 0.0], 180.0, Team::Spectator);
+    g.client_mut(spectator).unwrap().session = Session::Spectator;
+    let slots = [thrower, facing, away, far, hidden, dead, spectator];
     {
         let mut host = ScriptHost {
             game: &mut g,
@@ -1039,20 +1045,42 @@ watch(slot)
         Some(Value::Array(a)) => a.get(&Key::Int(i32::from(n))).cloned(),
         other => panic!("level.{field} is {other:?}"),
     };
-    let float = |v: Option<Value>| match v {
-        Some(Value::Float(f)) => f,
-        other => panic!("not a float: {other:?}"),
-    };
-    // Heard: the player facing the blast takes the larger angle dose, the one turned away the smaller; both
-    // are inside the radius that gives a full distance dose, and the notice names the thrower and its team.
-    for n in [facing, away] {
-        assert_eq!(float(got("d", n)), 1.0);
-        assert!(matches!(got("t", n), Some(Value::Str(s)) if &*s == "allies"));
-        assert!(matches!(got("by", n), Some(Value::Int(1))));
+    let mut told = std::collections::HashMap::new();
+    for n in slots {
+        let (
+            Some(Value::Float(d)),
+            Some(Value::Float(a)),
+            Some(Value::Int(by)),
+            Some(Value::Str(t)),
+        ) = (got("d", n), got("a", n), got("by", n), got("t", n))
+        else {
+            continue;
+        };
+        told.insert(n, (d, a, by == 1, t.to_string()));
     }
-    assert!(float(got("a", facing)) > 0.9);
-    assert!(float(got("a", away)) < 0.1);
-    // Out of range and out of sight hear nothing.
-    assert!(got("d", far).is_none());
-    assert!(got("d", hidden).is_none());
+    (slots, Flashed(told))
+}
+
+#[test]
+fn a_flashbang_tells_the_players_that_can_see_it_how_hard_they_were_hit() {
+    let (slots, Flashed(told)) = flash_round(Team::Allies);
+    let [thrower, facing, away, far, hidden, dead, spectator] = slots;
+    // Heard, the thrower included: a full distance dose inside the inner radius, the thrower's name and team.
+    for n in [thrower, facing, away] {
+        let (d, _, by, team) = &told[&n];
+        assert_eq!((*d, *by, team.as_str()), (1.0, true, "allies"));
+    }
+    // The player facing the blast takes the larger angle dose, the one turned away the smaller.
+    assert!(told[&facing].1 > 0.9);
+    assert!(told[&away].1 < 0.1);
+    // Out of range, out of sight, dead and not playing hear nothing.
+    for n in [far, hidden, dead, spectator] {
+        assert!(!told.contains_key(&n), "{n} was flashed");
+    }
+}
+
+#[test]
+fn a_flashbang_of_the_free_team_says_free() {
+    let (slots, Flashed(told)) = flash_round(Team::Free);
+    assert_eq!(told[&slots[1]].3, "free");
 }
