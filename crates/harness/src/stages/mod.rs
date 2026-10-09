@@ -21,6 +21,7 @@ pub mod client_objective;
 pub mod client_session;
 pub mod client_ui;
 pub mod client_viewmodel;
+pub mod net_items;
 pub mod net_killcam;
 pub mod net_loopback;
 pub mod net_mantle;

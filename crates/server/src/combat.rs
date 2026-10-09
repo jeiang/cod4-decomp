@@ -429,6 +429,9 @@ impl Game {
 
     /// `player_die`: notify, switch to the dead movement type and run the killed callback.
     pub fn player_die(&mut self, vm: &mut Vm, n: u16, d: &Damage, damage: i32) {
+        if self.alive_for_death(n) {
+            self.death_grenade_drop(vm, n, d.mean == MOD_SUICIDE);
+        }
         let Some(c) = self.client_mut(n) else { return };
         if c.ps.pm_type >= PmType::Noclip && c.ps.pm_type != PmType::LastStand {
             return;

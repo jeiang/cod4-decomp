@@ -19,6 +19,7 @@ pub(crate) mod fixtures;
 mod info;
 mod inventory;
 mod params;
+pub mod pickup;
 mod table;
 
 pub use info::{

@@ -544,6 +544,7 @@ impl NetPlay {
             self.reticle = None;
             let mut models = self.remote_players(dt, st, ps.client_num);
             models.extend(self.script_models(&snap));
+            models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
             models.extend(self.view_model(
                 dt,
@@ -656,6 +657,7 @@ impl NetPlay {
         self.shock_effects(&look);
         let mut models = self.remote_players(dt, st, own);
         models.extend(self.script_models(&snap));
+        models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));
         if !dead {
             models.extend(self.view_model(
@@ -853,6 +855,7 @@ impl NetPlay {
                 entity: s.client_num,
                 origin: eye.to_array(),
                 weapon: def.map(|d| &**d),
+                weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
             },
             s.event_sequence,
             &newest,
@@ -1079,6 +1082,31 @@ impl NetPlay {
         out
     }
 
+    /// The weapons lying on the floor, in the world model of their weapon and variant.
+    fn items(&self, snap: &net::Snapshot) -> Vec<ModelInstance> {
+        let mut out = Vec::new();
+        for e in snap.entities.iter().filter(|e| e.etype == etype::ITEM) {
+            let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
+                continue;
+            };
+            let Some(model) = def
+                .world_models
+                .get(usize::from(e.model))
+                .cloned()
+                .flatten()
+                .or_else(|| def.world_models.first().cloned().flatten())
+            else {
+                continue;
+            };
+            let mut m = ModelInstance::new(model, render::ModelKind::World);
+            m.origin = e.origin;
+            m.angles = e.angles;
+            m.light_origin = e.origin;
+            out.push(m);
+        }
+        out
+    }
+
     /// The vehicles (helicopters), between the snapshots around the interpolation moment, with their rotors turning.
     /// Their loops follow them.
     fn vehicles(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
@@ -1145,6 +1173,7 @@ impl NetPlay {
                     entity: e.number,
                     origin: e.origin,
                     weapon: def.map(|d| &**d),
+                    weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
                 },
                 e.event_seq,
                 &[(e.event, e.event_parm)],
