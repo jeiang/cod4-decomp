@@ -50,6 +50,11 @@ const SCORES_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
 
+/// Whether `spawn` starts a life the client has not seen yet (the first snapshot counts), remembering it in `last`.
+fn new_life(last: &mut Option<u16>, spawn: u16) -> bool {
+    last.replace(spawn) != Some(spawn)
+}
+
 /// Alive in the world: the weapon switching of the original (`pm_type < PM_DEAD`) leaves spectators and the dead alone.
 fn alive(ps: &PlayerState) -> bool {
     matches!(
@@ -221,7 +226,7 @@ pub struct NetPlay {
     /// The last primary weapon held (`weaponLatestPrimaryIdx`): where cycling from an item or offhand returns to.
     latest_primary: u16,
     /// The spawn count last seen on the player's own state: a new life drops the weapon asked for.
-    last_spawn: u16,
+    last_spawn: Option<u16>,
     /// The weapon held before an action slot picked another, for the slot's second press.
     before_slot: Option<u16>,
     /// A night-vision slot was pressed: the next command carries the button.
@@ -324,7 +329,7 @@ impl NetPlay {
             last_cmd: Instant::now(),
             want_weapon: None,
             latest_primary: 0,
-            last_spawn: 0,
+            last_spawn: None,
             before_slot: None,
             nv_press: false,
             own_events: Seen::default(),
@@ -485,6 +490,7 @@ impl NetPlay {
         self.cmd_time = 0;
         self.want_weapon = None;
         self.latest_primary = 0;
+        self.last_spawn = None;
         self.remotes.clear();
         self.vm = None;
         self.events = Events::default();
@@ -779,8 +785,10 @@ impl NetPlay {
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
         self.hear(dt, eye, &ps, &snap);
-        if std::mem::replace(&mut self.last_spawn, ps.spawn_count) != ps.spawn_count {
+        if new_life(&mut self.last_spawn, ps.spawn_count) {
+            // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
+            self.note_latest_primary(ps.weapon as u16);
         }
         let mut fb = scan_own(&mut self.own_events, &snap.ps);
         if std::mem::take(&mut fb.out_of_ammo) {
@@ -1873,6 +1881,18 @@ fn follow_server_turn(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_first_snapshot_and_every_respawn_start_a_life() {
+        let mut last = None;
+        assert!(
+            new_life(&mut last, 0),
+            "the first snapshot, even with spawn count 0"
+        );
+        assert!(!new_life(&mut last, 0));
+        assert!(new_life(&mut last, 1));
+        assert!(!new_life(&mut last, 1));
+    }
+
     use super::*;
 
     fn remote(f: impl FnOnce(&mut EntityState)) -> PlayerPoseInput {
