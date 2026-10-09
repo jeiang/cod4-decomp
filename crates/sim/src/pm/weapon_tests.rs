@@ -26,6 +26,8 @@ struct Rig {
     want: u16,
     want_offhand: u16,
     angles: [i32; 3],
+    /// The lunge the commands ask for (`melee_charge_yaw`, `melee_charge_dist`).
+    charge: (f32, u8),
 }
 
 impl Rig {
@@ -46,6 +48,7 @@ impl Rig {
             want: 0,
             want_offhand: 0,
             angles: [0; 3],
+            charge: (0.0, 0),
         }
     }
 
@@ -80,6 +83,8 @@ impl Rig {
             weapon: self.want as u8,
             offhand_index: self.want_offhand as u8,
             angles: self.angles,
+            melee_charge_yaw: self.charge.0,
+            melee_charge_dist: self.charge.1,
             server_time: pm.ps.command_time + dt,
             ..UserCmd::default()
         };
@@ -600,6 +605,42 @@ fn melee_swings_and_connects_after_the_delay() {
     assert_eq!(r.state(), ws::MELEE_FIRE);
     r.run(0, 1);
     assert_eq!(r.state(), ws::READY);
+}
+
+/// What a swing started with the lunge `charge` leaves in the player state: (lunging, yaw, distance).
+fn lunge_of(charge: (f32, u8)) -> (bool, f32, i32) {
+    let mut w = ak();
+    w.melee_damage = 135;
+    w.melee_time = 600;
+    w.melee_delay = 200;
+    let mut r = Rig::new(vec![w]);
+    r.hold("ak47_mp");
+    r.charge = charge;
+    r.run(button::MELEE, 1);
+    (
+        r.ps.pm_flags & crate::pm::pmf::MELEE_CHARGE != 0,
+        r.ps.melee_charge_yaw,
+        r.ps.melee_charge_dist,
+    )
+}
+
+#[test]
+fn a_swing_lunges_as_the_command_asks_within_the_range_the_aim_assist_uses() {
+    assert_eq!(lunge_of((0.0, 0)), (false, 0.0, 0), "no request, no lunge");
+    assert_eq!(lunge_of((90.0, 100)), (true, 90.0, 100));
+}
+
+#[test]
+fn a_lunge_longer_than_the_aim_assist_asks_for_is_cut_short() {
+    let (lunging, _, dist) = lunge_of((0.0, 255));
+    assert!(lunging);
+    assert_eq!(dist, 141);
+}
+
+#[test]
+fn a_lunge_with_a_yaw_that_is_not_a_number_is_refused() {
+    assert_eq!(lunge_of((f32::NAN, 100)).0, false);
+    assert_eq!(lunge_of((f32::INFINITY, 100)).0, false);
 }
 
 #[test]

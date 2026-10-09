@@ -72,6 +72,8 @@ pub enum WeaponEvent {
         /// The magazine is empty after this shot.
         last_round: bool,
     },
+    /// A bolt-action's spent case was ejected on the rechamber or the reload (`EV_EJECT_BRASS`).
+    EjectBrass { weapon: u16 },
     /// The melee swing connects now (`EV_FIRE_MELEE`).
     Melee { weapon: u16 },
     /// A grenade is thrown from the off-hand (`EV_USE_OFFHAND`). `fuse_left` is the fuse

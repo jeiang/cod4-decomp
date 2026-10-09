@@ -23,7 +23,8 @@ pub mod ev {
     /// A spherical physics blast (`physicsexplosionsphere`); see [`Physics`] for the fields.
     pub const PHYSICS_EXPLOSION: u8 = 0x86;
     /// A weapon fired (`FireWeapon`): `origin` is the shooter's eye, `angles` where they look, `client` who, `weapon`
-    /// which; the muzzle flash and the ejected shell.
+    /// which; the muzzle flash and the ejected shell. `event_parm` is [`FIRE_LAST_SHOT`] for the last round of the
+    /// clip.
     pub const WEAPON_FIRE: u8 = 0x87;
     /// A cylindrical physics blast (`physicsexplosioncylinder`); see [`Physics`].
     pub const PHYSICS_EXPLOSION_CYLINDER: u8 = 0x88;
@@ -37,7 +38,18 @@ pub mod ev {
     pub const DUD: u8 = 0x8c;
     /// An unarmed grenade came to rest (`EV_CHANGE_TO_DUD`): only the dud table's effect, no sound.
     pub const CHANGE_TO_DUD: u8 = 0x8d;
+    /// A bolt-action's case came out (`EV_EJECT_BRASS`, on the rechamber): `client` and `weapon` as in
+    /// [`WEAPON_FIRE`]; the gun's shell effect plays at its `tag_brass`.
+    pub const EJECT_BRASS: u8 = 0x8e;
+    /// A knife swing hit a player (`G_TempEntity(.., 35)` with `EV_MELEE_BLOOD` to the attacker): `origin` the point,
+    /// `client` the attacker, `weapon` the weapon, `model` the entity struck and `event_parm` 1 for a knife model.
+    pub const MELEE_FLESH: u8 = 0x8f;
+    /// A knife swing hit the world or an object (`G_TempEntity(.., 36)`); fields as in [`MELEE_FLESH`].
+    pub const MELEE_WORLD: u8 = 0x90;
 }
+
+/// `event_parm` of a [`ev::WEAPON_FIRE`] that spent the last round of the clip (`EV_FIRE_WEAPON_LASTSHOT`).
+pub const FIRE_LAST_SHOT: u8 = 1;
 
 /// `eflags` of a [`ev::BULLET_IMPACT`] where a penetrating bullet left a wall: the `_exit` sounds.
 pub const IMPACT_EXIT: u32 = 1;

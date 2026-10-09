@@ -458,6 +458,32 @@ impl ClientSound {
                         self.play_world(&name, *origin);
                     }
                 }
+                // `EV_MELEE_HIT`, `EV_MELEE_MISS`: a knife has its own sounds, other weapons the stock ones unless the
+                // weapon names its own.
+                ClientEvent::MeleeHit {
+                    origin,
+                    flesh,
+                    weapon: w,
+                    knife,
+                    ..
+                } => {
+                    let own = weapon(*w).and_then(|d| {
+                        let s = &d.sounds;
+                        let n = if *flesh {
+                            &s.melee_hit_sound
+                        } else {
+                            &s.melee_miss_sound
+                        };
+                        n.as_ref().filter(|n| !n.is_empty()).map(|n| n.to_string())
+                    });
+                    let name = match (*knife, *flesh) {
+                        (true, true) => "melee_knife_hit_body".to_owned(),
+                        (true, false) => "melee_knife_hit_other".to_owned(),
+                        (false, true) => own.unwrap_or_else(|| "melee_hit".to_owned()),
+                        (false, false) => own.unwrap_or_else(|| "melee_hit_other".to_owned()),
+                    };
+                    self.play_world(&name, *origin);
+                }
                 // A player's shot is heard from the player's own events; a vehicle has none.
                 ClientEvent::WeaponFire {
                     eye,

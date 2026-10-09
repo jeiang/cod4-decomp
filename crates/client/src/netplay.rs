@@ -10,6 +10,7 @@
 
 mod corpses;
 mod hud;
+mod melee;
 mod names;
 
 use crate::crosshair::Reticle;
@@ -23,7 +24,7 @@ use crate::look::{Look, LookOut, cap_turn};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::{Launches, Props};
 use crate::sound::{ClientSound, Who};
-use crate::viewmodel::{Sight, ViewModel};
+use crate::viewmodel::{Sight, ViewModel, ViewTags};
 use crate::wire::Wire;
 use glam::Vec3;
 use net::client::NetClient;
@@ -216,6 +217,7 @@ struct Counters {
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
+    fx_tracers_max: usize,
     fx_decals_max: usize,
     /// Ragdolls made for corpses seen, and the most corpses drawn at once.
     ragdolls: u64,
@@ -292,6 +294,12 @@ pub struct NetPlay {
     /// Events for the menu runtime (a person's menus drain them; autoplay answers them itself).
     ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
+    /// The melee aim assist: the tangents of the half angles of the view, the lunge the next command carries (yaw,
+    /// distance), whether the swing is winding up, and the view's pull onto its target.
+    tan_half_fov: [f32; 2],
+    melee_charge: (f32, u8),
+    meleeing: bool,
+    automelee: crate::automelee::AutoMelee,
     /// The camera layer over the logical eye: stair smoothing, bob, lean, landing dip, scoped sway.
     camera: crate::camera::Camera,
     /// The other players as the last frame's view saw them, for overhead names and head icons.
@@ -309,6 +317,11 @@ pub struct NetPlay {
     scores_asked: Option<Instant>,
     server_addr: String,
     effects: Effects,
+    tracer_cvars: crate::tracer::Cvars,
+    /// The weapon rules the client plays by (`player_meleeRange` and the like): the server's defaults, which no
+    /// cvar changes yet.
+    weapon_params: WeaponParams,
+    tracer_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
     /// Earthquakes shaking the view.
     shakes: sim::shake::CameraShakes,
     props: Props,
@@ -401,6 +414,10 @@ impl NetPlay {
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
+            tan_half_fov: [0.84, 0.63],
+            melee_charge: (0.0, 0),
+            meleeing: false,
+            automelee: crate::automelee::AutoMelee::default(),
             camera: crate::camera::Camera::default(),
             scan: crate::hud::NameScan::default(),
             hud_view: None,
@@ -417,6 +434,9 @@ impl NetPlay {
             max_turn: [0.0; 2],
             shock_sensitivity: 1.0,
             effects: Effects::new(&lib.content, world),
+            tracer_cvars: crate::tracer::Cvars::default(),
+            weapon_params: WeaponParams::default(),
+            tracer_material: None,
             shakes: Default::default(),
             lib,
             events: Events::default(),
@@ -519,6 +539,17 @@ impl NetPlay {
         }
     }
 
+    /// The material the tracers are drawn with (`gfx_tracer`, from the UI zones), kept across levels.
+    pub fn set_tracer_material(&mut self, m: Option<std::sync::Arc<assets::zone::gfx::Material>>) {
+        self.effects.set_tracer_material(m.clone());
+        self.tracer_material = m;
+    }
+
+    /// What the player has set about tracers (`cg_tracerchance` and the like).
+    pub fn set_tracer_cvars(&mut self, c: crate::tracer::Cvars) {
+        self.tracer_cvars = c;
+    }
+
     /// Every weapon definition of the loaded content.
     pub fn weapon_defs(&self) -> Vec<std::sync::Arc<assets::zone::weapon::WeaponDef>> {
         self.lib.content.weapons()
@@ -540,6 +571,8 @@ impl NetPlay {
                 .map_err(|e| format!("weapon table: {e:?}"))?;
             let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
             self.effects = Effects::new(&lib.content, map.world.clone());
+            self.effects
+                .set_tracer_material(self.tracer_material.clone());
             self.params.mantle_anims = lib.content.mantle_anims();
             self.lib = lib;
             self.boxes = PlayerBoxes::new(clipmap);
@@ -779,6 +812,18 @@ impl NetPlay {
         for c in &input.pending_commands {
             self.command(c);
         }
+        // Only a living player who is not watching another has a swing to assist.
+        if self
+            .net
+            .latest()
+            .is_some_and(|s| s.follow.is_none() && alive(&s.ps))
+        {
+            self.melee_assist(st, own, dt, input.buttons & buttons::MELEE != 0);
+        } else {
+            self.melee_charge = (0.0, 0);
+            self.meleeing = false;
+            self.automelee = crate::automelee::AutoMelee::default();
+        }
         if self.last_cmd.elapsed() >= CMD_INTERVAL || self.c.cmds == 0 {
             self.last_cmd = Instant::now();
             self.send_cmd(input, st);
@@ -891,6 +936,7 @@ impl NetPlay {
         let p = self.pred.predict(&snap, &env);
         self.c.predictions += 1;
         let ps = p.ps;
+        self.meleeing = ps.weapon_state == sim::pm::weapon_state::MELEE_INIT;
         let events = p.events;
         self.own_new.clone_from(&events);
         let err = self.pred.error_at(st);
@@ -1107,6 +1153,7 @@ impl NetPlay {
         eye: Vec3,
         (yaw, pitch, roll): (f32, f32, f32),
     ) -> crate::effects::Drawn {
+        self.effects.set_tracer_cvars(self.tracer_cvars);
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         for e in events {
@@ -1190,6 +1237,7 @@ impl NetPlay {
             .max(drawn.sway.iter().fold(0.0, |m, a| m.max(a.abs())));
         self.c.looped_fx_max = self.c.looped_fx_max.max(self.effects.looped_fx());
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
+        self.c.fx_tracers_max = self.c.fx_tracers_max.max(drawn.tracers);
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
         self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
         drawn
@@ -1199,7 +1247,7 @@ impl NetPlay {
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
         let index = sim::pm::viewmodel_weapon(ps);
         let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
-        let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &WeaponParams::default());
+        let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &self.weapon_params);
         Some(Reticle {
             weapon,
             spread_deg,
@@ -1459,6 +1507,8 @@ impl NetPlay {
             weapon: weapon as u8,
             forwardmove: axis(input.move_forward),
             rightmove: axis(input.move_right),
+            melee_charge_yaw: self.melee_charge.0,
+            melee_charge_dist: self.melee_charge.1,
             ..UserCmd::default()
         };
         if input.buttons & buttons::ATTACK != 0 {
@@ -1799,6 +1849,8 @@ impl NetPlay {
         let mut out = Vec::new();
         let mut players = 0;
         let mut drawn = 0;
+        // Where the guns are, for the flashes and shells that follow them.
+        let mut guns = HashMap::new();
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
             players += 1;
             let def = self
@@ -1888,6 +1940,15 @@ impl NetPlay {
             r.seen = now;
             let input = pose_input(e, weapon.as_deref(), false);
             r.player.update(dt, &input);
+            guns.insert(
+                e.client,
+                ViewTags {
+                    flash: r.player.weapon_tag(e.origin, "tag_flash"),
+                    brass: r.player.weapon_tag(e.origin, "tag_brass"),
+                    knife: None,
+                    camera: None,
+                },
+            );
             if matches!(
                 e.weapon_state,
                 sim::pm::weapon_state::RELOADING
@@ -1904,6 +1965,7 @@ impl NetPlay {
             out.extend(r.player.instances(e.origin));
         }
         out.extend(self.corpse_models(dt, &ents, now));
+        self.effects.set_remote_tags(guns);
         let present: Vec<u16> = ents
             .iter()
             .filter(|e| e.etype == etype::PLAYER)
@@ -1974,6 +2036,7 @@ impl NetPlay {
             "eye_speed": eye_speed_summary(&self.c.eye_speeds),
             "sound": self.sound.report(),
         });
+        report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
         report["gun_speed_given"] = json!(self.c.gun_speed_given);
         report["gun_recoil_max"] = json!(self.c.max_gun_recoil);
         report["gun_sway_max"] = json!(self.c.max_gun_sway);
