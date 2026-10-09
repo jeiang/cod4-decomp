@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Movement event sounds translated in part from KisakCOD (cgame/cg_event.cpp, cgame_mp/cg_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! What the player hears: the `audio` crate fed from the match. Sound tables load on a thread while the
 //! match connects; sounds asked for before they are ready are dropped.
 //!
@@ -57,6 +58,8 @@ pub struct ClientSound {
     pending: Vec<String>,
     /// Where the listener is, for sounds that depend on it (bullet whiz-bys).
     eye: [f32; 3],
+    /// `cg_footsteps`.
+    footsteps: bool,
 }
 
 /// Who an event belongs to.
@@ -68,6 +71,8 @@ pub struct Who<'a> {
     pub weapon: Option<&'a WeaponDef>,
     /// The definition of a weapon by index, for events that name one (a pickup).
     pub weapon_of: &'a dyn Fn(u16) -> Option<Arc<WeaponDef>>,
+    /// The player has Dead Silence (`specialty_quieter`): the `q` alias families.
+    pub quiet: bool,
 }
 
 impl ClientSound {
@@ -82,6 +87,7 @@ impl ClientSound {
             dropped: 0,
             pending: Vec::new(),
             eye: [0.0; 3],
+            footsteps: true,
         }
     }
 
@@ -129,6 +135,11 @@ impl ClientSound {
                 ),
             },
         }
+    }
+
+    /// `cg_footsteps`, from the cvar store each frame: off mutes the step sounds (not the gear rattle).
+    pub fn set_footsteps(&mut self, on: bool) {
+        self.footsteps = on;
     }
 
     fn ready(&mut self) -> Option<&mut Sound> {
@@ -388,7 +399,10 @@ impl ClientSound {
 
     fn event(&mut self, who: &Who, event: u8, parm: u8) {
         let cue = if who.own {
-            Cue::default()
+            Cue {
+                entity: u32::from(who.entity),
+                ..Cue::default()
+            }
         } else {
             Cue {
                 origin: Some([who.origin[0], who.origin[1], who.origin[2] + 40.0]),
@@ -396,7 +410,6 @@ impl ClientSound {
                 ..Cue::default()
             }
         };
-        let plr = if who.own { "_plr" } else { "" };
         if matches!(event, ev::ITEM_PICKUP | ev::AMMO_PICKUP) {
             let def = (who.weapon_of)(u16::from(parm));
             if let Some(name) = pickup_sound(def.as_deref(), event, who.own) {
@@ -405,32 +418,35 @@ impl ClientSound {
             return;
         }
         if let Some(name) = weapon_sound(who.weapon, event, who.own) {
-            self.play(&name, cue);
+            // A weapon change cuts a reload short (`EV_STOP_WEAPON_SOUND`).
+            let stoppable = matches!(
+                event,
+                ev::RELOAD | ev::RELOAD_FROM_EMPTY | ev::RELOAD_START | ev::RELOAD_END
+            );
+            self.play(&name, Cue { stoppable, ..cue });
             return;
         }
-        let surf = surface_names;
-        let step = |kind: &str, parm: u8| -> Vec<String> {
-            surf(parm)
-                .into_iter()
-                .map(|s| format!("step_{kind}{plr}_{s}"))
-                .collect()
-        };
         match event {
-            ev::FOOTSTEP_SPRINT => self.play_first(&step("sprint", parm), cue),
-            ev::FOOTSTEP_RUN => self.play_first(&step("run", parm), cue),
-            ev::FOOTSTEP_WALK => self.play_first(&step("walk", parm), cue),
-            ev::FOOTSTEP_PRONE => self.play_first(&step("prone", parm), cue),
-            e if (ev::LANDING_FIRST..ev::LANDING_FIRST + 28).contains(&e) => {
-                let names: Vec<String> = surf(e - ev::LANDING_FIRST + 1)
-                    .into_iter()
-                    .map(|s| format!("land{}_{s}", plr))
-                    .collect();
-                self.play_first(&names, cue);
+            ev::STOP_WEAPON_SOUND => {
+                for name in stopped_weapon_sounds(who.weapon, parm, who.own) {
+                    if let Some(s) = self.ready() {
+                        s.stop_alias(cue.entity, &name);
+                    }
+                }
             }
-            e if (ev::LANDING_PAIN_FIRST..ev::LANDING_PAIN_FIRST + 28).contains(&e) => {
-                self.play(&format!("land{plr}_damage"), cue);
+            ev::FOLIAGE_SOUND => self.play("movement_foliage", cue),
+            e => {
+                let Some(sounds) = movement_sounds(e, parm, who.own, who.quiet) else {
+                    return;
+                };
+                for (i, names) in sounds.iter().enumerate() {
+                    // The first group is the step, landing or jump; `cg_footsteps` mutes footsteps only, not the rattle.
+                    if i == 0 && !self.footsteps && is_step(e) {
+                        continue;
+                    }
+                    self.play_first(names, cue);
+                }
             }
-            _ => {}
         }
     }
 
@@ -673,6 +689,79 @@ fn pickup_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
     n.as_ref().filter(|n| !n.is_empty()).map(|n| n.to_string())
 }
 
+/// The movement event is a footstep, the sounds `cg_footsteps` governs (a jump is not).
+fn is_step(event: u8) -> bool {
+    matches!(
+        event,
+        ev::FOOTSTEP_SPRINT | ev::FOOTSTEP_RUN | ev::FOOTSTEP_WALK | ev::FOOTSTEP_PRONE
+    )
+}
+
+/// The alias groups of a movement event (`CG_EntityEvent`), each group playing its first alias the tables have:
+/// a footstep (`step_<kind>[_plr]_<surface>`) and the gear rattle after it, a jump (the run step), a landing
+/// (`land[_plr]_<surface>`, and `land_damage` after a hard one). `own` picks the first-person `_plr` families,
+/// `quiet` (Dead Silence) the `q` ones. `None` for other events.
+fn movement_sounds(event: u8, parm: u8, own: bool, quiet: bool) -> Option<Vec<Vec<String>>> {
+    let plr = if own { "_plr" } else { "" };
+    let q = if quiet { "q" } else { "" };
+    let by_surface = |family: &str, surface: u8| -> Vec<String> {
+        surface_names(surface)
+            .into_iter()
+            .map(|s| format!("{q}{family}{plr}_{s}"))
+            .collect()
+    };
+    let rattle = |kind: &str| vec![format!("{q}gear_rattle{plr}_{kind}")];
+    // `landSound[event - EV_LANDING_FIRST]`: surface 0 is not a landing.
+    let landing = |first: u8| {
+        let surface = event.checked_sub(first)?;
+        (1..=28).contains(&surface).then_some(surface)
+    };
+    Some(match event {
+        ev::FOOTSTEP_SPRINT => vec![by_surface("step_sprint", parm), rattle("sprint")],
+        ev::FOOTSTEP_RUN | ev::JUMP => vec![by_surface("step_run", parm), rattle("run")],
+        ev::FOOTSTEP_WALK => vec![by_surface("step_walk", parm), rattle("walk")],
+        // The prone step rattles like a walk.
+        ev::FOOTSTEP_PRONE => vec![by_surface("step_prone", parm), rattle("walk")],
+        _ => {
+            if let Some(surface) = landing(ev::LANDING_FIRST) {
+                vec![by_surface("land", surface)]
+            } else {
+                let surface = landing(ev::LANDING_PAIN_FIRST)?;
+                vec![by_surface("land", surface), vec!["land_damage".into()]]
+            }
+        }
+    })
+}
+
+/// `CG_StopWeaponSound`: the reload sounds a weapon change cuts off, by the weapon state it left.
+fn stopped_weapon_sounds(w: Option<&WeaponDef>, state: u8, own: bool) -> Vec<String> {
+    let Some(w) = w else { return Vec::new() };
+    let s = &w.sounds;
+    let pick = |plr: &Option<Arc<str>>, other: &Option<Arc<str>>| {
+        let n = if own { plr } else { other };
+        n.as_ref().filter(|n| !n.is_empty()).map(|n| n.to_string())
+    };
+    use sim::pm::weapon_state as ws;
+    match state {
+        ws::RELOADING | ws::RELOADING_INTERUPT => [
+            pick(&s.reload_empty_sound_player, &s.reload_empty_sound),
+            pick(&s.reload_sound_player, &s.reload_sound),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+        ws::RELOAD_START | ws::RELOAD_START_INTERUPT => {
+            pick(&s.reload_start_sound_player, &s.reload_start_sound)
+                .into_iter()
+                .collect()
+        }
+        ws::RELOAD_END => pick(&s.reload_end_sound_player, &s.reload_end_sound)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// The weapon's sound alias for a player event, `_player` (first-person) variants for the own player.
 fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
     let s = &w?.sounds;
@@ -713,6 +802,104 @@ fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+/// Scripted movement events on a fresh bank; returns the failed expectations as (message, false) and nothing
+/// for those met.
+#[cfg(not(target_arch = "wasm32"))]
+fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
+    let mut sound = Sound::new(bank, false);
+    sound.set_listener([0.0; 3], 0.0);
+    let mut cs = ClientSound {
+        state: State::Ready(Box::new(sound)),
+        device: false,
+        seen: HashMap::new(),
+        own_seq: None,
+        dropped: 0,
+        pending: Vec::new(),
+        eye: [0.0; 3],
+        footsteps: true,
+    };
+    let none = |_: u16| None;
+    let mut seq = 0u8;
+    let mut fire = |cs: &mut ClientSound, own: bool, quiet: bool, event: u8, parm: u8| {
+        let who = Who {
+            own,
+            entity: 3,
+            origin: [100.0, 0.0, 0.0],
+            weapon: None,
+            weapon_of: &none,
+            quiet,
+        };
+        // The first look at an entity only learns its counter; the second delivers the event.
+        cs.events(&who, seq, &[(0, 0)]);
+        seq = seq.wrapping_add(1);
+        cs.events(&who, seq, &[(event, parm)]);
+    };
+    // Concrete (5), grass (7) landings: own and remote; paintedmetal (28), which the old range left out.
+    for surface in [5u8, 28] {
+        fire(&mut cs, true, false, ev::LANDING_FIRST + surface, 0);
+        fire(&mut cs, false, false, ev::LANDING_FIRST + surface, 0);
+        fire(&mut cs, true, false, ev::LANDING_PAIN_FIRST + surface, 30);
+    }
+    fire(&mut cs, false, false, ev::FOOTSTEP_RUN, 5);
+    fire(&mut cs, false, false, ev::JUMP, 5);
+    fire(&mut cs, false, false, ev::FOLIAGE_SOUND, 0);
+    fire(&mut cs, false, true, ev::FOOTSTEP_WALK, 5);
+    fire(&mut cs, true, true, ev::LANDING_FIRST + 5, 0);
+    let State::Ready(sound) = &cs.state else {
+        return vec![("movement sound bank is not ready".into(), false)];
+    };
+    let played = &sound.played.aliases;
+    let mut out = Vec::new();
+    let mut expect = |what: &str, groups: Option<Vec<Vec<String>>>| {
+        for g in groups.unwrap_or_default() {
+            let first = g.iter().find(|n| sound.bank.has(n));
+            let ok = first.is_some_and(|n| played.contains_key(&n.to_ascii_lowercase()));
+            if !ok {
+                out.push((
+                    format!("{what}: expected {first:?} of {g:?}, played {played:?}"),
+                    false,
+                ));
+            }
+        }
+    };
+    expect(
+        "own concrete landing",
+        movement_sounds(ev::LANDING_FIRST + 5, 0, true, false),
+    );
+    expect(
+        "remote concrete landing",
+        movement_sounds(ev::LANDING_FIRST + 5, 0, false, false),
+    );
+    expect(
+        "paintedmetal landing",
+        movement_sounds(ev::LANDING_FIRST + 28, 0, true, false),
+    );
+    expect(
+        "hard landing",
+        movement_sounds(ev::LANDING_PAIN_FIRST + 5, 30, true, false),
+    );
+    expect(
+        "run step with gear rattle",
+        movement_sounds(ev::FOOTSTEP_RUN, 5, false, false),
+    );
+    expect("jump", movement_sounds(ev::JUMP, 5, false, false));
+    expect(
+        "Dead Silence step",
+        movement_sounds(ev::FOOTSTEP_WALK, 5, false, true),
+    );
+    expect(
+        "Dead Silence landing",
+        movement_sounds(ev::LANDING_FIRST + 5, 0, true, true),
+    );
+    if sound.bank.has("movement_foliage") && !played.contains_key("movement_foliage") {
+        out.push(("movement_foliage was not played".into(), false));
+    }
+    if sound.bank.has("land_plr_concrete") && played.contains_key("land_plr_dirt") {
+        out.push(("a concrete landing played dirt".into(), false));
+    }
+    out
 }
 
 /// `--audio-selftest`: loads the real tables and checks, with no window and no sound card, that a match's
@@ -1033,6 +1220,17 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         m.insert(key.into(), heard.into());
         m.insert(format!("{channel}_alias"), name.into());
     }
+    // Movement events through the client's event path: each plays the alias for its own surface, a hard landing
+    // adds the damage sound, and a Dead Silence player plays the `q` families.
+    match load(install, map) {
+        Ok(bank) => {
+            let names = movement_selftest(bank);
+            for (what, ok) in names {
+                check(ok, what);
+            }
+        }
+        Err(e) => check(false, format!("movement sounds: {e}")),
+    }
     check(
         s.played.failed.is_empty(),
         format!("sound files failed: {:?}", s.played.failed),
@@ -1041,5 +1239,77 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         Ok(Value::Object(m))
     } else {
         Err(bad)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first(groups: &[Vec<String>], i: usize) -> &str {
+        &groups[i][0]
+    }
+
+    #[test]
+    fn every_landing_plays_its_own_surface() {
+        for surface in 1..=28u8 {
+            let name = SURFACE_TYPE_NAMES[usize::from(surface)];
+            let g = movement_sounds(ev::LANDING_FIRST + surface, 0, false, false).unwrap();
+            assert_eq!(first(&g, 0), format!("land_{name}"), "surface {surface}");
+            assert_eq!(g.len(), 1, "a soft landing is only the surface sound");
+            let g = movement_sounds(ev::LANDING_FIRST + surface, 0, true, false).unwrap();
+            assert_eq!(first(&g, 0), format!("land_plr_{name}"));
+        }
+    }
+
+    #[test]
+    fn landing_range_is_surfaces_one_to_twenty_eight() {
+        assert!(movement_sounds(ev::LANDING_FIRST, 0, false, false).is_none());
+        assert!(movement_sounds(ev::LANDING_FIRST + 28, 0, false, false).is_some());
+        assert!(movement_sounds(ev::LANDING_PAIN_FIRST, 0, false, false).is_none());
+        assert!(movement_sounds(ev::LANDING_PAIN_FIRST + 28, 0, false, false).is_some());
+        assert!(movement_sounds(ev::LANDING_PAIN_FIRST + 29, 0, false, false).is_none());
+    }
+
+    #[test]
+    fn a_hard_landing_adds_the_damage_sound_to_the_surface_sound() {
+        let g = movement_sounds(ev::LANDING_PAIN_FIRST + 5, 40, true, false).unwrap();
+        assert_eq!(first(&g, 0), "land_plr_concrete");
+        assert_eq!(g[1], ["land_damage"]);
+    }
+
+    #[test]
+    fn a_footstep_is_followed_by_gear_rattle() {
+        let g = movement_sounds(ev::FOOTSTEP_SPRINT, 5, false, false).unwrap();
+        assert_eq!(first(&g, 0), "step_sprint_concrete");
+        assert_eq!(g[1], ["gear_rattle_sprint"]);
+        let g = movement_sounds(ev::FOOTSTEP_PRONE, 5, true, false).unwrap();
+        assert_eq!(first(&g, 0), "step_prone_plr_concrete");
+        assert_eq!(g[1], ["gear_rattle_plr_walk"]);
+    }
+
+    #[test]
+    fn a_jump_sounds_like_a_run_step() {
+        let g = movement_sounds(ev::JUMP, 5, false, false).unwrap();
+        assert_eq!(first(&g, 0), "step_run_concrete");
+        assert_eq!(g[1], ["gear_rattle_run"]);
+    }
+
+    #[test]
+    fn dead_silence_uses_the_quiet_families() {
+        let g = movement_sounds(ev::FOOTSTEP_RUN, 5, false, true).unwrap();
+        assert_eq!(first(&g, 0), "qstep_run_concrete");
+        assert_eq!(g[1], ["qgear_rattle_run"]);
+        let g = movement_sounds(ev::LANDING_FIRST + 5, 0, true, true).unwrap();
+        assert_eq!(first(&g, 0), "qland_plr_concrete");
+        // The damage sound has no quiet variant.
+        let g = movement_sounds(ev::LANDING_PAIN_FIRST + 5, 9, false, true).unwrap();
+        assert_eq!(g[1], ["land_damage"]);
+    }
+
+    #[test]
+    fn other_events_are_not_movement_sounds() {
+        assert!(movement_sounds(ev::FIRE_WEAPON, 0, false, false).is_none());
+        assert!(movement_sounds(ev::NONE, 0, false, false).is_none());
     }
 }

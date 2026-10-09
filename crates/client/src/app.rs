@@ -1007,6 +1007,11 @@ impl Viewer {
             }
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
+            net.set_footsteps(
+                st.input
+                    .cvar("cg_footsteps")
+                    .is_none_or(|v| v.trim() != "0"),
+            );
             if let Some(secs) = st
                 .input
                 .cvar("cl_timeout")

@@ -629,6 +629,13 @@ mod tests {
     use super::*;
     use gsc::{Builtins, Options, compile};
 
+    /// Clients pick the Dead Silence sound families by this bit of the entity state's perks.
+    #[test]
+    fn the_quieter_perk_bit_is_the_one_clients_test() {
+        let i = PERK_NAMES.iter().position(|n| *n == "specialty_quieter");
+        assert_eq!(i.map(|i| 1u32 << i), Some(sim::pm::PERK_QUIETER));
+    }
+
     #[test]
     fn setrank_keeps_the_prestige_unless_given_and_rejects_a_byte_overflow() {
         let prog = compile(

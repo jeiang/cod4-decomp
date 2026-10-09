@@ -498,6 +498,11 @@ impl NetPlay {
         self.sound.set_volume(volume);
     }
 
+    /// `cg_footsteps`, from the cvar store each frame.
+    pub fn set_footsteps(&mut self, on: bool) {
+        self.sound.set_footsteps(on);
+    }
+
     /// What the player state says the input layer must change (forced stance, ADS reset, frozen); take it each
     /// frame and give it to `Input::apply`.
     pub fn take_input_feedback(&mut self) -> Feedback {
@@ -952,6 +957,7 @@ impl NetPlay {
                 origin: eye.to_array(),
                 weapon: def.map(|d| &**d),
                 weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
+                quiet: s.perks & sim::pm::PERK_QUIETER != 0,
             },
             s.event_sequence,
             &newest,
@@ -1280,6 +1286,7 @@ impl NetPlay {
                     origin: e.origin,
                     weapon: def.map(|d| &**d),
                     weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
+                    quiet: e.perks & sim::pm::PERK_QUIETER != 0,
                 },
                 e.event_seq,
                 &[(e.event, e.event_parm)],
