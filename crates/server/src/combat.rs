@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Flashbang translated in part from KisakCOD (game_mp/g_combat_mp.cpp, game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Flashbang and the flinch direction translated in part from KisakCOD (game_mp/g_combat_mp.cpp, game_mp/g_client_script_cmd_mp.cpp, game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Damage: `G_Damage`, the player damage and death paths, radius damage and damage volumes.
 //!
 //! Scripts own the rules. The engine's part is the order of events: damage reaches
@@ -372,6 +372,13 @@ impl Game {
         let c = self.client_mut(target).expect("checked above");
         c.ps.damage_timer += (damage as f32 * per_point) as i32;
         c.ps.damage_timer = c.ps.damage_timer.min(max_time as i32);
+        c.ps.damage_duration = c.ps.damage_timer;
+        // `flinchYawAnim`: the blow's direction relative to the way the victim faces.
+        c.ps.flinch_yaw_anim = d.dir.map_or(0, |v| {
+            let yaw = sim::pm::math::vec_to_yaw(&v);
+            let facing = c.ps.viewangles[1].rem_euclid(360.0).trunc();
+            flinch_yaw_anim(yaw - facing)
+        });
         // What the end frame shows the player: how much, and which way it came (`damage_blood`, `damage_from`).
         c.damage_blood += damage;
         c.damage_from_world = d.dir.is_none();
@@ -751,9 +758,24 @@ impl Game {
     }
 }
 
+/// `flinchYawAnim` from the blow's yaw relative to the victim's facing, degrees: 0 forward (pushed along the view),
+/// 1 back, 2 left, 3 right.
+fn flinch_yaw_anim(relative: f32) -> u8 {
+    let r = relative.rem_euclid(360.0);
+    if !(45.0..315.0).contains(&r) {
+        0
+    } else if (135.0..225.0).contains(&r) {
+        1
+    } else if r < 135.0 {
+        2
+    } else {
+        3
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::flashbang_percents;
+    use super::{flashbang_percents, flinch_yaw_anim};
 
     #[test]
     fn a_flashbang_dose_falls_with_distance_and_with_looking_away() {
@@ -768,5 +790,13 @@ mod tests {
         let (edge, side) =
             flashbang_percents(600.0, 200.0, 600.0, [0.0; 3], eye, [0.0, 400.0, 0.0]);
         assert!(edge.abs() < 1e-6 && (side - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_hit_flinches_toward_where_it_came_from() {
+        assert_eq!(flinch_yaw_anim(0.0), 0);
+        assert_eq!(flinch_yaw_anim(90.0), 2);
+        assert_eq!(flinch_yaw_anim(180.0), 1);
+        assert_eq!(flinch_yaw_anim(-90.0), 3);
     }
 }

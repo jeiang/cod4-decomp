@@ -57,6 +57,40 @@ impl Accum {
         trans_weight: 0.0,
     };
 
+    /// This bone's accumulation mixed with `over`'s by `weight` (0..=1): where `over` animated the bone's rotation (or
+    /// translation) the result is the unit blend `(1 - weight) * self + weight * over`, normalised by
+    /// [`Accum::finish`]; where it did not, the bone is unchanged.
+    pub fn overlaid(&self, over: &Accum, weight: f32) -> Accum {
+        if over.quat == [0.0; 4] && over.trans_weight == 0.0 {
+            return *self;
+        }
+        let (oq, ot) = over.finish();
+        let (bq, bt) = self.finish();
+        let mut out = *self;
+        if let Some(oq) = oq {
+            let q = match bq {
+                Some(bq) => {
+                    let flip = if bq.iter().zip(&oq).map(|(a, b)| a * b).sum::<f32>() < 0.0 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    std::array::from_fn(|i| (1.0 - weight) * bq[i] + weight * flip * oq[i])
+                }
+                None => oq,
+            };
+            out.quat = q;
+        }
+        if let Some(ot) = ot {
+            out.trans = match bt {
+                Some(bt) => std::array::from_fn(|i| (1.0 - weight) * bt[i] + weight * ot[i]),
+                None => ot,
+            };
+            out.trans_weight = 1.0;
+        }
+        out
+    }
+
     /// Unit rotation and weighted-mean translation of what was accumulated; `None` for the
     /// parts nothing animated (no rotation weight, no translation weight).
     pub fn finish(&self) -> (Option<[f32; 4]>, Option<[f32; 3]>) {

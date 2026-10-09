@@ -56,6 +56,18 @@ pub struct EntityState {
     pub event: u8,
     pub event_parm: u8,
     pub event_seq: u8,
+    /// Player: the prone-on-a-slope body tilt (`ps.torso_pitch`, `ps.waist_pitch`), degrees.
+    pub torso_pitch: f32,
+    pub waist_pitch: f32,
+    /// Player: `ps.damage_timer` and `ps.damage_duration`, milliseconds; the hit's flinch and stumble windows are the
+    /// first part of the duration.
+    pub damage_timer: u16,
+    pub damage_duration: u16,
+    /// Player: the torso animation channel the server decided: the clip (0 none), its cap in 10 ms (0 none) and a
+    /// counter that changes whenever a clip starts or ends. See `server::playeranim::TorsoWire`.
+    pub torso_clip: u8,
+    pub torso_cap: u8,
+    pub torso_seq: u8,
     /// A launched script model (`eflags::PHYSICS_LAUNCH`, in `server::netsv`): where the launch struck it, in the
     /// world. `origin` and `angles` are where it was launched from and `velocity` is the launch force.
     pub launch_point: [f32; 3],
@@ -121,6 +133,13 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.event, Bits(8)),
         int!(s, s.event_parm, Bits(8)),
         int!(s, s.event_seq, Bits(8)),
+        num!(s, s.torso_pitch, Angle16),
+        num!(s, s.waist_pitch, Angle16),
+        int!(s, s.damage_timer, Bits(16)),
+        int!(s, s.damage_duration, Bits(16)),
+        int!(s, s.torso_clip, Bits(8)),
+        int!(s, s.torso_cap, Bits(8)),
+        int!(s, s.torso_seq, Bits(8)),
         num!(s, s.launch_point[0], pos),
         num!(s, s.launch_point[1], pos),
         num!(s, s.launch_point[2], pos),
@@ -155,6 +174,27 @@ mod tests {
     use super::*;
     use crate::bits::{BitReader, BitWriter};
     use crate::field::{read_delta, write_delta};
+
+    #[test]
+    fn the_animation_fields_survive_the_wire() {
+        let to = EntityState {
+            torso_pitch: 30.0,
+            waist_pitch: 200.0,
+            damage_timer: 750,
+            damage_duration: 900,
+            torso_clip: 12,
+            torso_cap: 40,
+            torso_seq: 200,
+            ..EntityState::new(5)
+        }
+        .canonical();
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(5), &to);
+        let bytes = w.into_bytes();
+        let mut got = EntityState::new(5);
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, to);
+    }
 
     #[test]
     fn a_launched_models_launch_point_and_force_reach_the_client() {

@@ -177,6 +177,11 @@ impl Player {
         self.state.current()
     }
 
+    /// The upper-body clip (fire, reload, melee, throw, pullout, flinch) playing over the legs, if any.
+    pub fn torso_animation(&self) -> Option<&'static str> {
+        self.state.torso(&self.anims)
+    }
+
     /// A ragdoll of the body as the last [`Player::update`] posed it, thrown with velocity `push`.
     pub fn ragdoll(&self, origin: [f32; 3], push: [f32; 3]) -> Ragdoll {
         let rig = self.anims.rig();

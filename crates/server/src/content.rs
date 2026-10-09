@@ -116,7 +116,7 @@ impl AnimInfo {
 pub type BoneNames = Arc<[Arc<str>]>;
 
 /// A player-body animation kept whole for the server skeleton (`pb_*`: the full-body stand,
-/// crouch, prone, run and death animations), with its part names resolved to text.
+/// crouch, prone, run and death animations; `pt_*`: the upper-body fire, reload, melee, throw and flinch partials), with its part names resolved to text.
 ///
 /// Script strings are indices into the zone that defined the asset, so the names are
 /// resolved here while that zone's table is at hand; a model from another zone is bound to
@@ -148,12 +148,13 @@ impl PlayerAnim {
     }
 }
 
-/// True for the animations the server skeleton samples (`pb_*`), the mantle animations whose
-/// root motion moves a climbing player, and, for a client, the weapon view model animations
+/// True for the animations the server skeleton samples (`pb_*` body animations and `pt_*` upper-body partials for a client), the
+/// mantle animations whose root motion moves a climbing player, and, for a client, the weapon view model animations
 /// (`viewmodel_*`) and the helicopter's rotors (`bh_rotors`).
 fn is_player_anim(name: &str, client: bool) -> bool {
     let starts = |p: &str| name.len() > p.len() && name[..p.len()].eq_ignore_ascii_case(p);
     starts("pb_")
+        || (client && starts("pt_"))
         || MANTLE_ANIM_NAMES
             .iter()
             .any(|n| n.eq_ignore_ascii_case(name))

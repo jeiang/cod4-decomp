@@ -32,7 +32,7 @@ use net::predict::{Env, PlayerBoxes, Predictor};
 use render::ModelInstance;
 use serde_json::{Value, json};
 use server::netsv::eflags;
-use server::playeranim::PlayerPoseInput;
+use server::playeranim::{PlayerPoseInput, TorsoWire};
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
 use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
@@ -134,6 +134,8 @@ struct Counters {
     /// zones lack): a player the snapshot has but the picture does not.
     max_players_drawn: usize,
     player_faults: std::collections::BTreeSet<String>,
+    /// Names of the torso clips (`pt_*`) seen playing on other players: fire, reload, melee, throw, pullout, flinch.
+    torso_clips: std::collections::BTreeSet<&'static str>,
     spawned: bool,
     start: Option<[f32; 3]>,
     end: [f32; 3],
@@ -1403,6 +1405,9 @@ impl NetPlay {
             }
             r.dead = Some(dead);
             r.player.update(dt, &input);
+            if let Some(c) = r.player.torso_animation() {
+                self.c.torso_clips.insert(c);
+            }
             drawn += 1;
             match &mut r.ragdoll {
                 Some((at, yaw, body)) => {
@@ -1487,6 +1492,7 @@ impl NetPlay {
         report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
         report["player_faults"] = json!(self.c.player_faults);
+        report["torso_clips"] = json!(self.c.torso_clips);
         report
     }
 
@@ -1512,18 +1518,39 @@ fn pose_input(
     weapon: Option<&assets::zone::weapon::WeaponDef>,
     dead: bool,
 ) -> PlayerPoseInput {
+    let pm_type = PmType::from_u8(e.pm_type);
     let ps = PlayerState {
         pm_flags: e.pm_flags,
-        pm_type: if dead { PmType::Dead } else { PmType::Normal },
+        pm_type: if dead && pm_type < PmType::Dead {
+            PmType::Dead
+        } else {
+            pm_type
+        },
         velocity: e.velocity,
         viewangles: e.angles,
+        leanf: e.angles[2] / 45.0,
         movement_dir: e.move_dir,
         weapon_pos_frac: f32::from(e.ads) / 255.0,
+        weapon_state: e.weapon_state,
+        torso_pitch: e.torso_pitch,
+        waist_pitch: e.waist_pitch,
+        damage_timer: i32::from(e.damage_timer),
+        damage_duration: i32::from(e.damage_duration),
+        e_flags: if e.eflags & eflags::TURRET != 0 {
+            sim::pm::ef::TURRET_ACTIVE
+        } else {
+            0
+        },
         ..PlayerState::default()
     };
     let moving = e.velocity[0].hypot(e.velocity[1]) > 10.0;
     let mut i = PlayerPoseInput::from_ps(&ps, moving, weapon);
     i.sprinting = e.pm_flags & pmf::SPRINTING != 0;
+    i.torso_wire = Some(TorsoWire {
+        clip: e.torso_clip,
+        cap: e.torso_cap,
+        seq: e.torso_seq,
+    });
     i
 }
 
@@ -1711,6 +1738,55 @@ fn follow_server_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote(f: impl FnOnce(&mut EntityState)) -> PlayerPoseInput {
+        let mut e = EntityState::new(3);
+        e.etype = net::entity::etype::PLAYER;
+        f(&mut e);
+        pose_input(&e, None, e.eflags & eflags::DEAD != 0)
+    }
+
+    #[test]
+    fn a_remote_last_stand_player_plays_the_last_stand_idle() {
+        let i = remote(|e| e.pm_type = PmType::LastStand as u8);
+        assert_eq!(i.select(), "pb_laststand_idle");
+        assert_eq!(remote(|_| {}).select(), "pb_stand_alert");
+        // Dead from the flag even if the type byte lags.
+        assert!(remote(|e| e.eflags = eflags::DEAD).dead);
+    }
+
+    #[test]
+    fn a_remote_players_lean_turret_and_body_tilt_reach_the_pose() {
+        let i = remote(|e| {
+            e.angles = [0.0, 90.0, 22.5];
+            e.eflags = eflags::TURRET;
+            e.torso_pitch = 12.0;
+            e.waist_pitch = 5.0;
+            e.damage_timer = 300;
+            e.damage_duration = 400;
+        });
+        assert!(i.walking, "leaning counts as walking");
+        assert!(i.turret);
+        assert_eq!((i.torso_pitch, i.waist_pitch), (12.0, 5.0));
+        assert_eq!((i.damage_timer, i.damage_duration), (300, 400));
+    }
+
+    #[test]
+    fn a_remote_players_torso_channel_is_the_servers() {
+        let i = remote(|e| {
+            e.torso_clip = 4;
+            e.torso_cap = 15;
+            e.torso_seq = 9;
+        });
+        assert_eq!(
+            i.torso_wire,
+            Some(TorsoWire {
+                clip: 4,
+                cap: 15,
+                seq: 9
+            })
+        );
+    }
 
     #[test]
     fn a_watched_players_deltas_do_not_turn_the_watchers_view() {

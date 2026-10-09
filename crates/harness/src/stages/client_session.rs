@@ -95,6 +95,9 @@ pub(super) fn verdict(report: &Value) -> Option<String> {
     if let Some(w) = players_problem(&report["net"]) {
         return Some(w);
     }
+    if let Some(w) = torso_problem(&report["net"]) {
+        return Some(w);
+    }
     hud_problem(&report["hud"])
 }
 
@@ -108,6 +111,15 @@ fn players_problem(net: &Value) -> Option<String> {
     }
     (seen > 0 && drawn == 0)
         .then(|| format!("{seen} other players were announced and none was ever drawn"))
+}
+
+/// Why the bots' weapon handling never showed on their bodies, or `None`: other players were drawn for a whole run in
+/// which bots fire and reload, so some upper-body clip (`pt_*`, or the whole-body throw) must have played on one.
+fn torso_problem(net: &Value) -> Option<String> {
+    let drawn = net["players_drawn_max"].as_u64().unwrap_or(0);
+    let clips = net["torso_clips"].as_array()?;
+    (drawn > 0 && clips.is_empty())
+        .then(|| "other players were drawn but none ever played a torso animation".to_owned())
 }
 
 /// What a spawned player's HUD must have: health replicated from the server, the weapon's ammunition, the map
@@ -221,6 +233,30 @@ mod tests {
             players_problem(&json!({"players_seen_max": 3, "players_drawn_max": 3, "player_faults": ["no body"]}))
                 .unwrap()
                 .contains("no body")
+        );
+    }
+
+    #[test]
+    fn a_run_where_nobody_fired_or_reloaded_on_screen_is_named() {
+        assert_eq!(
+            torso_problem(&json!({})),
+            None,
+            "reports without the field are not judged"
+        );
+        assert_eq!(
+            torso_problem(
+                &json!({"players_drawn_max": 2, "torso_clips": ["pt_reload_stand_rifle"]})
+            ),
+            None
+        );
+        assert!(
+            torso_problem(&json!({"players_drawn_max": 2, "torso_clips": []}))
+                .unwrap()
+                .contains("torso")
+        );
+        assert_eq!(
+            torso_problem(&json!({"players_drawn_max": 0, "torso_clips": []})),
+            None
         );
     }
 

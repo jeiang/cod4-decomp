@@ -22,6 +22,23 @@ pub enum PmType {
     DeadLinked,
 }
 
+impl PmType {
+    /// The type a wire byte names; an unknown byte reads as [`PmType::Normal`].
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::NormalLinked,
+            2 => Self::Noclip,
+            3 => Self::Ufo,
+            4 => Self::Spectator,
+            5 => Self::Intermission,
+            6 => Self::LastStand,
+            7 => Self::Dead,
+            8 => Self::DeadLinked,
+            _ => Self::Normal,
+        }
+    }
+}
+
 /// `pm_flags` bits.
 pub mod pmf {
     pub const PRONE: u32 = 1 << 0;
@@ -282,6 +299,10 @@ pub struct PlayerState {
     /// Percent of the maximum health the last hit took (0 to 127), zeroed half a second after it
     /// (`P_DamageFeedback`).
     pub damage_count: i32,
+    /// `damageDuration`: `damage_timer` as the last hit left it; the flinch and stumble windows are the first part of it.
+    pub damage_duration: i32,
+    /// `flinchYawAnim`: which way the last hit pushed the body, 0 forward, 1 back, 2 left, 3 right.
+    pub flinch_yaw_anim: u8,
     /// Counts up with each hit the player's screen shows; a change is what the client reacts to.
     pub damage_event: u8,
     /// Where the last hit came from, in 1/256 turns of yaw and pitch; 255 and 255 for a hit from the world.
@@ -398,6 +419,8 @@ impl Default for PlayerState {
             jump_origin_z: 0.0,
             damage_timer: 0,
             damage_count: 0,
+            damage_duration: 0,
+            flinch_yaw_anim: 0,
             damage_event: 0,
             damage_yaw: 0,
             damage_pitch: 0,
