@@ -5,6 +5,7 @@
 mod app;
 mod compass;
 mod crosshair;
+mod damage;
 mod decal;
 mod display;
 mod effects;

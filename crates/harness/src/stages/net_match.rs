@@ -58,6 +58,9 @@ struct Result {
     snaps: u64,
     max_step: f32,
     snapshots: u64,
+    /// Times the client's health fell and stayed above zero, and the times its `damage_event` counted up.
+    hits: u64,
+    damage_events: u64,
     bytes_in: u64,
     bytes_out: u64,
     secs: f64,
@@ -135,6 +138,7 @@ fn client(
     let mut cmd_time = 0;
     let mut shakes = sim::shake::CameraShakes::default();
     let mut quake_seq = None;
+    let mut vitals: Option<(i32, u8)> = None;
     let mut next = Instant::now();
     for frame in 0..FRAMES {
         next += FRAME;
@@ -162,6 +166,14 @@ fn client(
         pred.push(cmd);
         c.send_cmd(cmd);
         if let Some(s) = c.latest() {
+            let ps = &s.ps;
+            if let Some((health, event)) = vitals {
+                r.hits += u64::from(ps.health > 0 && ps.health < health);
+                if ps.damage_event != event {
+                    r.damage_events += 1;
+                }
+            }
+            vitals = Some((ps.health, ps.damage_event));
             boxes.sync(s);
             let env = Env {
                 world: boxes.world(),
@@ -380,6 +392,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     "client {i}'s camera did not shake in the earthquake"
                 ));
             }
+            // A bot's bullet that wounded the player reached its screen as a hit. (Whether a bot hits within the run
+            // is up to the match; with no hit the stage says so rather than passing silently.)
+            if r.hits > 0 && r.damage_events == 0 {
+                failures.push(format!(
+                    "client {i}: wounded {} times but damage_event never counted up",
+                    r.hits
+                ));
+            }
             if r.steps == 0 || r.snaps * 100 > r.steps {
                 failures.push(format!("client {i}: {} of {} interpolated steps jumped over {SMOOTH_STEP} units (max {:.0})", r.snaps, r.steps, r.max_step));
             }
@@ -404,6 +424,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         report.metrics.insert(
             "client.snapshots_per_sec".into(),
             mean(|r| r.snapshots as f64) / secs,
+        );
+        let wounds: u64 = live.iter().map(|r| r.hits).sum();
+        report.metrics.insert("client.wounds".into(), wounds as f64);
+        if wounds == 0 {
+            report
+                .notes
+                .push("damage feedback untested: no bot wounded a client".into());
+        }
+        report.metrics.insert(
+            "client.damage_events".into(),
+            live.iter().map(|r| r.damage_events as f64).sum(),
         );
         report.metrics.insert(
             "client.max_hud_elems".into(),

@@ -11,6 +11,7 @@
 mod hud;
 
 use crate::crosshair::Reticle;
+use crate::damage::{DamageHud, DamageView};
 use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::helicopter::Rotors;
@@ -121,6 +122,11 @@ struct Counters {
     /// How many times the view kick came back to rest after a kick.
     kick_settled: u64,
     kicked: bool,
+    /// How often the player state's `damage_event` changed while alive, the value last seen, and the most the red flash and the number of wedges showed.
+    damage_events: u64,
+    damage_event_seen: u8,
+    max_damage_flash: f32,
+    max_damage_wedges: usize,
     predictions: u64,
     max_players_seen: usize,
     /// The most other players drawn in one frame, and why the others could not be built (a model or animation the
@@ -179,6 +185,9 @@ pub struct NetPlay {
     angles: [f32; 2],
     /// The kick of the player's own shots; kept apart from `angles`, the player's aim.
     kick: Kick,
+    /// The screen's answer to the hits the player takes, and what the HUD draws of it this frame.
+    damage: DamageView,
+    damage_hud: DamageHud,
     pitch_limits: (f32, f32),
     cmd_time: i32,
     last_cmd: Instant,
@@ -276,6 +285,8 @@ impl NetPlay {
             pred: Predictor::default(),
             angles: [0.0; 2],
             kick: Kick::default(),
+            damage: DamageView::default(),
+            damage_hud: DamageHud::default(),
             pitch_limits,
             cmd_time: 0,
             last_cmd: Instant::now(),
@@ -391,6 +402,7 @@ impl NetPlay {
         live.flashed = self.look.flashbanged(self.live_time);
         live.night_vision = self.look.night_vision();
         live.reticle.clone_from(&self.reticle);
+        live.damage.clone_from(&self.damage_hud);
         if live.kill_icons.len() != self.kill_icons.len() {
             live.kill_icons.clone_from(&self.kill_icons);
         }
@@ -559,6 +571,11 @@ impl NetPlay {
             // player state is theirs, so nothing is predicted; draw their view as it came.
             let ps = snap.ps.clone();
             self.kick.clear();
+            // The followed player's hits turn the view and show on the screen as the player's own would.
+            self.damage
+                .look(&ps, st, [ps.viewangles[0], ps.viewangles[1]]);
+            let hit_view = self.damage.view_angles(st, ps.weapon_pos_frac, false);
+            self.damage_hud = self.damage.hud(st, ps.viewangles[1]);
             let eye = Vec3::new(
                 ps.origin[0],
                 ps.origin[1],
@@ -596,8 +613,8 @@ impl NetPlay {
             return Some(NetFrame {
                 origin: eye,
                 yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),
-                pitch: pitch + (look.kick[0] - drawn.sway[0]).to_radians(),
-                roll: drawn.sway[2].to_radians(),
+                pitch: pitch + (look.kick[0] - drawn.sway[0] - hit_view[0]).to_radians(),
+                roll: (drawn.sway[2] + hit_view[1]).to_radians(),
                 models,
                 sight: self.sight.clone(),
                 meshes: drawn.meshes,
@@ -623,10 +640,10 @@ impl NetPlay {
             ps.origin[2] + err[2],
         ];
         let dead = matches!(ps.pm_type, PmType::Dead | PmType::DeadLinked);
+        let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
         if dead {
             self.kick.clear();
         } else {
-            let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
             self.kick.shots(&ps, self.weapons.info(ps.weapon as u16));
             self.kick.step(
                 dt,
@@ -634,6 +651,29 @@ impl NetPlay {
                 def.map(|d| [d.hip_view_kick_center_speed, d.ads_view_kick_center_speed]),
             );
         }
+        // A hit turns the camera but not the aim, and the HUD shows it.
+        let overlay = def.is_some_and(|d| d.overlay_reticle != 0);
+        let hit_view = if dead {
+            self.damage.clear();
+            [0.0; 2]
+        } else {
+            let view = [
+                self.angles[0] + self.kick.angles()[0],
+                self.angles[1] + self.kick.angles()[1],
+            ];
+            self.damage.look(&ps, st, view);
+            self.damage.view_angles(st, ps.weapon_pos_frac, overlay)
+        };
+        self.damage_hud = if dead {
+            DamageHud::default()
+        } else {
+            self.damage.hud(st, self.angles[1] + self.kick.angles()[1])
+        };
+        // A respawn starts the count over; only a change the player lived to see is a hit.
+        self.c.damage_events += u64::from(!dead && ps.damage_event != self.c.damage_event_seen);
+        self.c.damage_event_seen = ps.damage_event;
+        self.c.max_damage_flash = self.c.max_damage_flash.max(self.damage_hud.flash);
+        self.c.max_damage_wedges = self.c.max_damage_wedges.max(self.damage_hud.wedges.len());
         let (was_kicked, kick) = (self.c.kicked, self.kick.angles());
         self.c.kicked = kick != [0.0; 3];
         self.c.kick_settled += u64::from(was_kicked && !self.c.kicked);
@@ -697,9 +737,17 @@ impl NetPlay {
         } else {
             self.angles[1] + kick[1]
         };
-        let pitch = if dead { 0.0 } else { self.angles[0] + kick[0] };
+        let pitch = if dead {
+            0.0
+        } else {
+            self.angles[0] + kick[0] + hit_view[0]
+        };
         let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
-        let roll = if dead { 0.0 } else { kick[2].to_radians() };
+        let roll = if dead {
+            0.0
+        } else {
+            (kick[2] + hit_view[1]).to_radians()
+        };
         let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch, roll));
         models.extend(self.props.instances());
         models.extend(drawn.models);
@@ -1400,6 +1448,9 @@ impl NetPlay {
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
         report["fx"]["camera_sway_max"] = self.c.sway_max.into();
+        report["damage_events"] = json!(self.c.damage_events);
+        report["damage_flash_max"] = json!(self.c.max_damage_flash);
+        report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
         report["player_faults"] = json!(self.c.player_faults);
         report

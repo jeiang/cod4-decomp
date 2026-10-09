@@ -277,7 +277,19 @@ pub struct PlayerState {
     pub jump_time: i32,
     pub jump_origin_z: f32,
     pub damage_timer: i32,
+    /// Percent of the maximum health the last hit took (0 to 127), zeroed half a second after it
+    /// (`P_DamageFeedback`).
     pub damage_count: i32,
+    /// Counts up with each hit the player's screen shows; a change is what the client reacts to.
+    pub damage_event: u8,
+    /// Where the last hit came from, in 1/256 turns of yaw and pitch; 255 and 255 for a hit from the world.
+    pub damage_yaw: u8,
+    pub damage_pitch: u8,
+    /// The weapon animation the view model plays.
+    pub weapon_anim: u16,
+    /// How steady the held breath keeps a scoped weapon (`holdBreathScale`).
+    pub hold_breath_scale: f32,
+    pub hold_breath_timer: i32,
     pub movement_dir: i8,
     pub e_flags: u32,
     pub client_num: u16,
@@ -384,6 +396,12 @@ impl Default for PlayerState {
             jump_origin_z: 0.0,
             damage_timer: 0,
             damage_count: 0,
+            damage_event: 0,
+            damage_yaw: 0,
+            damage_pitch: 0,
+            weapon_anim: 0,
+            hold_breath_scale: 0.0,
+            hold_breath_timer: 0,
             movement_dir: 0,
             e_flags: 0,
             client_num: 0,
