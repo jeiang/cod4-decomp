@@ -107,6 +107,12 @@ pub struct NetFrame {
     pub commands: Vec<String>,
     /// Vision set and shell shock for the picture.
     pub look: LookOut,
+    /// The blur of the picture.
+    pub dof: render::Dof,
+    /// The fog the server set, blended from the one before; `None` for none. Only meant once `fog_from_server`:
+    /// until the scripts set any, the map's own art fog stands.
+    pub fog: Option<render::art::Fog>,
+    pub fog_from_server: bool,
 }
 
 struct Remote {
@@ -171,6 +177,12 @@ struct Counters {
     view_bob_max: f32,
     view_turn_max: f32,
     camera_tag_frames: u64,
+    /// Frames drawn from behind the dead player's body, the farthest the camera hung from the head there (units),
+    /// frames a kill cam hung the camera on the entity that killed, and frames the picture was blurred.
+    death_view_frames: u64,
+    death_view_range_max: f32,
+    kill_cam_frames: u64,
+    dof_frames: u64,
     last_render_z: Option<f32>,
     /// How many times the view kick came back to rest after a kick.
     kick_settled: u64,
@@ -302,6 +314,12 @@ pub struct NetPlay {
     automelee: crate::automelee::AutoMelee,
     /// The camera layer over the logical eye: stair smoothing, bob, lean, landing dip, scoped sway.
     camera: crate::camera::Camera,
+    /// `cg_thirdPersonRange` and `cg_thirdPersonAngle`.
+    orbit: crate::camera::Orbit,
+    /// The blur of aiming down the sights, easing between frames.
+    ads_dof: crate::dof::AdsDof,
+    /// The fog the server set.
+    fog: crate::fog::FogState,
     /// The other players as the last frame's view saw them, for overhead names and head icons.
     scan: crate::hud::NameScan,
     /// The state the HUD shows (predicted, or the followed player's) and the view yaw in degrees, from the last frame.
@@ -419,6 +437,9 @@ impl NetPlay {
             meleeing: false,
             automelee: crate::automelee::AutoMelee::default(),
             camera: crate::camera::Camera::default(),
+            orbit: crate::camera::Orbit::default(),
+            ads_dof: crate::dof::AdsDof::default(),
+            fog: crate::fog::FogState::default(),
             scan: crate::hud::NameScan::default(),
             hud_view: None,
             reticle: None,
@@ -597,6 +618,8 @@ impl NetPlay {
         self.shakes.clear();
         self.last_eye = None;
         self.camera.reset();
+        self.ads_dof = crate::dof::AdsDof::default();
+        self.fog.reset();
         self.scan = crate::hud::NameScan::default();
         self.c.spawned = false;
         self.c.start = None;
@@ -739,6 +762,11 @@ impl NetPlay {
         self.tan_half_fov = [tan_x, tan_x / aspect.max(f32::EPSILON)];
     }
 
+    /// `cg_thirdPersonRange` and `cg_thirdPersonAngle`, from the cvar store each frame.
+    pub fn set_orbit(&mut self, range: f32, angle: f32) {
+        self.orbit = crate::camera::Orbit { range, angle };
+    }
+
     /// What the player state says the input layer must change (forced stance, ADS reset, frozen); take it each
     /// frame and give it to `Input::apply`.
     pub fn take_input_feedback(&mut self) -> Feedback {
@@ -773,6 +801,9 @@ impl NetPlay {
             return None;
         };
         self.live_time = st;
+        if let Some(fog) = self.net.ui_ref().map(|u| u.config(net::ui::cs::FOGVARS)) {
+            self.fog.follow(fog, st);
+        }
         if let Some(snap) = self.net.latest() {
             follow_server_turn(
                 &mut self.angles,
@@ -857,7 +888,11 @@ impl NetPlay {
             self.last_eye = Some(eye);
             self.hud_view = Some((ps.clone(), ps.viewangles[1]));
             self.reticle = None;
-            let mut models = self.remote_players(dt, st, ps.client_num);
+            // The thing that killed, if the scripts named one and it can be seen: the camera hangs on it, and
+            // every body is drawn, the followed player's too.
+            self.boxes.sync(&snap);
+            let kill = self.kill_cam(st, &snap);
+            let mut models = self.remote_players(dt, st, ps.client_num, kill.is_some());
             self.scan_names(
                 st,
                 ps.client_num,
@@ -868,41 +903,56 @@ impl NetPlay {
             models.extend(self.script_models(dt, st, ps.client_num));
             models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
-            // The watched player's view bobs and leans as their own does (`CG_OffsetFirstPersonView`).
+            let def = self
+                .lib
+                .content
+                .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)))
+                .cloned();
             let aim = [ps.viewangles[0], ps.viewangles[1]];
-            let cam = self.camera.follow(&crate::camera::Frame {
-                ps: &ps,
-                now: st,
-                weapon: self
-                    .lib
-                    .content
-                    .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)))
-                    .map(|d| crate::camera::WeaponView::from(&**d)),
-                aim,
-                step: 0.0,
-                params: &self.params,
-                events: &[],
-            });
-            let mut seen = [
-                aim[0] + cam.angles[0],
-                aim[1] + cam.angles[1],
-                cam.angles[2],
-            ];
-            let mut render = eye + Vec3::from(cam.offset);
-            let mut at = ps.origin;
-            for (a, o) in at.iter_mut().zip(cam.offset) {
-                *a += o;
-            }
-            models.extend(self.view_model(dt, &ps, at, seen, false));
-            render += self.hands_camera(&ps, &mut seen);
+            let (seen, render, kill_fov, view_model) = if let Some((k, _)) = &kill {
+                (k.angles, k.origin, Some(k.fov), None)
+            } else {
+                // The watched player's view bobs and leans as their own does (`CG_OffsetFirstPersonView`).
+                let cam = self.camera.follow(&crate::camera::Frame {
+                    ps: &ps,
+                    now: st,
+                    weapon: def.as_deref().map(crate::camera::WeaponView::from),
+                    aim,
+                    step: 0.0,
+                    params: &self.params,
+                    events: &[],
+                });
+                let mut seen = [
+                    aim[0] + cam.angles[0],
+                    aim[1] + cam.angles[1],
+                    cam.angles[2],
+                ];
+                let mut render = eye + Vec3::from(cam.offset);
+                let mut at = ps.origin;
+                for (a, o) in at.iter_mut().zip(cam.offset) {
+                    *a += o;
+                }
+                models.extend(self.view_model(dt, &ps, at, seen, false));
+                render += self.hands_camera(&ps, &mut seen);
+                let range = crate::dof::view_model(
+                    &ps,
+                    def.as_deref().map(|d| (d.ads_dof_start, d.ads_dof_end)),
+                );
+                (seen, render, None, Some(range))
+            };
+            let (yaw, pitch) = (seen[1].to_radians(), -seen[0].to_radians());
+            let dof = match &kill {
+                Some((_, dof)) => *dof,
+                None => self.scene_dof(&snap.ps, &ps, view_model, render, (yaw, pitch), dt),
+            };
+            self.c.kill_cam_frames += u64::from(kill.is_some());
+            self.c.dof_frames += u64::from(dof.active());
             let (events, commands) = self.take_events(&snap);
             self.look
                 .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
             let look = self.look.frame(st);
             self.shock_effects(&look);
-            let (yaw, pitch) = (seen[1].to_radians(), -seen[0].to_radians());
             // The effects the followed player's guns and the map's events start are as visible to a watcher.
-            self.boxes.sync(&snap);
             let drawn = self.fx_frame(
                 dt,
                 st,
@@ -919,13 +969,16 @@ impl NetPlay {
                 pitch: pitch + (look.kick[0] - drawn.sway[0] - hit_view[0]).to_radians(),
                 roll: seen[2].to_radians() + (drawn.sway[2] + hit_view[1]).to_radians(),
                 models,
-                sight: self.sight.clone(),
-                fixed_fov: fixed_fov(&ps),
+                sight: kill_fov.is_none().then(|| self.sight.clone()).flatten(),
+                fixed_fov: kill_fov.or_else(|| fixed_fov(&ps)),
                 meshes: drawn.meshes,
                 lights: drawn.lights,
                 events,
                 commands,
                 look,
+                dof,
+                fog: self.fog.at(st),
+                fog_from_server: self.fog.announced(),
             });
         }
         self.follow_movement_dvars();
@@ -953,6 +1006,7 @@ impl NetPlay {
             .lib
             .content
             .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)));
+        let ads_dof = def.map(|d| (d.ads_dof_start, d.ads_dof_end));
         if dead {
             self.kick.clear();
         } else {
@@ -1056,7 +1110,14 @@ impl NetPlay {
         ];
         let mut render = eye + Vec3::from(cam.offset);
         let mut hands = Vec::new();
-        if !dead {
+        let mut view_model = None;
+        if dead {
+            // The dead see their body from behind (`CG_OffsetThirdPersonView`), turned the way the blow came from.
+            let head = render;
+            (seen, render) = self.death_view(&ps, head);
+            self.c.death_view_frames += 1;
+            self.c.death_view_range_max = self.c.death_view_range_max.max(head.distance(render));
+        } else {
             let mut at = feet;
             for (a, o) in at.iter_mut().zip(cam.offset) {
                 *a += o;
@@ -1065,6 +1126,7 @@ impl NetPlay {
             let clip_empty = index != 0 && p.inv.clip(&self.weapons, index) == 0;
             hands = self.view_model(dt, &ps, at, seen, clip_empty);
             render += self.hands_camera(&ps, &mut seen);
+            view_model = Some(crate::dof::view_model(&ps, ads_dof));
         }
         // The listener hears from the drawn eye (`SND_SetListener(.., refdef.vieworg, ..)`).
         self.hear(dt, render, &ps, &events, &snap);
@@ -1082,7 +1144,7 @@ impl NetPlay {
         let (events, commands) = self.take_events(&snap);
         let look = self.look.frame(st);
         self.shock_effects(&look);
-        let mut models = self.remote_players(dt, st, own);
+        let mut models = self.remote_players(dt, st, own, dead);
         let view = if dead {
             (0.0, ps.viewangles[1])
         } else {
@@ -1093,14 +1155,10 @@ impl NetPlay {
         models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));
         models.extend(hands);
-        let yaw = if dead { ps.viewangles[1] } else { seen[1] };
-        let pitch = if dead { 0.0 } else { seen[0] + hit_view[0] };
-        let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
-        let roll = if dead {
-            0.0
-        } else {
-            (seen[2] + kick[2] + hit_view[1]).to_radians()
-        };
+        let (yaw, pitch) = (seen[1].to_radians(), -(seen[0] + hit_view[0]).to_radians());
+        let roll = (seen[2] + kick[2] + hit_view[1]).to_radians();
+        let dof = self.scene_dof(&snap.ps, &ps, view_model, render, (yaw, pitch), dt);
+        self.c.dof_frames += u64::from(dof.active());
         let drawn = self.fx_frame(dt, st, own, &events, render, (yaw, pitch, roll));
         models.extend(self.props.instances());
         models.extend(drawn.models);
@@ -1117,7 +1175,105 @@ impl NetPlay {
             events,
             commands,
             look,
+            dof,
+            fog: self.fog.at(st),
+            fog_from_server: self.fog.announced(),
         })
+    }
+
+    /// `CG_OffsetThirdPersonView` for a dead player: the angles (pitch positive down, yaw, roll) and the place of
+    /// the camera hung behind the head at `head`, the world's walls in its way.
+    fn death_view(&self, ps: &PlayerState, head: Vec3) -> ([f32; 3], Vec3) {
+        let world = self.boxes.world();
+        let hull = [crate::camera::ORBIT_HULL; 3];
+        let trace = |a: Vec3, b: Vec3| {
+            world
+                .trace(
+                    a.to_array(),
+                    b.to_array(),
+                    hull.map(|h| -h),
+                    hull,
+                    ps.client_num,
+                    crate::camera::ORBIT_MASK,
+                )
+                .fraction
+        };
+        let dead_yaw = (ps.dead_yaw != sim::pm::DEAD_YAW_UNSET).then_some(ps.dead_yaw as f32);
+        let (angles, at) = crate::camera::third_person(
+            head,
+            [ps.viewangles[0], ps.viewangles[1], 0.0],
+            dead_yaw,
+            self.orbit,
+            &trace,
+        );
+        (angles, at)
+    }
+
+    /// The camera a kill cam puts on the entity the scripts named as the killer, and the blur it is seen through
+    /// (`CG_HelicopterKillCamEnabled`, `CG_AirstrikeKillCamEnabled`): `None` outside a kill cam and while the entity
+    /// or the victim is not in view.
+    fn kill_cam(
+        &self,
+        st: i32,
+        snap: &net::snapshot::Snapshot,
+    ) -> Option<(crate::camera::KillCam, render::Dof)> {
+        let follow = snap.follow.filter(|f| f.archive_ms > 0)?;
+        let number = follow.entity?;
+        snap.entity(number)?;
+        let ents = self
+            .net
+            .snaps
+            .interpolate(st - net::view::INTERP_DELAY_MS, None);
+        let find = |n: u16| ents.iter().find(|e| e.number == n);
+        let (killer, victim) = (find(number)?, find(follow.own)?);
+        let target = Vec3::from(victim.origin);
+        if killer.etype == etype::VEHICLE {
+            let k = crate::camera::helicopter_kill_cam(Vec3::from(killer.origin), target)?;
+            let dof = crate::dof::helicopter_kill_cam(k.distance, crate::camera::HELI_DIST);
+            Some((k, dof))
+        } else {
+            let k =
+                crate::camera::airstrike_kill_cam(Vec3::from(killer.origin), killer.angles, target);
+            Some((k, crate::dof::airstrike_kill_cam(k.distance)))
+        }
+    }
+
+    /// `CG_UpdateSceneDepthOfField`: the blur of the picture seen from `eye` looking along `(yaw, pitch)` radians.
+    /// `snap` is the player state the server sent (the scripts' blur), `ps` the one drawn (the aim); `view_model` is
+    /// the range the first-person weapon blurs over, `None` when it is not drawn.
+    fn scene_dof(
+        &mut self,
+        snap: &PlayerState,
+        ps: &PlayerState,
+        view_model: Option<(f32, f32)>,
+        eye: Vec3,
+        (yaw, pitch): (f32, f32),
+        dt: f32,
+    ) -> render::Dof {
+        let mut dof = crate::dof::scripted(snap).unwrap_or_else(|| {
+            let aimed = ps.weapon_pos_frac != 0.0 || ps.pm_type >= PmType::Dead;
+            let mut focus = crate::dof::ADS_TRACE;
+            if aimed {
+                let (sy, cy) = yaw.sin_cos();
+                let (sp, cp) = pitch.sin_cos();
+                let to = eye + Vec3::new(cp * cy, cp * sy, sp) * focus;
+                focus *= self
+                    .boxes
+                    .world()
+                    .trace(
+                        eye.to_array(),
+                        to.to_array(),
+                        [0.0; 3],
+                        [0.0; 3],
+                        ps.client_num,
+                        contents::MASK_SHOT,
+                    )
+                    .fraction;
+            }
+            self.ads_dof.update(ps, focus, dt)
+        });
+        (dof.view_model_start, dof.view_model_end) = view_model.unwrap_or_default();
+        dof
     }
 
     /// Plays what the props did this frame (bullet impacts, destroy effects) and every body hit loud enough to hear.
@@ -1843,11 +1999,15 @@ impl NetPlay {
     }
 
     /// Models of every other player, between the snapshots around the interpolation moment.
-    fn remote_players(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
+    fn remote_players(&mut self, dt: f32, st: i32, own: u16, show_own: bool) -> Vec<ModelInstance> {
         let ents = self
             .net
             .snaps
-            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
+            .interpolate(st - net::view::INTERP_DELAY_MS, (!show_own).then_some(own));
+        if !show_own {
+            // Not seen through its own eyes: the body is made anew (and falls anew) the next time it is.
+            self.remotes.remove(&own);
+        }
         let now = Instant::now();
         let mut out = Vec::new();
         let mut players = 0;
@@ -1860,19 +2020,22 @@ impl NetPlay {
                 .weapons
                 .get(e.weapon)
                 .and_then(|i| self.lib.content.weapon(&i.name));
-            self.sound.events(
-                &Who {
-                    own: false,
-                    entity: e.number,
-                    origin: e.origin,
-                    weapon: def.map(|d| &**d),
-                    weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
-                    quiet: e.perks & sim::pm::PERK_QUIETER != 0,
-                    turret: false,
-                },
-                e.event_seq,
-                &e.recent_events(),
-            );
+            // The player's own events are heard as the prediction raises them, not twice.
+            if e.client != own {
+                self.sound.events(
+                    &Who {
+                        own: false,
+                        entity: e.number,
+                        origin: e.origin,
+                        weapon: def.map(|d| &**d),
+                        weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
+                        quiet: e.perks & sim::pm::PERK_QUIETER != 0,
+                        turret: false,
+                    },
+                    e.event_seq,
+                    &e.recent_events(),
+                );
+            }
             // A dead player is not drawn: the body the server's corpse entity stands for is, and it falls from the
             // pose the player was last seen in.
             if e.eflags & eflags::DEAD != 0 {
@@ -2066,6 +2229,10 @@ impl NetPlay {
             "bob_max": self.c.view_bob_max,
             "turn_max": self.c.view_turn_max,
             "camera_tag_frames": self.c.camera_tag_frames,
+            "death_view_frames": self.c.death_view_frames,
+            "death_view_range_max": self.c.death_view_range_max,
+            "kill_cam_frames": self.c.kill_cam_frames,
+            "dof_frames": self.c.dof_frames,
         });
         report["damage_events"] = json!(self.c.damage_events);
         report["damage_flash_max"] = json!(self.c.max_damage_flash);

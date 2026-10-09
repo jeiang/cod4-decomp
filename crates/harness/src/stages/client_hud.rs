@@ -99,6 +99,20 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     if n("killcam_frames") == 0 {
         bad.push("no killcam frame");
     }
+    // The dead see their body from behind, and the picture is blurred by depth of field at some point (the sights'
+    // blur, or the dead view's, which eases to a focus; the stock spawn call of `setDepthOfField` asks for nothing).
+    // A killcam of the kill needs the death first.
+    let view = &report["net"]["view"];
+    let v = |k: &str| view[k].as_u64().unwrap_or(0);
+    if n("killcam_frames") > 0 && v("death_view_frames") == 0 {
+        bad.push("the player died but the camera never went behind the body");
+    }
+    if v("death_view_frames") > 0 && view["death_view_range_max"].as_f64().unwrap_or(0.0) < 8.0 {
+        bad.push("the death camera hung at the head instead of behind it");
+    }
+    if v("dof_frames") == 0 {
+        bad.push("depth of field never blurred a frame");
+    }
     // A name is held to account only when the match gave the HUD something to name; `untested` says when not.
     if n("friends_in_sight_frames") > 0 && n("names_max") == 0 {
         bad.push("a teammate was in sight but no overhead name was drawn");
@@ -221,7 +235,8 @@ mod tests {
                 "killcam_frames": 120, "names_max": 3, "crosshair_name_frames": 40,
                 "friends_in_sight_frames": 50, "crosshair_due_frames": 60,
                 "head_icon_materials": ["headiconyouinkillcam"], "chat": 1
-            }
+            },
+            "net": {"view": {"death_view_frames": 40, "death_view_range_max": 120.0, "dof_frames": 900}}
         })
     }
 
@@ -253,6 +268,17 @@ mod tests {
         r["hud_draw"]["crosshair_due_frames"] = json!(0);
         assert_eq!(verdict(&r), None);
         assert_eq!(untested(&r).len(), 2);
+        let mut r = good();
+        r["net"]["view"]["death_view_frames"] = json!(0);
+        r["net"]["view"]["dof_frames"] = json!(0);
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("behind the body") && why.contains("depth of field"),
+            "{why}"
+        );
+        r["net"]["view"]["death_view_frames"] = json!(5);
+        r["net"]["view"]["death_view_range_max"] = json!(0.0);
+        assert!(verdict(&r).unwrap().contains("at the head"));
         let mut r = good();
         r["hud_draw"]["head_icon_materials"] = json!([]);
         assert!(verdict(&r).unwrap().contains("head icon"));

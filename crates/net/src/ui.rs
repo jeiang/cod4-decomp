@@ -49,6 +49,8 @@ pub mod cs {
     pub const CODINFO_COUNT: u16 = 128;
     pub const CODINFO_VALUE: u16 = 148;
     pub const MESSAGE: u16 = 3;
+    /// The scene's fog, `<start> <density> <r> <g> <b> <transition ms>` (`setExpFog`); empty or `0` for none.
+    pub const FOGVARS: u16 = 9;
     pub const SCORES_ALLIES: u16 = 4;
     pub const SCORES_AXIS: u16 = 5;
     pub const GAMEENDTIME: u16 = 11;

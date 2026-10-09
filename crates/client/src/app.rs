@@ -1121,6 +1121,17 @@ impl Viewer {
                     })
                     .collect(),
             );
+            let cvar_f32 = |name: &str, default: f32| {
+                st.input
+                    .cvar(name)
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(default)
+            };
+            net.set_orbit(
+                cvar_f32("cg_thirdPersonRange", 120.0),
+                cvar_f32("cg_thirdPersonAngle", 0.0),
+            );
             net.set_footsteps(
                 st.input
                     .cvar("cg_footsteps")
@@ -1259,6 +1270,11 @@ impl Viewer {
                         (r.post.glow, r.post.film) = (glow, film);
                     }
                     r.post.shell_shock = nf.look.shell_shock;
+                    r.post.dof = Some(nf.dof);
+                    // The server's fog replaces the one the map's art script was read for, once it has set any.
+                    if nf.fog_from_server {
+                        r.art.fog = nf.fog;
+                    }
                     r.post.save_screen |= nf.look.save_screen;
                 }
             }
@@ -1992,6 +2008,11 @@ fn script_step(st: &mut State) -> bool {
             }
             done(arg == "escape", sc, format!("key {arg}"));
         }
+        // Presses and releases a key as a player's hand does (`holdkey=mouse2` aims down the sights).
+        "holdkey" | "releasekey" => {
+            st.input.key(arg, key == "holdkey");
+            done(true, sc, format!("{key} {arg}"));
+        }
         // Holds a key down until the grenade count of the HUD drops (`throw=g:10`: the key, at most that many
         // seconds): the bind, the button and the server's throw as a player's key press goes through them.
         "throw" => {
@@ -2213,6 +2234,10 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| u8::from(r.settings.dof).to_string()),
+                // Whether the frame is blurred by depth of field: the scripts' or the sights' range, and `r_dof_enable`.
+                "blur" => st.renderer.as_ref().map(|r| {
+                    u8::from(r.settings.dof && r.post.dof.is_some_and(|d| d.active())).to_string()
+                }),
                 "glow" => st
                     .renderer
                     .as_ref()

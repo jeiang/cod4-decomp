@@ -127,11 +127,8 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("stopshellshock", r(stop_shell_shock)),
     ("viewkick", r(view_kick)),
     ("vibrate", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("setdepthoffield", r(|_, _, _, _| Ok(Value::Undefined))),
-    (
-        "setviewmodeldepthoffield",
-        r(|_, _, _, _| Ok(Value::Undefined)),
-    ),
+    ("setdepthoffield", r(set_depth_of_field)),
+    ("setviewmodeldepthoffield", r(set_view_model_depth_of_field)),
     ("playlocalsound", r(super::sound::play_local_sound)),
     ("stoplocalsound", r(super::sound::stop_local_sound)),
     (
@@ -387,6 +384,87 @@ fn view_kick(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     for (d, (o, f)) in c.damage_from.iter_mut().zip(c.ps.origin.iter().zip(from)) {
         *d = o - f;
     }
+    Ok(Value::Undefined)
+}
+
+/// `GScr_SetDepthOfField`'s checks and fix-ups, on `(near start, near end, far start, far end, near blur, far blur)`:
+/// an empty range turns that side off.
+fn dof_ranges(mut v: [f32; 6]) -> Result<[f32; 6], String> {
+    let [
+        near_start,
+        near_end,
+        far_start,
+        far_end,
+        near_blur,
+        far_blur,
+    ] = &mut v;
+    for (i, (x, what)) in [
+        (*near_start, "near start"),
+        (*near_end, "near end"),
+        (*far_start, "far start"),
+        (*far_end, "far end"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if x < 0.0 {
+            return Err(format!("parameter {}: {what} must be >= 0", i + 1));
+        }
+    }
+    if !(4.0..=10.0).contains(near_blur) {
+        return Err("parameter 5: near blur should be between 4 and 10".into());
+    }
+    if *far_blur < 0.0 || *near_blur < *far_blur {
+        return Err("parameter 6: far blur should be >= 0 and <= near blur".into());
+    }
+    if *near_end <= *near_start {
+        *near_start = 0.0;
+        *near_end = 0.0;
+    }
+    if *far_end <= *far_start || *far_blur == 0.0 {
+        *far_start = 0.0;
+        *far_end = 0.0;
+    } else if *near_end > *far_start {
+        return Err("parameter 3: far start must be >= near end, or far depth of field should be disabled with far start >= far end or far blur == 0".into());
+    }
+    Ok(v)
+}
+
+/// `setdepthoffield(near start, near end, far start, far end, near blur, far blur)`: the blur the player's view
+/// is drawn with (`GScr_SetDepthOfField`); all zero hands it back to the aim-down-sights blur.
+fn set_depth_of_field(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client_of(g, e)?;
+    if a.len() != 6 {
+        return Err("Incorrect number of parameters".into());
+    }
+    let mut v = [0.0; 6];
+    for (i, x) in v.iter_mut().enumerate() {
+        *x = a.float(i)?;
+    }
+    let [ns, ne, fs, fe, nb, fb] = dof_ranges(v)?;
+    let ps = &mut g.client_mut(n).expect("client").ps;
+    (ps.dof_near_start, ps.dof_near_end) = (ns, ne);
+    (ps.dof_far_start, ps.dof_far_end) = (fs, fe);
+    (ps.dof_near_blur, ps.dof_far_blur) = (nb, fb);
+    Ok(Value::Undefined)
+}
+
+/// `setviewmodeldepthoffield(start, end)`: where the first-person weapon blurs from and is sharp from
+/// (`GScr_SetViewModelDepthOfField`).
+fn set_view_model_depth_of_field(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    let n = client_of(g, e)?;
+    let (mut start, mut end) = (a.float(0)?, a.float(1)?);
+    if start < 0.0 {
+        return Err("parameter 1: start must be >= 0".into());
+    }
+    if end < 0.0 {
+        return Err("parameter 2: end must be >= 0".into());
+    }
+    if end <= start {
+        (start, end) = (0.0, 0.0);
+    }
+    let ps = &mut g.client_mut(n).expect("client").ps;
+    (ps.dof_viewmodel_start, ps.dof_viewmodel_end) = (start, end);
     Ok(Value::Undefined)
 }
 
@@ -690,6 +768,76 @@ mod tests {
     fn the_quieter_perk_bit_is_the_one_clients_test() {
         let i = PERK_NAMES.iter().position(|n| *n == "specialty_quieter");
         assert_eq!(i.map(|i| 1u32 << i), Some(sim::pm::PERK_QUIETER));
+    }
+
+    #[test]
+    fn depth_of_field_ranges_are_checked_and_empty_sides_switch_off() {
+        // What the stock spawn asks for.
+        assert_eq!(
+            dof_ranges([0.0, 128.0, 512.0, 4000.0, 6.0, 1.8]),
+            Ok([0.0, 128.0, 512.0, 4000.0, 6.0, 1.8])
+        );
+        // What the stock scripts call at every spawn asks for nothing, which leaves the view to the sights' blur.
+        assert_eq!(
+            dof_ranges([0.0, 0.0, 512.0, 4000.0, 4.0, 0.0]),
+            Ok([0.0, 0.0, 0.0, 0.0, 4.0, 0.0])
+        );
+        // No far blur: the far side is off. An empty near range: the near side is.
+        assert_eq!(
+            dof_ranges([10.0, 10.0, 512.0, 4000.0, 6.0, 0.0]),
+            Ok([0.0, 0.0, 0.0, 0.0, 6.0, 0.0])
+        );
+        for bad in [
+            [-1.0, 128.0, 512.0, 4000.0, 6.0, 1.8],
+            [0.0, 128.0, 512.0, 4000.0, 3.0, 1.8],
+            [0.0, 128.0, 512.0, 4000.0, 6.0, 7.0],
+            [0.0, 600.0, 512.0, 4000.0, 6.0, 1.8],
+        ] {
+            assert!(dof_ranges(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn setdepthoffield_reaches_the_player_state() {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(prog).unwrap();
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.reset_level(4);
+        let n = g.connect_client(&mut vm, true, "Ann").unwrap();
+        let e = EntRef {
+            num: n,
+            class: EntClass::Entity,
+        };
+        let v: Vec<Value> = [0, 128, 512, 4000, 6]
+            .into_iter()
+            .map(Value::Int)
+            .chain([Value::Float(1.8)])
+            .collect();
+        set_depth_of_field(&mut g, &mut vm, e, Args::new("setdepthoffield", &v)).unwrap();
+        let v = [Value::Int(2), Value::Int(9)];
+        set_view_model_depth_of_field(
+            &mut g,
+            &mut vm,
+            e,
+            Args::new("setviewmodeldepthoffield", &v),
+        )
+        .unwrap();
+        let ps = &g.client(n).unwrap().ps;
+        assert_eq!(
+            [
+                ps.dof_near_end,
+                ps.dof_far_start,
+                ps.dof_far_end,
+                ps.dof_far_blur
+            ],
+            [128.0, 512.0, 4000.0, 1.8]
+        );
+        assert_eq!((ps.dof_viewmodel_start, ps.dof_viewmodel_end), (2.0, 9.0));
     }
 
     #[test]

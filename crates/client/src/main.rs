@@ -12,11 +12,13 @@ mod crosshair;
 mod damage;
 mod decal;
 mod display;
+mod dof;
 #[cfg(not(target_arch = "wasm32"))]
 mod download;
 mod effects;
 mod events;
 mod flythrough;
+mod fog;
 #[cfg(not(target_arch = "wasm32"))]
 mod fx_selftest;
 mod gfx;

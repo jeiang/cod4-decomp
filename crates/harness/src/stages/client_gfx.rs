@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-gfx`: the graphics settings of the options menus reach the window and the renderer. The real client sets
 //! the dvars the menu writes, applies them with `vid_restart` (vsync off, a 4:3 screen), starts a match (4x
-//! antialiasing, no specular, depth of field, glow or shadows, four dynamic lights), then turns the match's settings back with a second
+//! antialiasing, no specular, depth of field, glow or shadows, four dynamic lights; with it on, aiming down the sights must
+//! blur the picture, and a hip-fired view must not), then turns the match's settings back with a second
 //! `vid_restart` in the running match. Every `gfxis=` check reads the renderer's and the surface's own state. A frame
 //! with a bright test light in front of the player must also be clearly brighter than the same frame without it (the
 //! dynamic light pass). Needs a display and the install; skips without.
@@ -20,7 +21,7 @@ set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_
 vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
 menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\
-gfxis=aa 4,gfxis=specular 0,gfxis=dof 0,gfxis=glow 0,gfxis=shadows 0,shot=gfx-on,\
+gfxis=aa 4,gfxis=specular 0,gfxis=dof 0,gfxis=blur 0,gfxis=glow 0,gfxis=shadows 0,shot=gfx-on,\
 set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
 set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
 set=set r_fullscreen 0,vidrestart,wait=2,gfxis=fullscreen 0,\
@@ -29,7 +30,7 @@ set=set r_distortion 0,vidrestart,wait=2,shot=distort-off,set=set r_distortion 1
 dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1,shot=dlight-on,dlight=0,\
 set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\
 set=set r_aspectRatio auto,vidrestart,wait=2,\
-gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off";
+gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,wait=2,gfxis=blur 1,releasekey=mouse2,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off";
 
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
 const LIT_SHARE: f64 = 0.05;

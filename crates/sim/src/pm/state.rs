@@ -394,6 +394,17 @@ pub struct PlayerState {
     pub view_height_lerp_down: bool,
     pub view_angle_clamp_base: [f32; 2],
     pub view_angle_clamp_range: [f32; 2],
+    /// The depth of field the scripts' `setdepthoffield` asks for: distances in units, blur radii in virtual 640x480
+    /// pixels. All four distances zero leaves it to the client's aim-down-sights blur.
+    pub dof_near_start: f32,
+    pub dof_near_end: f32,
+    pub dof_far_start: f32,
+    pub dof_far_end: f32,
+    pub dof_near_blur: f32,
+    pub dof_far_blur: f32,
+    /// `setviewmodeldepthoffield`: the range the first-person weapon is blurred from (full blur) to (in focus).
+    pub dof_viewmodel_start: f32,
+    pub dof_viewmodel_end: f32,
     /// `stats[STAT_DEAD_YAW]`.
     pub dead_yaw: i32,
     /// `stats[STAT_HEALTH]` and `stats[STAT_MAX_HEALTH]`: the server's, for the HUD.
@@ -507,6 +518,14 @@ impl Default for PlayerState {
             view_height_lerp_down: false,
             view_angle_clamp_base: [0.0; 2],
             view_angle_clamp_range: [180.0; 2],
+            dof_near_start: 0.0,
+            dof_near_end: 0.0,
+            dof_far_start: 0.0,
+            dof_far_end: 0.0,
+            dof_near_blur: 0.0,
+            dof_far_blur: 0.0,
+            dof_viewmodel_start: 0.0,
+            dof_viewmodel_end: 0.0,
             dead_yaw: DEAD_YAW_UNSET,
             health: 0,
             max_health: 0,
