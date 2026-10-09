@@ -2,7 +2,7 @@
 //! Copies what the server told the UI into a [`LiveUi`] once per frame: the script hud elements with their strings
 //! looked up, objectives, scoreboard lines, names and teams, and the replay state of a killcam.
 
-use super::{KillIcon, LiveElem, LiveObjective, LiveUi, ScoreLine};
+use super::{KillIcon, LiveElem, LiveObjective, LiveUi, LiveVote, ScoreLine};
 use crate::wire::Wire;
 use net::client::NetClient;
 use net::entity::etype;
@@ -166,6 +166,12 @@ pub fn fill(net: &mut NetClient<Wire>, live: &mut LiveUi, time: i32, eye: Option
         live.scores = lines;
     }
     (live.allies_score, live.axis_score) = ui.team_scores();
+    live.vote = LiveVote::parse(
+        ui.config(cs::VOTE_TIME),
+        ui.config(cs::VOTE_STRING),
+        ui.config(cs::VOTE_YES),
+        ui.config(cs::VOTE_NO),
+    );
 }
 
 /// Looks up the kill icon of each weapon a kill in `events` was made with.

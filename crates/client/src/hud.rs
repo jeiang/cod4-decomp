@@ -15,6 +15,7 @@ mod elems;
 mod feed;
 pub mod fill;
 pub mod names;
+mod prompt;
 mod scores;
 
 use crate::input::Cvars;
@@ -24,6 +25,7 @@ use std::collections::HashMap;
 
 pub use elems::{SPECTATE_PROMPTS, draw_over, draw_under};
 pub use feed::{BOLD, Feed, NOTIFY, WINDOWS};
+pub use prompt::{LiveVote, draw_typing, draw_vote};
 pub use scores::{ScoreView, draw_scoreboard, rows_shown, scoreboard_lines};
 
 use serde_json::{Value, json};
@@ -158,6 +160,8 @@ pub struct LiveUi {
     pub server_addr: String,
     /// The server has been silent long enough to warn of it ("Connection interrupted" and the net icon).
     pub interrupted: bool,
+    /// The vote the server is running, for the yellow lines (`CG_DrawVote`).
+    pub vote: Option<LiveVote>,
     /// Set by the shell: the scoreboard is up, so ask the server for fresh rows every couple of seconds.
     pub scores_wanted: bool,
     /// Eye position and clip matrix of the frame the world is drawn with, set by the app before painting.
@@ -326,6 +330,10 @@ pub struct Stats {
     /// two name counts above can be held to.
     pub friends_in_sight_frames: u32,
     pub crosshair_due_frames: u32,
+    /// Frames a vote was on screen, and the most yes and no answers its lines showed.
+    pub vote_frames: u32,
+    pub vote_yes_max: i32,
+    pub vote_no_max: i32,
     /// The elements of the busiest frame, as the screen got them.
     sample: Vec<Value>,
 }
@@ -361,6 +369,11 @@ impl Stats {
         self.killcam_frames += u32::from(live.killcam);
         self.intermission_frames += u32::from(live.intermission);
         self.following_frames += u32::from(live.following.is_some());
+        if let Some(v) = &live.vote {
+            self.vote_frames += 1;
+            self.vote_yes_max = self.vote_yes_max.max(v.yes);
+            self.vote_no_max = self.vote_no_max.max(v.no);
+        }
     }
 
     /// One frame of the names and icons over players' heads: how many reached the screen, and whether one was the
@@ -405,6 +418,9 @@ impl Stats {
             "head_icon_materials": self.head_icon_materials,
             "friends_in_sight_frames": self.friends_in_sight_frames,
             "crosshair_due_frames": self.crosshair_due_frames,
+            "vote_frames": self.vote_frames,
+            "vote_yes_max": self.vote_yes_max,
+            "vote_no_max": self.vote_no_max,
             "sample": self.sample,
         })
     }

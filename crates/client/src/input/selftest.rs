@@ -133,6 +133,36 @@ pub fn run() -> Vec<String> {
     i.exec_line("quit");
     check(o, "quit command -> quit", i.frame(0.01).quit());
 
+    // Chat and voting: T and Y open the chat field, F1 and F2 answer a vote, and what a player types in the field
+    // leaves as the `say` line the server reads.
+    for (key, want) in [
+        ("t", "chatmodepublic"),
+        ("y", "chatmodeteam"),
+        ("f1", "vote yes"),
+        ("f2", "vote no"),
+    ] {
+        i.key(key, true);
+        let f = i.frame(0.01);
+        i.key(key, false);
+        check(o, &format!("{key} -> {want}"), f.pending_commands == [want]);
+    }
+    let mut field = crate::console::Console::default();
+    field.open_chat(true);
+    for c in "on me, \"now\"".chars() {
+        field.key(crate::ui::UiKey::Char(c), |_| Vec::new());
+    }
+    let sent = match field.key(crate::ui::UiKey::Enter, |_| Vec::new()) {
+        Some(crate::console::Entered::Say { team, text }) => {
+            crate::console::server_line(&[if team { "say_team" } else { "say" }.to_owned(), text])
+        }
+        _ => None,
+    };
+    check(
+        o,
+        "Enter in the chat field -> a say_team line the server tokenizes whole",
+        sent.as_deref() == Some("say_team \"on me, 'now'\"") && !field.active(),
+    );
+
     // Mouse look is gated on focus and on the pointer being locked; motion made meanwhile is not replayed.
     i.set_captured(false);
     i.mouse.winit_motion((10.0, 4.0));

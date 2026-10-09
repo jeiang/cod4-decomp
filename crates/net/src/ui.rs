@@ -27,6 +27,13 @@ use crate::field::{Field, Kind, changed_count, read_delta, write_delta};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+/// What a chat line says about its speaker ([`ServerCmd::Chat`] `tag`): the original's `(Dead)` and `(Spectator)`.
+pub mod chat_tag {
+    pub const NORMAL: u8 = 0;
+    pub const DEAD: u8 = 1;
+    pub const SPECTATOR: u8 = 2;
+}
+
 /// Configstring layout: the index ranges the scripts and the client agree on. A string index a
 /// script gives to `settext`/`setshader`/`openmenu` is `BASE + n`; 0 is "none" in every range, so
 /// the first entry of a range is `BASE + 1`.
@@ -36,6 +43,11 @@ pub mod cs {
     pub const SCORES_ALLIES: u16 = 4;
     pub const SCORES_AXIS: u16 = 5;
     pub const GAMEENDTIME: u16 = 11;
+    /// The vote in progress: `<end server ms> <server id>` (empty when none), the shown text, the yes and no counts.
+    pub const VOTE_TIME: u16 = 13;
+    pub const VOTE_STRING: u16 = 14;
+    pub const VOTE_YES: u16 = 15;
+    pub const VOTE_NO: u16 = 16;
     /// Map name shown by `setmapnamestring` hud elements (`mapname` of the level).
     pub const MAPNAME: u16 = 17;
     /// Gametype shown by `setgametypestring` hud elements.
@@ -667,6 +679,8 @@ pub enum ServerCmd {
     Chat {
         team: bool,
         client: u16,
+        /// The speaker's state when the line was said ([`chat_tag`]).
+        tag: u8,
         text: String,
     },
     /// Scoreboard rows (see [`Scoreboard`]): the rows `start..start + rows.len()` of `total`, the
@@ -898,10 +912,16 @@ impl ServerCmd {
                 s.push_str("announce");
                 arg(&mut s, text);
             }
-            ServerCmd::Chat { team, client, text } => {
+            ServerCmd::Chat {
+                team,
+                client,
+                tag,
+                text,
+            } => {
                 s.push_str("chat");
                 arg(&mut s, if *team { "team" } else { "all" });
                 arg(&mut s, &client.to_string());
+                arg(&mut s, &tag.to_string());
                 arg(&mut s, text);
             }
             ServerCmd::Scores {
@@ -1009,10 +1029,11 @@ impl ServerCmd {
                 name: w[1].clone(),
                 ms: w[2].parse().ok()?,
             },
-            ("chat", 4) => ServerCmd::Chat {
+            ("chat", 5) => ServerCmd::Chat {
                 team: a(1)? == "team",
                 client: a(2)?.parse().ok()?,
-                text: w[3].clone(),
+                tag: a(3)?.parse().ok()?,
+                text: w[4].clone(),
             },
             _ => return None,
         })
@@ -1173,6 +1194,7 @@ pub enum UiEvent {
     Chat {
         team: bool,
         client: u16,
+        tag: u8,
         text: String,
     },
     Obituary(Obituary),
@@ -1256,8 +1278,18 @@ impl ClientUiState {
             ServerCmd::CloseIngameMenu => self.push(UiEvent::CloseIngameMenu),
             ServerCmd::Print { kind, text } => self.push(UiEvent::Print { kind, text }),
             ServerCmd::Announce { text } => self.push(UiEvent::Announce { text }),
-            ServerCmd::Chat { team, client, text } => {
-                self.push(UiEvent::Chat { team, client, text });
+            ServerCmd::Chat {
+                team,
+                client,
+                tag,
+                text,
+            } => {
+                self.push(UiEvent::Chat {
+                    team,
+                    client,
+                    tag,
+                    text,
+                });
             }
             ServerCmd::Obituary(o) => self.push(UiEvent::Obituary(o)),
             ServerCmd::Stat { index, value } => {
@@ -1459,6 +1491,7 @@ mod tests {
             ServerCmd::Chat {
                 team: true,
                 client: 7,
+                tag: chat_tag::DEAD,
                 text: "  spaced  out ".into(),
             },
         ]

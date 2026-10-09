@@ -6,17 +6,11 @@
 
 use std::collections::HashSet;
 
-use net::ui::{PrintKind, ServerCmd};
+use net::ui::{PrintKind, ServerCmd, cs};
 
 use crate::client::Team;
 use crate::game::Game;
 use crate::ui::Dest;
-
-/// Configstrings of the vote the clients show (`CS_VOTE_TIME` ...).
-pub const CS_VOTE_TIME: u16 = 13;
-pub const CS_VOTE_STRING: u16 = 14;
-pub const CS_VOTE_YES: u16 = 15;
-pub const CS_VOTE_NO: u16 = 16;
 
 /// How long a vote runs, and how long a passed vote waits before it acts.
 const VOTE_MS: i32 = 30_000;
@@ -137,7 +131,8 @@ impl Game {
             "map_restart" => (vec!["fast_restart".into()], "Restart the map".into()),
             "map_rotate" => (vec!["map_rotate".into()], "Play the next map".into()),
             what @ ("kick" | "tempbanuser" | "clientkick" | "tempbanclient") => {
-                let by_number = what.ends_with("client");
+                // `clientkick` and `tempBanClient` take a slot; `kick` and `tempBanUser` (the stock menu) a name.
+                let by_number = matches!(what, "clientkick" | "tempbanclient");
                 let target = self.connected_clients().find(|(k, c)| {
                     if by_number {
                         arg(1).parse::<u16>().ok() == Some(*k)
@@ -184,10 +179,10 @@ impl Game {
             no: 0,
             cast: HashSet::from([n]),
         });
-        self.set_configstring(CS_VOTE_TIME, &format!("{end} 0"));
-        self.set_configstring(CS_VOTE_STRING, &shown);
-        self.set_configstring(CS_VOTE_YES, "1");
-        self.set_configstring(CS_VOTE_NO, "0");
+        self.set_configstring(cs::VOTE_TIME, &format!("{end} 0"));
+        self.set_configstring(cs::VOTE_STRING, &shown);
+        self.set_configstring(cs::VOTE_YES, "1");
+        self.set_configstring(cs::VOTE_NO, "0");
         Ok(())
     }
 
@@ -206,11 +201,11 @@ impl Game {
         if matches!(answer.as_bytes().first(), Some(b'y' | b'Y' | b'1')) {
             v.yes += 1;
             let s = v.yes.to_string();
-            self.set_configstring(CS_VOTE_YES, &s);
+            self.set_configstring(cs::VOTE_YES, &s);
         } else {
             v.no += 1;
             let s = v.no.to_string();
-            self.set_configstring(CS_VOTE_NO, &s);
+            self.set_configstring(cs::VOTE_NO, &s);
         }
         self.tell(n, "Vote cast.");
     }
@@ -241,7 +236,7 @@ impl Game {
         let Some(passed) = passed else { return due };
         let commands = std::mem::take(&mut self.vote.current.as_mut().unwrap().commands);
         self.vote.current = None;
-        self.set_configstring(CS_VOTE_TIME, "");
+        self.set_configstring(cs::VOTE_TIME, "");
         self.send(
             Dest::All,
             ServerCmd::Print {
@@ -258,5 +253,62 @@ impl Game {
             self.vote.pending = Some((time + EXECUTE_DELAY_MS, commands));
         }
         due
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{Client, Conn};
+    use crate::content::Content;
+    use crate::cvar::Cvars;
+
+    fn game() -> Game {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.cvars.set("g_allowvote", "1");
+        g.clients = ["Ann", "^1Bo^7", "Cy"]
+            .iter()
+            .enumerate()
+            .map(|(n, name)| Client::new(n as u16, false, (*name).to_owned()))
+            .collect();
+        for c in &mut g.clients {
+            c.conn = Conn::Connected;
+            c.team = Team::Allies;
+        }
+        g
+    }
+
+    /// What the vote would run, or why it was refused.
+    fn call(g: &mut Game, line: &[&str]) -> Result<Vec<String>, String> {
+        let argv: Vec<String> = line.iter().map(|s| (*s).to_owned()).collect();
+        g.start_vote(0, &argv)?;
+        let v = g.vote.current.take().expect("a vote started");
+        Ok(v.commands)
+    }
+
+    #[test]
+    fn clientkick_and_tempbanclient_take_a_slot_and_kick_and_tempbanuser_a_name() {
+        let mut g = game();
+        assert_eq!(
+            call(&mut g, &["clientkick", "1"]),
+            Ok(vec!["clientkick 1".into()])
+        );
+        assert_eq!(
+            call(&mut g, &["tempBanClient", "2"]),
+            Ok(vec!["tempbanclient 2".into()])
+        );
+        // The name is matched without its colour codes, as the stock menu sends it.
+        assert_eq!(
+            call(&mut g, &["kick", "bo"]),
+            Ok(vec!["clientkick 1".into()])
+        );
+        assert_eq!(
+            call(&mut g, &["tempBanUser", "CY"]),
+            Ok(vec!["tempbanclient 2".into()])
+        );
+        // A name is not a slot and a slot is not a name.
+        assert!(call(&mut g, &["clientkick", "Bo"]).is_err());
+        assert!(call(&mut g, &["kick", "1"]).is_err());
+        assert!(call(&mut g, &["clientkick", "9"]).is_err());
     }
 }

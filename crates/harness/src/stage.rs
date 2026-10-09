@@ -179,7 +179,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "net-vote",
-        description: "two real UDP clients vote: a kick vote drops one, a typemap vote changes the gametype and map",
+        description: "two real UDP clients chat and vote: say and say_team reach the right people, an unknown verb is answered, a clientkick vote drops a bot by slot, a kick vote drops one client, a typemap vote changes the gametype and map",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
@@ -339,7 +339,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-hud",
-        description: "the HUD the client draws over the stock menus in a team deathmatch against bots: scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam",
+        description: "the HUD the client draws over the stock menus in a team deathmatch against bots: scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam, a typed chat line and a console vote call coming back from the server",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,

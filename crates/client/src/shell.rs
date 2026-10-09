@@ -96,6 +96,8 @@ pub struct ShellState {
     /// The names and icons over other players, and the dvars that shape them.
     pub names: hud::names::Names,
     pub names_cfg: hud::names::Cfg,
+    /// The chat field and the console.
+    pub console: crate::console::Console,
     was_active: bool,
     /// The join menu's server lists (LAN discovery, favorites).
     pub servers: crate::serverlist::ServerList,
@@ -239,6 +241,7 @@ impl ShellState {
             hud_stats: hud::Stats::default(),
             names: hud::names::Names::default(),
             names_cfg: hud::names::Cfg::read(&crate::input::Cvars::default()),
+            console: crate::console::Console::default(),
             was_active: false,
             servers: Default::default(),
             vfs: ::assets::vfs::Vfs::open_stock(&install.root, 0).ok(),
@@ -552,12 +555,15 @@ impl Shell {
             }
             UiEvent::Print { kind, text } => self.print(kind, &text),
             UiEvent::Announce { text } => self.print(net::ui::PrintKind::Bold, &text),
-            UiEvent::Chat { team, client, text } => {
-                let live = &self.st.live;
-                let esc = hud::team_color_escape(live.own_team, live.team(client));
-                let who = format!("{esc}{}^7", live.name(client));
-                let line = format!("{}{who}: {text}", if team { "(Team) " } else { "" });
-                self.st.feed.chat(line, live.time);
+            UiEvent::Chat {
+                team,
+                client,
+                tag,
+                text,
+            } => {
+                let line = self.chat_line(team, client, tag, &text);
+                self.log(&line);
+                self.st.feed.chat(line, self.st.live.time);
                 self.st.hud_stats.chat += 1;
             }
             UiEvent::Obituary(o) => {
@@ -579,19 +585,98 @@ impl Shell {
         }
     }
 
+    /// A line for the console's output; it keeps the latest 256.
+    fn log(&mut self, text: &str) {
+        let log = &mut self.st.feed.console;
+        log.extend(text.lines().map(str::to_owned));
+        let extra = log.len().saturating_sub(256);
+        log.drain(..extra);
+    }
+
+    /// A line for the console's output only.
+    pub fn print_console(&mut self, text: &str) {
+        self.log(text);
+    }
+
+    /// A chat line as the player reads it: the speaker's name in the colour of their team, `(Team)` for a team line
+    /// and `(Dead)` or `(Spectator)` for one from a player not in the match.
+    fn chat_line(&self, team: bool, client: u16, tag: u8, text: &str) -> String {
+        use net::ui::chat_tag;
+        let live = &self.st.live;
+        let esc = hud::team_color_escape(live.own_team, live.team(client));
+        let state = match tag {
+            chat_tag::DEAD => Some("GAME_DEAD"),
+            chat_tag::SPECTATOR => Some("GAME_SPECTATOR"),
+            _ => None,
+        }
+        .map_or_else(String::new, |k| {
+            format!(
+                "{esc}({}) ",
+                hud::localize(&self.ui.assets, &format!("&{k}"))
+            )
+        });
+        format!(
+            "{state}{}{esc}{}^7: {text}",
+            if team { "(Team) " } else { "" },
+            live.name(client)
+        )
+    }
+
+    /// A key typed into the chat field or the console.
+    pub fn console_key(&mut self, input: &mut Input, key: UiKey) {
+        use crate::console::Entered;
+        let cvars = |prefix: &str| {
+            input
+                .cvars
+                .with_prefix(prefix)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect()
+        };
+        match self.st.console.key(key, cvars) {
+            Some(Entered::Say { team, text }) => {
+                let verb = if team { "say_team" } else { "say" };
+                self.st
+                    .actions
+                    .push(Action::Console(crate::input::config::join(&[
+                        verb.to_owned(),
+                        text,
+                    ])));
+            }
+            Some(Entered::Line(line)) => self.console_line(input, &line),
+            None => {}
+        }
+    }
+
+    /// A line typed at the console: echoed, then run as a menu script or a bind would run it. A cvar's name alone
+    /// says its value and with a value sets it.
+    pub fn console_line(&mut self, input: &mut Input, line: &str) {
+        self.log(&format!("] {line}"));
+        for cmd in crate::input::config::split_commands(line) {
+            let name = cmd[0].to_ascii_lowercase();
+            if let Some(value) = input.cvars.get(&name).map(str::to_owned) {
+                if cmd.len() > 1 {
+                    input.set_cvar(&name, &cmd[1..].join(" "));
+                } else {
+                    self.log(&format!("\"{name}\" is \"{value}\""));
+                }
+            } else if crate::console::is_command(&name) {
+                Self::host(&mut self.st, input)
+                    .command(&self.ui, &crate::input::config::join(&cmd));
+            } else {
+                self.log(&format!("Unknown command \"{}\"", cmd[0]));
+            }
+        }
+    }
+
     /// An `iprintln` line or announcement: into the message window it belongs to, or only the console log.
     fn print(&mut self, kind: net::ui::PrintKind, text: &str) {
         use net::ui::PrintKind;
         let text = hud::localize(&self.ui.assets, text);
         let now = self.st.live.time;
+        self.log(&text);
         match kind {
-            PrintKind::Console => {
-                let log = &mut self.st.feed.console;
-                log.push(text);
-                if log.len() > 256 {
-                    log.remove(0);
-                }
-            }
+            PrintKind::Console => {}
             PrintKind::Normal => {
                 self.st.feed.text(hud::NOTIFY, &text, now);
                 self.st.hud_stats.messages[hud::NOTIFY] += 1;
@@ -688,6 +773,7 @@ impl Shell {
             if in_game {
                 hud::draw_over(&self.ui, &mut p, &self.st);
             }
+            hud::draw_typing(&self.ui, &mut p, &self.st.console, &self.st.feed.console);
         }
         self.ui2d.flush(target, clear);
     }
@@ -707,6 +793,9 @@ impl Shell {
                     .iter()
                     .map(|(_, cmd)| (*cmd).to_owned()),
             );
+        }
+        if self.st.live.vote.is_some() {
+            marks.extend(["vote yes".to_owned(), "vote no".to_owned()]);
         }
         self.st.live.keys.clear();
         for cmd in marks {
@@ -1014,7 +1103,8 @@ impl HostCx<'_> {
                     map: a(1).to_owned(),
                     gametype: self.dvar_get("g_gametype"),
                 }),
-                "say" | "say_team" | "togglemenu" => self
+                // The server's, or the app's own: not for the input layer, whose `pending_commands` a menu drops.
+                n if n == "togglemenu" || n == "rcon" || crate::console::is_server_verb(n) => self
                     .st
                     .actions
                     .push(Action::Console(crate::input::config::join(&cmd))),
@@ -1320,10 +1410,11 @@ impl Host for HostCx<'_> {
             }
             "votetempban" | "votekick" => {
                 if let Some((n, _)) = self.players().get(self.st.player_sel) {
+                    // The list is by slot: the by-name `kick` would need the name spelled the server's way.
                     let how = if name.eq_ignore_ascii_case("votekick") {
-                        "kick"
+                        "clientkick"
                     } else {
-                        "tempBanUser"
+                        "tempBanClient"
                     };
                     self.st
                         .actions
@@ -1821,7 +1912,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(lines, ["callvote kick 3"]);
+        assert_eq!(lines, ["callvote clientkick 3"]);
     }
 
     /// The profile menu lists the install's profiles, picks one, makes one and deletes it; the active profile's stats

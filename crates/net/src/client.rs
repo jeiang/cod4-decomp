@@ -184,15 +184,22 @@ impl<T: Transport> NetClient<T> {
                         ConnectState::Refused(r) => self.phase = Phase::Refused(r.clone()),
                         _ => {}
                     }
-                } else if from == self.server
-                    && matches!(self.phase, Phase::Playing(_))
-                    && let Some(why) = match o {
-                        Oob::Error(why) => Some(why),
-                        Oob::Disconnect => Some("Disconnected by the server".to_owned()),
-                        _ => None,
+                } else if from == self.server && matches!(self.phase, Phase::Playing(_)) {
+                    match o {
+                        Oob::Error(why) => self.phase = Phase::Dropped(why),
+                        Oob::Disconnect => {
+                            self.phase = Phase::Dropped("Disconnected by the server".to_owned());
+                        }
+                        // The reply to an `rcon`: the console output the server redirected to us.
+                        Oob::Print(text) => self.commands.push(
+                            crate::ui::ServerCmd::Print {
+                                kind: crate::ui::PrintKind::Console,
+                                text,
+                            }
+                            .encode(),
+                        ),
+                        _ => {}
                     }
-                {
-                    self.phase = Phase::Dropped(why);
                 }
             } else if from == self.server
                 && let Phase::Playing(link) = &mut self.phase
@@ -214,6 +221,15 @@ impl<T: Transport> NetClient<T> {
         {
             self.phase = Phase::Dropped(TIMED_OUT.into());
         }
+    }
+
+    /// `rcon <password> <command>`: a console command for the server, whose output comes back as console prints.
+    pub fn rcon(&mut self, password: &str, command: &str) {
+        let oob = Oob::Rcon {
+            password: password.to_owned(),
+            command: command.to_owned(),
+        };
+        self.t.send_to(self.server, &oob.encode());
     }
 
     /// Asks the server for the scoreboard (repeat every couple of seconds while it is shown).

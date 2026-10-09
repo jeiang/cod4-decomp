@@ -123,6 +123,7 @@ pub fn draw_under(ui: &Ui, p: &mut Painter, st: &ShellState) {
         crate::crosshair::draw(p.g, p.cache, r, (w as u32, h as u32));
     }
     st.feed.draw_chat(ui, p, &st.live, st.game.scoreboard);
+    super::draw_vote(ui, p, &st.live);
     draw_elems(ui, p, &st.live, false);
 }
 
