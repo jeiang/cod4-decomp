@@ -50,6 +50,14 @@ const SCORES_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
 
+/// Alive in the world: the weapon switching of the original (`pm_type < PM_DEAD`) leaves spectators and the dead alone.
+fn alive(ps: &PlayerState) -> bool {
+    matches!(
+        ps.pm_type,
+        PmType::Normal | PmType::NormalLinked | PmType::LastStand
+    )
+}
+
 /// The field of view the original forces for a turret user (55) and for the intermission (90), whatever the weapon
 /// (`CG_GetViewFov`).
 fn fixed_fov(ps: &PlayerState) -> Option<f32> {
@@ -210,6 +218,8 @@ pub struct NetPlay {
     cmd_time: i32,
     last_cmd: Instant,
     want_weapon: Option<u16>,
+    /// The last primary weapon held (`weaponLatestPrimaryIdx`): where cycling from an item or offhand returns to.
+    latest_primary: u16,
     /// The weapon held before an action slot picked another, for the slot's second press.
     before_slot: Option<u16>,
     /// A night-vision slot was pressed: the next command carries the button.
@@ -311,6 +321,7 @@ impl NetPlay {
             cmd_time: 0,
             last_cmd: Instant::now(),
             want_weapon: None,
+            latest_primary: 0,
             before_slot: None,
             nv_press: false,
             own_events: Seen::default(),
@@ -470,6 +481,7 @@ impl NetPlay {
         self.pred = Predictor::default();
         self.cmd_time = 0;
         self.want_weapon = None;
+        self.latest_primary = 0;
         self.remotes.clear();
         self.vm = None;
         self.events = Events::default();
@@ -763,8 +775,12 @@ impl NetPlay {
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
         self.hear(dt, eye, &ps, &snap);
-        self.feedback
-            .merge(scan_own(&mut self.own_events, &snap.ps));
+        self.note_latest_primary(ps.weapon as u16);
+        let mut fb = scan_own(&mut self.own_events, &snap.ps);
+        if std::mem::take(&mut fb.out_of_ammo) {
+            self.out_of_ammo_change(&snap.ps, &PlayerWeapons::from_words(&snap.inv));
+        }
+        self.feedback.merge(fb);
 
         let (events, commands) = self.take_events(&snap);
         let look = self.look.frame(st);
@@ -1081,20 +1097,63 @@ impl NetPlay {
             self.draw_vehicles = arg.trim() != "0";
             return;
         }
-        let step: i32 = match cmd {
-            "weapnext" => 1,
-            "weapprev" => -1,
+        let forward = match cmd {
+            "weapnext" => true,
+            "weapprev" => false,
             _ => return,
         };
         let Some(snap) = self.net.latest() else {
             return;
         };
+        // `WeaponCycleAllowed`, `CycleWeapPrimary`: not while dead, frozen or with the weapons disabled.
+        let ps = &snap.ps;
+        if !alive(ps)
+            || ps.pm_flags & pmf::FROZEN != 0
+            || ps.weapon_flags & sim::pm::wf::DISABLED != 0
+        {
+            return;
+        }
         let inv = PlayerWeapons::from_words(&snap.inv);
-        let list: Vec<u16> = inv.list(&self.weapons).collect();
-        let cur = self.want_weapon.unwrap_or_else(|| inv.selected());
-        if let Some(i) = list.iter().position(|w| *w == cur) {
-            let n = list.len() as i32;
-            self.want_weapon = Some(list[(i as i32 + step).rem_euclid(n) as usize]);
+        let cur = self.selected_weapon(&inv, ps);
+        if let Some(w) = inv.cycle_primary(&self.weapons, cur, self.latest_primary, forward, false)
+        {
+            self.select_weapon(w);
+        }
+    }
+
+    /// The weapon the player has asked for, else the one the scripts did, else the one in hand.
+    fn selected_weapon(&self, inv: &PlayerWeapons, ps: &PlayerState) -> u16 {
+        self.want_weapon.unwrap_or(match inv.selected() {
+            0 => ps.weapon as u16,
+            w => w,
+        })
+    }
+
+    fn select_weapon(&mut self, w: u16) {
+        self.want_weapon = Some(w);
+        self.note_latest_primary(w);
+    }
+
+    fn note_latest_primary(&mut self, w: u16) {
+        let primary = PlayerWeapons::latest_primary_of(&self.weapons, w);
+        if primary != 0 {
+            self.latest_primary = primary;
+        }
+    }
+
+    /// `CG_OutOfAmmoChange`: the weapon in hand ran dry, so raise another unless it is one that stays up when empty.
+    fn out_of_ammo_change(&mut self, ps: &PlayerState, inv: &PlayerWeapons) {
+        let held = ps.weapon as u16;
+        let stays = self
+            .lib
+            .content
+            .weapon(self.weapons.name(held))
+            .is_some_and(|d| d.cancel_auto_holster_when_empty != 0);
+        if !alive(ps) || held != 0 && stays {
+            return;
+        }
+        if let Some(w) = inv.out_of_ammo_target(&self.weapons, held, self.latest_primary) {
+            self.select_weapon(w);
         }
     }
 

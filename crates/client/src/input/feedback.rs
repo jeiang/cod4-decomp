@@ -25,6 +25,8 @@ pub struct Feedback {
     pub leave_ads: bool,
     /// The player state is frozen: no looking.
     pub frozen: bool,
+    /// The held weapon ran dry (`EV_NOAMMO`): [`scan_own`]'s caller switches weapons and does not pass this on.
+    pub out_of_ammo: bool,
 }
 
 impl Feedback {
@@ -42,6 +44,7 @@ impl Feedback {
             stances: std::mem::take(&mut self.stances),
             leave_ads: std::mem::take(&mut self.leave_ads),
             frozen,
+            ..Feedback::default()
         }
     }
 }
@@ -62,6 +65,7 @@ pub fn scan_own(seen: &mut Seen, ps: &PlayerState) -> Feedback {
                 ev::STANCE_FORCE_CROUCH => fb.stances.push(buttons::CROUCH),
                 ev::STANCE_FORCE_PRONE => fb.stances.push(buttons::PRONE),
                 ev::RESET_ADS => fb.leave_ads = true,
+                ev::NOAMMO => fb.out_of_ammo = true,
                 _ => {}
             }
         }
@@ -106,6 +110,16 @@ mod tests {
         assert!(fb.leave_ads);
         // Nothing new the next time.
         assert_eq!(scan_own(&mut last, &ps), Feedback::default());
+    }
+
+    #[test]
+    fn running_dry_is_reported_once() {
+        let mut seen = Seen::default();
+        let mut ps = ps_with(&[]);
+        scan_own(&mut seen, &ps);
+        ps.add_event(ev::NOAMMO, 0);
+        assert!(scan_own(&mut seen, &ps).out_of_ammo);
+        assert!(!scan_own(&mut seen, &ps).out_of_ammo);
     }
 
     #[test]

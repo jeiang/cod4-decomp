@@ -338,3 +338,91 @@ fn spawn_weapon_readies_an_owned_weapon() {
     assert_eq!(s.ps.weapon, u32::from(ak));
     assert_eq!(s.ps.weapon_state, crate::pm::weapon_state::READY);
 }
+
+/// The table is sorted by name: ak47, deserteagle, frag (offhand), m4.
+fn cycling() -> Setup {
+    let mut s = Setup::new(vec![
+        rifle("ak47_mp", "ar"),
+        grenade("frag_grenade_mp"),
+        rifle("m4_mp", "ar"),
+        rifle("deserteagle_mp", "pistol"),
+    ]);
+    for w in ["ak47_mp", "frag_grenade_mp", "m4_mp", "deserteagle_mp"] {
+        s.give(w);
+    }
+    s
+}
+
+#[test]
+fn cycling_walks_primaries_only_and_wraps() {
+    let s = cycling();
+    let (ak, frag, m4, de) = (
+        s.idx("ak47_mp"),
+        s.idx("frag_grenade_mp"),
+        s.idx("m4_mp"),
+        s.idx("deserteagle_mp"),
+    );
+    let next = |from, fwd| s.inv.cycle_primary(&s.table, from, 0, fwd, false);
+    assert_eq!(next(de, true), Some(m4), "the grenade is skipped");
+    assert_eq!(next(m4, true), Some(ak), "wraps");
+    assert_eq!(next(ak, true), Some(de));
+    assert_eq!(next(ak, false), Some(m4), "wraps backwards");
+    assert_eq!(
+        next(m4, false),
+        Some(de),
+        "the grenade is skipped backwards"
+    );
+    assert_eq!(next(frag, true), Some(m4));
+}
+
+#[test]
+fn manual_cycling_selects_empty_weapons_but_the_out_of_ammo_path_skips_them() {
+    let mut s = cycling();
+    let (ak, m4, de) = (s.idx("ak47_mp"), s.idx("m4_mp"), s.idx("deserteagle_mp"));
+    for w in [ak, m4] {
+        s.inv.set_clip(&s.table, w, 0);
+        s.inv.set_stock(&s.table, w, 0);
+    }
+    assert_eq!(s.inv.cycle_primary(&s.table, de, 0, true, false), Some(m4));
+    assert_eq!(s.inv.cycle_primary(&s.table, de, 0, true, true), None);
+    assert_eq!(
+        s.inv.out_of_ammo_target(&s.table, ak, 0),
+        Some(de),
+        "the empty rifle gives way to the sidearm that has rounds"
+    );
+    s.inv.set_clip(&s.table, de, 0);
+    s.inv.set_stock(&s.table, de, 0);
+    assert_eq!(s.inv.out_of_ammo_target(&s.table, ak, 0), None);
+}
+
+#[test]
+fn cycling_from_an_offhand_returns_to_the_latest_primary() {
+    let s = cycling();
+    let (frag, m4) = (s.idx("frag_grenade_mp"), s.idx("m4_mp"));
+    assert_eq!(
+        s.inv.cycle_primary(&s.table, frag, m4, true, false),
+        Some(m4)
+    );
+    assert_eq!(s.inv.out_of_ammo_target(&s.table, 0, m4), Some(m4));
+}
+
+#[test]
+fn cycling_toggles_an_alt_mode_and_the_alt_remembers_its_primary() {
+    let mut gl = rifle("gl_mp", "gl");
+    gl.inventory_type = InventoryType::AltMode;
+    gl.alt_weapon_name = "m4_gl_mp".into();
+    let mut m4 = rifle("m4_gl_mp", "ar");
+    m4.alt_weapon_name = "gl_mp".into();
+    let mut s = Setup::new(vec![m4, gl, rifle("deserteagle_mp", "pistol")]);
+    s.give("m4_gl_mp");
+    s.give("deserteagle_mp");
+    let (m4, gl) = (s.idx("m4_gl_mp"), s.idx("gl_mp"));
+    assert_eq!(s.inv.cycle_primary(&s.table, gl, m4, true, false), Some(m4));
+    assert_eq!(
+        s.inv.cycle_primary(&s.table, m4, m4, true, false),
+        Some(s.idx("deserteagle_mp"))
+    );
+    assert_eq!(PlayerWeapons::latest_primary_of(&s.table, gl), m4);
+    assert_eq!(PlayerWeapons::latest_primary_of(&s.table, m4), m4);
+    assert_eq!(PlayerWeapons::latest_primary_of(&s.table, 0), 0);
+}
