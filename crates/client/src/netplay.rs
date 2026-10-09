@@ -572,7 +572,8 @@ impl NetPlay {
             let ps = snap.ps.clone();
             self.kick.clear();
             // The followed player's hits turn the view and show on the screen as the player's own would.
-            self.damage.look(&ps, st, [ps.viewangles[0], ps.viewangles[1]]);
+            self.damage
+                .look(&ps, st, [ps.viewangles[0], ps.viewangles[1]]);
             let hit_view = self.damage.view_angles(st, ps.weapon_pos_frac, false);
             self.damage_hud = self.damage.hud(st, ps.viewangles[1]);
             let eye = Vec3::new(

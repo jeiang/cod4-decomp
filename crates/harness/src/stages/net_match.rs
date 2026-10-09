@@ -400,8 +400,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     r.hits
                 ));
             }
-                ));
-            }
             if r.steps == 0 || r.snaps * 100 > r.steps {
                 failures.push(format!("client {i}: {} of {} interpolated steps jumped over {SMOOTH_STEP} units (max {:.0})", r.snaps, r.steps, r.max_step));
             }
