@@ -59,7 +59,6 @@ impl Kick {
         self.vel = [0.0; 3];
         self.angles = [0.0; 3];
         self.gun = [0.0; 2];
-        self.idle = [0.0; 2];
     }
 
     /// Kicks for each shot among `events` (`CG_FireWeapon` of the own player): the predicted events no earlier
