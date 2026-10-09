@@ -9,6 +9,7 @@
 //! - the server's sound commands (`script::sound` in the server crate): script `playsound`, local sounds,
 //!   loops, the map's ambience and the music.
 
+use crate::effects::explodes_on_surface;
 use crate::events::ClientEvent;
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::weapon::WeaponDef;
@@ -18,7 +19,7 @@ use serde_json::{Value, json};
 use server::content::Install;
 use sim::pm::ev;
 use sim::weapon::damage::SURFACE_TYPE_NAMES;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
@@ -60,6 +61,8 @@ pub struct ClientSound {
     eye: [f32; 3],
     /// `cg_footsteps`.
     footsteps: bool,
+    /// The missiles whose flight loop is playing.
+    missile_loops: HashSet<u16>,
 }
 
 /// Who an event belongs to.
@@ -88,6 +91,7 @@ impl ClientSound {
             pending: Vec::new(),
             eye: [0.0; 3],
             footsteps: true,
+            missile_loops: HashSet::new(),
         }
     }
 
@@ -305,15 +309,46 @@ impl ClientSound {
                     }
                 }
                 ClientEvent::Explosion {
-                    origin, weapon: w, ..
+                    origin,
+                    surface,
+                    weapon: w,
+                    ..
                 } => {
-                    let prefix = match weapon(*w).map(|d| d.impact_type) {
-                        Some(IMPACT_GRENADE_EXPLODE) => "grenade_explode",
-                        Some(IMPACT_ROCKET_EXPLODE) => "rocket_explode",
-                        _ => continue,
-                    };
-                    // The server does not say what the blast sat on.
-                    self.surface_sound(prefix, 0, *origin);
+                    // The surface's blast, then the weapon's own sound on top (`EV_GRENADE_EXPLODE`).
+                    let def = weapon(*w);
+                    if let Some(d) = def.as_deref().filter(|d| explodes_on_surface(d)) {
+                        match d.impact_type {
+                            IMPACT_GRENADE_EXPLODE => {
+                                self.surface_sound("grenade_explode", *surface, *origin);
+                            }
+                            IMPACT_ROCKET_EXPLODE => {
+                                self.surface_sound("rocket_explode", *surface, *origin);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(name) = def
+                        .as_ref()
+                        .and_then(|d| d.proj_explosion_sound.clone())
+                        .filter(|n| !n.is_empty())
+                    {
+                        self.play_world(&name, *origin);
+                    }
+                }
+                ClientEvent::Dud {
+                    origin,
+                    surface,
+                    weapon: w,
+                    settled: false,
+                    ..
+                } => {
+                    self.surface_sound("bullet_large", *surface, *origin);
+                    if let Some(name) = weapon(*w)
+                        .and_then(|d| d.proj_dud_sound.clone())
+                        .filter(|n| !n.is_empty())
+                    {
+                        self.play_world(&name, *origin);
+                    }
                 }
                 ClientEvent::MissileBounce {
                     origin,
@@ -356,6 +391,39 @@ impl ClientSound {
     pub fn follow(&mut self, entity: u16, origin: [f32; 3]) {
         if let Some(s) = self.ready() {
             s.follow_entity(u32::from(entity), origin);
+        }
+    }
+
+    /// A missile is at `origin` now: its flight `alias` loops on it (a second call moves the loop), until
+    /// [`Self::missile_loops_end`] stops it.
+    pub fn missile_loop(&mut self, entity: u16, alias: &str, origin: [f32; 3]) {
+        if self.missile_loops.insert(entity) {
+            self.play(
+                alias,
+                Cue {
+                    origin: Some(origin),
+                    entity: u32::from(entity),
+                    ..Cue::default()
+                },
+            );
+        } else {
+            self.follow(entity, origin);
+        }
+    }
+
+    /// Stops the flight loops of the missiles not in `flying` any more.
+    pub fn missile_loops_end(&mut self, flying: &[u16]) {
+        let gone: Vec<u16> = self
+            .missile_loops
+            .iter()
+            .copied()
+            .filter(|n| !flying.contains(n))
+            .collect();
+        for n in gone {
+            self.missile_loops.remove(&n);
+            if let Some(s) = self.ready() {
+                s.stop_entity(u32::from(n));
+            }
         }
     }
 
@@ -590,6 +658,7 @@ impl ClientSound {
                     "out_of_range": s.played.out_of_range,
                     "missing": s.played.missing,
                     "failed": s.played.failed,
+                    "explosion_cues": s.played.aliases.iter().filter(|(k, _)| k.contains("explo")).map(|(_, v)| v).sum::<u64>(),
                     "top_aliases": top.iter().take(12).map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
                     "dropped_before_ready": dropped,
                 })
@@ -819,6 +888,7 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
         pending: Vec::new(),
         eye: [0.0; 3],
         footsteps: true,
+        missile_loops: HashSet::new(),
     };
     let none = |_: u16| None;
     let mut seq = 0u8;

@@ -11,6 +11,8 @@ pub mod etype {
     pub const CORPSE: u8 = 2;
     /// A `script_model`: drawn from its model index.
     pub const SCRIPT_MODEL: u8 = 3;
+    /// A grenade, rocket or other projectile: the client draws the weapon's projectile model at `origin` with `angles`
+    /// and points its trail along `velocity`; `eflags` (a missile does not use the player flag bits) the server time (ms, low 24 bits) before which it is not drawn, `weapon` the weapon index and `client` the owner.
     pub const MISSILE: u8 = 4;
     pub const ITEM: u8 = 5;
     /// A one-shot happening (impact, explosion, effect): see `server::tempev`.

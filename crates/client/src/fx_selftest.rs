@@ -18,6 +18,7 @@ const GUN: &str = "ak47_mp";
 const ROCKET: &str = "rpg_mp";
 /// A stock explosion whose chunks are physics models.
 const DEBRIS: &str = "explosions/grenadeexp_wood";
+const FRAG: &str = "frag_grenade_mp";
 const EXPLOSION: &str = "explosions/grenadeexp_dirt_1";
 const VISION: &str = "mp_crash";
 /// A stock map whose puddles use the water simulation.
@@ -296,6 +297,53 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             }
         }
         _ => bad.push(format!("weapon {ROCKET} has no projectile trail effect")),
+    }
+
+    // A frag is a model in flight, and its blast plays the surface's effect (and the weapon's own when it has one).
+    match lib.content.weapon(FRAG).cloned() {
+        Some(frag) => {
+            report.insert(
+                "frag_projectile_model".into(),
+                frag.projectile_model.is_some().into(),
+            );
+            if frag.projectile_model.is_none() {
+                bad.push(format!("weapon {FRAG} has no projectile model"));
+            }
+            let fw = |_: u16| Some(frag.clone());
+            let mut fx = Effects::new(&lib.content, data.world.clone());
+            fx.event(
+                &ClientEvent::Explosion {
+                    origin: at,
+                    normal,
+                    surface: 0,
+                    weapon: 0,
+                    owner: 1023,
+                },
+                &fw,
+            );
+            fx.event(
+                &ClientEvent::Dud {
+                    settled: false,
+                    origin: at,
+                    normal,
+                    surface: 0,
+                    weapon: 0,
+                    owner: 1023,
+                },
+                &fw,
+            );
+            let played = |k: &str| fx.played.get(k).copied().unwrap_or(0);
+            report.insert(
+                "frag_blast_impact_fx".into(),
+                played("explosion_impact").into(),
+            );
+            report.insert("frag_blast_weapon_fx".into(), played("explosion").into());
+            report.insert("frag_dud_fx".into(), played("dud").into());
+            if played("explosion_impact") == 0 {
+                bad.push("a frag's blast played no effect for the surface".into());
+            }
+        }
+        None => bad.push(format!("weapon {FRAG} is not in the content")),
     }
 
     // A looped script effect (`playloopedfx`) keeps spawning for as long as its entity is in the snapshot, and stops once

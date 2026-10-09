@@ -90,6 +90,8 @@ pub struct Missile {
     pub launch_time: i32,
     pub travel_dist: f32,
     pub surface_normal: Vec3,
+    /// The surface type the missile last bounced off, for the sound and effect of its explosion.
+    pub surface: u8,
     /// `groundEntityNum`: what the missile rests on.
     pub ground: Option<u16>,
     pub clipmask: i32,
@@ -382,6 +384,7 @@ impl Game {
             launch_time: now + no_draw_time(speed),
             travel_dist: 0.0,
             surface_normal: [0.0; 3],
+            surface: 0,
             ground: None,
             clipmask: MISSILE_CLIPMASK,
             curvature: [0.0; 3],
@@ -486,6 +489,7 @@ impl Game {
             launch_time: now + no_draw_time(speed),
             travel_dist: 0.0,
             surface_normal: [0.0; 3],
+            surface: 0,
             ground: None,
             clipmask: MISSILE_CLIPMASK,
             curvature,
@@ -951,20 +955,46 @@ impl Game {
         } else {
             m.surface_normal
         };
-        let weapon = m.weapon;
-        let owner = m.parent.unwrap_or(1023);
-        self.tempev.add(now, crate::tempev::ev::EXPLOSION, |s| {
-            s.origin = origin;
-            s.angles = crate::tempev::dir_to_angles(normal);
-            s.weapon = weapon;
-            s.client = owner;
-        });
+        self.explosion_event(m, origin, normal, m.surface);
         if m.info.explosion_inner_damage != 0 {
             self.missile_blast(vm, n, m, origin, math::angle_vectors(&angles).0, None);
         }
         self.missile_flash(vm, m, origin);
         vm.notify_entity(n, "death", &[]);
         self.free_entity(vm, n);
+    }
+
+    /// The `EV_*_EXPLODE` of a missile going off on a surface of type `surface` (a `proj_explosion` of `dud` also
+    /// plays the dud), for the clients' effects and sounds.
+    fn explosion_event(&mut self, m: &Missile, origin: Vec3, normal: Vec3, surface: u8) {
+        let now = self.level.time;
+        let (weapon, owner) = (m.weapon, m.parent.unwrap_or(1023));
+        let angles = crate::tempev::dir_to_angles(normal);
+        let mut kinds = vec![crate::tempev::ev::EXPLOSION];
+        if m.info.proj_explosion == ProjExplosion::Dud {
+            kinds.push(crate::tempev::ev::DUD);
+        }
+        for kind in kinds {
+            self.tempev.add(now, kind, |s| {
+                s.origin = origin;
+                s.angles = angles;
+                s.event_parm = surface;
+                s.weapon = weapon;
+                s.client = owner;
+            });
+        }
+    }
+
+    /// `EV_DUD_IMPACT`: a missile that will never go off hit `normal`'s surface.
+    fn dud_event(&mut self, m: &Missile, normal: Vec3, kind: u8) {
+        let origin = m.pos.evaluate(self.level.time);
+        self.tempev.add(self.level.time, kind, |s| {
+            s.origin = origin;
+            s.angles = crate::tempev::dir_to_angles(normal);
+            s.event_parm = m.surface;
+            s.weapon = m.weapon;
+            s.client = m.parent.unwrap_or(1023);
+        });
     }
 
     /// The flash of a `WEAPPROJEXP_FLASHBANG` weapon's explosion (`G_FlashbangBlast`), credited to the parent
@@ -1072,6 +1102,8 @@ impl Game {
         if !other_takes && m.bounces && !explode_on_impact && !self.crumples(m, &tr) {
             self.bounce_missile(vm, n, m, &tr);
             if m.info.projectile_activate_dist > 0 && m.pos.kind == TrType::Stationary {
+                // `EV_CHANGE_TO_DUD`: the grenade came to rest without arming.
+                self.dud_event(m, tr.normal, crate::tempev::ev::CHANGE_TO_DUD);
                 self.free_entity(vm, n);
             }
             return;
@@ -1126,7 +1158,12 @@ impl Game {
             vm.notify_entity(parent, "projectile_impact", &args);
         }
         // A dud (a grenade not yet armed) does not go off.
-        if !dud {
+        let surface = surface_type(tr.surface_flags).min(28) as u8;
+        if dud {
+            m.surface = surface;
+            self.dud_event(m, tr.normal, crate::tempev::ev::DUD);
+        } else {
+            self.explosion_event(m, endpos, tr.normal, surface);
             self.missile_flash(vm, m, endpos);
         }
         vm.notify_entity(n, "death", &[]);
@@ -1150,6 +1187,7 @@ impl Game {
         }
         let origin = self.ent(n).map_or([0.0; 3], |e| e.origin);
         let (weapon, owner) = (m.weapon, m.parent.unwrap_or(1023));
+        m.surface = surf as u8;
         self.tempev
             .add(now, crate::tempev::ev::MISSILE_BOUNCE, |s| {
                 s.origin = origin;

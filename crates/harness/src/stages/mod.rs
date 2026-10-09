@@ -16,6 +16,7 @@ pub mod client_leave;
 pub mod client_load;
 pub mod client_match;
 pub mod client_menu_match;
+pub mod client_missile;
 pub mod client_models;
 pub mod client_objective;
 pub mod client_session;

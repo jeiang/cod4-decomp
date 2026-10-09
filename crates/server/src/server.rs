@@ -122,6 +122,7 @@ pub const COMMANDS: &[&str] = &[
     "tempbanclient",
     "devhardpoint",
     "devheli",
+    "devgrenade",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -943,6 +944,44 @@ impl Server {
                     }
                     _ => self.game.teleport_to_named(n, first)?,
                 }
+            }
+            // Test hook: `devgrenade <client|human> <weapon> [speed] [fuse_ms]` throws a grenade (or any missile weapon
+            // launched like one) from the player's eye along where they look, as a thrown frag would be.
+            "devgrenade" => {
+                let (Some(who), Some(weapon)) = (arg(1), arg(2)) else {
+                    return Err(
+                        "usage: devgrenade <client|human> <weapon> [speed] [fuse_ms]".into(),
+                    );
+                };
+                let n = if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| n)
+                        .ok_or("devgrenade: no human is connected")?
+                } else {
+                    cvar::parse_int(who) as u16
+                };
+                let index = self.game.weapons.index(weapon);
+                let ps = &self.game.client(n).ok_or("devgrenade: no such client")?.ps;
+                let start = crate::fire::view_origin(ps);
+                let (fwd, _, _) = sim::pm::math::angle_vectors(&ps.viewangles);
+                let speed = arg(3).map_or(500.0, cvar::parse_float);
+                let toss = fwd.map(|v| v * speed);
+                let fuse = arg(4).map_or(3000, cvar::parse_int);
+                let Some(run) = self.run.as_mut() else {
+                    return Err("Server is not running.".into());
+                };
+                self.game.launch_grenade(
+                    &mut run.vm,
+                    n,
+                    index,
+                    start,
+                    toss,
+                    [0.0; 3],
+                    false,
+                    fuse,
+                )?;
             }
             // Test hook: `devhardpoint <client|human|bot> <weapon>` gives the player a killstreak reward as the
             // scripts would (`radar_mp`, `airstrike_mp`, `helicopter_mp`).

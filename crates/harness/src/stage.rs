@@ -282,6 +282,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_heli::run),
     },
     StageDef {
+        name: "client-missile",
+        description: "the real client sees a thrown grenade: the projectile model is drawn, and its explosion is received and heard",
+        needs_install: false,
+        timeout: Duration::from_secs(7 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_missile::run),
+    },
+    StageDef {
         name: "client-flythrough",
         description: "client flythrough per display mode, with video",
         needs_install: false,

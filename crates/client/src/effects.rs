@@ -36,11 +36,19 @@ const ROW_BY_IMPACT_TYPE: [Option<usize>; 9] = [
     Some(10),
     Some(11),
 ];
+/// `WeaponDef::impact_type` of the dud row.
+const IMPACT_TYPE_DUD: i32 = 8;
 const SURFACE_FLESH: u8 = 7;
 const FLESH_BODY_NONFATAL: usize = 0;
 const FLESH_BODY_FATAL: usize = 1;
 /// How high above a player's feet blood appears.
 const CHEST: f32 = 40.0;
+
+/// Whether a weapon's explosion also plays the impact table's blast for the surface (a flashbang's and a dud's do
+/// not): `weapProjExplosion_t` 2 and 4.
+pub fn explodes_on_surface(d: &WeaponDef) -> bool {
+    !matches!(d.proj_explosion, 2 | 4)
+}
 
 /// What the world looks like to a particle: solid map geometry.
 pub(crate) struct Tracer<'a>(pub(crate) &'a dyn Collide);
@@ -239,6 +247,7 @@ impl Effects {
             ClientEvent::Explosion {
                 origin,
                 normal,
+                surface,
                 weapon: w,
                 ..
             } => {
@@ -251,13 +260,33 @@ impl Effects {
                 } else {
                     Vec3::from(*normal)
                 };
-                let def = d
-                    .as_ref()
-                    .and_then(|d| d.proj_explosion_effect.clone())
-                    .or_else(|| {
-                        self.impact_effect(d.as_ref().map_or(0, |d| d.impact_type), 0, false)
-                    });
+                // The surface's own blast, then the weapon's (`EV_GRENADE_EXPLODE`, `EV_ROCKET_EXPLODE`); a flashbang
+                // or a dud has only its own.
+                if let Some(d) = d.as_ref().filter(|d| explodes_on_surface(d)) {
+                    let def = self.impact_effect(d.impact_type, *surface, false);
+                    self.play("explosion_impact", def, Vec3::from(*origin), n);
+                }
+                let def = d.as_ref().and_then(|d| d.proj_explosion_effect.clone());
                 self.play("explosion", def, Vec3::from(*origin), n);
+            }
+            ClientEvent::Dud {
+                origin,
+                normal,
+                surface,
+                weapon: w,
+                settled,
+                ..
+            } => {
+                let (at, n) = (Vec3::from(*origin), Vec3::from(*normal));
+                // `EV_CHANGE_TO_DUD`: the table's first surface only.
+                let table =
+                    self.impact_effect(IMPACT_TYPE_DUD, if *settled { 0 } else { *surface }, false);
+                self.play("dud", table, at, n);
+                if *settled {
+                    return;
+                }
+                let def = weapon(*w).and_then(|d| d.proj_dud_effect.clone());
+                self.play("dud", def, at, n);
             }
             ClientEvent::PlayFx {
                 origin,
