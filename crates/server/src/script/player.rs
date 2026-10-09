@@ -145,7 +145,15 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
             Ok(Value::Undefined)
         }),
     ),
-    ("istalking", r(|_, _, _, _| Ok(Value::Int(0)))),
+    (
+        "istalking",
+        r(|g, _, e, _| {
+            let n = client_of(g, e)?;
+            Ok(Value::Int(i32::from(
+                g.client(n).is_some_and(|c| c.talking_until > g.level.time),
+            )))
+        }),
+    ),
     ("setperk", r(set_perk)),
     ("unsetperk", r(unset_perk)),
     ("hasperk", r(has_perk)),

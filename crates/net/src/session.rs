@@ -6,7 +6,8 @@
 //! Server to client message: reliable block (with the ack of the client's commands), then an
 //! optional snapshot delta-coded against the newest snapshot the client acknowledged.
 //! Client to server message: the `qport`, a reliable block, the number of the newest snapshot
-//! received, and the last few user commands (each a delta from the one before).
+//! received, and the last few user commands (each a delta from the one before), then up to
+//! [`voice::MAX_PER_PACKET`] voice frames. The server's message ends with the voice frames it forwards.
 
 use crate::bits::{BitReader, BitWriter, Overflow};
 use crate::netchan::{FRAGMENT_SIZE, Netchan};
@@ -15,7 +16,9 @@ use crate::snapshot::{BACKUP, Snapshot, SnapshotError, read_snapshot, write_snap
 use crate::transport::Transport;
 use crate::ui::{ClientUiState, ServerCmd};
 use crate::usercmd::{read_cmd, write_cmd};
+use crate::voice::{self, Voice};
 use sim::pm::UserCmd;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 
 /// User commands a client packet carries (the newest plus repeats of the previous ones).
@@ -24,6 +27,9 @@ pub const REDUNDANT_CMDS: usize = 3;
 const CMD_HISTORY: usize = 16;
 /// Most commands one packet can claim.
 const MAX_CMDS_PER_PACKET: u32 = 16;
+
+/// Voice frames one server message carries (the length field has 3 bits).
+const MAX_VOICE_OUT: usize = 7;
 
 /// Bytes of reliable commands a message may carry beside a snapshot.
 const RELIABLE_BUDGET: usize = 500;
@@ -47,6 +53,8 @@ pub struct ClientPacket {
     /// Commands newer than any delivered before, oldest first, with their numbers.
     pub cmds: Vec<(u32, UserCmd)>,
     pub reliable: Vec<String>,
+    /// The talker's voice frames, oldest first, with their sequence numbers (unreliable: gaps are loss).
+    pub voice: Vec<(u16, voice::Frame)>,
 }
 
 pub struct ServerLink {
@@ -61,6 +69,8 @@ pub struct ServerLink {
     acked: u32,
     last_cmd: u32,
     scratch: Vec<u8>,
+    /// Voice frames of other players waiting for the next message.
+    voice_out: VecDeque<Voice>,
     pub stats: Stats,
 }
 
@@ -77,8 +87,17 @@ impl ServerLink {
             acked: 0,
             last_cmd: 0,
             scratch: Vec::new(),
+            voice_out: VecDeque::new(),
             stats: Stats::default(),
         }
+    }
+
+    /// Queues another player's voice frame for the next message; past [`voice::MAX_QUEUED`] the oldest goes.
+    pub fn push_voice(&mut self, v: Voice) {
+        if self.voice_out.len() == voice::MAX_QUEUED {
+            self.voice_out.pop_front();
+        }
+        self.voice_out.push_back(v);
     }
 
     /// Queues a reliable command for the client. `Err`: the client is too far behind to keep.
@@ -143,6 +162,16 @@ impl ServerLink {
                 out.cmds.push((num, c));
             }
         }
+        let frames = r.read_bits(2)?;
+        if frames as usize > voice::MAX_PER_PACKET {
+            return Err(Overflow);
+        }
+        for _ in 0..frames {
+            let seq = r.read_u16()?;
+            let mut frame = [0u8; voice::FRAME_BYTES];
+            frame.copy_from_slice(r.read_bytes(voice::FRAME_BYTES)?);
+            out.voice.push((seq, frame));
+        }
         Ok(out)
     }
 
@@ -170,6 +199,13 @@ impl ServerLink {
                 self.frames[slot] = Some(s);
             }
             None => w.write_bool(false),
+        }
+        let frames = self.voice_out.len().min(MAX_VOICE_OUT);
+        w.write_bits(frames as u32, 3);
+        for v in self.voice_out.drain(..frames) {
+            w.write_u8(v.speaker);
+            w.write_u16(v.seq);
+            w.write_bytes(&v.frame);
         }
         let addr = self.addr;
         let (mut bytes, mut packets) = (0u64, 0u64);
@@ -221,6 +257,10 @@ pub struct ServerMessage {
     pub reliable: Vec<String>,
     /// The server started a new level in this message: the snapshot clock restarts.
     pub new_map: bool,
+    /// Every reliable command of the message as received, user interface ones included (for demo recording).
+    pub raw: Vec<String>,
+    /// Other players' voice frames.
+    pub voice: Vec<Voice>,
 }
 
 pub struct ClientLink {
@@ -235,6 +275,9 @@ pub struct ClientLink {
     cmds: std::collections::VecDeque<(u32, UserCmd)>,
     next_cmd: u32,
     scratch: Vec<u8>,
+    /// The player's own voice frames not yet sent, and the sequence number of the next.
+    voice_out: VecDeque<(u16, voice::Frame)>,
+    voice_seq: u16,
     pub stats: Stats,
     /// Snapshots that arrived as a delta from one this side no longer had.
     pub unusable: u64,
@@ -255,6 +298,8 @@ impl ClientLink {
             cmds: Default::default(),
             next_cmd: 1,
             scratch: Vec::new(),
+            voice_out: VecDeque::new(),
+            voice_seq: 0,
             stats: Stats::default(),
             unusable: 0,
             ui: ClientUiState::new(),
@@ -263,6 +308,15 @@ impl ClientLink {
 
     pub fn command(&mut self, cmd: impl Into<String>) -> Result<(), Overflow> {
         self.rel_out.push(cmd)
+    }
+
+    /// Queues one of the player's own voice frames; past [`voice::MAX_QUEUED`] the oldest goes.
+    pub fn push_voice(&mut self, frame: voice::Frame) {
+        if self.voice_out.len() == voice::MAX_QUEUED {
+            self.voice_out.pop_front();
+        }
+        self.voice_out.push_back((self.voice_seq, frame));
+        self.voice_seq = self.voice_seq.wrapping_add(1);
     }
 
     /// Records a command to send; returns its number.
@@ -301,6 +355,7 @@ impl ClientLink {
         let mut cmds = Vec::new();
         self.rel_in.read(&mut r, &mut cmds)?;
         for c in cmds {
+            out.raw.push(c.clone());
             match ServerCmd::parse(&c) {
                 Some(cmd) => {
                     out.new_map |= matches!(cmd, ServerCmd::Map { .. });
@@ -309,6 +364,7 @@ impl ClientLink {
                 None => out.reliable.push(c),
             }
         }
+        let mut readable = true;
         if r.read_bool()? {
             let frames = &self.frames;
             match read_snapshot(&mut r, |n| {
@@ -325,8 +381,23 @@ impl ClientLink {
                 Err(SnapshotError::MissingBase) => {
                     self.unusable += 1;
                     self.ack = 0;
+                    // The rest of the message sits behind a snapshot that could not be read.
+                    readable = false;
                 }
                 Err(SnapshotError::Malformed) => return Err(Overflow),
+            }
+        }
+        if readable {
+            for _ in 0..r.read_bits(3)? {
+                let speaker = r.read_u8()?;
+                let seq = r.read_u16()?;
+                let mut frame = [0u8; voice::FRAME_BYTES];
+                frame.copy_from_slice(r.read_bytes(voice::FRAME_BYTES)?);
+                out.voice.push(Voice {
+                    speaker,
+                    seq,
+                    frame,
+                });
             }
         }
         Ok(out)
@@ -346,6 +417,12 @@ impl ClientLink {
         for (_, c) in self.cmds.iter().skip(self.cmds.len() - n) {
             write_cmd(&mut w, &prev, c);
             prev = *c;
+        }
+        let frames = self.voice_out.len().min(voice::MAX_PER_PACKET);
+        w.write_bits(frames as u32, 2);
+        for (seq, frame) in self.voice_out.drain(..frames) {
+            w.write_u16(seq);
+            w.write_bytes(&frame);
         }
         let to = self.server;
         let (mut bytes, mut packets) = (0u64, 0u64);
@@ -482,6 +559,52 @@ mod tests {
         assert!(nums.len() > 250);
         // Commands repeat, so only the last few packets can be missing.
         assert!(*nums.last().unwrap() >= 395, "{nums:?}");
+    }
+
+    #[test]
+    fn voice_frames_cross_in_both_directions_with_the_snapshot_and_without_one() {
+        let net = MemNet::new();
+        let mut st = net.endpoint(addr(1));
+        let mut ct = net.endpoint(addr(2));
+        let mut srv = ServerLink::new(addr(2), 3);
+        let mut cli = ClientLink::new(addr(1), 3);
+        let mut buf = [0u8; 2000];
+        let frame = |b: u8| [b; voice::FRAME_BYTES];
+        // Client to server: more than a packet holds is spread over the next packets, oldest first.
+        for b in 1..=5 {
+            cli.push_voice(frame(b));
+        }
+        let mut heard = Vec::new();
+        for _ in 0..2 {
+            cli.push_cmd(cmd(1));
+            cli.send(&mut ct);
+            let (n, _) = st.recv_from(&mut buf, None).unwrap().unwrap();
+            heard.extend(srv.receive(&buf[..n]).unwrap().voice);
+        }
+        let seqs: Vec<u16> = heard.iter().map(|v| v.0).collect();
+        assert_eq!(seqs, [0, 1, 2, 3, 4]);
+        assert_eq!(heard[4].1, frame(5));
+        // Server to client: with a snapshot, then alone.
+        srv.push_voice(Voice {
+            speaker: 9,
+            seq: 40,
+            frame: frame(7),
+        });
+        srv.send(&mut st, Some(world(1)));
+        let (n, _) = ct.recv_from(&mut buf, None).unwrap().unwrap();
+        let m = cli.receive(&buf[..n]).unwrap();
+        assert!(m.snapshot.is_some());
+        assert_eq!(m.voice.len(), 1);
+        assert_eq!((m.voice[0].speaker, m.voice[0].seq), (9, 40));
+        srv.push_voice(Voice {
+            speaker: 2,
+            seq: 1,
+            frame: frame(8),
+        });
+        srv.send(&mut st, None);
+        let (n, _) = ct.recv_from(&mut buf, None).unwrap().unwrap();
+        let m = cli.receive(&buf[..n]).unwrap();
+        assert_eq!(m.voice[0].frame, frame(8));
     }
 
     #[test]

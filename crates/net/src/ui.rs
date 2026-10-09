@@ -1333,6 +1333,38 @@ impl ClientUiState {
         }
     }
 
+    /// The commands that bring a fresh `ClientUiState` to this one's state on level `map`: the level, every
+    /// configstring, the stats and the client dvars. A demo begins with them so it can start mid-match.
+    pub fn state_commands(&self, map: &str) -> Vec<ServerCmd> {
+        let mut out = vec![ServerCmd::Map {
+            name: map.to_owned(),
+        }];
+        let strings: Vec<(u16, String)> = self
+            .cs
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(i, s)| (i as u16, s.clone()))
+            .collect();
+        if !strings.is_empty() {
+            out.push(ServerCmd::ConfigStrings(strings));
+        }
+        let mut stats: Vec<_> = self.stats.iter().collect();
+        stats.sort();
+        out.extend(
+            stats
+                .into_iter()
+                .map(|(&index, &value)| ServerCmd::Stat { index, value }),
+        );
+        let mut dvars: Vec<_> = self.dvars.iter().collect();
+        dvars.sort();
+        out.extend(dvars.into_iter().map(|(n, v)| ServerCmd::SetDvar {
+            name: n.clone(),
+            value: v.clone(),
+        }));
+        out
+    }
+
     /// Takes the HUD and objectives of a snapshot (the newest one wins).
     pub fn apply_snapshot(&mut self, snap: &crate::Snapshot) {
         self.server_time = snap.server_time;

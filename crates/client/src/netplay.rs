@@ -39,7 +39,7 @@ use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
 use sim::weapon::fire::aim_spread_degrees;
 use sim::weapon::gun::ViewFx;
 use sim::weapon::{PlayerWeapons, WeaponParams, WeaponTable};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
 use web_time::Instant;
@@ -235,6 +235,11 @@ const LOC_CURSOR_SPEED: f32 = 0.004;
 
 pub struct NetPlay {
     net: NetClient<Wire>,
+    /// Voice chat: the microphone, the other players' voices, `cl_voice`, and the players the person muted.
+    talker: crate::voice::Talker,
+    hearing: crate::voice::Hearing,
+    voice_on: bool,
+    muted: HashSet<u16>,
     lib: Library,
     weapons: WeaponTable,
     params: Params,
@@ -356,6 +361,10 @@ impl NetPlay {
             WeaponTable::new(&lib.content.weapons()).map_err(|e| format!("weapon table: {e:?}"))?;
         Ok(Self {
             net: NetClient::new(t, server, name, "", qport),
+            talker: crate::voice::Talker::default(),
+            hearing: crate::voice::Hearing::default(),
+            voice_on: true,
+            muted: HashSet::new(),
             weapons,
             params: Params {
                 mantle_anims: lib.content.mantle_anims(),
@@ -536,6 +545,10 @@ impl NetPlay {
             self.boxes = PlayerBoxes::new(clipmap);
             self.sound = sound;
         }
+        {
+            let sound = &mut self.sound;
+            self.hearing.close_all(|p| sound.close_voice_pipe(p));
+        }
         self.pred = Predictor::default();
         self.cmd_time = 0;
         self.want_weapon = None;
@@ -602,6 +615,73 @@ impl NetPlay {
         self.net.disconnect();
     }
 
+    /// `cl_voice`: whether holding the talk key sends the microphone.
+    pub fn set_voice(&mut self, on: bool) {
+        self.voice_on = on;
+    }
+
+    /// The players the person muted (the mute menu): their voices are not played, and the server is told so it does
+    /// not even send them.
+    pub fn set_muted(&mut self, muted: &HashSet<u16>) {
+        if *muted == self.muted {
+            return;
+        }
+        for n in muted.difference(&self.muted) {
+            self.net.command(&format!("mute {n}"));
+        }
+        for n in self.muted.difference(muted) {
+            self.net.command(&format!("unmute {n}"));
+        }
+        self.muted.clone_from(muted);
+    }
+
+    /// Why the microphone could not be used, once.
+    pub fn take_voice_note(&mut self) -> Option<String> {
+        self.talker.note.take()
+    }
+
+    /// One frame of voice chat: the microphone's frames go to the server while the talk key is `down`, the voices the
+    /// server relayed are played.
+    fn voice_step(&mut self, down: bool) {
+        let now = Instant::now();
+        for f in self.talker.frames(down, self.voice_on, now) {
+            self.net.send_voice(f);
+        }
+        let sound = &mut self.sound;
+        for v in self.net.take_voice() {
+            let gain = if self.muted.contains(&u16::from(v.speaker)) {
+                0.0
+            } else {
+                1.0
+            };
+            if gain > 0.0 {
+                self.hearing.feed(&v, gain, now, || sound.open_voice_pipe());
+            }
+        }
+        self.hearing.tick(now, |p| sound.close_voice_pipe(p));
+    }
+
+    /// Writes what this connection receives to `path` (`record`).
+    pub fn start_record(&mut self, path: &std::path::Path) -> Result<(), String> {
+        self.net.start_record(path)
+    }
+
+    /// Ends the recording (`stoprecord`); `false` when none was running.
+    pub fn stop_record(&mut self) -> bool {
+        self.net.stop_record()
+    }
+
+    /// Plays the demo at `path` instead of a server's match (`playdemo`).
+    pub fn play_demo(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let reader = net::demo::DemoReader::open(path).map_err(|e| e.to_string())?;
+        self.net.play_demo(reader)
+    }
+
+    /// `cl_freezeDemo`: holds a playing demo where it is.
+    pub fn set_demo_paused(&mut self, paused: bool) {
+        self.net.pause_demo(paused);
+    }
+
     /// `snd_volume`, from the cvar store each frame.
     pub fn set_volume(&mut self, volume: f32) {
         self.sound.set_volume(volume);
@@ -647,6 +727,7 @@ impl NetPlay {
     /// Runs one render frame of play. `None` until the server has given the player a body.
     pub fn frame(&mut self, dt: f32, input: &InputFrame) -> Option<NetFrame> {
         self.net.pump(Duration::ZERO);
+        self.voice_step(input.held_other.iter().any(|c| c == "talk"));
         self.answer_menus();
         let now_ms = self.net.now_ms();
         let st = self.net.snaps.server_time(now_ms);
@@ -706,9 +787,9 @@ impl NetPlay {
         }
 
         let snap = self.net.latest()?.clone();
-        if snap.follow.is_some() {
-            // Watching another player (a killcam or a followed spectator): the snapshot's
-            // player state is theirs, so nothing is predicted; draw their view as it came.
+        if snap.follow.is_some() || self.net.playing_demo() {
+            // Watching another player (a killcam or a followed spectator) or a recording: the snapshot's
+            // player state is what was, so nothing is predicted; draw the view as it came.
             self.pred.resync_events();
             self.own_new.clear();
             let ps = snap.ps.clone();

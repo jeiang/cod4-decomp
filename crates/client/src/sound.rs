@@ -341,6 +341,17 @@ impl ClientSound {
         }
     }
 
+    /// A voice that plays the samples pushed into it (voice chat), or `None` while the sound system is not ready.
+    pub fn open_voice_pipe(&mut self) -> Option<audio::engine::Pipe> {
+        self.ready()?.open_pipe(net::voice::RATE, "menu")
+    }
+
+    pub fn close_voice_pipe(&mut self, pipe: audio::engine::Pipe) {
+        if let Some(s) = self.ready() {
+            s.close_pipe(pipe);
+        }
+    }
+
     /// Plays `alias` as a 2D sound (menus).
     pub fn play_ui(&mut self, alias: &str) {
         self.play(alias, Cue::default());

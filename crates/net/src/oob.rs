@@ -8,7 +8,7 @@ use std::hash::BuildHasher;
 use std::net::SocketAddr;
 
 /// Bumped when the wire format changes; a server refuses other versions.
-pub const PROTOCOL: u32 = 12;
+pub const PROTOCOL: u32 = 13;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Oob {
@@ -45,6 +45,19 @@ pub enum Oob {
     },
     /// `print\n<text>`: console output the server redirected to the sender of an `rcon`.
     Print(String),
+    /// `getfile`: asks for the bytes of the map zone `name` from `offset` on. The server answers with up to
+    /// [`crate::download::WINDOW`] [`Oob::FileChunk`]s, or an [`Oob::Error`].
+    GetFile {
+        challenge: u32,
+        name: String,
+        offset: u64,
+    },
+    /// `filechunk`: `data` is the file's bytes at `offset` of `total`. The one packet whose payload is binary.
+    FileChunk {
+        total: u64,
+        offset: u64,
+        data: Vec<u8>,
+    },
 }
 
 /// One player of a [`Oob::StatusResponse`].
@@ -133,6 +146,17 @@ fn unquote_words(s: &str) -> Vec<String> {
 
 impl Oob {
     pub fn encode(&self) -> Vec<u8> {
+        if let Oob::FileChunk {
+            total,
+            offset,
+            data,
+        } = self
+        {
+            let mut v = OOB_MARKER.to_le_bytes().to_vec();
+            v.extend_from_slice(format!("filechunk {total} {offset}\n").as_bytes());
+            v.extend_from_slice(data);
+            return v;
+        }
         let text = match self {
             Oob::GetChallenge => "getchallenge".to_owned(),
             Oob::Challenge(c) => format!("challengeResponse {c}"),
@@ -162,6 +186,12 @@ impl Oob {
             Oob::Error(e) => format!("error {e}"),
             Oob::Rcon { password, command } => format!("rcon {} {command}", quote(password)),
             Oob::Print(t) => format!("print\n{t}"),
+            Oob::GetFile {
+                challenge,
+                name,
+                offset,
+            } => format!("getfile {challenge} {offset} {}", quote(name)),
+            Oob::FileChunk { .. } => unreachable!("encoded above"),
         };
         let mut v = OOB_MARKER.to_le_bytes().to_vec();
         v.extend_from_slice(text.as_bytes());
@@ -172,6 +202,16 @@ impl Oob {
     pub fn parse(packet: &[u8]) -> Option<Oob> {
         if !is_oob(packet) {
             return None;
+        }
+        if let Some(rest) = packet[4..].strip_prefix(b"filechunk ") {
+            let end = rest.iter().position(|b| *b == b'\n')?;
+            let head = std::str::from_utf8(&rest[..end]).ok()?;
+            let (total, offset) = head.split_once(' ')?;
+            return Some(Oob::FileChunk {
+                total: total.parse().ok()?,
+                offset: offset.parse().ok()?,
+                data: rest[end + 1..].to_vec(),
+            });
         }
         let text = std::str::from_utf8(&packet[4..]).ok()?;
         // Output keeps its own trailing newlines.
@@ -216,6 +256,14 @@ impl Oob {
             "infoResponse" => Oob::InfoResponse(parse_info(rest)),
             "getstatus" => Oob::GetStatus(rest.trim().parse().ok()?),
             "disconnect" => Oob::Disconnect,
+            "getfile" => {
+                let w = unquote_words(rest);
+                Oob::GetFile {
+                    challenge: w.first()?.parse().ok()?,
+                    offset: w.get(1)?.parse().ok()?,
+                    name: w.get(2)?.clone(),
+                }
+            }
             "error" => Oob::Error(rest.to_owned()),
             "rcon" => {
                 let rest = rest.trim_start();
@@ -318,6 +366,17 @@ mod tests {
                 players: Vec::new(),
             },
             Oob::Disconnect,
+            Oob::GetFile {
+                challenge: 5,
+                name: "mp_a b".into(),
+                offset: 1 << 40,
+            },
+            Oob::FileChunk {
+                total: 99,
+                offset: 3,
+                // Binary, with the bytes text parsing would trip on.
+                data: vec![0, 10, 255, b'\n', 0xc3],
+            },
             Oob::Error("Server is full.".into()),
             Oob::Rcon {
                 password: "pass word".into(),
