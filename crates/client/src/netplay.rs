@@ -1908,6 +1908,10 @@ impl NetPlay {
                     let attached = attach::attachments_of(ui, &self.lib.content, e, name);
                     let before = out.len();
                     match self.lib.rest_pose(name, &attached) {
+                        // A turret's gun swings with its gunner's view.
+                        Ok(rest) if e.gun_angles != [0.0; 3] => {
+                            out.extend(rest.swung(e.gun_angles, origin, angles, e.part_bits));
+                        }
                         Ok(rest) if !attached.is_empty() => {
                             out.extend(rest.instances(origin, angles, e.part_bits));
                         }

@@ -1503,6 +1503,9 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.origin = e.origin;
                 s.angles = e.angles;
                 s.model = model as u16;
+                if let Some(t) = e.turret.as_deref() {
+                    s.gun_angles = t.gun_angles;
+                }
                 if let Some((point, force)) = e.x.physics_launch {
                     s.eflags = eflags::PHYSICS_LAUNCH;
                     s.launch_point = point;

@@ -6,18 +6,23 @@
 //! reach and behind the gun mounts it with +activate, the view is held inside the gun's arcs, the attack button fires
 //! the turret's weapon from the muzzle, and +activate again, death, a respawn or a disconnect lets the gunner go.
 //!
-//! The gunner's view is held in the arcs by movement (`view_clamp`'s base and range in the player state). Where this
-//! differs from the original: the gun model does not swing with the view (`turret_controller`), so the gunner is
-//! placed from the turret's `tag_player` at rest rather than blended through the gunner animation's offsets, and only
-//! bullet weapons are fired (the stock turrets are all `saw_bipod_*`).
+//! The gunner's view is held in the arcs by movement (`view_clamp`'s base and range in the player state). The gun
+//! swings with the view (`turret_clientaim`'s `gunAngles`, which the clients turn `tag_aim`, `tag_aim_animated` and
+//! `tag_flash` by, `turret_controller`), and shots leave from the swung `tag_flash`. Where this differs from the
+//! original: the gunner is placed from the swung `tag_player` rather than blended through the gunner animation's
+//! offsets, and only bullet weapons are fired (the stock turrets are all `saw_bipod_*`).
 
 use crate::bullet::normalized;
+use crate::fire::view_origin;
 use crate::game::{Ent, Game, SpawnVars, spawn_var};
+use crate::tags;
 use gsc::vm::Vm;
 use sim::Vec3;
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
+use sim::pm::math::angle_delta;
 use sim::pm::{PmType, VIEW_CROUCH, VIEW_PRONE, VIEW_STAND, button, ef, ev, pmf};
+use sim::skel::{Controllers, Pose, Rig, RigModel};
 use sim::weapon::fire::AimBasis;
 use sim::weapon::{FireType, WeaponClass, WeaponType};
 
@@ -48,6 +53,9 @@ pub struct Turret {
     /// Milliseconds until the next shot may leave, and whether the attack button was down for the last.
     pub fire_time: i32,
     pub trigger_down: bool,
+    /// How far the gun has swung from the way the turret faces (`gunAngles`): the gunner's view less the turret's
+    /// angles, held in the arcs, `[pitch, yaw, 0]`. Nothing without a gunner.
+    pub gun_angles: [f32; 3],
 }
 
 /// The view-clamp base and range (`viewAngleClampBase`, `viewAngleClampRange`) that keep a gunner's view in the arcs
@@ -123,6 +131,7 @@ impl Game {
             prev_stance: None,
             fire_time: 0,
             trigger_down: false,
+            gun_angles: [0.0; 3],
         };
         if let Some(e) = self.ent_mut(num) {
             e.contents = contents::USE;
@@ -206,6 +215,7 @@ impl Game {
         let Some(n) = tu.gunner.take() else { return };
         let (prev, user_origin) = (tu.prev_stance.take(), tu.user_origin);
         tu.trigger_down = false;
+        tu.gun_angles = [0.0; 3];
         if let Some(c) = self.client_mut(n) {
             c.turret = None;
             c.turret_leave = false;
@@ -273,13 +283,59 @@ impl Game {
             self.stop_using_turret(t, playing);
             return;
         }
+        self.aim_gun(t, n);
         self.place_gunner(t, n);
         self.turret_shoot(vm, t, n);
     }
 
-    /// Puts the gunner behind the gun: their eye at the turret's `tag_player`, the feet on the floor under it.
+    /// `turret_clientaim`: swings the gun to the gunner's view, within the arcs.
+    fn aim_gun(&mut self, t: u16, n: u16) {
+        let (Some(c), Some(e)) = (self.client(n), self.ent(t)) else {
+            return;
+        };
+        let (view, angles) = (c.ps.viewangles, e.angles);
+        if let Some(tu) = self.ent_mut(t).and_then(|e| e.turret.as_deref_mut()) {
+            let swing =
+                |i: usize| angle_delta(view[i], angles[i]).clamp(tu.arc_min[i], tu.arc_max[i]);
+            tu.gun_angles = [swing(0), swing(1), 0.0];
+        }
+    }
+
+    /// `G_DObjGetWorldTagMatrix` with the gun swung (`turret_controller` has run): the turret's own tag, the one
+    /// the gunner and the shots follow.
+    pub fn swung_tag(&self, t: u16, tag: &str) -> Option<tags::Mat43> {
+        let e = self.ent(t)?;
+        let gun = e.turret.as_deref()?.gun_angles;
+        let model = self.content.model(&e.model)?;
+        let names: Vec<&str> = self
+            .content
+            .model_bone_names(&e.model)?
+            .iter()
+            .map(|n| &**n)
+            .collect();
+        let rig = Rig::new(&[RigModel {
+            model: model.clone(),
+            bone_names: &names,
+            attach: None,
+        }])
+        .ok()?;
+        let mut pose = Pose::default();
+        let ctl = Controllers {
+            turret: Some(gun),
+            ..Controllers::NONE
+        };
+        rig.pose(&[], &ctl, &mut pose);
+        let b = pose.bones().get(rig.bone_index(tag)?)?;
+        let a = sim::skel::quat::axes(&b.quat);
+        Some(tags::mul43(
+            &[a[0], a[1], a[2], b.trans],
+            &tags::frame(e.origin, e.angles),
+        ))
+    }
+
+    /// Puts the gunner behind the gun: their eye at the swung turret's `tag_player`, the feet on the floor under it.
     fn place_gunner(&mut self, t: u16, n: u16) {
-        let Some(tag) = self.world_tag(t, "tag_player") else {
+        let Some(tag) = self.swung_tag(t, "tag_player") else {
             return;
         };
         let (Some(c), Some(w)) = (self.client(n), self.world.as_ref()) else {
@@ -332,16 +388,14 @@ impl Game {
             }
         }
         let angles = c.ps.viewangles;
+        let eye = view_origin(&c.ps);
         if let Some(tu) = self.ent_mut(t).and_then(|e| e.turret.as_deref_mut()) {
             (tu.fire_time, tu.trigger_down) = (left, down);
         }
         if !shoot {
             return;
         }
-        let (Some(eye), Some(flash)) = (
-            self.world_tag(t, "tag_player").map(|m| m[3]),
-            self.world_tag(t, "tag_flash").map(|m| m[3]),
-        ) else {
+        let Some(flash) = self.swung_tag(t, "tag_flash").map(|m| m[3]) else {
             return;
         };
         let dist = crate::bullet::length(crate::bullet::sub(flash, eye));

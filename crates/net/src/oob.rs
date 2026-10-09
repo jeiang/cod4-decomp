@@ -8,7 +8,7 @@ use std::hash::BuildHasher;
 use std::net::SocketAddr;
 
 /// Bumped when the wire format changes; a server refuses other versions.
-pub const PROTOCOL: u32 = 17;
+pub const PROTOCOL: u32 = 18;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Oob {

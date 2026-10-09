@@ -98,6 +98,7 @@ impl Held {
 pub struct RestPose {
     models: Vec<Arc<XModel>>,
     bones: Vec<Vec<sim::skel::BoneMat>>,
+    rig: Rig,
 }
 
 /// The bits of `bits` (bone `n` is the `n`-th most significant over four words) that belong to the `count` bones from
@@ -121,10 +122,48 @@ impl RestPose {
         angles: [f32; 3],
         hidden: [u32; 4],
     ) -> Vec<ModelInstance> {
+        self.instances_of(&self.bones, origin, angles, hidden)
+    }
+
+    /// [`RestPose::instances`] with a turret's gun swung by `gun` (`gunAngles`): its `tag_aim`, `tag_aim_animated` and
+    /// `tag_flash` bones turn and what hangs from them follows.
+    pub fn swung(
+        &self,
+        gun: [f32; 3],
+        origin: [f32; 3],
+        angles: [f32; 3],
+        hidden: [u32; 4],
+    ) -> Vec<ModelInstance> {
+        let mut pose = Pose::default();
+        let ctl = Controllers {
+            turret: Some(gun),
+            ..Controllers::NONE
+        };
+        self.rig.pose(&[], &ctl, &mut pose);
+        let mut at = 0;
+        let bones: Vec<Vec<sim::skel::BoneMat>> = self
+            .bones
+            .iter()
+            .map(|rest| {
+                let b = pose.bones().get(at..at + rest.len()).unwrap_or(rest);
+                at += rest.len();
+                b.to_vec()
+            })
+            .collect();
+        self.instances_of(&bones, origin, angles, hidden)
+    }
+
+    fn instances_of(
+        &self,
+        bones: &[Vec<sim::skel::BoneMat>],
+        origin: [f32; 3],
+        angles: [f32; 3],
+        hidden: [u32; 4],
+    ) -> Vec<ModelInstance> {
         let mut base = 0;
         self.models
             .iter()
-            .zip(&self.bones)
+            .zip(bones)
             .map(|(model, bones)| {
                 let mut m = ModelInstance::new(model.clone(), ModelKind::World);
                 m.origin = origin;
@@ -336,7 +375,7 @@ impl Library {
                 b
             })
             .collect();
-        let r = Arc::new(RestPose { models, bones });
+        let r = Arc::new(RestPose { models, bones, rig });
         self.rests.insert(key, r.clone());
         Ok(r)
     }
