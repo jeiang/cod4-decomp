@@ -682,8 +682,9 @@ impl Viewer {
                 &mut input,
             )?)
         };
-        if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_ref()) {
+        if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_mut()) {
             sh.ui.assets.add_weapon_icons(&n.weapon_defs());
+            n.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
         }
         let (profiles, stats) = Profiles::open(&install.root, input.config_dir(), "default");
         let (read, write) = profiles.config_paths();
@@ -1134,6 +1135,20 @@ impl Viewer {
                 // The original's range is 0 to 3600 s; a timeout of 0 would drop the client at once.
                 net.set_timeout(Duration::from_secs_f32(secs.clamp(1.0, 3600.0)));
             }
+            let tracer = |name: &str, default: f32| {
+                st.input
+                    .cvar(name)
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(default)
+            };
+            net.set_tracer_cvars(crate::tracer::Cvars {
+                chance: tracer("cg_tracerchance", 0.2).clamp(0.0, 1.0),
+                own_chance: tracer("cg_firstPersonTracerChance", 0.5).clamp(0.0, 1.0),
+                scale: tracer("cg_tracerScale", 1.0).max(1.0),
+                scale_min_dist: tracer("cg_tracerScaleMinDist", 5000.0).max(0.0),
+                scale_dist_range: tracer("cg_tracerScaleDistRange", 25000.0).max(0.0),
+            });
             net.set_projection(
                 st.fov_x,
                 st.aspect
@@ -2693,6 +2708,7 @@ fn finish_load(
         net.new_level(Some((library, &data, sound)))?;
         if let Some(sh) = st.shell.as_ref() {
             net.upload_stats(&sh.st.stats);
+            net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
         }
     } else {
         let (addr, listen) = server.ok_or("no server to connect to")?;
@@ -2706,6 +2722,7 @@ fn finish_load(
         net.set_userinfo(&cli.name, rate, snaps);
         if let Some(sh) = st.shell.as_ref() {
             net.set_profile(&sh.st.stats);
+            net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
         }
         st.net = Some(net);
         st.listen = listen;

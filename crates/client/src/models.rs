@@ -215,6 +215,30 @@ impl Player {
         Some(sim::skel::Pose::to_world(&head, &origin, self.yaw))
     }
 
+    /// Where `tag` of the weapon in the player's hands is in the world, for a player standing at `origin` in the pose
+    /// of the last [`Player::update`]: the muzzle (`tag_flash`), the ejection port (`tag_brass`).
+    pub fn weapon_tag(&self, origin: [f32; 3], tag: &str) -> Option<fx::Frame> {
+        self.weapon.as_ref()?;
+        let b = self.pose.bones().get(self.anims.rig().bone_index(tag)?)?;
+        let body = glam::Mat4::from_rotation_translation(
+            glam::Quat::from_array(sim::skel::quat::from_angles(&[0.0, self.yaw, 0.0])),
+            glam::Vec3::from(origin),
+        );
+        let m = body
+            * glam::Mat4::from_rotation_translation(
+                glam::Quat::from_xyzw(b.quat[0], b.quat[1], b.quat[2], b.quat[3]).normalize(),
+                glam::Vec3::from(b.trans),
+            );
+        Some(fx::Frame {
+            origin: m.w_axis.truncate(),
+            axis: [
+                m.x_axis.truncate(),
+                m.y_axis.truncate(),
+                m.z_axis.truncate(),
+            ],
+        })
+    }
+
     /// The body and head as model instances for a player standing at `origin`.
     pub fn instances(&self, origin: [f32; 3]) -> Vec<ModelInstance> {
         self.instances_posed(origin, self.yaw, self.pose.bones())

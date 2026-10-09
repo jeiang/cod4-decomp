@@ -919,6 +919,7 @@ fn check_for_rechamber(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) -> 
     if ps.weapon_state == ws::RECHAMBERING && delayed {
         cx.inv.set_rechamber(weapon, false);
         ps.add_event(ev::EJECT_BRASS, 0);
+        cx.event(WeaponEvent::EjectBrass { weapon });
         if ps.weapon_time != 0 {
             return true;
         }
@@ -1150,6 +1151,7 @@ fn reload_delayed_action(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     }
     cx.inv.set_rechamber(weapon, false);
     ps.add_event(ev::EJECT_BRASS, 0);
+    cx.event(WeaponEvent::EjectBrass { weapon });
     let start = matches!(
         ps.weapon_state,
         ws::RELOAD_START | ws::RELOAD_START_INTERUPT
@@ -1275,12 +1277,17 @@ fn check_for_melee(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
     }
 }
 
+/// The longest lunge a command may ask for: `aim_automelee_range` (128) and a tenth for the target having moved.
+const MELEE_CHARGE_MAX: u8 = 141;
+
 /// `PM_MeleeChargeStart`.
 fn melee_charge_start(cx: &Cx<'_>, ps: &mut PlayerState) {
-    if cx.cmd.melee_charge_dist != 0 {
+    // Both come from the client: a non-finite yaw would poison the player's velocity, and a distance beyond what the
+    // aim assist ever asks for (`aim_automelee_range`) would launch a modified client across the map.
+    if cx.cmd.melee_charge_dist != 0 && cx.cmd.melee_charge_yaw.is_finite() {
         ps.pm_flags |= pmf::MELEE_CHARGE;
         ps.melee_charge_yaw = cx.cmd.melee_charge_yaw;
-        ps.melee_charge_dist = i32::from(cx.cmd.melee_charge_dist);
+        ps.melee_charge_dist = i32::from(cx.cmd.melee_charge_dist.min(MELEE_CHARGE_MAX));
         ps.melee_charge_time = 0;
     } else {
         melee_charge_clear(ps);

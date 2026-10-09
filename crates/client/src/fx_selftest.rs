@@ -203,6 +203,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             weapon: 0,
             shooter: 7,
             vehicle: false,
+            last_shot: false,
         },
         &weapon,
     );
@@ -236,6 +237,86 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         &mut report,
         &mut bad,
     );
+
+    // A burst of tracer rounds draws a beam for each while it flies, from the gun to where it struck, and none once
+    // they have landed; the beams are drawn with the stock tracer material.
+    let mut ui = crate::ui::assets::UiAssets::default();
+    let tracer_material = match server::content::Install::open(install)
+        .map_err(|e| e.to_string())
+        .and_then(|i| ui.load_zone(&i, "localized_common_mp"))
+    {
+        Ok(()) => ui.material("gfx_tracer").cloned(),
+        Err(e) => {
+            bad.push(format!("cannot read the tracer material: {e}"));
+            None
+        }
+    };
+    if tracer_material.is_none() {
+        bad.push("the stock tracer material gfx_tracer is not in the install".into());
+    }
+    let mut fx = Effects::new(&lib.content, data.world.clone());
+    fx.set_tracer_material(tracer_material);
+    fx.set_tracer_cvars(crate::tracer::Cvars {
+        chance: 1.0,
+        own_chance: 1.0,
+        ..crate::tracer::Cvars::default()
+    });
+    // Burst fire of the stock rifle by another player, aimed where there are a thousand units of open air.
+    let open = (0..16).map(|i| [-10.0, i as f32 * 22.5, 0.0]).find(|a| {
+        let (f, _, _) = sim::pm::math::angle_vectors(a);
+        let far = eye + glam::Vec3::from(f) * 1000.0;
+        world
+            .trace(
+                eye.to_array(),
+                far.to_array(),
+                [0.0; 3],
+                [0.0; 3],
+                sim::cm::ENTITYNUM_NONE,
+                sim::contents::SOLID,
+            )
+            .fraction
+            >= 1.0
+    });
+    let Some(aim) = open else {
+        return Err(vec!["no open air found to fire tracers into".into()]);
+    };
+    fx.update(1000, world);
+    for _ in 0..5 {
+        fx.event(
+            &ClientEvent::WeaponFire {
+                eye: eye.to_array(),
+                angles: aim,
+                weapon: 0,
+                shooter: 7,
+                vehicle: false,
+                last_shot: false,
+            },
+            &weapon,
+        );
+    }
+    fx.update(1020, world);
+    // Seen from the side: a beam coming straight at the eye is edge on.
+    let flying = fx.draw(eye + glam::Vec3::Z * 50.0, 0.0, 0.0, 0.0);
+    let beam_meshes = flying
+        .meshes
+        .iter()
+        .filter(|m| m.material.name.as_deref() == Some("gfx_tracer"))
+        .count();
+    fx.update(1000 + 8192 * 1000 / 7500 + 100, world);
+    let landed = fx.draw(eye, 0.0, 0.0, 0.0).tracers;
+    report.insert("tracers_in_flight".into(), flying.tracers.into());
+    report.insert("tracer_meshes".into(), beam_meshes.into());
+    if flying.tracers != 5 || beam_meshes != 1 {
+        bad.push(format!(
+            "five tracer rounds should draw five beams in one mesh, drew {} in {beam_meshes}",
+            flying.tracers
+        ));
+    }
+    if landed != 0 {
+        bad.push(format!(
+            "{landed} tracers were still flying after they had landed"
+        ));
+    }
 
     // The debris of an explosion are PhysPreset rigid bodies: chunks come down from where they were thrown, stay
     // above the floor they land on and come to rest; they do not hang in the air or fall through the map.
@@ -546,6 +627,7 @@ fn destructible(
                     weapon: 1,
                     shooter: 0,
                     vehicle: false,
+                    last_shot: false,
                 },
                 &|_| Some(gun.clone()),
                 &Open,

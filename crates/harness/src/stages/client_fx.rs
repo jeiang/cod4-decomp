@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-fx`: runs `cod4e --fx-selftest` on the real effects. With no window and no GPU it plays stock effects
 //! against a stock map and asserts what a match shows: an explosion draws sprites and then ends, a bullet into the
-//! floor leaves a decal clipped to it, a shot plays its muzzle flash and ejects a shell, and the vision and shock
-//! files the scripts name are in the install and change the picture. Needs the install; skips cleanly without it.
+//! floor leaves a decal clipped to it, a shot plays its muzzle flash and ejects a shell, a burst of tracer rounds draws
+//! one beam each in the stock tracer material, and the vision and shock files the scripts name are in the install and
+//! change the picture. Needs the install; skips cleanly without it.
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::io;
@@ -41,6 +42,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     r.metrics.insert(format!("fx.{k}"), n);
                 }
             }
+        }
+        // The burst of five tracer rounds is five beams in flight.
+        if r.metrics.get("fx.tracers_in_flight") != Some(&5.0) {
+            r.status = Status::Failed;
+            r.reason = Some(format!(
+                "a burst of five tracer rounds should draw five beams, the report says {:?}",
+                r.metrics.get("fx.tracers_in_flight")
+            ));
         }
     } else {
         r.reason = Some(String::from_utf8_lossy(&out.stderr).trim().to_owned());

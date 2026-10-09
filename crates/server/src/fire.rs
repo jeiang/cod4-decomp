@@ -40,7 +40,10 @@ impl Game {
     pub fn weapon_events(&mut self, vm: &mut Vm, n: u16, out: &WeaponOut) {
         for ev in out.events() {
             match *ev {
-                WeaponEvent::Fire { weapon, .. } => self.fire_weapon(vm, n, weapon),
+                WeaponEvent::Fire {
+                    weapon, last_round, ..
+                } => self.fire_weapon(vm, n, weapon, last_round),
+                WeaponEvent::EjectBrass { weapon } => self.eject_brass_event(n, weapon),
                 WeaponEvent::Melee { weapon } => self.fire_melee(vm, n, weapon),
                 WeaponEvent::OffhandThrow {
                     weapon, fuse_left, ..
@@ -61,8 +64,17 @@ impl Game {
         }
     }
 
+    /// `EV_EJECT_BRASS`: a bolt-action's case comes out of the gun.
+    fn eject_brass_event(&mut self, n: u16, weapon: u16) {
+        let now = self.level.time;
+        self.tempev.add(now, crate::tempev::ev::EJECT_BRASS, |s| {
+            s.weapon = weapon;
+            s.client = n;
+        });
+    }
+
     /// `FireWeapon`.
-    fn fire_weapon(&mut self, vm: &mut Vm, n: u16, weapon: u16) {
+    fn fire_weapon(&mut self, vm: &mut Vm, n: u16, weapon: u16, last_round: bool) {
         vm.notify_entity(n, "weapon_fired", &[]);
         let time = self.level.time;
         if let Some(c) = self.client_mut(n) {
@@ -87,6 +99,11 @@ impl Game {
             s.angles = angles;
             s.weapon = weapon;
             s.client = n;
+            s.event_parm = if last_round {
+                crate::tempev::FIRE_LAST_SHOT
+            } else {
+                0
+            };
         });
         match weap_type {
             WeaponType::Bullet => self.fire_bullets(vm, n, weapon, &aim, spread),
@@ -313,6 +330,23 @@ impl Game {
             self.check_hit_trigger_damage(vm, n, origin, end, damage, MOD_MELEE);
         }
         let Some((t, point)) = found else { return };
+        // `Weapon_Melee_internal`: what the swing struck is announced whether or not it takes damage.
+        let flesh = t.hit != ENTITYNUM_WORLD && self.is_client(t.hit);
+        let knife = self.weapons.get(weapon).is_some_and(|i| i.has_knife_model);
+        let now = self.level.time;
+        let kind = if flesh {
+            crate::tempev::ev::MELEE_FLESH
+        } else {
+            crate::tempev::ev::MELEE_WORLD
+        };
+        self.tempev.add(now, kind, |s| {
+            s.origin = point;
+            s.angles = crate::tempev::dir_to_angles(t.normal);
+            s.weapon = weapon;
+            s.client = n;
+            s.model = t.hit;
+            s.event_parm = u8::from(knife);
+        });
         if t.hit == ENTITYNUM_WORLD || !self.ent(t.hit).is_some_and(|e| e.takedamage) {
             return;
         }

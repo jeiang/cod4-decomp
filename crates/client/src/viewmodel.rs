@@ -247,6 +247,8 @@ pub struct ViewModel {
     /// Indices of `tag_flash` and `tag_brass` among the gun's bones.
     flash_bone: Option<usize>,
     brass_bone: Option<usize>,
+    /// `tag_knife_fx` of a knife.
+    knife_bone: Option<usize>,
     /// `tag_camera` of the hands: the animated pose of the eye.
     camera_bone: Option<usize>,
     tags: Option<ViewTags>,
@@ -272,6 +274,8 @@ pub struct ViewModel {
 pub struct ViewTags {
     pub flash: Option<fx::Frame>,
     pub brass: Option<fx::Frame>,
+    /// Where a knife's blow lands (`tag_knife_fx`), where its blood shows.
+    pub knife: Option<fx::Frame>,
     /// Where the animation of the hands puts the camera (`tag_camera`), relative to the eye: the offset in world
     /// units and the rotation. The view is level here, the aim's angles applied.
     pub camera: Option<CameraTag>,
@@ -346,7 +350,8 @@ impl ViewModel {
             },
         ])?;
         let bone = |n: &str| gn.iter().position(|b| &**b == n);
-        let (flash_bone, brass_bone) = (bone("tag_flash"), bone("tag_brass"));
+        let (flash_bone, brass_bone, knife_bone) =
+            (bone("tag_flash"), bone("tag_brass"), bone("tag_knife_fx"));
         let camera_bone = hn.iter().position(|b| &**b == "tag_camera");
         let mut slots: Vec<Option<Slot>> = (0..slot::COUNT).map(|_| None).collect();
         for (i, n) in weapon.anims.iter().enumerate().take(slot::COUNT) {
@@ -401,6 +406,7 @@ impl ViewModel {
             },
             flash_bone,
             brass_bone,
+            knife_bone,
             camera_bone,
             tags: None,
         })
@@ -645,6 +651,7 @@ impl ViewModel {
         self.tags = Some(ViewTags {
             flash: frame(self.flash_bone),
             brass: frame(self.brass_bone),
+            knife: frame(self.knife_bone),
             camera,
         });
         out

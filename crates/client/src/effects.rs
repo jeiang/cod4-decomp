@@ -8,6 +8,7 @@
 
 use crate::decal::{self, Placement};
 use crate::events::{ClientEvent, Events};
+use crate::tracer::{self, Tracers};
 use crate::viewmodel::ViewTags;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
 use assets::zone::gfx::Material;
@@ -39,6 +40,10 @@ const ROW_BY_IMPACT_TYPE: [Option<usize>; 9] = [
 /// `WeaponDef::impact_type` of the dud row.
 const IMPACT_TYPE_DUD: i32 = 8;
 const SURFACE_FLESH: u8 = 7;
+/// The effect of a knife blow that struck a player (`cgMedia.fxKnifeBlood`).
+/// How far a bullet is followed for its tracer.
+const TRACER_RANGE: f32 = 8192.0;
+const KNIFE_BLOOD: &str = "impacts/flesh_hit_knife";
 const FLESH_BODY_NONFATAL: usize = 0;
 const FLESH_BODY_FATAL: usize = 1;
 /// How high above a player's feet blood appears.
@@ -156,10 +161,37 @@ pub struct Effects {
     /// The camera's horizontal field of view in radians and its aspect ratio, for the view volume that the effects
     /// cull against; `None` culls nothing.
     projection: Option<(f32, f32)>,
+    /// Where the guns of the other players are, by client number.
+    remote_tags: HashMap<u16, ViewTags>,
+    /// The effects that follow a gun's tag until they end (a muzzle flash, a shell leaving the ejection port).
+    bolted: Vec<Bolted>,
+    tracers: Tracers,
+    /// Tracers rolled by shots, not yet launched: the shooter, their eye and the way they look.
+    pending_tracers: Vec<(u16, Vec3, Vec3)>,
+    tracer_cvars: tracer::Cvars,
+    /// The state of the dice for the tracers.
+    dice: u32,
+    /// `gfx_tracer`, which the tracers are drawn with; none, none are drawn.
+    tracer_material: Option<Arc<Material>>,
     /// What was played, by kind; for the report.
     pub played: BTreeMap<&'static str, u64>,
     /// Names of effects an event asked for that the content lacks.
     pub missing: HashSet<String>,
+}
+
+/// A tag of a gun an effect is bolted to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tag {
+    Flash,
+    Brass,
+    Knife,
+}
+
+/// An effect that follows `tag` of `shooter`'s gun (`CG_PlayBoltedEffect`).
+struct Bolted {
+    id: u64,
+    shooter: u16,
+    tag: Tag,
 }
 
 /// A frame at `origin` facing `forward` with `up` above it.
@@ -215,6 +247,8 @@ pub struct Drawn {
     pub clouds: usize,
     /// How many trail strips the meshes hold.
     pub trails: usize,
+    /// How many tracers are in flight.
+    pub tracers: usize,
     /// How far the camera shaking turns the view (pitch, yaw, roll in degrees); set by the caller.
     pub sway: [f32; 3],
 }
@@ -238,6 +272,13 @@ impl Effects {
             own: u16::MAX,
             view: None,
             projection: None,
+            remote_tags: HashMap::new(),
+            bolted: Vec::new(),
+            tracers: Tracers::default(),
+            pending_tracers: Vec::new(),
+            tracer_cvars: tracer::Cvars::default(),
+            dice: 0x9e37_79b9,
+            tracer_material: None,
             played: BTreeMap::new(),
             missing: HashSet::new(),
         }
@@ -423,6 +464,7 @@ impl Effects {
                 weapon: w,
                 shooter,
                 vehicle,
+                last_shot,
             } => {
                 let Some(d) = weapon(*w) else { return };
                 let mine = *shooter == self.own && !vehicle;
@@ -431,10 +473,43 @@ impl Effects {
                 } else {
                     (&d.world_flash_effect, &d.world_shell_eject_effect)
                 };
-                let (flash_at, brass_at) = match self.view.filter(|_| mine) {
-                    Some(t) => (t.flash, t.brass),
-                    // A vehicle's event names its muzzle, and it throws no shells.
-                    None if *vehicle => {
+                // The round that empties the clip has its own shell, where the gun has one (`CG_EjectWeaponBrass`).
+                let last = if mine {
+                    &d.view_last_shot_eject_effect
+                } else {
+                    &d.world_last_shot_eject_effect
+                };
+                let both = d.view_last_shot_eject_effect.is_some()
+                    && d.world_last_shot_eject_effect.is_some();
+                let eject = last
+                    .as_ref()
+                    .filter(|_| *last_shot && both)
+                    .or(eject.as_ref());
+                // A bolt-action throws its shell when the bolt is worked (`ClientEvent::EjectBrass`), not with the shot.
+                let eject = eject.filter(|_| d.bolt_action == 0);
+                // `CG_FireWeapon` -> `DrawBulletImpacts`: one shot in so many is a tracer, rolled here; where it ends is
+                // found at the next update, against the map and the players as they are then.
+                if !vehicle
+                    && sim::weapon::WeaponType::from_raw(d.weap_type)
+                        == sim::weapon::WeaponType::Bullet
+                {
+                    let chance = if mine {
+                        self.tracer_cvars.own_chance
+                    } else {
+                        self.tracer_cvars.chance
+                    };
+                    if self.roll() < chance {
+                        let (f, _, _) = sim::pm::math::angle_vectors(angles);
+                        self.pending_tracers
+                            .push((*shooter, Vec3::from(*eye), Vec3::from(f)));
+                    }
+                }
+                let (flash_at, brass_at) = match (
+                    self.tag_frame(*shooter, Tag::Flash),
+                    self.tag_frame(*shooter, Tag::Brass),
+                ) {
+                    (None, None) if *vehicle => {
+                        // A vehicle's event names its muzzle, and it throws no shells.
                         let (f, r, u) = sim::pm::math::angle_vectors(angles);
                         let flash = Frame {
                             origin: Vec3::from(*eye),
@@ -442,8 +517,9 @@ impl Effects {
                         };
                         (Some(flash), None)
                     }
-                    None => {
-                        // Another player's gun is not drawn: put the muzzle where a rifle's would be.
+                    (None, None) => {
+                        // A gun that is not drawn (out of view, or no model yet): put the muzzle where a rifle's would
+                        // be.
                         let (f, r, u) = sim::pm::math::angle_vectors(angles);
                         let (f, r, u) = (Vec3::from(f), Vec3::from(r), Vec3::from(u));
                         let eye = Vec3::from(*eye);
@@ -460,19 +536,104 @@ impl Effects {
                             }),
                         )
                     }
+                    tags => tags,
                 };
-                for (kind, def, at) in [
-                    ("muzzle_flash", flash, flash_at),
-                    ("shell_eject", eject, brass_at),
-                ] {
-                    if let (Some(def), Some(at)) = (def, at) {
-                        let def = self.resolve(def);
-                        self.fx.play(&def, at);
-                        *self.played.entry(kind).or_default() += 1;
-                    }
+                if let (Some(def), Some(at)) = (flash, flash_at) {
+                    self.play_bolted("muzzle_flash", def, *shooter, Tag::Flash, at, !vehicle);
+                }
+                if let (Some(def), Some(at)) = (eject, brass_at) {
+                    self.play_bolted("shell_eject", def, *shooter, Tag::Brass, at, !vehicle);
+                }
+            }
+            ClientEvent::EjectBrass { weapon: w, shooter } => {
+                let Some(d) = weapon(*w) else { return };
+                let def = if *shooter == self.own {
+                    &d.view_shell_eject_effect
+                } else {
+                    &d.world_shell_eject_effect
+                };
+                if let (Some(def), Some(at)) = (def, self.tag_frame(*shooter, Tag::Brass)) {
+                    self.play_bolted("shell_eject", def, *shooter, Tag::Brass, at, true);
+                }
+            }
+            ClientEvent::MeleeHit {
+                flesh,
+                attacker,
+                knife,
+                ..
+            } => {
+                // `CG_MeleeBloodEvent`: the attacker sees the knife bloody; nobody else's view shows it.
+                if *flesh
+                    && *knife
+                    && *attacker == self.own
+                    && let Some(def) = self.fx.library().get(KNIFE_BLOOD).cloned()
+                    && let Some(at) = self.tag_frame(*attacker, Tag::Knife)
+                {
+                    self.play_bolted("knife_blood", &def, *attacker, Tag::Knife, at, true);
                 }
             }
         }
+    }
+
+    /// Where `tag` of `shooter`'s gun is: on the view model for the player whose eyes these are, on the third-person
+    /// model for the others.
+    fn tag_frame(&self, shooter: u16, tag: Tag) -> Option<Frame> {
+        let t = if shooter == self.own {
+            self.view.as_ref()
+        } else {
+            self.remote_tags.get(&shooter)
+        }?;
+        match tag {
+            Tag::Flash => t.flash,
+            Tag::Brass => t.brass,
+            Tag::Knife => t.knife,
+        }
+    }
+
+    /// Launches the tracers shots rolled: from the muzzle where the gun is drawn, else from 30 units ahead of the eye,
+    /// to what the bullet meets or the end of its range (`DrawBulletImpacts`: 8192 units). The bullet's spread is not
+    /// reproduced: the tracer flies along the aim.
+    fn launch_tracers(&mut self, world: &dyn Collide) {
+        for (shooter, eye, dir) in std::mem::take(&mut self.pending_tracers) {
+            let far = eye + dir * TRACER_RANGE;
+            let t = world.trace(
+                eye.to_array(),
+                far.to_array(),
+                [0.0; 3],
+                [0.0; 3],
+                shooter,
+                sim::contents::SOLID | sim::contents::CLIPSHOT | sim::contents::PLAYER,
+            );
+            let end = eye.lerp(far, t.fraction);
+            let start = self
+                .tag_frame(shooter, Tag::Flash)
+                .map_or(eye + dir * 30.0, |f| f.origin);
+            self.tracers.spawn(self.clock, start, end);
+            *self.played.entry("tracer").or_default() += 1;
+        }
+    }
+
+    /// Plays `def` at `at`, which is where `tag` of `shooter`'s gun is now; with `follow` it goes on following the tag
+    /// until it ends (`CG_PlayBoltedEffect`).
+    fn play_bolted(
+        &mut self,
+        kind: &'static str,
+        def: &Arc<FxEffectDef>,
+        shooter: u16,
+        tag: Tag,
+        at: Frame,
+        follow: bool,
+    ) {
+        let d = self.resolve(def);
+        *self.played.entry(kind).or_default() += 1;
+        if !follow {
+            self.fx.play(&d, at);
+            return;
+        }
+        let id = self.fx.play_attached(&d, at);
+        // Attached effects loop until stopped: this one plays once, and is carried along while it does.
+        self.fx.stop(id);
+        self.bolted.push(Bolted { id, shooter, tag });
     }
 
     /// Keeps the trail effect of every missile in flight at the missile: starts it for a new one, follows it as it
@@ -624,6 +785,30 @@ impl Effects {
         self.projection = (fov_x > 0.0 && aspect > 0.0).then_some((fov_x, aspect));
     }
 
+    /// Tells the effects where the guns of the other players are this frame, by client number: what their muzzle
+    /// flashes and shells follow.
+    pub fn set_remote_tags(&mut self, tags: HashMap<u16, ViewTags>) {
+        self.remote_tags = tags;
+    }
+
+    /// What the player has set about tracers.
+    pub fn set_tracer_cvars(&mut self, c: tracer::Cvars) {
+        self.tracer_cvars = c;
+    }
+
+    /// A random number in [0, 1).
+    fn roll(&mut self) -> f32 {
+        self.dice ^= self.dice << 13;
+        self.dice ^= self.dice >> 17;
+        self.dice ^= self.dice << 5;
+        (self.dice >> 8) as f32 / (1u32 << 24) as f32
+    }
+
+    /// The material tracers are drawn with (`gfx_tracer`).
+    pub fn set_tracer_material(&mut self, material: Option<Arc<Material>>) {
+        self.tracer_material = material;
+    }
+
     /// Plays `name` 90 units ahead of a camera, facing it (for `--fx-demo`).
     pub fn demo(&mut self, name: &str, eye: Vec3, yaw: f32, pitch: f32) {
         let (sy, cy) = yaw.sin_cos();
@@ -672,6 +857,19 @@ impl Effects {
             let heading = c.axis[1] * -a.sin() + c.axis[2] * a.cos();
             self.fx.move_effect(id, Frame::facing(at, heading));
         }
+        // What is bolted to a gun goes where the gun has gone; what has ended is forgotten.
+        let mut bolted = std::mem::take(&mut self.bolted);
+        bolted.retain(|b| {
+            if !self.fx.is_live(b.id) {
+                return false;
+            }
+            if let Some(at) = self.tag_frame(b.shooter, b.tag) {
+                self.fx.move_effect(b.id, at);
+            }
+            true
+        });
+        self.bolted = bolted;
+        self.launch_tracers(world);
         let map = FxWorld {
             tracer: Tracer(world),
             map: &self.world,
@@ -716,7 +914,9 @@ impl Effects {
         self.fx.set_camera(cam);
         let mut d = Draws::default();
         self.fx.draw(&cam, &mut d);
+        let beams = self.tracers.beams(self.clock);
         let mut out = Drawn {
+            tracers: beams.len(),
             quads: d.quads.len(),
             lights: std::mem::take(&mut d.lights),
             ..Drawn::default()
@@ -792,6 +992,11 @@ impl Effects {
                 },
             ));
             out.clouds += 1;
+        }
+        if let Some(m) = &self.tracer_material
+            && let Some(mesh) = tracer::beam_mesh(m, &beams, eye, &self.tracer_cvars)
+        {
+            out.meshes.push(mesh);
         }
 
         let mut seen = HashSet::new();

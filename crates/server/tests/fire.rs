@@ -271,6 +271,83 @@ fn firing_tells_clients_who_fired_what_from_where() {
     assert!((fired[0].angles[1] - 90.0).abs() < 0.5);
 }
 
+/// The events of kind `kind` still live.
+fn live_events(g: &Game, kind: u8) -> Vec<net::entity::EntityState> {
+    g.tempev
+        .live(g.level.time)
+        .filter(|e| e.event == kind)
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn the_last_round_and_a_bolt_actions_case_are_announced() {
+    use server::tempev::{FIRE_LAST_SHOT, ev};
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let weapon = g.weapons.index("ak47_mp");
+    g.client_mut(shooter).unwrap().ps.weapon = u32::from(weapon);
+    for last_round in [false, true] {
+        fire(
+            &mut g,
+            &mut vm,
+            shooter,
+            WeaponEvent::Fire {
+                weapon,
+                shot: 1,
+                first: true,
+                ads: false,
+                burst: false,
+                last_round,
+            },
+        );
+    }
+    let parms: Vec<_> = live_events(&g, ev::WEAPON_FIRE)
+        .iter()
+        .map(|e| e.event_parm)
+        .collect();
+    assert_eq!(parms, [0, FIRE_LAST_SHOT]);
+    fire(&mut g, &mut vm, shooter, WeaponEvent::EjectBrass { weapon });
+    let brass = live_events(&g, ev::EJECT_BRASS);
+    assert_eq!(brass.len(), 1);
+    assert_eq!((brass[0].client, brass[0].weapon), (shooter, weapon));
+}
+
+#[test]
+fn a_knife_blow_announces_what_it_struck() {
+    use server::tempev::ev;
+    let wall = ([30.0, -100.0, 0.0], [40.0, 100.0, 200.0]);
+    let (mut g, mut vm) = arena(&[wall], 0, vec![knife()]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let weapon = g.weapons.index("knife_mp");
+    g.client_mut(shooter).unwrap().ps.view_height_current = 40.0;
+    // The wall: no damage, but a blow on the world.
+    fire(&mut g, &mut vm, shooter, WeaponEvent::Melee { weapon });
+    let world = live_events(&g, ev::MELEE_WORLD);
+    assert_eq!(world.len(), 1);
+    assert_eq!(world[0].client, shooter);
+    assert_eq!(world[0].model, sim::cm::ENTITYNUM_WORLD);
+    assert!(
+        (world[0].origin[0] - 30.0).abs() < 1.0,
+        "{:?}",
+        world[0].origin
+    );
+    assert!(live_events(&g, ev::MELEE_FLESH).is_empty());
+    // A player in front of it: a blow on flesh, naming whom.
+    let victim = add_player(&mut g, &mut vm, [25.0, 0.0, 0.0], 180.0, Team::Axis);
+    g.level.time += 1000;
+    fire(&mut g, &mut vm, shooter, WeaponEvent::Melee { weapon });
+    let flesh = live_events(&g, ev::MELEE_FLESH);
+    assert_eq!(flesh.len(), 1, "{flesh:?}");
+    assert_eq!((flesh[0].client, flesh[0].model), (shooter, victim));
+    // A swing at nothing announces nothing.
+    g.level.time += 1000;
+    g.client_mut(shooter).unwrap().ps.viewangles = [0.0, 270.0, 0.0];
+    let before = g.tempev.live(g.level.time).count();
+    fire(&mut g, &mut vm, shooter, WeaponEvent::Melee { weapon });
+    assert_eq!(g.tempev.live(g.level.time).count(), before);
+}
+
 #[test]
 fn a_shot_into_the_legs_is_not_a_headshot_and_a_miss_hurts_nobody() {
     let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);

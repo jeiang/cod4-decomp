@@ -3,6 +3,7 @@
 //! drives as stage 3 (`--flythrough`), which records frame times, a video and a screenshot.
 
 mod app;
+mod automelee;
 mod breath;
 mod camera;
 mod compass;
@@ -40,6 +41,7 @@ mod session;
 mod shell;
 mod showcase;
 mod sound;
+mod tracer;
 mod ui;
 #[cfg_attr(target_arch = "wasm32", path = "video_web.rs")]
 mod video;

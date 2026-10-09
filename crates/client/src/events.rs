@@ -84,6 +84,20 @@ pub enum ClientEvent {
         weapon: u16,
         shooter: u16,
         vehicle: bool,
+        /// The round that emptied the clip: its shell has its own effect.
+        last_shot: bool,
+    },
+    /// A bolt-action's case came out on the rechamber.
+    EjectBrass { weapon: u16, shooter: u16 },
+    /// A knife swing struck something: a player (`flesh`) or the world. `victim` is the entity struck; `knife` is
+    /// whether the attacker's weapon has a knife model.
+    MeleeHit {
+        origin: [f32; 3],
+        flesh: bool,
+        weapon: u16,
+        attacker: u16,
+        victim: u16,
+        knife: bool,
     },
 }
 
@@ -101,6 +115,8 @@ impl ClientEvent {
             Self::Physics { .. } => "physics",
             Self::Earthquake { .. } => "earthquake",
             Self::WeaponFire { .. } => "weapon_fire",
+            Self::EjectBrass { .. } => "eject_brass",
+            Self::MeleeHit { .. } => "melee_hit",
         }
     }
 }
@@ -236,6 +252,19 @@ impl Events {
                 weapon: e.weapon,
                 shooter: e.client,
                 vehicle: vehicles.contains(&e.client),
+                last_shot: e.event_parm == server::tempev::FIRE_LAST_SHOT,
+            },
+            ev::EJECT_BRASS => ClientEvent::EjectBrass {
+                weapon: e.weapon,
+                shooter: e.client,
+            },
+            ev::MELEE_FLESH | ev::MELEE_WORLD => ClientEvent::MeleeHit {
+                origin: e.origin,
+                flesh: e.event == ev::MELEE_FLESH,
+                weapon: e.weapon,
+                attacker: e.client,
+                victim: e.model,
+                knife: e.event_parm != 0,
             },
             _ => return None,
         })
@@ -341,10 +370,55 @@ mod tests {
                     angles: [5.0, 90.0, 0.0],
                     weapon: 7,
                     shooter: 3,
-                    vehicle: false
+                    vehicle: false,
+                    last_shot: false,
                 }]
             ),
             "{out:?}"
+        );
+    }
+
+    #[test]
+    fn the_last_round_brass_and_knife_hits_decode() {
+        let mut ev = Events::default();
+        let mut shot = event(964, super::ev::WEAPON_FIRE, 1);
+        shot.event_parm = server::tempev::FIRE_LAST_SHOT;
+        let mut brass = event(966, super::ev::EJECT_BRASS, 1);
+        brass.weapon = 4;
+        brass.client = 2;
+        let mut stab = event(967, super::ev::MELEE_FLESH, 1);
+        stab.origin = [1.0, 2.0, 3.0];
+        stab.client = 2;
+        stab.model = 9;
+        stab.event_parm = 1;
+        let out = ev.scan(&snap(&[shot, brass, stab]));
+        assert!(
+            matches!(
+                out[0],
+                ClientEvent::WeaponFire {
+                    last_shot: true,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
+        assert_eq!(
+            out[1],
+            ClientEvent::EjectBrass {
+                weapon: 4,
+                shooter: 2
+            }
+        );
+        assert_eq!(
+            out[2],
+            ClientEvent::MeleeHit {
+                origin: [1.0, 2.0, 3.0],
+                flesh: true,
+                weapon: 0,
+                attacker: 2,
+                victim: 9,
+                knife: true
+            }
         );
     }
 
