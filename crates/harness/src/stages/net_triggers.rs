@@ -112,9 +112,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if server.game.ent(volume).is_none() {
         return fail("the trigger_damage volume vanished before it was shot".into());
     }
-    if let Err(e) = server.exec_line("set sv_cheats 1") {
-        return fail(format!("sv_cheats: {e}"));
-    }
+    server.game.cvars.force("sv_cheats", "1");
     let shot = format!(
         "devshoot {bot} {} {} {} {} {} {}",
         at[0] - 400.0,

@@ -331,6 +331,9 @@ pub struct Level {
     pub north_yaw: f32,
     pub exit_requested: bool,
     pub map_restart_requested: bool,
+    /// A script's `savepersist` argument of `map_restart`, `map` or `exitlevel`: the `game` array survives the
+    /// level change (`level.savepersist`).
+    pub save_persist: bool,
     pub num_entities: usize,
     /// `setplayerignoreradiusdamage`.
     pub ignore_radius_damage: bool,
@@ -379,6 +382,12 @@ pub struct Game {
     /// `setteamradar`: whether the players with no team, the axis and the allies have radar (`level.teamHasRadar`).
     pub team_radar: [bool; 3],
     pub vote: crate::vote::VoteState,
+    /// `games_mp.log`.
+    pub log: crate::gamelog::GameLog,
+    /// Players the game dropped for sitting idle (`g_inactivity`), so the network side says why.
+    pub inactive: Vec<u16>,
+    /// Identifies this start of the level to the clients (`sv_serverId`): a vote called in an earlier level is stale.
+    pub server_id: i32,
     pub cvars: Cvars,
     pub content: Content,
     pub level: Level,
@@ -489,6 +498,9 @@ impl Game {
             nav: None,
             nav_goals: Vec::new(),
             vote: Default::default(),
+            log: Default::default(),
+            inactive: Vec::new(),
+            server_id: 0,
             compass: None,
             team_radar: [false; 3],
             nav_loads: Vec::new(),
@@ -586,6 +598,7 @@ impl Game {
     /// Clears per-map state for a new `G_InitGame`.
     pub fn reset_level(&mut self, max_clients: usize) {
         self.level = Level::default();
+        self.vote = Default::default();
         self.ambient = None;
         self.sound_out.clear();
         self.ents.clear();

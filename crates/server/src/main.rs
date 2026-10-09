@@ -38,8 +38,15 @@ fn expand_flags(args: Vec<String>) -> Result<Vec<String>, String> {
             None => rest.push(a),
         }
     }
-    sets.extend(rest);
-    Ok(sets)
+    // The game log is on for a dedicated server unless the command line says otherwise.
+    let mut all = vec![
+        "+set".to_owned(),
+        "g_log".to_owned(),
+        "games_mp.log".to_owned(),
+    ];
+    all.extend(sets);
+    all.extend(rest);
+    Ok(all)
 }
 
 fn main() -> ExitCode {

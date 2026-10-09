@@ -188,6 +188,10 @@ pub struct Server {
     rcon_throttle: Throttle,
     /// Lines typed on the server's own terminal (see [`Self::attach_console`]).
     console: Option<std::sync::mpsc::Receiver<String>>,
+    /// The game type the running level was started with (`sv.gametype`).
+    gametype: String,
+    /// The directory `g_log` names a file in.
+    log_dir: PathBuf,
 }
 
 fn register_core_dvars(c: &mut Cvars) {
@@ -237,7 +241,27 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_minGrenadeDamageSpeed", "400", CHEAT),
         ("g_inactivity", "0", 0),
         ("g_synchronousClients", "0", SYSTEMINFO),
-        ("sv_cheats", "0", 0),
+        // The original's default is on until the first `map` turns it off (`devmap` on).
+        ("sv_cheats", "1", SYSTEMINFO | INIT),
+        ("sv_serverid", "0", SYSTEMINFO | ROM),
+        // How much an abstention counts against a vote that runs out of time.
+        ("g_voteAbstainWeight", "0.5", ARCHIVE),
+        ("g_logSync", "0", ARCHIVE),
+        ("g_oldVoting", "1", ARCHIVE),
+        ("fs_game", "", SYSTEMINFO | INIT),
+        ("g_playerCollisionEjectSpeed", "25", ARCHIVE),
+        ("sv_keywords", "", SERVERINFO),
+        ("protocol", "", ROM | SERVERINFO),
+        ("sv_privateClients", "0", SERVERINFO),
+        ("sv_pure", "0", SERVERINFO | SYSTEMINFO),
+        ("sv_voice", "0", ARCHIVE | SERVERINFO | SYSTEMINFO),
+        ("sv_punkbuster", "0", ARCHIVE | SERVERINFO),
+        ("sv_allowAnonymous", "0", SERVERINFO),
+        ("sv_disableClientConsole", "0", SERVERINFO),
+        ("sv_minPing", "0", ARCHIVE | SERVERINFO),
+        ("sv_maxPing", "0", ARCHIVE | SERVERINFO),
+        // Most bytes a second one client is sent (0: what the client asks for).
+        ("sv_maxRate", "0", ARCHIVE | SERVERINFO),
         // Remote console: empty switches `rcon` off.
         ("rcon_password", "", 0),
         // Seconds `kick` and `tempBanClient` keep a player out (0-3600).
@@ -248,14 +272,121 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_mapRotationCurrent", "", 0),
         ("nextmap", "map_restart", 0),
         ("gamename", "Call of Duty 4", SERVERINFO | ROM),
-        ("g_log", "games_mp.log", ARCHIVE),
+        // The log file name (empty: no log); `cod4e-server` asks for `games_mp.log`.
+        ("g_log", "", ARCHIVE),
         ("loc_language", "0", ARCHIVE),
     ] {
         c.register(n, d, f);
     }
+    c.force("protocol", &net::oob::PROTOCOL.to_string());
+    // `Dvar_Register*` domains.
+    for (n, lo, hi) in [
+        ("sv_fps", 10, 1000),
+        ("sv_maxclients", 1, 64),
+        ("ui_maxclients", 1, 64),
+        ("sv_privateClients", 0, 64),
+        ("sv_maxRate", 0, 25_000),
+        ("sv_minPing", 0, 999),
+        ("sv_maxPing", 0, 999),
+        ("g_maxDroppedWeapons", 2, 32),
+        ("g_inactivity", 0, i32::MAX),
+        ("g_playerCollisionEjectSpeed", 0, 32_000),
+    ] {
+        c.set_limit(n, Limit::Int(lo, hi));
+    }
+    c.set_limit("g_voteAbstainWeight", Limit::Float(0.0, 1.0));
+    c.set_limit("g_gravity", Limit::Float(1.0, f32::MAX));
+    c.set_limit("sv_kickBanTime", Limit::Float(0.0, 3600.0));
     for (n, d) in crate::missile::MISSILE_CVARS {
         c.register(n, d, CHEAT);
     }
+}
+
+/// What one `map_rotate` does with the rotation.
+#[derive(Debug, PartialEq, Eq)]
+struct RotationPlan {
+    /// The console lines, newline included.
+    messages: Vec<String>,
+    /// What is left of the rotation for the next time (`sv_mapRotationCurrent`).
+    remaining: String,
+    /// The `gametype` the rotation named last.
+    gametype: Option<String>,
+    /// The map to change to; none forces a restart.
+    map: Option<String>,
+}
+
+/// The next word of a rotation (`Com_Parse`, which takes a quoted word whole); `None` when none is left.
+fn next_token(text: &mut String) -> Option<String> {
+    let t = text.trim_start();
+    if t.is_empty() {
+        text.clear();
+        return None;
+    }
+    let (token, rest) = match t.strip_prefix('"') {
+        Some(q) => q.split_once('"').unwrap_or((q, "")),
+        None => t.split_at(t.find(char::is_whitespace).unwrap_or(t.len())),
+    };
+    let (token, rest) = (token.to_owned(), rest.to_owned());
+    *text = rest;
+    Some(token)
+}
+
+/// `SV_MapRotate_f`: the rotation is `current` while it lasts and is read again from `rotation` when `current` is
+/// empty or runs out. `gametype X` sets the game type, `map Y` ends the search, any other word is skipped; a
+/// rotation with nothing to change to (or a keyword without its word) restarts the map.
+fn plan_rotation(rotation: &str, current: &str) -> RotationPlan {
+    let mut cur = if current.trim().is_empty() {
+        rotation.to_owned()
+    } else {
+        current.to_owned()
+    };
+    let mut plan = RotationPlan {
+        messages: Vec::new(),
+        remaining: String::new(),
+        gametype: None,
+        map: None,
+    };
+    let mut token = next_token(&mut cur);
+    if token.is_none() {
+        cur = rotation.to_owned();
+        token = next_token(&mut cur);
+    }
+    loop {
+        let Some(word) = token else {
+            plan.messages
+                .push("No map specified in sv_mapRotation - forcing map_restart.\n".into());
+            break;
+        };
+        if word.eq_ignore_ascii_case("gametype") {
+            let Some(g) = next_token(&mut cur) else {
+                plan.messages.push(
+                    "No gametype specified after 'gametype' keyword in sv_mapRotation - forcing map_restart.\n"
+                        .into(),
+                );
+                break;
+            };
+            plan.messages.push(format!("Setting g_gametype: {g}.\n"));
+            plan.gametype = Some(g);
+        } else if word.eq_ignore_ascii_case("map") {
+            match next_token(&mut cur) {
+                Some(m) => {
+                    plan.messages.push(format!("Setting map: {m}.\n"));
+                    plan.map = Some(m);
+                }
+                None => plan.messages.push(
+                    "No map specified after 'map' keyword in sv_mapRotation - forcing map_restart.\n"
+                        .into(),
+                ),
+            }
+            break;
+        } else {
+            plan.messages
+                .push(format!("Unknown keyword '{word}' in sv_mapRotation.\n"));
+        }
+        token = next_token(&mut cur);
+    }
+    plan.remaining = cur;
+    plan
 }
 
 fn io_err(e: impl std::fmt::Display) -> String {
@@ -266,6 +397,16 @@ impl Server {
     /// Boots a dedicated server on the install at `root`. `cmdline` is the program's
     /// arguments after the executable name (`+set a b +exec server.cfg +map mp_crash`).
     pub fn boot(root: &Path, cmdline: &[String], echo: bool) -> Result<Self, String> {
+        Self::boot_in(root, cmdline, echo, PathBuf::from("."))
+    }
+
+    /// [`Self::boot`] with the directory the game log (`g_log`) is written in.
+    pub fn boot_in(
+        root: &Path,
+        cmdline: &[String],
+        echo: bool,
+        log_dir: PathBuf,
+    ) -> Result<Self, String> {
         let t0 = Instant::now();
         let install =
             Install::open(root).map_err(|e| format!("{}: {}", root.display(), io_err(e)))?;
@@ -316,6 +457,8 @@ impl Server {
             redirect: None,
             rcon_throttle: Throttle::default(),
             console: None,
+            gametype: String::new(),
+            log_dir,
         };
         s.say("CoD4 MP headless server (cod4e)\n");
         s.say(&format!(
@@ -467,8 +610,13 @@ impl Server {
             return;
         };
         let info = self.server_info();
+        let status = self.server_status();
         let mut remote = Vec::new();
-        for i in net.poll(wait, &|| info.clone()) {
+        let answer = || crate::netsv::Status {
+            info: status.0.clone(),
+            players: status.1.clone(),
+        };
+        for i in net.poll(wait, &|| info.clone(), &answer) {
             match i {
                 Inbound::Rcon {
                     from,
@@ -551,19 +699,111 @@ impl Server {
         self.console = Some(lines);
     }
 
-    fn server_info(&self) -> Vec<(String, String)> {
+    /// The slots from `from` (a private slot's index) up that hold a connected client.
+    fn used_slots(&self, range: std::ops::Range<usize>) -> usize {
+        range
+            .filter(|n| {
+                self.game
+                    .clients
+                    .get(*n)
+                    .is_some_and(|c| c.conn != Conn::Free)
+            })
+            .count()
+    }
+
+    /// `SVC_Info`: the answer to `getinfo`. A key whose value is the default is left out, as at the original.
+    pub fn server_info(&self) -> Vec<(String, String)> {
         let c = &self.game.cvars;
-        vec![
+        let max = usize::try_from(c.int("sv_maxclients")).unwrap_or(0);
+        let private = usize::try_from(c.int("sv_privateClients"))
+            .unwrap_or(0)
+            .min(max);
+        let private_used = self.used_slots(0..private);
+        let clients = private_used + self.used_slots(private..max);
+        let max_clients = max - (private - private_used);
+        let mut kv = vec![
+            ("protocol".to_owned(), net::oob::PROTOCOL.to_string()),
             ("hostname".into(), c.string("sv_hostname").to_owned()),
             ("mapname".into(), self.map_name().unwrap_or("").to_owned()),
-            ("gametype".into(), c.string("g_gametype").to_owned()),
-            (
-                "clients".into(),
-                self.game.connected_clients().count().to_string(),
-            ),
-            ("sv_maxclients".into(), c.string("sv_maxclients").to_owned()),
-            ("protocol".into(), net::oob::PROTOCOL.to_string()),
-        ]
+        ];
+        let mut put = |k: &str, v: String| kv.push((k.to_owned(), v));
+        if clients > 0 {
+            put("clients", clients.to_string());
+        }
+        if max_clients > 0 {
+            put("sv_maxclients", max_clients.to_string());
+        }
+        put("gametype", c.string("g_gametype").to_owned());
+        if c.bool("sv_pure") {
+            put("pure", "1".into());
+        }
+        for (key, cvar) in [("minPing", "sv_minPing"), ("maxPing", "sv_maxPing")] {
+            if c.int(cvar) != 0 {
+                put(key, c.int(cvar).to_string());
+            }
+        }
+        let game_dir = c.string("fs_game");
+        if !game_dir.is_empty() {
+            put("game", game_dir.to_owned());
+        }
+        if c.bool("sv_allowAnonymous") {
+            put("sv_allowAnonymous", "1".into());
+        }
+        if c.bool("sv_disableClientConsole") {
+            put("con_disabled", "1".into());
+        }
+        if !c.string("g_password").is_empty() {
+            put("pswrd", "1".into());
+        }
+        for (key, cvar) in [("ff", "scr_team_fftype"), ("kc", "scr_game_allowkillcam")] {
+            if c.int(cvar) != 0 {
+                put(key, c.int(cvar).to_string());
+            }
+        }
+        // A dedicated server (the only kind here) is hardware type 2.
+        put("hw", "2".into());
+        put("mod", u8::from(!game_dir.is_empty()).to_string());
+        put("voice", u8::from(c.bool("sv_voice")).to_string());
+        put("pb", u8::from(c.bool("sv_punkbuster")).to_string());
+        kv
+    }
+
+    /// `SVC_Status`: the answer to `getstatus`: the server info variables, the password and mod flags, and the
+    /// players with their score and ping.
+    pub fn server_status(&self) -> (Vec<(String, String)>, Vec<net::oob::StatusPlayer>) {
+        let c = &self.game.cvars;
+        let mut info: Vec<(String, String)> = c
+            .info_pairs(cvar::SERVERINFO)
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("g_password"))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        let mut set =
+            |k: &str, v: String| match info.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(k)) {
+                Some(e) => e.1 = v,
+                None => info.push((k.to_owned(), v)),
+            };
+        set(
+            "pswrd",
+            u8::from(!c.string("g_password").is_empty()).to_string(),
+        );
+        set("mod", u8::from(!c.string("fs_game").is_empty()).to_string());
+        let players = self
+            .game
+            .connected_clients()
+            .map(|(n, p)| net::oob::StatusPlayer {
+                score: p.score,
+                ping: if p.bot {
+                    0
+                } else {
+                    self.net
+                        .as_ref()
+                        .and_then(|net| net.ping_of(n))
+                        .unwrap_or(0)
+                },
+                name: p.name.clone(),
+            })
+            .collect();
+        (info, players)
     }
 
     /// A `connect` that passed the challenge: gives the sender a slot like a bot gets one, and
@@ -585,16 +825,14 @@ impl Server {
         if !pw.is_empty() && pw != req.password {
             return refuse(net, "Invalid password.");
         }
-        let name: String = req
-            .name
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(31)
-            .collect();
+        let name = crate::client::clean_client_name(&req.name);
         let slot = match self.join_human(&name, None) {
             Ok(n) => n,
             Err(why) => return refuse(net, why),
         };
+        if let Some(c) = self.game.client_mut(slot) {
+            c.local = req.from.ip().is_loopback();
+        }
         net.add_peer(slot, req, &name);
         let map = self.map_name().unwrap_or("").to_owned();
         for line in NetSv::world_commands(&mut self.game, &map) {
@@ -699,10 +937,25 @@ impl Server {
         match verb.as_deref() {
             Some("disconnect") => self.net_drop(net, slot, DropReason::Left),
             Some(net::ui::SCORES_REQUEST) => net.send_scoreboard(slot, &self.game),
-            Some("callvote") => self.game.call_vote(slot, &argv[1..]),
-            Some("vote") => self
-                .game
-                .cast_vote(slot, argv.get(1).map_or("", String::as_str)),
+            Some("callvote") => {
+                if let Some([what, p1, p2]) = self.game.call_vote(slot, &argv[1..])
+                    && let Some(run) = self.run.as_mut()
+                {
+                    let args = [what, p1, p2].map(|a| Value::str(&a));
+                    run.vm.notify_entity(slot, "call_vote", &args);
+                }
+            }
+            Some("vote") => {
+                let answer = argv.get(1).map_or("", String::as_str);
+                if let Some(option) = self.game.cast_vote(slot, answer)
+                    && let Some(run) = self.run.as_mut()
+                {
+                    run.vm.notify_entity(slot, "vote", &[Value::str(option)]);
+                }
+            }
+            Some("userinfo") => {
+                self.userinfo_changed(net, slot, argv.get(1).map_or("", String::as_str))
+            }
             Some(cmd @ ("say" | "say_team")) if argv.len() >= 2 => {
                 // What a person types is plain text: no control characters, which steer the localizer.
                 // `\x15` marks it as an argument, which the client shows as it is, never as a string key.
@@ -781,6 +1034,25 @@ impl Server {
         }
     }
 
+    /// `SV_UpdateUserinfo_f`: a person's userinfo string (`\\name\\X\\rate\\R\\snaps\\S`) arrived. The name goes through
+    /// `ClientCleanName` and a new one is published to the others (they see "renamed to"); the rate and snapshot rate
+    /// set how often snapshots are sent.
+    fn userinfo_changed(&mut self, net: &mut NetSv, slot: u16, info: &str) {
+        net.set_userinfo(slot, info);
+        let Some(c) = self.game.client_mut(slot) else {
+            return;
+        };
+        let name = crate::netsv::info_value(info, "name");
+        if name.is_empty() {
+            return;
+        }
+        let name = crate::client::clean_client_name(name);
+        if name != c.name {
+            c.name.clone_from(&name);
+            net.rename(slot, &name);
+        }
+    }
+
     /// Prints a console line: to the log and, when enabled, stdout.
     pub fn say(&mut self, s: &str) {
         if let Some(r) = self.redirect.as_mut() {
@@ -855,7 +1127,7 @@ impl Server {
                     return Err(format!("usage: {lname} <variable> <value>"));
                 };
                 let v = argv[2..].join(" ");
-                self.game.cvars.set(n, &v);
+                self.console_set(n, &v)?;
                 let flag = match lname.as_str() {
                     "seta" => cvar::ARCHIVE,
                     "sets" => cvar::SERVERINFO,
@@ -883,13 +1155,11 @@ impl Server {
                 }
                 self.game
                     .cvars
-                    .set("sv_cheats", if lname == "devmap" { "1" } else { "0" });
+                    .force("sv_cheats", if lname == "devmap" { "1" } else { "0" });
                 self.spawn_server(&m)?;
             }
-            "map_restart" | "fast_restart" => {
-                let m = self.map_name().ok_or("Server is not running.")?.to_owned();
-                self.map_restart(&m)?;
-            }
+            "map_restart" => self.restart(false)?,
+            "fast_restart" => self.restart(true)?,
             "map_rotate" => self.map_rotate()?,
             "status" => self.status(),
             "expect" => {
@@ -1181,7 +1451,7 @@ impl Server {
                 } else {
                     (if cvar::parse_int(&cur) == 0 { "1" } else { "0" }).to_owned()
                 };
-                self.game.cvars.set(n, &next);
+                self.console_set(n, &next)?;
             }
             "reset" => {
                 let n = arg(1).ok_or("usage: reset <variable>")?;
@@ -1191,7 +1461,7 @@ impl Server {
                     .get(n)
                     .map(|c| c.default.clone())
                     .ok_or_else(|| format!("reset: {n} is not a variable"))?;
-                self.game.cvars.set(n, &default);
+                self.console_set(n, &default)?;
             }
             "setfromdvar" => {
                 let (Some(dst), Some(src)) = (arg(1), arg(2)) else {
@@ -1203,7 +1473,7 @@ impl Server {
                     .get(src)
                     .map(|c| c.value.clone())
                     .ok_or_else(|| format!("setfromdvar: {src} is not a variable"))?;
-                self.game.cvars.set(dst, &v);
+                self.console_set(dst, &v)?;
             }
             "cvarlist" => {
                 let filter = arg(1).map(str::to_ascii_lowercase);
@@ -1302,7 +1572,7 @@ impl Server {
                     match arg(1) {
                         Some(_) => {
                             let v = argv[1..].join(" ");
-                            self.game.cvars.set(name, &v);
+                            self.console_set(name, &v)?;
                         }
                         None => {
                             let c = self.game.cvars.get(name).cloned();
@@ -1457,53 +1727,89 @@ impl Server {
         self.say(&s);
     }
 
-    /// `SV_MapRotate_f`: consume `gametype X` / `map Y` tokens from the rotation.
-    fn map_rotate(&mut self) -> Result<(), String> {
-        let mut rot = self
+    /// A variable set from the console, a cfg, an rcon or a vote: refusals (read only, cheat protected, out of range)
+    /// are told, and a latched value says when it takes effect.
+    fn console_set(&mut self, name: &str, value: &str) -> Result<(), String> {
+        self.game
+            .cvars
+            .set_external(name, value)
+            .map_err(|e| e.to_string())?;
+        if self
             .game
             .cvars
-            .string("sv_mapRotationCurrent")
-            .trim()
-            .to_owned();
-        if rot.is_empty() {
-            rot = self.game.cvars.string("sv_mapRotation").trim().to_owned();
+            .get(name)
+            .is_some_and(|c| c.latched.is_some())
+        {
+            self.say(&format!("{name} will be changed upon restarting.\n"));
         }
-        if rot.is_empty() {
-            let m = self.map_name().ok_or("Server is not running.")?.to_owned();
-            self.say("map rotation is empty; restarting the map\n");
-            return self.spawn_server(&m);
+        Ok(())
+    }
+
+    /// `SV_MapRestart`: `map_restart` always loads the level afresh, with the latched variables (`g_gametype`,
+    /// `sv_maxclients`) applied; `fast_restart` only restarts the running level, unless one of those has a new value
+    /// waiting. A script's `map_restart(true)` keeps the `game` array across it.
+    fn restart(&mut self, fast: bool) -> Result<(), String> {
+        let map = self.map_name().ok_or("Server is not running.")?.to_owned();
+        let cvars = &self.game.cvars;
+        let gametype_changes = cvars
+            .get("g_gametype")
+            .and_then(|c| c.latched.as_deref())
+            .is_some_and(|g| !g.eq_ignore_ascii_case(&self.gametype));
+        let clients_change = cvars
+            .get("sv_maxclients")
+            .is_some_and(|c| c.latched.is_some());
+        if !fast || gametype_changes || clients_change {
+            self.game.level.save_persist = false;
+            return self.spawn_server(&map);
         }
-        let toks: Vec<&str> = rot.split_whitespace().collect();
-        let mut i = 0;
-        let mut next_map = None;
-        while i + 1 < toks.len() && next_map.is_none() {
-            match toks[i].to_ascii_lowercase().as_str() {
-                "gametype" => {
-                    self.game.cvars.set("g_gametype", toks[i + 1]);
-                }
-                "map" => next_map = Some(toks[i + 1].to_ascii_lowercase()),
-                t => return Err(format!("map_rotate: unknown token {t:?} in sv_mapRotation")),
-            };
-            i += 2;
+        let persist = std::mem::take(&mut self.game.level.save_persist);
+        self.start_game(&map, self.persisted_game(persist))
+    }
+
+    /// The `game` array to carry into the next level, when the script asked to keep it (`savepersist`).
+    fn persisted_game(&self, persist: bool) -> Option<Value> {
+        self.run
+            .as_ref()
+            .filter(|_| persist)
+            .map(|r| r.vm.game().clone())
+    }
+
+    /// `SV_MapRotate_f`: the next `gametype X` / `map Y` of `sv_mapRotationCurrent`, refilled from `sv_mapRotation`
+    /// when it runs out.
+    fn map_rotate(&mut self) -> Result<(), String> {
+        let c = &self.game.cvars;
+        let (rotation, current) = (
+            c.string("sv_mapRotation").to_owned(),
+            c.string("sv_mapRotationCurrent").to_owned(),
+        );
+        self.say(&format!(
+            "map_rotate...\n\n\"sv_mapRotation\" is:\"{rotation}\"\n\n\"sv_mapRotationCurrent\" is:\"{current}\"\n\n"
+        ));
+        let running = self.game.cvars.string("g_gametype").to_owned();
+        let plan = plan_rotation(&rotation, &current);
+        self.say(&plan.messages.concat());
+        self.game
+            .cvars
+            .set("sv_mapRotationCurrent", &plan.remaining);
+        if let Some(g) = &plan.gametype {
+            if self.run.is_some() && !running.eq_ignore_ascii_case(g) {
+                self.game.level.save_persist = false;
+            }
+            self.game.cvars.set("g_gametype", g);
         }
-        let rest = toks[i..].join(" ");
-        self.game.cvars.set("sv_mapRotationCurrent", &rest);
-        match next_map {
-            Some(m) if self.install.map_exists(&m) => self.spawn_server(&m),
-            Some(m) => Err(format!("Can't find map \"{m}\".")),
-            None => Err("map_rotate: the rotation names no map".into()),
+        match plan.map {
+            Some(m) => self.exec_command(&vec!["map".to_owned(), m]),
+            None => self.restart(true),
         }
     }
 
-    fn map_restart(&mut self, map: &str) -> Result<(), String> {
-        let game_var = self.run.as_ref().map(|r| r.vm.game().clone());
-        self.start_game(map, game_var)
-    }
-
-    /// `SV_SpawnServer`.
+    /// `SV_SpawnServer`: loads the level with the latched variables applied. The `game` array is kept when a script
+    /// asked for it (`savepersist`).
     pub fn spawn_server(&mut self, map: &str) -> Result<(), String> {
+        let persist = std::mem::take(&mut self.game.level.save_persist);
+        let game_var = self.persisted_game(persist);
         self.game.cvars.apply_latched();
-        self.start_game(map, None)
+        self.start_game(map, game_var)
     }
 
     fn start_game(&mut self, map: &str, game_var: Option<Value>) -> Result<(), String> {
@@ -1520,8 +1826,13 @@ impl Server {
                 (peer, name, stats.unwrap_or_default())
             })
             .collect();
+        self.shutdown_game_log();
         self.run = None;
         self.level_loads += 1;
+        self.game.server_id = (self.level_loads & 0xff) as i32;
+        self.game
+            .cvars
+            .force("sv_serverid", &self.game.server_id.to_string());
         self.script_errors.clear();
         self.say("------ Server Initialization ------\n");
         self.say(&format!("Server: {map}\n"));
@@ -1539,6 +1850,7 @@ impl Server {
         self.svs_time = 0;
         self.game
             .reset_level(self.game.cvars.int("sv_maxclients").clamp(1, 64) as usize);
+        self.game.publish_info(true);
         self.init_game(map, game_var)?;
         for _ in 0..SETTLE_FRAMES {
             self.svs_time += SETTLE_STEP_MS;
@@ -1548,6 +1860,9 @@ impl Server {
         for (mut peer, name, stats) in humans {
             let j = self.join_human(&name, Some(stats));
             if let Ok(slot) = j {
+                if let Some(c) = self.game.client_mut(slot) {
+                    c.local = peer.link.addr.ip().is_loopback();
+                }
                 for line in NetSv::world_commands(&mut self.game, map) {
                     peer.queue(line);
                 }
@@ -1573,6 +1888,8 @@ impl Server {
     /// `G_InitGame`: scripts, entities, gametype and level init.
     fn init_game(&mut self, map: &str, game_var: Option<Value>) -> Result<(), String> {
         let gametype = self.game.cvars.string("g_gametype").to_ascii_lowercase();
+        self.gametype.clone_from(&gametype);
+        self.open_game_log();
         let prog = {
             let sources: Vec<(String, String)> = self
                 .game
@@ -1686,6 +2003,44 @@ impl Server {
         Ok(())
     }
 
+    /// `G_InitGame`'s log lines: the file named by `g_log` is opened for appending and told what started.
+    fn open_game_log(&mut self) {
+        let c = &self.game.cvars;
+        let (path, sync) = (c.string("g_log").to_owned(), c.bool("g_logSync"));
+        if path.is_empty() {
+            self.say("Not logging to disk.\n");
+            return;
+        }
+        // A file name in the working directory, never a path out of it.
+        if path.contains(['/', '\\', ':']) || path.contains("..") {
+            self.say(&format!(
+                "WARNING: Couldn't open logfile: {path}: not a plain file name\n"
+            ));
+            return;
+        }
+        let file = self.log_dir.join(&path);
+        match crate::gamelog::GameLog::open(&file.to_string_lossy(), sync) {
+            Ok(log) => {
+                self.game.log = log;
+                let info = self.game.cvars.info_string(cvar::SERVERINFO);
+                self.game
+                    .log_print("------------------------------------------------------------\n");
+                self.game.log_print(&format!("InitGame: {info}\n"));
+            }
+            Err(e) => self.say(&format!("WARNING: Couldn't open logfile: {path}: {e}\n")),
+        }
+    }
+
+    /// `G_ShutdownGame`'s log lines.
+    fn shutdown_game_log(&mut self) {
+        if self.game.log.is_open() {
+            self.game.log_print("ShutdownGame:\n");
+            self.game
+                .log_print("------------------------------------------------------------\n");
+            self.game.log.close();
+        }
+    }
+
     fn record_errors(&mut self, mut errors: Vec<VmError>) {
         errors.append(&mut self.game.nested_errors);
         for e in errors {
@@ -1708,6 +2063,7 @@ impl Server {
         self.game.level.frame += 1;
         self.game.level.frametime = self.frame_ms;
         self.game.level.time = self.svs_time;
+        self.game.publish_info(false);
         for line in self.game.vote_frame() {
             self.cbuf.add_text(&format!("{line}\n"));
         }
@@ -1796,18 +2152,27 @@ impl Server {
         if let Some(net) = self.net.as_mut() {
             // A script dropped these clients (`kick`): they never sent a leave.
             let mut gone = Vec::new();
+            let inactive = std::mem::take(&mut self.game.inactive);
+            let reason_of = |n: u16| {
+                if inactive.contains(&n) {
+                    DropReason::Inactive
+                } else {
+                    DropReason::Kicked
+                }
+            };
             for (n, c) in self.game.clients.iter().enumerate() {
                 if c.conn == Conn::Free
                     && let Some(p) = net.peers.get(n).and_then(Option::as_ref)
                 {
                     gone.push((
                         n as u16,
-                        format!("{}^7 {}", p.name, DropReason::Kicked.text()),
+                        format!("{}^7 {}", p.name, reason_of(n as u16).text()),
+                        reason_of(n as u16),
                     ));
                 }
             }
-            for (n, text) in &gone {
-                net.remove_peer(*n, DropReason::Kicked.notice());
+            for (n, text, why) in &gone {
+                net.remove_peer(*n, why.notice());
                 net.print_to_others(*n, text);
                 gone_lines.push(format!("{n}:{}\n", crate::vote::clean_name(text)));
             }
@@ -1834,7 +2199,7 @@ impl Server {
         }
         if self.game.level.map_restart_requested {
             self.game.level.map_restart_requested = false;
-            self.cbuf.add_text("map_restart");
+            self.cbuf.add_text("fast_restart");
         }
         let total = t0.elapsed();
         let s = TickSample {
@@ -2079,6 +2444,12 @@ impl Server {
     }
 }
 
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.shutdown_game_log();
+    }
+}
+
 /// Why a client left the match.
 #[derive(Clone, Copy)]
 enum DropReason {
@@ -2088,6 +2459,8 @@ enum DropReason {
     TimedOut,
     /// It fell too far behind on reliable commands.
     Overflow,
+    /// It did nothing for `g_inactivity` seconds.
+    Inactive,
 }
 
 impl DropReason {
@@ -2098,6 +2471,7 @@ impl DropReason {
             Self::Kicked => "was kicked",
             Self::TimedOut => "timed out",
             Self::Overflow => "overflowed its reliable commands",
+            Self::Inactive => "was dropped for inactivity",
         }
     }
 
@@ -2108,6 +2482,7 @@ impl DropReason {
             Self::Kicked => Some("Player kicked"),
             Self::TimedOut => Some("Server timed out your connection"),
             Self::Overflow => Some("Server command overflow"),
+            Self::Inactive => Some("You were dropped for inactivity"),
         }
     }
 }
@@ -2232,7 +2607,72 @@ fn rss_line() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{flood_drops, ping_field, plain_text};
+    use super::{RotationPlan, flood_drops, ping_field, plain_text, plan_rotation};
+
+    #[test]
+    fn the_rotation_skips_a_word_it_does_not_know_and_goes_on() {
+        let p = plan_rotation(
+            "",
+            "bogus gametype sd map mp_crash gametype war map mp_backlot",
+        );
+        assert_eq!(p.map.as_deref(), Some("mp_crash"));
+        assert_eq!(p.gametype.as_deref(), Some("sd"));
+        assert_eq!(p.remaining, " gametype war map mp_backlot");
+        assert_eq!(
+            p.messages,
+            [
+                "Unknown keyword 'bogus' in sv_mapRotation.\n",
+                "Setting g_gametype: sd.\n",
+                "Setting map: mp_crash.\n"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_or_used_up_rotation_is_read_again_from_the_start() {
+        let full = "map mp_crash gametype dm map mp_backlot";
+        assert_eq!(plan_rotation(full, "").map.as_deref(), Some("mp_crash"));
+        // The current rotation ran out after its last map: the next call wraps.
+        let wrapped = plan_rotation(full, "   ");
+        assert_eq!(wrapped.map.as_deref(), Some("mp_crash"));
+        let last = plan_rotation(full, " gametype dm map mp_backlot");
+        assert_eq!(
+            (last.map.as_deref(), last.gametype.as_deref()),
+            (Some("mp_backlot"), Some("dm"))
+        );
+        assert_eq!(last.remaining, "");
+        // Used up by a trailing keyword: the rotation is read again.
+        let again = plan_rotation(full, "gametype");
+        assert_eq!(
+            again.map, None,
+            "a gametype without a name forces a restart"
+        );
+    }
+
+    #[test]
+    fn a_rotation_with_nothing_to_change_to_restarts_the_map() {
+        let restart = |p: RotationPlan| (p.map, p.messages);
+        let (map, said) = restart(plan_rotation("", ""));
+        assert_eq!(map, None);
+        assert_eq!(
+            said,
+            ["No map specified in sv_mapRotation - forcing map_restart.\n"]
+        );
+        let (map, said) = restart(plan_rotation("gametype sd", ""));
+        assert_eq!(map, None);
+        assert!(said[1].starts_with("No map specified in sv_mapRotation"));
+        let (map, said) = restart(plan_rotation("map", ""));
+        assert_eq!(map, None);
+        assert!(said[0].starts_with("No map specified after 'map' keyword"));
+        let (_, said) = restart(plan_rotation("gametype", ""));
+        assert!(said[0].starts_with("No gametype specified after 'gametype' keyword"));
+    }
+
+    #[test]
+    fn a_quoted_word_is_one_word() {
+        let p = plan_rotation("", "map \"mp_crash\" gametype dm");
+        assert_eq!(p.map.as_deref(), Some("mp_crash"));
+    }
 
     #[test]
     fn a_persons_chat_text_loses_the_marks_a_script_may_use() {

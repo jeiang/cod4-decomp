@@ -2,7 +2,8 @@
 //! `callvote` and `vote` (`g_oldVoting`: the engine runs the vote, not the scripts): a player calls a vote for
 //! `map`, `typemap`, `g_gametype`, `map_restart`, `map_rotate`, `kick` or `tempBanUser`, the other players
 //! answer `vote y` or `vote n`, and a majority of the voting players runs the command three seconds later.
-//! Bots do not vote (and do not count); spectators neither.
+//! Everyone connected and not a spectator counts as a voter, bots included, as at the original.
+//! With `g_oldVoting 0` the engine runs no vote: the scripts get `call_vote` and `vote` notifies instead.
 
 use std::collections::HashSet;
 
@@ -44,6 +45,8 @@ pub struct VoteState {
     current: Option<Vote>,
     /// A passed vote's lines and when they run.
     pending: Option<(i32, Vec<String>)>,
+    /// Lines of a passed vote whose wait a new vote cut short: they run at the next frame.
+    due_now: Vec<String>,
 }
 
 impl Game {
@@ -57,37 +60,54 @@ impl Game {
         );
     }
 
-    /// Players who may vote: connected people on a team.
+    /// Players who may vote: everyone connected who is not a spectator (`CalculateRanks`' `numVotingClients`).
     fn voters(&self) -> Vec<u16> {
         self.connected_clients()
-            .filter(|(_, c)| !c.bot && c.team != Team::Spectator)
+            .filter(|(_, c)| c.team != Team::Spectator)
             .map(|(n, _)| n)
             .collect()
     }
 
-    /// A client's `callvote <what> [args]`: what is refused is told to the caller.
-    pub fn call_vote(&mut self, n: u16, argv: &[String]) {
-        if let Err(why) = self.start_vote(n, argv) {
-            self.tell(n, &why);
+    /// A client's `callvote <what> [args]`: what is refused is told to the caller. With `g_oldVoting 0` the vote is
+    /// the scripts' to run: the result is the `call_vote` notify's arguments.
+    pub fn call_vote(&mut self, n: u16, argv: &[String]) -> Option<[String; 3]> {
+        match self.start_vote(n, argv) {
+            Ok(script) => script,
+            Err(why) => {
+                self.tell(n, &why);
+                None
+            }
         }
     }
 
-    fn start_vote(&mut self, n: u16, argv: &[String]) -> Result<(), String> {
+    fn start_vote(&mut self, n: u16, argv: &[String]) -> Result<Option<[String; 3]>, String> {
+        let old_voting = self.cvars.bool("g_oldVoting");
         if !self.cvars.bool("g_allowvote") {
             return Err("Voting is not enabled on this server.".into());
         }
         if self.connected_clients().count() < 2 {
             return Err("Not enough players to call a vote.".into());
         }
-        if self.vote.current.is_some() {
+        if old_voting && self.vote.current.is_some() {
             return Err("A vote is already in progress.".into());
         }
-        if self.client(n).is_none_or(|c| c.team == Team::Spectator) {
+        if old_voting && self.client(n).is_none_or(|c| c.team == Team::Spectator) {
             return Err("Spectators cannot call a vote.".into());
         }
         let arg = |i: usize| argv.get(i).map_or("", String::as_str);
         if argv.iter().any(|a| a.contains(';') || a.contains('"')) {
             return Err("Invalid vote string.".into());
+        }
+        if !old_voting {
+            return Ok(Some([
+                arg(0).to_owned(),
+                arg(1).to_owned(),
+                arg(2).to_owned(),
+            ]));
+        }
+        if let Some((_, lines)) = self.vote.pending.take() {
+            // The last vote was waiting out its delay: it acts now.
+            self.vote.due_now.extend(lines);
         }
         let gametype_ok = |g: &str| {
             self.content
@@ -114,10 +134,23 @@ impl Game {
                 if !map_ok(map) {
                     return Err(format!("{map} is not a valid map."));
                 }
-                (
-                    vec![format!("g_gametype {gt}"), format!("map {map}")],
-                    format!("Change gametype to {gt} on {map}"),
-                )
+                // What is already running is no change.
+                let new_gt = !gt.eq_ignore_ascii_case(self.cvars.string("g_gametype"));
+                let new_map = !map.eq_ignore_ascii_case(self.cvars.string("mapname"));
+                match (new_gt, new_map) {
+                    (false, false) => {
+                        return Err("That game type is already on that map.".into());
+                    }
+                    (true, true) => (
+                        vec![format!("g_gametype {gt}"), format!("map {map}")],
+                        format!("Change gametype to {gt} on {map}"),
+                    ),
+                    (false, true) => (vec![format!("map {map}")], format!("Change map to {map}")),
+                    (true, false) => (
+                        vec![format!("g_gametype {gt}"), "map_restart".into()],
+                        format!("Change gametype to {gt}"),
+                    ),
+                }
             }
             "g_gametype" => {
                 if !gametype_ok(arg(1)) {
@@ -179,15 +212,61 @@ impl Game {
             no: 0,
             cast: HashSet::from([n]),
         });
-        self.set_configstring(cs::VOTE_TIME, &format!("{end} 0"));
+        self.set_configstring(cs::VOTE_TIME, &format!("{end} {}", self.server_id));
         self.set_configstring(cs::VOTE_STRING, &shown);
         self.set_configstring(cs::VOTE_YES, "1");
         self.set_configstring(cs::VOTE_NO, "0");
-        Ok(())
+        Ok(None)
     }
 
-    /// A client's `vote y|n`.
-    pub fn cast_vote(&mut self, n: u16, answer: &str) {
+    /// What `setvote*` repeat of the engine's own vote: its end time and counts, none when no vote runs.
+    fn vote_numbers(&self) -> (i32, i32, i32) {
+        self.vote
+            .current
+            .as_ref()
+            .map_or((0, 0, 0), |v| (v.end, v.yes, v.no))
+    }
+
+    /// `setVoteString`: the text on the vote lines of the screen, with the vote's time and counts.
+    pub fn script_vote_string(&mut self, text: &str) {
+        let (time, yes, no) = self.vote_numbers();
+        self.set_configstring(cs::VOTE_STRING, text);
+        self.set_configstring(cs::VOTE_TIME, &format!("{time} {}", self.server_id));
+        self.set_configstring(cs::VOTE_YES, &yes.to_string());
+        self.set_configstring(cs::VOTE_NO, &no.to_string());
+    }
+
+    /// `setVoteTime`: when the vote on the screen ends.
+    pub fn script_vote_time(&mut self, time: i32) {
+        let (_, yes, no) = self.vote_numbers();
+        self.set_configstring(cs::VOTE_TIME, &format!("{time} {}", self.server_id));
+        self.set_configstring(cs::VOTE_YES, &yes.to_string());
+        self.set_configstring(cs::VOTE_NO, &no.to_string());
+    }
+
+    /// `setVoteYesCount`.
+    pub fn script_vote_yes(&mut self, yes: i32) {
+        let (_, _, no) = self.vote_numbers();
+        self.set_configstring(cs::VOTE_YES, &yes.to_string());
+        self.set_configstring(cs::VOTE_NO, &no.to_string());
+    }
+
+    /// `setVoteNoCount`.
+    pub fn script_vote_no(&mut self, no: i32) {
+        self.set_configstring(cs::VOTE_NO, &no.to_string());
+    }
+
+    /// A client's `vote y|n`. With `g_oldVoting 0` the answer is the scripts' (`"yes"` or `"no"`, the `vote` notify).
+    pub fn cast_vote(&mut self, n: u16, answer: &str) -> Option<&'static str> {
+        let yes = matches!(answer.as_bytes().first(), Some(b'y' | b'Y' | b'1'));
+        if !self.cvars.bool("g_oldVoting") {
+            return Some(if yes { "yes" } else { "no" });
+        }
+        self.cast_engine_vote(n, yes);
+        None
+    }
+
+    fn cast_engine_vote(&mut self, n: u16, yes: bool) {
         let spectator = self.client(n).is_none_or(|c| c.team == Team::Spectator);
         let Some(v) = self.vote.current.as_mut() else {
             return self.tell(n, "No vote in progress.");
@@ -198,7 +277,7 @@ impl Game {
         if !v.cast.insert(n) {
             return self.tell(n, "Vote already cast.");
         }
-        if matches!(answer.as_bytes().first(), Some(b'y' | b'Y' | b'1')) {
+        if yes {
             v.yes += 1;
             let s = v.yes.to_string();
             self.set_configstring(cs::VOTE_YES, &s);
@@ -213,9 +292,9 @@ impl Game {
     /// `CheckVote`, once a frame: ends a decided vote and returns the console lines that are due.
     pub fn vote_frame(&mut self) -> Vec<String> {
         let time = self.level.time;
-        let mut due = Vec::new();
+        let mut due = std::mem::take(&mut self.vote.due_now);
         if self.vote.pending.as_ref().is_some_and(|(at, _)| *at < time) {
-            due = self.vote.pending.take().map(|(_, c)| c).unwrap_or_default();
+            due.extend(self.vote.pending.take().map(|(_, c)| c).unwrap_or_default());
         }
         let voting = self.voters().len() as i32;
         let Some(v) = self.vote.current.as_ref() else {
@@ -224,8 +303,8 @@ impl Game {
         let need = voting / 2 + 1;
         let passed = if time >= v.end {
             // Out of time: the abstentions count for half.
-            let abstain = (voting - v.yes - v.no).max(0) as f32 * 0.5;
-            Some(v.yes > (abstain + 0.4999) as i32 + v.no)
+            let abstain = (voting - v.yes - v.no) as f32 * self.cvars.float("g_voteAbstainWeight");
+            Some(v.yes > (abstain + 0.5) as i32 + v.no)
         } else if v.yes >= need {
             Some(true)
         } else if v.no > voting - need {
@@ -266,6 +345,7 @@ mod tests {
     fn game() -> Game {
         let mut g = Game::new(Cvars::new(), Content::default());
         g.cvars.set("g_allowvote", "1");
+        g.cvars.set("g_oldVoting", "1");
         g.clients = ["Ann", "^1Bo^7", "Cy"]
             .iter()
             .enumerate()
@@ -284,6 +364,100 @@ mod tests {
         g.start_vote(0, &argv)?;
         let v = g.vote.current.take().expect("a vote started");
         Ok(v.commands)
+    }
+
+    #[test]
+    fn bots_are_voters_and_the_abstain_weight_decides_a_vote_that_runs_out() {
+        let mut g = game();
+        let mut bot = Client::new(3, true, "Bot".into());
+        bot.conn = Conn::Connected;
+        bot.team = Team::Axis;
+        g.clients.push(bot);
+        assert_eq!(g.voters().len(), 4);
+        call(&mut g, &["map_restart"]).unwrap();
+        for (weight, passes) in [("0", true), ("0.5", true), ("1", false)] {
+            g.cvars.set("g_voteAbstainWeight", weight);
+            g.level.time = 0;
+            g.start_vote(0, &["map_restart".to_owned()]).unwrap();
+            // Two yes of four voters, the other two abstain.
+            g.cast_vote(1, "y");
+            g.level.time = 40_000;
+            g.vote_frame();
+            assert_eq!(g.vote.pending.take().is_some(), passes, "weight {weight}");
+            assert!(g.vote.current.is_none());
+        }
+    }
+
+    #[test]
+    fn a_quorum_counts_everybody_who_is_not_a_spectator() {
+        let mut g = game();
+        let mut bot = Client::new(3, true, "Bot".into());
+        bot.conn = Conn::Connected;
+        bot.team = Team::Axis;
+        g.clients.push(bot);
+        g.start_vote(0, &["map_restart".to_owned()]).unwrap();
+        g.vote_frame();
+        assert!(
+            g.vote.current.is_some(),
+            "one yes of four is not a majority"
+        );
+        g.cast_vote(1, "y");
+        g.vote_frame();
+        assert!(g.vote.current.is_some(), "two of four is not either");
+        g.cast_vote(2, "y");
+        g.vote_frame();
+        assert!(g.vote.current.is_none());
+        assert!(g.vote.pending.is_some());
+    }
+
+    #[test]
+    fn the_vote_time_carries_the_level_it_was_called_in() {
+        let mut g = game();
+        g.server_id = 5;
+        g.level.time = 1000;
+        g.start_vote(0, &["map_restart".to_owned()]).unwrap();
+        assert_eq!(
+            g.configstrings
+                .get(&u32::from(cs::VOTE_TIME))
+                .map(String::as_str),
+            Some("31000 5")
+        );
+    }
+
+    #[test]
+    fn a_typemap_to_what_is_already_running_changes_nothing_and_a_half_change_is_only_that_half() {
+        let mut g = game();
+        for gt in ["war", "sd"] {
+            g.content
+                .add_test_rawfile(&format!("maps/mp/gametypes/{gt}.gsc"), "");
+        }
+        g.known_maps = vec!["mp_crash".into(), "mp_backlot".into()];
+        g.cvars.register("g_gametype", "war", 0);
+        g.cvars.register("mapname", "mp_crash", 0);
+        assert!(call(&mut g, &["typemap", "war", "mp_crash"]).is_err());
+        assert_eq!(
+            call(&mut g, &["typemap", "sd", "mp_crash"]),
+            Ok(vec!["g_gametype sd".into(), "map_restart".into()])
+        );
+        assert_eq!(
+            call(&mut g, &["typemap", "sd", "mp_backlot"]),
+            Ok(vec!["g_gametype sd".into(), "map mp_backlot".into()])
+        );
+        assert_eq!(
+            call(&mut g, &["typemap", "war", "mp_backlot"]),
+            Ok(vec!["map mp_backlot".into()])
+        );
+    }
+
+    #[test]
+    fn with_old_voting_off_the_scripts_get_the_vote_to_run() {
+        let mut g = game();
+        g.cvars.set("g_oldVoting", "0");
+        let script = g.call_vote(0, &["kick".to_owned(), "Bo".to_owned()]);
+        assert_eq!(script, Some(["kick".into(), "Bo".into(), String::new()]));
+        assert!(g.vote.current.is_none());
+        assert_eq!(g.cast_vote(1, "yes"), Some("yes"));
+        assert_eq!(g.cast_vote(1, "n"), Some("no"));
     }
 
     #[test]

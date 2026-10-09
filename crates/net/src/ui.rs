@@ -39,6 +39,12 @@ pub mod chat_tag {
 /// the first entry of a range is `BASE + 1`.
 pub mod cs {
     pub const SERVERINFO: u16 = 0;
+    /// The variables flagged `SYSTEMINFO` (`sv_cheats`, `sv_serverid`, ...).
+    pub const SYSTEMINFO: u16 = 1;
+    /// Names of the variables flagged `CODINFO` and, from [`CODINFO_VALUE`], their values.
+    pub const CODINFO: u16 = 20;
+    pub const CODINFO_COUNT: u16 = 128;
+    pub const CODINFO_VALUE: u16 = 148;
     pub const MESSAGE: u16 = 3;
     pub const SCORES_ALLIES: u16 = 4;
     pub const SCORES_AXIS: u16 = 5;
