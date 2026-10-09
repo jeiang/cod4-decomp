@@ -187,9 +187,6 @@ pub struct Server {
     pub level_loads: u32,
     pub boot_ms: f64,
     pub ticks: u64,
-    /// Bots wanted on every map (`bots N`); they join again after a map change. `None` until a `bots` command ran:
-    /// the `bot_count` variable says then.
-    bot_target: Option<usize>,
     bot_serial: u32,
     bot_shared: BotShared,
     /// While set, console output is collected here instead of printed (`rcon` replies).
@@ -231,7 +228,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_mantleBlockTimeBuffer", "500", 0),
         ("g_lagcomp", "1", 0),
         ("bot_idle", "0", 0),
-        // Bots on every map; the listen server's player sets it, and a `bots` command overrides it.
+        // Bots on every map; the listen server's player sets it, and a `bots` command sets it too.
         ("bot_count", "0", 0),
         ("g_allowvote", "1", 0),
         ("g_deadChat", "0", 0),
@@ -484,7 +481,6 @@ impl Server {
             level_loads: 0,
             boot_ms: 0.0,
             ticks: 0,
-            bot_target: None,
             bot_serial: 0,
             bot_shared: BotShared::default(),
             redirect: None,
@@ -1647,7 +1643,8 @@ impl Server {
                     .map(cvar::parse_int)
                     .ok_or("usage: bots <count>")?
                     .clamp(0, 64) as usize;
-                self.bot_target = Some(n);
+                // The variable is the one count: the map starts that follow read it.
+                self.game.cvars.set("bot_count", &n.to_string());
                 self.set_bots(n)?;
             }
             // Test hook: `devkill <victim> <attacker>` has the attacker's rifle kill the victim.
@@ -2017,9 +2014,7 @@ impl Server {
                 net.notify(peer.link.addr, why);
             }
         }
-        let wanted = self
-            .bot_target
-            .unwrap_or_else(|| self.game.cvars.int("bot_count").clamp(0, 64) as usize);
+        let wanted = self.game.cvars.int("bot_count").clamp(0, 64) as usize;
         if wanted > 0 {
             self.set_bots(wanted)?;
         }

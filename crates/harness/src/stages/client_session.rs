@@ -165,7 +165,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut problems = Vec::new();
     for (label, args, steps) in [
         ("direct", DIRECT, DIRECT_STEPS),
-        ("menus", &[][..], MENU_STEPS),
+        ("menus", &["--bots", "3"][..], MENU_STEPS),
         ("objectives", OBJECTIVE_ARGS, OBJECTIVE_STEPS),
     ] {
         let dir = ctx.dir.join(label);

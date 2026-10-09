@@ -40,8 +40,15 @@ fn bots_follow_the_cvar_at_map_start_and_the_command_at_once() {
     s.run_frames(60);
     assert_eq!(bots(&s), 0, "`bots 0` left bots");
 
-    // The command outranks the cvar on later maps.
+    // The command set the cvar: a later map keeps the count.
     s.exec_line("map mp_crash").unwrap();
     s.run_frames(60);
     assert_eq!(bots(&s), 0, "a later map brought the bots back");
+
+    // And a cvar change after the command is what the next map reads.
+    s.exec_line("bots 2").unwrap();
+    s.exec_line("set bot_count 5").unwrap();
+    s.exec_line("map mp_crash").unwrap();
+    s.run_frames(60);
+    assert_eq!(bots(&s), 5, "bot_count set after `bots 2` was ignored");
 }

@@ -2551,6 +2551,7 @@ fn saved_bot_count_lines(bots_flag: Option<usize>, input: &Input) -> Vec<String>
 }
 
 fn console_action(st: &mut State, line: &str) {
+    let count_before = bot_count(&st.input);
     for cmd in crate::input::config::split_commands(line) {
         if cmd[0].eq_ignore_ascii_case("bots") {
             // `bots <n>` brings the listen server's bots to n at once (the command is the listen server's console's).
@@ -2611,7 +2612,7 @@ fn console_action(st: &mut State, line: &str) {
         }
     }
     // The server of this process reads `bot_count` at its next map start.
-    if st.listen.is_some() {
+    if st.listen.is_some() && bot_count(&st.input) != count_before {
         listen::send(&format!("set bot_count {}", bot_count(&st.input)));
     }
 }
