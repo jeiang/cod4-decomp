@@ -42,6 +42,9 @@ pub struct MapSpec {
     pub terrain_contents: i32,
     /// Surface flags of the one material every brush uses; `None` keeps the default (`0x1234`).
     pub surface_flags: Option<i32>,
+    /// Splits the world at the plane `x = split_x` into two leaves, cluster 0 for `x >= split_x` and cluster 1 for
+    /// the rest, that see only themselves.
+    pub split_x: Option<f32>,
 }
 
 impl MapSpec {
@@ -132,9 +135,45 @@ impl MapSpec {
                 leaf: Leaf { ..leaf },
             });
             if g == 0 {
+                if self.split_x.is_some() {
+                    leafs.push(Leaf {
+                        cluster: 1,
+                        first_coll_aabb_index: leaf.first_coll_aabb_index,
+                        coll_aabb_count: leaf.coll_aabb_count,
+                        brush_contents: leaf.brush_contents,
+                        terrain_contents: leaf.terrain_contents,
+                        mins: leaf.mins,
+                        maxs: leaf.maxs,
+                        leaf_brush_node: leaf.leaf_brush_node,
+                    });
+                }
                 leafs.push(leaf);
             }
         }
+
+        let root = match self.split_x {
+            Some(x) => {
+                planes.push(Plane {
+                    normal: [1.0, 0.0, 0.0],
+                    dist: x,
+                    kind: 0,
+                    sign_bits: 0,
+                });
+                Node {
+                    plane: Some(planes.len() as u32 - 1),
+                    // Front (`x >= split_x`) is the leaf pushed second: cluster 0.
+                    children: [-2, -1],
+                }
+            }
+            None => Node {
+                plane: None,
+                children: [-1, -1],
+            },
+        };
+        let (num_clusters, visibility) = match self.split_x {
+            Some(_) => (2, vec![0b01u8, 0b10]),
+            None => (1, vec![0u8]),
+        };
 
         let mut verts = Vec::new();
         let mut tri_indices = Vec::new();
@@ -201,10 +240,7 @@ impl MapSpec {
             }]),
             brush_sides: sides.into(),
             brush_edges: Arc::from(Vec::new()),
-            nodes: Arc::from(vec![Node {
-                plane: None,
-                children: [-1, -1],
-            }]),
+            nodes: Arc::from(vec![root]),
             leafs: leafs.into(),
             leaf_brush_nodes: lb_nodes.into(),
             leaf_brushes: Arc::from(Vec::new()),
@@ -217,10 +253,10 @@ impl MapSpec {
             aabb_trees: aabb_trees.into(),
             cmodels: cmodels.into(),
             brushes: brushes.into(),
-            num_clusters: 1,
+            num_clusters,
             cluster_bytes: 1,
-            visibility: Arc::from(vec![0u8]),
-            vised: 0,
+            visibility: visibility.into(),
+            vised: i32::from(self.split_x.is_some()),
             map_ents: None,
             box_brush: None,
             box_model: CModel {

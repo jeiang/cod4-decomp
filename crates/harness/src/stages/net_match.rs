@@ -65,6 +65,8 @@ struct Result {
     /// quarter every second, so it loops back on itself and its end point says nothing about whether it moved.
     reach: f32,
     seen_max: usize,
+    /// Entities a snapshot listed both as visible and as a compass actor.
+    overlap: u64,
     steps: u64,
     snaps: u64,
     max_step: f32,
@@ -226,9 +228,17 @@ fn client(
             }
             r.shake_max = r.shake_max.max(shakes.strength(st, s.ps.origin));
         }
+        // Players beyond the client's sight come as compass actors, never in both lists.
+        if let Some(s) = c.latest() {
+            r.overlap += s
+                .actors
+                .iter()
+                .filter(|a| s.entity(a.number).is_some())
+                .count() as u64;
+        }
         let ents = c
             .snaps
-            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
+            .interpolate_with_actors(st - net::view::INTERP_DELAY_MS, Some(own));
         r.seen_max = r
             .seen_max
             .max(ents.iter().filter(|e| e.etype == etype::PLAYER).count());
@@ -469,6 +479,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             if moved < 50.0 {
                 failures.push(format!(
                     "client {i}: the server did not move it ({moved:.0} units in {FRAMES} frames)"
+                ));
+            }
+            if r.overlap > 0 {
+                failures.push(format!(
+                    "client {i}: {} entities were sent both as visible and as compass actors",
+                    r.overlap
                 ));
             }
             if r.seen_max < BOTS / 2 {

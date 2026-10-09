@@ -12,6 +12,25 @@ use super::{Trace, Vec3};
 /// Longest leaf list a position test gathers (the original's `leafs[1024]`).
 const MAX_TEST_LEAFS: usize = 1024;
 
+/// Most leaves [`CollisionWorld::box_clusters`] gathers for one box.
+const MAX_BOX_LEAFS: usize = 128;
+
+/// The clusters one point of the map can see.
+pub struct Pvs<'a> {
+    /// One bit per cluster; `None` when the map has no visibility data.
+    row: Option<&'a [u8]>,
+}
+
+impl Pvs<'_> {
+    pub fn sees(&self, cluster: i16) -> bool {
+        let Ok(c) = usize::try_from(cluster) else {
+            return false;
+        };
+        self.row
+            .is_none_or(|r| r.get(c >> 3).is_some_and(|b| b & (1 << (c & 7)) != 0))
+    }
+}
+
 /// Minimum Z of a surface normal for the ground to count as walkable.
 pub const WALKABLE_NORMAL_Z: f32 = 0.7;
 
@@ -168,6 +187,40 @@ impl CollisionWorld {
             ll.out[ll.count] = leaf;
             ll.count += 1;
         }
+    }
+
+    /// What a viewer at `eye` can see (`CM_PointLeafnum` and `CM_ClusterPVS`). `None` when the point is in no
+    /// cluster (solid or outside the map), which has no sight to speak of.
+    pub fn pvs_at(&self, eye: Vec3) -> Option<Pvs<'_>> {
+        let cluster = self.leaf_cluster(self.point_leafnum(eye));
+        if cluster < 0 {
+            return None;
+        }
+        let bytes = usize::try_from(self.cm.cluster_bytes).unwrap_or(0);
+        let start = usize::try_from(cluster).ok()?.checked_mul(bytes)?;
+        // A map compiled without visibility data (`vised` 0) shows everything everywhere.
+        let row = (self.cm.vised != 0)
+            .then(|| self.cm.visibility.get(start..start + bytes))
+            .flatten();
+        Some(Pvs { row })
+    }
+
+    /// The visibility clusters the box `mins..maxs` touches, each once. `None` when it spans more leaves than a
+    /// bounded list holds: such a box is never culled.
+    pub fn box_clusters(&self, mins: Vec3, maxs: Vec3) -> Option<Vec<i16>> {
+        let mut leafs = [0u16; MAX_BOX_LEAFS];
+        let (count, _) = self.box_leafnums(mins, maxs, &mut leafs);
+        if count == MAX_BOX_LEAFS {
+            return None;
+        }
+        let mut out: Vec<i16> = leafs[..count]
+            .iter()
+            .map(|&l| self.leaf_cluster(l))
+            .filter(|&c| c >= 0)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        Some(out)
     }
 
     /// Union of the contents of the brushes containing `p` in `model` (`CM_PointContents`).

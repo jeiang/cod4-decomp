@@ -5,7 +5,7 @@
 //! to serve ([`Archive::at`]); the stock `_killcam.gsc` asks for up to a few seconds back, the
 //! ring keeps [`KEEP_MS`].
 
-use net::entity::EntityState;
+use crate::netsv::Sent;
 use net::ui::{HudElem, MAX_OBJECTIVES, Objective};
 use sim::pm::PlayerState;
 use sim::weapon::PlayerWeapons;
@@ -29,7 +29,7 @@ pub struct ArchPlayer {
 pub struct Frame {
     pub time: i32,
     /// By entity number, wire-rounded.
-    pub entities: Vec<EntityState>,
+    pub entities: Vec<Sent>,
     /// By client slot; `None` for a slot nobody was playing in.
     pub players: Vec<Option<ArchPlayer>>,
 }

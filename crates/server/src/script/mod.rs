@@ -222,6 +222,9 @@ impl Host for ScriptHost<'_> {
                         if set && matches!(name, "origin" | "angles") {
                             self.game.relink(ent.num);
                         }
+                        if set && name == "origin" {
+                            self.game.mark_teleport(ent.num);
+                        }
                         Ok(set)
                     }
                     None => Ok(false),

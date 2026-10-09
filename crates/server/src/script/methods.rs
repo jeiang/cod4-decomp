@@ -22,6 +22,7 @@ pub const TABLE: &[(&str, Impl<MethFn>)] = &[
     ("setmodel", r(set_model)),
     ("show", r(|g, _, e, _| set_hidden(g, e, false))),
     ("hide", r(|g, _, e, _| set_hidden(g, e, true))),
+    ("showtoplayer", r(show_to_player)),
     ("getorigin", r(get_origin)),
     (
         "getentitynumber",
@@ -121,6 +122,21 @@ fn set_hidden(g: &mut Game, e: EntRef, hidden: bool) -> R {
     live(g, e)?;
     if let Some(ent) = g.ent_mut(e.num) {
         ent.hidden = hidden;
+        // `show` and `hide` both start over: nobody is singled out until `showtoplayer` says so.
+        ent.shown_to = 0;
+    }
+    Ok(Value::Undefined)
+}
+
+/// `showtoplayer`: a `hide`n entity is drawn for this player too (`ScrCmd_ShowToPlayer`).
+pub(super) fn show_to_player(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
+    live(g, e)?;
+    let who = a.entity(0)?;
+    if who.class != EntClass::Entity || !g.is_client(who.num) {
+        return Err("showToClient error: param must be a client entity".into());
+    }
+    if let Some(ent) = g.ent_mut(e.num) {
+        ent.shown_to |= 1 << who.num;
     }
     Ok(Value::Undefined)
 }

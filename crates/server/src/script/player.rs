@@ -258,6 +258,7 @@ fn set_origin(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     if let Some(en) = g.ent_mut(n) {
         en.origin = o;
     }
+    g.mark_teleport(n);
     g.relink(n);
     Ok(Value::Undefined)
 }

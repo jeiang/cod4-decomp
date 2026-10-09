@@ -471,3 +471,25 @@ fn model_bounds_and_contents_are_looked_up_by_index() {
     assert_eq!(w.model_bounds(7), None);
     assert_eq!(w.model_contents(7), 0);
 }
+
+#[test]
+fn a_viewer_sees_its_own_cluster_and_a_box_across_the_split_is_in_both() {
+    let w = MapSpec {
+        split_x: Some(0.0),
+        ..Default::default()
+    }
+    .world();
+    let east = w.pvs_at([100.0, 0.0, 0.0]).expect("in a cluster");
+    let west = w.pvs_at([-100.0, 0.0, 0.0]).expect("in a cluster");
+    assert!(east.sees(0) && !east.sees(1));
+    assert!(west.sees(1) && !west.sees(0));
+    assert_eq!(w.box_clusters([50.0; 3], [60.0; 3]), Some(vec![0]));
+    assert_eq!(w.box_clusters([-10.0; 3], [10.0; 3]), Some(vec![0, 1]));
+}
+
+#[test]
+fn a_map_without_visibility_data_shows_everything() {
+    let w = room();
+    let eye = w.pvs_at([0.0, 0.0, 10.0]).expect("in a cluster");
+    assert!(eye.sees(0) && eye.sees(7));
+}

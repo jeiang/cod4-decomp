@@ -7,6 +7,7 @@
 use crate::archive::{ArchPlayer, Archive, Frame};
 use crate::ban::BanList;
 use crate::client::{Conn, Session, Team};
+use crate::fire::view_origin;
 use crate::game::{EntKind, Game, SoundTo, WorldFx};
 use crate::ui::Dest;
 use net::connect::{ConnectRequest, Gate, serve};
@@ -55,6 +56,8 @@ pub mod eflags {
     pub const TURRET: u32 = 1 << 6;
     /// A script pinged the player (`pingPlayer`): the other team's compass shows them for a moment.
     pub const PING: u32 = 1 << 7;
+    /// The entity was moved by fiat since the last snapshot (`EF_TELEPORT_BIT`, flipped): not slid there.
+    pub const TELEPORT: u32 = net::entity::TELEPORT_BIT;
 }
 
 /// Time the server has listened to a client without hearing it, after which others are shown the
@@ -624,7 +627,7 @@ impl NetSv {
     /// Builds and sends every client's snapshot for the frame at `server_time`.
     pub fn send_snapshots(&mut self, game: &Game, server_time: i32) {
         self.now = server_time;
-        let mut entities = world_entities(game);
+        let mut entities = world_snapshot(game);
         let quiet = self.peers.iter().enumerate().filter_map(|(slot, p)| {
             let p = p.as_ref()?;
             (p.unheard_ms > CONNECTION_INTERRUPTED_MS).then_some(slot as u16)
@@ -704,7 +707,7 @@ impl NetSv {
         game: &Game,
         slot: u16,
         server_time: i32,
-        entities: &[EntityState],
+        world: &[Sent],
     ) -> Option<Snapshot> {
         let c = game.client(slot)?;
         let mut snap = Snapshot {
@@ -712,7 +715,8 @@ impl NetSv {
             server_time,
             ps: c.ps.clone(),
             inv: Box::new(c.inv.to_words()),
-            entities: entities.to_vec(),
+            entities: Vec::new(),
+            actors: Vec::new(),
             hud: game.visible_hud(slot),
             objectives: game.visible_objectives(slot),
             follow: None,
@@ -721,6 +725,7 @@ impl NetSv {
             .ok()
             .filter(|t| *t != slot && c.session == Session::Spectator);
         let Some(target) = followed else {
+            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&c.ps), &[], true);
             return Some(snap);
         };
         let archive_ms = (c.archive_time * 1000.0) as i32;
@@ -734,10 +739,12 @@ impl NetSv {
             ps_offset_ms: c.ps_offset_time,
             entity: u16::try_from(c.kill_cam_entity).ok(),
         };
+        let keep = [Some(target), follow.entity];
         if let Some(f) = past {
             follow.archive_ms = (server_time - f.time).max(1) as u32;
-            snap.entities.clone_from(&f.entities);
             if let Some(Some(p)) = f.players.get(usize::from(target)) {
+                // What the watched player's eyes could see then.
+                snap.entities = tell(game, &f.entities, slot, view_origin(&p.ps), &keep, false).0;
                 snap.ps = p.ps.clone();
                 snap.inv = p.inv.clone();
                 snap.objectives = p.objectives;
@@ -749,13 +756,16 @@ impl NetSv {
                 snap.hud.sort_by_key(|h| h.id);
                 snap.hud.dedup_by_key(|h| h.id);
             } else {
+                snap.entities = tell(game, &f.entities, slot, view_origin(&c.ps), &keep, false).0;
                 return Some(snap);
             }
         } else if let Some(t) = game.client(target).filter(|t| t.connected()) {
+            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&t.ps), &keep, true);
             snap.ps = t.ps.clone();
             snap.inv = Box::new(t.inv.to_words());
             snap.objectives = game.visible_objectives(target);
         } else {
+            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&c.ps), &keep, true);
             return Some(snap);
         }
         // The watcher's own prompts ride on the state of the player watched.
@@ -763,6 +773,64 @@ impl NetSv {
         snap.follow = Some(follow);
         Some(snap)
     }
+}
+
+/// What client `viewer` is sent of `world` when its eye is at `eye`: the entities it may see and, for the compass,
+/// the players beyond its sight (`SV_AddEntitiesVisibleFromPoint`). `keep` are entities it gets regardless (the
+/// player it watches, the killcam's entity) and its own.
+fn tell(
+    game: &Game,
+    world: &[Sent],
+    viewer: u16,
+    eye: [f32; 3],
+    keep: &[Option<u16>],
+    with_actors: bool,
+) -> (Vec<EntityState>, Vec<EntityState>) {
+    let pvs = game.world.as_ref().and_then(|w| w.collision().pvs_at(eye));
+    let (mut seen, mut actors) = (Vec::new(), Vec::new());
+    for s in world {
+        let n = s.state.number;
+        let always = n == viewer || keep.contains(&Some(n));
+        if !always
+            && s.shown_to
+                .is_some_and(|m| viewer >= 64 || m >> viewer & 1 == 0)
+        {
+            continue;
+        }
+        let in_sight = always
+            || match (&pvs, &s.clusters) {
+                (Some(p), Some(c)) => c.iter().any(|&c| p.sees(c)),
+                _ => true,
+            };
+        if in_sight {
+            seen.push(s.state.clone());
+        } else if with_actors && s.state.etype == etype::PLAYER {
+            actors.push(compass_state(&s.state));
+        }
+    }
+    (seen, actors)
+}
+
+/// What client `viewer` is sent at this moment: the entities it may see and the players beyond its sight the
+/// compass is told about.
+pub fn visible_to(game: &Game, viewer: u16) -> (Vec<EntityState>, Vec<EntityState>) {
+    let eye = game.client(viewer).map_or([0.0; 3], |c| view_origin(&c.ps));
+    tell(game, &world_snapshot(game), viewer, eye, &[], true)
+}
+
+/// The part of a player the compass reads: where, which way, which side, whether dead or pinged, and the events
+/// that show a shot.
+fn compass_state(p: &EntityState) -> EntityState {
+    let mut a = EntityState::new(p.number);
+    a.etype = p.etype;
+    a.client = p.client;
+    a.origin = p.origin;
+    a.angles = [0.0, p.angles[1], 0.0];
+    a.eflags = p.eflags;
+    a.perks = p.perks;
+    (a.event, a.prior_events) = (p.event, p.prior_events);
+    a.event_seq = p.event_seq;
+    a.canonical()
 }
 
 /// The `rate` of a stock profile (`seta rate "25000"`), and the most a client may ask for.
@@ -836,13 +904,13 @@ fn config_commands(entries: Vec<(u16, String)>) -> Vec<String> {
 }
 
 /// Flags the player bodies of the clients in `quiet` as having a connection problem.
-fn mark_interrupted(entities: &mut [EntityState], quiet: impl Iterator<Item = u16>) {
+fn mark_interrupted(entities: &mut [Sent], quiet: impl Iterator<Item = u16>) {
     for slot in quiet {
         if let Some(e) = entities
             .iter_mut()
-            .find(|e| e.etype == etype::PLAYER && e.number == slot)
+            .find(|e| e.state.etype == etype::PLAYER && e.state.number == slot)
         {
-            e.eflags |= eflags::CONNECTION_INTERRUPTED;
+            e.state.eflags |= eflags::CONNECTION_INTERRUPTED;
         }
     }
 }
@@ -856,13 +924,50 @@ fn owner_team_flags(game: &Game, owner: u16) -> u32 {
     }
 }
 
-/// Everything a client can see, in entity-number order, already rounded as the wire rounds it.
+/// How far from its origin a model reaches, so a box around it holds it whatever way it faces.
+fn model_reach(game: &Game, name: &str) -> f32 {
+    game.content
+        .model(name)
+        .map_or(128.0, |m| m.radius.max(16.0))
+}
+
+/// What the entities everybody may see look like: the entities no hiding applies to.
 pub fn world_entities(game: &Game) -> Vec<EntityState> {
+    world_snapshot(game)
+        .into_iter()
+        .filter(|s| s.shown_to.is_none())
+        .map(|s| s.state)
+        .collect()
+}
+
+/// One entity of the world with what decides who it is sent to.
+#[derive(Debug, Clone)]
+pub struct Sent {
+    pub state: EntityState,
+    /// A hidden entity (`hide`): the clients (bit per slot) it is shown to anyway (`showtoplayer`). `None` for one
+    /// everybody may see.
+    pub shown_to: Option<u64>,
+    /// The visibility clusters its bounds touch; only a client that can see one of them is sent it. `None` for
+    /// what is sent regardless (no extent, no map, or too big to bound).
+    pub clusters: Option<Vec<i16>>,
+}
+
+/// The clusters the box of half-size `reach` around `origin` touches.
+fn clusters_around(game: &Game, origin: [f32; 3], reach: f32) -> Option<Vec<i16>> {
+    let w = game.world.as_ref()?.collision();
+    let c = w.box_clusters(origin.map(|v| v - reach), origin.map(|v| v + reach))?;
+    (!c.is_empty()).then_some(c)
+}
+
+/// Everything in the world as [`Sent`], in entity-number order, already rounded as the wire rounds it.
+pub fn world_snapshot(game: &Game) -> Vec<Sent> {
     let mut out = Vec::new();
     for (n, e) in game.ents.iter().enumerate() {
         let Some(e) = e else { continue };
         let n = n as u16;
-        let state = match e.kind {
+        let mut shown_to = None;
+        let mut reach = None;
+        let mut state = match e.kind {
             EntKind::Client => {
                 let Some(c) = game.client(n) else { continue };
                 if c.conn != Conn::Connected
@@ -885,10 +990,13 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.weapon_state = c.ps.weapon_state;
                 s.ads = (c.ps.weapon_pos_frac.clamp(0.0, 1.0) * 255.0) as u8;
                 s.move_dir = c.ps.movement_dir;
-                s.event = c.ps.events[usize::from(c.ps.event_sequence.wrapping_sub(1) & 3)];
-                s.event_parm =
-                    c.ps.event_parms[usize::from(c.ps.event_sequence.wrapping_sub(1) & 3)];
+                // The four the player state keeps, so a frame that raised several loses none.
+                let at = |back: u8| usize::from(c.ps.event_sequence.wrapping_sub(back) & 3);
+                s.set_recent_events(
+                    [4, 3, 2, 1].map(|b| (c.ps.events[at(b)], c.ps.event_parms[at(b)])),
+                );
                 s.event_seq = c.ps.event_sequence;
+                reach = Some(48.0);
                 s.torso_pitch = c.ps.torso_pitch;
                 s.waist_pitch = c.ps.waist_pitch;
                 s.damage_timer = c.ps.damage_timer.clamp(0, i32::from(u16::MAX)) as u16;
@@ -933,6 +1041,7 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 }
                 let mut s = EntityState::new(n);
                 s.etype = etype::ITEM;
+                reach = Some(32.0);
                 s.origin = e.origin;
                 s.angles = e.angles;
                 s.weapon = item.weapon;
@@ -944,9 +1053,13 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 // The index names the model in the clients' configstrings; one that was never registered cannot be
                 // drawn.
                 let model = game.models.find(&e.model);
-                if e.hidden || model == 0 {
+                if model == 0 {
                     continue;
                 }
+                if e.hidden {
+                    shown_to = Some(e.shown_to);
+                }
+                reach = Some(model_reach(game, &e.model));
                 let mut s = EntityState::new(n);
                 s.etype = etype::SCRIPT_MODEL;
                 s.origin = e.origin;
@@ -971,6 +1084,7 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 if e.hidden || model == 0 {
                     continue;
                 }
+                reach = Some(model_reach(game, &e.model));
                 let mut s = EntityState::new(n);
                 s.etype = etype::VEHICLE;
                 s.origin = e.origin;
@@ -1017,6 +1131,7 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 };
                 let mut s = EntityState::new(n);
                 s.etype = etype::MISSILE;
+                reach = Some(32.0);
                 s.origin = e.origin;
                 s.angles = e.angles;
                 s.velocity = m.pos.evaluate_delta(game.level.time);
@@ -1027,16 +1142,39 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s
             }
         };
-        out.push(state.canonical());
+        // Moved by fiat since the last snapshot. Not for a missile or effect, whose `eflags` hold a time.
+        if e.teleport
+            && matches!(
+                state.etype,
+                etype::PLAYER | etype::SCRIPT_MODEL | etype::PLANE | etype::VEHICLE
+            )
+        {
+            state.eflags |= eflags::TELEPORT;
+        }
+        let clusters = reach.and_then(|r| clusters_around(game, state.origin, r));
+        out.push(Sent {
+            state: state.canonical(),
+            shown_to,
+            clusters,
+        });
     }
     add_loop_sounds(game, &mut out);
-    out.extend(game.tempev.live(game.level.time).cloned());
+    out.extend(
+        game.tempev
+            .live(game.level.time)
+            .cloned()
+            .map(|state| Sent {
+                state,
+                shown_to: None,
+                clusters: None,
+            }),
+    );
     out
 }
 
 /// The sound each entity loops (`playloopsound`), in its state. An entity the snapshot would not otherwise carry
 /// (a `script_origin`) becomes a plain one that only has its place and its loop.
-fn add_loop_sounds(game: &Game, out: &mut Vec<EntityState>) {
+fn add_loop_sounds(game: &Game, out: &mut Vec<Sent>) {
     let mut added = false;
     for (n, e) in game.ents.iter().enumerate() {
         let Some(e) = e
@@ -1046,20 +1184,25 @@ fn add_loop_sounds(game: &Game, out: &mut Vec<EntityState>) {
             continue;
         };
         let n = n as u16;
-        if let Some(s) = out.iter_mut().find(|s| s.number == n) {
-            s.loop_sound = e.loop_sound;
+        if let Some(s) = out.iter_mut().find(|s| s.state.number == n) {
+            s.state.loop_sound = e.loop_sound;
         } else if !e.hidden {
             let mut s = EntityState::new(n);
             s.etype = etype::GENERAL;
             s.origin = e.origin;
             s.angles = e.angles;
             s.loop_sound = e.loop_sound;
-            out.push(s.canonical());
+            // Heard from wherever it is, so not culled.
+            out.push(Sent {
+                state: s.canonical(),
+                shown_to: None,
+                clusters: None,
+            });
             added = true;
         }
     }
     if added {
-        out.sort_by_key(|s| s.number);
+        out.sort_by_key(|s| s.state.number);
     }
 }
 
@@ -1182,11 +1325,18 @@ mod tests {
             etype: etype::PLAYER,
             ..EntityState::new(n)
         };
-        let mut e = vec![player(1), player(2), EntityState::new(3)];
+        let mut e: Vec<Sent> = [player(1), player(2), EntityState::new(3)]
+            .into_iter()
+            .map(|state| Sent {
+                state,
+                shown_to: None,
+                clusters: None,
+            })
+            .collect();
         mark_interrupted(&mut e, [2u16, 3, 9].into_iter());
         let flagged: Vec<bool> = e
             .iter()
-            .map(|e| e.eflags & eflags::CONNECTION_INTERRUPTED != 0)
+            .map(|e| e.state.eflags & eflags::CONNECTION_INTERRUPTED != 0)
             .collect();
         assert_eq!(flagged, [false, true, false]);
     }

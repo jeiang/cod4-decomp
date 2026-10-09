@@ -607,6 +607,7 @@ impl Game {
             e.classname = "player".into();
             e.mv.pos.tr = sim::traj::Trajectory::stationary(origin);
         }
+        self.mark_teleport(n);
         if let Some(e) = self.ent_mut(n) {
             e.takedamage = true;
         }
