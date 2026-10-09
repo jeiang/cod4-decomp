@@ -1205,7 +1205,11 @@ impl NetPlay {
     /// The camera a kill cam puts on the entity the scripts named as the killer, and the blur it is seen through
     /// (`CG_HelicopterKillCamEnabled`, `CG_AirstrikeKillCamEnabled`): `None` outside a kill cam and while the entity
     /// or the victim is not in view.
-    fn kill_cam(&self, st: i32, snap: &net::snapshot::Snapshot) -> Option<(crate::camera::KillCam, render::Dof)> {
+    fn kill_cam(
+        &self,
+        st: i32,
+        snap: &net::snapshot::Snapshot,
+    ) -> Option<(crate::camera::KillCam, render::Dof)> {
         let follow = snap.follow.filter(|f| f.archive_ms > 0)?;
         let number = follow.entity?;
         snap.entity(number)?;
@@ -1221,7 +1225,8 @@ impl NetPlay {
             let dof = crate::dof::helicopter_kill_cam(k.distance, crate::camera::HELI_DIST);
             Some((k, dof))
         } else {
-            let k = crate::camera::airstrike_kill_cam(Vec3::from(killer.origin), killer.angles, target);
+            let k =
+                crate::camera::airstrike_kill_cam(Vec3::from(killer.origin), killer.angles, target);
             Some((k, crate::dof::airstrike_kill_cam(k.distance)))
         }
     }

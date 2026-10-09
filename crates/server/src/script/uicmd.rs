@@ -321,7 +321,9 @@ pub fn set_exp_fog(g: &mut Game, _: &mut Vm, a: Args) -> R {
         return Err("setExpFog: halfwayDist must be greater than 0".into());
     }
     if [red, green, blue].iter().any(|c| !(0.0..=1.0).contains(c)) {
-        return Err("setExpFog: red/green/blue color components must be in the range [0, 1]".into());
+        return Err(
+            "setExpFog: red/green/blue color components must be in the range [0, 1]".into(),
+        );
     }
     if seconds < 0.0 {
         return Err("setExpFog: transition time must be >= 0 seconds".into());
@@ -538,7 +540,10 @@ mod tests {
         let text = g.configstrings.get(&u32::from(cs::FOGVARS)).unwrap();
         let f: Vec<f32> = text.split(' ').map(|t| t.parse().unwrap()).collect();
         assert_eq!(f.len(), 6);
-        assert_eq!((f[0], f[2], f[3], f[4], f[5]), (64.0, 0.5, 0.25, 0.0, 2500.0));
+        assert_eq!(
+            (f[0], f[2], f[3], f[4], f[5]),
+            (64.0, 0.5, 0.25, 0.0, 2500.0)
+        );
         assert!((f[1] - std::f32::consts::LN_2 / 1000.0).abs() < 1e-9);
     }
 

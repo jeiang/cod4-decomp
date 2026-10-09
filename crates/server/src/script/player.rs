@@ -390,7 +390,14 @@ fn view_kick(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
 /// `GScr_SetDepthOfField`'s checks and fix-ups, on `(near start, near end, far start, far end, near blur, far blur)`:
 /// an empty range turns that side off.
 fn dof_ranges(mut v: [f32; 6]) -> Result<[f32; 6], String> {
-    let [near_start, near_end, far_start, far_end, near_blur, far_blur] = &mut v;
+    let [
+        near_start,
+        near_end,
+        far_start,
+        far_end,
+        near_blur,
+        far_blur,
+    ] = &mut v;
     for (i, (x, what)) in [
         (*near_start, "near start"),
         (*near_end, "near end"),
@@ -808,11 +815,21 @@ mod tests {
             .collect();
         set_depth_of_field(&mut g, &mut vm, e, Args::new("setdepthoffield", &v)).unwrap();
         let v = [Value::Int(2), Value::Int(9)];
-        set_view_model_depth_of_field(&mut g, &mut vm, e, Args::new("setviewmodeldepthoffield", &v))
-            .unwrap();
+        set_view_model_depth_of_field(
+            &mut g,
+            &mut vm,
+            e,
+            Args::new("setviewmodeldepthoffield", &v),
+        )
+        .unwrap();
         let ps = &g.client(n).unwrap().ps;
         assert_eq!(
-            [ps.dof_near_end, ps.dof_far_start, ps.dof_far_end, ps.dof_far_blur],
+            [
+                ps.dof_near_end,
+                ps.dof_far_start,
+                ps.dof_far_end,
+                ps.dof_far_blur
+            ],
             [128.0, 512.0, 4000.0, 1.8]
         );
         assert_eq!((ps.dof_viewmodel_start, ps.dof_viewmodel_end), (2.0, 9.0));

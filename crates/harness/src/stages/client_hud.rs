@@ -271,7 +271,10 @@ mod tests {
         r["net"]["view"]["death_view_frames"] = json!(0);
         r["net"]["view"]["dof_frames"] = json!(0);
         let why = verdict(&r).unwrap();
-        assert!(why.contains("behind the body") && why.contains("depth of field"), "{why}");
+        assert!(
+            why.contains("behind the body") && why.contains("depth of field"),
+            "{why}"
+        );
         r["net"]["view"]["death_view_frames"] = json!(5);
         r["net"]["view"]["death_view_range_max"] = json!(0.0);
         assert!(verdict(&r).unwrap().contains("at the head"));

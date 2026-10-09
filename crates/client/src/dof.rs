@@ -182,12 +182,18 @@ mod tests {
         let mut ads = AdsDof::default();
         let first = ads.update(&aiming(1.0), 2000.0, 0.016);
         // From hip numbers (far start 5000) toward the aimed 2500, at most 400 per 50 ms.
-        assert!(first.far_start < 5000.0 && first.far_start > 4800.0, "{first:?}");
+        assert!(
+            first.far_start < 5000.0 && first.far_start > 4800.0,
+            "{first:?}"
+        );
         let mut d = first;
         for _ in 0..600 {
             d = ads.update(&aiming(1.0), 2000.0, 0.016);
         }
-        assert_eq!((d.near_end, d.far_start, d.far_end), (256.0, 2500.0, 10000.0));
+        assert_eq!(
+            (d.near_end, d.far_start, d.far_end),
+            (256.0, 2500.0, 10000.0)
+        );
         assert_eq!((d.near_blur, d.far_blur), (6.0, 0.0));
     }
 
@@ -198,7 +204,10 @@ mod tests {
         (ps.dof_near_end, ps.dof_far_start, ps.dof_far_end) = (128.0, 512.0, 4000.0);
         (ps.dof_near_blur, ps.dof_far_blur) = (6.0, 1.8);
         let d = scripted(&ps).unwrap();
-        assert_eq!((d.near_start, d.near_end, d.far_start, d.far_end), (0.0, 128.0, 512.0, 4000.0));
+        assert_eq!(
+            (d.near_start, d.near_end, d.far_start, d.far_end),
+            (0.0, 128.0, 512.0, 4000.0)
+        );
         assert_eq!((d.near_blur, d.far_blur), (6.0, 1.8));
         assert!(d.active());
     }
@@ -220,6 +229,9 @@ mod tests {
         assert!(d.active());
         assert_eq!((d.near_end, d.far_start, d.far_end), (400.0, 600.0, 900.0));
         let h = helicopter_kill_cam(500.0, 1000.0);
-        assert_eq!((h.near_end, h.far_start, h.far_end), (1400.0, 1600.0, 1900.0));
+        assert_eq!(
+            (h.near_end, h.far_start, h.far_end),
+            (1400.0, 1600.0, 1900.0)
+        );
     }
 }

@@ -144,7 +144,10 @@ mod tests {
         f.follow("0 0.002 0 0 0 0", 0);
         f.follow("1000", 100);
         let thin = halfway(f.at(600)).unwrap();
-        assert!(thin > std::f32::consts::LN_2 / 0.002, "thinner half way: {thin}");
+        assert!(
+            thin > std::f32::consts::LN_2 / 0.002,
+            "thinner half way: {thin}"
+        );
         assert_eq!(f.at(1100), None);
     }
 }
