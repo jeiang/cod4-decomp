@@ -715,7 +715,11 @@ impl Shell {
             } else {
                 verb
             };
-            self.print(net::ui::PrintKind::Normal, &format!("{old}^7 {verb} {new}"));
+            self.print(
+                input,
+                net::ui::PrintKind::Normal,
+                &format!("{old}^7 {verb} {new}"),
+            );
         }
         let live_now = self.st.live.active;
         if live_now != self.st.was_active {
