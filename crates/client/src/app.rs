@@ -997,6 +997,7 @@ impl Viewer {
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
             let frame_out = net.frame(dt, &f);
+            st.input.apply(&net.take_input_feedback());
             st.prev_cost[0] = t_net.elapsed().as_secs_f64() * 1000.0;
             if net.spawned()
                 && let Some(g) = st.load_gaps.take()
