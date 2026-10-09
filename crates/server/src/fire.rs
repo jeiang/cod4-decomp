@@ -30,9 +30,15 @@ const MELEE_OFFSETS: [[f32; 2]; 5] = [
     [-1.0, -1.0],
 ];
 
-/// `G_GetPlayerViewOrigin` (`BG_GetPlayerViewOrigin`): the eye with its bob and lean, where shots start.
+/// `G_GetPlayerViewOrigin`: the eye, shifted sideways by a lean.
 pub fn view_origin(ps: &PlayerState) -> Vec3 {
-    sim::pm::bob::view_origin(ps, ps.command_time)
+    let mut o = [
+        ps.origin[0],
+        ps.origin[1],
+        ps.origin[2] + ps.view_height_current,
+    ];
+    math::add_lean_to_position(&mut o, ps.viewangles[1], ps.leanf, 16.0, 20.0);
+    o
 }
 
 impl Game {
@@ -333,19 +339,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shots_start_from_the_bobbing_eye_not_the_still_one() {
-        let still = PlayerState {
+    fn the_eye_is_above_the_origin_and_shifts_with_a_lean() {
+        let mut ps = PlayerState {
             origin: [10.0, 20.0, 30.0],
             view_height_current: 60.0,
-            view_height_target: sim::pm::VIEW_STAND,
             ..PlayerState::default()
         };
-        assert_eq!(view_origin(&still), [10.0, 20.0, 90.0]);
-        let running = PlayerState {
-            velocity: [190.0, 0.0, 0.0],
-            bob_cycle: 40,
-            ..still
-        };
-        assert_ne!(view_origin(&running)[2], 90.0);
+        assert_eq!(view_origin(&ps), [10.0, 20.0, 90.0]);
+        ps.leanf = 1.0;
+        let o = view_origin(&ps);
+        // Facing +x, leaning right moves the eye along -y by the lean distance.
+        assert!(o[0] == 10.0 && (o[1] - 20.0).abs() > 10.0, "{o:?}");
     }
 }

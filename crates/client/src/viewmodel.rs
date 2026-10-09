@@ -16,7 +16,7 @@ use assets::zone::weapon::WeaponDef;
 use assets::zone::xmodel::XModel;
 use render::{ModelInstance, ModelKind};
 use server::content::{Content, PlayerAnim};
-use sim::pm::{PlayerState, weapon_state as ws};
+use sim::pm::{PlayerState, VIEW_CROUCH, VIEW_PRONE, pmf, weapon_state as ws};
 use sim::skel::{AnimBinding, AnimLayer, Controllers, Pose, Rig, RigModel};
 use std::sync::Arc;
 
@@ -159,8 +159,6 @@ pub struct ViewModel {
     /// Indices of `tag_flash` and `tag_brass` among the gun's bones.
     flash_bone: Option<usize>,
     brass_bone: Option<usize>,
-    /// `tag_camera` of the hands: the animated pose of the eye.
-    camera_bone: Option<usize>,
     tags: Option<ViewTags>,
     recoil: GunRecoil,
 }
@@ -257,18 +255,6 @@ fn spring(
 pub struct ViewTags {
     pub flash: Option<fx::Frame>,
     pub brass: Option<fx::Frame>,
-    /// Where the animation of the hands puts the camera (`tag_camera`), relative to the eye: the offset in world
-    /// units and the rotation. The view is level here, the aim's angles applied.
-    pub camera: Option<CameraTag>,
-}
-
-/// The animated camera of the hands (`CG_ApplyViewAnimation`): reloads, sprints, draws and the like shake or tilt it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CameraTag {
-    /// Added to the eye position, world units.
-    pub offset: [f32; 3],
-    /// The view's own angles turned by the tag's rotation: pitch, yaw, roll degrees.
-    pub angles: [f32; 3],
 }
 
 impl ViewModel {
@@ -332,7 +318,6 @@ impl ViewModel {
         ])?;
         let bone = |n: &str| gn.iter().position(|b| &**b == n);
         let (flash_bone, brass_bone) = (bone("tag_flash"), bone("tag_brass"));
-        let camera_bone = hn.iter().position(|b| &**b == "tag_camera");
         let mut slots: Vec<Option<Slot>> = (0..slot::COUNT).map(|_| None).collect();
         for (i, n) in weapon.anims.iter().enumerate().take(slot::COUNT) {
             let Some(name) = n.as_deref().filter(|n| !n.is_empty()) else {
@@ -371,7 +356,6 @@ impl ViewModel {
             },
             flash_bone,
             brass_bone,
-            camera_bone,
             tags: None,
         })
     }
@@ -511,34 +495,24 @@ impl ViewModel {
                 ],
             })
         };
-        // The camera tag in a view that is just the aim: the hands' own model matrix has the gun's bob and recoil in it.
-        let camera = self.camera_bone.and_then(|i| {
-            let b = bones.get(i)?;
-            let view = glam::Mat4::from_rotation_translation(
-                glam::Quat::from_array(sim::skel::quat::from_angles(&ps.viewangles)),
-                glam::Vec3::ZERO,
-            );
-            let tag = glam::Mat4::from_rotation_translation(
-                glam::Quat::from_xyzw(b.quat[0], b.quat[1], b.quat[2], b.quat[3]).normalize(),
-                glam::Vec3::from(b.trans),
-            );
-            let m = view * tag;
-            let axis = [
-                m.x_axis.truncate().to_array(),
-                m.y_axis.truncate().to_array(),
-                m.z_axis.truncate().to_array(),
-            ];
-            Some(CameraTag {
-                offset: m.w_axis.truncate().to_array(),
-                angles: server::tags::axis_to_angles(&axis),
-            })
-        });
         self.tags = Some(ViewTags {
             flash: frame(self.flash_bone),
             brass: frame(self.brass_bone),
-            camera,
         });
         out
+    }
+}
+
+/// `bg_bobAmplitude{Standing,Ducked,Prone,Sprinting}`: (horizontal, vertical) degrees of bob per unit of bob speed.
+fn bob_amplitude(ps: &PlayerState) -> (f32, f32) {
+    if ps.view_height_target == VIEW_PRONE {
+        (0.02, 0.005)
+    } else if ps.view_height_target == VIEW_CROUCH {
+        (0.0075, 0.0075)
+    } else if ps.pm_flags & pmf::SPRINTING != 0 {
+        (0.02, 0.014)
+    } else {
+        (0.007, 0.007)
     }
 }
 
@@ -546,12 +520,15 @@ impl ViewModel {
 /// amplitude times the ground speed, capped, scaled by the weapon's `adsBobFactor` while aiming, and faded out
 /// entirely for a scoped weapon.
 pub fn bob_angles(ps: &PlayerState, ads: f32, w: &WeaponDef) -> [f32; 3] {
-    use sim::pm::bob::{bob_cycle, horizontal_bob, vertical_bob};
-    use std::f32::consts::{FRAC_PI_4, TAU};
-    let cycle = bob_cycle(ps) + FRAC_PI_4 + TAU;
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let (h, v) = bob_amplitude(ps);
+    let cycle = f32::from(ps.bob_cycle) / 255.0 * TAU + TAU + PI / 4.0 + TAU;
     let speed = ps.velocity[0].hypot(ps.velocity[1]) * BOB_SPEED;
-    let vertical = |cycle: f32, speed: f32| vertical_bob(ps, cycle, speed, BOB_MAX);
-    let horizontal = |cycle: f32, speed: f32| horizontal_bob(ps, cycle, speed, BOB_MAX);
+    let vertical = |cycle: f32, speed: f32| {
+        let amp = (speed * v).min(BOB_MAX);
+        ((cycle * 4.0 + FRAC_PI_2).sin() * 0.2 + (cycle * 2.0).sin()) * 0.75 * amp
+    };
+    let horizontal = |cycle: f32, speed: f32| cycle.sin() * (speed * h).min(BOB_MAX);
     let roll = horizontal(cycle - 0.471_238_9, speed * 1.5).min(0.0);
     let mut scale = 1.0 - (1.0 - w.ads_bob_factor) * ads;
     if w.overlay_reticle != 0 {
@@ -1164,48 +1141,5 @@ mod tests {
             let aimed = vm.update(&ps, 0.01)[1].bones[0].trans;
             assert!(aimed[1].abs() < 0.5, "{weapon}: aimed gun at {aimed:?}");
         }
-    }
-
-    /// The hands' `tag_camera` sits at the eye at rest (so a weapon in hand does not move the view), and a reload
-    /// moves it.
-    #[test]
-    fn the_hands_camera_is_still_at_rest_and_moves_in_a_reload() {
-        let Some(content) = content() else { return };
-        let (mut rested, mut moved) = (0, 0);
-        for name in class_loadouts(&content) {
-            let Some(mut vm) = build(&content, &name) else {
-                continue;
-            };
-            let mut ps = PlayerState {
-                view_height_current: 60.0,
-                viewangles: [10.0, 30.0, 0.0],
-                ..PlayerState::default()
-            };
-            vm.update(&ps, 0.01);
-            let Some(rest) = vm.tags().and_then(|t| t.camera) else {
-                continue;
-            };
-            assert!(
-                rest.offset.iter().all(|o| o.abs() < 0.01)
-                    && (rest.angles[0] - 10.0).abs() < 0.01
-                    && (rest.angles[1] - 30.0).abs() < 0.01
-                    && rest.angles[2].abs() < 0.01,
-                "{name}: the camera is off the eye at rest: {rest:?}"
-            );
-            rested += 1;
-            ps.weapon_state = ws::RELOADING;
-            let mut swing = 0.0f32;
-            for left in (0..2000).step_by(50) {
-                ps.weapon_time = left;
-                vm.update(&ps, 0.01);
-                if let Some(c) = vm.tags().and_then(|t| t.camera) {
-                    swing = swing
-                        .max(c.angles[0].abs().max(c.angles[2].abs()) - 10.0)
-                        .max(c.offset.iter().fold(0.0, |m, o| m.max(o.abs())));
-                }
-            }
-            moved += usize::from(swing > 0.05);
-        }
-        assert!(rested > 0 && moved > 0, "{rested} rested, {moved} moved");
     }
 }
