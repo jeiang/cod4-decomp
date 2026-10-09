@@ -1271,8 +1271,10 @@ impl Viewer {
                     }
                     r.post.shell_shock = nf.look.shell_shock;
                     r.post.dof = Some(nf.dof);
-                    // The server's fog replaces the one the map's art script was read for.
-                    r.art.fog = nf.fog;
+                    // The server's fog replaces the one the map's art script was read for, once it has set any.
+                    if nf.fog_from_server {
+                        r.art.fog = nf.fog;
+                    }
                     r.post.save_screen |= nf.look.save_screen;
                 }
             }

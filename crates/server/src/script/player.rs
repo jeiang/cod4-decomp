@@ -777,6 +777,11 @@ mod tests {
             dof_ranges([0.0, 128.0, 512.0, 4000.0, 6.0, 1.8]),
             Ok([0.0, 128.0, 512.0, 4000.0, 6.0, 1.8])
         );
+        // What the stock scripts call at every spawn asks for nothing, which leaves the view to the sights' blur.
+        assert_eq!(
+            dof_ranges([0.0, 0.0, 512.0, 4000.0, 4.0, 0.0]),
+            Ok([0.0, 0.0, 0.0, 0.0, 4.0, 0.0])
+        );
         // No far blur: the far side is off. An empty near range: the near side is.
         assert_eq!(
             dof_ranges([10.0, 10.0, 512.0, 4000.0, 6.0, 0.0]),

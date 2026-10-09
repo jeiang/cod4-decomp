@@ -36,6 +36,8 @@ pub struct FogState {
     /// The server times the blend starts and ends at (equal: no blend).
     start: i32,
     finish: i32,
+    /// Whether the server has set any fog (even none) since the level began.
+    announced: bool,
 }
 
 impl FogState {
@@ -56,9 +58,11 @@ impl FogState {
     /// `CG_ParseFog`: reads the configstring `text` (`<start> <density> <r> <g> <b> <transition ms>`, or a lone
     /// number, the milliseconds to fade the fog out over); a changed one starts a blend at `time`.
     pub fn follow(&mut self, text: &str, time: i32) {
-        if text == self.text {
+        // A server whose scripts never called `setExpFog` leaves the string empty: nothing was announced.
+        if text == self.text || (!self.announced && text.is_empty()) {
             return;
         }
+        self.announced = true;
         self.text = text.to_owned();
         let mut it = text.split_whitespace().map(|t| t.parse::<f32>().ok());
         let first = it.next().flatten().unwrap_or(0.0);
@@ -80,6 +84,11 @@ impl FogState {
         self.from = if ms == 0 { target } else { from };
         self.to = target;
         (self.start, self.finish) = (time, time + ms);
+    }
+
+    /// Whether the server has said anything about the fog; until it has, the map's own stands.
+    pub fn announced(&self) -> bool {
+        self.announced
     }
 
     /// The fog to draw at server time `time`, if any.
@@ -125,6 +134,18 @@ mod tests {
         assert_eq!((mid.start, mid.color), (200.0, [0.5, 0.0, 0.5]));
         assert!((mid.halfway - std::f32::consts::LN_2 / 0.002).abs() < 1e-2);
         assert_eq!((at(3000).start, at(9000).color), (300.0, [0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn a_server_that_never_sets_fog_leaves_the_maps_own() {
+        let mut f = FogState::default();
+        f.follow("", 0);
+        f.follow("", 500);
+        assert!(!f.announced());
+        // Saying "no fog" is saying something.
+        f.follow("0", 600);
+        assert!(f.announced());
+        assert_eq!(f.at(600), None);
     }
 
     #[test]

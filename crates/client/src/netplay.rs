@@ -109,8 +109,10 @@ pub struct NetFrame {
     pub look: LookOut,
     /// The blur of the picture.
     pub dof: render::Dof,
-    /// The fog the server set, blended from the one before; `None` for none.
+    /// The fog the server set, blended from the one before; `None` for none. Only meant once `fog_from_server`:
+    /// until the scripts set any, the map's own art fog stands.
     pub fog: Option<render::art::Fog>,
+    pub fog_from_server: bool,
 }
 
 struct Remote {
@@ -976,6 +978,7 @@ impl NetPlay {
                 look,
                 dof,
                 fog: self.fog.at(st),
+                fog_from_server: self.fog.announced(),
             });
         }
         self.follow_movement_dvars();
@@ -1171,6 +1174,7 @@ impl NetPlay {
             look,
             dof,
             fog: self.fog.at(st),
+            fog_from_server: self.fog.announced(),
         })
     }
 
