@@ -251,12 +251,15 @@ pub fn run_usercmd(
     pm.weapons = Some(WeaponCtx::new(table, inv));
     pm.cmd = cmd;
     pm.oldcmd = old_cmd;
-    pm.tracemask = if pm.ps.pm_type < PmType::Dead {
-        crate::contents::MASK_PLAYERSOLID
-    } else {
-        crate::contents::MASK_DEADSOLID
+    pm.tracemask = match pm.ps.pm_type {
+        PmType::Spectator => crate::contents::MASK_SPECTATOR,
+        t if t < PmType::Dead => crate::contents::MASK_PLAYERSOLID,
+        _ => crate::contents::MASK_DEADSOLID,
     };
-    pm.ps.speed = g_speed;
+    // A spectator's speed is the server's to give (400, or 0 when free flight is forbidden).
+    if pm.ps.pm_type != PmType::Spectator {
+        pm.ps.speed = g_speed;
+    }
     pmove(&mut pm, world);
     let touched = pm.touched().to_vec();
     let (mins, maxs) = (pm.mins, pm.maxs);

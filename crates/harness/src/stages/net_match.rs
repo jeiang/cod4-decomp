@@ -230,6 +230,61 @@ fn client(
     r
 }
 
+/// What a person who never picks a team sees: a free-flying spectator, which the server moves with the movement code.
+#[derive(Default)]
+struct Flight {
+    connected: bool,
+    spectator: bool,
+    start: [f32; 3],
+    end: [f32; 3],
+}
+
+/// Joins once the players have bodies, answers no menu, and flies straight ahead.
+fn spectator(addr: SocketAddr, stop: &AtomicBool, ready: &AtomicUsize) -> Flight {
+    let mut f = Flight::default();
+    let deadline = Instant::now() + SPAWN_LIMIT;
+    while ready.load(Ordering::SeqCst) < CLIENTS && Instant::now() < deadline {
+        if stop.load(Ordering::Relaxed) {
+            return f;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let Ok(t) = UdpTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0))) else {
+        return f;
+    };
+    let mut c = NetClient::new(t, addr, "netspec", "", 5900);
+    let mut cmd_time = 0;
+    let mut flying = 0;
+    while flying < 90 && Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+        c.pump(Duration::from_millis(33));
+        if let Some(ui) = c.ui() {
+            ui.drain_events();
+        }
+        let Some(s) = c.latest() else { continue };
+        f.connected = true;
+        f.spectator = s.ps.pm_type == sim::pm::PmType::Spectator;
+        if !f.spectator {
+            continue;
+        }
+        if flying == 0 {
+            f.start = s.ps.origin;
+        }
+        f.end = s.ps.origin;
+        let Some(st) = c.snaps.server_time(c.now_ms()) else {
+            continue;
+        };
+        cmd_time = (cmd_time + 1).max(st);
+        c.send_cmd(UserCmd {
+            server_time: cmd_time,
+            forwardmove: 127,
+            ..UserCmd::default()
+        });
+        flying += 1;
+    }
+    c.disconnect();
+    f
+}
+
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(install) = ctx.install.as_deref() else {
         return Ok(StageReport::new(NAME, Status::Skipped).with_reason("install not found"));
@@ -289,9 +344,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             std::thread::spawn(move || client(addr, i, &rules, &stop, &ready))
         })
         .collect();
+    let flier = {
+        let (stop, ready) = (stop.clone(), ready.clone());
+        std::thread::spawn(move || spectator(addr, &stop, &ready))
+    };
     // The server runs in this thread until every client thread has finished.
     let mut quaked = false;
-    while !handles.iter().all(|h| h.is_finished()) {
+    while !handles.iter().all(|h| h.is_finished()) || !flier.is_finished() {
         server.run_for(Duration::from_millis(100));
         // Once everyone has a body, an earthquake from the first client's position: every client is inside its radius.
         if !quaked && ready.load(Ordering::SeqCst) == CLIENTS {
@@ -311,6 +370,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         .into_iter()
         .map(|h| h.join().unwrap_or_default())
         .collect();
+    let flight = flier.join().unwrap_or_default();
     stop.store(true, Ordering::Relaxed);
     let stats = server.net_stats().unwrap_or_default();
 
@@ -340,6 +400,21 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "team scores follow the wrong team: kills axis {axis_kills} allies {allies_kills}, scores axis {axis} allies {allies}"
         ));
     }
+    // A spectator who joined and chose no team flies: the server runs its movement, so its origin leaves the spot.
+    let flown = ((flight.end[0] - flight.start[0]).powi(2)
+        + (flight.end[1] - flight.start[1]).powi(2)
+        + (flight.end[2] - flight.start[2]).powi(2))
+    .sqrt();
+    if !flight.connected || !flight.spectator {
+        failures.push("the team-less client never became a spectator".to_owned());
+    } else if flown < 100.0 {
+        failures.push(format!(
+            "the free spectator flew {flown:.0} units in 90 frames"
+        ));
+    }
+    report
+        .metrics
+        .insert("spectator.flown_units".into(), flown as f64);
     for (i, r) in results.iter().enumerate() {
         if let Some(why) = &r.refused {
             failures.push(format!("client {i} refused: {why}"));
@@ -482,12 +557,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let samples = samples.borrow();
     let loaded: Vec<f64> = samples
         .iter()
-        .filter(|(_, p)| *p == all)
+        .filter(|(_, p)| *p >= all)
         .map(|(t, _)| t.net_ms)
         .collect();
     let totals: Vec<f64> = samples
         .iter()
-        .filter(|(_, p)| *p == all)
+        .filter(|(_, p)| *p >= all)
         .map(|(t, _)| t.total_ms)
         .collect();
     if let (Some(n), Some(t)) = (

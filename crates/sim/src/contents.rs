@@ -42,3 +42,5 @@ pub const MASK_SHOT: i32 = SOLID | GLASS | WATER | SKY | CLIPSHOT | ACTOR | VEHI
 pub const MASK_CHARACTER: i32 = PLAYER | ACTOR | FAKE_ACTOR;
 pub const MASK_IGNORE_CHARACTERS: i32 = !MASK_CHARACTER;
 pub const MASK_DEADSOLID: i32 = MASK_PLAYERSOLID & !PLAYER;
+/// What a free-flying spectator collides with: the world, not players (`PM_SPECTATOR`'s 0x800811).
+pub const MASK_SPECTATOR: i32 = SOLID | GLASS | SKY | VEHICLE;

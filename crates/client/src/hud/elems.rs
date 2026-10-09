@@ -13,6 +13,7 @@ use crate::ui::Ui;
 use crate::ui::paint::{Painter, TextDraw};
 use crate::ui::place::{Place, Px, horz, vert};
 use net::ui::{HudElem, he, hf};
+use sim::pm::other;
 use std::collections::HashMap;
 
 /// Base text scale and menu font number of the script font numbers (`GetHudElemInfo`).
@@ -206,17 +207,7 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
         .filter(|_| !st.scoreboard_shown(ui))
     {
         let header = localize(&ui.assets, "CGAME_FOLLOWING");
-        let prompts = SPECTATE_PROMPTS.map(|(key, cmd)| {
-            let bound = live.keys.get(cmd).map_or("", String::as_str);
-            localize(&ui.assets, key).replace("&&1", bound)
-        });
-        let lines = [(header.as_str(), 20.0), (name, 36.0)].into_iter().chain(
-            prompts
-                .iter()
-                .zip([52.0, 64.0, 76.0])
-                .map(|(t, y)| (t.as_str(), y)),
-        );
-        for (text, y) in lines {
+        for (text, y) in [(header.as_str(), 20.0), (name, 36.0)] {
             let w = ui.text_width(text, 6, 1.0 / 3.0);
             ui.draw_text(
                 p,
@@ -233,6 +224,9 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
                 },
             );
         }
+    }
+    if live.descriptive_text && ui.open_menus().is_empty() && !st.scoreboard_shown(ui) {
+        draw_spectator_prompts(ui, p, live);
     }
     if st.scoreboard_shown(ui) {
         super::draw_scoreboard(ui, p, st);
@@ -273,12 +267,66 @@ fn draw_interrupted(ui: &Ui, p: &mut Painter, live: &LiveUi) {
     }
 }
 
-/// What a spectator is told about following players: the string and the command whose key it names.
-pub const SPECTATE_PROMPTS: [(&str, &str); 3] = [
-    ("PLATFORM_FOLLOWNEXTPLAYER", "+attack"),
-    ("PLATFORM_FOLLOWPREVIOUSPLAYER", "+speed_throw"),
-    ("PLATFORM_FOLLOWSTOP", "+activate"),
-];
+/// Commands that step back, in the order the first bound one is named (`CG_DrawSpectatorMessage`).
+const FOLLOW_PREV: [&str; 4] = ["+toggleads_throw", "+speed_throw", "+speed", "toggleads"];
+/// Commands that leave the player being followed.
+const FOLLOW_STOP: [&str; 2] = ["+melee", "+melee_breath"];
+
+/// The help lines a spectator's state asks for: the string and the commands whose first bound key it names.
+pub fn spectator_lines(flags: u8) -> Vec<(&'static str, &'static [&'static str])> {
+    let mut lines: Vec<(&str, &[&str])> = Vec::new();
+    if flags & other::CAN_CYCLE != 0 {
+        lines.push(("PLATFORM_FOLLOWNEXTPLAYER", &["+attack"]));
+        lines.push(("PLATFORM_FOLLOWPREVIOUSPLAYER", &FOLLOW_PREV));
+    }
+    if flags & other::CAN_STOP != 0 {
+        lines.push(("PLATFORM_FOLLOWSTOP", &FOLLOW_STOP));
+    }
+    lines
+}
+
+/// Every command a spectator's help lines may name, for resolving their keys.
+pub fn spectator_commands(flags: u8) -> impl Iterator<Item = &'static str> {
+    spectator_lines(flags)
+        .into_iter()
+        .flat_map(|(_, cmds)| cmds.iter().copied())
+}
+
+/// The key to name for one help line: the first command that has one, else the first command with "unbound".
+fn bound_key<'a>(live: &'a LiveUi, cmds: &[&str]) -> Option<&'a str> {
+    cmds.iter()
+        .find_map(|c| live.keys.get(*c))
+        .map(String::as_str)
+}
+
+/// `CG_DrawSpectatorMessage`: small white lines at the lower middle of the screen, from the spectator's state.
+fn draw_spectator_prompts(ui: &Ui, p: &mut Painter, live: &LiveUi) {
+    let lines = spectator_lines(live.spectator_flags);
+    let (font, scale) = (0, 0.208_333_33);
+    let height = ui.text_height(font, scale);
+    let mut y = 436.0 - 2.0 * height;
+    for (key, cmds) in lines {
+        let bound = bound_key(live, cmds)
+            .map_or_else(|| localize(&ui.assets, "KEY_UNBOUND"), str::to_owned);
+        let text = localize(&ui.assets, key).replace("&&1", &bound);
+        ui.draw_text(
+            p,
+            &TextDraw {
+                text: &text,
+                font_enum: font,
+                scale,
+                style: 3,
+                color: [1.0; 4],
+                // 240 of 640 from the left, as the centre-relative offset the centred placement takes.
+                x: 240.0 - 320.0,
+                y,
+                horz: horz::CENTER_SAFEAREA,
+                vert: vert::TOP,
+            },
+        );
+        y += height;
+    }
+}
 
 fn draw_elems(ui: &Ui, p: &mut Painter, live: &LiveUi, foreground: bool) {
     let menu_open = !ui.open_menus().is_empty();
@@ -759,5 +807,31 @@ mod tests {
             None,
             "no pulse fx: all letters, glow as is"
         );
+    }
+}
+
+#[cfg(test)]
+mod spectator_tests {
+    use super::spectator_lines;
+    use sim::pm::other;
+
+    #[test]
+    fn a_free_roaming_spectator_is_told_how_to_follow_and_a_follower_how_to_stop() {
+        let keys = |flags| {
+            spectator_lines(flags)
+                .into_iter()
+                .map(|(msg, _)| msg)
+                .collect::<Vec<_>>()
+        };
+        assert!(keys(0).is_empty(), "a player gets no help");
+        assert_eq!(
+            keys(other::CAN_CYCLE),
+            ["PLATFORM_FOLLOWNEXTPLAYER", "PLATFORM_FOLLOWPREVIOUSPLAYER"]
+        );
+        assert_eq!(
+            keys(other::FOLLOWING | other::CAN_CYCLE | other::CAN_STOP).last(),
+            Some(&"PLATFORM_FOLLOWSTOP")
+        );
+        assert_eq!(keys(other::FOLLOWING).len(), 0, "a killcam is not steered");
     }
 }

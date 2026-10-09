@@ -1097,6 +1097,11 @@ impl Viewer {
                     .cvars
                     .get("cg_hudDamageIconInScope")
                     .is_some_and(|v| v.trim().parse::<f32>().is_ok_and(|v| v != 0.0));
+                sh.st.live.descriptive_text = st
+                    .input
+                    .cvars
+                    .get("cg_descriptiveText")
+                    .is_none_or(|v| v.trim().parse::<f32>().is_ok_and(|v| v != 0.0));
                 let aspect = st.config.height as f32 / st.config.width as f32;
                 if let Some(r) = sh.st.live.reticle.as_mut() {
                     r.tan_half_fov_y = (st.fov_x * 0.5).tan() * aspect;

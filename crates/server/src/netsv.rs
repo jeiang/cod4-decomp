@@ -660,6 +660,8 @@ impl NetSv {
         } else {
             return Some(snap);
         }
+        // The watcher's own prompts ride on the state of the player watched.
+        snap.ps.other_flags = c.ps.other_flags;
         snap.follow = Some(follow);
         Some(snap)
     }
