@@ -7,7 +7,7 @@
 use crate::archive::{ArchPlayer, Archive, Frame};
 use crate::ban::BanList;
 use crate::client::{Conn, Session, Team};
-use crate::game::{EntKind, Game, SoundTo};
+use crate::game::{EntKind, Game, SoundTo, WorldFx};
 use crate::ui::Dest;
 use net::connect::{ConnectRequest, Gate, serve};
 use net::entity::{EntityState, etype};
@@ -658,6 +658,35 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                     Some(Team::Allies) => eflags::TEAM_ALLIES,
                     _ => 0,
                 };
+                s
+            }
+            EntKind::Plain if e.world_fx.is_some() => {
+                let mut s = EntityState::new(n);
+                s.origin = e.origin;
+                s.angles = e.angles;
+                match e.world_fx {
+                    Some(WorldFx::Once {
+                        effect,
+                        triggers,
+                        start_ms,
+                    }) => {
+                        s.etype = etype::FX;
+                        s.model = effect;
+                        s.event_seq = triggers;
+                        s.eflags = start_ms as u32 & 0xff_ffff;
+                    }
+                    Some(WorldFx::Looped {
+                        effect,
+                        period_ms,
+                        cull,
+                    }) => {
+                        s.etype = etype::LOOP_FX;
+                        s.model = effect;
+                        s.pm_flags = period_ms;
+                        s.velocity[0] = cull;
+                    }
+                    None => continue,
+                }
                 s
             }
             _ => {

@@ -9,7 +9,8 @@ use super::Impl::{self, Later, Real};
 use super::args::{Args, display};
 use super::{FuncFn, hud, uicmd};
 use crate::cvar;
-use crate::game::{Ent, EntKind, Game};
+use crate::game::{Ent, EntKind, Game, WorldFx};
+use crate::tempev::Physics;
 use crate::ui::Table;
 use sim::Vec3;
 use sim::cm::{Collide, ENTITYNUM_NONE, ENTITYNUM_WORLD};
@@ -293,14 +294,20 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("visionsetnight", r(|g, _, a| vision_set(g, a, true))),
     ("playfx", r(play_fx)),
     ("playfxontag", r(play_fx_on_tag)),
-    ("playloopedfx", Later(M8)),
-    ("spawnfx", Later(M8)),
-    ("triggerfx", Later(M8)),
-    ("earthquake", Later(M8)),
-    ("physicsexplosionsphere", r(physics_explosion_sphere)),
-    ("physicsexplosioncylinder", Later(M8)),
-    ("physicsjolt", Later(M8)),
-    ("physicsjitter", Later(M8)),
+    ("playloopedfx", r(play_looped_fx)),
+    ("spawnfx", r(spawn_fx)),
+    ("triggerfx", r(trigger_fx)),
+    ("earthquake", r(earthquake)),
+    (
+        "physicsexplosionsphere",
+        r(|g, _, a| physics_explosion(g, a, false)),
+    ),
+    (
+        "physicsexplosioncylinder",
+        r(|g, _, a| physics_explosion(g, a, true)),
+    ),
+    ("physicsjolt", r(physics_jolt)),
+    ("physicsjitter", r(physics_jitter)),
     ("grenadeexplosioneffect", Later(M8)),
     ("ambientplay", Real(super::sound::ambient_play)),
     ("ambientstop", Real(super::sound::ambient_stop)),
@@ -903,17 +910,142 @@ fn precache_item(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
-/// `playfx(fx, origin, forward, up)`: an effect where the script says.
+/// `playfx(fx, origin, [forward, [up]])`: an effect where the script says, turned to face `forward` and rolled so its
+/// up is `up`.
 fn play_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if !(2..=4).contains(&a.len()) {
+        return Err("Incorrect number of parameters".into());
+    }
     let index = a.int(0)?;
     let origin = a.vector(1)?;
-    let forward = if a.len() > 2 {
-        a.vector(2)?
-    } else {
-        [0.0, 0.0, 1.0]
-    };
-    emit_fx(g, index, origin, forward, 1023);
+    let angles = fx_angles(g, &a, 2, "playFx", index)?;
+    let now = g.level.time;
+    g.tempev.add(now, crate::tempev::ev::PLAY_FX, |s| {
+        s.origin = origin;
+        s.angles = angles;
+        s.model = index.clamp(0, 1023) as u16;
+        s.client = 1023;
+    });
     Ok(Value::Undefined)
+}
+
+/// `Scr_FxParamError`: a parameter error that names the effect.
+fn fx_param_error(g: &Game, what: &str, index: i32) -> String {
+    let name = usize::try_from(index)
+        .ok()
+        .filter(|i| *i > 0)
+        .and_then(|i| g.fx.name(i))
+        .unwrap_or("not successfully loaded");
+    format!("{what} (effect = {name})")
+}
+
+/// The angles of the optional `forward` (at parameter `at`) and `up` (at `at + 1`) the effect builtins take
+/// (`Scr_SetFxAngles`): straight up with neither, facing `forward` with one, and rolled to put `up` above with both.
+fn fx_angles(g: &Game, a: &Args, at: usize, who: &str, index: i32) -> Result<V3, String> {
+    use sim::pm::math::{cross, mad, normalize};
+    let unit = |i: usize, what: &str| -> Result<V3, String> {
+        let mut v = a.vector(i)?;
+        if normalize(&mut v) == 0.0 {
+            return Err(fx_param_error(
+                g,
+                &format!("{who} called with (0 0 0) {what} direction"),
+                index,
+            ));
+        }
+        Ok(v)
+    };
+    let upper = at + 1;
+    // `playloopedfx` takes the up vector before the forward vector is checked; the order of the errors is the original's.
+    let up = (a.len() > upper).then(|| unit(upper, "up")).transpose()?;
+    let forward = (a.len() > at).then(|| unit(at, "forward")).transpose()?;
+    Ok(match (forward, up) {
+        (None, _) => [270.0, 0.0, 0.0],
+        (Some(f), None) => vec_to_angles(f),
+        (Some(f), Some(u)) => {
+            let mut u = mad(&u, -sim::pm::math::dot(&f, &u), &f);
+            if normalize(&mut u) == 0.0 {
+                return Err(
+                    "forward and up vectors are the same direction or exact opposite directions"
+                        .into(),
+                );
+            }
+            crate::tags::axis_to_angles(&[f, cross(&u, &f), u])
+        }
+    })
+}
+
+/// `spawnfx(fx, origin, [forward, [up]])`: an effect entity that plays when `triggerfx` is called on it.
+fn spawn_fx(g: &mut Game, vm: &mut Vm, a: Args) -> R {
+    if !(2..=4).contains(&a.len()) {
+        return Err("Incorrect number of parameters".into());
+    }
+    let index = a.int(0)?;
+    let origin = a.vector(1)?;
+    let angles = fx_angles(g, &a, 2, "spawnFx", index)?;
+    let mut e = Ent::new(EntKind::Plain, "fx");
+    e.origin = origin;
+    e.angles = angles;
+    e.world_fx = Some(WorldFx::Once {
+        effect: index.clamp(0, 1023) as u16,
+        triggers: 0,
+        start_ms: 0,
+    });
+    let n = g.spawn(e)?;
+    Ok(g.entity_value(vm, n))
+}
+
+/// `playloopedfx(fx, repeat, origin, [cull, [forward, [up]]])`: an effect entity that replays every `repeat` seconds
+/// until it is deleted, for clients within `cull` units of it.
+fn play_looped_fx(g: &mut Game, vm: &mut Vm, a: Args) -> R {
+    if !(3..=6).contains(&a.len()) {
+        return Err("Incorrect number of parameters".into());
+    }
+    let index = a.int(0)?;
+    let cull = if a.len() > 3 { a.float(3)? } else { 0.0 };
+    let origin = a.vector(2)?;
+    let angles = fx_angles(g, &a, 4, "playLoopedFx", index)?;
+    let period = sim::pm::math::snap_to_int(a.float(1)? * 1000.0);
+    if period <= 0 {
+        return Err(fx_param_error(
+            g,
+            "playLoopedFx called with repeat < 0.001 seconds",
+            index,
+        ));
+    }
+    let mut e = Ent::new(EntKind::Plain, "fx");
+    e.origin = origin;
+    e.angles = angles;
+    e.world_fx = Some(WorldFx::Looped {
+        effect: index.clamp(0, 1023) as u16,
+        period_ms: period.min((1 << 21) - 1) as u32,
+        cull,
+    });
+    let n = g.spawn(e)?;
+    Ok(g.entity_value(vm, n))
+}
+
+/// `triggerfx(fx, [delay])`: plays an entity `spawnfx` made, after `delay` seconds.
+fn trigger_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if a.is_empty() || a.len() > 2 {
+        return Err("Incorrect number of parameters".into());
+    }
+    let n = a.entity(0)?.num;
+    let delay = if a.len() == 2 {
+        sim::pm::math::snap_to_int(a.float(1)? * 1000.0).clamp(0, 1 << 22)
+    } else {
+        0
+    };
+    let now = g.level.time;
+    match g.ent_mut(n).map(|e| &mut e.world_fx) {
+        Some(Some(WorldFx::Once {
+            triggers, start_ms, ..
+        })) => {
+            *triggers = triggers.wrapping_add(1).max(1);
+            *start_ms = now + delay;
+            Ok(Value::Undefined)
+        }
+        _ => Err("entity wasn't created with 'newFx'".into()),
+    }
 }
 
 /// `playfxontag(fx, entity, tag)`: an effect at a tag of an entity, played where the tag is now.
@@ -956,18 +1088,98 @@ fn emit_fx(g: &mut Game, index: i32, origin: V3, forward: V3, ent: u16) {
     });
 }
 
-/// `physicsexplosionsphere(origin, radius, inner, strength)`: tells the clients' bodies to be thrown.
-fn physics_explosion_sphere(g: &mut Game, _: &mut Vm, a: Args) -> R {
+/// The outer and inner radius of a physics event (`origin, outer, inner, ...`).
+fn physics_radii(a: &Args) -> Result<(f32, f32), String> {
+    let outer = a.float(1)?.round();
+    let inner = a.float(2)?;
+    if inner < 0.0 {
+        return Err("Radius is negative".into());
+    }
+    if inner > outer {
+        return Err("Inner radius is outside the outer radius".into());
+    }
+    Ok((outer, inner))
+}
+
+/// `physicsexplosionsphere(origin, outer, inner, magnitude)` and `physicsexplosioncylinder`: loose bodies are thrown
+/// from the origin.
+fn physics_explosion(g: &mut Game, a: Args, cylinder: bool) -> R {
+    if a.len() != 4 {
+        return Err("Incorrect number of parameters".into());
+    }
     let origin = a.vector(0)?;
-    let radius = a.float(1)?;
-    let strength = a.float(3)?;
-    let now = g.level.time;
-    g.tempev
-        .add(now, crate::tempev::ev::PHYSICS_EXPLOSION, |s| {
-            s.origin = origin;
-            s.velocity = [radius, 0.0, 0.0];
-            s.weapon = (strength * 10.0).clamp(0.0, 511.0) as u16;
-        });
+    let (outer, inner) = physics_radii(&a)?;
+    let magnitude = a.float(3)?;
+    g.physics_event(
+        origin,
+        Physics::Explosion {
+            cylinder,
+            outer,
+            inner,
+            magnitude,
+        },
+    );
+    Ok(Value::Undefined)
+}
+
+/// `physicsjolt(origin, outer, inner, impulse)`: loose bodies are thrown along `impulse`.
+fn physics_jolt(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if a.len() != 4 {
+        return Err("Incorrect number of parameters".into());
+    }
+    let origin = a.vector(0)?;
+    let (outer, inner) = physics_radii(&a)?;
+    let impulse = a.vector(3)?;
+    g.physics_event(
+        origin,
+        Physics::Jolt {
+            outer,
+            inner,
+            impulse,
+        },
+    );
+    Ok(Value::Undefined)
+}
+
+/// `physicsjitter(origin, outer, inner, min, max)`: loose bodies hop by a distance between `min` and `max`.
+fn physics_jitter(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if a.len() != 5 {
+        return Err("Incorrect number of parameters".into());
+    }
+    let origin = a.vector(0)?;
+    let (outer, inner) = physics_radii(&a)?;
+    let (min, max) = (a.float(3)?, a.float(4)?);
+    if max < min {
+        return Err("Maximum jitter is less than minimum jitter".into());
+    }
+    g.physics_event(
+        origin,
+        Physics::Jitter {
+            outer,
+            inner,
+            min,
+            max,
+        },
+    );
+    Ok(Value::Undefined)
+}
+
+/// `earthquake(scale, duration, origin, radius)`: shakes the camera of every client near the origin.
+fn earthquake(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let scale = a.float(0)?;
+    let duration = sim::pm::math::snap_to_int(a.float(1)? * 1000.0);
+    let origin = a.vector(2)?;
+    let radius = a.float(3)?;
+    if scale <= 0.0 {
+        return Err("Scale must be greater than 0".into());
+    }
+    if duration <= 0 {
+        return Err("duration must be greater than 0".into());
+    }
+    if radius <= 0.0 {
+        return Err("Radius must be greater than 0".into());
+    }
+    g.earthquake(origin, scale, duration, radius);
     Ok(Value::Undefined)
 }
 
@@ -1210,5 +1422,256 @@ mod team_score_tests {
             get_team_score(&mut g, &mut vm, Args::new("getteamscore", &v)),
             Ok(Value::Int(5))
         ));
+    }
+}
+
+#[cfg(test)]
+mod world_fx_tests {
+    use super::*;
+    use crate::netsv::world_entities;
+    use crate::tempev::{Earthquake, ev};
+    use gsc::{Builtins, Options, compile};
+    use net::entity::etype;
+
+    fn setup() -> (Game, Vm) {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.fx.index("fx/test/smoke");
+        (g, Vm::new(prog).unwrap())
+    }
+
+    fn v(x: f32, y: f32, z: f32) -> Value {
+        Value::Vector([x, y, z])
+    }
+
+    fn num(r: R) -> u16 {
+        match r.unwrap() {
+            Value::Object(o) => o.entity().expect("an entity").num,
+            o => panic!("{o:?}"),
+        }
+    }
+
+    fn fx_states(g: &Game) -> Vec<net::entity::EntityState> {
+        world_entities(g)
+            .into_iter()
+            .filter(|e| matches!(e.etype, etype::FX | etype::LOOP_FX))
+            .collect()
+    }
+
+    #[test]
+    fn a_spawned_effect_plays_once_per_trigger_until_deleted() {
+        let (mut g, mut vm) = setup();
+        let args = [Value::Int(1), v(1.0, 2.0, 3.0)];
+        let n = num(spawn_fx(&mut g, &mut vm, Args::new("spawnfx", &args)));
+        let triggers = |g: &Game| fx_states(g).iter().map(|e| e.event_seq).collect::<Vec<_>>();
+        assert_eq!(triggers(&g), [0]);
+        let at = fx_states(&g)[0].clone();
+        assert_eq!(
+            (at.etype, at.model, at.origin),
+            (etype::FX, 1, [1.0, 2.0, 3.0])
+        );
+        // Straight up unless told otherwise.
+        assert_eq!(at.angles[0].rem_euclid(360.0), 270.0);
+
+        let ent = g.entity_value(&mut vm, n);
+        for (i, delay) in [None, Some(1.5)].into_iter().enumerate() {
+            let mut a = vec![ent.clone()];
+            a.extend(delay.map(Value::Float));
+            trigger_fx(&mut g, &mut vm, Args::new("triggerfx", &a)).unwrap();
+            assert_eq!(triggers(&g), [i as u8 + 1]);
+        }
+        assert_eq!(fx_states(&g)[0].eflags, 1500);
+
+        g.free_entity(&mut vm, n);
+        assert!(fx_states(&g).is_empty());
+    }
+
+    #[test]
+    fn only_an_effect_entity_can_be_triggered() {
+        let (mut g, mut vm) = setup();
+        let args = [Value::Int(1), Value::Float(0.5), v(0.0, 0.0, 0.0)];
+        let looped = num(play_looped_fx(
+            &mut g,
+            &mut vm,
+            Args::new("playloopedfx", &args),
+        ));
+        let ent = g.entity_value(&mut vm, looped);
+        assert!(trigger_fx(&mut g, &mut vm, Args::new("triggerfx", &[ent])).is_err());
+    }
+
+    #[test]
+    fn a_looped_effect_carries_its_period_and_cull_distance() {
+        let (mut g, mut vm) = setup();
+        let args = [
+            Value::Int(1),
+            Value::Float(0.25),
+            v(0.0, 0.0, 0.0),
+            Value::Float(900.0),
+        ];
+        play_looped_fx(&mut g, &mut vm, Args::new("playloopedfx", &args)).unwrap();
+        let e = &fx_states(&g)[0];
+        assert_eq!(
+            (e.etype, e.pm_flags, e.velocity[0]),
+            (etype::LOOP_FX, 250, 900.0)
+        );
+
+        let bad = [Value::Int(1), Value::Float(0.0), v(0.0, 0.0, 0.0)];
+        let err = play_looped_fx(&mut g, &mut vm, Args::new("playloopedfx", &bad)).unwrap_err();
+        assert!(err.contains("fx/test/smoke"), "{err}");
+        assert_eq!(fx_states(&g).len(), 1);
+    }
+
+    #[test]
+    fn the_up_vector_rolls_an_effect_and_bad_directions_are_refused() {
+        let (mut g, mut vm) = setup();
+        let play = |g: &mut Game, vm: &mut Vm, extra: &[Value]| {
+            let mut a = vec![Value::Int(1), v(0.0, 0.0, 0.0)];
+            a.extend_from_slice(extra);
+            play_fx(g, vm, Args::new("playfx", &a))
+        };
+        let last = |g: &Game| {
+            let e = g.tempev.live(g.level.time).last().unwrap().clone();
+            assert_eq!(e.event, ev::PLAY_FX);
+            e.angles
+        };
+        // Facing +X with +Y above puts the effect's up on +Y.
+        play(&mut g, &mut vm, &[v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0)]).unwrap();
+        let (f, _, up) = sim::pm::math::angle_vectors(&last(&g));
+        assert!(
+            (f[0] - 1.0).abs() < 1e-2 && (up[1] - 1.0).abs() < 1e-2,
+            "{f:?} {up:?}"
+        );
+        // The same forward without an up has no roll.
+        play(&mut g, &mut vm, &[v(1.0, 0.0, 0.0)]).unwrap();
+        let (_, _, up) = sim::pm::math::angle_vectors(&last(&g));
+        assert!((up[2] - 1.0).abs() < 1e-2, "{up:?}");
+
+        assert!(play(&mut g, &mut vm, &[v(0.0, 0.0, 0.0)]).is_err());
+        assert!(play(&mut g, &mut vm, &[v(1.0, 0.0, 0.0), v(0.0, 0.0, 0.0)]).is_err());
+        assert!(play(&mut g, &mut vm, &[v(1.0, 0.0, 0.0), v(-2.0, 0.0, 0.0)]).is_err());
+        assert!(
+            play(
+                &mut g,
+                &mut vm,
+                &[v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), v(0.0, 0.0, 1.0)]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn earthquake_and_physics_world_events_reach_the_clients() {
+        let (mut g, mut vm) = setup();
+        let a = [
+            Value::Float(0.4),
+            Value::Int(2),
+            v(10.0, 20.0, 30.0),
+            Value::Int(1000),
+        ];
+        earthquake(&mut g, &mut vm, Args::new("earthquake", &a)).unwrap();
+        let s = g.tempev.live(g.level.time).last().unwrap().clone();
+        let q = Earthquake::decode(&s).unwrap();
+        assert_eq!(
+            (q.duration_ms, q.radius, s.origin),
+            (2000, 1000.0, [10.0, 20.0, 30.0])
+        );
+        assert!((q.scale - 0.4).abs() < 0.02);
+        for bad in [
+            [
+                Value::Int(0),
+                Value::Int(2),
+                v(0.0, 0.0, 0.0),
+                Value::Int(1),
+            ],
+            [
+                Value::Int(1),
+                Value::Int(0),
+                v(0.0, 0.0, 0.0),
+                Value::Int(1),
+            ],
+            [
+                Value::Int(1),
+                Value::Int(2),
+                v(0.0, 0.0, 0.0),
+                Value::Int(0),
+            ],
+        ] {
+            assert!(earthquake(&mut g, &mut vm, Args::new("earthquake", &bad)).is_err());
+        }
+
+        let cyl = [
+            v(0.0, 0.0, 0.0),
+            Value::Int(300),
+            Value::Int(100),
+            Value::Int(2),
+        ];
+        physics_explosion(&mut g, Args::new("physicsexplosioncylinder", &cyl), true).unwrap();
+        assert_eq!(
+            g.tempev.live(g.level.time).last().unwrap().event,
+            ev::PHYSICS_EXPLOSION_CYLINDER
+        );
+        let inside_out = [
+            v(0.0, 0.0, 0.0),
+            Value::Int(100),
+            Value::Int(300),
+            Value::Int(2),
+        ];
+        assert!(
+            physics_explosion(
+                &mut g,
+                Args::new("physicsexplosionsphere", &inside_out),
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn entities_never_reach_the_event_slots_even_when_the_table_is_full() {
+        let (mut g, mut vm) = setup();
+        let args = [Value::Int(1), Value::Float(1.0), v(0.0, 0.0, 0.0)];
+        let mut made = 0;
+        while play_looped_fx(&mut g, &mut vm, Args::new("playloopedfx", &args)).is_ok() {
+            made += 1;
+            assert!(made < 2000);
+        }
+        assert!(made > 800);
+        // Events of every kind still fit beside them: strictly ascending numbers, none dropped.
+        for _ in 0..70 {
+            let a = [
+                Value::Float(0.4),
+                Value::Int(2),
+                v(0.0, 0.0, 0.0),
+                Value::Int(100),
+            ];
+            earthquake(&mut g, &mut vm, Args::new("earthquake", &a)).unwrap();
+        }
+        let all = world_entities(&g);
+        assert!(all.windows(2).all(|w| w[0].number < w[1].number));
+        assert_eq!(
+            all.iter().filter(|e| e.etype == etype::LOOP_FX).count(),
+            made
+        );
+        assert_eq!(all.iter().filter(|e| e.etype == etype::EVENT).count(), 62);
+        assert!(all.iter().all(|e| e.number < 1022));
+    }
+
+    #[test]
+    fn an_earthquake_longer_or_wider_than_the_wire_holds_is_clamped_not_wrapped() {
+        let (mut g, mut vm) = setup();
+        let a = [
+            Value::Float(0.4),
+            Value::Int(60),
+            v(0.0, 0.0, 0.0),
+            Value::Int(50000),
+        ];
+        earthquake(&mut g, &mut vm, Args::new("earthquake", &a)).unwrap();
+        let q = Earthquake::decode(g.tempev.live(g.level.time).last().unwrap()).unwrap();
+        assert_eq!((q.duration_ms, q.radius), (16383, 16383.0));
     }
 }

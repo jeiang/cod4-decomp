@@ -156,6 +156,10 @@ struct Counters {
     /// Ragdolls made for players seen dying.
     ragdolls: u64,
     fx_live_max: usize,
+    /// The most script looping effects playing at once, and the strongest camera shake and sway felt.
+    looped_fx_max: usize,
+    shake_max: f32,
+    sway_max: f32,
     /// How fast the eye moved between drawn frames (units per second) while the player walked; the spread of these
     /// is what a jerky view is made of.
     eye_speeds: Vec<f32>,
@@ -213,6 +217,8 @@ pub struct NetPlay {
     scores_asked: Option<Instant>,
     server_addr: String,
     effects: Effects,
+    /// Earthquakes shaking the view.
+    shakes: sim::shake::CameraShakes,
     props: Props,
     look: Look,
     /// What the shell shock holds the view to (`CL_CapTurnRate`, the mouse scale): pitch and yaw degrees per second.
@@ -295,6 +301,7 @@ impl NetPlay {
             max_turn: [0.0; 2],
             shock_sensitivity: 1.0,
             effects: Effects::new(&lib.content, world),
+            shakes: Default::default(),
             lib,
             events: Events::default(),
             live_time: 0,
@@ -416,6 +423,7 @@ impl NetPlay {
         self.vm = None;
         self.events = Events::default();
         self.own_events = Seen::default();
+        self.shakes.clear();
         self.last_eye = None;
         self.c.spawned = false;
         self.c.start = None;
@@ -570,9 +578,9 @@ impl NetPlay {
             models.extend(drawn.models);
             return Some(NetFrame {
                 origin: eye,
-                yaw: yaw + look.kick[1].to_radians(),
-                pitch: pitch + look.kick[0].to_radians(),
-                roll: 0.0,
+                yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),
+                pitch: pitch + (look.kick[0] - drawn.sway[0]).to_radians(),
+                roll: drawn.sway[2].to_radians(),
                 models,
                 sight: self.sight.clone(),
                 meshes: drawn.meshes,
@@ -680,9 +688,9 @@ impl NetPlay {
         models.extend(drawn.models);
         Some(NetFrame {
             origin: eye,
-            yaw: yaw + look.kick[1].to_radians(),
-            pitch: pitch + look.kick[0].to_radians(),
-            roll,
+            yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),
+            pitch: pitch + (look.kick[0] - drawn.sway[0]).to_radians(),
+            roll: roll + drawn.sway[2].to_radians(),
             models,
             sight: self.sight.clone(),
             meshes: drawn.meshes,
@@ -706,6 +714,16 @@ impl NetPlay {
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         for e in events {
+            if let ClientEvent::Earthquake { origin, quake } = e {
+                self.shakes.start(
+                    st,
+                    eye.to_array(),
+                    quake.scale,
+                    quake.duration_ms,
+                    *origin,
+                    quake.radius,
+                );
+            }
             if let ClientEvent::PlayerDeath { client, push, .. } = e {
                 self.pushes.insert(*client, *push);
             }
@@ -756,12 +774,25 @@ impl NetPlay {
                 .and_then(|i| content.weapon(&i.name))
                 .cloned()
         });
+        if let Some(snap) = self.net.latest() {
+            self.effects.world_fx(&snap.entities, &self.events, eye, st);
+        }
         self.effects.update(st, self.boxes.world());
         for s in self.effects.take_sounds() {
             self.sound.play_world(&s.alias, s.origin.to_array());
         }
         self.props.update(dt, self.boxes.world());
-        let drawn = self.effects.draw(eye, yaw, pitch, roll);
+        let mut drawn = self.effects.draw(eye, yaw, pitch, roll);
+        drawn.sway = self.shakes.sway(st, eye.to_array());
+        self.c.shake_max = self
+            .c
+            .shake_max
+            .max(self.shakes.strength(st, eye.to_array()));
+        self.c.sway_max = self
+            .c
+            .sway_max
+            .max(drawn.sway.iter().fold(0.0, |m, a| m.max(a.abs())));
+        self.c.looped_fx_max = self.c.looped_fx_max.max(self.effects.looped_fx());
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
         self.c.fx_live_max = self.c.fx_live_max.max(self.effects.live_elems());
@@ -1339,6 +1370,9 @@ impl NetPlay {
         report["view_kick_max"] = json!(self.c.max_kick_up);
         report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
         report["view_kick_settled"] = json!(self.c.kick_settled);
+        report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
+        report["fx"]["camera_shake_max"] = self.c.shake_max.into();
+        report["fx"]["camera_sway_max"] = self.c.sway_max.into();
         report["players_drawn_max"] = self.c.max_players_drawn.into();
         report["player_faults"] = json!(self.c.player_faults);
         report

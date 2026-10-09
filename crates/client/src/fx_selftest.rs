@@ -192,6 +192,80 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         _ => bad.push(format!("weapon {ROCKET} has no projectile trail effect")),
     }
 
+    // A looped script effect (`playloopedfx`) keeps spawning for as long as its entity is in the snapshot, and stops once
+    // the entity is gone; a camera shake from an earthquake sways the near view and not the far one.
+    let effects = lib.content.effects();
+    let looped = effects
+        .iter()
+        .filter(|d| d.looping_count > 0)
+        .filter_map(|d| d.name.as_deref())
+        .filter(|n| n.contains("fire/") || n.contains("smoke"))
+        .min()
+        .map(str::to_owned);
+    match looped {
+        Some(name) => {
+            let mut fx = Effects::new(&lib.content, data.world.clone());
+            let mut e = net::entity::EntityState::new(100);
+            e.etype = net::entity::etype::LOOP_FX;
+            e.origin = [eye.x, eye.y, eye.z + 200.0];
+            e.angles = [270.0, 0.0, 0.0];
+            e.model = 1;
+            e.pm_flags = 1000;
+            let mut names = crate::events::Events::default();
+            names.take_commands(&mut vec![format!("fx 1 {name}")]);
+            let names = &names;
+            let (mut live_max, mut played) = (0, 0);
+            for step in 1..=60 {
+                fx.world_fx(std::slice::from_ref(&e), names, eye, step * 50);
+                fx.update(step * 50, world);
+                live_max = live_max.max(fx.live_elems());
+                played = played.max(fx.looped_fx());
+            }
+            // Out of range of its cull distance the effect is stopped; it starts again when back in range.
+            e.velocity[0] = 100.0;
+            fx.world_fx(std::slice::from_ref(&e), names, eye, 3000);
+            let culled = fx.looped_fx();
+            e.velocity[0] = 1000.0;
+            fx.world_fx(std::slice::from_ref(&e), names, eye, 3050);
+            let back = fx.looped_fx();
+            if culled != 0 || back != 1 {
+                bad.push(format!(
+                    "looped effect cull: {culled} playing out of range, {back} back in range"
+                ));
+            }
+            // A client joining long after a trigger still plays the effect, from the trigger's time.
+            let mut once = net::entity::EntityState::new(101);
+            once.etype = net::entity::etype::FX;
+            once.origin = e.origin;
+            once.model = 1;
+            once.event_seq = 1;
+            once.eflags = 1000;
+            fx.world_fx(&[once], names, eye, 60_000);
+            if fx.played.get("triggered_fx") != Some(&1) {
+                bad.push("a triggered effect seen long after its trigger was not played".into());
+            }
+            fx.world_fx(&[], names, eye, 3050);
+            report.insert("looped_fx_active_max".into(), played.into());
+            report.insert("looped_fx_live_elems_max".into(), live_max.into());
+            if played == 0 || live_max == 0 {
+                bad.push(format!("looped effect {name} never spawned anything"));
+            }
+            if fx.looped_fx() != 0 {
+                bad.push("a looped effect kept playing after its entity was gone".into());
+            }
+        }
+        None => bad.push("the content has no looping fire or smoke effect".into()),
+    }
+    let mut shakes = sim::shake::CameraShakes::default();
+    let src = [eye.x, eye.y, eye.z];
+    shakes.start(0, src, 0.5, 2000, src, 1000.0);
+    let near = shakes.sway(100, src).iter().any(|a| a.abs() > 0.1);
+    let far = shakes.sway(100, [src[0] + 5000.0, src[1], src[2]]);
+    report.insert("camera_shake_near".into(), u8::from(near).into());
+    if !near || far != [0.0; 3] {
+        bad.push(format!("camera shake: near {near}, far {far:?}"));
+    }
+
     // The stock scripts' vision and shock files are there and do something.
     let file = |n: &str| {
         lib.content.rawfile(n).map(|b| {

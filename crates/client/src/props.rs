@@ -10,6 +10,7 @@ use assets::zone::clipmap::DynEntityDef;
 use assets::zone::xmodel::XModel;
 use glam::Vec3;
 use render::{ModelInstance, ModelKind};
+use server::tempev::Physics;
 use sim::cm::Collide;
 use std::sync::Arc;
 
@@ -27,6 +28,8 @@ const BULLET_KICK: f32 = 90.0;
 /// Speed a blast gives a prop at its centre, units per second.
 const BLAST_KICK: f32 = 700.0;
 const BLAST_REACH: f32 = 220.0;
+/// Upward speed a jitter of one unit gives a prop.
+const JITTER_KICK: f32 = 120.0;
 /// Props with a side shorter than this are too small to bother (they are decoration).
 const MIN_SIZE: f32 = 2.0;
 /// Props this heavy in bounds-volume terms (cubic units) shrug off a bullet.
@@ -237,11 +240,11 @@ impl Props {
             ClientEvent::Explosion { origin, .. } => {
                 self.blast(Vec3::from(*origin), BLAST_REACH, 1.0)
             }
-            ClientEvent::PhysicsExplosion {
-                origin,
-                radius,
-                strength,
-            } => self.blast(Vec3::from(*origin), *radius, strength.max(0.1)),
+            ClientEvent::Physics { origin, what } => apply_physics(
+                self.props.iter_mut().map(|p| &mut p.shape),
+                Vec3::from(*origin),
+                what,
+            ),
             ClientEvent::WeaponFire {
                 eye,
                 angles,
@@ -322,6 +325,51 @@ impl Props {
     /// Every prop as a model to draw.
     pub fn instances(&self) -> impl Iterator<Item = ModelInstance> + '_ {
         self.props.iter().map(Prop::instance)
+    }
+}
+
+/// A physics world event: bodies within the outer radius are pushed, fully inside the inner radius and less out to the
+/// outer. Explosions throw them away from `at` (a cylinder ignores height), jolts along their impulse, jitters hop
+/// them.
+fn apply_physics<'a>(shapes: impl Iterator<Item = &'a mut Shape>, at: Vec3, what: &Physics) {
+    let (outer, inner) = match *what {
+        Physics::Explosion { outer, inner, .. }
+        | Physics::Jolt { outer, inner, .. }
+        | Physics::Jitter { outer, inner, .. } => (outer, inner),
+    };
+    if outer <= 0.0 {
+        return;
+    }
+    let flat = matches!(what, Physics::Explosion { cylinder: true, .. })
+        || matches!(what, Physics::Jitter { .. });
+    for p in shapes {
+        let (lo, hi) = p.bounds();
+        let (lo, hi, at) = if flat {
+            (lo.with_z(0.0), hi.with_z(0.0), at.with_z(0.0))
+        } else {
+            (lo, hi, at)
+        };
+        let dist = at.clamp(lo, hi).distance(at);
+        if dist > outer {
+            continue;
+        }
+        let fall = if dist <= inner || outer <= inner {
+            1.0
+        } else {
+            1.0 - (dist - inner) / (outer - inner)
+        };
+        let centre = (lo + hi) / 2.0;
+        let push = match *what {
+            Physics::Explosion { magnitude, .. } => {
+                let away = (centre - at).with_z(if flat { 0.0 } else { centre.z - at.z });
+                (away.normalize_or(Vec3::Z) + Vec3::Z * 0.8).normalize()
+                    * BLAST_KICK
+                    * magnitude.max(0.1)
+            }
+            Physics::Jolt { impulse, .. } => Vec3::from(impulse).normalize_or_zero() * BLAST_KICK,
+            Physics::Jitter { min, max, .. } => Vec3::Z * (min + max) * 0.5 * JITTER_KICK,
+        } * fall;
+        p.kick(centre, f32::MAX, |_, _| push);
     }
 }
 
@@ -430,6 +478,45 @@ mod tests {
             maxs: Vec3::new(10.0, 10.0, 30.0),
             body: None,
         }
+    }
+
+    fn kicked(what: Physics, at: Vec3, props: &mut [Shape]) -> Vec<bool> {
+        apply_physics(props.iter_mut(), at, &what);
+        props.iter().map(|p| p.body.is_some()).collect()
+    }
+
+    #[test]
+    fn a_physics_event_moves_the_props_inside_its_radius_only() {
+        let mk = || {
+            vec![
+                prop([0.0; 3], Vec3::new(100.0, 0.0, 0.0)),
+                prop([0.0; 3], Vec3::new(900.0, 0.0, 0.0)),
+            ]
+        };
+        let cyl = Physics::Explosion {
+            cylinder: true,
+            outer: 300.0,
+            inner: 100.0,
+            magnitude: 1.0,
+        };
+        assert_eq!(kicked(cyl, Vec3::ZERO, &mut mk()), [true, false]);
+        // A cylinder reaches any height; a sphere does not.
+        let high = Vec3::new(0.0, 0.0, 2000.0);
+        assert_eq!(kicked(cyl, high, &mut mk()), [true, false]);
+        let sphere = Physics::Explosion {
+            cylinder: false,
+            outer: 300.0,
+            inner: 100.0,
+            magnitude: 1.0,
+        };
+        assert_eq!(kicked(sphere, high, &mut mk()), [false, false]);
+        let jitter = Physics::Jitter {
+            outer: 300.0,
+            inner: 100.0,
+            min: 0.5,
+            max: 1.0,
+        };
+        assert_eq!(kicked(jitter, Vec3::ZERO, &mut mk()), [true, false]);
     }
 
     #[test]

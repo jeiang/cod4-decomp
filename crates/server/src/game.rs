@@ -181,6 +181,26 @@ pub struct Ent {
     pub veh: Option<Box<crate::vehicle::Vehicle>>,
     /// A dropped or placed weapon (`ET_ITEM`).
     pub item: Option<Box<crate::items::DroppedItem>>,
+    /// The effect this entity plays for the clients (`spawnfx`, `playloopedfx`).
+    pub world_fx: Option<WorldFx>,
+}
+
+/// What a script effect entity tells the clients to play (`ET_FX`, `ET_LOOP_FX`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WorldFx {
+    /// `spawnfx`: played once for each `triggerfx`; `triggers` counts them (wrapping, never back to 0), `start_ms`
+    /// is the level time the latest one plays at (its call plus its delay).
+    Once {
+        effect: u16,
+        triggers: u8,
+        start_ms: i32,
+    },
+    /// `playloopedfx`: restarted every `period_ms`, for whoever is within `cull` units (0 for everyone).
+    Looped {
+        effect: u16,
+        period_ms: u32,
+        cull: f32,
+    },
 }
 
 impl Ent {
@@ -213,6 +233,7 @@ impl Ent {
             owner: None,
             veh: None,
             item: None,
+            world_fx: None,
         }
     }
 }
@@ -493,18 +514,36 @@ impl Game {
             .filter_map(|(i, e)| e.as_ref().map(|e| (i as u16, e)))
     }
 
+    /// Tells the clients of a physics world event (`physicsexplosionsphere` and its kin).
+    pub fn physics_event(&mut self, origin: sim::Vec3, p: crate::tempev::Physics) {
+        let now = self.level.time;
+        self.tempev.add_physics(now, origin, &p);
+    }
+
+    /// `earthquake`: tells the clients to shake the cameras of whoever is near `origin`.
+    pub fn earthquake(&mut self, origin: sim::Vec3, scale: f32, duration_ms: i32, radius: f32) {
+        let now = self.level.time;
+        let q = crate::tempev::Earthquake {
+            scale,
+            duration_ms,
+            radius,
+        };
+        self.tempev.add_earthquake(now, origin, &q);
+    }
+
     /// `G_Spawn`: the lowest free slot from [`FIRST_SPAWNED`], growing the table on demand.
     pub fn spawn(&mut self, ent: Ent) -> Result<u16, String> {
         let first = FIRST_SPAWNED.max(self.max_clients);
+        // The slots from `tempev::FIRST` up carry the one-shot events in snapshots: entities stop short of them.
+        let limit = usize::from(crate::tempev::FIRST);
         let slot = (first..self.ents.len())
             .find(|&i| self.ents[i].is_none())
-            .unwrap_or_else(|| {
-                let n = self.ents.len().max(first);
-                self.ents.resize(n + 1, None);
-                n
-            });
-        if slot >= usize::from(ENTITYNUM_WORLD) {
+            .unwrap_or_else(|| self.ents.len().max(first));
+        if slot >= limit {
             return Err("G_Spawn: no free entities".into());
+        }
+        if slot >= self.ents.len() {
+            self.ents.resize(slot + 1, None);
         }
         self.ents[slot] = Some(ent);
         self.level.num_entities = self.level.num_entities.max(slot + 1);

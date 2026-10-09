@@ -12,7 +12,7 @@ use assets::zone::fx::{FxEffectDef, FxElemDef, FxVisuals, elem, flags};
 use assets::zone::gfx::Material;
 use assets::zone::xmodel::XModel;
 use glam::Vec3;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod rng;
@@ -21,7 +21,7 @@ pub use rng::Rng;
 /// Longest single integration step.
 const STEP_MS: i32 = 16;
 /// Effects alive at once; older ones are dropped beyond this.
-const MAX_EFFECTS: usize = 400;
+const MAX_EFFECTS: usize = 1024;
 /// Elements alive at once over all effects.
 const MAX_ELEMS: usize = 6000;
 /// Gravity of a `gravity` factor of one, in units per second squared.
@@ -252,6 +252,8 @@ struct Effect {
 pub struct Fx {
     lib: Arc<Library>,
     effects: Vec<Effect>,
+    /// Handles of the effects that exist, for [`Fx::is_live`]; rebuilt by every update.
+    live_ids: HashSet<u64>,
     now: i32,
     rng: Rng,
     next_id: u64,
@@ -270,6 +272,7 @@ impl Fx {
         Fx {
             lib,
             effects: Vec::new(),
+            live_ids: HashSet::new(),
             now: 0,
             rng: Rng::new(0x5EED),
             next_id: 1,
@@ -299,37 +302,54 @@ impl Fx {
     /// Plays `def` at `frame`, starting `at` the given time (milliseconds on the effect clock).
     pub fn play_at(&mut self, def: &Arc<FxEffectDef>, frame: Frame, at: i32) -> u64 {
         if self.effects.len() >= MAX_EFFECTS {
-            self.effects.remove(0);
+            let old = self.effects.remove(0);
+            self.live_ids.remove(&old.id);
             self.stats.dropped += 1;
         }
         self.stats.effects_played += 1;
-        let looping = def.looping_count as usize;
-        let one_shot = def.one_shot_count as usize;
-        let loop_end = if def.msec_looping_life > 0 {
-            at.saturating_add(def.msec_looping_life)
-        } else {
-            at
-        };
         let mut e = Effect {
             def: def.clone(),
             frame,
             elems: Vec::new(),
-            next_loop: vec![at; looping],
-            loop_end,
+            next_loop: Vec::new(),
+            loop_end: at,
             id: self.next_id,
             goal: None,
             dist: 0.0,
             last_move: at,
-            spawned: vec![0; def.elems.len()],
+            spawned: Vec::new(),
         };
         self.next_id += 1;
+        self.begin(&mut e, at);
+        let id = e.id;
+        self.live_ids.insert(id);
+        self.effects.push(e);
+        id
+    }
+
+    /// Starts (or restarts) the effect's timeline at `at`: its looping elements begin their intervals, its one-shot
+    /// elements spawn, and its trails take their first point.
+    fn begin(&mut self, e: &mut Effect, at: i32) {
+        let def = e.def.clone();
+        let def = &def;
+        let looping = def.looping_count as usize;
+        let one_shot = def.one_shot_count as usize;
+        e.loop_end = if def.msec_looping_life > 0 {
+            at.saturating_add(def.msec_looping_life)
+        } else {
+            at
+        };
+        e.next_loop = vec![at; looping];
+        e.spawned = vec![0; def.elems.len()];
+        e.dist = 0.0;
+        e.last_move = at;
         for k in 0..def.elems.len() {
             if is_trail(&def.elems[k]) {
                 // Trails spawn by distance travelled, not on an interval.
                 if let Some(n) = e.next_loop.get_mut(k) {
                     *n = i32::MAX;
                 }
-                self.spawn_trail_point(&mut e, k, at, 0.0);
+                self.spawn_trail_point(e, k, at, 0.0);
             }
         }
         for k in looping..(looping + one_shot).min(def.elems.len()) {
@@ -339,12 +359,30 @@ impl Fx {
             }
             let count = d.spawn[0] as f32 + d.spawn[1] as f32 * self.rng.f();
             for _ in 0..(count as i32).max(0) {
-                self.spawn(&mut e, k, at);
+                self.spawn(e, k, at);
             }
         }
-        let id = e.id;
+    }
+
+    /// Whether effect `id` still exists (it ended, or the pool dropped it).
+    pub fn is_live(&self, id: u64) -> bool {
+        self.live_ids.contains(&id)
+    }
+
+    /// Restarts effect `id` at `at` (`FX_RetriggerEffect`): its looping elements start over and its one-shot elements
+    /// spawn again, without a second effect. Returns false if the effect is over.
+    pub fn retrigger(&mut self, id: u64, at: i32) -> bool {
+        let Some(i) = self.effects.iter().position(|e| e.id == id) else {
+            return false;
+        };
+        let mut e = self.effects.swap_remove(i);
+        let attached = e.loop_end == i32::MAX;
+        self.begin(&mut e, at);
+        if attached {
+            e.loop_end = i32::MAX;
+        }
         self.effects.push(e);
-        id
+        true
     }
 
     /// Plays `def` at `frame` as an effect that goes on until [`Fx::stop`] and follows [`Fx::move_effect`]: a missile's
@@ -540,6 +578,8 @@ impl Fx {
             });
         }
         self.live_elems = effects.iter().map(|e| e.elems.len()).sum();
+        self.live_ids.clear();
+        self.live_ids.extend(effects.iter().map(|e| e.id));
         self.effects = effects;
     }
 
@@ -1468,6 +1508,45 @@ mod tests {
         };
         let (a, b) = (land(5), land(33));
         assert!((a - b).length() < 1e-3, "{a:?} vs {b:?}");
+    }
+
+    #[test]
+    fn a_retriggered_effect_spawns_its_one_shots_again_without_a_second_effect() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [2, 0];
+        e.life_span_msec.base = 1000;
+        let def = effect("fx/retrigger", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        let id = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(100, &Empty);
+        assert_eq!((fx.live_effects(), fx.stats.elems_spawned), (1, 2));
+        assert!(fx.retrigger(id, 300));
+        fx.update(400, &Empty);
+        assert_eq!(
+            (fx.live_effects(), fx.stats.elems_spawned, fx.live_elems()),
+            (1, 4, 4)
+        );
+        // Stopped and played out, an effect cannot be retriggered.
+        fx.stop(id);
+        fx.update(5000, &Empty);
+        assert!(!fx.retrigger(id, 5100));
+    }
+
+    #[test]
+    fn a_handle_is_live_until_its_effect_ends_or_is_evicted() {
+        let e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        let def = effect("fx/live", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        let first = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        assert!(fx.is_live(first));
+        for _ in 0..MAX_EFFECTS {
+            fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        }
+        assert!(!fx.is_live(first));
+        let one = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.stop(one);
+        fx.update(10_000, &Empty);
+        assert!(!fx.is_live(one));
     }
 
     #[test]
