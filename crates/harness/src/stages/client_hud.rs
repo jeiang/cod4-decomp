@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 const NAME: &str = "client-hud";
 const LIMIT: Duration = Duration::from_secs(420);
 const ARGS: &[&str] = &["--listen", "--bots", "9", "--autoplay", "--duration", "400"];
-const STEPS: &str = "ingame=120,wait=5,chat=hello from the script,saw=hello from the script:20,console=callvote kick bot5,saw=called a vote:20,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
+const STEPS: &str = "ingame=120,wait=5,loc=MP_CHANGE_CLASS_NEXT_SPAWN:PLATFORM_HOLD_TO_PLANT_EXPLOSIVES,chat=hello from the script,saw=hello from the script:20,console=callvote kick bot5,saw=called a vote:20,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
 killcam=300,shot=killcam_first,wait=1,shot=killcam_next,wait=1,shot=killcam,respawn=120";
 
 fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String> {
@@ -112,6 +112,17 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
         .is_some_and(|m| m.iter().any(|v| v == "headiconyouinkillcam"));
     if n("killcam_frames") > 0 && !marked {
         bad.push("the killcam drew no head icon over the viewer's body");
+    }
+    // A message or hint that is still a string key (MP_CHANGE_CLASS_NEXT_SPAWN) was not localized.
+    let keys: Vec<&str> = [&h["unresolved"], &report["hud"]["unresolved_text"]]
+        .into_iter()
+        .filter_map(|v| v.as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let unresolved = format!("unlocalized text on screen: {}", keys.join(", "));
+    if !keys.is_empty() {
+        bad.push(&unresolved);
     }
     // The grenade and d-pad icons are weapon materials; one that is missing draws as a white square.
     let icons: Vec<&str> = report["missing_images"]
@@ -245,6 +256,15 @@ mod tests {
         let mut r = good();
         r["hud_draw"]["head_icon_materials"] = json!([]);
         assert!(verdict(&r).unwrap().contains("head icon"));
+        let mut r = good();
+        r["hud_draw"]["unresolved"] = json!(["MP_CHANGE_CLASS_NEXT_SPAWN"]);
+        r["hud"] = json!({"unresolved_text": ["PLATFORM_HOLD_TO_PLANT_EXPLOSIVES"]});
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("MP_CHANGE_CLASS_NEXT_SPAWN")
+                && why.contains("PLATFORM_HOLD_TO_PLANT_EXPLOSIVES"),
+            "{why}"
+        );
         let mut r = good();
         r["hud_draw"]["scoreboard_rows_max"] = json!(2);
         assert!(verdict(&r).unwrap().contains("scoreboard"));

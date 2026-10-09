@@ -1258,20 +1258,25 @@ impl Ui {
         }
     }
 
-    /// What a bind item shows for `command`: its keys (at most two, joined by "or"), or the unbound text.
-    pub(crate) fn bind_label(&self, host: &dyn Host, command: &str) -> String {
-        let keys: Vec<String> = host
-            .key_bindings(command)
-            .iter()
-            .take(2)
-            .map(|k| self.localize_key(k))
-            .collect();
-        match keys.as_slice() {
-            [] => self.localize_key("KEY_UNBOUND"),
-            [a] => a.clone(),
-            [a, b] => format!("{a} {} {b}", self.localize_key("KEY_OR")),
-            _ => unreachable!(),
+    /// The keys as a player reads them: at most two, joined by "or"; `None` when there are none.
+    pub(crate) fn keys_text(&self, keys: &[String]) -> Option<String> {
+        let name = |k: &String| self.localize_key(k);
+        match keys {
+            [] => None,
+            [a] => Some(name(a)),
+            [a, b, ..] => Some(format!(
+                "{} {} {}",
+                name(a),
+                self.localize_key("KEY_OR"),
+                name(b)
+            )),
         }
+    }
+
+    /// What a bind item shows for `command`: its keys, or the unbound text.
+    pub(crate) fn bind_label(&self, host: &dyn Host, command: &str) -> String {
+        self.keys_text(&host.key_bindings(command))
+            .unwrap_or_else(|| self.localize_key("KEY_UNBOUND"))
     }
 
     /// Handles a key press. Returns whether the menus used it.

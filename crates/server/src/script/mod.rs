@@ -20,7 +20,7 @@ mod misc;
 mod missile;
 mod player;
 mod sound;
-mod uicmd;
+pub mod uicmd;
 mod vehicle;
 mod weapons;
 

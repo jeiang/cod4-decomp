@@ -25,7 +25,7 @@ fn player(g: &Game, e: EntRef) -> Result<u16, String> {
 }
 
 /// One argument of a message: a localized reference, or text (a player's name already with its `^7`).
-enum Part {
+pub enum Part {
     Loc(String),
     Text(String),
 }
@@ -33,7 +33,7 @@ enum Part {
 /// The parts as one message (`Scr_ConstructMessageString`), in the form the clients localize
 /// (`hud::localize`): `\x14` before a localized reference, `\x15` before text. The first
 /// reference needs no mark. Marks inside a part become `.`.
-fn construct(parts: &[Part]) -> String {
+pub fn construct(parts: &[Part]) -> String {
     let mut s = String::new();
     for p in parts {
         let (mark, text) = match p {
@@ -243,7 +243,7 @@ pub fn client_announcement(g: &mut Game, _: &mut Vm, a: Args) -> R {
 
 fn say(g: &mut Game, e: EntRef, a: Args, team: bool) -> R {
     let n = player(g, e)?;
-    g.chat(n, &joined(a, 0), team);
+    g.chat(n, &message(g, a, 0)?, team);
     Ok(Value::Undefined)
 }
 
@@ -262,8 +262,9 @@ impl Game {
         };
         let text: String = text.chars().take(149).collect();
         self.print(format!(
-            "{}: {name}: {text}\n",
-            if team { "sayteam" } else { "say" }
+            "{}: {name}: {}\n",
+            if team { "sayteam" } else { "say" },
+            text.replace(['\x14', '\x15', '\x16'], "")
         ));
         let dead_chat = self.cvars.bool("g_deadChat");
         let hears: Vec<u16> = self
@@ -489,6 +490,11 @@ mod tests {
         );
         // Plain text is an argument too, and a later reference is marked as a key.
         assert_eq!(construct(&[text("hi")]), "\x15hi");
+        // A message that is one key goes out as that key alone: the client looks every first piece up.
+        assert_eq!(
+            construct(&[loc("MP_CHANGE_CLASS_NEXT_SPAWN")]),
+            "MP_CHANGE_CLASS_NEXT_SPAWN"
+        );
         assert_eq!(construct(&[loc("A"), loc("B")]), "A\x14B");
         // A mark a script puts in its text cannot start a part.
         assert_eq!(construct(&[loc("A"), text("x\x14y")]), "A\x15x.y");

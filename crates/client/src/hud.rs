@@ -202,13 +202,13 @@ pub fn team_color_escape(viewer_team: u8, team: u8) -> &'static str {
 /// arrives as `&KEY` (or a bare `&` for none). Within a message the first piece is a localized key, `\x14` starts
 /// another key and `\x15` a literal argument (a player's name, a number); each piece after the first fills the
 /// next `&&1`, `&&2`.. left in the text before it, and `\x16` keeps the pieces after it from being filled in.
-/// Text without any of those is shown as it is.
+/// A message that is one bare key (`MP_CHANGE_CLASS_NEXT_SPAWN`, a use-trigger hint) is looked up like any first
+/// piece; text that is no key is shown as it is.
 pub fn localize(assets: &UiAssets, raw: &str) -> String {
-    let reference = raw.strip_prefix('&').filter(|k| !k.starts_with('&'));
-    let raw = reference.unwrap_or(raw);
-    if reference.is_none() && !raw.bytes().any(|c| matches!(c, 20..=22)) {
-        return raw.to_owned();
-    }
+    let raw = raw
+        .strip_prefix('&')
+        .filter(|k| !k.starts_with('&'))
+        .unwrap_or(raw);
     let digit =
         |s: &[u8], j: usize| s.get(j + 2).is_some_and(u8::is_ascii_digit) && s[j..j + 2] == *b"&&";
     let b = raw.as_bytes();
@@ -273,6 +273,27 @@ pub fn localize(assets: &UiAssets, raw: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Text that is still a string key (`MP_CHANGE_CLASS_NEXT_SPAWN`): what a failed lookup leaves on screen.
+pub fn is_unresolved_key(text: &str) -> bool {
+    text.len() > 1
+        && text.contains('_')
+        && text
+            .bytes()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+}
+
+/// A chat line as it is shown: localized (the server marks what is a key and what is a player's own text) and cut
+/// to the 150 bytes the original keeps (`CG_ServerCommand` chat).
+pub fn chat_text(assets: &UiAssets, raw: &str) -> String {
+    let mut text = localize(assets, raw);
+    let mut end = text.len().min(150);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
+}
+
 /// The `{+command}` marks of `text`, without the braces.
 pub fn key_marks(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
@@ -285,8 +306,8 @@ pub fn key_marks(text: &str) -> Vec<&str> {
     out
 }
 
-/// `text` with each `[{+command}]` replaced by `[key]`, the key `command` is bound to in `keys` (a mark with no
-/// entry is left as it is).
+/// `text` with each `[{+command}]` (brackets included) replaced by what `keys` has for `command`: the keys it is
+/// bound to, or the unbound text (`ReplaceDirective`). A mark with no entry is left as it is.
 pub fn expand_keys(text: &str, keys: &HashMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -295,11 +316,7 @@ pub fn expand_keys(text: &str, keys: &HashMap<String, String>) -> String {
         let cmd = &rest[a + 2..a + b];
         out.push_str(&rest[..a]);
         match keys.get(cmd) {
-            Some(k) => {
-                out.push('[');
-                out.push_str(k);
-                out.push(']');
-            }
+            Some(k) => out.push_str(k),
             None => out.push_str(&rest[a..a + b + 2]),
         }
         rest = &rest[a + b + 2..];
@@ -320,6 +337,8 @@ pub struct Stats {
     /// Lines the message windows drew, summed over frames.
     pub window_lines: [u32; WINDOWS],
     pub chat: u32,
+    /// Message and chat lines shown that are still a bare string key.
+    pub unresolved: Vec<String>,
     pub scoreboard_rows_max: usize,
     pub scoreboard_frames: u32,
     pub killcam_frames: u32,
@@ -343,6 +362,13 @@ pub struct Stats {
 }
 
 impl Stats {
+    /// Notes text the HUD is about to show that is still a bare string key, for the harness.
+    pub fn note_text(&mut self, text: &str) {
+        if is_unresolved_key(text) && !self.unresolved.iter().any(|t| t == text) {
+            self.unresolved.push(text.to_owned());
+        }
+    }
+
     /// One frame of the live state; `rows_shown` is how many player rows the scoreboard drew, `None` when it is not up.
     pub fn frame(&mut self, live: &LiveUi, rows_shown: Option<usize>) {
         use net::ui::he;
@@ -411,6 +437,7 @@ impl Stats {
             "obituaries": self.obituaries,
             "window_lines": self.window_lines,
             "chat": self.chat,
+            "unresolved": self.unresolved,
             "scoreboard_rows_max": self.scoreboard_rows_max,
             "scoreboard_frames": self.scoreboard_frames,
             "killcam_frames": self.killcam_frames,
@@ -493,7 +520,7 @@ mod tests {
         .into();
         assert_eq!(
             expand_keys(text, &keys),
-            "Press [4] to use, [F] to open, [{+nothing}] and [{+open"
+            "Press 4 to use, F to open, [{+nothing}] and [{+open"
         );
         assert_eq!(expand_keys("plain", &keys), "plain");
     }
@@ -530,6 +557,67 @@ mod tests {
         assert_eq!(localize(&a, "&MP_CONNECTED\x15Bob"), "Bob connected");
         assert_eq!(localize(&a, "plain text"), "plain text");
         assert_eq!(localize(&a, "&NO_SUCH_KEY"), "NO_SUCH_KEY");
+    }
+
+    #[test]
+    fn a_bare_key_is_looked_up_like_a_marked_one() {
+        let mut a = UiAssets::default();
+        a.localize.insert(
+            "MP_CHANGE_CLASS_NEXT_SPAWN".into(),
+            "Class changes next spawn".into(),
+        );
+        // What the server sends for `iprintlnbold(&"KEY")` (no mark) and the other spellings of the same key.
+        for raw in [
+            "MP_CHANGE_CLASS_NEXT_SPAWN",
+            "&MP_CHANGE_CLASS_NEXT_SPAWN",
+            "\x14MP_CHANGE_CLASS_NEXT_SPAWN",
+        ] {
+            assert_eq!(localize(&a, raw), "Class changes next spawn", "{raw:?}");
+        }
+        assert_eq!(localize(&a, "MP_UNKNOWN_KEY"), "MP_UNKNOWN_KEY");
+        assert!(is_unresolved_key("MP_UNKNOWN_KEY"));
+        assert!(!is_unresolved_key("Class changes next spawn"));
+    }
+
+    /// What the server's `construct()` sends is what the client's `localize()` reads, for the shapes scripts use.
+    #[test]
+    fn server_messages_localize_to_their_text() {
+        use server::script::uicmd::{Part, construct};
+        let mut a = UiAssets::default();
+        for (k, v) in [
+            ("MP_CHANGE_CLASS_NEXT_SPAWN", "Class changes next spawn"),
+            ("MP_CONNECTED", "&&1 connected"),
+            ("MP_KILLED", "&&1 killed &&2"),
+        ] {
+            a.localize.insert(k.into(), v.into());
+        }
+        let loc = |k: &str| Part::Loc(k.into());
+        let text = |t: &str| Part::Text(t.into());
+        let shown = |parts: &[Part]| localize(&a, &construct(parts));
+        assert_eq!(
+            shown(&[loc("MP_CHANGE_CLASS_NEXT_SPAWN")]),
+            "Class changes next spawn"
+        );
+        assert_eq!(
+            shown(&[loc("MP_CONNECTED"), text("Bob^7")]),
+            "Bob^7 connected"
+        );
+        assert_eq!(
+            shown(&[loc("MP_KILLED"), text("Al"), text("Bo")]),
+            "Al killed Bo"
+        );
+        // A script's own text that looks like a key stays text.
+        assert_eq!(shown(&[text("MP_CONNECTED")]), "MP_CONNECTED");
+    }
+
+    #[test]
+    fn chat_from_a_player_is_not_a_key_but_a_script_reference_is() {
+        let mut a = UiAssets::default();
+        a.localize.insert("MP_X".into(), "Localized".into());
+        // The server marks a player's own text as an argument; a script's `&"MP_X"` is the first key.
+        assert_eq!(chat_text(&a, "\x15MP_X"), "MP_X");
+        assert_eq!(chat_text(&a, "MP_X"), "Localized");
+        assert_eq!(chat_text(&a, &"é".repeat(100)).len(), 150);
     }
 
     #[test]

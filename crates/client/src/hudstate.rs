@@ -428,6 +428,8 @@ pub struct HudFacts {
     pub prev_spawn: Option<(u16, u16)>,
     /// How often each owner-draw piece drew since the match began, for the run report.
     pub drawn: std::collections::BTreeMap<i32, u32>,
+    /// Hint texts drawn that are still a bare string key (a lookup that failed), for the run report.
+    pub unresolved_text: std::collections::BTreeSet<String>,
     /// Objective marks the compass and the full map drew since the match began.
     pub objective_marks: u32,
     /// The most objectives the server listed and the most alpha the compass drew them with.
@@ -506,6 +508,7 @@ impl HudFacts {
             "enemies": self.actors.values().filter(|a| !a.friendly).count(),
             "overlay_alpha": self.overlay.alpha(self.now),
             "drawn": self.drawn,
+            "unresolved_text": self.unresolved_text,
             "objective_marks": self.objective_marks,
             "radar_pings": self.radar_pings,
             "radar_marks": self.radar_marks,
