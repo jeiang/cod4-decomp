@@ -831,17 +831,6 @@ impl NetPlay {
         } else {
             self.angles[1]
         };
-        if let Some(last) = self.last_eye
-            && dt > 0.0
-            && dt < 0.05
-            && !dead
-        {
-            let step = eye.distance(last);
-            // A respawn or a teleport is not walking.
-            if step < 64.0 {
-                self.c.eye_speeds.push(step / dt);
-            }
-        }
         self.last_eye = Some(eye);
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
@@ -1346,6 +1335,18 @@ impl NetPlay {
                         c.stair_last_snap = [jump, drawn_jump, cam.step, dt];
                     }
                 }
+            }
+        }
+        // How fast the eye moved, with the stairs eased as they are drawn: a step the smoothing absorbs is not a jerk.
+        if let (Some(last), Some(drawn)) = (self.last_eye, c.last_render_z)
+            && dt > 0.0
+            && dt < 0.05
+            && !dead
+        {
+            let moved = Vec3::new(eye.x - last.x, eye.y - last.y, render_z - drawn).length();
+            // A respawn or a teleport is not walking.
+            if moved < 64.0 {
+                c.eye_speeds.push(moved / dt);
             }
         }
         c.last_render_z = Some(render_z);
