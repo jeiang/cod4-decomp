@@ -184,9 +184,7 @@ impl<T: Transport> NetClient<T> {
                         ConnectState::Refused(r) => self.phase = Phase::Refused(r.clone()),
                         _ => {}
                     }
-                } else if from == self.server
-                    && matches!(self.phase, Phase::Playing(_))
-                {
+                } else if from == self.server && matches!(self.phase, Phase::Playing(_)) {
                     match o {
                         Oob::Error(why) => self.phase = Phase::Dropped(why),
                         Oob::Disconnect => {
