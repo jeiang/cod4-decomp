@@ -20,6 +20,11 @@ use std::time::{Duration, Instant};
 const NAME: &str = "net-vote";
 const LIMIT: Duration = Duration::from_secs(120);
 
+/// A chat line without the mark that makes the client show it as typed text.
+fn plain(s: &str) -> &str {
+    s.trim_start_matches('\x15')
+}
+
 /// Puts every bot on the spectators' side: connected, so the vote has someone to be called against, but no voter.
 fn sideline_bots(server: &mut Server) {
     let bots: Vec<u16> = server
@@ -101,16 +106,20 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if let Err(e) = say(&mut server, &mut people, "say \"hello there\"") {
         return fail(e);
     }
-    while !(people[1].chats.iter().any(|c| c.2 == "hello there")
-        && people[0].chats.iter().any(|c| c.2 == "hello there"))
+    while !(people[1].chats.iter().any(|c| plain(&c.2) == "hello there")
+        && people[0].chats.iter().any(|c| plain(&c.2) == "hello there"))
     {
         if Instant::now() > deadline {
             return fail("the line a person said never reached both people".into());
         }
         frame(&mut server, &mut people);
     }
-    let heard = people[1].chats.iter().find(|c| c.2 == "hello there");
-    if heard != Some(&(false, a, "hello there".into())) {
+    let heard = people[1]
+        .chats
+        .iter()
+        .find(|c| plain(&c.2) == "hello there")
+        .map(|c| (c.0, c.1, plain(&c.2).to_owned()));
+    if heard != Some((false, a, "hello there".into())) {
         return fail(format!("the line arrived as {heard:?}"));
     }
 
@@ -134,13 +143,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 return fail(e);
             }
         }
-        while !people[1].chats.iter().any(|c| c.2 == "marker") {
+        while !people[1].chats.iter().any(|c| plain(&c.2) == "marker") {
             if Instant::now() > deadline {
                 return fail("the public marker line never arrived".into());
             }
             frame(&mut server, &mut people);
         }
-        let got = people[1].chats.iter().any(|c| c.2 == text);
+        let got = people[1].chats.iter().any(|c| plain(&c.2) == text);
         if got != on_team {
             return fail(format!(
                 "a team line {} the teammate {on_team}: heard {got}",
