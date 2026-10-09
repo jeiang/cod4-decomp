@@ -273,7 +273,7 @@ pub struct NetPlay {
     voice_on: bool,
     muted: HashSet<u16>,
     lib: Library,
-    /// The models the server precached have had their pipelines asked for, see [`NetPlay::unwarmed_models`].
+    /// The models the server precached have had their pipelines asked for (native).
     models_warmed: bool,
     weapons: WeaponTable,
     params: Params,
@@ -549,6 +549,7 @@ impl NetPlay {
     /// The server has put the player in the world (alive at least once).
     /// Once the player has spawned: the models the server precached (`precachemodel`: planes, vehicles, props the
     /// scripts make) that the loaded zones have, for the renderer to get pipelines for before they first show.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn unwarmed_models(&mut self) -> Vec<std::sync::Arc<assets::zone::xmodel::XModel>> {
         if !self.c.spawned || std::mem::replace(&mut self.models_warmed, true) {
             return Vec::new();
