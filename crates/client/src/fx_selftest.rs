@@ -323,6 +323,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             );
             fx.event(
                 &ClientEvent::Dud {
+                    settled: false,
                     origin: at,
                     normal,
                     surface: 0,

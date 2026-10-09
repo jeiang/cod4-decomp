@@ -871,6 +871,8 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.origin = e.origin;
                 s.angles = e.angles;
                 s.velocity = m.pos.evaluate_delta(game.level.time);
+                // When it may be drawn (`CG_Missile`'s launch time), as the low 24 bits of the server time.
+                s.eflags = m.launch_time as u32 & 0xff_ffff;
                 s.weapon = m.weapon;
                 s.client = m.parent.unwrap_or(1023);
                 s

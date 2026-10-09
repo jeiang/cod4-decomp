@@ -274,11 +274,17 @@ impl Effects {
                 normal,
                 surface,
                 weapon: w,
+                settled,
                 ..
             } => {
                 let (at, n) = (Vec3::from(*origin), Vec3::from(*normal));
-                let table = self.impact_effect(IMPACT_TYPE_DUD, *surface, false);
+                // `EV_CHANGE_TO_DUD`: the table's first surface only.
+                let table =
+                    self.impact_effect(IMPACT_TYPE_DUD, if *settled { 0 } else { *surface }, false);
                 self.play("dud", table, at, n);
+                if *settled {
+                    return;
+                }
                 let def = weapon(*w).and_then(|d| d.proj_dud_effect.clone());
                 self.play("dud", def, at, n);
             }

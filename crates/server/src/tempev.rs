@@ -35,6 +35,8 @@ pub mod ev {
     pub const EARTHQUAKE: u8 = 0x8b;
     /// A missile that did not go off hit or came to rest on a surface (`event_parm`): the dud's sound and effect.
     pub const DUD: u8 = 0x8c;
+    /// An unarmed grenade came to rest (`EV_CHANGE_TO_DUD`): only the dud table's effect, no sound.
+    pub const CHANGE_TO_DUD: u8 = 0x8d;
 }
 
 /// Script numbers that travel in a velocity component, which the wire keeps to a quarter unit: scaled up to keep the

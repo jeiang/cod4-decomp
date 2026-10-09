@@ -588,6 +588,11 @@ fn a_flying_frag_is_networked_with_its_weapon_and_heading_and_its_blast_with_the
         .unwrap();
     assert_eq!(state.etype, net::entity::etype::MISSILE);
     assert_eq!(state.weapon, frag_w);
+    assert_eq!(
+        state.eflags,
+        g.ent(nade).unwrap().missile.as_ref().unwrap().launch_time as u32 & 0xff_ffff,
+        "the launch time gates drawing"
+    );
     assert!(state.velocity[0] > 200.0, "heading: {:?}", state.velocity);
 
     g.detonate_missile(&mut vm, nade);

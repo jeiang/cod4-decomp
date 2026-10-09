@@ -874,7 +874,7 @@ impl NetPlay {
                 .and_then(|i| content.weapon(&i.name))
                 .cloned()
         });
-        let projectiles = self.projectiles(&flying);
+        let projectiles = self.projectiles(&flying, st);
         if let Some(snap) = self.net.latest() {
             self.effects.world_fx(&snap.entities, &self.events, eye, st);
         }
@@ -1256,7 +1256,7 @@ impl NetPlay {
 
     /// The grenades, rockets and other projectiles in flight or at rest (`CG_Missile`): the weapon's projectile model
     /// along the entity's angles, and the flight loop of weapons that have one following it.
-    fn projectiles(&mut self, flying: &[EntityState]) -> Vec<ModelInstance> {
+    fn projectiles(&mut self, flying: &[EntityState], st: i32) -> Vec<ModelInstance> {
         let mut out = Vec::new();
         let mut looping = Vec::new();
         for e in flying {
@@ -1272,7 +1272,9 @@ impl NetPlay {
                 self.sound.missile_loop(e.number, alias, e.origin);
                 looping.push(e.number);
             }
-            let Some(model) = def.projectile_model.clone() else {
+            // Not drawn until its launch time (a rocket leaves the tube before it shows).
+            let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
+            let Some(model) = def.projectile_model.clone().filter(|_| until_launch <= 0) else {
                 continue;
             };
             let mut m = ModelInstance::new(model, render::ModelKind::World);

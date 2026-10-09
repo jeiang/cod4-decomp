@@ -986,16 +986,15 @@ impl Game {
     }
 
     /// `EV_DUD_IMPACT`: a missile that will never go off hit `normal`'s surface.
-    fn dud_event(&mut self, m: &Missile, normal: Vec3) {
+    fn dud_event(&mut self, m: &Missile, normal: Vec3, kind: u8) {
         let origin = m.pos.evaluate(self.level.time);
-        self.tempev
-            .add(self.level.time, crate::tempev::ev::DUD, |s| {
-                s.origin = origin;
-                s.angles = crate::tempev::dir_to_angles(normal);
-                s.event_parm = m.surface;
-                s.weapon = m.weapon;
-                s.client = m.parent.unwrap_or(1023);
-            });
+        self.tempev.add(self.level.time, kind, |s| {
+            s.origin = origin;
+            s.angles = crate::tempev::dir_to_angles(normal);
+            s.event_parm = m.surface;
+            s.weapon = m.weapon;
+            s.client = m.parent.unwrap_or(1023);
+        });
     }
 
     /// The flash of a `WEAPPROJEXP_FLASHBANG` weapon's explosion (`G_FlashbangBlast`), credited to the parent
@@ -1104,7 +1103,7 @@ impl Game {
             self.bounce_missile(vm, n, m, &tr);
             if m.info.projectile_activate_dist > 0 && m.pos.kind == TrType::Stationary {
                 // `EV_CHANGE_TO_DUD`: the grenade came to rest without arming.
-                self.dud_event(m, tr.normal);
+                self.dud_event(m, tr.normal, crate::tempev::ev::CHANGE_TO_DUD);
                 self.free_entity(vm, n);
             }
             return;
@@ -1162,7 +1161,7 @@ impl Game {
         let surface = surface_type(tr.surface_flags).min(28) as u8;
         if dud {
             m.surface = surface;
-            self.dud_event(m, tr.normal);
+            self.dud_event(m, tr.normal, crate::tempev::ev::DUD);
         } else {
             self.explosion_event(m, endpos, tr.normal, surface);
             self.missile_flash(vm, m, endpos);

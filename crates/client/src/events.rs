@@ -38,6 +38,8 @@ pub enum ClientEvent {
         surface: u8,
         weapon: u16,
         owner: u16,
+        /// An unarmed grenade that came to rest: the dud table's effect only, no sound.
+        settled: bool,
     },
     MissileBounce {
         origin: [f32; 3],
@@ -179,7 +181,8 @@ impl Events {
                 weapon: e.weapon,
                 owner: e.client,
             },
-            ev::DUD => ClientEvent::Dud {
+            ev::DUD | ev::CHANGE_TO_DUD => ClientEvent::Dud {
+                settled: e.event == ev::CHANGE_TO_DUD,
                 origin: e.origin,
                 normal,
                 surface: e.event_parm,
@@ -409,7 +412,10 @@ mod tests {
         blast.weapon = 3;
         let mut dud = event(961, super::ev::DUD, 1);
         dud.event_parm = 9;
-        let out = ev.scan(&snap(&[blast, dud]));
+        let mut settled = event(962, super::ev::CHANGE_TO_DUD, 1);
+        settled.event_parm = 2;
+        let out = ev.scan(&snap(&[blast, dud, settled]));
+        assert!(matches!(out[2], ClientEvent::Dud { settled: true, .. }));
         assert!(matches!(
             out[0],
             ClientEvent::Explosion {
@@ -418,6 +424,13 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(out[1], ClientEvent::Dud { surface: 9, .. }));
+        assert!(matches!(
+            out[1],
+            ClientEvent::Dud {
+                surface: 9,
+                settled: false,
+                ..
+            }
+        ));
     }
 }

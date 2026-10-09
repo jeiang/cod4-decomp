@@ -339,6 +339,7 @@ impl ClientSound {
                     origin,
                     surface,
                     weapon: w,
+                    settled: false,
                     ..
                 } => {
                     self.surface_sound("bullet_large", *surface, *origin);
@@ -396,15 +397,18 @@ impl ClientSound {
     /// A missile is at `origin` now: its flight `alias` loops on it (a second call moves the loop), until
     /// [`Self::missile_loops_end`] stops it.
     pub fn missile_loop(&mut self, entity: u16, alias: &str, origin: [f32; 3]) {
-        self.missile_loops.insert(entity);
-        self.play(
-            alias,
-            Cue {
-                origin: Some(origin),
-                entity: u32::from(entity),
-                ..Cue::default()
-            },
-        );
+        if self.missile_loops.insert(entity) {
+            self.play(
+                alias,
+                Cue {
+                    origin: Some(origin),
+                    entity: u32::from(entity),
+                    ..Cue::default()
+                },
+            );
+        } else {
+            self.follow(entity, origin);
+        }
     }
 
     /// Stops the flight loops of the missiles not in `flying` any more.
