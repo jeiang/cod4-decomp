@@ -5,8 +5,8 @@
 //! by the death's impulse) and draws that ragdoll as long as the entity is in the snapshots. A blast near a body wakes
 //! it and throws it.
 
-use super::{NetPlay, pose_input, team_of};
-use crate::models::{Player, PlayerModelSet};
+use super::{NetPlay, pose_input};
+use crate::models::Player;
 use crate::props::blast_of;
 use crate::ragdoll::{MAX_SIMULATING, Ragdoll};
 use net::entity::{EntityState, etype};
@@ -37,19 +37,10 @@ pub(super) struct Body {
 }
 
 impl NetPlay {
-    /// The body the scripts gave a player (`model`), failing that the stock body of the team in `flags`.
-    pub(super) fn body_set(&self, model: u16, flags: u32) -> Option<PlayerModelSet> {
-        self.net
-            .ui_ref()
-            .map(|u| u.model(model).to_owned())
-            .and_then(|n| self.lib.body_models(&n))
-            .or_else(|| team_of(flags).and_then(|t| self.lib.team_models(t)))
-    }
-
     /// Makes the body of the corpse entity `e`: from the pose its owner was last seen in if the client has it, else
     /// from the end of its death clip.
     fn make_body(&mut self, e: &EntityState, now: Instant) -> Option<Body> {
-        let set = self.body_set(e.model, e.eflags)?;
+        let set = self.body_set(e)?;
         let mut player = match self.lib.player(&set) {
             Ok(p) => p,
             Err(f) => {
@@ -57,6 +48,7 @@ impl NetPlay {
                 return None;
             }
         };
+        player.hide_parts(e.part_bits);
         let push = self.pushes.remove(&e.client).unwrap_or_default();
         let live = self
             .remotes

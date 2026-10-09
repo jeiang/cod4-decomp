@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The end notify follows KisakCOD (xanim/xanim.cpp XAnimProcessServerNotify; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Server-side animation clocks and notetrack delivery (`G_XAnimUpdateEnt`).
 //!
 //! An entity that plays a flagged animation gets a notify (`ent notify(flag, note)`) each time
-//! the animation's clock crosses a notetrack. The frame advances the clock one notetrack at a
+//! the animation's clock crosses a notetrack, and an `end` notify when a clip that does not loop reaches its last
+//! frame (`XAnimProcessServerNotify`), whether or not the clip's file lists an `end` notetrack. The frame advances the clock one notetrack at a
 //! time and lets the scripts run between notetracks, so a script that reacts to a notetrack
 //! sees the entity at exactly that point of the animation.
 
@@ -19,7 +21,11 @@ pub struct Playing {
     pub rate: f32,
     /// Normalized animation time in `[0, 1]`.
     pub time: f32,
+    /// The `end` notify of a clip that does not loop has been delivered.
+    pub ended: bool,
 }
+
+const END: &str = "end";
 
 #[derive(Debug, Default, Clone)]
 pub struct AnimTree {
@@ -44,25 +50,27 @@ impl AnimTree {
     /// animation. `None` means the whole `dt` was consumed with nothing reached.
     pub fn step(&mut self, dt: f32) -> Option<Reached> {
         // The earliest event: a notetrack, or a looping animation reaching its end.
-        // (seconds, animation, note); `note` is `None` for a loop edge.
-        let mut first: Option<(f32, usize, Option<Arc<str>>)> = None;
+        // (seconds, animation, note, whether the note is the synthetic end); `note` is `None` for a loop edge.
+        let mut first: Option<(f32, usize, Option<Arc<str>>, bool)> = None;
         for (i, p) in self.playing.iter().enumerate() {
             if p.rate <= 0.0 || p.info.length <= 0.0 {
                 continue;
             }
             let reach = (p.time + dt * p.rate / p.info.length).min(1.0);
-            let mut consider = |at: f32, note: Option<Arc<str>>| {
+            let mut consider = |at: f32, note: Option<Arc<str>>, synthetic: bool| {
                 if first.as_ref().is_none_or(|f| at < f.0) {
-                    first = Some((at, i, note));
+                    first = Some((at, i, note, synthetic));
                 }
             };
             for (name, t) in &p.info.notes {
                 if *t > p.time && *t <= reach {
-                    consider(Self::seconds(p, *t), Some(name.clone()));
+                    consider(Self::seconds(p, *t), Some(name.clone()), false);
                 }
             }
             if p.info.looping && reach >= 1.0 {
-                consider(Self::seconds(p, 1.0), None);
+                consider(Self::seconds(p, 1.0), None, false);
+            } else if !p.info.looping && !p.ended && reach >= 1.0 {
+                consider(Self::seconds(p, 1.0), Some(END.into()), true);
             }
         }
         let at = first.as_ref().map_or(dt, |f| f.0.min(dt));
@@ -71,13 +79,16 @@ impl AnimTree {
                 p.time = (p.time + at * p.rate / p.info.length).min(1.0);
             }
         }
-        let (_, i, note) = first?;
+        let (_, i, note, synthetic) = first?;
         match note {
             Some(note) => {
                 let p = &mut self.playing[i];
-                if let Some(t) = p.info.notes.iter().find(|(n, _)| *n == note).map(|n| n.1) {
+                if synthetic {
+                    p.time = 1.0;
+                } else if let Some(t) = p.info.notes.iter().find(|(n, _)| *n == note).map(|n| n.1) {
                     p.time = t;
                 }
+                p.ended |= &*note == END && p.time >= 1.0;
                 Some(Reached {
                     flag: p.flag.clone(),
                     note,
@@ -123,6 +134,7 @@ mod tests {
                 flag: "a".into(),
                 rate: 1.0,
                 time: 0.0,
+                ended: false,
             }],
         }
     }
@@ -144,6 +156,46 @@ mod tests {
         assert_eq!(seen[1].0, "end");
         assert!((seen[1].1 - 2.0).abs() < 1e-4, "{}", seen[1].1);
         assert_eq!(t.playing[0].time, 1.0);
+    }
+
+    /// Everything `t` delivers over `seconds` of 50 ms frames: the note and the second it arrived at.
+    fn run(t: &mut AnimTree, seconds: f32) -> Vec<(String, f32)> {
+        let mut seen = Vec::new();
+        let mut now = 0.0;
+        while now < seconds - 1e-4 {
+            let mut left = 0.05;
+            while let Some(r) = t.step(left) {
+                left -= r.elapsed;
+                seen.push((r.note.to_string(), now + 0.05 - left));
+            }
+            now += 0.05;
+        }
+        seen
+    }
+
+    #[test]
+    fn a_clip_without_an_end_notetrack_still_says_end_once_when_it_runs_out() {
+        let mut t = play(clip(false, &[("mid", 0.5)]));
+        let seen = run(&mut t, 5.0);
+        let names: Vec<_> = seen.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(names, ["mid", "end"]);
+        assert!(
+            (seen[1].1 - 2.0).abs() < 0.06,
+            "at the clip's length: {}",
+            seen[1].1
+        );
+    }
+
+    #[test]
+    fn an_end_notetrack_in_the_file_is_not_followed_by_a_second_end() {
+        let mut t = play(clip(false, &[("end", 1.0)]));
+        assert_eq!(run(&mut t, 5.0).len(), 1);
+    }
+
+    #[test]
+    fn a_looping_clip_never_says_end() {
+        let mut t = play(clip(true, &[("step", 0.5)]));
+        assert!(run(&mut t, 7.0).iter().all(|s| s.0 == "step"));
     }
 
     #[test]

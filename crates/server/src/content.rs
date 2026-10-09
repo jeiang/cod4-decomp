@@ -113,6 +113,15 @@ pub struct AnimInfo {
 }
 
 impl AnimInfo {
+    /// Whether the last `anim_gunhand` notetrack at or before normalized `time` puts the gun in the left hand
+    /// (`CG_ProcessClientNoteTracks`); a clip without one leaves it in the right.
+    pub fn gun_hand_left(&self, time: f32) -> bool {
+        self.notes
+            .iter()
+            .rfind(|(n, t)| n.starts_with("anim_gunhand") && *t <= time)
+            .is_some_and(|(n, _)| n.contains("left"))
+    }
+
     fn new(x: &XAnimParts, strings: &[Option<Arc<str>>]) -> Self {
         let notes = x
             .notify
@@ -590,5 +599,32 @@ impl Content {
             .as_ref()
             .or(self.base.clipmap.as_ref())
             .map(|(_, c)| c)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_gun_changes_hands_at_the_gunhand_notetracks() {
+        let note = |n: &str, t: f32| (Arc::from(n), t);
+        let reload = AnimInfo {
+            looping: false,
+            length: 2.0,
+            notes: vec![
+                note("anim_gunhand = \"left\"", 0.0),
+                note("reload_clipout", 0.4),
+                note("anim_gunhand = \"right\"", 0.9),
+            ],
+        };
+        assert!(reload.gun_hand_left(0.0));
+        assert!(reload.gun_hand_left(0.89));
+        assert!(!reload.gun_hand_left(0.9));
+        let pullout = AnimInfo {
+            notes: vec![note("anim_gunhand = \"right\"", 0.85)],
+            ..reload
+        };
+        assert!(!pullout.gun_hand_left(0.5), "no note yet: the right hand");
     }
 }

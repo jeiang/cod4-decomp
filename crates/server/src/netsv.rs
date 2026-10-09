@@ -1368,6 +1368,7 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.angles = [c.ps.viewangles[0], c.ps.viewangles[1], c.ps.leanf * 45.0];
                 s.velocity = c.ps.velocity;
                 s.weapon = c.ps.weapon as u16;
+                s.weapon_model = c.inv.model(s.weapon);
                 s.pm_type = c.ps.pm_type as u8;
                 s.pm_flags = c.ps.pm_flags & 0x1f_ffff;
                 s.weapon_state = c.ps.weapon_state;
@@ -1581,6 +1582,12 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s
             }
         };
+        if matches!(
+            state.etype,
+            etype::PLAYER | etype::CORPSE | etype::SCRIPT_MODEL | etype::PLANE
+        ) {
+            game.net_attachments(n, &mut state);
+        }
         // Moved by fiat since the last snapshot. Not for a missile or effect, whose `eflags` hold a time.
         if e.teleport
             && matches!(

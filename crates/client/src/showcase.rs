@@ -211,9 +211,11 @@ impl Showcase {
             .cloned()
             .flatten()
             .and_then(|m| m.name.as_deref().map(str::to_owned));
-        let armed = |s: PlayerModelSet| PlayerModelSet {
-            weapon: held.clone(),
-            ..s
+        let armed = |s: PlayerModelSet| {
+            s.armed(
+                held.clone().map(|m| (m, "tag_weapon_right".to_owned())),
+                None,
+            )
         };
         let allies = lib
             .team_models(Team::Allies)

@@ -67,6 +67,44 @@ fn a_model_less_entity_has_no_tags_and_parts_are_named_in_bone_order() {
 }
 
 #[test]
+fn attachments_and_hidden_parts_reach_the_wire_and_name_the_same_tags_on_the_other_end() {
+    let Some(mut s) = boot() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let g = &mut s.game;
+    let (body, head, gun) = (
+        "body_mp_usmc_assault",
+        "head_mp_usmc_tactical_mich",
+        "weapon_ak47",
+    );
+    for m in [body, head, gun] {
+        g.note_model(m);
+    }
+    let e = model_ent(g, body, [0.0; 3], [0.0; 3]);
+    assert!(g.attach_model(e, head, "", true));
+    assert!(g.attach_model(e, gun, "tag_weapon_right", false));
+    g.ent_mut(e).unwrap().x.hide_bits = [0, 0x4000_0000, 0, 0];
+    let sent = server::netsv::world_snapshot(g)
+        .into_iter()
+        .find(|x| x.state.number == e)
+        .expect("the script model is in the snapshot")
+        .state;
+    let got: Vec<_> = sent.attachments().collect();
+    assert_eq!(got.len(), 2);
+    assert_eq!(
+        got[0],
+        (g.models.find(head) as u16, 0),
+        "a head melds onto the body"
+    );
+    assert_eq!(got[1].0, g.models.find(gun) as u16);
+    // The client numbers the tag among the bones of the body and the head before the gun.
+    let tag = server::link::tag_name(&g.content, &[body, head], got[1].1).expect("a tag");
+    assert_eq!(&*tag, "tag_weapon_right");
+    assert_eq!(sent.part_bits, [0, 0x4000_0000, 0, 0]);
+}
+
+#[test]
 fn tags_of_attached_models_are_found_through_the_attach_tag() {
     let Some(mut s) = boot() else {
         eprintln!("COD4_PATH not set; skipping");

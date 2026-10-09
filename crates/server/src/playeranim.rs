@@ -1289,16 +1289,18 @@ impl PlayerAnims {
     /// every retained animation the selection can return. Animations the zones lack are listed
     /// by [`PlayerAnims::missing`].
     pub fn new(content: &Content, body: &str, head: Option<&str>) -> Result<Self, String> {
-        Self::with_weapon(content, body, head, None)
+        let attach: Vec<(&str, &str)> = head.into_iter().map(|h| (h, "")).collect();
+        Self::with_attachments(content, body, &attach)
     }
 
-    /// [`PlayerAnims::new`] with the world model of a held weapon attached at the body's `tag_weapon_right`; its bones
-    /// follow the head's in the rig, so the animation bindings of the body and head are unchanged.
-    pub fn with_weapon(
+    /// [`PlayerAnims::new`] with the models the scripts attached to the body, and the weapon in the hand, as
+    /// `(model, tag)` in order: a model with no tag melds onto the body by bone name (a head), one with a tag hangs
+    /// from that bone of the models before it. Their bones follow the body's in the rig, so the animation bindings of
+    /// the body are unchanged.
+    pub fn with_attachments(
         content: &Content,
         body: &str,
-        head: Option<&str>,
-        weapon: Option<&str>,
+        attachments: &[(&str, &str)],
     ) -> Result<Self, String> {
         let spec =
             |name: &str| -> Result<(Arc<assets::zone::xmodel::XModel>, Vec<Arc<str>>), String> {
@@ -1311,12 +1313,8 @@ impl PlayerAnims {
                 Ok((m.clone(), names.to_vec()))
             };
         let mut parts = vec![spec(body)?];
-        if let Some(h) = head {
-            parts.push(spec(h)?);
-        }
-        let weapon_part = parts.len();
-        if let Some(w) = weapon {
-            parts.push(spec(w)?);
+        for (model, _) in attachments {
+            parts.push(spec(model)?);
         }
         let texts: Vec<Vec<&str>> = parts
             .iter()
@@ -1329,7 +1327,10 @@ impl PlayerAnims {
             .map(|(i, ((m, _), t))| RigModel {
                 model: m.clone(),
                 bone_names: t,
-                attach: (weapon.is_some() && i == weapon_part).then_some("tag_weapon_right"),
+                attach: i
+                    .checked_sub(1)
+                    .map(|a| attachments[a].1)
+                    .filter(|tag| !tag.is_empty()),
             })
             .collect();
         let rig = Rig::new(&models)?;
@@ -1911,6 +1912,11 @@ impl PlayerPoseState {
     /// The torso clip playing over `anims`' legs, if any (a client; the server keeps no torso clips).
     pub fn torso(&self, anims: &PlayerAnims) -> Option<&'static str> {
         self.torso_layer(anims).and(self.torso.map(|t| t.clip))
+    }
+
+    /// The torso clip playing and how many seconds into it, if one is.
+    pub fn torso_seconds(&self) -> Option<(&'static str, f32)> {
+        self.torso.map(|t| (t.clip, t.seconds))
     }
 
     /// The torso clip chosen, whether or not it has clips to play.

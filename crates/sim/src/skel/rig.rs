@@ -37,8 +37,9 @@ use super::anim::{self, Accum, NO_BONE};
 use super::quat::{self, Quat};
 use crate::Vec3;
 
-/// `DOBJ_MAX_PARTS`.
-pub const MAX_BONES: usize = 128;
+/// Bones one rig may hold: the original's `DOBJ_MAX_PARTS` is 128, but a body, a head and a heavy weapon (a melded model
+/// keeps a duplicate slot for every bone it repeats) pass that; indices are bytes with 255 for none.
+pub const MAX_BONES: usize = 255;
 
 /// The six bones the engine drives from view angles, in `controller_names` order.
 pub const CONTROLLER_BONES: [&str; 6] =
