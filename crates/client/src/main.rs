@@ -43,6 +43,8 @@ mod ui;
 mod video;
 mod viewmodel;
 #[cfg(not(target_arch = "wasm32"))]
+mod vmanim;
+#[cfg(not(target_arch = "wasm32"))]
 mod vmtour;
 #[cfg(target_arch = "wasm32")]
 mod web;

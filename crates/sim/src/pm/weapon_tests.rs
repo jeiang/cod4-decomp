@@ -1294,3 +1294,198 @@ fn sprinting_lowers_the_weapon_and_stopping_raises_it() {
     r.run(0, 10);
     assert_eq!(r.state(), ws::READY);
 }
+
+// ---- the animation the view model plays, and the weapon it shows ---------------------------------------------------
+
+use super::state::weap_anim as wa;
+
+fn anim(r: &Rig) -> u16 {
+    r.ps.weapon_anim & !wa::TOGGLE
+}
+
+#[test]
+fn an_offhand_throw_shows_the_grenade_and_its_animations_then_the_weapon_again() {
+    let (mut r, a, g) = grenade_rig();
+    assert_eq!(super::viewmodel_weapon(&r.ps), a);
+    r.run(button::FRAG, 1);
+    assert_eq!(
+        (super::viewmodel_weapon(&r.ps), anim(&r)),
+        (a, wa::QUICK_DROP),
+        "the weapon in hand lowers first"
+    );
+    r.run(button::FRAG, 25);
+    assert_eq!(r.state(), ws::OFFHAND_PREPARE);
+    assert_eq!(
+        (super::viewmodel_weapon(&r.ps), anim(&r)),
+        (g, wa::HOLD_FIRE),
+        "the pin is pulled on the grenade"
+    );
+    assert_eq!(r.ps.weapon as u16, a, "the weapon in hand does not change");
+    r.run(button::FRAG, 40);
+    assert_eq!(r.state(), ws::OFFHAND_START);
+    assert_eq!(
+        (super::viewmodel_weapon(&r.ps), anim(&r)),
+        (g, wa::HOLD_FIRE)
+    );
+    r.run(0, 1);
+    assert_eq!((super::viewmodel_weapon(&r.ps), anim(&r)), (g, wa::ATTACK));
+    r.run(0, 14);
+    assert_eq!(r.state(), ws::OFFHAND);
+    assert_eq!(
+        super::viewmodel_weapon(&r.ps),
+        g,
+        "still the grenade in the throw"
+    );
+    r.run(0, 30);
+    assert_eq!(r.state(), ws::OFFHAND_END);
+    assert_eq!(
+        (super::viewmodel_weapon(&r.ps), anim(&r)),
+        (a, wa::QUICK_RAISE),
+        "the weapon in hand comes back up"
+    );
+    r.run(0, 30);
+    assert_eq!((r.state(), anim(&r)), (ws::READY, wa::IDLE));
+}
+
+#[test]
+fn every_shot_restarts_its_animation_and_the_last_round_has_its_own() {
+    let mut r = Rig::new(vec![ak()]);
+    let a = r.hold("ak47_mp");
+    let mut starts = Vec::new();
+    let mut last = r.ps.weapon_anim;
+    while r.clip(a) > 0 {
+        r.run(ATTACK, 1);
+        if r.ps.weapon_anim != last {
+            starts.push((r.clip(a), anim(&r)));
+            last = r.ps.weapon_anim;
+        }
+    }
+    assert!(
+        starts.len() >= 30,
+        "each of the 30 shots starts one: {}",
+        starts.len()
+    );
+    assert!(starts[..29].iter().all(|&(_, a)| a == wa::ATTACK));
+    assert_eq!(
+        starts[29],
+        (0, wa::ATTACK_LASTSHOT),
+        "the slide locks back on the last round"
+    );
+    // Aimed, the shot plays the sights' animation.
+    let mut r = Rig::new(vec![WeaponInfo {
+        aim_down_sight: true,
+        oo_pos_anim_length: [0.01, 0.01],
+        ..ak()
+    }]);
+    r.hold("ak47_mp");
+    r.run(button::ADS, 40);
+    assert_eq!(r.ps.weapon_pos_frac, 1.0);
+    r.run(ATTACK | button::ADS, 1);
+    assert_eq!(anim(&r), wa::ADS_ATTACK);
+}
+
+#[test]
+fn an_empty_reload_plays_its_own_animation_and_a_tactical_one_does_not() {
+    let mut r = Rig::new(vec![ak()]);
+    let a = r.hold("ak47_mp");
+    r.run(0, 1);
+    r.run(button::RELOAD, 1);
+    assert_eq!(r.state(), ws::READY, "a full magazine does not reload");
+    while r.clip(a) > 28 {
+        r.run(ATTACK, 1);
+    }
+    r.run(0, 20);
+    r.run(button::RELOAD, 1);
+    assert_eq!(
+        (r.state(), anim(&r)),
+        (ws::RELOADING, wa::RELOAD),
+        "a tactical reload"
+    );
+    r.run(0, 200);
+    assert_eq!((r.state(), r.clip(a)), (ws::READY, 30));
+    while r.clip(a) > 0 {
+        r.run(ATTACK, 1);
+    }
+    r.run(0, 20);
+    assert_eq!(
+        (r.state(), anim(&r)),
+        (ws::RELOADING, wa::RELOAD_EMPTY),
+        "an empty magazine reloads from empty"
+    );
+    r.run(0, 250);
+    assert_eq!((r.state(), anim(&r)), (ws::READY, wa::IDLE));
+}
+
+#[test]
+fn raises_and_drops_play_the_animation_of_their_kind() {
+    let mut r = Rig::new(vec![ak(), rifle("m16_mp", "ar")]);
+    let a = r.give("ak47_mp");
+    r.want = a;
+    r.run(0, 1);
+    assert_eq!(
+        anim(&r),
+        wa::FIRST_RAISE,
+        "a weapon raised for the first time"
+    );
+    r.run(0, 100);
+    let m = r.give("m16_mp");
+    r.want = m;
+    r.run(0, 1);
+    assert_eq!(anim(&r), wa::DROP);
+    r.run(0, 60);
+    assert_eq!(r.ps.weapon as u16, m);
+    assert_eq!(anim(&r), wa::FIRST_RAISE);
+    r.run(0, 100);
+    r.want = a;
+    r.run(0, 1);
+    r.run(0, 60);
+    assert_eq!(
+        (r.ps.weapon as u16, anim(&r)),
+        (a, wa::RAISE),
+        "raised again"
+    );
+}
+
+#[test]
+fn walking_speed_blocked_prone_and_sprint_time_follow_the_weapon_in_hand_not_the_grenade_on_show() {
+    let held = WeaponInfo {
+        move_speed_scale: 0.8,
+        sprint_duration_scale: 1.5,
+        blocks_prone: true,
+        aim_down_sight: true,
+        ..rifle("ak47_mp", "ar")
+    };
+    let shown = WeaponInfo {
+        move_speed_scale: 1.0,
+        sprint_duration_scale: 1.0,
+        ..frag()
+    };
+    let mut r = Rig::new(vec![held, shown]);
+    let a = r.hold("ak47_mp");
+    let g = r.give("frag_grenade_mp");
+    let params = Params::default();
+    let sync = |r: &mut Rig, offhand: bool| {
+        r.ps.weapon_flags = if offhand { wf::USING_OFFHAND } else { 0 };
+        r.ps.offhand_index = g;
+        let mut pm = Pmove::new(r.ps.clone(), &params);
+        pm.weapons = Some(WeaponCtx::new(&r.table, &mut r.inv));
+        super::pm_weapon::sync_weapon_move(&mut pm);
+        pm.weapon
+    };
+    let in_hand = sync(&mut r, false);
+    assert_eq!(r.ps.weapon as u16, a);
+    let throwing = sync(&mut r, true);
+    assert_eq!(
+        (
+            throwing.move_speed_scale,
+            throwing.sprint_duration_scale,
+            throwing.blocks_prone
+        ),
+        (0.8, 1.5, true),
+        "movement reads the weapon in hand"
+    );
+    assert!(
+        in_hand.aim_down_sight && !throwing.aim_down_sight,
+        "the sights read the weapon on show"
+    );
+}

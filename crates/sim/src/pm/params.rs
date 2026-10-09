@@ -352,6 +352,21 @@ pub struct WeaponMove {
     pub ads_fire_only: bool,
 }
 
+impl WeaponMove {
+    /// These values with the ones that govern how the player moves taken from `held`, the weapon in the player's
+    /// hand: walking pace, sprint time, prone and freezing while firing follow `ps->weapon` even while an off-hand
+    /// grenade is on show (`PM_CmdScale_Walk`, `BG_WeaponBlocksProne`, `PM_UpdateSprint`), the sights follow the weapon
+    /// shown.
+    pub fn moving_as(mut self, held: &WeaponMove) -> Self {
+        self.move_speed_scale = held.move_speed_scale;
+        self.ads_move_speed_scale = held.ads_move_speed_scale;
+        self.sprint_duration_scale = held.sprint_duration_scale;
+        self.blocks_prone = held.blocks_prone;
+        self.freeze_movement_when_firing = held.freeze_movement_when_firing;
+        self
+    }
+}
+
 impl Default for WeaponMove {
     fn default() -> Self {
         Self {

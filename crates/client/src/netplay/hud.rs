@@ -214,11 +214,13 @@ impl NetPlay {
         h.loc_radius = f32::from(ps.loc_radius) / 63.0;
         h.loc_cursor = self.loc_cursor;
         h.selecting_location = ps.e_flags & sim::pm::ef::LOC_SELECTING != 0;
-        let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
+        // The breath hint is about the weapon on show (`BG_GetViewmodelWeaponIndex`).
+        let shown = sim::pm::viewmodel_weapon(ps);
+        let def = self.lib.content.weapon(self.weapons.name(shown));
         h.breath_hint = ps.weapon_flags & wf::HOLD_BREATH == 0
             && ps.weapon_pos_frac == 1.0
             && def.is_some_and(|d| d.overlay_reticle != 0)
-            && info.weap_class != WeaponClass::Item;
+            && self.weapons.info(shown).weap_class != WeaponClass::Item;
 
         // Things that make a piece show up for a while.
         let sprint_changed = h.sprint_left != h.prev_sprint_left && h.sprint_left < h.sprint_max;

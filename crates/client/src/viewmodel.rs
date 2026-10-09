@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Parts translated from KisakCOD (cgame/cg_weapons.cpp: WeaponRunXModelAnims, ProcessWeaponNoteTracks,
+// PlayNoteMappedSoundAliases; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The first-person weapon: the hands model with the gun attached at `tag_weapon`, animated by the weapon's
 //! `viewmodel_*` animations from the player state's weapon state machine.
 //!
-//! The original plays the animation the weapon code last started (`weapAnim` in the player state, which this
-//! reimplementation's `PlayerState` does not carry), so the animation is derived from the state instead: each
-//! `weapon_state` names one of the weapon's animation slots and `weapon_time`, the time left in the state, gives how
-//! far through it is. Aiming down sights layers `ADS_UP` (rising) or `ADS_DOWN` (falling) by `weapon_pos_frac` over it.
+//! The animation is the one the weapon code last started (`weapAnim`, `PlayerState::weapon_anim`); it names one of the
+//! weapon's animation slots and `weapon_time`, the time left in the action, gives how far through it is. Aiming down
+//! sights layers `ADS_UP` (rising) or `ADS_DOWN` (falling) by `weapon_pos_frac` over it. The notetracks the animation
+//! passes play the weapon's mapped sounds.
 //! Bob is the original's angle bob (`CalculateWeaponPosition_BobAngles`) with its stock amplitudes, and the gun's recoil
 //! is the original's spring, with the idle breathing, the stance's offsets and the sway behind a turning view
 //! ([`sim::weapon::gun`]). The weapon's `hideTags` hide the sights and mounts of the variants it is not; [`Sight`] carries
@@ -15,9 +17,9 @@ use assets::zone::gfx::Material;
 use assets::zone::weapon::WeaponDef;
 use assets::zone::xmodel::XModel;
 use render::{ModelInstance, ModelKind};
-use server::content::{Content, PlayerAnim};
+use server::content::{Content, NoteSounds, PlayerAnim};
 use server::tags::{angles_to_axis, axis_to_angles, mul3, transform3};
-use sim::pm::{PlayerState, weapon_state as ws};
+use sim::pm::PlayerState;
 use sim::skel::{AnimBinding, AnimLayer, Controllers, Pose, Rig, RigModel};
 use sim::weapon::gun::{GunFrame, GunParams, GunState, Hit, shell_shock_sway_scale};
 use std::sync::Arc;
@@ -25,21 +27,56 @@ use std::sync::Arc;
 /// `weapAnimFiles_t`: indices into [`WeaponDef::anims`].
 pub mod slot {
     pub const IDLE: usize = 1;
+    pub const EMPTY_IDLE: usize = 2;
     pub const FIRE: usize = 3;
+    pub const HOLD_FIRE: usize = 4;
+    pub const LASTSHOT: usize = 5;
     pub const RECHAMBER: usize = 6;
     pub const MELEE: usize = 7;
+    pub const MELEE_CHARGE: usize = 8;
     pub const RELOAD: usize = 9;
+    pub const RELOAD_EMPTY: usize = 10;
     pub const RELOAD_START: usize = 11;
     pub const RELOAD_END: usize = 12;
     pub const RAISE: usize = 13;
+    pub const FIRST_RAISE: usize = 14;
     pub const DROP: usize = 15;
+    pub const ALT_RAISE: usize = 16;
+    pub const ALT_DROP: usize = 17;
+    pub const QUICK_RAISE: usize = 18;
+    pub const QUICK_DROP: usize = 19;
+    pub const EMPTY_RAISE: usize = 20;
+    pub const EMPTY_DROP: usize = 21;
     pub const SPRINT_IN: usize = 22;
     pub const SPRINT_LOOP: usize = 23;
     pub const SPRINT_OUT: usize = 24;
+    pub const DETONATE: usize = 25;
+    pub const NIGHTVISION_WEAR: usize = 26;
+    pub const NIGHTVISION_REMOVE: usize = 27;
     pub const ADS_FIRE: usize = 28;
+    pub const ADS_LASTSHOT: usize = 29;
+    pub const ADS_RECHAMBER: usize = 30;
     pub const ADS_UP: usize = 31;
     pub const ADS_DOWN: usize = 32;
     pub const COUNT: usize = 33;
+}
+
+/// The sound aliases a notetrack plays: the goggles' own for their power up and down notes, and every one the
+/// weapon maps the note to (`ProcessWeaponNoteTracks`). The note `end` plays nothing.
+fn note_sounds(note: &str, map: &NoteSounds, out: &mut Vec<Arc<str>>) {
+    if note.eq_ignore_ascii_case("end") {
+        return;
+    }
+    if note.eq_ignore_ascii_case("NVG_on_powerup") {
+        out.push(Arc::from("item_nightvision_on"));
+    } else if note.eq_ignore_ascii_case("NVG_off_powerdown") {
+        out.push(Arc::from("item_nightvision_off"));
+    }
+    out.extend(
+        map.iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(note))
+            .map(|(_, v)| v.clone()),
+    );
 }
 
 /// What to play: an animation slot and the normalised time in it.
@@ -49,36 +86,88 @@ pub struct Playing {
     pub time: f32,
 }
 
-/// The slot a weapon state plays and how long the state lasts in milliseconds (0 for a held pose).
-fn state_slot(state: u8, ads: f32, w: &WeaponDef) -> (usize, i32) {
-    match state {
-        ws::RAISING | ws::RAISING_ALTSWITCH => (slot::RAISE, w.raise_time),
-        ws::DROPPING | ws::DROPPING_QUICK => (slot::DROP, w.drop_time),
-        ws::FIRING if ads > 0.5 => (slot::ADS_FIRE, w.fire_time),
-        ws::FIRING => (slot::FIRE, w.fire_time),
-        ws::RECHAMBERING => (slot::RECHAMBER, w.rechamber_time),
-        ws::RELOADING | ws::RELOADING_INTERUPT => (slot::RELOAD, w.reload_time),
-        ws::RELOAD_START | ws::RELOAD_START_INTERUPT => (slot::RELOAD_START, w.reload_start_time),
-        ws::RELOAD_END => (slot::RELOAD_END, w.reload_end_time),
-        ws::MELEE_INIT | ws::MELEE_FIRE | ws::MELEE_END => (slot::MELEE, w.melee_time),
-        ws::SPRINT_RAISE => (slot::SPRINT_IN, w.sprint_in_time),
-        ws::SPRINT_LOOP => (slot::SPRINT_LOOP, 0),
-        ws::SPRINT_DROP => (slot::SPRINT_OUT, w.sprint_out_time),
-        _ => (slot::IDLE, 0),
+/// The slot the animation the weapon code started (`WeaponRunXModelAnims`) plays. A resting weapon shows its empty
+/// pose when the magazine is.
+fn anim_slot(anim: u16, clip_empty: bool) -> usize {
+    use sim::pm::weap_anim as wa;
+    match anim & !wa::TOGGLE {
+        wa::ATTACK => slot::FIRE,
+        wa::ATTACK_LASTSHOT => slot::LASTSHOT,
+        wa::RECHAMBER => slot::RECHAMBER,
+        wa::ADS_ATTACK => slot::ADS_FIRE,
+        wa::ADS_ATTACK_LASTSHOT => slot::ADS_LASTSHOT,
+        wa::ADS_RECHAMBER => slot::ADS_RECHAMBER,
+        wa::MELEE_ATTACK => slot::MELEE,
+        wa::MELEE_CHARGE => slot::MELEE_CHARGE,
+        wa::DROP => slot::DROP,
+        wa::RAISE => slot::RAISE,
+        wa::FIRST_RAISE => slot::FIRST_RAISE,
+        wa::RELOAD => slot::RELOAD,
+        wa::RELOAD_EMPTY => slot::RELOAD_EMPTY,
+        wa::RELOAD_START => slot::RELOAD_START,
+        wa::RELOAD_END => slot::RELOAD_END,
+        wa::ALTSWITCH_FROM => slot::ALT_DROP,
+        wa::ALTSWITCH_TO => slot::ALT_RAISE,
+        wa::QUICK_DROP => slot::QUICK_DROP,
+        wa::QUICK_RAISE => slot::QUICK_RAISE,
+        wa::EMPTY_DROP => slot::EMPTY_DROP,
+        wa::EMPTY_RAISE => slot::EMPTY_RAISE,
+        wa::SPRINT_IN => slot::SPRINT_IN,
+        wa::SPRINT_LOOP => slot::SPRINT_LOOP,
+        wa::SPRINT_OUT => slot::SPRINT_OUT,
+        wa::HOLD_FIRE => slot::HOLD_FIRE,
+        wa::DETONATE => slot::DETONATE,
+        wa::NIGHTVISION_WEAR => slot::NIGHTVISION_WEAR,
+        wa::NIGHTVISION_REMOVE => slot::NIGHTVISION_REMOVE,
+        _ if clip_empty => slot::EMPTY_IDLE,
+        _ => slot::IDLE,
     }
 }
 
-/// Picks the animation for a state: what the weapon is doing, or its idle.
-pub fn select(state: u8, weapon_time: i32, ads: f32, sprint_clock: f32, w: &WeaponDef) -> Playing {
-    let (s, total) = state_slot(state, ads, w);
+/// How long the weapon's action in `slot` lasts in milliseconds (0 for a held pose): what the animation is stretched
+/// over.
+fn slot_time(slot: usize, w: &WeaponDef) -> i32 {
+    match slot {
+        slot::FIRE | slot::LASTSHOT | slot::ADS_FIRE | slot::ADS_LASTSHOT => w.fire_time,
+        slot::HOLD_FIRE => w.hold_fire_time,
+        slot::RECHAMBER | slot::ADS_RECHAMBER => w.rechamber_time,
+        slot::MELEE => w.melee_time,
+        slot::MELEE_CHARGE => w.melee_charge_time,
+        slot::RELOAD => w.reload_time,
+        slot::RELOAD_EMPTY => w.reload_empty_time,
+        slot::RELOAD_START => w.reload_start_time,
+        slot::RELOAD_END => w.reload_end_time,
+        slot::RAISE => w.raise_time,
+        slot::FIRST_RAISE => w.first_raise_time,
+        slot::DROP => w.drop_time,
+        slot::ALT_RAISE => w.alt_raise_time,
+        slot::ALT_DROP => w.alt_drop_time,
+        slot::QUICK_RAISE => w.quick_raise_time,
+        slot::QUICK_DROP => w.quick_drop_time,
+        slot::EMPTY_RAISE => w.empty_raise_time,
+        slot::EMPTY_DROP => w.empty_drop_time,
+        slot::SPRINT_IN => w.sprint_in_time,
+        slot::SPRINT_OUT => w.sprint_out_time,
+        slot::DETONATE => w.detonate_time,
+        slot::NIGHTVISION_WEAR => w.night_vision_wear_time,
+        slot::NIGHTVISION_REMOVE => w.night_vision_remove_time,
+        _ => 0,
+    }
+}
+
+/// Picks the animation the weapon code started (`weapon_anim`) and how far along it is. `left` is the time left in the
+/// action: `weapon_time`, or the delay before it starts when that is all that runs.
+pub fn select(anim: u16, clip_empty: bool, left: i32, sprint_clock: f32, w: &WeaponDef) -> Playing {
+    let s = anim_slot(anim, clip_empty);
     if s == slot::SPRINT_LOOP {
         return Playing {
             slot: s,
             time: sprint_clock,
         };
     }
+    let total = slot_time(s, w);
     let time = if total > 0 {
-        ((total - weapon_time) as f32 / total as f32).clamp(0.0, 1.0)
+        ((total - left) as f32 / total as f32).clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -107,6 +196,8 @@ struct Slot {
     bind: AnimBinding,
     /// Seconds one loop takes.
     length: f32,
+    /// The notetracks of the animation: name and the normalised time they fall at.
+    notes: Vec<(Arc<str>, f32)>,
 }
 
 /// The scope picture of a weapon with an overlay (`adsOverlay*`), drawn over the screen centre while aimed.
@@ -166,6 +257,14 @@ pub struct ViewModel {
     hit: Hit,
     /// The server time the shell shock ends at, 0 for none.
     shock_end: i32,
+    /// The magazine of the weapon is empty: it rests in its empty pose.
+    clip_empty: bool,
+    /// The sound aliases of the notetracks (`notetrackSoundMap`): note name and alias.
+    note_sounds: NoteSounds,
+    /// The animation the last update played and how far: what notetracks fall between it and the next.
+    last_played: Option<(u16, Playing)>,
+    /// Aliases the notetracks of the last updates asked for, until [`take_sounds`](Self::take_sounds).
+    sounds: Vec<Arc<str>>,
 }
 
 /// Where the gun's muzzle and ejection port are in the world.
@@ -259,6 +358,9 @@ impl ViewModel {
                 slots[i] = Some(Slot {
                     bind: rig.bind(&a.part_names),
                     length: f32::from(p.num_frames) / p.frame_rate,
+                    notes: content
+                        .anim(name)
+                        .map_or_else(Vec::new, |i| i.notes.clone()),
                     anim: a.clone(),
                 });
             }
@@ -284,6 +386,15 @@ impl ViewModel {
             params: GunParams::from_def(weapon),
             hit: Hit::default(),
             shock_end: 0,
+            clip_empty: false,
+            note_sounds: weapon
+                .internal_name
+                .as_deref()
+                .and_then(|n| content.weapon_note_sounds(n))
+                .cloned()
+                .unwrap_or_default(),
+            last_played: None,
+            sounds: Vec::new(),
             playing: Playing {
                 slot: slot::IDLE,
                 time: 0.0,
@@ -350,9 +461,53 @@ impl ViewModel {
         &self.motion
     }
 
+    /// Whether the weapon's magazine is empty, which it shows in its empty animations.
+    pub fn set_clip_empty(&mut self, empty: bool) {
+        self.clip_empty = empty;
+    }
+
+    /// The sound aliases the notetracks of the animation fired since the last call (`ProcessWeaponNoteTracks`).
+    pub fn take_sounds(&mut self) -> Vec<Arc<str>> {
+        std::mem::take(&mut self.sounds)
+    }
+
+    /// Forgets where the animation was, so the next update fires no notetrack for the time before it: for a view model
+    /// that comes back after being put away.
+    pub fn resume(&mut self) {
+        self.last_played = None;
+    }
+
     /// The animation of the last update.
     pub fn playing(&self) -> Playing {
         self.playing
+    }
+
+    /// Collects the sounds of the notetracks `p` passed since the last update. The same animation passes each once; a
+    /// new one (a new `weapon_anim`, toggle bit included) starts from its first frame; a loop that came round again
+    /// passes the ones after where it was and up to where it is.
+    fn fire_notes(&mut self, anim: u16, p: Playing) {
+        let last = self.last_played.replace((anim, p));
+        let Some((last_anim, last)) = last else {
+            return;
+        };
+        let (from, wrapped) = if last_anim != anim || last.slot != p.slot {
+            (-1.0, false)
+        } else {
+            (last.time, p.time < last.time)
+        };
+        let Some(s) = &self.slots[p.slot] else {
+            return;
+        };
+        for (name, at) in &s.notes {
+            let passed = if wrapped {
+                *at > from || *at <= p.time
+            } else {
+                *at > from && *at <= p.time
+            };
+            if passed {
+                note_sounds(name, &self.note_sounds, &mut self.sounds);
+            }
+        }
     }
 
     /// Advances to the state in `ps` (`dt` seconds since the last call) and returns the hands and the gun.
@@ -366,13 +521,19 @@ impl ViewModel {
             .as_ref()
             .map_or(1.0, |s| s.length.max(0.001));
         self.sprint_clock = (self.sprint_clock + dt / loop_len).fract();
+        let left = if ps.weapon_time > 0 {
+            ps.weapon_time
+        } else {
+            ps.weapon_delay
+        };
         let mut p = select(
-            ps.weapon_state,
-            ps.weapon_time,
-            ads,
+            ps.weapon_anim,
+            self.clip_empty,
+            left,
             self.sprint_clock,
             &self.def,
         );
+        // An animation the weapon does not have shows its idle (`CG_CreateWeaponViewModelXAnim`).
         if self.slots[p.slot].is_none() {
             p = Playing {
                 slot: slot::IDLE,
@@ -380,6 +541,7 @@ impl ViewModel {
             };
         }
         self.playing = p;
+        self.fire_notes(ps.weapon_anim, p);
         let sights = ads_layer(ads, self.rising);
         let mut layers = Vec::with_capacity(2);
         for l in [Some(p), (ads > 0.0).then_some(sights)]
@@ -1103,7 +1265,7 @@ mod tests {
                 "{name}: the camera is off the eye at rest: {rest:?}"
             );
             rested += 1;
-            ps.weapon_state = ws::RELOADING;
+            ps.weapon_anim = sim::pm::weap_anim::RELOAD;
             let mut swing = 0.0f32;
             for left in (0..2000).step_by(50) {
                 ps.weapon_time = left;
@@ -1117,5 +1279,101 @@ mod tests {
             moved += usize::from(swing > 0.05);
         }
         assert!(rested > 0 && moved > 0, "{rested} rested, {moved} moved");
+    }
+
+    /// Every animation the weapon code can start plays the file of its own kind, and a weapon at rest with an empty
+    /// magazine shows its empty pose.
+    #[test]
+    fn every_started_animation_has_a_slot_of_its_own() {
+        use sim::pm::weap_anim as wa;
+        let mut seen = std::collections::HashSet::new();
+        for a in wa::ATTACK..=wa::NIGHTVISION_REMOVE {
+            for toggle in [0, wa::TOGGLE] {
+                assert_eq!(anim_slot(a | toggle, false), anim_slot(a, false), "{a}");
+            }
+            assert!(
+                seen.insert(anim_slot(a, false)),
+                "animation {a} shares a slot"
+            );
+            assert_ne!(anim_slot(a, true), slot::EMPTY_IDLE, "{a}");
+        }
+        for a in [wa::IDLE, wa::FORCE_IDLE] {
+            assert_eq!(anim_slot(a, false), slot::IDLE);
+            assert_eq!(anim_slot(a, true), slot::EMPTY_IDLE);
+        }
+    }
+
+    /// A stock rifle shows its empty-reload, last-shot and empty-idle files, and an animation started on the weapon
+    /// plays each notetrack's sounds once as it passes; starting it again plays them again.
+    #[test]
+    fn a_reload_plays_its_notetrack_sounds_once_and_the_slots_follow_the_started_animation() {
+        use sim::pm::weap_anim as wa;
+        let Some(content) = content() else { return };
+        let mut vm = build(&content, "ak47_mp").expect("view model");
+        let def = content.weapon("ak47_mp").unwrap().clone();
+        let mut ps = PlayerState {
+            view_height_current: 60.0,
+            ..PlayerState::default()
+        };
+        let play = |vm: &mut ViewModel, ps: &mut PlayerState, anim: u16, total: i32| {
+            ps.weapon_anim = anim;
+            let mut sounds = Vec::new();
+            for left in (0..=total).rev().step_by(10) {
+                ps.weapon_time = left;
+                vm.update(ps, 0.01);
+                sounds.extend(vm.take_sounds().iter().map(|s| s.to_string()));
+            }
+            // Frames after the end of the animation fire nothing more.
+            vm.update(ps, 0.01);
+            sounds.extend(vm.take_sounds().iter().map(|s| s.to_string()));
+            sounds
+        };
+        vm.update(&ps, 0.01);
+        let expected = [
+            "weap_ak47_lift_plr",
+            "weap_ak47_clipout_plr",
+            "weap_ak47_clipin_plr",
+        ];
+        assert_eq!(
+            play(&mut vm, &mut ps, wa::RELOAD, def.reload_time),
+            expected
+        );
+        assert_eq!(vm.playing().slot, slot::RELOAD);
+        assert_eq!(
+            play(&mut vm, &mut ps, wa::RELOAD | wa::TOGGLE, def.reload_time),
+            expected,
+            "a restart plays them again"
+        );
+        let empty = play(&mut vm, &mut ps, wa::RELOAD_EMPTY, def.reload_empty_time);
+        assert_eq!(vm.playing().slot, slot::RELOAD_EMPTY);
+        assert!(!empty.is_empty(), "the empty reload has notes of its own");
+        play(&mut vm, &mut ps, wa::ATTACK_LASTSHOT, def.fire_time);
+        assert_eq!(vm.playing().slot, slot::LASTSHOT);
+        ps.weapon_anim = wa::IDLE;
+        let mut m4 = build(&content, "m4_mp").expect("m4");
+        m4.set_clip_empty(true);
+        m4.update(&ps, 0.01);
+        assert_eq!(m4.playing().slot, slot::EMPTY_IDLE);
+        m4.set_clip_empty(false);
+        m4.update(&ps, 0.01);
+        assert_eq!(m4.playing().slot, slot::IDLE);
+    }
+
+    /// The night vision goggles' power up and down notes play the goggles' sounds.
+    #[test]
+    fn the_goggles_notes_play_their_own_sounds_and_end_plays_nothing() {
+        let map: NoteSounds = Arc::from(vec![
+            (Arc::from("clip"), Arc::from("a")),
+            (Arc::from("clip"), Arc::from("b")),
+        ]);
+        let play = |n: &str| {
+            let mut out = Vec::new();
+            note_sounds(n, &map, &mut out);
+            out.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        };
+        assert_eq!(play("NVG_on_powerup"), ["item_nightvision_on"]);
+        assert_eq!(play("nvg_off_powerdown"), ["item_nightvision_off"]);
+        assert_eq!(play("CLIP"), ["a", "b"]);
+        assert!(play("end").is_empty() && play("other").is_empty());
     }
 }

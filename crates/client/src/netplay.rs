@@ -277,6 +277,9 @@ pub struct NetPlay {
     /// The impulse of each recent death by client number, until the body is made.
     pushes: HashMap<u16, [f32; 3]>,
     vm: Option<((u16, u16), ViewModel)>,
+    /// The view model put away for the off-hand weapon on show (or back for the weapon in hand), so a throw does not
+    /// build one each time.
+    vm_spare: Option<((u16, u16), ViewModel)>,
     /// What aiming did to the view in the last frame.
     sight: Option<Sight>,
     c: Counters,
@@ -382,6 +385,7 @@ impl NetPlay {
             remotes: HashMap::new(),
             pushes: HashMap::new(),
             vm: None,
+            vm_spare: None,
             sight: None,
             c: Counters::default(),
             auto: autoplay.then(Auto::default),
@@ -539,6 +543,7 @@ impl NetPlay {
         self.last_spawn = None;
         self.remotes.clear();
         self.vm = None;
+        self.vm_spare = None;
         self.events = Events::default();
         self.own_events = Seen::default();
         self.own_new.clear();
@@ -704,7 +709,7 @@ impl NetPlay {
             // The followed player's hits turn the view and show on the screen as the player's own would.
             self.damage
                 .look(&ps, st, [ps.viewangles[0], ps.viewangles[1]]);
-            let gun = self.weapons.info(ps.weapon as u16).gun;
+            let gun = self.weapons.info(sim::pm::viewmodel_weapon(&ps)).gun;
             self.fx.observe(&ps);
             let hit_view = self.fx.damage_kick(&ps, &gun);
             self.damage_hud = self.damage.hud(st, ps.viewangles[1]);
@@ -735,7 +740,7 @@ impl NetPlay {
                 weapon: self
                     .lib
                     .content
-                    .weapon(self.weapons.name(ps.weapon as u16))
+                    .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)))
                     .map(|d| crate::camera::WeaponView::from(&**d)),
                 aim,
                 step: 0.0,
@@ -752,7 +757,7 @@ impl NetPlay {
             for (a, o) in at.iter_mut().zip(cam.offset) {
                 *a += o;
             }
-            models.extend(self.view_model(dt, &ps, at, seen));
+            models.extend(self.view_model(dt, &ps, at, seen, false));
             render += self.hands_camera(&ps, &mut seen);
             let (events, commands) = self.take_events(&snap);
             self.look
@@ -807,19 +812,25 @@ impl NetPlay {
             ps.origin[2] + err[2],
         ];
         let dead = matches!(ps.pm_type, PmType::Dead | PmType::DeadLinked);
-        let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
+        let def = self
+            .lib
+            .content
+            .weapon(self.weapons.name(sim::pm::viewmodel_weapon(&ps)));
         if dead {
             self.kick.clear();
         } else {
-            self.kick
-                .shots(&events, &ps, self.weapons.info(ps.weapon as u16));
+            self.kick.shots(
+                &events,
+                &ps,
+                self.weapons.info(sim::pm::viewmodel_weapon(&ps)),
+            );
             self.kick.step(
                 dt,
                 ps.weapon_pos_frac,
                 def.map(|d| [d.hip_view_kick_center_speed, d.ads_view_kick_center_speed]),
             );
         }
-        let gun = self.weapons.info(ps.weapon as u16).gun;
+        let gun = self.weapons.info(sim::pm::viewmodel_weapon(&ps)).gun;
         if dead {
             self.fx.clear();
         } else {
@@ -913,7 +924,9 @@ impl NetPlay {
             for (a, o) in at.iter_mut().zip(cam.offset) {
                 *a += o;
             }
-            hands = self.view_model(dt, &ps, at, seen);
+            let index = sim::pm::viewmodel_weapon(&ps);
+            let clip_empty = index != 0 && p.inv.clip(&self.weapons, index) == 0;
+            hands = self.view_model(dt, &ps, at, seen, clip_empty);
             render += self.hands_camera(&ps, &mut seen);
         }
         // The listener hears from the drawn eye (`SND_SetListener(.., refdef.vieworg, ..)`).
@@ -1095,7 +1108,7 @@ impl NetPlay {
 
     /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
-        let index = ps.weapon as u16;
+        let index = sim::pm::viewmodel_weapon(ps);
         let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
         let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &WeaponParams::default());
         Some(Reticle {
@@ -1191,6 +1204,7 @@ impl NetPlay {
                 weapon: def.map(|d| &**d),
                 weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
                 quiet: ps.perks & sim::pm::PERK_QUIETER != 0,
+                turret: ps.e_flags & sim::pm::ef::TURRET_ACTIVE != 0,
             },
             events,
         );
@@ -1450,18 +1464,30 @@ impl NetPlay {
             .max(cam.angles[0].abs().max(cam.angles[1].abs()));
     }
 
-    /// The view model of the held weapon, built when the weapon changes.
+    /// The view model of the weapon on show (`BG_GetViewmodelWeaponIndex`: the off-hand weapon while one is thrown),
+    /// built when it changes. `clip_empty`: its magazine is.
     fn view_model(
         &mut self,
         dt: f32,
         ps: &PlayerState,
         feet: [f32; 3],
         look: [f32; 3],
+        clip_empty: bool,
     ) -> Vec<ModelInstance> {
-        let index = ps.weapon as u16;
+        let index = sim::pm::viewmodel_weapon(ps);
         let key = (index, ps.viewmodel_index);
         if self.vm.as_ref().is_none_or(|(k, _)| *k != key) {
-            self.vm = None;
+            if self.vm_spare.as_ref().is_some_and(|(k, _)| *k == key) {
+                std::mem::swap(&mut self.vm, &mut self.vm_spare);
+                if let Some((_, vm)) = self.vm.as_mut() {
+                    vm.resume();
+                }
+                self.c.weapon = self.weapons.name(index).to_owned();
+            } else if self.vm.is_some() {
+                self.vm_spare = self.vm.take();
+            }
+        }
+        if self.vm.as_ref().is_none_or(|(k, _)| *k != key) {
             let name = self.weapons.name(index).to_owned();
             // The hands the script gave the player (`setviewmodel`), else the weapon's own.
             let hands = self
@@ -1501,7 +1527,11 @@ impl NetPlay {
         self.c.gun_speed_given += speed[0].abs() + speed[1].abs();
         vm.kick_gun(speed);
         vm.set_felt(self.fx.hit, self.look.shock_end());
+        vm.set_clip_empty(clip_empty);
         let models = vm.update(&shown, dt);
+        for alias in vm.take_sounds() {
+            self.sound.play_ui(&alias);
+        }
         let g = vm.gun_state();
         let recoil = g.offset[0].abs().max(g.offset[1].abs());
         self.c.max_gun_recoil = self.c.max_gun_recoil.max(recoil);
@@ -1694,6 +1724,7 @@ impl NetPlay {
                     weapon: def.map(|d| &**d),
                     weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
                     quiet: e.perks & sim::pm::PERK_QUIETER != 0,
+                    turret: false,
                 },
                 e.event_seq,
                 &e.recent_events(),

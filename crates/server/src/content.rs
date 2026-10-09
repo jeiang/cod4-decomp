@@ -115,6 +115,9 @@ impl AnimInfo {
 /// One resolved name per bone of a model.
 pub type BoneNames = Arc<[Arc<str>]>;
 
+/// A weapon's notetrack to sound alias pairs, as text.
+pub type NoteSounds = Arc<[(Arc<str>, Arc<str>)]>;
+
 /// A player-body animation kept whole for the server skeleton (`pb_*`: the full-body stand,
 /// crouch, prone, run and death animations; `pt_*`: the upper-body fire, reload, melee, throw and flinch partials), with its part names resolved to text.
 ///
@@ -195,6 +198,8 @@ struct Layer {
     model_bones: HashMap<String, (u8, BoneNames)>,
     /// The tag names each weapon hides on its view model (`hideTags`), as text.
     hide_tags: HashMap<String, (u8, BoneNames)>,
+    /// The sound alias each weapon plays at a notetrack of its view model animations (`notetrackSoundMap`).
+    note_sounds: HashMap<String, (u8, NoteSounds)>,
     motions: HashMap<String, (u8, Arc<RootMotion>)>,
     localize: HashMap<String, (u8, Arc<str>)>,
     clipmap: Option<(u8, Arc<Clipmap>)>,
@@ -286,6 +291,16 @@ impl Content {
                         .map(|t| resolve(&strings, *t))
                         .collect();
                     put(&mut layer.hide_tags, tag, &n, tags);
+                    // The map ends at the first empty key; a pair with no sound plays nothing.
+                    let notes: NoteSounds = w
+                        .notetrack_sound_map_keys
+                        .iter()
+                        .zip(&w.notetrack_sound_map_values)
+                        .take_while(|(k, _)| **k != 0)
+                        .filter(|(_, v)| **v != 0)
+                        .map(|(k, v)| (resolve(&strings, *k), resolve(&strings, *v)))
+                        .collect();
+                    put(&mut layer.note_sounds, tag, &n, notes);
                     put(&mut layer.weapons, tag, &n, w);
                 }
             }
@@ -542,6 +557,12 @@ impl Content {
     /// The tags `weapon` hides on its view model (`hideTags`): the sights and parts other variants of the model show.
     pub fn weapon_hide_tags(&self, name: &str) -> Option<&BoneNames> {
         get(&self.map.hide_tags, name).or_else(|| get(&self.base.hide_tags, name))
+    }
+
+    /// The sound aliases `weapon` plays at the notetracks of its view model animations (`notetrackSoundMap`): note name
+    /// and alias.
+    pub fn weapon_note_sounds(&self, name: &str) -> Option<&NoteSounds> {
+        get(&self.map.note_sounds, name).or_else(|| get(&self.base.note_sounds, name))
     }
 
     pub fn localize(&self, name: &str) -> Option<&Arc<str>> {

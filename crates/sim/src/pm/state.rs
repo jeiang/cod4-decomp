@@ -210,6 +210,44 @@ pub mod weapon_state {
     pub const NIGHTVISION_REMOVE: u8 = 26;
 }
 
+/// `weapAnimNumber_t`: what the weapon code last started on the view model (`PlayerState::weapon_anim`); the client maps
+/// each to one of the weapon's animation files. [`TOGGLE`](weap_anim::TOGGLE) flips on every start so the same animation
+/// restarts.
+pub mod weap_anim {
+    pub const IDLE: u16 = 0;
+    pub const FORCE_IDLE: u16 = 1;
+    pub const ATTACK: u16 = 2;
+    pub const ATTACK_LASTSHOT: u16 = 3;
+    pub const RECHAMBER: u16 = 4;
+    pub const ADS_ATTACK: u16 = 5;
+    pub const ADS_ATTACK_LASTSHOT: u16 = 6;
+    pub const ADS_RECHAMBER: u16 = 7;
+    pub const MELEE_ATTACK: u16 = 8;
+    pub const MELEE_CHARGE: u16 = 9;
+    pub const DROP: u16 = 10;
+    pub const RAISE: u16 = 11;
+    pub const FIRST_RAISE: u16 = 12;
+    pub const RELOAD: u16 = 13;
+    pub const RELOAD_EMPTY: u16 = 14;
+    pub const RELOAD_START: u16 = 15;
+    pub const RELOAD_END: u16 = 16;
+    pub const ALTSWITCH_FROM: u16 = 17;
+    pub const ALTSWITCH_TO: u16 = 18;
+    pub const QUICK_DROP: u16 = 19;
+    pub const QUICK_RAISE: u16 = 20;
+    pub const EMPTY_DROP: u16 = 21;
+    pub const EMPTY_RAISE: u16 = 22;
+    pub const SPRINT_IN: u16 = 23;
+    pub const SPRINT_LOOP: u16 = 24;
+    pub const SPRINT_OUT: u16 = 25;
+    pub const HOLD_FIRE: u16 = 26;
+    pub const DETONATE: u16 = 27;
+    pub const NIGHTVISION_WEAR: u16 = 28;
+    pub const NIGHTVISION_REMOVE: u16 = 29;
+    /// Flips each time an animation starts.
+    pub const TOGGLE: u16 = 0x200;
+}
+
 /// `playerState_t.weapFlags` bits.
 pub mod wf {
     /// A reload was requested by the script or the server (`weapFlags & 1`).
