@@ -9,6 +9,13 @@
 use super::buttons;
 use sim::pm::{PlayerState, ev, pmf};
 
+/// What [`scan_own`] has already acted on: the event counter and the spawn count.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Seen {
+    events: Option<u8>,
+    spawn: Option<u16>,
+}
+
 /// What to tell [`super::Input::apply`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Feedback {
@@ -41,13 +48,13 @@ impl Feedback {
 
 /// The events of `ps` raised since `last` (the previous call's `event_sequence`; the first call only learns it),
 /// as feedback. `ps` is the own player's state; its four-slot event ring keeps at most the newest four.
-pub fn scan_own(last: &mut Option<u8>, ps: &PlayerState) -> Feedback {
+pub fn scan_own(seen: &mut Seen, ps: &PlayerState) -> Feedback {
     let mut fb = Feedback {
         frozen: ps.pm_flags & pmf::FROZEN != 0,
         ..Feedback::default()
     };
     let seq = ps.event_sequence;
-    if let Some(prev) = last.replace(seq) {
+    if let Some(prev) = seen.events.replace(seq) {
         let fresh = usize::from(seq.wrapping_sub(prev)).min(4);
         for k in (1..=fresh).rev() {
             match ps.events[usize::from(seq.wrapping_sub(k as u8)) & 3] {
@@ -59,9 +66,13 @@ pub fn scan_own(last: &mut Option<u8>, ps: &PlayerState) -> Feedback {
             }
         }
     }
-    if ps.pm_flags & pmf::RESPAWNED != 0 {
+    // A new life: stand, once (`CL_SetStance(STAND)` in the original; ADS is reset by its own event).
+    if seen
+        .spawn
+        .replace(ps.spawn_count)
+        .is_some_and(|n| n != ps.spawn_count)
+    {
         fb.stances.push(0);
-        fb.leave_ads = true;
     }
     fb
 }
@@ -80,7 +91,7 @@ mod tests {
 
     #[test]
     fn only_events_new_since_the_last_look_count() {
-        let mut last = None;
+        let mut last = Seen::default();
         // The first look learns the counter: old events are not replayed.
         assert_eq!(
             scan_own(&mut last, &ps_with(&[ev::STANCE_FORCE_PRONE])),
@@ -98,14 +109,23 @@ mod tests {
     }
 
     #[test]
-    fn respawn_stands_and_leaves_ads_and_frozen_is_a_state() {
+    fn a_new_spawn_stands_once_and_frozen_is_a_state() {
+        let mut seen = Seen::default();
         let mut ps = PlayerState::default();
-        ps.pm_flags |= pmf::RESPAWNED | pmf::FROZEN;
-        let fb = scan_own(&mut None, &ps);
+        ps.pm_flags |= pmf::FROZEN;
+        assert!(scan_own(&mut seen, &ps).stances.is_empty());
+        ps.spawn_count += 1;
+        let fb = scan_own(&mut seen, &ps);
         assert_eq!(fb.stances, [0]);
-        assert!(fb.leave_ads && fb.frozen);
+        assert!(!fb.leave_ads && fb.frozen);
+        assert!(
+            scan_own(&mut seen, &ps).stances.is_empty(),
+            "once per spawn"
+        );
         let mut held = fb.clone();
+        held.leave_ads = true;
         let taken = held.take();
-        assert!(taken.leave_ads && held.frozen && held.stances.is_empty() && !held.leave_ads);
+        assert!(taken.leave_ads);
+        assert!(held.frozen && held.stances.is_empty() && !held.leave_ads);
     }
 }

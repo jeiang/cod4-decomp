@@ -14,6 +14,9 @@ use crate::crosshair::Reticle;
 use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::helicopter::Rotors;
+use crate::input::{Feedback, InputFrame, Seen, buttons, scan_own};
+use crate::kick::Kick;
+use crate::look::{Look, LookOut, cap_turn};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::Props;
 use crate::ragdoll::Ragdoll;
@@ -181,7 +184,7 @@ pub struct NetPlay {
     /// A night-vision slot was pressed: the next command carries the button.
     nv_press: bool,
     /// The own player's event counter last acted on, and what the input layer is yet to be told of it.
-    own_events: Option<u8>,
+    own_events: Seen,
     feedback: Feedback,
     /// Where the map pick of a location selection points, 0..1 across and down the map.
     pub loc_cursor: [f32; 2],
@@ -268,7 +271,7 @@ impl NetPlay {
             want_weapon: None,
             before_slot: None,
             nv_press: false,
-            own_events: None,
+            own_events: Seen::default(),
             feedback: Feedback::default(),
             loc_cursor: [0.5; 2],
             remotes: HashMap::new(),
@@ -410,7 +413,7 @@ impl NetPlay {
         self.remotes.clear();
         self.vm = None;
         self.events = Events::default();
-        self.own_events = None;
+        self.own_events = Seen::default();
         self.last_eye = None;
         self.c.spawned = false;
         self.c.start = None;

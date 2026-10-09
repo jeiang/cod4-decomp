@@ -31,7 +31,7 @@ mod rawmouse;
 pub mod selftest;
 
 pub use cvar::Cvars;
-pub use feedback::{Feedback, scan_own};
+pub use feedback::{Feedback, Seen, scan_own};
 pub use rawmouse::RawMouse;
 
 use assets::vfs::Vfs;
@@ -351,7 +351,8 @@ impl Input {
         match ev {
             WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
                 if let PhysicalKey::Code(c) = event.physical_key
-                    && let Some(n) = keys::key_name(c)
+                    && let Some(n) =
+                        keys::keypad_nav_name(c, &event.logical_key).or_else(|| keys::key_name(c))
                 {
                     self.key(n, event.state == ElementState::Pressed);
                 }
@@ -479,6 +480,9 @@ impl Input {
                 1.0
             };
         let (mut yaw, mut pitch) = (0.0, 0.0);
+        // The filter's sample buffer rotates every frame, frozen or not.
+        let (mut mx, mut my) = (mdx as f32, mdy as f32);
+        let (px, py) = std::mem::replace(&mut self.prev_mouse, (mx, my));
         if !self.frozen {
             if !strafe {
                 yaw += (turn_l - turn_r) * cv.f32("cl_yawspeed") * speed;
@@ -486,9 +490,6 @@ impl Input {
             pitch += (look_d - look_u) * cv.f32("cl_pitchspeed") * speed;
 
             // `CL_MouseMove`: optional two-sample filter, acceleration by speed, then yaw/pitch or strafe/walk.
-            let (mut mx, mut my) = (mdx as f32, mdy as f32);
-            let (px, py) = self.prev_mouse;
-            self.prev_mouse = (mx, my);
             if cv.bool("m_filter") {
                 (mx, my) = ((mx + px) * 0.5, (my + py) * 0.5);
             }
@@ -870,8 +871,11 @@ impl Input {
             if let Some(s) = h.since.take() {
                 h.accum += now - s;
             }
-            if cmd == "stance" {
-                self.stance_up();
+            match cmd {
+                "stance" => self.stance_up(),
+                // `IN_SpeedUp` / `IN_Speed_Throw_Up`: letting go also ends a toggled ADS.
+                "speed" | "speed_throw" => self.using_ads = false,
+                _ => {}
             }
         }
     }
@@ -1399,6 +1403,36 @@ mod tests {
         let f = frame(&mut i);
         assert_eq!(f.look_delta_yaw, 0.0);
         assert!(f.move_right > 0.0);
+    }
+
+    #[test]
+    fn releasing_the_speed_key_ends_a_toggled_ads() {
+        let mut i = Input::detached();
+        i.exec_line("bind mouse3 \"+toggleads_throw\"; bind mouse2 \"+speed_throw\"");
+        i.key("mouse3", true);
+        i.key("mouse3", false);
+        frame(&mut i);
+        assert!(i.using_ads);
+        i.key("mouse2", true);
+        i.key("mouse2", false);
+        assert!(!i.using_ads);
+    }
+
+    #[test]
+    fn the_mouse_filter_keeps_rotating_while_frozen() {
+        let mut i = Input::detached();
+        i.exec_line("set sensitivity 1; set m_yaw 1; set m_filter 1");
+        i.apply(&Feedback {
+            frozen: true,
+            ..Feedback::default()
+        });
+        i.mouse.winit_motion((10.0, 0.0));
+        frame(&mut i);
+        i.apply(&Feedback::default());
+        frame(&mut i);
+        // The frozen frame's motion is no longer a sample two frames on.
+        i.mouse.winit_motion((10.0, 0.0));
+        assert_eq!(frame(&mut i).look_delta_yaw, -5.0);
     }
 
     #[test]
