@@ -1108,7 +1108,7 @@ impl NetPlay {
 
     /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
-        let index = sim::pm::viewmodel_weapon(&ps);
+        let index = sim::pm::viewmodel_weapon(ps);
         let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
         let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &WeaponParams::default());
         Some(Reticle {
