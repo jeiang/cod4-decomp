@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Torso event selection and flinch/stumble windows follow KisakCOD (bgame/bg_animation_mp.cpp, bgame/bg_pmove.cpp, bgame/bg_weapons.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Server-side player body animation: which `pb_*` animation a player is in, how far through
 //! it, and the resulting skeleton for locational hits.
 //!
@@ -414,8 +415,6 @@ fn all_names() -> Vec<&'static str> {
     v.extend(DEATH_RUN);
     v.extend(STUMBLE_RUN.iter().flatten());
     v.extend(STUMBLE_WALK.iter().flatten());
-    v.extend(TORSO_BODY_CLIPS.iter().copied());
-    v.extend(TORSO_CLIPS.iter().copied());
     v.sort_unstable();
     v.dedup();
     v
@@ -497,8 +496,12 @@ pub struct PlayerPoseInput {
     pub weapon_state: u8,
     /// The newest entry of the player event ring and its sequence number; a new sequence with a fire event starts
     /// another fire clip while the weapon state stays in `FIRING`.
-    pub event: u8,
+    pub events: [u8; 4],
     pub event_seq: u8,
+    /// `ps.weapon`: a different weapon ends a torso clip.
+    pub weapon: u16,
+    /// A remote player's torso channel as the server decided it; `None` where this side decides it from the state.
+    pub torso_wire: Option<TorsoWire>,
     /// `ps.damage_timer` and `ps.damage_duration`, milliseconds, and `ps.flinch_yaw_anim`.
     pub damage_timer: i32,
     pub damage_duration: i32,
@@ -560,7 +563,9 @@ impl PlayerPoseInput {
             waist_pitch: ps.waist_pitch,
             turret: ps.e_flags & ef::TURRET_ACTIVE != 0,
             weapon_state: ps.weapon_state,
-            event: ps.events[usize::from(ps.event_sequence.wrapping_sub(1) & 3)],
+            events: ps.events,
+            weapon: ps.weapon as u16,
+            torso_wire: None,
             event_seq: ps.event_sequence,
             damage_timer: ps.damage_timer,
             damage_duration: ps.damage_duration,
@@ -594,8 +599,9 @@ impl PlayerPoseInput {
         Some(match self.motion() {
             Motion::Idle => return None,
             Motion::Sprint => STUMBLE_SPRINT,
-            Motion::Walk => STUMBLE_WALK[pg][dir],
-            Motion::Run => {
+            Motion::Walk if self.stance == StanceInput::Stand => STUMBLE_WALK[pg][dir],
+            // Crouched, walking and running share `stumble_crouch_*`.
+            Motion::Walk | Motion::Run => {
                 let family = if self.stance != StanceInput::Stand {
                     pg
                 } else if self.weap_class == weap_class::PISTOL {
@@ -965,7 +971,10 @@ impl PlayerAnims {
         let rig = Rig::new(&models)?;
         let mut slots = HashMap::new();
         let mut missing = Vec::new();
-        for name in all_names() {
+        // Upper-body clips are bound where the content has them (a client's); the server does without.
+        let torso = TORSO_BODY_CLIPS.iter().chain(TORSO_CLIPS.iter()).copied();
+        for name in all_names().into_iter().chain(torso.clone()) {
+            let optional = torso.clone().any(|t| t == name);
             match content.player_anim(name) {
                 Some(a) => {
                     let p = &a.parts;
@@ -979,6 +988,7 @@ impl PlayerAnims {
                         },
                     );
                 }
+                None if optional => {}
                 None => missing.push(name),
             }
         }
@@ -1024,6 +1034,10 @@ pub struct PlayerPoseState {
     /// Seconds of cross-fade left.
     blend: f32,
     torso: Option<Torso>,
+    /// Counts every start and end of a torso clip: what a snapshot carries so a client plays the server's choice.
+    torso_seq: u8,
+    /// The last wire sequence a client acted on.
+    wire_seen: Option<u8>,
     /// Swings so far, to take turns among the melee clips.
     swings: u32,
     seen: bool,
@@ -1037,6 +1051,49 @@ struct Torso {
     seconds: f32,
     /// The script's `duration`: stop this early.
     cap: Option<f32>,
+    /// What the clip was chosen for: it ends when the stance or the weapon changes, or (a reload) when the weapon
+    /// leaves the reload states. A pullout belongs to no weapon.
+    stance: StanceInput,
+    weapon: Option<u16>,
+    reload: bool,
+}
+
+/// The torso channel as a snapshot carries it: the clip (`0` none, else 1 + its place in the torso clip list), the
+/// script's `duration` cap in 10 ms (`0` none), and a counter that changes whenever a clip starts or ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TorsoWire {
+    pub clip: u8,
+    pub cap: u8,
+    pub seq: u8,
+}
+
+fn torso_name(clip: u8) -> Option<&'static str> {
+    let i = usize::from(clip).checked_sub(1)?;
+    TORSO_BODY_CLIPS
+        .iter()
+        .chain(TORSO_CLIPS.iter())
+        .nth(i)
+        .copied()
+}
+
+fn torso_index(name: &str) -> u8 {
+    TORSO_BODY_CLIPS
+        .iter()
+        .chain(TORSO_CLIPS.iter())
+        .position(|c| *c == name)
+        .map_or(0, |i| i as u8 + 1)
+}
+
+/// `weapon_state` values of a reload in progress.
+fn in_reload(state: u8) -> bool {
+    matches!(
+        state,
+        ws::RELOADING
+            | ws::RELOADING_INTERUPT
+            | ws::RELOAD_START
+            | ws::RELOAD_START_INTERUPT
+            | ws::RELOAD_END
+    )
 }
 
 impl PlayerPoseState {
@@ -1078,29 +1135,57 @@ impl PlayerPoseState {
         self.input = *input;
     }
 
-    /// Starts the torso clip the change from the last input to `input` calls for (the script's `EVENTS`): weapon
-    /// state edges for reload, melee, offhand throw and pullout, the weapon state or a new fire event for firing,
-    /// and the flinch window opening on a still standing player. The first input only seeds the edges.
+    /// Decides the torso channel. A player this side simulates (`torso_wire` `None`) starts the clip the change
+    /// from the last input to `input` calls for (the script's `EVENTS`): weapon state edges for reload, melee,
+    /// offhand throw and pullout, the weapon state or a fire event in the player event ring for firing, and the
+    /// flinch window opening on a still standing player; a clip ends on death, a stance or weapon change, and a
+    /// reload ends when the weapon leaves the reload states. A remote player follows the server's wire values.
+    /// The first input only seeds the edges.
     fn start_torso(&mut self, input: &PlayerPoseInput) {
+        let seen = std::mem::replace(&mut self.seen, true);
+        if let Some(w) = input.torso_wire {
+            let before = self.wire_seen.replace(w.seq);
+            if input.dead {
+                self.torso = None;
+            } else if before.is_some_and(|b| b != w.seq) {
+                self.torso = torso_name(w.clip).map(|clip| Torso {
+                    clip,
+                    seconds: 0.0,
+                    cap: (w.cap != 0).then(|| f32::from(w.cap) * 0.01),
+                    stance: input.stance,
+                    weapon: None,
+                    reload: false,
+                });
+            }
+            return;
+        }
         let flinching = input.flinching();
         let was = (
             self.input.weapon_state,
             self.input.event_seq,
             self.flinching,
         );
-        let seen = std::mem::replace(&mut self.seen, true);
         self.flinching = flinching;
-        if input.dead {
-            self.torso = None;
-            return;
+        if let Some(t) = self.torso
+            && (input.dead
+                || input.stance != t.stance
+                || t.weapon.is_some_and(|w| w != input.weapon)
+                || (t.reload && !in_reload(input.weapon_state)))
+        {
+            self.set_torso(None);
         }
-        if !seen {
+        if input.dead || !seen {
             return;
         }
         let state_edge = input.weapon_state != was.0;
+        let mut reload = false;
+        let mut pullout = false;
         let clip = match input.weapon_state {
             ws::FIRING if state_edge => input.fire_clip(),
-            ws::RELOADING | ws::RELOAD_START if state_edge => Some((input.reload_clip(), None)),
+            ws::RELOADING | ws::RELOAD_START if state_edge && !in_reload(was.0) => {
+                reload = true;
+                Some((input.reload_clip(), None))
+            }
             ws::MELEE_INIT if state_edge => {
                 self.swings = self.swings.wrapping_add(1);
                 Some(input.melee_clip(self.swings))
@@ -1112,22 +1197,50 @@ impl PlayerPoseState {
             }
             .throw_clip(false),
             ws::DROPPING | ws::DROPPING_QUICK if state_edge && !input.mantle => {
+                pullout = true;
                 Some((input.pullout_clip(), None))
             }
             _ => None,
         }
         .or_else(|| {
-            let fired = input.event_seq != was.1
-                && matches!(input.event, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT);
+            // Every event raised since the last input, not just the newest.
+            let new = usize::from(input.event_seq.wrapping_sub(was.1)).min(4);
+            let fired = (0..new).any(|k| {
+                let slot = usize::from(input.event_seq.wrapping_sub(k as u8 + 1) & 3);
+                matches!(
+                    input.events[slot],
+                    ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT
+                )
+            });
             fired.then(|| input.fire_clip()).flatten()
         })
         .or_else(|| (flinching && !was.2).then(|| (input.flinch_clip(), None)));
         if let Some((clip, cap)) = clip {
-            self.torso = Some(Torso {
+            self.set_torso(Some(Torso {
                 clip,
                 seconds: 0.0,
                 cap,
-            });
+                stance: input.stance,
+                weapon: (!pullout).then_some(input.weapon),
+                reload,
+            }));
+        }
+    }
+
+    fn set_torso(&mut self, t: Option<Torso>) {
+        self.torso = t;
+        self.torso_seq = self.torso_seq.wrapping_add(1);
+    }
+
+    /// The torso channel for a snapshot.
+    pub fn torso_wire(&self) -> TorsoWire {
+        TorsoWire {
+            clip: self.torso.map_or(0, |t| torso_index(t.clip)),
+            cap: self
+                .torso
+                .and_then(|t| t.cap)
+                .map_or(0, |c| (c * 100.0).round() as u8),
+            seq: self.torso_seq,
         }
     }
 
@@ -1145,9 +1258,14 @@ impl PlayerPoseState {
         anims.layer(t.clip, t.seconds, weight)
     }
 
-    /// The torso clip playing over `anims`' legs, if any.
+    /// The torso clip playing over `anims`' legs, if any (a client; the server keeps no torso clips).
     pub fn torso(&self, anims: &PlayerAnims) -> Option<&'static str> {
         self.torso_layer(anims).and(self.torso.map(|t| t.clip))
+    }
+
+    /// The torso clip chosen, whether or not it has clips to play.
+    pub fn torso_choice(&self) -> Option<&'static str> {
+        self.torso.map(|t| t.clip)
     }
 
     /// The animation currently selected.
@@ -1661,7 +1779,7 @@ mod tests {
         s.update(
             0.033,
             &PlayerPoseInput {
-                event: ev::FIRE_WEAPON,
+                events: [ev::FIRE_WEAPON; 4],
                 event_seq: 1,
                 ..firing
             },
@@ -1731,5 +1849,210 @@ mod tests {
             .select(),
             "pb_stumble_pistol_forward"
         );
+    }
+
+    #[test]
+    fn a_crouched_player_stumbles_in_the_crouch_clips_walking_or_running() {
+        let hit = PlayerPoseInput {
+            stance: StanceInput::Crouch,
+            damage_timer: 300,
+            damage_duration: 300,
+            ..running()
+        };
+        assert_eq!(hit.select(), "pb_stumble_forward");
+        assert_eq!(
+            PlayerPoseInput {
+                walking: true,
+                ..hit
+            }
+            .select(),
+            "pb_stumble_forward",
+            "a crouched walk does not use the standing walk stumbles"
+        );
+        let pistol = PlayerPoseInput {
+            weap_class: weap_class::PISTOL,
+            move_dir: 90.0,
+            walking: true,
+            ..hit
+        };
+        assert_eq!(pistol.select(), "pb_stumble_pistol_left");
+        let grenade = PlayerPoseInput {
+            weap_class: weap_class::GRENADE,
+            ..hit
+        };
+        assert_eq!(grenade.select(), "pb_stumble_pistol_forward");
+    }
+
+    #[test]
+    fn a_torso_clip_ends_with_the_stance_the_weapon_or_the_reload() {
+        let rest = PlayerPoseInput {
+            weapon: 3,
+            ..Default::default()
+        };
+        let reloading = |s: &mut PlayerPoseState| {
+            s.update(0.033, &rest);
+            s.update(
+                0.033,
+                &PlayerPoseInput {
+                    weapon_state: ws::RELOADING,
+                    ..rest
+                },
+            );
+            assert!(s.torso.is_some());
+        };
+        let mut s = PlayerPoseState::default();
+        reloading(&mut s);
+        // RELOAD_START then RELOADING is one reload, not two.
+        let seq = s.torso_seq;
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::RELOAD_END,
+                ..rest
+            },
+        );
+        assert!(s.torso.is_some() && s.torso_seq == seq);
+        // Crouching mid-reload ends it.
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::RELOAD_END,
+                stance: StanceInput::Crouch,
+                ..rest
+            },
+        );
+        assert!(s.torso.is_none());
+        // Interrupted (the weapon is dropped) ends it.
+        let mut s = PlayerPoseState::default();
+        reloading(&mut s);
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::READY,
+                ..rest
+            },
+        );
+        assert!(s.torso.is_none());
+        // A switch to another weapon ends a fire clip.
+        let mut s = PlayerPoseState::default();
+        s.update(0.033, &rest);
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::FIRING,
+                ..rest
+            },
+        );
+        assert!(s.torso.is_some());
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::FIRING,
+                weapon: 4,
+                ..rest
+            },
+        );
+        assert!(s.torso.is_none());
+        // But the pullout that starts the switch survives the weapon index changing.
+        let mut s = PlayerPoseState::default();
+        s.update(0.033, &rest);
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::DROPPING,
+                ..rest
+            },
+        );
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::RAISING,
+                weapon: 4,
+                ..rest
+            },
+        );
+        assert!(s.torso.is_some());
+    }
+
+    #[test]
+    fn a_fire_event_is_found_anywhere_in_the_ring() {
+        let mut s = PlayerPoseState::default();
+        let still = PlayerPoseInput {
+            weapon_state: ws::FIRING,
+            ..Default::default()
+        };
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::READY,
+                ..still
+            },
+        );
+        s.update(0.033, &still);
+        let t = s.torso_seq;
+        // Three events since the last input, the fire first, a footstep after it.
+        s.update(
+            0.033,
+            &PlayerPoseInput {
+                events: [ev::FIRE_WEAPON, ev::FOOTSTEP_RUN, ev::FOOTSTEP_RUN, 0],
+                event_seq: 3,
+                ..still
+            },
+        );
+        assert_ne!(s.torso_seq, t);
+    }
+
+    #[test]
+    fn a_remote_player_plays_what_the_server_chose() {
+        // The server decides a reload; its snapshot carries the choice; a client with no weapon state plays it.
+        let rest = PlayerPoseInput::default();
+        let mut server = PlayerPoseState::default();
+        server.update(0.033, &rest);
+        server.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::RELOADING,
+                ..rest
+            },
+        );
+        let wire = server.torso_wire();
+        assert_eq!(torso_name(wire.clip), Some("pt_reload_stand_rifle"));
+        let mut client = PlayerPoseState::default();
+        let remote = |w| PlayerPoseInput {
+            torso_wire: Some(w),
+            ..rest
+        };
+        client.update(
+            0.033,
+            &remote(TorsoWire {
+                seq: wire.seq.wrapping_sub(1),
+                ..TorsoWire::default()
+            }),
+        );
+        assert_eq!(client.torso_choice(), None);
+        client.update(0.033, &remote(wire));
+        assert_eq!(client.torso_choice(), Some("pt_reload_stand_rifle"));
+        // The same snapshot again does not restart it.
+        client.update(0.5, &remote(wire));
+        client.update(0.033, &remote(wire));
+        assert!(client.torso.unwrap().seconds > 0.5);
+        // The server ending the clip ends it.
+        server.update(
+            0.033,
+            &PlayerPoseInput {
+                weapon_state: ws::READY,
+                ..rest
+            },
+        );
+        client.update(0.033, &remote(server.torso_wire()));
+        assert_eq!(client.torso_choice(), None);
+    }
+
+    #[test]
+    fn every_clip_a_selection_returns_has_a_wire_index() {
+        for name in TORSO_BODY_CLIPS.iter().chain(TORSO_CLIPS.iter()) {
+            assert_eq!(torso_name(torso_index(name)), Some(*name));
+        }
+        assert!(TORSO_BODY_CLIPS.len() + TORSO_CLIPS.len() < 255);
     }
 }

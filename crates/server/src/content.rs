@@ -148,13 +148,13 @@ impl PlayerAnim {
     }
 }
 
-/// True for the animations the server skeleton samples (`pb_*` body animations and `pt_*` upper-body partials), the
+/// True for the animations the server skeleton samples (`pb_*` body animations and `pt_*` upper-body partials for a client), the
 /// mantle animations whose root motion moves a climbing player, and, for a client, the weapon view model animations
 /// (`viewmodel_*`) and the helicopter's rotors (`bh_rotors`).
 fn is_player_anim(name: &str, client: bool) -> bool {
     let starts = |p: &str| name.len() > p.len() && name[..p.len()].eq_ignore_ascii_case(p);
     starts("pb_")
-        || starts("pt_")
+        || (client && starts("pt_"))
         || MANTLE_ANIM_NAMES
             .iter()
             .any(|n| n.eq_ignore_ascii_case(name))

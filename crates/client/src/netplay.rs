@@ -30,7 +30,7 @@ use net::predict::{Env, PlayerBoxes, Predictor};
 use render::ModelInstance;
 use serde_json::{Value, json};
 use server::netsv::eflags;
-use server::playeranim::PlayerPoseInput;
+use server::playeranim::{PlayerPoseInput, TorsoWire};
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
 use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
@@ -1345,19 +1345,21 @@ fn pose_input(
         waist_pitch: e.waist_pitch,
         damage_timer: i32::from(e.damage_timer),
         damage_duration: i32::from(e.damage_duration),
-        flinch_yaw_anim: e.flinch_dir,
         e_flags: if e.eflags & eflags::TURRET != 0 {
             sim::pm::ef::TURRET_ACTIVE
         } else {
             0
         },
-        event_sequence: e.event_seq,
-        events: [e.event; 4],
         ..PlayerState::default()
     };
     let moving = e.velocity[0].hypot(e.velocity[1]) > 10.0;
     let mut i = PlayerPoseInput::from_ps(&ps, moving, weapon);
     i.sprinting = e.pm_flags & pmf::SPRINTING != 0;
+    i.torso_wire = Some(TorsoWire {
+        clip: e.torso_clip,
+        cap: e.torso_cap,
+        seq: e.torso_seq,
+    });
     i
 }
 
@@ -1545,6 +1547,55 @@ fn follow_server_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote(f: impl FnOnce(&mut EntityState)) -> PlayerPoseInput {
+        let mut e = EntityState::new(3);
+        e.etype = net::entity::etype::PLAYER;
+        f(&mut e);
+        pose_input(&e, None, e.eflags & eflags::DEAD != 0)
+    }
+
+    #[test]
+    fn a_remote_last_stand_player_plays_the_last_stand_idle() {
+        let i = remote(|e| e.pm_type = PmType::LastStand as u8);
+        assert_eq!(i.select(), "pb_laststand_idle");
+        assert_eq!(remote(|_| {}).select(), "pb_stand_alert");
+        // Dead from the flag even if the type byte lags.
+        assert!(remote(|e| e.eflags = eflags::DEAD).dead);
+    }
+
+    #[test]
+    fn a_remote_players_lean_turret_and_body_tilt_reach_the_pose() {
+        let i = remote(|e| {
+            e.angles = [0.0, 90.0, 22.5];
+            e.eflags = eflags::TURRET;
+            e.torso_pitch = 12.0;
+            e.waist_pitch = 5.0;
+            e.damage_timer = 300;
+            e.damage_duration = 400;
+        });
+        assert!(i.walking, "leaning counts as walking");
+        assert!(i.turret);
+        assert_eq!((i.torso_pitch, i.waist_pitch), (12.0, 5.0));
+        assert_eq!((i.damage_timer, i.damage_duration), (300, 400));
+    }
+
+    #[test]
+    fn a_remote_players_torso_channel_is_the_servers() {
+        let i = remote(|e| {
+            e.torso_clip = 4;
+            e.torso_cap = 15;
+            e.torso_seq = 9;
+        });
+        assert_eq!(
+            i.torso_wire,
+            Some(TorsoWire {
+                clip: 4,
+                cap: 15,
+                seq: 9
+            })
+        );
+    }
 
     #[test]
     fn a_watched_players_deltas_do_not_turn_the_watchers_view() {

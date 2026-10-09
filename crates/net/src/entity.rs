@@ -56,8 +56,11 @@ pub struct EntityState {
     /// first part of the duration.
     pub damage_timer: u16,
     pub damage_duration: u16,
-    /// Player: `ps.flinch_yaw_anim` (0 forward, 1 back, 2 left, 3 right).
-    pub flinch_dir: u8,
+    /// Player: the torso animation channel the server decided: the clip (0 none), its cap in 10 ms (0 none) and a
+    /// counter that changes whenever a clip starts or ends. See `server::playeranim::TorsoWire`.
+    pub torso_clip: u8,
+    pub torso_cap: u8,
+    pub torso_seq: u8,
 }
 
 macro_rules! int {
@@ -117,7 +120,9 @@ fn table() -> Vec<Field<EntityState>> {
         num!(s, s.waist_pitch, Angle16),
         int!(s, s.damage_timer, Bits(16)),
         int!(s, s.damage_duration, Bits(16)),
-        int!(s, s.flinch_dir, Bits(2)),
+        int!(s, s.torso_clip, Bits(8)),
+        int!(s, s.torso_cap, Bits(8)),
+        int!(s, s.torso_seq, Bits(8)),
     ]
 }
 
@@ -154,7 +159,9 @@ mod tests {
             waist_pitch: 200.0,
             damage_timer: 750,
             damage_duration: 900,
-            flinch_dir: 3,
+            torso_clip: 12,
+            torso_cap: 40,
+            torso_seq: 200,
             ..EntityState::new(5)
         }
         .canonical();

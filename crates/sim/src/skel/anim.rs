@@ -61,6 +61,9 @@ impl Accum {
     /// translation) the result is the unit blend `(1 - weight) * self + weight * over`, normalised by
     /// [`Accum::finish`]; where it did not, the bone is unchanged.
     pub fn overlaid(&self, over: &Accum, weight: f32) -> Accum {
+        if over.quat == [0.0; 4] && over.trans_weight == 0.0 {
+            return *self;
+        }
         let (oq, ot) = over.finish();
         let (bq, bt) = self.finish();
         let mut out = *self;

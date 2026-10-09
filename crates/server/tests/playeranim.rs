@@ -8,9 +8,15 @@ use sim::skel::hitloc::HitLocation;
 use std::path::PathBuf;
 
 fn content() -> Option<Content> {
+    content_for(false)
+}
+
+/// `client`: keep what a client keeps, the upper-body `pt_*` clips among it.
+fn content_for(client: bool) -> Option<Content> {
     let root = PathBuf::from(std::env::var_os("COD4_PATH")?);
     let install = Install::open(&root).expect("install");
     let mut c = Content::default();
+    c.client = client;
     c.load_boot(&install).expect("boot zones");
     c.load_map(&install, "mp_crash").expect("mp_crash");
     Some(c)
@@ -174,7 +180,7 @@ fn rig_name(anims: &PlayerAnims, bone: usize) -> &str {
 
 #[test]
 fn a_torso_clip_moves_the_arms_and_leaves_the_legs() {
-    let Some(c) = content() else {
+    let Some(c) = content_for(true) else {
         eprintln!("COD4_PATH not set; skipping");
         return;
     };
@@ -228,4 +234,14 @@ fn a_torso_clip_moves_the_arms_and_leaves_the_legs() {
         );
         assert!(d("j_ankle_le") < 0.01, "{clip}: the legs moved");
     }
+}
+
+#[test]
+fn the_server_keeps_no_torso_clips() {
+    let Some(c) = content() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    assert!(c.player_anim("pt_stand_shoot").is_none());
+    assert!(c.player_anim("pb_stand_alert").is_some());
 }

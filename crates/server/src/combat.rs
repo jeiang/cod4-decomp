@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Flashbang translated in part from KisakCOD (game_mp/g_combat_mp.cpp, game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Flashbang and the flinch direction translated in part from KisakCOD (game_mp/g_combat_mp.cpp, game_mp/g_client_script_cmd_mp.cpp, game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Damage: `G_Damage`, the player damage and death paths, radius damage and damage volumes.
 //!
 //! Scripts own the rules. The engine's part is the order of events: damage reaches

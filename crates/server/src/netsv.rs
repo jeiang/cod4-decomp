@@ -602,7 +602,10 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
                 s.waist_pitch = c.ps.waist_pitch;
                 s.damage_timer = c.ps.damage_timer.clamp(0, i32::from(u16::MAX)) as u16;
                 s.damage_duration = c.ps.damage_duration.clamp(0, i32::from(u16::MAX)) as u16;
-                s.flinch_dir = c.ps.flinch_yaw_anim & 3;
+                let torso = c.pose.torso_wire();
+                s.torso_clip = torso.clip;
+                s.torso_cap = torso.cap;
+                s.torso_seq = torso.seq;
                 s.eflags = match c.team {
                     Team::Axis => eflags::TEAM_AXIS,
                     Team::Allies => eflags::TEAM_ALLIES,
