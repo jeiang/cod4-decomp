@@ -9,6 +9,7 @@ use super::Impl::{self, Later, Real};
 use super::methods::live;
 use super::{Args, FuncFn, MethFn};
 use crate::game::Game;
+use crate::missile::FL_STABLE_MISSILES;
 
 type R = Result<Value, String>;
 
@@ -24,9 +25,6 @@ const M5: &str = "M5 connect and play";
 const M7: &str = "M7 audio";
 const M8: &str = "M8 FX, decals, post";
 const VEH: &str = "M8 vehicles";
-
-/// `FL_STABLE_MISSILES`.
-const FL_STABLE_MISSILES: i32 = 0x2_0000;
 
 pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
     ("kick", f(kick)),

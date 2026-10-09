@@ -639,7 +639,7 @@ fn flight_path(
 ) -> Vec<[f32; 3]> {
     let infos = vec![sidewinder(), lock_on_launcher(), hellfire(), rpg()];
     let (mut g, mut vm) = arena(&[], 0, infos);
-    for (name, defaults) in server::missile::JAVELIN_CVARS {
+    for (name, defaults) in server::missile::MISSILE_CVARS {
         g.cvars.register(name, defaults, 0);
     }
     let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
@@ -1152,4 +1152,447 @@ fn the_blow_that_killed_shows_nothing_on_the_next_life() {
     let ps = &g.client(victim).unwrap().ps;
     assert_eq!((ps.damage_event, ps.damage_count), (0, 0));
     assert_eq!(ps.aim_spread_scale, 0.0);
+}
+
+// ---- damage model and explosives ------------------------------------------------------------
+
+use server::combat::{Blast, Damage};
+
+fn blast_at(origin: [f32; 3], attacker: u16, inner: f32, outer: f32, radius: f32) -> Blast {
+    Blast {
+        origin,
+        radius,
+        inner,
+        outer,
+        attacker: Some(attacker),
+        inflictor: None,
+        cone: None,
+        ignore: None,
+        skip_clients: false,
+        mean: server::combat::MOD_GRENADE_SPLASH,
+        weapon: 0,
+    }
+}
+
+#[test]
+fn blast_damage_falls_with_distance_from_the_origin_not_the_box() {
+    let (mut g, mut vm) = arena(&[], 0, vec![frag()]);
+    let attacker = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [100.0, 0.0, 0.0], 0.0, Team::Axis);
+    // 100 units off in a radius of 110: 100 * (1 - 100/110) = 9; measured to the box it would be 22.
+    g.blast(
+        &mut vm,
+        &blast_at([0.0, 0.0, 1.0], attacker, 100.0, 0.0, 110.0),
+    );
+    assert_eq!(damage_calls(&g, victim)[0].0, 9);
+}
+
+#[test]
+fn a_blast_hurts_by_how_much_of_the_player_it_reaches() {
+    // A low wall between blast and victim: only the two points of the upper body see the blast.
+    let wall = ([50.0, -100.0, 0.0], [54.0, 100.0, 40.0]);
+    let (mut g, mut vm) = arena(&[wall], 0, vec![frag()]);
+    let attacker = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [100.0, 0.0, 0.0], 0.0, Team::Axis);
+    g.blast(
+        &mut vm,
+        &blast_at([0.0, 0.0, 30.0], attacker, 90.0, 90.0, 300.0),
+    );
+    assert_eq!(damage_calls(&g, victim)[0].0, 60);
+    // Behind a full wall: nothing.
+    let wall = ([50.0, -100.0, 0.0], [54.0, 100.0, 400.0]);
+    let (mut g, mut vm) = arena(&[wall], 0, vec![frag()]);
+    let attacker = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [100.0, 0.0, 0.0], 0.0, Team::Axis);
+    g.blast(
+        &mut vm,
+        &blast_at([0.0, 0.0, 30.0], attacker, 90.0, 90.0, 300.0),
+    );
+    assert!(damage_calls(&g, victim).is_empty());
+}
+
+fn run_script(g: &mut Game, vm: Vm, src: &str, func: &str) -> Vm {
+    use server::script::{Dispatch, ScriptHost};
+    let prog = compile(&[("t.gsc", src)], &Builtins::stock_mp(), Options::default()).unwrap();
+    let f = prog.find("t", func).unwrap();
+    let dispatch = Dispatch::new(&prog);
+    drop(vm);
+    let mut vm = Vm::new(prog).unwrap();
+    let mut host = ScriptHost {
+        game: g,
+        dispatch: &dispatch,
+    };
+    vm.call(&mut host, f, None, &[]).unwrap();
+    vm
+}
+
+#[test]
+fn setplayerignoreradiusdamage_spares_players_only_and_the_world_is_the_default_attacker() {
+    let (mut g, vm) = arena(&[], 0, vec![frag()]);
+    let mut vm = vm;
+    let victim = add_player(&mut g, &mut vm, [100.0, 0.0, 0.0], 0.0, Team::Axis);
+    let mut crate_ent = server::game::Ent::new(server::game::EntKind::Plain, "crate");
+    crate_ent.origin = [0.0, 100.0, 30.0];
+    crate_ent.health = 500;
+    crate_ent.takedamage = true;
+    let crate_ent = g.spawn(crate_ent).unwrap();
+    let src = "go() { setplayerignoreradiusdamage(1); radiusdamage((0,0,30), 300, 100, 50); \
+               setplayerignoreradiusdamage(0); radiusdamage((0,0,30), 300, 100, 50); }";
+    let _ = run_script(&mut g, vm, src, "go");
+    // Both blasts reached the crate (83 each), whoever was the attacker: the world.
+    assert_eq!(
+        g.ent(crate_ent).unwrap().health,
+        500 - 83 * 2,
+        "{}",
+        g.ent(crate_ent).unwrap().health
+    );
+    // The flag the script latches makes a blast skip players and nothing else.
+    g.calls.clear();
+    let mut b = blast_at(
+        [0.0, 0.0, 30.0],
+        sim::cm::ENTITYNUM_WORLD,
+        100.0,
+        50.0,
+        300.0,
+    );
+    b.skip_clients = true;
+    g.blast(&mut self::vm(), &b);
+    assert!(damage_calls(&g, victim).is_empty());
+    b.skip_clients = false;
+    g.blast(&mut self::vm(), &b);
+    assert_eq!(damage_calls(&g, victim).len(), 1);
+}
+
+#[test]
+fn the_player_damage_notify_gives_the_amount_before_the_attacker() {
+    use gsc::EntClass;
+    use server::script::{Dispatch, ScriptHost};
+    let script = r#"
+init() { level.amount = 0; level.who = -1; }
+watch() { self waittill("damage", amount, attacker); level.amount = amount; level.who = attacker getentitynumber(); }
+"#;
+    let (mut g, _) = arena(&[], 0, vec![frag()]);
+    let prog = compile(
+        &[("t.gsc", script)],
+        &Builtins::stock_mp(),
+        Options::default(),
+    )
+    .unwrap();
+    let (init, watch) = (
+        prog.find("t", "init").unwrap(),
+        prog.find("t", "watch").unwrap(),
+    );
+    let dispatch = Dispatch::new(&prog);
+    let mut vm = Vm::new(prog).unwrap();
+    let a = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let b = add_player(&mut g, &mut vm, [200.0, 0.0, 0.0], 0.0, Team::Axis);
+    {
+        let mut host = ScriptHost {
+            game: &mut g,
+            dispatch: &dispatch,
+        };
+        vm.call(&mut host, init, None, &[]).unwrap();
+        let obj = vm.entity(b, EntClass::Entity);
+        vm.call(&mut host, watch, Some(obj), &[]).unwrap();
+    }
+    let mut d = Damage::new(37, server::combat::MOD_RIFLE_BULLET);
+    d.attacker = Some(a);
+    g.finish_player_damage(&mut vm, b, d).unwrap();
+    let mut host = ScriptHost {
+        game: &mut g,
+        dispatch: &dispatch,
+    };
+    assert!(vm.run_current_threads(&mut host).is_empty());
+    let level = vm.level();
+    assert!(matches!(level.get("amount"), Some(Value::Int(37))));
+    assert!(matches!(level.get("who"), Some(Value::Int(w)) if w == i32::from(a)));
+}
+
+#[test]
+fn a_player_the_last_stand_perk_saved_is_immune_for_half_a_second() {
+    let (mut g, mut vm) = arena(&[], 0, vec![frag()]);
+    let a = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let b = add_player(&mut g, &mut vm, [200.0, 0.0, 0.0], 0.0, Team::Axis);
+    g.client_mut(b).unwrap().ps.perks = 0x80;
+    g.level.time = 1000;
+    let hit = |g: &mut Game, vm: &mut Vm, n: i32| {
+        let mut d = Damage::new(n, server::combat::MOD_RIFLE_BULLET);
+        d.attacker = Some(a);
+        g.finish_player_damage(vm, b, d).unwrap();
+    };
+    hit(&mut g, &mut vm, 150);
+    assert!(g.client(b).unwrap().last_stand);
+    let health = g.ent(b).unwrap().health;
+    g.level.time = 1400;
+    hit(&mut g, &mut vm, 50);
+    assert_eq!(
+        g.ent(b).unwrap().health,
+        health,
+        "no damage inside the window"
+    );
+    g.level.time = 1501;
+    hit(&mut g, &mut vm, 50);
+    assert_eq!(g.ent(b).unwrap().health, 0, "dead after it");
+    assert_eq!(g.client(b).unwrap().ps.pm_type, PmType::Dead);
+}
+
+#[test]
+fn the_engine_sends_no_obituary_of_its_own_and_the_script_one_carries_its_arguments() {
+    use net::ui::ServerCmd;
+    let (mut g, vm) = arena(&[], 0, vec![rifle()]);
+    let mut vm = vm;
+    let a = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let b = add_player(&mut g, &mut vm, [200.0, 0.0, 0.0], 0.0, Team::Axis);
+    let mut d = Damage::new(500, server::combat::MOD_RIFLE_BULLET);
+    d.attacker = Some(a);
+    g.finish_player_damage(&mut vm, b, d).unwrap();
+    assert_eq!(g.client(b).unwrap().ps.pm_type, PmType::Dead);
+    let obits = |g: &Game| {
+        g.ui.out
+            .iter()
+            .filter_map(|o| match &o.cmd {
+                ServerCmd::Obituary(o) => Some(o.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(obits(&g).is_empty(), "death alone is not a kill-feed line");
+    let src = format!(
+        "go() {{ obituary(getentbynum({b}), getentbynum({a}), \"rifle_mp\", \"MOD_HEAD_SHOT\"); }}"
+    );
+    let _ = run_script(&mut g, vm, &src, "go");
+    let o = obits(&g);
+    assert_eq!(o.len(), 1);
+    assert_eq!((o[0].killer, o[0].victim, o[0].headshot), (a, b, true));
+    assert_eq!(o[0].mean, "MOD_HEAD_SHOT");
+}
+
+#[test]
+fn a_shot_judged_in_the_past_tells_the_script_how_far_back() {
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [40.0, 0.0, 0.0], 180.0, Team::Axis);
+    g.client_mut(shooter).unwrap().ps.view_height_current = 66.0;
+    g.level.time = 1000;
+    g.lag_time = Some(900);
+    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
+    let call = g
+        .calls
+        .iter()
+        .find(|c| c.this == Some(victim))
+        .expect("a hit");
+    assert!(
+        matches!(call.args[9], Value::Int(100)),
+        "{:?}",
+        call.args[9]
+    );
+}
+
+// ---- rockets ---------------------------------------------------------------------------------
+
+fn drifting_rpg() -> WeaponInfo {
+    WeaponInfo {
+        name: "drift_mp".into(),
+        destabilization_rate_time: 0.3,
+        destabilization_curvature_max: 40.0,
+        destabilize_distance: 300,
+        ..rpg()
+    }
+}
+
+fn rocket_path(info: WeaponInfo, setup: impl FnOnce(&mut Game, u16)) -> Vec<[f32; 3]> {
+    let name = info.name.to_string();
+    let (mut g, mut vm) = arena(&[], 0, vec![info]);
+    let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
+    let weapon = g.weapons.index(&name);
+    g.level.time = 1000;
+    let n = g
+        .launch_rocket(shooter, weapon, [0.0, 0.0, 500.0], [1.0, 0.0, 0.0])
+        .expect("launch");
+    setup(&mut g, n);
+    let mut path = vec![[0.0, 0.0, 500.0]];
+    for t in (1005..6000).step_by(5) {
+        g.level.time = t;
+        g.run_entity(&mut vm, n);
+        match g.ent(n) {
+            Some(e) => path.push(e.origin),
+            None => break,
+        }
+    }
+    path
+}
+
+fn lateral(path: &[[f32; 3]]) -> f32 {
+    path.iter()
+        .map(|p| p[1].abs().max((p[2] - 500.0).abs()))
+        .fold(0.0, f32::max)
+}
+
+#[test]
+fn an_unstable_rocket_drifts_off_its_line_after_its_destabilise_distance() {
+    let drifting = rocket_path(drifting_rpg(), |_, _| {});
+    assert!(lateral(&drifting) > 30.0, "{}", lateral(&drifting));
+    // Nothing happens before the distance.
+    assert!(
+        drifting
+            .iter()
+            .filter(|p| p[0] < 290.0)
+            .all(|p| p[1].abs() < 1.0 && (p[2] - 500.0).abs() < 1.0)
+    );
+    // A stable rocket (no rate time) flies straight, and so does one a script made stable.
+    let straight = rocket_path(
+        WeaponInfo {
+            destabilization_rate_time: 0.0,
+            ..drifting_rpg()
+        },
+        |_, _| {},
+    );
+    assert!(lateral(&straight) < 1.0);
+    let flagged = rocket_path(drifting_rpg(), |g, n| {
+        g.ent_mut(n).unwrap().flags |= server::missile::FL_STABLE_MISSILES;
+    });
+    assert!(lateral(&flagged) < 1.0);
+}
+
+#[test]
+fn an_attractor_bends_a_destabilised_rocket_toward_it_and_a_stable_one_ignores_it() {
+    let calm = WeaponInfo {
+        destabilization_curvature_max: 0.0,
+        ..drifting_rpg()
+    };
+    let goal = [3000.0, 800.0, 500.0];
+    let attract = move |g: &mut Game, _: u16| {
+        g.attractors
+            .add(server::missile::Attractor {
+                attractor: true,
+                entity: None,
+                origin: goal,
+                strength: 3000.0,
+                max_dist: 20_000.0,
+            })
+            .unwrap();
+    };
+    let bent = rocket_path(calm.clone(), attract);
+    let plain = rocket_path(calm.clone(), |_, _| {});
+    assert!(lateral(&plain) < 1.0);
+    assert!(bent.iter().any(|p| p[1] > 50.0), "never turned");
+    let stable = WeaponInfo {
+        destabilization_rate_time: 0.0,
+        ..calm
+    };
+    assert!(lateral(&rocket_path(stable, attract)) < 1.0);
+}
+
+// ---- water and glass ---------------------------------------------------------------------------
+
+/// A floor and a pool of water above it (surface at z = 200), every brush of `surface` type.
+fn pool(surface: i32, extra: Vec<BrushSpec>, models: Vec<Vec<BrushSpec>>) -> (Game, Vm) {
+    let mut world = vec![
+        BrushSpec::aabb([-4000.0, -4000.0, -100.0], [4000.0, 4000.0, 0.0], SOLID),
+        BrushSpec::aabb(
+            [-4000.0, -4000.0, 0.0],
+            [4000.0, 4000.0, 200.0],
+            sim::contents::WATER,
+        ),
+    ];
+    world.extend(extra);
+    let map = MapSpec {
+        world,
+        models,
+        surface_flags: Some(surface),
+        ..Default::default()
+    };
+    let (mut g, vm) = arena(&[], 0, vec![rpg()]);
+    g.world = Some(World::new(map.build()));
+    for (name, defaults) in server::missile::MISSILE_CVARS {
+        g.cvars.register(name, defaults, 0);
+    }
+    (g, vm)
+}
+
+fn explosion_heights(g: &Game) -> Vec<f32> {
+    g.tempev
+        .live(g.level.time)
+        .filter(|s| s.event == server::tempev::ev::EXPLOSION)
+        .map(|s| s.origin[2])
+        .collect()
+}
+
+#[test]
+fn an_explosion_in_shallow_water_shows_on_the_surface_and_a_deep_one_not_at_all() {
+    for (z, want) in [(170.0, vec![200.0]), (50.0, vec![])] {
+        let (mut g, mut vm) = pool(0, vec![], vec![]);
+        let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
+        g.level.time = 1000;
+        let weapon = g.weapons.index("rpg_mp");
+        let n = g
+            .launch_rocket(shooter, weapon, [0.0, 0.0, z], [1.0, 0.0, 0.0])
+            .unwrap();
+        g.detonate_missile(&mut vm, n);
+        let got = explosion_heights(&g);
+        assert!(
+            got.len() == want.len() && got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1.0),
+            "exploded at z = {z}: {got:?}"
+        );
+    }
+}
+
+#[test]
+fn a_missile_falling_into_water_splashes_and_flies_on() {
+    let (mut g, mut vm) = pool(20 << 20, vec![], vec![]);
+    let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 300.0], 0.0, Team::Allies);
+    g.level.time = 1000;
+    let weapon = g.weapons.index("rpg_mp");
+    let n = g
+        .launch_rocket(shooter, weapon, [0.0, 0.0, 400.0], [0.3, 0.0, -0.95])
+        .unwrap();
+    let mut deepest = 400.0f32;
+    for t in (1005..1400).step_by(5) {
+        g.level.time = t;
+        g.run_entity(&mut vm, n);
+        let Some(e) = g.ent(n) else { break };
+        deepest = deepest.min(e.origin[2]);
+    }
+    assert!(deepest < 190.0, "stopped at the surface: {deepest}");
+    let splash = g
+        .tempev
+        .live(g.level.time)
+        .any(|s| s.event == server::tempev::ev::MISSILE_BOUNCE && s.event_parm == 20);
+    assert!(splash);
+}
+
+#[test]
+fn a_missile_hurts_a_damageable_pane_of_glass_and_flies_through_it() {
+    let pane = BrushSpec::aabb([-2.0, -200.0, 0.0], [2.0, 200.0, 400.0], SOLID);
+    let (mut g, mut vm) = pool(9 << 20, vec![], vec![vec![pane]]);
+    let shooter = add_player(&mut g, &mut vm, [-500.0, 0.0, 0.0], 0.0, Team::Allies);
+    let mut e = server::game::Ent::new(server::game::EntKind::Brush, "script_brushmodel");
+    e.brush_model = Some(1);
+    e.origin = [322.0, 0.0, 0.0];
+    e.mins = [-2.0, -200.0, 0.0];
+    e.maxs = [2.0, 200.0, 400.0];
+    e.health = 100;
+    e.takedamage = true;
+    e.contents = SOLID;
+    let glass = g.spawn(e).unwrap();
+    g.relink(glass);
+    g.level.time = 1000;
+    let weapon = g.weapons.index("rpg_mp");
+    let n = g
+        .launch_rocket(shooter, weapon, [0.0, 0.0, 300.0], [1.0, 0.0, 0.0])
+        .unwrap();
+    // Frames of 50 ms: the rocket crosses the 4 unit pane in one step.
+    g.level.frametime = 50;
+    let mut passed = false;
+    for t in (1050..2000).step_by(50) {
+        g.level.time = t;
+        g.run_entity(&mut vm, n);
+        let Some(e) = g.ent(n) else { break };
+        passed |= e.origin[0] > 330.0;
+    }
+    assert!(
+        g.ent(glass).unwrap().health < 100,
+        "the pane took no damage"
+    );
+    assert!(passed, "the rocket stopped at the pane");
 }

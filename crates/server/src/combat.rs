@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Flashbang and the flinch direction translated in part from KisakCOD (game_mp/g_combat_mp.cpp, game_mp/g_client_script_cmd_mp.cpp, game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Flashbang, the flinch direction, radius damage and CanDamage, G_Damage and the player damage and death paths translated in part from KisakCOD (game_mp/g_combat_mp.cpp, game_mp/g_client_script_cmd_mp.cpp, game_mp/g_scr_main_mp.cpp, game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Damage: `G_Damage`, the player damage and death paths, radius damage and damage volumes.
 //!
 //! Scripts own the rules. The engine's part is the order of events: damage reaches
@@ -17,7 +17,12 @@ use sim::pm::{PmType, pmf};
 
 use crate::bullet::{dot, length, sub};
 use crate::client::{Session, Team};
-use crate::game::{EntKind, Game, ScriptCall};
+use crate::game::{Ent, EntKind, Game, ScriptCall};
+
+/// How long a player the Last Stand perk saved is immune to damage.
+const LAST_STAND_GRACE_MS: i32 = 500;
+/// The death animation length when the body animations are not loaded.
+const DEFAULT_DEATH_ANIM_MS: i32 = 1200;
 
 /// `meansOfDeath_t` in the original's order.
 pub const MODS: [&str; 16] = [
@@ -108,6 +113,8 @@ pub struct Blast {
     pub cone: Option<(f32, Vec3)>,
     /// An entity the blast skips, e.g. the one a rocket hit directly.
     pub ignore: Option<u16>,
+    /// Players take no damage (`setplayerignoreradiusdamage`); other entities still do.
+    pub skip_clients: bool,
     pub mean: u8,
     pub weapon: u32,
 }
@@ -187,6 +194,93 @@ pub fn flashbang_percents(
     (distance, (dot(forward, to_blast) + 1.0) * 0.5)
 }
 
+/// What a blast is stopped by (`0x802011`): the map, glass, shot clips and vehicles.
+pub(crate) const RADIUS_DAMAGE_MASK: i32 =
+    contents::SOLID | contents::GLASS | contents::CLIPSHOT | contents::VEHICLE;
+
+fn cross(a: Vec3, b: Vec3) -> Vec3 {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// The points `CanDamage` samples on a player: the middle of the body and four more, half a body height above and
+/// below it and 15 units to either side of it across the line from the blast.
+fn client_sample_points(origin: Vec3, eye: Vec3, centre: Vec3) -> [Vec3; 5] {
+    let half = (eye[2] - origin[2]) * 0.5;
+    let ahead = normalize([centre[0] - origin[0], centre[1] - origin[1], 0.0]);
+    let right = [-ahead[1], ahead[0]];
+    let mid = [0, 1, 2].map(|i| (eye[i] + origin[i]) * 0.5);
+    let at = |side: f32, up: f32| {
+        [
+            mid[0] + 15.0 * side * right[0],
+            mid[1] + 15.0 * side * right[1],
+            mid[2] + up * half,
+        ]
+    };
+    [
+        mid,
+        at(1.0, 1.0),
+        at(1.0, -1.0),
+        at(-1.0, 1.0),
+        at(-1.0, -1.0),
+    ]
+}
+
+/// The points `CanDamage` samples on anything else: the middle of its box and the four corners of the box's
+/// outline as seen from the blast.
+fn box_sample_points(mins: Vec3, maxs: Vec3, centre: Vec3) -> [Vec3; 5] {
+    let mid = [0, 1, 2].map(|i| (mins[i] + maxs[i]) * 0.5);
+    let toward = normalize(sub(centre, mid));
+    let side = normalize([-toward[1], toward[0], 0.0]);
+    let up = cross(toward, side);
+    let corner = sub(maxs, mid);
+    let reach_side = (corner[0] * side[0]).abs() + (corner[1] * side[1]).abs();
+    let reach_up =
+        (corner[0] * up[0]).abs() + (corner[1] * up[1]).abs() + (corner[2] * up[2]).abs();
+    let at = |s: f32, u: f32| {
+        [0, 1, 2].map(|i| mid[i] + s * reach_side * side[i] + u * reach_up * up[i])
+    };
+    [
+        mid,
+        at(1.0, 1.0),
+        at(-1.0, 1.0),
+        at(1.0, -1.0),
+        at(-1.0, -1.0),
+    ]
+}
+
+/// How much of a target `seen` of its five sample points cover: a player a third per point (all of it from four),
+/// anything else wholly from the first.
+fn coverage_fraction(player: bool, seen: usize) -> f32 {
+    match seen {
+        0 => 0.0,
+        s if !player || s > 3 => 1.0,
+        s => s as f32 / 3.0,
+    }
+}
+
+/// `G_GetRadiusDamageDistanceSquared`: from the blast to a brush model's box, to anything else's origin.
+fn radius_distance_squared(e: &Ent, blast: Vec3) -> f32 {
+    let v: Vec3 = if e.brush_model.is_some() {
+        [0, 1, 2].map(|i| {
+            let (lo, hi) = (e.origin[i] + e.mins[i], e.origin[i] + e.maxs[i]);
+            if lo > blast[i] {
+                lo - blast[i]
+            } else if hi < blast[i] {
+                blast[i] - hi
+            } else {
+                0.0
+            }
+        })
+    } else {
+        sub(e.origin, blast)
+    };
+    dot(v, v)
+}
+
 impl Game {
     fn ent_obj(&self, vm: &mut Vm, n: Option<u16>) -> Value {
         match n {
@@ -208,7 +302,8 @@ impl Game {
             self.damage_client(vm, target, d);
             return;
         }
-        if !t.takedamage {
+        // Damage reaches nothing that is not damageable or that cannot be hurt (`FL_GODMODE`).
+        if !t.takedamage || t.flags & 1 != 0 {
             return;
         }
         let mut damage = d.damage.max(1);
@@ -219,15 +314,16 @@ impl Game {
         t.health -= damage;
         let health = t.health;
         let attacker = self.ent_obj(vm, d.attacker.or(Some(ENTITYNUM_WORLD)));
-        let dir = normalize(d.dir.unwrap_or([0.0; 3]));
-        // `waittill("damage", amount, attacker, direction, point, type, ...)`.
+        // `waittill("damage", amount, attacker, direction, point, type, model, tag, part, flags)`; the direction is
+        // the one the damage was dealt with, unnormalised. Model, tag and part name what a trace hit of an attached
+        // model or body part; nothing here traces those, so they are empty, as for any hit without one.
         vm.notify_entity(
             target,
             "damage",
             &[
                 Value::Int(damage),
                 attacker.clone(),
-                Value::Vector(dir),
+                vec_or_zero(d.dir),
                 vec_or_zero(d.point),
                 Value::str(MODS[usize::from(d.mean)]),
                 Value::str(""),
@@ -237,6 +333,9 @@ impl Game {
             ],
         );
         if health <= 0 {
+            if let Some(t) = self.ent_mut(target) {
+                t.health = t.health.max(-999);
+            }
             vm.notify_entity(target, "death", &[attacker]);
         }
         if self
@@ -313,8 +412,9 @@ impl Game {
         let Some(c) = self.client(target) else {
             return Err(format!("entity {target} is not a player"));
         };
-        if c.last_stand && c.ps.damage_timer > 0 {
-            // Last-stand grace: the original skips damage until the stand timer ends.
+        // A player the Last Stand perk just saved takes nothing at all for a moment.
+        if c.last_stand && c.last_stand_time > self.level.time {
+            return Ok(());
         }
         let mut damage = d.damage;
         if damage <= 0 {
@@ -378,7 +478,8 @@ impl Game {
         e.health -= damage;
         let health = e.health;
         let attacker = self.ent_obj(vm, d.attacker);
-        vm.notify_entity(target, "damage", &[attacker, Value::Int(damage)]);
+        // `waittill("damage", amount, attacker)`.
+        vm.notify_entity(target, "damage", &[Value::Int(damage), attacker]);
         let at = self.ent(target).map_or([0.0; 3], |e| e.origin);
         self.tempev.add(now, crate::tempev::ev::PLAYER_PAIN, |s| {
             s.origin = at;
@@ -392,8 +493,10 @@ impl Game {
             .client(target)
             .is_some_and(|c| !c.last_stand && c.ps.perks & 0x80 != 0);
         if last_stand_perk {
+            let until = self.level.time + LAST_STAND_GRACE_MS;
             let c = self.client_mut(target).expect("checked above");
             c.last_stand = true;
+            c.last_stand_time = until;
             if let Some(func) = self.callbacks.player_last_stand {
                 let args = self.damage_callback_args(vm, &d, damage);
                 self.calls.push(ScriptCall {
@@ -452,6 +555,17 @@ impl Game {
         ]
     }
 
+    /// `BG_AnimScriptEvent(ANIM_ET_DEATH)`: the length in milliseconds of the death animation of `n`; a server
+    /// without the body animations keeps a corpse pose of [`DEFAULT_DEATH_ANIM_MS`].
+    fn death_anim_ms(&mut self, n: u16) -> i32 {
+        self.ensure_player_anims();
+        let anims = self.player_anims.as_deref();
+        anims
+            .zip(self.client(n))
+            .and_then(|(a, c)| c.pose.death_duration_ms(a))
+            .unwrap_or(DEFAULT_DEATH_ANIM_MS)
+    }
+
     /// `player_die`: notify, switch to the dead movement type and run the killed callback.
     pub fn player_die(&mut self, vm: &mut Vm, n: u16, d: &Damage, damage: i32) {
         if self.alive_for_death(n) {
@@ -477,27 +591,11 @@ impl Game {
         if d.attacker.is_some_and(|a| a != n && self.is_client(a)) {
             self.stats.kills += 1;
         }
-        let killer = d
-            .attacker
-            .filter(|a| self.is_client(*a))
-            .unwrap_or(net::ui::NO_ENTITY);
-        let mean = MODS[usize::from(d.mean)];
-        self.send(
-            crate::ui::Dest::All,
-            net::ui::ServerCmd::Obituary(net::ui::Obituary {
-                killer,
-                victim: n,
-                weapon: self.weapon_name(d.weapon).to_owned(),
-                mean: mean.to_owned(),
-                headshot: d.mean == MOD_HEAD_SHOT || d.hitloc == HITLOC_HEAD,
-            }),
-        );
         let attacker = self.ent_obj(vm, d.attacker);
         vm.notify_entity(n, "death", std::slice::from_ref(&attacker));
-        // Death animation length: the original asks the animation script; the server's
-        // corpse pose lasts 1.2 s.
+        // How long the death animation plays: what the body animation of the player picks to die in.
         let mut args = self.damage_callback_args(vm, d, damage);
-        args[8] = Value::Int(1200);
+        args[8] = Value::Int(self.death_anim_ms(n));
         if let Some(func) = self.callbacks.player_killed {
             self.calls.push(ScriptCall {
                 func,
@@ -528,147 +626,106 @@ impl Game {
         self.relink(n);
     }
 
-    /// `CanDamage`: the blast reaches `target` when a line from `origin` to the entity's
-    /// centre (or one of its offsets) is clear.
-    pub fn can_damage(&self, target: u16, origin: Vec3, inflictor: u16) -> Option<Vec3> {
-        self.can_damage_through(target, origin, inflictor, contents::MASK_SOLID)
-    }
-
-    /// `CanDamage` with the contents the line of sight is blocked by.
-    pub fn can_damage_through(
+    /// `CanDamage`: how much of `target` a blast at `centre` reaches, from 0 to 1. Five points of the target are
+    /// sampled and each counts when a line from `centre` to it is clear of `mask` (and, with a `cone`, lies inside
+    /// it: cosine of the half angle and axis). A player is covered a third per point seen, any other entity wholly
+    /// by one point.
+    pub fn damage_coverage(
         &self,
         target: u16,
-        origin: Vec3,
+        centre: Vec3,
+        cone: Option<(f32, Vec3)>,
         inflictor: u16,
         mask: i32,
-    ) -> Option<Vec3> {
-        let w = self.world.as_ref()?;
-        let e = self.ent(target)?;
-        let mid = [
-            e.origin[0] + (e.mins[0] + e.maxs[0]) * 0.5,
-            e.origin[1] + (e.mins[1] + e.maxs[1]) * 0.5,
-            e.origin[2] + (e.mins[2] + e.maxs[2]) * 0.5,
-        ];
-        let clear = |to: Vec3| {
-            let t = w.trace(origin, to, [0.0; 3], [0.0; 3], inflictor, mask);
-            t.fraction >= 1.0 || t.hit_id == target
+    ) -> f32 {
+        let (Some(w), Some(e)) = (self.world.as_ref(), self.ent(target)) else {
+            return 0.0;
+        };
+        let client = self.client(target);
+        let points = match client {
+            Some(c) => {
+                let eye = [
+                    c.ps.origin[0],
+                    c.ps.origin[1],
+                    c.ps.origin[2] + c.ps.view_height_current,
+                ];
+                client_sample_points(e.origin, eye, centre)
+            }
+            None => box_sample_points(
+                [0, 1, 2].map(|i| e.origin[i] + e.mins[i]),
+                [0, 1, 2].map(|i| e.origin[i] + e.maxs[i]),
+                centre,
+            ),
         };
         use sim::cm::Collide;
-        if clear(mid) {
-            return Some(mid);
-        }
-        for off in [
-            [15.0, 15.0, 0.0],
-            [-15.0, 15.0, 0.0],
-            [15.0, -15.0, 0.0],
-            [-15.0, -15.0, 0.0],
-        ] {
-            let p = [mid[0] + off[0], mid[1] + off[1], mid[2] + 24.0];
-            if clear(p) {
-                return Some(p);
-            }
-        }
-        None
+        let seen = points
+            .iter()
+            .filter(|p| {
+                if let Some((cos, axis)) = cone
+                    && cos > dot(normalize(sub(**p, centre)), axis)
+                {
+                    return false;
+                }
+                let t = w.trace(centre, **p, [0.0; 3], [0.0; 3], inflictor, mask);
+                t.fraction >= 1.0 || t.hit_id == target
+            })
+            .count();
+        coverage_fraction(client.is_some(), seen)
     }
 
-    /// `G_RadiusDamage` with no damage cone and nothing ignored. Returns whether any entity
-    /// was hit.
-    #[allow(clippy::too_many_arguments)]
-    pub fn radius_damage(
-        &mut self,
-        vm: &mut Vm,
-        origin: Vec3,
-        radius: f32,
-        inner: i32,
-        outer: i32,
-        attacker: Option<u16>,
-        inflictor: Option<u16>,
-        mean: u8,
-        weapon: u32,
-    ) -> bool {
-        self.blast(
-            vm,
-            &Blast {
-                origin,
-                radius,
-                inner: inner as f32,
-                outer: outer as f32,
-                attacker,
-                inflictor,
-                cone: None,
-                ignore: None,
-                mean,
-                weapon,
-            },
-        )
-    }
-
-    /// `G_RadiusDamage`: everything in range that the blast can see takes distance-scaled
-    /// damage. Returns whether any entity was hit.
+    /// `G_RadiusDamage`: everything in range that the blast reaches takes damage falling from `inner` at the centre
+    /// to `outer` at `radius`, by distance from the blast to the entity's origin (to its box for a brush model)
+    /// and scaled by how much of it the blast reaches. Returns whether it hurt an enemy player.
     pub fn blast(&mut self, vm: &mut Vm, b: &Blast) -> bool {
-        let (origin, radius) = (b.origin, b.radius);
-        if radius < 1.0 {
+        // The original does nothing for a blast without an attacker.
+        let Some(attacker) = b.attacker else {
             return false;
-        }
+        };
+        let radius = b.radius.max(1.0);
         let mut hit = false;
         let targets: Vec<u16> = self
             .in_use()
-            .filter(|(n, e)| {
-                (e.takedamage || e.kind == EntKind::Client)
-                    && Some(*n) != b.inflictor
-                    && Some(*n) != b.ignore
-                    && *n < 1022
-            })
+            .filter(|(n, e)| e.takedamage && Some(*n) != b.ignore && *n < ENTITYNUM_WORLD)
             .map(|(n, _)| n)
             .collect();
         for t in targets {
             let Some(e) = self.ent(t) else { continue };
-            // Distance from the blast to the entity's box.
-            let mut d2 = 0.0f32;
-            for (i, o) in origin.iter().enumerate() {
-                let (lo, hi) = (e.origin[i] + e.mins[i], e.origin[i] + e.maxs[i]);
-                let delta = if *o < lo {
-                    lo - o
-                } else if *o > hi {
-                    o - hi
-                } else {
-                    0.0
-                };
-                d2 += delta * delta;
-            }
-            let dist = d2.sqrt();
-            if dist >= radius {
+            if b.skip_clients && e.kind == EntKind::Client {
                 continue;
             }
+            let dist2 = radius_distance_squared(e, b.origin);
+            if dist2 >= radius * radius {
+                continue;
+            }
+            let dist = dist2.sqrt();
+            let mut dir = sub(e.origin, b.origin);
+            dir[2] += 24.0;
             if let Some(c) = self.client(t)
                 && (!c.connected() || c.session != Session::Playing)
             {
                 continue;
             }
-            let Some(p) = self.can_damage(t, origin, b.inflictor.unwrap_or(ENTITYNUM_NONE)) else {
+            let reach = self.damage_coverage(
+                t,
+                b.origin,
+                b.cone,
+                b.inflictor.unwrap_or(ENTITYNUM_NONE),
+                RADIUS_DAMAGE_MASK,
+            );
+            if reach <= 0.0 {
                 continue;
-            };
-            let mut dir = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
-            if let Some((cos, axis)) = b.cone {
-                let d = normalize(dir);
-                if cos > d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2] {
-                    continue;
-                }
             }
-            let frac = dist / radius;
-            let points = ((b.outer - b.inner) * frac + b.inner) as i32;
-            let points = points.max(1);
-            dir[2] += 24.0;
-            let mut dmg = Damage::new(points, b.mean);
+            hit |= self.is_accurate_hit(t, attacker);
+            let points = ((b.inner - b.outer) * (1.0 - dist / radius) + b.outer) * reach;
+            let mut dmg = Damage::new(points as i32, b.mean);
             dmg.attacker = b.attacker;
             dmg.inflictor = b.inflictor;
-            dmg.dir = Some(normalize(dir));
-            dmg.point = Some(p);
+            dmg.dir = Some(dir);
+            dmg.point = Some(b.origin);
             dmg.flags = dflags::RADIUS | dflags::NO_KNOCKBACK;
             dmg.weapon = b.weapon;
             dmg.hitloc = HITLOC_NONE;
             self.g_damage(vm, t, dmg);
-            hit = true;
         }
         hit
     }
@@ -703,7 +760,7 @@ impl Game {
             // The thrower is not in the way, and sky blocks the flash as well as walls (mask 2049).
             let ignore = attacker.unwrap_or(ENTITYNUM_NONE);
             let mask = contents::SOLID | contents::SKY;
-            if dist > radius_max || self.can_damage_through(n, origin, ignore, mask).is_none() {
+            if dist > radius_max || self.damage_coverage(n, origin, None, ignore, mask) <= 0.0 {
                 continue;
             }
             let eye = [
@@ -763,7 +820,10 @@ fn flinch_yaw_anim(relative: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{flashbang_percents, flinch_yaw_anim};
+    use super::{
+        box_sample_points, client_sample_points, coverage_fraction, flashbang_percents,
+        flinch_yaw_anim,
+    };
 
     #[test]
     fn a_flashbang_dose_falls_with_distance_and_with_looking_away() {
@@ -786,5 +846,35 @@ mod tests {
         assert_eq!(flinch_yaw_anim(90.0), 2);
         assert_eq!(flinch_yaw_anim(180.0), 1);
         assert_eq!(flinch_yaw_anim(-90.0), 3);
+    }
+
+    #[test]
+    fn a_player_is_covered_a_third_per_point_seen_and_anything_else_by_one() {
+        let player: Vec<f32> = (0..=5).map(|n| coverage_fraction(true, n)).collect();
+        assert_eq!(player, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0, 1.0, 1.0]);
+        let other: Vec<f32> = (0..=5).map(|n| coverage_fraction(false, n)).collect();
+        assert_eq!(other, [0.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn the_sample_points_of_a_player_straddle_the_body_across_the_line_from_the_blast() {
+        // Feet at the origin, eyes 60 up, the blast along +x: the points spread along y and z.
+        let p = client_sample_points([0.0; 3], [0.0, 0.0, 60.0], [100.0, 0.0, 0.0]);
+        assert_eq!(p[0], [0.0, 0.0, 30.0]);
+        let ys: Vec<f32> = p.iter().map(|p| p[1]).collect();
+        let zs: Vec<f32> = p.iter().map(|p| p[2]).collect();
+        assert_eq!(ys, [0.0, 15.0, 15.0, -15.0, -15.0]);
+        assert_eq!(zs, [30.0, 60.0, 0.0, 60.0, 0.0]);
+    }
+
+    #[test]
+    fn the_sample_points_of_a_box_are_its_outline_as_the_blast_sees_it() {
+        let p = box_sample_points([-10.0, -20.0, 0.0], [10.0, 20.0, 40.0], [100.0, 0.0, 20.0]);
+        assert_eq!(p[0], [0.0, 0.0, 20.0]);
+        // Seen along x: half the width in y, half the height in z.
+        for q in &p[1..] {
+            assert!((q[1].abs() - 20.0).abs() < 1e-3 && ((q[2] - 20.0).abs() - 20.0).abs() < 1e-3);
+        }
+        assert!(p[1][2] > 20.0 && p[3][2] < 20.0);
     }
 }

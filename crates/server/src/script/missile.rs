@@ -2,10 +2,10 @@
 //! Missile builtins: `detonate`, grenade touch damage, `missile_settarget`, `dropitem` and the
 //! attractor and repulsor slots.
 //!
-//! Attractors and repulsors only steer guided missiles in the original (`GuidedMissileSteering`);
-//! the slots are real (ids, limits, errors, release with their entity) but nothing reads them
-//! yet. The multiplayer binary has no `missile_setflightmode*` builtins: `missile_settarget` is the
-//! only way a script aims a guided rocket.
+//! Attractors and repulsors bend the heading of an unguided rocket that has begun to destabilise
+//! (`Missile_ApplyAttractorsRepulsors`); the slots are real (ids, limits, errors, release with their entity). The
+//! multiplayer binary has no `missile_setflightmode*` builtins: `missile_settarget` is the only way a script aims
+//! a guided rocket.
 
 use gsc::{EntClass, EntRef, Value, Vm};
 use sim::cm::{ENTITYNUM_NONE, ENTITYNUM_WORLD};
