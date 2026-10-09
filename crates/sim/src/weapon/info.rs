@@ -7,6 +7,7 @@
 //! `weapInventoryType_t`, `weapFireType_t`, `OffhandClass` and `PenetrateType`. Times are
 //! milliseconds. Fact source: `iw3mp.exe` 1.7 weapon definition loader.
 
+use super::gun::GunParams;
 use crate::pm::WeaponMove;
 use assets::zone::weapon::WeaponDef;
 
@@ -353,6 +354,9 @@ pub struct WeaponInfo {
     pub stickiness: i32,
     pub parallel_bounce: [f32; SURFACE_TYPES],
     pub perpendicular_bounce: [f32; SURFACE_TYPES],
+
+    /// What moves the gun in the player's hands.
+    pub gun: GunParams,
 }
 
 impl Default for WeaponInfo {
@@ -504,6 +508,7 @@ impl Default for WeaponInfo {
             stickiness: 0,
             parallel_bounce: [0.0; SURFACE_TYPES],
             perpendicular_bounce: [0.0; SURFACE_TYPES],
+            gun: GunParams::default(),
         }
     }
 }
@@ -684,6 +689,7 @@ impl WeaponInfo {
             stickiness: def.stickiness,
             parallel_bounce: def.parallel_bounce,
             perpendicular_bounce: def.perpendicular_bounce,
+            gun: GunParams::from_def(def),
         }
     }
 

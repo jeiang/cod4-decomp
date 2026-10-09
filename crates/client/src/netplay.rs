@@ -148,6 +148,14 @@ struct Counters {
     shots: u64,
     /// The most the view kicked up, and the most the pitch of a sent cmd differed from the player's own aim, degrees.
     max_kick_up: f32,
+    /// The gun: the speed shots gave its recoil spring, the most its offset and its turn-lag reached, degrees, and
+    /// how often the recoil came back to rest. `gun_springs` is false for a weapon that cannot aim (no spring).
+    gun_speed_given: f32,
+    max_gun_recoil: f32,
+    max_gun_sway: f32,
+    gun_recoil_settled: u64,
+    gun_recoil_live: bool,
+    gun_springs: bool,
     max_kick_in_cmd: f32,
     /// The camera layer: frames the prediction began a stair step on (the eye was to ease, not jump), the frames of
     /// those where the drawn eye still jumped, the largest offsets of the drawn eye from the logical one (units, the
@@ -1440,8 +1448,21 @@ impl NetPlay {
         shown.origin = feet;
         shown.viewangles = look;
         self.c.frames_with_viewmodel += 1;
-        vm.kick_gun(self.kick.take_gun_speed());
+        let speed = self.kick.take_gun_speed();
+        self.c.gun_speed_given += speed[0].abs() + speed[1].abs();
+        vm.kick_gun(speed);
+        vm.set_clock(self.live_time, self.damage.hit());
         let models = vm.update(&shown, dt);
+        let g = vm.gun_state();
+        let recoil = g.offset[0].abs().max(g.offset[1].abs());
+        self.c.max_gun_recoil = self.c.max_gun_recoil.max(recoil);
+        self.c.max_gun_sway = self
+            .c
+            .max_gun_sway
+            .max(g.sway_angles[0].abs().max(g.sway_angles[1].abs()));
+        self.c.gun_recoil_settled += u64::from(self.c.gun_recoil_live && recoil == 0.0);
+        self.c.gun_recoil_live = recoil != 0.0;
+        self.c.gun_springs = vm.has_recoil_spring();
         let sight = vm.sight();
         // Through the scope the original draws no gun.
         let scoped = sight.overlay.is_some();
@@ -1807,6 +1828,11 @@ impl NetPlay {
             "eye_speed": eye_speed_summary(&self.c.eye_speeds),
             "sound": self.sound.report(),
         });
+        report["gun_speed_given"] = json!(self.c.gun_speed_given);
+        report["gun_recoil_max"] = json!(self.c.max_gun_recoil);
+        report["gun_sway_max"] = json!(self.c.max_gun_sway);
+        report["gun_recoil_settled"] = json!(self.c.gun_recoil_settled);
+        report["gun_has_spring"] = json!(self.c.gun_springs);
         report["view_kick_max"] = json!(self.c.max_kick_up);
         report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
         report["view_kick_settled"] = json!(self.c.kick_settled);

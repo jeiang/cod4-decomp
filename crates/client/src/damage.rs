@@ -122,6 +122,15 @@ impl DamageView {
         self.hit_time = now;
     }
 
+    /// The last hit as the gun feels it: when, and the kick at full strength.
+    pub fn hit(&self) -> crate::viewmodel::Hit {
+        crate::viewmodel::Hit {
+            time: self.hit_time,
+            pitch: self.pitch,
+            roll: self.roll,
+        }
+    }
+
     /// The view's turn from the last hit, degrees pitch (positive down) and roll, for the weapon at `ads` aimed
     /// (`overlay`: through a scope).
     pub fn view_angles(&self, now: i32, ads: f32, overlay: bool) -> [f32; 2] {

@@ -3,9 +3,9 @@
 //! grenades, and the script notifies that follow (`HandleClientEvent`, `FireWeapon`,
 //! `FireWeaponMelee`, `G_UseOffHand`).
 //!
-//! Shots leave the player's view origin along the view angles; the original aims along the gun
-//! angles, which only differ by the weapon sway of aimed-down-sight weapons (not modelled). The
-//! view kick of a shot is applied by clients, so the server does not need it.
+//! Shots leave the player's view origin along [`Client::fire_angles`]: the view angles with the view's effects
+//! (a hit's kick, a scope's sway) and, aimed down sights, the gun's angles (idle, bob, recoil, sway). The view kick
+//! of a shot is applied by clients, so the server only advances the gun's recoil spring.
 
 use gsc::Vm;
 use sim::Vec3;
@@ -47,7 +47,7 @@ impl Game {
                 } => {
                     let Some(aim) = self
                         .client(n)
-                        .map(|c| AimBasis::from_angles(view_origin(&c.ps), &c.ps.viewangles))
+                        .map(|c| AimBasis::from_angles(view_origin(&c.ps), &c.fire_angles()))
                     else {
                         continue;
                     };
@@ -69,8 +69,8 @@ impl Game {
         };
         let (weap_type, class) = (info.weap_type, info.weap_class);
         let Some(c) = self.client(n) else { return };
-        let aim = AimBasis::from_angles(view_origin(&c.ps), &c.ps.viewangles);
-        let aim_angles = c.ps.viewangles;
+        let aim_angles = c.fire_angles();
+        let aim = AimBasis::from_angles(view_origin(&c.ps), &aim_angles);
         let spread = aim_spread_degrees(info, &c.ps, &WeaponParams::default());
         let fuse_left = c.ps.grenade_time_left;
         self.stats.shots += 1;
@@ -93,6 +93,21 @@ impl Game {
             WeaponType::Projectile => self.fire_rocket(n, weapon, &aim, spread),
             WeaponType::Binoculars => {}
         }
+        self.kick_gun(n, weapon);
+    }
+
+    /// `BG_WeaponFireRecoil` for the gun's recoil spring (`G_PlayerEvent`): the shot has left, now the gun kicks.
+    fn kick_gun(&mut self, n: u16, weapon: u16) {
+        let rolls: [f32; 4] = std::array::from_fn(|_| self.rand() as f32 / u32::MAX as f32);
+        let mut rolls = rolls.into_iter().cycle();
+        let (Some(info), Some(c)) = (
+            self.weapons.get(weapon),
+            self.clients.get_mut(usize::from(n)),
+        ) else {
+            return;
+        };
+        let r = sim::weapon::fire::fire_recoil(info, &c.ps, || rolls.next().unwrap_or(0.0));
+        c.gun.state.kick(r.gun_kick);
     }
 
     /// `Bullet_Fire` and the damage it deals.
