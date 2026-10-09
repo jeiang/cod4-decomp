@@ -295,6 +295,11 @@ fn real_grenades_prime_cook_and_throw() {
         ws::OFFHAND_START,
         "holding a primed grenade"
     );
+    assert_eq!(
+        (viewmodel_weapon(&s.ps), s.ps.weapon as u16),
+        (frag, s.want),
+        "the grenade is on show while the weapon stays in hand"
+    );
     pm_step(&mut s, 0, 200);
     let throw = s.log.iter().find_map(|e| match e {
         WeaponEvent::OffhandThrow {
@@ -307,4 +312,5 @@ fn real_grenades_prime_cook_and_throw() {
     let fuse = t.info(frag).fuse_time;
     assert!(fuse_left <= fuse && fuse_left > 0);
     assert_eq!(s.ps.weapon_state, ws::READY);
+    assert_eq!(viewmodel_weapon(&s.ps), s.want, "the weapon is back");
 }

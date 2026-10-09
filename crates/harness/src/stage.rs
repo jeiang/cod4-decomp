@@ -315,7 +315,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-viewmodel",
-        description: "cod4e --viewmodel-tour on three maps: the first-person weapon and hands drawn from spawn points and paths must not be one colour (a wrong reflection probe painted them red) nor black",
+        description: "cod4e --viewmodel-tour on three maps: the first-person weapon and hands drawn from spawn points and paths must not be one colour (a wrong reflection probe painted them red) nor black; an off-hand throw must show the grenade, and the last round and an empty reload their own animations",
         needs_install: false,
         timeout: Duration::from_secs(8 * MINUTES),
         default: true,

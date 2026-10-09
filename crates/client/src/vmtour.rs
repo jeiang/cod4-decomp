@@ -122,6 +122,7 @@ pub fn run(
         .cloned()
         .ok_or_else(|| format!("weapon {WEAPON} not loaded"))?;
     let mut vm = ViewModel::new(&lib.content, &def, None)?;
+    let mut animation = crate::vmanim::check(&lib.content);
     let spawns = data.spawn_points();
     if spawns.is_empty() {
         return Err(format!("{map} has no spawn points"));
@@ -147,7 +148,7 @@ pub fn run(
     });
     let tv = tex.create_view(&Default::default());
     let mut samples = Vec::new();
-    let mut bad = Vec::new();
+    let mut bad = std::mem::take(&mut animation);
     // The spawn points, and the way from each to the one across the map in quarters: where a player crosses it.
     let n = views.min(spawns.len());
     let picked: Vec<[f32; 3]> = (0..n).map(|i| spawns[i * spawns.len() / n]).collect();

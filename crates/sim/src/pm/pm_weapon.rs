@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Parts translated from KisakCOD (bgame/bg_weapons.cpp: PM_StartWeaponAnim, PM_ContinueWeaponAnim and the weapon animation
+// starts of the PM_Weapon_* functions; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! `PM_Weapon`: the weapon state machine one user command steps through, and
 //! `PM_AdjustAimSpreadScale`.
 //!
@@ -7,8 +9,8 @@
 //! [`PlayerWeapons`] (what is owned, magazines and stock). Weapon values come from the
 //! [`WeaponTable`]. It only runs when the [`Pmove`] carries a [`WeaponCtx`](crate::weapon::WeaponCtx).
 //! Outputs are the original's predictable events on the player state plus the reliable list of
-//! [`WeaponEvent`](crate::weapon::WeaponEvent)s in `Pmove::weapon_out`. Animation selection is not
-//! modelled; it does not change which state follows which. Holding the breath on a scoped weapon
+//! [`WeaponEvent`](crate::weapon::WeaponEvent)s in `Pmove::weapon_out`. The animation the view model plays
+//! (`weapon_anim`, started where the original starts it) does not change which state follows which. Holding the breath on a scoped weapon
 //! (`PM_UpdateHoldBreath`, `PM_HoldBreathFire`) is: it steadies the scope's sway through
 //! `hold_breath_scale`.
 //!
@@ -25,7 +27,7 @@ use super::math;
 use super::single::melee_charge_clear;
 use super::state::{
     ANGLE_UNIT, PlayerState, PmType, SpreadOverrideState, UserCmd, button, ef, ev, pmf,
-    weapon_state as ws, wf,
+    weap_anim as wa, weapon_state as ws, wf,
 };
 use super::{Pml, Pmove};
 use crate::cm::ENTITYNUM_NONE;
@@ -114,7 +116,7 @@ fn raising_or_dropping(s: u8) -> bool {
 
 /// `BG_GetViewmodelWeaponIndex`: the weapon the player is showing: the off-hand weapon while
 /// throwing one.
-pub(super) fn viewmodel_weapon(ps: &PlayerState) -> u16 {
+pub fn viewmodel_weapon(ps: &PlayerState) -> u16 {
     if ps.weapon_flags & wf::USING_OFFHAND == 0 {
         ps.weapon as u16
     } else {
@@ -126,9 +128,28 @@ pub(super) fn viewmodel_weapon(ps: &PlayerState) -> u16 {
 /// rounds in the current weapon's magazine.
 pub(super) fn sync_weapon_move(pm: &mut Pmove<'_>) {
     if let Some(ctx) = &pm.weapons {
-        let mut m = ctx.table.info(viewmodel_weapon(&pm.ps)).weapon_move();
+        let held = ctx.table.info(pm.ps.weapon as u16).weapon_move();
+        let mut m = ctx
+            .table
+            .info(viewmodel_weapon(&pm.ps))
+            .weapon_move()
+            .moving_as(&held);
         m.ammo_in_clip = ctx.inv.clip(ctx.table, pm.ps.weapon as u16);
         pm.weapon = m;
+    }
+}
+
+/// `PM_StartWeaponAnim`: the view model starts `anim` (a dead player's stays put).
+fn start_anim(ps: &mut PlayerState, anim: u16) {
+    if ps.pm_type < PmType::Dead {
+        ps.weapon_anim = anim | ((ps.weapon_anim & wa::TOGGLE) ^ wa::TOGGLE);
+    }
+}
+
+/// `PM_ContinueWeaponAnim`: starts `anim` unless it is the one playing.
+fn continue_anim(ps: &mut PlayerState, anim: u16) {
+    if ps.weapon_anim & !wa::TOGGLE != anim {
+        start_anim(ps, anim);
     }
 }
 
@@ -139,6 +160,7 @@ pub(super) fn idle(ps: &mut PlayerState) {
     ps.weapon_time = 0;
     ps.weapon_delay = 0;
     ps.weapon_state = ws::READY;
+    start_anim(ps, wa::IDLE);
 }
 
 /// `PM_ResetWeaponState`.
@@ -389,7 +411,10 @@ fn step(cx: &mut Cx<'_>, ps: &mut PlayerState) {
         return;
     }
     match ps.weapon_state {
-        ws::RAISING | ws::RAISING_ALTSWITCH => ps.weapon_state = ws::READY,
+        ws::RAISING | ws::RAISING_ALTSWITCH => {
+            ps.weapon_state = ws::READY;
+            start_anim(ps, wa::IDLE);
+        }
         ws::DROPPING | ws::DROPPING_QUICK => {
             finish_weapon_change(cx, ps, ps.weapon_state == ws::DROPPING_QUICK);
         }
@@ -489,6 +514,7 @@ fn weapon_time_adjust(cx: &mut Cx<'_>, ps: &mut PlayerState) -> bool {
                 } else {
                     math::snap_to_int(cx.params.burst_fire_cooldown * 1000.0)
                 };
+                continue_anim(ps, wa::IDLE);
                 ps.weapon_state = ws::READY;
                 return false;
             }
@@ -508,6 +534,7 @@ fn weapon_time_adjust(cx: &mut Cx<'_>, ps: &mut PlayerState) -> bool {
                     ps.weapon_time = 0;
                     ps.weapon_shot_count = 0;
                 } else if matches!(state, ws::RECHAMBERING | ws::FIRING) || melee_state(state) {
+                    continue_anim(ps, wa::IDLE);
                     ps.weapon_state = ws::READY;
                 }
             } else {
@@ -559,6 +586,7 @@ fn check_for_change_weapon(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     {
         if ps.weapon == u32::from(want) && matches!(s, ws::DROPPING | ws::DROPPING_QUICK) {
             idle(ps);
+            start_anim(ps, wa::FORCE_IDLE);
         } else if ps.weapon != 0 && !cx.inv.has(ps.weapon as u16) {
             begin_weapon_change(cx, ps, 0, false);
         }
@@ -592,8 +620,21 @@ fn begin_weapon_change(cx: &mut Cx<'_>, ps: &mut PlayerState, new: u16, mut quic
         ps.grenade_time_left = 0;
         if alt {
             ps.add_event(ev::WEAPON_ALT, 0);
+            start_anim(ps, wa::ALTSWITCH_FROM);
         } else {
             ps.add_event(ev::PUTAWAY_WEAPON, 0);
+            if ps.pm_flags & pmf::SPRINTING == 0 {
+                start_anim(
+                    ps,
+                    if no_ammo {
+                        wa::EMPTY_DROP
+                    } else if quick {
+                        wa::QUICK_DROP
+                    } else {
+                        wa::DROP
+                    },
+                );
+            }
         }
         ps.weapon_state = ws::DROPPING + u8::from(quick);
         set_prone_override(ps);
@@ -635,6 +676,7 @@ fn finish_weapon_change(cx: &mut Cx<'_>, ps: &mut PlayerState, quick: bool) {
     let w = cx.table.info(new);
     if old == new {
         ps.weapon_state = ws::READY;
+        start_anim(ps, wa::IDLE);
         return;
     }
     let first_equip = !cx.inv.was_raised(new);
@@ -643,17 +685,21 @@ fn finish_weapon_change(cx: &mut Cx<'_>, ps: &mut PlayerState, quick: bool) {
         && old != 0
         && new != 0
         && new == cx.table.info(old).alt_weapon;
-    let (time, aim) = if alt {
-        (w.alt_raise_time, ps.aim_spread_scale.max(128.0))
+    let (time, aim, anim) = if alt {
+        (
+            w.alt_raise_time,
+            ps.aim_spread_scale.max(128.0),
+            wa::ALTSWITCH_TO,
+        )
     } else {
-        let time = if cx.clip_available(ps) == 0 {
-            w.empty_raise_time
+        let (time, anim) = if cx.clip_available(ps) == 0 {
+            (w.empty_raise_time, wa::EMPTY_RAISE)
         } else if first_equip {
-            w.first_raise_time
+            (w.first_raise_time, wa::FIRST_RAISE)
         } else if quick {
-            w.quick_raise_time
+            (w.quick_raise_time, wa::QUICK_RAISE)
         } else {
-            w.raise_time
+            (w.raise_time, wa::RAISE)
         };
         if old != 0 {
             ps.add_event(
@@ -665,12 +711,13 @@ fn finish_weapon_change(cx: &mut Cx<'_>, ps: &mut PlayerState, quick: bool) {
                 0,
             );
         }
-        (time, 255.0)
+        (time, 255.0, anim)
     };
     ps.weapon_state = ws::RAISING + u8::from(alt);
     ps.weapon_time = time;
     ps.aim_spread_scale = aim;
     set_prone_override(ps);
+    start_anim(ps, anim);
     let had_old = cx.inv.has(old);
     cx.inv.take_clip_only_if_empty(cx.table, ps, old);
     if had_old && !cx.inv.has(old) {
@@ -690,6 +737,9 @@ fn should_be_firing(cx: &Cx<'_>, ps: &mut PlayerState, delayed: bool) -> bool {
     }
     if start || delayed || burst_fire_pending(cx, ps) {
         return true;
+    }
+    if ps.weapon_state == ws::FIRING {
+        continue_anim(ps, wa::IDLE);
     }
     ps.weapon_state = ws::READY;
     false
@@ -742,6 +792,7 @@ fn check_firing_ammo(cx: &mut Cx<'_>, ps: &mut PlayerState) -> bool {
         begin_weapon_reload(cx, ps);
     } else {
         cx.inv.set_rechamber(ps.weapon as u16, false);
+        continue_anim(ps, wa::IDLE);
         if w.weap_type != WeaponType::Grenade {
             ps.weapon_time += DRY_FIRE_PENALTY;
         }
@@ -773,6 +824,7 @@ fn start_firing(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
     } else if !delayed {
         if cx.clip_available(ps) != 0 {
             ps.grenade_time_left = w.fuse_time;
+            start_anim(ps, wa::HOLD_FIRE);
             ps.add_event(ev::PULLBACK_WEAPON, ps.weapon);
         }
         ps.weapon_delay = w.hold_fire_time;
@@ -786,6 +838,20 @@ fn start_firing(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
         }
         ps.weapon_shot_count = (ps.weapon_shot_count + 1).min(4);
     }
+}
+
+/// `PM_Weapon_SetFPSFireAnim`: the shot's animation, the hip or sights one, the slide-lock one after the last round.
+fn set_fps_fire_anim(ps: &mut PlayerState, last_round: bool) {
+    let hip = ps.weapon_pos_frac <= 0.75;
+    start_anim(
+        ps,
+        match (hip, last_round) {
+            (true, true) => wa::ATTACK_LASTSHOT,
+            (true, false) => wa::ATTACK,
+            (false, true) => wa::ADS_ATTACK_LASTSHOT,
+            (false, false) => wa::ADS_ATTACK,
+        },
+    );
 }
 
 /// `PM_Weapon_FireWeapon`.
@@ -806,6 +872,7 @@ fn fire_weapon(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
         ps.weapon_time = w.fire_time;
     }
     let last_round = cx.clip_available(ps) == 0;
+    set_fps_fire_anim(ps, last_round);
     ps.add_event(
         if last_round {
             ev::FIRE_WEAPON_LASTSHOT
@@ -861,8 +928,17 @@ fn check_for_rechamber(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) -> 
         || s != ws::FIRING && s != ws::RECHAMBERING && !melee_state(s) && ps.weapon_delay == 0
     {
         if s == ws::RECHAMBERING {
+            continue_anim(ps, wa::IDLE);
             ps.weapon_state = ws::READY;
         } else if s == ws::READY {
+            start_anim(
+                ps,
+                if ps.weapon_pos_frac <= 0.75 {
+                    wa::RECHAMBER
+                } else {
+                    wa::ADS_RECHAMBER
+                },
+            );
             ps.weapon_state = ws::RECHAMBERING;
             ps.weapon_time = w.rechamber_time;
             ps.weapon_delay =
@@ -951,6 +1027,7 @@ fn begin_weapon_reload(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     ps.add_event(ev::RESET_ADS, 0);
     ps.add_event(ev::RELOAD_START_NOTIFY, 0);
     if w.segmented_reload && w.reload_start_time != 0 {
+        start_anim(ps, wa::RELOAD_START);
         ps.weapon_time = w.reload_start_time;
         ps.weapon_state = ws::RELOAD_START;
         ps.add_event(ev::RELOAD_START, 0);
@@ -964,9 +1041,11 @@ fn begin_weapon_reload(cx: &mut Cx<'_>, ps: &mut PlayerState) {
 fn set_reloading_state(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     let w = cx.info(ps.weapon);
     if cx.clip_available(ps) != 0 || w.weap_type != WeaponType::Bullet {
+        start_anim(ps, wa::RELOAD);
         ps.weapon_time = w.reload_time;
         ps.add_event(ev::RELOAD, 0);
     } else {
+        start_anim(ps, wa::RELOAD_EMPTY);
         ps.weapon_time = w.reload_empty_time;
         ps.add_event(ev::RELOAD_FROM_EMPTY, 0);
     }
@@ -1117,12 +1196,14 @@ fn finish_reload(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
         }
         if w.reload_end_time != 0 {
             ps.weapon_state = ws::RELOAD_END;
+            start_anim(ps, wa::RELOAD_END);
             ps.weapon_time = w.reload_end_time;
             ps.add_event(ev::RELOAD_END, 0);
             return;
         }
     }
     ps.weapon_state = ws::READY;
+    start_anim(ps, wa::IDLE);
     cx.event(WeaponEvent::ReloadComplete {
         weapon: ps.weapon as u16,
     });
@@ -1146,10 +1227,12 @@ fn finish_reload_start(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
         cx.inv.set_rechamber(ps.weapon as u16, false);
         if w.reload_end_time != 0 {
             ps.weapon_state = ws::RELOAD_END;
+            start_anim(ps, wa::RELOAD_END);
             ps.weapon_time = w.reload_end_time;
             ps.add_event(ev::RELOAD_END, 0);
         } else {
             ps.weapon_state = ws::READY;
+            start_anim(ps, wa::IDLE);
             cx.event(WeaponEvent::ReloadComplete {
                 weapon: ps.weapon as u16,
             });
@@ -1162,6 +1245,7 @@ fn finish_reload_start(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
 /// `PM_Weapon_FinishReloadEnd`.
 fn finish_reload_end(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     ps.weapon_state = ws::READY;
+    start_anim(ps, wa::IDLE);
     cx.event(WeaponEvent::ReloadComplete {
         weapon: ps.weapon as u16,
     });
@@ -1211,9 +1295,11 @@ fn melee_init(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     if charge {
         ps.weapon_time = w.melee_charge_time;
         ps.weapon_delay = w.melee_charge_delay;
+        start_anim(ps, wa::MELEE_CHARGE);
     } else {
         ps.weapon_time = w.melee_time;
         ps.weapon_delay = w.melee_delay;
+        start_anim(ps, wa::MELEE_ATTACK);
     }
     ps.weapon_state = ws::MELEE_INIT;
     ps.add_event(ev::MELEE_SWIPE, 0);
@@ -1235,6 +1321,7 @@ fn melee_end(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     let w = cx.info(ps.weapon);
     if w.has_knife_model {
         ps.weapon_state = ws::MELEE_END;
+        start_anim(ps, wa::QUICK_RAISE);
         ps.weapon_time = w.quick_raise_time;
         ps.weapon_delay = 0;
         set_prone_override(ps);
@@ -1317,6 +1404,7 @@ fn offhand_init(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     ps.throw_back_grenade_owner = ENTITYNUM_NONE;
     ads::exit_ads(ps);
     ps.weapon_time = if ps.weapon != 0 {
+        start_anim(ps, wa::QUICK_DROP);
         cx.info(ps.weapon).quick_drop_time
     } else {
         EMPTY_HAND_OFFHAND_TIME
@@ -1330,8 +1418,11 @@ fn offhand_prepare(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     ps.weapon_time = w.hold_fire_time;
     ps.weapon_delay = 0;
     ps.weapon_flags |= wf::USING_OFFHAND;
-    if !throwing_back(ps) {
+    if throwing_back(ps) {
+        start_anim(ps, wa::ALTSWITCH_TO);
+    } else {
         ps.add_event(ev::PREP_OFFHAND, u32::from(ps.offhand_index));
+        start_anim(ps, wa::HOLD_FIRE);
     }
     set_prone_override(ps);
 }
@@ -1358,6 +1449,7 @@ fn offhand_start(cx: &mut Cx<'_>, ps: &mut PlayerState) {
         ps.weapon_time = w.fire_time;
         ps.weapon_delay = w.fire_delay;
         ps.weapon_flags |= wf::USING_OFFHAND;
+        start_anim(ps, wa::ATTACK);
     }
 }
 
@@ -1388,6 +1480,7 @@ fn offhand_end(cx: &mut Cx<'_>, ps: &mut PlayerState) {
     if ps.weapon != 0 {
         ps.weapon_time = cx.info(ps.weapon).quick_raise_time;
         ps.weapon_delay = 0;
+        start_anim(ps, wa::QUICK_RAISE);
     } else {
         ps.weapon_time = 0;
         ps.weapon_delay = 1;
@@ -1446,6 +1539,7 @@ fn check_for_grenade_throw_cancel(cx: &mut Cx<'_>, ps: &mut PlayerState) {
             && cx.cmd.buttons & button::ATTACK == 0
         {
             idle(ps);
+            start_anim(ps, wa::FORCE_IDLE);
         }
     }
 }
@@ -1476,6 +1570,7 @@ fn check_for_detonation(cx: &mut Cx<'_>, ps: &mut PlayerState) {
         ps.weapon_state = ws::DETONATING;
         ps.weapon_time = w.detonate_time;
         ps.weapon_delay = w.detonate_delay;
+        start_anim(ps, wa::DETONATE);
     }
 }
 
@@ -1527,10 +1622,12 @@ fn check_for_sprint(cx: &mut Cx<'_>, ps: &mut PlayerState) {
         ps.weapon_state = ws::SPRINT_RAISE;
         ps.weapon_time = w.sprint_in_time;
         ps.weapon_delay = 0;
+        start_anim(ps, wa::SPRINT_IN);
     } else if !sprinting && matches!(s, ws::SPRINT_RAISE | ws::SPRINT_LOOP) {
         ps.weapon_state = ws::SPRINT_DROP;
         ps.weapon_time = w.sprint_out_time;
         ps.weapon_delay = 0;
+        start_anim(ps, wa::SPRINT_OUT);
     }
 }
 
@@ -1539,4 +1636,5 @@ fn sprint_loop(ps: &mut PlayerState) {
     ps.weapon_state = ws::SPRINT_LOOP;
     ps.weapon_time = 0;
     ps.weapon_delay = 0;
+    start_anim(ps, wa::SPRINT_LOOP);
 }
