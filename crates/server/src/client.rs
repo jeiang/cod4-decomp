@@ -883,6 +883,19 @@ impl Game {
         }
     }
 
+    /// `ps.radarEnabled`: the client's team has radar (`setteamradar`) or the client has (`hasradar`).
+    pub fn client_radar(&self, n: u16) -> bool {
+        self.client(n).is_some_and(|c| {
+            c.has_radar
+                || match c.team {
+                    Team::Free => self.team_radar[0],
+                    Team::Axis => self.team_radar[1],
+                    Team::Allies => self.team_radar[2],
+                    Team::Spectator => false,
+                }
+        })
+    }
+
     /// `ClientEndFrame`: state that follows from the session after scripts ran.
     pub fn client_end_frame(&mut self, _vm: &mut Vm, n: u16) {
         self.spectator_upkeep(n);
@@ -902,7 +915,9 @@ impl Game {
         c.ps.move_speed_scale_multiplier = c.move_speed_scale;
         let health = self.ents[usize::from(n)].as_ref().map_or(0, |e| e.health);
         let linked = self.is_linked(n);
+        let radar = self.client_radar(n);
         let c = &mut self.clients[usize::from(n)];
+        c.ps.radar_enabled = radar;
         c.ps.health = health;
         c.ps.max_health = c.max_health;
         c.ps.pm_type = match c.session {
@@ -1068,6 +1083,38 @@ mod spectate_tests {
         g.clients[0].spec_allow = 0;
         g.spectate_next(0);
         assert_eq!(g.clients[0].spectator_client, -1);
+    }
+
+    #[test]
+    fn radar_follows_the_team_flag_or_the_players_own() {
+        let mut g = game();
+        assert!(!(0..5).any(|n| g.client_radar(n)));
+        g.team_radar[1] = true;
+        // Axis: clients 2 and 4.
+        assert_eq!(
+            (0..5).filter(|&n| g.client_radar(n)).collect::<Vec<_>>(),
+            [2, 4]
+        );
+        g.clients[1].has_radar = true;
+        assert!(g.client_radar(1), "a player's own radar needs no team flag");
+        g.team_radar[1] = false;
+        assert_eq!(
+            (0..5).filter(|&n| g.client_radar(n)).collect::<Vec<_>>(),
+            [1]
+        );
+    }
+
+    #[test]
+    fn the_no_team_radar_covers_free_players_but_not_spectators() {
+        let mut g = game();
+        g.clients[1].team = Team::Free;
+        g.clients[3].team = Team::Spectator;
+        g.team_radar[0] = true;
+        assert_eq!(
+            (0..5).filter(|&n| g.client_radar(n)).collect::<Vec<_>>(),
+            [0, 1],
+            "client 0 has no team yet"
+        );
     }
 
     #[test]

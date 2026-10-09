@@ -4,7 +4,9 @@
 
 use super::{NetPlay, team_of};
 use crate::compass::MapInfo;
-use crate::hudstate::{self, Actor, Counter, HudFacts, OffhandFacts, Stance, WeaponFacts};
+use crate::hudstate::{
+    self, Actor, CompassVehicle, Counter, HudFacts, OffhandFacts, Stance, WeaponFacts,
+};
 use crate::models::Team;
 use crate::shell::GameFacts;
 use net::entity::etype;
@@ -27,6 +29,15 @@ fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+/// Whether a vehicle owned by `owner` with team flags `eflags` is the viewer's enemy: another team's, or with no
+/// teams anyone's but the viewer's own (`CG_CompassDrawVehicles`).
+fn vehicle_is_enemy(own_team: u8, own: u16, owner: u16, eflags: u32) -> bool {
+    if own_team == 0 {
+        return owner != own;
+    }
+    team_of(eflags).map(|t| if t == Team::Axis { 1 } else { 2 }) != Some(own_team)
 }
 
 impl NetPlay {
@@ -95,7 +106,14 @@ impl NetPlay {
         h.now = now;
         h.own_client = own;
         h.team_known = matches!(team, 1 | 2);
+        h.team_spectator = team == 3;
+        // Nothing says what team the player is on yet: not even "no team", so nobody is an enemy.
+        h.team_valid = snap
+            .entity(own)
+            .is_some_and(|e| team_of(e.eflags).is_some())
+            || ui.client(own).is_some();
         h.pm_dead = dead;
+        h.radar_enabled = ps.radar_enabled;
         h.spectator = ps.pm_type == PmType::Spectator;
         h.health = ps.health;
         h.max_health = ps.max_health;
@@ -270,7 +288,18 @@ impl NetPlay {
             .snaps
             .interpolate(server_time - net::view::INTERP_DELAY_MS, Some(own));
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
+            // The dead are not on the radar; they leave the compass at once.
             if e.eflags & eflags::DEAD != 0 {
+                h.actors.remove(&e.client);
+                continue;
+            }
+            if self
+                .net
+                .ui_ref()
+                .and_then(|ui| ui.client(e.client))
+                .is_some_and(|c| c.team == 3)
+            {
+                h.actors.remove(&e.client);
                 continue;
             }
             let theirs = team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 });
@@ -279,7 +308,11 @@ impl NetPlay {
                 ..Actor::default()
             });
             a.friendly = own_team != 0 && theirs == Some(own_team);
-            a.pos = [e.origin[0], e.origin[1]];
+            a.prev_pos = std::mem::replace(&mut a.pos, [e.origin[0], e.origin[1]]);
+            if a.last_update == 0 {
+                a.prev_pos = a.pos;
+            }
+            a.perks = e.perks;
             a.yaw = e.angles[1];
             a.last_update = now;
             if e.event_seq != a.event_seq {
@@ -291,6 +324,23 @@ impl NetPlay {
             }
         }
         h.actors.retain(|_, a| now - a.last_update < ACTOR_KEEP_MS);
+        h.vehicles.clear();
+        for e in ents
+            .iter()
+            .filter(|e| matches!(e.etype, etype::VEHICLE | etype::PLANE))
+        {
+            let enemy = vehicle_is_enemy(own_team, own, e.client, e.eflags);
+            h.vehicles.push(CompassVehicle {
+                plane: e.etype == etype::PLANE,
+                pos: [e.origin[0], e.origin[1]],
+                yaw: e.angles[1],
+                enemy,
+            });
+        }
+        h.vehicles_max = h.vehicles_max.max(h.vehicles.len() as u32);
+        h.enemy_vehicles_max = h
+            .enemy_vehicles_max
+            .max(h.vehicles.iter().filter(|v| v.enemy).count() as u32);
     }
 
     /// The best grenade of a class to show: one with rounds left, else any carried.
@@ -416,5 +466,22 @@ impl NetPlay {
             hide_warning: reloading || ps.e_flags & sim::pm::ef::TURRET_ACTIVE != 0,
             blocks_prone: info.blocks_prone,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_vehicle_is_the_enemys_by_team_or_in_free_for_all_by_owner() {
+        // Allies (2) viewing: an axis helicopter is an enemy, an allied one is not.
+        assert!(vehicle_is_enemy(2, 0, 5, eflags::TEAM_AXIS));
+        assert!(!vehicle_is_enemy(2, 0, 5, eflags::TEAM_ALLIES));
+        // A vehicle with no team is nobody's friend in a team match.
+        assert!(vehicle_is_enemy(1, 0, 5, 0));
+        // Free for all: only the viewer's own.
+        assert!(vehicle_is_enemy(0, 0, 5, 0));
+        assert!(!vehicle_is_enemy(0, 5, 5, 0));
     }
 }

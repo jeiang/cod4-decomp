@@ -1111,6 +1111,8 @@ impl Viewer {
                 }
                 let now = sh.now_ms();
                 net.fill_game_facts(&mut sh.st.game, now);
+                let radar = crate::ownerdraw::radar_cfg(&st.input.cvars);
+                sh.st.game.hud.step_radar(now, &radar);
                 // The server's later stat changes (rank, unlocks) are the profile's. A new level's first burst is not.
                 if new_level.is_none() {
                     for (i, v) in net.stat_changes() {

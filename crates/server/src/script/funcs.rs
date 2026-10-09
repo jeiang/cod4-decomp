@@ -249,8 +249,8 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("sendranks", r(|_, _, _| Ok(Value::Undefined))),
     ("endparty", r(|_, _, _| Ok(Value::Undefined))),
     ("endlobby", r(|_, _, _| Ok(Value::Undefined))),
-    ("setteamradar", r(|g, _, a| set_team_flag(g, a, "radar"))),
-    ("getteamradar", r(|g, _, a| get_team_flag(g, a, "radar"))),
+    ("setteamradar", r(set_team_radar)),
+    ("getteamradar", r(get_team_radar)),
     ("setvotestring", Later(M5)),
     ("setvotetime", Later(M5)),
     ("setvoteyescount", Later(M5)),
@@ -1251,7 +1251,7 @@ fn spawn_helicopter(g: &mut Game, vm: &mut Vm, a: Args) -> R {
     Ok(g.entity_value(vm, n))
 }
 
-/// `spawnPlane(owner, "script_model", origin)`: a model the airstrike flies past; clients draw it as a script model.
+/// `spawnPlane(owner, "script_model", origin)`: a model the airstrike flies past; clients draw it as a script model and mark it on the compass.
 fn spawn_plane(g: &mut Game, vm: &mut Vm, a: Args) -> R {
     let owner = a.entity(0)?;
     if !g.is_client(owner.num) {
@@ -1262,6 +1262,7 @@ fn spawn_plane(g: &mut Game, vm: &mut Vm, a: Args) -> R {
     }
     let mut e = Ent::new(EntKind::Plain, "script_model");
     e.origin = a.vector(2)?;
+    e.x.plane_owner = Some(owner.num);
     let n = g.spawn(e)?;
     g.init_clip(n, None);
     Ok(g.entity_value(vm, n))
@@ -1356,17 +1357,23 @@ fn set_team_score(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
-fn set_team_flag(g: &mut Game, a: Args, key: &str) -> R {
-    let t = team_index(a)?;
-    g.configstrings
-        .insert(config_key(&format!("{key}{t}")), a.int(1)?.to_string());
+/// The index into `Game::team_radar`: `none` (free-for-all players), `axis` or `allies`.
+fn radar_team(a: Args) -> Result<usize, String> {
+    match a.string(0)? {
+        "none" => Ok(0),
+        "axis" => Ok(1),
+        "allies" => Ok(2),
+        t => Err(format!("team '{t}' is not none, allies or axis")),
+    }
+}
+
+fn set_team_radar(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    g.team_radar[radar_team(a)?] = a.int(1)? != 0;
     Ok(Value::Undefined)
 }
 
-fn get_team_flag(g: &mut Game, a: Args, key: &str) -> R {
-    let t = team_index(a)?;
-    let v = g.configstrings.get(&config_key(&format!("{key}{t}")));
-    Ok(Value::Int(v.map_or(0, |s| cvar::parse_int(s))))
+fn get_team_radar(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    Ok(Value::Int(i32::from(g.team_radar[radar_team(a)?])))
 }
 
 #[cfg(test)]

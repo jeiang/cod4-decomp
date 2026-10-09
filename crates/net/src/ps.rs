@@ -182,6 +182,7 @@ fn table() -> Vec<Field<PlayerState>> {
         int!(s, s.action_slot_param[3], Bits(9)),
         int!(s, s.loc_selection, Bits(9)),
         int!(s, s.loc_radius, Bits(6)),
+        flag!(s, s.radar_enabled),
     ]
 }
 
@@ -223,6 +224,23 @@ mod tests {
         // Compare through the table so a field the table forgot shows up as a diff of `got`
         // against a state that differs only in that field.
         assert_eq!(got, to);
+    }
+
+    #[test]
+    fn the_radar_flag_reaches_the_client() {
+        let off = PlayerState::default();
+        let mut on = off.clone();
+        on.radar_enabled = true;
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &off, &on);
+        let mut got = off.clone();
+        read_delta(&mut BitReader::new(w.as_bytes()), fields(), &mut got).unwrap();
+        assert!(got.radar_enabled);
+        // And back off again.
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &on, &off);
+        read_delta(&mut BitReader::new(w.as_bytes()), fields(), &mut got).unwrap();
+        assert!(!got.radar_enabled);
     }
 
     #[test]

@@ -136,6 +136,41 @@ pub fn fit_map(world_size: [f32; 2], rect: [f32; 4], border: f32) -> [f32; 4] {
     [fx, fy, fw, fh]
 }
 
+/// Half the extra width the radar line travels beyond the map on each side so the whole line clears it
+/// (`GetRadarLineMargin`): the line is as thick as the larger of the minimap's and the full map's.
+pub fn radar_margin(world_w: f32, max_range: f32, line: f32, map_line: f32) -> f32 {
+    let minimap = max_range * std::f32::consts::SQRT_2 + line * max_range;
+    (map_line * world_w).max(minimap) * 0.5
+}
+
+/// The radar line at `progress` (0 to 1, west to east along the map's east axis) as `[nx, ny, d]`: the points `p` with
+/// `nx * p.x + ny * p.y == d` (`GetRadarLine`).
+pub fn radar_line(map: &MapInfo, margin: f32, progress: f32) -> [f32; 3] {
+    let n = north_vec(map.north_yaw);
+    let (nx, ny) = (n[1], -n[0]);
+    let corner = ny * map.upper_left[1] + nx * map.upper_left[0];
+    [
+        nx,
+        ny,
+        (margin * 2.0 + map.world_size[0]) * progress + corner - margin,
+    ]
+}
+
+/// Which side of a radar line `p` is on: negative to the west of it.
+fn radar_side(line: &[f32; 3], p: [f32; 2]) -> bool {
+    p[0] * line[0] + p[1] * line[1] - line[2] < 0.0
+}
+
+/// The sweep from `a` to `b` went over `p` (`DoLinesSurroundPoint`).
+pub fn sweep_crossed(a: &[f32; 3], b: &[f32; 3], p: [f32; 2]) -> bool {
+    radar_side(a, p) != radar_side(b, p)
+}
+
+/// A move from `p` to `q` went across the line (`DoesMovementCrossRadar`).
+pub fn move_crossed(line: &[f32; 3], p: [f32; 2], q: [f32; 2]) -> bool {
+    radar_side(line, p) != radar_side(line, q)
+}
+
 /// Normalises an angle to `0..360`.
 pub fn norm360(a: f32) -> f32 {
     a.rem_euclid(360.0)
@@ -246,6 +281,28 @@ mod tests {
         // The border never eats more than a quarter.
         let r = fit_map([100.0, 100.0], [0.0, 0.0, 8.0, 8.0], 50.0);
         assert_eq!(r, [2.0, 2.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn the_radar_line_sweeps_the_map_from_west_to_east() {
+        // North along +x, so east is -y: the map is 1000 wide (east) and 2000 tall (south of the corner is -x).
+        let m = MapInfo::parse("\"a\" 0 0 -2000 -1000", "0").unwrap();
+        let margin = radar_margin(1000.0, 100.0, 0.1, 0.01);
+        assert!((margin - (100.0 * 2f32.sqrt() + 10.0) * 0.5).abs() < 1e-3);
+        let at = |p| radar_line(&m, margin, p);
+        // Before the sweep starts the whole map is east of the line; once it ends, west of it.
+        let (start, end) = (at(0.0), at(1.0));
+        assert!(!sweep_crossed(&start, &start, [0.0, -500.0]));
+        assert!(sweep_crossed(&start, &end, [0.0, -999.0]));
+        assert!(sweep_crossed(&start, &end, [-1900.0, -1.0]));
+        // A point halfway east is passed by the sweep around the middle of its travel, not before or after.
+        let p = [-700.0, -500.0];
+        assert!(!sweep_crossed(&at(0.0), &at(0.4), p));
+        assert!(sweep_crossed(&at(0.4), &at(0.6), p));
+        assert!(!sweep_crossed(&at(0.6), &at(1.0), p));
+        // The line is where the move across it says.
+        assert!(move_crossed(&at(0.5), [0.0, -400.0], [0.0, -600.0]));
+        assert!(!move_crossed(&at(0.5), [0.0, -600.0], [0.0, -700.0]));
     }
 
     #[test]

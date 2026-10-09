@@ -123,6 +123,7 @@ pub const COMMANDS: &[&str] = &[
     "devhardpoint",
     "devheli",
     "devgrenade",
+    "devradar",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -1016,6 +1017,26 @@ impl Server {
                     args: vec![Value::str(weapon)],
                 });
                 host.run_calls(&mut run.vm);
+            }
+            // Test hook: `devradar <client|human> <0|1>` gives the player (or takes away) the radar of a UAV, as
+            // `hasradar` does.
+            "devradar" => {
+                let (Some(who), Some(on)) = (arg(1), arg(2)) else {
+                    return Err("usage: devradar <client|human> <0|1>".into());
+                };
+                let n = if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| n)
+                        .ok_or("devradar: no human is connected")?
+                } else {
+                    cvar::parse_int(who) as u16
+                };
+                self.game
+                    .client_mut(n)
+                    .ok_or("devradar: no such client")?
+                    .has_radar = cvar::parse_int(on) != 0;
             }
             // Test hook: `devheli view <client|human> [distance]` makes the player a chase camera: every frame it
             // floats `distance` (700) units behind and to the side of the first script vehicle, a little below it, looking at it.

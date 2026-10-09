@@ -76,6 +76,8 @@ pub struct EntExtra {
     pub ragdoll: bool,
     /// `physicslaunch(point, force)`: the launch the clients simulate.
     pub physics_launch: Option<(Vec3, Vec3)>,
+    /// `spawnplane`: the player the plane belongs to; the clients mark it on the compass.
+    pub plane_owner: Option<u16>,
 }
 
 impl Default for EntExtra {
@@ -92,6 +94,7 @@ impl Default for EntExtra {
             corpse: None,
             ragdoll: false,
             physics_launch: None,
+            plane_owner: None,
         }
     }
 }

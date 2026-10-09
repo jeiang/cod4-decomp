@@ -28,6 +28,9 @@ pub mod etype {
     /// A looping script effect (`playLoopedFX`): `origin`, `angles` and `model` as for [`FX`], `pm_flags` the repeat
     /// period in milliseconds and `velocity[0]` the distance beyond which it is not played (0 for always).
     pub const LOOP_FX: u8 = 9;
+    /// A `spawnPlane` model (an airstrike's plane): drawn like a [`SCRIPT_MODEL`], and the compass marks it. `client`
+    /// is its owner and `eflags` carries the owner's team.
+    pub const PLANE: u8 = 10;
 }
 
 pub const MAX_ENTITIES: usize = 1024;

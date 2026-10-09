@@ -368,6 +368,8 @@ pub struct MatchStats {
 pub struct Game {
     /// `setMiniMap`: the map's world size along its axes, north's direction and the upper left corner (location picks).
     pub compass: Option<[f32; 6]>,
+    /// `setteamradar`: whether the players with no team, the axis and the allies have radar (`level.teamHasRadar`).
+    pub team_radar: [bool; 3],
     pub vote: crate::vote::VoteState,
     pub cvars: Cvars,
     pub content: Content,
@@ -480,6 +482,7 @@ impl Game {
             nav_goals: Vec::new(),
             vote: Default::default(),
             compass: None,
+            team_radar: [false; 3],
             nav_loads: Vec::new(),
             hitloc_table: default_hitloc_table(),
             weapons: sim::weapon::WeaponTable::from_infos(Vec::new()).expect("empty table"),
@@ -962,6 +965,27 @@ mod tests {
         );
         g.ent_mut(n).unwrap().hidden = true;
         assert!(published(&g).is_none(), "a hidden model is not drawn");
+    }
+
+    #[test]
+    fn a_plane_is_published_with_its_owner_and_team() {
+        use crate::client::{Client, Conn, Team};
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.clients = vec![Client::new(0, false, "p0".into())];
+        g.clients[0].conn = Conn::Connected;
+        g.clients[0].team = Team::Allies;
+        let mut e = Ent::new(EntKind::Plain, "script_model");
+        e.model = "vehicle_mig29_desert".into();
+        e.x.plane_owner = Some(0);
+        let n = g.spawn(e).unwrap();
+        g.note_model("vehicle_mig29_desert");
+        let s = crate::netsv::world_entities(&g)
+            .into_iter()
+            .find(|s| s.number == n)
+            .unwrap();
+        assert_eq!(s.etype, net::entity::etype::PLANE);
+        assert_eq!(s.client, 0);
+        assert_ne!(s.eflags & crate::netsv::eflags::TEAM_ALLIES, 0);
     }
 
     #[test]
