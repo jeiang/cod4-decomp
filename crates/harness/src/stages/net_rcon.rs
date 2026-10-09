@@ -291,7 +291,13 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
     }
 
     // `banClient` is for good: it reaches the ban file, which a restart reads.
-    let slot = back[0].own.unwrap_or_default();
+    // The person's slot as the server has it: the client's own idea of it (`own`) can still be a bot's before the
+    // person has a body.
+    let slot = server
+        .game
+        .connected_clients()
+        .find(|(_, c)| !c.bot && c.name == "human4")
+        .map_or(0, |(n, _)| n);
     admin.rcon(
         &mut server,
         &mut back,
