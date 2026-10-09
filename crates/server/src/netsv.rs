@@ -340,7 +340,7 @@ impl NetSv {
         } else if rate.is_empty() {
             0
         } else {
-            crate::cvar::parse_int(rate).clamp(1000, 90_000)
+            crate::cvar::parse_int(rate).clamp(1000, MAX_RATE)
         };
         let snaps = info_value(info, "snaps");
         p.snapshot_msec = if snaps.is_empty() {
@@ -745,10 +745,16 @@ impl NetSv {
     }
 }
 
+/// The `rate` of a stock profile (`seta rate "25000"`), and the most a client may ask for.
+const STOCK_RATE: i32 = 25_000;
+const MAX_RATE: i32 = 90_000;
+
 /// Milliseconds until the next snapshot of a client with `rate` and `snapshot_msec` after one of `bytes` (`SV_RateMsec`): its `snaps` interval, or
 /// the time its rate (at most `max_rate` when that is set, at least 1000) takes to carry the message if longer.
 fn snapshot_delay(rate: i32, snapshot_msec: i32, bytes: usize, max_rate: i32) -> i32 {
-    let mut rate = rate;
+    // Our snapshots are bigger than the original's delta-compressed ones, so the stock profile's 25000 B/s would
+    // hold a full snapshot back for two frames: a rate of 25000 or more is treated as the 90000 maximum.
+    let mut rate = if rate >= STOCK_RATE { MAX_RATE } else { rate };
     if max_rate > 0 {
         let cap = max_rate.max(1000);
         rate = if rate > 0 { rate.min(cap) } else { cap };
@@ -1044,6 +1050,10 @@ mod tests {
         // The server's cap beats a higher rate, and is never below 1000.
         assert_eq!(snapshot_delay(90_000, 0, 1500, 5000), 309);
         assert_eq!(snapshot_delay(90_000, 0, 1500, 10), 1548);
+        // The stock profile's rate does not skip a 33 ms frame for a big snapshot.
+        assert_eq!(snapshot_delay(25_000, 33, 1500, 0), 33);
+        // A slow link is still paced by what it asked for.
+        assert_eq!(snapshot_delay(24_999, 33, 1500, 0), 61);
         // Fast enough: the interval is what counts.
         assert_eq!(snapshot_delay(90_000, 50, 500, 0), 50);
     }
