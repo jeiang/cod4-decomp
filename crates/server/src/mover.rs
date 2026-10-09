@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The mover push (`G_MoverTeam`, `G_MoverPush`, `G_TryPushingEntity`) translated in part from KisakCOD (game/g_mover.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Script movers: `moveto`, `rotateto` and friends as trajectories the frame loop advances.
 //!
 //! A move is up to three phases: accelerate for `accel` seconds, cruise, decelerate for
@@ -8,8 +9,12 @@
 
 use gsc::{EntClass, EntRef, Value, Vm};
 use sim::Vec3;
+use sim::cm::ENTITYNUM_NONE;
+use sim::contents;
+use sim::pm::math;
 use sim::traj::{TrType, Trajectory};
 
+use crate::client::Session;
 use crate::game::Game;
 use crate::script::Args;
 
@@ -261,6 +266,21 @@ pub fn gravity_move(ch: &mut Channel, curr: &mut Vec3, velocity: Vec3, seconds: 
     *curr = ch.tr.evaluate(now);
 }
 
+impl Mover {
+    /// Milliseconds from `now` until the whole move of the origin is over (every phase, not just the running one);
+    /// 0 for a mover that is not moving.
+    pub fn remaining_ms(&self, now: i32) -> i32 {
+        let ch = &self.pos;
+        let phase = (ch.tr.time + ch.tr.duration - now).max(0);
+        match ch.tr.kind {
+            TrType::Stationary => 0,
+            TrType::Accelerate => phase + ms(ch.mid_time) + ms(ch.decel_time),
+            TrType::LinearStop => phase + ms(ch.decel_time),
+            _ => phase,
+        }
+    }
+}
+
 impl Channel {
     /// True when the trajectory has run out at `now`.
     pub fn finished(&self, now: i32) -> bool {
@@ -400,16 +420,40 @@ impl Game {
             return;
         }
         let now = self.level.time;
-        let Some(ent) = self.ent_mut(n) else { return };
+        let Some(ent) = self.ent(n) else { return };
         if ent.mv.pos.tr.kind == TrType::Stationary && ent.mv.ang.tr.kind == TrType::Stationary {
             return;
         }
-        if ent.mv.pos.tr.kind != TrType::Stationary {
-            ent.origin = ent.mv.pos.tr.evaluate(now);
+        let to = if ent.mv.pos.tr.kind != TrType::Stationary {
+            ent.mv.pos.tr.evaluate(now)
+        } else {
+            ent.origin
+        };
+        let turn = if ent.mv.ang.tr.kind != TrType::Stationary {
+            ent.mv.ang.tr.evaluate(now)
+        } else {
+            ent.angles
+        };
+        let (mv, amove) = (sub(to, ent.origin), sub(turn, ent.angles));
+        if self.mover_push(vm, n, mv, amove).is_err() {
+            // `G_MoverTeam`: what stopped it holds it where it was; the clock waits too.
+            let frame = self.level.frametime;
+            let ent = self.ent_mut(n).expect("pushed above");
+            for ch in [&mut ent.mv.pos, &mut ent.mv.ang] {
+                ch.tr.time += frame;
+            }
+            if ent.mv.pos.tr.kind != TrType::Stationary {
+                ent.origin = ent.mv.pos.tr.evaluate(now);
+            }
+            if ent.mv.ang.tr.kind != TrType::Stationary {
+                ent.angles = ent.mv.ang.tr.evaluate(now);
+            }
+            self.relink(n);
+            return;
         }
-        if ent.mv.ang.tr.kind != TrType::Stationary {
-            ent.angles = ent.mv.ang.tr.evaluate(now);
-        }
+        // The shift is a sum of differences: put the mover exactly where its trajectory says.
+        let ent = self.ent_mut(n).expect("pushed above");
+        (ent.origin, ent.angles) = (to, turn);
         self.relink(n);
         if self.ent(n).is_some_and(|e| e.mv.pos.finished(now)) {
             let ent = self.ent_mut(n).expect("checked above");
@@ -434,6 +478,185 @@ impl Game {
             if done {
                 vm.notify_entity(n, "rotatedone", &[]);
             }
+        }
+    }
+}
+
+/// `G_CreateRotationMatrix` applied to a point: `v` turned by the Euler angles `a`.
+fn rotate(v: Vec3, a: Vec3) -> Vec3 {
+    let (f, r, u) = math::angle_vectors(&a);
+    [0, 1, 2].map(|i| v[0] * f[i] - v[1] * r[i] + v[2] * u[i])
+}
+
+/// What a mover's push did to one player, to undo it when the mover is blocked.
+struct Pushed {
+    n: u16,
+    origin: Vec3,
+    yaw: f32,
+}
+
+impl Game {
+    /// `G_MoverPush`: moves `pusher` by `mv` and `amove`, carrying the players that stand on it and shoving the ones
+    /// it runs into. A player that cannot be moved blocks the mover: everything it moved goes back and the player is
+    /// returned, unless the mover swings on a sine (a crusher), which kills the player instead. Only players are
+    /// pushed; no stock mover carries a missile or an item.
+    pub fn mover_push(
+        &mut self,
+        vm: &mut Vm,
+        pusher: u16,
+        mv: Vec3,
+        amove: Vec3,
+    ) -> Result<(), u16> {
+        let mask = contents::MASK_DEADSOLID;
+        let Some(before) = self
+            .world
+            .as_ref()
+            .and_then(|w| w.entity(pusher))
+            .map(|d| (d.abs_min, d.abs_max))
+        else {
+            self.shift_mover(pusher, mv, amove);
+            return Ok(());
+        };
+        self.shift_mover(pusher, mv, amove);
+        let Some(after) = self
+            .world
+            .as_ref()
+            .and_then(|w| w.entity(pusher))
+            .map(|d| (d.abs_min, d.abs_max))
+        else {
+            return Ok(());
+        };
+        if self.ent(pusher).is_none_or(|e| e.contents & mask == 0) {
+            return Ok(());
+        }
+        let mut movers = Vec::new();
+        for (n, c) in self.connected_clients() {
+            if !matches!(c.session, Session::Playing | Session::Dead) {
+                continue;
+            }
+            let Some(e) = self.ent(n) else { continue };
+            let overlaps = (0..3).all(|i| {
+                let (lo, hi) = (e.origin[i] + e.mins[i], e.origin[i] + e.maxs[i]);
+                hi >= before.0[i].min(after.0[i]) - 1.0 && lo <= before.1[i].max(after.1[i]) + 1.0
+            });
+            let stuck = || {
+                self.world
+                    .as_ref()
+                    .and_then(|w| w.box_in_solid(e.origin, e.mins, e.maxs, n, mask))
+                    == Some(pusher)
+            };
+            if c.ps.ground_entity_num == pusher || (overlaps && stuck()) {
+                movers.push(n);
+            }
+        }
+        let sine = self
+            .ent(pusher)
+            .is_some_and(|e| e.mv.pos.tr.kind == TrType::Sine || e.mv.ang.tr.kind == TrType::Sine);
+        let mut done: Vec<Pushed> = Vec::new();
+        let mut obstacle = None;
+        for &n in &movers {
+            let at = self.ent(n).map_or([0.0; 3], |e| e.origin);
+            done.push(Pushed {
+                n,
+                origin: at,
+                yaw: amove[1],
+            });
+            if self.try_push(n, pusher, mv, amove) {
+                continue;
+            }
+            if !sine {
+                obstacle = Some(n);
+                break;
+            }
+            let mut d = crate::combat::Damage::new(99_999, crate::combat::MOD_CRUSH);
+            d.inflictor = Some(pusher);
+            d.attacker = Some(pusher);
+            self.g_damage(vm, n, d);
+        }
+        if let Some(n) = obstacle {
+            for p in done.iter().rev() {
+                self.put_player(p.n, p.origin, -p.yaw);
+            }
+            // The mover goes back too; the caller puts it where its clock says.
+            self.shift_mover(pusher, scale(mv, -1.0), scale(amove, -1.0));
+            return Err(n);
+        }
+        for p in &done {
+            self.relink(p.n);
+        }
+        Ok(())
+    }
+
+    fn shift_mover(&mut self, n: u16, mv: Vec3, amove: Vec3) {
+        if let Some(e) = self.ent_mut(n) {
+            for i in 0..3 {
+                e.origin[i] += mv[i];
+                e.angles[i] += amove[i];
+            }
+        }
+        self.relink(n);
+    }
+
+    /// Moves a player to `origin`, turning its view by `yaw` degrees (`delta_angles`).
+    fn put_player(&mut self, n: u16, origin: Vec3, yaw: f32) {
+        if let Some(e) = self.ent_mut(n) {
+            e.origin = origin;
+        }
+        if let Some(c) = self.client_mut(n) {
+            c.ps.origin = origin;
+            c.ps.delta_angles[1] += yaw;
+        }
+        self.relink(n);
+    }
+
+    /// `G_TryPushingEntity`: the player moves with the pusher; one it would leave inside something steps aside by up
+    /// to a few units, or stays put if it still fits there. False when it cannot be moved at all.
+    fn try_push(&mut self, n: u16, pusher: u16, mv: Vec3, amove: Vec3) -> bool {
+        let mask = contents::MASK_DEADSOLID;
+        let (Some(e), Some(p)) = (self.ent(n), self.ent(pusher)) else {
+            return false;
+        };
+        let (origin, mins, maxs, centre) = (e.origin, e.mins, e.maxs, p.origin);
+        let mut to = [0, 1, 2].map(|i| origin[i] + mv[i]);
+        if amove != [0.0; 3] {
+            let rel = sub(to, centre);
+            let turned = rotate(rel, amove);
+            to = [0, 1, 2].map(|i| to[i] + turned[i] - rel[i]);
+        }
+        let free = |g: &Game, at: Vec3| {
+            g.world
+                .as_ref()
+                .is_none_or(|w| w.box_in_solid(at, mins, maxs, n, mask).is_none())
+        };
+        let mut spot = free(self, to).then_some(to);
+        if spot.is_none() && maxs[0] / 2.0 > 4.0 {
+            spot = [-4.0f32, 4.0]
+                .into_iter()
+                .flat_map(|z| [-4.0f32, 4.0].into_iter().map(move |x| (x, z)))
+                .flat_map(|(x, z)| [-4.0f32, 4.0].into_iter().map(move |y| [x, y, z]))
+                .map(|d| [to[0] + d[0], to[1] + d[1], to[2] + d[2]])
+                .find(|&at| free(self, at));
+        }
+        let ground = self
+            .client(n)
+            .map_or(ENTITYNUM_NONE, |c| c.ps.ground_entity_num);
+        match spot {
+            Some(at) => {
+                self.put_player(n, at, amove[1]);
+                if ground != pusher
+                    && let Some(c) = self.client_mut(n)
+                {
+                    c.ps.ground_entity_num = ENTITYNUM_NONE;
+                }
+                true
+            }
+            None if free(self, origin) => {
+                if let Some(c) = self.client_mut(n) {
+                    c.ps.ground_entity_num = ENTITYNUM_NONE;
+                }
+                true
+            }
+            None => false,
         }
     }
 }

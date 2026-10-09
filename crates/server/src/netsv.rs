@@ -1461,6 +1461,31 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 reach = Some(48.0);
                 s
             }
+            EntKind::Brush => {
+                let Some(model) = e.brush_model else { continue };
+                if e.hidden {
+                    shown_to = Some(e.shown_to);
+                }
+                reach = game
+                    .world
+                    .as_ref()
+                    .and_then(|w| w.collision().model_bounds(model))
+                    .map(|(lo, hi)| {
+                        let far = |i: usize| lo[i].abs().max(hi[i].abs());
+                        (far(0).powi(2) + far(1).powi(2) + far(2).powi(2)).sqrt()
+                    });
+                let mut s = EntityState::new(n);
+                s.etype = etype::BRUSH;
+                s.origin = e.origin;
+                s.angles = e.angles;
+                s.model = model;
+                s.eflags = e.contents as u32 & 0xff_ffff;
+                if !game.is_linked(n) && e.mv.pos.tr.kind != sim::traj::TrType::Stationary {
+                    s.velocity = e.mv.pos.tr.evaluate_delta(game.level.time);
+                    s.pm_flags = e.mv.remaining_ms(game.level.time).clamp(0, 0x1f_ffff) as u32;
+                }
+                s
+            }
             EntKind::Plain if &*e.classname == "script_model" || e.turret.is_some() => {
                 // The index names the model in the clients' configstrings; one that was never registered cannot be
                 // drawn.

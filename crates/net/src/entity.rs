@@ -31,6 +31,10 @@ pub mod etype {
     /// A `spawnPlane` model (an airstrike's plane): drawn like a [`SCRIPT_MODEL`], and the compass marks it. `client`
     /// is its owner and `eflags` carries the owner's team.
     pub const PLANE: u8 = 10;
+    /// A `script_brushmodel`: the map's inline model `model` (`*N`) placed at `origin` and `angles`. `velocity` is its
+    /// motion in units per second at the snapshot's time, so a client can carry what stands on it and draw it ahead
+    /// of the snapshot, `pm_flags` the milliseconds left of its move (it is not carried past that); `eflags` is its contents (low 24 bits), which tells the client whether it blocks a player.
+    pub const BRUSH: u8 = 11;
 }
 
 pub const MAX_ENTITIES: usize = 1024;

@@ -29,7 +29,7 @@ pub use dlight::{DynLight, SpotCone, SpotParams};
 pub use dynmesh::{Cloud, DynMesh, DynVertex};
 pub use gpu::{Gpu, GpuError, GpuInfo};
 pub use post::{Dof, PostParams, ShellShock};
-pub use renderer::{FrameStats, Progress, Renderer, Settings, ShadowMode, View};
+pub use renderer::{BrushInstance, FrameStats, Progress, Renderer, Settings, ShadowMode, View};
 pub use scene::{MapData, Scene};
 pub use skin::{ModelInstance, ModelKind};
 pub use texture::TextureCache;
