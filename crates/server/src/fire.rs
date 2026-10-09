@@ -171,7 +171,11 @@ impl Game {
             s.event_parm = surface;
             s.weapon = weapon;
             s.client = shooter;
-            s.eflags = if h.exit { crate::tempev::IMPACT_EXIT } else { 0 };
+            s.eflags = if h.exit {
+                crate::tempev::IMPACT_EXIT
+            } else {
+                0
+            };
         });
     }
 

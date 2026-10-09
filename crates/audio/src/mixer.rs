@@ -1210,13 +1210,19 @@ mod tests {
         let open = level(&mut m)[0];
         h.fade_all(0.25, 0);
         let quiet = level(&mut m)[0];
-        assert!((quiet - 0.25 * open).abs() < 0.01 * open, "{open} -> {quiet}");
+        assert!(
+            (quiet - 0.25 * open).abs() < 0.01 * open,
+            "{open} -> {quiet}"
+        );
         // Back to full over 100 ms: a quarter of the way in, it is still short of full.
         h.fade_all(1.0, 400);
         let mut out = vec![0.0; 960];
         m.fill(&mut out);
         let early = out.iter().step_by(2).sum::<f32>() / (out.len() / 2) as f32;
-        assert!(early > quiet && early < 0.8 * open, "{quiet} {early} {open}");
+        assert!(
+            early > quiet && early < 0.8 * open,
+            "{quiet} {early} {open}"
+        );
         for _ in 0..40 {
             m.fill(&mut out);
         }

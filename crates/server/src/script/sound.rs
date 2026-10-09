@@ -142,8 +142,10 @@ pub fn stop_loop_sound(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
 /// `soundFade(volume, [seconds])`: every client's sound goes to `volume` times itself over the time.
 pub fn sound_fade(g: &mut Game, _: &mut Vm, a: Args) -> R {
     let volume = a.float(0)?.max(0.0);
-    g.sound_out
-        .push((SoundTo::All, format!("soundfade {volume} {}", fade_ms(&a, 1))));
+    g.sound_out.push((
+        SoundTo::All,
+        format!("soundfade {volume} {}", fade_ms(&a, 1)),
+    ));
     Ok(Value::Undefined)
 }
 

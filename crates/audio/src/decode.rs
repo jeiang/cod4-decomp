@@ -297,7 +297,7 @@ mod tests {
 
     #[test]
     fn a_stream_can_start_part_way_through() {
-        let (mut job, mut s) = StreamJob::open(wav(22_050, 1, 20_000), "wav", false, 0.5).unwrap();
+        let (mut job, s) = StreamJob::open(wav(22_050, 1, 20_000), "wav", false, 0.5).unwrap();
         assert!(!job.pump());
         let n = s.ring.len();
         assert!(

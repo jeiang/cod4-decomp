@@ -424,10 +424,9 @@ impl Sound {
             Clip::Silent => return None,
             Clip::Loaded(p) => (Source::Loaded(p.clone()), p.channels == 2),
             Clip::Streamed(path) => {
-                let opened = self
-                    .bank
-                    .read_stream(path)
-                    .and_then(|b| StreamJob::open(b, decode::extension(path), alias.looping, start));
+                let opened = self.bank.read_stream(path).and_then(|b| {
+                    StreamJob::open(b, decode::extension(path), alias.looping, start)
+                });
                 match opened {
                     Ok((job, stream)) => {
                         let stereo = stream.channels == 2;
@@ -511,7 +510,12 @@ impl Sound {
     /// Ends the looping sounds of `entity`, and only those.
     pub fn stop_entity_loops(&mut self, entity: u32) {
         self.waiting.retain(|k, _| k.0 != entity);
-        let keys: Vec<_> = self.loops.keys().filter(|k| k.0 == entity).cloned().collect();
+        let keys: Vec<_> = self
+            .loops
+            .keys()
+            .filter(|k| k.0 == entity)
+            .cloned()
+            .collect();
         for k in keys {
             if let Some(id) = self.loops.remove(&k) {
                 self.handle.stop(id);
@@ -562,10 +566,7 @@ impl Sound {
             self.missing(alias);
             return;
         };
-        let secondary = primary
-            .secondary
-            .as_deref()
-            .and_then(|n| self.bank.pick(n));
+        let secondary = primary.secondary.as_deref().and_then(|n| self.bank.pick(n));
         let cue = Cue {
             fade_in_ms: fade_ms,
             ..Cue::default()
@@ -903,7 +904,11 @@ mod tests {
         let id = s.play("first", at).unwrap();
         s.stop(id);
         run(&mut s, 200);
-        assert_eq!(s.played.aliases.get("second"), None, "a stopped sound chained");
+        assert_eq!(
+            s.played.aliases.get("second"),
+            None,
+            "a stopped sound chained"
+        );
         s.play("first", at);
         run(&mut s, 200);
         assert_eq!(s.played.aliases.get("second"), Some(&1));

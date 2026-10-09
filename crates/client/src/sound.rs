@@ -624,10 +624,7 @@ impl ClientSound {
         let gone: Vec<u16> = self
             .entity_loops
             .iter()
-            .filter(|(e, i)| {
-                !now.iter()
-                    .any(|(n, idx, _)| n == *e && idx == *i)
-            })
+            .filter(|(e, i)| !now.iter().any(|(n, idx, _)| n == *e && idx == *i))
             .map(|(e, _)| *e)
             .collect();
         for e in gone {
@@ -1160,6 +1157,8 @@ fn loop_selftest(cs: &mut ClientSound) -> Vec<(String, bool)> {
             .find(|n| {
                 s.bank.aliases_of(n).first().is_some_and(|a| {
                     a.looping
+                        && a.secondary.is_none()
+                        && a.chain.is_none()
                         && matches!(a.audio, audio::bank::Clip::Loaded(_))
                         && s.bank.channels[usize::from(a.channel)].is_3d
                         && a.dist.1 > 300.0
@@ -1174,6 +1173,8 @@ fn loop_selftest(cs: &mut ClientSound) -> Vec<(String, bool)> {
         s.tick(Duration::from_millis(20));
         s.stats().active.load(std::sync::atomic::Ordering::Relaxed)
     };
+    // The movement sounds before this one are still ringing: start from silence.
+    cs.stop_all();
     cs.command(&format!("sndname 1 {name}"));
     let here = [(5u16, 1u16, [10.0f32, 0.0, 0.0])];
     cs.entity_loops(&here);
@@ -1186,7 +1187,10 @@ fn loop_selftest(cs: &mut ClientSound) -> Vec<(String, bool)> {
     cs.command("stopsounds");
     out.push(("a restart ends the loop".into(), active(cs) == 0));
     cs.entity_loops(&here);
-    out.push(("the loop returns with the next snapshot".into(), active(cs) == 1));
+    out.push((
+        "the loop returns with the next snapshot".into(),
+        active(cs) == 1,
+    ));
     out
 }
 
