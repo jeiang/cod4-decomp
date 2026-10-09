@@ -122,8 +122,9 @@ struct Counters {
     /// How many times the view kick came back to rest after a kick.
     kick_settled: u64,
     kicked: bool,
-    /// The player state's `damage_event` as last seen, and the most the red flash and the number of wedges showed.
-    damage_events: u8,
+    /// How often the player state's `damage_event` changed while alive, the value last seen, and the most the red flash and the number of wedges showed.
+    damage_events: u64,
+    damage_event_seen: u8,
     max_damage_flash: f32,
     max_damage_wedges: usize,
     predictions: u64,
@@ -667,7 +668,9 @@ impl NetPlay {
         } else {
             self.damage.hud(st, self.angles[1] + self.kick.angles()[1])
         };
-        self.c.damage_events = ps.damage_event;
+        // A respawn starts the count over; only a change the player lived to see is a hit.
+        self.c.damage_events += u64::from(!dead && ps.damage_event != self.c.damage_event_seen);
+        self.c.damage_event_seen = ps.damage_event;
         self.c.max_damage_flash = self.c.max_damage_flash.max(self.damage_hud.flash);
         self.c.max_damage_wedges = self.c.max_damage_wedges.max(self.damage_hud.wedges.len());
         let (was_kicked, kick) = (self.c.kicked, self.kick.angles());
