@@ -140,6 +140,28 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             jerky * 100.0
         ));
     }
+    // The camera eases over stair steps: a frame that began a step on the logical eye did not jump the drawn one.
+    // The match's walking decides whether a step is climbed at all; with none the stage notes it as untested.
+    let (stairs, snapped) = (
+        num(net, &["view", "stair_frames"]),
+        num(net, &["view", "stair_snaps"]),
+    );
+    if snapped > 0.0 {
+        failures.push(format!(
+            "{snapped} of {stairs} stair steps jumped the drawn eye instead of easing it (last: logical jump, drawn jump, offset, dt = {})",
+            net["view"]["stair_last_snap"]
+        ));
+    }
+    if num(net, &["view", "steps"]) >= 1.0 && num(net, &["view", "step_max"]) <= 0.0 {
+        failures.push("the player climbed steps but the camera never smoothed one".into());
+    }
+    // Leaning out moved the eye sideways and a landing dipped it, when the bot did either.
+    if num(net, &["view", "lean_frames"]) >= 1.0 && num(net, &["view", "lean_max"]) < 1.0 {
+        failures.push("the player leaned but the camera did not move sideways".into());
+    }
+    if num(net, &["view", "landings"]) >= 1.0 && num(net, &["view", "dip_max"]) <= 0.0 {
+        failures.push("the player landed from a jump but the view never dipped".into());
+    }
     if net["viewmodel_frames"].as_f64().unwrap_or(0.0) < secs {
         failures.push("the first-person weapon was hardly drawn".into());
     }

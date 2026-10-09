@@ -67,6 +67,14 @@ _Avoid_: frame (a frame is a rendered client image)
 **Snapshot**:
 The state of the world that the server sends to one client for one tick.
 
+**Logical eye**:
+The predicted feet plus the view height: where shots start, the listener hears and the harness measures the player's movement from.
+_Avoid_: camera origin
+
+**Render eye**:
+The logical eye moved by the camera layer (stair smoothing, bob, lean, landing dip); it is only what the screen draws from.
+_Avoid_: eye (say which)
+
 ## Verification
 
 **Harness**:
