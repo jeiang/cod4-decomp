@@ -41,6 +41,7 @@ mod ui;
 #[cfg_attr(target_arch = "wasm32", path = "video_web.rs")]
 mod video;
 mod viewmodel;
+#[cfg(not(target_arch = "wasm32"))]
 mod vmtour;
 #[cfg(target_arch = "wasm32")]
 mod web;

@@ -23,6 +23,10 @@ jobs:
       # `cargo test` compiles every target, so a separate `cargo build` adds nothing.
       - run: cargo test --workspace
       - run: cargo clippy --workspace -- -D warnings
+      # The browser client (web/build.sh) shares the client crate; keep it compiling.
+      - run: cargo check -p client --target wasm32-unknown-unknown
+        env:
+          RUSTFLAGS: -D warnings
       # Release build, smoke test, artifacts and the tester zip run on main only, keeping
       # the required PR check short (main does not require up-to-date branches).
       - if: github.event_name == 'push'
