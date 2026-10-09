@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-gfx`: the graphics settings of the options menus reach the window and the renderer. The real client sets
 //! the dvars the menu writes, applies them with `vid_restart` (vsync off, a 4:3 screen), starts a match (4x
-//! antialiasing, no specular, depth of field, glow or shadows), then turns the match's settings back with a second
-//! `vid_restart` in the running match. Every `gfxis=` check reads the renderer's and the surface's own state. Needs a
-//! display and the install; skips without.
+//! antialiasing, no specular, depth of field, glow or shadows, four dynamic lights), then turns the match's settings back with a second
+//! `vid_restart` in the running match. Every `gfxis=` check reads the renderer's and the surface's own state. A frame
+//! with a bright test light in front of the player must also be clearly brighter than the same frame without it (the
+//! dynamic light pass). Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -15,7 +16,7 @@ const NAME: &str = "client-gfx";
 const LIMIT: Duration = Duration::from_secs(300);
 
 const STEPS: &str = "set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 4,\
-set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_enable 0,\
+set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_enable 0,set=set r_dlightLimit 4,\
 vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
 menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\

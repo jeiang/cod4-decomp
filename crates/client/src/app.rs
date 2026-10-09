@@ -1280,9 +1280,6 @@ impl Viewer {
             }
             st.surfaces_drawn.push(stats.surfaces as f64);
             st.lights_drawn = stats.lights;
-            if st.test_light {
-                eprintln!("DBGLIGHT drawn={} n={} limit={}", stats.lights, r.dynamic_lights.len(), r.settings.dlight_limit);
-            }
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
         if let (Some(sh), Some(l)) = (st.shell.as_mut(), st.loading.as_ref()) {
