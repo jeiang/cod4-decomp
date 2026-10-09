@@ -3,6 +3,7 @@
 //! drives as stage 3 (`--flythrough`), which records frame times, a video and a screenshot.
 
 mod app;
+mod breath;
 mod compass;
 mod console;
 mod crosshair;
@@ -14,7 +15,6 @@ mod events;
 mod flythrough;
 #[cfg(not(target_arch = "wasm32"))]
 mod fx_selftest;
-mod breath;
 mod gfx;
 mod helicopter;
 mod hud;

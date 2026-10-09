@@ -279,7 +279,10 @@ mod tests {
         // A weapon with no zoom field leaves the field alone.
         assert_eq!(view_fov(80.0, None, Some((0.0, 1.0)), 1.0, 10.0), 80.0);
         // Turret and intermission fields win over aiming; the scale and the floor apply to all.
-        assert_eq!(view_fov(80.0, Some(55.0), Some((20.0, 1.0)), 1.0, 10.0), 55.0);
+        assert_eq!(
+            view_fov(80.0, Some(55.0), Some((20.0, 1.0)), 1.0, 10.0),
+            55.0
+        );
         assert_eq!(view_fov(80.0, None, None, 2.0, 10.0), 160.0);
         assert_eq!(view_fov(80.0, None, Some((4.0, 1.0)), 1.0, 10.0), 10.0);
     }

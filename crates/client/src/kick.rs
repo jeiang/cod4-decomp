@@ -12,10 +12,10 @@
 //! A scoped weapon also sways ([`Kick::idle`]): the view wavers while aimed, as steadily as the player state's
 //! `hold_breath_scale` allows, and the wavering moves where shots land the same way the kick does.
 
-use fx::Rng;
-use sim::pm::{PlayerState, ev};
 use assets::zone::weapon::WeaponDef;
+use fx::Rng;
 use sim::pm::ef;
+use sim::pm::{PlayerState, ev};
 use sim::weapon::WeaponInfo;
 use sim::weapon::fire::fire_recoil;
 

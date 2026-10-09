@@ -60,13 +60,7 @@ impl Default for Breath {
 impl Breath {
     /// `HoldBreathUpdate`: the frame's `dt_ms`, whether the breath is held, the longest it can be held (ms) and how
     /// long the breath-in sound lasts (ms).
-    pub fn step(
-        &mut self,
-        dt_ms: i32,
-        holding: bool,
-        hold_ms: i32,
-        in_length: i32,
-    ) -> Option<Cue> {
+    pub fn step(&mut self, dt_ms: i32, holding: bool, hold_ms: i32, in_length: i32) -> Option<Cue> {
         if self.delay > 0 {
             self.delay -= dt_ms;
         }
