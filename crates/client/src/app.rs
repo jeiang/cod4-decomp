@@ -1746,15 +1746,16 @@ fn script_step(st: &mut State) -> bool {
             done(true, sc, String::new());
         }
         // `loc=MESSAGE_KEY:HINT_KEY`: puts a bare-key message (as `iprintlnbold(&"KEY")` sends it) through the print,
-        // announcement and chat paths and holds a use-trigger hint of the second key for half a second. Fails if
+        // announcement and chat paths and holds a use-trigger hint of the second key until it has been drawn. Fails if
         // either shows as a key, or the hint was never drawn.
         "loc" => {
             let Some(sh) = st.shell.as_mut() else {
                 return true;
             };
             let (msg, hint) = arg.split_once(':').unwrap_or((arg, ""));
+            let drawn = |sh: &Shell| sh.st.game.hud.drawn.get(&72).copied().unwrap_or(0);
             if sc.marker.is_none() {
-                sc.marker = Some("sent".into());
+                sc.marker = Some(drawn(sh).to_string());
                 use net::ui::{PrintKind, UiEvent};
                 for ev in [
                     UiEvent::Print {
@@ -1767,19 +1768,26 @@ fn script_step(st: &mut State) -> bool {
                     UiEvent::Chat {
                         team: false,
                         client: 0,
+                        tag: net::ui::chat_tag::NORMAL,
                         text: msg.to_owned(),
                     },
                 ] {
                     sh.apply(&mut st.input, ev);
                 }
             }
+            let before: u32 = sc
+                .marker
+                .as_deref()
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(0);
             let h = &mut sh.st.game.hud;
-            (h.cursor_hint, h.cursor_hint_time) = (2, h.now);
+            // Dated a second ahead: the hint lasts 100 ms, and a slow frame must not outrun it.
+            (h.cursor_hint, h.cursor_hint_time) = (2, h.now + 1000);
             h.cursor_hint_text = hint.to_owned();
-            if waited > 0.5 {
+            let hint_drawn = drawn(sh) > before;
+            if hint_drawn || waited > 10.0 {
                 let shown = crate::hud::localize(&sh.ui.assets, msg);
                 let h = &sh.st.game.hud;
-                let hint_drawn = h.drawn.get(&72).copied().unwrap_or(0) > 0;
                 let unresolved = &sh.st.hud_stats.unresolved;
                 let ok = shown != msg
                     && hint_drawn
