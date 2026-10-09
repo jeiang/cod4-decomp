@@ -1244,6 +1244,7 @@ impl Viewer {
                 st.fx_in_view = nf.meshes.len();
                 if let Some(r) = st.renderer.as_mut() {
                     r.dynamic_models = nf.models;
+                    r.brush_models = nf.brush_models;
                     r.dynamic_meshes = nf.meshes;
                     r.dynamic_lights = nf
                         .lights

@@ -22,6 +22,7 @@ use crate::sunshadow::{self, SunShadow};
 use crate::texture::{Tex, TextureCache};
 use crate::timing::GpuTimer;
 use assets::zone::gfx::Material;
+use assets::zone::gfxworld::GfxWorld;
 use assets::zone::xmodel::XModel;
 use glam::{Mat4, Vec3, Vec4};
 use sm3::SamplerDim;
@@ -414,6 +415,41 @@ impl PassKind {
 }
 
 /// Visible geometry to draw.
+/// An inline model of the map (`script_brushmodel`: a door, lift or crate) drawn where its entity is: the surfaces of
+/// `GfxWorld::models[model]`, moved by the entity's origin and angles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrushInstance {
+    pub model: u16,
+    pub origin: [f32; 3],
+    /// Pitch, yaw, roll in degrees.
+    pub angles: [f32; 3],
+}
+
+impl BrushInstance {
+    /// The map's surfaces of this model (none for a model without any, such as a clip brush) with the object each
+    /// is drawn with.
+    fn surfaces(&self, world: &GfxWorld) -> Vec<(u32, Object)> {
+        let q = sim::skel::quat::from_angles(&self.angles);
+        let object = Object {
+            world: Mat4::from_rotation_translation(
+                glam::Quat::from_xyzw(q[0], q[1], q[2], q[3]),
+                Vec3::from(self.origin),
+            ),
+            ..Object::default()
+        };
+        let range = world.models.get(usize::from(self.model)).map_or(0..0, |m| {
+            // A model without surfaces has no first one (`0xFFFF`).
+            let first = u32::from(m.start_surf_index);
+            if m.surface_count == 0 {
+                0..0
+            } else {
+                first..first + u32::from(m.surface_count)
+            }
+        });
+        range.map(|si| (si, object)).collect()
+    }
+}
+
 struct Items<'a> {
     surfaces: &'a [u32],
     smodels: &'a [u32],
@@ -509,6 +545,9 @@ pub struct Renderer {
     warm: Option<Warm>,
     /// Skinned models to draw in the next [`Renderer::render`]; the caller refills the list every frame.
     pub dynamic_models: Vec<ModelInstance>,
+    /// Inline models (doors, lifts, crates) to draw in the next [`Renderer::render`]; the caller refills the list
+    /// every frame.
+    pub brush_models: Vec<BrushInstance>,
     /// Materials of models the map does not contain but a match draws (players, weapons), warmed with the map's.
     warm_extra: Vec<Arc<Material>>,
     /// Materials of the effects' particle clouds, which have pipelines of their own vertex layout.
@@ -651,6 +690,7 @@ impl Renderer {
             shadow_dummy,
             timer,
             dynamic_models: Vec::new(),
+            brush_models: Vec::new(),
             warm_extra: Vec::new(),
             warm_clouds: Vec::new(),
             dynamic_meshes: Vec::new(),
@@ -1344,7 +1384,14 @@ impl Renderer {
         let mut shared = SharedBanks::new();
         let world = self.scene.world.clone();
 
-        for &si in items.surfaces {
+        // The map's own surfaces stand where they were built; an inline model's move with their entity.
+        let moved: Vec<(u32, Object)> = self
+            .brush_models
+            .iter()
+            .flat_map(|b| b.surfaces(&world))
+            .collect();
+        let plain = items.surfaces.iter().map(|&si| (si, Object::default()));
+        for (si, obj) in plain.chain(moved) {
             let Some(surf) = world.dpvs.surfaces.get(si as usize) else {
                 continue;
             };
@@ -1372,7 +1419,7 @@ impl Renderer {
                 continue;
             };
             let fc = light_frames.get(&light).unwrap_or(frame);
-            let (vs, ps) = self.banks(&prep, fc, &Object::default(), &mut shared, light);
+            let (vs, ps) = self.banks(&prep, fc, &obj, &mut shared, light);
             let Some(pipeline) = self.materials.pipeline(&self.gpu, &prep, target) else {
                 continue;
             };

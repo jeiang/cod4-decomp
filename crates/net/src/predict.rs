@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The carry by a ground mover follows `CG_AdjustPositionForMover` of KisakCOD (cgame_mp/cg_ents_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Client-side prediction: the player's own movement is run locally, with the same
 //! [`sim::pm::run_usercmd`] the server uses, so it responds at once instead of one round trip
 //! later. Every snapshot carries the server's state for the last command it ran; the client
@@ -83,8 +84,9 @@ impl StepView {
     }
 }
 
-/// The map's collision plus the other players as the newest snapshot has them: people block
-/// each other, so a replay that ignored them would walk through a player the server stopped at.
+/// The map's collision plus the other players and the movers as the newest snapshot has them: people block
+/// each other, so a replay that ignored them would walk through a player the server stopped at, and a lift not
+/// there would drop the player standing on it.
 pub struct PlayerBoxes {
     world: World,
     linked: Vec<u16>,
@@ -108,6 +110,21 @@ impl PlayerBoxes {
             self.world.unlink(n);
         }
         for e in &snap.entities {
+            if e.etype == crate::entity::etype::BRUSH {
+                // A mover stands where the snapshot has it; `Predictor::predict` carries the player on it from there.
+                self.world.link(
+                    e.number,
+                    &ClipEnt {
+                        contents: e.eflags as i32,
+                        origin: e.origin,
+                        angles: e.angles,
+                        brush_model: Some(e.model),
+                        ..ClipEnt::EMPTY
+                    },
+                );
+                self.linked.push(e.number);
+                continue;
+            }
             let alive = !matches!(e.pm_type, 2..=5 | 7 | 8);
             if e.etype != crate::entity::etype::PLAYER || e.client == snap.ps.client_num || !alive {
                 continue;
@@ -177,6 +194,30 @@ pub struct Predictor {
     pub step_taken: f32,
 }
 
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+/// How far the mover the player stands on has gone from where `snap` has it by server time `at`.
+pub fn ground_carry(snap: &Snapshot, ps: &PlayerState, at: i32) -> [f32; 3] {
+    let Some(m) = snap
+        .entities
+        .iter()
+        .find(|e| e.etype == crate::entity::etype::BRUSH && e.number == ps.ground_entity_num)
+    else {
+        return [0.0; 3];
+    };
+    mover_offset(m.velocity, at - snap.server_time)
+}
+
+/// The way a mover moving at `velocity` (units per second) has gone in `ms`: what a client draws it ahead of its
+/// snapshot by, and what it carries the player on it by. Capped, so a snapshot that stopped arriving does not send it
+/// off.
+pub fn mover_offset(velocity: [f32; 3], ms: i32) -> [f32; 3] {
+    let s = ms.clamp(0, 250) as f32 * 0.001;
+    velocity.map(|v| v * s)
+}
+
 impl Predictor {
     /// Records a command about to be sent. Times must increase.
     pub fn push(&mut self, cmd: UserCmd) {
@@ -214,6 +255,7 @@ impl Predictor {
             .copied()
             .unwrap_or_default();
         let mut replayed = 0;
+        let mut carry = [0.0; 3];
         // Steps the replay finds, newer than the last one the eye already follows.
         let (mut view_change, mut view_change_time) = (0.0, self.step.start);
         // The previous pass's end, as this pass saw that moment, to measure the disagreement.
@@ -238,10 +280,14 @@ impl Predictor {
             }
             old = *cmd;
             replayed += 1;
+            carry = ground_carry(snap, &ps, cmd.server_time);
             if self.last.is_some_and(|(t, _)| t == cmd.server_time) {
-                at_last = Some(ps.origin);
+                at_last = Some(add(ps.origin, carry));
             }
         }
+        // The commands ran against the movers where the snapshot has them; the one under the player has gone on since
+        // (`CG_AdjustPositionForMover`).
+        ps.origin = add(ps.origin, carry);
         // The server flips the teleport bit when it moves the player (a respawn, `setorigin`): that, not how far,
         // makes a disagreement a teleport, shown as one instead of slid.
         let tele_bit = snap.ps.e_flags & ef::TELEPORT_BIT;
@@ -389,6 +435,7 @@ impl Predictor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entity::EntityState;
     use sim::pm::test_world::TestWorld;
     use sim::pm::{PmType, button};
 
@@ -778,5 +825,42 @@ mod tests {
         s.update(1000, 8.0, 1000, true);
         s.update(1000 + STEP_MS + 1, 0.0, 1000, true);
         assert_eq!(s.offset(1000), 0.0);
+    }
+
+    /// Standing on a lift that rises 100 units a second, the player is carried with it between the snapshot and the
+    /// command the replay ends on, and by nothing when the thing under the feet stands still.
+    #[test]
+    fn the_player_is_carried_by_the_mover_it_stands_on() {
+        let mut world = TestWorld::floor();
+        world.blocks[0].entity = 5;
+        let (w, p) = (table(), Params::default());
+        let env = Env {
+            world: &world,
+            weapons: &w,
+            params: &p,
+            time: 0,
+        };
+        let lift = |velocity: [f32; 3]| EntityState {
+            number: 5,
+            etype: crate::entity::etype::BRUSH,
+            velocity,
+            ..EntityState::default()
+        };
+        let carried = |velocity: [f32; 3]| {
+            let mut ps = start();
+            ps.ground_entity_num = 5;
+            ps.command_time = 1000;
+            let mut snap = snapshot(&ps);
+            snap.server_time = 1000;
+            snap.entities.push(lift(velocity));
+            let mut pr = Predictor::default();
+            pr.push(UserCmd {
+                server_time: 1100,
+                ..UserCmd::default()
+            });
+            pr.predict(&snap, &env).ps.origin[2]
+        };
+        assert!((carried([0.0, 0.0, 100.0]) - 10.0).abs() < 1e-3);
+        assert_eq!(carried([0.0; 3]), 0.0);
     }
 }

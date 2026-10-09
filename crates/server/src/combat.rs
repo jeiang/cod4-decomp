@@ -53,6 +53,7 @@ pub const MOD_PROJECTILE: u8 = 5;
 pub const MOD_PROJECTILE_SPLASH: u8 = 6;
 pub const MOD_MELEE: u8 = 7;
 pub const MOD_HEAD_SHOT: u8 = 8;
+pub const MOD_CRUSH: u8 = 9;
 pub const MOD_FALLING: u8 = 11;
 pub const MOD_SUICIDE: u8 = 12;
 pub const MOD_TRIGGER_HURT: u8 = 13;

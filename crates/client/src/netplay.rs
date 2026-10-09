@@ -57,6 +57,10 @@ fn new_life(last: &mut Option<u16>, spawn: u16) -> bool {
     last.replace(spawn) != Some(spawn)
 }
 
+fn brush_surfaces(world: &assets::zone::gfxworld::GfxWorld) -> Vec<bool> {
+    world.models.iter().map(|m| m.surface_count > 0).collect()
+}
+
 /// Alive in the world: the weapon switching of the original (`pm_type < PM_DEAD`) leaves spectators and the dead alone.
 fn alive(ps: &PlayerState) -> bool {
     matches!(
@@ -88,6 +92,8 @@ pub struct NetFrame {
     /// Radians, clockwise: the roll of the recoil kick.
     pub roll: f32,
     pub models: Vec<ModelInstance>,
+    /// The map's inline models (doors, lifts, crates) where their entities are.
+    pub brush_models: Vec<render::BrushInstance>,
     /// The aim zoom and scope overlay of the held weapon.
     pub sight: Option<Sight>,
     /// The field of view the world is drawn with regardless of the weapon: a turret's or the intermission's.
@@ -216,6 +222,9 @@ struct Counters {
     /// not be (a model the zones lack).
     script_models_seen: usize,
     script_models_drawn: usize,
+    /// `BRUSH` entities with surfaces in the newest snapshot (each is handed to the renderer), and the most at once.
+    brush_models_seen: usize,
+    brush_models_max: usize,
     script_models_unloaded: std::collections::BTreeSet<String>,
     /// Every model a `script_model` was drawn with at some frame.
     script_models_names: std::collections::BTreeSet<String>,
@@ -260,6 +269,8 @@ pub struct NetPlay {
     /// The `MOVEMENT` configstring [`Self::params`] was made from.
     params_info: String,
     boxes: PlayerBoxes,
+    /// Per inline model of the map: whether it has surfaces to draw (a clip brush has none).
+    brush_surfaces: Vec<bool>,
     pred: Predictor,
     /// Pitch (positive down) and yaw (positive left) in degrees, as the player has turned.
     angles: [f32; 2],
@@ -403,6 +414,7 @@ impl NetPlay {
             },
             params_info: String::new(),
             boxes: PlayerBoxes::new(clipmap),
+            brush_surfaces: brush_surfaces(&map.world),
             pred: Predictor::default(),
             angles: [0.0; 2],
             kick: Kick::default(),
@@ -597,6 +609,7 @@ impl NetPlay {
             self.params.mantle_anims = lib.content.mantle_anims();
             self.lib = lib;
             self.boxes = PlayerBoxes::new(clipmap);
+            self.brush_surfaces = brush_surfaces(&map.world);
             self.sound = sound;
         }
         {
@@ -901,6 +914,7 @@ impl NetPlay {
                 false,
             );
             models.extend(self.script_models(dt, st, ps.client_num));
+            let brush_models = self.brush_models(&snap, st);
             models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
             let def = self
@@ -969,6 +983,7 @@ impl NetPlay {
                 pitch: pitch + (look.kick[0] - drawn.sway[0] - hit_view[0]).to_radians(),
                 roll: seen[2].to_radians() + (drawn.sway[2] + hit_view[1]).to_radians(),
                 models,
+                brush_models,
                 sight: kill_fov.is_none().then(|| self.sight.clone()).flatten(),
                 fixed_fov: kill_fov.or_else(|| fixed_fov(&ps)),
                 meshes: drawn.meshes,
@@ -1152,6 +1167,7 @@ impl NetPlay {
         };
         self.scan_names(st, own, eye, view, dead);
         models.extend(self.script_models(dt, st, own));
+        let brush_models = self.brush_models(&snap, st);
         models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));
         models.extend(hands);
@@ -1168,6 +1184,7 @@ impl NetPlay {
             pitch: pitch + (look.kick[0] - drawn.sway[0]).to_radians(),
             roll: roll + drawn.sway[2].to_radians(),
             models,
+            brush_models,
             sight: self.sight.clone(),
             fixed_fov: fixed_fov(&ps),
             meshes: drawn.meshes,
@@ -1897,6 +1914,34 @@ impl NetPlay {
         out
     }
 
+    /// The map's inline models that the newest snapshot has as entities (`script_brushmodel`), ahead of it by the way
+    /// they moved since, the same way the player standing on one is carried: a lift under the feet is drawn under the
+    /// feet.
+    fn brush_models(&mut self, snap: &net::Snapshot, st: i32) -> Vec<render::BrushInstance> {
+        let mut out = Vec::new();
+        let mut seen = 0;
+        for e in snap.entities.iter().filter(|e| e.etype == etype::BRUSH) {
+            if !self
+                .brush_surfaces
+                .get(usize::from(e.model))
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            seen += 1;
+            let by = net::predict::mover_offset(e.velocity, st - snap.server_time);
+            out.push(render::BrushInstance {
+                model: e.model,
+                origin: [0, 1, 2].map(|i| e.origin[i] + by[i]),
+                angles: e.angles,
+            });
+        }
+        self.c.brush_models_seen = seen;
+        self.c.brush_models_max = self.c.brush_models_max.max(seen);
+        out
+    }
+
     /// The weapons lying on the floor, in the world model of their weapon and variant.
     fn items(&self, snap: &net::Snapshot) -> Vec<ModelInstance> {
         let mut out = Vec::new();
@@ -2212,6 +2257,8 @@ impl NetPlay {
         report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
         report["view_kick_settled"] = json!(self.c.kick_settled);
         report["projectiles_max_drawn"] = self.c.projectiles_max.into();
+        report["brush_models_seen"] = self.c.brush_models_seen.into();
+        report["brush_models_max"] = self.c.brush_models_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
         report["fx"]["corpses_max"] = self.c.corpses_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
