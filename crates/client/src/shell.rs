@@ -339,6 +339,7 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
 const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("r_aspectRatio", "auto"),
     ("r_gamma", "0.8"),
+    ("r_ignorehwgamma", "0"),
     // On, unlike the stock default: the window has always waited for the display, and this keeps it so.
     ("r_vsync", "1"),
     ("r_aaSamples", "1"),

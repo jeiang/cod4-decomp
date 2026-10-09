@@ -415,9 +415,9 @@ impl NetPlay {
         })
     }
 
-    /// Plays effect `name` in front of the player every 1.5 s of server time.
-    pub fn set_fx_demo(&mut self, name: String) {
-        self.fx_demo = Some((name, None));
+    /// Plays effect `name` in front of the player every 1.5 s of server time; `None` stops.
+    pub fn set_fx_demo(&mut self, name: Option<String>) {
+        self.fx_demo = name.map(|n| (n, None));
     }
 
     pub fn refused(&self) -> Option<&str> {

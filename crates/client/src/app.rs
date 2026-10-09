@@ -335,6 +335,10 @@ struct State {
     script: Option<UiScript>,
     /// A screenshot to take after the next paint (name without extension).
     shot_request: Option<String>,
+    /// `shotd=`: the screenshot waits for a frame that copied the scene for distortion.
+    shot_gate: bool,
+    /// The last frame copied the scene for distortion materials.
+    distortion_now: bool,
     /// `dlight=1`: a bright light a little way in front of the camera, for the harness.
     test_light: bool,
     /// Dynamic lights the last frame drew.
@@ -649,7 +653,7 @@ impl Viewer {
             )?;
             n.set_autojoin(self.cli.autojoin || self.cli.autoplay);
             if let Some(name) = &self.cli.fx_demo {
-                n.set_fx_demo(name.clone());
+                n.set_fx_demo(Some(name.clone()));
             }
             net = Some(n);
         }
@@ -772,6 +776,8 @@ impl Viewer {
                 results: Vec::new(),
             }),
             shot_request: None,
+            shot_gate: false,
+            distortion_now: false,
             test_light: false,
             lights_drawn: 0,
             menu_sound: None,
@@ -1267,14 +1273,18 @@ impl Viewer {
         };
         let surface_view = frame.texture.create_view(&Default::default());
         let size = (st.config.width, st.config.height);
-        // `r_gamma` maps the whole picture: the frame is drawn offscreen and copied through the ramp at the end.
+        // `r_gamma` maps the whole picture, as the original's display ramp does: that ramp works only in full screen
+        // and not with `r_ignorehwgamma`, so a window shows the picture as drawn. The frame goes offscreen and is
+        // copied through the ramp at the end.
         let r_gamma = st
             .input
             .cvars
             .get("r_gamma")
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(render::gamma::DEFAULT);
-        let gamma = !render::gamma::is_identity(r_gamma);
+        let gamma = st.window.fullscreen().is_some()
+            && !st.input.cvars.bool("r_ignorehwgamma")
+            && !render::gamma::is_identity(r_gamma);
         let target = if gamma {
             st.gamma.target(&st.gpu, size).clone()
         } else {
@@ -1297,6 +1307,7 @@ impl Viewer {
             }
             st.surfaces_drawn.push(stats.surfaces as f64);
             st.lights_drawn = stats.lights;
+            st.distortion_now = stats.distortion_copy;
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
         if let (Some(sh), Some(l)) = (st.shell.as_mut(), st.loading.as_ref()) {
@@ -1398,7 +1409,9 @@ impl Viewer {
                 el.exit();
             }
         }
-        if let Some(name) = st.shot_request.take() {
+        let shot_ready = !st.shot_gate || st.distortion_now;
+        if shot_ready && let Some(name) = st.shot_request.take() {
+            st.shot_gate = false;
             let out = self.cli.out.clone().unwrap_or_default();
             let _ = std::fs::create_dir_all(&out);
             let lit = save_png(
@@ -2172,6 +2185,24 @@ fn script_step(st: &mut State) -> bool {
         "dlight" => {
             st.test_light = arg.trim() != "0";
             done(true, sc, String::new());
+        }
+        // `shotd=<name>`: the screenshot of the first frame that copied the scene for a distortion material.
+        "shotd" => {
+            if st.shot_request.is_none() {
+                st.shot_gate = true;
+                st.shot_request = Some(arg.to_owned());
+            } else if waited > 10.0 {
+                st.shot_gate = false;
+                st.shot_request = None;
+                done(false, sc, "no frame drew a distortion material".into());
+            }
+        }
+        // `fxdemo=<effect>` plays the effect in front of the player every 1.5 s, `fxdemo=off` stops it.
+        "fxdemo" => {
+            if let Some(n) = st.net.as_mut() {
+                n.set_fx_demo((arg != "off").then(|| arg.to_owned()));
+            }
+            done(st.net.is_some(), sc, "fx demo".into());
         }
         "shot" => {
             if st.shot_request.is_none() {

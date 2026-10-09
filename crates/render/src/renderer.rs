@@ -2528,9 +2528,10 @@ impl Renderer {
             .iter()
             .any(|d| d.prepared.flags & TECH_NEEDS_POST_SUN != 0);
         let late: Vec<Draw> = if distortion {
+            // The sky belongs to the first half, whatever technique it has: it is the backdrop of the copy.
             let (late, early) = draws
                 .into_iter()
-                .partition(|d| d.prepared.technique == TECH_EMISSIVE);
+                .partition(|d| !d.sky && d.prepared.technique == TECH_EMISSIVE);
             draws = early;
             late
         } else {
@@ -2554,7 +2555,7 @@ impl Renderer {
             .iter()
             .map(|(k, f)| (*k, with_proj(f)))
             .collect();
-        let vm_draws = self.build_dynamic(
+        let mut vm_draws = self.build_dynamic(
             PassKind::Scene,
             &vm_frame,
             &vm_lights,
@@ -2564,6 +2565,9 @@ impl Renderer {
             scene_target,
             false,
         );
+        if !self.settings.distortion {
+            vm_draws.retain(|d| d.prepared.flags & TECH_NEEDS_POST_SUN == 0);
+        }
         let dlights = std::mem::take(&mut self.dynamic_lights);
         let light_passes = self.build_light_passes(
             &dlights,
@@ -2618,12 +2622,10 @@ impl Renderer {
         stats.floatz = z_feathered || self.post_params().dof_active();
         stats.distortion_copy = distortion;
         let floatz = stats.floatz.then(|| {
-            let mut zf = frame.clone();
-            zf.vec[codeconst::DEPTH_FROM_CLIP as usize] = [0.0, 0.0, 0.0, 1.0];
             let zview = self.post_state.floatz_view(&self.gpu, size, format);
             let mut list = self.build_draws(
                 PassKind::FloatZ,
-                &zf,
+                &frame,
                 &HashMap::new(),
                 &items,
                 Target {
@@ -2637,7 +2639,7 @@ impl Renderer {
             );
             list.extend(self.build_dynamic(
                 PassKind::FloatZ,
-                &zf,
+                &frame,
                 &HashMap::new(),
                 &insts,
                 &dynsurfs,

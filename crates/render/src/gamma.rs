@@ -16,6 +16,9 @@ pub const DEFAULT: f32 = 0.8;
 
 /// The ramp's exponent for `r_gamma`, clamped to the dvar's range.
 pub fn exponent(r_gamma: f32) -> f32 {
+    if r_gamma.is_nan() {
+        return 1.0 / DEFAULT;
+    }
     1.0 / r_gamma.clamp(MIN, MAX)
 }
 
@@ -209,6 +212,11 @@ mod tests {
         assert!(ramp(0.5, 0.8) < 0.5 && ramp(0.5, 1.0) == 0.5 && ramp(0.5, 1.5) > 0.5);
         assert_eq!((ramp(0.0, 0.8), ramp(1.0, 0.8)), (0.0, 1.0));
         assert!(is_identity(1.0) && !is_identity(0.8));
+    }
+
+    #[test]
+    fn a_non_number_takes_the_default() {
+        assert_eq!(exponent(f32::NAN), 1.0 / DEFAULT);
     }
 
     #[test]

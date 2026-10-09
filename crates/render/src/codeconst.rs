@@ -283,6 +283,9 @@ impl FrameConsts {
         vec[SHADOWMAP_SCALE as usize] = [0.0, 0.0, 1.0, 1.0];
         vec[FOG as usize] = crate::art::Fog::OFF;
         vec[OUTDOOR_FEATHER_PARMS as usize] = [OUTDOOR_FEATHER; 4];
+        // Depth of a position is its view-space w, as `rb_depthprepass.cpp` leaves it after the float-Z pass: the
+        // z-feathered scene shaders compare their own depth with the float-Z image's.
+        vec[DEPTH_FROM_CLIP as usize] = [0.0, 0.0, 0.0, 1.0];
         // Clip space (x right, y up) to the UV of the same pixel in a full-target image, as `R_UpdateViewport` sets it
         // for a viewport covering the target; no half-texel shift, unlike D3D9, which wgpu does not need.
         vec[CLIP_SPACE_LOOKUP_SCALE as usize] = [0.5, -0.5, 0.0, 1.0];
@@ -417,6 +420,7 @@ mod tests {
         let f = FrameConsts::new(Mat4::IDENTITY, Mat4::IDENTITY, Vec3::ZERO);
         let o = Object::default();
         assert_eq!(f.value(OUTDOOR_FEATHER_PARMS, 0, &o), [8.0; 4]);
+        assert_eq!(f.value(DEPTH_FROM_CLIP, 0, &o), [0.0, 0.0, 0.0, 1.0]);
         // The clip-space corners land on the corners of the image: top left is (0, 0), bottom right (1, 1).
         let uv = |x: f32, y: f32| {
             let s = f.value(CLIP_SPACE_LOOKUP_SCALE, 0, &o);
