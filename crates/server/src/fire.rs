@@ -132,7 +132,14 @@ impl Game {
     }
 
     /// `Bullet_Fire` and the damage it deals.
-    fn fire_bullets(&mut self, vm: &mut Vm, n: u16, weapon: u16, aim: &AimBasis, spread: f32) {
+    pub(crate) fn fire_bullets(
+        &mut self,
+        vm: &mut Vm,
+        n: u16,
+        weapon: u16,
+        aim: &AimBasis,
+        spread: f32,
+    ) {
         self.ensure_player_anims();
         let penetration = self.penetration_table();
         let params = WeaponParams::default();

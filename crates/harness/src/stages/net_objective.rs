@@ -26,6 +26,9 @@ pub(super) struct Human {
     pub(super) own: Option<u16>,
     cmd_time: i32,
     pub(super) hold_use: bool,
+    /// Holds the attack button, and turns the view to this yaw instead of keeping it.
+    pub(super) attack: bool,
+    pub(super) yaw: Option<f32>,
     /// The hint the server's player state showed at the zone, and its text.
     hint: Option<(u16, String)>,
     /// Chat lines and console prints the server sent, oldest first.
@@ -47,6 +50,8 @@ impl Human {
             own: None,
             cmd_time: 0,
             hold_use: false,
+            attack: false,
+            yaw: None,
             hint: None,
             chats: Vec::new(),
             prints: Vec::new(),
@@ -90,11 +95,14 @@ impl Human {
             return;
         };
         self.cmd_time = (self.cmd_time + 1).max(st);
-        let yaw = self.c.latest().map_or(0.0, |s| s.ps.viewangles[1]);
+        let yaw = self
+            .yaw
+            .unwrap_or_else(|| self.c.latest().map_or(0.0, |s| s.ps.viewangles[1]));
         let delta = self.c.latest().map_or(0.0, |s| s.ps.delta_angles[1]);
         let cmd = UserCmd {
             server_time: self.cmd_time,
-            buttons: if self.hold_use { button::USE } else { 0 },
+            buttons: if self.hold_use { button::USE } else { 0 }
+                | if self.attack { button::ATTACK } else { 0 },
             angles: [0, (((yaw - delta) / ANGLE_UNIT) as i32) & 0xffff, 0],
             ..UserCmd::default()
         };

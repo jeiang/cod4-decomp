@@ -174,6 +174,9 @@ pub struct Client {
     pub use_hold_time: i32,
     /// The use press was consumed; a held button is not a fresh press until released.
     pub use_button_done: bool,
+    /// The turret this player is on, and whether they pressed use to get off it.
+    pub turret: Option<u16>,
+    pub turret_leave: bool,
     /// Damage taken since the last end frame, as health points (`damage_blood`), the way the last blow travelled and
     /// whether it came from no direction at all.
     pub damage_blood: i32,
@@ -259,6 +262,8 @@ impl Client {
             use_hold_ent: None,
             use_hold_time: 0,
             use_button_done: false,
+            turret: None,
+            turret_leave: false,
             damage_blood: 0,
             damage_from: [0.0; 3],
             damage_from_world: false,
@@ -502,6 +507,7 @@ impl Game {
     /// Frees the slots whose disconnect callback has run.
     pub fn finish_disconnects(&mut self, vm: &mut Vm) {
         for n in std::mem::take(&mut self.pending_free) {
+            self.release_turret(n);
             crate::script::free_client_hud_elems(self, vm, n);
             self.free_entity(vm, n);
             self.clients[usize::from(n)] = Client::new(n, false, String::new());
@@ -580,6 +586,7 @@ impl Game {
     pub fn client_spawn(&mut self, vm: &mut Vm, n: u16, origin: Vec3, angles: Vec3) {
         let time = self.level.time;
         let max_clients = self.max_clients as u16;
+        self.release_turret(n);
         let Some(c) = self.client_mut(n) else { return };
         let keep = c.ps.e_flags & 0x10_0002;
         let spawn_count = c.spawn_count + 1;
@@ -1086,6 +1093,7 @@ impl Game {
         }
         self.damage_feedback(n);
         self.set_client_contents(n);
+        self.turret_think_client(_vm, n);
         self.update_cursor_hints(n);
         self.update_pose(n);
         self.stuck_in_client(n);

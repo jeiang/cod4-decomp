@@ -24,7 +24,7 @@ mod table;
 
 pub use info::{
     FireType, HITLOC_COUNT, ImpactType, InventoryType, OffhandClass, PenetrateType, ProjExplosion,
-    SURFACE_TYPES, WeaponClass, WeaponInfo, WeaponType,
+    SURFACE_TYPES, TurretDef, WeaponClass, WeaponInfo, WeaponType,
 };
 pub use inventory::PlayerWeapons;
 pub use params::{WeaponParams, perk};

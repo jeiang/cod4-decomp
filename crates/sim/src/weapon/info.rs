@@ -170,6 +170,22 @@ impl FireType {
     }
 }
 
+/// What a mounted turret (`WEAPCLASS_TURRET`) reads from its weapon: the arcs a gunner may swing the gun through
+/// (degrees from the way the turret faces), the stance a gunner is held in and the hint strings.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TurretDef {
+    pub left_arc: f32,
+    pub right_arc: f32,
+    pub top_arc: f32,
+    pub bottom_arc: f32,
+    /// `stance`: 0 standing, 1 crouched, 2 prone.
+    pub stance: i32,
+    pub player_spread: f32,
+    /// What the crosshair says to a player who could mount it, and to the one mounted.
+    pub use_hint_string: Box<str>,
+    pub drop_hint_string: Box<str>,
+}
+
 /// Everything simulation reads from a weapon definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WeaponInfo {
@@ -357,6 +373,7 @@ pub struct WeaponInfo {
 
     /// What moves the gun in the player's hands.
     pub gun: GunParams,
+    pub turret: TurretDef,
 }
 
 impl Default for WeaponInfo {
@@ -509,6 +526,7 @@ impl Default for WeaponInfo {
             parallel_bounce: [0.0; SURFACE_TYPES],
             perpendicular_bounce: [0.0; SURFACE_TYPES],
             gun: GunParams::default(),
+            turret: TurretDef::default(),
         }
     }
 }
@@ -690,6 +708,16 @@ impl WeaponInfo {
             parallel_bounce: def.parallel_bounce,
             perpendicular_bounce: def.perpendicular_bounce,
             gun: GunParams::from_def(def),
+            turret: TurretDef {
+                left_arc: def.left_arc,
+                right_arc: def.right_arc,
+                top_arc: def.top_arc,
+                bottom_arc: def.bottom_arc,
+                stance: def.stance,
+                player_spread: def.player_spread,
+                use_hint_string: text(&def.use_hint_string),
+                drop_hint_string: text(&def.drop_hint_string),
+            },
         }
     }
 

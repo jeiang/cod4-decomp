@@ -1461,7 +1461,7 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 reach = Some(48.0);
                 s
             }
-            EntKind::Plain if &*e.classname == "script_model" => {
+            EntKind::Plain if &*e.classname == "script_model" || e.turret.is_some() => {
                 // The index names the model in the clients' configstrings; one that was never registered cannot be
                 // drawn.
                 let model = game.models.find(&e.model);

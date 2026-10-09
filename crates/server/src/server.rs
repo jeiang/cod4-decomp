@@ -242,6 +242,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("pickupPrints", "0", CHEAT),
         ("player_throwbackInnerRadius", "90", CHEAT),
         ("player_throwbackOuterRadius", "160", CHEAT),
+        ("player_MGUseRadius", "128", CHEAT),
         ("bg_maxGrenadeIndicatorSpeed", "20", CHEAT),
         ("perk_grenadeDeath", "frag_grenade_short_mp", 0),
         ("g_useholdspawndelay", "500", 0),
