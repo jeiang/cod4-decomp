@@ -15,9 +15,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 use web_time::Instant;
 
-/// How long a body is kept after the snapshots stop carrying its entity: one that left the viewer's sight comes back
-/// where it lay, one that was freed does not linger long.
+/// How long a body out of the snapshots goes on simulating; after that it is settled at its resting pose, so one that
+/// returns to view lies where it came to rest instead of falling again.
 const KEEP: Duration = Duration::from_secs(5);
+/// How long a body the snapshots no longer carry is remembered at all.
+const FORGET: Duration = Duration::from_secs(600);
 /// A body first seen with no pose to fall from plays its death clip this long (in steps) before it is made.
 const SETTLE_STEPS: usize = 12;
 const SETTLE_STEP: f32 = 0.25;
@@ -31,6 +33,7 @@ pub(super) struct Body {
     /// `None` without a ragdoll definition: the body keeps the pose it was made in.
     ragdoll: Option<Ragdoll>,
     seen: Instant,
+    settled: bool,
 }
 
 impl NetPlay {
@@ -84,6 +87,7 @@ impl NetPlay {
             at: e.origin,
             ragdoll,
             seen: now,
+            settled: false,
         })
     }
 
@@ -112,6 +116,7 @@ impl NetPlay {
                 continue;
             };
             b.seen = now;
+            b.settled = false;
             drawn += 1;
             match &mut b.ragdoll {
                 Some(r) => {
@@ -129,7 +134,23 @@ impl NetPlay {
             }
         }
         self.c.corpses_max = self.c.corpses_max.max(drawn);
-        self.corpses.retain(|_, b| now - b.seen < KEEP);
+        let world = self.boxes.world();
+        for b in self.corpses.values_mut() {
+            if !b.settled && now - b.seen >= KEEP {
+                b.settled = true;
+                if let Some(r) = &mut b.ragdoll {
+                    // Fast-forward to rest: a body's life is bounded, so this is.
+                    for _ in 0..64 {
+                        if r.at_rest() {
+                            break;
+                        }
+                        r.update(0.1, world);
+                    }
+                    r.freeze();
+                }
+            }
+        }
+        self.corpses.retain(|_, b| now - b.seen < FORGET);
         out
     }
 }
