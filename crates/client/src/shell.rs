@@ -464,8 +464,15 @@ impl Shell {
 
     /// Opens a menu by name (the app's `togglemenu`, the server's `openmenu`).
     pub fn open(&mut self, input: &mut Input, name: &str) {
+        let kind = if name == "scoreboard" {
+            crate::ui::MenuKind::Scoreboard
+        } else if self.st.in_game {
+            crate::ui::MenuKind::Ingame
+        } else {
+            crate::ui::MenuKind::Other
+        };
         let mut h = Self::host(&mut self.st, input);
-        self.ui.open_by_name(&mut h, name);
+        self.ui.open_as(&mut h, name, kind);
     }
 
     pub fn close_by_name(&mut self, input: &mut Input, name: &str) {
@@ -534,9 +541,7 @@ impl Shell {
             }
             UiEvent::CloseIngameMenu => {
                 let mut h = Self::host(&mut self.st, input);
-                if !self.ui.full_screen_visible(&mut h) {
-                    self.ui.close_all(&mut h);
-                }
+                self.ui.close_ingame_menu(&mut h);
             }
             UiEvent::Print { kind, text } => self.print(kind, &text),
             UiEvent::Announce { text } => self.print(net::ui::PrintKind::Bold, &text),

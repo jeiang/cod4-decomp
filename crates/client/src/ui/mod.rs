@@ -23,6 +23,18 @@ use expr::Compiled;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// What opened the current menu (`uiInfo.currentMenuType`): decides whether a server menu may replace it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MenuKind {
+    #[default]
+    Other,
+    /// The Escape menu of a match.
+    Ingame,
+    /// A menu the server opened (`openmenu`).
+    ScriptPopup,
+    Scoreboard,
+}
+
 /// Window dynamic flags.
 pub mod dynf {
     /// The pointer is over the item (`WINDOW_MOUSEOVER`): `mouseEnter` has run and `mouseExit` is owed.
@@ -334,8 +346,8 @@ pub struct Ui {
     bind_pending: Option<(usize, usize)>,
     /// Whether `scriptMenuResponse` reaches the server; off while menus close because the level changed.
     pub allow_menu_response: bool,
-    /// The menu the server opened (`openmenu`) that is still up.
-    script_menu: Option<String>,
+    /// What opened the menu that is up.
+    pub menu_kind: MenuKind,
     /// A server menu that came while another had focus: it opens when that one closes (`cg_waitingScriptMenu`).
     waiting_menu: Option<(String, bool)>,
 }
@@ -379,7 +391,7 @@ impl Ui {
             unknown: Vec::new(),
             bind_pending: None,
             allow_menu_response: true,
-            script_menu: None,
+            menu_kind: MenuKind::Other,
             waiting_menu: None,
         }
     }
@@ -731,17 +743,15 @@ impl Ui {
     fn popup_script_menu(&mut self, host: &mut dyn Host, name: &str, mouse: bool) -> bool {
         let top = self.stack.last().map(|&m| self.menus[m].name.clone());
         let name = name.to_ascii_lowercase();
-        if let Some(top) = &top
-            && self.script_menu.as_ref() != Some(top)
-            && top != "scoreboard"
+        if top.is_some() && !matches!(self.menu_kind, MenuKind::ScriptPopup | MenuKind::Scoreboard)
         {
             return false;
         }
         if top.as_ref() != Some(&name) {
             self.close_all(host);
             self.open_by_name(host, &name);
-            self.script_menu = Some(name);
         }
+        self.menu_kind = MenuKind::ScriptPopup;
         self.cursor_visible = mouse;
         true
     }
@@ -774,6 +784,19 @@ impl Ui {
 
     pub fn clear_waiting_menu(&mut self) {
         self.waiting_menu = None;
+    }
+
+    /// Opens a menu on behalf of the client (not a menu script), recording what kind it is.
+    pub fn open_as(&mut self, host: &mut dyn Host, name: &str, kind: MenuKind) {
+        self.menu_kind = kind;
+        self.open_by_name(host, name);
+    }
+
+    /// `UI_CloseInGameMenu`: closes the Escape menu, unless a full-screen menu is up or something else is.
+    pub fn close_ingame_menu(&mut self, host: &mut dyn Host) {
+        if self.menu_kind == MenuKind::Ingame && !self.full_screen_visible(host) {
+            self.close_all(host);
+        }
     }
 
     pub fn close_by_name(&mut self, host: &mut dyn Host, name: &str) {
@@ -1279,6 +1302,52 @@ impl Ui {
         true
     }
 
+    /// Keys for the edit field `i` being typed in: `Some(used)` when it took the key, `None` when it ended the edit
+    /// and the key goes on to the usual handling.
+    fn edit_key(&mut self, host: &mut dyn Host, m: usize, i: usize, key: &UiKey) -> Option<bool> {
+        let def = self.menus[m].def.clone();
+        let d = &def.items[i];
+        match key {
+            UiKey::Char(c) if !c.is_control() => {
+                let max = match &d.data {
+                    ::assets::zone::menu::ItemData::EditField(Some(e)) if e.max_chars > 0 => {
+                        e.max_chars as usize
+                    }
+                    _ => 256,
+                };
+                let it = &mut self.menus[m].items[i];
+                if it.edit.chars().count() < max {
+                    it.edit.push(*c);
+                }
+                self.commit_edit(host, m, i);
+                Some(true)
+            }
+            UiKey::Backspace => {
+                self.menus[m].items[i].edit.pop();
+                self.commit_edit(host, m, i);
+                Some(true)
+            }
+            UiKey::Enter => {
+                self.menus[m].items[i].editing = false;
+                self.commit_edit(host, m, i);
+                if let Some(s) = &d.on_accept {
+                    self.run_script(host, Some(m), Some(i), s);
+                }
+                self.move_focus(host, m, 1);
+                Some(true)
+            }
+            UiKey::Escape => {
+                self.menus[m].items[i].editing = false;
+                Some(true)
+            }
+            UiKey::Mouse1 | UiKey::Mouse2 | UiKey::Tab => {
+                self.menus[m].items[i].editing = false;
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn key_in(&mut self, host: &mut dyn Host, m: usize, key: UiKey, oob: bool) -> bool {
         if self.bind_pending.is_some() {
             // The next key is the new binding (`bind_capture`); Escape and text input only get in the way.
@@ -1296,24 +1365,20 @@ impl Ui {
         {
             return self.oob_click(host, m, key);
         }
-        // `execKey` handlers see keys 1..=255 before the built-in handling, but an edit field in use keeps its typing.
-        let editing = self.menus[m]
-            .cursor
-            .is_some_and(|i| self.menus[m].items[i].editing);
-        let typing = matches!(key, UiKey::Char(_) | UiKey::Backspace | UiKey::Enter);
+        // An edit field in use owns the keys, wherever the pointer is (`g_editingField`): typing, Enter and Escape
+        // end up in it; a mouse button or Tab ends the edit and goes on to the usual handling.
+        if let Some(i) = self.menus[m].items.iter().position(|it| it.editing)
+            && let Some(used) = self.edit_key(host, m, i, &key)
+        {
+            return used;
+        }
         if let Some(code) = key_code(&key)
-            && !(editing && typing)
             && self.check_on_key(host, m, code)
         {
             return true;
         }
         // Key handlers of the menu (`onKey`), keyed by the original's key numbers: only Esc matters here.
         if key == UiKey::Escape {
-            if let Some(i) = self.menus[m].cursor
-                && self.menus[m].items[i].editing
-            {
-                self.menus[m].items[i].editing = false;
-            }
             match def.on_esc.as_deref() {
                 Some(s) if !s.trim().is_empty() && s.trim() != ";" => {
                     self.run_script(host, Some(m), None, s)
@@ -1340,49 +1405,10 @@ impl Ui {
                     self.move_focus(host, m, 1);
                     true
                 }
-                // A click on nothing: a menu that closes on outside clicks closes.
-                UiKey::Mouse1 if def.window.static_flags & statf::OUT_OF_BOUNDS_CLICK != 0 => {
-                    self.close(host, m);
-                    true
-                }
                 _ => def.window.static_flags & statf::POPUP != 0,
             };
         };
         let d = &def.items[i];
-        // Edit fields eat characters.
-        if self.menus[m].items[i].editing {
-            match &key {
-                UiKey::Char(c) if !c.is_control() => {
-                    let max = match &d.data {
-                        ::assets::zone::menu::ItemData::EditField(Some(e)) if e.max_chars > 0 => {
-                            e.max_chars as usize
-                        }
-                        _ => 256,
-                    };
-                    let it = &mut self.menus[m].items[i];
-                    if it.edit.chars().count() < max {
-                        it.edit.push(*c);
-                    }
-                    self.commit_edit(host, m, i);
-                    return true;
-                }
-                UiKey::Backspace => {
-                    self.menus[m].items[i].edit.pop();
-                    self.commit_edit(host, m, i);
-                    return true;
-                }
-                UiKey::Enter => {
-                    self.menus[m].items[i].editing = false;
-                    self.commit_edit(host, m, i);
-                    if let Some(s) = &d.on_accept {
-                        self.run_script(host, Some(m), Some(i), s);
-                    }
-                    self.move_focus(host, m, 1);
-                    return true;
-                }
-                _ => {}
-            }
-        }
         match key {
             UiKey::Up => {
                 if d.ty == ity::LISTBOX {
@@ -2090,5 +2116,119 @@ mod tests {
         ui.allow_menu_response = false;
         ui.key(&mut host, UiKey::Char('1'));
         assert!(host.responses.is_empty());
+    }
+
+    /// The center of item `i` of menu `m`, in pixels.
+    fn center(ui: &Ui, m: usize, i: usize) -> (f32, f32) {
+        let p = ui.item_pixels(m, i);
+        (p.x + p.w / 2.0, p.y + p.h / 2.0)
+    }
+
+    /// Typing in an edit field goes on after the pointer leaves it, and Escape ends the edit without closing the menu.
+    #[test]
+    fn an_edit_field_keeps_the_keys_when_the_pointer_leaves() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "createserver");
+        let m = ui.menu_index("createserver").unwrap();
+        let i = (0..ui.menus[m].items.len())
+            .find(|&i| {
+                ui.menus[m].def.items[i].ty == ity::EDITFIELD && ui.item_visible(&mut host, m, i)
+            })
+            .expect("a visible edit field");
+        let (x, y) = center(&ui, m, i);
+        ui.mouse_move(&mut host, x, y);
+        assert!(
+            ui.menus[m].items[i].editing,
+            "hovering the field starts the edit"
+        );
+        ui.mouse_move(&mut host, 2.0, 2.0);
+        assert!(ui.key(&mut host, UiKey::Char('x')));
+        assert_eq!(ui.menus[m].items[i].edit, "x");
+        ui.key(&mut host, UiKey::Escape);
+        assert!(!ui.menus[m].items[i].editing);
+        assert!(ui.is_open("createserver"), "Escape only ended the edit");
+    }
+
+    /// A click outside a plain menu that asks for it closes it; one inside does not.
+    #[test]
+    fn a_click_outside_a_menu_closes_it_when_it_asks() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let Some(m) = (0..ui.menus.len()).find(|&m| {
+            let d = &ui.menus[m].def;
+            d.window.static_flags & statf::OUT_OF_BOUNDS_CLICK != 0
+                && d.window.static_flags & statf::POPUP == 0
+                && d.full_screen == 0
+        }) else {
+            eprintln!("no such stock menu; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        let name = ui.menus[m].name.clone();
+        ui.open_by_name(&mut host, &name);
+        let r = ui.menus[m].rect;
+        let inside = ui
+            .place
+            .rect(r.x, r.y, r.w, r.h, r.horz_align, r.vert_align);
+        ui.cursor = (inside.x + inside.w / 2.0, inside.y + inside.h / 2.0);
+        ui.key(&mut host, UiKey::Mouse1);
+        ui.open_by_name(&mut host, &name);
+        ui.cursor = (-5.0, -5.0);
+        ui.key(&mut host, UiKey::Mouse1);
+        assert!(
+            !ui.is_open(&name),
+            "{name} stayed open after an outside click"
+        );
+    }
+
+    /// Closing a menu with the pointer on an item runs the item's exit (clears the hover).
+    #[test]
+    fn closing_a_menu_ends_the_hover() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "createserver");
+        let m = ui.menu_index("createserver").unwrap();
+        let i = ui.menus[m]
+            .def
+            .items
+            .iter()
+            .position(|d| d.window.name.as_deref() == Some("back"))
+            .unwrap();
+        let (x, y) = center(&ui, m, i);
+        ui.mouse_move(&mut host, x, y);
+        let over = |ui: &Ui| {
+            ui.menus[m]
+                .items
+                .iter()
+                .any(|it| it.dyn_flags & dynf::MOUSEOVER != 0)
+        };
+        assert!(over(&ui));
+        ui.close(&mut host, m);
+        assert!(!over(&ui));
+    }
+
+    /// The Escape menu of a match is closed by the server's `closeingamemenu`; a menu of another kind is not.
+    #[test]
+    fn close_ingame_menu_only_closes_the_ingame_menu() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        ui.open_as(&mut host, "popup_leavegame", MenuKind::Other);
+        ui.close_ingame_menu(&mut host);
+        assert!(ui.is_open("popup_leavegame"));
+        ui.open_as(&mut host, "popup_leavegame", MenuKind::Ingame);
+        ui.close_ingame_menu(&mut host);
+        assert!(!ui.captures_input());
     }
 }
