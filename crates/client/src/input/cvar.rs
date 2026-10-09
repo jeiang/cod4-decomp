@@ -25,6 +25,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("cl_yawspeed", "140", true),
     ("cl_pitchspeed", "140", true),
     ("cg_fov", "80", true),
+    ("cg_fovscale", "1", false),
+    ("cg_fovmin", "10", false),
     ("in_mouse", "1", true),
     ("in_gamepad", "1", true),
     ("in_gamepad_deadzone", "0.2", true),

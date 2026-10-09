@@ -65,6 +65,30 @@ pub fn hor_plus(fov_4_3: f32, aspect: f32) -> f32 {
     2.0 * (tan_x * 0.75 * aspect).atan()
 }
 
+/// The `fov_4_3`-degree field of view the world is drawn with (`CG_GetViewFov`). `fixed` is the intermission's or a
+/// turret's own field; otherwise aiming a zoom weapon (`zoom` = its `adsZoomFov` and how far the zoom has come, 0 to 1)
+/// moves from `cg_fov` to exactly the weapon's field, whatever `cg_fov` is. `scale` and `min` are `cg_fovScale` and
+/// `cg_fovMin`.
+pub fn view_fov(
+    cg_fov: f32,
+    fixed: Option<f32>,
+    zoom: Option<(f32, f32)>,
+    scale: f32,
+    min: f32,
+) -> f32 {
+    let fov = fixed.unwrap_or(match zoom {
+        Some((zoom_fov, k)) if zoom_fov > 0.0 => cg_fov - (cg_fov - zoom_fov) * k,
+        _ => cg_fov,
+    });
+    (fov * scale).max(min)
+}
+
+/// `cgameGlob->zoomSensitivity`: how far the mouse turns the view per count relative to hip fire, the ratio of the
+/// tangents of the half fields of view.
+pub fn zoom_sensitivity(view_fov: f32, cg_fov: f32) -> f32 {
+    (view_fov.to_radians() * 0.5).tan() / (cg_fov.to_radians() * 0.5).tan()
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn mode_json(m: &VideoModeHandle) -> Value {
     json!({
@@ -243,6 +267,33 @@ fn page_canvas() -> Result<web_sys::HtmlCanvasElement, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aimed_view_fov_is_the_weapons_whatever_cg_fov_is() {
+        for cg in [65.0, 80.0, 110.0] {
+            assert_eq!(view_fov(cg, None, Some((20.0, 1.0)), 1.0, 10.0), 20.0);
+            assert_eq!(view_fov(cg, None, Some((20.0, 0.0)), 1.0, 10.0), cg);
+            assert_eq!(view_fov(cg, None, None, 1.0, 10.0), cg);
+        }
+        assert_eq!(view_fov(80.0, None, Some((20.0, 0.5)), 1.0, 10.0), 50.0);
+        // A weapon with no zoom field leaves the field alone.
+        assert_eq!(view_fov(80.0, None, Some((0.0, 1.0)), 1.0, 10.0), 80.0);
+        // Turret and intermission fields win over aiming; the scale and the floor apply to all.
+        assert_eq!(
+            view_fov(80.0, Some(55.0), Some((20.0, 1.0)), 1.0, 10.0),
+            55.0
+        );
+        assert_eq!(view_fov(80.0, None, None, 2.0, 10.0), 160.0);
+        assert_eq!(view_fov(80.0, None, Some((4.0, 1.0)), 1.0, 10.0), 10.0);
+    }
+
+    #[test]
+    fn zoom_sensitivity_is_the_tangent_ratio() {
+        assert!((zoom_sensitivity(80.0, 80.0) - 1.0).abs() < 1e-6);
+        let s = zoom_sensitivity(20.0, 80.0);
+        assert!((s - 10f32.to_radians().tan() / 40f32.to_radians().tan()).abs() < 1e-6);
+        assert!(s < 0.25);
+    }
 
     #[test]
     fn hor_plus_keeps_the_four_three_field_and_widens_for_wide_displays() {

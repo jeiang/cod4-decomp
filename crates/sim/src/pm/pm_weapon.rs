@@ -7,8 +7,10 @@
 //! [`PlayerWeapons`] (what is owned, magazines and stock). Weapon values come from the
 //! [`WeaponTable`]. It only runs when the [`Pmove`] carries a [`WeaponCtx`](crate::weapon::WeaponCtx).
 //! Outputs are the original's predictable events on the player state plus the reliable list of
-//! [`WeaponEvent`](crate::weapon::WeaponEvent)s in `Pmove::weapon_out`. Animation selection and
-//! breath holding are not modelled; neither changes which state follows which.
+//! [`WeaponEvent`](crate::weapon::WeaponEvent)s in `Pmove::weapon_out`. Animation selection is not
+//! modelled; it does not change which state follows which. Holding the breath on a scoped weapon
+//! (`PM_UpdateHoldBreath`, `PM_HoldBreathFire`) is: it steadies the scope's sway through
+//! `hold_breath_scale`.
 //!
 //! Time is in milliseconds: `weapon_time` counts down the current action and `weapon_delay`
 //! counts down to the moment within it the action takes effect (the shot leaves the barrel, the
@@ -29,7 +31,7 @@ use super::{Pml, Pmove};
 use crate::cm::ENTITYNUM_NONE;
 use crate::weapon::{
     FireType, OffhandClass, PlayerWeapons, WeaponClass, WeaponEvent, WeaponInfo, WeaponOut,
-    WeaponParams, WeaponTable, WeaponType,
+    WeaponParams, WeaponTable, WeaponType, perk,
 };
 
 /// A segmented reload's first phase ignores a fire press until this fraction of it has played.
@@ -249,6 +251,73 @@ pub(super) fn adjust_aim_spread(pm: &mut Pmove<'_>, pml: &Pml) {
     };
 }
 
+/// Whether the breath can be held on `w`: it has a scope overlay and is not an item.
+fn breath_scope(w: &WeaponInfo) -> bool {
+    w.overlay_reticle && w.weap_class != WeaponClass::Item
+}
+
+/// `PM_UpdateHoldBreath`: the breath is held while the scoped weapon is fully aimed and the button is down, for at
+/// most `player_breath_hold_time`; then it is out for the gasp, during which the sway comes back stronger.
+/// `hold_breath_timer` counts up while held and down after, and `hold_breath_scale` follows its target.
+fn update_hold_breath(pm: &mut Pmove<'_>, pml: &Pml) {
+    let Some(ctx) = &pm.weapons else {
+        return;
+    };
+    let p = ctx.params;
+    let scoped = breath_scope(ctx.table.info(viewmodel_weapon(&pm.ps)));
+    let ps = &mut pm.ps;
+    let mut hold_time = math::snap_to_int(p.breath_hold_time * 1000.0);
+    let gasp_time = math::snap_to_int(p.breath_gasp_time * 1000.0);
+    if ps.perks & perk::EXTRA_BREATH != 0 {
+        hold_time += math::snap_to_int(p.perk_extra_breath * 1000.0);
+    }
+    if hold_time <= 0 {
+        ps.weapon_flags &= !wf::HOLD_BREATH;
+        ps.hold_breath_scale = 1.0;
+        ps.hold_breath_timer = 0;
+        return;
+    }
+    if ps.weapon_pos_frac == 1.0 && scoped && pm.cmd.buttons & button::BREATH != 0 {
+        if ps.hold_breath_timer == 0 {
+            ps.weapon_flags |= wf::HOLD_BREATH;
+        }
+    } else {
+        ps.weapon_flags &= !wf::HOLD_BREATH;
+    }
+    let holding = |ps: &PlayerState| ps.weapon_flags & wf::HOLD_BREATH != 0;
+    if holding(ps) {
+        ps.hold_breath_timer += pml.msec;
+    } else {
+        ps.hold_breath_timer = (ps.hold_breath_timer - pml.msec).max(0);
+    }
+    if holding(ps) && ps.hold_breath_timer > hold_time {
+        ps.hold_breath_timer = gasp_time + hold_time;
+        ps.weapon_flags &= !wf::HOLD_BREATH;
+    }
+    let (target, lerp) = if holding(ps) {
+        (0.0, p.breath_hold_lerp)
+    } else {
+        let gasp = ps.hold_breath_timer as f32 / (gasp_time + hold_time) as f32;
+        ((p.breath_gasp_scale - 1.0) * gasp + 1.0, p.breath_gasp_lerp)
+    };
+    let target = (target - 1.0) * ps.weapon_pos_frac + 1.0;
+    ps.hold_breath_scale = math::diff_track(target, ps.hold_breath_scale, lerp, pml.frametime);
+}
+
+/// `PM_HoldBreathFire`: a shot from a fully aimed scope costs breath time and lets the breath out.
+fn hold_breath_fire(cx: &Cx<'_>, ps: &mut PlayerState, w: &WeaponInfo) {
+    if ps.weapon_pos_frac != 1.0 || !breath_scope(w) {
+        return;
+    }
+    let hold_time = math::snap_to_int(cx.params.breath_hold_time * 1000.0);
+    if ps.hold_breath_timer < hold_time {
+        ps.hold_breath_timer = (ps.hold_breath_timer
+            + math::snap_to_int(cx.params.breath_fire_delay * 1000.0))
+        .min(hold_time);
+    }
+    ps.weapon_flags &= !wf::HOLD_BREATH;
+}
+
 /// `PM_Weapon`: one step of the weapon state machine. Called where the original calls it, after
 /// movement.
 pub(super) fn pm_weapon(pm: &mut Pmove<'_>, pml: &Pml) {
@@ -265,6 +334,7 @@ pub(super) fn pm_weapon(pm: &mut Pmove<'_>, pml: &Pml) {
         return;
     }
     ads::update_lerp(pm, pml);
+    update_hold_breath(pm, pml);
     let mantle_inactive = weapon_inactive(pm);
     let Some(ctx) = pm.weapons.take() else {
         return;
@@ -752,6 +822,7 @@ fn fire_weapon(cx: &mut Cx<'_>, ps: &mut PlayerState, delayed: bool) {
         burst: w.fire_type.is_burst(),
         last_round,
     });
+    hold_breath_fire(cx, ps, w);
     if ps.weapon_pos_frac != 1.0 {
         ps.aim_spread_scale =
             (f64::from(w.hip_spread_fire_add) * 255.0 + f64::from(ps.aim_spread_scale)) as f32;

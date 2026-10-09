@@ -121,6 +121,17 @@ pub fn run() -> Vec<String> {
         (f.look_delta_yaw, f.look_delta_pitch) == (-10.0, 2.0),
     );
 
+    // Aiming a zoom weapon narrows the view; the same mouse motion turns it by the same ratio, for yaw and pitch.
+    i.set_fov_sensitivity_scale(0.25);
+    i.mouse.winit_motion((10.0, 4.0));
+    let ads = i.frame(0.01);
+    i.set_fov_sensitivity_scale(1.0);
+    check(
+        o,
+        "ADS zoom scales mouse look by the fov ratio",
+        (ads.look_delta_yaw, ads.look_delta_pitch) == (-2.5, 0.5),
+    );
+
     // Escape opens the menu (and releases the pointer); it never quits. Only `quit` does.
     i.key("escape", true);
     let esc = i.frame(0.01);

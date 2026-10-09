@@ -3,6 +3,7 @@
 //! drives as stage 3 (`--flythrough`), which records frame times, a video and a screenshot.
 
 mod app;
+mod breath;
 mod compass;
 mod console;
 mod crosshair;
@@ -109,6 +110,8 @@ pub struct Cli {
     /// Treat the GPU as having no BC textures: decode them on the CPU, as the GPUs and browsers without BC do.
     pub no_bc: bool,
     pub fov: f32,
+    /// `--fov` was given: it sets `cg_fov` at start-up, over the saved value.
+    pub fov_given: bool,
     pub settings: render::Settings,
     pub flythrough: bool,
     pub duration: f32,
@@ -176,6 +179,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         backend: "auto".into(),
         no_bc: false,
         fov: 80.0,
+        fov_given: false,
         settings: render::Settings::default(),
         flythrough: false,
         duration: 12.0,
@@ -243,7 +247,10 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             }
             "--no-fog" => c.settings.fog = false,
             "--no-lights" => c.settings.primary_lights = false,
-            "--fov" => c.fov = val(a)?.parse().map_err(|_| "bad fov")?,
+            "--fov" => {
+                c.fov = val(a)?.parse().map_err(|_| "bad fov")?;
+                c.fov_given = true;
+            }
             "--fly-at" => c.fly_at = Some(val(a)?.parse().map_err(|_| "bad time")?),
             "--duration" => c.duration = val(a)?.parse().map_err(|_| "bad duration")?,
             "--out" => c.out = Some(val(a)?.into()),

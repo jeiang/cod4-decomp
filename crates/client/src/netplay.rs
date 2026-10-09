@@ -17,7 +17,7 @@ use crate::effects::Effects;
 use crate::events::{ClientEvent, Events};
 use crate::helicopter::Rotors;
 use crate::input::{Feedback, InputFrame, Seen, buttons, scan_own};
-use crate::kick::Kick;
+use crate::kick::{Kick, Scope};
 use crate::look::{Look, LookOut, cap_turn};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::{Launches, Props};
@@ -50,6 +50,18 @@ const SCORES_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
 
+/// The field of view the original forces for a turret user (55) and for the intermission (90), whatever the weapon
+/// (`CG_GetViewFov`).
+fn fixed_fov(ps: &PlayerState) -> Option<f32> {
+    if ps.e_flags & sim::pm::ef::TURRET_ACTIVE != 0 {
+        Some(55.0)
+    } else if ps.pm_type == PmType::Intermission {
+        Some(90.0)
+    } else {
+        None
+    }
+}
+
 /// What the render loop draws this frame.
 pub struct NetFrame {
     /// Eye position.
@@ -63,6 +75,8 @@ pub struct NetFrame {
     pub models: Vec<ModelInstance>,
     /// The aim zoom and scope overlay of the held weapon.
     pub sight: Option<Sight>,
+    /// The field of view the world is drawn with regardless of the weapon: a turret's or the intermission's.
+    pub fixed_fov: Option<f32>,
     /// Effect sprites and decals.
     pub meshes: Vec<render::DynMesh>,
     /// Happenings new this frame; see [`crate::events`].
@@ -513,6 +527,11 @@ impl NetPlay {
     }
 
     /// `cg_footsteps`, from the cvar store each frame.
+    /// The `bg_shock_volume_<channel>` cvars: what a held breath dips the channels to.
+    pub fn set_breath_volumes(&mut self, volumes: Vec<(String, f32)>) {
+        self.sound.set_breath_volumes(volumes);
+    }
+
     pub fn set_footsteps(&mut self, on: bool) {
         self.sound.set_footsteps(on);
     }
@@ -563,9 +582,9 @@ impl NetPlay {
         if picking {
             // The mouse moves the point on the map, not the view.
             self.loc_cursor[0] =
-                (self.loc_cursor[0] - input.look_delta_yaw * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
+                (self.loc_cursor[0] - input.cursor_yaw * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
             self.loc_cursor[1] =
-                (self.loc_cursor[1] + input.look_delta_pitch * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
+                (self.loc_cursor[1] + input.cursor_pitch * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
         } else {
             self.loc_cursor = [0.5; 2];
             let scale = self.shock_sensitivity;
@@ -643,6 +662,7 @@ impl NetPlay {
                 roll: (drawn.sway[2] + hit_view[1]).to_radians(),
                 models,
                 sight: self.sight.clone(),
+                fixed_fov: fixed_fov(&ps),
                 meshes: drawn.meshes,
                 events,
                 commands,
@@ -676,6 +696,8 @@ impl NetPlay {
                 ps.weapon_pos_frac,
                 def.map(|d| [d.hip_view_kick_center_speed, d.ads_view_kick_center_speed]),
             );
+            self.kick
+                .idle(dt, &ps, def.and_then(|d| Scope::of(d)).as_ref());
         }
         // A hit turns the camera but not the aim, and the HUD shows it.
         let overlay = def.is_some_and(|d| d.overlay_reticle != 0);
@@ -701,9 +723,10 @@ impl NetPlay {
         self.c.max_damage_flash = self.c.max_damage_flash.max(self.damage_hud.flash);
         self.c.max_damage_wedges = self.c.max_damage_wedges.max(self.damage_hud.wedges.len());
         let (was_kicked, kick) = (self.c.kicked, self.kick.angles());
-        self.c.kicked = kick != [0.0; 3];
+        let spring = self.kick.spring();
+        self.c.kicked = spring != [0.0; 3];
         self.c.kick_settled += u64::from(was_kicked && !self.c.kicked);
-        self.c.max_kick_up = self.c.max_kick_up.max(-kick[0]);
+        self.c.max_kick_up = self.c.max_kick_up.max(-spring[0]);
         // Alive in the world: a spectator (before the team and class are chosen) has a view but no body.
         self.c.spawned |= matches!(
             ps.pm_type,
@@ -790,6 +813,7 @@ impl NetPlay {
             roll: roll + drawn.sway[2].to_radians(),
             models,
             sight: self.sight.clone(),
+            fixed_fov: fixed_fov(&ps),
             meshes: drawn.meshes,
             events,
             commands,
@@ -971,6 +995,11 @@ impl NetPlay {
         for line in mine {
             self.sound.command(&line);
         }
+        self.sound.hold_breath(
+            (dt * 1000.0) as i32,
+            ps.weapon_flags & sim::pm::wf::HOLD_BREATH != 0,
+            (WeaponParams::default().breath_hold_time * 1000.0) as i32,
+        );
         let s = &snap.ps;
         let newest: Vec<(u8, u8)> = (0..4u8)
             .map(|i| s.event_sequence.wrapping_sub(4 - i))
@@ -1099,8 +1128,9 @@ impl NetPlay {
                 buttons |= b::LOC_CANCEL;
             }
         }
-        // The kick of the player's shots goes to the server with the aim (`CL_FinishMove`).
-        let kick = self.kick.angles();
+        // The kick of the player's shots goes to the server with the aim (`CL_FinishMove`); the scope's sway only
+        // moves the camera.
+        let kick = self.kick.spring();
         let cmd = UserCmd {
             selected_location,
             server_time: self.cmd_time,
@@ -1753,6 +1783,7 @@ impl NetPlay {
             f.buttons |= buttons::RELOAD;
         }
         self.auto = Some(a);
+        (f.cursor_yaw, f.cursor_pitch) = (f.look_delta_yaw, f.look_delta_pitch);
         f
     }
 }

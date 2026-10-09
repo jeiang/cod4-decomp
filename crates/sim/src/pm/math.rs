@@ -11,6 +11,17 @@
 use crate::Vec3;
 
 pub const EQUAL_EPSILON: f32 = 0.001;
+/// `DiffTrack`: moves `cur` toward `tgt` by `rate` times the remaining distance per second.
+pub fn diff_track(tgt: f32, cur: f32, rate: f32, dt: f32) -> f32 {
+    let err = tgt - cur;
+    let step = rate * err * dt;
+    if err.abs() <= EQUAL_EPSILON || step.abs() > err.abs() {
+        tgt
+    } else {
+        cur + step
+    }
+}
+
 /// `1 / 360` as the original multiplies angles by it before `floor` (double constant).
 const INV_360: f32 = 0.002_777_777_8;
 
