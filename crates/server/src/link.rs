@@ -17,9 +17,12 @@ use sim::contents;
 use sim::pm::{PLAYER_MAXS, PLAYER_MINS, PmType};
 use sim::traj::Trajectory;
 
-use crate::client::{Session, Team};
+use crate::client::{Conn, Session, Team};
+use crate::delta;
 use crate::game::{Ent, EntKind, Game};
+use crate::playeranim::LegsWire;
 use crate::tags::{self, IDENTITY, Mat43, Skeleton};
+use sim::pm::math;
 
 /// `FL_SUPPORTS_LINKTO` in `ent->flags`.
 pub const FL_SUPPORTS_LINKTO: i32 = 0x1000;
@@ -55,6 +58,13 @@ pub struct Corpse {
     pub end_time: i32,
     /// The death animation `getcorpseanim` reports.
     pub anim: Rc<str>,
+    /// The client the body was, its team and the legs clip it died in, for the clients that draw it.
+    pub client: u16,
+    pub team: Team,
+    pub legs: LegsWire,
+    /// Level time of the clone, and the low byte of [`Level::corpses_made`] it was.
+    pub start_time: i32,
+    pub serial: u8,
 }
 
 /// State of the entity builtins that does not belong to the engine fields of [`Ent`].
@@ -413,6 +423,28 @@ impl Game {
         }
     }
 
+    /// `G_GetFreePlayerCorpseIndex`: the first unused corpse slot; with all of them used, the one whose body lies
+    /// farthest from the first player, freed.
+    fn free_corpse_slot(&mut self, vm: &mut Vm) -> usize {
+        let slot = |i: usize| CORPSE_BASE + i;
+        if let Some(i) = (0..CORPSES).find(|i| self.ent(slot(*i) as u16).is_none()) {
+            return slot(i);
+        }
+        let from = (0..self.max_clients as u16)
+            .find_map(|n| self.client(n).filter(|c| c.conn == Conn::Connected))
+            .map(|c| c.ps.origin)
+            .unwrap_or_default();
+        let dist = |i: usize| {
+            let o = self.ent(slot(i) as u16).map_or(from, |e| e.origin);
+            (0..3).map(|k| (o[k] - from[k]).powi(2)).sum::<f32>()
+        };
+        let far = (0..CORPSES)
+            .max_by(|a, b| dist(*a).total_cmp(&dist(*b)))
+            .unwrap_or(0);
+        self.free_entity(vm, slot(far) as u16);
+        slot(far)
+    }
+
     /// `PlayerCmd_ClonePlayer`: a corpse entity at the player's place with its velocity. It
     /// falls until it lands; clients animate it. Returns the corpse's entity number.
     pub fn clone_player(
@@ -424,14 +456,14 @@ impl Game {
     ) -> Option<u16> {
         let src = self.ent(n)?.clone();
         let c = self.client(n)?;
-        let (origin, velocity) = (c.ps.origin, c.ps.velocity);
-        let slot = CORPSE_BASE + self.level.next_corpse % CORPSES;
-        self.level.next_corpse += 1;
-        self.free_entity(vm, slot as u16);
+        let (origin, velocity, yaw) = (c.ps.origin, c.ps.velocity, c.ps.viewangles[1]);
+        let (team, legs) = (c.team, c.pose.legs_wire());
+        let slot = self.free_corpse_slot(vm);
+        self.level.corpses_made += 1;
         let mut e = Ent::new(EntKind::Plain, "");
         e.model = src.model.clone();
         e.origin = origin;
-        e.angles = src.angles;
+        e.angles = [0.0, yaw, 0.0];
         e.mins = src.mins;
         e.maxs = src.maxs;
         e.contents = contents::CORPSE | contents::ACTOR;
@@ -449,6 +481,11 @@ impl Game {
             falling: true,
             end_time: self.level.time + duration_ms,
             anim: anim.into(),
+            client: n,
+            team,
+            legs,
+            start_time: self.level.time,
+            serial: self.level.corpses_made as u8,
         });
         if self.ents.len() <= slot {
             self.ents.resize(slot + 1, None);
@@ -492,44 +529,116 @@ impl Game {
         self.set_ent_pose(n, floor, None);
     }
 
-    /// `G_RunCorpse`: gravity until the body lands, then it only waits for `BodyEnd`.
-    pub fn run_corpse(&mut self, n: u16) {
+    /// How far the death animation moves the body this frame, forward and to the left (`G_GetAnimDeltaForCorpse`).
+    fn corpse_delta(&self, c: &Corpse) -> Vec3 {
+        let (Some(m), Some(a)) = (
+            self.content.root_motion(&c.anim),
+            self.content.anim(&c.anim),
+        ) else {
+            return [0.0; 3];
+        };
+        let at = |t: i32| ((t - c.start_time) as f32 * 0.001 / a.length.max(1e-3)).clamp(0.0, 1.0);
+        let now = self.level.time;
+        delta::rel_delta(m, at(now - self.level.frametime), at(now)).1
+    }
+
+    /// `G_RunCorpseMove`: a falling body drops under gravity; a landed one follows the death animation's root motion
+    /// and falls again if that carries it off its footing. A body that lands on a slope tilts to it and one that
+    /// strikes a wall or a steep face is pushed off it.
+    pub fn run_corpse(&mut self, vm: &mut Vm, n: u16) {
         let now = self.level.time;
         let dt = self.level.frametime as f32 * 0.001;
         let gravity = self.cvars.float("g_gravity");
-        let Some(e) = self.ent_mut(n) else { return };
-        let Some(c) = e.x.corpse.as_mut() else { return };
-        let (mins, maxs) = (e.mins, e.maxs);
+        let Some(e) = self.ent(n) else { return };
+        let Some(c) = e.x.corpse.as_ref() else { return };
         if now >= c.end_time && e.contents & contents::ACTOR != 0 {
-            e.contents = contents::CORPSE;
+            if let Some(e) = self.ent_mut(n) {
+                e.contents = contents::CORPSE;
+            }
             self.relink(n);
             return;
         }
-        if !c.falling {
+        let (mins, maxs, start, angles) = (e.mins, e.maxs, e.origin, e.angles);
+        let (falling, mut v) = (c.falling, c.velocity);
+        let delta = if falling {
+            [0.0; 3]
+        } else {
+            self.corpse_delta(c)
+        };
+        let moving = !falling && math::dot(&delta, &delta) > 1.0;
+        if !falling && !moving {
             return;
         }
-        c.velocity[2] -= gravity * dt;
-        let (start, v) = (e.origin, c.velocity);
-        let end = [
-            start[0] + v[0] * dt,
-            start[1] + v[1] * dt,
-            start[2] + v[2] * dt,
-        ];
+        let mut end = start;
+        if falling {
+            v[2] -= gravity * dt;
+            end = math::mad(&end, dt, &v);
+        }
+        if moving {
+            let (fwd, right, _) = math::angle_vectors(&[0.0, angles[1], 0.0]);
+            end = math::mad(&end, delta[0], &fwd);
+            end = math::mad(&end, -delta[1], &right);
+        }
         let Some(w) = self.world.as_ref() else { return };
-        let t = w.trace(start, end, mins, maxs, n, contents::MASK_DEADSOLID);
-        let at = [
-            start[0] + (end[0] - start[0]) * t.fraction,
-            start[1] + (end[1] - start[1]) * t.fraction,
-            start[2] + (end[2] - start[2]) * t.fraction,
-        ];
+        let mask = contents::MASK_DEADSOLID;
+        let mut t = w.trace(start, end, mins, maxs, n, mask);
+        let mut at = math::lerp(&start, &end, t.fraction);
+        let (mut falling_now, mut velocity, mut tilt) = (falling, v, None);
+        if t.fraction == 1.0 {
+            if moving {
+                // Carried off its footing: it falls from here at the speed it was moving.
+                let below = [at[0], at[1], at[2] - 1.0];
+                let g = w.trace(at, below, mins, maxs, n, mask);
+                if g.fraction == 1.0 && !g.all_solid {
+                    falling_now = true;
+                    velocity = [delta[0] / dt, delta[1] / dt, 0.0];
+                    let (fwd, right, _) = math::angle_vectors(&[0.0, angles[1], 0.0]);
+                    velocity = math::mad(
+                        &math::mad(&[0.0; 3], velocity[0], &fwd),
+                        -velocity[1],
+                        &right,
+                    );
+                }
+            }
+        } else if w.point_contents(at, sim::cm::ENTITYNUM_NONE, contents::NODROP) & contents::NODROP
+            != 0
+        {
+            self.free_entity(vm, n);
+            return;
+        } else if falling {
+            if t.all_solid {
+                // Started inside something: look again from a little higher, ignoring player clips.
+                let up = [start[0], start[1], start[2] + 32.0];
+                t = w.trace(up, end, mins, maxs, n, mask & !contents::PLAYERCLIP);
+                if !t.all_solid {
+                    at = math::lerp(&up, &end, t.fraction);
+                }
+            }
+            velocity = [0.0; 3];
+            if t.all_solid || t.normal[2] > 0.0 {
+                falling_now = false;
+                if !t.all_solid {
+                    // `G_BounceCorpse`: the body's up is the surface's normal, its forward still toward its yaw.
+                    let (fwd, _, _) = math::angle_vectors(&[0.0, angles[1], 0.0]);
+                    let mut left = math::cross(&t.normal, &fwd);
+                    math::normalize(&mut left);
+                    let mut f = math::cross(&left, &t.normal);
+                    math::normalize(&mut f);
+                    tilt = Some(tags::axis_to_angles(&[f, left, t.normal]));
+                }
+            } else {
+                at = math::mad(&at, 1.0, &t.normal);
+            }
+        }
         if let Some(e) = self.ent_mut(n) {
             e.origin = at;
             e.mv.pos.tr = Trajectory::stationary(at);
-            if t.fraction < 1.0
-                && let Some(c) = e.x.corpse.as_mut()
-            {
-                c.velocity = [0.0; 3];
-                c.falling = false;
+            if let Some(a) = tilt {
+                e.angles = a;
+            }
+            if let Some(c) = e.x.corpse.as_mut() {
+                c.falling = falling_now;
+                c.velocity = velocity;
             }
         }
         self.relink(n);
@@ -697,5 +806,37 @@ mod tests {
             .collect();
         assert_eq!(&names[..4], ["m0", "m1", "m2", "m4"]);
         assert_eq!(names.len(), MAX_ATTACH - 1);
+    }
+
+    #[test]
+    fn with_every_corpse_slot_used_the_body_farthest_from_the_first_player_is_replaced() {
+        let mut g = game();
+        let mut vm = vm();
+        g.clients = (0..8)
+            .map(|n| {
+                let mut c = crate::client::Client::new(n, false, String::new());
+                c.conn = Conn::Free;
+                c
+            })
+            .collect();
+        g.ents.resize(8, None);
+        let n = g.connect_client(&mut vm, false, "p").expect("slot");
+        let mut slots = Vec::new();
+        for i in 0..CORPSES {
+            // Bodies at 100, 200 ... along x, so the last made is the farthest.
+            g.client_mut(n).unwrap().ps.origin = [100.0 * (i + 1) as f32, 0.0, 0.0];
+            slots.push(g.clone_player(&mut vm, n, 0, "a").expect("corpse"));
+        }
+        assert_eq!(
+            slots.iter().map(|s| usize::from(*s)).collect::<Vec<_>>(),
+            (CORPSE_BASE..CORPSE_BASE + CORPSES).collect::<Vec<_>>()
+        );
+        let first = g.ent(slots[0]).unwrap().x.corpse.as_ref().unwrap().serial;
+        g.client_mut(n).unwrap().ps.origin = [0.0; 3];
+        let ninth = g.clone_player(&mut vm, n, 0, "a").expect("corpse");
+        assert_eq!(ninth, slots[CORPSES - 1], "the farthest slot is reused");
+        let serial = g.ent(ninth).unwrap().x.corpse.as_ref().unwrap().serial;
+        assert_ne!(serial, first);
+        assert!(g.ent(slots[0]).is_some(), "the nearest body stays");
     }
 }

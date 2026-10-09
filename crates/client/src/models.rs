@@ -8,12 +8,12 @@
 use assets::zone::xmodel::XModel;
 use server::content::{Content, Install};
 use server::playeranim::{PlayerAnims, PlayerPoseInput, PlayerPoseState};
-use sim::skel::Pose;
+use sim::skel::{Controllers, Pose};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::ragdoll::Ragdoll;
+use crate::ragdoll::{Def, Ragdoll, Skel};
 use render::{ModelInstance, ModelKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +44,8 @@ pub struct PlayerModelSet {
 /// The loaded content and the animation sets built from it.
 pub struct Library {
     pub content: Content,
+    /// The install's `ragdoll.cfg`: empty when it has none, which leaves bodies in the pose they died in.
+    pub ragdoll: Def,
     anims: HashMap<(String, Option<String>, Option<String>), Arc<PlayerAnims>>,
     /// [`Library::team_models`] by team: the loaded models never change, and the net frame asks for every player.
     teams: [std::sync::OnceLock<Option<PlayerModelSet>>; 2],
@@ -56,8 +58,13 @@ impl Library {
         let mut content = Content::for_client();
         content.load_zone(&install, "common_mp", 4)?;
         content.load_map(&install, map)?;
+        let ragdoll = match install.vfs.read("ragdoll.cfg") {
+            Ok(Some(bytes)) => Def::parse(&String::from_utf8_lossy(&bytes)),
+            _ => Def::default(),
+        };
         Ok(Library {
             content,
+            ragdoll,
             anims: HashMap::new(),
             teams: Default::default(),
         })
@@ -167,11 +174,6 @@ impl Player {
         self.weapon = other.weapon;
     }
 
-    /// The yaw of the last update, degrees.
-    pub fn yaw(&self) -> f32 {
-        self.yaw
-    }
-
     /// The animation currently playing.
     pub fn animation(&self) -> Option<&'static str> {
         self.state.current()
@@ -182,13 +184,24 @@ impl Player {
         self.state.torso(&self.anims)
     }
 
-    /// A ragdoll of the body as the last [`Player::update`] posed it, thrown with velocity `push`.
-    pub fn ragdoll(&self, origin: [f32; 3], push: [f32; 3]) -> Ragdoll {
+    /// A ragdoll of the body as the last [`Player::update`] posed it, thrown with velocity `push`. `None` when the
+    /// definition names a bone the skeleton lacks.
+    pub fn ragdoll(&self, def: &Def, origin: [f32; 3], push: [f32; 3]) -> Option<Ragdoll> {
         let rig = self.anims.rig();
+        let skel = Skel {
+            names: (0..rig.len())
+                .map(|i| rig.bone_name(i).to_owned())
+                .collect(),
+            parent: (0..rig.len()).map(|i| rig.parent(i)).collect(),
+            alias: (0..rig.len()).map(|i| rig.duplicate_of(i)).collect(),
+        };
+        let mut bind = Pose::default();
+        rig.pose(&[], &Controllers::NONE, &mut bind);
         Ragdoll::new(
+            def,
+            &skel,
             self.pose.bones(),
-            |i| rig.parent(i),
-            |i| rig.duplicate_of(i),
+            bind.bones(),
             origin,
             self.yaw,
             push,
@@ -273,5 +286,70 @@ mod tests {
             (20.0..70.0).contains(&at[2]) && at[0].hypot(at[1]) < 40.0,
             "the gun is at {at:?}"
         );
+    }
+
+    /// The stock skeleton and `ragdoll.cfg` make a body that falls on a floor and settles with the bones the
+    /// definition drives still the length they were, the head above the floor and every skeleton bone accounted for.
+    #[test]
+    fn a_stock_body_falls_as_a_ragdoll_and_keeps_its_bones_together() {
+        use sim::cm::{Collide, Trace};
+        struct Floor;
+        impl Collide for Floor {
+            fn trace(
+                &self,
+                a: [f32; 3],
+                b: [f32; 3],
+                mins: [f32; 3],
+                _: [f32; 3],
+                _: u16,
+                _: i32,
+            ) -> Trace {
+                let (a, b) = (a[2] + mins[2], b[2] + mins[2]);
+                let mut t = Trace::MISS;
+                if b < 0.0 && a >= 0.0 {
+                    t.fraction = a / (a - b);
+                    t.normal = [0.0, 0.0, 1.0];
+                }
+                t
+            }
+            fn point_contents(&self, _: [f32; 3], _: u16, _: i32) -> i32 {
+                0
+            }
+        }
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            eprintln!("COD4_PATH not set; untested");
+            return;
+        };
+        let mut lib = Library::load(std::path::Path::new(&root), "mp_backlot").expect("content");
+        assert!(!lib.ragdoll.is_empty(), "the install has a ragdoll.cfg");
+        let set = lib.team_models(Team::Allies).expect("allied models");
+        let mut p = lib.player(&set).expect("player");
+        p.update(0.0, &PlayerPoseInput::default());
+        let rig = p.anims.rig();
+        let (root_bone, neck, head) = (
+            rig.bone_index("j_mainroot").expect("root"),
+            rig.bone_index("j_neck").expect("neck"),
+            rig.bone_index("j_head").expect("head"),
+        );
+        let mut r = p
+            .ragdoll(&lib.ragdoll, [0.0; 3], [120.0, 0.0, 0.0])
+            .expect("a ragdoll");
+        let len = |b: &[sim::skel::BoneMat]| {
+            glam::Vec3::from(b[root_bone].trans).distance(glam::Vec3::from(b[neck].trans))
+        };
+        let before = len(&r.bones());
+        for _ in 0..900 {
+            r.update(1.0 / 60.0, &Floor);
+        }
+        assert!(r.at_rest());
+        let after = r.bones();
+        assert!(
+            (len(&after) - before).abs() < 0.5,
+            "{before} -> {}",
+            len(&after)
+        );
+        assert!(after.iter().all(|b| b.trans.iter().all(|v| v.is_finite())));
+        let h = after[head].trans;
+        assert!((0.0..60.0).contains(&h[2]), "the head lies at {h:?}");
     }
 }

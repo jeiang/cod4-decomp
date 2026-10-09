@@ -347,8 +347,8 @@ pub struct Level {
     pub num_entities: usize,
     /// `setplayerignoreradiusdamage`.
     pub ignore_radius_damage: bool,
-    /// Next slot of the player corpse ring (`level.currentPlayerClone`).
-    pub next_corpse: usize,
+    /// Corpses made so far; the low byte tells clients a reused corpse slot holds another body.
+    pub corpses_made: u32,
     /// `map(name)` was called: the server changes to this map after the frame.
     pub map_requested: Option<String>,
     /// Entities spawned so far (`useCount` of the next one).

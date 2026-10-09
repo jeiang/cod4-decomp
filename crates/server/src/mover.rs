@@ -396,7 +396,7 @@ impl Game {
             return;
         }
         if self.ent(n).is_some_and(|e| e.x.corpse.is_some()) {
-            self.run_corpse(n);
+            self.run_corpse(vm, n);
             return;
         }
         let now = self.level.time;

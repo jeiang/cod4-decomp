@@ -8,6 +8,7 @@
 //! [`net::view::INTERP_DELAY_MS`] behind the server clock between the two snapshots around that moment, which is also
 //! the moment the server rewinds them to when it judges this client's shots.
 
+mod corpses;
 mod hud;
 mod names;
 
@@ -21,7 +22,6 @@ use crate::kick::Kick;
 use crate::look::{Look, LookOut, cap_turn};
 use crate::models::{Library, Player, PlayerModelSet, Team};
 use crate::props::{Launches, Props};
-use crate::ragdoll::Ragdoll;
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::{Sight, ViewModel};
 use crate::wire::Wire;
@@ -115,10 +115,6 @@ struct Remote {
     /// World model of the weapon the player holds.
     weapon: Option<String>,
     seen: Instant,
-    /// Whether the player was dead as of the last frame; `None` before the first.
-    dead: Option<bool>,
-    /// The body of a player who died while watched: where it fell from, which way it faced, and the simulation.
-    ragdoll: Option<([f32; 3], f32, Ragdoll)>,
 }
 
 /// The spread of how fast the eye moved: median, 99th percentile and the share of frames faster than twice the median
@@ -221,8 +217,9 @@ struct Counters {
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
     fx_decals_max: usize,
-    /// Ragdolls made for players seen dying.
+    /// Ragdolls made for corpses seen, and the most corpses drawn at once.
     ragdolls: u64,
+    corpses_max: usize,
     fx_live_max: usize,
     /// The most script looping effects playing at once, and the strongest camera shake and sway felt.
     looped_fx_max: usize,
@@ -274,6 +271,8 @@ pub struct NetPlay {
     /// Where the map pick of a location selection points, 0..1 across and down the map.
     pub loc_cursor: [f32; 2],
     remotes: HashMap<u16, Remote>,
+    /// The bodies the server's corpse entities are drawn as, by entity number.
+    corpses: HashMap<u16, corpses::Body>,
     /// The impulse of each recent death by client number, until the body is made.
     pushes: HashMap<u16, [f32; 3]>,
     vm: Option<((u16, u16), ViewModel)>,
@@ -383,6 +382,7 @@ impl NetPlay {
             feedback: Feedback::default(),
             loc_cursor: [0.5; 2],
             remotes: HashMap::new(),
+            corpses: HashMap::new(),
             pushes: HashMap::new(),
             vm: None,
             vm_spare: None,
@@ -542,6 +542,7 @@ impl NetPlay {
         self.latest_primary = 0;
         self.last_spawn = None;
         self.remotes.clear();
+        self.corpses.clear();
         self.vm = None;
         self.vm_spare = None;
         self.events = Events::default();
@@ -1044,6 +1045,7 @@ impl NetPlay {
                     .cloned()
             };
             self.props.event(e, &def, self.boxes.world());
+            corpses::blast(&mut self.corpses, e, &def);
             self.effects.event(e, &def);
         }
         if let Some((name, last)) = &mut self.fx_demo
@@ -1729,6 +1731,11 @@ impl NetPlay {
                 e.event_seq,
                 &e.recent_events(),
             );
+            // A dead player is not drawn: the body the server's corpse entity stands for is, and it falls from the
+            // pose the player was last seen in.
+            if e.eflags & eflags::DEAD != 0 {
+                continue;
+            }
             let weapon = self
                 .weapons
                 .get(e.weapon)
@@ -1740,20 +1747,11 @@ impl NetPlay {
                 .filter(|_| e.eflags & eflags::TURRET == 0)
                 .and_then(|w| w.world_models.first().cloned().flatten())
                 .and_then(|m| m.name.as_deref().map(str::to_owned));
-            // The body the scripts gave the player; failing that, the stock body of the team's faction.
-            let scripted = self
-                .net
-                .ui()
-                .map(|u| u.model(e.model).to_owned())
-                .and_then(|n| self.lib.body_models(&n));
-            let set = scripted
-                .or_else(|| team_of(e.eflags).and_then(|t| self.lib.team_models(t)))
-                .map(|set| PlayerModelSet {
-                    weapon: held.clone(),
-                    ..set
-                });
             // A player the scripts have not given a model yet (just joined) is not drawn.
-            let Some(set) = set else {
+            let Some(set) = self.body_set(e.model, e.eflags).map(|set| PlayerModelSet {
+                weapon: held.clone(),
+                ..set
+            }) else {
                 continue;
             };
             match self.remotes.get_mut(&e.client) {
@@ -1779,8 +1777,6 @@ impl NetPlay {
                                 body: set.body.clone(),
                                 weapon: held,
                                 seen: now,
-                                dead: None,
-                                ragdoll: None,
                             },
                         );
                     }
@@ -1803,18 +1799,7 @@ impl NetPlay {
                 continue;
             };
             r.seen = now;
-            let dead = e.eflags & eflags::DEAD != 0;
-            let input = pose_input(e, weapon.as_deref(), dead);
-            // A player who dies in view falls as a ragdoll from the pose they stood in.
-            if dead && r.dead == Some(false) {
-                let push = self.pushes.remove(&e.client).unwrap_or_default();
-                let body = r.player.ragdoll(e.origin, push);
-                r.ragdoll = Some((e.origin, r.player.yaw(), body));
-                self.c.ragdolls += 1;
-            } else if !dead {
-                r.ragdoll = None;
-            }
-            r.dead = Some(dead);
+            let input = pose_input(e, weapon.as_deref(), false);
             r.player.update(dt, &input);
             if matches!(
                 e.weapon_state,
@@ -1822,29 +1807,16 @@ impl NetPlay {
                     | sim::pm::weapon_state::RELOAD_START
                     | sim::pm::weapon_state::MELEE_INIT
                     | sim::pm::weapon_state::OFFHAND_HOLD
-            ) && !dead
-            {
+            ) {
                 self.c.remote_weapon_frames += 1;
             }
             if let Some(c) = r.player.torso_animation() {
                 self.c.torso_clips.insert(c);
             }
             drawn += 1;
-            match &mut r.ragdoll {
-                Some((at, yaw, body)) => {
-                    body.update(dt, self.boxes.world());
-                    if let Some(hit) = body.take_impact() {
-                        self.ragdoll_hits.push(crate::props::heard(
-                            self.boxes.world(),
-                            crate::ragdoll::SOUND.into(),
-                            &hit,
-                        ));
-                    }
-                    out.extend(r.player.instances_posed(*at, *yaw, &body.bones()));
-                }
-                None => out.extend(r.player.instances(e.origin)),
-            }
+            out.extend(r.player.instances(e.origin));
         }
+        out.extend(self.corpse_models(dt, &ents, now));
         let present: Vec<u16> = ents
             .iter()
             .filter(|e| e.etype == etype::PLAYER)
@@ -1925,6 +1897,7 @@ impl NetPlay {
         report["view_kick_settled"] = json!(self.c.kick_settled);
         report["projectiles_max_drawn"] = self.c.projectiles_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
+        report["fx"]["corpses_max"] = self.c.corpses_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
         report["fx"]["camera_sway_max"] = self.c.sway_max.into();
         report["view"] = json!({
