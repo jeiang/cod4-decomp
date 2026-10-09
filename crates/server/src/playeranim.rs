@@ -1464,14 +1464,32 @@ pub struct LegsWire {
     pub seq: u8,
 }
 
+/// Every clip the legs channel can carry: the events', then the death animations, which keep a corpse in the pose
+/// the server chose for every viewer.
+fn legs_wire_clips() -> impl Iterator<Item = &'static str> {
+    LEGS_CLIPS
+        .iter()
+        .chain(&DEATH_STAND)
+        .chain(&DEATH_CROUCH)
+        .chain(&DEATH_RUN)
+        .chain(&DEATH_CROUCH_RUN)
+        .chain(&[
+            DEATH_PRONE,
+            DEATH_RUN_BACK,
+            DEATH_RUN_LEFT,
+            DEATH_RUN_RIGHT,
+            LASTSTAND_DEATH,
+        ])
+        .copied()
+}
+
 fn legs_name(clip: u8) -> Option<&'static str> {
-    LEGS_CLIPS.get(usize::from(clip).checked_sub(1)?).copied()
+    legs_wire_clips().nth(usize::from(clip).checked_sub(1)?)
 }
 
 fn legs_index(name: &str) -> u8 {
-    LEGS_CLIPS
-        .iter()
-        .position(|c| *c == name)
+    legs_wire_clips()
+        .position(|c| c == name)
         .map_or(0, |i| i as u8 + 1)
 }
 
@@ -1551,6 +1569,8 @@ impl PlayerPoseState {
         self.start_legs(clips, dt, input);
         let want = if !input.dead {
             self.legs.map_or_else(|| input.select(), |l| l.clip)
+        } else if let Some(l) = self.legs {
+            l.clip
         } else if self.input.dead {
             // A corpse keeps the animation it died in even as its speed decays.
             self.current.unwrap_or_else(|| input.select())
@@ -1639,9 +1659,7 @@ impl PlayerPoseState {
     fn start_legs(&mut self, clips: &dyn Clips, dt: f32, input: &PlayerPoseInput) {
         if let Some(w) = input.legs_wire {
             let before = self.legs_wire_seen.replace(w.seq);
-            if input.dead {
-                self.legs = None;
-            } else if before != Some(w.seq) {
+            if before != Some(w.seq) {
                 self.legs = legs_name(w.clip).map(|clip| Legs {
                     clip,
                     timer: 0.0,
@@ -1651,8 +1669,20 @@ impl PlayerPoseState {
             return;
         }
         if input.dead {
-            self.set_legs(None);
+            // The death animation is the server's choice, held for every viewer from the frame of the death.
+            if !self.input.dead || (self.legs.is_none() && !self.seen) {
+                let clip = self.input.dead_selection(input);
+                self.set_legs(Some(Legs {
+                    clip,
+                    timer: 0.0,
+                    mantle: false,
+                }));
+            }
             return;
+        }
+        if self.input.dead {
+            // Respawned: the death clip is over.
+            self.set_legs(None);
         }
         if let Some(l) = &mut self.legs {
             l.timer -= dt;
@@ -2002,6 +2032,7 @@ impl PlayerPoseInput {
     fn dead_selection(&self, now: &PlayerPoseInput) -> &'static str {
         PlayerPoseInput {
             dead: true,
+            seed: now.seed,
             laststand: self.laststand || now.laststand,
             ..*self
         }
@@ -3026,16 +3057,16 @@ mod tests {
         assert_eq!(s.current(), Some("pb_standjump_land"));
         s.update(&CLIPS, 0.033, &wire(0, 3));
         assert_eq!(s.current(), Some("pb_stand_alert"));
+        // The death clip the server chose is the corpse's pose, for a viewer who saw the death and for one who did not.
         let dead = PlayerPoseInput {
             dead: true,
-            ..wire(legs_index("pb_standjump_land"), 4)
+            ..wire(legs_index("pb_stand_death_legs"), 4)
         };
         s.update(&CLIPS, 0.033, &dead);
-        assert_ne!(
-            s.current(),
-            Some("pb_standjump_land"),
-            "a corpse plays its death"
-        );
+        assert_eq!(s.current(), Some("pb_stand_death_legs"));
+        let mut late = PlayerPoseState::default();
+        late.update(&CLIPS, 0.033, &dead);
+        assert_eq!(late.current(), Some("pb_stand_death_legs"));
     }
 
     #[test]
@@ -3311,5 +3342,53 @@ mod tests {
         assert_eq!(s.ctl.angles[0][2], 0.0);
         frames(&mut s, &NoClips, 60, 0.016, &at(60.0, 1.0));
         assert!(s.ctl.angles[0][2] > 0.0 && s.ctl.tag_origin_angles[2] > 0.0);
+    }
+
+    #[test]
+    fn a_corpse_holds_the_death_clip_on_the_wire_without_a_new_one_every_frame() {
+        let run = running();
+        let mut s = PlayerPoseState::default();
+        s.update(&CLIPS, 0.033, &run);
+        let dead = PlayerPoseInput {
+            dead: true,
+            seed: 1,
+            ..run
+        };
+        s.update(&CLIPS, 0.033, &dead);
+        assert_eq!(s.current(), Some("pb_death_run_onfront"));
+        let wire = s.legs_wire();
+        assert_eq!(legs_name(wire.clip), Some("pb_death_run_onfront"));
+        frames(
+            &mut s,
+            &CLIPS,
+            20,
+            0.033,
+            &PlayerPoseInput { speed: 0.0, ..dead },
+        );
+        assert_eq!(s.legs_wire(), wire, "nothing new is announced for a corpse");
+        assert_eq!(s.current(), Some("pb_death_run_onfront"));
+        // Respawning ends it.
+        s.update(&CLIPS, 0.033, &PlayerPoseInput::default());
+        assert_eq!(s.current(), Some("pb_stand_alert"));
+        assert_eq!(s.legs_wire().clip, 0);
+    }
+
+    #[test]
+    fn every_death_clip_can_be_named_on_the_legs_wire() {
+        let all: Vec<_> = DEATH_STAND
+            .iter()
+            .chain(&DEATH_CROUCH)
+            .chain(&DEATH_RUN)
+            .chain(&DEATH_CROUCH_RUN)
+            .chain(&[
+                DEATH_PRONE,
+                DEATH_RUN_BACK,
+                DEATH_RUN_LEFT,
+                DEATH_RUN_RIGHT,
+                LASTSTAND_DEATH,
+            ])
+            .collect();
+        assert!(all.iter().all(|c| legs_index(c) != 0));
+        assert!(legs_wire_clips().count() < 256);
     }
 }
