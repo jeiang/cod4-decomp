@@ -95,12 +95,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             ] {
                 out.files.push(f.into());
             }
-            if let Some(w) = verdict(&report) {
+            let problems: Vec<String> = verdict(&report)
+                .into_iter()
+                .chain(dynamic_light_lit(&ctx.dir).err())
+                .collect();
+            if !problems.is_empty() {
                 out.status = Status::Failed;
-                out.reason = Some(w);
-            } else if let Err(w) = dynamic_light_lit(&ctx.dir) {
-                out.status = Status::Failed;
-                out.reason = Some(w);
+                out.reason = Some(problems.join("; "));
             } else {
                 out.notes.push(
                     "vsync, aspect, antialiasing, specular, depth of field, glow and shadows took the menu's values, in the menu and in a running match".into(),
