@@ -149,6 +149,23 @@ struct Counters {
     /// The most the view kicked up, and the most the pitch of a sent cmd differed from the player's own aim, degrees.
     max_kick_up: f32,
     max_kick_in_cmd: f32,
+    /// The camera layer: frames the prediction began a stair step on (the eye was to ease, not jump), the frames of
+    /// those where the drawn eye still jumped, the largest offsets of the drawn eye from the logical one (units, the
+    /// lean sideways, the landing dip, the stair smoothing), the largest turn of the view (degrees), and the frames
+    /// the hands' animated camera moved the view.
+    stair_frames: u64,
+    stair_snaps: u64,
+    /// The last snap's logical jump, drawn jump, smoothing offset and frame time, to tell why.
+    stair_last_snap: [f32; 4],
+    steps_seen: u64,
+    view_lean_max: f32,
+    lean_frames: u64,
+    view_dip_max: f32,
+    view_step_max: f32,
+    view_bob_max: f32,
+    view_turn_max: f32,
+    camera_tag_frames: u64,
+    last_render_z: Option<f32>,
     /// How many times the view kick came back to rest after a kick.
     kick_settled: u64,
     kicked: bool,
@@ -250,6 +267,8 @@ pub struct NetPlay {
     /// Events for the menu runtime (a person's menus drain them; autoplay answers them itself).
     ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
+    /// The camera layer over the logical eye: stair smoothing, bob, lean, landing dip, scoped sway.
+    camera: crate::camera::Camera,
     /// The other players as the last frame's view saw them, for overhead names and head icons.
     scan: crate::hud::NameScan,
     /// The state the HUD shows (predicted, or the followed player's) and the view yaw in degrees, from the last frame.
@@ -346,6 +365,7 @@ impl NetPlay {
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
+            camera: crate::camera::Camera::default(),
             scan: crate::hud::NameScan::default(),
             hud_view: None,
             reticle: None,
@@ -499,6 +519,7 @@ impl NetPlay {
         self.own_events = Seen::default();
         self.shakes.clear();
         self.last_eye = None;
+        self.camera.reset();
         self.scan = crate::hud::NameScan::default();
         self.c.spawned = false;
         self.c.start = None;
@@ -663,12 +684,32 @@ impl NetPlay {
             models.extend(self.script_models(&snap, dt));
             models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
-            models.extend(self.view_model(
-                dt,
-                &ps,
-                ps.origin,
-                [ps.viewangles[0], ps.viewangles[1]],
-            ));
+            // The watched player's view bobs and leans as their own does (`CG_OffsetFirstPersonView`).
+            let aim = [ps.viewangles[0], ps.viewangles[1]];
+            let cam = self.camera.follow(&crate::camera::Frame {
+                ps: &ps,
+                now: st,
+                weapon: self
+                    .lib
+                    .content
+                    .weapon(self.weapons.name(ps.weapon as u16))
+                    .map(|d| crate::camera::WeaponView::from(&**d)),
+                aim,
+                step: 0.0,
+                params: &self.params,
+            });
+            let mut seen = [
+                aim[0] + cam.angles[0],
+                aim[1] + cam.angles[1],
+                cam.angles[2],
+            ];
+            let mut render = eye + Vec3::from(cam.offset);
+            let mut at = ps.origin;
+            for (a, o) in at.iter_mut().zip(cam.offset) {
+                *a += o;
+            }
+            models.extend(self.view_model(dt, &ps, at, seen));
+            render += self.hands_camera(&ps, &mut seen);
             let (events, commands) = self.take_events(&snap);
             self.look
                 .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
@@ -676,20 +717,24 @@ impl NetPlay {
                 .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
             let look = self.look.frame(st);
             self.shock_effects(&look);
-            let (yaw, pitch) = (
-                ps.viewangles[1].to_radians(),
-                -ps.viewangles[0].to_radians(),
-            );
+            let (yaw, pitch) = (seen[1].to_radians(), -seen[0].to_radians());
             // The effects the followed player's guns and the map's events start are as visible to a watcher.
             self.boxes.sync(&snap);
-            let drawn = self.fx_frame(dt, st, ps.client_num, &events, eye, (yaw, pitch, 0.0));
+            let drawn = self.fx_frame(
+                dt,
+                st,
+                ps.client_num,
+                &events,
+                render,
+                (yaw, pitch, seen[2].to_radians()),
+            );
             models.extend(self.props.instances());
             models.extend(drawn.models);
             return Some(NetFrame {
-                origin: eye,
+                origin: render,
                 yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),
                 pitch: pitch + (look.kick[0] - drawn.sway[0] - hit_view[0]).to_radians(),
-                roll: (drawn.sway[2] + hit_view[1]).to_radians(),
+                roll: seen[2].to_radians() + (drawn.sway[2] + hit_view[1]).to_radians(),
                 models,
                 sight: self.sight.clone(),
                 fixed_fov: fixed_fov(&ps),
@@ -706,6 +751,7 @@ impl NetPlay {
             weapons: &self.weapons,
             params: &self.params,
             speed: 190,
+            time: st,
         };
         let p = self.pred.predict(&snap, &env);
         self.c.predictions += 1;
@@ -773,27 +819,45 @@ impl NetPlay {
             }
         }
         self.c.end = feet;
+        // The logical eye is where shots start, sound is heard and the harness measures; the camera draws from the
+        // render eye, which the stair smoothing, bob, lean and landing move.
         let eye = Vec3::new(feet[0], feet[1], feet[2] + ps.view_height_current);
+        let aim = [self.angles[0] + kick[0], self.angles[1] + kick[1]];
+        let cam = self.camera.view(&crate::camera::Frame {
+            ps: &ps,
+            now: st,
+            weapon: def.map(|d| crate::camera::WeaponView::from(&**d)),
+            aim,
+            step: self.pred.step_offset(st),
+            params: &self.params,
+        });
+        self.camera_metrics(&cam, eye, dt, dead, ps.leanf != 0.0 && !dead);
         let yaw_deg = if dead {
             ps.viewangles[1]
         } else {
             self.angles[1]
         };
-        if let Some(last) = self.last_eye
-            && dt > 0.0
-            && dt < 0.05
-            && !dead
-        {
-            let step = eye.distance(last);
-            // A respawn or a teleport is not walking.
-            if step < 64.0 {
-                self.c.eye_speeds.push(step / dt);
-            }
-        }
         self.last_eye = Some(eye);
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
-        self.hear(dt, eye, &ps, &snap);
+        // The hands hang off the render eye, with the camera's angles on the aim.
+        let mut seen = [
+            aim[0] + cam.angles[0],
+            aim[1] + cam.angles[1],
+            cam.angles[2],
+        ];
+        let mut render = eye + Vec3::from(cam.offset);
+        let mut hands = Vec::new();
+        if !dead {
+            let mut at = feet;
+            for (a, o) in at.iter_mut().zip(cam.offset) {
+                *a += o;
+            }
+            hands = self.view_model(dt, &ps, at, seen);
+            render += self.hands_camera(&ps, &mut seen);
+        }
+        // The listener hears from the drawn eye (`SND_SetListener(.., refdef.vieworg, ..)`).
+        self.hear(dt, render, &ps, &snap);
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
@@ -812,41 +876,26 @@ impl NetPlay {
         let view = if dead {
             (0.0, ps.viewangles[1])
         } else {
-            (self.angles[0] + kick[0], self.angles[1] + kick[1])
+            (aim[0], aim[1])
         };
         self.scan_names(st, own, eye, view, dead);
         models.extend(self.script_models(&snap, dt));
         models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));
-        if !dead {
-            models.extend(self.view_model(
-                dt,
-                &ps,
-                feet,
-                [self.angles[0] + kick[0], self.angles[1] + kick[1]],
-            ));
-        }
-        let yaw = if dead {
-            ps.viewangles[1]
-        } else {
-            self.angles[1] + kick[1]
-        };
-        let pitch = if dead {
-            0.0
-        } else {
-            self.angles[0] + kick[0] + hit_view[0]
-        };
+        models.extend(hands);
+        let yaw = if dead { ps.viewangles[1] } else { seen[1] };
+        let pitch = if dead { 0.0 } else { seen[0] + hit_view[0] };
         let (yaw, pitch) = (yaw.to_radians(), -pitch.to_radians());
         let roll = if dead {
             0.0
         } else {
-            (kick[2] + hit_view[1]).to_radians()
+            (seen[2] + kick[2] + hit_view[1]).to_radians()
         };
-        let drawn = self.fx_frame(dt, st, own, &events, eye, (yaw, pitch, roll));
+        let drawn = self.fx_frame(dt, st, own, &events, render, (yaw, pitch, roll));
         models.extend(self.props.instances());
         models.extend(drawn.models);
         Some(NetFrame {
-            origin: eye,
+            origin: render,
             yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),
             pitch: pitch + (look.kick[0] - drawn.sway[0]).to_radians(),
             roll: roll + drawn.sway[2].to_radians(),
@@ -1238,13 +1287,94 @@ impl NetPlay {
         self.net.send_cmd(cmd);
     }
 
+    /// The hands' own camera (reloads, sprints and draws shake it; `CG_ApplyViewAnimation`): moves `seen`, the view
+    /// angles, onto the tag's and returns how far it moves the eye. Nothing for a spectator, a turret or the
+    /// intermission.
+    fn hands_camera(&mut self, ps: &PlayerState, seen: &mut [f32; 3]) -> Vec3 {
+        let tag = crate::camera::takes_hands_camera(ps)
+            .then(|| self.vm.as_ref().and_then(|(_, v)| v.tags()))
+            .flatten()
+            .and_then(|t| t.camera);
+        let Some(tag) = tag else { return Vec3::ZERO };
+        for (a, t) in seen.iter_mut().zip(tag.angles) {
+            *a += sim::pm::math::angle_delta(t, *a);
+        }
+        self.c.camera_tag_frames += 1;
+        Vec3::from(tag.offset)
+    }
+
+    /// Records what the camera layer did this frame; `eye` is the logical eye.
+    fn camera_metrics(
+        &mut self,
+        cam: &crate::camera::View,
+        eye: Vec3,
+        dt: f32,
+        dead: bool,
+        leaning: bool,
+    ) {
+        let c = &mut self.c;
+        // The eye's height with only the stair smoothing applied: bob, a landing's dip and a lean move it too, and
+        // would blur whether the smoothing did its part.
+        let render_z = eye.z + cam.step;
+        let steps = self.pred.steps;
+        // A frame that began a stair step: the logical eye jumped by the step, the drawn one must not.
+        if steps != c.steps_seen {
+            c.steps_seen = steps;
+            // A long frame stamps its step well before `now`, so the smoothing has already run part of its way.
+            if let (Some(last), Some(drawn)) = (self.last_eye, c.last_render_z)
+                && dt > 0.0
+                && dt < 0.03
+                && !dead
+            {
+                let jump = (eye.z - last.z).abs();
+                // A step the smoothing is full for (`cg_viewZSmoothingMax`) cannot be eased whole, by design.
+                // Only a jump the step explains: walking up a slope moves the eye too, and nothing eases that.
+                let taken = self.pred.step_taken.abs();
+                if (3.0..24.0).contains(&jump)
+                    && taken >= jump * 0.8
+                    && cam.step.abs() < net::predict::STEP_MAX - 0.01
+                {
+                    c.stair_frames += 1;
+                    let drawn_jump = (render_z - drawn).abs();
+                    if drawn_jump > jump * 0.6 {
+                        c.stair_snaps += 1;
+                        c.stair_last_snap = [jump, drawn_jump, cam.step, dt];
+                    }
+                }
+            }
+        }
+        // How fast the eye moved, with the stairs eased as they are drawn: a step the smoothing absorbs is not a jerk.
+        if let (Some(last), Some(drawn)) = (self.last_eye, c.last_render_z)
+            && dt > 0.0
+            && dt < 0.05
+            && !dead
+        {
+            let moved = Vec3::new(eye.x - last.x, eye.y - last.y, render_z - drawn).length();
+            // A respawn or a teleport is not walking.
+            if moved < 64.0 {
+                c.eye_speeds.push(moved / dt);
+            }
+        }
+        c.last_render_z = Some(render_z);
+        c.lean_frames += u64::from(leaning);
+        c.view_lean_max = c.view_lean_max.max(cam.lean.abs());
+        c.view_dip_max = c.view_dip_max.max(cam.dip.abs());
+        c.view_step_max = c.view_step_max.max(cam.step.abs());
+        c.view_bob_max = c
+            .view_bob_max
+            .max((cam.offset[2] - cam.step - cam.dip).abs());
+        c.view_turn_max = c
+            .view_turn_max
+            .max(cam.angles[0].abs().max(cam.angles[1].abs()));
+    }
+
     /// The view model of the held weapon, built when the weapon changes.
     fn view_model(
         &mut self,
         dt: f32,
         ps: &PlayerState,
         feet: [f32; 3],
-        look: [f32; 2],
+        look: [f32; 3],
     ) -> Vec<ModelInstance> {
         let index = ps.weapon as u16;
         let key = (index, ps.viewmodel_index);
@@ -1283,7 +1413,7 @@ impl NetPlay {
         };
         let mut shown = ps.clone();
         shown.origin = feet;
-        shown.viewangles = [look[0], look[1], 0.0];
+        shown.viewangles = look;
         self.c.frames_with_viewmodel += 1;
         vm.kick_gun(self.kick.take_gun_speed());
         let models = vm.update(&shown, dt);
@@ -1642,6 +1772,20 @@ impl NetPlay {
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
         report["fx"]["camera_sway_max"] = self.c.sway_max.into();
+        report["view"] = json!({
+            "steps": self.pred.steps,
+            "stair_frames": self.c.stair_frames,
+            "stair_snaps": self.c.stair_snaps,
+            "stair_last_snap": self.c.stair_last_snap,
+            "lean_frames": self.c.lean_frames,
+            "lean_max": self.c.view_lean_max,
+            "landings": self.camera.landings,
+            "dip_max": self.c.view_dip_max,
+            "step_max": self.c.view_step_max,
+            "bob_max": self.c.view_bob_max,
+            "turn_max": self.c.view_turn_max,
+            "camera_tag_frames": self.c.camera_tag_frames,
+        });
         report["damage_events"] = json!(self.c.damage_events);
         report["damage_flash_max"] = json!(self.c.max_damage_flash);
         report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
@@ -1867,6 +2011,11 @@ impl NetPlay {
         }
         f.look_delta_pitch +=
             (0.0 - self.angles[0]).clamp(-1.0, 1.0) * if aim.is_none() { 1.0 } else { 0.0 };
+        // With nothing to shoot at, the bot leans out for a moment now and then, so the camera's lean is exercised
+        // against the real server. (It does not hop: a jump is a burst of eye speed the jerkiness check would count.)
+        if !visible && a.t % 8.0 < 0.6 {
+            f.buttons |= buttons::LEAN_RIGHT;
+        }
         if a.t - a.reload_at > 3.0 && a.t - a.target_seen_at > 0.3 {
             a.reload_at = a.t;
             f.buttons |= buttons::RELOAD;

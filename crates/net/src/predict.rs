@@ -11,7 +11,7 @@ use crate::snapshot::Snapshot;
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
 use sim::pm::{PLAYER_MAXS, PLAYER_MINS, pmf};
-use sim::pm::{Params, PlayerState, UserCmd, run_usercmd};
+use sim::pm::{Params, PlayerState, PmType, UserCmd, run_usercmd};
 use sim::weapon::{PlayerWeapons, WeaponTable};
 use sim::world::{ClipEnt, World};
 use std::collections::VecDeque;
@@ -25,6 +25,65 @@ const SNAP_DISTANCE: f32 = 64.0;
 const NOISE: f32 = 0.01;
 /// How long a disagreement takes to fade, in milliseconds.
 pub const SMOOTH_MS: i32 = 100;
+/// `cg_viewZSmoothingMin`: a step smaller than this (units) is not smoothed.
+pub const STEP_MIN: f32 = 1.0;
+/// `cg_viewZSmoothingMax`: the most of a step (units) the view lags behind.
+pub const STEP_MAX: f32 = 16.0;
+/// `cg_viewZSmoothingTime` in milliseconds: how long the view takes to catch up with a step.
+pub const STEP_MS: i32 = 100;
+
+/// The view's lag behind the player's steps up stairs and ledges (`stepViewChange` / `stepViewStart`): the body is
+/// where prediction puts it at once, the eye eases to the new height over [`STEP_MS`].
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+pub struct StepView {
+    change: f32,
+    start: i32,
+}
+
+impl StepView {
+    /// How far to lower the eye below its true height at command time `now` (`CG_SmoothCameraZ`): the part of the
+    /// last step the eye has not covered yet.
+    pub fn offset(&self, now: i32) -> f32 {
+        let since = now - self.start;
+        if self.change == 0.0 || since < 0 {
+            return 0.0;
+        }
+        let lerp = if since < STEP_MS {
+            since as f32 / STEP_MS as f32
+        } else {
+            1.0
+        };
+        (1.0 - lerp) * self.change
+    }
+
+    /// Takes the steps a prediction pass found (`view_change` in total, the newest at `view_change_time`; unchanged
+    /// `start` when it found none) at time `now`. `smooth` is false for a teleport or a state that does not walk.
+    fn update(&mut self, now: i32, view_change: f32, view_change_time: i32, smooth: bool) {
+        let settle = |s: &mut Self| {
+            if STEP_MS < now - s.start {
+                s.change = 0.0;
+            }
+        };
+        if view_change == 0.0
+            || view_change_time == self.start
+            || !smooth
+            || view_change.abs() < STEP_MIN
+        {
+            settle(self);
+            return;
+        }
+        // The earlier step's share the eye had not covered when this one happened carries over.
+        let mut left = 0.0;
+        if STEP_MS > now - self.start {
+            let since = view_change_time - self.start;
+            if (0..STEP_MS).contains(&since) {
+                left = (1.0 - since as f32 / STEP_MS as f32) * self.change;
+            }
+        }
+        self.change = (view_change + left).clamp(-STEP_MAX, STEP_MAX);
+        self.start = view_change_time;
+    }
+}
 
 /// The map's collision plus the other players as the newest snapshot has them: people block
 /// each other, so a replay that ignored them would walk through a player the server stopped at.
@@ -84,6 +143,8 @@ pub struct Env<'a, W: Collide> {
     pub params: &'a Params,
     /// `g_speed`, from the server.
     pub speed: i32,
+    /// The client's time (what its commands are stamped with), for easing the view over steps.
+    pub time: i32,
 }
 
 pub struct Predicted {
@@ -101,8 +162,14 @@ pub struct Predictor {
     /// The disagreement being faded: offset to add to the predicted origin, and when it began.
     error: [f32; 3],
     error_from: i32,
+    /// The eye's lag behind the steps taken.
+    step: StepView,
     /// Prediction passes whose result differed from the previous pass, beyond rounding.
     pub corrections: u64,
+    /// Steps up or down the eye began easing over.
+    pub steps: u64,
+    /// The vertical distance of the step the last pass began easing over, `0.0` when it began none.
+    pub step_taken: f32,
 }
 
 impl Predictor {
@@ -142,13 +209,15 @@ impl Predictor {
             .copied()
             .unwrap_or_default();
         let mut replayed = 0;
+        // Steps the replay finds, newer than the last one the eye already follows.
+        let (mut view_change, mut view_change_time) = (0.0, self.step.start);
         // The previous pass's end, as this pass saw that moment, to measure the disagreement.
         let mut at_last = None;
         for cmd in self.cmds.iter().filter(|c| c.server_time > base) {
             if cmd.server_time - ps.command_time < 1 {
                 continue;
             }
-            run_usercmd(
+            let out = run_usercmd(
                 &mut ps,
                 &mut inv,
                 *cmd,
@@ -158,12 +227,17 @@ impl Predictor {
                 env.params,
                 env.world,
             );
+            if out.view_change != 0.0 && view_change_time < out.view_change_time {
+                view_change += out.view_change;
+                view_change_time = out.view_change_time;
+            }
             old = *cmd;
             replayed += 1;
             if self.last.is_some_and(|(t, _)| t == cmd.server_time) {
                 at_last = Some(ps.origin);
             }
         }
+        let mut teleported = false;
         if let (Some((t, was)), Some(now)) = (
             self.last,
             at_last.or_else(|| {
@@ -176,6 +250,7 @@ impl Predictor {
             let d = [was[0] - now[0], was[1] - now[1], was[2] - now[2]];
             let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             if len > SNAP_DISTANCE {
+                teleported = true;
                 self.error = [0.0; 3];
             } else if len > NOISE {
                 // Whatever of the old error is left still counts.
@@ -186,7 +261,26 @@ impl Predictor {
             }
         }
         self.last = Some((ps.command_time, ps.origin));
+        if teleported {
+            self.step = StepView::default();
+        }
+        let walks = matches!(ps.pm_type, PmType::Normal | PmType::Noclip | PmType::Ufo);
+        let before = self.step.start;
+        self.step.update(
+            env.time,
+            view_change,
+            view_change_time,
+            walks && !teleported,
+        );
+        let began = self.step.start != before;
+        self.steps += u64::from(began);
+        self.step_taken = if began { view_change } else { 0.0 };
         Predicted { ps, inv, replayed }
+    }
+
+    /// How far to lower the eye at time `now` for the stair steps taken ([`StepView::offset`]).
+    pub fn step_offset(&self, now: i32) -> f32 {
+        self.step.offset(now)
     }
 
     /// The fading disagreement to add to the predicted origin at command time `t`.
@@ -267,6 +361,7 @@ mod tests {
             weapons: &w,
             params: &p,
             speed: 190,
+            time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=60)
             .map(|i| cmd(i * 16, 127, (i * 300) % 65536))
@@ -296,6 +391,7 @@ mod tests {
             weapons: &w,
             params: &p,
             speed: 190,
+            time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=40).map(|i| cmd(i * 16, 127, 0)).collect();
         let truth = serve(&cmds, &env);
@@ -334,6 +430,7 @@ mod tests {
             weapons: &w,
             params: &p,
             speed: 190,
+            time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=20).map(|i| cmd(i * 16, 127, 0)).collect();
         let truth = serve(&cmds, &env);
@@ -357,6 +454,7 @@ mod tests {
             weapons: &w,
             params: &p,
             speed: 190,
+            time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=10).map(|i| cmd(i * 16, 127, 0)).collect();
         let truth = serve(&cmds, &env);
@@ -367,5 +465,77 @@ mod tests {
         let out = pr.predict(&snapshot(&truth[9]), &env);
         assert_eq!(out.replayed, 0);
         assert_eq!(out.ps, truth[9]);
+    }
+
+    #[test]
+    fn the_eye_eases_over_a_step_instead_of_snapping() {
+        let mut world = TestWorld::floor();
+        world.add(
+            [60.0, -100.0, 0.0],
+            [400.0, 100.0, 10.0],
+            sim::contents::SOLID,
+            0,
+        );
+        let (w, p) = (table(), Params::default());
+        let cmds: Vec<UserCmd> = (1..=80).map(|i| cmd(i * 16 + 1, 127, 0)).collect();
+        let env = |t| Env {
+            world: &world,
+            weapons: &w,
+            params: &p,
+            speed: 190,
+            time: t,
+        };
+        let truth = serve(&cmds, &env(0));
+        let mut pr = Predictor::default();
+        let (mut worst_snap, mut stepped, mut last_eye) = (0.0f32, 0.0f32, None::<f32>);
+        for (i, c) in cmds.iter().enumerate() {
+            pr.push(*c);
+            // The server is five commands behind.
+            let acked = if i >= 5 {
+                truth[i - 5].clone()
+            } else {
+                start()
+            };
+            let out = pr.predict(&snapshot(&acked), &env(c.server_time));
+            let drop = pr.step_offset(c.server_time);
+            stepped = stepped.max(drop.abs());
+            let eye = out.ps.origin[2] + out.ps.view_height_current - drop;
+            if let Some(last) = last_eye {
+                worst_snap = worst_snap.max((eye - last).abs());
+            }
+            last_eye = Some(eye);
+        }
+        assert!(
+            stepped > 5.0,
+            "the 10-unit step was never smoothed: {stepped}"
+        );
+        assert!(worst_snap < 4.0, "the eye jumped {worst_snap} in one frame");
+        assert_eq!(pr.step_offset(100_000), 0.0);
+    }
+
+    /// The curve of `CG_SmoothCameraZ`: the whole step at first, linear to nothing over `STEP_MS`, clamped.
+    #[test]
+    fn the_step_curve_is_linear_clamped_and_chained() {
+        let mut s = StepView::default();
+        s.update(1000, 10.0, 1000, true);
+        assert_eq!(s.offset(1000), 10.0);
+        assert!((s.offset(1050) - 5.0).abs() < 1e-4);
+        assert_eq!(s.offset(1000 + STEP_MS), 0.0);
+        // A second step half way carries the rest of the first.
+        s.update(1050, 6.0, 1050, true);
+        assert!((s.offset(1050) - 11.0).abs() < 1e-4);
+        // Never more than the cap, either way.
+        s.update(2000, 40.0, 2000, true);
+        assert_eq!(s.offset(2000), STEP_MAX);
+        s.update(3000, -40.0, 3000, true);
+        assert_eq!(s.offset(3000), -STEP_MAX);
+        // Too small, a state that does not walk, or no new step: nothing smoothed; an old one is dropped.
+        let mut s = StepView::default();
+        s.update(1000, 0.5, 1000, true);
+        s.update(1000, 8.0, 1000, false);
+        assert_eq!(s.offset(1000), 0.0);
+        s.update(1000, 8.0, 1000, true);
+        s.update(1000 + STEP_MS + 1, 0.0, 1000, true);
+        assert_eq!(s.offset(1000), 0.0);
     }
 }
