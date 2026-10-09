@@ -17,11 +17,6 @@ const CROUCHED: f32 = 50.0;
 const PRONE: f32 = 30.0;
 
 impl NetPlay {
-    /// Tells the aim assist how wide the view is: the tangents of its half angles.
-    pub fn set_projection(&mut self, tan_half_fov: [f32; 2]) {
-        self.tan_half_fov = tan_half_fov;
-    }
-
     /// The enemies in view of the player, nearest the crosshair first. `eye` and `feet` are the player's.
     fn melee_targets(&self, st: i32, own: u16, eye: Vec3, feet: Vec3) -> Vec<automelee::Screen> {
         let (Some(snap), Some(ui)) = (self.net.latest(), self.net.ui_ref()) else {

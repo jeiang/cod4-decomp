@@ -734,6 +734,9 @@ impl NetPlay {
     /// what they spawn and draw against.
     pub fn set_projection(&mut self, fov_x: f32, aspect: f32) {
         self.effects.set_projection(fov_x, aspect);
+        // The aim assist's view: the tangents of the half angles.
+        let tan_x = (fov_x * 0.5).tan();
+        self.tan_half_fov = [tan_x, tan_x / aspect.max(f32::EPSILON)];
     }
 
     /// What the player state says the input layer must change (forced stance, ADS reset, frozen); take it each
