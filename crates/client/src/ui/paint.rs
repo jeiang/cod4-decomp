@@ -578,7 +578,7 @@ impl Ui {
         }
     }
 
-    fn text_y(&self, mode: i32, container: f32, h: f32) -> f32 {
+    pub(super) fn text_y(&self, mode: i32, container: f32, h: f32) -> f32 {
         match mode {
             4 => h,
             8 => (container + h) * 0.5,

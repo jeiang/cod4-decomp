@@ -90,6 +90,10 @@ pub struct LiveUi {
     pub hud_time: i32,
     /// A killcam or final killcam replay is on screen (what the stock `killcam` menu keys on).
     pub killcam: bool,
+    /// A flashbang is blinding the view (`CG_Flashbanged`).
+    pub flashed: bool,
+    /// The view is through night vision goggles.
+    pub night_vision: bool,
     /// Name of the player being followed live as a spectator.
     pub following: Option<String>,
     /// The view's player is dead (hud elements marked hide-when-dead stay away).
