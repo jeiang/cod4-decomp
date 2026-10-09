@@ -207,15 +207,16 @@ pub fn ground_carry(snap: &Snapshot, ps: &PlayerState, at: i32) -> [f32; 3] {
     else {
         return [0.0; 3];
     };
-    mover_offset(m.velocity, at - snap.server_time)
+    mover_offset(m, at - snap.server_time)
 }
 
-/// The way a mover moving at `velocity` (units per second) has gone in `ms`: what a client draws it ahead of its
-/// snapshot by, and what it carries the player on it by. Capped, so a snapshot that stopped arriving does not send it
-/// off.
-pub fn mover_offset(velocity: [f32; 3], ms: i32) -> [f32; 3] {
-    let s = ms.clamp(0, 250) as f32 * 0.001;
-    velocity.map(|v| v * s)
+/// The way the `BRUSH` entity `m` has gone in `ms` since its snapshot: what a client draws it ahead of the snapshot
+/// by, and what it carries the player on it by. At the snapshot's velocity, and no longer than the move has left
+/// (`pm_flags`), so a mover that has stopped is not carried on; capped, so a snapshot that stopped arriving does not
+/// send it off.
+pub fn mover_offset(m: &crate::entity::EntityState, ms: i32) -> [f32; 3] {
+    let s = ms.clamp(0, 250).min(m.pm_flags as i32) as f32 * 0.001;
+    m.velocity.map(|v| v * s)
 }
 
 impl Predictor {
@@ -844,6 +845,7 @@ mod tests {
             number: 5,
             etype: crate::entity::etype::BRUSH,
             velocity,
+            pm_flags: 1000,
             ..EntityState::default()
         };
         let carried = |velocity: [f32; 3]| {
@@ -862,5 +864,9 @@ mod tests {
         };
         assert!((carried([0.0, 0.0, 100.0]) - 10.0).abs() < 1e-3);
         assert_eq!(carried([0.0; 3]), 0.0);
+        // A move with 40 ms left carries no further than that.
+        let mut m = lift([0.0, 0.0, 100.0]);
+        m.pm_flags = 40;
+        assert!((mover_offset(&m, 100)[2] - 4.0).abs() < 1e-4);
     }
 }

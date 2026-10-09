@@ -33,7 +33,7 @@ pub mod etype {
     pub const PLANE: u8 = 10;
     /// A `script_brushmodel`: the map's inline model `model` (`*N`) placed at `origin` and `angles`. `velocity` is its
     /// motion in units per second at the snapshot's time, so a client can carry what stands on it and draw it ahead
-    /// of the snapshot; `eflags` is its contents (low 24 bits), which tells the client whether it blocks a player.
+    /// of the snapshot, `pm_flags` the milliseconds left of its move (it is not carried past that); `eflags` is its contents (low 24 bits), which tells the client whether it blocks a player.
     pub const BRUSH: u8 = 11;
 }
 

@@ -328,10 +328,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     m.insert("sound.impacts_heard".into(), heard(&["bulletimpact"]));
     m.insert("fx.ragdolls".into(), num(fx, &["ragdolls"]));
     m.insert("client.script_models_drawn".into(), drawn);
-    m.insert(
-        "client.brush_models_max".into(),
-        num(net, &["brush_models_max"]),
-    );
     m.insert("fx.quads_max".into(), num(fx, &["quads_max"]));
     m.insert("fx.decals_max".into(), num(fx, &["decals_max"]));
     m.insert("fx.live_elems_max".into(), num(fx, &["live_elems_max"]));

@@ -1482,6 +1482,7 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.eflags = e.contents as u32 & 0xff_ffff;
                 if !game.is_linked(n) && e.mv.pos.tr.kind != sim::traj::TrType::Stationary {
                     s.velocity = e.mv.pos.tr.evaluate_delta(game.level.time);
+                    s.pm_flags = e.mv.remaining_ms(game.level.time).clamp(0, 0x1f_ffff) as u32;
                 }
                 s
             }

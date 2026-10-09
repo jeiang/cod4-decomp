@@ -1930,7 +1930,7 @@ impl NetPlay {
                 continue;
             }
             seen += 1;
-            let by = net::predict::mover_offset(e.velocity, st - snap.server_time);
+            let by = net::predict::mover_offset(e, st - snap.server_time);
             out.push(render::BrushInstance {
                 model: e.model,
                 origin: [0, 1, 2].map(|i| e.origin[i] + by[i]),

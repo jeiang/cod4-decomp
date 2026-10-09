@@ -124,6 +124,34 @@ fn a_lift_carries_the_player_standing_on_it() {
     assert!((top - 300.125).abs() < 0.01, "{top}");
 }
 
+/// The movement code, not the test, finds the lift under the player: a player's own command rests on the brush
+/// entity and names it as the ground, which is what makes the mover carry it.
+#[test]
+fn a_players_command_rests_on_a_lift_and_names_it_as_the_ground() {
+    let (mut g, mut vm) = arena();
+    let lift = brush(&mut g, "*1", [0.0, 0.0, 100.0]);
+    let p = player(&mut g, &mut vm, [0.0, 0.0, 100.125]);
+    assert_eq!(
+        g.client(p).unwrap().ps.ground_entity_num,
+        sim::cm::ENTITYNUM_NONE
+    );
+    for _ in 0..4 {
+        g.level.time += FRAME;
+        let cmd = sim::pm::UserCmd {
+            server_time: g.level.time,
+            ..Default::default()
+        };
+        g.client_think(&mut vm, p, cmd);
+    }
+    let c = g.client(p).unwrap();
+    assert_eq!(c.ps.ground_entity_num, lift, "origin {:?}", c.ps.origin);
+    // And from there the mover carries it.
+    moveto(&mut g, lift, [0.0, 0.0, 300.0], 2.0);
+    let before = g.client(p).unwrap().ps.origin[2];
+    step(&mut g, &mut vm, lift, 10);
+    assert!(g.client(p).unwrap().ps.origin[2] > before + 49.0);
+}
+
 #[test]
 fn a_door_shoves_a_player_in_its_way_along() {
     let (mut g, mut vm) = arena();

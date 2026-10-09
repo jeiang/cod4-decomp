@@ -266,6 +266,21 @@ pub fn gravity_move(ch: &mut Channel, curr: &mut Vec3, velocity: Vec3, seconds: 
     *curr = ch.tr.evaluate(now);
 }
 
+impl Mover {
+    /// Milliseconds from `now` until the whole move of the origin is over (every phase, not just the running one);
+    /// 0 for a mover that is not moving.
+    pub fn remaining_ms(&self, now: i32) -> i32 {
+        let ch = &self.pos;
+        let phase = (ch.tr.time + ch.tr.duration - now).max(0);
+        match ch.tr.kind {
+            TrType::Stationary => 0,
+            TrType::Accelerate => phase + ms(ch.mid_time) + ms(ch.decel_time),
+            TrType::LinearStop => phase + ms(ch.decel_time),
+            _ => phase,
+        }
+    }
+}
+
 impl Channel {
     /// True when the trajectory has run out at `now`.
     pub fn finished(&self, now: i32) -> bool {

@@ -2,6 +2,7 @@
 //! Built-in stages.
 pub mod asset_load;
 pub mod audio;
+pub mod client_brush;
 pub mod client_custom_class;
 pub mod client_flythrough;
 pub mod client_frontend;
