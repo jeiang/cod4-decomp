@@ -1362,27 +1362,9 @@ impl Ui {
         let r = self.menus[m].items[i].rect;
         let h = self.text_height(d.font_enum, d.text_scale);
         let w = self.text_width(&text, d.font_enum, d.text_scale);
-        let mut x = d.text_align_x;
-        match d.text_align_mode & 3 {
-            1 => x += (r.w - w) * 0.5,
-            2 => x += r.w - w,
-            _ => {}
-        }
-        let y = d.text_align_y + self.text_y(d.text_align_mode & 0xC, r.h, h);
-        let bsz = if d.window.border != 0 {
-            d.window.border_size
-        } else {
-            0.0
-        };
+        let (x, y) = self.text_origin(d, &r, w, h, 0.0);
         // `y` is the baseline: the rect spans the text height above it.
-        Some(self.place.rect(
-            x + bsz + r.x,
-            y + bsz + r.y - h,
-            w,
-            h,
-            r.horz_align,
-            r.vert_align,
-        ))
+        Some(self.place.rect(x, y - h, w, h, r.horz_align, r.vert_align))
     }
 
     /// Type-0 text items answer the pointer over their text only; every other item over its whole rect.
@@ -2699,6 +2681,41 @@ mod tests {
             assets::UiAssets::load(&install).expect("ui assets"),
             (1280, 720),
         ))
+    }
+
+    /// A text field (edit, numeric) shows its value after its label like the stock item types do: the value
+    /// column of the Start New Server screen lines up between its text fields and its enum/yes-no items.
+    #[test]
+    fn text_field_values_line_up_with_the_other_value_items() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "createserver");
+        let m = ui.menu_index("createserver").unwrap();
+        let def = ui.menus[m].def.clone();
+        let value_x = |dvar: &str| {
+            let i = def
+                .items
+                .iter()
+                .position(|d| d.dvar.as_deref() == Some(dvar))
+                .unwrap_or_else(|| panic!("no item for {dvar}"));
+            let d = &def.items[i];
+            let (x, _, vx, _, label_w) = ui.text_field_layout(&host, m, i, d);
+            (is_text_field(d.ty), x, vx, label_w, d.text.is_some())
+        };
+        let (field, x, vx, w, labelled) = value_x("sv_hostname");
+        assert!(field && labelled);
+        assert!((vx - (x + w + 8.0)).abs() < 1e-3, "8 units after the label");
+        let (_, _, enum_x, _, _) = value_x("ui_dedicated");
+        for dvar in ["sv_hostname", "sv_maxclients", "sv_minping", "sv_maxping"] {
+            let (_, _, vx, _, _) = value_x(dvar);
+            assert!(
+                (vx - enum_x).abs() < 3.0,
+                "{dvar} value at {vx}, the other values at {enum_x}"
+            );
+        }
     }
 
     /// A number key in the quick-chat menu runs the menu's `execKey` handler: it answers the server and closes.
