@@ -64,6 +64,7 @@ impl Game {
             self.cvars.float("player_throwbackOuterRadius"),
         );
         let max_speed = self.cvars.float("bg_maxGrenadeIndicatorSpeed");
+        let mg_radius = self.cvars.float("player_MGUseRadius");
         let mut scored: Vec<(f32, u16)> = Vec::new();
         for t in near {
             let (Some(te), Some(le)) = (self.ent(t), world.entity(t)) else {
@@ -95,7 +96,14 @@ impl Game {
                     continue;
                 }
             }
-            if dist > if missile.is_some() { outer } else { USE_RADIUS } {
+            let reach = if missile.is_some() {
+                outer
+            } else if te.turret.is_some() {
+                mg_radius
+            } else {
+                USE_RADIUS
+            };
+            if dist > reach {
                 continue;
             }
             if dist > 0.0 {
@@ -126,6 +134,9 @@ impl Game {
             if &*te.classname == "trigger_use" {
                 score -= SCORE_SPAN;
             }
+            if te.turret.is_some() {
+                score -= SCORE_SPAN * 0.5;
+            }
             scored.push((score, t));
         }
         scored.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -139,7 +150,13 @@ impl Game {
                 if &*te.classname == "trigger_use_touch" {
                     return true;
                 }
-                let mid: Vec3 = std::array::from_fn(|i| (le.abs_min[i] + le.abs_max[i]) * 0.5);
+                let mut mid: Vec3 = std::array::from_fn(|i| (le.abs_min[i] + le.abs_max[i]) * 0.5);
+                // A turret is aimed at through its `tag_aim`.
+                if te.turret.is_some()
+                    && let Some(m) = self.world_tag(t, "tag_aim")
+                {
+                    mid = m[3];
+                }
                 world.trace_passed(eye, mid, [0.0; 3], [0.0; 3], n, ENTITYNUM_NONE, 17)
             })
             .map(|(_, t)| t)
@@ -159,9 +176,19 @@ impl Game {
             || c.frozen;
         let mut hint = (0u8, -1i8, ENTITYNUM_NONE);
         let mut throw_back_left = 0;
-        if !blocked {
+        if let Some(t) = c.turret {
+            hint = self.turret_drop_hint(t);
+        } else if !blocked {
             for t in self.use_list(n) {
                 let Some(te) = self.ent(t) else { continue };
+                if let Some(tu) = te.turret.as_deref() {
+                    if !self.turret_usable(t, n) {
+                        continue;
+                    }
+                    let weapon = (tu.weapon as u8).saturating_add(pickup::WEAPON_HINT_OFFSET);
+                    hint = (weapon, tu.use_hint.map_or(-1, |s| s as i8), t);
+                    break;
+                }
                 if let Some(item) = te.item.as_ref() {
                     let h = pickup::item_cursor_hint(
                         &c.inv,
@@ -228,10 +255,15 @@ impl Game {
         }
         if c.latched_buttons & use_mask != 0 {
             c.use_hold_ent = None;
-            let busy = c.ps.pm_flags & (pmf::MANTLE | pmf::SPRINTING) != 0
+            let busy = c.turret.is_some()
+                || c.ps.pm_flags & (pmf::MANTLE | pmf::SPRINTING) != 0
                 || (weapon_state::OFFHAND_INIT..=weapon_state::OFFHAND_END)
                     .contains(&c.ps.weapon_state);
-            if busy {
+            if c.turret.is_some() {
+                // Use on a turret gets the gunner off it; the end of the frame lets go.
+                c.turret_leave = true;
+                used = true;
+            } else if busy {
                 used = true;
             } else if c.ps.cursor_hint != 0 && c.ps.cursor_hint_ent_index != ENTITYNUM_NONE {
                 c.use_hold_ent = Some(c.ps.cursor_hint_ent_index);
@@ -251,6 +283,12 @@ impl Game {
                     let who = self.entity_value(vm, n);
                     vm.notify_entity(t, "touch", &[who]);
                     self.touch_item(vm, n, t, false);
+                } else if self.ent(t).is_some_and(|e| e.turret.is_some()) {
+                    if self.turret_usable(t, n) {
+                        let who = self.entity_value(vm, n);
+                        vm.notify_entity(t, "trigger", &[who]);
+                        self.turret_use(t, n);
+                    }
                 } else if self.ent(t).is_some() {
                     let who = self.entity_value(vm, n);
                     vm.notify_entity(t, "trigger", &[who]);

@@ -178,6 +178,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_items::run),
     },
     StageDef {
+        name: "net-turret",
+        description: "two real UDP clients on mp_convoy: one mounts a stock turret holding +activate, is held inside its arc, fires it and lets go; the other is shown the turret and the gunner on it",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_turret::run),
+    },
+    StageDef {
         name: "net-triggers",
         description: "a bot is held in spawned volumes on mp_crash: a trigger_hurt wears its health down, a trigger_once is freed after the first touch, a bullet through a one-shot trigger_damage sets it off",
         needs_install: false,

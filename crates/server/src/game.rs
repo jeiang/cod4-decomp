@@ -188,6 +188,8 @@ pub struct Ent {
     pub veh: Option<Box<crate::vehicle::Vehicle>>,
     /// A dropped or placed weapon (`ET_ITEM`).
     pub item: Option<Box<crate::items::DroppedItem>>,
+    /// A mountable turret (`ET_MG42`, `misc_mg42` and `misc_turret`).
+    pub turret: Option<Box<crate::turret::Turret>>,
     /// The effect this entity plays for the clients (`spawnfx`, `playloopedfx`).
     pub world_fx: Option<WorldFx>,
     /// `playloopsound`: the sound alias (`Game::sounds` index) this entity loops, 0 for none. It travels in the
@@ -246,6 +248,7 @@ impl Ent {
             owner: None,
             veh: None,
             item: None,
+            turret: None,
             world_fx: None,
             loop_sound: 0,
         }
@@ -592,6 +595,7 @@ impl Game {
 
     /// `G_FreeEntity`: the script object dies at the next `Scr_IncTime`.
     pub fn free_entity(&mut self, vm: &mut Vm, num: u16) {
+        self.stop_using_turret(num, true);
         self.unlink_all(num);
         self.dropped.retain(|&d| d != num);
         if let Some(slot) = self.ents.get_mut(usize::from(num))
@@ -849,6 +853,9 @@ impl Game {
                 radius.zip(height)
             };
             self.init_clip(num, extent);
+            if matches!(class, "misc_mg42" | "misc_turret") {
+                self.init_turret(num, vars)?;
+            }
             if class.starts_with("trigger_") {
                 let int = |k| get(vars, k).map_or(0, cvar::parse_int);
                 self.init_trigger_spawn(
