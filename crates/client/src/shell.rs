@@ -38,6 +38,9 @@ pub enum Action {
     Join(String),
     /// `playdemo <name>`: play a recorded demo.
     PlayDemo(String),
+    /// A menu's `soundLoop` starts or stops.
+    SoundLoop(String),
+    SoundLoopStop(String),
     /// Join the server last joined again (`reconnect`).
     Reconnect,
     Disconnect,
@@ -78,6 +81,8 @@ pub struct ShellState {
     pub profiles: Profiles,
     pub profile_names: Vec<String>,
     pub actions: Vec<Action>,
+    /// The menu `soundLoop`s playing now.
+    pub menu_loops: Vec<String>,
     pub in_game: bool,
     pub started: Instant,
     pub maps: Vec<MapEntry>,
@@ -240,6 +245,7 @@ impl ShellState {
             profiles: Profiles::none(),
             profile_names: Vec::new(),
             actions: Vec::new(),
+            menu_loops: Vec::new(),
             in_game: false,
             started: Instant::now(),
             maps,
@@ -526,6 +532,17 @@ impl Shell {
         }
         let mut h = Self::host(&mut self.st, input);
         self.ui.key(&mut h, key)
+    }
+
+    /// Runs a menu script (the harness's colour probe).
+    pub fn run_menu_script(&mut self, input: &mut Input, menu: &str, src: &str) {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.run_menu_script(&mut h, menu, src);
+    }
+
+    /// A mouse button came up: a dragged scroll bar or slider is let go.
+    pub fn mouse_up(&mut self) {
+        self.ui.key_up(&UiKey::Mouse1);
     }
 
     /// Gives a pending bind item the key the player pressed.
@@ -898,7 +915,20 @@ impl Shell {
                 cache: &mut self.cache,
                 images: &mut self.images,
             };
-            self.ui.paint_loading(&mut p, view);
+            // The view names the game mode by id; the screen shows its title.
+            let title = self
+                .st
+                .gametypes
+                .iter()
+                .find(|g| g.id.eq_ignore_ascii_case(view.gametype))
+                .map_or("", |g| g.title.as_str());
+            self.ui.paint_loading(
+                &mut p,
+                &LoadingView {
+                    gametype: title,
+                    ..*view
+                },
+            );
         }
         self.ui2d.flush(target, Some(wgpu::Color::BLACK));
     }
@@ -921,6 +951,31 @@ impl Shell {
 pub struct HostCx<'a> {
     pub st: &'a mut ShellState,
     pub input: &'a mut Input,
+}
+
+/// First and last stat of the perks, weapons and attachments that carry an unlock flag.
+const UNLOCK_STATS: std::ops::RangeInclusive<i32> = 150..=298;
+
+/// `Script_StatClearPerkNew`: an unlocked item (bit 0, or bit 1 for "new") stays unlocked and loses its "new" flag.
+fn clear_new_flag(stats: &mut [i32], index: i32) -> Result<(), String> {
+    if !UNLOCK_STATS.contains(&index) {
+        return Err(format!("invalid stat index {index}"));
+    }
+    let stat = stats
+        .get_mut(index as usize)
+        .ok_or_else(|| format!("no stat {index}"))?;
+    if *stat & 3 == 0 {
+        return Err(format!("stat {index} isn't unlocked"));
+    }
+    *stat = (*stat & !2) | 1;
+    Ok(())
+}
+
+/// `Script_StatClearBitMask`.
+fn clear_stat_bits(stats: &mut [i32], stat: i32, mask: i32) {
+    if let Some(s) = usize::try_from(stat).ok().and_then(|i| stats.get_mut(i)) {
+        *s &= !mask;
+    }
 }
 
 fn atoi(s: &str) -> i32 {
@@ -1264,9 +1319,28 @@ impl HostCx<'_> {
                         }
                     }
                 }
-                "statclearbitmask"
-                | "statclearperknew"
-                | "wait"
+                // statClearBitMask <stat dvar> <mask dvar>: the dvars hold the stat number and the bits to clear.
+                "statclearbitmask" => {
+                    let from = |n: &str| {
+                        let v = self.dvar_get(n);
+                        atoi(if v.is_empty() { n } else { &v })
+                    };
+                    let (stat, mask) = (from(a(1)), from(a(2)));
+                    clear_stat_bits(&mut self.st.stats, stat, mask);
+                }
+                // statClearPerkNew ( ref ): the perk, weapon or attachment has been looked at, so it is not "new".
+                "statclearperknew" => {
+                    let name = cmd
+                        .iter()
+                        .skip(1)
+                        .find(|t| !matches!(t.as_str(), "(" | ")" | "\""))
+                        .map_or("", String::as_str);
+                    let index = atoi(&ui.table_lookup("mp/statstable.csv", 4, name, 1));
+                    if let Err(e) = clear_new_flag(&mut self.st.stats, index) {
+                        eprintln!("statClearPerkNew {name}: {e}");
+                    }
+                }
+                "wait"
                 // Stays a no-op: `snd_volume` is read live every frame, and no other snd_ dvar needs a restart.
                 | "snd_restart"
                 | "updatedvarsfromprofile"
@@ -1480,6 +1554,16 @@ impl Host for HostCx<'_> {
 
     fn play(&mut self, alias: &str) {
         self.st.actions.push(Action::Sound(alias.to_owned()));
+    }
+
+    fn menu_loops(&mut self, aliases: &[String]) {
+        for a in aliases.iter().filter(|a| !self.st.menu_loops.contains(a)) {
+            self.st.actions.push(Action::SoundLoop(a.clone()));
+        }
+        for a in self.st.menu_loops.iter().filter(|a| !aliases.contains(a)) {
+            self.st.actions.push(Action::SoundLoopStop(a.clone()));
+        }
+        self.st.menu_loops = aliases.to_vec();
     }
 
     fn menu_response(&mut self, menu: &str, response: &str) {
@@ -1782,14 +1866,10 @@ impl Host for HostCx<'_> {
         let next = |i: usize, n: usize| if back { (i + n - 1) % n } else { (i + 1) % n };
         match id {
             // 245: the gametype chooser of the server settings. A click or Enter steps on, the right button back (the
-            // arrow keys do nothing, as in the original); the map list and the settings menu follow `ui_netGametypeName`.
+            // arrow keys are not its: they move the focus on, as in the original); the map list and the settings menu follow `ui_netGametypeName`.
             245 => {
                 let n = self.st.gametypes.len();
-                let back = matches!(key, UiKey::Left | UiKey::Mouse2);
-                let step = matches!(
-                    key,
-                    UiKey::Left | UiKey::Right | UiKey::Mouse1 | UiKey::Mouse2 | UiKey::Enter
-                );
+                let step = pick;
                 if n > 0 && step {
                     let d = if back { n - 1 } else { 1 };
                     let sel = (self.gametype_sel() + d) % n;
@@ -1883,6 +1963,15 @@ impl Host for HostCx<'_> {
                     .unwrap_or_default();
                 let t = ui.assets.translate(&t).map_or(t.clone(), |s| s.to_string());
                 ui_text(ui, p, d, rect, color, &t);
+            }
+            // 250: what a bind item waits for (`UI_DrawKeyBindStatus`).
+            250 => {
+                let key = if ui.bind_pending() {
+                    "EXE_KEYWAIT"
+                } else {
+                    "EXE_KEYCHANGE"
+                };
+                ui_text(ui, p, d, rect, color, &translate(ui, key));
             }
             205 => {
                 let at = usize::try_from(atoi(&self.dvar_get("ui_gametype"))).unwrap_or(0);
@@ -2460,6 +2549,13 @@ mod tests {
         assert!(h.owner_key(&ui, 245, &UiKey::Mouse2));
         assert_eq!(h.dvar("ui_netGametypeName"), "sab");
         assert!(!h.owner_key(&ui, 245, &UiKey::Up));
+        let before = h.gametype_sel();
+        assert!(
+            !h.owner_key(&ui, 245, &UiKey::Left),
+            "the arrows are not the chooser's"
+        );
+        assert!(!h.owner_key(&ui, 245, &UiKey::Right));
+        assert_eq!(h.gametype_sel(), before);
         assert!(h.owner_key(&ui, 245, &UiKey::Enter));
         assert_eq!(h.dvar("ui_netGametypeName"), "war");
     }
@@ -2764,5 +2860,25 @@ mod tests {
         assert_eq!(civil(0), (1970, 1, 1, 0, 0));
         assert_eq!(civil(951_868_740), (2000, 2, 29, 23, 59));
         assert_eq!(civil(1_791_554_700), (2026, 10, 9, 14, 5));
+    }
+
+    #[test]
+    fn stat_clear_commands_clear_the_new_flag_and_the_masked_bits() {
+        let mut stats = vec![0; 300];
+        stats[200] = 3;
+        stats[201] = 1;
+        stats[202] = 0;
+        clear_new_flag(&mut stats, 200).unwrap();
+        assert_eq!(stats[200], 1, "unlocked, no longer new");
+        clear_new_flag(&mut stats, 201).unwrap();
+        assert_eq!(stats[201], 1);
+        assert!(clear_new_flag(&mut stats, 202).is_err(), "locked");
+        assert!(clear_new_flag(&mut stats, 5).is_err(), "not an unlock stat");
+        assert!(clear_new_flag(&mut stats, 299).is_err());
+        stats[10] = 0b1111;
+        clear_stat_bits(&mut stats, 10, 0b0110);
+        assert_eq!(stats[10], 0b1001);
+        clear_stat_bits(&mut stats, -1, 1);
+        clear_stat_bits(&mut stats, 9999, 1);
     }
 }

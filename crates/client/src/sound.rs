@@ -53,6 +53,9 @@ const BREATH_VOLUME: f32 = 0.5;
 /// The entity the heartbeat is started for, so a looping one is started once however often it is asked for.
 const BREATH_ENTITY: u32 = 0x00ff_fffe;
 
+/// The entity a menu's `soundLoop` plays for, so a looping alias starts once however often it is asked for.
+const MENU_ENTITY: u32 = 0x00ff_fffd;
+
 pub struct ClientSound {
     state: State,
     device: bool,
@@ -355,6 +358,23 @@ impl ClientSound {
     /// Plays `alias` as a 2D sound (menus).
     pub fn play_ui(&mut self, alias: &str) {
         self.play(alias, Cue::default());
+    }
+
+    /// A menu's `soundLoop`: a looping alias plays on until [`Self::menu_loop_stop`].
+    pub fn menu_loop(&mut self, alias: &str) {
+        self.play(
+            alias,
+            Cue {
+                entity: MENU_ENTITY,
+                ..Cue::default()
+            },
+        );
+    }
+
+    pub fn menu_loop_stop(&mut self, alias: &str) {
+        if let Some(s) = self.ready() {
+            s.stop_loop(MENU_ENTITY, alias);
+        }
     }
 
     /// Plays `alias` at a world position (effect sounds, impacts).

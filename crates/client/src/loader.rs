@@ -63,6 +63,8 @@ pub struct Load {
     pub map: String,
     /// A level change of a running session ([`Server::Keep`]), not the start of one.
     pub level_change: bool,
+    /// A join of someone else's match, not one this client hosts.
+    pub joining: bool,
     #[cfg(not(target_arch = "wasm32"))]
     rx: mpsc::Receiver<Result<Loaded, String>>,
     state: Arc<Progress>,
@@ -110,6 +112,7 @@ impl Load {
         let cancel = Arc::new(AtomicBool::new(false));
         let map = req.map.clone();
         let level_change = matches!(req.server, Server::Keep);
+        let joining = matches!(req.server, Server::Join(_));
         let req = Arc::new(req);
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -128,6 +131,7 @@ impl Load {
         Load {
             map,
             level_change,
+            joining,
             #[cfg(not(target_arch = "wasm32"))]
             rx,
             state,

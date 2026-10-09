@@ -354,6 +354,8 @@ struct State {
     pending_demo: Option<PathBuf>,
     /// Where `record` writes demos and `playdemo` looks for them.
     demo_dir: PathBuf,
+    /// The game mode id of the match being loaded (the loading screen names it); empty when unknown.
+    load_gametype: String,
     /// Frame intervals from the start of a map load until the player is in the world.
     load_gaps: Option<LoadGaps>,
     /// What the last load measured, for the report.
@@ -798,6 +800,7 @@ impl Viewer {
             download: None,
             pending_demo: None,
             demo_dir: demo_dir.clone(),
+            load_gametype: String::new(),
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
@@ -1374,7 +1377,13 @@ impl Viewer {
         } else {
             surface_view.clone()
         };
+        // The menus up blur the world behind them (`UI_GetBlurRadius`, from the last painted frame).
+        let menu_blur = match (&st.loading, &st.shell) {
+            (None, Some(sh)) => sh.ui.blur_radius,
+            _ => 0.0,
+        };
         if let Some(r) = st.renderer.as_mut() {
+            r.post.blur_radius = menu_blur;
             r.viewmodel_fov_x = Some(st.fov_x);
             #[cfg(target_arch = "wasm32")]
             {
@@ -1402,10 +1411,20 @@ impl Viewer {
         #[cfg(target_arch = "wasm32")]
         let downloading: Option<(String, String, f32)> = None;
         if let (Some(sh), Some(l)) = (st.shell.as_mut(), st.loading.as_ref()) {
+            let progress = l.progress();
+            // The connection state shows once the level has loaded (`displayConnectionInfo`).
+            let status = match (progress >= 1.0, l.joining) {
+                (false, _) => "",
+                (true, true) => "EXE_AWAITINGGAMESTATE",
+                (true, false) => "EXE_AWAITINGHOST",
+            };
             let view = LoadingView {
                 map: &l.map,
                 note: l.note(),
-                progress: l.progress(),
+                progress,
+                gametype: &st.load_gametype,
+                status,
+                now_ms: (t * 1000.0) as i32,
             };
             sh.paint_loading(&target, size, &view);
         } else if let (Some(sh), Some((map, note, progress))) = (st.shell.as_mut(), &downloading) {
@@ -1413,6 +1432,9 @@ impl Viewer {
                 map,
                 note,
                 progress: *progress,
+                gametype: &st.load_gametype,
+                status: "",
+                now_ms: (t * 1000.0) as i32,
             };
             sh.paint_loading(&target, size, &view);
         } else if let Some(sh) = st.shell.as_mut() {
@@ -1666,6 +1688,19 @@ impl Viewer {
                 Action::Console(line) => console_action(st, &line),
                 // Menu sounds live in the zones of the front end (`code_post_gfx`), which the match's tables
                 // do not load, so they have their own small sound system.
+                Action::SoundLoop(alias) if !self.cli.no_sound => {
+                    st.menu_sound
+                        .get_or_insert_with(|| {
+                            crate::sound::ClientSound::start(&self.cli.install, "", true)
+                        })
+                        .menu_loop(&alias);
+                }
+                Action::SoundLoop(_) => {}
+                Action::SoundLoopStop(alias) => {
+                    if let Some(s) = st.menu_sound.as_mut() {
+                        s.menu_loop_stop(&alias);
+                    }
+                }
                 Action::Sound(alias) => {
                     if !self.cli.no_sound {
                         st.menu_sound
@@ -2377,6 +2412,15 @@ fn tour_step(
             Some(m) => sh.open(input, m),
             None => return true,
         }
+        // The join menu's tab highlight is set by `setitemcolor <group> backcolor`: the tour sets one and checks that
+        // the item took it (reported as `setitemcolor`).
+        if t.menus.get(t.index) == Some(&"pc_join_unranked") {
+            sh.run_menu_script(
+                input,
+                "pc_join_unranked",
+                "setitemcolor grpTabs backcolor 1 0 0 1",
+            );
+        }
     }
     t.frames += 1;
     if t.frames < TOUR_FRAMES {
@@ -2393,7 +2437,13 @@ fn tour_step(
         }
     };
     if lit >= 0.0 {
-        t.results.push(json!({"menu": name, "open": sh.ui.is_open(name), "lit_fraction": lit, "screenshot": format!("{name}.png")}));
+        let mut entry = json!({"menu": name, "open": sh.ui.is_open(name), "lit_fraction": lit, "screenshot": format!("{name}.png")});
+        if name == "pc_join_unranked" {
+            let colors = sh.ui.item_back_colors(name, "grpTabs");
+            entry["setitemcolor"] =
+                json!(!colors.is_empty() && colors.iter().all(|c| *c == [1.0, 0.0, 0.0, 1.0]));
+        }
+        t.results.push(entry);
     }
     t.index += 1;
     t.frames = 0;
@@ -2413,6 +2463,7 @@ fn typed_keys(event: &winit::event::KeyEvent) -> Vec<UiKey> {
         Key::Named(NamedKey::Tab) => Some(UiKey::Tab),
         Key::Named(NamedKey::Backspace) => Some(UiKey::Backspace),
         Key::Named(NamedKey::Delete) => Some(UiKey::Delete),
+        Key::Named(NamedKey::Insert) => Some(UiKey::Insert),
         Key::Named(NamedKey::Home) => Some(UiKey::Home),
         Key::Named(NamedKey::End) => Some(UiKey::End),
         Key::Named(NamedKey::PageUp) => Some(UiKey::PageUp),
@@ -2551,6 +2602,11 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
             };
             sh.key(&mut st.input, key);
         }
+        WindowEvent::MouseInput {
+            state: ElementState::Released,
+            button: MouseButton::Left | MouseButton::Right,
+            ..
+        } => sh.mouse_up(),
         WindowEvent::MouseWheel { delta, .. } => {
             let y = match delta {
                 winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
@@ -2675,7 +2731,7 @@ fn start_session(
         Some(a) => loader::Server::Join(a),
         None => loader::Server::Boot(listen_config(st, map, gametype, cli.bots)),
     };
-    begin_load(cli, st, map, server);
+    begin_load(cli, st, map, gametype, server);
     if let Some(sh) = st.shell.as_mut() {
         sh.close_all(&mut st.input);
     }
@@ -2683,7 +2739,7 @@ fn start_session(
 }
 
 /// Starts the background load of `map` and the measuring of its frame gaps.
-fn begin_load(cli: &Cli, st: &mut State, map: &str, server: loader::Server) {
+fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: loader::Server) {
     let gfx = Gfx::from_cvars(&st.input.cvars);
     let req = loader::Request {
         install: cli.install.clone(),
@@ -2694,6 +2750,7 @@ fn begin_load(cli: &Cli, st: &mut State, map: &str, server: loader::Server) {
         aniso_max: gfx.aniso_max,
         format: st.config.format,
     };
+    gametype.clone_into(&mut st.load_gametype);
     st.loading = Some(Load::start(req, st.gpu.clone()));
     st.load_gaps = Some(LoadGaps {
         map: map.to_owned(),
@@ -2804,7 +2861,13 @@ fn enter_level(
         LevelChange::Load => {
             st.renderer = None;
             *map_slot = None;
-            begin_load(cli, st, name, loader::Server::Keep);
+            let gametype = st
+                .input
+                .cvars
+                .get("g_gametype")
+                .unwrap_or_default()
+                .to_string();
+            begin_load(cli, st, name, &gametype, loader::Server::Keep);
         }
     }
     Ok(())
@@ -2872,7 +2935,7 @@ fn play_demo(
         let map = net::demo::map_of(&path).map_err(|e| e.to_string())?;
         end_session(map_slot, st);
         st.pending_demo = Some(path);
-        begin_load(cli, st, &map, loader::Server::Demo);
+        begin_load(cli, st, &map, "", loader::Server::Demo);
         if let Some(sh) = st.shell.as_mut() {
             sh.close_all(&mut st.input);
         }

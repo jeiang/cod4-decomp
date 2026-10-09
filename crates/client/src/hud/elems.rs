@@ -104,7 +104,7 @@ fn rgba(c: [u8; 4]) -> [f32; 4] {
 fn shown_text(ui: &Ui, le: &LiveElem, now: i32) -> String {
     match le.e.kind {
         he::TEXT => localize(&ui.assets, &le.text),
-        he::VALUE => format!("{}", le.e.value),
+        he::VALUE => server::script::format_float(le.e.value),
         he::TIMER_DOWN | he::TIMER_UP => timer_text(elem_time_ms(&le.e, now)),
         he::TENTHS_TIMER_DOWN | he::TENTHS_TIMER_UP => tenths_timer_text(elem_time_ms(&le.e, now)),
         _ => le.text.clone(),

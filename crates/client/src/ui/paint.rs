@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Window, fade, list box and connect-screen behaviour follows KisakCOD (GPL-3.0; `ui/ui_shared.cpp`, `ui/ui_atoms.cpp`,
+// `ui_mp/ui_main_mp.cpp`; copyright holders of KisakCOD and the original Call of Duty 4 authors).
 //! Drawing menus: windows, borders, items and their text onto the 2D layer.
 
 use super::assets::UiAssets;
 use super::place::Px;
 use super::{
-    Host, SLIDER_H, SLIDER_W, Ui, dynf, enum_index, ity, multi_index, slider_bar_x, slider_thumb_x,
-    statf,
+    CaptureKind, Host, SCROLL_W, SLIDER_H, SLIDER_W, Ui, dynf, enum_index, ity, multi_index,
+    slider_bar_x, slider_thumb_x, statf,
 };
 use ::assets::zone::gfx::Material;
 use ::assets::zone::menu::{ItemData, ItemDef, Rect};
@@ -92,6 +94,27 @@ pub fn pick_font(assets: &UiAssets, font_enum: i32, scale: f32, unit: f32) -> Op
         }
     };
     assets.fonts.get(name)
+}
+
+/// `Fade`: every `cycle` ms an item that is fading out loses `out` of the alpha `f` (and goes invisible at nothing), one
+/// fading in gains `into` up to `clamp`. `fade` is `[cycle, clamp, out, into]`.
+fn fade(flags: &mut u32, f: &mut f32, next: &mut i32, now: i32, fade: [f32; 4]) {
+    let [cycle, clamp, out, into] = fade;
+    if *flags & (dynf::FADINGOUT | dynf::FADINGIN) != 0 && now > *next {
+        *next = cycle as i32 + now;
+        if *flags & dynf::FADINGOUT != 0 {
+            *f -= out;
+            if *f <= 0.0 {
+                *flags &= !(dynf::FADINGOUT | dynf::VISIBLE);
+            }
+        } else {
+            *f += into;
+            if clamp <= *f {
+                *f = clamp;
+                *flags &= !dynf::FADINGIN;
+            }
+        }
+    }
 }
 
 fn lerp4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
@@ -187,6 +210,14 @@ impl Ui {
     /// Paints the HUD menus (when `in_game`), then the open menus bottom to top.
     pub fn paint(&mut self, host: &mut dyn Host, p: &mut Painter, in_game: bool) {
         self.now_ms = host.time_ms();
+        self.blur_radius = 0.0;
+        self.sound_loops.clear();
+        self.border_low_scale = host
+            .dvar("ui_borderLowLightScale")
+            .trim()
+            .parse()
+            .unwrap_or(0.6);
+        self.tick_capture(host);
         if in_game {
             for m in self.hud.clone() {
                 if !self.stack.contains(&m) {
@@ -213,6 +244,9 @@ impl Ui {
                 [1.0; 4],
             );
         }
+        let loops = std::mem::take(&mut self.sound_loops);
+        host.menu_loops(&loops);
+        self.sound_loops = loops;
     }
 
     fn paint_menu(&mut self, host: &mut dyn Host, p: &mut Painter, m: usize) {
@@ -220,6 +254,15 @@ impl Ui {
             return;
         }
         let def = self.menus[m].def.clone();
+        // `Menu_Paint`: the sound plays while the menu is up, and its blur adds in quadrature to the others.
+        if let Some(s) = def.sound_name.as_deref().filter(|s| !s.is_empty())
+            && !self.sound_loops.iter().any(|l| l == s)
+        {
+            self.sound_loops.push(s.to_owned());
+        }
+        if def.blur_radius != 0.0 {
+            self.blur_radius = self.blur_radius.hypot(def.blur_radius);
+        }
         if let Some(e) = &self.menus[m].rect_x {
             self.menus[m].rect.x = self.eval_float(&*host, e);
         }
@@ -236,25 +279,33 @@ impl Ui {
             let img = p.material(&self.assets, bg);
             p.pic(&img, r, [1.0; 4]);
         }
-        let (fore, back) = (def.window.fore_color, def.window.back_color);
-        self.paint_window(p, &def.window, &mr, fore, back, def.window.dynamic_flags);
+        let w = &def.window;
+        self.paint_window(
+            p,
+            w,
+            &mr,
+            [w.fore_color, w.back_color, w.border_color],
+            w.dynamic_flags,
+        );
         for i in 0..self.menus[m].items.len() {
             self.paint_item(host, p, m, i);
         }
     }
 
+    /// `Window_Paint`: the background by `style` and the border by `border`. `colors` are the fore, back and border
+    /// colours as they stand now (menus change them with `setitemcolor`).
     fn paint_window(
         &self,
         p: &mut Painter,
         w: &::assets::zone::menu::WindowDef,
         rect: &Rect,
-        fore: [f32; 4],
-        back: [f32; 4],
+        colors: [[f32; 4]; 3],
         dyn_flags: u32,
     ) {
         if w.style == 0 && w.border == 0 {
             return;
         }
+        let [fore, back, border] = colors;
         let mut fill = Rect { ..*rect };
         if w.border != 0 {
             fill.x += w.border_size;
@@ -283,7 +334,8 @@ impl Ui {
                 }
                 None => p.fill(px, back),
             },
-            3 | 5 => {
+            // 6 is `UI_DrawLoadBar`: the picture as far as the level has loaded, which is all of it once a menu is up.
+            3 | 5 | 6 => {
                 if let Some(bg) = &w.background {
                     let img = p.material(&self.assets, bg);
                     p.pic(&img, px, tint);
@@ -301,22 +353,48 @@ impl Ui {
                 rect.vert_align,
             );
             let t = (w.border_size * self.place.unit()).max(1.0);
-            let c = w.border_color;
-            let side =
-                |p: &mut Painter, x: f32, y: f32, w_: f32, h: f32| p.fill(Px { x, y, w: w_, h }, c);
+            let low = [
+                border[0] * self.border_low_scale,
+                border[1] * self.border_low_scale,
+                border[2] * self.border_low_scale,
+                border[3],
+            ];
+            // The lit sides of a raised border (5) are top and left, of a sunken one (6) bottom and right.
+            let (hi, lo) = match w.border {
+                5 => (border, low),
+                _ => (low, border),
+            };
+            let bar = |p: &mut Painter, x: f32, y: f32, w_: f32, h: f32, c: [f32; 4]| {
+                p.fill(Px { x, y, w: w_, h }, c)
+            };
             let (top_bottom, sides) = match w.border {
                 1 | 5 | 6 => (true, true),
                 2 => (true, false),
                 3 => (false, true),
                 _ => (false, false),
             };
+            let bevel = matches!(w.border, 5 | 6);
             if top_bottom {
-                side(p, r.x, r.y, r.w, t);
-                side(p, r.x, r.y + r.h - t, r.w, t);
+                bar(p, r.x, r.y, r.w, t, if bevel { hi } else { border });
+                bar(
+                    p,
+                    r.x,
+                    r.y + r.h - t,
+                    r.w,
+                    t,
+                    if bevel { lo } else { border },
+                );
             }
             if sides {
-                side(p, r.x, r.y, t, r.h);
-                side(p, r.x + r.w - t, r.y, t, r.h);
+                bar(p, r.x, r.y, t, r.h, if bevel { hi } else { border });
+                bar(
+                    p,
+                    r.x + r.w - t,
+                    r.y,
+                    t,
+                    r.h,
+                    if bevel { lo } else { border },
+                );
             }
         }
     }
@@ -424,10 +502,18 @@ impl Ui {
             outline_color: d.window.outline_color,
             background: d.window.background.clone(),
         };
-        let mat_name = self.menus[m].items[i]
-            .material
-            .as_ref()
-            .map(|e| self.eval_string(&*host, e));
+        // A dvar-shader window (style 5) shows the material its dvar names, whatever it was before.
+        let mat_name = if d.window.style == 5 {
+            Some(
+                host.dvar(d.dvar.as_deref().unwrap_or(""))
+                    .to_ascii_lowercase(),
+            )
+        } else {
+            self.menus[m].items[i]
+                .material
+                .as_ref()
+                .map(|e| self.eval_string(&*host, e))
+        };
         if let Some(n) = mat_name.filter(|n| !n.is_empty()) {
             // A name, not a decoded material: resolve at draw time through a one-off window below.
             let rect = self.menus[m].items[i].rect;
@@ -448,12 +534,37 @@ impl Ui {
             p.pic(&img, px, tint);
             win.style = 0;
         }
-        let rect = self.menus[m].items[i].rect;
-        let (fore, flags) = (
-            self.menus[m].items[i].fore,
-            self.menus[m].items[i].dyn_flags,
+        let it = &mut self.menus[m].items[i];
+        // `Fade`: the back colour's alpha fades with a picture behind it, the fore colour's with the text.
+        let (cycle, clamp, out, into) = (
+            def.fade_cycle as f32,
+            def.fade_clamp,
+            def.fade_amount,
+            def.fade_in_amount,
         );
-        self.paint_window(p, &win, &rect, fore, d.window.back_color, flags);
+        let now = self.now_ms;
+        if d.window.style == 1 && (d.window.background.is_some() || it.material.is_some()) {
+            fade(
+                &mut it.dyn_flags,
+                &mut it.back[3],
+                &mut it.next_time,
+                now,
+                [cycle, clamp, out, into],
+            );
+        }
+        fade(
+            &mut it.dyn_flags,
+            &mut it.fore[3],
+            &mut it.next_time,
+            now,
+            [cycle, clamp, out, into],
+        );
+        let rect = it.rect;
+        let (colors, flags) = ([it.fore, it.back, it.border], it.dyn_flags);
+        self.paint_window(p, &win, &rect, colors, flags);
+        if d.window.style == 5 {
+            return;
+        }
         match d.ty {
             ity::TEXT | ity::BUTTON => self.paint_item_text(host, p, m, i, d, None),
             ity::EDITFIELD
@@ -467,9 +578,25 @@ impl Ui {
                 } else {
                     host.dvar(d.dvar.as_deref().unwrap_or(""))
                 };
-                let caret = it.editing && (self.now_ms / 300) & 1 == 0;
-                let shown = if caret { format!("{value}|") } else { value };
-                self.paint_item_text(host, p, m, i, d, Some(&shown));
+                // The text from `paintOffset` on, at most `maxPaintChars` of it, and the blinking caret in it.
+                let max_paint = match &d.data {
+                    ItemData::EditField(Some(e)) if e.max_paint_chars > 0 => {
+                        e.max_paint_chars as usize
+                    }
+                    _ => usize::MAX,
+                };
+                let shown: String = value
+                    .chars()
+                    .skip(it.paint_offset)
+                    .take(max_paint)
+                    .collect();
+                let caret = (it.editing && (self.now_ms / 300) & 1 == 0).then(|| {
+                    (
+                        it.edit_cursor.saturating_sub(it.paint_offset),
+                        if self.overstrike { '_' } else { '|' },
+                    )
+                });
+                self.paint_item_text_caret(host, p, m, i, d, Some(&shown), caret);
             }
             ity::YESNO => {
                 let on = host
@@ -596,11 +723,26 @@ impl Ui {
         d: &ItemDef,
         over: Option<&str>,
     ) {
+        self.paint_item_text_caret(host, p, m, i, d, over, None);
+    }
+
+    /// Like [`Ui::paint_item_text`], with a caret character drawn over the text before its `.0`th character.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_item_text_caret(
+        &self,
+        host: &dyn Host,
+        p: &mut Painter,
+        m: usize,
+        i: usize,
+        d: &ItemDef,
+        over: Option<&str>,
+        caret: Option<(usize, char)>,
+    ) {
         let text = match over {
             Some(t) => t.to_owned(),
             None => self.item_text(host, m, i, d),
         };
-        if text.is_empty() {
+        if text.is_empty() && caret.is_none() {
             return;
         }
         let r = self.menus[m].items[i].rect;
@@ -639,6 +781,24 @@ impl Ui {
                 vert: r.vert_align,
             },
         );
+        if let Some((at, c)) = caret {
+            let before: String = text.chars().take(at).collect();
+            let cx = x + self.text_width(&before, d.font_enum, d.text_scale);
+            self.draw_text(
+                p,
+                &TextDraw {
+                    text: &c.to_string(),
+                    font_enum: d.font_enum,
+                    scale: d.text_scale,
+                    style: d.text_style,
+                    color,
+                    x: cx,
+                    y,
+                    horz: r.horz_align,
+                    vert: r.vert_align,
+                },
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -706,7 +866,8 @@ impl Ui {
         let feeder = d.special as i32;
         let n = host.feeder_count(feeder);
         let eh = l.element_height.max(1.0);
-        let rows = (r.h / eh).floor().max(1.0) as usize;
+        let rows = self.list_viewmax(m, i).max(1) as usize;
+        let selectable = l.not_selectable == 0;
         let focus = it.dyn_flags & dynf::HASFOCUS != 0;
         let clip = self
             .place
@@ -718,7 +879,7 @@ impl Ui {
                 break;
             }
             let y = r.y + row as f32 * eh;
-            if idx as i32 == it.list_cursor {
+            if idx as i32 == it.list_cursor && selectable {
                 let px = self.place.rect(r.x, y, r.w, eh, r.horz_align, r.vert_align);
                 let c = if focus {
                     l.select_border
@@ -731,6 +892,18 @@ impl Ui {
                     ]
                 };
                 p.fill(px, [c[0], c[1], c[2], c[3].max(0.25) * 0.5]);
+                if let Some(icon) = &l.select_icon {
+                    let at = self.place.rect(
+                        r.x + 4.0,
+                        y + 4.0,
+                        eh - 4.0,
+                        eh - 4.0,
+                        r.horz_align,
+                        r.vert_align,
+                    );
+                    let img = p.material(&self.assets, icon);
+                    p.pic(&img, at, [1.0; 4]);
+                }
             }
             let cols: Vec<(f32, f32, i32, i32)> = if l.columns.is_empty() {
                 vec![(0.0, r.w, 0, 0)]
@@ -776,7 +949,7 @@ impl Ui {
                     2 => x0 + width - w,
                     _ => x0,
                 };
-                let color = if idx as i32 == it.list_cursor {
+                let color = if idx as i32 == it.list_cursor && selectable {
                     self.menus[m].def.focus_color
                 } else {
                     it.fore
@@ -798,5 +971,92 @@ impl Ui {
             }
         }
         p.g.scissor(None);
+        if l.no_scroll_bars == 0 {
+            self.paint_scroll_bar(p, m, i, n as i32);
+        }
+    }
+
+    /// The list's scroll bar down its right edge: the arrows, the track and the thumb (`Item_ListBox_Paint`).
+    fn paint_scroll_bar(&self, p: &mut Painter, m: usize, i: usize, n: i32) {
+        let it = &self.menus[m].items[i];
+        let r = it.rect;
+        let max = (n - self.list_viewmax(m, i) + 1).max(0);
+        let x = r.x + r.w - SCROLL_W - 1.0;
+        let mut pic = |name: &str, y: f32, h: f32| {
+            let img = p.named(&self.assets, name);
+            let at = self
+                .place
+                .rect(x, y, SCROLL_W, h, r.horz_align, r.vert_align);
+            p.pic(&img, at, [1.0; 4]);
+        };
+        let top = r.y + 1.0;
+        pic("ui_scrollbar_arrow_up_a", top, SCROLL_W);
+        let track = top + SCROLL_W - 1.0;
+        let track_h = r.h - 2.0 * SCROLL_W;
+        pic("ui_scrollbar", track, track_h + 1.0);
+        let down = track + track_h - 1.0;
+        pic("ui_scrollbar_arrow_dwn_a", down, SCROLL_W);
+        let mut thumb = self.list_thumb_y(m, i, max);
+        // A thumb being dragged sits under the pointer, within the track.
+        if self
+            .capture
+            .is_some_and(|c| c.menu == m && c.item == i && c.kind == CaptureKind::ListThumb)
+        {
+            let px = self.item_pixels(m, i);
+            let y = r.y + (self.cursor.1 - px.y) / self.place.scale.1 - 8.0;
+            if y >= r.y + SCROLL_W + 1.0 && y <= r.y + r.h - 2.0 * SCROLL_W - 1.0 {
+                thumb = y;
+            }
+        }
+        pic(
+            "ui_scrollbar_thumb",
+            thumb.min(down - SCROLL_W - 1.0),
+            SCROLL_W,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `[cycle, clamp, out, in]`
+    const PARAMS: [f32; 4] = [100.0, 0.8, 0.25, 0.5];
+
+    #[test]
+    fn fading_in_ramps_the_alpha_up_to_the_clamp_and_stops() {
+        let (mut flags, mut a, mut next) = (dynf::VISIBLE | dynf::FADINGIN, 0.0, 0);
+        fade(&mut flags, &mut a, &mut next, 10, PARAMS);
+        assert_eq!((a, next), (0.5, 110));
+        fade(&mut flags, &mut a, &mut next, 50, PARAMS);
+        assert_eq!(a, 0.5, "nothing before the next cycle");
+        fade(&mut flags, &mut a, &mut next, 111, PARAMS);
+        assert_eq!(a, 0.8, "clamped");
+        assert_eq!(flags & dynf::FADINGIN, 0, "done");
+        assert_ne!(flags & dynf::VISIBLE, 0);
+        fade(&mut flags, &mut a, &mut next, 999, PARAMS);
+        assert_eq!(a, 0.8);
+    }
+
+    #[test]
+    fn fading_out_hides_the_item_at_nothing() {
+        let (mut flags, mut a, mut next) = (dynf::VISIBLE | dynf::FADINGOUT, 0.5, 0);
+        fade(&mut flags, &mut a, &mut next, 1, PARAMS);
+        assert_eq!(a, 0.25);
+        assert_ne!(flags & dynf::FADINGOUT, 0);
+        fade(&mut flags, &mut a, &mut next, 200, PARAMS);
+        assert_eq!(a, 0.0);
+        assert_eq!(
+            flags & (dynf::FADINGOUT | dynf::VISIBLE),
+            0,
+            "invisible once gone"
+        );
+    }
+
+    #[test]
+    fn an_item_that_is_not_fading_keeps_its_alpha() {
+        let (mut flags, mut a, mut next) = (dynf::VISIBLE, 0.3, 0);
+        fade(&mut flags, &mut a, &mut next, 500, PARAMS);
+        assert_eq!(a, 0.3);
     }
 }

@@ -91,6 +91,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 lit * 100.0
             ));
         }
+        // The tour sets the join menu's tab colour with `setitemcolor` and reports whether the items took it.
+        if m["setitemcolor"] == Value::Bool(false) {
+            bad.push(format!("{name} (setitemcolor backcolor not applied)"));
+        }
         if let Some(f) = m["screenshot"].as_str() {
             out.files.push(format!("ui/{f}"));
         }
