@@ -1431,6 +1431,9 @@ impl Viewer {
                 map,
                 note,
                 progress: *progress,
+                gametype: &st.load_gametype,
+                status: "",
+                now_ms: (t * 1000.0) as i32,
             };
             sh.paint_loading(&target, size, &view);
         } else if let Some(sh) = st.shell.as_mut() {
@@ -2931,7 +2934,7 @@ fn play_demo(
         let map = net::demo::map_of(&path).map_err(|e| e.to_string())?;
         end_session(map_slot, st);
         st.pending_demo = Some(path);
-        begin_load(cli, st, &map, loader::Server::Demo);
+        begin_load(cli, st, &map, "", loader::Server::Demo);
         if let Some(sh) = st.shell.as_mut() {
             sh.close_all(&mut st.input);
         }
