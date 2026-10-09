@@ -153,6 +153,10 @@ pub struct Ent {
     pub health: i32,
     pub dmg: i32,
     pub hidden: bool,
+    /// Clients (bit per slot) a `hide`n entity is still shown to (`showtoplayer`).
+    pub shown_to: u64,
+    /// Flips whenever the entity is moved by fiat (`origin` set, a respawn), so clients do not slide it across.
+    pub teleport: bool,
     pub contents: i32,
     /// Local collision bounds (`r.mins`, `r.maxs`).
     pub mins: Vec3,
@@ -224,6 +228,8 @@ impl Ent {
             health: 0,
             dmg: 0,
             hidden: false,
+            shown_to: 0,
+            teleport: false,
             contents: 0,
             mins: [0.0; 3],
             maxs: [0.0; 3],
@@ -665,6 +671,14 @@ impl Game {
 
     /// `SV_LinkEntity`: publishes entity `num`'s origin, angles, bounds and contents to the
     /// collision world. Call after any of them changes.
+    /// The entity was moved by fiat (a respawn, a script's `origin`): clients show it at its new place, not
+    /// sliding there (`EF_TELEPORT_BIT`).
+    pub fn mark_teleport(&mut self, num: u16) {
+        if let Some(e) = self.ent_mut(num) {
+            e.teleport = !e.teleport;
+        }
+    }
+
     pub fn relink(&mut self, num: u16) {
         let (Some(w), Some(Some(e))) = (self.world.as_mut(), self.ents.get(usize::from(num)))
         else {

@@ -724,7 +724,7 @@ impl NetPlay {
                 (ps.viewangles[0], ps.viewangles[1]),
                 false,
             );
-            models.extend(self.script_models(&snap, dt));
+            models.extend(self.script_models(dt, st, ps.client_num));
             models.extend(self.items(&snap));
             models.extend(self.vehicles(dt, st, ps.client_num));
             // The watched player's view bobs and leans as their own does (`CG_OffsetFirstPersonView`).
@@ -939,7 +939,7 @@ impl NetPlay {
             (aim[0], aim[1])
         };
         self.scan_names(st, own, eye, view, dead);
-        models.extend(self.script_models(&snap, dt));
+        models.extend(self.script_models(dt, st, own));
         models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));
         models.extend(hands);
@@ -1520,16 +1520,19 @@ impl NetPlay {
     }
 
     /// The scripted models of the level (`script_model`: props, cars, objectives), posed at the origin and angles the
-    /// server gave them. They move in steps of the snapshots; the stock scripts only move them a few at a time.
-    fn script_models(&mut self, snap: &net::Snapshot, dt: f32) -> Vec<ModelInstance> {
+    /// server gave them, between the snapshots around the interpolation moment like the players they move with.
+    fn script_models(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
+        let ents = self
+            .net
+            .snaps
+            .interpolate(st - net::view::INTERP_DELAY_MS, Some(own));
         let Some(ui) = self.net.ui() else {
             return Vec::new();
         };
         let mut out = Vec::new();
         let mut seen = 0;
         self.c.script_models_unloaded.clear();
-        for e in snap
-            .entities
+        for e in ents
             .iter()
             .filter(|e| matches!(e.etype, etype::SCRIPT_MODEL | etype::PLANE))
         {
@@ -1693,7 +1696,7 @@ impl NetPlay {
                     quiet: e.perks & sim::pm::PERK_QUIETER != 0,
                 },
                 e.event_seq,
-                &[(e.event, e.event_parm)],
+                &e.recent_events(),
             );
             let weapon = self
                 .weapons
@@ -1811,6 +1814,12 @@ impl NetPlay {
                 None => out.extend(r.player.instances(e.origin)),
             }
         }
+        let present: Vec<u16> = ents
+            .iter()
+            .filter(|e| e.etype == etype::PLAYER)
+            .map(|e| e.number)
+            .collect();
+        self.sound.forget_absent(&present);
         self.c.max_players_seen = self.c.max_players_seen.max(players);
         self.c.max_players_drawn = self.c.max_players_drawn.max(drawn);
         self.remotes.retain(|_, r| now - r.seen < GONE_AFTER);

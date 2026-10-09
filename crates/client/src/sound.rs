@@ -539,6 +539,12 @@ impl ClientSound {
         }
     }
 
+    /// Forgets the entities that are not among `present`: one that comes back (it left the viewer's sight) is a first
+    /// look again, not a replay of what it did meanwhile.
+    pub fn forget_absent(&mut self, present: &[u16]) {
+        self.seen.retain(|n, _| present.contains(n));
+    }
+
     /// The player events of a remote entity, each once. `seq` is its event sequence number and `newest` its
     /// newest events, oldest first.
     pub fn events(&mut self, who: &Who, seq: u8, newest: &[(u8, u8)]) {

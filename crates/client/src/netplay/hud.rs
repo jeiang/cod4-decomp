@@ -283,7 +283,7 @@ impl NetPlay {
         let ents = self
             .net
             .snaps
-            .interpolate(server_time - net::view::INTERP_DELAY_MS, Some(own));
+            .interpolate_with_actors(server_time - net::view::INTERP_DELAY_MS, Some(own));
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
             // The dead are not on the radar; they leave the compass at once.
             if e.eflags & eflags::DEAD != 0 {
@@ -318,8 +318,13 @@ impl NetPlay {
                 a.fire_pos = a.pos;
             }
             if e.event_seq != a.event_seq {
+                // Every event raised since the last look, not only the newest.
+                let fresh = usize::from(e.event_seq.wrapping_sub(a.event_seq)).min(4);
                 a.event_seq = e.event_seq;
-                if matches!(e.event, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT) {
+                let fired = e.recent_events()[4 - fresh..]
+                    .iter()
+                    .any(|&(k, _)| matches!(k, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT));
+                if fired {
                     a.fire_time = now;
                     a.fire_pos = a.pos;
                 }

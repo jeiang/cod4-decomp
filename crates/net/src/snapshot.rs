@@ -47,6 +47,10 @@ pub struct Snapshot {
     pub inv: Box<[i32; PlayerWeapons::WORDS]>,
     /// Sorted by entity number.
     pub entities: Vec<EntityState>,
+    /// The players the viewer's visibility does not reach (behind walls), as far as the compass and the names
+    /// over heads need them (`SV_AddEntitiesVisibleFromPoint` sends nobody beyond the viewer's PVS; the compass
+    /// has its own channel). Sorted by number, disjoint from `entities`; never drawn.
+    pub actors: Vec<EntityState>,
     /// The script hud elements this client sees, ascending by id.
     pub hud: Vec<HudElem>,
     /// The compass objectives this client sees.
@@ -73,6 +77,7 @@ impl Snapshot {
             ps: PlayerState::default(),
             inv: Box::new([0; PlayerWeapons::WORDS]),
             entities: Vec::new(),
+            actors: Vec::new(),
             hud: Vec::new(),
             objectives: [Objective::default(); MAX_OBJECTIVES],
             follow: None,
@@ -91,6 +96,11 @@ impl Snapshot {
         field::canonicalize(ps::fields(), &mut self.ps);
         self.entities = self
             .entities
+            .into_iter()
+            .map(EntityState::canonical)
+            .collect();
+        self.actors = self
+            .actors
             .into_iter()
             .map(EntityState::canonical)
             .collect();
@@ -113,6 +123,7 @@ pub fn write_snapshot(w: &mut BitWriter, base: Option<&Snapshot>, snap: &Snapsho
     let zero_inv = [0i32; PlayerWeapons::WORDS];
     write_sparse(w, base.map_or(&zero_inv[..], |b| &b.inv[..]), &snap.inv[..]);
     write_entities(w, base.map_or(&[], |b| &b.entities), &snap.entities);
+    write_entities(w, base.map_or(&[], |b| &b.actors), &snap.actors);
     ui::write_hud(w, base.map_or(&[], |b| &b.hud), &snap.hud);
     let zero_obj = [Objective::default(); MAX_OBJECTIVES];
     ui::write_objectives(
@@ -158,6 +169,7 @@ pub fn read_snapshot<'a>(
     read_delta(r, ps::fields(), &mut snap.ps)?;
     read_sparse(r, &mut snap.inv[..])?;
     snap.entities = read_entities(r, &snap.entities)?;
+    snap.actors = read_entities(r, &snap.actors)?;
     snap.hud = ui::read_hud(r, &snap.hud)?;
     ui::read_objectives(r, &mut snap.objectives)?;
     snap.follow = if r.read_bool()? {
@@ -349,6 +361,35 @@ mod tests {
         let got2 = read_snapshot(&mut BitReader::new(&delta), |n| (n == 1).then_some(&a)).unwrap();
         assert_eq!(got2, b);
         assert!(delta.len() < full.len());
+    }
+
+    #[test]
+    fn actors_beyond_sight_follow_their_own_delta_list() {
+        let actor = |n: u16, x: f32| {
+            EntityState {
+                number: n,
+                etype: etype::PLAYER,
+                client: n,
+                origin: [x, 0.0, 0.0],
+                ..EntityState::default()
+            }
+            .canonical()
+        };
+        let mut a = world(5, 1000);
+        a.num = 1;
+        a.actors = vec![actor(0, 10.0), actor(1, 20.0)];
+        let mut b = world(5, 1033);
+        b.num = 2;
+        // One walks into sight (leaves the list), one stays, one is new.
+        b.actors = vec![actor(1, 25.0), actor(4, 5.0)];
+        let full = encode(None, &a);
+        assert_eq!(
+            read_snapshot(&mut BitReader::new(&full), |_| None).unwrap(),
+            a
+        );
+        let delta = encode(Some(&a), &b);
+        let got = read_snapshot(&mut BitReader::new(&delta), |n| (n == 1).then_some(&a)).unwrap();
+        assert_eq!(got, b);
     }
 
     #[test]

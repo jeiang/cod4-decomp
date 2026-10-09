@@ -198,6 +198,8 @@ pub struct Client {
     pub local: bool,
     /// `pingPlayer`: until when the enemies' compasses show this player (0: not pinged).
     pub compass_ping_until: i32,
+    /// Level time of the player's latest shot: enemies' compasses show where it came from for a moment.
+    pub last_fire_time: i32,
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
@@ -270,6 +272,7 @@ impl Client {
             inactivity_warned: false,
             local: false,
             compass_ping_until: 0,
+            last_fire_time: i32::MIN / 2,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
             pose: PlayerPoseState::default(),
@@ -607,6 +610,7 @@ impl Game {
             e.classname = "player".into();
             e.mv.pos.tr = sim::traj::Trajectory::stationary(origin);
         }
+        self.mark_teleport(n);
         if let Some(e) = self.ent_mut(n) {
             e.takedamage = true;
         }

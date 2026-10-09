@@ -11,8 +11,6 @@ use std::collections::VecDeque;
 const HISTORY: usize = 32;
 /// How far behind the newest server time other entities are drawn.
 pub const INTERP_DELAY_MS: i32 = 100;
-/// How long past the newest snapshot an entity is held in place before it is considered stale.
-const HOLD_MS: i32 = 250;
 
 /// How much of the gap between a snapshot's clock reading and the running estimate the estimate takes up.
 const CLOCK_EASE: f64 = 0.05;
@@ -74,25 +72,40 @@ impl SnapshotBuffer {
         Some(t)
     }
 
-    /// Entities (not the viewer's own player) as they were at `render_time` of the server clock.
+    /// Entities (not the viewer's own player) as they were at `render_time` of the server clock. Past the newest
+    /// snapshot they hold where it left them, however long the stall: a frozen body, not a vanished one.
     pub fn interpolate(&self, render_time: i32, own_client: Option<u16>) -> Vec<EntityState> {
+        self.interp(render_time, own_client, false)
+    }
+
+    /// [`interpolate`](Self::interpolate) over the entities and the actors the viewer has no line of sight to: what
+    /// the compass and the names over heads read.
+    pub fn interpolate_with_actors(
+        &self,
+        render_time: i32,
+        own_client: Option<u16>,
+    ) -> Vec<EntityState> {
+        self.interp(render_time, own_client, true)
+    }
+
+    fn interp(&self, render_time: i32, own_client: Option<u16>, actors: bool) -> Vec<EntityState> {
         let Some((_, newest)) = self.snaps.back() else {
             return Vec::new();
         };
         let own = |e: &EntityState| {
             own_client.is_some_and(|c| e.etype == crate::entity::etype::PLAYER && e.client == c)
         };
-        if render_time >= newest.server_time {
-            // Past the newest snapshot: hold it rather than invent motion.
-            if render_time - newest.server_time > HOLD_MS {
-                return Vec::new();
-            }
-            return newest
-                .entities
+        let all = |s: &Snapshot| -> Vec<EntityState> {
+            let extra: &[EntityState] = if actors { &s.actors } else { &[] };
+            s.entities
                 .iter()
+                .chain(extra)
                 .filter(|e| !own(e))
                 .cloned()
-                .collect();
+                .collect()
+        };
+        if render_time >= newest.server_time {
+            return all(newest);
         }
         let Some(i) = self
             .snaps
@@ -104,16 +117,35 @@ impl SnapshotBuffer {
         let b = &self.snaps[i].1;
         let Some(a) = i.checked_sub(1).map(|j| &self.snaps[j].1) else {
             // Older than anything kept: the oldest snapshot is the best there is.
-            return b.entities.iter().filter(|e| !own(e)).cloned().collect();
+            return all(b);
         };
         let span = (b.server_time - a.server_time).max(1) as f32;
         let f = ((render_time - a.server_time) as f32 / span).clamp(0.0, 1.0);
-        b.entities
-            .iter()
-            .filter(|e| !own(e))
-            .map(|eb| match a.entity(eb.number) {
-                Some(ea) if ea.etype == eb.etype && ea.client == eb.client => lerp(ea, eb, f),
-                _ => eb.clone(),
+        let find = |n: u16| {
+            a.entity(n).or_else(|| {
+                actors
+                    .then(|| {
+                        a.actors
+                            .binary_search_by_key(&n, |e| e.number)
+                            .ok()
+                            .map(|k| &a.actors[k])
+                    })
+                    .flatten()
+            })
+        };
+        all(b)
+            .into_iter()
+            .map(|eb| match find(eb.number) {
+                // The same thing as before: an entity number the server reused for another, or one it moved by
+                // fiat (a respawn), does not slide.
+                Some(ea)
+                    if ea.etype == eb.etype
+                        && ea.client == eb.client
+                        && (ea.eflags ^ eb.eflags) & crate::entity::TELEPORT_BIT == 0 =>
+                {
+                    lerp(ea, &eb, f)
+                }
+                _ => eb,
             })
             .collect()
     }
@@ -217,14 +249,63 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_view_shows_nothing_and_old_or_duplicate_snapshots_are_ignored() {
+    fn old_or_duplicate_snapshots_are_ignored() {
         let mut b = SnapshotBuffer::default();
         b.push(0, snap(100, 0.0, 0.0));
         b.push(1, snap(100, 5.0, 0.0));
         b.push(2, snap(50, 5.0, 0.0));
         assert_eq!(b.latest().unwrap().entities[0].origin[0], 0.0);
-        assert_eq!(b.interpolate(100 + HOLD_MS, None).len(), 1);
-        assert!(b.interpolate(100 + HOLD_MS + 1, None).is_empty());
         assert_eq!(b.server_time(40), Some(140));
+    }
+
+    #[test]
+    fn a_stall_freezes_everything_where_it_was_instead_of_deleting_it() {
+        let mut b = SnapshotBuffer::default();
+        b.push(0, snap(100, 0.0, 0.0));
+        b.push(33, snap(200, 40.0, 0.0));
+        for late in [50, 250, 5_000, 600_000] {
+            let e = b.interpolate(200 + late, None);
+            assert_eq!(e.len(), 1, "{late} ms past the newest snapshot");
+            assert_eq!(e[0].origin[0], 40.0);
+        }
+    }
+
+    #[test]
+    fn a_respawn_flagged_by_the_server_does_not_slide_even_a_short_way() {
+        let mut b = SnapshotBuffer::default();
+        let mut after = snap(200, 30.0, 0.0);
+        after.entities[0].eflags ^= crate::entity::TELEPORT_BIT;
+        b.push(0, snap(100, 0.0, 0.0));
+        b.push(33, after);
+        // Well inside the distance a jump is guessed from: only the flag says it was one.
+        assert_eq!(b.interpolate(150, None)[0].origin[0], 30.0);
+    }
+
+    #[test]
+    fn a_reused_entity_number_of_another_player_does_not_slide() {
+        let mut b = SnapshotBuffer::default();
+        let mut other = snap(200, 30.0, 0.0);
+        other.entities[0].client = 7;
+        b.push(0, snap(100, 0.0, 0.0));
+        b.push(33, other);
+        assert_eq!(b.interpolate(150, None)[0].origin[0], 30.0);
+    }
+
+    #[test]
+    fn the_players_beyond_sight_are_interpolated_only_for_those_who_ask() {
+        let mut b = SnapshotBuffer::default();
+        let behind_wall = |t: i32, x: f32| {
+            let mut s = snap(t, 0.0, 0.0);
+            s.actors = std::mem::take(&mut s.entities);
+            s.actors[0].origin[0] = x;
+            s
+        };
+        b.push(0, behind_wall(100, 0.0));
+        b.push(33, behind_wall(200, 100.0));
+        assert!(b.interpolate(150, None).is_empty());
+        let seen = b.interpolate_with_actors(150, None);
+        assert_eq!(seen.len(), 1);
+        assert!((seen[0].origin[0] - 50.0).abs() < 1e-3);
+        assert!(b.interpolate_with_actors(150, Some(3)).is_empty());
     }
 }

@@ -35,6 +35,10 @@ pub mod etype {
 
 pub const MAX_ENTITIES: usize = 1024;
 
+/// `EntityState::eflags` bit the server flips whenever it moves an entity by fiat (a respawn, a script's `origin`):
+/// the client does not slide the entity from where it was to where it is (`EF_TELEPORT_BIT`).
+pub const TELEPORT_BIT: u32 = 1 << 8;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EntityState {
     /// Not part of the delta; the entity list codes it.
@@ -61,6 +65,11 @@ pub struct EntityState {
     pub event: u8,
     pub event_parm: u8,
     pub event_seq: u8,
+    /// Player: the events raised before the newest, `prior_events[0]` the one before it. A frame can raise several
+    /// (a shot and a reload start, a jump and a footstep); with the newest in `event` these are the four the player
+    /// state keeps. Both are the wire form of [`EntityState::recent_events`].
+    pub prior_events: [u8; 3],
+    pub prior_parms: [u8; 3],
     /// Player: the prone-on-a-slope body tilt (`ps.torso_pitch`, `ps.waist_pitch`), degrees.
     pub torso_pitch: f32,
     pub waist_pitch: f32,
@@ -145,6 +154,12 @@ fn table() -> Vec<Field<EntityState>> {
         int!(s, s.event, Bits(8)),
         int!(s, s.event_parm, Bits(8)),
         int!(s, s.event_seq, Bits(8)),
+        int!(s, s.prior_events[0], Bits(8)),
+        int!(s, s.prior_events[1], Bits(8)),
+        int!(s, s.prior_events[2], Bits(8)),
+        int!(s, s.prior_parms[0], Bits(8)),
+        int!(s, s.prior_parms[1], Bits(8)),
+        int!(s, s.prior_parms[2], Bits(8)),
         num!(s, s.torso_pitch, Angle16),
         num!(s, s.waist_pitch, Angle16),
         int!(s, s.damage_timer, Bits(16)),
@@ -175,6 +190,22 @@ impl EntityState {
             number,
             ..Self::default()
         }
+    }
+
+    /// The last four events as `(event, parm)`, oldest first: the same window as a player state's event ring, so
+    /// the newest `event_seq - last_seen` of them (at most four) are the ones not yet acted on.
+    pub fn recent_events(&self) -> [(u8, u8); 4] {
+        let p = |i: usize| (self.prior_events[i], self.prior_parms[i]);
+        [p(2), p(1), p(0), (self.event, self.event_parm)]
+    }
+
+    /// Records `events` (`(event, parm)`, oldest first, at most the last four are kept) as the newest ones, as the
+    /// player state's ring holds them.
+    pub fn set_recent_events(&mut self, events: [(u8, u8); 4]) {
+        let [a, b, c, d] = events;
+        self.prior_events = [c.0, b.0, a.0];
+        self.prior_parms = [c.1, b.1, a.1];
+        (self.event, self.event_parm) = d;
     }
 
     /// Rounds every quantized field the way the wire does.
@@ -211,6 +242,23 @@ mod tests {
         let mut got = EntityState::new(5);
         read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
         assert_eq!(got, to);
+    }
+
+    #[test]
+    fn four_events_survive_the_wire_in_order() {
+        let mut sent = EntityState::new(5);
+        sent.set_recent_events([(1, 10), (2, 20), (3, 30), (4, 40)]);
+        sent.event_seq = 9;
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(5), &sent);
+        let bytes = w.into_bytes();
+        let mut got = EntityState::new(5);
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(
+            got.recent_events(),
+            [(1, 10), (2, 20), (3, 30), (4, 40)],
+            "oldest first, as the player state keeps them"
+        );
     }
 
     #[test]

@@ -60,7 +60,6 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("disableaimassist", Later(M5)),
     ("laseron", Later(M8)),
     ("laseroff", Later(M8)),
-    ("showtoplayer", Later(M5)),
     ("devaddpitch", Later(M5)),
     ("devaddyaw", Later(M5)),
     ("devaddroll", Later(M5)),

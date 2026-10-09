@@ -342,6 +342,7 @@ impl Game {
         if let Some(e) = self.ent_mut(n) {
             e.origin = origin;
         }
+        self.mark_teleport(n);
         self.relink(n);
     }
 

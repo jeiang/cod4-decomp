@@ -24,6 +24,7 @@ pub mod test_support;
 mod tests;
 
 pub use map::{ClipModel, CollisionWorld};
+pub use query::Pvs;
 pub(crate) use tw::Tw;
 
 pub const ENTITYNUM_NONE: u16 = 1023;
