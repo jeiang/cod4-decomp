@@ -22,18 +22,45 @@ pub use rng::Rng;
 
 /// Longest single integration step.
 const STEP_MS: i32 = 16;
-/// Effects alive at once; older ones are dropped beyond this.
+/// Effects alive at once; a new effect beyond this is not played (`FX_EFFECT_LIMIT`).
 const MAX_EFFECTS: usize = 1024;
-/// Elements alive at once over all effects.
-const MAX_ELEMS: usize = 6000;
+/// Elements alive at once over all effects (`FX_ELEM_LIMIT`).
+const MAX_ELEMS: usize = 2048;
+/// Trail points alive at once: the original keeps them in a pool of their own (`FX_TRAIL_ELEM_LIMIT`).
+const MAX_TRAIL_ELEMS: usize = 2048;
+/// Sight-blocking particles the visibility test knows at once (`FX_VIS_BLOCKER_LIMIT`).
+const MAX_BLOCKERS: usize = 256;
+/// Shortest line [`Fx::visibility`] looks along (`fx_visMinTraceDist`).
+const MIN_VIS_TRACE: f32 = 80.0;
 /// Gravity of a `gravity` factor of one, in units per second squared.
 const GRAVITY: f32 = 800.0;
 const VELOCITY_SCALE: f32 = 1000.0;
+/// The average light that tints nothing: [`tint`] leaves a colour as it is.
+const NEUTRAL_LIGHT: [u8; 3] = [128; 3];
 
 /// What an element asks of the world: the first thing a moving box hits.
 pub trait World {
     /// A trace of a box from `a` to `b`: the fraction travelled and the surface normal, `None` for a clear path.
     fn trace(&self, a: Vec3, b: Vec3, mins: Vec3, maxs: Vec3) -> Option<(f32, Vec3)>;
+
+    /// [`World::trace`] as a particle sees the world: windows and the sky box stop it as well (and the item clip when
+    /// `item_clip`), and a path that starts inside something solid is clear (`FX_TraceHitSomething`), so the particle
+    /// goes on moving.
+    fn trace_particle(
+        &self,
+        a: Vec3,
+        b: Vec3,
+        mins: Vec3,
+        maxs: Vec3,
+        _item_clip: bool,
+    ) -> Option<(f32, Vec3)> {
+        self.trace(a, b, mins, maxs)
+    }
+
+    /// The average light at `p` (`R_GetAverageLightingAtPoint`), which tints the elements that ask for it.
+    fn lighting(&self, _p: Vec3) -> [u8; 3] {
+        NEUTRAL_LIGHT
+    }
 }
 
 /// A world with nothing in it.
@@ -101,12 +128,46 @@ pub fn basis(f: Vec3) -> [Vec3; 3] {
     [f, right, f.cross(right)]
 }
 
-/// The camera, for billboards.
+/// The sides of the view volume, for culling: a point is inside a plane when `dot(normal, p) >= d`.
+#[derive(Clone, Copy, Debug)]
+pub struct Frustum {
+    planes: [(Vec3, f32); 4],
+}
+
+impl Frustum {
+    /// The volume seen from `origin` along `axis` (forward, left, up) with the tangents of the half angles across and
+    /// up: left, right, top and bottom. There is no far plane, as in the original for elements that draw past fog.
+    pub fn new(origin: Vec3, axis: [Vec3; 3], tan_half: [f32; 2]) -> Frustum {
+        let [f, l, u] = axis;
+        let [tx, ty] = tan_half;
+        let plane = |n: Vec3| {
+            let n = n.normalize();
+            (n, n.dot(origin))
+        };
+        Frustum {
+            planes: [
+                plane(f * tx - l),
+                plane(f * tx + l),
+                plane(f * ty - u),
+                plane(f * ty + u),
+            ],
+        }
+    }
+
+    /// Whether a sphere is wholly outside one side (`FX_CullSphere`).
+    pub fn culls(&self, pos: Vec3, radius: f32) -> bool {
+        self.planes.iter().any(|&(n, d)| n.dot(pos) - d <= -radius)
+    }
+}
+
+/// The camera, for billboards and culling.
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {
     pub origin: Vec3,
     /// Forward, left, up.
     pub axis: [Vec3; 3],
+    /// What the camera sees; `None` culls nothing.
+    pub frustum: Option<Frustum>,
 }
 
 /// One camera-facing or oriented quad.
@@ -153,7 +214,10 @@ pub struct Trail {
 pub struct Decal {
     /// Stable for the life of the element, so the renderer can keep the geometry it cut.
     pub id: u64,
+    /// The material the mark is drawn with: the original's first, for models.
     pub material: Arc<Material>,
+    /// The original's second, the one it marks the map's brushes with; only the kinds of surface it takes are used.
+    pub world_material: Option<Arc<Material>>,
     pub origin: Vec3,
     pub normal: Vec3,
     /// Texture up.
@@ -170,6 +234,26 @@ pub struct ModelDraw {
     /// The element's axes.
     pub axis: [Vec3; 3],
     pub scale: f32,
+}
+
+/// A particle cloud element: a volume of soft sprites the cloud material's shader spreads over `scale` around
+/// `origin`, each facing the camera and stretched along `endpos - origin` seen from it.
+#[derive(Clone)]
+pub struct Cloud {
+    pub material: Arc<Material>,
+    pub origin: Vec3,
+    /// The element's axes (forward, left, up).
+    pub axis: [Vec3; 3],
+    pub scale: f32,
+    /// One unit back along the element's motion.
+    pub endpos: Vec3,
+    /// The sprites' half width and height.
+    pub radius: [f32; 2],
+    /// RGBA.
+    pub color: [u8; 4],
+    /// Distance to the camera along its view axis, to sort far to near.
+    pub depth: f32,
+    pub sort_order: u8,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -198,10 +282,20 @@ pub struct Light {
 #[derive(Default)]
 pub struct Draws {
     pub quads: Vec<Quad>,
+    pub clouds: Vec<Cloud>,
     pub decals: Vec<Decal>,
     pub models: Vec<ModelDraw>,
     pub lights: Vec<Light>,
     pub trails: Vec<Trail>,
+}
+
+/// A particle that blocks sight (a smoke puff): the line of sight through its `radius` is dimmed to `visibility`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VisBlocker {
+    pub origin: Vec3,
+    pub radius: f32,
+    /// What passes, 0 to 1.
+    pub visibility: f32,
 }
 
 /// Counters of a run.
@@ -238,7 +332,8 @@ struct Elem {
     done: bool,
     at_rest: bool,
     started: bool,
-    emit_left: f32,
+    /// How far the element moved since it last emitted an effect.
+    emit_since: f32,
     id: u64,
     trail: Option<TrailPoint>,
     /// The rigid body of a model element with `USE_MODEL_PHYSICS`, once it has started.
@@ -260,6 +355,9 @@ struct Effect {
     last_move: i32,
     /// Elements spawned so far, per element definition (looping ones stop at their count).
     spawned: Vec<u32>,
+    /// The average light where the effect started, for the elements that take their colour from it; sampled by the
+    /// first update.
+    light: Option<[u8; 3]>,
 }
 
 pub struct Fx {
@@ -271,15 +369,79 @@ pub struct Fx {
     rng: Rng,
     next_id: u64,
     live_elems: usize,
+    live_trail_elems: usize,
     pub stats: Stats,
     /// Sounds started since the last [`Fx::take_sounds`].
     sounds: Vec<SoundPlay>,
     /// Loud body hits since the last [`Fx::take_collisions`].
     collisions: Vec<Collision>,
+    /// The camera of the last frame: what the spawn culling looks from.
+    camera: Option<Camera>,
+    /// The sight blockers of the last [`Fx::draw`].
+    blockers: Vec<VisBlocker>,
 }
 
 fn pick(r: f32, range: &assets::zone::fx::Range<f32>) -> f32 {
     range.base + range.amplitude * r
+}
+
+/// An average light colour as the original keeps it per effect: five bits a channel.
+fn quantize_light(c: [u8; 3]) -> [u8; 3] {
+    c.map(|v| (v & 0xF8) | (v >> 5 & 0x07))
+}
+
+/// `colour` lit by `light`: a light of mid grey leaves it, a brighter one lifts it by up to `frac` of its own value
+/// again, a darker one darkens it (`FX_EvaluateVisualState_DoLighting`).
+fn tint(color: &mut [u8; 4], light: [u8; 3], frac: u8) {
+    for (c, l) in color.iter_mut().zip(light) {
+        let factor = (2 * i32::from(l) - 255) * i32::from(frac) / 255 + 255;
+        *c = (factor * i32::from(*c) / 255).clamp(0, 255) as u8;
+    }
+}
+
+/// 1 up to `range.base`, falling to 0 over `range.amplitude` further (`FX_ClampRangeLerp`).
+fn clamp_range_lerp(dist: f32, range: &assets::zone::fx::Range<f32>) -> f32 {
+    let beyond = dist - range.base;
+    if beyond < 0.0 {
+        1.0
+    } else if range.amplitude > beyond {
+        1.0 - beyond / range.amplitude
+    } else {
+        0.0
+    }
+}
+
+/// How much of its alpha an element keeps at `pos` seen from `eye`, in 256ths (`FX_EvaluateDistanceFade`): it fades
+/// in as the camera comes within `fade_in_range` and out as it comes within `fade_out_range`.
+fn distance_fade(d: &FxElemDef, pos: Vec3, eye: Vec3) -> u32 {
+    if d.fade_in_range.amplitude == 0.0 && d.fade_out_range.amplitude == 0.0 {
+        return 255;
+    }
+    let dist = pos.distance(eye);
+    let fade_in = if d.fade_in_range.amplitude != 0.0 {
+        clamp_range_lerp(dist, &d.fade_in_range)
+    } else {
+        1.0
+    };
+    let fade_out = if d.fade_out_range.amplitude != 0.0 {
+        1.0 - clamp_range_lerp(dist, &d.fade_out_range)
+    } else {
+        1.0
+    };
+    (fade_in.min(fade_out) * 255.0 + 0.5) as u32
+}
+
+/// A unit vector perpendicular to the unit vector `v` (`PerpendicularVector`).
+fn perpendicular(v: Vec3) -> Vec3 {
+    let a = v.abs();
+    let axis = if a.x <= a.y && a.x <= a.z {
+        Vec3::X
+    } else if a.y <= a.z {
+        Vec3::Y
+    } else {
+        Vec3::Z
+    };
+    (axis - v * axis.dot(v)).normalize()
 }
 
 impl Fx {
@@ -292,10 +454,71 @@ impl Fx {
             rng: Rng::new(0x5EED),
             next_id: 1,
             live_elems: 0,
+            live_trail_elems: 0,
             stats: Stats::default(),
             sounds: Vec::new(),
             collisions: Vec::new(),
+            camera: None,
+            blockers: Vec::new(),
         }
+    }
+
+    /// Where the camera is: what effects that start from now on are culled against (`FX_CullElemForSpawn`).
+    pub fn set_camera(&mut self, cam: Camera) {
+        self.camera = Some(cam);
+    }
+
+    /// Whether an element of `d` starting at `origin` is too far from the camera or off screen to be worth spawning.
+    fn culled_for_spawn(&self, d: &FxElemDef, origin: Vec3) -> bool {
+        let Some(cam) = &self.camera else {
+            return false;
+        };
+        let range = &d.spawn_range;
+        if range.amplitude != 0.0 {
+            let dist = cam.origin.distance(origin) - range.base;
+            if dist < 0.0 || range.amplitude < dist {
+                return true;
+            }
+        }
+        d.flags & flags::SPAWN_FRUSTUM_CULL != 0
+            && cam
+                .frustum
+                .is_some_and(|f| f.culls(origin, d.spawn_frustum_cull_radius))
+    }
+
+    /// Whether the trail point number `seq` of `d` that the effect at `origin` would leave is dropped: far from the
+    /// camera a trail keeps every other point, then every fourth, and so on (`FX_CullTrailElem`).
+    fn trail_point_culled(&self, d: &FxElemDef, origin: Vec3, seq: u8) -> bool {
+        let Some(cam) = &self.camera else {
+            return false;
+        };
+        let base = d.spawn_range.base + d.spawn_range.amplitude;
+        if base == 0.0 || seq == 0 {
+            return false;
+        }
+        let cutoff = base * (1 + seq.trailing_zeros()) as f32;
+        cam.origin.distance_squared(origin) > cutoff * cutoff
+    }
+
+    /// How much of the line from `start` to `end` is seen through the sight-blocking particles of the last frame, 0
+    /// to 1 (`FX_GetClientVisibility`). Short lines see everything.
+    pub fn visibility(&self, start: Vec3, end: Vec3) -> f32 {
+        let len = start.distance(end);
+        if len < MIN_VIS_TRACE {
+            return 1.0;
+        }
+        let dir = (end - start) / len;
+        let half = len * 0.5;
+        let mut seen = 1.0;
+        for b in &self.blockers {
+            let along = (b.origin - start).dot(dir);
+            if (along - half).abs() <= half
+                && (start + dir * along).distance_squared(b.origin) < b.radius * b.radius
+            {
+                seen *= b.visibility;
+            }
+        }
+        seen
     }
 
     pub fn library(&self) -> &Arc<Library> {
@@ -322,10 +545,27 @@ impl Fx {
 
     /// Plays `def` at `frame`, starting `at` the given time (milliseconds on the effect clock).
     pub fn play_at(&mut self, def: &Arc<FxEffectDef>, frame: Frame, at: i32) -> u64 {
-        if self.effects.len() >= MAX_EFFECTS {
-            let old = self.effects.remove(0);
-            self.live_ids.remove(&old.id);
+        let Some(e) = self.start(self.effects.len(), def, frame, at) else {
+            return 0;
+        };
+        let id = e.id;
+        self.live_ids.insert(id);
+        self.effects.push(e);
+        id
+    }
+
+    /// A new effect of `def` begun at `at`, or `None` when `live` effects fill the pool: the new effect is the one
+    /// that is dropped (`FX_SpawnEffect`).
+    fn start(
+        &mut self,
+        live: usize,
+        def: &Arc<FxEffectDef>,
+        frame: Frame,
+        at: i32,
+    ) -> Option<Effect> {
+        if live >= MAX_EFFECTS {
             self.stats.dropped += 1;
+            return None;
         }
         self.stats.effects_played += 1;
         let mut e = Effect {
@@ -339,13 +579,11 @@ impl Fx {
             dist: 0.0,
             last_move: at,
             spawned: Vec::new(),
+            light: None,
         };
         self.next_id += 1;
         self.begin(&mut e, at);
-        let id = e.id;
-        self.live_ids.insert(id);
-        self.effects.push(e);
-        id
+        Some(e)
     }
 
     /// Starts (or restarts) the effect's timeline at `at`: its looping elements begin their intervals, its one-shot
@@ -447,8 +685,18 @@ impl Fx {
     }
 
     fn spawn(&mut self, e: &mut Effect, k: usize, time: i32) {
-        if self.live_elems >= MAX_ELEMS {
+        let trail = is_trail(&e.def.elems[k]);
+        let (live, limit) = if trail {
+            (self.live_trail_elems, MAX_TRAIL_ELEMS)
+        } else {
+            (self.live_elems, MAX_ELEMS)
+        };
+        if live >= limit {
             self.stats.dropped += 1;
+            return;
+        }
+        // Trail points are culled by their own rule, before they get here.
+        if !trail && self.culled_for_spawn(&e.def.elems[k], e.frame.origin) {
             return;
         }
         let d = &e.def.elems[k];
@@ -487,7 +735,7 @@ impl Fx {
             done: false,
             at_rest: false,
             started: false,
-            emit_left: d.emit_dist.base + d.emit_dist.amplitude * r[19],
+            emit_since: 0.0,
             id,
             trail: None,
             body: None,
@@ -497,12 +745,16 @@ impl Fx {
     /// Spawns the trail point of element `k` that the effect leaves at `dist` units of travel, from the effect's
     /// frame now.
     fn spawn_trail_point(&mut self, e: &mut Effect, k: usize, time: i32, dist: f32) {
+        let seq = e.spawned[k];
+        if self.trail_point_culled(&e.def.elems[k], e.frame.origin, seq as u8) {
+            e.spawned[k] += 1;
+            return;
+        }
         let before = e.elems.len();
         self.spawn(e, k, time);
         if e.elems.len() == before {
             return;
         }
-        let seq = e.spawned[k];
         e.spawned[k] += 1;
         let [_, right, up] = e.frame.axis;
         e.elems[before].trail = Some(TrailPoint {
@@ -571,11 +823,10 @@ impl Fx {
             rounds += 1;
             let batch = std::mem::take(&mut spawned);
             for (def, frame, at) in batch {
-                self.effects = Vec::new();
-                self.play_at(&def, frame, at);
-                let mut ne = self.effects.pop().expect("just played");
-                self.update_effect(&mut ne, now_ms, world, &mut spawned);
-                effects.push(ne);
+                if let Some(mut ne) = self.start(effects.len(), &def, frame, at) {
+                    self.update_effect(&mut ne, now_ms, world, &mut spawned);
+                    effects.push(ne);
+                }
             }
         }
         // Drop what is over.
@@ -599,7 +850,13 @@ impl Fx {
                 keep[i - 1]
             });
         }
-        self.live_elems = effects.iter().map(|e| e.elems.len()).sum();
+        self.live_trail_elems = effects
+            .iter()
+            .flat_map(|e| e.elems.iter().map(|x| is_trail(&e.def.elems[x.def])))
+            .filter(|&t| t)
+            .count();
+        self.live_elems =
+            effects.iter().map(|e| e.elems.len()).sum::<usize>() - self.live_trail_elems;
         self.live_ids.clear();
         self.live_ids.extend(effects.iter().map(|e| e.id));
         self.effects = effects;
@@ -612,6 +869,13 @@ impl Fx {
         world: &dyn World,
         spawned: &mut Vec<(Arc<FxEffectDef>, Frame, i32)>,
     ) {
+        if e.light.is_none() {
+            e.light = Some(if e.def.elems.iter().any(|d| d.lighting_frac != 0) {
+                quantize_light(world.lighting(e.frame.origin))
+            } else {
+                NEUTRAL_LIGHT
+            });
+        }
         if let Some(goal) = e.goal.take() {
             self.move_trails(e, goal, now);
         }
@@ -787,8 +1051,13 @@ impl Fx {
         to.z -= g * dt * 0.5;
         el.base_vel.z -= g;
         if d.flags & flags::USE_COLLISION != 0
-            && let Some((frac, normal)) =
-                world.trace(from, to, Vec3::from(d.coll_mins), Vec3::from(d.coll_maxs))
+            && let Some((frac, normal)) = world.trace_particle(
+                from,
+                to,
+                Vec3::from(d.coll_mins),
+                Vec3::from(d.coll_maxs),
+                d.use_item_clip,
+            )
         {
             self.stats.impacts += 1;
             el.pos = from.lerp(to, frac);
@@ -822,39 +1091,89 @@ impl Fx {
             el.base_vel += post - pre;
             return;
         }
-        // Emitters drop an effect every so often along their path.
-        if let Some(name) = d.effect_emitted.as_deref()
-            && (d.emit_dist.base > 0.0 || d.emit_dist.amplitude > 0.0)
+        if let Some(def) = d
+            .effect_emitted
+            .as_deref()
+            .and_then(|n| self.lib.get(n))
+            .cloned()
         {
-            el.emit_left -= from.distance(to);
-            if el.emit_left <= 0.0
-                && let Some(def) = self.lib.get(name)
-            {
-                spawned.push((
-                    def.clone(),
-                    Frame::facing(to, v.try_normalize().unwrap_or(Vec3::Z)),
-                    el.at + ms,
-                ));
-                el.emit_left = d.emit_dist.base
-                    + d.emit_dist.amplitude * self.rng.f()
-                    + d.emit_dist_variance.base * self.rng.f();
-                el.emit_left = el.emit_left.max(1.0);
-            }
+            self.emit_along(el, d, &def, (from, to), (el.at, ms), spawned);
         }
         el.pos = to;
     }
 
+    /// An emitter element moved from `from` to `to` over `ms` milliseconds starting at `at`: it drops `def` every
+    /// `emit_dist` (plus the variance) along the way, as many times as that fits, and carries what is left over into
+    /// its next step (`FX_ProcessEmitting`). Each drop faces the way the element moves.
+    fn emit_along(
+        &mut self,
+        el: &mut Elem,
+        d: &FxElemDef,
+        def: &Arc<FxEffectDef>,
+        (from, to): (Vec3, Vec3),
+        (at, ms): (i32, i32),
+        spawned: &mut Vec<(Arc<FxEffectDef>, Frame, i32)>,
+    ) {
+        let len = from.distance(to);
+        if len == 0.0 {
+            return;
+        }
+        let spacing = d.emit_dist_variance.base + pick(el.r[19], &d.emit_dist);
+        let max_spacing = spacing + d.emit_dist_variance.amplitude;
+        let forward = (to - from) / len;
+        let side = perpendicular(forward);
+        let axis = [forward, side, forward.cross(side)];
+        let mut next = -el.emit_since;
+        let mut last;
+        loop {
+            last = next;
+            let step = self.rng.f() * d.emit_dist_variance.amplitude + spacing;
+            if step <= 0.0 {
+                break;
+            }
+            next = (next + step).max(0.0);
+            if len < next {
+                break;
+            }
+            let along = next / len;
+            spawned.push((
+                def.clone(),
+                Frame {
+                    origin: from.lerp(to, along),
+                    axis,
+                },
+                at + (ms as f32 * along) as i32,
+            ));
+        }
+        el.emit_since = (len - last).clamp(0.0, max_spacing.max(0.0));
+    }
+
     /// Everything to draw at the current time.
-    pub fn draw(&self, cam: &Camera, out: &mut Draws) {
+    pub fn draw(&mut self, cam: &Camera, out: &mut Draws) {
+        let mut blockers = Vec::new();
         for e in &self.effects {
             self.draw_trails(e, cam, out);
+            let light = e.light.unwrap_or(NEUTRAL_LIGHT);
             for el in &e.elems {
                 if el.done || el.trail.is_some() || !el.started || self.now < el.begin {
                     continue;
                 }
                 let d = &e.def.elems[el.def];
                 let t = ((self.now - el.begin) as f32 / el.life).clamp(0.0, 0.999_999);
-                let vis = visual_state(d, el, t);
+                let mut vis = visual_state(d, el, t);
+                if d.lighting_frac != 0 {
+                    tint(&mut vis.color, light, d.lighting_frac);
+                }
+                let fade = distance_fade(d, el.pos, cam.origin);
+                vis.color[3] = ((fade * u32::from(vis.color[3])) >> 8) as u8;
+                if d.flags & flags::BLOCKS_SIGHT != 0 && blockers.len() < MAX_BLOCKERS {
+                    blockers.push(VisBlocker {
+                        origin: el.pos,
+                        radius: vis.size[0],
+                        visibility: 1.0 - f32::from(vis.color[3]) / 255.0,
+                    });
+                }
+                let off_screen = |radius: f32| cam.frustum.is_some_and(|f| f.culls(el.pos, radius));
                 let sort_order = d.sort_order;
                 match (&d.visuals, d.elem_type) {
                     (
@@ -864,7 +1183,7 @@ impl Fx {
                         let Some(Some(material)) = mats.get(pick_index(el, mats.len())) else {
                             continue;
                         };
-                        if vis.color[3] == 0 {
+                        if vis.color[3] == 0 || off_screen(vis.size[0].max(vis.size[1])) {
                             continue;
                         }
                         let (tangent, up, normal) = match d.elem_type {
@@ -892,6 +1211,29 @@ impl Fx {
                             sort_order,
                         ));
                     }
+                    (FxVisuals::Materials(mats), elem::CLOUD) => {
+                        let Some(Some(material)) = mats.get(pick_index(el, mats.len())) else {
+                            continue;
+                        };
+                        if vis.scale == 0.0
+                            || vis.color[3] == 0
+                            || off_screen(vis.size[0].max(vis.size[1]) + vis.scale)
+                        {
+                            continue;
+                        }
+                        let dir = (velocity(d, el, t) + el.base_vel).normalize_or_zero();
+                        out.clouds.push(Cloud {
+                            material: material.clone(),
+                            origin: el.pos,
+                            axis: element_axis(d, el, (self.now - el.begin) as f32),
+                            scale: vis.scale,
+                            endpos: el.pos - dir,
+                            radius: vis.size,
+                            color: vis.color,
+                            depth: (el.pos - cam.origin).dot(cam.axis[0]),
+                            sort_order,
+                        });
+                    }
                     (FxVisuals::Models(models), elem::MODEL) => {
                         let Some(Some(model)) = models.get(pick_index(el, models.len())) else {
                             continue;
@@ -912,7 +1254,8 @@ impl Fx {
                         });
                     }
                     (FxVisuals::Decals(mats), elem::DECAL) => {
-                        let Some([Some(material), _]) = mats.get(pick_index(el, mats.len())) else {
+                        let Some([Some(material), world]) = mats.get(pick_index(el, mats.len()))
+                        else {
                             continue;
                         };
                         let rot = vis.rotation;
@@ -922,6 +1265,7 @@ impl Fx {
                         out.decals.push(Decal {
                             id: el.id,
                             material: material.clone(),
+                            world_material: world.clone(),
                             origin: el.pos,
                             normal: n,
                             up: a1 * s + a2 * c,
@@ -929,7 +1273,7 @@ impl Fx {
                             color: vis.color,
                         });
                     }
-                    (_, elem::OMNI_LIGHT) => {
+                    (_, elem::OMNI_LIGHT) if !off_screen(vis.size[0]) => {
                         out.lights.push(Light {
                             origin: el.pos,
                             color: [vis.color[0], vis.color[1], vis.color[2]],
@@ -937,7 +1281,7 @@ impl Fx {
                             dir: None,
                         });
                     }
-                    (_, elem::SPOT_LIGHT) => {
+                    (_, elem::SPOT_LIGHT) if !off_screen(vis.size[0]) => {
                         let axis = match &el.body {
                             Some(b) => b.axes(),
                             None => element_axis(d, el, (self.now - el.begin) as f32),
@@ -953,6 +1297,7 @@ impl Fx {
                 }
             }
         }
+        self.blockers = blockers;
     }
 }
 
@@ -1440,8 +1785,8 @@ mod tests {
         assert_eq!(fx.stats.elems_spawned, 3);
     }
 
-    fn trail_effect(life: i32) -> Arc<FxEffectDef> {
-        let material = Arc::new(Material {
+    fn plain_material() -> Arc<Material> {
+        Arc::new(Material {
             name: None,
             game_flags: 0,
             sort_key: 0,
@@ -1457,7 +1802,11 @@ mod tests {
             textures: Arc::from(Vec::new()),
             constants: Arc::from(Vec::new()),
             state_bits: Arc::from(Vec::new()),
-        });
+        })
+    }
+
+    fn trail_effect(life: i32) -> Arc<FxEffectDef> {
+        let material = plain_material();
         let mut e = elem_def(
             elem::TRAIL,
             FxVisuals::Materials(vec![Some(material)].into()),
@@ -1479,6 +1828,7 @@ mod tests {
         Camera {
             origin: Vec3::new(-500.0, 0.0, 0.0),
             axis: [Vec3::X, Vec3::Y, Vec3::Z],
+            frustum: None,
         }
     }
 
@@ -1683,6 +2033,7 @@ mod tests {
         let cam = Camera {
             origin: Vec3::ZERO,
             axis: [Vec3::X, Vec3::Y, Vec3::Z],
+            frustum: None,
         };
         fx.draw(&cam, &mut out);
         out.models.first().map(|m| m.origin)
@@ -1770,24 +2121,29 @@ mod tests {
     }
 
     #[test]
-    fn a_handle_is_live_until_its_effect_ends_or_is_evicted() {
+    fn a_handle_is_live_until_its_effect_ends() {
         let e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
         let def = effect("fx/live", 0, 1, 0, vec![e]);
         let mut fx = Fx::new(lib(vec![def.clone()]));
         let first = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
         assert!(fx.is_live(first));
-        for _ in 0..MAX_EFFECTS {
-            fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        // The pool is full: the effect that finds it so is the one that is not played.
+        for _ in 1..MAX_EFFECTS {
+            assert_ne!(
+                fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z)),
+                0
+            );
         }
-        assert!(!fx.is_live(first));
-        let one = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
-        fx.stop(one);
+        let refused = fx.play_attached(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        assert!(!fx.is_live(refused));
+        assert!(fx.is_live(first), "the oldest effect stays");
+        fx.stop(first);
         fx.update(10_000, &Empty);
-        assert!(!fx.is_live(one));
+        assert!(!fx.is_live(first));
     }
 
     #[test]
-    fn effects_beyond_the_cap_drop_the_oldest() {
+    fn effects_and_elements_beyond_the_pools_are_not_played() {
         let e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
         let def = effect("fx/many", 0, 1, 0, vec![e]);
         let mut fx = Fx::new(lib(vec![def.clone()]));
@@ -1796,6 +2152,14 @@ mod tests {
         }
         assert_eq!(fx.live_effects(), MAX_EFFECTS);
         assert_eq!(fx.stats.dropped, 5);
+        let mut burst = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        burst.spawn = [MAX_ELEMS as i32 + 100, 0];
+        let def = effect("fx/burst", 0, 1, 0, vec![burst]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(10, &Empty);
+        assert_eq!(fx.live_elems(), MAX_ELEMS);
+        assert_eq!(fx.stats.dropped, 100);
     }
 
     #[test]
@@ -1804,5 +2168,321 @@ mod tests {
         let mut fx = Fx::new(lib(vec![def]));
         assert!(fx.play_named("fx/misc/smoke", Frame::facing(Vec3::ZERO, Vec3::Z)));
         assert!(!fx.play_named("fx/misc/none", Frame::facing(Vec3::ZERO, Vec3::Z)));
+    }
+
+    /// A visual sample of a constant `color` (blue first), `size` and `scale`: the random amplitude adds nothing.
+    fn vis_state(color: [u8; 4], size: f32, scale: f32) -> assets::zone::fx::VisSample {
+        use assets::zone::fx::{VisSample, VisState};
+        let st = |size, scale| VisState {
+            color,
+            rotation_delta: 0.0,
+            rotation_total: 0.0,
+            size: [size; 2],
+            scale,
+        };
+        VisSample {
+            base: st(size, scale),
+            amplitude: st(0.0, 0.0),
+        }
+    }
+
+    /// A sprite effect that lives a second, drawn white-ish (`color`, in the zone's blue-first order).
+    fn sprite_effect(color: [u8; 4], tweak: impl FnOnce(&mut FxElemDef)) -> Arc<FxEffectDef> {
+        let mut e = elem_def(
+            elem::SPRITE_BILLBOARD,
+            FxVisuals::Materials(vec![Some(plain_material())].into()),
+        );
+        e.life_span_msec = range(1000, 0);
+        e.vis_samples = Arc::from(vec![
+            vis_state(color, 10.0, 1.0),
+            vis_state(color, 10.0, 1.0),
+        ]);
+        tweak(&mut e);
+        effect("fx/sprite", 0, 1, 0, vec![e])
+    }
+
+    fn drawn(def: &Arc<FxEffectDef>, world: &dyn World, cam: &Camera) -> Draws {
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(10, world);
+        let mut d = Draws::default();
+        fx.draw(cam, &mut d);
+        d
+    }
+
+    fn cam_at(origin: Vec3) -> Camera {
+        Camera {
+            origin,
+            axis: [Vec3::X, Vec3::Y, Vec3::Z],
+            frustum: None,
+        }
+    }
+
+    #[test]
+    fn a_sprite_fades_out_as_the_camera_comes_close() {
+        // Opaque beyond 300 units, half there at 200, gone within 100.
+        let def = sprite_effect([255; 4], |e| e.fade_out_range = range(100.0, 200.0));
+        let alpha = |dist: f32| {
+            drawn(&def, &Empty, &cam_at(Vec3::new(-dist, 0.0, 0.0)))
+                .quads
+                .first()
+                .map(|q| q.color[3])
+        };
+        assert_eq!(alpha(80.0), None);
+        let mid = alpha(200.0).expect("half faded");
+        assert!((120..=134).contains(&mid), "{mid}");
+        let far = alpha(400.0).expect("opaque");
+        assert!(far >= 250, "{far}");
+    }
+
+    #[test]
+    fn a_sprite_fades_in_as_the_camera_comes_within_range() {
+        // Seen only within 100 units of the camera, fading to nothing by 300.
+        let def = sprite_effect([255; 4], |e| e.fade_in_range = range(100.0, 200.0));
+        let alpha = |dist: f32| {
+            drawn(&def, &Empty, &cam_at(Vec3::new(-dist, 0.0, 0.0)))
+                .quads
+                .first()
+                .map(|q| q.color[3])
+        };
+        assert!(alpha(50.0).expect("near") >= 250);
+        assert_eq!(alpha(400.0), None);
+    }
+
+    struct Lit([u8; 3]);
+
+    impl World for Lit {
+        fn trace(&self, _: Vec3, _: Vec3, _: Vec3, _: Vec3) -> Option<(f32, Vec3)> {
+            None
+        }
+
+        fn lighting(&self, _: Vec3) -> [u8; 3] {
+            self.0
+        }
+    }
+
+    #[test]
+    fn the_light_where_an_effect_starts_tints_the_elements_that_ask_for_it() {
+        // The zone's blue-first (100, 100, 100); lit elements take their colour from the light, up to double.
+        let lit = sprite_effect([100, 100, 100, 255], |e| e.lighting_frac = 255);
+        let plain = sprite_effect([100, 100, 100, 255], |_| {});
+        let rgb = |def: &Arc<FxEffectDef>, light: u8| {
+            let d = drawn(def, &Lit([light; 3]), &trail_cam());
+            let c = d.quads[0].color;
+            [c[0], c[1], c[2]]
+        };
+        assert_eq!(rgb(&lit, 255), [200; 3]);
+        assert_eq!(rgb(&lit, 0), [0; 3]);
+        assert_eq!(rgb(&plain, 255), [100; 3]);
+        let half = rgb(&lit, 128)[0];
+        assert!(
+            (98..=106).contains(&half),
+            "mid grey light barely changes it: {half}"
+        );
+    }
+
+    /// An element that moves along +x at `speed` thousand units a second and drops a sound effect every `spacing`
+    /// units, `variance` more at random.
+    fn emitter(speed: f32, spacing: f32, variance: f32) -> (Arc<FxEffectDef>, Arc<Library>) {
+        use assets::zone::fx::{VelFrame, VelSample};
+        let frame = |x: f32| VelFrame {
+            velocity: range([x, 0.0, 0.0], [0.0; 3]),
+            total_delta: range([0.0; 3], [0.0; 3]),
+        };
+        let sample = || VelSample {
+            local: frame(0.0),
+            world: frame(speed),
+        };
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.flags = flags::HAS_VELOCITY_WORLD;
+        e.vel_samples = Arc::from(vec![sample(), sample()]);
+        e.life_span_msec = range(100, 0);
+        e.effect_emitted = Some("fx/drop".into());
+        e.emit_dist = range(spacing, 0.0);
+        e.emit_dist_variance = range(0.0, variance);
+        let def = effect("fx/emitter", 0, 1, 0, vec![e]);
+        let drop = effect("fx/drop", 0, 1, 0, vec![sound("drip")]);
+        (def.clone(), lib(vec![def, drop]))
+    }
+
+    #[test]
+    fn an_emitter_drops_an_effect_every_spacing_however_far_it_moves_in_a_step() {
+        // 10 000 units a second is 160 units a step: three drops of 50 a step, 20 over the 1000 units.
+        let (def, lib) = emitter(10.0, 50.0, 0.0);
+        let mut fx = Fx::new(lib);
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(200, &Empty);
+        let mut xs: Vec<f32> = fx.take_sounds().iter().map(|s| s.origin.x).collect();
+        xs.sort_by(f32::total_cmp);
+        assert!((19..=20).contains(&xs.len()), "{xs:?}");
+        for w in xs.windows(2) {
+            assert!((w[1] - w[0] - 50.0).abs() < 1.0, "{xs:?}");
+        }
+    }
+
+    #[test]
+    fn an_emitters_variance_stretches_the_spacing_between_drops() {
+        // Between 50 and 100 units apart: 10 to 20 drops over 1000 units, and not all of them 50 apart.
+        let (def, lib) = emitter(10.0, 50.0, 50.0);
+        let mut fx = Fx::new(lib);
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(200, &Empty);
+        let mut xs: Vec<f32> = fx.take_sounds().iter().map(|s| s.origin.x).collect();
+        xs.sort_by(f32::total_cmp);
+        assert!((10..=20).contains(&xs.len()), "{xs:?}");
+        let gaps: Vec<f32> = xs.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.iter().all(|g| (49.0..=101.0).contains(g)), "{gaps:?}");
+        assert!(gaps.iter().any(|g| *g > 55.0), "{gaps:?}");
+    }
+
+    /// A floor at z = 0 that only an element with the item clip on sees.
+    struct ItemFloor;
+
+    impl World for ItemFloor {
+        fn trace(&self, _: Vec3, _: Vec3, _: Vec3, _: Vec3) -> Option<(f32, Vec3)> {
+            None
+        }
+
+        fn trace_particle(
+            &self,
+            a: Vec3,
+            b: Vec3,
+            _: Vec3,
+            _: Vec3,
+            item_clip: bool,
+        ) -> Option<(f32, Vec3)> {
+            (item_clip && a.z >= 0.0 && b.z < 0.0).then(|| (a.z / (a.z - b.z), Vec3::Z))
+        }
+    }
+
+    #[test]
+    fn an_element_asks_for_the_item_clip_only_when_its_definition_does() {
+        let landed = |item_clip: bool| {
+            let (def, lib) = falling_particle();
+            let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+            e.flags = flags::USE_COLLISION | flags::DIE_ON_TOUCH;
+            e.gravity = range(1.0, 0.0);
+            e.life_span_msec = range(2000, 0);
+            e.use_item_clip = item_clip;
+            e.effect_on_impact = def.elems[0].effect_on_impact.clone();
+            let def = effect("fx/fall", 0, 1, 0, vec![e]);
+            let mut fx = Fx::new(lib);
+            fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 10.0), Vec3::Z));
+            fx.update(400, &ItemFloor);
+            fx.stats.impacts
+        };
+        assert_eq!(landed(true), 1);
+        assert_eq!(landed(false), 0);
+    }
+
+    #[test]
+    fn elements_far_from_the_camera_or_off_screen_are_not_spawned() {
+        let ranged = sprite_effect([255; 4], |e| e.spawn_range = range(0.0, 100.0));
+        let spawned = |def: &Arc<FxEffectDef>, cam: Camera| {
+            let mut fx = Fx::new(lib(vec![def.clone()]));
+            fx.set_camera(cam);
+            fx.play(def, Frame::facing(Vec3::ZERO, Vec3::Z));
+            fx.stats.elems_spawned
+        };
+        assert_eq!(spawned(&ranged, cam_at(Vec3::new(50.0, 0.0, 0.0))), 1);
+        assert_eq!(spawned(&ranged, cam_at(Vec3::new(500.0, 0.0, 0.0))), 0);
+        // Looking at the effect, or away from it.
+        let culling = sprite_effect([255; 4], |e| {
+            e.flags = flags::SPAWN_FRUSTUM_CULL;
+            e.spawn_frustum_cull_radius = 10.0;
+        });
+        let looking = |dir: Vec3| {
+            let axis = [dir, Vec3::Z.cross(dir), Vec3::Z];
+            let origin = Vec3::new(-300.0, 0.0, 0.0);
+            Camera {
+                origin,
+                axis,
+                frustum: Some(Frustum::new(origin, axis, [1.0, 0.75])),
+            }
+        };
+        assert_eq!(spawned(&culling, looking(Vec3::X)), 1);
+        assert_eq!(spawned(&culling, looking(-Vec3::X)), 0);
+    }
+
+    #[test]
+    fn sprites_off_screen_are_not_drawn() {
+        let def = sprite_effect([255; 4], |_| {});
+        let looking = |dir: Vec3| {
+            let axis = [dir, Vec3::Z.cross(dir), Vec3::Z];
+            let origin = Vec3::new(-300.0, 0.0, 0.0);
+            Camera {
+                origin,
+                axis,
+                frustum: Some(Frustum::new(origin, axis, [1.0, 0.75])),
+            }
+        };
+        assert_eq!(drawn(&def, &Empty, &looking(Vec3::X)).quads.len(), 1);
+        assert_eq!(drawn(&def, &Empty, &looking(-Vec3::X)).quads.len(), 0);
+        assert_eq!(drawn(&def, &Empty, &looking(Vec3::Y)).quads.len(), 0);
+    }
+
+    #[test]
+    fn a_cloud_element_draws_as_a_cloud_with_its_scale_and_size() {
+        let mut e = elem_def(
+            elem::CLOUD,
+            FxVisuals::Materials(vec![Some(plain_material())].into()),
+        );
+        e.life_span_msec = range(1000, 0);
+        e.vis_samples = Arc::from(vec![
+            vis_state([10, 20, 30, 255], 8.0, 40.0),
+            vis_state([10, 20, 30, 255], 8.0, 40.0),
+        ]);
+        let def = effect("fx/cloud", 0, 1, 0, vec![e]);
+        let d = drawn(&def, &Empty, &trail_cam());
+        assert_eq!((d.quads.len(), d.clouds.len()), (0, 1));
+        let c = &d.clouds[0];
+        assert_eq!((c.scale, c.radius), (40.0, [8.0, 8.0]));
+        // Blue first in the zone, red first here.
+        assert_eq!(&c.color[..3], &[30, 20, 10]);
+        // A cloud that has shrunk to nothing is not drawn.
+        let mut gone = elem_def(
+            elem::CLOUD,
+            FxVisuals::Materials(vec![Some(plain_material())].into()),
+        );
+        gone.life_span_msec = range(1000, 0);
+        gone.vis_samples = Arc::from(vec![
+            vis_state([0; 4], 8.0, 0.0),
+            vis_state([0; 4], 8.0, 0.0),
+        ]);
+        let def = effect("fx/cloud0", 0, 1, 0, vec![gone]);
+        assert!(drawn(&def, &Empty, &trail_cam()).clouds.is_empty());
+    }
+
+    #[test]
+    fn smoke_blocks_the_line_of_sight_through_it() {
+        let def = sprite_effect([255; 4], |e| {
+            e.flags = flags::BLOCKS_SIGHT;
+            e.vis_samples = Arc::from(vec![
+                vis_state([255; 4], 50.0, 1.0),
+                vis_state([255; 4], 50.0, 1.0),
+            ]);
+        });
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(10, &Empty);
+        assert_eq!(
+            fx.visibility(Vec3::new(-200.0, 0.0, 0.0), Vec3::new(200.0, 0.0, 0.0)),
+            1.0
+        );
+        fx.draw(&trail_cam(), &mut Draws::default());
+        let through = fx.visibility(Vec3::new(-200.0, 0.0, 0.0), Vec3::new(200.0, 0.0, 0.0));
+        assert!(through < 0.05, "{through}");
+        let beside = fx.visibility(Vec3::new(-200.0, 120.0, 0.0), Vec3::new(200.0, 120.0, 0.0));
+        assert_eq!(beside, 1.0);
+        // Not past the end of the line.
+        assert_eq!(
+            fx.visibility(Vec3::new(-200.0, 0.0, 0.0), Vec3::new(-100.0, 0.0, 0.0)),
+            1.0
+        );
+        // Lines too short to trace see everything.
+        assert_eq!(
+            fx.visibility(Vec3::new(-30.0, 0.0, 0.0), Vec3::new(30.0, 0.0, 0.0)),
+            1.0
+        );
     }
 }

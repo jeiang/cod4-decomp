@@ -112,6 +112,8 @@ pub const FILTER_TAP_0: u32 = 0x15;
 pub const GLOW_SETUP: u32 = 0x2B;
 pub const GLOW_APPLY: u32 = 0x2C;
 pub const GAMETIME: u32 = 0x12;
+pub const PARTICLE_CLOUD_COLOR: u32 = 0x11;
+pub const PARTICLE_CLOUD_MATRIX: u32 = 0x35;
 pub const ZNEAR: u32 = 0x22;
 pub const SUN_POSITION: u32 = 0x23;
 pub const SUN_DIFFUSE: u32 = 0x24;
@@ -246,6 +248,9 @@ pub fn texture_from_ctab_name(name: &str) -> Option<u32> {
 pub struct Object {
     pub world: Mat4,
     pub base_lighting: [f32; 4],
+    /// A particle cloud's `PARTICLE_CLOUD_MATRIX` (the 2x2 that takes a corner's offset to view space) and
+    /// `PARTICLE_CLOUD_COLOR`.
+    pub particle: [[f32; 4]; 2],
 }
 
 impl Default for Object {
@@ -253,6 +258,7 @@ impl Default for Object {
         Object {
             world: Mat4::IDENTITY,
             base_lighting: [0.0, 0.0, 0.5, 1.0],
+            particle: [[0.0; 4]; 2],
         }
     }
 }
@@ -360,10 +366,11 @@ impl FrameConsts {
     /// expects.
     pub fn value(&self, id: u32, row: u32, obj: &Object) -> [f32; 4] {
         if id < FIRST_MATRIX {
-            return if id == BASE_LIGHTING_COORDS {
-                obj.base_lighting
-            } else {
-                self.vec[id as usize]
+            return match id {
+                BASE_LIGHTING_COORDS => obj.base_lighting,
+                PARTICLE_CLOUD_MATRIX => obj.particle[0],
+                PARTICLE_CLOUD_COLOR => obj.particle[1],
+                _ => self.vec[id as usize],
             };
         }
         let rel = id - FIRST_MATRIX;
@@ -442,5 +449,21 @@ mod tests {
         let tr = f.value(0x44, 0, &o);
         assert_eq!(plain, [1., 2., 3., 4.]);
         assert_eq!(tr, [1., 5., 9., 13.]);
+    }
+
+    #[test]
+    fn a_particle_clouds_constants_come_from_the_object_not_the_frame() {
+        assert_eq!(
+            NAMES[PARTICLE_CLOUD_MATRIX as usize],
+            "PARTICLE_CLOUD_MATRIX"
+        );
+        assert_eq!(NAMES[PARTICLE_CLOUD_COLOR as usize], "PARTICLE_CLOUD_COLOR");
+        let f = FrameConsts::new(Mat4::IDENTITY, Mat4::IDENTITY, Vec3::ZERO);
+        let o = Object {
+            particle: [[1., 2., 3., 4.], [0.5; 4]],
+            ..Object::default()
+        };
+        assert_eq!(f.value(PARTICLE_CLOUD_MATRIX, 0, &o), [1., 2., 3., 4.]);
+        assert_eq!(f.value(PARTICLE_CLOUD_COLOR, 0, &o), [0.5; 4]);
     }
 }

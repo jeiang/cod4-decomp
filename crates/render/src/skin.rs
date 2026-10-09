@@ -42,6 +42,8 @@ pub struct ModelInstance {
     pub origin: [f32; 3],
     /// Pitch, yaw, roll in degrees, as the engine's `angles`.
     pub angles: [f32; 3],
+    /// Uniform size of the model (an effect's model that grows or shrinks over its life); 1 draws it as it is.
+    pub scale: f32,
     /// One matrix per bone of `model` in model space (what `sim::skel::Rig::pose` yields for this model's slice of the
     /// rig). Missing bones keep the bind pose.
     pub bones: Vec<BoneMat>,
@@ -63,6 +65,7 @@ impl ModelInstance {
             model,
             origin: [0.0; 3],
             angles: [0.0; 3],
+            scale: 1.0,
             bones: Vec::new(),
             kind,
             lod: None,
@@ -72,13 +75,19 @@ impl ModelInstance {
         }
     }
 
-    /// World matrix: the model's origin and angles.
+    /// World matrix: the model's origin, angles and scale.
     pub fn world_matrix(&self) -> glam::Mat4 {
         let q = sim::skel::quat::from_angles(&self.angles);
-        glam::Mat4::from_rotation_translation(
+        glam::Mat4::from_scale_rotation_translation(
+            Vec3::splat(self.scale),
             Quat::from_xyzw(q[0], q[1], q[2], q[3]),
             Vec3::from(self.origin),
         )
+    }
+
+    /// Radius of the sphere that holds the model as drawn.
+    pub fn radius(&self) -> f32 {
+        self.model.radius * self.scale
     }
 }
 

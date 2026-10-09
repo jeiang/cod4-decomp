@@ -13,7 +13,7 @@ use assets::zone::fx::{FxEffectDef, FxImpactTable};
 use assets::zone::gfx::Material;
 use assets::zone::gfxworld::GfxWorld;
 use assets::zone::weapon::WeaponDef;
-use fx::{Camera, Draws, Frame, Fx, Library, SoundPlay};
+use fx::{Camera, Draws, Frame, Frustum, Fx, Library, SoundPlay};
 use glam::Vec3;
 use net::entity::{EntityState, etype};
 use render::{DynMesh, DynVertex, ModelInstance, ModelKind};
@@ -65,6 +65,68 @@ impl fx::World for Tracer<'_> {
         );
         (t.fraction < 1.0).then(|| (t.fraction, Vec3::from(t.normal)))
     }
+
+    /// Particles stop at windows and the sky box too (and at the item clip, for those that ask), and go on moving
+    /// when they start inside something: `FX_UpdateElementPosition_CollidingStep`'s mask and `FX_TraceHitSomething`.
+    fn trace_particle(
+        &self,
+        a: Vec3,
+        b: Vec3,
+        mins: Vec3,
+        maxs: Vec3,
+        item_clip: bool,
+    ) -> Option<(f32, Vec3)> {
+        let mask = sim::contents::SOLID
+            | sim::contents::GLASS
+            | sim::contents::SKY
+            | if item_clip {
+                sim::contents::ITEMCLIP
+            } else {
+                0
+            };
+        let t = self.0.trace(
+            a.to_array(),
+            b.to_array(),
+            mins.to_array(),
+            maxs.to_array(),
+            sim::cm::ENTITYNUM_NONE,
+            mask,
+        );
+        (t.fraction < 1.0 && !t.start_solid && !t.all_solid)
+            .then(|| (t.fraction, Vec3::from(t.normal)))
+    }
+}
+
+/// What the effects see of the map: its collision for the particles that bounce, its light grid for the elements
+/// that take their colour from the light they stand in.
+struct FxWorld<'a> {
+    tracer: Tracer<'a>,
+    map: &'a GfxWorld,
+}
+
+impl fx::World for FxWorld<'_> {
+    fn trace(&self, a: Vec3, b: Vec3, mins: Vec3, maxs: Vec3) -> Option<(f32, Vec3)> {
+        self.tracer.trace(a, b, mins, maxs)
+    }
+
+    fn trace_particle(
+        &self,
+        a: Vec3,
+        b: Vec3,
+        mins: Vec3,
+        maxs: Vec3,
+        item_clip: bool,
+    ) -> Option<(f32, Vec3)> {
+        self.tracer.trace_particle(a, b, mins, maxs, item_clip)
+    }
+
+    fn lighting(&self, p: Vec3) -> [u8; 3] {
+        render::lightgrid::average_lighting(
+            self.map,
+            p.to_array(),
+            &render::lightgrid::LightingEnv::none(),
+        )
+    }
 }
 
 /// A decal's clipped geometry, kept for as long as the decal lives.
@@ -91,6 +153,9 @@ pub struct Effects {
     /// The client number of this player and the gun in their hands, for the first-person flash.
     own: u16,
     view: Option<ViewTags>,
+    /// The camera's horizontal field of view in radians and its aspect ratio, for the view volume that the effects
+    /// cull against; `None` culls nothing.
+    projection: Option<(f32, f32)>,
     /// What was played, by kind; for the report.
     pub played: BTreeMap<&'static str, u64>,
     /// Names of effects an event asked for that the content lacks.
@@ -119,8 +184,12 @@ struct WorldFx {
     stamp: u32,
 }
 
-/// Looping script effects do not start while this many elements are alive: the rest is for the effects of play.
-const LOOP_BUDGET: usize = 4500;
+/// Looping script effects do not start while this many elements are alive: the rest is for the effects of play. A
+/// share of the pool of elements (`fx::MAX_ELEMS`, the original's 2048).
+const LOOP_BUDGET: usize = 1500;
+
+/// Particle clouds drawn at once (`R_AddParticleCloudToScene`'s 256); the farthest ones are the ones left out.
+const MAX_CLOUDS: usize = 256;
 
 /// Where and how a script effect entity plays.
 fn world_fx_frame(e: &EntityState) -> Frame {
@@ -141,6 +210,8 @@ pub struct Drawn {
     /// How many sprites and decals the meshes hold.
     pub quads: usize,
     pub decals: usize,
+    /// How many particle clouds the meshes hold.
+    pub clouds: usize,
     /// How many trail strips the meshes hold.
     pub trails: usize,
     /// How far the camera shaking turns the view (pitch, yaw, roll in degrees); set by the caller.
@@ -165,6 +236,7 @@ impl Effects {
             sweep: None,
             own: u16::MAX,
             view: None,
+            projection: None,
             played: BTreeMap::new(),
             missing: HashSet::new(),
         }
@@ -546,6 +618,11 @@ impl Effects {
         self.view = tags;
     }
 
+    /// The camera's horizontal field of view in radians and its aspect ratio (width over height).
+    pub fn set_projection(&mut self, fov_x: f32, aspect: f32) {
+        self.projection = (fov_x > 0.0 && aspect > 0.0).then_some((fov_x, aspect));
+    }
+
     /// Plays `name` 90 units ahead of a camera, facing it (for `--fx-demo`).
     pub fn demo(&mut self, name: &str, eye: Vec3, yaw: f32, pitch: f32) {
         let (sy, cy) = yaw.sin_cos();
@@ -594,12 +671,22 @@ impl Effects {
             let heading = c.axis[1] * -a.sin() + c.axis[2] * a.cos();
             self.fx.move_effect(id, Frame::facing(at, heading));
         }
-        self.fx.update(now_ms, &Tracer(world));
+        let map = FxWorld {
+            tracer: Tracer(world),
+            map: &self.world,
+        };
+        self.fx.update(now_ms, &map);
     }
 
     /// Sounds the effects started since the last call.
     pub fn take_sounds(&mut self) -> Vec<SoundPlay> {
         self.fx.take_sounds()
+    }
+
+    /// How much of the line from `start` to `end` shows through the smoke of the last frame drawn, 0 to 1.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn visibility(&self, start: Vec3, end: Vec3) -> f32 {
+        self.fx.visibility(start, end)
     }
 
     pub fn live_elems(&self) -> usize {
@@ -615,10 +702,17 @@ impl Effects {
         let up = forward.cross(left);
         // Rolled clockwise like the view (`render::View::roll`).
         let (sr, cr) = roll.sin_cos();
+        let axis = [forward, left * cr + up * sr, up * cr - left * sr];
         let cam = Camera {
             origin: eye,
-            axis: [forward, left * cr + up * sr, up * cr - left * sr],
+            axis,
+            frustum: self.projection.map(|(fov_x, aspect)| {
+                let tan = (fov_x * 0.5).tan();
+                Frustum::new(eye, axis, [tan, tan / aspect])
+            }),
         };
+        // What the effects that start next are culled against.
+        self.fx.set_camera(cam);
         let mut d = Draws::default();
         self.fx.draw(&cam, &mut d);
         let mut out = Drawn {
@@ -677,6 +771,28 @@ impl Effects {
             out.trails += 1;
         }
 
+        // Clouds, far to near.
+        d.clouds.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then(b.depth.total_cmp(&a.depth))
+        });
+        let skipped = d.clouds.len().saturating_sub(MAX_CLOUDS);
+        for c in d.clouds.iter().skip(skipped) {
+            out.meshes.push(DynMesh::cloud(
+                c.material.clone(),
+                render::Cloud {
+                    origin: c.origin,
+                    axis: c.axis,
+                    scale: c.scale,
+                    endpos: c.endpos,
+                    radius: c.radius,
+                    color: c.color,
+                },
+            ));
+            out.clouds += 1;
+        }
+
         let mut seen = HashSet::new();
         for dc in &d.decals {
             seen.insert(dc.id);
@@ -689,7 +805,14 @@ impl Effects {
                 };
                 let reach = Vec3::splat(p.half_size[0].max(p.half_size[1]) + 16.0);
                 let verts = decal::clip(
-                    decal::world_triangles(&self.world, p.origin - reach, p.origin + reach),
+                    decal::receivers(
+                        &self.world,
+                        p.origin - reach,
+                        p.origin + reach,
+                        // The original marks the brushes with the second material and the models with the first.
+                        dc.world_material.as_ref().unwrap_or(&dc.material),
+                        &dc.material,
+                    ),
                     &p,
                 );
                 self.marks.insert(
@@ -724,6 +847,7 @@ impl Effects {
             inst.origin = m.origin.to_array();
             inst.light_origin = inst.origin;
             inst.angles = crate::props::angles_of(m.axis);
+            inst.scale = m.scale;
             out.models.push(inst);
         }
         out

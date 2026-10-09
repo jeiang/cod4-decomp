@@ -26,6 +26,10 @@ const WATER_MAP: &str = "mp_farm";
 /// A stock map with destructible props.
 const PROPS_MAP: &str = "mp_bog";
 const SHOCK: &str = "concussion_grenade_mp";
+/// A stock smoke grenade: sprites and a runner, two of the sprites block sight.
+const SMOKE: &str = "smoke/smoke_grenade_11sec_mp";
+/// A stock explosion with a particle cloud among its elements.
+const CLOUDY: &str = "explosions/artilleryexp_dirt_brown";
 
 /// Plays `effects` from `from_ms` for `secs` seconds in 50 ms steps and returns (most sprites in one frame, most
 /// decals, sprites at the end, live elements at the end).
@@ -205,6 +209,24 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     if flash_quads == 0 {
         bad.push("the muzzle flash drew no sprite".into());
     }
+
+    // Stock effects of each kind of element draw what they are made of.
+    let surfaces: Vec<u8> = decals_by_surface
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| **d > 0)
+        .map(|(i, _)| i as u8)
+        .collect();
+    elements(
+        &lib,
+        &data,
+        world,
+        eye,
+        &weapon,
+        &surfaces,
+        &mut report,
+        &mut bad,
+    );
 
     // The debris of an explosion are PhysPreset rigid bodies: chunks come down from where they were thrown, stay
     // above the floor they land on and come to rest; they do not hang in the air or fall through the map.
@@ -614,6 +636,201 @@ fn water(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mut 
     if moved < 3.0 {
         bad.push(format!(
             "the water barely moved in two seconds ({moved} per texel)"
+        ));
+    }
+}
+
+/// How many elements of each type `name` is made of, by the names of the types.
+fn element_types(lib: &Library, name: &str) -> Option<serde_json::Map<String, Value>> {
+    const NAMES: [&str; 11] = [
+        "sprite_billboard",
+        "sprite_oriented",
+        "tail",
+        "trail",
+        "cloud",
+        "model",
+        "omni_light",
+        "spot_light",
+        "sound",
+        "decal",
+        "runner",
+    ];
+    let def = lib.content.effects().into_iter().find(|e| {
+        e.name
+            .as_deref()
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+    })?;
+    let mut counts = serde_json::Map::new();
+    for d in def.elems.iter() {
+        let n = counts
+            .entry(NAMES[usize::from(d.elem_type).min(NAMES.len() - 1)])
+            .or_insert(0.into());
+        *n = (n.as_u64().unwrap_or(0) + 1).into();
+    }
+    Some(counts)
+}
+
+/// A material that takes a mark of any kind.
+fn any_mark() -> assets::zone::gfx::Material {
+    assets::zone::gfx::Material {
+        name: None,
+        game_flags: 0,
+        sort_key: 0,
+        atlas_rows: 1,
+        atlas_columns: 1,
+        draw_surf: 0,
+        surface_type_bits: 0,
+        hash_index: 0,
+        state_bits_entry: [0; 34],
+        state_flags: 0,
+        camera_region: 0,
+        technique_set: None,
+        textures: std::sync::Arc::from(Vec::new()),
+        constants: std::sync::Arc::from(Vec::new()),
+        state_bits: std::sync::Arc::from(Vec::new()),
+    }
+}
+
+/// What the effects of each kind of element draw: a stock smoke grenade's sprites and the smoke that blocks the line
+/// of sight, a stock explosion's particle clouds, and the bullet marks on a static model that no map surface is near.
+#[allow(clippy::too_many_arguments)]
+fn elements(
+    lib: &Library,
+    data: &render::MapData,
+    world: &dyn Collide,
+    eye: glam::Vec3,
+    weapon: &dyn Fn(u16) -> Option<std::sync::Arc<assets::zone::weapon::WeaponDef>>,
+    surfaces: &[u8],
+    report: &mut serde_json::Map<String, Value>,
+    bad: &mut Vec<String>,
+) {
+    // The smoke grenade: six sprites and the runner, two of the sprites blocking sight.
+    let Some(types) = element_types(lib, SMOKE) else {
+        return bad.push(format!("effect {SMOKE} is not in the content"));
+    };
+    report.insert("smoke_elements".into(), Value::Object(types.clone()));
+    let count = |k: &str| types.get(k).and_then(Value::as_u64).unwrap_or(0);
+    if count("sprite_billboard") < 2 || count("runner") != 1 {
+        bad.push(format!("{SMOKE} is not a runner and sprites: {types:?}"));
+    }
+    let mut fx = Effects::new(&lib.content, data.world.clone());
+    fx.demo(SMOKE, eye, 0.0, 0.0);
+    let along = glam::Vec3::X * 400.0;
+    let (mut quads, mut seen) = (0, 1.0f32);
+    for step in 1..=400 {
+        fx.update(step * 50, world);
+        quads = quads.max(fx.draw(eye, 0.0, 0.0, 0.0).quads);
+        seen = seen.min(fx.visibility(eye, eye + along));
+    }
+    report.insert("smoke_quads_max".into(), quads.into());
+    report.insert("smoke_visibility_min".into(), seen.into());
+    if quads == 0 {
+        bad.push("the smoke grenade drew no sprite".into());
+    }
+    if seen > 0.5 {
+        bad.push(format!(
+            "the line of sight through a smoke grenade stayed {seen} clear"
+        ));
+    }
+
+    // An explosion with particle clouds draws them next to its sprites.
+    let cloudy = element_types(lib, CLOUDY).unwrap_or_default();
+    report.insert(
+        "cloud_effect_elements".into(),
+        Value::Object(cloudy.clone()),
+    );
+    if cloudy.get("cloud").and_then(Value::as_u64).unwrap_or(0) == 0 {
+        bad.push(format!("effect {CLOUDY} has no cloud element: {cloudy:?}"));
+    }
+    let mut fx = Effects::new(&lib.content, data.world.clone());
+    fx.demo(CLOUDY, eye, 0.0, 0.0);
+    let (mut clouds, mut quads, mut cloud_meshes) = (0, 0, 0);
+    for step in 1..=400 {
+        fx.update(step * 50, world);
+        let d = fx.draw(eye, 0.0, 0.0, 0.0);
+        clouds = clouds.max(d.clouds);
+        quads = quads.max(d.quads);
+        cloud_meshes = cloud_meshes.max(d.meshes.iter().filter(|m| m.cloud.is_some()).count());
+    }
+    report.insert("cloud_effect_clouds_max".into(), clouds.into());
+    report.insert("cloud_effect_quads_max".into(), quads.into());
+    if clouds == 0 || clouds != cloud_meshes {
+        bad.push(format!(
+            "{CLOUDY} drew {clouds} clouds as {cloud_meshes} cloud meshes"
+        ));
+    }
+
+    // A bullet into the top of a static model that has no map surface beside it leaves a mark on the model.
+    let w = &data.world;
+    let any = any_mark();
+    let (mut candidates, mut marked) = (0, None);
+    'models: for (inst, draw) in w
+        .dpvs
+        .smodel_insts
+        .iter()
+        .zip(&w.dpvs.smodel_draw_insts)
+        .step_by(5)
+    {
+        if draw.model.is_none() {
+            continue;
+        }
+        let (mins, maxs) = (glam::Vec3::from(inst.mins), glam::Vec3::from(inst.maxs));
+        for t in crate::decal::model_triangles(w, mins, maxs, &any) {
+            let cross = (t[1] - t[0]).cross(t[2] - t[0]);
+            let n = cross.normalize_or_zero();
+            if n.z < 0.95 || cross.length() < 40.0 {
+                continue;
+            }
+            let c = (t[0] + t[1] + t[2]) / 3.0;
+            let p = crate::decal::Placement {
+                origin: c,
+                normal: n,
+                up: n.any_orthonormal_vector(),
+                half_size: [4.0, 4.0],
+            };
+            let reach = glam::Vec3::splat(24.0);
+            if !crate::decal::clip(
+                crate::decal::world_triangles(w, c - reach, c + reach, &any),
+                &p,
+            )
+            .is_empty()
+            {
+                continue;
+            }
+            candidates += 1;
+            for &surface in surfaces {
+                let mut fx = Effects::new(&lib.content, data.world.clone());
+                fx.event(
+                    &ClientEvent::BulletImpact {
+                        origin: c.to_array(),
+                        normal: n.to_array(),
+                        surface,
+                        weapon: 0,
+                        shooter: 0,
+                        exit: false,
+                    },
+                    weapon,
+                );
+                let (_, decals, _, _) =
+                    run_for(&mut fx, world, 0, 1, c + glam::Vec3::Z * 60.0, -1.2);
+                if decals > 0 {
+                    marked = Some(surface);
+                    break 'models;
+                }
+            }
+            if candidates >= 30 {
+                break 'models;
+            }
+        }
+    }
+    report.insert("static_model_mark_candidates".into(), candidates.into());
+    report.insert(
+        "static_model_mark_surface".into(),
+        marked.map_or(Value::Null, |s| s.into()),
+    );
+    if marked.is_none() {
+        bad.push(format!(
+            "no bullet mark landed on a static model ({candidates} places tried); the map has none to try if 0"
         ));
     }
 }

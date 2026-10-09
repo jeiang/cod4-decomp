@@ -26,6 +26,8 @@ pub mod elem {
 pub mod flags {
     /// The spawn origin offset is in the effect's frame instead of the world's.
     pub const SPAWN_RELATIVE_TO_EFFECT: i32 = 0x2;
+    /// The element is not spawned when its effect starts off screen (`spawn_frustum_cull_radius` is its size).
+    pub const SPAWN_FRUSTUM_CULL: i32 = 0x4;
     pub const SPAWN_OFFSET_MASK: i32 = 0x30;
     pub const SPAWN_OFFSET_SPHERE: i32 = 0x10;
     pub const SPAWN_OFFSET_CYLINDER: i32 = 0x20;
@@ -38,6 +40,8 @@ pub mod flags {
     pub const USE_COLLISION: i32 = 0x100;
     pub const DIE_ON_TOUCH: i32 = 0x200;
     pub const DRAW_PAST_FOG: i32 = 0x400;
+    /// The element's alpha blocks lines of sight through it (smoke): see `FX_AddVisBlocker`.
+    pub const BLOCKS_SIGHT: i32 = 0x1000;
     /// The local velocity samples apply.
     pub const HAS_VELOCITY_LOCAL: i32 = 0x100_0000;
     /// The world velocity samples apply.

@@ -212,6 +212,10 @@ pub struct Settings {
     pub distortion: bool,
     /// `r_drawSun`: off, the map's sun sprite, lens flare and glare are not drawn.
     pub draw_sun: bool,
+    /// `r_lodScaleRigid` and `r_lodScaleSkinned`: how much farther a model counts as for its level of detail.
+    pub lod_scale: [f32; 2],
+    /// `r_lodBiasRigid` and `r_lodBiasSkinned`: units added to that distance.
+    pub lod_bias: [f32; 2],
 }
 
 impl Default for Settings {
@@ -236,6 +240,8 @@ impl Default for Settings {
             spot_fade_time: 1.0,
             draw_sun: true,
             distortion: true,
+            lod_scale: [1.0; 2],
+            lod_bias: [0.0; 2],
         }
     }
 }
@@ -493,6 +499,10 @@ pub struct Renderer {
     pub(crate) post_state: post::State,
     /// Size and format of the frame being drawn, for the code images that are frame-sized targets.
     frame_target: ((u32, u32), wgpu::TextureFormat),
+    /// What the frame's models' distances count as for their level of detail.
+    lod: LodParms,
+    /// The sprites every particle cloud is drawn from.
+    cloud_bytes: Vec<u8>,
     /// The map's sun sprite, lens flare and glare; its overlay is drawn at the end of the post chain.
     pub(crate) sun: Sun,
     warm: Option<Warm>,
@@ -620,6 +630,8 @@ impl Renderer {
             post: PostParams::from_art(&data.art),
             post_state,
             frame_target: ((1, 1), wgpu::TextureFormat::Rgba8Unorm),
+            lod: LodParms::default(),
+            cloud_bytes: dynmesh::cloud_vertices(),
             sun: Sun::new(&gpu_for_dyn),
             warm: None,
             lights,
@@ -1387,10 +1399,13 @@ impl Renderer {
             };
             let origin = Vec3::from(inst.origin);
             let dist = origin.distance(eye);
-            if inst.cull_dist > 0.0 && dist > inst.cull_dist {
+            let adjusted = self.lod.adjusted(&model, dist);
+            if inst.cull_dist > 0.0 && adjusted >= inst.cull_dist {
                 continue;
             }
-            let lod = pick_lod(&model, dist);
+            let Some(lod) = pick_lod(&model, adjusted) else {
+                continue;
+            };
             let info = &model.lod_info[lod];
             let obj = Object {
                 world: model_matrix(inst),
@@ -1398,6 +1413,7 @@ impl Renderer {
                     .scene
                     .lighting
                     .base_coords(self.scene.lighting.static_model_handle(mi as usize)),
+                ..Object::default()
             };
             let light = if kind == PassKind::Scene {
                 inst.primary_light_index
@@ -1488,6 +1504,7 @@ impl Renderer {
         insts: &[ModelInstance],
         meshes: &[DynMesh],
         eye: Vec3,
+        view: &Mat4,
     ) -> (Vec<DynSurf>, Vec<MeshDraw>) {
         self.scene.begin_dynamic_lighting();
         self.dyn_bytes.clear();
@@ -1495,7 +1512,13 @@ impl Renderer {
         for (ii, inst) in insts.iter().enumerate() {
             let model = &inst.model;
             let dist = Vec3::from(inst.origin).distance(eye);
-            let lod = inst.lod.unwrap_or_else(|| pick_lod(model, dist)).min(3);
+            let lod = match inst.lod {
+                Some(l) => l.min(3),
+                None => match pick_lod(model, self.lod.adjusted(model, dist)) {
+                    Some(l) => l,
+                    None => continue,
+                },
+            };
             let info = &model.lod_info[lod];
             let mats = skin::skin_matrices(model, &inst.bones);
             let (base_lighting, light) = match self
@@ -1511,6 +1534,7 @@ impl Renderer {
             let obj = Object {
                 world: inst.world_matrix(),
                 base_lighting,
+                ..Object::default()
             };
             for s in 0..usize::from(info.surf_count) {
                 let idx = usize::from(info.surf_index) + s;
@@ -1544,7 +1568,28 @@ impl Renderer {
             }
         }
         let mut mesh_draws = Vec::new();
+        // Every cloud of the frame is drawn from one copy of the same vertices.
+        let mut cloud_vb = None;
         for (mi, m) in meshes.iter().enumerate() {
+            if let Some(c) = &m.cloud {
+                let (at, len) = *cloud_vb.get_or_insert_with(|| {
+                    let at = self.dyn_bytes.len() as u64;
+                    self.dyn_bytes.extend_from_slice(&self.cloud_bytes);
+                    (at, self.cloud_bytes.len() as u64)
+                });
+                mesh_draws.push(MeshDraw {
+                    mesh: mi,
+                    vb: (at, len),
+                    count: dynmesh::CLOUD_VERTS,
+                    light: self.scene.world.sun_primary_light_index as u8,
+                    obj: Object {
+                        world: c.world(),
+                        particle: [c.matrix(view), c.color_const()],
+                        ..Object::default()
+                    },
+                });
+                continue;
+            }
             let show_missing = self.settings.show_missing_light_grid;
             let (base_lighting, light) = match m
                 .light_origin
@@ -1569,6 +1614,7 @@ impl Renderer {
                     obj: Object {
                         world: Mat4::IDENTITY,
                         base_lighting,
+                        ..Object::default()
                     },
                 });
             }
@@ -1603,7 +1649,12 @@ impl Renderer {
         for (n, d) in runs.iter().enumerate() {
             let mat = &meshes[d.mesh].material;
             let techs = self.scene_techs(d.light, sun_shadows);
-            let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {
+            let kind = if meshes[d.mesh].cloud.is_some() {
+                VertexKind::Cloud
+            } else {
+                VertexKind::Model
+            };
+            let Some(prep) = self.prepare(mat, techs, kind, hsm) else {
                 continue;
             };
             let fc = light_frames.get(&d.light).unwrap_or(frame);
@@ -1878,7 +1929,7 @@ impl Renderer {
                 .copied()
                 .filter(|d| {
                     let inst = &insts[d.inst];
-                    cone.reaches_sphere(Vec3::from(inst.origin), inst.model.radius)
+                    cone.reaches_sphere(Vec3::from(inst.origin), inst.radius())
                 })
                 .collect();
             let mut list = self.build_draws(
@@ -2199,7 +2250,7 @@ impl Renderer {
                 .copied()
                 .filter(|d| {
                     let inst = &insts[d.inst];
-                    l.reaches_sphere(Vec3::from(inst.origin), inst.model.radius)
+                    l.reaches_sphere(Vec3::from(inst.origin), inst.radius())
                 })
                 .collect();
             // A spot light of an effect takes a free tile of the shadow atlas, if shadows are on.
@@ -2316,6 +2367,7 @@ impl Renderer {
             .settings
             .aspect
             .unwrap_or(size.0 as f32 / size.1 as f32);
+        self.lod = LodParms::new((view.fov_x * 0.5).tan() / aspect, &self.settings);
         let (v, p) = view.matrices(aspect);
         let mut frame = FrameConsts::new(v, p, view.origin);
         frame.set_sun(
@@ -2380,7 +2432,7 @@ impl Renderer {
         if let (Some(quad), Some(mat)) = (sun_quad, world.sun.sprite_material.clone()) {
             meshes.push(sun::sprite_mesh(mat, quad));
         }
-        let (dynsurfs, mesh_runs) = self.prepare_dynamic(&insts, &meshes, view.origin);
+        let (dynsurfs, mesh_runs) = self.prepare_dynamic(&insts, &meshes, view.origin, &v);
 
         // The sun shadow map.
         let has_sun = world.sun_light.is_some() && self.shadow.is_some();
@@ -3259,12 +3311,54 @@ fn ring_groups(
     (vs, ps)
 }
 
-/// First LOD whose range covers `dist`; the last LOD otherwise.
-fn pick_lod(model: &assets::zone::xmodel::XModel, dist: f32) -> usize {
+/// How far away a model counts as, for the choice of its level of detail (`GfxLodParms`): its distance times
+/// `r_lodScale` and the tangent of half the view's vertical field of view (a narrowed view shows a far model in the
+/// detail of a near one), plus `r_lodBias`. Rigid and skinned models have a ramp each.
+#[derive(Clone, Copy)]
+struct LodParms {
+    /// Scale and bias.
+    ramp: [(f32, f32); 2],
+}
+
+impl Default for LodParms {
+    fn default() -> Self {
+        LodParms {
+            ramp: [(1.0, 0.0); 2],
+        }
+    }
+}
+
+impl LodParms {
+    /// `R_UpdateLodParms`.
+    fn new(tan_half_fov_y: f32, s: &Settings) -> LodParms {
+        let k = tan_half_fov_y * 2.118_673;
+        LodParms {
+            ramp: [0, 1].map(|i| (s.lod_scale[i] * k, s.lod_bias[i] * k)),
+        }
+    }
+
+    fn adjusted(&self, model: &XModel, dist: f32) -> f32 {
+        self.scaled(model.lod_ramp_type != 0, dist)
+    }
+
+    /// `dist` on the skinned ramp, or on the rigid one.
+    fn scaled(&self, skinned: bool, dist: f32) -> f32 {
+        let (scale, bias) = self.ramp[usize::from(skinned)];
+        dist * scale + bias
+    }
+}
+
+/// The first LOD that reaches as far as `dist` (`XModelGetLodForDist`): one with no range reaches everywhere, and
+/// beyond the last LOD's range the model is not drawn.
+fn pick_lod(model: &XModel, dist: f32) -> Option<usize> {
     let n = usize::from(model.num_lods).clamp(1, 4);
-    (0..n - 1)
-        .find(|&i| model.lod_info[i].dist > 0.0 && dist < model.lod_info[i].dist)
-        .unwrap_or(n - 1)
+    lod_reaching(model.lod_info[..n].iter().map(|l| l.dist), dist)
+}
+
+fn lod_reaching(reaches: impl Iterator<Item = f32>, dist: f32) -> Option<usize> {
+    reaches
+        .enumerate()
+        .find_map(|(i, reach)| (reach == 0.0 || reach > dist).then_some(i))
 }
 
 fn is_sky(m: &Material) -> bool {
@@ -3346,5 +3440,36 @@ fn nearest(items: &mut Vec<u32>, centre: Vec3, at: impl Fn(u32) -> Vec3) {
                 .total_cmp(&at(b).distance_squared(centre))
         });
         items.truncate(MAX_LIGHT_SURFACES);
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lod_reaches_up_to_its_range_and_a_zero_range_reaches_everywhere() {
+        let pick = |reaches: &[f32], dist| lod_reaching(reaches.iter().copied(), dist);
+        assert_eq!(pick(&[100.0, 400.0, 0.0], 50.0), Some(0));
+        assert_eq!(pick(&[100.0, 400.0, 0.0], 100.0), Some(1));
+        assert_eq!(pick(&[100.0, 400.0, 0.0], 9000.0), Some(2));
+        // A zero in the middle ends the search there.
+        assert_eq!(pick(&[100.0, 0.0, 500.0], 300.0), Some(1));
+        // Past the last range there is nothing to draw.
+        assert_eq!(pick(&[100.0, 400.0], 400.0), None);
+    }
+
+    #[test]
+    fn the_view_angle_and_the_dvars_scale_the_distance_a_model_is_judged_at() {
+        let tan = 0.5;
+        let mut s = Settings::default();
+        let k = tan * 2.118_673;
+        assert!((LodParms::new(tan, &s).scaled(false, 100.0) - 100.0 * k).abs() < 1e-3);
+        // A narrower view (zoomed in) judges the same model nearer; the skinned ramp has its own scale and bias.
+        assert!(LodParms::new(tan * 0.5, &s).scaled(false, 100.0) < 100.0 * k);
+        s.lod_scale = [1.0, 2.0];
+        s.lod_bias = [0.0, 10.0];
+        let p = LodParms::new(tan, &s);
+        assert!((p.scaled(true, 100.0) - (200.0 + 10.0) * k).abs() < 1e-2);
+        assert!((p.scaled(false, 100.0) - 100.0 * k).abs() < 1e-3);
     }
 }

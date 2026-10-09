@@ -617,6 +617,12 @@ impl NetPlay {
         self.sound.set_footsteps(on);
     }
 
+    /// The camera's horizontal field of view in radians and aspect ratio (width over height), which the effects cull
+    /// what they spawn and draw against.
+    pub fn set_projection(&mut self, fov_x: f32, aspect: f32) {
+        self.effects.set_projection(fov_x, aspect);
+    }
+
     /// What the player state says the input layer must change (forced stance, ADS reset, frozen); take it each
     /// frame and give it to `Input::apply`.
     pub fn take_input_feedback(&mut self) -> Feedback {

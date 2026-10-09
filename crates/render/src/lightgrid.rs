@@ -732,24 +732,7 @@ impl ModelLighting {
     }
 
     fn apply(&mut self, grid: &LightGrid, e: u32, patch: &Patch) {
-        let set = |i: u16| {
-            let at = usize::from(i) * COLORS_SIZE;
-            grid.colors
-                .get(at..at + COLORS_SIZE)
-                .map_or([0u8; COLORS_SIZE], |c| c.try_into().unwrap())
-        };
-        let colors = if patch.count == 1 {
-            set(patch.colors[0])
-        } else {
-            let mut acc = [0u16; COLORS_SIZE];
-            for k in 0..patch.count {
-                let c = set(patch.colors[k]);
-                for (a, &v) in acc.iter_mut().zip(&c) {
-                    *a = a.wrapping_add(patch.weights[k].wrapping_mul(u16::from(v)));
-                }
-            }
-            acc.map(|a| (a.wrapping_add(127) >> 8) as u8)
-        };
+        let colors = blended_colors(grid, patch);
         for (s, &ci) in TEXEL_COLOR.iter().enumerate() {
             let c = &colors[usize::from(ci) * 3..usize::from(ci) * 3 + 3];
             let o = self.texel_offset(e, s);
@@ -758,6 +741,45 @@ impl ModelLighting {
     }
 }
 
+/// The light grid's 56 colours of `patch`: its colour sets weighted by the patch's fixed-point weights.
+fn blended_colors(grid: &LightGrid, patch: &Patch) -> [u8; COLORS_SIZE] {
+    let set = |i: u16| {
+        let at = usize::from(i) * COLORS_SIZE;
+        grid.colors
+            .get(at..at + COLORS_SIZE)
+            .map_or([0u8; COLORS_SIZE], |c| c.try_into().unwrap())
+    };
+    if patch.count == 1 {
+        return set(patch.colors[0]);
+    }
+    let mut acc = [0u16; COLORS_SIZE];
+    for k in 0..patch.count {
+        let c = set(patch.colors[k]);
+        for (a, &v) in acc.iter_mut().zip(&c) {
+            *a = a.wrapping_add(patch.weights[k].wrapping_mul(u16::from(v)));
+        }
+    }
+    acc.map(|a| (a.wrapping_add(127) >> 8) as u8)
+}
+
+/// `R_GetAverageLightingAtPoint`: the light of the grid at `pos` averaged over all its directions, the sun's colour
+/// added by how much of it reaches there. Red, green and blue.
+pub fn average_lighting(world: &GfxWorld, pos: [f32; 3], env: &LightingEnv) -> [u8; 3] {
+    let grid = &world.light_grid;
+    let (patch, _) = lighting_at_point(grid, pos, 0, Extrapolate::Default, env);
+    let colors = blended_colors(grid, &patch);
+    let sun = world.sun_light.as_ref().map_or([0.0; 3], |l| l.color);
+    let sun_weight = f32::from(patch.primary_weight) * 0.5;
+    [0, 1, 2].map(|c| {
+        let sum: u32 = colors
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|rgb| u32::from(rgb[c]))
+            .sum();
+        (sun[c] * sun_weight + (sum / 56) as f32).clamp(0.0, 255.0) as u8
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,6 +1126,22 @@ mod tests {
             for k in 0..g.entry_count {
                 assert!(u32::from(grid_entry(g, k).unwrap().colors_index) < g.color_count);
             }
+        }
+
+        #[test]
+        fn the_average_light_at_a_point_is_lit_and_differs_across_the_map() {
+            let Some(w) = world() else { return };
+            let mut seen = Vec::new();
+            for inst in w.dpvs.smodel_insts.iter().step_by(25) {
+                let centre = [0, 1, 2].map(|a| (inst.mins[a] + inst.maxs[a]) * 0.5);
+                seen.push(average_lighting(w, centre, &LightingEnv::none()));
+            }
+            let bright = |c: &[u8; 3]| u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2]);
+            let (dim, lit) = seen.iter().fold((u32::MAX, 0), |(lo, hi), c| {
+                (lo.min(bright(c)), hi.max(bright(c)))
+            });
+            assert!(lit > 150, "something is lit: {lit}");
+            assert!(lit > dim + 60, "light varies from {dim} to {lit}");
         }
 
         #[test]

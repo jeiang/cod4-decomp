@@ -45,6 +45,9 @@ pub struct Gfx {
     /// `sm_maxLights`, at most four, and `sm_spotShadowFadeTime` in seconds.
     pub max_shadow_lights: usize,
     pub spot_fade_time: f32,
+    /// `r_lodScaleRigid` and `r_lodScaleSkinned`, `r_lodBiasRigid` and `r_lodBiasSkinned`.
+    pub lod_scale: [f32; 2],
+    pub lod_bias: [f32; 2],
     /// `r_spotLightStartRadius`, `r_spotLightEndRadius`, `r_spotLightFovInnerFraction` and `r_spotLightBrightness`.
     pub spot: render::SpotParams,
     /// `r_drawSun`.
@@ -149,6 +152,18 @@ impl Gfx {
                 .get("sm_spotShadowFadeTime")
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .map_or(1.0, |v| v.clamp(0.0, 5.0)),
+            lod_scale: ["r_lodScaleRigid", "r_lodScaleSkinned"].map(|n| {
+                c.get(n)
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .filter(|v| v.is_finite())
+                    .map_or(1.0, |v| v.max(0.0))
+            }),
+            lod_bias: ["r_lodBiasRigid", "r_lodBiasSkinned"].map(|n| {
+                c.get(n)
+                    .and_then(|v| v.trim().parse::<f32>().ok())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(0.0)
+            }),
             draw_sun: on("r_drawSun"),
             distortion: on("r_distortion"),
         }
@@ -188,6 +203,8 @@ impl Gfx {
         base.dynamic_spot_shadows = self.dynamic_spot_shadows;
         base.max_shadow_lights = self.max_shadow_lights;
         base.spot_fade_time = self.spot_fade_time;
+        base.lod_scale = self.lod_scale;
+        base.lod_bias = self.lod_bias;
         base
     }
 
@@ -287,5 +304,19 @@ mod tests {
         let off = Gfx::from_cvars(&cvars(&[("r_vsync", "0")]));
         assert_eq!(off.present("auto"), "uncapped");
         assert_eq!(off.present("fifo"), "fifo");
+    }
+
+    #[test]
+    fn the_lod_dvars_scale_and_bias_the_distance_models_are_judged_at() {
+        let g = Gfx::from_cvars(&cvars(&[
+            ("r_lodScaleRigid", "2.5"),
+            ("r_lodBiasSkinned", "-40"),
+            ("r_lodScaleSkinned", "-3"),
+        ]));
+        let s = g.settings(render::Settings::default());
+        assert_eq!(s.lod_scale, [2.5, 0.0], "a scale is not negative");
+        assert_eq!(s.lod_bias, [0.0, -40.0]);
+        let s = Gfx::from_cvars(&cvars(&[])).settings(render::Settings::default());
+        assert_eq!((s.lod_scale, s.lod_bias), ([1.0; 2], [0.0; 2]));
     }
 }

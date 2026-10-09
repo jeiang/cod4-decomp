@@ -1090,6 +1090,11 @@ impl Viewer {
                 // The original's range is 0 to 3600 s; a timeout of 0 would drop the client at once.
                 net.set_timeout(Duration::from_secs_f32(secs.clamp(1.0, 3600.0)));
             }
+            net.set_projection(
+                st.fov_x,
+                st.aspect
+                    .unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
+            );
             let frame_out = net.frame(dt, &f);
             st.input.apply(&net.take_input_feedback());
             st.prev_cost[0] = t_net.elapsed().as_secs_f64() * 1000.0;
