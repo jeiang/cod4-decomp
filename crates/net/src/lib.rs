@@ -9,6 +9,8 @@
 pub mod bits;
 pub mod client;
 pub mod connect;
+pub mod demo;
+pub mod download;
 pub mod entity;
 pub mod field;
 pub mod netchan;
@@ -22,6 +24,7 @@ pub mod transport;
 pub mod ui;
 pub mod usercmd;
 pub mod view;
+pub mod voice;
 #[cfg(feature = "webtransport")]
 pub mod wt;
 

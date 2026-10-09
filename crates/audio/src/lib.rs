@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Sound.
 pub mod bank;
+pub mod capture;
 pub mod channels;
 pub mod curve;
 pub mod decode;

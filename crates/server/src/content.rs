@@ -43,15 +43,34 @@ pub struct Install {
     pub language: &'static str,
 }
 
+/// The install's language: line 1 of `localization.txt` (default `english`), as an index into [`LANGUAGES`].
+fn language_index(root: &Path) -> usize {
+    assets::fs::read_to_string(root.join("localization.txt"))
+        .ok()
+        .and_then(|t| t.lines().next().map(|l| l.trim().to_ascii_lowercase()))
+        .and_then(|l| LANGUAGES.iter().position(|n| *n == l))
+        .unwrap_or(0)
+}
+
+/// `zone/<language>` of the install at `root`, matched case-insensitively; where a downloaded map zone goes.
+pub fn zone_dir(root: &Path) -> Option<PathBuf> {
+    let mut dir = root.to_owned();
+    for part in ["zone", LANGUAGES[language_index(root)]] {
+        dir = find_ci(&dir, part)?;
+    }
+    Some(dir)
+}
+
+/// `zone/<language>/<name>.ff` of the install at `root`, if it is there.
+pub fn zone_file(root: &Path, name: &str) -> Option<PathBuf> {
+    find_ci(&zone_dir(root)?, &format!("{name}.ff"))
+}
+
 impl Install {
     /// Opens the install: language from line 1 of `localization.txt` (default `english`) and
     /// the stock search path.
     pub fn open(root: &Path) -> io::Result<Self> {
-        let language = assets::fs::read_to_string(root.join("localization.txt"))
-            .ok()
-            .and_then(|t| t.lines().next().map(|l| l.trim().to_ascii_lowercase()))
-            .and_then(|l| LANGUAGES.iter().position(|n| *n == l))
-            .unwrap_or(0);
+        let language = language_index(root);
         Ok(Self {
             root: root.to_owned(),
             vfs: Vfs::open_stock(root, language)?,
@@ -61,11 +80,7 @@ impl Install {
 
     /// `zone/<language>/<name>.ff`, matched case-insensitively.
     pub fn zone_path(&self, name: &str) -> Option<PathBuf> {
-        let mut dir = self.root.clone();
-        for part in ["zone", self.language] {
-            dir = find_ci(&dir, part)?;
-        }
-        find_ci(&dir, &format!("{name}.ff"))
+        zone_file(&self.root, name)
     }
 
     pub fn map_exists(&self, map: &str) -> bool {

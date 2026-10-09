@@ -11,6 +11,8 @@ mod crosshair;
 mod damage;
 mod decal;
 mod display;
+#[cfg(not(target_arch = "wasm32"))]
+mod download;
 mod effects;
 mod events;
 mod flythrough;
@@ -46,6 +48,7 @@ mod viewmodel;
 mod vmanim;
 #[cfg(not(target_arch = "wasm32"))]
 mod vmtour;
+mod voice;
 #[cfg(target_arch = "wasm32")]
 mod web;
 mod wire;

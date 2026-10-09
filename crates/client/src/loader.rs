@@ -28,6 +28,9 @@ pub enum Server {
     Join(SocketAddr),
     /// The connection stays: a level change on the server being played on.
     Keep,
+    /// Play a recorded demo: there is no server, and the address handed back is only a stand-in the net layer names the
+    /// peer by.
+    Demo,
 }
 
 /// What to load.
@@ -303,6 +306,7 @@ impl Work {
         progress.set(3, 0.9);
         let server = match (&self.req.server, self.booting) {
             (Server::Join(addr), _) => Some((*addr, None)),
+            (Server::Demo, _) => Some((std::net::SocketAddr::from(([127, 0, 0, 1], 9)), None)),
             (_, Some(b)) => {
                 let l = b.wait()?;
                 Some((l.addr, Some(l)))

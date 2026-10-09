@@ -10,9 +10,10 @@ use crate::decode::{self, StreamJob};
 use crate::device::{Config, Output};
 use crate::eq::Band;
 use crate::mixer::{
-    Duck, Emitter, Handle, Listener, Mixer, NO_ENTITY, Play, Source, VoiceId, mixer,
+    Duck, Emitter, Handle, Listener, Mixer, NO_ENTITY, Play, Source, Stream, VoiceId, mixer,
 };
 use crate::reverb::room_index;
+use crate::ring::{Producer, ring};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,6 +128,18 @@ pub struct Sound {
     shock_loops: [Option<VoiceId>; 2],
     /// `snd_volume` as last sent to the mixer.
     volume: f32,
+}
+
+/// The write end of a voice opened by [`Sound::open_pipe`].
+pub struct Pipe {
+    tx: Producer,
+}
+
+impl Pipe {
+    /// Queues samples (`-1..1`); returns how many fit.
+    pub fn push(&mut self, samples: &[f32]) -> usize {
+        self.tx.push(samples)
+    }
 }
 
 /// Where streamed files decode. Natively a thread feeds each job's ring; on `wasm32`, which has no threads
@@ -487,6 +500,36 @@ impl Sound {
         Some(id)
     }
 
+    /// Opens a 2D voice on the channel named `channel` (the first channel when there is none of that name) that
+    /// plays mono samples at `rate` as they are pushed into the returned [`Pipe`]: what voice chat plays through.
+    /// `None` when the mixer has no room for another streamed voice.
+    pub fn open_pipe(&mut self, rate: u32, channel: &str) -> Option<Pipe> {
+        let ch = self
+            .bank
+            .channels
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(channel))
+            .unwrap_or(0) as u8;
+        // Two seconds of room: far more than the jitter the network leaves.
+        let (tx, rx) = ring(rate as usize * 2);
+        let id = self.handle.next_id();
+        self.handle.play(Play::new(
+            id,
+            Source::Stream(Stream {
+                ring: rx,
+                rate,
+                channels: 1,
+            }),
+            ch,
+        ));
+        Some(Pipe { tx })
+    }
+
+    /// Ends a [`Pipe`]: what it still holds plays out, then the voice is gone.
+    pub fn close_pipe(&mut self, pipe: Pipe) {
+        pipe.tx.finish();
+    }
+
     pub fn stop(&mut self, id: VoiceId) {
         self.handle.stop(id);
     }
@@ -747,6 +790,20 @@ mod tests {
         assert!(s.take(3, "reload_other").is_empty());
         assert_eq!(s.take(3, "reload_m4"), [7]);
         assert!(s.take(3, "reload_m4").is_empty());
+    }
+
+    #[test]
+    fn a_pipe_plays_what_is_pushed_in_at_its_own_rate_and_ends_when_closed() {
+        let mut s = engine(vec![]);
+        let mut pipe = s.open_pipe(8000, "flat").expect("a voice is free");
+        // 100 ms of 8 kHz audio at half scale.
+        assert_eq!(pipe.push(&vec![0.5; 800]), 800);
+        let out = s.render(48 * 50);
+        let heard = out.iter().map(|x| x.abs()).sum::<f32>() / out.len() as f32;
+        assert!(heard > 0.05, "the pushed audio is mixed in ({heard})");
+        s.close_pipe(pipe);
+        run(&mut s, 300);
+        assert_eq!(active(&s), 0, "the voice is gone once the audio played out");
     }
 
     #[test]

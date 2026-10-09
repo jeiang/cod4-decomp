@@ -16,7 +16,7 @@ use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, 
 
 use crate::ban::BanList;
 use crate::bot::{BotShared, Brain};
-use crate::client::Conn;
+use crate::client::{Conn, Team};
 use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
 use crate::cvar::{self, Cvars};
@@ -255,6 +255,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_privateClients", "0", SERVERINFO),
         ("sv_pure", "0", SERVERINFO | SYSTEMINFO),
         ("sv_voice", "0", ARCHIVE | SERVERINFO | SYSTEMINFO),
+        ("sv_allowDownload", "0", ARCHIVE | SERVERINFO),
         ("sv_punkbuster", "0", ARCHIVE | SERVERINFO),
         ("sv_allowAnonymous", "0", SERVERINFO),
         ("sv_disableClientConsole", "0", SERVERINFO),
@@ -628,6 +629,9 @@ impl Server {
                     command,
                 } => remote.push((from, password, command)),
                 Inbound::Connect(req) => self.net_accept(&mut net, &req),
+                Inbound::GetFile { from, name, offset } => {
+                    self.net_file(&mut net, from, &name, offset);
+                }
                 Inbound::Left(addr) => {
                     if let Some(slot) = net.slot_of(addr) {
                         self.net_drop(&mut net, slot, DropReason::Left);
@@ -635,6 +639,7 @@ impl Server {
                 }
             }
         }
+        self.relay_voice(&mut net);
         for (slot, line) in std::mem::take(&mut net.inbox) {
             self.net_client_command(&mut net, slot, &line);
         }
@@ -658,6 +663,44 @@ impl Server {
         // Commands may kick, ban or change the map, which need the network back in place.
         for (from, password, command) in remote {
             self.remote_command(from, &password, &command);
+        }
+    }
+
+    /// Forwards the voice frames clients sent (`sv_voice`; off drops them): each goes to the speaker's team and to
+    /// spectators, minus the players who muted the speaker. The speaker counts as talking for a moment.
+    fn relay_voice(&mut self, net: &mut NetSv) {
+        let frames = net.take_voice();
+        if self.game.cvars.int("sv_voice") == 0 {
+            return;
+        }
+        let time = self.game.level.time;
+        for (speaker, seq, frame) in frames {
+            let Some(team) = self.game.client(speaker).map(|c| c.team) else {
+                continue;
+            };
+            if let Some(c) = self.game.client_mut(speaker) {
+                c.talking_until = time + crate::netsv::TALKING_MS;
+            }
+            let game = &self.game;
+            net.relay_voice(speaker, seq, frame, |listener| {
+                game.client(listener)
+                    .is_some_and(|c| c.team == team || c.team == Team::Spectator)
+            });
+        }
+    }
+
+    /// A `getfile`: the zone of a map this server may give away, from `offset` on (see [`net::download`]).
+    fn net_file(&mut self, net: &mut NetSv, from: SocketAddr, name: &str, offset: u64) {
+        if !self.game.cvars.bool("sv_allowDownload") {
+            return net.refuse(from, "Downloads are not enabled on this server");
+        }
+        // Only map zones (`mp_*` and their loading screens), named plainly: nothing else of the install is offered.
+        if !net::download::valid_name(name) || !name.starts_with("mp_") {
+            return net.refuse(from, net::download::NOT_AVAILABLE);
+        }
+        match self.install.zone_path(name) {
+            Some(path) => net.send_file(from, &path, offset),
+            None => net.refuse(from, net::download::NOT_AVAILABLE),
         }
     }
 
@@ -940,6 +983,11 @@ impl Server {
         }
         match verb.as_deref() {
             Some("disconnect") => self.net_drop(net, slot, DropReason::Left),
+            Some(v @ ("mute" | "unmute")) => {
+                if let Some(who) = argv.get(1).and_then(|n| n.parse::<u16>().ok()) {
+                    net.set_muted(slot, who, v == "mute");
+                }
+            }
             Some(net::ui::SCORES_REQUEST) => net.send_scoreboard(slot, &self.game),
             Some("callvote") => {
                 if let Some([what, p1, p2]) = self.game.call_vote(slot, &argv[1..])

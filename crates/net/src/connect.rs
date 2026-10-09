@@ -22,6 +22,12 @@ pub enum Gate {
     Reply(Oob),
     /// The sender may join: allocate a slot, then reply [`Oob::ConnectResponse`].
     Accept(ConnectRequest),
+    /// A `getfile` that passed the challenge check: the server decides whether to serve it.
+    File {
+        from: SocketAddr,
+        name: String,
+        offset: u64,
+    },
     /// A client left.
     Left,
     Ignore,
@@ -62,6 +68,17 @@ pub fn serve(
                     name,
                     password,
                 })
+            }
+        }
+        Oob::GetFile {
+            challenge,
+            name,
+            offset,
+        } => {
+            if challenger.check(from, challenge, now_secs) {
+                Gate::File { from, name, offset }
+            } else {
+                Gate::Reply(Oob::Error(crate::download::BAD_CHALLENGE.into()))
             }
         }
         Oob::Disconnect => Gate::Left,

@@ -347,6 +347,13 @@ struct State {
     menu_sound: Option<crate::sound::ClientSound>,
     /// The map being loaded in the background (the loading screen shows meanwhile).
     loading: Option<Load>,
+    /// A map the server plays being fetched from it before the join (the loading screen shows meanwhile).
+    #[cfg(not(target_arch = "wasm32"))]
+    download: Option<crate::download::Download>,
+    /// The demo `playdemo` is loading the map of: played once the load is done.
+    pending_demo: Option<PathBuf>,
+    /// Where `record` writes demos and `playdemo` looks for them.
+    demo_dir: PathBuf,
     /// Frame intervals from the start of a map load until the player is in the world.
     load_gaps: Option<LoadGaps>,
     /// What the last load measured, for the report.
@@ -660,6 +667,10 @@ impl Viewer {
         let install = server::content::Install::open(&self.cli.install)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         let mut input = Input::new(self.cli.config_dir.clone(), Some(&install.vfs));
+        let demo_dir = input
+            .config_dir()
+            .unwrap_or_else(|| self.cli.install.clone())
+            .join("demos");
         let mut shell = if self.cli.flythrough || self.cli.show_models.is_some() {
             None
         } else {
@@ -782,6 +793,10 @@ impl Viewer {
             lights_drawn: 0,
             menu_sound: None,
             loading: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            download: None,
+            pending_demo: None,
+            demo_dir: demo_dir.clone(),
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
@@ -945,6 +960,26 @@ impl Viewer {
                 }));
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(done) = st.download.as_mut().and_then(|d| d.poll())
+            && let Some(d) = st.download.take()
+        {
+            match done {
+                Ok(()) => {
+                    let (addr, gametype) = d.join.clone();
+                    if let Err(err) =
+                        start_session(&self.cli, &mut self.map, st, &d.map, &gametype, Some(addr))
+                    {
+                        eprintln!("cannot join {addr}: {err}");
+                        end_session(&mut self.map, st);
+                    }
+                }
+                Err(why) => {
+                    eprintln!("cannot download {}: {why}", d.map);
+                    show_error(st, &format!("Could not download the map {}: {why}", d.map));
+                }
+            }
+        }
         if let Some(done) = st.loading.as_mut().and_then(Load::poll)
             && let Some(load) = st.loading.take()
         {
@@ -1063,6 +1098,15 @@ impl Viewer {
             }
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
+            net.set_voice(st.input.cvar("cl_voice").is_none_or(|v| v.trim() != "0"));
+            net.set_demo_paused(
+                st.input
+                    .cvar("cl_freezeDemo")
+                    .is_some_and(|v| v.trim() != "0"),
+            );
+            if let Some(sh) = st.shell.as_ref() {
+                net.set_muted(&sh.st.muted);
+            }
             net.set_breath_volumes(
                 st.input
                     .cvars
@@ -1096,6 +1140,9 @@ impl Viewer {
                     .unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
             );
             let frame_out = net.frame(dt, &f);
+            if let (Some(note), Some(sh)) = (net.take_voice_note(), st.shell.as_mut()) {
+                sh.print_console(&note);
+            }
             st.input.apply(&net.take_input_feedback());
             st.prev_cost[0] = t_net.elapsed().as_secs_f64() * 1000.0;
             if net.spawned()
@@ -1315,11 +1362,25 @@ impl Viewer {
             st.distortion_now = stats.distortion_copy;
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let downloading = st
+            .download
+            .as_ref()
+            .map(|d| (d.map.clone(), d.note(), d.fraction()));
+        #[cfg(target_arch = "wasm32")]
+        let downloading: Option<(String, String, f32)> = None;
         if let (Some(sh), Some(l)) = (st.shell.as_mut(), st.loading.as_ref()) {
             let view = LoadingView {
                 map: &l.map,
                 note: l.note(),
                 progress: l.progress(),
+            };
+            sh.paint_loading(&target, size, &view);
+        } else if let (Some(sh), Some((map, note, progress))) = (st.shell.as_mut(), &downloading) {
+            let view = LoadingView {
+                map,
+                note,
+                progress: *progress,
             };
             sh.paint_loading(&target, size, &view);
         } else if let Some(sh) = st.shell.as_mut() {
@@ -1508,6 +1569,37 @@ impl Viewer {
                         .and_then(|a| serverlist::query(a, JOIN_QUERY).map(|e| (a, e)));
                     match found {
                         Ok((a, e)) => {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if crate::download::missing(&self.cli.install, &e.map) {
+                                // The install lacks the server's map: fetch it first, if the player allows it.
+                                if st
+                                    .input
+                                    .cvar("cl_allowDownload")
+                                    .is_some_and(|v| v.trim() == "0")
+                                {
+                                    show_error(
+                                        st,
+                                        &format!(
+                                            "You do not have the map {}, and downloading is turned off (cl_allowDownload).",
+                                            e.map
+                                        ),
+                                    );
+                                    continue;
+                                }
+                                match crate::download::Download::start(
+                                    &self.cli.install,
+                                    a,
+                                    &e.map,
+                                    &e.gametype,
+                                ) {
+                                    Ok(d) => {
+                                        end_session(&mut self.map, st);
+                                        st.download = Some(d);
+                                    }
+                                    Err(err) => show_error(st, &err),
+                                }
+                                continue;
+                            }
                             if let Err(err) = start_session(
                                 &self.cli,
                                 &mut self.map,
@@ -1524,6 +1616,12 @@ impl Viewer {
                             eprintln!("cannot join {addr}: {err}");
                             show_error(st, &err);
                         }
+                    }
+                }
+                Action::PlayDemo(name) => {
+                    if let Err(e) = play_demo(&self.cli, &mut self.map, st, &name) {
+                        eprintln!("cannot play the demo {name}: {e}");
+                        show_error(st, &format!("Cannot play the demo {name}: {e}"));
                     }
                 }
                 Action::Disconnect => end_session(&mut self.map, st),
@@ -2340,6 +2438,18 @@ fn console_action(st: &mut State, line: &str) {
             }
         } else if !crate::console::is_server_verb(&cmd[0]) {
             st.input.exec_line(&crate::input::config::join(&cmd));
+        } else if cmd[0].eq_ignore_ascii_case("record") {
+            record_command(st, cmd.get(1).map(String::as_str));
+        } else if cmd[0].eq_ignore_ascii_case("stoprecord") {
+            let stopped = st.net.as_mut().is_some_and(NetPlay::stop_record);
+            say(
+                st,
+                if stopped {
+                    "Stopped recording the demo."
+                } else {
+                    "Not recording a demo."
+                },
+            );
         } else if let Some(net) = st.net.as_mut() {
             if let Some(wire) = crate::console::server_line(&cmd) {
                 net.send_command(&wire);
@@ -2588,6 +2698,9 @@ fn finish_load(
         let (addr, listen) = server.ok_or("no server to connect to")?;
         let limits = st.input.pitch_limits();
         let mut net = NetPlay::connect(library, &data, addr, &cli.name, limits, false, sound)?;
+        if let Some(path) = st.pending_demo.take() {
+            net.play_demo(&path)?;
+        }
         net.set_autojoin(std::mem::take(&mut st.autojoin_next));
         let (rate, snaps) = netplay_rates(&st.input);
         net.set_userinfo(&cli.name, rate, snaps);
@@ -2654,6 +2767,76 @@ fn enter_level(
     Ok(())
 }
 
+/// A line for the console.
+fn say(st: &mut State, text: &str) {
+    if let Some(sh) = st.shell.as_mut() {
+        sh.print_console(text);
+    }
+}
+
+/// The file of demo `name` in `dir`: a plain name, so it cannot reach outside the folder.
+fn demo_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err("a demo name is letters, digits, _ and -".into());
+    }
+    Ok(dir.join(format!("{name}.c4edemo")))
+}
+
+/// `record [name]`: starts writing the match being played to a demo.
+fn record_command(st: &mut State, name: Option<&str>) {
+    let name = name.map_or_else(
+        || {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            format!("demo_{secs}")
+        },
+        str::to_owned,
+    );
+    let result = demo_file(&st.demo_dir, &name).and_then(|path| {
+        std::fs::create_dir_all(&st.demo_dir).map_err(|e| e.to_string())?;
+        st.net
+            .as_mut()
+            .ok_or("not connected to a server".to_owned())?
+            .start_record(&path)
+            .map(|()| path)
+    });
+    match result {
+        Ok(path) => say(st, &format!("Recording the demo to {}.", path.display())),
+        Err(e) => say(st, &format!("record: {e}")),
+    }
+}
+
+/// `playdemo <name>`: ends the session, loads the map the demo was recorded on and plays the demo there.
+fn play_demo(
+    cli: &Cli,
+    map_slot: &mut Option<MapData>,
+    st: &mut State,
+    name: &str,
+) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (cli, map_slot, st, name);
+        Err("demos are not available in the browser".into())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = demo_file(&st.demo_dir, name)?;
+        let map = net::demo::map_of(&path).map_err(|e| e.to_string())?;
+        end_session(map_slot, st);
+        st.pending_demo = Some(path);
+        begin_load(cli, st, &map, loader::Server::Demo);
+        if let Some(sh) = st.shell.as_mut() {
+            sh.close_all(&mut st.input);
+        }
+        Ok(())
+    }
+}
+
 /// The error screen: `message` over the menu.
 fn show_error(st: &mut State, message: &str) {
     st.input.cvars.set("com_errorMessage", message, false);
@@ -2666,7 +2849,10 @@ fn show_error(st: &mut State, message: &str) {
 fn connection_lost(map_slot: &mut Option<MapData>, st: &mut State, why: &str) {
     eprintln!("connection lost: {why}");
     end_session(map_slot, st);
-    show_error(st, why);
+    // A demo that ran out is no failure: the menu, without an error over it.
+    if why != net::client::DEMO_ENDED {
+        show_error(st, why);
+    }
 }
 
 /// Back to the main menu: drops the connection, the server and the world.
@@ -2678,6 +2864,11 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
     st.input.set_fov_sensitivity_scale(1.0);
     st.roll = 0.0;
     st.loading = None;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        st.download = None;
+    }
+    st.pending_demo = None;
     st.load_gaps = None;
     if let Some(l) = st.listen.as_mut() {
         l.finish();

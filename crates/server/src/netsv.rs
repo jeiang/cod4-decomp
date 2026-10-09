@@ -18,6 +18,7 @@ use net::snapshot::Follow;
 use net::transport::{MAX_MESSAGE, Transport};
 use net::ui::HudElem;
 use net::ui::ServerCmd;
+use net::voice::{self, Voice};
 use net::{ServerLink, Snapshot};
 use sim::pm::{PmType, UserCmd};
 use std::collections::VecDeque;
@@ -28,6 +29,11 @@ use std::time::{Duration, Instant};
 const TIMEOUT: Duration = Duration::from_secs(15);
 /// Usercmds taken from one client per server frame; a client cannot run faster than real time.
 const MAX_CMDS_PER_FRAME: usize = 24;
+/// Voice frames kept between two services of the network (a service is a server frame; a talker sends 50 a second).
+const MAX_VOICE_IN: usize = 512;
+/// How long after a relayed frame a player still counts as talking (`istalking`, the talk balloon over their head).
+pub const TALKING_MS: i32 = 300;
+
 /// Commands kept for a client that is ahead of the server's frames.
 const MAX_QUEUED_CMDS: usize = 64;
 
@@ -49,7 +55,7 @@ pub mod eflags {
     /// A script model the script `physicslaunch`ed (`TR_PHYSICS`): clients simulate it as a rigid body launched from
     /// `origin` and `angles`, struck at `launch_point` by `velocity`, and draw it where the body is.
     pub const PHYSICS_LAUNCH: u32 = 1 << 3;
-    /// The player is speaking over voice chat (`EF_TALK`); nothing sets it while the server has no voice.
+    /// The player is speaking over voice chat (`EF_TALK`): the server relayed a frame of theirs a moment ago.
     pub const TALKING: u32 = 1 << 4;
     /// The server has heard nothing from the player for [`CONNECTION_INTERRUPTED_MS`] (`EF_CONNECTION_INTERRUPTED`).
     pub const CONNECTION_INTERRUPTED: u32 = 1 << 5;
@@ -93,6 +99,8 @@ pub struct Peer {
     snapshot_msec: i32,
     /// Server time before which no snapshot goes out (the rate and `snaps` pacing).
     next_snapshot: i32,
+    /// Players this client muted (`mute <n>`), by bit: their voice is not relayed to it.
+    muted: u64,
 }
 
 impl Peer {
@@ -121,6 +129,12 @@ fn ignorable(line: &str) -> bool {
 pub enum Inbound {
     Connect(ConnectRequest),
     Left(SocketAddr),
+    /// A `getfile` with a good challenge: whether to serve it is the server's to judge.
+    GetFile {
+        from: SocketAddr,
+        name: String,
+        offset: u64,
+    },
     /// An `rcon` packet; whether it is allowed is the server's to judge.
     Rcon {
         from: SocketAddr,
@@ -161,6 +175,8 @@ pub struct NetSv {
     buf: Vec<u8>,
     /// Addresses refused at connect.
     pub bans: BanList,
+    /// Voice frames clients sent since the last [`NetSv::take_voice`]: `(speaker slot, sequence, frame)`.
+    voice_in: Vec<(u16, u16, voice::Frame)>,
 }
 
 impl NetSv {
@@ -176,6 +192,7 @@ impl NetSv {
             archive: Archive::default(),
             buf: vec![0; MAX_MESSAGE],
             bans: BanList::default(),
+            voice_in: Vec::new(),
         }
     }
 
@@ -242,6 +259,9 @@ impl NetSv {
                 ) {
                     Gate::Reply(r) => self.t.send_to(from, &r.encode()),
                     Gate::Accept(req) => out.push(Inbound::Connect(req)),
+                    Gate::File { from, name, offset } => {
+                        out.push(Inbound::GetFile { from, name, offset });
+                    }
                     Gate::Left => out.push(Inbound::Left(from)),
                     Gate::Ignore => {}
                 }
@@ -258,6 +278,11 @@ impl NetSv {
                         }
                     }
                     self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
+                    for (seq, frame) in p.voice {
+                        if self.voice_in.len() < MAX_VOICE_IN {
+                            self.voice_in.push((slot, seq, frame));
+                        }
+                    }
                 }
             } else {
                 // A client the server no longer has (kicked, timed out, the server restarted) is told, so it does
@@ -272,6 +297,71 @@ impl NetSv {
             p.unheard_ms += listened;
         }
         out
+    }
+
+    /// Takes the voice frames received since the last call.
+    pub fn take_voice(&mut self) -> Vec<(u16, u16, voice::Frame)> {
+        std::mem::take(&mut self.voice_in)
+    }
+
+    /// Forwards `speaker`'s frame to every client `hears` says yes to, except those that muted the speaker.
+    pub fn relay_voice(
+        &mut self,
+        speaker: u16,
+        seq: u16,
+        frame: voice::Frame,
+        hears: impl Fn(u16) -> bool,
+    ) {
+        let bit = 1u64 << (speaker & 63);
+        for (slot, p) in self.peers.iter_mut().enumerate() {
+            let Some(p) = p else { continue };
+            if slot == usize::from(speaker) || p.muted & bit != 0 || !hears(slot as u16) {
+                continue;
+            }
+            p.link.push_voice(Voice {
+                speaker: speaker as u8,
+                seq,
+                frame,
+            });
+        }
+    }
+
+    /// `mute <n>` / `unmute <n>` from `slot`: stops (or resumes) relaying player `who` to it.
+    pub fn set_muted(&mut self, slot: u16, who: u16, muted: bool) {
+        if who >= 64 {
+            return;
+        }
+        if let Some(p) = self
+            .peers
+            .get_mut(usize::from(slot))
+            .and_then(Option::as_mut)
+        {
+            let bit = 1u64 << who;
+            if muted {
+                p.muted |= bit;
+            } else {
+                p.muted &= !bit;
+            }
+        }
+    }
+
+    /// Answers a `getfile` with the window of `path` that starts at `offset`.
+    pub fn send_file(&mut self, to: SocketAddr, path: &std::path::Path, offset: u64) {
+        match net::download::window(path, offset) {
+            Ok(chunks) => {
+                for c in chunks {
+                    let bytes = c.encode();
+                    self.stats.bytes_out += bytes.len() as u64;
+                    self.t.send_to(to, &bytes);
+                }
+            }
+            Err(e) => self.refuse(to, &format!("Cannot read the file: {e}")),
+        }
+    }
+
+    /// An out-of-band error to `to`.
+    pub fn refuse(&mut self, to: SocketAddr, why: &str) {
+        self.t.send_to(to, &Oob::Error(why.to_owned()).encode());
     }
 
     /// The measured round trip of a connected client in ms, once it has acknowledged a snapshot.
@@ -310,7 +400,12 @@ impl NetSv {
             rate: 0,
             snapshot_msec: 0,
             next_snapshot: 0,
+            muted: 0,
         });
+        // The slot may have held someone a client muted: the new person starts unmuted.
+        for p in self.peers.iter_mut().flatten() {
+            p.muted &= !(1u64 << (slot & 63));
+        }
         self.stats.joins += 1;
         self.t.send_to(req.from, &Oob::ConnectResponse.encode());
     }
@@ -1049,6 +1144,10 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                     eflags::PING
                 } else {
                     0
+                } | if c.talking_until > game.level.time {
+                    eflags::TALKING
+                } else {
+                    0
                 };
                 // The scripts' `headicon` is a precached material; one never registered has no index to show.
                 s.head_icon = game.shaders.find(&c.head_icon) as u16;
@@ -1279,7 +1378,93 @@ mod tests {
             rate: 0,
             snapshot_msec: 0,
             next_snapshot: 0,
+            muted: 0,
         }
+    }
+
+    fn addr(p: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], p))
+    }
+
+    fn joined(net: &mut NetSv, slot: u16, port: u16) {
+        let req = ConnectRequest {
+            from: addr(port),
+            qport: port,
+            name: format!("p{slot}"),
+            password: String::new(),
+        };
+        net.add_peer(slot, &req, &req.name.clone());
+    }
+
+    /// What `slot` of `net` would hear from a message sent now, read by a client at `port`.
+    fn heard(
+        net: &mut NetSv,
+        slot: u16,
+        client: &mut net::session::ClientLink,
+        wire: &mut impl Transport,
+    ) -> Vec<u8> {
+        let mut buf = [0u8; 2048];
+        while let Ok(Some(_)) = wire.recv_from(&mut buf, None) {}
+        let NetSv { t, peers, .. } = net;
+        peers[usize::from(slot)]
+            .as_mut()
+            .unwrap()
+            .link
+            .send(t, None);
+        let mut speakers = Vec::new();
+        while let Ok(Some((n, _))) = wire.recv_from(&mut buf, None) {
+            if let Some(m) = client.receive(&buf[..n]) {
+                speakers.extend(m.voice.iter().map(|v| v.speaker));
+            }
+        }
+        speakers
+    }
+
+    #[test]
+    fn a_voice_frame_reaches_those_who_may_hear_it_unless_they_muted_the_speaker() {
+        let mem = net::MemNet::new();
+        let mut n = NetSv::new(Box::new(mem.endpoint(addr(1))), 4);
+        let (mut w1, mut w2, mut w3) = (
+            mem.endpoint(addr(11)),
+            mem.endpoint(addr(12)),
+            mem.endpoint(addr(13)),
+        );
+        for (slot, port) in [(0, 11), (1, 12), (2, 13)] {
+            joined(&mut n, slot, port);
+        }
+        let (mut c1, mut c2, mut c3) = (
+            net::session::ClientLink::new(addr(1), 11),
+            net::session::ClientLink::new(addr(1), 12),
+            net::session::ClientLink::new(addr(1), 13),
+        );
+        let frame = [3u8; voice::FRAME_BYTES];
+        // Slot 2 is on another team; slot 1 muted the speaker.
+        n.set_muted(1, 0, true);
+        n.relay_voice(0, 7, frame, |l| l != 2);
+        assert_eq!(
+            heard(&mut n, 0, &mut c1, &mut w1),
+            Vec::<u8>::new(),
+            "never to the speaker"
+        );
+        assert_eq!(
+            heard(&mut n, 1, &mut c2, &mut w2),
+            Vec::<u8>::new(),
+            "muted"
+        );
+        assert_eq!(
+            heard(&mut n, 2, &mut c3, &mut w3),
+            Vec::<u8>::new(),
+            "not on the team"
+        );
+        n.set_muted(1, 0, false);
+        n.relay_voice(0, 8, frame, |l| l != 2);
+        assert_eq!(heard(&mut n, 1, &mut c2, &mut w2), [0]);
+        assert_eq!(heard(&mut n, 2, &mut c3, &mut w3), Vec::<u8>::new());
+        // A new person in the slot starts unmuted.
+        n.set_muted(1, 0, true);
+        joined(&mut n, 0, 11);
+        n.relay_voice(0, 9, frame, |_| true);
+        assert_eq!(heard(&mut n, 1, &mut c2, &mut w2), [0]);
     }
 
     #[test]
