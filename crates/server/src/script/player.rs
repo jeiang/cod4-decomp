@@ -253,6 +253,7 @@ fn set_origin(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     let o = a.vector(0)?;
     if let Some(c) = g.client_mut(n) {
         c.ps.origin = o;
+        c.ps.e_flags ^= sim::pm::ef::TELEPORT_BIT;
     }
     if let Some(en) = g.ent_mut(n) {
         en.origin = o;
@@ -628,7 +629,9 @@ pub fn set_client_field(g: &mut Game, n: u16, name: &str, v: &Value) -> Option<R
             }
             "origin" => {
                 if let Value::Vector(o) = v {
-                    g.client_mut(n).expect("client").ps.origin = *o;
+                    let c = g.client_mut(n).expect("client");
+                    c.ps.origin = *o;
+                    c.ps.e_flags ^= sim::pm::ef::TELEPORT_BIT;
                 }
                 Ok(false)
             }

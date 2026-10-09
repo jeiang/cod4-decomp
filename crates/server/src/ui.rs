@@ -241,6 +241,15 @@ impl Game {
                 self.set_configstring(cs::CODINFO_VALUE + i, &v);
             }
         }
+        if force || changed & crate::cvar::CHEAT != 0 {
+            // The movement tunables: the server's own movement follows the variables, and the clients get what
+            // is not stock so their prediction moves the same.
+            let cvars = &self.cvars;
+            self.pm_params
+                .set_from(|n| cvars.get(n).map(|v| v.value.as_str()));
+            let info = self.pm_params.info_diff();
+            self.set_configstring(cs::MOVEMENT, &info);
+        }
     }
 
     /// Keeps the per-client `n\name\t\team` configstrings current.

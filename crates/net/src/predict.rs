@@ -10,7 +10,7 @@
 use crate::snapshot::Snapshot;
 use sim::cm::{Collide, ENTITYNUM_NONE};
 use sim::contents;
-use sim::pm::{PLAYER_MAXS, PLAYER_MINS, pmf};
+use sim::pm::{PLAYER_MAXS, PLAYER_MINS, ef, ev, pmf};
 use sim::pm::{Params, PlayerState, PmType, UserCmd, run_usercmd};
 use sim::weapon::{PlayerWeapons, WeaponTable};
 use sim::world::{ClipEnt, World};
@@ -19,10 +19,8 @@ use std::sync::Arc;
 
 /// Commands kept: about two seconds at 60 per second, far more than any round trip.
 const KEEP: usize = 128;
-/// A disagreement larger than this is a teleport (a respawn): shown as one, not slid.
-const SNAP_DISTANCE: f32 = 64.0;
-/// A disagreement smaller than this is rounding.
-const NOISE: f32 = 0.01;
+/// A disagreement no larger than this is rounding (`CG_PredictPlayerState`).
+const NOISE: f32 = 0.1;
 /// How long a disagreement takes to fade, in milliseconds.
 pub const SMOOTH_MS: i32 = 100;
 /// `cg_viewZSmoothingMin`: a step smaller than this (units) is not smoothed.
@@ -141,8 +139,6 @@ pub struct Env<'a, W: Collide> {
     pub world: &'a W,
     pub weapons: &'a WeaponTable,
     pub params: &'a Params,
-    /// `g_speed`, from the server.
-    pub speed: i32,
     /// The client's time (what its commands are stamped with), for easing the view over steps.
     pub time: i32,
 }
@@ -152,6 +148,17 @@ pub struct Predicted {
     pub inv: PlayerWeapons,
     /// Commands replayed on top of the snapshot.
     pub replayed: usize,
+    /// The own player's events (event, parameter) no earlier pass delivered, oldest first: footsteps, jumps,
+    /// landings, shots, reloads. Each comes out once however often its command is replayed.
+    pub events: Vec<(u8, u8)>,
+}
+
+/// One pass's own event ring, to tell which events the next pass raises anew.
+#[derive(Clone, Copy)]
+struct EventRing {
+    spawn: u16,
+    seq: u8,
+    events: [u8; 4],
 }
 
 #[derive(Default)]
@@ -159,9 +166,13 @@ pub struct Predictor {
     cmds: VecDeque<UserCmd>,
     /// Where the last replay ended: its final command's time and the origin it reached.
     last: Option<(i32, [f32; 3])>,
-    /// The disagreement being faded: offset to add to the predicted origin, and when it began.
+    /// The disagreement being faded: offset to add to the predicted origin, and the client time it began.
     error: [f32; 3],
     error_from: i32,
+    /// The server's teleport bit as the previous pass's snapshot had it.
+    tele_bit: Option<u32>,
+    /// The own events delivered up to the previous pass.
+    ring: Option<EventRing>,
     /// The eye's lag behind the steps taken.
     step: StepView,
     /// Prediction passes whose result differed from the previous pass, beyond rounding.
@@ -222,7 +233,7 @@ impl Predictor {
                 &mut inv,
                 *cmd,
                 old,
-                env.speed,
+                snap.ps.speed,
                 env.weapons,
                 env.params,
                 env.world,
@@ -237,8 +248,16 @@ impl Predictor {
                 at_last = Some(ps.origin);
             }
         }
-        let mut teleported = false;
-        if let (Some((t, was)), Some(now)) = (
+        // The server flips the teleport bit when it moves the player (a respawn, `setorigin`): that, not how far,
+        // makes a disagreement a teleport, shown as one instead of slid.
+        let tele_bit = snap.ps.e_flags & ef::TELEPORT_BIT;
+        let teleported = self
+            .tele_bit
+            .replace(tele_bit)
+            .is_some_and(|b| b != tele_bit);
+        if teleported {
+            self.error = [0.0; 3];
+        } else if let (Some((_, was)), Some(now)) = (
             self.last,
             at_last.or_else(|| {
                 // The previous end was acknowledged meanwhile: the snapshot is that moment.
@@ -249,14 +268,11 @@ impl Predictor {
         ) {
             let d = [was[0] - now[0], was[1] - now[1], was[2] - now[2]];
             let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-            if len > SNAP_DISTANCE {
-                teleported = true;
-                self.error = [0.0; 3];
-            } else if len > NOISE {
+            if len > NOISE {
                 // Whatever of the old error is left still counts.
-                let cur = self.error_at(t);
+                let cur = self.error_at(env.time);
                 self.error = [cur[0] + d[0], cur[1] + d[1], cur[2] + d[2]];
-                self.error_from = t;
+                self.error_from = env.time;
                 self.corrections += 1;
             }
         }
@@ -275,7 +291,13 @@ impl Predictor {
         let began = self.step.start != before;
         self.steps += u64::from(began);
         self.step_taken = if began { view_change } else { 0.0 };
-        Predicted { ps, inv, replayed }
+        let events = self.fresh_events(&ps);
+        Predicted {
+            ps,
+            inv,
+            replayed,
+            events,
+        }
     }
 
     /// How far to lower the eye at time `now` for the stair steps taken ([`StepView::offset`]).
@@ -283,13 +305,59 @@ impl Predictor {
         self.step.offset(now)
     }
 
-    /// The fading disagreement to add to the predicted origin at command time `t`.
-    pub fn error_at(&self, t: i32) -> [f32; 3] {
-        let k = 1.0 - (t - self.error_from) as f32 / SMOOTH_MS as f32;
+    /// The fading disagreement to add to the predicted origin at client time `now`.
+    pub fn error_at(&self, now: i32) -> [f32; 3] {
+        let k = 1.0 - (now - self.error_from) as f32 / SMOOTH_MS as f32;
         if k <= 0.0 {
             return [0.0; 3];
         }
         self.error.map(|e| e * k)
+    }
+
+    /// Forgets which own events were delivered: the next pass only learns the counter. For after the player state
+    /// was someone else's (a followed player), whose event ring says nothing about the player's own.
+    pub fn resync_events(&mut self) {
+        self.ring = None;
+    }
+
+    /// The events `ps` carries that no earlier pass delivered, oldest first (`CG_CheckPlayerstateEvents`): those
+    /// past the previous pass's counter, and those a correction changed in a slot already delivered. A replay that
+    /// raises an event again does not deliver it again; one the server raised beyond what was predicted is.
+    fn fresh_events(&mut self, ps: &PlayerState) -> Vec<(u8, u8)> {
+        let now = EventRing {
+            spawn: ps.spawn_count,
+            seq: ps.event_sequence,
+            events: ps.events,
+        };
+        let Some(mut old) = self.ring else {
+            self.ring = Some(now);
+            return Vec::new();
+        };
+        if old.spawn != now.spawn {
+            // A new life counts from zero.
+            old = EventRing {
+                spawn: now.spawn,
+                seq: 0,
+                events: [0; 4],
+            };
+        }
+        let ahead = i32::from(now.seq.wrapping_sub(old.seq) as i8);
+        if ahead < 0 {
+            // A pass that stopped short of the events delivered (a replay shorter than the last one): it delivers
+            // nothing and the ring stays, so the replay catching up again is not new.
+            self.ring = Some(old);
+            return Vec::new();
+        }
+        self.ring = Some(now);
+        (1..=4i32)
+            .rev()
+            .filter_map(|back| {
+                let slot = usize::from(now.seq.wrapping_sub(back as u8) & 3);
+                let event = now.events[slot];
+                let new = back <= ahead || (back < ahead + 4 && event != old.events[slot]);
+                (new && event != ev::NONE).then_some((event, ps.event_parms[slot]))
+            })
+            .collect()
     }
 }
 
@@ -319,7 +387,6 @@ mod tests {
             pm_type: PmType::Normal,
             view_height_target: sim::pm::VIEW_STAND,
             view_height_current: sim::pm::VIEW_STAND as f32,
-            speed: 190,
             gravity: 800,
             ..PlayerState::default()
         }
@@ -335,7 +402,7 @@ mod tests {
                     &mut inv,
                     *c,
                     old,
-                    env.speed,
+                    190,
                     env.weapons,
                     env.params,
                     env.world,
@@ -360,7 +427,6 @@ mod tests {
             world: &world,
             weapons: &w,
             params: &p,
-            speed: 190,
             time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=60)
@@ -390,7 +456,6 @@ mod tests {
             world: &world,
             weapons: &w,
             params: &p,
-            speed: 190,
             time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=40).map(|i| cmd(i * 16, 127, 0)).collect();
@@ -408,14 +473,13 @@ mod tests {
             (before[0] - after.origin[0] - 20.0).abs() < 1.0,
             "prediction follows the server"
         );
-        let end = after.command_time;
         let shown = |t: i32| after.origin[0] + pr.error_at(t)[0];
         assert!(
-            (shown(end) - before[0]).abs() < 1.0,
+            (shown(0) - before[0]).abs() < 1.0,
             "no visible jump when the correction arrives"
         );
         assert!(
-            (shown(end + SMOOTH_MS) - after.origin[0]).abs() < 1e-3,
+            (shown(SMOOTH_MS) - after.origin[0]).abs() < 1e-3,
             "fully corrected after the fade"
         );
         assert_eq!(pr.corrections, 1);
@@ -429,7 +493,6 @@ mod tests {
             world: &world,
             weapons: &w,
             params: &p,
-            speed: 190,
             time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=20).map(|i| cmd(i * 16, 127, 0)).collect();
@@ -441,8 +504,129 @@ mod tests {
         pr.predict(&snapshot(&truth[9]), &env);
         let mut moved = truth[9].clone();
         moved.origin[1] += 1000.0;
-        let out = pr.predict(&snapshot(&moved), &env);
-        assert_eq!(pr.error_at(out.ps.command_time), [0.0; 3]);
+        moved.e_flags ^= ef::TELEPORT_BIT;
+        pr.predict(&snapshot(&moved), &env);
+        assert_eq!(pr.error_at(0), [0.0; 3]);
+        assert_eq!(pr.corrections, 0);
+    }
+
+    #[test]
+    fn a_large_shove_without_the_teleport_bit_is_slid() {
+        let world = TestWorld::floor();
+        let (w, p) = (table(), Params::default());
+        let env = Env {
+            world: &world,
+            weapons: &w,
+            params: &p,
+            time: 0,
+        };
+        let cmds: Vec<UserCmd> = (1..=20).map(|i| cmd(i * 16, 127, 0)).collect();
+        let truth = serve(&cmds, &env);
+        let mut pr = Predictor::default();
+        for c in &cmds {
+            pr.push(*c);
+        }
+        pr.predict(&snapshot(&truth[9]), &env);
+        let mut shoved = truth[9].clone();
+        shoved.origin[1] += 100.0;
+        pr.predict(&snapshot(&shoved), &env);
+        assert!(pr.error_at(0)[1].abs() > 90.0);
+        assert_eq!(pr.corrections, 1);
+    }
+
+    #[test]
+    fn a_miss_of_a_tenth_of_a_unit_is_not_a_correction() {
+        let world = TestWorld::floor();
+        let (w, p) = (table(), Params::default());
+        let env = Env {
+            world: &world,
+            weapons: &w,
+            params: &p,
+            time: 0,
+        };
+        let cmds: Vec<UserCmd> = (1..=20).map(|i| cmd(i * 16, 127, 0)).collect();
+        let truth = serve(&cmds, &env);
+        let mut pr = Predictor::default();
+        for c in &cmds {
+            pr.push(*c);
+        }
+        pr.predict(&snapshot(&truth[9]), &env);
+        let mut off = truth[9].clone();
+        off.origin[0] += 0.05;
+        pr.predict(&snapshot(&off), &env);
+        assert_eq!(pr.corrections, 0);
+    }
+
+    #[test]
+    fn the_server_speed_in_the_snapshot_is_what_is_predicted() {
+        let world = TestWorld::floor();
+        let (w, p) = (table(), Params::default());
+        let env = Env {
+            world: &world,
+            weapons: &w,
+            params: &p,
+            time: 0,
+        };
+        let cmds: Vec<UserCmd> = (1..=30).map(|i| cmd(i * 16, 127, 0)).collect();
+        let mut fast = start();
+        fast.speed = 250;
+        let (mut ps, mut inv, mut old) =
+            (fast.clone(), PlayerWeapons::default(), UserCmd::default());
+        for c in &cmds {
+            run_usercmd(&mut ps, &mut inv, *c, old, 250, &w, &p, &world);
+            old = *c;
+        }
+        let mut pr = Predictor::default();
+        for c in &cmds {
+            pr.push(*c);
+        }
+        let out = pr.predict(&snapshot(&fast), &env);
+        assert_eq!(out.ps.origin, ps.origin);
+        assert_eq!(pr.corrections, 0);
+    }
+
+    #[test]
+    fn an_event_replayed_every_pass_is_delivered_once() {
+        let mut pr = Predictor::default();
+        let mut base = start();
+        assert!(
+            pr.fresh_events(&base).is_empty(),
+            "the first pass learns the counter"
+        );
+        // Passes replay the same jump from the same snapshot, as the server has not caught up.
+        base.add_event(ev::JUMP, 5);
+        assert_eq!(pr.fresh_events(&base), [(ev::JUMP, 5)]);
+        for _ in 0..3 {
+            assert!(pr.fresh_events(&base).is_empty());
+        }
+        // A later pass stops short of the jump (fewer commands replayed) and then replays it again.
+        let short = start();
+        assert!(pr.fresh_events(&short).is_empty());
+        assert!(
+            pr.fresh_events(&base).is_empty(),
+            "the replay catching up is not new"
+        );
+        // A new event is.
+        base.add_event(ev::FIRE_WEAPON, 0);
+        assert_eq!(pr.fresh_events(&base), [(ev::FIRE_WEAPON, 0)]);
+    }
+
+    #[test]
+    fn an_event_the_server_adds_is_delivered_and_a_changed_prediction_is_too() {
+        let mut pr = Predictor::default();
+        let mut ps = start();
+        pr.fresh_events(&ps);
+        ps.add_event(ev::JUMP, 1);
+        assert_eq!(pr.fresh_events(&ps).len(), 1);
+        // The server's snapshot has a different event in the slot the prediction used, same counter.
+        let mut other = start();
+        other.add_event(ev::ITEM_PICKUP, 2);
+        assert_eq!(pr.fresh_events(&other), [(ev::ITEM_PICKUP, 2)]);
+        // A new life starts over: its first events count.
+        let mut life = start();
+        life.spawn_count = 1;
+        life.add_event(ev::JUMP, 0);
+        assert_eq!(pr.fresh_events(&life), [(ev::JUMP, 0)]);
     }
 
     #[test]
@@ -453,7 +637,6 @@ mod tests {
             world: &world,
             weapons: &w,
             params: &p,
-            speed: 190,
             time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=10).map(|i| cmd(i * 16, 127, 0)).collect();
@@ -482,7 +665,6 @@ mod tests {
             world: &world,
             weapons: &w,
             params: &p,
-            speed: 190,
             time: t,
         };
         let truth = serve(&cmds, &env(0));

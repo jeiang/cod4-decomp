@@ -9,19 +9,10 @@
 use super::buttons;
 use sim::pm::{PlayerState, ev, pmf};
 
-/// What [`scan_own`] has already acted on: the event counter and the spawn count.
+/// What [`scan_own`] has already acted on: the spawn count.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Seen {
-    events: Option<u8>,
     spawn: Option<u16>,
-}
-
-impl Seen {
-    /// Forgets the event counter: the next [`scan_own`] only learns it. For after the player state was someone
-    /// else's (a followed player, a killcam), whose event ring says nothing about the player's own.
-    pub fn resync_events(&mut self) {
-        self.events = None;
-    }
 }
 
 /// What to tell [`super::Input::apply`].
@@ -57,25 +48,21 @@ impl Feedback {
     }
 }
 
-/// The events of `ps` raised since `last` (the previous call's `event_sequence`; the first call only learns it),
-/// as feedback. `ps` is the own player's state; its four-slot event ring keeps at most the newest four.
-pub fn scan_own(seen: &mut Seen, ps: &PlayerState) -> Feedback {
+/// The own player's `events` (the predicted ones no earlier frame delivered, oldest first) as feedback, with what
+/// the state `ps` itself says.
+pub fn scan_own(seen: &mut Seen, ps: &PlayerState, events: &[(u8, u8)]) -> Feedback {
     let mut fb = Feedback {
         frozen: ps.pm_flags & pmf::FROZEN != 0,
         ..Feedback::default()
     };
-    let seq = ps.event_sequence;
-    if let Some(prev) = seen.events.replace(seq) {
-        let fresh = usize::from(seq.wrapping_sub(prev)).min(4);
-        for k in (1..=fresh).rev() {
-            match ps.events[usize::from(seq.wrapping_sub(k as u8)) & 3] {
-                ev::STANCE_FORCE_STAND => fb.stances.push(0),
-                ev::STANCE_FORCE_CROUCH => fb.stances.push(buttons::CROUCH),
-                ev::STANCE_FORCE_PRONE => fb.stances.push(buttons::PRONE),
-                ev::RESET_ADS => fb.leave_ads = true,
-                ev::NOAMMO => fb.out_of_ammo = true,
-                _ => {}
-            }
+    for &(event, _) in events {
+        match event {
+            ev::STANCE_FORCE_STAND => fb.stances.push(0),
+            ev::STANCE_FORCE_CROUCH => fb.stances.push(buttons::CROUCH),
+            ev::STANCE_FORCE_PRONE => fb.stances.push(buttons::PRONE),
+            ev::RESET_ADS => fb.leave_ads = true,
+            ev::NOAMMO => fb.out_of_ammo = true,
+            _ => {}
         }
     }
     // A new life: stand, once (`CL_SetStance(STAND)` in the original; ADS is reset by its own event).
@@ -95,41 +82,31 @@ pub fn scan_own(seen: &mut Seen, ps: &PlayerState) -> Feedback {
 mod tests {
     use super::*;
 
-    fn ps_with(events: &[u8]) -> PlayerState {
-        let mut ps = PlayerState::default();
-        for &e in events {
-            ps.add_event(e, 0);
-        }
-        ps
-    }
-
     #[test]
-    fn only_events_new_since_the_last_look_count() {
-        let mut last = Seen::default();
-        // The first look learns the counter: old events are not replayed.
-        assert_eq!(
-            scan_own(&mut last, &ps_with(&[ev::STANCE_FORCE_PRONE])),
-            Feedback::default()
+    fn the_events_given_are_the_feedback() {
+        let mut seen = Seen::default();
+        let ps = PlayerState::default();
+        let fb = scan_own(
+            &mut seen,
+            &ps,
+            &[
+                (ev::STANCE_FORCE_CROUCH, 0),
+                (ev::STANCE_FORCE_STAND, 0),
+                (ev::RESET_ADS, 0),
+                (ev::JUMP, 3),
+            ],
         );
-        let mut ps = ps_with(&[ev::STANCE_FORCE_PRONE]);
-        ps.add_event(ev::STANCE_FORCE_CROUCH, 0);
-        ps.add_event(ev::STANCE_FORCE_STAND, 0);
-        ps.add_event(ev::RESET_ADS, 0);
-        let fb = scan_own(&mut last, &ps);
         assert_eq!(fb.stances, [buttons::CROUCH, 0]);
         assert!(fb.leave_ads);
-        // Nothing new the next time.
-        assert_eq!(scan_own(&mut last, &ps), Feedback::default());
+        assert_eq!(scan_own(&mut seen, &ps, &[]), Feedback::default());
     }
 
     #[test]
-    fn running_dry_is_reported_once() {
+    fn running_dry_is_reported_for_the_event_only() {
         let mut seen = Seen::default();
-        let mut ps = ps_with(&[]);
-        scan_own(&mut seen, &ps);
-        ps.add_event(ev::NOAMMO, 0);
-        assert!(scan_own(&mut seen, &ps).out_of_ammo);
-        assert!(!scan_own(&mut seen, &ps).out_of_ammo);
+        let ps = PlayerState::default();
+        assert!(scan_own(&mut seen, &ps, &[(ev::NOAMMO, 0)]).out_of_ammo);
+        assert!(!scan_own(&mut seen, &ps, &[]).out_of_ammo);
     }
 
     #[test]
@@ -137,13 +114,17 @@ mod tests {
         let mut seen = Seen::default();
         let mut ps = PlayerState::default();
         ps.pm_flags |= pmf::FROZEN;
-        assert!(scan_own(&mut seen, &ps).stances.is_empty());
+        assert!(scan_own(&mut seen, &ps, &[]).stances.is_empty());
         ps.spawn_count += 1;
-        let fb = scan_own(&mut seen, &ps);
+        let fb = scan_own(&mut seen, &ps, &[(ev::NOAMMO, 0)]);
         assert_eq!(fb.stances, [0]);
         assert!(!fb.leave_ads && fb.frozen);
         assert!(
-            scan_own(&mut seen, &ps).stances.is_empty(),
+            !fb.out_of_ammo,
+            "the last life's ring does not switch the new life's weapon"
+        );
+        assert!(
+            scan_own(&mut seen, &ps, &[]).stances.is_empty(),
             "once per spawn"
         );
         let mut held = fb.clone();

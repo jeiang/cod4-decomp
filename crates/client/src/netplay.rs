@@ -241,6 +241,8 @@ pub struct NetPlay {
     lib: Library,
     weapons: WeaponTable,
     params: Params,
+    /// The `MOVEMENT` configstring [`Self::params`] was made from.
+    params_info: String,
     boxes: PlayerBoxes,
     pred: Predictor,
     /// Pitch (positive down) and yaw (positive left) in degrees, as the player has turned.
@@ -266,6 +268,8 @@ pub struct NetPlay {
     nv_press: bool,
     /// The own player's event counter last acted on, and what the input layer is yet to be told of it.
     own_events: Seen,
+    /// The own events the latest frame's prediction delivered, for the HUD's hints.
+    own_new: Vec<(u8, u8)>,
     feedback: Feedback,
     /// Where the map pick of a location selection points, 0..1 across and down the map.
     pub loc_cursor: [f32; 2],
@@ -355,6 +359,7 @@ impl NetPlay {
                 mantle_anims: lib.content.mantle_anims(),
                 ..Params::default()
             },
+            params_info: String::new(),
             boxes: PlayerBoxes::new(clipmap),
             pred: Predictor::default(),
             angles: [0.0; 2],
@@ -371,6 +376,7 @@ impl NetPlay {
             before_slot: None,
             nv_press: false,
             own_events: Seen::default(),
+            own_new: Vec::new(),
             feedback: Feedback::default(),
             loc_cursor: [0.5; 2],
             remotes: HashMap::new(),
@@ -535,6 +541,7 @@ impl NetPlay {
         self.vm = None;
         self.events = Events::default();
         self.own_events = Seen::default();
+        self.own_new.clear();
         self.shakes.clear();
         self.last_eye = None;
         self.camera.reset();
@@ -610,6 +617,21 @@ impl NetPlay {
         self.feedback.take()
     }
 
+    /// Takes the server's movement tunables (`jump_height`, `friction`, ...) as its `MOVEMENT` configstring gives
+    /// them, so the prediction moves as the server does.
+    fn follow_movement_dvars(&mut self) {
+        let Some(info) = self.net.ui_ref().map(|u| u.config(net::ui::cs::MOVEMENT)) else {
+            return;
+        };
+        if info != self.params_info {
+            self.params = Params {
+                mantle_anims: self.lib.content.mantle_anims(),
+                ..Params::from_info(info)
+            };
+            self.params_info = info.to_owned();
+        }
+    }
+
     /// Runs one render frame of play. `None` until the server has given the player a body.
     pub fn frame(&mut self, dt: f32, input: &InputFrame) -> Option<NetFrame> {
         self.net.pump(Duration::ZERO);
@@ -675,7 +697,8 @@ impl NetPlay {
         if snap.follow.is_some() {
             // Watching another player (a killcam or a followed spectator): the snapshot's
             // player state is theirs, so nothing is predicted; draw their view as it came.
-            self.own_events.resync_events();
+            self.pred.resync_events();
+            self.own_new.clear();
             let ps = snap.ps.clone();
             self.kick.clear();
             // The followed player's hits turn the view and show on the screen as the player's own would.
@@ -717,6 +740,7 @@ impl NetPlay {
                 aim,
                 step: 0.0,
                 params: &self.params,
+                events: &[],
             });
             let mut seen = [
                 aim[0] + cam.angles[0],
@@ -765,18 +789,20 @@ impl NetPlay {
                 look,
             });
         }
+        self.follow_movement_dvars();
         self.boxes.sync(&snap);
         let env = Env {
             world: self.boxes.world(),
             weapons: &self.weapons,
             params: &self.params,
-            speed: 190,
             time: st,
         };
         let p = self.pred.predict(&snap, &env);
         self.c.predictions += 1;
         let ps = p.ps;
-        let err = self.pred.error_at(ps.command_time);
+        let events = p.events;
+        self.own_new.clone_from(&events);
+        let err = self.pred.error_at(st);
         let feet = [
             ps.origin[0] + err[0],
             ps.origin[1] + err[1],
@@ -787,7 +813,8 @@ impl NetPlay {
         if dead {
             self.kick.clear();
         } else {
-            self.kick.shots(&ps, self.weapons.info(ps.weapon as u16));
+            self.kick
+                .shots(&events, &ps, self.weapons.info(ps.weapon as u16));
             self.kick.step(
                 dt,
                 ps.weapon_pos_frac,
@@ -859,6 +886,7 @@ impl NetPlay {
         ];
         let cam = self.camera.view(&crate::camera::Frame {
             ps: &ps,
+            events: &events,
             now: st,
             weapon: def.map(|d| crate::camera::WeaponView::from(&**d)),
             aim,
@@ -891,15 +919,15 @@ impl NetPlay {
             render += self.hands_camera(&ps, &mut seen);
         }
         // The listener hears from the drawn eye (`SND_SetListener(.., refdef.vieworg, ..)`).
-        self.hear(dt, render, &ps, &snap);
+        self.hear(dt, render, &ps, &events);
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
             self.note_latest_primary(ps.weapon as u16);
         }
-        let mut fb = scan_own(&mut self.own_events, &snap.ps);
+        let mut fb = scan_own(&mut self.own_events, &ps, &events);
         if std::mem::take(&mut fb.out_of_ammo) {
-            self.out_of_ammo_change(&snap.ps, &PlayerWeapons::from_words(&snap.inv));
+            self.out_of_ammo_change(&ps, &p.inv);
         }
         self.feedback.merge(fb);
 
@@ -1126,7 +1154,7 @@ impl NetPlay {
     }
 
     /// Feeds the sound system: the listener, the server's sound commands, and the own player's events.
-    fn hear(&mut self, dt: f32, eye: Vec3, ps: &PlayerState, snap: &net::Snapshot) {
+    fn hear(&mut self, dt: f32, eye: Vec3, ps: &PlayerState, events: &[(u8, u8)]) {
         let yaw = self.angles[1].to_radians();
         self.sound.frame(eye.to_array(), yaw, dt);
         let loops: Vec<_> = snap
@@ -1149,28 +1177,17 @@ impl NetPlay {
             ps.weapon_flags & sim::pm::wf::HOLD_BREATH != 0,
             (WeaponParams::default().breath_hold_time * 1000.0) as i32,
         );
-        let s = &snap.ps;
-        let newest: Vec<(u8, u8)> = (0..4u8)
-            .map(|i| s.event_sequence.wrapping_sub(4 - i))
-            .map(|n| {
-                (
-                    s.events[usize::from(n & 3)],
-                    s.event_parms[usize::from(n & 3)],
-                )
-            })
-            .collect();
         let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
-        self.sound.events(
+        self.sound.own_events(
             &Who {
                 own: true,
-                entity: s.client_num,
+                entity: ps.client_num,
                 origin: eye.to_array(),
                 weapon: def.map(|d| &**d),
                 weapon_of: &|w| self.lib.content.weapon(self.weapons.name(w)).cloned(),
-                quiet: s.perks & sim::pm::PERK_QUIETER != 0,
+                quiet: ps.perks & sim::pm::PERK_QUIETER != 0,
             },
-            s.event_sequence,
-            &newest,
+            events,
         );
     }
 

@@ -336,6 +336,7 @@ impl Game {
     pub fn teleport(&mut self, n: u16, origin: Vec3) {
         if let Some(c) = self.client_mut(n) {
             c.ps.origin = origin;
+            c.ps.e_flags ^= sim::pm::ef::TELEPORT_BIT;
             c.ps.velocity = [0.0; 3];
         }
         if let Some(e) = self.ent_mut(n) {

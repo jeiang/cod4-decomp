@@ -29,8 +29,6 @@ pub struct Kick {
     angles: [f32; 3],
     /// Speed the shots gave the gun's pitch and yaw spring, not yet handed to the view model.
     gun: [f32; 2],
-    /// The event sequence of the player state as of the last look; `None` before the first.
-    seen: Option<u8>,
     rng: Rng,
 }
 
@@ -40,7 +38,6 @@ impl Default for Kick {
             vel: [0.0; 3],
             angles: [0.0; 3],
             gun: [0.0; 2],
-            seen: None,
             rng: Rng::new(0x4B1C),
         }
     }
@@ -62,27 +59,13 @@ impl Kick {
         self.vel = [0.0; 3];
         self.angles = [0.0; 3];
         self.gun = [0.0; 2];
-        // Whatever shots the state shows next are learnt, not kicked for.
-        self.seen = None;
+        self.idle = [0.0; 2];
     }
 
-    /// Kicks for each shot `ps` fired since the last call (`CG_FireWeapon` of the own player). `ps` is the
-    /// predicted state: each event is seen once however often the prediction replays it.
-    pub fn shots(&mut self, ps: &PlayerState, info: &WeaponInfo) {
-        let seq = ps.event_sequence;
-        let Some(last) = self.seen else {
-            self.seen = Some(seq);
-            return;
-        };
-        let new = seq.wrapping_sub(last);
-        // `seen` only moves forward: a prediction that changed its mind and went back must not kick again for
-        // the shots it then replays.
-        if new == 0 || new > 128 {
-            return;
-        }
-        self.seen = Some(seq);
-        for i in (1..=new.min(4)).rev() {
-            let e = ps.events[usize::from(seq.wrapping_sub(i) & 3)];
+    /// Kicks for each shot among `events` (`CG_FireWeapon` of the own player): the predicted events no earlier
+    /// frame delivered, so a shot kicks once however often the prediction replays it.
+    pub fn shots(&mut self, events: &[(u8, u8)], ps: &PlayerState, info: &WeaponInfo) {
+        for &(e, _) in events {
             if matches!(e, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT) {
                 let r = fire_recoil(info, ps, || self.rng.f());
                 self.vel = r.view_kick;
@@ -152,17 +135,10 @@ mod tests {
         }
     }
 
-    fn fired(seq: u8, event: u8) -> PlayerState {
-        let mut ps = PlayerState {
-            event_sequence: seq,
-            ..PlayerState::default()
-        };
-        ps.events[usize::from(seq.wrapping_sub(1) & 3)] = event;
-        ps
-    }
+    const SHOT: [(u8, u8); 1] = [(ev::FIRE_WEAPON, 0)];
 
-    fn pitch_kicks(k: &mut Kick, info: &WeaponInfo, ps: &PlayerState) -> f32 {
-        k.shots(ps, info);
+    fn pitch_kicks(k: &mut Kick, info: &WeaponInfo, events: &[(u8, u8)]) -> f32 {
+        k.shots(events, &PlayerState::default(), info);
         k.vel[0]
     }
 
@@ -170,8 +146,7 @@ mod tests {
     fn a_shot_kicks_the_view_up_and_it_settles_back_to_zero() {
         let mut k = Kick::default();
         let info = rifle();
-        k.shots(&fired(5, 0), &info);
-        assert!(pitch_kicks(&mut k, &info, &fired(6, ev::FIRE_WEAPON)) < 0.0);
+        assert!(pitch_kicks(&mut k, &info, &SHOT) < 0.0);
         let d = Some([600.0; 2]);
         let mut peak = 0.0f32;
         for _ in 0..30 {
@@ -183,50 +158,6 @@ mod tests {
             k.step(0.016, 0.0, d);
         }
         assert_eq!(k.angles(), [0.0; 3], "and recovered");
-    }
-
-    #[test]
-    fn the_same_shot_seen_twice_kicks_once() {
-        let mut k = Kick::default();
-        let info = rifle();
-        k.shots(&fired(5, 0), &info);
-        let ps = fired(6, ev::FIRE_WEAPON);
-        k.shots(&ps, &info);
-        assert!(k.take_gun_speed()[0] > 0.0);
-        let vel = k.vel;
-        // The prediction replays: the same sequence again.
-        k.shots(&ps, &info);
-        assert_eq!(k.vel, vel);
-        assert_eq!(k.take_gun_speed(), [0.0; 2]);
-    }
-
-    #[test]
-    fn a_regressed_prediction_does_not_kick_for_the_same_shot_again() {
-        let mut k = Kick::default();
-        let info = rifle();
-        k.shots(&fired(5, 0), &info);
-        k.shots(&fired(6, ev::FIRE_WEAPON), &info);
-        k.take_gun_speed();
-        // The prediction went back a step, then replays the shot.
-        k.shots(&fired(5, 0), &info);
-        k.shots(&fired(6, ev::FIRE_WEAPON), &info);
-        assert_eq!(k.take_gun_speed(), [0.0; 2]);
-        // A new shot still kicks.
-        k.shots(&fired(7, ev::FIRE_WEAPON), &info);
-        assert!(k.take_gun_speed()[0] > 0.0);
-    }
-
-    #[test]
-    fn shots_shown_after_a_clear_are_learnt_not_kicked() {
-        let mut k = Kick::default();
-        let info = rifle();
-        k.shots(&fired(5, 0), &info);
-        k.clear();
-        // Back from watching someone else: the counter is somewhere else entirely.
-        k.shots(&fired(90, ev::FIRE_WEAPON), &info);
-        assert_eq!(k.take_gun_speed(), [0.0; 2]);
-        k.shots(&fired(91, ev::FIRE_WEAPON), &info);
-        assert!(k.take_gun_speed()[0] > 0.0);
     }
 
     #[test]

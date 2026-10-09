@@ -255,30 +255,27 @@ impl NetPlay {
         (h.prev_health, h.prev_stance, h.prev_ammo, h.prev_offhand) =
             (h.health, Some(h.stance), ammo_now, off_now);
         (h.prev_origin, h.prev_weapon, h.prev_sprint_left) = (ps.origin, ammo_now.0, h.sprint_left);
-        self.hint_events(&mut g.hud, &snap.ps, first, now);
+        self.hint_events(&mut g.hud, first, now);
 
         g.hud.map = MapInfo::parse(ui.config(cs::MINIMAP), ui.config(cs::NORTHYAW));
         let own_team = team;
         self.update_actors(&mut g.hud, server_time, own, own_team, now);
     }
 
-    /// The "no ammo" style hints, from the server's events on the player's state.
-    fn hint_events(&self, h: &mut HudFacts, ps: &PlayerState, first: bool, now: i32) {
-        let seq = ps.event_sequence;
-        if !first {
-            let new = usize::from(seq.wrapping_sub(h.prev_event_seq)).min(4);
-            for i in 0..new {
-                let n = seq.wrapping_sub((new - 1 - i) as u8);
-                let key = match ps.events[usize::from(n & 3)] {
-                    ev::NOAMMO => "WEAPON_NO_AMMO",
-                    ev::NO_FRAG_GRENADE_HINT => "WEAPON_NO_FRAG_GRENADE",
-                    ev::NO_SPECIAL_GRENADE_HINT => "WEAPON_NO_SPECIAL_GRENADE",
-                    _ => continue,
-                };
-                h.invalid_cmd = Some((key, now));
-            }
+    /// The "no ammo" style hints, from the own player's predicted events not yet shown.
+    fn hint_events(&self, h: &mut HudFacts, first: bool, now: i32) {
+        if first {
+            return;
         }
-        h.prev_event_seq = seq;
+        for &(event, _) in &self.own_new {
+            let key = match event {
+                ev::NOAMMO => "WEAPON_NO_AMMO",
+                ev::NO_FRAG_GRENADE_HINT => "WEAPON_NO_FRAG_GRENADE",
+                ev::NO_SPECIAL_GRENADE_HINT => "WEAPON_NO_SPECIAL_GRENADE",
+                _ => continue,
+            };
+            h.invalid_cmd = Some((key, now));
+        }
     }
 
     /// Other players for the compass: where they are and which way they face, and when they fire.

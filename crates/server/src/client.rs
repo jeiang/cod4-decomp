@@ -441,6 +441,7 @@ impl Game {
         }
         if let Some(c) = self.client_mut(n) {
             c.ps.origin = at;
+            c.ps.e_flags ^= sim::pm::ef::TELEPORT_BIT;
             c.ps.velocity = [0.0; 3];
         }
         self.set_client_view_angle(n, look);
@@ -564,7 +565,7 @@ impl Game {
         let mut ps = PlayerState {
             client_num: n,
             spawn_count: spawn_count as u16,
-            e_flags: keep ^ 2,
+            e_flags: keep ^ sim::pm::ef::TELEPORT_BIT,
             ..PlayerState::default()
         };
         ps.view_height_target = pm::VIEW_STAND;

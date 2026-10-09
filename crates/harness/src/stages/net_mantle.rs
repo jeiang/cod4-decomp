@@ -86,7 +86,6 @@ impl Walker {
                 world: self.boxes.world(),
                 weapons: &self.weapons,
                 params: &self.params,
-                speed: self.speed,
                 time: cmd.server_time,
             };
             self.predicted = Some(self.pred.predict(s, &env).ps);

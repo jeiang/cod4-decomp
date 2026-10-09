@@ -58,7 +58,8 @@ pub struct ClientSound {
     device: bool,
     /// Last event sequence seen per entity, so an event plays once.
     seen: HashMap<u16, u8>,
-    own_seq: Option<u8>,
+    /// The own player's entity number: its sounds (events, `lsnd`) belong to it, so a restricted channel keeps one.
+    own_entity: u32,
     /// Sounds asked for before the tables were ready.
     dropped: u64,
     /// Server commands that arrived while the tables loaded (the map's ambience is sent on connect).
@@ -100,7 +101,7 @@ impl ClientSound {
             state,
             device,
             seen: HashMap::new(),
-            own_seq: None,
+            own_entity: NO_ENTITY,
             dropped: 0,
             pending: Vec::new(),
             eye: [0.0; 3],
@@ -538,18 +539,23 @@ impl ClientSound {
         }
     }
 
-    /// The player events of an entity or player state, each once. `seq` is its event sequence number and
-    /// `events` its newest events, oldest first.
+    /// The player events of a remote entity, each once. `seq` is its event sequence number and `newest` its
+    /// newest events, oldest first.
     pub fn events(&mut self, who: &Who, seq: u8, newest: &[(u8, u8)]) {
-        let last = if who.own {
-            self.own_seq.replace(seq)
-        } else {
-            self.seen.insert(who.entity, seq)
-        };
+        let last = self.seen.insert(who.entity, seq);
         // The first look at an entity only learns its counter.
         let Some(last) = last else { return };
         let fresh = usize::from(seq.wrapping_sub(last)).min(newest.len());
         for &(event, parm) in &newest[newest.len() - fresh..] {
+            self.event(who, event, parm);
+        }
+    }
+
+    /// The own player's predicted events (`Predicted::events`: each already once), as the player's own entity
+    /// makes them.
+    pub fn own_events(&mut self, who: &Who, events: &[(u8, u8)]) {
+        self.own_entity = u32::from(who.entity);
+        for &(event, parm) in events {
             self.event(who, event, parm);
         }
     }
@@ -736,16 +742,21 @@ impl ClientSound {
                     },
                 );
             }
-            ("lsnd", [alias]) => self.play(
-                alias,
-                Cue {
-                    stoppable: true,
-                    ..Cue::default()
-                },
-            ),
+            ("lsnd", [alias]) => {
+                let entity = self.own_entity;
+                self.play(
+                    alias,
+                    Cue {
+                        entity,
+                        stoppable: true,
+                        ..Cue::default()
+                    },
+                );
+            }
             ("stoplsnd", [alias]) => {
+                let entity = self.own_entity;
                 if let Some(s) = self.ready() {
-                    s.stop_alias(NO_ENTITY, alias);
+                    s.stop_alias(entity, alias);
                 }
             }
             ("soundfade", [volume, ms]) => {
@@ -1054,7 +1065,7 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
         state: State::Ready(Box::new(sound)),
         device: false,
         seen: HashMap::new(),
-        own_seq: None,
+        own_entity: NO_ENTITY,
         dropped: 0,
         pending: Vec::new(),
         eye: [0.0; 3],
@@ -1077,6 +1088,10 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
             quiet,
         };
         // The first look at an entity only learns its counter; the second delivers the event.
+        if own {
+            cs.own_events(&who, &[(event, parm)]);
+            return;
+        }
         cs.events(&who, seq, &[(0, 0)]);
         seq = seq.wrapping_add(1);
         cs.events(&who, seq, &[(event, parm)]);
