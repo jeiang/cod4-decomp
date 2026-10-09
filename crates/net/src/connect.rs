@@ -86,9 +86,12 @@ pub struct Connector {
     password: String,
     state: ConnectState,
     last_send_ms: Option<u64>,
+    sent: u32,
 }
 
 const RETRY_MS: u64 = 500;
+/// Requests sent in all before the server counts as unreachable (`cl_connectTimeout`: about 20 s).
+const MAX_ATTEMPTS: u32 = 40;
 
 impl Connector {
     pub fn new(server: SocketAddr, qport: u16, name: &str, password: &str) -> Self {
@@ -99,7 +102,17 @@ impl Connector {
             password: password.to_owned(),
             state: ConnectState::Challenging,
             last_send_ms: None,
+            sent: 0,
         }
+    }
+
+    /// The server has not answered after [`MAX_ATTEMPTS`] requests.
+    pub fn gave_up(&self) -> bool {
+        self.sent >= MAX_ATTEMPTS
+            && matches!(
+                self.state,
+                ConnectState::Challenging | ConnectState::Connecting(_)
+            )
     }
 
     pub fn state(&self) -> &ConnectState {
@@ -123,6 +136,7 @@ impl Connector {
             ConnectState::Connected | ConnectState::Refused(_) => return,
         };
         self.last_send_ms = Some(now_ms);
+        self.sent += 1;
         t.send_to(self.server, &msg.encode());
     }
 

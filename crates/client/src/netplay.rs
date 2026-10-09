@@ -320,6 +320,16 @@ impl NetPlay {
         self.net.refused()
     }
 
+    /// Why the server ended the connection (a kick) or went silent: the message the player is shown.
+    pub fn dropped(&self) -> Option<&str> {
+        self.net.dropped()
+    }
+
+    /// `cl_timeout`: the silence the server may keep.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.net.set_timeout(timeout);
+    }
+
     /// Answers the team and class menus with defaults (what a person's menus do when they pick the first choices).
     pub fn set_autojoin(&mut self, on: bool) {
         self.auto_join = on.then(net::ui::AutoJoin::default);

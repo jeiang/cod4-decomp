@@ -29,6 +29,13 @@ const MAX_CMDS_PER_FRAME: usize = 24;
 /// Commands kept for a client that is ahead of the server's frames.
 const MAX_QUEUED_CMDS: usize = 64;
 
+/// Commands behind at which a client no longer gets the ones it can do without (prints, chat, kill feed): it is
+/// already struggling and each one only adds to the backlog.
+const IGNORABLE_BEHIND: usize = 64;
+
+/// What a client hears when it sends game packets to a server that has no slot for it.
+pub const NOT_CONNECTED: &str = "Not connected to the server";
+
 /// `EntityState::eflags` bits the server sets on players.
 pub mod eflags {
     pub const TEAM_AXIS: u32 = 1 << 0;
@@ -43,6 +50,32 @@ pub struct Peer {
     last_heard: Instant,
     /// Effect names announced so far (`fx <index> <name>` commands).
     fx_sent: usize,
+    /// A reliable command did not fit: the peer is too far behind and is dropped at the next service
+    /// ([`NetSv::overflowed`]).
+    overflowed: bool,
+}
+
+impl Peer {
+    /// Queues a reliable command. A client already [`IGNORABLE_BEHIND`] behind does not get the commands that only
+    /// inform; one that cannot take a command at all is flagged for dropping instead of carrying on desynced.
+    pub fn queue(&mut self, line: impl Into<String>) {
+        let line = line.into();
+        if self.link.commands_pending() > IGNORABLE_BEHIND && ignorable(&line) {
+            return;
+        }
+        if self.link.command(line).is_err() {
+            self.overflowed = true;
+        }
+    }
+}
+
+/// Commands the game plays fine without: console and feed prints, chat, kill feed.
+fn ignorable(line: &str) -> bool {
+    match ServerCmd::parse(line) {
+        Some(ServerCmd::Print { kind, .. }) => kind != net::ui::PrintKind::Bold,
+        Some(ServerCmd::Chat { .. } | ServerCmd::Obituary(_)) => true,
+        _ => false,
+    }
 }
 
 pub enum Inbound {
@@ -150,17 +183,23 @@ impl NetSv {
                     Gate::Left => out.push(Inbound::Left(from)),
                     Gate::Ignore => {}
                 }
-            } else if let Some(slot) = self.slot_of(from)
-                && let Some(peer) = self.peers[usize::from(slot)].as_mut()
-                && let Some(p) = peer.link.receive(packet)
-            {
-                peer.last_heard = Instant::now();
-                for (_, c) in p.cmds {
-                    if peer.cmds.len() < MAX_QUEUED_CMDS {
-                        peer.cmds.push_back(c);
+            } else if let Some(slot) = self.slot_of(from) {
+                if let Some(peer) = self.peers[usize::from(slot)].as_mut()
+                    && let Some(p) = peer.link.receive(packet)
+                {
+                    peer.last_heard = Instant::now();
+                    for (_, c) in p.cmds {
+                        if peer.cmds.len() < MAX_QUEUED_CMDS {
+                            peer.cmds.push_back(c);
+                        }
                     }
+                    self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
                 }
-                self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
+            } else {
+                // A client the server no longer has (kicked, timed out, the server restarted) is told, so it does
+                // not sit in a match that is gone.
+                self.t
+                    .send_to(from, &Oob::Error(NOT_CONNECTED.into()).encode());
             }
         }
         self.buf = buf;
@@ -193,6 +232,7 @@ impl NetSv {
             name: name.to_owned(),
             last_heard: Instant::now(),
             fx_sent: 0,
+            overflowed: false,
         });
         self.stats.joins += 1;
         self.t.send_to(req.from, &Oob::ConnectResponse.encode());
@@ -219,8 +259,48 @@ impl NetSv {
         self.peers[usize::from(slot)] = Some(peer);
     }
 
-    pub fn remove_peer(&mut self, slot: u16) {
+    /// Frees the slot. With a `notice` the client is told why first, so it shows it instead of sitting in a match
+    /// that no longer has it (a few copies: the datagram may be lost).
+    pub fn remove_peer(&mut self, slot: u16, notice: Option<&str>) {
+        if let (Some(p), Some(why)) = (self.peers[usize::from(slot)].as_ref(), notice) {
+            self.notify(p.link.addr, why);
+        }
         self.peers[usize::from(slot)] = None;
+    }
+
+    /// Tells `addr` the connection is over, and why.
+    pub fn notify(&mut self, addr: SocketAddr, why: &str) {
+        let packet = Oob::Error(why.to_owned()).encode();
+        for _ in 0..3 {
+            self.t.send_to(addr, &packet);
+        }
+    }
+
+    /// A console print for every client but `except`.
+    pub fn print_to_others(&mut self, except: u16, text: &str) {
+        let line = ServerCmd::Print {
+            kind: net::ui::PrintKind::Normal,
+            text: text.to_owned(),
+        }
+        .encode();
+        for (slot, p) in self.peers.iter_mut().enumerate() {
+            if let Some(p) = p
+                && slot != usize::from(except)
+            {
+                p.queue(line.clone());
+            }
+        }
+    }
+
+    /// Clients that fell too far behind on reliable commands.
+    pub fn overflowed(&self) -> Vec<u16> {
+        (0..self.peers.len() as u16)
+            .filter(|n| {
+                self.peers[usize::from(*n)]
+                    .as_ref()
+                    .is_some_and(|p| p.overflowed)
+            })
+            .collect()
     }
 
     /// Clients to drop for silence.
@@ -256,7 +336,7 @@ impl NetSv {
             .get_mut(usize::from(slot))
             .and_then(Option::as_mut)
         {
-            let _ = p.link.command(line);
+            p.queue(line);
         }
     }
 
@@ -352,7 +432,7 @@ impl NetSv {
             .and_then(Option::as_mut)
         {
             for l in lines {
-                let _ = p.link.command(l.clone());
+                p.queue(l.clone());
             }
         }
     }
@@ -376,7 +456,7 @@ impl NetSv {
                 .collect();
             for line in config_commands(entries) {
                 for p in self.peers.iter_mut().flatten() {
-                    let _ = p.link.command(line.clone());
+                    p.queue(line.clone());
                 }
             }
         }
@@ -390,7 +470,7 @@ impl NetSv {
                     Dest::Team(t) => game.client(slot as u16).is_some_and(|c| c.team == t),
                 };
                 if wanted {
-                    let _ = p.link.command(line.clone());
+                    p.queue(line.clone());
                 }
             }
         }
@@ -439,11 +519,8 @@ impl NetSv {
                 let Some(name) = game.fx.name(peer.fx_sent + 1) else {
                     break;
                 };
-                if peer
-                    .link
-                    .command(format!("fx {} {name}", peer.fx_sent + 1))
-                    .is_err()
-                {
+                peer.queue(format!("fx {} {name}", peer.fx_sent + 1));
+                if peer.overflowed {
                     break;
                 }
                 peer.fx_sent += 1;
@@ -677,4 +754,56 @@ pub fn world_entities(game: &Game) -> Vec<EntityState> {
     }
     out.extend(game.tempev.live(game.level.time).cloned());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use net::ui::PrintKind;
+
+    fn peer() -> Peer {
+        Peer {
+            link: ServerLink::new(SocketAddr::from(([127, 0, 0, 1], 9)), 1),
+            cmds: VecDeque::new(),
+            name: String::new(),
+            last_heard: Instant::now(),
+            fx_sent: 0,
+            overflowed: false,
+        }
+    }
+
+    fn print(kind: PrintKind) -> String {
+        ServerCmd::Print {
+            kind,
+            text: "x".into(),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn a_client_too_far_behind_is_flagged_but_one_merely_late_just_misses_prints() {
+        let mut p = peer();
+        let cfg = ServerCmd::ConfigStrings(vec![(1, "a".into())]).encode();
+        for _ in 0..=IGNORABLE_BEHIND {
+            p.queue(cfg.clone());
+        }
+        let n = p.link.commands_pending();
+        p.queue(print(PrintKind::Normal));
+        p.queue(print(PrintKind::Console));
+        assert_eq!(
+            p.link.commands_pending(),
+            n,
+            "prints are culled while behind"
+        );
+        p.queue(print(PrintKind::Bold));
+        assert_eq!(p.link.commands_pending(), n + 1, "a bold message is kept");
+        assert!(!p.overflowed);
+        for _ in 0..net::reliable::WINDOW {
+            p.queue(cfg.clone());
+        }
+        assert!(
+            p.overflowed,
+            "a command that does not fit marks the peer for dropping"
+        );
+    }
 }

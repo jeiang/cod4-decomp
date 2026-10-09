@@ -326,6 +326,8 @@ struct State {
     net: Option<NetPlay>,
     /// The map the world, renderer and net state are for (empty in the menus).
     map_name: String,
+    /// The server last joined, for `reconnect`.
+    last_server: Option<String>,
     listen: Option<Listen>,
     tour: Option<flythrough::Tour>,
     ui_tour: Option<UiTour>,
@@ -744,6 +746,7 @@ impl Viewer {
             } else {
                 String::new()
             },
+            last_server: self.cli.connect.clone(),
             listen,
             script: self.cli.ui_script.as_ref().map(|s| UiScript {
                 marker: None,
@@ -951,6 +954,14 @@ impl Viewer {
         {
             grab_pointer(st);
         }
+        if let Some(why) = st
+            .net
+            .as_ref()
+            .and_then(NetPlay::dropped)
+            .map(str::to_owned)
+        {
+            connection_lost(&mut self.map, st, &why);
+        }
         let mut new_level = None;
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
@@ -996,6 +1007,13 @@ impl Viewer {
             }
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
+            if let Some(secs) = st
+                .input
+                .cvar("cl_timeout")
+                .and_then(|v| v.parse::<f32>().ok())
+            {
+                net.set_timeout(Duration::from_secs_f32(secs.max(1.0)));
+            }
             let frame_out = net.frame(dt, &f);
             st.input.apply(&net.take_input_feedback());
             st.prev_cost[0] = t_net.elapsed().as_secs_f64() * 1000.0;
@@ -1318,7 +1336,18 @@ impl Viewer {
     fn apply_actions(&mut self, el: &ActiveEventLoop, actions: Vec<Action>) -> Result<(), String> {
         for a in actions {
             let st = self.st.as_mut().ok_or("no window")?;
+            let a = match a {
+                Action::Reconnect => match st.last_server.clone() {
+                    Some(addr) => Action::Join(addr),
+                    None => {
+                        show_error(st, "There is no server to reconnect to.");
+                        continue;
+                    }
+                },
+                a => a,
+            };
             match a {
+                Action::Reconnect => {}
                 Action::Quit => {
                     // A scripted run that reaches Quit has proved the exit path.
                     if st.script.is_some() {
@@ -1335,6 +1364,7 @@ impl Viewer {
                     }
                 }
                 Action::Join(addr) => {
+                    st.last_server = Some(addr.clone());
                     // The client loads what the server is playing, so it asks first.
                     let found = serverlist::resolve(&addr)
                         .and_then(|a| serverlist::query(a, JOIN_QUERY).map(|e| (a, e)));
@@ -1354,10 +1384,7 @@ impl Viewer {
                         }
                         Err(err) => {
                             eprintln!("cannot join {addr}: {err}");
-                            st.input.cvars.set("com_errorMessage", &err, false);
-                            if let Some(sh) = st.shell.as_mut() {
-                                sh.open(&mut st.input, "error_popmenu");
-                            }
+                            show_error(st, &err);
                         }
                     }
                 }
@@ -2242,6 +2269,21 @@ fn enter_level(
         }
     }
     Ok(())
+}
+
+/// The error screen: `message` over the menu.
+fn show_error(st: &mut State, message: &str) {
+    st.input.cvars.set("com_errorMessage", message, false);
+    if let Some(sh) = st.shell.as_mut() {
+        sh.open(&mut st.input, "error_popmenu");
+    }
+}
+
+/// The server kicked us or went silent: back to the main menu with the reason up (`reconnect` rejoins).
+fn connection_lost(map_slot: &mut Option<MapData>, st: &mut State, why: &str) {
+    eprintln!("connection lost: {why}");
+    end_session(map_slot, st);
+    show_error(st, why);
 }
 
 /// Back to the main menu: drops the connection, the server and the world.

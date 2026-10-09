@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `net-rcon`: the server is administered over UDP. A plain socket sends `rcon` packets: a wrong
 //! password is refused and changes nothing, the right one runs `status`, `set`, `say` and the kick
-//! and ban commands, with the console output coming back as `print` packets. A person kicked is
+//! and ban commands, with the console output coming back as `print` packets. A person kicked is told so and
 //! refused on reconnecting until `unbanUser`; `banClient` is written to the ban file.
 use super::net_objective::Human;
 use crate::stage::{StageCtx, StageReport, Status};
@@ -242,6 +242,16 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
         }
         step(&mut server, &mut people);
     }
+    // The person is told why, not left in a match that no longer has them.
+    while people[0].c.dropped() != Some("Player kicked") {
+        if Instant::now() > dropped {
+            return fail(format!(
+                "the kicked person was told {:?}",
+                people[0].c.dropped()
+            ));
+        }
+        step(&mut server, &mut people);
+    }
     let mut again = [Human::new(addr, 2)?];
     while again[0].c.refused().is_none() {
         if Instant::now() > dropped + Duration::from_secs(30) {
@@ -255,6 +265,27 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
     while !playing(&server, &back[0]) {
         if Instant::now() > deadline {
             return fail("the address was not let back in after unbanUser".into());
+        }
+        step(&mut server, &mut back);
+    }
+
+    // A server that goes quiet ends the client's connection with a timeout message, not a frozen world.
+    back[0].c.set_timeout(Duration::from_secs(1));
+    let limit = Instant::now() + Duration::from_secs(30);
+    while back[0].c.dropped().is_none() {
+        if Instant::now() > limit {
+            return fail("a silent server did not end the client's connection".into());
+        }
+        back[0].step();
+    }
+    if back[0].c.dropped() != Some(net::client::TIMED_OUT) {
+        return fail(format!("silent server: {:?}", back[0].c.dropped()));
+    }
+    let mut back = [Human::new(addr, 4)?];
+    let deadline = Instant::now() + LIMIT;
+    while !playing(&server, &back[0]) {
+        if Instant::now() > deadline {
+            return fail("the client could not rejoin after the timeout".into());
         }
         step(&mut server, &mut back);
     }
@@ -273,7 +304,7 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     let mut report = StageReport::new(NAME, Status::Passed);
     report.notes.push(
-        "rcon: wrong password refused and logged; status/set/say/cvarlist answered in print packets; rate limited; kick banned the address until unbanUser; banClient written to the ban file".into(),
+        "rcon: wrong password refused and logged; status/set/say/cvarlist answered in print packets; rate limited; kick told the person and banned the address until unbanUser; a silent server times the client out; banClient written to the ban file".into(),
     );
     Ok(report)
 }
