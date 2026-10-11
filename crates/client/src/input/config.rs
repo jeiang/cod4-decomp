@@ -98,7 +98,11 @@ pub fn join(tokens: &[String]) -> String {
 
 /// `<platform config dir>/cod4e`: where the user's profiles live.
 pub fn default_dir() -> Option<PathBuf> {
-    install::default_config_dir()
+    #[cfg(not(target_arch = "wasm32"))]
+    return install::default_config_dir();
+    // The browser has no profile folder.
+    #[cfg(target_arch = "wasm32")]
+    None
 }
 
 #[cfg(test)]

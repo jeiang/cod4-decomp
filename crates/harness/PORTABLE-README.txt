@@ -43,9 +43,11 @@ PLAY A MATCH
      server's own PC). Inside the game you can also press ~ and type
        connect 192.168.1.20:28960
 
-4. Play. The server's menus ask for a team (Auto Assign is fine) and a class.
-   WASD move, mouse look, left click fires. The bots fill the teams on their
-   own.
+4. Play. WASD move, mouse look, left click fires. Joining with --connect
+   (or the ~ console) picks a team and a class for you; add --no-autojoin to
+   get the team and class menus instead. Joining from the Join Game menu
+   shows those menus (Auto Assign and any class are fine). The bots fill the
+   teams on their own.
 
 5. Stop. In the game press Esc, choose Leave Game and confirm (Quit on the
    main menu closes the program, or just close the window); the server sees

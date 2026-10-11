@@ -18,11 +18,11 @@ assets = { path = "../assets" }
 gsc = { path = "../gsc" }
 sim = { path = "../sim" }
 net = { path = "../net" }
-install = { path = "../install" }
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 net = { path = "../net", features = ["webtransport"] }
+install = { path = "../install" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

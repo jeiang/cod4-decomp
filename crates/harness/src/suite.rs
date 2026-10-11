@@ -99,7 +99,6 @@ fn run_in(
     let detection: Detection = install::detect(&install::Options {
         explicit: cfg.cod4.as_deref(),
         flag: "--cod4",
-        config_dir: None,
         prompt: cfg.prompt,
         exe_dir: cfg.exe_dir.as_deref(),
     });

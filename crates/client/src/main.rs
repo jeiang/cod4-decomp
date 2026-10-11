@@ -350,7 +350,6 @@ fn main() -> ExitCode {
         let found = install::detect(&install::Options {
             explicit: cli.install_given.then_some(cli.install.as_path()),
             flag: "--install",
-            config_dir: cli.config_dir.as_deref(),
             prompt: true,
             exe_dir: std::env::current_exe()
                 .ok()
@@ -360,7 +359,12 @@ fn main() -> ExitCode {
         match found.install {
             Some(i) => cli.install = i.path,
             None => {
-                eprintln!("{}", found.not_found_message("cod4e"));
+                let why = found.not_found_message("cod4e");
+                eprintln!("{why}");
+                // A double-clicked console closes with the program; a message box outlives it.
+                if found.prompted {
+                    install::show_error(&why);
+                }
                 return ExitCode::from(1);
             }
         }

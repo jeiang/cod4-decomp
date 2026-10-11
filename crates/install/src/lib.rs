@@ -24,6 +24,8 @@ pub struct Install {
 #[derive(Debug, Default)]
 pub struct Detection {
     pub install: Option<Install>,
+    /// The folder dialog was offered (it may have been cancelled or given a wrong folder).
+    pub prompted: bool,
     /// Every place that was looked at, in order, and why it failed.
     pub tried: Vec<String>,
 }
@@ -79,23 +81,27 @@ pub struct Options<'a> {
     /// The path the command line gave, and the flag's name for messages.
     pub explicit: Option<&'a Path>,
     pub flag: &'a str,
-    /// Where the remembered path is kept; the platform default when `None`.
-    pub config_dir: Option<&'a Path>,
     /// Ask with a folder dialog as the last resort (needs the `prompt` feature and a display).
     pub prompt: bool,
     pub exe_dir: Option<&'a Path>,
 }
 
+/// Finds the install. The remembered path always lives in the platform's default config dir, so the client, the
+/// server and the harness share one whatever profile folder a run uses.
 pub fn detect(opts: &Options) -> Detection {
-    let mut d = Detection::default();
-    let config = opts
-        .config_dir
-        .map(Path::to_owned)
-        .or_else(default_config_dir);
+    detect_in(opts, default_config_dir().as_deref())
+}
+
+fn detect_in(opts: &Options, config: Option<&Path>) -> Detection {
     let env = std::env::var_os("COD4_PATH")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from);
-    let candidates = candidates(opts, env, config.as_deref().and_then(recall));
+    detect_from(opts, env, config)
+}
+
+fn detect_from(opts: &Options, env: Option<PathBuf>, config: Option<&Path>) -> Detection {
+    let mut d = Detection::default();
+    let candidates = candidates(opts, env, config.and_then(recall));
     for (source, path) in candidates {
         if is_install(&path) {
             d.install = Some(Install { path, source });
@@ -105,9 +111,10 @@ pub fn detect(opts: &Options) -> Detection {
             .push(format!("{source}: {} (no main/ and zone/)", path.display()));
     }
     if opts.prompt {
+        d.prompted = true;
         match prompt_for_folder() {
             Some(path) if is_install(&path) => {
-                if let Some(c) = &config {
+                if let Some(c) = config {
                     remember(c, &path);
                 }
                 d.install = Some(Install {
@@ -188,6 +195,26 @@ fn prompt_for_folder() -> Option<PathBuf> {
 fn prompt_for_folder() -> Option<PathBuf> {
     None
 }
+
+/// Tells the person why no install was found in a message box, for a console that closes with the program.
+/// Without a display (or the `prompt` feature) it does nothing: the caller printed the text too.
+#[cfg(feature = "prompt")]
+pub fn show_error(text: &str) {
+    if cfg!(all(unix, not(target_os = "macos")))
+        && std::env::var_os("DISPLAY").is_none()
+        && std::env::var_os("WAYLAND_DISPLAY").is_none()
+    {
+        return;
+    }
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Call of Duty 4 install not found")
+        .set_description(text)
+        .show();
+}
+
+#[cfg(not(feature = "prompt"))]
+pub fn show_error(_text: &str) {}
 
 #[cfg(windows)]
 fn platform_candidates() -> Vec<(String, PathBuf)> {
@@ -283,7 +310,6 @@ mod tests {
         Options {
             explicit,
             flag: "--install",
-            config_dir: None,
             prompt: false,
             exe_dir: None,
         }
@@ -317,20 +343,23 @@ mod tests {
     }
 
     #[test]
-    fn a_remembered_path_is_read_back_and_a_stale_one_is_skipped() {
+    fn a_valid_remembered_path_is_used_and_a_stale_one_is_not() {
         let cfg = tempfile::tempdir().unwrap();
         let game = tempfile::tempdir().unwrap();
         fake_install(game.path());
         assert_eq!(recall(cfg.path()), None);
         remember(cfg.path(), game.path());
         assert_eq!(recall(cfg.path()).as_deref(), Some(game.path()));
+        let found = detect_from(&options(None), None, Some(cfg.path()));
+        let got = found.install.expect("the remembered install is found");
+        assert_eq!(
+            (got.source.as_str(), got.path),
+            ("remembered path", game.path().to_owned())
+        );
         remember(cfg.path(), Path::new("/no/such/place"));
-        let d = detect(&Options {
-            config_dir: Some(cfg.path()),
-            ..options(None)
-        });
-        assert!(d.tried.iter().any(|t| t.starts_with("remembered path")));
-        assert!(d.install.is_none_or(|i| i.source != "remembered path"));
+        let stale = detect_from(&options(None), None, Some(cfg.path()));
+        assert!(stale.tried.iter().any(|t| t.starts_with("remembered path")));
+        assert!(stale.install.is_none_or(|i| i.source != "remembered path"));
     }
 
     #[test]

@@ -92,7 +92,6 @@ fn main() -> ExitCode {
     let found = install::detect(&install::Options {
         explicit: explicit.as_deref(),
         flag: "--install",
-        config_dir: None,
         prompt: false,
         exe_dir: std::env::current_exe()
             .ok()

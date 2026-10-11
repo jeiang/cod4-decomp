@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-dedicated`: what a Windows tester does with the portable folder. The real `cod4e-server` binary starts on
 //! a free UDP port with a map and a few bots; the real windowed `cod4e` client joins it with `--connect`, spawns,
-//! walks and shoots for half a minute (`--autoplay`) and quits. The stage reads the client's report for the same
-//! frame and clock checks as `client-match`, checks that snapshots arrived, and then asks the server (`status`) whether
+//! walks and shoots for 45 seconds (`--autoplay`) and quits. The stage reads the client's report: connected, spawned,
+//! moved, fired, snapshots arrived, no pipeline built mid-play and no clock jumps (frame times are `client-match`'s;
+//! here they are only reported), and then asks the server (`status`) whether
 //! the player is gone: a clean disconnect frees the slot at once, a dropped connection would keep it until the
 //! timeout. Needs a display, the install, and `cod4e-server` next to the harness; skips cleanly without them.
 use super::client_flythrough::locate_client;
-use super::client_match::{column, hitches, num};
+use super::client_match::{column, hitches, num, spike_share};
 use super::client_models::no_display;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
@@ -19,10 +20,6 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = "client-dedicated";
 const BOTS: usize = 3;
-/// Share of frames that may cost over the usual by the `client-match` rule: the server, the client and the rest of the
-/// machine compete here, and a busy runner stalls the client for a few seconds at a time. A client that hitches
-/// throughout is still far over this.
-const SPIKE_SHARE: f64 = 0.05;
 const SECS: u64 = 45;
 /// The server keeps 15 characters of a name.
 const NICK: &str = "DedicatedTest";
@@ -311,7 +308,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let cpu = fs::read_to_string(dir.join("frames.raw.csv"))
         .map(|csv| column(&csv, 0))
         .unwrap_or_default();
-    failures.extend(hitches(&json, &cpu, SPIKE_SHARE));
+    // Frame times are `client-match`'s to gate: here the server and the host's other load compete with the client.
+    // Late pipelines and clock jumps (the server's pace) stay gates; the spike share is only reported.
+    failures.extend(hitches(&json, &cpu, None));
 
     // The client has quit. A clean disconnect has freed its slot; a lost connection would still list it.
     let mut left = false;
@@ -358,6 +357,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     m.insert("client.predictions".into(), predicted);
     m.insert("client.prediction_corrections".into(), corrected);
     m.insert("server.port".into(), f64::from(port));
+    if let Some(share) = spike_share(&cpu) {
+        m.insert("client.frame_spike_share".into(), share);
+    }
     if !failures.is_empty() {
         report
             .notes
