@@ -59,7 +59,13 @@ const MAX_CLOCK_JUMPS: u64 = 3;
 /// skipped for the frames the compile took), so the load's warm-up missed it. None may be, whatever the runner's
 /// speed; the spike share is the relative check on what that misses. `clock_jumps` counts how often the clock the
 /// view follows jumped (a server running at the wrong pace does it every few seconds).
-pub(super) fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
+fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
+    hitches(report, cpu_ms, SPIKE_SHARE)
+}
+
+/// [`hitch_failures`] with the share of frames that may hitch given: a stage that shares its machine with a server
+/// and whatever else runs there is stalled in bursts that a 1% share does not forgive.
+pub(super) fn hitches(report: &Value, cpu_ms: &[f64], spike_share: f64) -> Vec<String> {
     let mut out = Vec::new();
     let late: Vec<&str> = report["late_builds"]
         .as_array()
@@ -91,7 +97,7 @@ pub(super) fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
     if let Some(p) = Percentiles::from_samples(cpu_ms) {
         let limit = (p.p50 * SPIKE_FACTOR).max(p.p50 + SPIKE_EXTRA_MS);
         let spikes = cpu_ms.iter().filter(|c| **c > limit).count();
-        if spikes as f64 > cpu_ms.len() as f64 * SPIKE_SHARE {
+        if spikes as f64 > cpu_ms.len() as f64 * spike_share {
             out.push(format!(
                 "{spikes} of {} frames cost over {limit:.0} ms (median {:.1} ms, worst {:.0} ms): the frames hitch",
                 cpu_ms.len(),

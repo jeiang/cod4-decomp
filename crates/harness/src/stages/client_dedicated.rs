@@ -6,7 +6,7 @@
 //! the player is gone: a clean disconnect frees the slot at once, a dropped connection would keep it until the
 //! timeout. Needs a display, the install, and `cod4e-server` next to the harness; skips cleanly without them.
 use super::client_flythrough::locate_client;
-use super::client_match::{column, hitch_failures, num};
+use super::client_match::{column, hitches, num};
 use super::client_models::no_display;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
@@ -19,7 +19,11 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = "client-dedicated";
 const BOTS: usize = 3;
-const SECS: u64 = 30;
+/// Share of frames that may cost over the usual by the `client-match` rule: the server, the client and the rest of the
+/// machine compete here, and a busy runner stalls the client for a few seconds at a time. A client that hitches
+/// throughout is still far over this.
+const SPIKE_SHARE: f64 = 0.05;
+const SECS: u64 = 45;
 /// The server keeps 15 characters of a name.
 const NICK: &str = "DedicatedTest";
 /// The server loads the zones and the map, and a slow disk is slow.
@@ -307,7 +311,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let cpu = fs::read_to_string(dir.join("frames.raw.csv"))
         .map(|csv| column(&csv, 0))
         .unwrap_or_default();
-    failures.extend(hitch_failures(&json, &cpu));
+    failures.extend(hitches(&json, &cpu, SPIKE_SHARE));
 
     // The client has quit. A clean disconnect has freed its slot; a lost connection would still list it.
     let mut left = false;
