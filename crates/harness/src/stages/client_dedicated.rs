@@ -20,7 +20,8 @@ use std::time::{Duration, Instant};
 const NAME: &str = "client-dedicated";
 const BOTS: usize = 3;
 const SECS: u64 = 30;
-const NICK: &str = "HarnessDedicated";
+/// The server keeps 15 characters of a name.
+const NICK: &str = "DedicatedTest";
 /// The server loads the zones and the map, and a slow disk is slow.
 const SERVER_UP: Duration = Duration::from_secs(240);
 const CLIENT_LIMIT: Duration = Duration::from_secs(300);
@@ -322,14 +323,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             break;
         }
     }
-    let joined = dedicated
-        .lines
-        .seen
-        .lock()
-        .unwrap()
-        .iter()
-        .any(|l| l.starts_with("MP_CONNECTED") && l.contains(NICK));
-    if !joined {
+    let said = dedicated.lines.seen.lock().unwrap().clone();
+    let heard = |what: &str| said.iter().any(|l| l.contains(NICK) && l.contains(what));
+    if !heard("MP_CONNECTED") {
         failures.push("the server never announced the player joining".into());
     }
     if !left {
@@ -337,6 +333,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "the server still lists the player {} s after the client quit: not a clean disconnect",
             LEAVE_LIMIT.as_secs()
         ));
+    } else if !heard("left the game") {
+        failures.push("the player's slot was freed, but not by the player leaving (a timeout or a kick)".into());
     }
     let code = dedicated.quit();
     if code.is_none_or(|c| !c.success()) {
@@ -378,12 +376,12 @@ mod tests {
     #[test]
     fn a_status_row_of_a_person_counts_and_a_bot_of_the_same_name_does_not() {
         let person =
-            rows(&["  3     0   12    0 HarnessDedicated      40 127.0.0.1:5000   1234    -"]);
-        assert!(lists_player(&person, "HarnessDedicated"));
+            rows(&["  3     0   12    0 DedicatedTest      40 127.0.0.1:5000   1234    -"]);
+        assert!(lists_player(&person, "DedicatedTest"));
         let bot =
-            rows(&["  0     0  BOT    0 HarnessDedicated       0 bot                 0    -"]);
-        assert!(!lists_player(&bot, "HarnessDedicated"));
-        assert!(!lists_player(&rows(&["end-of-1"]), "HarnessDedicated"));
+            rows(&["  0     0  BOT    0 DedicatedTest       0 bot                 0    -"]);
+        assert!(!lists_player(&bot, "DedicatedTest"));
+        assert!(!lists_player(&rows(&["end-of-1"]), "DedicatedTest"));
     }
 
     #[test]
