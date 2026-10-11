@@ -20,7 +20,7 @@ usage:
 run options:
   --stage <name>      run this stage (repeatable, or comma separated); default: the suite
   --script <file>     run a console script as a stage (repeatable)
-  --cod4 <dir>        CoD4 install (else COD4_PATH, registry, Steam, ./COD4, a folder prompt)
+  --cod4 <dir>        CoD4 install (else COD4_PATH, the remembered folder, registry, Steam, ./COD4, a folder prompt)
   --out <dir>         where to write the zip (default: ./bundles)
   --timeout <secs>    per-stage timeout, replacing each stage's own
   --no-prompt         never ask for the install folder (also: COD4E_NO_PROMPT=1)

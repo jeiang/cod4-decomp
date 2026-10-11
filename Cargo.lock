@@ -477,6 +477,7 @@ dependencies = [
  "fx",
  "gilrs",
  "glam",
+ "install",
  "js-sys",
  "net",
  "objc2 0.6.5",
@@ -1203,10 +1204,10 @@ version = "0.0.0"
 dependencies = [
  "assets",
  "crash-handler",
+ "install",
  "minidumper",
  "net",
  "png",
- "rfd",
  "serde",
  "serde_json",
  "server",
@@ -1215,7 +1216,6 @@ dependencies = [
  "tempfile",
  "tracing",
  "tracing-subscriber",
- "winreg",
  "zip",
 ]
 
@@ -1407,6 +1407,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c033f80b2c113cdf91ab7a33faa9cbc014726dcad99880c8609af2a370edf37d"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "install"
+version = "0.0.0"
+dependencies = [
+ "rfd",
+ "tempfile",
+ "winreg",
 ]
 
 [[package]]
@@ -3272,6 +3281,7 @@ version = "0.0.0"
 dependencies = [
  "assets",
  "gsc",
+ "install",
  "libc",
  "net",
  "sim",

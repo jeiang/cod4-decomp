@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `cod4e-server`: the headless dedicated server.
 //!
-//! `cod4e-server [+set name value] [+exec server.cfg] [+map mp_crash]`; the install comes from
-//! `COD4_PATH` (default `./COD4`). The `--webtransport` family of flags turns on the endpoint for
+//! `cod4e-server [--install dir] [+set name value] [+exec server.cfg] [+map mp_crash]`; the install is
+//! found as `install::detect` does (`--install`, `COD4_PATH`, the path `cod4e` remembered, Steam, `./COD4`). The `--webtransport` family of flags turns on the endpoint for
 //! browser clients; each is shorthand for setting a cvar. Lines on stdin run as console commands;
 //! with `rcon_password` set, `rcon` packets do the same from the network.
 
@@ -49,9 +49,32 @@ fn expand_flags(args: Vec<String>) -> Result<Vec<String>, String> {
     Ok(all)
 }
 
+/// Removes `--install dir` (or `--install=dir`) from the arguments and returns the directory.
+fn take_install(args: Vec<String>) -> Result<(Vec<String>, Option<PathBuf>), String> {
+    let mut rest = Vec::new();
+    let mut dir = None;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--install" {
+            dir = Some(it.next().ok_or("--install needs a value")?.into());
+        } else if let Some(v) = a.strip_prefix("--install=") {
+            dir = Some(v.into());
+        } else {
+            rest.push(a);
+        }
+    }
+    Ok((rest, dir))
+}
+
 fn main() -> ExitCode {
-    let root = PathBuf::from(std::env::var_os("COD4_PATH").unwrap_or_else(|| "COD4".into()));
-    let args = match expand_flags(std::env::args().skip(1).collect()) {
+    let (args, explicit) = match take_install(std::env::args().skip(1).collect()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let args = match expand_flags(args) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
@@ -60,12 +83,26 @@ fn main() -> ExitCode {
     };
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
-            "usage: cod4e-server [+set name value] [+exec file.cfg] [+map name]\n\
+            "usage: cod4e-server [--install dir] [+set name value] [+exec file.cfg] [+map name]\n\
              \x20      [--webtransport [host:]port [--wt-cert cert.pem --wt-key key.pem] [--wt-info info.json]]\n\
-             install: $COD4_PATH (default ./COD4)"
+             install: --install, $COD4_PATH, the folder cod4e remembered, Steam, ./COD4"
         );
         return ExitCode::SUCCESS;
     }
+    let found = install::detect(&install::Options {
+        explicit: explicit.as_deref(),
+        flag: "--install",
+        config_dir: None,
+        prompt: false,
+        exe_dir: std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(PathBuf::from))
+            .as_deref(),
+    });
+    let Some(root) = found.install.as_ref().map(|i| i.path.clone()) else {
+        eprintln!("{}", found.not_found_message("cod4e-server"));
+        return ExitCode::FAILURE;
+    };
     let mut s = match Server::boot(&root, &args, true) {
         Ok(s) => s,
         Err(e) => {
@@ -85,4 +122,23 @@ fn main() -> ExitCode {
     s.attach_console(rx);
     s.run_forever();
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn install_flag_is_taken_out_of_the_arguments() {
+        let (rest, dir) = take_install(args("+set a b --install /game +map mp_crash")).unwrap();
+        assert_eq!(dir, Some(PathBuf::from("/game")));
+        assert_eq!(rest, args("+set a b +map mp_crash"));
+        let (_, dir) = take_install(args("--install=/x")).unwrap();
+        assert_eq!(dir, Some(PathBuf::from("/x")));
+        assert!(take_install(args("+map x --install")).is_err());
+    }
 }

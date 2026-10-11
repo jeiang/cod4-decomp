@@ -23,7 +23,7 @@ const LIMIT: Duration = Duration::from_secs(300);
 /// Share of the last frame's pixels that may look magenta.
 const MAX_MAGENTA: f64 = 0.002;
 
-fn num(v: &Value, path: &[&str]) -> f64 {
+pub(super) fn num(v: &Value, path: &[&str]) -> f64 {
     path.iter()
         .try_fold(v, |v, k| v.get(k))
         .and_then(Value::as_f64)
@@ -37,7 +37,7 @@ fn fail(mut r: StageReport, why: String) -> StageReport {
 }
 
 /// One column of `frames.raw.csv`.
-fn column(csv: &str, i: usize) -> Vec<f64> {
+pub(super) fn column(csv: &str, i: usize) -> Vec<f64> {
     csv.lines()
         .skip(1)
         .filter_map(|l| l.split(',').nth(i)?.parse().ok())
@@ -59,7 +59,7 @@ const MAX_CLOCK_JUMPS: u64 = 3;
 /// skipped for the frames the compile took), so the load's warm-up missed it. None may be, whatever the runner's
 /// speed; the spike share is the relative check on what that misses. `clock_jumps` counts how often the clock the
 /// view follows jumped (a server running at the wrong pace does it every few seconds).
-fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
+pub(super) fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
     let mut out = Vec::new();
     let late: Vec<&str> = report["late_builds"]
         .as_array()
