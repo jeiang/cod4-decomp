@@ -128,7 +128,7 @@ pub fn run(
         return Err(format!("{map} has no spawn points"));
     }
     let gpu = Arc::new(Gpu::new(None).map_err(|e| format!("{e:?}"))?);
-    let scene = Scene::new(&gpu, &data);
+    let scene = Scene::new(&gpu, &data)?;
     let vfs = assets::vfs::Vfs::open_stock(install, 0).map_err(|e| e.to_string())?;
     let mut r = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
     let format = wgpu::TextureFormat::Rgba8Unorm;

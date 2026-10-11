@@ -480,7 +480,6 @@ const QUAD_BYTES: u64 = 4 * std::mem::size_of::<ScreenVertex>() as u64;
 
 impl State {
     pub(crate) fn new(gpu: &Gpu, data: &MapData) -> State {
-        use wgpu::util::DeviceExt;
         State {
             materials: data
                 .post_materials
@@ -495,13 +494,11 @@ impl State {
                 mapped_at_creation: false,
             }),
             // Clockwise on screen, like the original's 2D quads.
-            indices: gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("post quad indices"),
-                    contents: bytemuck::cast_slice(&[0u16, 1, 2, 0, 2, 3]),
-                    usage: wgpu::BufferUsages::INDEX,
-                }),
+            indices: gpu.buffer_init_or_empty(
+                Some("post quad indices"),
+                bytemuck::cast_slice(&[0u16, 1, 2, 0, 2, 3]),
+                wgpu::BufferUsages::INDEX,
+            ),
             saved: false,
         }
     }

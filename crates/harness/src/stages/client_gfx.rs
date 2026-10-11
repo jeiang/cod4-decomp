@@ -5,7 +5,8 @@
 //! blur the picture, and a hip-fired view must not), then turns the match's settings back with a second
 //! `vid_restart` in the running match. Every `gfxis=` check reads the renderer's and the surface's own state. A frame
 //! with a bright test light in front of the player must also be clearly brighter than the same frame without it (the
-//! dynamic light pass). Needs a display and the install; skips without.
+//! dynamic light pass). At the end the graphics device is destroyed under the match, as a driver reset does it, and the
+//! client must make a new one and draw the world again. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -30,7 +31,8 @@ set=set r_distortion 0,vidrestart,wait=2,shot=distort-off,set=set r_distortion 1
 dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1,shot=dlight-on,dlight=0,\
 set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\
 set=set r_aspectRatio auto,vidrestart,wait=2,\
-gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,wait=2,gfxis=blur 1,releasekey=mouse2,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off";
+gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,wait=2,gfxis=blur 1,releasekey=mouse2,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
+losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered";
 
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
 const LIT_SHARE: f64 = 0.05;
@@ -40,6 +42,8 @@ const GAMMA_STEP: f64 = 20.0;
 /// Channel value from which a pixel counts as white, and how much whiter the middle may get with distortion on.
 const WHITE: u8 = 250;
 const WHITE_MARGIN: f64 = 0.15;
+/// A picture with a world in it has more light than this on average (of 255).
+const BLANK_LUMA: f64 = 5.0;
 
 /// Share of pixels of `on` whose luma is more than [`LIT_STEP`] above that of `off` (same size).
 fn brightened_share(off: &[u8], on: &[u8]) -> f64 {
@@ -96,6 +100,26 @@ fn gamma_moves_brightness(dir: &std::path::Path) -> Result<(), String> {
     if hi < lo + GAMMA_STEP {
         return Err(format!(
             "r_gamma 2.0 gave mean luma {hi:.1} against {lo:.1} at 0.5 (need {GAMMA_STEP} more)"
+        ));
+    }
+    Ok(())
+}
+
+/// A graphics device that is lost under a running match is made again: the report names the loss, and the picture
+/// after it is not blank.
+fn device_recovers(dir: &std::path::Path, report: &serde_json::Value) -> Result<(), String> {
+    use super::client_models::decode;
+    let losses = report["gpu_health"]["device_losses"]
+        .as_array()
+        .map_or(0, Vec::len);
+    if losses == 0 {
+        return Err("the device was destroyed and the client did not notice".into());
+    }
+    let (_, _, px) = decode(&dir.join("recovered.png"))?;
+    let luma = mean_luma(&px);
+    if luma < BLANK_LUMA {
+        return Err(format!(
+            "the picture after the device was made again has mean luma {luma:.1}"
         ));
     }
     Ok(())
@@ -169,6 +193,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 "gamma-hi.png",
                 "distort-on.png",
                 "distort-off.png",
+                "recovered.png",
             ] {
                 out.files.push(f.into());
             }
@@ -177,6 +202,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 .chain(dynamic_light_lit(&ctx.dir).err())
                 .chain(gamma_moves_brightness(&ctx.dir).err())
                 .chain(distortion_samples_the_scene(&ctx.dir).err())
+                .chain(device_recovers(&ctx.dir, &report).err())
                 .collect();
             if !problems.is_empty() {
                 out.status = Status::Failed;

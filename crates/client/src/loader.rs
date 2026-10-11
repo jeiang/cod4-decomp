@@ -251,7 +251,7 @@ impl Work {
         let data = self.data.as_ref().ok_or("not decoded")?;
         let vfs = Vfs::open_stock(&self.req.install, 0)
             .map_err(|e| format!("cannot open the install: {e}"))?;
-        let scene = Scene::new(&self.gpu, data);
+        let scene = Scene::new(&self.gpu, data)?;
         let mut renderer = Renderer::new(
             self.gpu.clone(),
             scene,

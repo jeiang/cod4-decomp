@@ -39,6 +39,23 @@ impl FullscreenKind {
     }
 }
 
+/// What the window is now, which can differ from what was asked for (no video mode to switch to, no exclusive
+/// fullscreen on the platform).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn actual_kind(window: &Window) -> FullscreenKind {
+    match window.fullscreen() {
+        None => FullscreenKind::Windowed,
+        Some(Fullscreen::Exclusive(_)) => FullscreenKind::Exclusive,
+        Some(_) => FullscreenKind::Borderless,
+    }
+}
+
+/// The page's canvas is whatever the page makes it.
+#[cfg(target_arch = "wasm32")]
+pub fn actual_kind(_: &Window) -> FullscreenKind {
+    FullscreenKind::Windowed
+}
+
 #[derive(Clone, Debug)]
 pub struct Request {
     pub kind: FullscreenKind,

@@ -26,7 +26,7 @@ if [ "$1" = --list-display-modes ]; then
 fi
 all="$*"
 while [ $# -gt 0 ]; do
-  case $1 in --out) out=$2; shift;; esac
+  case $1 in --out) out=$2; shift;; --fullscreen) kind=$2; shift;; esac
   shift
 done
 mkdir -p "$out"
@@ -38,7 +38,10 @@ fi
 printf 'cpu_ms,gpu_ms,present_interval_ms,mem_bytes\n1.0,0.5,16.0,100\n2.0,,17.0,200\n3.0,0.7,18.0,300\n' > "$out/frames.raw.csv"
 printf 'video' > "$out/flythrough.ivf"
 printf 'png' > "$out/screenshot.png"
-echo '{"status":"ok","frames":3,"video":{"file":"flythrough.ivf","frames":3,"dropped":0,"bytes":5},"screenshot":"screenshot.png","zone_load_ms":42.0,"world":{"surfaces_drawn_p50":7}}' > "$out/client.json"
+[ "$beh" = fellback ] && [ "$kind" = exclusive ] && kind=borderless
+health='{"device_losses":[],"errors":[]}'
+[ "$beh" = gpuerror ] && health='{"device_losses":[],"errors":["Buffer is invalid"]}'
+echo '{"status":"ok","frames":3,"video":{"file":"flythrough.ivf","frames":3,"dropped":0,"bytes":5},"screenshot":"screenshot.png","zone_load_ms":42.0,"world":{"surfaces_drawn_p50":7},"mode":{"fullscreen":"'$kind'"},"gpu_health":'$health'}' > "$out/client.json"
 "#;
 
 struct Fake {
@@ -168,4 +171,21 @@ fn error_and_hung_runs_fail_the_stage_but_not_the_other_runs() {
     assert_eq!(r.notes.len(), 8, "a hung run must not stop the others");
     assert!(r.notes.iter().all(|n| n.contains("Hung")), "{:?}", r.notes);
     assert!(Path::new(&dir.join("native-borderless/client.log")).exists());
+}
+
+#[test]
+fn an_exclusive_run_that_was_not_exclusive_fails_and_says_so() {
+    let fake = Fake::new("fellback");
+    let (r, _, _k) = run(&fake, true);
+    assert_eq!(r.status, Status::Failed);
+    let failed = r.reason.unwrap();
+    assert!(failed.contains("exclusive-2560x1440-30000mhz"), "{failed}");
+}
+
+#[test]
+fn graphics_errors_the_client_reports_fail_every_run() {
+    let fake = Fake::new("gpuerror");
+    let (r, _, _k) = run(&fake, true);
+    assert_eq!(r.status, Status::Failed);
+    assert_eq!(r.notes.len(), 8);
 }
