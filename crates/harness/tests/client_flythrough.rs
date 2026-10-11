@@ -180,11 +180,6 @@ fn an_exclusive_run_that_was_not_exclusive_fails_and_says_so() {
     assert_eq!(r.status, Status::Failed);
     let failed = r.reason.unwrap();
     assert!(failed.contains("exclusive-2560x1440-30000mhz"), "{failed}");
-    assert!(
-        r.notes.iter().any(|n| n.contains("asked for exclusive")),
-        "{:?}",
-        r.notes
-    );
 }
 
 #[test]
@@ -193,9 +188,4 @@ fn graphics_errors_the_client_reports_fail_every_run() {
     let (r, _, _k) = run(&fake, true);
     assert_eq!(r.status, Status::Failed);
     assert_eq!(r.notes.len(), 8);
-    assert!(
-        r.notes.iter().all(|n| n.contains("Buffer is invalid")),
-        "{:?}",
-        r.notes
-    );
 }

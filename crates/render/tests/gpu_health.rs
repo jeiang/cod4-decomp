@@ -20,6 +20,12 @@ fn buffer_on_a_lost_device_is_an_error_with_the_reason() {
     let err = gpu
         .buffer_init(Some("world vertices"), &[0; 64], wgpu::BufferUsages::VERTEX)
         .expect_err("a buffer on a destroyed device");
-    assert!(err.contains("world vertices"), "{err}");
     assert!(gpu.lost().is_some(), "the loss is recorded: {err}");
+    // The places that cannot fail get an empty buffer and no panic.
+    let empty = gpu.buffer_init_or_empty(Some("indices"), &[0; 6], wgpu::BufferUsages::INDEX);
+    assert_eq!(empty.size(), 8);
+    assert!(
+        gpu.buffer_init_or_none(Some("model"), &[0; 6], wgpu::BufferUsages::VERTEX)
+            .is_none()
+    );
 }

@@ -309,20 +309,17 @@ impl Scene {
         let mut idx: Vec<u16> = s.tri_indices.to_vec();
         idx.resize(idx.len().next_multiple_of(2), 0);
         let mesh = Arc::new(Mesh {
-            vb: gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: model.name.as_deref(),
-                    contents: &s.verts,
-                    usage: wgpu::BufferUsages::VERTEX,
-                }),
-            ib: gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: model.name.as_deref(),
-                    contents: bytemuck::cast_slice(&idx),
-                    usage: wgpu::BufferUsages::INDEX,
-                }),
+            // A device that is gone has no model to draw; the frame loop finds the loss.
+            vb: gpu.buffer_init_or_none(
+                model.name.as_deref(),
+                &s.verts,
+                wgpu::BufferUsages::VERTEX,
+            )?,
+            ib: gpu.buffer_init_or_none(
+                model.name.as_deref(),
+                bytemuck::cast_slice(&idx),
+                wgpu::BufferUsages::INDEX,
+            )?,
         });
         self.models.insert(key, mesh.clone());
         Some(mesh)

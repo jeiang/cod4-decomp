@@ -113,8 +113,9 @@ impl Gpu {
             *h.lost.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
         });
         // A window outlives a bad frame, so its device keeps the errors (the client reports them and the harness fails
-        // on any). Headless users (tests, tools) keep wgpu's own handler: an error there panics, as it should.
-        if surface.is_some() {
+        // on any). Headless users (tests, tools) keep wgpu's own handler: an error there panics, as it should, and so
+        // does the browser's: its page shows the failure, which a kept error would hide.
+        if surface.is_some() && cfg!(not(target_arch = "wasm32")) {
             let h = health.clone();
             device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
                 eprintln!("graphics error: {e}");
@@ -185,6 +186,51 @@ impl Gpu {
             Err(e) => Err(self.explain(&format!(
                 "cannot create the buffer '{name}' ({size} bytes): {e}"
             ))),
+        }
+    }
+
+    /// [`Gpu::buffer_init`] for a place that cannot fail: when the buffer cannot be made, an empty one of the right
+    /// size comes back instead, which draws nothing. The cause is reported as a lost device (the client replaces it)
+    /// or as an error (the harness fails on it).
+    pub fn buffer_init_or_empty(
+        &self,
+        label: Option<&str>,
+        contents: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
+        self.buffer_init(label, contents, usage)
+            .unwrap_or_else(|e| {
+                self.note_error(e);
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label,
+                    size: padded_size(contents.len() as u64)
+                        .min(self.device.limits().max_buffer_size),
+                    usage,
+                    mapped_at_creation: false,
+                })
+            })
+    }
+
+    /// [`Gpu::buffer_init`] where a missing buffer means nothing to draw: the cause is reported as for
+    /// [`Gpu::buffer_init_or_empty`].
+    pub fn buffer_init_or_none(
+        &self,
+        label: Option<&str>,
+        contents: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> Option<wgpu::Buffer> {
+        self.buffer_init(label, contents, usage)
+            .map_err(|e| self.note_error(e))
+            .ok()
+    }
+
+    /// Keeps `e` for the report unless the device is lost, which is reported on its own.
+    fn note_error(&self, e: String) {
+        if self.lost().is_none() {
+            let mut errors = self.health.errors.lock().unwrap_or_else(|e| e.into_inner());
+            if errors.len() < KEPT_ERRORS {
+                errors.push(e);
+            }
         }
     }
 

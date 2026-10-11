@@ -377,6 +377,9 @@ struct State {
     prev_cost: [f64; 4],
     /// Frames in a row the surface gave no texture although it was configured again; see [`recover_surface`].
     surface_failures: u32,
+    /// How long a surface may time out or be occluded before a harness run gives up; `None` for a player's window,
+    /// which a workspace switch or a cover can hide for any time.
+    surface_stall_limit: Option<Duration>,
     /// Since when the surface has only timed out or been occluded without the window being minimized.
     surface_stalled: Option<Instant>,
     /// The next resize takes a new surface from the window: the present mode changed, and a live swapchain is not
@@ -463,7 +466,11 @@ struct UiScript {
     results: Vec<Value>,
 }
 
-/// Device losses one run recovers from before it gives up.
+/// A device that has run this long since its predecessor was lost starts the count of losses again.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const LOSS_FORGOTTEN: Duration = Duration::from_secs(5 * 60);
+
+/// Device losses in a row one run recovers from before it gives up.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const MAX_DEVICE_LOSSES: usize = 3;
 
@@ -473,6 +480,9 @@ const MAX_DEVICE_LOSSES: usize = 3;
 struct GpuLog {
     losses: Vec<String>,
     errors: Vec<String>,
+    /// Losses that count toward [`MAX_DEVICE_LOSSES`]: those since the device last ran for [`LOSS_FORGOTTEN`].
+    recent: usize,
+    last_loss: Option<Instant>,
 }
 
 impl GpuLog {
@@ -480,12 +490,18 @@ impl GpuLog {
     /// Notes that `gpu` was lost during `context`; an error once there have been more losses than a run recovers from.
     fn record_loss(&mut self, gpu: &Gpu, context: &str) -> Result<(), String> {
         let why = gpu.lost().unwrap_or_default();
-        self.errors.extend(gpu.take_errors());
+        // What a device that is gone reported is the loss's own noise, not a second failure.
+        drop(gpu.take_errors());
+        if self.last_loss.is_some_and(|t| t.elapsed() > LOSS_FORGOTTEN) {
+            self.recent = 0;
+        }
+        self.last_loss = Some(Instant::now());
+        self.recent += 1;
         self.losses.push(format!("{context}: {why}"));
-        if self.losses.len() > MAX_DEVICE_LOSSES {
+        if self.recent > MAX_DEVICE_LOSSES {
             return Err(format!(
-                "the graphics device was lost {} times: {}",
-                self.losses.len(),
+                "the graphics device was lost {} times in a row: {}",
+                self.recent,
                 self.losses.join("; ")
             ));
         }
@@ -911,6 +927,8 @@ impl Viewer {
             prev_cost: [0.0; 4],
             surface_failures: 0,
             surface_stalled: None,
+            surface_stall_limit: (self.cli.timed() || self.cli.ui_script.is_some())
+                .then_some(SURFACE_STALL),
             fresh_surface: false,
             gpu_log: std::mem::take(&mut self.gpu_log),
             pending_resize: None,
@@ -1122,8 +1140,15 @@ impl Viewer {
             let vfs = Vfs::open_stock(&self.cli.install, 0)
                 .map_err(|e| format!("cannot open the install: {e}"))?;
             let scene = Scene::new(&gpu, map)?;
-            let mut r = Renderer::new(gpu.clone(), scene, map, TextureCache::new(Some(vfs), 0));
-            r.settings = self.cli.settings;
+            let gfx = Gfx::from_cvars(&st.input.cvars);
+            let mut r = Renderer::new(
+                gpu.clone(),
+                scene,
+                map,
+                TextureCache::new(Some(vfs), gfx.picmip),
+            );
+            r.materials.aniso_max = gfx.aniso_max;
+            r.settings = gfx.settings(self.cli.settings);
             r.warm(format);
             st.renderer = Some(r);
         }
@@ -1179,6 +1204,11 @@ impl Viewer {
             let result = done.and_then(|l| finish_load(&self.cli, &mut self.map, st, &load, l));
             if let Err(e) = result {
                 eprintln!("cannot load {}: {e}", load.map);
+                // A level change on a lost device is loaded again on the new one; a session that was starting ends.
+                #[cfg(not(target_arch = "wasm32"))]
+                if st.net.is_some() && st.gpu.lost().is_some() {
+                    return self.recover_device();
+                }
                 end_session(&mut self.map, st);
             }
         }
@@ -2975,7 +3005,8 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
 
 /// Frames in a row a configured surface may give no texture before the run stops with an error.
 const SURFACE_RETRIES: u32 = 120;
-/// How long a surface may only time out, or be occluded in a window that is not minimized, before the run stops.
+/// How long a surface may only time out, or be occluded in a window that is not minimized, before a timed or scripted
+/// run stops.
 const SURFACE_STALL: Duration = Duration::from_secs(10);
 
 /// What a frame without a texture needs next.
@@ -3007,10 +3038,12 @@ fn recover_surface(
             return Ok(SurfaceAction::Retry);
         }
         let since = *st.surface_stalled.get_or_insert_with(Instant::now);
-        if since.elapsed() > SURFACE_STALL {
+        if let Some(limit) = st.surface_stall_limit
+            && since.elapsed() > limit
+        {
             return Err(st.gpu.explain(&format!(
                 "the window's surface gave no frame for {} s ({outcome:?})",
-                SURFACE_STALL.as_secs()
+                limit.as_secs()
             )));
         }
         return Ok(SurfaceAction::Retry);
@@ -3588,8 +3621,7 @@ mod gpu_log_tests {
         for _ in 0..MAX_DEVICE_LOSSES {
             log.record_loss(&gpu, "test").expect("recoverable");
         }
-        let e = log.record_loss(&gpu, "test").expect_err("too many");
-        assert!(e.contains("lost"), "{e}");
+        assert!(log.record_loss(&gpu, "test").is_err());
         let health = log.report(&gpu);
         assert_eq!(
             health["device_losses"].as_array().map(Vec::len),
