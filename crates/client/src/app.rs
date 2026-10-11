@@ -372,6 +372,8 @@ struct State {
     /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
     /// to explain a slow gap.
     prev_cost: [f64; 4],
+    /// Frames in a row the surface gave no texture although it was configured again; see [`recover_surface`].
+    surface_failures: u32,
     /// A resize that arrived during a map load; see [`apply_resize`].
     pending_resize: Option<(u32, u32)>,
     /// When the page's debug overlay was last given its values.
@@ -460,7 +462,32 @@ impl Viewer {
     /// Window, surface and GPU, where the platform can wait for the adapter.
     #[cfg(not(target_arch = "wasm32"))]
     fn init(&mut self, el: &ActiveEventLoop) -> Result<State, String> {
-        let (window, note) = display::create_window(el, &self.cli.request)?;
+        let request = self.cli.request.clone();
+        match self.init_for(el, &request, None) {
+            // A driver can lose the device while the mode switches; the same window without the switch works.
+            Err(e) if request.kind == display::FullscreenKind::Exclusive => {
+                let borderless = display::Request {
+                    kind: display::FullscreenKind::Borderless,
+                    ..request
+                };
+                let note = format!("exclusive fullscreen failed ({e}); fell back to borderless");
+                eprintln!("{note}");
+                self.init_for(el, &borderless, Some(note))
+                    .map_err(|e2| format!("{e}; borderless: {e2}"))
+            }
+            r => r,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn init_for(
+        &mut self,
+        el: &ActiveEventLoop,
+        request: &display::Request,
+        fallback: Option<String>,
+    ) -> Result<State, String> {
+        let (window, note) = display::create_window(el, request)?;
+        let note = fallback.or(note);
         let window = Arc::new(window);
         let instance = wgpu::Instance::new(instance_descriptor(&self.cli.backend)?);
         let surface = instance
@@ -549,6 +576,9 @@ impl Viewer {
             color_space: Default::default(),
         };
         surface.configure(&gpu.device, &config);
+        if gpu.lost().is_some() {
+            return Err(gpu.explain("the window's surface could not be configured"));
+        }
         let vfs = Vfs::open_stock(&self.cli.install, 0)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         // Native warms it again once the library is loaded (see below); the browser builds its pipelines by frames.
@@ -557,7 +587,7 @@ impl Viewer {
             Some(map) => {
                 #[cfg(target_arch = "wasm32")]
                 crate::web::log("building the scene");
-                let scene = Scene::new(&gpu, map);
+                let scene = Scene::new(&gpu, map)?;
                 #[cfg(target_arch = "wasm32")]
                 crate::web::log("building the renderer");
                 let mut r = Renderer::new(gpu.clone(), scene, map, TextureCache::new(Some(vfs), 0));
@@ -833,6 +863,7 @@ impl Viewer {
             load_report: None,
             autojoin_next: false,
             prev_cost: [0.0; 4],
+            surface_failures: 0,
             pending_resize: None,
             #[cfg(target_arch = "wasm32")]
             overlay_at: now,
@@ -1378,11 +1409,12 @@ impl Viewer {
         let t_acquire = Instant::now();
         let frame = match st.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            _ => {
-                if st.loading.is_none() {
-                    reconfigure(st);
-                }
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
+                st.surface_failures = 0;
+                f
+            }
+            other => {
+                recover_surface(st, &other)?;
                 st.window.request_redraw();
                 return Ok(());
             }
@@ -2786,6 +2818,37 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
         }
         _ => {}
     }
+}
+
+/// Frames in a row a configured surface may give no texture before the run stops with an error.
+const SURFACE_RETRIES: u32 = 120;
+
+/// What to do when the surface gave no texture. A timeout or an occluded (minimized) window only skips the frame;
+/// outdated or invalid state is configured again; a lost surface is made again from the window. A device that was lost
+/// takes everything with it and ends the run with the reason, as does a surface that stays unusable.
+fn recover_surface(st: &mut State, outcome: &wgpu::CurrentSurfaceTexture) -> Result<(), String> {
+    use wgpu::CurrentSurfaceTexture as C;
+    if st.gpu.lost().is_some() {
+        return Err(st.gpu.explain("cannot draw"));
+    }
+    if matches!(outcome, C::Timeout | C::Occluded) || st.loading.is_some() {
+        return Ok(());
+    }
+    st.surface_failures += 1;
+    if st.surface_failures > SURFACE_RETRIES {
+        return Err(st
+            .gpu
+            .explain(&format!("the window's surface gave no frame ({outcome:?})")));
+    }
+    if matches!(outcome, C::Lost) {
+        st.surface = st
+            .gpu
+            .instance
+            .create_surface(st.window.clone())
+            .map_err(|e| format!("cannot make the window's surface again: {e}"))?;
+    }
+    reconfigure(st);
+    Ok(())
 }
 
 /// Configures the surface again. wgpu refuses while the queue still has work to finish (a timestamp read-back that has

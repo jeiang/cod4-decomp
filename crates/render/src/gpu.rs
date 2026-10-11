@@ -2,6 +2,7 @@
 //! Instance, adapter and device creation, and the facts about them the harness reports.
 
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 /// The wgpu device and what it supports. Cheap to share by reference; wgpu handles are reference counted.
 pub struct Gpu {
@@ -15,7 +16,25 @@ pub struct Gpu {
     pub base_vertex: bool,
     /// GPU pass timing via timestamp queries.
     pub timestamps: bool,
+    health: Arc<Health>,
 }
+
+/// What the device reported through its callbacks: wgpu would panic on these without a handler, and a lost device
+/// reports nothing else (calls on it only fail later, far from the cause).
+#[derive(Default)]
+struct Health {
+    lost: Mutex<Option<String>>,
+    errors: Mutex<Vec<String>>,
+}
+
+/// The size a buffer holding `len` bytes is created with: a whole number of copy units, at least one.
+fn padded_size(len: u64) -> u64 {
+    len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+        .max(wgpu::COPY_BUFFER_ALIGNMENT)
+}
+
+/// Errors kept for the message of the failure they led to.
+const KEPT_ERRORS: usize = 8;
 
 #[derive(Debug)]
 pub enum GpuError {
@@ -73,16 +92,36 @@ impl Gpu {
         } else {
             wgpu::Limits::default()
         };
+        let have_limits = adapter.limits();
+        // A world's vertex buffer can pass the 256 MiB default; take what the adapter offers.
+        let mut limits = base.using_resolution(have_limits.clone());
+        limits.max_buffer_size = have_limits.max_buffer_size;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("cod4e"),
                 required_features: want,
-                required_limits: base.using_resolution(adapter.limits()),
+                required_limits: limits,
                 ..Default::default()
             })
             .await
             .map_err(|e| GpuError::Device(e.to_string()))?;
+        let health = Arc::new(Health::default());
+        let h = health.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            let text = format!("{reason:?}: {message}");
+            eprintln!("graphics device lost ({text})");
+            *h.lost.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+        });
+        let h = health.clone();
+        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+            eprintln!("graphics error: {e}");
+            let mut errors = h.errors.lock().unwrap_or_else(|e| e.into_inner());
+            if errors.len() < KEPT_ERRORS {
+                errors.push(e.to_string());
+            }
+        }));
         Ok(Gpu {
+            health,
             instance,
             adapter,
             device,
@@ -91,6 +130,70 @@ impl Gpu {
             bc: want.contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
             timestamps: want.contains(wgpu::Features::TIMESTAMP_QUERY),
         })
+    }
+
+    /// Why the device was lost, once it is: every call on it fails from then on and nothing can be recovered
+    /// without a new device and new resources. wgpu reports the loss from a device poll, so this polls.
+    pub fn lost(&self) -> Option<String> {
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        self.health
+            .lost
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The errors wgpu reported outside any error scope since the last call, oldest first.
+    pub fn take_errors(&self) -> Vec<String> {
+        std::mem::take(&mut *self.health.errors.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// A buffer holding `contents`, or why it could not be made: larger than the device's `max_buffer_size`, the
+    /// device lost, or the creation rejected (the reported errors are named).
+    pub fn buffer_init(
+        &self,
+        label: Option<&str>,
+        contents: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> Result<wgpu::Buffer, String> {
+        let name = label.unwrap_or("unnamed");
+        let size = padded_size(contents.len() as u64);
+        let max = self.device.limits().max_buffer_size;
+        if size > max {
+            return Err(format!(
+                "the buffer '{name}' needs {size} bytes, over the device's limit of {max}"
+            ));
+        }
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label,
+            size,
+            usage,
+            mapped_at_creation: true,
+        });
+        let mapped = buffer.get_mapped_range_mut(..);
+        match mapped {
+            Ok(mut view) => {
+                view.slice(..contents.len()).copy_from_slice(contents);
+                drop(view);
+                buffer.unmap();
+                Ok(buffer)
+            }
+            Err(e) => Err(self.explain(&format!(
+                "cannot create the buffer '{name}' ({size} bytes): {e}"
+            ))),
+        }
+    }
+
+    /// `what` with the device's loss and the errors it reported appended.
+    pub fn explain(&self, what: &str) -> String {
+        let mut out = what.to_owned();
+        if let Some(l) = self.lost() {
+            out += &format!("; the graphics device was lost ({l})");
+        }
+        for e in self.take_errors() {
+            out += &format!("; {}", e.replace('\n', " ").trim());
+        }
+        out
     }
 
     /// Adapter facts for the run manifest.
@@ -124,4 +227,17 @@ pub struct GpuInfo {
     pub features: Vec<String>,
     pub max_texture_dimension_2d: u32,
     pub max_bind_groups: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buffers_are_padded_to_the_copy_unit() {
+        assert_eq!(padded_size(0), wgpu::COPY_BUFFER_ALIGNMENT);
+        assert_eq!(padded_size(1), wgpu::COPY_BUFFER_ALIGNMENT);
+        assert_eq!(padded_size(5), 8);
+        assert_eq!(padded_size(8), 8);
+    }
 }

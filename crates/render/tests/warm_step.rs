@@ -25,7 +25,7 @@ fn spent_budget_skips_draws_until_warm_step_has_built_them() {
         return;
     };
     let gpu = Arc::new(gpu);
-    let scene = Scene::new(&gpu, &data);
+    let scene = Scene::new(&gpu, &data).expect("scene");
     let vfs = Vfs::open_stock(&root, 0).unwrap();
     let mut r = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
