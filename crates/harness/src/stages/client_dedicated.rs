@@ -9,6 +9,7 @@
 use super::client_flythrough::locate_client;
 use super::client_match::{column, hitches, num, spike_share};
 use super::client_models::no_display;
+use super::client_session::profile_args;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::fs::{self, File};
@@ -234,8 +235,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         .arg(format!("127.0.0.1:{port}"))
         .args(["--name", NICK, "--autoplay", "--duration"])
         .arg(SECS.to_string())
-        .args(["--size", "1280x720", "--no-sound", "--config-dir"])
-        .arg(dir.join("config"))
+        .args(["--size", "1280x720", "--no-sound"])
+        .args(profile_args(&dir.join("config")))
         .arg("--out")
         .arg(&dir)
         .stdin(Stdio::null())

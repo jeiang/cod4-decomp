@@ -5,6 +5,7 @@
 //! models are drawn, with textures, at the right place. The scene's two scripted players (a jump, a stance change)
 //! must also have played the legs clips the script calls for, which the client reports. Needs a display and the install; skips cleanly without.
 use super::client_flythrough::locate_client;
+use super::client_session::profile_args;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::fs::{self, File};
@@ -89,6 +90,7 @@ fn shoot(
     let mut child = Command::new(client)
         .arg("--install")
         .arg(install)
+        .args(profile_args(&dir.join("config")))
         .args(["--map", "mp_crash", "--show-models", "--model-count"])
         .arg(players.to_string())
         .args(["--flythrough", "--duration"])

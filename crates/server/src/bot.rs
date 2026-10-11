@@ -177,8 +177,12 @@ impl Brain {
             self.finish(&mut cmd, delta);
             return cmd;
         }
-        // `bot_idle`: bots stand where they are (a stage that needs a quiet round).
+        // `bot_idle`: bots stand where they are (a stage that needs a quiet round), holding +activate where a use
+        // trigger's hint shows (a bot put in a bomb zone by `devtele` plants or defuses).
         if g.cvars.bool("bot_idle") {
+            if use_trigger_hint(g, c.ps.cursor_hint_ent_index) != sim::cm::ENTITYNUM_NONE {
+                cmd.buttons |= button::USE;
+            }
             self.yaw = c.ps.viewangles[1];
             self.finish(&mut cmd, delta);
             return cmd;

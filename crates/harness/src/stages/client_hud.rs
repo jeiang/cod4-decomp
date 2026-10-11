@@ -8,6 +8,7 @@
 //! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
+use super::client_session::profile_args;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::fs::{self, File};
@@ -30,6 +31,7 @@ fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String
         .arg(install)
         .args(["--size", "1280x720", "--no-sound"])
         .args(ARGS)
+        .args(profile_args(&dir.join("config")))
         .arg("--ui-script")
         .arg(STEPS)
         .arg("--out")

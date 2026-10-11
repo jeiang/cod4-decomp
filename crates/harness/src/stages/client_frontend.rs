@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `client-frontend`: the front end as a player meets it, with the install's own player profile. The main menu lists
+//! `client-frontend`: the front end as a player meets it, with the harness's own fully unlocked profile. The main menu lists
 //! every stock row, Select Profile opens the profile list, the profile's unlocks make Create a Class open its
 //! menu, the join menu cycles its server source and game mode (a favorite shows until a game mode is chosen, and the
 //! internet list is empty), and Start New Server's game mode chooser steps through the modes in the original's order. The install's
-//! `players/` folder must be exactly as it was after the run. Needs a display and an install that has a
-//! `players/profiles/` folder with an unlocked profile; skips without.
+//! `players/` folder must be exactly as it was after the run. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::run_client;
@@ -112,14 +111,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         return Ok(StageReport::new(NAME, Status::Skipped).with_reason("no install"));
     };
     let players = install.join("players");
-    if !players.join("profiles").is_dir() {
-        return Ok(StageReport::new(NAME, Status::Skipped)
-            .with_reason("the install has no players/profiles folder"));
-    }
     if let Some(r) = no_display(&client, NAME)? {
         return Ok(r);
     }
-    let before = snapshot(&players)?;
+    let before = snapshot(&players).unwrap_or_default();
     let mut out = StageReport::new(NAME, Status::Passed);
     let lan = LanServer::start(install);
     let steps = STEPS.replacen(
@@ -163,12 +158,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     }
     drop(lan);
-    if snapshot(&players)? != before {
+    if snapshot(&players).unwrap_or_default() != before {
         out.status = Status::Failed;
         out.reason = Some("the run changed the install's players folder".into());
     }
     out.notes.push(
-        "the main menu, Select Profile, Create a Class with the install's profile, and the game mode order; the install's players folder is untouched"
+        "the main menu, Select Profile, Create a Class with the harness's unlocked profile, and the game mode order; the install's players folder is untouched"
             .into(),
     );
     Ok(out)

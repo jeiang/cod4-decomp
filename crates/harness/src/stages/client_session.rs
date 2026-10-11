@@ -25,6 +25,16 @@ click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=3,sho
 const OBJECTIVE_ARGS: &[&str] = &["--listen", "--gametype", "dom", "--bots", "3"];
 const OBJECTIVE_STEPS: &str = "ingame=120,wait=8,shot=objectives";
 
+/// The arguments that give a client run the harness's own fully unlocked profile in `config_dir`, so it never reads or
+/// writes the tester's profile, config or the install's profiles (those are listed, never active).
+pub(super) fn profile_args(config_dir: &Path) -> [&std::ffi::OsStr; 3] {
+    [
+        "--config-dir".as_ref(),
+        config_dir.as_os_str(),
+        "--harness-profile".as_ref(),
+    ]
+}
+
 /// Runs the client with `args` and `--ui-script steps`; returns the parsed `ui-script.json`.
 pub(super) fn run_client(
     client: &Path,
@@ -42,9 +52,7 @@ pub(super) fn run_client(
         .arg(install)
         .args(["--size", "1280x720", "--no-sound", "--bots", "3"])
         .args(args)
-        // The player profile and config live next to the run's output, never in the tester's own folders.
-        .arg("--config-dir")
-        .arg(config_dir)
+        .args(profile_args(config_dir))
         .arg("--ui-script")
         .arg(steps)
         .arg("--out")
