@@ -798,7 +798,19 @@ impl Viewer {
             sh.ui.assets.add_weapon_icons(&n.weapon_defs());
             n.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
         }
-        let (profiles, stats) = Profiles::open(&install.root, input.config_dir(), "default");
+        let (profiles, stats) = match self
+            .cli
+            .config_dir
+            .clone()
+            .filter(|_| self.cli.harness_profile)
+        {
+            Some(dir) => {
+                crate::profile::seed_harness_profile(&dir)
+                    .map_err(|e| format!("cannot seed the harness profile: {e}"))?;
+                Profiles::open_isolated(dir)
+            }
+            None => Profiles::open(&install.root, input.config_dir(), "default"),
+        };
         let (read, write) = profiles.config_paths();
         input.use_profile(read, write);
         // A bare `--listen` started its server before the config was read: it learns `bot_count` now.

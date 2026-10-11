@@ -6,6 +6,7 @@
 //! `cod4e --list-display-modes --json` describes the GPU and monitors; each
 //! run is `cod4e --install .. --map mp_crash --flythrough ..` writing
 //! `frames.raw.csv`, a video, `screenshot.png` and `client.json` into `--out`.
+use super::client_session::profile_args;
 use crate::perf::{FrameRecorder, FrameSample};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde::Deserialize;
@@ -348,6 +349,7 @@ fn run_one(
     let mut child = Command::new(&opts.client)
         .arg("--install")
         .arg(install)
+        .args(profile_args(&ctx.dir.join("config")))
         .args([
             "--map",
             plan.map,

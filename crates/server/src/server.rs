@@ -126,6 +126,7 @@ pub const COMMANDS: &[&str] = &[
     "expect",
     "until",
     "devtele",
+    "devrun",
     "clientkick",
     "tempbanclient",
     "devhardpoint",
@@ -1327,6 +1328,14 @@ impl Server {
                 if have < min {
                     return Err(format!("until {what} {min}: only {have} after {secs} s"));
                 }
+            }
+            // Test hook: `devrun <seconds>` runs the server that long, so a script can let what it set up happen
+            // (a teleported bot picks the bomb up) before its next step.
+            "devrun" => {
+                let secs = arg(1).ok_or("usage: devrun <seconds>")?;
+                self.run_frames(
+                    cvar::parse_int(secs).max(0) as u32 * 1000 / self.frame_ms.max(1) as u32,
+                );
             }
             // Test hook: `devtele <client|human> <x> <y> <z>` puts the player there, standing still;
             // `devtele <client|human> <name>` puts it on the floor in the first live trigger whose

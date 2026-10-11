@@ -251,7 +251,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "headless-sab-objective",
-        description: "headless server, 16 bots plant a Sabotage bomb and defuse one",
+        description: "headless server, idle bots put in place plant a Sabotage bomb and a bot of the other team defuses it",
         needs_install: false,
         timeout: Duration::from_secs(5 * MINUTES),
         default: true,
@@ -275,7 +275,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "headless-airstrike",
-        description: "headless server, bots earn the airstrike, pick a point on the map and call it in",
+        description: "headless server, a bot given the airstrike selects it, picks a point on the map and calls it in",
         needs_install: false,
         timeout: Duration::from_secs(5 * MINUTES),
         default: true,
@@ -395,7 +395,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-frontend",
-        description: "the front end with the install's own player profile: the main menu rows, Select Profile, Create a Class opening, the game mode order, and the install's players folder unchanged",
+        description: "the front end with the harness's own unlocked profile: the main menu rows, Select Profile, Create a Class opening, the game mode order, and the install's players folder unchanged",
         needs_install: false,
         timeout: Duration::from_secs(4 * MINUTES),
         default: true,

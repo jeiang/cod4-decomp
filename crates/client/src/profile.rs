@@ -120,6 +120,40 @@ pub fn default_stats() -> Vec<i32> {
     s
 }
 
+/// The profile name `--harness-profile` seeds.
+pub const HARNESS_PROFILE: &str = "harness";
+
+/// A new profile's stats with every perk, weapon and attachment unlocked, Create a Class open, and enough experience
+/// for the top rank: what a harness run needs so no menu is locked.
+pub fn unlocked_stats() -> Vec<i32> {
+    let mut s = default_stats();
+    // What the stock menus test: Create a Class is open from stat 260 (the original sets it at rank 4), custom class
+    // slot n is listed from the slot's first stat (200, 210 ... 240), the fourth and fifth stock classes from 257 and 258.
+    for i in (101..=200)
+        .chain([210, 220, 230, 240, 257, 258, 260])
+        .chain(270..=279)
+    {
+        if s[i] == 0 {
+            s[i] = 1;
+        }
+    }
+    s[2301] = 1_000_000;
+    s
+}
+
+/// Makes `<config_dir>/players/profiles/harness` (the stats of [`unlocked_stats`], left alone if it exists, so what
+/// a run saves is there for the next one) the active profile of that folder. Only the user's folder is written.
+pub fn seed_harness_profile(config_dir: &Path) -> io::Result<()> {
+    let root = config_dir.join("players").join("profiles");
+    let dir = root.join(HARNESS_PROFILE);
+    std::fs::create_dir_all(&dir)?;
+    let mpdata = dir.join("mpdata");
+    if !mpdata.exists() {
+        std::fs::write(mpdata, encode(&unlocked_stats()))?;
+    }
+    std::fs::write(root.join("active.txt"), HARNESS_PROFILE)
+}
+
 fn crc32(data: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in data {
@@ -256,8 +290,27 @@ impl Profiles {
     /// asks for a name; there is no way to ask before the menus exist).
     /// Returns the profiles and the active profile's stats.
     pub fn open(install: &Path, config_dir: Option<PathBuf>, fallback: &str) -> (Self, Vec<i32>) {
+        Self::open_roots(
+            Some(install.join("players").join("profiles")),
+            config_dir,
+            fallback,
+        )
+    }
+
+    /// The harness's view (`--harness-profile`): only the profiles in `config_dir`, none of the install's, so the menus
+    /// list just the seeded profile (with several profiles the stock main menu asks which one to use) and a run can
+    /// never load a profile it did not make.
+    pub fn open_isolated(config_dir: PathBuf) -> (Self, Vec<i32>) {
+        Self::open_roots(None, Some(config_dir), "default")
+    }
+
+    fn open_roots(
+        install_root: Option<PathBuf>,
+        config_dir: Option<PathBuf>,
+        fallback: &str,
+    ) -> (Self, Vec<i32>) {
         let mut p = Profiles {
-            install_root: Some(install.join("players").join("profiles")),
+            install_root,
             user_root: config_dir.map(|d| d.join("players").join("profiles")),
             active: String::new(),
             saved: Vec::new(),
@@ -492,6 +545,41 @@ mod tests {
         let d = std::env::temp_dir().join(format!("cod4e-profile-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn the_unlocked_profile_opens_create_a_class_and_every_class_slot_and_keeps_the_setups() {
+        let (def, all) = (default_stats(), unlocked_stats());
+        for i in [200, 210, 220, 230, 240, 257, 258, 260] {
+            assert_eq!((def[i], all[i]), (0, 1), "stat {i} opens a menu item");
+        }
+        for first in (200..250).step_by(10) {
+            let items = first + 1..first + 9;
+            assert_eq!(all[items.clone()], def[items], "slot {first}'s setup stays");
+        }
+    }
+
+    #[test]
+    fn the_isolated_harness_profile_is_the_only_one_and_keeps_its_saved_stats() {
+        let root = tmp("harness");
+        let install = root.join("install");
+        let cfg = root.join("cfg");
+        std::fs::create_dir_all(install.join("players/profiles/Ann")).unwrap();
+        std::fs::write(install.join("players/profiles/Ann/mpdata"), b"iwm0").unwrap();
+        std::fs::write(install.join("players/profiles/active.txt"), "Ann").unwrap();
+        seed_harness_profile(&cfg).unwrap();
+        let (mut p, stats) = Profiles::open_isolated(cfg.clone());
+        assert_eq!(p.active(), HARNESS_PROFILE);
+        assert_eq!(p.list(), [HARNESS_PROFILE]);
+        assert_eq!(stats, unlocked_stats());
+        let mut changed = stats.clone();
+        changed[2301] = 7;
+        assert!(p.save_if_changed(&changed).unwrap());
+        seed_harness_profile(&cfg).unwrap();
+        let (p, stats) = Profiles::open_isolated(cfg);
+        assert_eq!(p.active(), HARNESS_PROFILE);
+        assert_eq!(stats[2301], 7);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

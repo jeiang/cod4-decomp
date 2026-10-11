@@ -5,6 +5,7 @@
 //! image is missing. Needs a display and the install; skips cleanly without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
+use super::client_session::profile_args;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::fs::{self, File};
@@ -42,7 +43,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut child = Command::new(&client)
         .arg("--install")
         .arg(install)
-        .args(["--size", "1280x720", "--ui-tour"])
+        .args(["--size", "1280x720"])
+        .args(profile_args(&ctx.dir.join("config")))
+        .arg("--ui-tour")
         .arg(&dir)
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)

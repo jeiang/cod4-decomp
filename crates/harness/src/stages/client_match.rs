@@ -8,6 +8,7 @@
 //! install; skips cleanly without.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
+use super::client_session::profile_args;
 use crate::perf::Percentiles;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
@@ -134,6 +135,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut child = Command::new(&client)
         .arg("--install")
         .arg(install)
+        .args(profile_args(&dir.join("config")))
         .args(["--map", "mp_crash", "--listen", "--bots"])
         .arg(BOTS.to_string())
         .args(["--autoplay", "--duration"])
