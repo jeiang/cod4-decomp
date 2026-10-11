@@ -117,6 +117,16 @@ impl Recorder {
         })
     }
 
+    /// The device was replaced: the staging buffers belonged to the old one. Frames still being read back are lost
+    /// (counted as dropped); the next `capture` makes new buffers.
+    pub fn reset_gpu(&mut self) {
+        self.dropped += self.pending.len() as u64;
+        self.pending.clear();
+        self.free.clear();
+        self.ring.clear();
+        self.format = None;
+    }
+
     /// Record at most one frame per `1/fps`; returns false when skipped (too soon, or the
     /// readback ring / encoder is saturated, in which case it is counted in `dropped`).
     pub fn capture(

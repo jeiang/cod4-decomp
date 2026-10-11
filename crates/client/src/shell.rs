@@ -435,6 +435,22 @@ impl Shell {
         Ok(shell)
     }
 
+    /// The device was replaced: the menus' pipelines and every texture uploaded so far belonged to the old one. They
+    /// are made again, the images as the menus ask for them.
+    pub fn replace_gpu(
+        &mut self,
+        gpu: Arc<Gpu>,
+        format: wgpu::TextureFormat,
+        install: &std::path::Path,
+    ) -> Result<(), String> {
+        let vfs = ::assets::vfs::Vfs::open_stock(install, 0)
+            .map_err(|e| format!("cannot open the install: {e}"))?;
+        self.ui2d = Ui2d::new(gpu, format);
+        self.cache = TextureCache::new(Some(vfs), 0);
+        self.images.clear();
+        Ok(())
+    }
+
     /// Installs the player profiles and the active one's stats, and tells the menus.
     pub fn set_profiles(&mut self, input: &mut Input, profiles: Profiles, stats: Vec<i32>) {
         self.st.stats = stats;

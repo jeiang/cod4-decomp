@@ -19,8 +19,8 @@ pub struct Gpu {
     health: Arc<Health>,
 }
 
-/// What the device reported through its callbacks: wgpu would panic on these without a handler, and a lost device
-/// reports nothing else (calls on it only fail later, far from the cause).
+/// What the device reported through its callbacks: a lost device reports nothing else (calls on it only fail later,
+/// far from the cause), and a window's device keeps its errors instead of panicking.
 #[derive(Default)]
 struct Health {
     lost: Mutex<Option<String>>,
@@ -112,14 +112,18 @@ impl Gpu {
             eprintln!("graphics device lost ({text})");
             *h.lost.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
         });
-        let h = health.clone();
-        device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-            eprintln!("graphics error: {e}");
-            let mut errors = h.errors.lock().unwrap_or_else(|e| e.into_inner());
-            if errors.len() < KEPT_ERRORS {
-                errors.push(e.to_string());
-            }
-        }));
+        // A window outlives a bad frame, so its device keeps the errors (the client reports them and the harness fails
+        // on any). Headless users (tests, tools) keep wgpu's own handler: an error there panics, as it should.
+        if surface.is_some() {
+            let h = health.clone();
+            device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
+                eprintln!("graphics error: {e}");
+                let mut errors = h.errors.lock().unwrap_or_else(|e| e.into_inner());
+                if errors.len() < KEPT_ERRORS {
+                    errors.push(e.to_string());
+                }
+            }));
+        }
         Ok(Gpu {
             health,
             instance,

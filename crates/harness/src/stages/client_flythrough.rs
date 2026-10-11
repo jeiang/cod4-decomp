@@ -311,6 +311,15 @@ struct ClientJson {
     frames: Option<u64>,
     zone_load_ms: Option<f64>,
     world: Option<WorldJson>,
+    mode: Option<ModeJson>,
+    #[serde(default)]
+    gpu_health: Value,
+}
+
+#[derive(Deserialize)]
+struct ModeJson {
+    /// What the window was, not what was asked for.
+    fullscreen: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -444,6 +453,30 @@ fn consume(
     }
 
     let mut problems = Vec::new();
+    // An exclusive run that was not one tests nothing it is there for.
+    if plan.fullscreen == Fullscreen::Exclusive {
+        let actual = cj.mode.as_ref().and_then(|m| m.fullscreen.as_deref());
+        if actual != Some("exclusive") {
+            problems.push(format!(
+                "asked for exclusive fullscreen, the window was {}",
+                actual.unwrap_or("unknown")
+            ));
+        }
+    }
+    if let Some(p) = super::client_session::gpu_problem(&cj.gpu_health) {
+        problems.push(p);
+    }
+    if let Some(losses) = cj.gpu_health["device_losses"]
+        .as_array()
+        .filter(|l| !l.is_empty())
+    {
+        report
+            .metrics
+            .insert(format!("{slug}.device_losses"), losses.len() as f64);
+        report.notes.push(format!(
+            "{slug}: graphics device lost and recovered: {losses:?}"
+        ));
+    }
     match &cj.video {
         Some(v) => {
             let size = fs::metadata(out.join(&v.file)).map_or(0, |m| m.len());
