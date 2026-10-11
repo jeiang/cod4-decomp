@@ -272,7 +272,9 @@ impl ApplicationHandler<Ready> for Lister {
 
 struct State {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
+    /// Only ever `None` while it is being replaced: a window takes one surface at a time (Wayland refuses a second
+    /// one's swapchain presenting with a fifo), so the old one is dropped before the new is made.
+    surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     gpu: Arc<Gpu>,
     renderer: Option<Renderer>,
@@ -395,6 +397,14 @@ struct State {
     /// Milliseconds of each frame's [`Renderer::warm_step`].
     #[cfg(target_arch = "wasm32")]
     warm_ms: Vec<f64>,
+}
+
+impl State {
+    fn surface(&self) -> &wgpu::Surface<'static> {
+        self.surface
+            .as_ref()
+            .expect("the surface is only absent while it is being replaced")
+    }
 }
 
 /// The longest gap between two presented frames while a map loads.
@@ -821,7 +831,7 @@ impl Viewer {
         Ok(State {
             tour,
             window,
-            surface,
+            surface: Some(surface),
             config,
             gpu,
             renderer,
@@ -1005,7 +1015,10 @@ impl ApplicationHandler<Ready> for Viewer {
                 if st.loading.is_some() {
                     st.pending_resize = Some((s.width, s.height));
                 } else {
-                    apply_resize(st, (s.width, s.height));
+                    if let Err(e) = apply_resize(st, (s.width, s.height)) {
+                        self.error = Some(e);
+                        el.exit();
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -1058,6 +1071,8 @@ impl Viewer {
         let old = st.gpu.clone();
         st.gpu_log.record_loss(&old, "while running")?;
         let window = st.window.clone();
+        // The window takes one surface at a time.
+        st.surface = None;
         // The new device must configure the surface the window has now: a mode that cannot be had is an error.
         let (surface, gpu) = loop {
             let (surface, gpu) = open_gpu(&self.cli, &window)?;
@@ -1078,7 +1093,7 @@ impl Viewer {
         let format = st.config.format;
         // Everything on the old device goes before anything is built on the new one.
         st.renderer = None;
-        st.surface = surface;
+        st.surface = Some(surface);
         st.gpu = gpu.clone();
         st.gamma = render::gamma::Gamma::new(&gpu, format);
         if let Some(r) = st.recorder.as_mut() {
@@ -1515,10 +1530,10 @@ impl Viewer {
         if st.loading.is_none()
             && let Some(size) = st.pending_resize.take()
         {
-            apply_resize(st, size);
+            apply_resize(st, size)?;
         }
         let t_acquire = Instant::now();
-        let frame = match st.surface.get_current_texture() {
+        let frame = match st.surface().get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
                 st.surface_failures = 0;
@@ -2552,7 +2567,11 @@ fn script_step(st: &mut State) -> bool {
                 "fullscreen" => Some(u8::from(st.window.fullscreen().is_some()).to_string()),
                 // 1 when the surface does not wait for the display, or has no mode that does not.
                 "uncapped" => {
-                    let caps = st.surface.get_capabilities(&st.gpu.adapter);
+                    let caps = st
+                        .surface
+                        .as_ref()
+                        .map(|s| s.get_capabilities(&st.gpu.adapter))
+                        .unwrap_or_default();
                     let free = caps
                         .present_modes
                         .iter()
@@ -3016,12 +3035,14 @@ fn fresh_surface(st: &mut State) -> Result<(), String> {
     if let Some(r) = st.renderer.as_mut() {
         record_gpu(&mut st.gpu_ms, r.flush_gpu_times());
     }
-    st.surface = st
+    st.surface = None;
+    let surface = st
         .gpu
         .instance
         .create_surface(st.window.clone())
         .map_err(|e| format!("cannot make the window's surface again: {e}"))?;
-    st.surface.configure(&st.gpu.device, &st.config);
+    surface.configure(&st.gpu.device, &st.config);
+    st.surface = Some(surface);
     Ok(())
 }
 
@@ -3031,7 +3052,7 @@ fn reconfigure(st: &mut State) {
     if let Some(r) = st.renderer.as_mut() {
         record_gpu(&mut st.gpu_ms, r.flush_gpu_times());
     }
-    st.surface.configure(&st.gpu.device, &st.config);
+    st.surface().configure(&st.gpu.device, &st.config);
 }
 
 /// What the renderer draws for a light an effect added: colour is bytes there, and an element with a direction is a
@@ -3052,7 +3073,7 @@ fn vid_restart(cli: &Cli, st: &mut State) {
     if let Some(note) = display::apply(&st.window, &g.request(&cli.request)) {
         st.notes.push(note);
     }
-    let caps = st.surface.get_capabilities(&st.gpu.adapter);
+    let caps = st.surface().get_capabilities(&st.gpu.adapter);
     let (mode, _) = pick_present(g.present(&cli.present), &caps.present_modes);
     let mut reconfigure_surface = mode != st.config.present_mode;
     // The swapchain is not handed over to another present mode: the surface is taken again (see `apply_resize`).
@@ -3100,15 +3121,12 @@ fn view_fov_4_3(st: &State) -> f32 {
     )
 }
 
-fn apply_resize(st: &mut State, (w, h): (u32, u32)) {
+fn apply_resize(st: &mut State, (w, h): (u32, u32)) -> Result<(), String> {
     let resized = (w, h) != (st.config.width, st.config.height);
     st.config.width = w;
     st.config.height = h;
     if std::mem::take(&mut st.fresh_surface) {
-        if let Err(e) = fresh_surface(st) {
-            st.notes.push(e);
-            reconfigure(st);
-        }
+        fresh_surface(st)?;
     } else if resized {
         reconfigure(st);
     }
@@ -3116,6 +3134,7 @@ fn apply_resize(st: &mut State, (w, h): (u32, u32)) {
     if let Some(sh) = st.shell.as_mut() {
         sh.resize(w, h);
     }
+    Ok(())
 }
 
 /// Starts (`join` of `None`) or joins a match from the menus: begins loading the map in the background. The window
