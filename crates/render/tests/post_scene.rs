@@ -125,7 +125,7 @@ fn distortion_samples_the_scene_copy_and_soft_particles_draw_float_z() {
         return;
     };
     let gpu = Arc::new(gpu);
-    let scene = Scene::new(&gpu, &data);
+    let scene = Scene::new(&gpu, &data).expect("scene");
     let vfs = Vfs::open_stock(&root, 0).unwrap();
     let mut r = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
     r.settings.aa_samples = 1;
@@ -240,7 +240,7 @@ fn a_smoke_sheet_fades_out_where_it_meets_the_floor() {
         return;
     };
     let gpu = Arc::new(gpu);
-    let scene = Scene::new(&gpu, &data);
+    let scene = Scene::new(&gpu, &data).expect("scene");
     let vfs = Vfs::open_stock(&root, 0).unwrap();
     let mut r = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
     r.settings.aa_samples = 1;

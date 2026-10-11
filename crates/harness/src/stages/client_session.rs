@@ -77,8 +77,23 @@ pub(super) fn run_client(
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
+/// Why a run's graphics device is a failure, or `None`: any error it reported outside a scope is. A device that was
+/// lost and made again is no failure of the run (it is in the report), but one that could not be is.
+pub(super) fn gpu_problem(health: &Value) -> Option<String> {
+    let errors: Vec<&str> = health["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    (!errors.is_empty()).then(|| format!("graphics errors: {}", errors.join("; ")))
+}
+
 /// Why a run failed, or `None` when every step passed and the player spawned.
 pub(super) fn verdict(report: &Value) -> Option<String> {
+    if let Some(w) = gpu_problem(&report["gpu_health"]) {
+        return Some(w);
+    }
     let failed: Vec<String> = report["steps"]
         .as_array()
         .into_iter()
@@ -269,5 +284,16 @@ mod tests {
         let mut h = good();
         h["weapon"]["clip"] = json!(0);
         assert!(hud_problem(&h).unwrap().contains("ammunition"));
+    }
+
+    #[test]
+    fn reported_graphics_errors_fail_a_run_and_a_recovered_loss_does_not() {
+        assert_eq!(gpu_problem(&Value::Null), None);
+        assert_eq!(
+            gpu_problem(&json!({"device_losses": ["while running: Destroyed"], "errors": []})),
+            None
+        );
+        let bad = json!({"device_losses": [], "errors": ["Buffer is invalid"]});
+        assert!(gpu_problem(&bad).is_some());
     }
 }

@@ -194,22 +194,22 @@ pub struct Scene {
 }
 
 impl Scene {
-    pub fn new(gpu: &Gpu, data: &MapData) -> Scene {
+    /// Fails when the world's buffers cannot be created (see [`Gpu::buffer_init`]).
+    pub fn new(gpu: &Gpu, data: &MapData) -> Result<Scene, String> {
         let world = data.world.clone();
-        let dev = &gpu.device;
         let mut indices = world.indices.clone();
         indices.resize(indices.len().next_multiple_of(2), 0);
         let world_mesh = Arc::new(Mesh {
-            vb: dev.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("world vertices"),
-                contents: &world.vertices,
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-            ib: dev.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("world indices"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            }),
+            vb: gpu.buffer_init(
+                Some("world vertices"),
+                &world.vertices,
+                wgpu::BufferUsages::VERTEX,
+            )?,
+            ib: gpu.buffer_init(
+                Some("world indices"),
+                bytemuck::cast_slice(&indices),
+                wgpu::BufferUsages::INDEX,
+            )?,
         });
         let collision = data
             .clipmap
@@ -229,7 +229,7 @@ impl Scene {
                 Vec3::from(world.sun_color_from_bsp),
             ),
         };
-        Scene {
+        Ok(Scene {
             world,
             world_mesh,
             lighting,
@@ -240,7 +240,7 @@ impl Scene {
             sun_dir,
             sun_color,
             models: HashMap::new(),
-        }
+        })
     }
 
     /// Starts a frame of dynamic lighting: releases last frame's entries.
@@ -309,20 +309,17 @@ impl Scene {
         let mut idx: Vec<u16> = s.tri_indices.to_vec();
         idx.resize(idx.len().next_multiple_of(2), 0);
         let mesh = Arc::new(Mesh {
-            vb: gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: model.name.as_deref(),
-                    contents: &s.verts,
-                    usage: wgpu::BufferUsages::VERTEX,
-                }),
-            ib: gpu
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: model.name.as_deref(),
-                    contents: bytemuck::cast_slice(&idx),
-                    usage: wgpu::BufferUsages::INDEX,
-                }),
+            // A device that is gone has no model to draw; the frame loop finds the loss.
+            vb: gpu.buffer_init_or_none(
+                model.name.as_deref(),
+                &s.verts,
+                wgpu::BufferUsages::VERTEX,
+            )?,
+            ib: gpu.buffer_init_or_none(
+                model.name.as_deref(),
+                bytemuck::cast_slice(&idx),
+                wgpu::BufferUsages::INDEX,
+            )?,
         });
         self.models.insert(key, mesh.clone());
         Some(mesh)

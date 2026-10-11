@@ -30,7 +30,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use web_time::{Duration, Instant};
-use wgpu::util::DeviceExt;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
@@ -3391,13 +3390,11 @@ fn counting_mesh(gpu: &Gpu) -> Mesh {
             usage: wgpu::BufferUsages::VERTEX,
             mapped_at_creation: false,
         }),
-        ib: gpu
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("counting indices"),
-                contents: bytemuck::cast_slice(&idx),
-                usage: wgpu::BufferUsages::INDEX,
-            }),
+        ib: gpu.buffer_init_or_empty(
+            Some("counting indices"),
+            bytemuck::cast_slice(&idx),
+            wgpu::BufferUsages::INDEX,
+        ),
     }
 }
 

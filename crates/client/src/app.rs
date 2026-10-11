@@ -80,6 +80,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
         load_ms,
         st: None,
         error: None,
+        gpu_log: GpuLog::default(),
         proxy: None,
         #[cfg(target_arch = "wasm32")]
         starting: false,
@@ -271,7 +272,9 @@ impl ApplicationHandler<Ready> for Lister {
 
 struct State {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
+    /// Only ever `None` while it is being replaced: a window takes one surface at a time (Wayland refuses a second
+    /// one's swapchain presenting with a fifo), so the old one is dropped before the new is made.
+    surface: Option<wgpu::Surface<'static>>,
     config: wgpu::SurfaceConfiguration,
     gpu: Arc<Gpu>,
     renderer: Option<Renderer>,
@@ -372,6 +375,18 @@ struct State {
     /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
     /// to explain a slow gap.
     prev_cost: [f64; 4],
+    /// Frames in a row the surface gave no texture although it was configured again; see [`recover_surface`].
+    surface_failures: u32,
+    /// How long a surface may time out or be occluded before a harness run gives up; `None` for a player's window,
+    /// which a workspace switch or a cover can hide for any time.
+    surface_stall_limit: Option<Duration>,
+    /// Since when the surface has only timed out or been occluded without the window being minimized.
+    surface_stalled: Option<Instant>,
+    /// The next resize takes a new surface from the window: the present mode changed, and a live swapchain is not
+    /// handed over to another mode (see [`vid_restart`]).
+    fresh_surface: bool,
+    /// What the graphics device went through: losses and recoveries, and errors it reported.
+    gpu_log: GpuLog,
     /// A resize that arrived during a map load; see [`apply_resize`].
     pending_resize: Option<(u32, u32)>,
     /// When the page's debug overlay was last given its values.
@@ -385,6 +400,14 @@ struct State {
     /// Milliseconds of each frame's [`Renderer::warm_step`].
     #[cfg(target_arch = "wasm32")]
     warm_ms: Vec<f64>,
+}
+
+impl State {
+    fn surface(&self) -> &wgpu::Surface<'static> {
+        self.surface
+            .as_ref()
+            .expect("the surface is only absent while it is being replaced")
+    }
 }
 
 /// The longest gap between two presented frames while a map loads.
@@ -443,12 +466,76 @@ struct UiScript {
     results: Vec<Value>,
 }
 
+/// A device that has run this long since its predecessor was lost starts the count of losses again.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const LOSS_FORGOTTEN: Duration = Duration::from_secs(5 * 60);
+
+/// Device losses in a row one run recovers from before it gives up.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const MAX_DEVICE_LOSSES: usize = 3;
+
+/// What the graphics device went through, for the run's report: the losses (each one was recovered from, or ended the
+/// run) and the errors wgpu reported outside any scope, which the harness fails on.
+#[derive(Default)]
+struct GpuLog {
+    losses: Vec<String>,
+    errors: Vec<String>,
+    /// Losses that count toward [`MAX_DEVICE_LOSSES`]: those since the device last ran for [`LOSS_FORGOTTEN`].
+    recent: usize,
+    last_loss: Option<Instant>,
+}
+
+impl GpuLog {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    /// Notes that `gpu` was lost during `context`; an error once there have been more losses than a run recovers from.
+    fn record_loss(&mut self, gpu: &Gpu, context: &str) -> Result<(), String> {
+        let why = gpu.lost().unwrap_or_default();
+        // What a device that is gone reported is the loss's own noise, not a second failure.
+        drop(gpu.take_errors());
+        if self.last_loss.is_some_and(|t| t.elapsed() > LOSS_FORGOTTEN) {
+            self.recent = 0;
+        }
+        self.last_loss = Some(Instant::now());
+        self.recent += 1;
+        self.losses.push(format!("{context}: {why}"));
+        if self.recent > MAX_DEVICE_LOSSES {
+            return Err(format!(
+                "the graphics device was lost {} times in a row: {}",
+                self.recent,
+                self.losses.join("; ")
+            ));
+        }
+        eprintln!("recovering from the lost graphics device ({context}: {why})");
+        Ok(())
+    }
+
+    /// The report's `gpu_health`, with what `gpu` reported since.
+    fn report(&mut self, gpu: &Gpu) -> Value {
+        self.errors.extend(gpu.take_errors());
+        json!({"device_losses": self.losses, "errors": self.errors})
+    }
+}
+
+/// A new instance, the window's surface on it and a device for both.
+#[cfg(not(target_arch = "wasm32"))]
+fn open_gpu(cli: &Cli, window: &Arc<Window>) -> Result<(wgpu::Surface<'static>, Arc<Gpu>), String> {
+    let instance = wgpu::Instance::new(instance_descriptor(&cli.backend)?);
+    let surface = instance
+        .create_surface(window.clone())
+        .map_err(|e| e.to_string())?;
+    let mut gpu = Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?;
+    gpu.bc &= !cli.no_bc;
+    Ok((surface, Arc::new(gpu)))
+}
+
 struct Viewer {
     cli: Cli,
     map: Option<MapData>,
     load_ms: f64,
     st: Option<State>,
     error: Option<String>,
+    /// Device losses and errors from before the state exists (the start-up retries); moved into it.
+    gpu_log: GpuLog,
     /// Where the GPU arrives on the web.
     proxy: Option<winit::event_loop::EventLoopProxy<Ready>>,
     /// The browser window is open and the GPU has been asked for.
@@ -457,24 +544,26 @@ struct Viewer {
 }
 
 impl Viewer {
-    /// Window, surface and GPU, where the platform can wait for the adapter.
+    /// Window, surface and GPU, where the platform can wait for the adapter. A device that is lost while the
+    /// surface is configured (the mode switch of exclusive fullscreen can do it) is made again on the same window.
     #[cfg(not(target_arch = "wasm32"))]
     fn init(&mut self, el: &ActiveEventLoop) -> Result<State, String> {
         let (window, note) = display::create_window(el, &self.cli.request)?;
         let window = Arc::new(window);
-        let instance = wgpu::Instance::new(instance_descriptor(&self.cli.backend)?);
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|e| e.to_string())?;
-        let mut gpu = Gpu::with_instance(instance, Some(&surface)).map_err(|e| e.to_string())?;
-        gpu.bc &= !self.cli.no_bc;
-        let gpu = Arc::new(gpu);
-        self.finish_init(Ready {
-            window,
-            surface,
-            gpu,
-            note,
-        })
+        loop {
+            let (surface, gpu) = open_gpu(&self.cli, &window)?;
+            let probe = gpu.clone();
+            let ready = Ready {
+                window: window.clone(),
+                surface,
+                gpu,
+                note: note.clone(),
+            };
+            match self.finish_init(ready) {
+                Err(e) if probe.lost().is_some() => self.gpu_log.record_loss(&probe, &e)?,
+                result => return result,
+            }
+        }
     }
 
     /// The browser hands out the adapter and device asynchronously: open the window now and finish in
@@ -549,6 +638,9 @@ impl Viewer {
             color_space: Default::default(),
         };
         surface.configure(&gpu.device, &config);
+        if gpu.lost().is_some() {
+            return Err(gpu.explain("the window's surface could not be configured"));
+        }
         let vfs = Vfs::open_stock(&self.cli.install, 0)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         // Native warms it again once the library is loaded (see below); the browser builds its pipelines by frames.
@@ -557,7 +649,7 @@ impl Viewer {
             Some(map) => {
                 #[cfg(target_arch = "wasm32")]
                 crate::web::log("building the scene");
-                let scene = Scene::new(&gpu, map);
+                let scene = Scene::new(&gpu, map)?;
                 #[cfg(target_arch = "wasm32")]
                 crate::web::log("building the renderer");
                 let mut r = Renderer::new(gpu.clone(), scene, map, TextureCache::new(Some(vfs), 0));
@@ -755,7 +847,7 @@ impl Viewer {
         Ok(State {
             tour,
             window,
-            surface,
+            surface: Some(surface),
             config,
             gpu,
             renderer,
@@ -833,6 +925,12 @@ impl Viewer {
             load_report: None,
             autojoin_next: false,
             prev_cost: [0.0; 4],
+            surface_failures: 0,
+            surface_stalled: None,
+            surface_stall_limit: (self.cli.timed() || self.cli.ui_script.is_some())
+                .then_some(SURFACE_STALL),
+            fresh_surface: false,
+            gpu_log: std::mem::take(&mut self.gpu_log),
             pending_resize: None,
             #[cfg(target_arch = "wasm32")]
             overlay_at: now,
@@ -935,7 +1033,10 @@ impl ApplicationHandler<Ready> for Viewer {
                 if st.loading.is_some() {
                     st.pending_resize = Some((s.width, s.height));
                 } else {
-                    apply_resize(st, (s.width, s.height));
+                    if let Err(e) = apply_resize(st, (s.width, s.height)) {
+                        self.error = Some(e);
+                        el.exit();
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -974,6 +1075,87 @@ impl ApplicationHandler<Ready> for Viewer {
 const PHASES: &str = "net_ms,acquire_ms,render_ms,present_ms,late_pipelines,late_pipeline_ms,late_passes,late_pass_ms,r_setup,r_dynamic,r_sun_shadow,r_spot_shadow,r_main_draws,r_lights,r_floatz,r_post_upload,r_encode,r_submit";
 
 impl Viewer {
+    /// The graphics device is lost and cannot be used again: a new one is made for the window, and everything that
+    /// lived on the old one is built again. The menus and the surface at once; the world from its map (a match
+    /// loads it again as for a level change, the server and the connection going on).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recover_device(&mut self) -> Result<(), String> {
+        let st = self.st.as_mut().ok_or("no window")?;
+        if st.showcase.is_some() {
+            return Err(st
+                .gpu
+                .explain("the graphics device was lost, which --show-models cannot recover from"));
+        }
+        let old = st.gpu.clone();
+        st.gpu_log.record_loss(&old, "while running")?;
+        let window = st.window.clone();
+        // The window takes one surface at a time.
+        st.surface = None;
+        // The new device must configure the surface the window has now: a mode that cannot be had is an error.
+        let (surface, gpu) = loop {
+            let (surface, gpu) = open_gpu(&self.cli, &window)?;
+            let caps = surface.get_capabilities(&gpu.adapter);
+            if !caps.formats.contains(&st.config.format)
+                || !caps.present_modes.contains(&st.config.present_mode)
+            {
+                return Err(
+                    "the new graphics device cannot present the way the old one did".into(),
+                );
+            }
+            surface.configure(&gpu.device, &st.config);
+            if gpu.lost().is_none() {
+                break (surface, gpu);
+            }
+            st.gpu_log.record_loss(&gpu, "while recovering")?;
+        };
+        let format = st.config.format;
+        // Everything on the old device goes before anything is built on the new one.
+        st.renderer = None;
+        st.surface = Some(surface);
+        st.gpu = gpu.clone();
+        st.gamma = render::gamma::Gamma::new(&gpu, format);
+        if let Some(r) = st.recorder.as_mut() {
+            r.reset_gpu();
+        }
+        if let Some(sh) = st.shell.as_mut() {
+            sh.replace_gpu(gpu.clone(), format, &self.cli.install)?;
+        }
+        st.surface_failures = 0;
+        st.surface_stalled = None;
+        st.fresh_surface = false;
+        if st.net.is_some() {
+            let name = if st.map_name.is_empty() {
+                self.cli.map.clone()
+            } else {
+                st.map_name.clone()
+            };
+            let gametype = st
+                .input
+                .cvars
+                .get("g_gametype")
+                .unwrap_or_default()
+                .to_string();
+            begin_load(&self.cli, st, &name, &gametype, loader::Server::Keep);
+        } else if let Some(map) = &self.map {
+            let vfs = Vfs::open_stock(&self.cli.install, 0)
+                .map_err(|e| format!("cannot open the install: {e}"))?;
+            let scene = Scene::new(&gpu, map)?;
+            let gfx = Gfx::from_cvars(&st.input.cvars);
+            let mut r = Renderer::new(
+                gpu.clone(),
+                scene,
+                map,
+                TextureCache::new(Some(vfs), gfx.picmip),
+            );
+            r.materials.aniso_max = gfx.aniso_max;
+            r.settings = gfx.settings(self.cli.settings);
+            r.warm(format);
+            st.renderer = Some(r);
+        }
+        st.window.request_redraw();
+        Ok(())
+    }
+
     fn frame(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
         let st = self.st.as_mut().ok_or("no window")?;
         let now = Instant::now();
@@ -1022,6 +1204,11 @@ impl Viewer {
             let result = done.and_then(|l| finish_load(&self.cli, &mut self.map, st, &load, l));
             if let Err(e) = result {
                 eprintln!("cannot load {}: {e}", load.map);
+                // A level change on a lost device is loaded again on the new one; a session that was starting ends.
+                #[cfg(not(target_arch = "wasm32"))]
+                if st.net.is_some() && st.gpu.lost().is_some() {
+                    return self.recover_device();
+                }
                 end_session(&mut self.map, st);
             }
         }
@@ -1373,15 +1560,22 @@ impl Viewer {
         if st.loading.is_none()
             && let Some(size) = st.pending_resize.take()
         {
-            apply_resize(st, size);
+            apply_resize(st, size)?;
         }
         let t_acquire = Instant::now();
-        let frame = match st.surface.get_current_texture() {
+        let frame = match st.surface().get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            _ => {
-                if st.loading.is_none() {
-                    reconfigure(st);
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
+                st.surface_failures = 0;
+                st.surface_stalled = None;
+                f
+            }
+            other => {
+                if let SurfaceAction::DeviceLost = recover_surface(st, &other)? {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    return self.recover_device();
+                    #[cfg(target_arch = "wasm32")]
+                    return Err(st.gpu.explain("cannot draw"));
                 }
                 st.window.request_redraw();
                 return Ok(());
@@ -1872,7 +2066,8 @@ impl Viewer {
             "mode": {
                 "width": st.config.width, "height": st.config.height,
                 "refresh_mhz": monitor_mhz,
-                "fullscreen": self.cli.request.kind.name(),
+                "fullscreen": display::actual_kind(&st.window).name(),
+                "fullscreen_requested": self.cli.request.kind.name(),
                 "present_mode": format!("{:?}", st.present_mode).to_lowercase(),
             },
             "frames": st.samples.len(),
@@ -1883,6 +2078,7 @@ impl Viewer {
             "world": {"surfaces_drawn_p50": drawn.get(drawn.len() / 2)},
             "showcase": st.showcase.as_ref().map(Showcase::report),
             "notes": st.notes,
+            "gpu_health": st.gpu_log.report(&st.gpu),
         });
         std::fs::write(
             out.join("client.json"),
@@ -1907,7 +2103,9 @@ fn record_gpu(slots: &mut Vec<Option<f64>>, finished: Vec<(u64, f64)>) {
 fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
     let Some(sc) = st.script.take() else { return };
     let ok = sc.results.iter().all(|r| r["ok"] == Value::Bool(true));
+    let gpu_health = st.gpu_log.report(&st.gpu);
     let report = json!({
+        "gpu_health": gpu_health,
         "status": if ok { "ok" } else { "failed" },
         "quit": quit,
         "steps": sc.results,
@@ -2344,6 +2542,19 @@ fn script_step(st: &mut State) -> bool {
             listen::send(arg);
             done(true, sc, String::new());
         }
+        // The graphics device is destroyed under the client, as a driver reset does it: the next frame must find it lost
+        // and make a new one (`losedevice`); `renderer=secs` then waits for the world to be drawable again.
+        "losedevice" => {
+            st.gpu.device.destroy();
+            done(true, sc, String::new());
+        }
+        "renderer" => {
+            if st.renderer.is_some() {
+                done(true, sc, String::new());
+            } else if waited > arg.parse::<f32>().unwrap_or(60.0) {
+                done(false, sc, "no renderer".into());
+            }
+        }
         // `vid_restart` as the graphics menu's Apply does it.
         "vidrestart" => {
             if let Some(sh) = st.shell.as_mut() {
@@ -2386,7 +2597,11 @@ fn script_step(st: &mut State) -> bool {
                 "fullscreen" => Some(u8::from(st.window.fullscreen().is_some()).to_string()),
                 // 1 when the surface does not wait for the display, or has no mode that does not.
                 "uncapped" => {
-                    let caps = st.surface.get_capabilities(&st.gpu.adapter);
+                    let caps = st
+                        .surface
+                        .as_ref()
+                        .map(|s| s.get_capabilities(&st.gpu.adapter))
+                        .unwrap_or_default();
                     let free = caps
                         .present_modes
                         .iter()
@@ -2788,13 +3003,89 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
     }
 }
 
+/// Frames in a row a configured surface may give no texture before the run stops with an error.
+const SURFACE_RETRIES: u32 = 120;
+/// How long a surface may only time out, or be occluded in a window that is not minimized, before a timed or scripted
+/// run stops.
+const SURFACE_STALL: Duration = Duration::from_secs(10);
+
+/// What a frame without a texture needs next.
+enum SurfaceAction {
+    /// The frame is skipped; the next one tries again.
+    Retry,
+    /// The device is gone: [`Viewer::recover_device`].
+    DeviceLost,
+}
+
+/// What to do when the surface gave no texture. A timeout, or an occluded (minimized) window, only skips the frame;
+/// outdated or invalid state is configured again; a lost surface is taken again from the window. A lost device is
+/// for the caller to replace; a surface that stays unusable ends the run with the reason.
+fn recover_surface(
+    st: &mut State,
+    outcome: &wgpu::CurrentSurfaceTexture,
+) -> Result<SurfaceAction, String> {
+    use wgpu::CurrentSurfaceTexture as C;
+    // A load runs on the device: configuring the surface under it fails, and its end shows what the device is.
+    if st.loading.is_some() {
+        return Ok(SurfaceAction::Retry);
+    }
+    if st.gpu.lost().is_some() {
+        return Ok(SurfaceAction::DeviceLost);
+    }
+    if matches!(outcome, C::Timeout | C::Occluded) {
+        if matches!(outcome, C::Occluded) && st.window.is_minimized() == Some(true) {
+            st.surface_stalled = None;
+            return Ok(SurfaceAction::Retry);
+        }
+        let since = *st.surface_stalled.get_or_insert_with(Instant::now);
+        if let Some(limit) = st.surface_stall_limit
+            && since.elapsed() > limit
+        {
+            return Err(st.gpu.explain(&format!(
+                "the window's surface gave no frame for {} s ({outcome:?})",
+                limit.as_secs()
+            )));
+        }
+        return Ok(SurfaceAction::Retry);
+    }
+    st.surface_failures += 1;
+    if st.surface_failures > SURFACE_RETRIES {
+        return Err(st
+            .gpu
+            .explain(&format!("the window's surface gave no frame ({outcome:?})")));
+    }
+    if matches!(outcome, C::Lost) {
+        fresh_surface(st)?;
+    } else {
+        reconfigure(st);
+    }
+    Ok(SurfaceAction::Retry)
+}
+
+/// Takes a new surface from the window and configures it: the old one, with its swapchain, goes. wgpu refuses a
+/// reconfiguration while the queue has work to finish, so the renderer's timestamps are waited for first.
+fn fresh_surface(st: &mut State) -> Result<(), String> {
+    if let Some(r) = st.renderer.as_mut() {
+        record_gpu(&mut st.gpu_ms, r.flush_gpu_times());
+    }
+    st.surface = None;
+    let surface = st
+        .gpu
+        .instance
+        .create_surface(st.window.clone())
+        .map_err(|e| format!("cannot make the window's surface again: {e}"))?;
+    surface.configure(&st.gpu.device, &st.config);
+    st.surface = Some(surface);
+    Ok(())
+}
+
 /// Configures the surface again. wgpu refuses while the queue still has work to finish (a timestamp read-back that has
 /// not come back is enough: the call panics), so the renderer's are waited for first.
 fn reconfigure(st: &mut State) {
     if let Some(r) = st.renderer.as_mut() {
         record_gpu(&mut st.gpu_ms, r.flush_gpu_times());
     }
-    st.surface.configure(&st.gpu.device, &st.config);
+    st.surface().configure(&st.gpu.device, &st.config);
 }
 
 /// What the renderer draws for a light an effect added: colour is bytes there, and an element with a direction is a
@@ -2815,9 +3106,11 @@ fn vid_restart(cli: &Cli, st: &mut State) {
     if let Some(note) = display::apply(&st.window, &g.request(&cli.request)) {
         st.notes.push(note);
     }
-    let caps = st.surface.get_capabilities(&st.gpu.adapter);
+    let caps = st.surface().get_capabilities(&st.gpu.adapter);
     let (mode, _) = pick_present(g.present(&cli.present), &caps.present_modes);
     let mut reconfigure_surface = mode != st.config.present_mode;
+    // The swapchain is not handed over to another present mode: the surface is taken again (see `apply_resize`).
+    st.fresh_surface |= reconfigure_surface;
     st.config.present_mode = mode;
     st.present_mode = mode;
     if st.aspect != g.aspect {
@@ -2861,14 +3154,20 @@ fn view_fov_4_3(st: &State) -> f32 {
     )
 }
 
-fn apply_resize(st: &mut State, (w, h): (u32, u32)) {
+fn apply_resize(st: &mut State, (w, h): (u32, u32)) -> Result<(), String> {
+    let resized = (w, h) != (st.config.width, st.config.height);
     st.config.width = w;
     st.config.height = h;
-    reconfigure(st);
+    if std::mem::take(&mut st.fresh_surface) {
+        fresh_surface(st)?;
+    } else if resized {
+        reconfigure(st);
+    }
     st.fov_x = hor_plus(cg_fov(&st.input), st.aspect.unwrap_or(w as f32 / h as f32));
     if let Some(sh) = st.shell.as_mut() {
         sh.resize(w, h);
     }
+    Ok(())
 }
 
 /// Starts (`join` of `None`) or joins a match from the menus: begins loading the map in the background. The window
@@ -3304,6 +3603,31 @@ fn save_png(
         .and_then(|mut w| w.write_image_data(&rgba))
         .map_err(|e| e.to_string())?;
     Ok(lit as f64 / f64::from(w * h))
+}
+
+#[cfg(test)]
+mod gpu_log_tests {
+    use super::*;
+
+    /// Needs an adapter: skips without.
+    #[test]
+    fn losses_are_recovered_from_a_few_times_then_end_the_run() {
+        let Ok(gpu) = Gpu::new(None) else {
+            eprintln!("skipped: no GPU adapter");
+            return;
+        };
+        gpu.device.destroy();
+        let mut log = GpuLog::default();
+        for _ in 0..MAX_DEVICE_LOSSES {
+            log.record_loss(&gpu, "test").expect("recoverable");
+        }
+        assert!(log.record_loss(&gpu, "test").is_err());
+        let health = log.report(&gpu);
+        assert_eq!(
+            health["device_losses"].as_array().map(Vec::len),
+            Some(MAX_DEVICE_LOSSES + 1)
+        );
+    }
 }
 
 #[cfg(test)]

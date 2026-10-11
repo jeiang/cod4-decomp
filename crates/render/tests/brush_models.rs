@@ -80,7 +80,7 @@ fn an_inline_model_is_drawn_where_its_entity_is() {
         return;
     };
     let gpu = Arc::new(gpu);
-    let scene = Scene::new(&gpu, &data);
+    let scene = Scene::new(&gpu, &data).expect("scene");
     let vfs = Vfs::open_stock(&root, 0).unwrap();
     let mut r = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));
     r.settings.aa_samples = 1;
