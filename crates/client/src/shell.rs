@@ -437,6 +437,7 @@ impl Shell {
 
     /// The device was replaced: the menus' pipelines and every texture uploaded so far belonged to the old one. They
     /// are made again, the images as the menus ask for them.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn replace_gpu(
         &mut self,
         gpu: Arc<Gpu>,

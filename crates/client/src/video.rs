@@ -119,6 +119,7 @@ impl Recorder {
 
     /// The device was replaced: the staging buffers belonged to the old one. Frames still being read back are lost
     /// (counted as dropped); the next `capture` makes new buffers.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn reset_gpu(&mut self) {
         self.dropped += self.pending.len() as u64;
         self.pending.clear();
