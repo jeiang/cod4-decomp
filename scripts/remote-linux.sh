@@ -22,7 +22,7 @@ harness=""
 display=""
 [ -n "${COD4E_LINUX_WAYLAND_DISPLAY:-}" ] && display="WAYLAND_DISPLAY=$(printf '%q' "$COD4E_LINUX_WAYLAND_DISPLAY") "
 [ -n "${COD4E_LINUX_XDG_RUNTIME_DIR:-}" ] && display="${display}XDG_RUNTIME_DIR=$(printf '%q' "$COD4E_LINUX_XDG_RUNTIME_DIR") "
-[ $run = 1 ] && harness="cargo build --release -p harness -p client && ${display}COD4E_NO_PROMPT=1 cargo run --release -p harness -- run --out bundles $(printf '%q ' "$@")"
+[ $run = 1 ] && harness="cargo build --release -p harness -p client -p server && ${display}COD4E_NO_PROMPT=1 cargo run --release -p harness -- run --out bundles $(printf '%q ' "$@")"
 
 git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -C $dir'"
 status=0

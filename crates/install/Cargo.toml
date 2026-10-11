@@ -1,0 +1,23 @@
+[package]
+name = "install"
+description = "Finds the Call of Duty 4 install for the client, the server and the harness."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# A native folder dialog as the last resort (the client and the harness; the server has no display).
+prompt = ["dep:rfd"]
+
+[dependencies]
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
+
+[lints]
+workspace = true
+
+[target."cfg(windows)".dependencies]
+winreg = "0.56.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"

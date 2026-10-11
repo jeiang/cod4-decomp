@@ -2,12 +2,12 @@
 //! The suite runner: detects the install, runs each selected stage under the
 //! watchdog, and writes the bundle.
 use crate::bundle::{self, Written};
-use crate::install::{self, Detection};
 use crate::manifest;
 use crate::scrub::Scrubber;
 use crate::stage::{self, StageReport, Status};
 use crate::stages::asset_load;
 use crate::watchdog::{self, DumpServer, Selection, StageRun};
+use install::{self, Detection};
 use serde_json::json;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -98,6 +98,7 @@ fn run_in(
 
     let detection: Detection = install::detect(&install::Options {
         explicit: cfg.cod4.as_deref(),
+        flag: "--cod4",
         prompt: cfg.prompt,
         exe_dir: cfg.exe_dir.as_deref(),
     });

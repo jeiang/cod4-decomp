@@ -23,7 +23,7 @@ const LIMIT: Duration = Duration::from_secs(300);
 /// Share of the last frame's pixels that may look magenta.
 const MAX_MAGENTA: f64 = 0.002;
 
-fn num(v: &Value, path: &[&str]) -> f64 {
+pub(super) fn num(v: &Value, path: &[&str]) -> f64 {
     path.iter()
         .try_fold(v, |v, k| v.get(k))
         .and_then(Value::as_f64)
@@ -37,7 +37,7 @@ fn fail(mut r: StageReport, why: String) -> StageReport {
 }
 
 /// One column of `frames.raw.csv`.
-fn column(csv: &str, i: usize) -> Vec<f64> {
+pub(super) fn column(csv: &str, i: usize) -> Vec<f64> {
     csv.lines()
         .skip(1)
         .filter_map(|l| l.split(',').nth(i)?.parse().ok())
@@ -60,6 +60,20 @@ const MAX_CLOCK_JUMPS: u64 = 3;
 /// speed; the spike share is the relative check on what that misses. `clock_jumps` counts how often the clock the
 /// view follows jumped (a server running at the wrong pace does it every few seconds).
 fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
+    hitches(report, cpu_ms, Some(SPIKE_SHARE))
+}
+
+/// The share of frames that hitched by the rule of [`hitch_failures`].
+pub(super) fn spike_share(cpu_ms: &[f64]) -> Option<f64> {
+    let p = Percentiles::from_samples(cpu_ms)?;
+    let limit = (p.p50 * SPIKE_FACTOR).max(p.p50 + SPIKE_EXTRA_MS);
+    let spikes = cpu_ms.iter().filter(|c| **c > limit).count();
+    Some(spikes as f64 / cpu_ms.len() as f64)
+}
+
+/// [`hitch_failures`] with the frame-spike gate optional: a stage that shares its machine with a server and whatever
+/// else runs there is stalled in bursts, and leaves frame times to the stage that has the client alone.
+pub(super) fn hitches(report: &Value, cpu_ms: &[f64], max_spike_share: Option<f64>) -> Vec<String> {
     let mut out = Vec::new();
     let late: Vec<&str> = report["late_builds"]
         .as_array()
@@ -88,10 +102,10 @@ fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
             "the view's clock jumped {jumps} times to catch up with the server's: the server runs off the client's pace"
         ));
     }
-    if let Some(p) = Percentiles::from_samples(cpu_ms) {
+    if let (Some(max), Some(p)) = (max_spike_share, Percentiles::from_samples(cpu_ms)) {
         let limit = (p.p50 * SPIKE_FACTOR).max(p.p50 + SPIKE_EXTRA_MS);
         let spikes = cpu_ms.iter().filter(|c| **c > limit).count();
-        if spikes as f64 > cpu_ms.len() as f64 * SPIKE_SHARE {
+        if spikes as f64 > cpu_ms.len() as f64 * max {
             out.push(format!(
                 "{spikes} of {} frames cost over {limit:.0} ms (median {:.1} ms, worst {:.0} ms): the frames hitch",
                 cpu_ms.len(),

@@ -67,7 +67,7 @@ const USAGE: &str = "\
 cod4e: CoD4 multiplayer client (world viewer)
 
 usage: cod4e [options]
-  --install <dir>        original install (else COD4_PATH, else ./COD4)
+  --install <dir>        original install (else COD4_PATH, the folder picked last time, Steam and registry locations, ./COD4, a folder prompt that is remembered)
   --map <name>           map zone to load (default mp_crash)
   --size WxH             window size, or the video mode for --fullscreen exclusive
   --refresh <hz>         refresh rate for exclusive fullscreen
@@ -111,6 +111,8 @@ Keys are the config file's binds, e.g. bind w +forward.";
 
 pub struct Cli {
     pub install: PathBuf,
+    /// `--install` was given: it is the first place looked at.
+    pub install_given: bool,
     pub map: String,
     pub request: Request,
     /// `--size`, `--refresh` or `--fullscreen` was given: the graphics menu's saved video choice does not apply.
@@ -182,7 +184,8 @@ impl Cli {
 
 fn parse(args: &[String]) -> Result<Cli, String> {
     let mut c = Cli {
-        install: std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), Into::into),
+        install: "COD4".into(),
+        install_given: false,
         map: "mp_crash".into(),
         request: Request::default(),
         video_given: false,
@@ -222,7 +225,10 @@ fn parse(args: &[String]) -> Result<Cli, String> {
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().cloned().ok_or(format!("{name} needs a value"));
         match a.as_str() {
-            "--install" => c.install = val(a)?.into(),
+            "--install" => {
+                c.install = val(a)?.into();
+                c.install_given = true;
+            }
             "--map" => c.map = val(a)?,
             "--gametype" => c.gametype = Some(val(a)?),
             "--size" => {
@@ -320,7 +326,7 @@ fn main() {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cli = match parse(&args) {
+    let mut cli = match parse(&args) {
         Ok(c) => c,
         Err(e) if e.is_empty() => {
             println!("{USAGE}");
@@ -339,6 +345,29 @@ fn main() -> ExitCode {
             eprintln!("input selftest failed: {}", bad.join("; "));
             ExitCode::from(1)
         };
+    }
+    if !cli.list {
+        let found = install::detect(&install::Options {
+            explicit: cli.install_given.then_some(cli.install.as_path()),
+            flag: "--install",
+            prompt: true,
+            exe_dir: std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(PathBuf::from))
+                .as_deref(),
+        });
+        match found.install {
+            Some(i) => cli.install = i.path,
+            None => {
+                let why = found.not_found_message("cod4e");
+                eprintln!("{why}");
+                // A double-clicked console closes with the program; a message box outlives it.
+                if found.prompted {
+                    install::show_error(&why);
+                }
+                return ExitCode::from(1);
+            }
+        }
     }
     if cli.audio_selftest {
         return match sound::selftest(&cli.install, &cli.map) {

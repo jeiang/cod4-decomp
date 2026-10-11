@@ -2,10 +2,10 @@
 //! Stage 3 against a fake `cod4e` shell script that follows the client CLI
 //! contract. Unix only: the fake is a `sh` script.
 #![cfg(unix)]
-use harness::install::Detection;
 use harness::manifest;
 use harness::stage::{StageCtx, StageReport, Status};
 use harness::stages::client_flythrough::{Options, run_with};
+use install::Detection;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

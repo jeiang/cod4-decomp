@@ -458,6 +458,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_match::run),
     },
     StageDef {
+        name: "client-dedicated",
+        description: "the portable folder's way to play: the real cod4e-server on a free port with bots, the windowed cod4e client joins with --connect, spawns, plays and quits; snapshots, frame and clock checks, and the server sees a clean disconnect",
+        needs_install: false,
+        timeout: Duration::from_secs(15 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_dedicated::run),
+    },
+    StageDef {
         name: "web-client",
         description: "the browser client (web/pkg) in a headless Chromium on WebGL2 and, where it has it, WebGPU: draws mp_crash; records load time, frame cost and wasm memory (skipped without a built web/pkg or a Chromium)",
         needs_install: false,
