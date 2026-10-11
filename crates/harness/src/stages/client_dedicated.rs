@@ -338,7 +338,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             LEAVE_LIMIT.as_secs()
         ));
     } else if !heard("left the game") {
-        failures.push("the player's slot was freed, but not by the player leaving (a timeout or a kick)".into());
+        failures.push(
+            "the player's slot was freed, but not by the player leaving (a timeout or a kick)"
+                .into(),
+        );
     }
     let code = dedicated.quit();
     if code.is_none_or(|c| !c.success()) {
@@ -382,8 +385,7 @@ mod tests {
         let person =
             rows(&["  3     0   12    0 DedicatedTest      40 127.0.0.1:5000   1234    -"]);
         assert!(lists_player(&person, "DedicatedTest"));
-        let bot =
-            rows(&["  0     0  BOT    0 DedicatedTest       0 bot                 0    -"]);
+        let bot = rows(&["  0     0  BOT    0 DedicatedTest       0 bot                 0    -"]);
         assert!(!lists_player(&bot, "DedicatedTest"));
         assert!(!lists_player(&rows(&["end-of-1"]), "DedicatedTest"));
     }

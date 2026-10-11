@@ -33,22 +33,23 @@ PLAY A MATCH
    time. Allow it (tick Private networks for a game on your home network).
    This is needed for other PCs only; the same PC always works.
 
-3. Join. Start cod4e.exe (double-click is fine), then:
-   - Join Game: the list shows the servers it finds on your network; pick
-     yours and press Join Server. Servers on the same PC and the same LAN
-     appear on their own; if the list is empty press Refresh.
+3. Join. Start cod4e.exe (double-click is fine), then either:
+   - Join Game, click "Source" until it says Local, wait a moment for the
+     list to fill (Refresh List asks again), click your server, then Join
+     Server. Local finds servers on the same PC and on your network.
    - or skip the menus and run, on any PC that can reach the server:
        cod4e.exe --connect 192.168.1.20:28960
      (the server PC's address and the port from step 1; use 127.0.0.1 on the
      server's own PC). Inside the game you can also press ~ and type
        connect 192.168.1.20:28960
 
-4. Play. Pick a team and a class when the menus ask. WASD move, mouse look,
-   left click fires. The bots join the teams on their own.
+4. Play. The server's menus ask for a team (Auto Assign is fine) and a class.
+   WASD move, mouse look, left click fires. The bots fill the teams on their
+   own.
 
-5. Stop. In the game press Esc and leave (or close the window); the server
-   sees you leave. To stop the server type  quit  in its window (or press
-   Ctrl+C).
+5. Stop. In the game press Esc, choose Leave Game and confirm (Quit on the
+   main menu closes the program, or just close the window); the server sees
+   you leave. To stop the server type  quit  in its window (or press Ctrl+C).
 
 
 RUN THE TEST STAGES
