@@ -9,7 +9,8 @@
 //! (dvars) and a [`ShellState`] (stats, map and gametype lists, queued [`Action`]s the app carries out).
 
 use crate::hud::{self, Feed, LiveUi, ScoreView};
-use crate::input::Input;
+use crate::input::config::atoi;
+use crate::input::{Input, Item};
 use crate::profile::{CreateError, Profiles};
 use crate::ui::assets::UiAssets;
 use crate::ui::env::World;
@@ -22,7 +23,7 @@ use ::assets::zone::menu::ItemDef;
 use render::ui2d::{Ui2d, UiImage};
 use render::{Gpu, TextureCache};
 use server::content::Install;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use web_time::Instant;
@@ -120,7 +121,7 @@ pub struct ShellState {
     pub status_rows: Vec<[String; 4]>,
     /// A map list row the lists are to scroll to on the next frame (the game mode changed under them).
     pub reselect_map: Option<usize>,
-    /// The install's files, for `exec <file>.cfg` from a menu script.
+    /// The install's files, for completing `exec <file>`.
     vfs: Option<::assets::vfs::Vfs>,
     /// The install, and the mod (`fs_game`) the menus and files above were loaded for.
     root: std::path::PathBuf,
@@ -128,7 +129,8 @@ pub struct ShellState {
     /// The mods folder's mods (name, description) as `loadmods` listed them (feeder 9), and the selected row.
     mods: Vec<(String, String)>,
     mod_sel: usize,
-    exec_depth: u32,
+    /// The `.cfg` names of the install, listed on the first Tab that needs them.
+    cfg_names: std::cell::OnceCell<Vec<String>>,
     /// The display's video modes as `r_mode` and `r_displayRefresh` list them.
     pub video_modes: Vec<(u32, u32)>,
     pub refresh_rates: Vec<u32>,
@@ -178,6 +180,14 @@ pub struct GameFacts {
 const STAT_COUNT: usize = 4000;
 
 impl ShellState {
+    /// A line for the console's output; it keeps the latest 256.
+    fn log(&mut self, text: &str) {
+        let log = &mut self.feed.console;
+        log.extend(text.lines().map(str::to_owned));
+        let extra = log.len().saturating_sub(256);
+        log.drain(..extra);
+    }
+
     /// The maps the install can run and the game modes the menus offer, from the UI tables, and the selected map.
     fn catalog(assets: &UiAssets, install: &Install) -> (Vec<MapEntry>, usize, Vec<GameTypeEntry>) {
         let mut maps = Vec::new();
@@ -303,7 +313,7 @@ impl ShellState {
             fs_game: install.game.clone(),
             mods: Vec::new(),
             mod_sel: 0,
-            exec_depth: 0,
+            cfg_names: std::cell::OnceCell::new(),
             video_modes: STOCK_MODES.to_vec(),
             refresh_rates: vec![60],
         }
@@ -816,10 +826,7 @@ impl Shell {
 
     /// A line for the console's output; it keeps the latest 256.
     fn log(&mut self, text: &str) {
-        let log = &mut self.st.feed.console;
-        log.extend(text.lines().map(str::to_owned));
-        let extra = log.len().saturating_sub(256);
-        log.drain(..extra);
+        self.st.log(text);
     }
 
     /// A line for the console's output only.
@@ -853,16 +860,44 @@ impl Shell {
 
     /// A key typed into the chat field or the console.
     pub fn console_key(&mut self, input: &mut Input, key: UiKey) {
-        use crate::console::Entered;
-        let cvars = |prefix: &str| {
-            input
-                .cvars
-                .with_prefix(prefix)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect()
+        use crate::console::{Arg, Entered, Want};
+        let (maps, vfs, names) = (&self.st.maps, self.st.vfs.as_ref(), &self.st.cfg_names);
+        let complete = |w: Want| -> Vec<String> {
+            let starts = |n: &String| n.starts_with(w.prefix);
+            match w.kind {
+                Arg::Cvar => input
+                    .cvars
+                    .with_prefix(w.prefix)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect(),
+                Arg::Map => maps
+                    .iter()
+                    .map(|m| m.name.to_ascii_lowercase())
+                    .filter(starts)
+                    .collect(),
+                Arg::Cfg => vfs
+                    .map(|v| names.get_or_init(|| v.names_with_ext(".cfg")))
+                    .into_iter()
+                    .flatten()
+                    .filter(|n| starts(n))
+                    .cloned()
+                    .collect(),
+                Arg::Demo => input
+                    .config_dir()
+                    .and_then(|d| std::fs::read_dir(d.join("demos")).ok())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|e| {
+                        let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+                        n.strip_suffix(".c4edemo").map(str::to_owned)
+                    })
+                    .filter(starts)
+                    .collect(),
+            }
         };
-        match self.st.console.key(key, cvars) {
+        match self.st.console.key(key, complete) {
             Some(Entered::Say { team, text }) => {
                 let verb = if team { "say_team" } else { "say" };
                 self.st
@@ -877,24 +912,24 @@ impl Shell {
         }
     }
 
-    /// A line typed at the console: echoed, then run as a menu script or a bind would run it. A cvar's name alone
-    /// says its value and with a value sets it.
+    /// A line typed at the console: echoed, then run as one buffer. A cvar's name alone says its value and with a
+    /// value sets it; a `wait` holds the rest of the line.
     pub fn console_line(&mut self, input: &mut Input, line: &str) {
         self.log(&format!("] {line}"));
-        for cmd in crate::input::config::split_commands(line) {
-            let name = cmd[0].to_ascii_lowercase();
-            if let Some(value) = input.cvars.get(&name).map(str::to_owned) {
-                if cmd.len() > 1 {
-                    input.set_cvar(&name, &cmd[1..].join(" "));
-                } else {
-                    self.log(&format!("\"{name}\" is \"{value}\""));
-                }
-            } else if crate::console::is_command(&name) {
-                Self::host(&mut self.st, input)
-                    .command(&self.ui, &crate::input::config::join(&cmd));
-            } else {
-                self.log(&format!("Unknown command \"{}\"", cmd[0]));
-            }
+        let cmds = crate::input::config::split_commands(line)
+            .into_iter()
+            .map(|toks| Item {
+                console: true,
+                ..Item::new(toks, 0, None)
+            })
+            .collect();
+        Self::host(&mut self.st, input).submit(&self.ui, cmds);
+    }
+
+    /// Runs the buffers whose `wait` has run out, once a frame.
+    pub fn run_due(&mut self, input: &mut Input) {
+        if let Some(cmds) = input.take_due() {
+            Self::host(&mut self.st, input).run_buffer(&self.ui, cmds);
         }
     }
 
@@ -1197,33 +1232,7 @@ fn clear_stat_bits(stats: &mut [i32], stat: i32, mask: i32) {
     }
 }
 
-fn atoi(s: &str) -> i32 {
-    s.trim().parse::<f64>().map_or(0, |v| v as i32)
-}
-
 impl HostCx<'_> {
-    /// Runs a config file of the install, one line at a time (`exec options_graphics.cfg`).
-    fn exec_file(&mut self, ui: &Ui, name: &str) {
-        const MAX_DEPTH: u32 = 8;
-        if self.st.exec_depth >= MAX_DEPTH {
-            return;
-        }
-        let bytes = self
-            .st
-            .vfs
-            .as_ref()
-            .and_then(|v| v.read(name).ok().flatten());
-        let Some(bytes) = bytes else {
-            eprintln!("ui: exec {name}: no such file");
-            return;
-        };
-        self.st.exec_depth += 1;
-        for line in String::from_utf8_lossy(&bytes).lines() {
-            self.command(ui, line);
-        }
-        self.st.exec_depth -= 1;
-    }
-
     /// The other players of the match: client number and name, in slot order.
     fn players(&self) -> Vec<(u16, String)> {
         let live = &self.st.live;
@@ -1505,17 +1514,59 @@ impl HostCx<'_> {
         self.input.cvars.set("ui_currentNetMap", &i, false);
     }
 
-    /// One console command the shell understands; `false` if it is not one of its own.
+    /// One console line, as a menu script or a bind runs it.
     fn command(&mut self, ui: &Ui, line: &str) {
-        let toks: Vec<String> = crate::input::config::split_commands(line)
+        let cmds = crate::input::config::split_commands(line)
             .into_iter()
-            .flatten()
-            .filter(|t| t != "(" && t != ")" && t != ",")
+            .map(|t| Item::new(t, 0, None))
             .collect();
-        for cmd in crate::input::config::split_commands(line) {
+        self.submit(ui, cmds);
+    }
+
+    /// New commands queue behind a pending `wait` instead of running ahead of it (`Cbuf_AddText`).
+    fn submit(&mut self, ui: &Ui, cmds: VecDeque<Item>) {
+        if self.input.busy() {
+            self.input.enqueue(cmds);
+        } else {
+            self.run_buffer(ui, cmds);
+        }
+    }
+
+    /// `Cbuf_Execute` over one buffer of commands the shell understands. An item typed at the console (`console`)
+    /// shows or sets a cvar by its name alone, and an unknown word is said.
+    fn run_buffer(&mut self, ui: &Ui, mut rest: VecDeque<Item>) {
+        const MAX_INSERTS: u32 = 64;
+        let mut inserted = 0;
+        let toks: Vec<String> = rest
+            .iter()
+            .flat_map(|i| i.toks.iter())
+            .filter(|t| *t != "(" && *t != ")" && *t != ",")
+            .cloned()
+            .collect();
+        while let Some(Item {
+            toks: cmd,
+            depth,
+            dir,
+            console,
+        }) = rest.pop_front()
+        {
             let Some(name) = cmd.first().map(|s| s.to_ascii_lowercase()) else {
                 continue;
             };
+            if console {
+                if let Some(value) = self.input.cvars.get(&name).map(str::to_owned) {
+                    if cmd.len() > 1 {
+                        self.input.set_cvar(&name, &cmd[1..].join(" "));
+                    } else {
+                        self.st.log(&format!("\"{name}\" is \"{value}\""));
+                    }
+                    continue;
+                }
+                if !crate::console::is_command(&name) {
+                    self.st.log(&format!("Unknown command \"{}\"", cmd[0]));
+                    continue;
+                }
+            }
             let a = |i: usize| cmd.get(i).map_or("", String::as_str);
             match name.as_str() {
                 "setfromdvar" => {
@@ -1580,15 +1631,36 @@ impl HostCx<'_> {
                         eprintln!("statClearPerkNew {name}: {e}");
                     }
                 }
-                "wait"
-                // Stays a no-op: `snd_volume` is read live every frame, and no other snd_ dvar needs a restart.
-                | "snd_restart"
+                // The rest of the buffer waits for later frames (`Cmd_Wait_f`).
+                "wait" => {
+                    let n = if cmd.len() > 1 { atoi(a(1)) } else { 1 };
+                    if n > 0 {
+                        self.input
+                            .defer(n.unsigned_abs(), std::mem::take(&mut rest));
+                        return;
+                    }
+                }
+                // `snd_volume` is read live every frame, and no other snd_ dvar needs a restart: these stay no-ops.
+                "snd_restart"
                 | "updatedvarsfromprofile"
                 | "loc_warnings"
                 | "r_applypicmip"
                 | "writeconfig"
                 | "setprofile" => {}
-                "exec" => self.exec_file(ui, a(1)),
+                // `vstr` and `exec` run their commands in place, in this buffer.
+                "vstr" | "exec" => {
+                    inserted += 1;
+                    if inserted > MAX_INSERTS || (name == "exec" && depth >= 8) {
+                        self.input.say(format!("{name}: too many nested commands"));
+                    } else if let Some((next, from)) = self.input.expand(&cmd, dir.as_deref(), true)
+                    {
+                        let dir = from.map(Arc::from).or(dir);
+                        let depth = depth + u32::from(name == "exec");
+                        for toks in next.into_iter().rev() {
+                            rest.push_front(Item::new(toks, depth, dir.clone()));
+                        }
+                    }
+                }
                 "vid_restart" => self.st.actions.push(Action::VidRestart),
                 "quit" => self.st.actions.push(Action::Quit),
                 "disconnect" => self.st.actions.push(Action::Disconnect),
@@ -1607,8 +1679,7 @@ impl HostCx<'_> {
                     || n == "name"
                     || crate::console::is_server_verb(n) =>
                 {
-                    self
-                        .st
+                    self.st
                         .actions
                         .push(Action::Console(crate::input::config::join(&cmd)))
                 }
@@ -2636,6 +2707,36 @@ mod tests {
         assert!(ui.unknown.is_empty(), "unimplemented: {:?}", ui.unknown);
     }
 
+    /// A menu script's `wait` holds the rest of its buffer, which then runs through the shell's own commands (a
+    /// `setfromdvar` after it is the shell's, not the input layer's).
+    #[test]
+    fn a_menu_wait_keeps_the_shell_commands_after_it() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        let Some(install) = Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+        else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let assets = UiAssets::load(&install).expect("ui assets");
+        let mut st = ShellState::new(&assets, &install);
+        let ui = Ui::new(assets, (1280, 720));
+        let mut input = Input::detached();
+        input.cvars.set("wait_src", "7", false);
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        h.command(&ui, "set wait_a 1; wait 2; setfromdvar wait_dst wait_src");
+        assert_eq!(h.input.cvar("wait_a"), Some("1"));
+        assert!(h.input.take_due().is_none(), "held for two frames");
+        let due = h.input.take_due().expect("due on the second frame");
+        h.run_buffer(&ui, due);
+        assert_eq!(h.input.cvar("wait_dst"), Some("7"));
+    }
+
     /// The team menu lists both teams to a player on none (and on the spectators), and the other team to a player on
     /// one: `team(name)` is `TEAM_FREE` / `TEAM_SPECTATOR` there, not an axis stand-in.
     #[test]
@@ -2694,7 +2795,8 @@ mod tests {
         let assets = UiAssets::load(&install).expect("ui assets");
         let mut st = ShellState::new(&assets, &install);
         let mut ui = Ui::new(assets, (1280, 720));
-        let mut input = Input::detached();
+        let vfs = ::assets::vfs::Vfs::open_stock(&root, 0).expect("install files");
+        let mut input = Input::detached_with(vfs);
         register_defaults(&mut input);
         input.cvars.set("r_mode", "1280x720", true);
         let mut h = HostCx {

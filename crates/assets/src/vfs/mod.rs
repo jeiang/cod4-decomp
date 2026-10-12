@@ -51,6 +51,11 @@ fn normalize(name: &str) -> String {
         .collect()
 }
 
+/// A lookup key that names something below a search-path node: not absolute, no drive, no `..`.
+fn stays_inside(norm: &str) -> bool {
+    !norm.starts_with('/') && !norm.contains(':') && !norm.split('/').any(|p| p == "..")
+}
+
 fn language_index(name: &str) -> Option<usize> {
     LANGUAGES.iter().position(|l| l.eq_ignore_ascii_case(name))
 }
@@ -149,6 +154,9 @@ impl Vfs {
     /// Like [`Vfs::locate`], also returning the index into [`Vfs::nodes`].
     pub fn locate_node(&self, name: &str) -> Option<(usize, Hit<'_>)> {
         let norm = normalize(name);
+        if !stays_inside(&norm) {
+            return None;
+        }
         self.nodes.iter().enumerate().find_map(|(i, node)| {
             if node.language.is_some_and(|l| l != self.language) {
                 return None;
@@ -190,6 +198,37 @@ impl Vfs {
     /// Read `name` through the search path; `Ok(None)` if absent.
     pub fn read(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
         self.locate(name).map(|h| h.read()).transpose()
+    }
+
+    /// Top-level names (lower-cased, sorted, unique) of the files of the search path that end with `ext`, for the
+    /// console's argument completion.
+    pub fn names_with_ext(&self, ext: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for node in &self.nodes {
+            if node.language.is_some_and(|l| l != self.language) {
+                continue;
+            }
+            match &node.kind {
+                NodeKind::Iwd { iwd, .. } => {
+                    out.extend(iwd.entries().iter().map(|e| e.name.clone()));
+                }
+                NodeKind::Dir(dir) => {
+                    if let Ok(rd) = crate::fs::read_dir(dir) {
+                        out.extend(
+                            rd.flatten()
+                                .map(|e| e.file_name().to_string_lossy().into_owned()),
+                        );
+                    }
+                }
+            }
+        }
+        out.retain(|n| !n.contains(['/', '\\']) && n.to_ascii_lowercase().ends_with(ext));
+        for n in &mut out {
+            n.make_ascii_lowercase();
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 }
 
@@ -315,10 +354,13 @@ impl Builder {
                 },
                 (None, None) => None,
             };
-            // Basepath `main` accepts only `iw_*` for non-localized IWDs.
+            // Basepath `main` accepts only `iw_*` for non-localized IWDs, plus the `jcod4x_` and `xbase_` names the
+            // CoD4X loader exempts.
             if language.is_none()
                 && game_dir.eq_ignore_ascii_case("main")
-                && !lower.starts_with("iw_")
+                && !["iw_", "jcod4x_", "xbase_"]
+                    .iter()
+                    .any(|p| lower.starts_with(p))
             {
                 continue;
             }

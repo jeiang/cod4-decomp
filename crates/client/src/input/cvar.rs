@@ -92,6 +92,19 @@ impl Cvars {
         c.archive |= archive;
     }
 
+    /// `(name, value, archived)` of every cvar whose name matches the glob `filter` (`*` and `?`, any case; all
+    /// when `None`), sorted by name: what `dvarlist` shows.
+    pub fn entries(&self, filter: Option<&str>) -> Vec<(String, String, bool)> {
+        let mut v: Vec<_> = self
+            .map
+            .iter()
+            .filter(|(n, _)| filter.is_none_or(|f| glob(&f.to_ascii_lowercase(), n)))
+            .map(|(n, c)| (n.clone(), c.value.clone(), c.archive))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
     /// `(name, value)` of every cvar whose lowercase name starts with `prefix`, sorted by name.
     pub fn with_prefix(&self, prefix: &str) -> Vec<(String, String)> {
         let mut v: Vec<_> = self
@@ -116,4 +129,17 @@ impl Cvars {
         v.sort_unstable();
         v
     }
+}
+
+/// `Com_Filter`'s matching: `*` any run, `?` any one byte; `name` is already lowercase.
+fn glob(pattern: &str, name: &str) -> bool {
+    fn at(p: &[u8], n: &[u8]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some((b'*', rest)) => (0..=n.len()).any(|i| at(rest, &n[i..])),
+            Some((b'?', rest)) => !n.is_empty() && at(rest, &n[1..]),
+            Some((c, rest)) => n.first() == Some(c) && at(rest, &n[1..]),
+        }
+    }
+    at(pattern.as_bytes(), name.as_bytes())
 }

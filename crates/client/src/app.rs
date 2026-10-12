@@ -823,7 +823,10 @@ impl Viewer {
         }
         let install = server::content::Install::open_game(&self.cli.install, &self.cli.game)
             .map_err(|e| format!("cannot open the install: {e}"))?;
-        let mut input = Input::new(self.cli.config_dir.clone(), Some(&install.vfs));
+        let mut input = Input::new(
+            self.cli.config_dir.clone(),
+            assets::vfs::Vfs::open(&self.cli.install, 0, &self.cli.game, None).ok(),
+        );
         input.cvars.set("fs_game", &self.cli.game, false);
         let demo_dir = input
             .config_dir()
@@ -1242,6 +1245,11 @@ impl Viewer {
         let dt = (t - st.last_t).min(0.1);
         st.last_t = t;
         st.pace.1 += 1;
+        // The commands a `wait` held back run before this frame's input is read.
+        match st.shell.as_mut() {
+            Some(sh) => sh.run_due(&mut st.input),
+            None => st.input.run_due(),
+        }
         if let Some(g) = st.load_gaps.as_mut() {
             g.frames += 1;
             g.max_ms = g.max_ms.max(interval);
@@ -1907,6 +1915,12 @@ impl Viewer {
         if let Some(m) = st.menu_sound.as_mut() {
             m.set_volume(crate::sound::volume_of(&st.input.cvars));
             m.frame([0.0; 3], 0.0, (interval / 1000.0) as f32);
+        }
+        // What commands said (a missing `exec` file, `dvarlist`) goes to the console.
+        let said = st.input.take_messages();
+        match st.shell.as_mut() {
+            Some(sh) => said.iter().for_each(|l| sh.print_console(l)),
+            None => said.iter().for_each(|l| eprintln!("{l}")),
         }
         let actions = st
             .shell
