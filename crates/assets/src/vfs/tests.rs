@@ -407,3 +407,16 @@ fn list_finds_files_in_iwds_and_loose_directories_once() {
         ["maps/mp/a.gsc", "maps/mp/b.gsc", "maps/mp/gametypes/c.gsc"]
     );
 }
+
+#[test]
+fn loose_files_are_found_in_every_directory_that_folds_to_the_name() {
+    let t = Tmp::new();
+    t.iwd("main/iw_00.iwd", &[]);
+    t.file("main_shared/maps/a.gsc", b"a");
+    t.file("main_shared/Maps/b.gsc", b"b");
+    let v = Vfs::open_stock(&t.0, 0).unwrap();
+    assert_eq!(
+        (get(&v, "maps/a.gsc"), get(&v, "MAPS/b.gsc")),
+        ("a".into(), "b".into())
+    );
+}

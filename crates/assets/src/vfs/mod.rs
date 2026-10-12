@@ -226,23 +226,27 @@ fn walk(dir: &Path, prefix: &str, suffix: &str, out: &mut std::collections::BTre
     rec(dir, "", prefix, suffix, out);
 }
 
-/// Case-insensitive path lookup below `dir` (the install may sit on a
-/// case-sensitive file system). Directory entries are not files.
+/// Case-insensitive path lookup below `dir` (the install may sit on a case-sensitive file system, where directories
+/// that differ only in case can both exist: each is tried). Directory entries are not files.
 fn find_file(dir: &Path, norm: &str) -> Option<PathBuf> {
-    let mut cur = dir.to_path_buf();
-    for part in norm.split('/').filter(|p| !p.is_empty()) {
-        let direct = cur.join(part);
-        cur = if crate::fs::exists(&direct) {
-            direct
-        } else {
-            crate::fs::read_dir(&cur)
-                .ok()?
-                .flatten()
-                .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == part)?
-                .path()
+    let parts: Vec<&str> = norm.split('/').filter(|p| !p.is_empty()).collect();
+    fn rec(cur: &Path, parts: &[&str]) -> Option<PathBuf> {
+        let Some((part, rest)) = parts.split_first() else {
+            return crate::fs::is_file(cur).then(|| cur.to_path_buf());
         };
+        let direct = cur.join(part);
+        if crate::fs::exists(&direct)
+            && let Some(f) = rec(&direct, rest)
+        {
+            return Some(f);
+        }
+        crate::fs::read_dir(cur)
+            .ok()?
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == *part)
+            .find_map(|e| rec(&e.path(), rest))
     }
-    crate::fs::is_file(&cur).then_some(cur)
+    rec(dir, &parts)
 }
 
 /// Builds the search path the way `AddGameDirectory` does: every addition is

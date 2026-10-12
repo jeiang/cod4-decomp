@@ -39,9 +39,14 @@ pub fn incomplete(root: &std::path::Path, game: &str, map: &str) -> bool {
     let Some(dir) = assets::paths::usermap_dir(root, map) else {
         return false;
     };
-    let has = |f: String| assets::fs::exists(&dir.join(f));
-    !assets::paths::usermap_marker(root, map).is_some_and(|m| assets::fs::exists(&m))
-        && !(has(format!("{map}.iwd")) && has(format!("{map}_load.ff")))
+    let has = |f: &str| assets::fs::exists(&dir.join(f));
+    // A finished download lists the files the server gave; one of them gone is fetched again, and a file the server
+    // refused is not listed, so not asked for again.
+    match assets::paths::usermap_marker(root, map).and_then(|m| assets::fs::read_to_string(m).ok())
+    {
+        Some(list) => list.lines().any(|f| !f.is_empty() && !has(f)),
+        None => !(has(&format!("{map}.iwd")) && has(&format!("{map}_load.ff"))),
+    }
 }
 
 impl Download {
@@ -134,6 +139,7 @@ fn run(
     let mut t =
         UdpTransport::bind(SocketAddr::from(([0, 0, 0, 0], 0))).map_err(|e| e.to_string())?;
     let (load, iwd) = (format!("{map}_load"), format!("{map}.iwd"));
+    let mut given = String::new();
     for (name, optional) in [(map, false), (load.as_str(), true), (iwd.as_str(), true)] {
         let file = if name.ends_with(".iwd") {
             name.to_owned()
@@ -142,16 +148,26 @@ fn run(
         };
         let dest: PathBuf = dir.join(file);
         if dest.exists() {
+            given.push_str(&format!(
+                "{}\n",
+                dest.file_name().unwrap().to_string_lossy()
+            ));
             continue;
         }
         progress.done.store(0, Ordering::Relaxed);
         progress.total.store(0, Ordering::Relaxed);
         match fetch(&mut t, server, name, &dest, progress, cancel) {
             Err(e) if optional && e == net::download::NOT_AVAILABLE => {}
-            r => r?,
+            r => {
+                r?;
+                given.push_str(&format!(
+                    "{}\n",
+                    dest.file_name().unwrap().to_string_lossy()
+                ));
+            }
         }
     }
-    std::fs::write(dir.join(format!("{map}.complete")), b"").map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{map}.complete")), given).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -185,10 +201,22 @@ mod tests {
         );
         assert!(!incomplete(root, "mods/m", "mp_inmod"));
         let dir = root.join("usermaps/mp_custom");
-        std::fs::write(dir.join("mp_custom.complete"), b"").unwrap();
+        std::fs::write(dir.join("mp_custom.complete"), "mp_custom.ff\n").unwrap();
         assert!(
             !incomplete(root, "", "mp_custom"),
-            "finished, whatever the server had"
+            "finished, the server had no IWD"
+        );
+        std::fs::write(dir.join("mp_custom.iwd"), b"").unwrap();
+        std::fs::write(
+            dir.join("mp_custom.complete"),
+            "mp_custom.ff\nmp_custom.iwd\n",
+        )
+        .unwrap();
+        assert!(!incomplete(root, "", "mp_custom"));
+        std::fs::remove_file(dir.join("mp_custom.iwd")).unwrap();
+        assert!(
+            incomplete(root, "", "mp_custom"),
+            "a downloaded IWD that is gone is fetched again"
         );
         std::fs::remove_file(dir.join("mp_custom.complete")).unwrap();
         std::fs::write(dir.join("mp_custom.iwd"), b"").unwrap();
