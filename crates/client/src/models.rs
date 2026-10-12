@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::ragdoll::{Birth, Def, Ragdoll, Skel, Tunables};
+use crate::ragdoll::{Birth, Def, Motion, Ragdoll, Skel, Tunables};
 use render::{ModelInstance, ModelKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -306,6 +306,9 @@ impl Library {
             pose: Pose::default(),
             before: Vec::new(),
             step: 0.0,
+            before_at: ([0.0; 3], 0.0),
+            at: [0.0; 3],
+            prev_at: [0.0; 3],
             yaw: 0.0,
         };
         player.set_hand(self.hand(&set.hand)?);
@@ -414,15 +417,28 @@ pub struct Player {
     /// velocity is made from when the body is handed to a ragdoll.
     before: Vec<sim::skel::BoneMat>,
     step: f32,
+    /// Where the entity and which way it faced when `before` was posed.
+    before_at: ([f32; 3], f32),
+    /// Where the entity is, as of the last [`Player::place`].
+    at: [f32; 3],
+    prev_at: [f32; 3],
     yaw: f32,
 }
 
 impl Player {
+    /// Tells the player where its entity is for the next [`Player::update`]: the frame before is where the entity was
+    /// when the last one was placed, which a ragdoll made from it needs to keep the entity's travel.
+    pub fn place(&mut self, origin: [f32; 3]) {
+        self.prev_at = self.at;
+        self.at = origin;
+    }
+
     /// Advances the animation by `dt` seconds for `input` and poses the skeleton.
     pub fn update(&mut self, dt: f32, input: &PlayerPoseInput) {
         self.before.clear();
         self.before.extend_from_slice(self.pose.bones());
         self.step = dt;
+        self.before_at = (self.prev_at, self.yaw);
         self.state.update(&*self.anims, dt, input);
         self.state.pose(&self.anims, &mut self.pose);
         self.yaw = input.yaw;
@@ -504,7 +520,12 @@ impl Player {
                 origin,
                 yaw_degrees: self.yaw,
                 push,
-                motion: Some((self.before.as_slice(), self.step)),
+                motion: Some(Motion {
+                    pose: self.before.as_slice(),
+                    origin: self.before_at.0,
+                    yaw_degrees: self.before_at.1,
+                    secs: self.step,
+                }),
                 tun,
             },
         )

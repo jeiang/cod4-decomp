@@ -48,8 +48,6 @@ pub struct Tunables {
     pub explode_upbias: f32,
     /// `ragdoll_self_collision_scale`: how much larger than the bone the capsules that keep limbs apart are.
     pub self_collision_scale: f32,
-    /// `ragdoll_baselerp_time` (seconds): how long a baselerp bone the file gives no time takes to reach the bind pose.
-    pub baselerp_time: f32,
     /// `ragdoll_rotvel_scale`: scales the turning rate a bone has from its animation when the body is handed to physics.
     pub rotvel_scale: f32,
 }
@@ -63,7 +61,6 @@ impl Default for Tunables {
             explode_force: 18000.0,
             explode_upbias: 0.8,
             self_collision_scale: 1.2,
-            baselerp_time: 1.0,
             rotvel_scale: 1.0,
         }
     }
@@ -103,12 +100,6 @@ impl Tunables {
                 0.1,
                 10.0,
             ),
-            baselerp_time: cheat(
-                "ragdoll_baselerp_time",
-                stock.baselerp_time * 1000.0,
-                100.0,
-                6000.0,
-            ) / 1000.0,
             rotvel_scale: cheat("ragdoll_rotvel_scale", stock.rotvel_scale, 0.0, 2000.0),
         }
     }
@@ -186,8 +177,9 @@ struct LerpDef {
     bone: String,
     /// The body whose first joint the bone is placed against.
     parent: usize,
-    /// Milliseconds to reach the bind pose; `None` takes [`Tunables::baselerp_time`].
-    millis: Option<u32>,
+    /// Milliseconds to reach the bind pose. A line with no time reads it as `atoi("")`, 0, which the command holds to
+    /// its 100 ms floor (`ragdoll_baselerp_time` is only used by a path the command's argument count never reaches).
+    millis: u32,
 }
 
 impl Def {
@@ -270,7 +262,8 @@ impl Def {
                     let millis = rest
                         .first()
                         .and_then(|t| t.parse::<i32>().ok())
-                        .map(|ms| ms.clamp(100, 6000) as u32);
+                        .unwrap_or(0)
+                        .clamp(100, 6000) as u32;
                     let parent = rest.get(1).map_or(Some(0), |p| p.parse::<usize>().ok());
                     if let Some(parent) = parent {
                         d.lerp((*name).to_owned(), parent, millis);
@@ -278,7 +271,7 @@ impl Def {
                 }
                 ["ragdoll_pin_bone", DEFINITION, name, parent] => {
                     if let Ok(parent) = parent.parse::<usize>() {
-                        d.lerp((*name).to_owned(), parent, Some(0));
+                        d.lerp((*name).to_owned(), parent, 0);
                     }
                 }
                 _ => {}
@@ -309,7 +302,7 @@ impl Def {
     }
 
     /// One baselerp or pinned bone against body `parent`: at most nine, as the original has room for.
-    fn lerp(&mut self, bone: String, parent: usize, millis: Option<u32>) {
+    fn lerp(&mut self, bone: String, parent: usize, millis: u32) {
         if parent < self.bones.len() && self.lerps.len() < 9 {
             self.lerps.push(LerpDef {
                 bone,
@@ -472,6 +465,17 @@ fn quat_of(b: &BoneMat) -> Quat {
     Quat::from_xyzw(b.quat[0], b.quat[1], b.quat[2], b.quat[3]).normalize()
 }
 
+/// The frame before the one a body is made in, in the same terms as [`Birth`]'s own: the entity moved and turned as well
+/// as the pose changed, and the body keeps the velocity of both (`Ragdoll_EstimateInitialVelocities` compares world
+/// positions).
+pub struct Motion<'a> {
+    pub pose: &'a [BoneMat],
+    pub origin: [f32; 3],
+    pub yaw_degrees: f32,
+    /// Seconds between the two frames.
+    pub secs: f32,
+}
+
 /// What a body is made from.
 pub struct Birth<'a> {
     /// The pose (entity space) the body goes in.
@@ -482,8 +486,8 @@ pub struct Birth<'a> {
     pub yaw_degrees: f32,
     /// Velocity (units per second) the death throws the body with.
     pub push: [f32; 3],
-    /// The pose before `pose` and the seconds between the two: the animation's own velocity.
-    pub motion: Option<(&'a [BoneMat], f32)>,
+    /// The frame before `pose`: the velocity the body had on its way in.
+    pub motion: Option<Motion<'a>>,
     pub tun: Tunables,
 }
 
@@ -627,7 +631,7 @@ impl Ragdoll {
             lerps.push(Lerp {
                 bone,
                 body: l.parent,
-                secs: l.millis.map_or(tun.baselerp_time, |ms| ms as f32 / 1000.0),
+                secs: l.millis as f32 / 1000.0,
                 rest: (to_parent * quat_of(&base[bone])).normalize(),
                 at: to_parent * (Vec3::from(base[bone].trans) - Vec3::from(base[from].trans)),
             });
@@ -687,18 +691,28 @@ impl Ragdoll {
         let v = Vec3::from(push).clamp_length_max(MAX_SPEED);
         for (b, &(from, _)) in bodies.iter_mut().zip(&ends) {
             b.v = v;
-            let Some((before, dt)) = motion.filter(|(p, dt)| p.len() >= n && *dt > EPS) else {
+            let Some(m) = motion
+                .as_ref()
+                .filter(|m| m.pose.len() >= n && m.secs > EPS)
+            else {
                 continue;
             };
-            // The body's own animation: how far the joint moved and turned since the last pose.
+            // The bone's own motion in the world: how far it moved and turned since the last frame, the entity's
+            // travel included, so a running victim keeps running.
+            let yaw0 = Quat::from_rotation_z(m.yaw_degrees.to_radians());
             let (p0, q0) = (
-                origin + yaw * Vec3::from(before[from].trans),
-                yaw * quat_of(&before[from]),
+                Vec3::from(m.origin) + yaw0 * Vec3::from(m.pose[from].trans),
+                yaw0 * quat_of(&m.pose[from]),
             );
             let (p1, q1) = world[from];
+            let speed = (p1 - p0) / m.secs;
+            // A snap (a respawn, a teleport) is not motion.
+            if speed.length() > MAX_SPEED {
+                continue;
+            }
             let q0 = if q0.dot(q1) < 0.0 { -q0 } else { q0 };
-            b.v += (p1 - p0) / dt;
-            b.w = (q1 * q0.inverse()).normalize().to_scaled_axis() * (tun.rotvel_scale / dt);
+            b.v += speed;
+            b.w = (q1 * q0.inverse()).normalize().to_scaled_axis() * (tun.rotvel_scale / m.secs);
         }
         let seed = (origin.x.to_bits() ^ origin.y.to_bits().rotate_left(11)) as u64;
         Some(Self {
@@ -1329,7 +1343,7 @@ mod tests {
         pose: &[BoneMat],
         origin: [f32; 3],
         push: [f32; 3],
-        before: Option<(&[BoneMat], f32)>,
+        before: Option<Motion>,
         tun: Tunables,
     ) -> Ragdoll {
         let def = Def::parse(DEF);
@@ -1432,10 +1446,8 @@ mod tests {
             Tunables::read(&c).jointlerp_time,
             Tunables::default().jointlerp_time
         );
-        c.set("ragdoll_baselerp_time", "50", false);
         c.set("ragdoll_rotvel_scale", "5000", false);
         let t = Tunables::read(&c);
-        assert_eq!(t.baselerp_time, 0.1, "held to the dvar's 100 ms floor");
         assert_eq!(t.rotvel_scale, 2000.0, "held to the dvar's limit");
     }
 
@@ -1488,7 +1500,7 @@ mod tests {
                 d.lerps[0].parent,
                 d.lerps[0].millis
             ),
-            ("j_head", 0, Some(2000))
+            ("j_head", 0, 2000)
         );
         assert_eq!((d.lerps[5].parent, d.lerps[8].parent), (4, 10));
         let lines = Def::parse(
@@ -1506,13 +1518,8 @@ mod tests {
             .collect();
         assert_eq!(
             got,
-            [
-                ("c", Some(100)),
-                ("d", Some(6000)),
-                ("e", None),
-                ("g", Some(0))
-            ],
-            "a bone against a body that is not there is left out; a pinned bone has no time"
+            [("c", 100), ("d", 6000), ("e", 100), ("g", 0)],
+            "a time is held to 100..6000 ms and a missing one reads as 0, so 100; a bone against a body that is not there is left out; a pinned bone has no time"
         );
         let flipped = Def::parse(
             "ragdoll_bone 1 a b 1 0.5 1 0.3 -1 0 capsule
@@ -1752,7 +1759,12 @@ mod tests {
                 &pose,
                 [0.0; 3],
                 [0.0, 5.0, 0.0],
-                Some((&before, 0.1)),
+                Some(Motion {
+                    pose: &before,
+                    origin: [0.0; 3],
+                    yaw_degrees: 0.0,
+                    secs: 0.1,
+                }),
                 Tunables {
                     rotvel_scale: scale,
                     ..Tunables::default()
@@ -1776,5 +1788,40 @@ mod tests {
         );
         assert!((made(2.0).bodies[0].w.z - 2.0).abs() < 1e-2);
         assert_eq!(made(0.0).bodies[0].w, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_body_keeps_the_travel_of_its_entity_and_a_teleport_is_not_travel() {
+        let pose = standing(&[]);
+        let made = |was: [f32; 3]| {
+            make_moving(
+                &pose,
+                [30.0, 0.0, 0.0],
+                [0.0; 3],
+                Some(Motion {
+                    pose: &pose,
+                    origin: was,
+                    yaw_degrees: 0.0,
+                    secs: 0.1,
+                }),
+                Tunables::default(),
+            )
+        };
+        // The same pose, but the entity was 3 units back a tenth of a second ago: 30 units a second on.
+        let r = made([27.0, 0.0, 0.0]);
+        assert!(
+            r.bodies
+                .iter()
+                .all(|b| (b.v - Vec3::X * 30.0).length() < 1e-2),
+            "{}",
+            r.bodies[0].v
+        );
+        // It was 500 units away a tenth of a second ago: a respawn, so no velocity at all.
+        let r = made([-470.0, 0.0, 0.0]);
+        assert!(
+            r.bodies
+                .iter()
+                .all(|b| b.v == Vec3::ZERO && b.w == Vec3::ZERO)
+        );
     }
 }

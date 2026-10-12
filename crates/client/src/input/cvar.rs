@@ -45,7 +45,6 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("ragdoll_explode_force", "18000", false),
     ("ragdoll_explode_upbias", "0.8", false),
     ("ragdoll_self_collision_scale", "1.2", false),
-    ("ragdoll_baselerp_time", "1000", false),
     ("ragdoll_rotvel_scale", "1", false),
     ("phys_bulletupbias", "0.5", false),
     ("phys_bulletspinscale", "3", true),
