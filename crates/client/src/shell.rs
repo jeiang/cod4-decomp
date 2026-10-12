@@ -2227,11 +2227,8 @@ mod tests {
 
     #[test]
     fn singleplayer_selects_install_executable_and_reports_unavailable_cases() {
-        let install = std::env::temp_dir().join(format!(
-            "cod4e-singleplayer-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let install =
+            std::env::temp_dir().join(format!("cod4e-singleplayer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&install);
         std::fs::create_dir_all(&install).unwrap();
 
