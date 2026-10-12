@@ -203,6 +203,8 @@ impl Library {
             Install::open_game(root, game).map_err(|e| format!("cannot open the install: {e}"))?;
         install.mount_usermap(map).map_err(|e| e.to_string())?;
         let mut content = Content::for_client();
+        // The materials the models of the other zones name (`mc/lambert1`) are defined here.
+        content.load_zone(&install, "code_post_gfx_mp", 2)?;
         content.load_zone(&install, "common_mp", 4)?;
         content.load_mod(&install)?;
         content.load_map(&install, map)?;
@@ -867,9 +869,8 @@ mod tests {
         };
         let mut found = 0;
         for map in ["mp_convoy", "mp_backlot", "mp_farm"] {
-            let Ok(data) = render::MapData::load(&root, "", map) else {
-                continue;
-            };
+            let data =
+                render::MapData::load(&root, "", map).unwrap_or_else(|e| panic!("{map}: {e}"));
             let lib = Library::load(&root, "", map).expect("content");
             for (name, ..) in placed_turrets(&data) {
                 let model = lib
@@ -886,9 +887,7 @@ mod tests {
                 found += 1;
             }
         }
-        if found == 0 {
-            eprintln!("untested: no stock map with a turret");
-        }
+        assert!(found > 0, "no stock map places a turret");
     }
 
     /// A turret placed by a stock map shows in a frame seen from behind it, as the gunner would, at rest and swung.
@@ -907,13 +906,13 @@ mod tests {
         let fmt = wgpu::TextureFormat::Rgba8Unorm;
         let mut drawn = 0;
         for map in ["mp_convoy", "mp_backlot"] {
-            let Ok(data) = render::MapData::load(&root, "", map) else {
-                continue;
-            };
+            let data =
+                render::MapData::load(&root, "", map).unwrap_or_else(|e| panic!("{map}: {e}"));
             let turrets = placed_turrets(&data);
-            let Some((name, at, yaw)) = turrets.first().cloned() else {
-                continue;
-            };
+            let (name, at, yaw) = turrets
+                .first()
+                .cloned()
+                .unwrap_or_else(|| panic!("{map} places no turret"));
             let mut lib = Library::load(&root, "", map).expect("content");
             let rest = lib.rest_pose(&name, &[]).expect("the turret model");
             let scene = render::Scene::new(&gpu, &data).expect("scene");
@@ -984,8 +983,39 @@ mod tests {
             }
             drawn += 1;
         }
-        if drawn == 0 {
-            eprintln!("untested: no stock map with a turret");
+        assert!(drawn > 0, "no stock map places a turret");
+    }
+
+    /// Every model of every stock map has materials to draw it by, except the ones that are not drawn at all.
+    #[test]
+    fn no_stock_model_is_left_with_a_material_it_cannot_draw() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let custom = assets::paths::custom_maps(&root, "");
+        let mut left = Vec::new();
+        for map in assets::paths::maps(&root, "") {
+            if custom.contains(&map) {
+                continue;
+            }
+            let lib = Library::load(&root, "", &map).unwrap_or_else(|e| panic!("{map}: {e}"));
+            for name in lib.content.model_names("") {
+                let model = lib.content.model(name).expect("a listed model");
+                for m in model.materials.iter().flatten() {
+                    if m.technique_set.is_none()
+                        || m.name.as_deref().is_some_and(|n| n.starts_with(','))
+                    {
+                        left.push(format!("{map}: {name}: {:?}", m.name));
+                    }
+                }
+            }
         }
+        left.sort();
+        left.dedup();
+        assert!(
+            left.is_empty(),
+            "models with a material nothing defines: {left:#?}"
+        );
     }
 }
