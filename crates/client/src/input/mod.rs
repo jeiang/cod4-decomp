@@ -2105,7 +2105,8 @@ mod tests {
         for _ in 0..4 {
             i.run_due();
         }
-        assert_eq!(frame(&mut i).move_forward, 0.0);
+        frame(&mut i); // the tap shows for one frame
+        assert_eq!(frame(&mut i).move_forward, 0.0, "not stuck");
     }
 
     #[test]
