@@ -308,11 +308,12 @@ impl ShellState {
         }
     }
 
-    /// The scoreboard rows are on screen: held by the player, or the match is over and its menu is up.
+    /// The scoreboard rows are on screen: held by the player, or the match is over (`DrawIntermission` keeps drawing
+    /// them behind a script popup; only the end-of-game menu replaces them).
     pub fn scoreboard_shown(&self, ui: &Ui) -> bool {
         self.game.scoreboard
             || self.scores_forced
-            || (self.live.intermission && ui.is_open("scoreboard"))
+            || (self.live.intermission && !ui.is_open("endofgame"))
     }
 
     /// The wheel, the arrows and the page keys move the scoreboard's list while it is up and has more rows than fit.
@@ -681,15 +682,19 @@ impl Shell {
 
     /// Opens a menu by name (the app's `togglemenu`, the server's `openmenu`).
     pub fn open(&mut self, input: &mut Input, name: &str) {
+        Self::open_menu(&mut self.st, &mut self.ui, input, name);
+    }
+
+    fn open_menu(st: &mut ShellState, ui: &mut Ui, input: &mut Input, name: &str) {
         let kind = if name == "scoreboard" {
             crate::ui::MenuKind::Scoreboard
-        } else if self.st.in_game {
+        } else if st.in_game {
             crate::ui::MenuKind::Ingame
         } else {
             crate::ui::MenuKind::Other
         };
-        let mut h = Self::host(&mut self.st, input);
-        self.ui.open_as(&mut h, name, kind);
+        let mut h = Self::host(st, input);
+        ui.open_as(&mut h, name, kind);
     }
 
     pub fn close_by_name(&mut self, input: &mut Input, name: &str) {
@@ -925,6 +930,32 @@ impl Shell {
         }
     }
 
+    /// `DrawIntermission` / `CG_DrawActiveFrame`: at the end of a match the scoreboard (or the end-of-game menu when
+    /// the scripts ask for it) is up for as long as the server holds the players there, unless a menu the server
+    /// opened is up (the unlock and summary popups `_globallogic.gsc::endGame` opens): that one is left alone, and
+    /// the scoreboard rows stay drawn behind it. Once the match is on again the end-of-game request is forgotten.
+    fn intermission_menus(st: &mut ShellState, ui: &mut Ui, input: &mut Input) {
+        if st.live.intermission {
+            if !ui.script_popup_up() {
+                let show_end = input
+                    .cvars
+                    .get("ui_showEndOfGame")
+                    .is_some_and(|v| v.trim() == "1");
+                let want = if show_end { "endofgame" } else { "scoreboard" };
+                if !ui.is_open(want) {
+                    Self::open_menu(st, ui, input, want);
+                }
+            }
+        } else if st.live.active
+            && input
+                .cvars
+                .get("ui_showEndOfGame")
+                .is_some_and(|v| v.trim() != "0")
+        {
+            input.set_cvar("ui_showEndOfGame", "0");
+        }
+    }
+
     /// Once a frame, after the network has been read: what follows from the live state. Opens the end-of-match
     /// menus, clears the feed between matches and says whether the scoreboard needs fresh rows.
     pub fn tick(&mut self, input: &mut Input) {
@@ -952,28 +983,7 @@ impl Shell {
             self.st.was_active = live_now;
             self.st.feed.clear();
         }
-        // `DrawIntermission`: at the end of a match the scoreboard (or the end-of-game menu when the scripts ask
-        // for it) is up for as long as the server holds the players there, unless a menu the server opened is up
-        // (the unlock and summary popups `_globallogic.gsc::endGame` opens): that one is left alone. Outside
-        // an intermission the end-of-game request is forgotten.
-        if self.st.live.intermission {
-            if !self.ui.script_popup_up() {
-                let show_end = input
-                    .cvars
-                    .get("ui_showEndOfGame")
-                    .is_some_and(|v| v.trim() == "1");
-                let want = if show_end { "endofgame" } else { "scoreboard" };
-                if !self.ui.is_open(want) {
-                    self.open(input, want);
-                }
-            }
-        } else if input
-            .cvars
-            .get("ui_showEndOfGame")
-            .is_some_and(|v| v.trim() != "0")
-        {
-            input.set_cvar("ui_showEndOfGame", "0");
-        }
+        Self::intermission_menus(&mut self.st, &mut self.ui, input);
         self.st.live.scores_wanted = self.st.scoreboard_shown(&self.ui);
         if self.st.live.active {
             let st = &mut self.st;
@@ -2998,6 +3008,28 @@ mod tests {
         let mut input = Input::detached();
         register_defaults(&mut input);
         Some((st, Ui::new(assets, (1280, 720)), input))
+    }
+
+    /// The unlock popup the server opens at the end of a match stays up through the intermission, with the
+    /// scoreboard rows still wanted behind it.
+    #[test]
+    fn the_intermission_leaves_a_server_popup_up_and_keeps_the_rows() {
+        let Some((mut st, mut ui, mut input)) = shell_env() else {
+            return;
+        };
+        st.live.active = true;
+        st.live.intermission = true;
+        Shell::intermission_menus(&mut st, &mut ui, &mut input);
+        assert!(ui.is_open("scoreboard"));
+        let mut h = Shell::host(&mut st, &mut input);
+        ui.open_script_menu(&mut h, "popup_unlock", true);
+        for _ in 0..3 {
+            Shell::intermission_menus(&mut st, &mut ui, &mut input);
+        }
+        // With nothing unlocked the unlock popup hands over to the summary popup; either way a popup is up.
+        assert!(ui.script_popup_up(), "the popup is not closed again");
+        assert!(!ui.is_open("scoreboard"));
+        assert!(st.scoreboard_shown(&ui), "the rows stay drawn behind it");
     }
 
     fn lan_server(addr: &str, mode: &str) -> Entry {
