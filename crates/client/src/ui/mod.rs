@@ -670,6 +670,12 @@ impl Ui {
             .is_some_and(|i| self.stack.contains(&i))
     }
 
+    /// A menu the server opened (`openmenu`, and what its scripts open in turn) is up: the end-of-match unlock and
+    /// summary popups the scripts show are such menus.
+    pub fn script_popup_up(&self) -> bool {
+        self.menu_kind == MenuKind::ScriptPopup && !self.stack.is_empty()
+    }
+
     /// True when any menu on the stack wants the mouse and keyboard (the game does not get them).
     pub fn captures_input(&self) -> bool {
         !self.stack.is_empty()
@@ -3104,6 +3110,28 @@ mod tests {
         let t: Vec<char> = "a^1b".chars().collect();
         assert_eq!(cursor_step(&t, 3, -1), 1);
         assert_eq!(cursor_step(&t, 1, 1), 4);
+    }
+
+    /// The unlock popup the scripts open over the end-of-match scoreboard replaces it and counts as a menu the
+    /// server opened, so the intermission must leave it be; with nothing up, it does not.
+    #[test]
+    fn a_server_popup_over_the_scoreboard_is_a_script_popup() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        assert!(!ui.script_popup_up());
+        ui.open_as(&mut host, "scoreboard", MenuKind::Scoreboard);
+        assert!(!ui.script_popup_up(), "the scoreboard itself is not one");
+        ui.open_script_menu(&mut host, "popup_unlock", true);
+        assert!(ui.script_popup_up());
+        assert!(!ui.is_open("scoreboard"), "the popup replaced it");
+        // Closing the unlock popup opens the summary popup (its own close script), which is one too.
+        ui.close_all(&mut host);
+        assert!(ui.is_open("popup_summary") && ui.script_popup_up());
+        ui.close_all(&mut host);
+        assert!(!ui.script_popup_up(), "nothing is up once they are closed");
     }
 
     fn group_items(ui: &Ui, m: usize, group: &str) -> Vec<usize> {
