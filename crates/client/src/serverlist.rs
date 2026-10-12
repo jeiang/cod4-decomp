@@ -561,6 +561,9 @@ pub struct ServerList {
     selected: Option<SocketAddr>,
     /// When the running refresh started and which list it is for; it counts as running for [`REFRESH_WINDOW`].
     refresh_started: Option<(Instant, Source)>,
+    /// Tests only: a window that no machine load can outlast, in place of the real ones.
+    #[cfg(test)]
+    pub(crate) window_override: Option<Duration>,
     /// The server a `getstatus` is out to, when it was last sent and how often.
     status_req: Option<(SocketAddr, Instant, u32)>,
     /// An answer that arrived and has not been taken yet.
@@ -687,6 +690,8 @@ impl ServerList {
             } else {
                 REFRESH_WINDOW
             };
+            #[cfg(test)]
+            let window = self.window_override.unwrap_or(window);
             s == source && t.elapsed() < window
         })
     }

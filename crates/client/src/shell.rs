@@ -3160,6 +3160,8 @@ mod tests {
             st: &mut st,
             input: &mut input,
         };
+        // The refresh window is wall-clock: under load the test could outlast the real 1.5 s.
+        h.st.servers.window_override = Some(std::time::Duration::from_secs(3600));
         h.st.servers.take(lan_server("192.168.1.5:28960", "dm"));
         assert!(h.ui_script(&mut ui, "RefreshFilter", &[]));
         assert!(h.st.servers.refreshing(Source::Lan));

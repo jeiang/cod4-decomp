@@ -47,6 +47,12 @@ impl Talker {
                 }
             }
         }
+        // The browser reports a refused permission after the open call returned.
+        if let Some(e) = self.mic.as_mut().and_then(Capture::failure) {
+            self.mic = None;
+            self.failed_at = Some(now);
+            self.note = Some(format!("voice chat: {e}"));
+        }
         let Some(mic) = self.mic.as_mut() else {
             return Vec::new();
         };
