@@ -356,6 +356,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("ui_netGametypeName", "war"),
     ("ui_netSource", "0"),
     ("ui_joinGameType", "0"),
+    // The userinfo dvar a join sends as its password (`password_popmenu` edits it); never saved.
+    ("password", ""),
     ("ui_gametype", "0"),
     ("ui_currentMap", "0"),
     ("ui_currentNetMap", "0"),
@@ -418,6 +420,18 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("ai_corpseCount", "10"),
     ("cl_freelook", "1"),
     ("m_filter", "0"),
+    // The join menu's filters (`filter_popmenu`), the stock values. `ui_browserShowPure` has no control in the popup
+    // and is off here, unlike the stock 1: our servers do not enforce pure content and default to `sv_pure 0`, so
+    // the stock value would hide every one of them.
+    ("ui_browserShowFull", "1"),
+    ("ui_browserShowEmpty", "1"),
+    ("ui_browserShowPassword", "-1"),
+    ("ui_browserShowPure", "0"),
+    ("ui_browserMod", "0"),
+    ("ui_browserShowDedicated", "0"),
+    ("ui_browserFriendlyfire", "-1"),
+    ("ui_browserKillcam", "-1"),
+    ("ui_browserShowPunkBuster", "-1"),
     // Not a stock dvar: the bots a server started from the menus plays with, on every map.
     ("bot_count", "0"),
     // Not a stock dvar: the master servers (`host[:port]`, space separated, up to five) the Internet list asks.
@@ -462,7 +476,8 @@ impl Shell {
     ) -> Result<Self, String> {
         let mut assets = UiAssets::load(install)?;
         assets.note_menu_materials();
-        let st = ShellState::new(&assets, install);
+        let mut st = ShellState::new(&assets, install);
+        st.servers.load_favorites(input.config_dir());
         register_defaults(input);
         let vfs = ::assets::vfs::Vfs::open(&install.root, 0, &install.game)
             .map_err(|e| format!("cannot open the install: {e}"))?;
@@ -1266,15 +1281,33 @@ impl HostCx<'_> {
         self.st.gametypes.get(n.checked_sub(1)?)
     }
 
+    /// The filter popup's settings (`ui_browser*`).
+    fn server_filter(&self) -> crate::serverlist::Filter {
+        let on = |name: &str| atoi(&self.dvar_get(name)) != 0;
+        let n = |name: &str| atoi(&self.dvar_get(name));
+        crate::serverlist::Filter {
+            show_full: on("ui_browserShowFull"),
+            show_empty: on("ui_browserShowEmpty"),
+            password: n("ui_browserShowPassword"),
+            pure_only: on("ui_browserShowPure"),
+            dedicated_only: on("ui_browserShowDedicated"),
+            modded: n("ui_browserMod"),
+            friendly_fire: n("ui_browserFriendlyfire"),
+            killcam: n("ui_browserKillcam"),
+            punkbuster: n("ui_browserShowPunkBuster"),
+        }
+    }
+
     /// The join list as shown: the servers of the chosen source that run the chosen game mode (a server that has not
-    /// answered does not say, so a chosen mode hides it).
+    /// answered does not say, so a chosen mode hides it) and pass the filter popup's settings.
     fn server_rows(&self) -> Vec<&crate::serverlist::Entry> {
         let mode = self.join_gametype().map(|g| g.id.as_str());
+        let filter = self.server_filter();
         self.st
             .servers
             .rows(self.net_source())
             .iter()
-            .filter(|e| mode.is_none_or(|m| e.gametype == m))
+            .filter(|e| mode.is_none_or(|m| e.gametype == m) && filter.passes(e))
             .collect()
     }
 
@@ -2033,7 +2066,7 @@ impl Host for HostCx<'_> {
                 self.st.servers.select(None);
                 true
             }
-            // 222: the server filter; the only filter there is shows every server.
+            // 222: the server filter button; the filter popup's settings apply as the list is built.
             222 if pick => {
                 self.st.servers.select(None);
                 true
@@ -2898,6 +2931,40 @@ mod tests {
         assert!(h.owner_key(&ui, 220, &UiKey::Mouse2));
         assert_eq!(h.dvar("ui_netSource"), "2");
         assert!(!h.owner_key(&ui, 220, &UiKey::Up));
+    }
+
+    /// The filter popup's dvars cut the join list, and its sort buttons order every column.
+    #[test]
+    fn the_filter_popup_dvars_cut_the_join_list() {
+        let Some((mut st, mut ui, mut input)) = shell_env() else {
+            return;
+        };
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        let mut locked = lan_server("192.168.1.5:28960", "war");
+        locked.password = true;
+        h.st.servers.take(locked);
+        h.st.servers.take(lan_server("192.168.1.6:28960", "war"));
+        for (k, v) in [("ui_browserShowPassword", "-1"), ("ui_browserShowFull", "1")] {
+            h.set_dvar(k, v);
+        }
+        assert_eq!(h.feeder_count(2), 2);
+        h.set_dvar("ui_browserShowPassword", "1");
+        assert_eq!(h.feeder_count(2), 1);
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.5:28960");
+        h.set_dvar("ui_browserShowPassword", "0");
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.6:28960");
+        h.set_dvar("ui_browserShowPassword", "-1");
+        // Sorting by the password column puts the open server first.
+        assert!(h.ui_script(&mut ui, "ServerSort", &["0".into()]));
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.6:28960");
+        assert!(h.ui_script(&mut ui, "ServerSort", &["0".into()]));
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.5:28960");
+        // The defaults list the servers of a stock-configured game: nothing is cut but the modified servers.
+        assert_eq!(h.dvar("ui_browserShowPassword"), "-1");
+        assert_eq!(h.dvar("password"), "");
     }
 
     /// A refresh runs until it is stopped, and leaving the join menu while one runs stops it first (the list stays).

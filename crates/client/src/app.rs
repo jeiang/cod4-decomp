@@ -794,6 +794,7 @@ impl Viewer {
                 self.map.as_ref().ok_or("no map")?,
                 addr,
                 &self.cli.name,
+                "",
                 limits,
                 self.cli.autoplay,
                 crate::sound::ClientSound::start(
@@ -1949,6 +1950,13 @@ impl Viewer {
                     let found = serverlist::resolve(&addr)
                         .and_then(|a| serverlist::query(a, JOIN_QUERY).map(|e| (a, e)));
                     match found {
+                        Ok((_, e)) if e.lacks_password(st.input.cvar("password").unwrap_or("")) => {
+                            // A passworded server and no password given: ask for one; the join is tried again from
+                            // the menu once it is typed (`password_popmenu` edits the `password` dvar).
+                            if let Some(sh) = st.shell.as_mut() {
+                                sh.open(&mut st.input, "password_popmenu");
+                            }
+                        }
                         Ok((a, e)) => {
                             // The server's mod is the client's too (`CL_SystemInfoChanged` sets `fs_game`).
                             if let Err(why) =
@@ -3417,7 +3425,11 @@ fn finish_load(
     } else {
         let (addr, listen) = server.ok_or("no server to connect to")?;
         let limits = st.input.pitch_limits();
-        let mut net = NetPlay::connect(library, &data, addr, &cli.name, limits, false, sound)?;
+        // The `password` userinfo dvar: what a passworded server is given.
+        let password = st.input.cvar("password").unwrap_or("").to_owned();
+        let mut net = NetPlay::connect(
+            library, &data, addr, &cli.name, &password, limits, false, sound,
+        )?;
         if let Some(path) = st.pending_demo.take() {
             net.play_demo(&path)?;
         }

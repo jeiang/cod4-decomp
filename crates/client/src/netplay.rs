@@ -399,6 +399,7 @@ impl NetPlay {
         map: &render::MapData,
         server: SocketAddr,
         name: &str,
+        password: &str,
         pitch_limits: (f32, f32),
         autoplay: bool,
         sound: ClientSound,
@@ -414,7 +415,7 @@ impl NetPlay {
         let weapons =
             WeaponTable::new(&lib.content.weapons()).map_err(|e| format!("weapon table: {e:?}"))?;
         Ok(Self {
-            net: NetClient::new(t, server, name, "", qport),
+            net: NetClient::new(t, server, name, password, qport),
             talker: crate::voice::Talker::default(),
             hearing: crate::voice::Hearing::default(),
             voice_on: true,
