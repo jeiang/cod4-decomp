@@ -294,7 +294,8 @@ impl ShellState {
             names_cfg: hud::names::Cfg::read(&crate::input::Cvars::default()),
             console: crate::console::Console::default(),
             was_active: false,
-            servers: Default::default(),
+            // Unit tests never scan the real network.
+            servers: crate::serverlist::ServerList::for_shell(),
             status_rows: Vec::new(),
             reselect_map: None,
             vfs: ::assets::vfs::Vfs::open(&install.root, 0, &install.game, None).ok(),
@@ -3251,6 +3252,8 @@ mod tests {
             };
             srv.send_to(&reply.encode(), from).unwrap();
         });
+        // This one talks to a server it starts itself, on a real socket.
+        st.servers.offline = false;
         let mut h = HostCx {
             st: &mut st,
             input: &mut input,
