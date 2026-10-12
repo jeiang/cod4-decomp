@@ -63,6 +63,15 @@ pub fn run(mut cli: Cli) -> Result<(), String> {
             }
             cli.game = e.game;
         }
+        // The server's map is fetched first when the install lacks it (or part of it), as a join from the menus does.
+        #[cfg(not(target_arch = "wasm32"))]
+        if crate::download::missing(&cli.install, &cli.game, &e.map)
+            || crate::download::incomplete(&cli.install, &cli.game, &e.map)
+        {
+            let a = serverlist::resolve(&addr)?;
+            crate::download::Download::start(&cli.install, a, &e.map, &e.gametype)?.wait()?;
+        }
+        cli.map = e.map;
     }
     let el = EventLoop::<Ready>::with_user_event()
         .build()
@@ -673,7 +682,7 @@ impl Viewer {
         if gpu.lost().is_some() {
             return Err(gpu.explain("the window's surface could not be configured"));
         }
-        let vfs = loader::open_vfs(&self.cli.install, &self.cli.game)?;
+        let vfs = loader::open_vfs(&self.cli.install, &self.cli.game, &self.cli.map)?;
         // Native warms it again once the library is loaded (see below); the browser builds its pipelines by frames.
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut renderer = match &self.map {
@@ -794,6 +803,7 @@ impl Viewer {
                 self.map.as_ref().ok_or("no map")?,
                 addr,
                 &self.cli.name,
+                "",
                 limits,
                 self.cli.autoplay,
                 crate::sound::ClientSound::start(
@@ -1183,7 +1193,15 @@ impl Viewer {
                 .to_string();
             begin_load(&self.cli, st, &name, &gametype, loader::Server::Keep);
         } else if let Some(map) = &self.map {
-            let vfs = loader::open_vfs(&self.cli.install, &game_of(&st.input))?;
+            let vfs = loader::open_vfs(
+                &self.cli.install,
+                &game_of(&st.input),
+                if st.map_name.is_empty() {
+                    &self.cli.map
+                } else {
+                    &st.map_name
+                },
+            )?;
             let scene = Scene::new(&gpu, map)?;
             let gfx = Gfx::from_cvars(&st.input.cvars);
             let mut r = Renderer::new(
@@ -1306,6 +1324,22 @@ impl Viewer {
             && may_ask
         {
             grab_pointer(st);
+        }
+        // A refused join (a wrong password, a full server, a ban) goes back to the menus with the reason; a scripted
+        // run has no one to read it and ends.
+        if !self.cli.autoplay
+            && let Some(why) = st
+                .net
+                .as_ref()
+                .and_then(NetPlay::refused)
+                .map(str::to_owned)
+            && st.shell.is_some()
+        {
+            eprintln!("join refused: {why}");
+            end_session(&mut self.map, st);
+            if let Some(sh) = st.shell.as_mut() {
+                sh.join_refused(&mut st.input, &why);
+            }
         }
         if let Some(why) = st
             .net
@@ -1949,6 +1983,13 @@ impl Viewer {
                     let found = serverlist::resolve(&addr)
                         .and_then(|a| serverlist::query(a, JOIN_QUERY).map(|e| (a, e)));
                     match found {
+                        Ok((_, e)) if e.lacks_password(st.input.cvar("password").unwrap_or("")) => {
+                            // A passworded server and no password given: ask for one; the join is tried again from
+                            // the menu once it is typed (`password_popmenu` edits the `password` dvar).
+                            if let Some(sh) = st.shell.as_mut() {
+                                sh.open(&mut st.input, "password_popmenu");
+                            }
+                        }
                         Ok((a, e)) => {
                             // The server's mod is the client's too (`CL_SystemInfoChanged` sets `fs_game`).
                             if let Err(why) =
@@ -1958,7 +1999,9 @@ impl Viewer {
                                 continue;
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            if crate::download::missing(&self.cli.install, &e.game, &e.map) {
+                            if crate::download::missing(&self.cli.install, &e.game, &e.map)
+                                || crate::download::incomplete(&self.cli.install, &e.game, &e.map)
+                            {
                                 // The install lacks the server's map: fetch it first, if the player allows it.
                                 if st
                                     .input
@@ -3417,7 +3460,11 @@ fn finish_load(
     } else {
         let (addr, listen) = server.ok_or("no server to connect to")?;
         let limits = st.input.pitch_limits();
-        let mut net = NetPlay::connect(library, &data, addr, &cli.name, limits, false, sound)?;
+        // The `password` userinfo dvar: what a passworded server is given.
+        let password = st.input.cvar("password").unwrap_or("").to_owned();
+        let mut net = NetPlay::connect(
+            library, &data, addr, &cli.name, &password, limits, false, sound,
+        )?;
         if let Some(path) = st.pending_demo.take() {
             net.play_demo(&path)?;
         }

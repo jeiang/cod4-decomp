@@ -252,7 +252,7 @@ impl Work {
     /// The scene (uploads) and the renderer.
     fn build_world(&mut self, progress: &Progress) -> Result<(), String> {
         let data = self.data.as_ref().ok_or("not decoded")?;
-        let vfs = open_vfs(&self.req.install, &self.req.game)?;
+        let vfs = open_vfs(&self.req.install, &self.req.game, &self.req.map)?;
         let scene = Scene::new(&self.gpu, data)?;
         let mut renderer = Renderer::new(
             self.gpu.clone(),
@@ -492,7 +492,8 @@ mod tests {
     }
 }
 
-/// The search path textures are read through: the stock one and the mod `game`'s (`fs_game`).
-pub fn open_vfs(install: &std::path::Path, game: &str) -> Result<Vfs, String> {
-    Vfs::open(install, 0, game).map_err(|e| format!("cannot open the install: {e}"))
+/// The search path textures and sounds are read through: the stock one, the mod `game`'s (`fs_game`) and the package of
+/// the custom map `map`.
+pub fn open_vfs(install: &std::path::Path, game: &str, map: &str) -> Result<Vfs, String> {
+    Vfs::open(install, 0, game, Some(map)).map_err(|e| format!("cannot open the install: {e}"))
 }

@@ -95,11 +95,18 @@ impl Vfs {
     /// Stock search path rooted at the install directory: `players`,
     /// `main_shared`, `main` (see the boot-load research for the order).
     pub fn open_stock(root: &Path, language: usize) -> io::Result<Self> {
-        Self::open(root, language, "")
+        Self::open(root, language, "", None)
     }
 
-    /// The stock search path plus `game` (`fs_game`, such as `mods/promod`; empty for none) above `main`.
-    pub fn open(root: &Path, language: usize, game: &str) -> io::Result<Self> {
+    /// The stock search path plus `game` (`fs_game`, such as `mods/promod`; empty for none) and the
+    /// package of the custom map `usermap` (`usermaps/<map>`: its IWDs and loose files). The mod
+    /// directory sits above the usermap's, which sits above `main`.
+    pub fn open(
+        root: &Path,
+        language: usize,
+        game: &str,
+        usermap: Option<&str>,
+    ) -> io::Result<Self> {
         if !crate::paths::valid_game(game) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -110,6 +117,9 @@ impl Vfs {
         b.add_game_dir("players")?;
         b.add_game_dir("main_shared")?;
         b.add_game_dir("main")?;
+        if let Some(map) = usermap.filter(|m| crate::paths::valid_map(m)) {
+            b.add_game_dir(&format!("usermaps/{map}"))?;
+        }
         if !game.is_empty() {
             let rel = crate::paths::game_rel(root, game).ok_or_else(|| {
                 io::Error::new(
@@ -183,9 +193,17 @@ impl Vfs {
     }
 }
 
-/// Adds the files below `dir/<prefix>` ending in `suffix`, named from `dir` on (lowercase, `/`).
+/// Adds the files below `dir` whose name starts with `prefix` and ends with `suffix`, named from `dir` on (lowercase,
+/// `/`). Every directory whose name folds to the same lowercase one is walked, as the file system of a platform that
+/// ignores case would see one.
 fn walk(dir: &Path, prefix: &str, suffix: &str, out: &mut std::collections::BTreeSet<String>) {
-    fn rec(path: &Path, name: &str, suffix: &str, out: &mut std::collections::BTreeSet<String>) {
+    fn rec(
+        path: &Path,
+        name: &str,
+        prefix: &str,
+        suffix: &str,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
         let Ok(entries) = crate::fs::read_dir(path) else {
             return;
         };
@@ -196,58 +214,39 @@ fn walk(dir: &Path, prefix: &str, suffix: &str, out: &mut std::collections::BTre
             );
             let p = e.path();
             if crate::fs::is_dir(&p) {
-                rec(&p, &format!("{n}/"), suffix, out);
-            } else if n.ends_with(suffix) {
+                let d = format!("{n}/");
+                if prefix.starts_with(&d) || d.starts_with(prefix) {
+                    rec(&p, &d, prefix, suffix, out);
+                }
+            } else if n.starts_with(prefix) && n.ends_with(suffix) {
                 out.insert(n);
             }
         }
     }
-    let rel = prefix.trim_end_matches('/');
-    let start = if rel.is_empty() {
-        Some(dir.to_path_buf())
-    } else {
-        find_dir(dir, rel)
-    };
-    if let Some(start) = start {
-        let name = if rel.is_empty() {
-            String::new()
-        } else {
-            format!("{rel}/")
-        };
-        rec(&start, &name, suffix, out);
-    }
+    rec(dir, "", prefix, suffix, out);
 }
 
-/// `rel` below `dir`, each part matched case-insensitively, when it is a directory.
-fn find_dir(dir: &Path, rel: &str) -> Option<PathBuf> {
-    let mut cur = dir.to_path_buf();
-    for part in rel.split('/').filter(|p| !p.is_empty()) {
-        cur = crate::fs::read_dir(&cur)
+/// Case-insensitive path lookup below `dir` (the install may sit on a case-sensitive file system, where directories
+/// that differ only in case can both exist: each is tried). Directory entries are not files.
+fn find_file(dir: &Path, norm: &str) -> Option<PathBuf> {
+    let parts: Vec<&str> = norm.split('/').filter(|p| !p.is_empty()).collect();
+    fn rec(cur: &Path, parts: &[&str]) -> Option<PathBuf> {
+        let Some((part, rest)) = parts.split_first() else {
+            return crate::fs::is_file(cur).then(|| cur.to_path_buf());
+        };
+        let direct = cur.join(part);
+        if crate::fs::exists(&direct)
+            && let Some(f) = rec(&direct, rest)
+        {
+            return Some(f);
+        }
+        crate::fs::read_dir(cur)
             .ok()?
             .flatten()
-            .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == part)?
-            .path();
+            .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == *part)
+            .find_map(|e| rec(&e.path(), rest))
     }
-    crate::fs::is_dir(&cur).then_some(cur)
-}
-
-/// Case-insensitive path lookup below `dir` (the install may sit on a
-/// case-sensitive file system). Directory entries are not files.
-fn find_file(dir: &Path, norm: &str) -> Option<PathBuf> {
-    let mut cur = dir.to_path_buf();
-    for part in norm.split('/').filter(|p| !p.is_empty()) {
-        let direct = cur.join(part);
-        cur = if crate::fs::exists(&direct) {
-            direct
-        } else {
-            crate::fs::read_dir(&cur)
-                .ok()?
-                .flatten()
-                .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == part)?
-                .path()
-        };
-    }
-    crate::fs::is_file(&cur).then_some(cur)
+    rec(dir, &parts)
 }
 
 /// Builds the search path the way `AddGameDirectory` does: every addition is

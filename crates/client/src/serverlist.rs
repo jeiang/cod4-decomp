@@ -12,6 +12,7 @@
 //! ([`Status`]), shown through [`status_rows`].
 
 use net::oob::{Oob, StatusPlayer};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::ToSocketAddrs;
@@ -92,6 +93,11 @@ impl Entry {
             max_ping: 0,
             game: String::new(),
         }
+    }
+
+    /// Whether joining needs a password the player has not given (`given` is the `password` dvar).
+    pub fn lacks_password(&self, given: &str) -> bool {
+        self.password && given.is_empty()
     }
 
     /// From an `infoResponse`; `None` when it names no map (not a game server's answer).
@@ -451,6 +457,91 @@ impl Source {
     }
 }
 
+/// Ping ascending with the unanswered rows (ping 0) last, then game mode and name: the tie-break of every column.
+fn by_ping(a: &Entry, b: &Entry) -> Ordering {
+    (a.ping == 0, a.ping)
+        .cmp(&(b.ping == 0, b.ping))
+        .then_with(|| a.gametype.cmp(&b.gametype))
+        .then_with(|| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()))
+}
+
+/// Orders two rows by stock column `col` (`LAN_CompareServers`): the column's value, a tie settled by [`by_ping`]
+/// whichever way the column runs; `down` reverses the column (the ping column wholly). A column that holds nothing to
+/// order by leaves the rows as they are.
+fn compare(col: usize, down: bool, a: &Entry, b: &Entry) -> Ordering {
+    let by = match col {
+        0 => a.password.cmp(&b.password),
+        // A server of unknown hardware goes last when ascending.
+        1 => (a.hardware == 0, a.hardware).cmp(&(b.hardware == 0, b.hardware)),
+        2 => a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()),
+        3 => a.map.cmp(&b.map),
+        4 => a.clients.cmp(&b.clients),
+        5 => a.gametype.cmp(&b.gametype),
+        6 => a.voice.cmp(&b.voice),
+        7 => a.pure.cmp(&b.pure),
+        8 => a.modded.cmp(&b.modded),
+        9 => a.punkbuster.cmp(&b.punkbuster),
+        10 => return if down { by_ping(b, a) } else { by_ping(a, b) },
+        _ => return Ordering::Equal,
+    };
+    let by = if down { by.reverse() } else { by };
+    by.then_with(|| by_ping(a, b))
+}
+
+/// What the join menu's filter popup leaves in the list (`UI_DoServerRefresh`): each field is a `ui_browser*` dvar,
+/// the tri-state ones holding -1 for "either".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Filter {
+    /// `ui_browserShowFull` and `ui_browserShowEmpty`: whether full and empty servers are listed.
+    pub show_full: bool,
+    pub show_empty: bool,
+    /// `ui_browserShowPassword`: 1 only passworded servers, 0 only open ones.
+    pub password: i32,
+    /// `ui_browserShowDedicated`: only dedicated servers. (`ui_browserShowPure` is not a filter here: see
+    /// `Shell::server_filter`.)
+    pub dedicated_only: bool,
+    /// `ui_browserMod`, `ui_browserFriendlyfire`, `ui_browserKillcam` and `ui_browserShowPunkBuster`: the value the
+    /// server's `mod`, `ff`, `kc` or `pb` must hold.
+    pub modded: i32,
+    pub friendly_fire: i32,
+    pub killcam: i32,
+    pub punkbuster: i32,
+}
+
+impl Default for Filter {
+    /// Lists every server.
+    fn default() -> Self {
+        Filter {
+            show_full: true,
+            show_empty: true,
+            password: -1,
+            dedicated_only: false,
+            modded: -1,
+            friendly_fire: -1,
+            killcam: -1,
+            punkbuster: -1,
+        }
+    }
+}
+
+impl Filter {
+    /// Whether the list shows `e`. A server that has not answered says nothing the filter could test, so it stays.
+    pub fn passes(&self, e: &Entry) -> bool {
+        if e.ping <= 0 {
+            return true;
+        }
+        let is = |want: i32, has: bool| want < 0 || want == i32::from(has);
+        (self.show_empty || e.clients != 0)
+            && (self.show_full || e.clients != e.max_clients)
+            && is(self.password, e.password)
+            && (!self.dedicated_only || (1..=3).contains(&e.hardware))
+            && is(self.modded, e.modded)
+            && (self.friendly_fire < 0 || self.friendly_fire == e.friendly_fire)
+            && is(self.killcam, e.killcam)
+            && is(self.punkbuster, e.punkbuster)
+    }
+}
+
 /// The lists behind the join menu.
 #[derive(Default)]
 pub struct ServerList {
@@ -474,6 +565,61 @@ pub struct ServerList {
     status_req: Option<(SocketAddr, Instant, u32)>,
     /// An answer that arrived and has not been taken yet.
     status: Option<Status>,
+    /// Where the favorites are kept (`None`: nowhere, they last until the client exits). A browser has no files.
+    #[cfg(not(target_arch = "wasm32"))]
+    store: Option<std::path::PathBuf>,
+    /// The lines of the favorites file that are not listed favorites, written back as they were.
+    #[cfg(not(target_arch = "wasm32"))]
+    kept_lines: Vec<String>,
+}
+
+/// The favorites file in the user's folder. The stock game keeps them in `servercache.dat`, a dump of its in-memory
+/// server structs together with the Internet cache; ours is a text file of one `address:port` a line that a person
+/// can read and edit, and that is not tied to this client's data layout. A line that is no usable address (a host
+/// name, say) is kept as it is.
+#[cfg(not(target_arch = "wasm32"))]
+pub const FAVORITES_FILE: &str = "favorites.txt";
+
+/// Most favorites kept (`MAX_FAVOURITESERVERS`).
+pub const MAX_FAVORITES: usize = 128;
+#[cfg(not(target_arch = "wasm32"))]
+const FAVORITES_HEADER: &str = "# Favorite servers, one address:port a line.";
+
+/// Whether `a` can be asked: a port and a host to send to.
+fn askable(a: &SocketAddr) -> bool {
+    a.port() != 0 && !a.ip().is_unspecified()
+}
+
+/// What a favorites file holds: the addresses it lists (in order, without repeats, at most [`MAX_FAVORITES`]) and
+/// every other line (a host name not yet resolved, a comment, an address that cannot be asked, the surplus), kept
+/// so that saving the file again does not lose them.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_favorites(text: &str) -> (Vec<SocketAddr>, Vec<String>) {
+    let mut found: Vec<SocketAddr> = Vec::new();
+    let mut other = Vec::new();
+    for line in text.lines().map(str::trim) {
+        match line.parse::<SocketAddr>() {
+            Ok(a) if askable(&a) && found.contains(&a) => {}
+            Ok(a) if askable(&a) && found.len() < MAX_FAVORITES => found.push(a),
+            Ok(a) if askable(&a) => other.push(line.to_owned()),
+            _ if line.is_empty() || line == FAVORITES_HEADER => {}
+            _ => other.push(line.to_owned()),
+        }
+    }
+    (found, other)
+}
+
+/// The text of a favorites file for `favorites` and the `other` lines of the file read.
+#[cfg(not(target_arch = "wasm32"))]
+fn favorites_text(favorites: &[Entry], other: &[String]) -> String {
+    let mut s = format!("{FAVORITES_HEADER}\n");
+    for f in favorites {
+        s += &format!("{}\n", f.addr);
+    }
+    for l in other {
+        s += &format!("{l}\n");
+    }
+    s
 }
 
 impl ServerList {
@@ -570,10 +716,14 @@ impl ServerList {
 
     /// Adds a favorite (once) and asks it.
     pub fn add_favorite(&mut self, addr: SocketAddr) {
-        if self.favorites.iter().any(|f| f.addr == addr) {
+        if !askable(&addr)
+            || self.favorites.len() >= MAX_FAVORITES
+            || self.favorites.iter().any(|f| f.addr == addr)
+        {
             return;
         }
         self.favorites.push(Entry::unanswered(addr));
+        self.save_favorites();
         if self.browser.is_none() {
             self.browser = Browser::new().ok();
         }
@@ -585,6 +735,52 @@ impl ServerList {
 
     pub fn remove_favorite(&mut self, addr: SocketAddr) {
         self.favorites.retain(|f| f.addr != addr);
+        self.save_favorites();
+    }
+
+    /// Keeps the favorites in `<dir>/`[`FAVORITES_FILE`] from now on and takes in those it holds (a missing file is
+    /// an empty list). Call once, before the first refresh.
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_favorites(&mut self, _dir: Option<std::path::PathBuf>) {}
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_favorites(&mut self, dir: Option<std::path::PathBuf>) {
+        let Some(path) = dir.map(|d| d.join(FAVORITES_FILE)) else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let (found, other) = parse_favorites(&text);
+                self.favorites
+                    .extend(found.into_iter().map(Entry::unanswered));
+                self.kept_lines = other;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // A file that cannot be read is left alone: saving over it would destroy what it holds.
+            Err(e) => {
+                eprintln!("cannot read the favorites in {}: {e}", path.display());
+                return;
+            }
+        }
+        self.store = Some(path);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn save_favorites(&self) {}
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_favorites(&self) {
+        if let Some(path) = &self.store {
+            let written = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| {
+                    std::fs::write(path, favorites_text(&self.favorites, &self.kept_lines))
+                });
+            if let Err(e) = written {
+                eprintln!("cannot save the favorites to {}: {e}", path.display());
+            }
+        }
     }
 
     /// Takes in the replies that arrived; call once per frame while the join menu is up.
@@ -699,18 +895,7 @@ impl ServerList {
     fn resort(&mut self) {
         let Some((col, down)) = self.sort else { return };
         for list in [&mut self.lan, &mut self.favorites, &mut self.internet] {
-            list.sort_by(|a, b| {
-                let o = match col {
-                    2 => a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()),
-                    3 => a.map.cmp(&b.map),
-                    4 => a.clients.cmp(&b.clients),
-                    5 => a.gametype.cmp(&b.gametype),
-                    // Unanswered rows (ping 0) go last when ascending.
-                    10 => (a.ping == 0, a.ping).cmp(&(b.ping == 0, b.ping)),
-                    _ => std::cmp::Ordering::Equal,
-                };
-                if down { o.reverse() } else { o }
-            });
+            list.sort_by(|a, b| compare(col, down, a, b));
         }
     }
 
@@ -1074,5 +1259,237 @@ mod tests {
             ]
         );
         assert!(parse_masters("  ").is_empty());
+    }
+
+    fn hosts(l: &ServerList) -> Vec<String> {
+        l.rows(Source::Favorites)
+            .iter()
+            .map(|e| e.hostname.clone())
+            .collect()
+    }
+
+    /// Every column of the list orders its rows, a tie is settled by ping, and a second request reverses it.
+    #[test]
+    fn every_column_sorts_and_ties_go_by_ping() {
+        let mut a = entry("10.0.0.1:28960", "a", "mp_crash", 50);
+        let mut b = entry("10.0.0.2:28960", "b", "mp_crash", 20);
+        let mut c = entry("10.0.0.3:28960", "c", "mp_crash", 30);
+        a.password = true;
+        b.pure = true;
+        c.pure = true;
+        c.punkbuster = true;
+        a.voice = true;
+        b.modded = true;
+        a.hardware = 0;
+        b.hardware = 2;
+        c.hardware = 1;
+        for (col, up, down) in [
+            (0, "bca", "abc"),
+            (1, "cba", "abc"),
+            (6, "bca", "abc"),
+            (7, "abc", "bca"),
+            (8, "cab", "bca"),
+            (9, "bac", "cba"),
+        ] {
+            let mut l = ServerList::default();
+            for e in [&a, &b, &c] {
+                l.favorites.push(e.clone());
+            }
+            l.sort_by(col);
+            assert_eq!(hosts(&l).concat(), up, "column {col} ascending");
+            l.sort_by(col);
+            assert_eq!(hosts(&l).concat(), down, "column {col} descending");
+        }
+    }
+
+    #[test]
+    fn the_filter_drops_the_servers_the_popup_rules_out() {
+        let mut open = entry("10.0.0.1:28960", "open", "mp_crash", 20);
+        open.pure = true;
+        open.hardware = 2;
+        let mut full = open.clone();
+        full.clients = full.max_clients;
+        let mut empty = open.clone();
+        empty.clients = 0;
+        let mut locked = open.clone();
+        locked.password = true;
+        let mut modded = open.clone();
+        modded.modded = true;
+        let mut ff = open.clone();
+        ff.friendly_fire = 2;
+        let mut kc = open.clone();
+        kc.killcam = true;
+        let mut pb = open.clone();
+        pb.punkbuster = true;
+        let mut home = open.clone();
+        home.hardware = 0;
+        let mut loose = open.clone();
+        loose.pure = false;
+        let all = [
+            &open, &full, &empty, &locked, &modded, &ff, &kc, &pb, &home, &loose,
+        ];
+        let shown =
+            |f: Filter| -> Vec<usize> { (0..all.len()).filter(|&i| f.passes(all[i])).collect() };
+        assert_eq!(shown(Filter::default()).len(), all.len());
+        let base = Filter::default();
+        assert!(
+            !shown(Filter {
+                show_full: false,
+                ..base
+            })
+            .contains(&1)
+        );
+        assert!(
+            !shown(Filter {
+                show_empty: false,
+                ..base
+            })
+            .contains(&2)
+        );
+        assert_eq!(
+            shown(Filter {
+                password: 1,
+                ..base
+            }),
+            [3],
+            "only the passworded one"
+        );
+        assert!(
+            !shown(Filter {
+                password: 0,
+                ..base
+            })
+            .contains(&3)
+        );
+        assert!(
+            !shown(Filter {
+                dedicated_only: true,
+                ..base
+            })
+            .contains(&8)
+        );
+        assert_eq!(shown(Filter { modded: 1, ..base }), [4]);
+        assert!(!shown(Filter { modded: 0, ..base }).contains(&4));
+        assert_eq!(
+            shown(Filter {
+                friendly_fire: 2,
+                ..base
+            }),
+            [5]
+        );
+        assert_eq!(shown(Filter { killcam: 1, ..base }), [6]);
+        assert_eq!(
+            shown(Filter {
+                punkbuster: 1,
+                ..base
+            }),
+            [7]
+        );
+        // A favorite that has not answered has nothing to test and is kept.
+        let silent = Entry::unanswered(addr("10.0.0.9:28960"));
+        assert!(
+            Filter {
+                password: 1,
+                ..base
+            }
+            .passes(&silent)
+        );
+    }
+
+    #[test]
+    fn a_passworded_server_needs_one_only_until_it_is_given() {
+        let mut e = entry("10.0.0.1:28960", "a", "mp_crash", 20);
+        assert!(!e.lacks_password(""));
+        e.password = true;
+        assert!(e.lacks_password(""));
+        assert!(!e.lacks_password("secret"));
+    }
+
+    #[test]
+    fn favorites_survive_a_restart_and_a_removal_is_kept_too() {
+        let dir = std::env::temp_dir().join(format!("cod4e-favorites-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut l = ServerList::default();
+        l.load_favorites(Some(dir.clone()));
+        assert!(
+            l.rows(Source::Favorites).is_empty(),
+            "no file is no favorites"
+        );
+        l.add_favorite(addr("10.0.0.1:28960"));
+        l.add_favorite(addr("10.0.0.2:28961"));
+        l.add_favorite(addr("10.0.0.1:28960"));
+        let mut again = ServerList::default();
+        again.load_favorites(Some(dir.clone()));
+        let kept: Vec<_> = again
+            .rows(Source::Favorites)
+            .iter()
+            .map(|e| e.addr)
+            .collect();
+        assert_eq!(kept, [addr("10.0.0.1:28960"), addr("10.0.0.2:28961")]);
+        again.remove_favorite(addr("10.0.0.1:28960"));
+        let mut third = ServerList::default();
+        third.load_favorites(Some(dir.clone()));
+        let kept: Vec<_> = third
+            .rows(Source::Favorites)
+            .iter()
+            .map(|e| e.addr)
+            .collect();
+        assert_eq!(kept, [addr("10.0.0.2:28961")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A host name, a comment and an address nobody can ask are not favorites but are not thrown away by a save;
+    /// a file that cannot be read is never overwritten; the list stops at the stock 128.
+    #[test]
+    fn favorites_file_keeps_what_it_cannot_list_and_is_never_overwritten_unread() {
+        let dir = std::env::temp_dir().join(format!("cod4e-favorites-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(FAVORITES_FILE);
+        std::fs::write(
+            &file,
+            "# mine\nplay.example.org:28960\n0.0.0.0:28960\n10.0.0.5:0\n10.0.0.3:28960\n",
+        )
+        .unwrap();
+        let mut l = ServerList::default();
+        l.load_favorites(Some(dir.clone()));
+        let listed: Vec<_> = l.rows(Source::Favorites).iter().map(|e| e.addr).collect();
+        assert_eq!(listed, [addr("10.0.0.3:28960")]);
+        l.add_favorite(addr("0.0.0.0:28960"));
+        l.add_favorite(addr("10.0.0.6:0"));
+        l.add_favorite(addr("10.0.0.4:28960"));
+        let saved = std::fs::read_to_string(&file).unwrap();
+        for line in [
+            "# mine",
+            "play.example.org:28960",
+            "0.0.0.0:28960",
+            "10.0.0.5:0",
+            "10.0.0.4:28960",
+        ] {
+            assert!(saved.lines().any(|l| l == line), "{line} survives a save");
+        }
+        assert_eq!(
+            l.rows(Source::Favorites).len(),
+            2,
+            "unaskable addresses are not added"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A favorites path that is a directory cannot be read: nothing is written over it.
+        let dir = std::env::temp_dir().join(format!("cod4e-favorites-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(FAVORITES_FILE)).unwrap();
+        let mut l = ServerList::default();
+        l.load_favorites(Some(dir.clone()));
+        l.add_favorite(addr("10.0.0.1:28960"));
+        assert!(dir.join(FAVORITES_FILE).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The cap.
+        let mut l = ServerList::default();
+        for i in 0..MAX_FAVORITES + 5 {
+            l.add_favorite(addr(&format!("10.1.{}.{}:28960", i / 200, i % 200 + 1)));
+        }
+        assert_eq!(l.rows(Source::Favorites).len(), MAX_FAVORITES);
     }
 }
