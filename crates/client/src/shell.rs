@@ -502,7 +502,7 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("cl_freelook", "1"),
     ("m_filter", "0"),
     // The join menu's filters (`filter_popmenu`), the stock values. `ui_browserShowPure` (stock 1) has no control in
-    // the popup and the list ignores it: see `Shell::server_filter`.
+    // the popup: a profile carries it, and it lists pure servers only (`sv_pure`).
     ("ui_browserShowFull", "1"),
     ("ui_browserShowEmpty", "1"),
     ("ui_browserShowPassword", "-1"),
@@ -1417,10 +1417,7 @@ impl HostCx<'_> {
         self.st.gametypes.get(n.checked_sub(1)?)
     }
 
-    /// The filter popup's settings (`ui_browser*`). `ui_browserShowPure` is left out on purpose: the stock default 1
-    /// (and the `seta` in every stock profile) lists pure servers only, and the popup has no control to undo it, but
-    /// our servers do not verify IWDs yet (`sv_pure` is off by default, #302), so it would hide every one of them.
-    /// It counts again once `sv_pure` verifies.
+    /// The filter popup's settings (`ui_browser*`).
     fn server_filter(&self) -> crate::serverlist::Filter {
         let on = |name: &str| atoi(&self.dvar_get(name)) != 0;
         let n = |name: &str| atoi(&self.dvar_get(name));
@@ -1428,6 +1425,7 @@ impl HostCx<'_> {
             show_full: on("ui_browserShowFull"),
             show_empty: on("ui_browserShowEmpty"),
             password: n("ui_browserShowPassword"),
+            pure_only: on("ui_browserShowPure"),
             dedicated_only: on("ui_browserShowDedicated"),
             modded: n("ui_browserMod"),
             friendly_fire: n("ui_browserFriendlyfire"),
@@ -3182,6 +3180,8 @@ mod tests {
             clients: 1,
             max_clients: 18,
             ping: 5,
+            // The stock `ui_browserShowPure 1` lists pure servers only.
+            pure: true,
             ..Entry::unanswered(addr.parse().unwrap())
         }
     }
@@ -3267,9 +3267,15 @@ mod tests {
         assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.6:28960");
         assert!(h.ui_script(&mut ui, "ServerSort", &["0".into()]));
         assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.5:28960");
-        // A profile's `seta ui_browserShowPure 1` (the stock default) does not hide a server that is not pure.
+        // `ui_browserShowPure 1` (the stock default) lists pure servers only.
+        h.st.servers.take(Entry {
+            pure: false,
+            ..lan_server("192.168.1.7:28960", "war")
+        });
         h.set_dvar("ui_browserShowPure", "1");
         assert_eq!(h.feeder_count(2), 2);
+        h.set_dvar("ui_browserShowPure", "0");
+        assert_eq!(h.feeder_count(2), 3);
     }
 
     /// The browser's dvars start at their stock values, and `password` (the userinfo dvar a join sends) is not saved.

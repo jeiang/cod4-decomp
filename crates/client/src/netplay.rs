@@ -479,8 +479,10 @@ impl NetPlay {
         let qport = (js_sys::Math::random() * 65536.0) as u16;
         let weapons =
             WeaponTable::new(&lib.content.weapons()).map_err(|e| format!("weapon table: {e:?}"))?;
+        let mut net = NetClient::new(t, server, name, password, qport);
+        net.set_pure(lib.pure_digest);
         Ok(Self {
-            net: NetClient::new(t, server, name, password, qport),
+            net,
             talker: crate::voice::Talker::default(),
             hearing: crate::voice::Hearing::default(),
             voice_on: true,

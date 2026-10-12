@@ -103,6 +103,12 @@ fn main() -> ExitCode {
         eprintln!("{}", found.not_found_message("cod4e-server"));
         return ExitCode::FAILURE;
     };
+    // A dedicated server checks its clients' IWDs as the stock one does; `+set sv_pure 0` turns that off.
+    let args: Vec<String> = ["+set", "sv_pure", "1"]
+        .map(String::from)
+        .into_iter()
+        .chain(args)
+        .collect();
     let mut s = match Server::boot(&root, &args, true) {
         Ok(s) => s,
         Err(e) => {

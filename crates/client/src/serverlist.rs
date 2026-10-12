@@ -68,6 +68,8 @@ pub struct Entry {
     pub max_ping: i32,
     /// `game`: the server's `fs_game` directory, empty for stock.
     pub game: String,
+    /// `protocol`: the wire version the server speaks; 0 when it did not say.
+    pub protocol: u32,
 }
 
 impl Entry {
@@ -92,6 +94,19 @@ impl Entry {
             min_ping: 0,
             max_ping: 0,
             game: String::new(),
+            protocol: 0,
+        }
+    }
+
+    /// An error when the server speaks another wire version than this client (it would refuse the connect anyway).
+    pub fn check_protocol(&self) -> Result<(), String> {
+        match self.protocol {
+            0 => Ok(()),
+            p if p == net::oob::PROTOCOL => Ok(()),
+            p => Err(format!(
+                "The server uses protocol {p}, this client uses {}.",
+                net::oob::PROTOCOL
+            )),
         }
     }
 
@@ -131,6 +146,7 @@ impl Entry {
             min_ping: num("minPing"),
             max_ping: num("maxPing"),
             game: get("game").to_owned(),
+            protocol: get("protocol").trim().parse().unwrap_or(0),
         })
     }
 }
@@ -497,8 +513,9 @@ pub struct Filter {
     pub show_empty: bool,
     /// `ui_browserShowPassword`: 1 only passworded servers, 0 only open ones.
     pub password: i32,
-    /// `ui_browserShowDedicated`: only dedicated servers. (`ui_browserShowPure` is not a filter here: see
-    /// `Shell::server_filter`.)
+    /// `ui_browserShowPure`: only servers that check their clients' IWDs (`sv_pure`).
+    pub pure_only: bool,
+    /// `ui_browserShowDedicated`: only dedicated servers.
     pub dedicated_only: bool,
     /// `ui_browserMod`, `ui_browserFriendlyfire`, `ui_browserKillcam` and `ui_browserShowPunkBuster`: the value the
     /// server's `mod`, `ff`, `kc` or `pb` must hold.
@@ -515,6 +532,7 @@ impl Default for Filter {
             show_full: true,
             show_empty: true,
             password: -1,
+            pure_only: false,
             dedicated_only: false,
             modded: -1,
             friendly_fire: -1,
@@ -534,6 +552,7 @@ impl Filter {
         (self.show_empty || e.clients != 0)
             && (self.show_full || e.clients != e.max_clients)
             && is(self.password, e.password)
+            && (!self.pure_only || e.pure)
             && (!self.dedicated_only || (1..=3).contains(&e.hardware))
             && is(self.modded, e.modded)
             && (self.friendly_fire < 0 || self.friendly_fire == e.friendly_fire)
@@ -1371,6 +1390,15 @@ mod tests {
                 ..base
             })
             .contains(&2)
+        );
+        assert_eq!(
+            shown(Filter {
+                pure_only: true,
+                ..base
+            })
+            .len(),
+            all.len() - 1,
+            "everything but the server that does not check IWDs"
         );
         assert_eq!(
             shown(Filter {

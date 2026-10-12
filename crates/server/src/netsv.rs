@@ -185,6 +185,8 @@ pub enum Inbound {
         name: String,
         offset: u64,
     },
+    /// A `getmanifest` with a good challenge: the server answers with the files it gives.
+    GetManifest { from: SocketAddr },
     /// An `rcon` packet; whether it is allowed is the server's to judge.
     Rcon {
         from: SocketAddr,
@@ -496,6 +498,11 @@ impl NetSv {
                             out.push(Inbound::GetFile { from, name, offset });
                         }
                     }
+                    Gate::Manifest { from } => {
+                        if self.file_allowed(from) {
+                            out.push(Inbound::GetManifest { from });
+                        }
+                    }
                     Gate::Ignore => {}
                 }
             } else if let Some(slot) = self.slot_of(from) {
@@ -595,6 +602,15 @@ impl NetSv {
                 }
             }
             Err(e) => self.refuse(to, &format!("Cannot read the file: {e}")),
+        }
+    }
+
+    /// Answers a `getmanifest` with `files` and the fast-download base `www`.
+    pub fn send_manifest(&mut self, to: SocketAddr, files: &[net::manifest::File], www: &str) {
+        for p in net::manifest::packets(files, www) {
+            let bytes = p.encode();
+            self.stats.bytes_out += bytes.len() as u64;
+            self.t.send_to(to, &bytes);
         }
     }
 
@@ -1760,6 +1776,7 @@ mod tests {
         let req = ConnectRequest {
             from: addr(port),
             qport: port,
+            pure: 0,
             name: format!("p{slot}"),
             password: String::new(),
         };
@@ -1892,6 +1909,7 @@ mod tests {
         let req = |ip: [u8; 4]| ConnectRequest {
             from: SocketAddr::from((ip, 5)),
             qport: 1,
+            pure: 0,
             name: String::new(),
             password: String::new(),
         };
@@ -2103,6 +2121,7 @@ mod tests {
         ConnectRequest {
             from,
             qport,
+            pure: 0,
             name: String::new(),
             password: String::new(),
         }

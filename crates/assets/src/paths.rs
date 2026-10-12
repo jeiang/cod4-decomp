@@ -20,15 +20,18 @@ pub fn language_index(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Whether `game` may be an `fs_game`: empty, or `mods/<name>` (lowercase, `/`) with no `..` and no `:`. Stricter than
-/// `FS_GameDirDomainFunc`, which also takes any case, a backslash and a single `:`: the path is the same on every
-/// file system this way.
+/// Whether `game` may be an `fs_game`: empty, or `mods/<name>` (lowercase, `/`): one folder of `mods`, not hidden, with no
+/// `..` and no `:`. Stricter than `FS_GameDirDomainFunc`, which also takes any case, a backslash, a single `:` and
+/// deeper paths: the path is the same on every file system this way, and a mod cannot be `mods` itself or a folder
+/// inside another mod.
 pub fn valid_game(game: &str) -> bool {
     game.is_empty()
-        || (game.len() > 5
-            && game.starts_with("mods/")
-            && !game.contains("..")
-            && !game.contains([':', '\\']))
+        || game.strip_prefix("mods/").is_some_and(|name| {
+            !name.is_empty()
+                && !name.starts_with('.')
+                && !name.contains(['/', ':', '\\'])
+                && !name.contains("..")
+        })
 }
 
 /// A map name that cannot name a path: lowercase letters, digits and `_`.
@@ -91,12 +94,6 @@ pub fn is_usermap(root: &Path, game: &str, map: &str) -> bool {
         .and_then(|d| find_ci(&d, &file))
         .or_else(|| find_ci(&zone_dir(root)?, &file));
     stock.is_none() && usermap_dir(root, map).is_some_and(|d| find_ci(&d, &file).is_some())
-}
-
-/// The file in a custom map's folder that says its download finished, so a map with no IWD or loading zone is not asked
-/// for again.
-pub fn usermap_marker(root: &Path, map: &str) -> Option<PathBuf> {
-    Some(usermap_dir(root, map)?.join(format!("{map}.complete")))
 }
 
 /// The IWD of the custom map `map`, `usermaps/<map>/<map>.iwd`.
@@ -243,6 +240,11 @@ mod tests {
             "Mods/x",
             "mods\\x",
             "mods/a:b",
+            "mods/.",
+            "mods/..",
+            "mods/.hidden",
+            "mods/a/b",
+            "mods//x",
         ] {
             assert!(!valid_game(bad), "{bad}");
         }

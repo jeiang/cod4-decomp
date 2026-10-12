@@ -13,6 +13,7 @@ pub mod combat;
 pub mod content;
 pub mod cvar;
 pub mod delta;
+pub mod fastdl;
 pub mod fire;
 pub mod game;
 pub mod gamelog;

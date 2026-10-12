@@ -116,6 +116,16 @@ impl Iwd {
         &self.entries
     }
 
+    /// The pack checksum: the CRC-32 of the entries' CRCs in directory order, which is cheap (the directory is in
+    /// memory) and changes when any file inside changes (`FS_LoadZipFile`'s `checksum`).
+    pub fn pack_checksum(&self) -> u32 {
+        let mut c = crate::crc::Crc32::default();
+        for e in &self.entries {
+            c.update(&e.crc32.to_le_bytes());
+        }
+        c.finish()
+    }
+
     /// Case-insensitive lookup; `\` and `/` are equivalent.
     pub fn find(&self, name: &str) -> Option<&Entry> {
         self.index.get(&normalize(name)).map(|&i| &self.entries[i])

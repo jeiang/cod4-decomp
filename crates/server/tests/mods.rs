@@ -3,8 +3,12 @@
 //! scripts override the stock ones and run. Skips without `COD4_PATH` or off unix.
 #![cfg(unix)]
 
+use net::connect::{ConnectState, Connector};
+use net::{Oob, Transport, UdpTransport};
 use server::server::Server;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 /// A scratch install: the real content linked in, a mods folder of its own.
 fn scratch(root: &Path) -> tempfile::TempDir {
@@ -183,4 +187,243 @@ fn a_mod_that_is_not_installed_fails_the_boot() {
             "{game}"
         );
     }
+}
+
+/// The IWD of the synthetic mod of [`a_pure_server_checks_the_iwds_and_gives_its_mod_files`].
+fn mod_iwd() -> Vec<u8> {
+    iwd(&[("zz_mod.cfg", b"set zz_mod_loaded 1\n")])
+}
+
+/// Connects a client that claims the IWD digest `pure` to the server at `addr`, running `s` meanwhile.
+fn try_join(s: &mut Server, addr: std::net::SocketAddr, pure: u32, qport: u16) -> ConnectState {
+    let lo = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let mut t = UdpTransport::bind(lo).unwrap();
+    let mut c = Connector::new(addr, qport, "tester", "");
+    c.set_pure(pure);
+    let mut buf = [0u8; 2048];
+    for round in 0..200u64 {
+        c.poll(round * 50, &mut t);
+        s.run_for(Duration::from_millis(20));
+        while let Ok(Some((n, from))) = t.recv_from(&mut buf, None) {
+            if let Some(o) = Oob::parse(&buf[..n]) {
+                c.handle(from, o);
+            }
+        }
+        if !matches!(
+            c.state(),
+            ConnectState::Challenging | ConnectState::Connecting(_)
+        ) {
+            break;
+        }
+    }
+    c.state().clone()
+}
+
+/// Runs `client` on its own thread while `s` serves it (the server is not `Send`).
+fn serve_while<T: Send + 'static>(
+    s: &mut Server,
+    client: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let h = std::thread::spawn(client);
+    while !h.is_finished() {
+        s.run_for(Duration::from_millis(10));
+    }
+    h.join().unwrap()
+}
+
+#[test]
+fn a_pure_server_checks_the_iwds_and_gives_its_mod_files() {
+    let Some(root) = install() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let t = scratch(&root);
+    let mod_dir = t.path().join("mods/testmod");
+    std::fs::create_dir_all(&mod_dir).unwrap();
+    std::fs::write(mod_dir.join("zz_mod.iwd"), mod_iwd()).unwrap();
+    std::fs::write(mod_dir.join("notes.txt"), b"not offered").unwrap();
+    let mut s = boot(
+        t.path(),
+        &[
+            "+set",
+            "fs_game",
+            "mods/testmod",
+            "+set",
+            "sv_pure",
+            "1",
+            "+set",
+            "sv_allowDownload",
+            "1",
+            "+map",
+            "mp_crash",
+        ],
+    )
+    .expect("boot");
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], s.net_addr().unwrap().port()));
+
+    // The client's own digest of the same search path is the server's.
+    let vfs = assets::vfs::Vfs::open(t.path(), 0, "mods/testmod", None).unwrap();
+    let digest = assets::vfs::pure_digest(&vfs.pure_iwds(t.path()));
+    assert!(matches!(
+        try_join(&mut s, addr, digest, 1),
+        ConnectState::Connected
+    ));
+    for (pure, qport) in [(0, 2), (digest ^ 1, 3)] {
+        match try_join(&mut s, addr, pure, qport) {
+            ConnectState::Refused(why) => assert_eq!(why, server::server::IMPURE),
+            other => panic!("an impure client got {other:?}"),
+        }
+    }
+    // Without the mod's IWD (a client on the stock search path) the digest is another one.
+    let stock = assets::vfs::Vfs::open(t.path(), 0, "", None).unwrap();
+    let stock = assets::vfs::pure_digest(&stock.pure_iwds(t.path()));
+    assert!(matches!(
+        try_join(&mut s, addr, stock, 4),
+        ConnectState::Refused(_)
+    ));
+    // A changed file inside the mod's IWD, same name and same size, is another digest.
+    let same_size = iwd(&[("zz_mod.cfg", b"set zz_mod_loaded 2\n")]);
+    assert_eq!(same_size.len(), mod_iwd().len());
+    std::fs::write(mod_dir.join("zz_mod.iwd"), same_size).unwrap();
+    let edited = assets::vfs::Vfs::open(t.path(), 0, "mods/testmod", None).unwrap();
+    let edited = assets::vfs::pure_digest(&edited.pure_iwds(t.path()));
+    std::fs::write(mod_dir.join("zz_mod.iwd"), mod_iwd()).unwrap();
+    assert_ne!(edited, digest);
+    assert!(matches!(
+        try_join(&mut s, addr, edited, 6),
+        ConnectState::Refused(_)
+    ));
+    // With `sv_pure 0` any digest passes.
+    s.exec_line("set sv_pure 0").unwrap();
+    assert!(matches!(
+        try_join(&mut s, addr, 0, 5),
+        ConnectState::Connected
+    ));
+    s.exec_line("set sv_pure 1").unwrap();
+
+    // The manifest lists the mod's IWD with its size and CRC, and the file comes whole by that name only.
+    let (list, www) = serve_while(&mut s, move || {
+        let mut c = UdpTransport::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        net::manifest::fetch_list(&mut c, addr, &AtomicBool::new(false)).unwrap()
+    });
+    assert_eq!(www, "");
+    let names: Vec<&str> = list.iter().map(|f| f.name.as_str()).collect();
+    // The running map's zones are given as a custom map's, wherever the server has them.
+    assert_eq!(
+        names,
+        [
+            "usermaps/mp_crash/mp_crash.ff",
+            "usermaps/mp_crash/mp_crash_load.ff",
+            "mods/testmod/zz_mod.iwd",
+        ]
+    );
+    let bytes = mod_iwd();
+    assert_eq!(
+        (list[2].size, list[2].crc),
+        (bytes.len() as u64, assets::crc::crc32(&bytes))
+    );
+    let dest = t.path().join("got.iwd");
+    let to = dest.clone();
+    serve_while(&mut s, move || {
+        let mut c = UdpTransport::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        net::download::fetch(
+            &mut c,
+            addr,
+            "mods/testmod/zz_mod.iwd",
+            &to,
+            &net::download::Progress::default(),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    });
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    for name in [
+        "main/iw_00.iwd",
+        "mods/testmod/notes.txt",
+        "../mods/testmod/zz_mod.iwd",
+        "mp_crash",
+    ] {
+        let err = serve_while(&mut s, move || {
+            let mut c =
+                UdpTransport::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            net::download::fetch(
+                &mut c,
+                addr,
+                name,
+                &std::env::temp_dir().join("cod4e-never-written"),
+                &net::download::Progress::default(),
+                &AtomicBool::new(false),
+            )
+            .unwrap_err()
+        });
+        assert_eq!(err, net::download::NOT_AVAILABLE, "{name}");
+    }
+
+    // The fast-download base is published once the server turns it on, and only when it is a plain http(s) URL.
+    s.exec_line("set sv_wwwDownload 1").unwrap();
+    s.exec_line(r#"set sv_wwwBaseURL "http://dl.example/fast""#)
+        .unwrap();
+    let fetch_www = |s: &mut Server| {
+        serve_while(s, move || {
+            let mut c =
+                UdpTransport::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+            net::manifest::fetch_list(&mut c, addr, &AtomicBool::new(false))
+                .unwrap()
+                .1
+        })
+    };
+    assert_eq!(fetch_www(&mut s), "http://dl.example/fast");
+    s.exec_line(r#"set sv_wwwBaseURL "file:///etc""#).unwrap();
+    assert_eq!(fetch_www(&mut s), "");
+
+    // With downloads off the manifest and the files are refused.
+    s.exec_line("set sv_allowDownload 0").unwrap();
+    let err = serve_while(&mut s, move || {
+        let mut c = UdpTransport::bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        net::manifest::fetch_list(&mut c, addr, &AtomicBool::new(false)).unwrap_err()
+    });
+    assert_eq!(err, net::manifest::DOWNLOADS_OFF);
+}
+
+#[test]
+fn a_pure_server_running_a_custom_map_counts_the_maps_iwd_as_a_client_loads_it() {
+    let Some(root) = install() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let src = root.join("zone/english/mp_crash.ff");
+    if !src.exists() {
+        eprintln!("no mp_crash.ff; skipping");
+        return;
+    }
+    let t = scratch(&root);
+    let dir = t.path().join("usermaps/mp_crashcopy");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink(&src, dir.join("mp_crashcopy.ff")).unwrap();
+    std::fs::write(
+        dir.join("mp_crashcopy.iwd"),
+        iwd(&[("usermapcfg.cfg", b"set zz_usermap_loaded 1\n")]),
+    )
+    .unwrap();
+    let mut s = boot(t.path(), &["+set", "sv_pure", "1", "+map", "mp_crashcopy"]).expect("boot");
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], s.net_addr().unwrap().port()));
+    // What a client's library works out: the install with the map's package mounted.
+    let digest = |map: Option<&str>| {
+        let mut install = server::content::Install::open_game(t.path(), "").unwrap();
+        if let Some(m) = map {
+            install.mount_usermap(m).unwrap();
+        }
+        assets::vfs::pure_digest(&install.vfs.pure_iwds(&install.root))
+    };
+    assert!(matches!(
+        try_join(&mut s, addr, digest(Some("mp_crashcopy")), 1),
+        ConnectState::Connected
+    ));
+    assert!(
+        matches!(
+            try_join(&mut s, addr, digest(None), 2),
+            ConnectState::Refused(_)
+        ),
+        "a client that lacks the map's IWD is not pure"
+    );
 }

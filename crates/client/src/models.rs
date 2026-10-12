@@ -188,6 +188,8 @@ pub struct Library {
     pub content: Content,
     /// The install's `ragdoll.cfg`: empty when it has none, which leaves bodies in the pose they died in.
     pub ragdoll: Def,
+    /// [`assets::vfs::pure_digest`] of the IWDs this library was read through: what an `sv_pure` server compares.
+    pub pure_digest: u32,
     anims: HashMap<(String, Vec<Attachment>), Arc<PlayerAnims>>,
     rests: HashMap<(String, Vec<Attachment>), Arc<RestPose>>,
     /// [`Library::team_models`] by team: the loaded models never change, and the net frame asks for every player.
@@ -208,9 +210,11 @@ impl Library {
             Ok(Some(bytes)) => Def::parse(&String::from_utf8_lossy(&bytes)),
             _ => Def::default(),
         };
+        let pure_digest = assets::vfs::pure_digest(&install.vfs.pure_iwds(&install.root));
         Ok(Library {
             content,
             ragdoll,
+            pure_digest,
             anims: HashMap::new(),
             rests: HashMap::new(),
             teams: Default::default(),

@@ -52,24 +52,25 @@ pub fn run(mut cli: Cli) -> Result<(), String> {
     // A direct `--connect` runs the server's mod, as a join from the menus does.
     if let Some(addr) = cli.connect.clone() {
         let e = serverlist::resolve(&addr).and_then(|a| serverlist::query(a, JOIN_QUERY))?;
+        e.check_protocol()?;
+        if !assets::paths::valid_game(&e.game) {
+            return Err(format!("The server runs an invalid mod ({}).", e.game));
+        }
+        // What the server runs that the install lacks is fetched first, as a join from the menus does.
+        #[cfg(not(target_arch = "wasm32"))]
+        if crate::download::wanted(&cli.install, &e.game, &e.map) {
+            let a = serverlist::resolve(&addr)?;
+            crate::download::Download::start(&cli.install, a, &e.game, &e.map, &e.gametype)?
+                .wait()?;
+        }
         if e.game != cli.game {
-            if !assets::paths::valid_game(&e.game)
-                || (!e.game.is_empty() && !assets::paths::game_dir(&cli.install, &e.game))
-            {
+            if !e.game.is_empty() && !assets::paths::game_dir(&cli.install, &e.game) {
                 return Err(format!(
                     "You do not have the mod {} this server is running.",
                     e.game
                 ));
             }
             cli.game = e.game;
-        }
-        // The server's map is fetched first when the install lacks it (or part of it), as a join from the menus does.
-        #[cfg(not(target_arch = "wasm32"))]
-        if crate::download::missing(&cli.install, &cli.game, &e.map)
-            || crate::download::incomplete(&cli.install, &cli.game, &e.map)
-        {
-            let a = serverlist::resolve(&addr)?;
-            crate::download::Download::start(&cli.install, a, &e.map, &e.gametype)?.wait()?;
         }
         cli.map = e.map;
     }
@@ -1278,7 +1279,10 @@ impl Viewer {
             match done {
                 Ok(()) => {
                     let (addr, gametype) = d.join.clone();
-                    if let Err(err) =
+                    // The mod is here now, so the client can run it as the server does.
+                    if let Err(why) = follow_server_game(&self.cli, &mut self.map, st, &d.game) {
+                        show_error(st, &why);
+                    } else if let Err(err) =
                         start_session(&self.cli, &mut self.map, st, &d.map, &gametype, Some(addr))
                     {
                         eprintln!("cannot join {addr}: {err}");
@@ -1287,7 +1291,7 @@ impl Viewer {
                 }
                 Err(why) => {
                     eprintln!("cannot download {}: {why}", d.map);
-                    show_error(st, &format!("Could not download the map {}: {why}", d.map));
+                    show_error(st, &format!("Could not download from the server: {why}"));
                 }
             }
         }
@@ -2047,44 +2051,52 @@ impl Viewer {
                             }
                         }
                         Ok((a, e)) => {
-                            // The server's mod is the client's too (`CL_SystemInfoChanged` sets `fs_game`).
-                            if let Err(why) =
-                                follow_server_game(&self.cli, &mut self.map, st, &e.game)
-                            {
+                            if let Err(why) = e.check_protocol() {
                                 show_error(st, &why);
                                 continue;
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            if crate::download::missing(&self.cli.install, &e.game, &e.map)
-                                || crate::download::incomplete(&self.cli.install, &e.game, &e.map)
-                            {
-                                // The install lacks the server's map: fetch it first, if the player allows it.
+                            if crate::download::wanted(&self.cli.install, &e.game, &e.map) {
+                                // The install may lack what the server runs (its mod, its map) or have other
+                                // versions of it: ask the server for its files, if the player allows it.
+                                let lacking =
+                                    crate::download::lacks(&self.cli.install, &e.game, &e.map);
                                 if st
                                     .input
                                     .cvar("cl_allowDownload")
                                     .is_some_and(|v| v.trim() == "0")
                                 {
-                                    show_error(
-                                        st,
-                                        &format!(
-                                            "You do not have the map {}, and downloading is turned off (cl_allowDownload).",
-                                            e.map
-                                        ),
-                                    );
+                                    if let Some(what) = lacking {
+                                        show_error(
+                                            st,
+                                            &format!(
+                                                "You do not have {what}, and downloading is turned off (cl_allowDownload)."
+                                            ),
+                                        );
+                                        continue;
+                                    }
+                                } else {
+                                    match crate::download::Download::start(
+                                        &self.cli.install,
+                                        a,
+                                        &e.game,
+                                        &e.map,
+                                        &e.gametype,
+                                    ) {
+                                        Ok(d) => {
+                                            end_session(&mut self.map, st);
+                                            st.download = Some(d);
+                                        }
+                                        Err(err) => show_error(st, &err),
+                                    }
                                     continue;
                                 }
-                                match crate::download::Download::start(
-                                    &self.cli.install,
-                                    a,
-                                    &e.map,
-                                    &e.gametype,
-                                ) {
-                                    Ok(d) => {
-                                        end_session(&mut self.map, st);
-                                        st.download = Some(d);
-                                    }
-                                    Err(err) => show_error(st, &err),
-                                }
+                            }
+                            // The server's mod is the client's too (`CL_SystemInfoChanged` sets `fs_game`).
+                            if let Err(why) =
+                                follow_server_game(&self.cli, &mut self.map, st, &e.game)
+                            {
+                                show_error(st, &why);
                                 continue;
                             }
                             if let Err(err) = start_session(
@@ -3406,7 +3418,7 @@ fn restart_files(cli: &Cli, st: &mut State) {
 }
 
 /// Before a join: the client runs the mod the server runs. Disconnects and restarts the file system when they differ;
-/// the mod must be installed (its folder under `mods/`), the client has no way to fetch one.
+/// the mod must be installed (its folder under `mods/`; a join fetches it first, see [`crate::download`]).
 fn follow_server_game(
     cli: &Cli,
     map_slot: &mut Option<MapData>,
