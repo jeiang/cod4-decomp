@@ -727,6 +727,16 @@ impl Input {
     /// New commands join the buffer behind a `wait` instead of running ahead of it (`Cbuf_AddText`).
     fn submit(&mut self, cmds: VecDeque<Item>, sink: bool, held: Option<&mut Vec<String>>) {
         if sink && self.busy() {
+            // A key's `+command` queued behind the wait: its release queues behind it too (stock sends
+            // `-command <key>` through the same buffer).
+            if let Some(held) = held {
+                for c in &cmds {
+                    let n = c.toks[0].to_ascii_lowercase();
+                    if n.starts_with('+') && n != "+actionslot" {
+                        held.push(format!("\0{}", &n[1..]));
+                    }
+                }
+            }
             self.backlog.extend(cmds);
         } else {
             self.run(cmds, sink, held);
@@ -847,6 +857,10 @@ impl Input {
     /// Once a frame: the buffer behind a `wait` once the wait has run out (`Cbuf_Execute` checks `cmd_wait` first).
     /// The caller runs it through its own command handler.
     pub(crate) fn take_due(&mut self) -> Option<VecDeque<Item>> {
+        // `Cbuf_Execute` counts the wait down only while text is pending.
+        if self.backlog.is_empty() {
+            return None;
+        }
         match self.wait {
             Some(n) if n > 0 => {
                 self.wait = Some(n - 1);
@@ -854,7 +868,7 @@ impl Input {
             }
             _ => {
                 self.wait = None;
-                Some(std::mem::take(&mut self.backlog)).filter(|b| !b.is_empty())
+                Some(std::mem::take(&mut self.backlog))
             }
         }
     }
@@ -1206,7 +1220,13 @@ impl Input {
     pub(crate) fn key(&mut self, name: &str, down: bool) {
         if !down {
             for c in self.down.remove(name).unwrap_or_default() {
-                self.release(&c);
+                match c.strip_prefix('\0') {
+                    Some(n) => {
+                        let up = Item::new(vec![format!("-{n}")], 0, None);
+                        self.submit(VecDeque::from([up]), true, None);
+                    }
+                    None => self.release(&c),
+                }
             }
             return;
         }
@@ -2072,6 +2092,20 @@ mod tests {
         i.run_due();
         assert_eq!(i.cvar("nested_b"), Some("1"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A key pressed while a `wait` is pending: its release waits in line behind its press.
+    #[test]
+    fn a_bound_button_pressed_during_a_wait_is_released() {
+        let mut i = Input::detached();
+        i.exec_line("bind a \"wait 3\"; bind w \"+forward\"");
+        i.key("a", true);
+        i.key("w", true);
+        i.key("w", false);
+        for _ in 0..4 {
+            i.run_due();
+        }
+        assert_eq!(frame(&mut i).move_forward, 0.0);
     }
 
     #[test]
