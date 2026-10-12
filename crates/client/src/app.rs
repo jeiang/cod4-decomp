@@ -877,7 +877,8 @@ impl Viewer {
         }
         if let Some(sh) = shell.as_mut() {
             sh.set_profiles(&mut input, profiles, stats);
-            let (modes, rates) = display::video_modes(&window);
+            let (modes, rates) =
+                display::video_modes(&window, Gfx::from_cvars(&input.cvars).monitor);
             sh.set_display(
                 &mut input,
                 modes,
@@ -3475,6 +3476,15 @@ fn vid_restart(cli: &Cli, st: &mut State) {
     let g = Gfx::from_cvars(&st.input.cvars);
     if let Some(note) = display::apply(&st.window, &g.request(&cli.request)) {
         st.notes.push(note);
+    }
+    let (modes, rates) = display::video_modes(&st.window, g.monitor);
+    if let Some(sh) = st.shell.as_mut() {
+        if !modes.is_empty() {
+            sh.st.video_modes = modes;
+        }
+        if !rates.is_empty() {
+            sh.st.refresh_rates = rates;
+        }
     }
     let caps = st.surface().get_capabilities(&st.gpu.adapter);
     let (mode, _) = pick_present(g.present(&cli.present), &caps.present_modes);

@@ -152,11 +152,8 @@ pub fn monitors_json(el: &ActiveEventLoop) -> Value {
 
 #[cfg(not(target_arch = "wasm32"))]
 /// The sizes and refresh rates (Hz) the window's monitor offers, for the graphics menus.
-pub fn video_modes(window: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
-    let Some(m) = window
-        .current_monitor()
-        .or_else(|| window.primary_monitor())
-    else {
+pub fn video_modes(window: &Window, choice: Option<usize>) -> (Vec<(u32, u32)>, Vec<u32>) {
+    let Some(m) = chosen_monitor(window, choice) else {
         return (Vec::new(), Vec::new());
     };
     let modes: Vec<VideoModeHandle> = m.video_modes().collect();
@@ -169,7 +166,7 @@ pub fn video_modes(window: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
 
 /// A page has no video modes to offer.
 #[cfg(target_arch = "wasm32")]
-pub fn video_modes(_: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
+pub fn video_modes(_: &Window, _: Option<usize>) -> (Vec<(u32, u32)>, Vec<u32>) {
     (Vec::new(), Vec::new())
 }
 
@@ -188,6 +185,17 @@ fn wayland(display: &impl HasDisplayHandle) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 fn is_wayland(raw: RawDisplayHandle) -> bool {
     matches!(raw, RawDisplayHandle::Wayland(_))
+}
+
+/// The monitor `r_monitor` names for fullscreen, else the one the window is on (the stock `R_ChooseMonitor` falls
+/// back to the monitor at the window's position).
+#[cfg(not(target_arch = "wasm32"))]
+fn chosen_monitor(window: &Window, choice: Option<usize>) -> Option<MonitorHandle> {
+    let all: Vec<MonitorHandle> = window.available_monitors().collect();
+    monitor_slot(choice, all.len())
+        .map(|i| all[i].clone())
+        .or_else(|| window.current_monitor())
+        .or_else(|| window.primary_monitor())
 }
 
 /// The monitor `choice` names (`r_monitor`), else the primary one.
@@ -259,11 +267,7 @@ pub fn create_window(
 /// note about any fallback taken. The window answers with a resize, which the surface follows.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn apply(window: &Window, req: &Request) -> Option<String> {
-    let all: Vec<MonitorHandle> = window.available_monitors().collect();
-    let mon = monitor_slot(req.monitor, all.len())
-        .map(|i| all[i].clone())
-        .or_else(|| window.current_monitor())
-        .or_else(|| window.primary_monitor());
+    let mon = chosen_monitor(window, req.monitor);
     match req.kind {
         FullscreenKind::Windowed => {
             window.set_fullscreen(None);
