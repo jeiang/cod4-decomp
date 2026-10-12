@@ -2,6 +2,10 @@
 //! `cod4e`, the player-facing client. For now: a fly camera over a map, and the scripted flythrough the harness
 //! drives as stage 3 (`--flythrough`), which records frame times, a video and a screenshot.
 
+/// Held by every test that creates a GPU device, so no two devices start or stop at once in the test process.
+#[cfg(test)]
+static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 mod app;
 mod automelee;
 mod breath;
