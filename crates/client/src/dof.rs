@@ -38,6 +38,21 @@ fn approach(current: f32, target: f32, max_change: f32, dt: f32) -> f32 {
     }
 }
 
+/// `AimTarget_PlayerInValidState`: a player that is spectating, flying, dead or in the intermission (or has
+/// `otherFlags` bit 2 set) has no aim-assist targets, so the blur falls back to its default focus.
+pub fn targets_allowed(ps: &PlayerState) -> bool {
+    ps.other_flags & 2 == 0
+        && !matches!(
+            ps.pm_type,
+            PmType::Noclip
+                | PmType::Ufo
+                | PmType::Spectator
+                | PmType::Intermission
+                | PmType::Dead
+                | PmType::DeadLinked
+        )
+}
+
 /// The blur of aiming down the sights, which eases to its focus while the weapon is fully aimed.
 #[derive(Debug, Clone, Copy)]
 pub struct AdsDof {
@@ -185,6 +200,17 @@ mod tests {
         let mut ads = AdsDof::default();
         let d = ads.update(&aiming(0.5), &[], 100.0, 0.016);
         assert_eq!(d.near_end, 0.5 * 70.0);
+    }
+
+    #[test]
+    fn a_player_who_cannot_aim_assist_has_no_screen_targets() {
+        assert!(targets_allowed(&aiming(1.0)));
+        for t in [PmType::Spectator, PmType::Dead, PmType::Noclip, PmType::Intermission] {
+            let ps = PlayerState { pm_type: t, ..aiming(1.0) };
+            assert!(!targets_allowed(&ps), "{t:?}");
+        }
+        let ps = PlayerState { other_flags: 2, ..aiming(1.0) };
+        assert!(!targets_allowed(&ps));
     }
 
     #[test]

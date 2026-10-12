@@ -1368,17 +1368,19 @@ impl NetPlay {
                     )
                     .fraction;
                 // The enemies on screen (`AimAssist_GetScreenTarget*`): the focus band spans them.
-                targets = self
-                    .screen_targets(
-                        st,
-                        ps.client_num,
-                        eye,
-                        Vec3::from(ps.origin),
-                        [-pitch.to_degrees(), yaw.to_degrees()],
-                    )
-                    .iter()
-                    .map(|s| s.dist_sqr.sqrt())
-                    .collect();
+                if crate::dof::targets_allowed(ps) {
+                    targets = self
+                        .screen_targets(
+                            st,
+                            ps.client_num,
+                            eye,
+                            Vec3::from(ps.origin),
+                            [-pitch.to_degrees(), yaw.to_degrees()],
+                        )
+                        .iter()
+                        .map(|s| s.dist_sqr.sqrt())
+                        .collect();
+                }
             }
             self.ads_dof.update(ps, &targets, focus, dt)
         });

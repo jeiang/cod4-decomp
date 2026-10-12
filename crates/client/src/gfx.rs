@@ -170,12 +170,14 @@ impl Gfx {
             shadows: on("sm_enable"),
             specular: on("r_specular"),
             dof: on("r_dof_enable"),
+            // `r_dof_bias` and `r_dof_tweak` are CHEAT dvars: they only act with `sv_cheats` on.
             dof_bias: c
                 .get("r_dof_bias")
+                .filter(|_| c.bool("sv_cheats"))
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .filter(|v| v.is_finite())
                 .map_or(render::DOF_BIAS, |v| v.clamp(0.1, 3.0)),
-            dof_tweak: c.bool("r_dof_tweak").then(|| dof_tweak(c)),
+            dof_tweak: (c.bool("sv_cheats") && c.bool("r_dof_tweak")).then(|| dof_tweak(c)),
             glow: on("r_glow_allowed"),
             dlight_limit: c
                 .get("r_dlightLimit")
@@ -337,7 +339,12 @@ mod tests {
     fn the_dof_dvars_set_the_bias_and_the_tweaked_blur() {
         let s = Gfx::from_cvars(&cvars(&[])).settings(render::Settings::default());
         assert_eq!((s.dof_bias, s.dof_tweak), (0.5, None));
+        // Cheat dvars do nothing without `sv_cheats`.
+        let s = Gfx::from_cvars(&cvars(&[("r_dof_bias", "2"), ("r_dof_tweak", "1")]))
+            .settings(render::Settings::default());
+        assert_eq!((s.dof_bias, s.dof_tweak), (0.5, None));
         let g = Gfx::from_cvars(&cvars(&[
+            ("sv_cheats", "1"),
             ("r_dof_bias", "9"),
             ("r_dof_tweak", "1"),
             ("r_dof_nearEnd", "90"),
