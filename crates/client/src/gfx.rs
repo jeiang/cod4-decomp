@@ -17,6 +17,8 @@ pub struct Gfx {
     pub mode: Option<(u32, u32)>,
     /// `r_displayRefresh`: `N Hz`.
     pub refresh: Option<f64>,
+    /// `r_monitor`: the 1-based monitor fullscreen goes to, 0 for automatic.
+    pub monitor: Option<usize>,
     /// `r_aspectRatio`: the shape of the screen, `None` for the window's own.
     pub aspect: Option<f32>,
     /// `r_vsync`.
@@ -148,6 +150,7 @@ impl Gfx {
             fullscreen: c.bool("r_fullscreen"),
             mode: parse_mode(text("r_mode")),
             refresh: parse_hz(text("r_displayRefresh")),
+            monitor: text("r_monitor").trim().parse().ok().filter(|&n| n > 0),
             aspect: parse_aspect(text("r_aspectRatio")),
             vsync: c.bool("r_vsync"),
             aa_samples: text("r_aaSamples").trim().parse().unwrap_or(1).clamp(1, 16),
@@ -233,6 +236,7 @@ impl Gfx {
             kind,
             size: self.mode.or(base.size),
             refresh: self.refresh.or(base.refresh),
+            monitor: self.monitor.or(base.monitor),
         }
     }
 
@@ -387,6 +391,10 @@ mod tests {
             (r.kind, r.size),
             (FullscreenKind::Exclusive, Some((800, 600)))
         );
+        let g = Gfx::from_cvars(&cvars(&[("r_monitor", "2")]));
+        assert_eq!(g.request(&base).monitor, Some(2));
+        let g = Gfx::from_cvars(&cvars(&[("r_monitor", "0")]));
+        assert_eq!(g.request(&base).monitor, None);
         let g = Gfx::from_cvars(&cvars(&[("r_fullscreen", "0")]));
         let borderless = Request {
             kind: FullscreenKind::Borderless,

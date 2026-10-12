@@ -39,6 +39,7 @@ mod pointer;
 mod profile;
 mod props;
 mod ragdoll;
+mod screenshot;
 mod serverlist;
 mod session;
 mod shell;
@@ -73,6 +74,7 @@ usage: cod4e [options]
   --game <mods/name>     run a mod (fs_game): its mod.ff, IWDs and menus, and the server's too with --listen
   --size WxH             window size, or the video mode for --fullscreen exclusive
   --refresh <hz>         refresh rate for exclusive fullscreen
+  --monitor <n>          monitor (1 is the first) fullscreen goes to; the `r_monitor` dvar after start
   --fullscreen <kind>    windowed (default), borderless or exclusive
   --present <mode>       auto (default, vsync), fifo, mailbox or immediate
   --backend <name>       graphics backend: auto (default), or one of vulkan, metal, dx12, gl, webgpu (webgpu or webgl in a browser)
@@ -258,6 +260,10 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             }
             "--refresh" => {
                 c.request.refresh = Some(val(a)?.parse().map_err(|_| "bad refresh")?);
+                c.video_given = true;
+            }
+            "--monitor" => {
+                c.request.monitor = Some(val(a)?.parse().map_err(|_| "bad monitor")?);
                 c.video_given = true;
             }
             "--fullscreen" => {

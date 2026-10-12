@@ -221,6 +221,9 @@ pub struct Input {
     wheel: Vec<String>,
     mouse: RawMouse,
     pad: pad::Pad,
+    /// A menu waits for a key to bind: a pad button goes to [`Input::take_pad_press`] instead of the bind table.
+    pub capture_pad: bool,
+    pad_press: Option<String>,
     focused: bool,
     captured: bool,
     prev_buttons: u32,
@@ -361,6 +364,8 @@ impl Input {
             wheel: Vec::new(),
             mouse: RawMouse::detached(),
             pad: pad::Pad::none(),
+            capture_pad: false,
+            pad_press: None,
             focused: true,
             captured: true,
             prev_buttons: 0,
@@ -449,11 +454,26 @@ impl Input {
         }
     }
 
+    /// One gamepad button edge. While [`Input::capture_pad`] is set a press is held back for the bind menu, `pad_start`
+    /// excepted: it stays the menu key that cancels the capture.
+    fn pad_event(&mut self, name: &str, down: bool) {
+        if self.capture_pad && down && name != "pad_start" {
+            self.pad_press.get_or_insert_with(|| name.to_owned());
+            return;
+        }
+        self.key(name, down);
+    }
+
+    /// The pad button pressed while a bind was being captured.
+    pub fn take_pad_press(&mut self) -> Option<String> {
+        self.pad_press.take()
+    }
+
     /// Everything the player asked for since the previous call.
     pub fn frame(&mut self, dt: f32) -> InputFrame {
         for (name, down) in self.pad.poll() {
             if self.focused && self.cvars.bool("in_gamepad") {
-                self.key(name, down);
+                self.pad_event(name, down);
             }
         }
         let raw = self.mouse.drain();
@@ -1353,6 +1373,27 @@ mod tests {
         );
         i.key("c", false);
         assert_eq!(frame(&mut i).buttons, 0);
+    }
+
+    #[test]
+    fn a_pad_button_pressed_while_a_bind_waits_is_the_binding_not_a_command() {
+        let mut i = Input::detached();
+        i.exec_line("bind pad_a \"+forward\"");
+        i.capture_pad = true;
+        i.pad_event("pad_a", true);
+        assert_eq!(i.take_pad_press().as_deref(), Some("pad_a"));
+        assert_eq!(i.take_pad_press(), None);
+        assert_eq!(
+            frame(&mut i).move_forward,
+            0.0,
+            "the press did not run its bind"
+        );
+        // Start still reaches the menu key that cancels, and with no bind waiting a press is a key again.
+        i.pad_event("pad_start", true);
+        assert_eq!(i.take_pad_press(), None);
+        i.capture_pad = false;
+        i.pad_event("pad_a", true);
+        assert_eq!(frame(&mut i).move_forward, 1.0);
     }
 
     #[test]

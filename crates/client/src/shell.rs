@@ -56,6 +56,8 @@ pub enum Action {
     Console(String),
     /// `vid_restart`: take the graphics settings.
     VidRestart,
+    /// `screenshot` or `screenshotJpeg`: write the next frame to the screenshots folder.
+    Screenshot(crate::screenshot::Request),
     /// A menu sound (`play` in a menu script) for the sound system to play.
     Sound(String),
     /// Start the install's Windows Single Player executable.
@@ -1679,6 +1681,16 @@ impl HostCx<'_> {
                     }
                 }
                 "vid_restart" => self.st.actions.push(Action::VidRestart),
+                "screenshot" | "screenshotjpeg" => {
+                    let format = if name == "screenshot" {
+                        crate::screenshot::Format::Tga
+                    } else {
+                        crate::screenshot::Format::Jpeg
+                    };
+                    if let Some(r) = crate::screenshot::Request::parse(format, &cmd[1..]) {
+                        self.st.actions.push(Action::Screenshot(r));
+                    }
+                }
                 "quit" => self.st.actions.push(Action::Quit),
                 "disconnect" => self.st.actions.push(Action::Disconnect),
                 "connect" => self.st.actions.push(Action::Join(a(1).to_owned())),
