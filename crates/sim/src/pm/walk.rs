@@ -270,7 +270,8 @@ fn cmd_scale_walk(pm: &Pmove<'_>) -> f32 {
     } else {
         s *= w.move_speed_scale;
     }
-    if ps.pm_flags & pmf::SHELLSHOCKED != 0 && pm.shellshock_slows {
+    // `bg_shock_movement` is 1 in multiplayer, so every shell shock affects movement.
+    if ps.pm_flags & pmf::SHELLSHOCKED != 0 {
         s *= 0.4;
     }
     s * ps.move_speed_scale_multiplier

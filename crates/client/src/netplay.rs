@@ -99,6 +99,8 @@ pub struct NetFrame {
     pub sight: Option<Sight>,
     /// The field of view the world is drawn with regardless of the weapon: a turret's or the intermission's.
     pub fixed_fov: Option<f32>,
+    /// The shell shock's mouse sensitivity scale (`bg_shock_lookcontrol_mousesensitivityscale`), 1 without one.
+    pub shock_sensitivity: f32,
     /// Effect sprites and decals.
     pub meshes: Vec<render::DynMesh>,
     /// The lights the effects add: muzzle flashes, explosions, fire.
@@ -369,9 +371,8 @@ pub struct NetPlay {
     ragdoll_hits: Vec<crate::props::Collision>,
     launches: Launches,
     look: Look,
-    /// What the shell shock holds the view to (`CL_CapTurnRate`, the mouse scale): pitch and yaw degrees per second.
+    /// What the shell shock holds the view to (`CL_CapTurnRate`): pitch and yaw degrees per second.
     max_turn: [f32; 2],
-    shock_sensitivity: f32,
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
     /// The server announced a level the app has not acted on yet.
@@ -476,7 +477,6 @@ impl NetPlay {
             ragdoll_hits: Vec::new(),
             look: Look::new((map.art.glow, map.art.film)),
             max_turn: [0.0; 2],
-            shock_sensitivity: 1.0,
             effects: Effects::new(&lib.content, world),
             tracer_cvars: crate::tracer::Cvars::default(),
             weapon_params: WeaponParams::default(),
@@ -879,11 +879,7 @@ impl NetPlay {
                 (self.loc_cursor[1] + input.cursor_pitch * LOC_CURSOR_SPEED).clamp(0.0, 1.0);
         } else {
             self.loc_cursor = [0.5; 2];
-            let scale = self.shock_sensitivity;
-            self.angles[1] += cap_turn(input.look_delta_yaw * scale, self.max_turn[1], dt);
-            self.angles[0] = (self.angles[0]
-                + cap_turn(input.look_delta_pitch * scale, self.max_turn[0], dt))
-            .clamp(self.pitch_limits.0, self.pitch_limits.1);
+            self.angles = turned(self.angles, input, self.max_turn, dt, self.pitch_limits);
         }
         for c in &input.pending_commands {
             self.command(c);
@@ -1015,6 +1011,7 @@ impl NetPlay {
                 brush_models,
                 sight: kill_fov.is_none().then(|| self.sight.clone()).flatten(),
                 fixed_fov: kill_fov.or_else(|| fixed_fov(&ps)),
+                shock_sensitivity: look.sensitivity,
                 meshes: drawn.meshes,
                 lights: drawn.lights,
                 events,
@@ -1217,6 +1214,7 @@ impl NetPlay {
             brush_models,
             sight: self.sight.clone(),
             fixed_fov: fixed_fov(&ps),
+            shock_sensitivity: look.sensitivity,
             meshes: drawn.meshes,
             lights: drawn.lights,
             events,
@@ -1503,7 +1501,6 @@ impl NetPlay {
     /// The shell shock's hold on the view and its sounds for this frame.
     fn shock_effects(&mut self, look: &LookOut) {
         self.max_turn = look.max_turn;
-        self.shock_sensitivity = look.sensitivity;
         self.sound.shock(&look.sound);
     }
 
@@ -2662,8 +2659,48 @@ fn follow_server_turn(
     }
 }
 
+/// The view angles `[pitch, yaw]` after one frame's turning. `CL_AdjustAngles` caps the key and gamepad turning and
+/// `CL_MouseMove` the mouse's, each on its own (the shell shock's `max_turn`); the shock's sensitivity scale is
+/// already in the mouse's delta.
+fn turned(
+    angles: [f32; 2],
+    input: &InputFrame,
+    max_turn: [f32; 2],
+    dt: f32,
+    pitch_limits: (f32, f32),
+) -> [f32; 2] {
+    let key = [
+        input.look_delta_pitch - input.mouse_delta_pitch,
+        input.look_delta_yaw - input.mouse_delta_yaw,
+    ];
+    let mouse = [input.mouse_delta_pitch, input.mouse_delta_yaw];
+    let turn = |i: usize| cap_turn(key[i], max_turn[i], dt) + cap_turn(mouse[i], max_turn[i], dt);
+    [
+        (angles[0] + turn(0)).clamp(pitch_limits.0, pitch_limits.1),
+        angles[1] + turn(1),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn key_and_mouse_turning_are_capped_apart() {
+        let frame = |key: f32, mouse: f32| InputFrame {
+            look_delta_yaw: key + mouse,
+            mouse_delta_yaw: mouse,
+            ..InputFrame::default()
+        };
+        let cap = [90.0, 60.0];
+        let wide = (-90.0, 90.0);
+        // A key turn within the cap is untouched, whatever the mouse does.
+        assert_eq!(turned([0.0; 2], &frame(0.5, 0.0), cap, 0.01, wide)[1], 0.5);
+        // Each source is held to one cap: two at once reach twice the cap.
+        let both = turned([0.0; 2], &frame(5.0, 5.0), cap, 0.01, wide)[1];
+        assert!((both - 1.2).abs() < 1e-5, "{both}");
+        let key_only = turned([0.0; 2], &frame(5.0, 0.0), cap, 0.01, wide)[1];
+        assert!((key_only - 0.6).abs() < 1e-5, "{key_only}");
+    }
+
     #[test]
     fn the_first_snapshot_and_every_respawn_start_a_life() {
         let mut last = None;

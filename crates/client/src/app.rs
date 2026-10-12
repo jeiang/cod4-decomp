@@ -1486,8 +1486,9 @@ impl Viewer {
                 st.aim_zoom = nf.sight.as_ref().map(|s| (s.zoom_fov, s.zoom));
                 st.fixed_fov = nf.fixed_fov;
                 let fov = view_fov_4_3(st);
-                st.input
-                    .set_fov_sensitivity_scale(zoom_sensitivity(fov, cg_fov(&st.input)));
+                st.input.set_fov_sensitivity_scale(
+                    zoom_sensitivity(fov, cg_fov(&st.input)) * nf.shock_sensitivity,
+                );
                 st.fx_in_view = nf.meshes.len();
                 if let Some(r) = st.renderer.as_mut() {
                     r.dynamic_models = nf.models;

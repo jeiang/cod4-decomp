@@ -675,6 +675,59 @@ mod tests {
         assert_eq!(pr.corrections, 0);
     }
 
+    /// A shell-shocked player walks at 40% and cannot sprint; the client replays the same, so the server's
+    /// snapshots never correct it.
+    #[test]
+    fn shell_shock_slows_and_blocks_sprint_with_no_corrections() {
+        let world = TestWorld::floor();
+        let (w, p) = (table(), Params::default());
+        let env = Env {
+            world: &world,
+            weapons: &w,
+            params: &p,
+            time: 0,
+        };
+        let cmds: Vec<UserCmd> = (1..=60)
+            .map(|i| UserCmd {
+                buttons: button::SPRINT,
+                ..cmd(i * 16, 127, 0)
+            })
+            .collect();
+        let run = |flags: u32| {
+            let mut ps = start();
+            ps.pm_flags |= flags;
+            let (mut inv, mut old) = (PlayerWeapons::default(), UserCmd::default());
+            cmds.iter()
+                .map(|c| {
+                    run_usercmd(&mut ps, &mut inv, *c, old, 190, &w, &p, &world);
+                    old = *c;
+                    ps.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        let (shocked, free) = (run(sim::pm::pmf::SHELLSHOCKED), run(0));
+        let speed = |ps: &PlayerState| ps.velocity[0].hypot(ps.velocity[1]);
+        assert!(
+            speed(&free[59]) > 190.0,
+            "sprint runs: {}",
+            speed(&free[59])
+        );
+        assert!(
+            speed(&shocked[59]) < 190.0 * 0.4 + 2.0,
+            "shock slows and blocks sprint: {}",
+            speed(&shocked[59])
+        );
+        let mut pr = Predictor::default();
+        for c in &cmds {
+            pr.push(*c);
+        }
+        for known in [9, 29, 44] {
+            let out = pr.predict(&snapshot(&shocked[known]), &env);
+            assert_eq!(out.ps, shocked[59]);
+        }
+        assert_eq!(pr.corrections, 0);
+    }
+
     /// The server's state with `events` in its ring, and the replayed state with `more` on top.
     fn states(events: &[(u8, u8)], more: &[(u8, u8)]) -> (PlayerState, PlayerState) {
         let mut server = start();

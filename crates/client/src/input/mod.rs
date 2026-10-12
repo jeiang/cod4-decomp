@@ -77,6 +77,10 @@ pub struct InputFrame {
     pub look_delta_yaw: f32,
     /// Degrees, positive = look down.
     pub look_delta_pitch: f32,
+    /// The mouse's part of the look deltas (what `CL_MouseMove` adds), so the turn-rate caps can treat it apart from
+    /// key and gamepad turning.
+    pub mouse_delta_yaw: f32,
+    pub mouse_delta_pitch: f32,
     /// The same turning as the look deltas but without the FOV sensitivity scale of the mouse: what moves a cursor
     /// (the location selection) rather than the view.
     pub cursor_yaw: f32,
@@ -331,7 +335,8 @@ impl Input {
     }
 
     /// `CL_SetFOVSensitivityScale`: the mouse turns the view by this much less (or more) than the hip rate, since
-    /// the view's field of view is that much narrower (or wider) than `cg_fov`. Gamepad and key turning ignore it.
+    /// the view's field of view is that much narrower (or wider) than `cg_fov` (or the shell shock's look control slows
+    /// it). Gamepad and key turning ignore it.
     pub fn set_fov_sensitivity_scale(&mut self, scale: f32) {
         self.fov_sensitivity_scale = scale;
     }
@@ -547,6 +552,8 @@ impl Input {
             up,
             look_delta_yaw: yaw,
             look_delta_pitch: pitch,
+            mouse_delta_yaw: mouse_yaw,
+            mouse_delta_pitch: mouse_pitch,
             cursor_yaw: cursor_yaw + pad_yaw,
             cursor_pitch: cursor_pitch + pad_pitch,
             buttons,
@@ -1278,6 +1285,26 @@ mod tests {
             ..Feedback::default()
         });
         assert_eq!(frame(&mut i).buttons, 0);
+    }
+
+    #[test]
+    fn the_sensitivity_scale_touches_the_mouse_share_only() {
+        let run = |scale: f32| {
+            let mut i = Input::detached();
+            i.exec_line("set sensitivity 2; set m_yaw 0.5; set cl_yawspeed 100");
+            i.set_fov_sensitivity_scale(scale);
+            i.clock = Some(1.0);
+            i.key("leftarrow", true);
+            i.clock = Some(1.1);
+            i.mouse.winit_motion((10.0, 0.0));
+            let f = i.frame(0.1);
+            (f.look_delta_yaw - f.mouse_delta_yaw, f.mouse_delta_yaw)
+        };
+        let (key_full, mouse_full) = run(1.0);
+        let (key_slow, mouse_slow) = run(0.5);
+        assert!(key_full > 0.0 && mouse_full < 0.0);
+        assert!((key_full - key_slow).abs() < 1e-4, "key turning ignores it");
+        assert!((mouse_full * 0.5 - mouse_slow).abs() < 1e-4);
     }
 
     #[test]
