@@ -349,11 +349,16 @@ pub fn is_command(name: &str) -> bool {
     n.starts_with(['+', '-']) || is_server_verb(&n) || OWN_COMMANDS.contains(&n.as_str())
 }
 
+/// Whether `name` is a command the app answers itself in `console_action` (not the server's, not the input layer's).
+pub fn is_own_verb(name: &str) -> bool {
+    const OWN: &[&str] = &["rcon", "record", "stoprecord", "name", "bots"];
+    OWN.iter().any(|v| name.eq_ignore_ascii_case(v))
+}
+
 /// Whether the shell hands `name` to the app as a console action (`console_action`) instead of the input layer:
 /// the server's verbs and the commands the app answers itself.
 pub fn is_app_verb(name: &str) -> bool {
-    const OWN: &[&str] = &["togglemenu", "rcon", "record", "stoprecord", "name", "bots"];
-    is_server_verb(name) || OWN.iter().any(|v| name.eq_ignore_ascii_case(v))
+    is_server_verb(name) || is_own_verb(name) || name.eq_ignore_ascii_case("togglemenu")
 }
 
 /// Whether `name` (a command's first word) goes to the server.

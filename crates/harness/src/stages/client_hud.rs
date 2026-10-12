@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 const NAME: &str = "client-hud";
 const LIMIT: Duration = Duration::from_secs(420);
 const ARGS: &[&str] = &["--listen", "--bots", "9", "--autoplay", "--duration", "400"];
-const STEPS: &str = "ingame=120,wait=5,loc=MP_CHANGE_CLASS_NEXT_SPAWN:PLATFORM_HOLD_TO_PLANT_EXPLOSIVES,chat=hello from the script,saw=hello from the script:20,console=callvote kick bot5,saw=called a vote:20,console=bots,saw=<count>:10,console=bots 12,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
+const STEPS: &str = "ingame=120,wait=5,loc=MP_CHANGE_CLASS_NEXT_SPAWN:PLATFORM_HOLD_TO_PLANT_EXPLOSIVES,chat=hello from the script,saw=hello from the script:20,console=callvote kick bot5,saw=called a vote:20,console=bots,saw=<count>:10,console=bots 12,players=13:30,throw=g:30,wait=2,scores=on,wait=4,shot=scoreboard,scores=off,feed=120,wait=1,shot=feed,\
 killcam=300,shot=killcam_first,wait=1,shot=killcam_next,wait=1,shot=killcam,respawn=120";
 
 fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String> {
@@ -91,10 +91,6 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     }
     if sum("messages") + n("obituaries") == 0 {
         bad.push("no print or kill line arrived");
-    }
-    // `bots 12` over the nine of `ARGS` is the console's own command: the bots it asks for must arrive.
-    if report["net"]["players_seen_max"].as_u64().unwrap_or(0) < 11 {
-        bad.push("`bots 12` typed at the console added no bots");
     }
     if n("chat") == 0 {
         bad.push("the chat line the player typed never came back");
@@ -246,20 +242,13 @@ mod tests {
                 "friends_in_sight_frames": 50, "crosshair_due_frames": 60,
                 "head_icon_materials": ["headiconyouinkillcam"], "chat": 1
             },
-            "net": {"players_seen_max": 12, "view": {"death_view_frames": 40, "death_view_range_max": 120.0, "dof_frames": 900}}
+            "net": {"view": {"death_view_frames": 40, "death_view_range_max": 120.0, "dof_frames": 900}}
         })
     }
 
     #[test]
     fn a_run_that_showed_everything_passes() {
         assert_eq!(verdict(&good()), None);
-    }
-
-    #[test]
-    fn bots_typed_at_the_console_must_arrive() {
-        let mut r = good();
-        r["net"]["players_seen_max"] = json!(9);
-        assert!(verdict(&r).unwrap().contains("bots 12"));
     }
 
     #[test]

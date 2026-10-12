@@ -1442,6 +1442,9 @@ impl Viewer {
             };
             open_chat(st.shell.as_mut(), &mut st.input, &f);
             screenshot_commands(st.shell.as_mut(), &f);
+            if let Some(sh) = st.shell.as_mut() {
+                sh.st.actions.extend(own_commands(&f));
+            }
             if f.quit() {
                 el.exit();
             }
@@ -2782,6 +2785,26 @@ fn script_step(st: &mut State) -> bool {
             }
             done(true, sc, String::new());
         }
+        // Waits until the scoreboard lists at least this many players (`players=13:30`, at most that many seconds):
+        // the server's own roster, not what is in view. It holds the scoreboard up meanwhile and lets go after.
+        "players" => {
+            let (n, secs) = arg
+                .split_once(':')
+                .map_or((arg, 10.0), |(n, s)| (n, s.parse().unwrap_or(10.0)));
+            let want = n.parse::<usize>().unwrap_or(usize::MAX);
+            if let Some(sh) = st.shell.as_mut() {
+                if sh.st.live.scores.len() >= want {
+                    sh.st.scores_forced = false;
+                    done(true, sc, String::new());
+                } else if waited > secs {
+                    sh.st.scores_forced = false;
+                    let have = sh.st.live.scores.len();
+                    done(false, sc, format!("timed out; {have} of {want} players listed"));
+                } else {
+                    sh.st.scores_forced = true;
+                }
+            }
+        }
         // Waits until a line with this text is in the console's output (`saw=hello:10`, at most that many seconds):
         // a chat line or a print the server sent.
         "saw" => {
@@ -3166,6 +3189,17 @@ fn screenshot_commands(shell: Option<&mut Shell>, f: &InputFrame) {
             }
         }
     }
+}
+
+/// `bots`, `rcon`, `name`, `record` and `stoprecord` from a bind or a config line: the app's own commands, which
+/// `console_action` carries out (the input layer only hands them over).
+fn own_commands(f: &InputFrame) -> Vec<Action> {
+    f.pending_commands
+        .iter()
+        .flat_map(|c| crate::input::config::split_commands(c))
+        .filter(|cmd| crate::console::is_own_verb(&cmd[0]))
+        .map(|cmd| Action::Console(crate::input::config::join(&cmd)))
+        .collect()
 }
 
 /// A console line a menu, a bind or the console itself produced. What the server carries out goes to it (without the
@@ -4142,6 +4176,21 @@ mod fullscreen_tests {
 #[cfg(test)]
 mod bot_count_tests {
     use super::*;
+
+    #[test]
+    fn a_bound_bots_command_becomes_a_console_action() {
+        let mut input = Input::detached();
+        input.exec_line("bind x \"bots 12\"");
+        input.key("x", true);
+        let lines: Vec<_> = own_commands(&input.frame(0.01))
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::Console(l) => Some(l),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines, ["bots 12"]);
+    }
 
     #[test]
     fn a_saved_bot_count_reaches_a_bare_listen_server_and_the_flag_wins() {
