@@ -542,7 +542,9 @@ mod tests {
         assert_eq!(server_line(&w(&["vote"])).as_deref(), Some("vote"));
         assert!(is_server_verb("Say_Team") && is_server_verb("kill") && !is_server_verb("map"));
         // `bots` once fell through to the input layer, which ignored it without a word.
-        assert!(is_app_verb("bots") && is_app_verb("RCON") && is_app_verb("say") && !is_app_verb("map"));
+        assert!(
+            is_app_verb("bots") && is_app_verb("RCON") && is_app_verb("say") && !is_app_verb("map")
+        );
         assert!(is_command("MAP") && is_command("+attack") && is_command("rcon"));
         assert!(!is_command("frobnicate"));
         // The video commands and the screenshot ones are known, so the console answers them itself.
