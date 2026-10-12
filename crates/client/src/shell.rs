@@ -1805,8 +1805,10 @@ impl Host for HostCx<'_> {
             "runmod" => {
                 if let Some((name, _)) = self.st.mods.get(self.st.mod_sel) {
                     let game = format!("mods/{name}");
-                    self.input.cvars.set("fs_game", &game, false);
-                    self.st.actions.push(Action::VidRestart);
+                    if ::assets::paths::valid_game(&game) {
+                        self.input.cvars.set("fs_game", &game, false);
+                        self.st.actions.push(Action::VidRestart);
+                    }
                 }
                 true
             }

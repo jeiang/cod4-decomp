@@ -78,9 +78,24 @@ fn a_mods_scripts_override_and_add_to_the_stock_ones() {
     let err = s
         .exec_line("map mp_crash")
         .expect_err("the broken script is compiled");
-    assert!(err.contains("gametypes\\dm"), "{err}");
+    assert!(err.contains("script compile errors"), "{err}");
 
     // Without the mod the same install runs the stock script.
     let mut s = boot(t.path(), &[]).expect("stock boot");
     s.exec_line("map mp_crash").expect("stock map");
+}
+
+#[test]
+fn a_mod_that_is_not_installed_fails_the_boot() {
+    let Some(root) = install() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let t = scratch(&root);
+    for game in ["mods/nonexist", "Mods/x", "mods/../main"] {
+        assert!(
+            boot(t.path(), &["+set", "fs_game", game]).is_err(),
+            "{game}"
+        );
+    }
 }

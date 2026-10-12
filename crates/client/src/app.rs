@@ -48,7 +48,22 @@ struct Ready {
     note: Option<String>,
 }
 
-pub fn run(cli: Cli) -> Result<(), String> {
+pub fn run(mut cli: Cli) -> Result<(), String> {
+    // A direct `--connect` runs the server's mod, as a join from the menus does.
+    if let Some(addr) = cli.connect.clone() {
+        let e = serverlist::resolve(&addr).and_then(|a| serverlist::query(a, JOIN_QUERY))?;
+        if e.game != cli.game {
+            if !assets::paths::valid_game(&e.game)
+                || (!e.game.is_empty() && !assets::paths::game_dir(&cli.install, &e.game))
+            {
+                return Err(format!(
+                    "You do not have the mod {} this server is running.",
+                    e.game
+                ));
+            }
+            cli.game = e.game;
+        }
+    }
     let el = EventLoop::<Ready>::with_user_event()
         .build()
         .map_err(|e| format!("no display: {e}"))?;
@@ -2031,7 +2046,11 @@ impl Viewer {
                         show_error(st, &format!("Cannot play the demo {name}: {e}"));
                     }
                 }
-                Action::Disconnect => end_session(&mut self.map, st),
+                Action::Disconnect => {
+                    end_session(&mut self.map, st);
+                    // An `fs_game` changed during the match applies now.
+                    restart_files(&self.cli, st);
+                }
                 Action::MenuResponse { menu, response } => {
                     if let Some(n) = st.net.as_mut() {
                         n.send_command(&format!("menuresponse {menu} {response}"));

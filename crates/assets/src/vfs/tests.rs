@@ -376,6 +376,14 @@ fn a_mod_overrides_main() {
         ("main".into(), "main".into())
     );
     assert!(Vfs::open(&t.0, 0, "mods/../main").is_err());
+    assert!(
+        Vfs::open(&t.0, 0, "mods/missing").is_err(),
+        "a mod that is not there"
+    );
+    assert!(
+        Vfs::open(&t.0, 0, "Mods/m").is_err(),
+        "only the lowercase form"
+    );
 }
 
 #[test]

@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Search order, game directory rule and mod fastfile lookup follow KisakCOD (GPL-3.0): universal/com_files.cpp
+// (FS_GameDirDomainFunc, FS_GetModList) and database/db_registry.cpp (DB_TryLoadXFileInternal); Activision and
+// the KisakCOD authors.
 //! Where the install keeps what is not in the VFS: fastfiles, mods and custom maps.
 //!
 //! Fastfiles are looked up the way the original's `DB_TryLoadXFileInternal` does for a running mod: in the `fs_game`
@@ -16,17 +19,15 @@ pub fn language_index(root: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// Whether `game` may be an `fs_game`: empty, or `mods/<name>` with no `..` and no `::`
-/// (`FS_GameDirDomainFunc`; the original also takes a backslash after `mods`).
+/// Whether `game` may be an `fs_game`: empty, or `mods/<name>` (lowercase, `/`) with no `..` and no `:`. Stricter than
+/// `FS_GameDirDomainFunc`, which also takes any case, a backslash and a single `:`: the path is the same on every
+/// file system this way.
 pub fn valid_game(game: &str) -> bool {
     game.is_empty()
-        || (game.len() >= 6
-            && game
-                .get(..4)
-                .is_some_and(|m| m.eq_ignore_ascii_case("mods"))
-            && matches!(game.as_bytes()[4], b'/' | b'\\')
+        || (game.len() > 5
+            && game.starts_with("mods/")
             && !game.contains("..")
-            && !game.contains("::"))
+            && !game.contains([':', '\\']))
 }
 
 /// `name` in `dir`, matched case-insensitively.
@@ -64,6 +65,14 @@ pub fn zone_file(root: &Path, game: &str, name: &str) -> Option<PathBuf> {
     in_game().or_else(|| find_ci(&zone_dir(root)?, &file))
 }
 
+/// The directory of `game` as it is named on disk, relative to `root` (`mods/Synth` for `mods/synth` on a
+/// case-sensitive file system); `None` when `game` is not valid or not there.
+pub fn game_rel(root: &Path, game: &str) -> Option<String> {
+    let dir = find_path(root, game).filter(|d| valid_game(game) && crate::fs::is_dir(d))?;
+    let rel = dir.strip_prefix(root).ok()?;
+    Some(rel.to_string_lossy().replace('\\', "/"))
+}
+
 /// Whether the game directory `game` (`mods/<name>`) is in the install at `root`.
 pub fn game_dir(root: &Path, game: &str) -> bool {
     valid_game(game) && find_path(root, game).is_some_and(|d| crate::fs::is_dir(&d))
@@ -87,6 +96,7 @@ pub fn list_mods(root: &Path) -> Vec<(String, String)> {
         .flatten()
         .flatten()
         .filter(|e| crate::fs::is_dir(&e.path()))
+        .filter(|e| valid_game(&format!("mods/{}", e.file_name().to_string_lossy())))
         .map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let desc = find_ci(&e.path(), "description.txt")
@@ -167,7 +177,7 @@ mod tests {
 
     #[test]
     fn game_directories_stay_inside_mods() {
-        for ok in ["", "mods/promod", "Mods\\x"] {
+        for ok in ["", "mods/promod"] {
             assert!(valid_game(ok), "{ok}");
         }
         for bad in [
@@ -178,6 +188,9 @@ mod tests {
             "/mods/x",
             "mods/a::b",
             "xmods/a",
+            "Mods/x",
+            "mods\\x",
+            "mods/a:b",
         ] {
             assert!(!valid_game(bad), "{bad}");
         }
@@ -194,6 +207,8 @@ mod tests {
         assert_eq!(at("", "mp_a").unwrap(), b"stock");
         assert_eq!(at("mods/m", "mp_a").unwrap(), b"mod");
         assert!(at("", "mp_m").is_none(), "a mod's own map is not stock");
+        assert_eq!(game_rel(&t.0, "mods/m").as_deref(), Some("mods/m"));
+        assert!(game_rel(&t.0, "mods/gone").is_none());
         assert!(mod_zone(&t.0, "mods/m").is_some() && mod_zone(&t.0, "").is_none());
         assert!(
             zone_file(&t.0, "mods/../zone", "mp_a").is_some(),
@@ -208,6 +223,7 @@ mod tests {
         t.file("mods/b/mod.ff", b"");
         t.file("mods/A/description.txt", b"Alpha mod");
         t.file("mods/loose.txt", b"");
+        t.file("mods/a..b/mod.ff", b"");
         assert_eq!(
             list_mods(&t.0),
             [("A".into(), "Alpha mod".into()), ("b".into(), "b".into())]

@@ -111,7 +111,13 @@ impl Vfs {
         b.add_game_dir("main_shared")?;
         b.add_game_dir("main")?;
         if !game.is_empty() {
-            b.add_game_dir(game)?;
+            let rel = crate::paths::game_rel(root, game).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("fs_game '{game}': no such mod folder"),
+                )
+            })?;
+            b.add_game_dir(&rel)?;
         }
         b.finish(language)
     }
