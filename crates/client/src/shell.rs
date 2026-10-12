@@ -23,6 +23,7 @@ use render::ui2d::{Ui2d, UiImage};
 use render::{Gpu, TextureCache};
 use server::content::Install;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use web_time::Instant;
 
@@ -56,6 +57,8 @@ pub enum Action {
     VidRestart,
     /// A menu sound (`play` in a menu script) for the sound system to play.
     Sound(String),
+    /// Start the install's Windows Single Player executable.
+    StartSingleplayer,
 }
 
 pub struct MapEntry {
@@ -1715,7 +1718,11 @@ impl Host for HostCx<'_> {
                 self.st.actions.push(Action::Quit);
                 true
             }
-            "startsingleplayer" | "runmod" => true,
+            "startsingleplayer" => {
+                self.st.actions.push(Action::StartSingleplayer);
+                true
+            }
+            "runmod" => true,
             "addplayerprofiles"
             | "sortplayerprofiles"
             | "selectactiveplayerprofile"
@@ -2195,10 +2202,53 @@ fn ui_text(ui: &Ui, p: &mut Painter, d: &ItemDef, rect: Px, color: [f32; 4], tex
     );
 }
 
+/// Select the stock Single Player executable or explain why it cannot be started here.
+pub(crate) fn singleplayer_executable(install: &Path, windows: bool) -> Result<PathBuf, String> {
+    if !windows {
+        return Err("Single Player can only be launched on Windows.".into());
+    }
+
+    let executable = install.join("iw3sp.exe");
+    if executable.is_file() {
+        Ok(executable)
+    } else {
+        Err(
+            "Single Player is unavailable because iw3sp.exe was not found in the game install."
+                .into(),
+        )
+    }
+}
+
 #[cfg(test)]
+
 mod tests {
     use super::*;
     use crate::serverlist::{Entry, Source};
+
+    #[test]
+    fn singleplayer_selects_install_executable_and_reports_unavailable_cases() {
+        let install = std::env::temp_dir().join(format!(
+            "cod4e-singleplayer-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&install);
+        std::fs::create_dir_all(&install).unwrap();
+
+        let executable = install.join("iw3sp.exe");
+        assert!(matches!(
+            singleplayer_executable(&install, true),
+            Err(message) if message.contains("iw3sp.exe")
+        ));
+        std::fs::write(&executable, []).unwrap();
+        assert_eq!(singleplayer_executable(&install, true).unwrap(), executable);
+        assert!(matches!(
+            singleplayer_executable(&install, false),
+            Err(message) if message.contains("Windows")
+        ));
+
+        let _ = std::fs::remove_dir_all(&install);
+    }
 
     #[test]
     fn server_list_cells_follow_the_stock_columns() {

@@ -1966,6 +1966,38 @@ impl Viewer {
                         }
                     }
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                Action::StartSingleplayer => {
+                    match crate::shell::singleplayer_executable(
+                        &self.cli.install,
+                        cfg!(target_os = "windows"),
+                    ) {
+                        Ok(executable) => match std::fs::canonicalize(executable) {
+                            Ok(executable) => {
+                                if let Err(err) = std::process::Command::new(executable)
+                                    .current_dir(&self.cli.install)
+                                    .spawn()
+                                {
+                                    show_error(
+                                        st,
+                                        &format!("Could not start Single Player: {err}"),
+                                    );
+                                }
+                            }
+                            Err(err) => show_error(
+                                st,
+                                &format!("Could not locate Single Player executable: {err}"),
+                            ),
+                        },
+                        Err(message) => show_error(st, &message),
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                Action::StartSingleplayer => {
+                    let message = crate::shell::singleplayer_executable(&self.cli.install, false)
+                        .expect_err("Single Player is not supported in the browser");
+                    show_error(st, &message);
+                }
                 Action::PlayDemo(name) => {
                     if let Err(e) = play_demo(&self.cli, &mut self.map, st, &name) {
                         eprintln!("cannot play the demo {name}: {e}");
