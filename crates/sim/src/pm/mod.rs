@@ -102,8 +102,6 @@ pub struct Pmove<'a> {
     pub weapons: Option<WeaponCtx<'a>>,
     /// What the weapon state machine did during this `pmove` call; cleared at its start.
     pub weapon_out: WeaponOut,
-    /// The active shellshock slows movement (`shellshock.movement.affect`).
-    pub shellshock_slows: bool,
     pub params: &'a Params,
 }
 
@@ -128,7 +126,6 @@ impl<'a> Pmove<'a> {
             weapon: WeaponMove::default(),
             weapons: None,
             weapon_out: WeaponOut::default(),
-            shellshock_slows: false,
             params,
         }
     }

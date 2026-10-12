@@ -355,13 +355,28 @@ fn shell_shock(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
     let n = client_of(g, e)?;
     let name = a.string(0)?.to_owned();
     let ms = (a.float(1)? * 1000.0).round() as i32;
+    if !(0..=60_000).contains(&ms) {
+        return Err(format!(
+            "duration {} should be >= 0 and <= 60",
+            ms as f32 * 0.001
+        ));
+    }
     let end = if name.is_empty() {
         0
     } else {
         g.level.time + ms
     };
+    let alive = g.ents[usize::from(n)]
+        .as_ref()
+        .is_some_and(|e| e.health > 0);
     if let Some(c) = g.client_mut(n) {
         c.gun.shock_end = end;
+        // `GScr_Shellshock`: the movement code slows and stops sprinting while the flag is up; a dead player is not slowed.
+        if end != 0 && alive {
+            c.ps.pm_flags |= pmf::SHELLSHOCKED;
+        } else {
+            c.ps.pm_flags &= !pmf::SHELLSHOCKED;
+        }
     }
     g.send(
         crate::ui::Dest::Client(n),
@@ -472,6 +487,7 @@ fn stop_shell_shock(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client_of(g, e)?;
     if let Some(c) = g.client_mut(n) {
         c.gun.shock_end = 0;
+        c.ps.pm_flags &= !pmf::SHELLSHOCKED;
     }
     g.send(
         crate::ui::Dest::Client(n),
@@ -795,6 +811,42 @@ mod tests {
         ] {
             assert!(dof_ranges(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn shellshock_raises_the_movement_flag_until_it_ends_or_is_stopped() {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(prog).unwrap();
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.reset_level(4);
+        let n = g.connect_client(&mut vm, true, "Ann").unwrap();
+        let e = EntRef {
+            num: n,
+            class: EntClass::Entity,
+        };
+        g.ents[usize::from(n)].as_mut().unwrap().health = 100;
+        let v = [
+            Value::Str("concussion_grenade_mp".into()),
+            Value::Float(4.0),
+        ];
+        shell_shock(&mut g, &mut vm, e, Args::new("shellshock", &v)).unwrap();
+        let shocked = |g: &Game| g.client(n).unwrap().ps.pm_flags & pmf::SHELLSHOCKED != 0;
+        assert!(shocked(&g));
+        g.client_end_frame(&mut vm, n);
+        assert!(shocked(&g), "still shocked while the time runs");
+        g.level.time += 4001;
+        g.client_end_frame(&mut vm, n);
+        assert!(!shocked(&g), "the flag ends with the shock");
+        shell_shock(&mut g, &mut vm, e, Args::new("shellshock", &v)).unwrap();
+        stop_shell_shock(&mut g, &mut vm, e, Args::new("stopshellshock", &[])).unwrap();
+        assert!(!shocked(&g));
+        let long = [Value::Str("x".into()), Value::Float(61.0)];
+        assert!(shell_shock(&mut g, &mut vm, e, Args::new("shellshock", &long)).is_err());
     }
 
     #[test]

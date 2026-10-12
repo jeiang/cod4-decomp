@@ -1049,6 +1049,10 @@ impl Game {
             c.ps.pm_flags &= !pmf::FROZEN;
         }
         c.ps.move_speed_scale_multiplier = c.move_speed_scale;
+        // `ClientEndFrame`: the shell shock's hold on movement ends with it.
+        if c.gun.shock_end <= self.level.time {
+            c.ps.pm_flags &= !pmf::SHELLSHOCKED;
+        }
         let health = self.ents[usize::from(n)].as_ref().map_or(0, |e| e.health);
         let linked = self.is_linked(n);
         let radar = self.client_radar(n);
