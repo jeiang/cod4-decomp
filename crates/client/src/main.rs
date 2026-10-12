@@ -70,6 +70,7 @@ cod4e: CoD4 multiplayer client (world viewer)
 usage: cod4e [options]
   --install <dir>        original install (else COD4_PATH, the folder picked last time, Steam and registry locations, ./COD4, a folder prompt that is remembered)
   --map <name>           map zone to load (default mp_crash)
+  --game <mods/name>     run a mod (fs_game): its mod.ff, IWDs and menus, and the server's too with --listen
   --size WxH             window size, or the video mode for --fullscreen exclusive
   --refresh <hz>         refresh rate for exclusive fullscreen
   --fullscreen <kind>    windowed (default), borderless or exclusive
@@ -116,6 +117,8 @@ pub struct Cli {
     /// `--install` was given: it is the first place looked at.
     pub install_given: bool,
     pub map: String,
+    /// `--game`: the mod (`mods/<name>`) to run, as `fs_game`; empty for stock.
+    pub game: String,
     pub request: Request,
     /// `--size`, `--refresh` or `--fullscreen` was given: the graphics menu's saved video choice does not apply.
     pub video_given: bool,
@@ -191,6 +194,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         install: "COD4".into(),
         install_given: false,
         map: "mp_crash".into(),
+        game: String::new(),
         request: Request::default(),
         video_given: false,
         present: "auto".into(),
@@ -235,6 +239,12 @@ fn parse(args: &[String]) -> Result<Cli, String> {
                 c.install_given = true;
             }
             "--map" => c.map = val(a)?,
+            "--game" => {
+                c.game = val(a)?;
+                if !assets::paths::valid_game(&c.game) {
+                    return Err("--game takes mods/<name>".into());
+                }
+            }
             "--gametype" => c.gametype = Some(val(a)?),
             "--size" => {
                 let v = val(a)?;

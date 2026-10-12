@@ -37,6 +37,8 @@ pub enum Server {
 /// What to load.
 pub struct Request {
     pub install: PathBuf,
+    /// `fs_game`: the mod the match runs, empty for stock.
+    pub game: String,
     pub map: String,
     pub server: Server,
     pub settings: Settings,
@@ -226,9 +228,9 @@ impl Work {
         progress.set(0, 0.0);
         #[cfg(not(target_arch = "wasm32"))]
         let (data, library) = std::thread::scope(|s| {
-            let lib = s.spawn(|| Library::load(&req.install, map));
-            let data =
-                MapData::load(&req.install, map).map_err(|e| format!("cannot load {map}: {e}"));
+            let lib = s.spawn(|| Library::load(&req.install, &req.game, map));
+            let data = MapData::load(&req.install, &req.game, map)
+                .map_err(|e| format!("cannot load {map}: {e}"));
             (
                 data,
                 lib.join()
@@ -237,8 +239,9 @@ impl Work {
         });
         #[cfg(target_arch = "wasm32")]
         let (data, library) = (
-            MapData::load(&req.install, map).map_err(|e| format!("cannot load {map}: {e}")),
-            Library::load(&req.install, map),
+            MapData::load(&req.install, &req.game, map)
+                .map_err(|e| format!("cannot load {map}: {e}")),
+            Library::load(&req.install, &req.game, map),
         );
         self.data = Some(data?);
         self.library = Some(library?);
@@ -249,8 +252,7 @@ impl Work {
     /// The scene (uploads) and the renderer.
     fn build_world(&mut self, progress: &Progress) -> Result<(), String> {
         let data = self.data.as_ref().ok_or("not decoded")?;
-        let vfs = Vfs::open_stock(&self.req.install, 0)
-            .map_err(|e| format!("cannot open the install: {e}"))?;
+        let vfs = open_vfs(&self.req.install, &self.req.game)?;
         let scene = Scene::new(&self.gpu, data)?;
         let mut renderer = Renderer::new(
             self.gpu.clone(),
@@ -488,4 +490,9 @@ mod tests {
         let ents = b"{\n\"classname\" \"script_model\"\n\"model\" \"vehicle_80s_hatch1_red\"\n}\n{\n\"model\" \"*12\"\n}\n{\n\"model\" \"vehicle_80s_hatch1_red\"\n\"modelscale\" \"2\"\n\"origin\" \"1 2 3\"\n}\0";
         assert_eq!(entity_models(ents), ["vehicle_80s_hatch1_red"]);
     }
+}
+
+/// The search path textures are read through: the stock one and the mod `game`'s (`fs_game`).
+pub fn open_vfs(install: &std::path::Path, game: &str) -> Result<Vfs, String> {
+    Vfs::open(install, 0, game).map_err(|e| format!("cannot open the install: {e}"))
 }

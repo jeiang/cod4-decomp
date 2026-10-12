@@ -63,7 +63,7 @@ fn an_inline_model_is_drawn_where_its_entity_is() {
         eprintln!("skipped: no GPU adapter");
         return;
     };
-    let Ok(data) = MapData::load(&root, "mp_cargoship") else {
+    let Ok(data) = MapData::load(&root, "", "mp_cargoship") else {
         eprintln!("skipped: no mp_cargoship");
         return;
     };

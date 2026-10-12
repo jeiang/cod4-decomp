@@ -462,8 +462,6 @@ impl Server {
         log_dir: PathBuf,
     ) -> Result<Self, String> {
         let t0 = Instant::now();
-        let install =
-            Install::open(root).map_err(|e| format!("{}: {}", root.display(), io_err(e)))?;
         let mut cvars = Cvars::new();
         // Com_StartupVariable: set lines run before the cvars are registered, and again with the other held
         // commands (Com_AddStartupCommands) so they win over the stock configs, whose `set` lines would
@@ -482,6 +480,10 @@ impl Server {
             startup.push(line);
         }
         register_core_dvars(&mut cvars);
+        // `fs_game` is read once, before the search path is built (`FS_Startup`).
+        let fs_game = cvars.string("fs_game").to_owned();
+        let install = Install::open_game(root, &fs_game)
+            .map_err(|e| format!("{}: {}", root.display(), io_err(e)))?;
         let game = Game::new(cvars, Content::default());
         let mut s = Server {
             game,
@@ -522,6 +524,9 @@ impl Server {
             root.display(),
             s.install.language
         ));
+        if !fs_game.is_empty() {
+            s.say(&format!("fs_game: {fs_game}\n"));
+        }
         s.game.known_maps = known_maps(&s.install);
         // Boot-time execs read the IWD copies: no zone is loaded yet.
         s.cbuf.add_text("exec default_mp.cfg; exec language.cfg");
@@ -2095,13 +2100,28 @@ impl Server {
         self.gametype.clone_from(&gametype);
         self.open_game_log();
         let prog = {
-            let sources: Vec<(String, String)> = self
+            let mut sources: Vec<(String, String)> = self
                 .game
                 .content
                 .rawfiles()
                 .filter(|(n, _)| n.ends_with(".gsc"))
                 .map(|(n, b)| (n.to_owned(), String::from_utf8_lossy(b).into_owned()))
                 .collect();
+            // Under a mod a script is read from the search path first, and from the fastfiles when no file has
+            // it (`Scr_ReadFile`): the mod's loose scripts and IWDs, and `main_shared`, override and add to them.
+            if !self.install.game.is_empty() {
+                let vfs = &self.install.vfs;
+                for name in vfs.list("", ".gsc") {
+                    let Ok(Some(bytes)) = vfs.read(&name) else {
+                        continue;
+                    };
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    match sources.iter_mut().find(|(n, _)| *n == name) {
+                        Some(s) => s.1 = text,
+                        None => sources.push((name, text)),
+                    }
+                }
+            }
             let mut refs: Vec<(&str, &str)> = sources
                 .iter()
                 .map(|(n, t)| (n.as_str(), t.as_str()))
@@ -2787,31 +2807,7 @@ fn quote_word(w: &str) -> String {
 }
 
 fn known_maps(install: &Install) -> Vec<String> {
-    let mut dir = install.root.clone();
-    for part in ["zone", install.language] {
-        match std::fs::read_dir(&dir).ok().and_then(|mut d| {
-            d.find_map(|e| {
-                e.ok()
-                    .filter(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(part))
-            })
-        }) {
-            Some(e) => dir = e.path(),
-            None => return Vec::new(),
-        }
-    }
-    let mut v: Vec<String> = std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let p: PathBuf = e.path();
-            let stem = p.file_stem()?.to_str()?.to_ascii_lowercase();
-            let is_ff = p.extension()?.eq_ignore_ascii_case("ff");
-            (is_ff && stem.starts_with("mp_") && !stem.ends_with("_load")).then_some(stem)
-        })
-        .collect();
-    v.sort();
-    v
+    assets::paths::maps(&install.root, &install.game)
 }
 
 fn call(

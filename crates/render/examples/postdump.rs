@@ -6,7 +6,7 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let install = std::path::Path::new(&a[1]);
     let gpu = Arc::new(Gpu::new(None).unwrap());
-    let data = MapData::load(install, &a[2]).unwrap();
+    let data = MapData::load(install, "", &a[2]).unwrap();
     let scene = Scene::new(&gpu, &data).expect("scene");
     let vfs = Vfs::open_stock(install, 0).unwrap();
     let mut r = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));

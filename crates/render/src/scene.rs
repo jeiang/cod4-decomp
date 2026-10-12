@@ -99,8 +99,9 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 impl MapData {
-    /// Decode `zone/english/<map>.ff`, `common_mp.ff` and `code_post_gfx_mp.ff` under the install root.
-    pub fn load(install: &Path, map: &str) -> Result<MapData, LoadError> {
+    /// Decode `<map>.ff`, `common_mp.ff` and `code_post_gfx_mp.ff` of the install at `install`, each from the mod
+    /// directory `game` (`fs_game`, empty for none), else `zone/<language>` ([`assets::paths::zone_file`]).
+    pub fn load(install: &Path, game: &str, map: &str) -> Result<MapData, LoadError> {
         let mut world = None;
         let mut com_world = None;
         let mut clipmap = None;
@@ -112,7 +113,12 @@ impl MapData {
         let vision_name = format!("vision/{map}.vision");
         let art_name = format!("maps/createart/{map}_art.gsc");
         for zone in ["code_post_gfx_mp", "common_mp", map] {
-            let path = install.join("zone/english").join(format!("{zone}.ff"));
+            let path = assets::paths::zone_file(install, game, zone).ok_or_else(|| {
+                LoadError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Could not find zone '{zone}'"),
+                ))
+            })?;
             let file = assets::fs::buffered(path).map_err(LoadError::Io)?;
             let z = Zone::open(file).map_err(LoadError::Zone)?;
             let keep = Keep(zone);

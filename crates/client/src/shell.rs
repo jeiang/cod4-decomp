@@ -122,6 +122,12 @@ pub struct ShellState {
     pub reselect_map: Option<usize>,
     /// The install's files, for `exec <file>.cfg` from a menu script.
     vfs: Option<::assets::vfs::Vfs>,
+    /// The install, and the mod (`fs_game`) the menus and files above were loaded for.
+    root: std::path::PathBuf,
+    pub fs_game: String,
+    /// The mods folder's mods (name, description) as `loadmods` listed them (feeder 9), and the selected row.
+    mods: Vec<(String, String)>,
+    mod_sel: usize,
     exec_depth: u32,
     /// The display's video modes as `r_mode` and `r_displayRefresh` list them.
     pub video_modes: Vec<(u32, u32)>,
@@ -172,7 +178,8 @@ pub struct GameFacts {
 const STAT_COUNT: usize = 4000;
 
 impl ShellState {
-    pub fn new(assets: &UiAssets, install: &Install) -> Self {
+    /// The maps the install can run and the game modes the menus offer, from the UI tables, and the selected map.
+    fn catalog(assets: &UiAssets, install: &Install) -> (Vec<MapEntry>, usize, Vec<GameTypeEntry>) {
         let mut maps = Vec::new();
         if let Some(t) = assets.table("mp/mapstable.csv") {
             for r in 0..t.row_count as usize {
@@ -199,6 +206,20 @@ impl ShellState {
                     name,
                     title: assets.translate(&title).map_or(title, |t| t.to_string()),
                     image: cell(4),
+                });
+            }
+        }
+        // A mod's own maps the tables do not list are offered under their file name.
+        for name in ::assets::paths::custom_maps(&install.root, &install.game) {
+            if !maps
+                .iter()
+                .any(|m: &MapEntry| m.name.eq_ignore_ascii_case(&name))
+            {
+                maps.push(MapEntry {
+                    modes: Vec::new(),
+                    title: name.clone(),
+                    image: String::new(),
+                    name,
                 });
             }
         }
@@ -243,6 +264,11 @@ impl ShellState {
                 .position(|m| *m == g.id)
                 .unwrap_or(MODE_ORDER.len())
         });
+        (maps, map_sel, gametypes)
+    }
+
+    pub fn new(assets: &UiAssets, install: &Install) -> Self {
+        let (maps, map_sel, gametypes) = Self::catalog(assets, install);
         ShellState {
             stats: vec![0; STAT_COUNT],
             profiles: Profiles::none(),
@@ -271,7 +297,11 @@ impl ShellState {
             servers: Default::default(),
             status_rows: Vec::new(),
             reselect_map: None,
-            vfs: ::assets::vfs::Vfs::open_stock(&install.root, 0).ok(),
+            vfs: ::assets::vfs::Vfs::open(&install.root, 0, &install.game).ok(),
+            root: install.root.clone(),
+            fs_game: install.game.clone(),
+            mods: Vec::new(),
+            mod_sel: 0,
             exec_depth: 0,
             video_modes: STOCK_MODES.to_vec(),
             refresh_rates: vec![60],
@@ -434,7 +464,7 @@ impl Shell {
         assets.note_menu_materials();
         let st = ShellState::new(&assets, install);
         register_defaults(input);
-        let vfs = ::assets::vfs::Vfs::open_stock(&install.root, 0)
+        let vfs = ::assets::vfs::Vfs::open(&install.root, 0, &install.game)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         let mut shell = Shell {
             ui: Ui::new(assets, size),
@@ -456,11 +486,46 @@ impl Shell {
         format: wgpu::TextureFormat,
         install: &std::path::Path,
     ) -> Result<(), String> {
-        let vfs = ::assets::vfs::Vfs::open_stock(install, 0)
+        let vfs = ::assets::vfs::Vfs::open(install, 0, &self.st.fs_game)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         self.ui2d = Ui2d::new(gpu, format);
         self.cache = TextureCache::new(Some(vfs), 0);
         self.images.clear();
+        Ok(())
+    }
+
+    /// `fs_game` was changed (`runmod`, `clearmods`, a server's mod): the mod the menus run is not the one in the
+    /// cvar. The original restarts its file system at the next `vid_restart` for this.
+    pub fn game_changed(&self, input: &Input) -> bool {
+        crate::app::game_of(input) != self.st.fs_game
+    }
+
+    /// The file system restart for a new `fs_game` (`FS_Restart`): the menus, fonts, strings and textures are loaded
+    /// again from the stock zones and the mod's `mod.ff` and IWDs, and the main menu opens.
+    pub fn restart_files(
+        &mut self,
+        install: &Install,
+        size: (u32, u32),
+        input: &mut Input,
+    ) -> Result<(), String> {
+        let mut assets = UiAssets::load(install)?;
+        assets.note_menu_materials();
+        let (maps, map_sel, gametypes) = ShellState::catalog(&assets, install);
+        let open = || {
+            ::assets::vfs::Vfs::open(&install.root, 0, &install.game)
+                .map_err(|e| format!("cannot open the install: {e}"))
+        };
+        self.cache = TextureCache::new(Some(open()?), 0);
+        self.images.clear();
+        self.ui = Ui::new(assets, size);
+        self.ui.cursor_visible = true;
+        self.st.vfs = Some(open()?);
+        self.st.fs_game = install.game.clone();
+        self.st.maps = maps;
+        self.st.map_sel = map_sel;
+        self.st.gametypes = gametypes;
+        self.st.mods.clear();
+        self.open(input, "main");
         Ok(())
     }
 
@@ -1723,7 +1788,30 @@ impl Host for HostCx<'_> {
                 true
             }
             "setpbclstatus" | "getlanguage" | "verifylanguage" | "setrecommended" | "getcdkey"
-            | "verifycdkey" | "clearmods" | "loadmods" => true,
+            | "verifycdkey" => true,
+            // `UI_LoadMods`: the folders of `mods/` with their descriptions (the mods menu's list, feeder 9).
+            "loadmods" => {
+                self.st.mods = ::assets::paths::list_mods(&self.st.root);
+                self.st.mod_sel = 0;
+                true
+            }
+            // Back to the stock game: `fs_game` is reset and the file system restarts.
+            "clearmods" => {
+                self.input.cvars.set("fs_game", "", false);
+                self.st.actions.push(Action::VidRestart);
+                true
+            }
+            // Runs the selected mod: `fs_game` is `mods/<name>` and the file system restarts.
+            "runmod" => {
+                if let Some((name, _)) = self.st.mods.get(self.st.mod_sel) {
+                    let game = format!("mods/{name}");
+                    if ::assets::paths::valid_game(&game) {
+                        self.input.cvars.set("fs_game", &game, false);
+                        self.st.actions.push(Action::VidRestart);
+                    }
+                }
+                true
+            }
             "quit" => {
                 self.st.actions.push(Action::Quit);
                 true
@@ -1732,7 +1820,6 @@ impl Host for HostCx<'_> {
                 self.st.actions.push(Action::StartSingleplayer);
                 true
             }
-            "runmod" => true,
             "addplayerprofiles"
             | "sortplayerprofiles"
             | "selectactiveplayerprofile"
@@ -1808,6 +1895,7 @@ impl Host for HostCx<'_> {
                 self.server_rows().len()
             }
             4 => self.mode_maps().len(),
+            9 => self.st.mods.len(),
             13 => {
                 self.poll_servers();
                 self.st.status_rows.len()
@@ -1849,6 +1937,12 @@ impl Host for HostCx<'_> {
                 .map(|(_, n)| n.clone())
                 .unwrap_or_default(),
             (24, _) => self.st.profile_names.get(row).cloned().unwrap_or_default(),
+            (9, _) => self
+                .st
+                .mods
+                .get(row)
+                .map(|(_, desc)| desc.clone())
+                .unwrap_or_default(),
             (4, _) => self
                 .mode_maps()
                 .get(row)
@@ -1865,6 +1959,9 @@ impl Host for HostCx<'_> {
         }
         if feeder == 7 {
             self.st.player_sel = row;
+        }
+        if feeder == 9 {
+            self.st.mod_sel = row;
         }
         if feeder == 20 {
             self.st.mute_sel = row;
@@ -2963,5 +3060,106 @@ mod tests {
         assert_eq!(stats[10], 0b1001);
         clear_stat_bits(&mut stats, -1, 1);
         clear_stat_bits(&mut stats, 9999, 1);
+    }
+    /// A scratch install: the real `main` and `zone` linked in, a `mods/` of its own.
+    #[cfg(unix)]
+    struct Scratch(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl Scratch {
+        fn new(root: &std::path::Path) -> Self {
+            let dir = std::env::temp_dir().join(format!("cod4e-shell-mods-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            for d in ["main", "zone", "main_shared", "localization.txt"] {
+                if root.join(d).exists() {
+                    let _ = std::os::unix::fs::symlink(root.join(d), dir.join(d));
+                }
+            }
+            Scratch(dir)
+        }
+
+        fn file(&self, rel: &str, bytes: &[u8]) {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, bytes).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The mods menu lists `mods/`, `RunMod` sets `fs_game` and asks for the restart that loads the mod's menu assets,
+    /// `ClearMods` goes back, and a custom map is offered in the map list.
+    #[cfg(unix)]
+    #[test]
+    fn the_mods_menu_lists_runs_and_clears_mods() {
+        let root =
+            std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
+        if Install::open(&root)
+            .ok()
+            .filter(|i| i.zone_path("ui_mp").is_some())
+            .is_none()
+        {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        }
+        let scratch = Scratch::new(&root);
+        scratch.file("mods/alpha/description.txt", b"Alpha mod");
+        scratch.file(
+            "mods/alpha/mod.ff",
+            &::assets::zone::testing::rawfile_zone(&[(
+                "mp/modmap.arena",
+                "{\nmap \"mp_modmap\"\ngametype \"dm\"\n}\n",
+            )]),
+        );
+        scratch.file("mods/beta/mod.ff", b"");
+        scratch.file("mods/alpha/mp_modown.ff", b"");
+
+        // Stock first: nothing of the mod is there.
+        let stock = Install::open(&scratch.0).unwrap();
+        assert!(
+            UiAssets::load(&stock)
+                .unwrap()
+                .arenas
+                .get("mp_modmap")
+                .is_none()
+        );
+
+        let install = Install::open_game(&scratch.0, "mods/alpha").unwrap();
+        let assets = UiAssets::load(&install).expect("ui assets");
+        assert!(
+            assets.arenas.contains_key("mp_modmap"),
+            "the mod's fastfile is part of the UI assets"
+        );
+        let mut st = ShellState::new(&assets, &install);
+        assert!(
+            st.maps.iter().any(|m| m.name == "mp_modown"),
+            "a map in the mod folder is offered"
+        );
+        let mut ui = Ui::new(assets, (1280, 720));
+        let mut input = Input::detached();
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        assert_eq!(h.feeder_count(9), 0, "nothing listed before loadmods");
+        assert!(h.ui_script(&mut ui, "loadMods", &[]));
+        assert_eq!(h.feeder_count(9), 2);
+        assert_eq!(h.feeder_text(9, 0, 0), "Alpha mod");
+        assert_eq!(
+            h.feeder_text(9, 1, 0),
+            "beta",
+            "no description: the folder name"
+        );
+        h.feeder_select(9, 1);
+        assert!(h.ui_script(&mut ui, "RunMod", &[]));
+        assert_eq!(h.dvar("fs_game"), "mods/beta");
+        assert!(h.st.actions.iter().any(|a| matches!(a, Action::VidRestart)));
+        assert!(h.ui_script(&mut ui, "ClearMods", &[]));
+        assert_eq!(h.dvar("fs_game"), "");
     }
 }

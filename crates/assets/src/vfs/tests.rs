@@ -345,3 +345,60 @@ fn install_reads_known_file() {
     assert_eq!(&bytes[..3], b"IWi");
     assert!(v.read("DEFAULT_MP.cfg").unwrap().is_some()); // localized english tier
 }
+
+#[test]
+fn a_mod_overrides_main() {
+    let t = Tmp::new();
+    t.iwd(
+        "main/iw_00.iwd",
+        &[("a", b"main"), ("b", b"main"), ("c", b"main")],
+    );
+    t.file("main_shared/a", b"shared");
+    t.file("main_shared/d", b"shared");
+    t.file("mods/m/c", b"loose-mod");
+    t.iwd(
+        "mods/m/m.iwd",
+        &[("c", b"mod-iwd"), ("maps/mp/gametypes/x.gsc", b"x")],
+    );
+    let v = Vfs::open(&t.0, 0, "mods/m").unwrap();
+    assert_eq!(
+        (get(&v, "a"), get(&v, "d")),
+        ("main".into(), "shared".into())
+    );
+    assert_eq!(
+        get(&v, "c"),
+        "mod-iwd",
+        "the mod's IWDs come before its loose files"
+    );
+    let stock = Vfs::open(&t.0, 0, "").unwrap();
+    assert_eq!(
+        (get(&stock, "b"), get(&stock, "c")),
+        ("main".into(), "main".into())
+    );
+    assert!(Vfs::open(&t.0, 0, "mods/../main").is_err());
+    assert!(
+        Vfs::open(&t.0, 0, "mods/missing").is_err(),
+        "a mod that is not there"
+    );
+    assert!(
+        Vfs::open(&t.0, 0, "Mods/m").is_err(),
+        "only the lowercase form"
+    );
+}
+
+#[test]
+fn list_finds_files_in_iwds_and_loose_directories_once() {
+    let t = Tmp::new();
+    t.iwd(
+        "main/iw_00.iwd",
+        &[("maps/mp/a.gsc", b""), ("images/x.iwi", b"")],
+    );
+    t.file("main_shared/Maps/MP/b.gsc", b"");
+    t.file("main_shared/maps/mp/gametypes/c.gsc", b"");
+    t.iwd("mods/m/m.iwd", &[("maps/mp/a.gsc", b"")]);
+    let v = Vfs::open(&t.0, 0, "mods/m").unwrap();
+    assert_eq!(
+        v.list("maps/", ".gsc"),
+        ["maps/mp/a.gsc", "maps/mp/b.gsc", "maps/mp/gametypes/c.gsc"]
+    );
+}

@@ -100,8 +100,8 @@ fn wide_floor(world: &dyn Collide, lo: [f32; 3], hi: [f32; 3]) -> Option<glam::V
 }
 
 pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
-    let lib = Library::load(install, map).map_err(|e| vec![e])?;
-    let data = render::MapData::load(install, map).map_err(|e| vec![format!("{e:?}")])?;
+    let lib = Library::load(install, "", map).map_err(|e| vec![e])?;
+    let data = render::MapData::load(install, "", map).map_err(|e| vec![format!("{e:?}")])?;
     let clipmap = data
         .clipmap
         .clone()
@@ -588,7 +588,7 @@ fn destructible(
 ) {
     use crate::props::Props;
     use glam::{Quat, Vec3};
-    let lib = match Library::load(install, PROPS_MAP) {
+    let lib = match Library::load(install, "", PROPS_MAP) {
         Ok(l) => l,
         Err(e) => return bad.push(format!("{PROPS_MAP}: {e}")),
     };
@@ -675,7 +675,7 @@ impl Collide for Open {
 /// The ocean simulation of a stock map's water: a height image with real relief that moves and stays in range.
 fn water(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mut Vec<String>) {
     use assets::zone::gfx::TextureSource;
-    let data = match render::MapData::load(install, WATER_MAP) {
+    let data = match render::MapData::load(install, "", WATER_MAP) {
         Ok(d) => d,
         Err(e) => return bad.push(format!("{WATER_MAP}: {e:?}")),
     };

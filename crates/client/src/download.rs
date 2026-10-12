@@ -21,11 +21,12 @@ pub struct Download {
     rx: Receiver<Result<(), String>>,
 }
 
-/// Whether the install at `root` lacks the zone of `map` (and could take it: it has a zone folder).
-pub fn missing(root: &std::path::Path, map: &str) -> bool {
+/// Whether the install at `root` lacks the zone of `map` (and could take it: it has a zone folder), looking where the
+/// mod `game` would have it too.
+pub fn missing(root: &std::path::Path, game: &str, map: &str) -> bool {
     net::download::valid_name(map)
         && map.starts_with("mp_")
-        && server::content::zone_file(root, map).is_none()
+        && assets::paths::zone_file(root, game, map).is_none()
         && server::content::zone_dir(root).is_some()
 }
 
