@@ -491,6 +491,7 @@ dependencies = [
  "server",
  "sim",
  "sysinfo",
+ "tempfile",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

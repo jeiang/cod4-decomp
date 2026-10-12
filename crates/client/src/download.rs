@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Fetching a map the server is playing and the install lacks (`cl_allowDownload`): a worker thread asks the server
-//! for the map's zone (and its loading screen's) over [`net::download`] and the window shows the loading screen with
-//! the bytes arrived meanwhile. The browser build has no files to put it in, so this is native only.
+//! for the map's zone, its loading screen's and its IWD over [`net::download`] and puts them in `usermaps/<map>/` (the
+//! layout of a custom map), and the window shows the loading screen with the bytes arrived meanwhile. The browser build has no files to put it in, so this is native only.
 
 use net::UdpTransport;
 use net::download::{Progress, fetch};
@@ -22,7 +22,7 @@ pub struct Download {
 }
 
 /// Whether the install at `root` lacks the zone of `map` (and could take it: it has a zone folder), looking where the
-/// mod `game` would have it too.
+/// mod `game` and a custom map's `usermaps/<map>` would have it.
 pub fn missing(root: &std::path::Path, game: &str, map: &str) -> bool {
     net::download::valid_name(map)
         && map.starts_with("mp_")
@@ -38,8 +38,10 @@ impl Download {
         map: &str,
         gametype: &str,
     ) -> Result<Self, String> {
-        let dir = server::content::zone_dir(root)
+        server::content::zone_dir(root)
             .ok_or("the install has no zone folder to put the map in")?;
+        let dir = root.join("usermaps").join(map);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let progress = Arc::new(Progress::default());
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
@@ -112,9 +114,14 @@ fn run(
 ) -> Result<(), String> {
     let mut t =
         UdpTransport::bind(SocketAddr::from(([0, 0, 0, 0], 0))).map_err(|e| e.to_string())?;
-    let load = format!("{map}_load");
-    for (name, optional) in [(map, false), (load.as_str(), true)] {
-        let dest: PathBuf = dir.join(format!("{name}.ff"));
+    let (load, iwd) = (format!("{map}_load"), format!("{map}.iwd"));
+    for (name, optional) in [(map, false), (load.as_str(), true), (iwd.as_str(), true)] {
+        let file = if name.ends_with(".iwd") {
+            name.to_owned()
+        } else {
+            format!("{name}.ff")
+        };
+        let dest: PathBuf = dir.join(file);
         if dest.exists() {
             continue;
         }
@@ -126,4 +133,29 @@ fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missing;
+
+    #[test]
+    fn a_map_in_usermaps_or_the_mod_folder_is_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for f in [
+            "zone/english/mp_stock.ff",
+            "usermaps/mp_custom/mp_custom.ff",
+            "mods/m/mp_inmod.ff",
+        ] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
+        }
+        assert!(!missing(root, "", "mp_stock"));
+        assert!(!missing(root, "", "mp_custom"));
+        assert!(missing(root, "", "mp_inmod"), "the mod is not running");
+        assert!(!missing(root, "mods/m", "mp_inmod"));
+        assert!(missing(root, "", "mp_gone"));
+    }
 }

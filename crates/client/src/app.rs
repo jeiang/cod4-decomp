@@ -673,7 +673,7 @@ impl Viewer {
         if gpu.lost().is_some() {
             return Err(gpu.explain("the window's surface could not be configured"));
         }
-        let vfs = loader::open_vfs(&self.cli.install, &self.cli.game)?;
+        let vfs = loader::open_vfs(&self.cli.install, &self.cli.game, &self.cli.map)?;
         // Native warms it again once the library is loaded (see below); the browser builds its pipelines by frames.
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut renderer = match &self.map {
@@ -1183,7 +1183,7 @@ impl Viewer {
                 .to_string();
             begin_load(&self.cli, st, &name, &gametype, loader::Server::Keep);
         } else if let Some(map) = &self.map {
-            let vfs = loader::open_vfs(&self.cli.install, &game_of(&st.input))?;
+            let vfs = loader::open_vfs(&self.cli.install, &game_of(&st.input), &self.cli.map)?;
             let scene = Scene::new(&gpu, map)?;
             let gfx = Gfx::from_cvars(&st.input.cvars);
             let mut r = Renderer::new(

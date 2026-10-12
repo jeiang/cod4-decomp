@@ -347,7 +347,7 @@ fn install_reads_known_file() {
 }
 
 #[test]
-fn a_mod_overrides_main() {
+fn a_mod_overrides_main_and_a_usermap_sits_between() {
     let t = Tmp::new();
     t.iwd(
         "main/iw_00.iwd",
@@ -355,33 +355,38 @@ fn a_mod_overrides_main() {
     );
     t.file("main_shared/a", b"shared");
     t.file("main_shared/d", b"shared");
+    t.iwd(
+        "usermaps/mp_u/mp_u.iwd",
+        &[("b", b"usermap"), ("c", b"usermap")],
+    );
     t.file("mods/m/c", b"loose-mod");
     t.iwd(
         "mods/m/m.iwd",
         &[("c", b"mod-iwd"), ("maps/mp/gametypes/x.gsc", b"x")],
     );
-    let v = Vfs::open(&t.0, 0, "mods/m").unwrap();
+    let v = Vfs::open(&t.0, 0, "mods/m", Some("mp_u")).unwrap();
     assert_eq!(
         (get(&v, "a"), get(&v, "d")),
         ("main".into(), "shared".into())
     );
+    assert_eq!(get(&v, "b"), "usermap");
     assert_eq!(
         get(&v, "c"),
         "mod-iwd",
         "the mod's IWDs come before its loose files"
     );
-    let stock = Vfs::open(&t.0, 0, "").unwrap();
+    let stock = Vfs::open(&t.0, 0, "", None).unwrap();
     assert_eq!(
         (get(&stock, "b"), get(&stock, "c")),
         ("main".into(), "main".into())
     );
-    assert!(Vfs::open(&t.0, 0, "mods/../main").is_err());
+    assert!(Vfs::open(&t.0, 0, "mods/../main", None).is_err());
     assert!(
-        Vfs::open(&t.0, 0, "mods/missing").is_err(),
+        Vfs::open(&t.0, 0, "mods/missing", None).is_err(),
         "a mod that is not there"
     );
     assert!(
-        Vfs::open(&t.0, 0, "Mods/m").is_err(),
+        Vfs::open(&t.0, 0, "Mods/m", None).is_err(),
         "only the lowercase form"
     );
 }
@@ -396,7 +401,7 @@ fn list_finds_files_in_iwds_and_loose_directories_once() {
     t.file("main_shared/Maps/MP/b.gsc", b"");
     t.file("main_shared/maps/mp/gametypes/c.gsc", b"");
     t.iwd("mods/m/m.iwd", &[("maps/mp/a.gsc", b"")]);
-    let v = Vfs::open(&t.0, 0, "mods/m").unwrap();
+    let v = Vfs::open(&t.0, 0, "mods/m", None).unwrap();
     assert_eq!(
         v.list("maps/", ".gsc"),
         ["maps/mp/a.gsc", "maps/mp/b.gsc", "maps/mp/gametypes/c.gsc"]

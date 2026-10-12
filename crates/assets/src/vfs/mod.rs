@@ -95,11 +95,18 @@ impl Vfs {
     /// Stock search path rooted at the install directory: `players`,
     /// `main_shared`, `main` (see the boot-load research for the order).
     pub fn open_stock(root: &Path, language: usize) -> io::Result<Self> {
-        Self::open(root, language, "")
+        Self::open(root, language, "", None)
     }
 
-    /// The stock search path plus `game` (`fs_game`, such as `mods/promod`; empty for none) above `main`.
-    pub fn open(root: &Path, language: usize, game: &str) -> io::Result<Self> {
+    /// The stock search path plus `game` (`fs_game`, such as `mods/promod`; empty for none) and the
+    /// package of the custom map `usermap` (`usermaps/<map>`: its IWDs and loose files). The mod
+    /// directory sits above the usermap's, which sits above `main`.
+    pub fn open(
+        root: &Path,
+        language: usize,
+        game: &str,
+        usermap: Option<&str>,
+    ) -> io::Result<Self> {
         if !crate::paths::valid_game(game) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -110,6 +117,9 @@ impl Vfs {
         b.add_game_dir("players")?;
         b.add_game_dir("main_shared")?;
         b.add_game_dir("main")?;
+        if let Some(map) = usermap.filter(|m| crate::paths::valid_map(m)) {
+            b.add_game_dir(&format!("usermaps/{map}"))?;
+        }
         if !game.is_empty() {
             let rel = crate::paths::game_rel(root, game).ok_or_else(|| {
                 io::Error::new(
