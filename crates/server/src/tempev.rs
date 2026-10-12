@@ -53,6 +53,8 @@ pub const FIRE_LAST_SHOT: u8 = 1;
 
 /// `eflags` of a [`ev::BULLET_IMPACT`] where a penetrating bullet left a wall: the `_exit` sounds.
 pub const IMPACT_EXIT: u32 = 1;
+/// `eflags` of a [`ev::BULLET_IMPACT`] on a player's head (the head column of the flesh effects).
+pub const IMPACT_HEAD: u32 = 2;
 
 /// Script numbers that travel in a velocity component, which the wire keeps to a quarter unit: scaled up to keep the
 /// precision scripts use (0.4 of an earthquake, a jitter of 0.05).

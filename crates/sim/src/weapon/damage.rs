@@ -136,6 +136,9 @@ pub const PENETRATION_ADVANCE: f32 = 0.135;
 pub const GLASS_ADVANCE: f32 = 0.135;
 /// Distance of the backwards trace that measures the thickness of a penetrated surface.
 pub const PENETRATION_REVERSE_ADVANCE: f32 = 0.01;
+/// `bullet_penetrationMinFxDist` (30, a cheat-protected dvar): a penetrated wall thinner than this shows no impact
+/// effects, sounds or marks at its entry and exit; the damage is unaffected.
+pub const PENETRATION_MIN_FX_DIST: f32 = 30.0;
 /// Thinnest thickness a penetration counts as.
 pub const MIN_PENETRATION_THICKNESS: f32 = 1.0;
 

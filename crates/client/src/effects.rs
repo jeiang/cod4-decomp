@@ -4,7 +4,7 @@
 //! sounds to draw.
 //!
 //! Which effect an impact plays is the original's: the weapon's impact type picks a row of the impact table, the
-//! surface type a column; flesh has its own four columns (body or head, fatal or not).
+//! surface type a column; flesh has its own columns (body or head; the stock event carries only the head bit, so the fatal columns are not used).
 
 use crate::decal::{self, Placement};
 use crate::events::{ClientEvent, Events};
@@ -44,8 +44,11 @@ const SURFACE_FLESH: u8 = 7;
 /// How far a bullet is followed for its tracer.
 const TRACER_RANGE: f32 = 8192.0;
 const KNIFE_BLOOD: &str = "impacts/flesh_hit_knife";
-const FLESH_BODY_NONFATAL: usize = 0;
-const FLESH_BODY_FATAL: usize = 1;
+/// The column of the impact table's flesh effects (`g_FleshTypeName`: body_nonfatal, body_fatal, head_nonfatal,
+/// head_fatal): the bullet event only says whether the head was hit.
+fn flesh_column(head: bool) -> usize {
+    2 * usize::from(head)
+}
 /// How high above a player's feet blood appears.
 const CHEST: f32 = 40.0;
 
@@ -288,19 +291,14 @@ impl Effects {
         &self,
         impact_type: i32,
         surface: u8,
-        fatal: bool,
+        flesh: usize,
     ) -> Option<Arc<FxEffectDef>> {
         let row = usize::try_from(impact_type)
             .ok()
             .and_then(|i| ROW_BY_IMPACT_TYPE.get(i).copied().flatten())?;
         let entry = self.impact.as_ref()?.table.get(row)?;
         if surface == SURFACE_FLESH {
-            let i = if fatal {
-                FLESH_BODY_FATAL
-            } else {
-                FLESH_BODY_NONFATAL
-            };
-            entry.flesh[i].clone()
+            entry.flesh.get(flesh)?.clone()
         } else {
             entry.nonflesh.get(usize::from(surface))?.clone()
         }
@@ -346,6 +344,7 @@ impl Effects {
                 surface,
                 weapon: w,
                 exit,
+                head,
                 ..
             } => {
                 // The exit wound's marks are not drawn (only its sound is played).
@@ -353,7 +352,7 @@ impl Effects {
                     return;
                 }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
-                let def = self.impact_effect(t, *surface, false);
+                let def = self.impact_effect(t, *surface, flesh_column(*head));
                 self.play(
                     "bullet_impact",
                     def,
@@ -369,7 +368,7 @@ impl Effects {
                 ..
             } => {
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
-                let def = self.impact_effect(t, *surface, false);
+                let def = self.impact_effect(t, *surface, 0);
                 self.play(
                     "missile_bounce",
                     def,
@@ -396,7 +395,7 @@ impl Effects {
                 // The surface's own blast, then the weapon's (`EV_GRENADE_EXPLODE`, `EV_ROCKET_EXPLODE`); a flashbang
                 // or a dud has only its own.
                 if let Some(d) = d.as_ref().filter(|d| explodes_on_surface(d)) {
-                    let def = self.impact_effect(d.impact_type, *surface, false);
+                    let def = self.impact_effect(d.impact_type, *surface, 0);
                     self.play("explosion_impact", def, Vec3::from(*origin), n);
                 }
                 let def = d.as_ref().and_then(|d| d.proj_explosion_effect.clone());
@@ -413,7 +412,7 @@ impl Effects {
                 let (at, n) = (Vec3::from(*origin), Vec3::from(*normal));
                 // `EV_CHANGE_TO_DUD`: the table's first surface only.
                 let table =
-                    self.impact_effect(IMPACT_TYPE_DUD, if *settled { 0 } else { *surface }, false);
+                    self.impact_effect(IMPACT_TYPE_DUD, if *settled { 0 } else { *surface }, 0);
                 self.play("dud", table, at, n);
                 if *settled {
                     return;
@@ -438,18 +437,8 @@ impl Effects {
                     self.missing.insert(name.clone());
                 }
             },
-            ClientEvent::PlayerDeath { origin, push, .. } => {
-                let def = self.impact_effect(1, SURFACE_FLESH, true);
-                let dir = Vec3::from(*push).try_normalize().unwrap_or(Vec3::Z);
-                self.play(
-                    "player_death",
-                    def,
-                    Vec3::from(*origin) + Vec3::Z * CHEST,
-                    dir,
-                );
-            }
             ClientEvent::PlayerPain { origin, .. } => {
-                let def = self.impact_effect(1, SURFACE_FLESH, false);
+                let def = self.impact_effect(1, SURFACE_FLESH, flesh_column(false));
                 self.play(
                     "player_pain",
                     def,
@@ -457,7 +446,10 @@ impl Effects {
                     Vec3::Z,
                 );
             }
-            ClientEvent::Physics { .. } | ClientEvent::Earthquake { .. } => {}
+            // A death plays no blood of its own in stock: the bullet impacts did (the event only pushes the body).
+            ClientEvent::PlayerDeath { .. }
+            | ClientEvent::Physics { .. }
+            | ClientEvent::Earthquake { .. } => {}
             ClientEvent::WeaponFire {
                 eye,
                 angles,
@@ -1057,5 +1049,16 @@ impl Effects {
             out.models.push(inst);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod flesh_tests {
+    #[test]
+    fn a_head_hit_uses_the_head_column() {
+        assert_eq!(
+            [super::flesh_column(false), super::flesh_column(true)],
+            [0, 2]
+        );
     }
 }

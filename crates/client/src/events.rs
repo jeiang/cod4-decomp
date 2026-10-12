@@ -23,6 +23,8 @@ pub enum ClientEvent {
         shooter: u16,
         /// A penetrating bullet came out of a wall here.
         exit: bool,
+        /// The bullet hit a player's head.
+        head: bool,
     },
     /// A missile blew up; `owner` is 1023 when it had none.
     Explosion {
@@ -192,6 +194,7 @@ impl Events {
                 weapon: e.weapon,
                 shooter: e.client,
                 exit: e.eflags & server::tempev::IMPACT_EXIT != 0,
+                head: e.eflags & server::tempev::IMPACT_HEAD != 0,
             },
             ev::EXPLOSION => ClientEvent::Explosion {
                 origin: e.origin,
@@ -292,6 +295,19 @@ mod tests {
         e.event = kind;
         e.event_seq = seq;
         e
+    }
+
+    #[test]
+    fn a_bullet_impact_carries_the_head_bit() {
+        let mut ev = Events::default();
+        let mut e = event(960, super::ev::BULLET_IMPACT, 1);
+        e.event_parm = 7;
+        e.eflags = server::tempev::IMPACT_HEAD;
+        let got = ev.scan(&snap(&[e]));
+        let [ClientEvent::BulletImpact { head, exit, .. }] = got.as_slice() else {
+            panic!("{got:?}");
+        };
+        assert_eq!((*head, *exit), (true, false));
     }
 
     #[test]

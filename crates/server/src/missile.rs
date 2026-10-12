@@ -39,6 +39,8 @@ use crate::game::{Ent, EntKind, Game};
 /// What grenades and rockets collide with (`0x2806891`): the map, glass, missile clips, sky, shot
 /// clips, actors, vehicles and players.
 pub const MISSILE_CLIPMASK: i32 = 0x0280_6891;
+/// How much a bounce must change a missile's velocity to be heard (`BounceMissile`).
+const BOUNCE_EVENT_MIN_DELTA_V: f32 = 100.0;
 /// The contents of a grenade: shootable and a pickup item.
 const GRENADE_CONTENTS: i32 = 0x2100;
 /// `FL_GRENADE_TOUCH_DAMAGE`.
@@ -283,6 +285,12 @@ fn truncated(v: Vec3) -> Vec3 {
 /// `CalcMissileNoDrawTime`.
 fn no_draw_time(speed: f32) -> i32 {
     ((speed * -35.0 / 600.0 + 85.0) as i32).clamp(20, 50)
+}
+
+/// Whether a bounce that did not stop the missile is heard: not in water, and the velocity changed by more than
+/// [`BOUNCE_EVENT_MIN_DELTA_V`].
+fn bounce_is_loud(in_water: bool, before: Vec3, after: Vec3) -> bool {
+    !in_water && length(sub(after, before)) > BOUNCE_EVENT_MIN_DELTA_V
 }
 
 impl Game {
@@ -1447,9 +1455,30 @@ impl Game {
         self.free_entity(vm, n);
     }
 
-    /// `BounceMissile`: reflects the velocity off the surface, scaled by the weapon's bounce
-    /// factors for the surface type; a grenade slow enough, or on sticky ground, stops.
+    /// `BounceMissile` and the `EV_GRENADE_BOUNCE` its callers add: the event is for a grenade that stopped or that
+    /// bounced hard (its velocity changed by more than 100) in the open air, and not for one that touched a
+    /// surface while moving slowly, in water, or from inside solid.
     fn bounce_missile(&mut self, vm: &mut Vm, n: u16, m: &mut Missile, tr: &ShotTrace) {
+        let origin = self.ent(n).map_or([0.0; 3], |e| e.origin);
+        let in_water = self.in_water(origin);
+        let loud = self.reflect_missile(vm, n, m, tr, in_water);
+        if loud && !tr.start_solid {
+            let surf = surface_type(tr.surface_flags).min(28);
+            self.missile_bounce_event(m, origin, tr.normal, surf);
+        }
+    }
+
+    /// `BounceMissile`: reflects the velocity off the surface, scaled by the weapon's bounce
+    /// factors for the surface type; a grenade slow enough, or on sticky ground, stops. Returns whether it stopped
+    /// or, outside water, changed its velocity by more than 100.
+    fn reflect_missile(
+        &mut self,
+        vm: &mut Vm,
+        n: u16,
+        m: &mut Missile,
+        tr: &ShotTrace,
+        in_water: bool,
+    ) -> bool {
         let now = self.level.time;
         let surf = surface_type(tr.surface_flags).min(28);
         let hit_time = self.hit_time(tr.fraction);
@@ -1464,7 +1493,6 @@ impl Game {
         }
         let origin = self.ent(n).map_or([0.0; 3], |e| e.origin);
         m.surface = surf as u8;
-        self.missile_bounce_event(m, origin, tr.normal, surf);
         if m.bounces {
             let speed = length(velocity);
             if speed > 0.0 && d <= 0.0 {
@@ -1490,7 +1518,7 @@ impl Game {
                     m.next_think = 0;
                 }
                 self.grenade_danger(vm, n, m);
-                return;
+                return true;
             }
         }
         let mut nudge = mad([0.0; 3], 0.1, tr.normal);
@@ -1503,6 +1531,7 @@ impl Game {
         m.pos.time = now;
         m.apos.base = self.land_angles_free(m, tr, hit_time, false);
         m.apos.time = now;
+        bounce_is_loud(in_water, velocity, m.pos.delta)
     }
 
     /// The angles the missile lands in, by how it is allowed to stick.
@@ -1622,4 +1651,23 @@ impl Game {
 fn roll_on_normal(angles: &Vec3, normal: &Vec3) -> f32 {
     let (_, right, up) = math::angle_vectors(angles);
     dot(right, *normal).atan2(dot(up, *normal)).to_degrees()
+}
+
+#[cfg(test)]
+mod bounce_tests {
+    use super::bounce_is_loud;
+
+    #[test]
+    fn a_hard_dry_bounce_is_heard_and_a_graze_or_a_splash_is_not() {
+        let fall = [0.0, 0.0, -300.0];
+        assert!(bounce_is_loud(false, fall, [0.0, 0.0, 150.0]));
+        // Rolling on the floor: the velocity barely changes.
+        assert!(!bounce_is_loud(
+            false,
+            [200.0, 0.0, -3.0],
+            [200.0, 0.0, 2.0]
+        ));
+        // The same hard bounce in water.
+        assert!(!bounce_is_loud(true, fall, [0.0, 0.0, 150.0]));
+    }
 }
