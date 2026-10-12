@@ -125,7 +125,6 @@ pub fn run(cli: Cli) -> Result<(), String> {
             .take()
             .map(|executable| (executable, v.cli.install.clone()));
         drop(v);
-        drop(el);
         result?;
         if let Some((executable, install)) = start_singleplayer {
             std::process::Command::new(executable)
