@@ -12,6 +12,8 @@ wasm module. Two development aids, both off unless asked for:
                   starts. In Safari pick the install folder once and use the saved copy (no ?dev-install).
   POST /report    the page posts its run statistics (numbers only, no file content) with ?report; printed here.
 """
+from __future__ import annotations
+
 import argparse
 import http.server
 import json
@@ -20,15 +22,26 @@ import re
 import sys
 from pathlib import Path
 
-# The files the client reads (the same rule as web/main.js).
+# The files the client reads (the same rule as web/install.js): the install's language is line 1 of localization.txt.
+LANGUAGES = ["english", "french", "german", "italian", "spanish", "british", "russian", "polish", "korean",
+             "taiwanese", "japanese", "chinese", "thai", "leet", "czech"]
 ZONES = {"code_post_gfx", "code_post_gfx_mp", "localized_code_post_gfx_mp", "ui_mp", "common_mp", "localized_common_mp"}
 
 
-def wanted(rel: str) -> bool:
+def language_of(root: Path) -> str:
+    for name in os.listdir(root):
+        if name.lower() == "localization.txt":
+            lines = (root / name).read_text(errors="replace").splitlines()
+            first = lines[0].strip().lower() if lines else ""
+            return first if first in LANGUAGES else "english"
+    return "english"
+
+
+def wanted(rel: str, language: str) -> bool:
     low = rel.lower()
     if low == "localization.txt" or re.fullmatch(r"main/[^/]+\.iwd", low):
         return True
-    m = re.fullmatch(r"zone/english/([^/]+)\.ff", low)
+    m = re.fullmatch(rf"zone/{language}/([^/]+)\.ff", low)
     if not m:
         return False
     zone = m.group(1)
@@ -36,11 +49,12 @@ def wanted(rel: str) -> bool:
 
 
 def install_index(root: Path):
+    language = language_of(root)
     out = []
     for dirpath, _, files in os.walk(root):
         for name in files:
             rel = (Path(dirpath) / name).relative_to(root).as_posix()
-            if rel.count("/") <= 2 and wanted(rel):
+            if rel.count("/") <= 2 and wanted(rel, language):
                 out.append({"path": rel, "size": (Path(dirpath) / name).stat().st_size})
     return sorted(out, key=lambda e: e["path"])
 

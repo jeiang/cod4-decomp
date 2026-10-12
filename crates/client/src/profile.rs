@@ -41,6 +41,27 @@ const STATS_AT: usize = CRC_AT + 4;
 const CHECKED_LEN: usize = 0x1FFC;
 /// The stats version the stock scripts check (`stat_version`); stat 299 holds it.
 const STAT_VERSION: i32 = 10;
+/// The profile a first run starts (`Profiles::open`'s fallback).
+pub const DEFAULT_PROFILE: &str = "default";
+
+/// The profile a browser runs as: the one `players/profiles/active.txt` names in the page's storage, else
+/// [`DEFAULT_PROFILE`]. A browser lists no profiles (no folders to read), so `Profiles::open` takes this as its
+/// start-up profile, and a switch records its choice there.
+#[cfg(target_arch = "wasm32")]
+pub fn web_active_profile() -> String {
+    crate::web::pref_get("players/profiles/active.txt")
+        .and_then(|t| clean_name(t.lines().next().unwrap_or("")))
+        .unwrap_or_else(|| DEFAULT_PROFILE.to_owned())
+}
+
+/// The name a browser keeps the profile's `config_mp.cfg` under (where a folder would put it).
+#[cfg(target_arch = "wasm32")]
+pub fn web_config_key(profile: &str) -> PathBuf {
+    Path::new("players/profiles")
+        .join(profile)
+        .join("config_mp.cfg")
+}
+
 /// The most profiles the menu lists.
 pub const MAX_PROFILES: usize = 64;
 /// The longest profile name.
@@ -386,6 +407,18 @@ impl Profiles {
         if self.active.is_empty() {
             return (None, None);
         }
+        // A browser has no folders: the page keeps the config under the path it would have.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let key = web_config_key(&self.active);
+            (Some(key.clone()), Some(key))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.config_files()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn config_files(&self) -> (Option<PathBuf>, Option<PathBuf>) {
         let write = Self::dir_of(&self.user_root, &self.active).map(|d| d.join("config_mp.cfg"));
         let read = write.clone().filter(|p| p.is_file()).or_else(|| {
             let d = Self::find_in(&self.install_root, &self.active)?;
@@ -503,6 +536,10 @@ impl Profiles {
             eprintln!("cannot save the profile: {e}");
         }
         self.active = name;
+        #[cfg(target_arch = "wasm32")]
+        if let Err(e) = crate::web::pref_set("players/profiles/active.txt", &self.active) {
+            eprintln!("cannot record the active profile: {e:?}");
+        }
         if let Some(root) = &self.user_root
             && std::fs::create_dir_all(root).is_ok()
             && let Err(e) = std::fs::write(root.join("active.txt"), &self.active)

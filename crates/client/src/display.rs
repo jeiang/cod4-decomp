@@ -52,10 +52,14 @@ pub fn actual_kind(window: &Window) -> FullscreenKind {
     }
 }
 
-/// The page's canvas is whatever the page makes it.
+/// A page's canvas is fullscreen or it is not; the browser has no exclusive mode.
 #[cfg(target_arch = "wasm32")]
-pub fn actual_kind(_: &Window) -> FullscreenKind {
-    FullscreenKind::Windowed
+pub fn actual_kind(window: &Window) -> FullscreenKind {
+    if window.fullscreen().is_some() {
+        FullscreenKind::Borderless
+    } else {
+        FullscreenKind::Windowed
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -164,10 +168,46 @@ pub fn video_modes(window: &Window, choice: Option<usize>) -> (Vec<(u32, u32)>, 
     (sizes.collect(), rates.collect())
 }
 
-/// A page has no video modes to offer.
+/// A page offers the standard sizes that fit its screen, and the screen's own: the canvas takes any of them while
+/// windowed, and the screen's size when fullscreen. The browser gives no say over the refresh rate: the page is drawn
+/// when the display wants a frame, so there is none to list.
 #[cfg(target_arch = "wasm32")]
 pub fn video_modes(_: &Window, _: Option<usize>) -> (Vec<(u32, u32)>, Vec<u32>) {
-    (Vec::new(), Vec::new())
+    (
+        fitting_modes(crate::shell::STOCK_MODES, screen_size()),
+        Vec::new(),
+    )
+}
+
+/// The screen in device pixels, as the browser reports it.
+#[cfg(target_arch = "wasm32")]
+fn screen_size() -> Option<(u32, u32)> {
+    let w = web_sys::window()?;
+    let s = w.screen().ok()?;
+    let scale = w.device_pixel_ratio();
+    let px = |css: Result<i32, wasm_bindgen::JsValue>| {
+        Some((f64::from(css.ok()?) * scale).round() as u32)
+    };
+    Some((px(s.width())?, px(s.height())?))
+}
+
+/// The `standard` sizes that fit `screen`, with the screen's own size, in order; all of them when the screen is not
+/// known.
+#[cfg(any(target_arch = "wasm32", test))]
+fn fitting_modes(standard: &[(u32, u32)], screen: Option<(u32, u32)>) -> Vec<(u32, u32)> {
+    let Some((sw, sh)) = screen else {
+        return standard.to_vec();
+    };
+    let mut modes: Vec<(u32, u32)> = standard
+        .iter()
+        .copied()
+        .filter(|&(w, h)| w <= sw && h <= sh)
+        .collect();
+    if !modes.contains(&(sw, sh)) {
+        modes.push((sw, sh));
+    }
+    modes.sort_unstable();
+    modes
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -296,10 +336,38 @@ pub fn apply(window: &Window, req: &Request) -> Option<String> {
     }
 }
 
-/// The page lays the canvas out; there is nothing to move.
+/// Moves the page's canvas to what `req` asks: windowed at the size asked for, or fullscreen (the browser's, on the
+/// screen the page is on). The browser grants fullscreen only to a page the player just touched, and says nothing
+/// when it refuses, so that case is checked here and noted. The canvas answers with a resize, which the surface follows.
 #[cfg(target_arch = "wasm32")]
-pub fn apply(_: &Window, _: &Request) -> Option<String> {
-    None
+pub fn apply(window: &Window, req: &Request) -> Option<String> {
+    use winit::dpi::{PhysicalSize, Size};
+    use winit::window::Fullscreen;
+    match req.kind {
+        FullscreenKind::Windowed => {
+            if window.fullscreen().is_some() {
+                window.set_fullscreen(None);
+            }
+            let now = window.inner_size();
+            if let Some((w, h)) = req.size.filter(|&s| s != (now.width, now.height)) {
+                let _ = window.request_inner_size(Size::Physical(PhysicalSize::new(w, h)));
+            }
+            None
+        }
+        FullscreenKind::Borderless | FullscreenKind::Exclusive => {
+            if window.fullscreen().is_some() {
+                None
+            } else if crate::web::user_active() {
+                window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                None
+            } else {
+                Some(
+                    "the browser allows fullscreen only right after a click or key press"
+                        .to_owned(),
+                )
+            }
+        }
+    }
 }
 
 /// Create the window: the page's canvas, which the page lays out, so the window is whatever size the canvas has.
@@ -387,6 +455,21 @@ mod tests {
         assert_eq!(monitor_slot(Some(2), 2), Some(1));
         assert_eq!(monitor_slot(Some(3), 2), None);
         assert_eq!(monitor_slot(Some(1), 0), None);
+    }
+
+    #[test]
+    fn a_page_offers_the_sizes_that_fit_its_screen_and_the_screens_own() {
+        let std = [(640, 480), (1280, 720), (1920, 1080), (2560, 1440)];
+        assert_eq!(
+            fitting_modes(&std, Some((1920, 1080))),
+            [(640, 480), (1280, 720), (1920, 1080)]
+        );
+        // A screen between sizes (a laptop panel, a scaled display) is offered as it is.
+        assert_eq!(
+            fitting_modes(&std, Some((1512, 982))),
+            [(640, 480), (1280, 720), (1512, 982)]
+        );
+        assert_eq!(fitting_modes(&std, None), std);
     }
 
     #[test]

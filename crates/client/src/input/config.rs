@@ -110,11 +110,29 @@ pub fn join(tokens: &[String]) -> String {
         .join(" ")
 }
 
+/// The value a config text gives the cvar `name` (the last `set`, `seta`, `sets` or `setu` of it), for what must be
+/// known before the config is run: whether a download is allowed, before a join starts.
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn saved_value(text: &str, name: &str) -> Option<String> {
+    text.lines()
+        .flat_map(split_commands)
+        .filter(|t| {
+            t.len() >= 3
+                && matches!(
+                    t[0].to_ascii_lowercase().as_str(),
+                    "set" | "seta" | "sets" | "setu"
+                )
+                && t[1].eq_ignore_ascii_case(name)
+        })
+        .next_back()
+        .map(|t| t[2].clone())
+}
+
 /// `<platform config dir>/cod4e`: where the user's profiles live.
 pub fn default_dir() -> Option<PathBuf> {
     #[cfg(not(target_arch = "wasm32"))]
     return install::default_config_dir();
-    // The browser has no profile folder.
+    // The browser has no profile folder: the page keeps each profile's config (see `Input::use_profile`).
     #[cfg(target_arch = "wasm32")]
     None
 }
@@ -144,6 +162,14 @@ mod tests {
         assert!(split_commands("// only a comment").is_empty());
         // `//` inside quotes is data.
         assert_eq!(one(r#"set u "http://x""#), ["set", "u", "http://x"]);
+    }
+
+    #[test]
+    fn a_saved_cvar_is_the_last_one_set() {
+        let text = "// c\nseta sensitivity 3\nseta cl_allowDownload \"0\"\nset CL_ALLOWDOWNLOAD 1; seta x y\n";
+        assert_eq!(saved_value(text, "cl_allowdownload").as_deref(), Some("1"));
+        assert_eq!(saved_value(text, "sensitivity").as_deref(), Some("3"));
+        assert_eq!(saved_value(text, "missing"), None);
     }
 
     #[test]

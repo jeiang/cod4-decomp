@@ -11,8 +11,11 @@
 
 const IDLE = 0, REQUEST = 1, DONE = 2, FAILED = 3;
 export const COPY_DIR = "cod4e-install";
+// Files the client downloaded from servers (saver.js): the same layout, served on top of any source.
+export const DOWNLOAD_DIR = "cod4e-downloads";
 
 let sources = [];
+let downloads = []; // the downloaded files this session serves
 
 // A source is { size, read(offset, dst) } filling dst (a Uint8Array over the shared data buffer) completely.
 
@@ -26,6 +29,23 @@ function fileSource(file) {
   };
 }
 
+// One OPFS file as a source: `handle` is its open sync access handle.
+function syncSource(path, size, handle) {
+  let scratch = null; // used when this browser refuses a shared buffer
+  return {
+    path, size,
+    read(offset, dst) {
+      if (!scratch) {
+        try { return void handle.read(dst, { at: offset }); } catch { scratch = new Uint8Array(dst.length); }
+      }
+      if (scratch.length < dst.length) scratch = new Uint8Array(dst.length);
+      handle.read(scratch.subarray(0, dst.length), { at: offset });
+      dst.set(scratch.subarray(0, dst.length));
+    },
+  };
+}
+
+// The saved copy of the install (copier.js): null when there is no whole one.
 async function opfsSources() {
   const root = await navigator.storage.getDirectory();
   let dir;
@@ -45,20 +65,44 @@ async function opfsSources() {
   for (const { path, size } of manifest.files) {
     const handle = await (await dir.getFileHandle(encodeURIComponent(path))).createSyncAccessHandle();
     if (handle.getSize() !== size) throw new Error(`the saved copy of ${path} is damaged`);
-    let scratch = null; // used when this browser refuses a shared buffer
-    out.push({
-      path, size,
-      read(offset, dst) {
-        if (!scratch) {
-          try { return void handle.read(dst, { at: offset }); } catch { scratch = new Uint8Array(dst.length); }
-        }
-        if (scratch.length < dst.length) scratch = new Uint8Array(dst.length);
-        handle.read(scratch.subarray(0, dst.length), { at: offset });
-        dst.set(scratch.subarray(0, dst.length));
-      },
-    });
+    out.push(syncSource(path, size, handle));
   }
   return out;
+}
+
+// The downloaded files kept in this browser (saver.js): the newer of its two lists that parses. An entry that cannot
+// be opened or has the wrong size is skipped, not the whole set; it is fetched again on the next join.
+async function downloadSources() {
+  try {
+    const root = await navigator.storage.getDirectory();
+    let dir;
+    try {
+      dir = await root.getDirectoryHandle(DOWNLOAD_DIR);
+    } catch {
+      return [];
+    }
+    let best = null;
+    for (const name of ["manifest.a", "manifest.b"]) {
+      try {
+        const m = JSON.parse(await (await (await dir.getFileHandle(name)).getFile()).text());
+        if (Array.isArray(m.files) && Number.isInteger(m.seq) && (!best || m.seq > best.seq)) best = m;
+      } catch {}
+    }
+    const out = [];
+    for (const { path, size, file } of best?.files ?? []) {
+      let handle;
+      try {
+        handle = await (await dir.getFileHandle(file)).createSyncAccessHandle();
+        if (handle.getSize() !== size) throw new Error("size");
+        out.push(syncSource(path, size, handle));
+      } catch {
+        try { handle?.close(); } catch {}
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 function httpSources(base, index) {
@@ -114,7 +158,12 @@ self.onmessage = async ({ data: m }) => {
       const index = await (await fetch(`${m.base}/index.json`)).json();
       sources = httpSources(m.base, index);
     } else throw new Error(`unknown source ${m.source}`);
-    postMessage({ type: "ready", files: sources.map(({ path, size }) => [path, size]) });
+    // Maps downloaded in earlier visits join the install; one the install has since gained wins by coming first.
+    const have = new Set(sources.map((s) => s.path.toLowerCase()));
+    const kept = (await downloadSources()).filter((s) => !have.has(s.path.toLowerCase()));
+    sources.push(...kept);
+    downloads = kept.map((s) => s.path);
+    postMessage({ type: "ready", files: sources.map(({ path, size }) => [path, size]), downloads });
   } catch (e) {
     return postMessage({ type: "error", message: String(e?.message ?? e) });
   }

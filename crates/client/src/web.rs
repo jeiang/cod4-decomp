@@ -39,6 +39,30 @@ extern "C" {
     /// Debug overlay data, a JSON object of name to value.
     #[wasm_bindgen(js_namespace = cod4, js_name = overlay)]
     fn page_overlay(json: &str);
+
+    /// What the page keeps for this browser under `key` (the settings, as a `config_mp.cfg`); `undefined` when nothing.
+    #[wasm_bindgen(js_namespace = cod4, js_name = pref_get)]
+    fn page_pref_get(key: &str) -> Option<String>;
+
+    /// Shows `text` over the page while the client fetches files from the server (empty hides it).
+    #[wasm_bindgen(js_namespace = cod4, js_name = download_progress)]
+    fn page_download_progress(text: &str);
+
+    /// How many bytes this browser will still let the page store, or -1 when it does not say.
+    #[wasm_bindgen(js_namespace = cod4, js_name = storage_free)]
+    fn page_storage_free() -> f64;
+
+    /// Tells the player something for a few seconds (a setting that cannot be kept, say).
+    #[wasm_bindgen(js_namespace = cod4, js_name = notice)]
+    fn page_notice(text: &str);
+
+    /// Keeps a downloaded file (install-relative `path`) in this browser for the next visit.
+    #[wasm_bindgen(js_namespace = cod4, js_name = save_download)]
+    fn page_save_download(path: &str, bytes: &[u8]);
+
+    /// Keeps `value` under `key` in this browser; throws when the browser refuses (storage full or disabled).
+    #[wasm_bindgen(js_namespace = cod4, js_name = pref_set, catch)]
+    fn page_pref_set(key: &str, value: &str) -> Result<(), JsValue>;
 }
 
 #[wasm_bindgen]
@@ -100,6 +124,11 @@ impl Drop for Wire {
     }
 }
 
+/// Whether the session to the server is open.
+pub fn wire_open() -> bool {
+    net_state() == "open"
+}
+
 /// Why the session cannot be used, once it has closed.
 pub fn wire_failure() -> Option<String> {
     (net_state() == "closed").then(|| {
@@ -151,6 +180,37 @@ impl ReadAt for WebFile {
         debug_assert!(end <= self.len);
         read_into(self.id, offset as f64, buf).map_err(|e| io::Error::other(format!("{e:?}")))
     }
+}
+
+/// The text the page kept for this browser under `key`.
+pub fn pref_get(key: &str) -> Option<String> {
+    page_pref_get(key)
+}
+
+/// Has the page keep `value` for this browser under `key`.
+pub fn pref_set(key: &str, value: &str) -> Result<(), JsValue> {
+    page_pref_set(key, value)
+}
+
+/// Shows the page how far the fetching of files from the server has come (empty text hides it).
+pub fn show_progress(text: &str) {
+    page_download_progress(text);
+}
+
+/// Bytes of storage the browser still allows this page, when it says.
+pub fn storage_free() -> Option<u64> {
+    let free = page_storage_free();
+    (free >= 0.0).then_some(free as u64)
+}
+
+/// Shows the player `text` for a few seconds.
+pub fn notice(text: &str) {
+    page_notice(text);
+}
+
+/// Has the page keep a file the client downloaded, `path` being where it lies in the install.
+pub fn save_download(path: &str, bytes: &[u8]) {
+    page_save_download(path, bytes);
 }
 
 /// Tells the page the client has stopped, and why.
@@ -218,5 +278,17 @@ fn boot() -> Result<(), String> {
         .unwrap_or_default();
     let mut cli = crate::parse(&args).map_err(|e| format!("bad arguments: {e}"))?;
     cli.install = PathBuf::from(WEB_ROOT);
-    crate::app::run(cli)
+    if cli.connect.is_none() {
+        return crate::app::run(cli);
+    }
+    // A join first learns what the server runs, which takes the page's session a few frames: a task, not a wait.
+    wasm_bindgen_futures::spawn_local(async move {
+        let started = crate::web_join::prepare(&mut cli)
+            .await
+            .and_then(|()| crate::app::run(cli));
+        if let Err(e) = started {
+            page_fatal(&e);
+        }
+    });
+    Ok(())
 }

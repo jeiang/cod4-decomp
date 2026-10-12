@@ -139,7 +139,7 @@ pub struct ShellState {
 }
 
 /// The `r_mode` list when the display's own is unknown.
-const STOCK_MODES: &[(u32, u32)] = &[
+pub(crate) const STOCK_MODES: &[(u32, u32)] = &[
     (640, 480),
     (800, 600),
     (1024, 768),
@@ -659,15 +659,18 @@ impl Shell {
         if !rates.is_empty() {
             self.st.refresh_rates = rates;
         }
+        // A page's size and fullscreen are the browser's to give (fullscreen needs a click, the canvas follows the
+        // page), so there they are not kept in the config: the next visit starts from the page again.
+        let keep = cfg!(not(target_arch = "wasm32"));
         if input.cvars.get("r_fullscreen").is_none() {
             input
                 .cvars
-                .set("r_fullscreen", if fullscreen { "1" } else { "0" }, true);
+                .set("r_fullscreen", if fullscreen { "1" } else { "0" }, keep);
         }
         if input.cvars.get("r_mode").is_none_or(str::is_empty) {
             input
                 .cvars
-                .set("r_mode", &format!("{}x{}", current.0, current.1), true);
+                .set("r_mode", &format!("{}x{}", current.0, current.1), keep);
         }
         if input
             .cvars
@@ -677,7 +680,7 @@ impl Shell {
             let hz = self.st.refresh_rates.last().copied().unwrap_or(60);
             input
                 .cvars
-                .set("r_displayRefresh", &format!("{hz} Hz"), true);
+                .set("r_displayRefresh", &format!("{hz} Hz"), keep);
         }
     }
 
@@ -1346,7 +1349,6 @@ impl HostCx<'_> {
                 {
                     return;
                 }
-                #[cfg(not(target_arch = "wasm32"))]
                 if let Err(e) = self.input.save() {
                     eprintln!("cannot save the settings: {e}");
                 }

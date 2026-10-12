@@ -14,7 +14,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use web_time::Instant;
 
 /// Bytes of file in one packet.
 pub const CHUNK: usize = 1024;
@@ -32,6 +33,9 @@ const REQUEST_SILENCE: Duration = Duration::from_millis(600);
 const WINDOW_SILENCE: Duration = Duration::from_millis(200);
 /// Windows asked for in a row without a byte arriving before the download is given up.
 const MAX_RETRIES: u32 = 25;
+/// How long a `getchallenge` may go unanswered before it is sent again, and how many times it is sent.
+const CHALLENGE_WAIT: Duration = Duration::from_millis(700);
+const CHALLENGE_TRIES: u32 = 8;
 
 /// Largest file a client accepts: above any stock zone, below what a hostile server could use to fill a disk or memory.
 pub const MAX_TOTAL: u64 = 256 << 20;
@@ -83,88 +87,295 @@ pub struct Progress {
     pub total: AtomicU64,
 }
 
-/// What a packet did to a wait.
-enum Step {
-    /// Not what was waited for.
-    Ignore,
-    /// A piece of what was waited for: the silence clock starts over.
-    More,
-    /// Done waiting.
-    Done,
+/// Where a download's bytes go: a file on disk, or memory (the browser has no disk to write to).
+pub trait Sink {
+    /// The size the file will have, known with the first piece.
+    fn set_len(&mut self, len: u64) -> io::Result<()>;
+    fn write_at(&mut self, at: u64, data: &[u8]) -> io::Result<()>;
+    /// Every piece is in.
+    fn finish(&mut self) -> io::Result<()>;
 }
 
-/// Reads packets from `server` until `take` says [`Step::Done`] (`true`), `first` passes with no [`Step::More`] or
-/// `after` passes since the last one (`false`), or `cancel` is set.
-fn wait_for(
-    t: &mut dyn Transport,
+impl Sink for File {
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        File::set_len(self, len)
+    }
+
+    fn write_at(&mut self, at: u64, data: &[u8]) -> io::Result<()> {
+        self.seek(SeekFrom::Start(at))?;
+        self.write_all(data)
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.flush()
+    }
+}
+
+impl Sink for Vec<u8> {
+    fn set_len(&mut self, len: u64) -> io::Result<()> {
+        self.resize(len as usize, 0);
+        Ok(())
+    }
+
+    fn write_at(&mut self, at: u64, data: &[u8]) -> io::Result<()> {
+        let at = at as usize;
+        self.get_mut(at..at + data.len())
+            .ok_or(io::ErrorKind::UnexpectedEof)?
+            .copy_from_slice(data);
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+enum Phase {
+    /// Waiting for the server's challenge: `getchallenge` was sent `tries` times, the last answer is due by `until`.
+    Challenge { tries: u32, until: Instant },
+    /// A `getfile` is out: the first piece is due by `until`, and once pieces arrive each is due within
+    /// [`WINDOW_SILENCE`] of the last. `new` pieces have come in this window.
+    Window { until: Instant, new: usize },
+}
+
+/// One file being fetched, driven by [`Fetcher::poll`]: it never blocks beyond the wait it is given, so a browser can
+/// drive it a frame at a time over its one WebTransport session and a thread can loop on it ([`fetch`]).
+pub struct Fetcher {
     server: SocketAddr,
-    buf: &mut [u8],
-    (first, after): (Duration, Duration),
-    cancel: &AtomicBool,
-    mut take: impl FnMut(Oob) -> Step,
-) -> Result<bool, String> {
-    let mut until = Instant::now() + first;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err("Download cancelled".into());
+    name: String,
+    buf: Vec<u8>,
+    phase: Phase,
+    challenge: u32,
+    challenge_at: Instant,
+    /// The server said the challenge is not (or no longer) its own: the next window takes a new one.
+    stale: bool,
+    /// Which pieces are in, once the size is known.
+    have: Vec<bool>,
+    total: Option<u64>,
+    offset: u64,
+    /// The size the file is known to have (a manifest said): a first piece that claims another is refused.
+    expect: Option<u64>,
+    /// Windows asked for in a row without a byte arriving.
+    idle: u32,
+}
+
+impl Fetcher {
+    /// Starts fetching `name` from `server`: the first `getchallenge` goes out now.
+    pub fn new(t: &mut dyn Transport, server: SocketAddr, name: &str) -> Self {
+        t.send_to(server, &Oob::GetChallenge.encode());
+        Self {
+            server,
+            name: name.to_owned(),
+            buf: vec![0u8; 2048],
+            phase: Phase::Challenge {
+                tries: 1,
+                until: Instant::now() + CHALLENGE_WAIT,
+            },
+            challenge: 0,
+            challenge_at: Instant::now(),
+            stale: false,
+            have: Vec::new(),
+            total: None,
+            offset: 0,
+            expect: None,
+            idle: 0,
         }
-        let left = until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Ok(false);
-        }
-        // Wake often enough to notice a cancel.
-        match t.recv_from(buf, Some(left.min(Duration::from_millis(50)))) {
-            Ok(Some((n, from))) if from == server => {
-                if let Some(o) = Oob::parse(&buf[..n]) {
-                    match take(o) {
-                        Step::Done => return Ok(true),
-                        Step::More => until = Instant::now() + after,
-                        Step::Ignore => {}
+    }
+
+    /// The file is known to be `size` bytes: nothing is allocated for a server that claims another.
+    pub fn expecting(mut self, size: u64) -> Self {
+        self.expect = Some(size);
+        self
+    }
+
+    /// Takes in what has arrived (waiting up to `wait` for the first packet, where the transport can wait) and sends
+    /// what is due. `None` while the download goes on, the outcome once it ends. The file is whole in `sink`, and
+    /// `finish` has been called, on `Some(Ok)`.
+    pub fn poll(
+        &mut self,
+        t: &mut dyn Transport,
+        sink: &mut dyn Sink,
+        progress: &Progress,
+        wait: Duration,
+    ) -> Option<Result<(), String>> {
+        let mut wait = wait;
+        loop {
+            let got = t.recv_from(&mut self.buf, Some(wait));
+            wait = Duration::ZERO;
+            match got {
+                Ok(Some((n, from))) if from == self.server => {
+                    if let Some(o) = Oob::parse(&self.buf[..n])
+                        && let Some(end) = self.take(t, sink, progress, o)
+                    {
+                        return Some(end);
                     }
                 }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(e) => return Some(Err(e.to_string())),
             }
-            Ok(_) => {}
-            Err(e) => return Err(e.to_string()),
         }
+        self.tick(t, sink, Instant::now())
     }
-}
 
-fn challenge(
-    t: &mut dyn Transport,
-    server: SocketAddr,
-    buf: &mut [u8],
-    cancel: &AtomicBool,
-) -> Result<u32, String> {
-    for _ in 0..8 {
-        t.send_to(server, &Oob::GetChallenge.encode());
-        let mut got = None;
-        let mut refused = None;
-        wait_for(
-            t,
-            server,
-            buf,
-            (Duration::from_millis(700), Duration::ZERO),
-            cancel,
-            |o| match o {
-                Oob::Challenge(c) => {
-                    got = Some(c);
-                    Step::Done
+    /// A packet from the server.
+    fn take(
+        &mut self,
+        t: &mut dyn Transport,
+        sink: &mut dyn Sink,
+        progress: &Progress,
+        o: Oob,
+    ) -> Option<Result<(), String>> {
+        match (&self.phase, o) {
+            (Phase::Challenge { .. }, Oob::Challenge(c)) => {
+                self.challenge = c;
+                self.challenge_at = Instant::now();
+                self.ask(t);
+                None
+            }
+            (Phase::Challenge { .. }, Oob::Error(why)) => Some(Err(why)),
+            (
+                Phase::Window { new, .. },
+                Oob::FileChunk {
+                    total: tot,
+                    offset: at,
+                    data,
+                },
+            ) => {
+                let mut new = *new;
+                if self.total.is_some_and(|t| t != tot) {
+                    return Some(Err("The file changed during the download".to_owned()));
                 }
-                Oob::Error(why) => {
-                    refused = Some(why);
-                    Step::Done
+                if self.total.is_none() {
+                    if self.expect.is_some_and(|e| e != tot) {
+                        return Some(Err("The file is not the one the server listed".to_owned()));
+                    }
+                    if tot > MAX_TOTAL {
+                        return Some(Err("The file is too large".to_owned()));
+                    }
+                    self.total = Some(tot);
+                    self.have = vec![false; (tot as usize).div_ceil(CHUNK)];
+                    progress.total.store(tot, Ordering::Relaxed);
+                    if let Err(e) = sink.set_len(tot) {
+                        return Some(Err(e.to_string()));
+                    }
                 }
-                _ => Step::Ignore,
-            },
-        )?;
-        if let Some(why) = refused {
-            return Err(why);
-        }
-        if let Some(c) = got {
-            return Ok(c);
+                if tot == 0 {
+                    return self.end_window(t, sink, new);
+                }
+                let (idx, window_end) = (
+                    (at / CHUNK as u64) as usize,
+                    tot.min(self.offset + (WINDOW * CHUNK) as u64),
+                );
+                let expected = (tot - at.min(tot)).min(CHUNK as u64) as usize;
+                if at % CHUNK as u64 != 0
+                    || at < self.offset
+                    || at >= window_end
+                    || data.len() != expected
+                {
+                    return None;
+                }
+                if !self.have[idx] {
+                    if let Err(e) = sink.write_at(at, &data) {
+                        return Some(Err(e.to_string()));
+                    }
+                    self.have[idx] = true;
+                    new += 1;
+                    progress
+                        .done
+                        .fetch_add(data.len() as u64, Ordering::Relaxed);
+                }
+                let first = (self.offset / CHUNK as u64) as usize;
+                let last = (window_end as usize).div_ceil(CHUNK);
+                if self.have[first..last].iter().all(|h| *h) {
+                    return self.end_window(t, sink, new);
+                }
+                self.phase = Phase::Window {
+                    until: Instant::now() + WINDOW_SILENCE,
+                    new,
+                };
+                None
+            }
+            (Phase::Window { new, .. }, Oob::Error(why)) if why == BAD_CHALLENGE => {
+                // A stale challenge: take a new one and ask again; this window brought what it brought.
+                let new = *new;
+                self.stale = true;
+                self.end_window(t, sink, new)
+            }
+            (Phase::Window { .. }, Oob::Error(why)) => Some(Err(why)),
+            _ => None,
         }
     }
-    Err("The server does not answer".into())
+
+    /// The clock: a request unanswered for too long is made again.
+    fn tick(
+        &mut self,
+        t: &mut dyn Transport,
+        sink: &mut dyn Sink,
+        now: Instant,
+    ) -> Option<Result<(), String>> {
+        match self.phase {
+            Phase::Challenge { tries, until } if now >= until => {
+                if tries >= CHALLENGE_TRIES {
+                    return Some(Err("The server does not answer".into()));
+                }
+                t.send_to(self.server, &Oob::GetChallenge.encode());
+                self.phase = Phase::Challenge {
+                    tries: tries + 1,
+                    until: now + CHALLENGE_WAIT,
+                };
+                None
+            }
+            Phase::Window { until, new } if now >= until => self.end_window(t, sink, new),
+            _ => None,
+        }
+    }
+
+    /// Sends the `getfile` for the window starting at `offset`.
+    fn ask(&mut self, t: &mut dyn Transport) {
+        t.send_to(
+            self.server,
+            &Oob::GetFile {
+                challenge: self.challenge,
+                name: self.name.clone(),
+                offset: self.offset,
+            }
+            .encode(),
+        );
+        self.phase = Phase::Window {
+            until: Instant::now() + REQUEST_SILENCE,
+            new: 0,
+        };
+    }
+
+    /// The window is over (complete, or gone quiet): the download is done, or the next window starts.
+    fn end_window(
+        &mut self,
+        t: &mut dyn Transport,
+        sink: &mut dyn Sink,
+        new: usize,
+    ) -> Option<Result<(), String>> {
+        if self.total.is_some() {
+            match self.have.iter().position(|h| !*h) {
+                None => return Some(sink.finish().map_err(|e| e.to_string())),
+                Some(i) => self.offset = (i * CHUNK) as u64,
+            }
+        }
+        self.idle = if new == 0 { self.idle + 1 } else { 0 };
+        if self.idle >= MAX_RETRIES {
+            return Some(Err("The download timed out".into()));
+        }
+        if std::mem::take(&mut self.stale) || self.challenge_at.elapsed() > CHALLENGE_REFRESH {
+            t.send_to(self.server, &Oob::GetChallenge.encode());
+            self.phase = Phase::Challenge {
+                tries: 1,
+                until: Instant::now() + CHALLENGE_WAIT,
+            };
+        } else {
+            self.ask(t);
+        }
+        None
+    }
 }
 
 /// Downloads the file `name` (a map zone, or a custom map's `<map>.iwd`) from `server` into `dest` (written as `dest.part` and renamed when whole). Blocks
@@ -181,141 +392,22 @@ pub fn fetch(
     part.push(".part");
     let part = std::path::PathBuf::from(part);
     let mut out = File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
-    let result = fetch_into(t, server, name, &mut out, progress, cancel);
+    let mut f = Fetcher::new(t, server, name);
+    let result = loop {
+        if cancel.load(Ordering::Relaxed) {
+            break Err("Download cancelled".to_owned());
+        }
+        // Wake often enough to notice a cancel.
+        if let Some(r) = f.poll(t, &mut out, progress, Duration::from_millis(50)) {
+            break r;
+        }
+    };
     drop(out);
     match result {
         Ok(()) => std::fs::rename(&part, dest).map_err(|e| e.to_string()),
         Err(e) => {
             let _ = std::fs::remove_file(&part);
             Err(e)
-        }
-    }
-}
-
-fn fetch_into(
-    t: &mut dyn Transport,
-    server: SocketAddr,
-    name: &str,
-    out: &mut File,
-    progress: &Progress,
-    cancel: &AtomicBool,
-) -> Result<(), String> {
-    let mut buf = vec![0u8; 2048];
-    let mut ch = challenge(t, server, &mut buf, cancel)?;
-    let mut ch_at = Instant::now();
-    // Which pieces are in, once the size is known.
-    let mut have: Vec<bool> = Vec::new();
-    let mut total: Option<u64> = None;
-    let mut offset = 0u64;
-    let mut idle = 0;
-    loop {
-        if ch_at.elapsed() > CHALLENGE_REFRESH {
-            ch = challenge(t, server, &mut buf, cancel)?;
-            ch_at = Instant::now();
-        }
-        t.send_to(
-            server,
-            &Oob::GetFile {
-                challenge: ch,
-                name: name.to_owned(),
-                offset,
-            }
-            .encode(),
-        );
-        let (mut failed, mut stale) = (None, false);
-        let mut new = 0usize;
-        wait_for(
-            t,
-            server,
-            &mut buf,
-            (REQUEST_SILENCE, WINDOW_SILENCE),
-            cancel,
-            |o| match o {
-                Oob::FileChunk {
-                    total: tot,
-                    offset: at,
-                    data,
-                } => {
-                    if total.is_some_and(|t| t != tot) {
-                        failed = Some("The file changed during the download".to_owned());
-                        return Step::Done;
-                    }
-                    if total.is_none() {
-                        if tot > MAX_TOTAL {
-                            failed = Some("The file is too large".to_owned());
-                            return Step::Done;
-                        }
-                        total = Some(tot);
-                        have = vec![false; (tot as usize).div_ceil(CHUNK)];
-                        progress.total.store(tot, Ordering::Relaxed);
-                        if let Err(e) = out.set_len(tot) {
-                            failed = Some(e.to_string());
-                            return Step::Done;
-                        }
-                    }
-                    let (idx, window_end) = (
-                        (at / CHUNK as u64) as usize,
-                        tot.min(offset + (WINDOW * CHUNK) as u64),
-                    );
-                    let expected = (tot - at.min(tot)).min(CHUNK as u64) as usize;
-                    if tot == 0 {
-                        return Step::Done;
-                    }
-                    if at % CHUNK as u64 != 0
-                        || at < offset
-                        || at >= window_end
-                        || data.len() != expected
-                    {
-                        return Step::Ignore;
-                    }
-                    if !have[idx] {
-                        let wrote = out
-                            .seek(SeekFrom::Start(at))
-                            .and_then(|_| out.write_all(&data));
-                        if let Err(e) = wrote {
-                            failed = Some(e.to_string());
-                            return Step::Done;
-                        }
-                        have[idx] = true;
-                        new += 1;
-                        progress
-                            .done
-                            .fetch_add(data.len() as u64, Ordering::Relaxed);
-                    }
-                    let first = (offset / CHUNK as u64) as usize;
-                    let last = (window_end as usize).div_ceil(CHUNK);
-                    if have[first..last].iter().all(|h| *h) {
-                        Step::Done
-                    } else {
-                        Step::More
-                    }
-                }
-                Oob::Error(why) if why == BAD_CHALLENGE => {
-                    stale = true;
-                    Step::Done
-                }
-                Oob::Error(why) => {
-                    failed = Some(why);
-                    Step::Done
-                }
-                _ => Step::Ignore,
-            },
-        )?;
-        if let Some(e) = failed {
-            return Err(e);
-        }
-        if stale {
-            ch_at = Instant::now() - CHALLENGE_REFRESH - Duration::from_millis(1);
-        }
-        if total.is_some() {
-            match have.iter().position(|h| !*h) {
-                None => return out.flush().map_err(|e| e.to_string()),
-                Some(i) => offset = (i * CHUNK) as u64,
-            }
-        }
-        idle = if new == 0 { idle + 1 } else { 0 };
-        if idle >= MAX_RETRIES {
-            return Err("The download timed out".into());
         }
     }
 }
@@ -392,6 +484,58 @@ mod tests {
         assert!(!nope.exists() && !nope.with_extension("ff.part").exists());
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_download_into_memory_goes_a_poll_at_a_time_on_one_thread() {
+        use crate::connect::{Gate, serve};
+        use crate::oob::Challenger;
+        use crate::transport::MemNet;
+
+        // What the browser does: one thread, no waiting inside `poll`, the server answered between polls.
+        let dir = std::env::temp_dir().join(format!("cod4e-dl-poll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("mp_x.ff");
+        let bytes: Vec<u8> = (0..(WINDOW * CHUNK + 300))
+            .map(|i| (i * 13) as u8)
+            .collect();
+        std::fs::write(&src, &bytes).unwrap();
+        let net = MemNet::new();
+        let server = SocketAddr::from(([127, 0, 0, 1], 1));
+        let mut st = net.endpoint(server);
+        let mut ct = net.endpoint(SocketAddr::from(([127, 0, 0, 1], 2)));
+        let ch = Challenger::new();
+        let progress = Progress::default();
+        let mut buf = [0u8; 2048];
+        let mut drive = |ct: &mut dyn Transport, f: &mut Fetcher, got: &mut Vec<u8>| {
+            (0..1000).find_map(|_| {
+                while let Ok(Some((n, from))) = st.recv_from(&mut buf, Some(Duration::ZERO)) {
+                    match serve(&ch, 0, from, Oob::parse(&buf[..n]).unwrap(), Vec::new) {
+                        Gate::Reply(r) => st.send_to(from, &r.encode()),
+                        Gate::File { offset, from, .. } => {
+                            for c in window(&src, offset).unwrap() {
+                                st.send_to(from, &c.encode());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                f.poll(ct, got, &progress, Duration::ZERO)
+            })
+        };
+        let mut got: Vec<u8> = Vec::new();
+        let mut f = Fetcher::new(&mut ct, server, "mp_x").expecting(bytes.len() as u64);
+        assert_eq!(drive(&mut ct, &mut f, &mut got), Some(Ok(())));
+        assert_eq!(got, bytes);
+        // A server whose file is not the size the manifest listed is refused before anything is allocated.
+        let mut wrong = Fetcher::new(&mut ct, server, "mp_x").expecting(bytes.len() as u64 + 1);
+        let mut none: Vec<u8> = Vec::new();
+        assert!(matches!(
+            drive(&mut ct, &mut wrong, &mut none),
+            Some(Err(_))
+        ));
+        assert!(none.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

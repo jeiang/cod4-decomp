@@ -3,34 +3,25 @@
 // next time, and starts the wasm client. The files are read in this browser only; nothing is uploaded.
 import { createBridge } from "./bridge.js";
 import { createTransport } from "./transport.js";
+import { choose, isLanguageDir, wanted } from "./install.js";
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 
-// What the client reads from the install: the archives and the zones of the multiplayer maps and menus.
+// Which files of the install the client reads, and in which language: see install.js.
 const ci = (s) => s.toLowerCase();
-const wantedOnPage = (path) => {
-  const p = ci(path);
-  if (p === "localization.txt") return true;
-  if (/^main\/[^/]+\.iwd$/.test(p)) return true;
-  const zone = /^zone\/english\/([^/]+)\.ff$/.exec(p)?.[1];
-  if (!zone) return false;
-  return /^(code_post_gfx|code_post_gfx_mp|localized_code_post_gfx_mp|ui_mp|common_mp|localized_common_mp)$/.test(zone)
-    || (/^mp_[a-z0-9_]+$/.test(zone) && !zone.endsWith("_load"));
-};
-const REQUIRED = ["main/iw_00.iwd", "zone/english/common_mp.ff", "zone/english/code_post_gfx_mp.ff", "zone/english/ui_mp.ff"];
 
 // ---- picking ------------------------------------------------------------------------------------------------
 
 const isDirName = (name, depth, prefix) =>
   (depth === 0 && (ci(name) === "main" || ci(name) === "zone")) ||
-  (depth === 1 && ci(prefix) === "zone/" && ci(name) === "english");
+  (depth === 1 && ci(prefix) === "zone/" && isLanguageDir(name));
 
 async function walkHandle(dir, prefix, depth, out) {
   for await (const [name, h] of dir.entries()) {
     const path = prefix + name;
     if (h.kind === "file") {
-      if (wantedOnPage(path)) out.push([path, await h.getFile()]);
+      if (wanted(path)) out.push([path, await h.getFile()]);
     } else if (isDirName(name, depth, prefix)) {
       await walkHandle(h, path + "/", depth + 1, out);
     }
@@ -47,7 +38,7 @@ async function walkEntry(dir, prefix, depth, out) {
   for (const e of await readAll(dir.createReader())) {
     const path = prefix + e.name;
     if (e.isFile) {
-      if (wantedOnPage(path)) out.push([path, await new Promise((res, rej) => e.file(res, rej))]);
+      if (wanted(path)) out.push([path, await new Promise((res, rej) => e.file(res, rej))]);
     } else if (isDirName(e.name, depth, prefix)) {
       await walkEntry(e, path + "/", depth + 1, out);
     }
@@ -56,7 +47,9 @@ async function walkEntry(dir, prefix, depth, out) {
 
 // <input webkitdirectory>: webkitRelativePath is "<picked folder>/<path>".
 const fromInput = (files) =>
-  [...files].map((f) => [f.webkitRelativePath.split("/").slice(1).join("/"), f]).filter(([p]) => wantedOnPage(p));
+  [...files].map((f) => [f.webkitRelativePath.split("/").slice(1).join("/"), f]).filter(([p]) => wanted(p));
+
+const PREF = "cod4e:"; // localStorage key prefix of the settings
 
 // ---- state ----------------------------------------------------------------------------------------------------
 
@@ -66,8 +59,30 @@ const wire = createTransport();
 addEventListener("pagehide", () => wire.close());
 let reader = null;
 let copier = null;
+let saver = null;
+let storageFree = -1;
+let noticeTimer = 0;
+
+// A few words over the game for the player, which go away on their own.
+function notice(text) {
+  $("progress").textContent = text;
+  $("progress").hidden = !text;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { $("progress").hidden = true; }, 8000);
+}
+
+// The worker that keeps downloaded files; what it cannot keep it says, and the player is told.
+function getSaver() {
+  if (!saver) {
+    saver = new Worker(new URL("./saver.js", import.meta.url), { type: "module" });
+    saver.onmessage = ({ data }) => {
+      if (data.type === "error") notice(`Could not keep ${data.path || "a downloaded file"} for next time: ${data.message}`);
+    };
+  }
+  return saver;
+}
+const savedFiles = []; // the downloaded files this visit has kept (the run report lists them)
 let install = null; // [[path, size], ...] once a reader is ready
-let entries = null; // [[path, File]] of this session's pick, for the copier
 
 const status = (text, cls = "") => {
   $("status").textContent = text;
@@ -91,6 +106,8 @@ async function openInstall(source, extra) {
   const r = await ask(newReader(), { type: "open", source, ctl: bridge.ctl, data: bridge.data, ...extra });
   if (r.type === "ready") {
     install = r.files;
+    // The kept downloads this visit uses count as used, so the least recently used are the ones dropped for room.
+    if (r.downloads?.length) getSaver().postMessage({ type: "touch", paths: r.downloads });
     return true;
   }
   if (r.type === "error") status(r.message, "bad");
@@ -105,12 +122,13 @@ function ready(how) {
 
 async function pick(found) {
   if (!found.length) return status("That folder has none of the game's files. Pick the Call of Duty 4 install folder.", "bad");
-  const have = new Set(found.map(([p]) => ci(p)));
-  const missing = REQUIRED.filter((n) => !have.has(n));
+  // The install's language is in its localization.txt; the client reads that language's zones.
+  const loc = found.find(([p]) => ci(p) === "localization.txt");
+  const { language, entries, missing } = choose(found, loc ? await loc[1].text() : "");
   if (missing.length) return status(`That folder lacks ${missing.join(", ")}. Pick the Call of Duty 4 install folder.`, "bad");
-  entries = found;
+  found = entries;
   if (!(await openInstall("files", { entries: found }))) return;
-  ready(`Install found (${found.length} files).`);
+  ready(`Install found (${found.length} files, ${language}).`);
   if ($("keep").checked) keepCopy(found);
 }
 
@@ -159,6 +177,10 @@ function showOverlay() {
 
 async function play() {
   if (!install) return;
+  try {
+    const { quota, usage } = await navigator.storage.estimate();
+    if (quota) storageFree = Math.max(0, quota - (usage ?? 0));
+  } catch {}
   $("play").disabled = true;
   $("setup").hidden = true;
   $("cod4e-canvas").hidden = false;
@@ -173,6 +195,25 @@ async function play() {
     net_error: () => wire.error(),
     net_close: () => wire.close(),
     config: () => JSON.stringify({ args: clientArgs(), files: install }),
+    // The settings (a config_mp.cfg per profile) are kept in this browser, written the moment the client changes them.
+    pref_get: (key) => {
+      try { return localStorage.getItem(PREF + key) ?? undefined; } catch { return undefined; }
+    },
+    pref_set: (key, value) => localStorage.setItem(PREF + key, value),
+    download_progress: (text) => {
+      $("progress").textContent = text;
+      $("progress").hidden = !text;
+    },
+    // A file the client downloaded from the server it joins (a map): kept for the next visit (saver.js).
+    // What the browser will still let this page store (-1: it does not say), for the client to check before a download.
+    storage_free: () => storageFree,
+    notice,
+    save_download: (path, bytes) => {
+      savedFiles.push(path);
+      const saver = getSaver();
+      const copy = bytes.slice(); // the view is of wasm memory, which lives on after this call
+      saver.postMessage({ type: "save", path, bytes: copy }, [copy.buffer]);
+    },
     fatal: (message) => {
       $("setup").hidden = false;
       $("cod4e-canvas").hidden = true;
@@ -204,7 +245,7 @@ async function play() {
       const reportFrames = params.has("connect") ? (t.spawnedFrames ?? Infinity) : 0;
       if (params.has("report") && !t.reported && (overlay.frames ?? 0) - reportFrames >= Number(params.get("report") || 600)) {
         t.reported = true;
-        fetch("/report", { method: "POST", body: JSON.stringify({ ua: navigator.userAgent, overlay }) }).catch(() => {});
+        fetch("/report", { method: "POST", body: JSON.stringify({ ua: navigator.userAgent, overlay, saved: savedFiles }) }).catch(() => {});
       }
     },
   };
@@ -250,6 +291,10 @@ async function boot() {
     }
   }
   if (params.has("name")) $("name").value = params.get("name");
+  // Automated runs can start with settings already kept: ?seed=<JSON object of settings key to config text>.
+  if (params.has("seed")) {
+    for (const [key, text] of Object.entries(JSON.parse(params.get("seed")))) localStorage.setItem(PREF + key, text);
+  }
   $("play").onclick = play;
   if (!self.crossOriginIsolated) {
     return status("This page must be served with cross-origin isolation headers (COOP and COEP); see web/serve.py.", "bad");
@@ -281,14 +326,23 @@ async function boot() {
     else await walkEntry(item.webkitGetAsEntry(), "", 0, out);
     pick(out);
   };
+  if (navigator.storage?.getDirectory) {
+    $("forget-downloads").hidden = false;
+    $("forget-downloads").onclick = async () => {
+      try { await (await navigator.storage.getDirectory()).removeEntry("cod4e-downloads", { recursive: true }); } catch {}
+      status("The maps downloaded to this browser are deleted. Reload the page to use the install only.");
+    };
+  }
   $("forget").onclick = async () => {
     reader?.terminate();
     install = null;
     $("play").disabled = true;
-    try { await (await navigator.storage.getDirectory()).removeEntry("cod4e-install", { recursive: true }); } catch {}
+    for (const dir of ["cod4e-install", "cod4e-downloads"]) {
+      try { await (await navigator.storage.getDirectory()).removeEntry(dir, { recursive: true }); } catch {}
+    }
     $("forget").hidden = true;
     $("copy").textContent = "";
-    status("The saved copy is deleted. Pick the install folder again.");
+    status("The saved copy and the maps downloaded to this browser are deleted. Pick the install folder again.");
   };
   // Automated runs read the install from a development server instead of a picker (web/serve.py --install).
   if (params.has("dev-install")) {

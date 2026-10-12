@@ -20,27 +20,48 @@ struct Mount {
 
 static MOUNT: RwLock<Option<Mount>> = RwLock::new(None);
 
-/// Replaces the mounted install. `files` pairs an install-relative `/`-separated path (`main/iw_00.iwd`) with its
-/// source; directories are implied by the paths.
-pub fn mount(files: impl IntoIterator<Item = (String, Arc<dyn ReadAt>)>) {
-    let mut m = Mount::default();
-    m.dirs.entry(WEB_ROOT.to_owned()).or_default();
-    for (rel, src) in files {
+impl Mount {
+    fn new() -> Self {
+        let mut m = Self::default();
+        m.dirs.entry(WEB_ROOT.to_owned()).or_default();
+        m
+    }
+
+    fn insert(&mut self, rel: &str, src: Arc<dyn ReadAt>) {
         let mut dir = WEB_ROOT.to_owned();
         let mut parts = rel.split('/').filter(|p| !p.is_empty()).peekable();
         while let Some(part) = parts.next() {
-            let entries = m.dirs.entry(dir.clone()).or_default();
+            let entries = self.dirs.entry(dir.clone()).or_default();
             if !entries.iter().any(|e| e == part) {
                 entries.push(part.to_owned());
             }
             dir = format!("{dir}/{part}");
             if parts.peek().is_some() {
-                m.dirs.entry(dir.clone()).or_default();
+                self.dirs.entry(dir.clone()).or_default();
             }
         }
-        m.files.insert(dir, src);
+        self.files.insert(dir, src);
+    }
+}
+
+/// Replaces the mounted install. `files` pairs an install-relative `/`-separated path (`main/iw_00.iwd`) with its
+/// source; directories are implied by the paths.
+pub fn mount(files: impl IntoIterator<Item = (String, Arc<dyn ReadAt>)>) {
+    let mut m = Mount::new();
+    for (rel, src) in files {
+        m.insert(&rel, src);
     }
     *MOUNT.write().unwrap() = Some(m);
+}
+
+/// Adds (or replaces) one file in the mounted install: what the client wrote after the page mounted it, a map it
+/// downloaded.
+pub fn add(rel: &str, src: Arc<dyn ReadAt>) {
+    MOUNT
+        .write()
+        .unwrap()
+        .get_or_insert_with(Mount::new)
+        .insert(rel, src);
 }
 
 /// The path as the mount keys it: `/`-separated, no trailing slash.

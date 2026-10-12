@@ -28,7 +28,8 @@ pub fn is_identity(r_gamma: f32) -> bool {
 }
 
 const SHADER: &str = "
-struct Params { exponent: f32 }
+// A vec4: WebGL2 binds uniform buffers in 16-byte units, and a 4-byte struct fails pipeline validation there.
+struct Params { exponent: vec4<f32> }
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> params: Params;
 
@@ -41,7 +42,7 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let c = textureLoad(src, vec2<i32>(pos.xy), 0);
-    return vec4<f32>(pow(c.rgb, vec3<f32>(params.exponent)), c.a);
+    return vec4<f32>(pow(c.rgb, vec3<f32>(params.exponent.x)), c.a);
 }
 ";
 

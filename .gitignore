@@ -7,3 +7,4 @@
 # Agent and local git worktrees.
 /.worktrees/
 games_mp.log
+__pycache__/

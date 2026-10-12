@@ -490,6 +490,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::web_join::run),
     },
     StageDef {
+        name: "web-download",
+        description: "the browser client in a headless Chromium joins a native server whose map (a custom map in its usermaps folder) the browser's install lacks: it downloads the map over WebTransport, plays, keeps it in the browser, and a second visit joins with no download (skipped without a built web/pkg, a Chromium or an install)",
+        needs_install: false,
+        timeout: Duration::from_secs(20 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::web_join::run_download),
+    },
+    StageDef {
         name: "headless-bots-32",
         description: "headless server with 32 bots (the 32-player server budget)",
         needs_install: false,
