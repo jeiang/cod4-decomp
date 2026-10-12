@@ -38,6 +38,21 @@ fn approach(current: f32, target: f32, max_change: f32, dt: f32) -> f32 {
     }
 }
 
+/// `AimTarget_PlayerInValidState`: a player that is spectating, flying, dead or in the intermission (or has
+/// `otherFlags` bit 2 set) has no aim-assist targets, so the blur falls back to its default focus.
+pub fn targets_allowed(ps: &PlayerState) -> bool {
+    ps.other_flags & 2 == 0
+        && !matches!(
+            ps.pm_type,
+            PmType::Noclip
+                | PmType::Ufo
+                | PmType::Spectator
+                | PmType::Intermission
+                | PmType::Dead
+                | PmType::DeadLinked
+        )
+}
+
 /// The blur of aiming down the sights, which eases to its focus while the weapon is fully aimed.
 #[derive(Debug, Clone, Copy)]
 pub struct AdsDof {
@@ -51,18 +66,28 @@ impl Default for AdsDof {
 }
 
 impl AdsDof {
-    /// `CG_UpdateAdsDof`: the blur for a view with the weapon `frac` of the way to the sights (0 hip, 1 aimed) and
-    /// something `trace` units ahead of the eye (`ADS_TRACE` when nothing is). The original focuses on the players on
-    /// screen; with no list of them here, the focus is the middle of the screen's distance alone: sharp from just
-    /// in front of what the sights point at out to 2500 units, closer than 256 and farther blurred.
-    pub fn update(&mut self, ps: &PlayerState, trace: f32, dt: f32) -> Dof {
+    /// `CG_UpdateAdsDof`: the blur for a view with the weapon `frac` of the way to the sights (0 hip, 1 aimed),
+    /// `targets` the distances of the enemies on screen (`AimAssist_GetScreenTargetEntity`) and something `trace`
+    /// units ahead of the eye (`ADS_TRACE` when nothing is). The focus band spans the targets, 30 units either way
+    /// (near end 50..512, far start 1000..2500); with none it is 256 to 2500, and what the sights point at widens it.
+    pub fn update(&mut self, ps: &PlayerState, targets: &[f32], trace: f32, dt: f32) -> Dof {
         let frac = ps.weapon_pos_frac;
         let dead = ps.pm_type >= PmType::Dead;
         if frac == 0.0 && !dead {
             self.current = REST;
             return REST;
         }
-        let (mut near_end, mut far_start): (f32, f32) = (256.0, 2500.0);
+        let (mut near_end, mut far_start) = (10000.0f32, -1.0f32);
+        for d in targets {
+            near_end = near_end.min(d - 30.0);
+            far_start = far_start.max(d + 30.0);
+        }
+        if far_start >= near_end {
+            near_end = near_end.clamp(50.0, 512.0);
+            far_start = far_start.clamp(1000.0, 2500.0);
+        } else {
+            (near_end, far_start) = (256.0, 2500.0);
+        }
         if trace < near_end {
             near_end = trace - 30.0;
         }
@@ -160,27 +185,74 @@ mod tests {
     #[test]
     fn a_hip_fired_view_is_sharp() {
         let mut ads = AdsDof::default();
-        assert!(!ads.update(&aiming(0.0), 300.0, 0.016).active());
+        assert!(!ads.update(&aiming(0.0), &[], 300.0, 0.016).active());
     }
 
     #[test]
     fn aiming_blurs_what_is_closer_and_what_is_farther_than_the_focus() {
         let mut ads = AdsDof::default();
-        let d = ads.update(&aiming(0.5), 2000.0, 0.016);
+        let d = ads.update(&aiming(0.5), &[], 2000.0, 0.016);
         assert!(d.active());
         // Half way to the sights is half way between the hip and the aimed numbers.
         assert_eq!(d.near_end, 0.5 * 256.0);
         assert_eq!(d.far_start, 0.5 * 2500.0 + 0.5 * 5000.0);
         // Everything nearer than the wall in front of the sights is out of focus.
         let mut ads = AdsDof::default();
-        let d = ads.update(&aiming(0.5), 100.0, 0.016);
+        let d = ads.update(&aiming(0.5), &[], 100.0, 0.016);
         assert_eq!(d.near_end, 0.5 * 70.0);
+    }
+
+    #[test]
+    fn a_player_who_cannot_aim_assist_has_no_screen_targets() {
+        assert!(targets_allowed(&aiming(1.0)));
+        for t in [
+            PmType::Spectator,
+            PmType::Dead,
+            PmType::Noclip,
+            PmType::Intermission,
+        ] {
+            let ps = PlayerState {
+                pm_type: t,
+                ..aiming(1.0)
+            };
+            assert!(!targets_allowed(&ps), "{t:?}");
+        }
+        let ps = PlayerState {
+            other_flags: 2,
+            ..aiming(1.0)
+        };
+        assert!(!targets_allowed(&ps));
+    }
+
+    #[test]
+    fn the_enemies_on_screen_set_the_focus_band() {
+        let focus = |targets: &[f32], trace: f32| {
+            let mut ads = AdsDof::default();
+            let mut d = ads.update(&aiming(1.0), targets, trace, 0.016);
+            for _ in 0..2000 {
+                d = ads.update(&aiming(1.0), targets, trace, 0.016);
+            }
+            d
+        };
+        // A far enemy and a near one: the band spans both, 30 units either side, then is clamped; a wall at 1000 ends the
+        // view there.
+        let d = focus(&[800.0, 1200.0], 1000.0);
+        assert_eq!((d.near_end, d.far_start), (512.0, 1230.0));
+        // A close enemy: near end follows it but never under 50, far start never under 1000.
+        let d = focus(&[60.0], 1000.0);
+        assert_eq!((d.near_end, d.far_start), (50.0, 1000.0));
+        // A very far enemy cannot push the far start past 2500.
+        let d = focus(&[6000.0], 1000.0);
+        assert_eq!((d.near_end, d.far_start), (512.0, 2500.0));
+        // A wall in front of the sights still pulls the near end in.
+        let d = focus(&[300.0], 100.0);
+        assert_eq!(d.near_end, 70.0);
     }
 
     #[test]
     fn a_fully_aimed_view_eases_to_its_focus_instead_of_jumping() {
         let mut ads = AdsDof::default();
-        let first = ads.update(&aiming(1.0), 2000.0, 0.016);
+        let first = ads.update(&aiming(1.0), &[], 2000.0, 0.016);
         // From hip numbers (far start 5000) toward the aimed 2500, at most 400 per 50 ms.
         assert!(
             first.far_start < 5000.0 && first.far_start > 4800.0,
@@ -188,7 +260,7 @@ mod tests {
         );
         let mut d = first;
         for _ in 0..600 {
-            d = ads.update(&aiming(1.0), 2000.0, 0.016);
+            d = ads.update(&aiming(1.0), &[], 2000.0, 0.016);
         }
         assert_eq!(
             (d.near_end, d.far_start, d.far_end),

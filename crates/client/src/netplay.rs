@@ -1030,7 +1030,7 @@ impl NetPlay {
             let (yaw, pitch) = (seen[1].to_radians(), -seen[0].to_radians());
             let dof = match &kill {
                 Some((_, dof)) => *dof,
-                None => self.scene_dof(&snap.ps, &ps, view_model, render, (yaw, pitch), dt),
+                None => self.scene_dof(st, &snap.ps, &ps, view_model, (render, (yaw, pitch)), dt),
             };
             self.c.kill_cam_frames += u64::from(kill.is_some());
             self.c.dof_frames += u64::from(dof.active());
@@ -1252,7 +1252,7 @@ impl NetPlay {
         models.extend(hands);
         let (yaw, pitch) = (seen[1].to_radians(), -(seen[0] + hit_view[0]).to_radians());
         let roll = (seen[2] + kick[2] + hit_view[1]).to_radians();
-        let dof = self.scene_dof(&snap.ps, &ps, view_model, render, (yaw, pitch), dt);
+        let dof = self.scene_dof(st, &snap.ps, &ps, view_model, (render, (yaw, pitch)), dt);
         self.c.dof_frames += u64::from(dof.active());
         let drawn = self.fx_frame(dt, st, own, &events, render, (yaw, pitch, roll));
         models.extend(self.props.instances());
@@ -1340,16 +1340,17 @@ impl NetPlay {
     /// the range the first-person weapon blurs over, `None` when it is not drawn.
     fn scene_dof(
         &mut self,
+        st: i32,
         snap: &PlayerState,
         ps: &PlayerState,
         view_model: Option<(f32, f32)>,
-        eye: Vec3,
-        (yaw, pitch): (f32, f32),
+        (eye, (yaw, pitch)): (Vec3, (f32, f32)),
         dt: f32,
     ) -> render::Dof {
         let mut dof = crate::dof::scripted(snap).unwrap_or_else(|| {
             let aimed = ps.weapon_pos_frac != 0.0 || ps.pm_type >= PmType::Dead;
             let mut focus = crate::dof::ADS_TRACE;
+            let mut targets = Vec::new();
             if aimed {
                 let (sy, cy) = yaw.sin_cos();
                 let (sp, cp) = pitch.sin_cos();
@@ -1363,11 +1364,25 @@ impl NetPlay {
                         [0.0; 3],
                         [0.0; 3],
                         ps.client_num,
-                        contents::MASK_SHOT,
+                        contents::MASK_ADS_DOF_TRACE,
                     )
                     .fraction;
+                // The enemies on screen (`AimAssist_GetScreenTarget*`): the focus band spans them.
+                if crate::dof::targets_allowed(ps) {
+                    targets = self
+                        .screen_targets(
+                            st,
+                            ps.client_num,
+                            eye,
+                            Vec3::from(ps.origin),
+                            [-pitch.to_degrees(), yaw.to_degrees()],
+                        )
+                        .iter()
+                        .map(|s| s.dist_sqr.sqrt())
+                        .collect();
+                }
             }
-            self.ads_dof.update(ps, focus, dt)
+            self.ads_dof.update(ps, &targets, focus, dt)
         });
         (dof.view_model_start, dof.view_model_end) = view_model.unwrap_or_default();
         dof

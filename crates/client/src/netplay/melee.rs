@@ -17,8 +17,16 @@ const CROUCHED: f32 = 50.0;
 const PRONE: f32 = 30.0;
 
 impl NetPlay {
-    /// The enemies in view of the player, nearest the crosshair first. `eye` and `feet` are the player's.
-    fn melee_targets(&self, st: i32, own: u16, eye: Vec3, feet: Vec3) -> Vec<automelee::Screen> {
+    /// The enemies in view of the player, nearest the crosshair first. `eye` and `feet` are the player's, `angles`
+    /// (pitch, yaw, degrees) the way the view looks.
+    pub(super) fn screen_targets(
+        &self,
+        st: i32,
+        own: u16,
+        eye: Vec3,
+        feet: Vec3,
+        angles: [f32; 2],
+    ) -> Vec<automelee::Screen> {
         let (Some(snap), Some(ui)) = (self.net.latest(), self.net.ui_ref()) else {
             return Vec::new();
         };
@@ -47,7 +55,7 @@ impl NetPlay {
         let view = View {
             eye,
             feet,
-            angles: [self.angles[0], self.angles[1], 0.0],
+            angles: [angles[0], angles[1], 0.0],
             tan_half_fov: self.tan_half_fov,
         };
         let mut seen = automelee::screen_targets(&view, &targets);
@@ -84,7 +92,7 @@ impl NetPlay {
             self.automelee = automelee::AutoMelee::default();
             return;
         }
-        let screens = self.melee_targets(st, own, eye, feet);
+        let screens = self.screen_targets(st, own, eye, feet, [self.angles[0], self.angles[1]]);
         if melee && !prone {
             self.melee_charge = automelee::charge(&screens, eye, self.weapon_params.melee_range);
         }

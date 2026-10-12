@@ -36,6 +36,10 @@ pub struct Gfx {
     pub specular: bool,
     /// `r_dof_enable`.
     pub dof: bool,
+    /// `r_dof_bias`, within the 0.1 to 3 the engine registers it with.
+    pub dof_bias: f32,
+    /// `r_dof_tweak`: the blur the `r_dof_*` dvars describe, replacing the game's.
+    pub dof_tweak: Option<render::Dof>,
     /// `r_glow_allowed`.
     pub glow: bool,
     /// `r_dlightLimit`, at most four.
@@ -114,6 +118,26 @@ fn spot_params(c: &Cvars) -> render::SpotParams {
     }
 }
 
+/// The blur `r_dof_tweak` asks for (`R_SetDepthOfField`), each dvar within the range the engine registers it with.
+fn dof_tweak(c: &Cvars) -> render::Dof {
+    let value = |n: &str, min: f32, max: f32, default: f32| {
+        c.get(n)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .map_or(default, |v| v.clamp(min, max))
+    };
+    render::Dof {
+        view_model_start: value("r_dof_viewModelStart", 0.0, 128.0, 2.0),
+        view_model_end: value("r_dof_viewModelEnd", 0.0, 128.0, 8.0),
+        near_start: value("r_dof_nearStart", 0.0, 1000.0, 10.0),
+        near_end: value("r_dof_nearEnd", 0.0, 1000.0, 60.0),
+        far_start: value("r_dof_farStart", 0.0, 20000.0, 1000.0),
+        far_end: value("r_dof_farEnd", 0.0, 20000.0, 7000.0),
+        near_blur: value("r_dof_nearBlur", 4.0, 10.0, 6.0),
+        far_blur: value("r_dof_farBlur", 0.0, 10.0, 1.8),
+    }
+}
+
 impl Gfx {
     pub fn from_cvars(c: &Cvars) -> Gfx {
         let text = |n: &str| c.get(n).unwrap_or("");
@@ -146,6 +170,14 @@ impl Gfx {
             shadows: on("sm_enable"),
             specular: on("r_specular"),
             dof: on("r_dof_enable"),
+            // `r_dof_bias` and `r_dof_tweak` are CHEAT dvars: they only act with `sv_cheats` on.
+            dof_bias: c
+                .get("r_dof_bias")
+                .filter(|_| c.bool("sv_cheats"))
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+                .map_or(render::DOF_BIAS, |v| v.clamp(0.1, 3.0)),
+            dof_tweak: (c.bool("sv_cheats") && c.bool("r_dof_tweak")).then(|| dof_tweak(c)),
             glow: on("r_glow_allowed"),
             dlight_limit: c
                 .get("r_dlightLimit")
@@ -154,7 +186,7 @@ impl Gfx {
                     n.min(render::dlight::MAX_VISIBLE)
                 }),
             spot: spot_params(c),
-            cookies: on("sc_enable"),
+            cookies: c.bool("sc_enable"),
             cookie_count: c
                 .get("sc_count")
                 .and_then(|v| v.trim().parse::<usize>().ok())
@@ -211,6 +243,8 @@ impl Gfx {
         }
         base.specular = self.specular;
         base.dof = self.dof;
+        base.dof_bias = self.dof_bias;
+        base.dof_tweak = self.dof_tweak;
         base.glow = self.glow;
         base.draw_sun = self.draw_sun;
         base.distortion = self.distortion;
@@ -299,6 +333,33 @@ mod tests {
         assert_eq!(s.shadows, render::ShadowMode::Off);
         assert!(!s.specular && !s.dof && !s.glow && !s.draw_sun && !s.distortion);
         assert_eq!(s.aa_samples, 4);
+    }
+
+    #[test]
+    fn the_dof_dvars_set_the_bias_and_the_tweaked_blur() {
+        let s = Gfx::from_cvars(&cvars(&[])).settings(render::Settings::default());
+        assert_eq!((s.dof_bias, s.dof_tweak), (0.5, None));
+        // Cheat dvars do nothing without `sv_cheats`.
+        let s = Gfx::from_cvars(&cvars(&[("r_dof_bias", "2"), ("r_dof_tweak", "1")]))
+            .settings(render::Settings::default());
+        assert_eq!((s.dof_bias, s.dof_tweak), (0.5, None));
+        let g = Gfx::from_cvars(&cvars(&[
+            ("sv_cheats", "1"),
+            ("r_dof_bias", "9"),
+            ("r_dof_tweak", "1"),
+            ("r_dof_nearEnd", "90"),
+            ("r_dof_nearBlur", "1"),
+        ]));
+        let s = g.settings(render::Settings::default());
+        assert_eq!(s.dof_bias, 3.0);
+        let d = s.dof_tweak.unwrap();
+        assert_eq!((d.near_end, d.near_blur, d.far_end), (90.0, 4.0, 7000.0));
+    }
+
+    #[test]
+    fn the_shadow_cookies_are_off_unless_asked_for() {
+        assert!(!Gfx::from_cvars(&cvars(&[])).cookies);
+        assert!(Gfx::from_cvars(&cvars(&[("sc_enable", "1")])).cookies);
     }
 
     #[test]
