@@ -1137,13 +1137,31 @@ impl Ui {
         self.lose_item_focus(host, m);
     }
 
-    fn lose_item_focus(&mut self, host: &mut dyn Host, m: usize) {
-        if let Some(i) = self.menus[m].cursor.take() {
+    /// `Menu_ClearFocus`: every item that has the focus loses it (running its `leaveFocus`), and the cursor is
+    /// cleared. Returns the item that had it.
+    fn lose_item_focus(&mut self, host: &mut dyn Host, m: usize) -> Option<usize> {
+        self.menus[m].cursor = None;
+        let mut had = None;
+        for i in 0..self.menus[m].items.len() {
+            if self.menus[m].items[i].dyn_flags & dynf::HASFOCUS == 0 {
+                continue;
+            }
             self.menus[m].items[i].dyn_flags &= !dynf::HASFOCUS;
+            had = Some(i);
             if let Some(s) = self.menus[m].def.items[i].leave_focus.clone() {
                 self.run_script(host, Some(m), Some(i), &s);
             }
         }
+        had
+    }
+
+    /// `Menu_GetFocusedItem`: the item that has the focus, which is not always the cursor (a static text item the
+    /// cursor moved onto, with the pointer off its text, leaves the focus where it was).
+    fn focused_item(&self, m: usize) -> Option<usize> {
+        self.menus[m]
+            .items
+            .iter()
+            .position(|it| it.dyn_flags & dynf::HASFOCUS != 0)
     }
 
     fn gain_focus(&mut self, host: &mut dyn Host, m: usize) {
@@ -1174,26 +1192,34 @@ impl Ui {
     }
 
     pub fn set_focus(&mut self, host: &mut dyn Host, m: usize, i: usize) {
-        if self.menus[m].cursor == Some(i) {
+        if self.menus[m].items[i].dyn_flags & dynf::HASFOCUS != 0 {
             return;
         }
-        self.lose_item_focus(host, m);
+        let old = self.lose_item_focus(host, m);
         // Typing in a field ends when another item takes focus.
         for it in &mut self.menus[m].items {
             it.editing = false;
         }
         self.menus[m].cursor = Some(i);
-        // A static text item is highlighted only while the pointer is over its text.
-        let (cx, cy) = self.cursor;
-        if self.menus[m].def.items[i].ty != ity::TEXT || self.over_text(&*host, m, i, cx, cy) {
-            self.menus[m].items[i].dyn_flags |= dynf::HASFOCUS;
-        }
         let d = self.menus[m].def.clone();
-        // A static text item takes focus without running `onFocus` (`Item_SetFocus`).
-        if d.items[i].ty != ity::TEXT
-            && let Some(s) = &d.items[i].on_focus
-        {
-            self.run_script(host, Some(m), Some(i), s);
+        // A static text item takes the focus only while the pointer is over its text, and runs no `onFocus`; off
+        // its text the item before it keeps the focus (`Item_SetFocus`).
+        let focus = if d.items[i].ty != ity::TEXT {
+            Some(i)
+        } else {
+            let (cx, cy) = self.cursor;
+            if self.over_text(&*host, m, i, cx, cy) {
+                self.menus[m].items[i].dyn_flags |= dynf::HASFOCUS;
+                None
+            } else {
+                old
+            }
+        };
+        if let Some(f) = focus {
+            self.menus[m].items[f].dyn_flags |= dynf::HASFOCUS;
+            if let Some(s) = &d.items[f].on_focus {
+                self.run_script(host, Some(m), Some(f), s);
+            }
         }
     }
 
@@ -1711,7 +1737,7 @@ impl Ui {
             return used;
         }
         // The focused item's own key handling comes before the menu's `execKey` handlers (`Menu_HandleKey`).
-        let item_keys = self.menus[m].cursor.is_some_and(|i| {
+        let item_keys = self.focused_item(m).is_some_and(|i| {
             let enter = matches!(key, UiKey::Enter | UiKey::Mouse1);
             let steps = matches!(
                 key,
@@ -1766,14 +1792,14 @@ impl Ui {
             }
             return true;
         }
-        let Some(i) = self.menus[m].cursor else {
+        let Some(i) = self.focused_item(m) else {
             // `Menu_HandleKey`: Up and Left step back, Tab, Down and Right forward; Enter acts on the focused item only.
             return match key {
-                UiKey::Up | UiKey::Left => {
+                UiKey::Up | UiKey::Left | UiKey::WheelUp => {
                     self.move_focus(host, m, -1);
                     true
                 }
-                UiKey::Down | UiKey::Tab | UiKey::Right => {
+                UiKey::Down | UiKey::Tab | UiKey::Right | UiKey::WheelDown => {
                     self.move_focus(host, m, 1);
                     true
                 }
@@ -2688,6 +2714,65 @@ mod tests {
         ui.cursor = (600.0, 450.0);
         ui.key(&mut host, UiKey::Mouse1);
         assert!(!ui.menus[0].items[0].editing);
+    }
+
+    #[test]
+    fn a_click_that_lands_on_another_menu_ends_the_edit_of_the_first() {
+        let mut back = spec("back");
+        back.items = vec![item("b", ity::BUTTON, rect(300.0, 300.0, 100.0, 20.0))];
+        let mut field = item("f", ity::EDITFIELD, rect(10.0, 10.0, 100.0, 20.0));
+        field.dvar = Some("name".into());
+        let mut front = spec("front");
+        front.rect = rect(0.0, 0.0, 200.0, 100.0);
+        front.items = vec![field];
+        let mut ui = synthetic(vec![back, front]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "back");
+        ui.open_by_name(&mut host, "front");
+        let front = ui.menu_index("front").unwrap();
+        ui.set_focus(&mut host, front, 0);
+        ui.begin_edit(&mut host, front, 0);
+        ui.cursor = (310.0, 310.0);
+        ui.key(&mut host, UiKey::Mouse1);
+        assert!(!ui.menus[front].items[0].editing);
+    }
+
+    #[test]
+    fn the_wheel_steps_the_focus_when_nothing_has_it() {
+        let mut s = spec("a");
+        s.items = buttons(3);
+        let mut ui = synthetic(vec![s]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "a");
+        ui.key(&mut host, UiKey::WheelDown);
+        assert_eq!(ui.menus[0].cursor, Some(1));
+    }
+
+    /// A static text item reached by the keyboard, with the pointer off its text, takes no highlight: the item that
+    /// had it keeps it, and Enter acts on that one.
+    #[test]
+    fn keyboard_focus_onto_a_text_item_leaves_the_highlight_and_enter_where_they_were() {
+        let mut s = spec("a");
+        s.items = buttons(1);
+        for i in 1..3 {
+            let mut t = item(
+                &i.to_string(),
+                ity::TEXT,
+                rect(10.0, 10.0 + 30.0 * i as f32, 100.0, 20.0),
+            );
+            t.text = Some("label".into());
+            s.items.push(t);
+        }
+        let mut ui = synthetic(vec![s]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "a");
+        ui.cursor = (600.0, 450.0);
+        ui.set_focus(&mut host, 0, 0);
+        ui.key(&mut host, UiKey::Down);
+        assert_eq!(ui.menus[0].cursor, Some(1), "the cursor moved on");
+        assert_eq!(ui.focused_item(0), Some(0), "the highlight did not");
+        ui.key(&mut host, UiKey::Enter);
+        assert_eq!(host.dvar("ran"), "0");
     }
 
     #[test]
