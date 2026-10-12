@@ -447,6 +447,9 @@ struct State {
     /// When the settings were last written to the page's storage: a browser has no exit to save them at.
     #[cfg(target_arch = "wasm32")]
     config_saved_at: Instant,
+    /// The browser refused the settings once: they are not tried again, and the player has been told.
+    #[cfg(target_arch = "wasm32")]
+    config_failed: bool,
     /// How many pipelines the background compile has built, and how many draws the last frame skipped for want of one.
     #[cfg(target_arch = "wasm32")]
     warm: render::Progress,
@@ -1024,6 +1027,8 @@ impl Viewer {
             overlay_at: now,
             #[cfg(target_arch = "wasm32")]
             config_saved_at: now,
+            #[cfg(target_arch = "wasm32")]
+            config_failed: false,
             #[cfg(target_arch = "wasm32")]
             warm: render::Progress { done: 0, total: 0 },
             #[cfg(target_arch = "wasm32")]
@@ -1703,10 +1708,17 @@ impl Viewer {
         }
         // A native client writes the config when it exits; a tab has no such moment, so changes are kept as they come.
         #[cfg(target_arch = "wasm32")]
-        if st.input.unsaved() && st.config_saved_at.elapsed() >= CONFIG_SAVE_EVERY {
+        if !st.config_failed
+            && st.input.unsaved()
+            && st.config_saved_at.elapsed() >= CONFIG_SAVE_EVERY
+        {
             st.config_saved_at = Instant::now();
             if let Err(e) = st.input.save() {
                 eprintln!("cannot save the config: {e}");
+                st.config_failed = true;
+                crate::web::notice(
+                    "Your settings cannot be saved in this browser (storage is full or off).",
+                );
             }
         }
         if std::mem::take(&mut st.video_pending) && st.shell.is_some() {

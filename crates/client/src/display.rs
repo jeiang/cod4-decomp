@@ -345,7 +345,9 @@ pub fn apply(window: &Window, req: &Request) -> Option<String> {
     use winit::window::Fullscreen;
     match req.kind {
         FullscreenKind::Windowed => {
-            window.set_fullscreen(None);
+            if window.fullscreen().is_some() {
+                window.set_fullscreen(None);
+            }
             let now = window.inner_size();
             if let Some((w, h)) = req.size.filter(|&s| s != (now.width, now.height)) {
                 let _ = window.request_inner_size(Size::Physical(PhysicalSize::new(w, h)));

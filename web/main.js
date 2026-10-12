@@ -60,6 +60,27 @@ addEventListener("pagehide", () => wire.close());
 let reader = null;
 let copier = null;
 let saver = null;
+let storageFree = -1;
+let noticeTimer = 0;
+
+// A few words over the game for the player, which go away on their own.
+function notice(text) {
+  $("progress").textContent = text;
+  $("progress").hidden = !text;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { $("progress").hidden = true; }, 8000);
+}
+
+// The worker that keeps downloaded files; what it cannot keep it says, and the player is told.
+function getSaver() {
+  if (!saver) {
+    saver = new Worker(new URL("./saver.js", import.meta.url), { type: "module" });
+    saver.onmessage = ({ data }) => {
+      if (data.type === "error") notice(`Could not keep ${data.path || "a downloaded file"} for next time: ${data.message}`);
+    };
+  }
+  return saver;
+}
 const savedFiles = []; // the downloaded files this visit has kept (the run report lists them)
 let install = null; // [[path, size], ...] once a reader is ready
 
@@ -85,6 +106,8 @@ async function openInstall(source, extra) {
   const r = await ask(newReader(), { type: "open", source, ctl: bridge.ctl, data: bridge.data, ...extra });
   if (r.type === "ready") {
     install = r.files;
+    // The kept downloads this visit uses count as used, so the least recently used are the ones dropped for room.
+    if (r.downloads?.length) getSaver().postMessage({ type: "touch", paths: r.downloads });
     return true;
   }
   if (r.type === "error") status(r.message, "bad");
@@ -154,6 +177,10 @@ function showOverlay() {
 
 async function play() {
   if (!install) return;
+  try {
+    const { quota, usage } = await navigator.storage.estimate();
+    if (quota) storageFree = Math.max(0, quota - (usage ?? 0));
+  } catch {}
   $("play").disabled = true;
   $("setup").hidden = true;
   $("cod4e-canvas").hidden = false;
@@ -178,9 +205,12 @@ async function play() {
       $("progress").hidden = !text;
     },
     // A file the client downloaded from the server it joins (a map): kept for the next visit (saver.js).
+    // What the browser will still let this page store (-1: it does not say), for the client to check before a download.
+    storage_free: () => storageFree,
+    notice,
     save_download: (path, bytes) => {
       savedFiles.push(path);
-      saver ??= new Worker(new URL("./saver.js", import.meta.url), { type: "module" });
+      const saver = getSaver();
       const copy = bytes.slice(); // the view is of wasm memory, which lives on after this call
       saver.postMessage({ type: "save", path, bytes: copy }, [copy.buffer]);
     },
@@ -296,6 +326,13 @@ async function boot() {
     else await walkEntry(item.webkitGetAsEntry(), "", 0, out);
     pick(out);
   };
+  if (navigator.storage?.getDirectory) {
+    $("forget-downloads").hidden = false;
+    $("forget-downloads").onclick = async () => {
+      try { await (await navigator.storage.getDirectory()).removeEntry("cod4e-downloads", { recursive: true }); } catch {}
+      status("The maps downloaded to this browser are deleted. Reload the page to use the install only.");
+    };
+  }
   $("forget").onclick = async () => {
     reader?.terminate();
     install = null;

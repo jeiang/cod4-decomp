@@ -27,6 +27,8 @@ use web_time::Instant;
 /// How long the session may take to open, and how long the server may take to say what it runs once it has.
 const OPEN_WITHIN: Duration = Duration::from_secs(10);
 const ANSWER_WITHIN: Duration = Duration::from_secs(5);
+/// Most a browser takes from one server: the files are held in memory while the page runs.
+const WEB_MAX_BYTES: u64 = 512 << 20;
 /// How long the server may take to list its files.
 const LIST_WITHIN: Duration = Duration::from_secs(10);
 
@@ -149,7 +151,7 @@ async fn download(
     let progress = Progress::default();
     progress.total.store(file.size, Ordering::Relaxed);
     let mut bytes: Vec<u8> = Vec::new();
-    let mut fetcher = Fetcher::new(wire, server, &file.name);
+    let mut fetcher = Fetcher::new(wire, server, &file.name).expecting(file.size);
     let mut shown: Option<Instant> = None;
     loop {
         let before = progress.done.load(Ordering::Relaxed);
@@ -205,6 +207,19 @@ async fn sync(
     };
     let todo = download::plan(&cli.install, game, map, listing);
     let count = todo.len();
+    let need: u64 = todo.iter().map(|(f, _)| f.size).sum();
+    if need > manifest::MAX_SUM.min(WEB_MAX_BYTES) {
+        return Err("The server's files are too large for this browser".into());
+    }
+    if let Some(free) = web::storage_free()
+        && free < need
+    {
+        return Err(format!(
+            "There is not enough room in this browser's storage for the server's files ({:.0} MB needed, {:.0} MB free)",
+            need as f64 / 1e6,
+            free as f64 / 1e6
+        ));
+    }
     for (i, (file, dest)) in todo.into_iter().enumerate() {
         let note = format!("Downloading {} ({} of {count})", file.name, i + 1);
         let bytes = download(wire, server, &file, &note).await?;
@@ -229,7 +244,8 @@ pub async fn prepare(cli: &mut Cli) -> Result<(), String> {
         return Err(format!("The server runs an invalid mod ({}).", e.game));
     }
     if download::wanted(&cli.install, &e.game, &e.map) {
-        // `cl_allowDownload` is the player's, kept in the settings the client has not read yet.
+        // `cl_allowDownload` is the player's, kept in the settings the client has not read yet. A browser has one
+        // profile (profiles are folders it has none of), so the active one is the default.
         let kept =
             web::pref_get(&profile::web_config_key(profile::DEFAULT_PROFILE).to_string_lossy());
         let allowed = kept

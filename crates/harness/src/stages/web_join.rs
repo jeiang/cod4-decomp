@@ -373,6 +373,8 @@ fn visit(
     let started = Instant::now();
     let browser = Kill(
         Command::new(chrome)
+            // The dev shell's library path is for the build; a Chromium from the Nix store takes its own.
+            .env_remove("LD_LIBRARY_PATH")
             .args([
                 "--headless=new",
                 "--no-first-run",

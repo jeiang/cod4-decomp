@@ -153,6 +153,8 @@ pub struct Fetcher {
     have: Vec<bool>,
     total: Option<u64>,
     offset: u64,
+    /// The size the file is known to have (a manifest said): a first piece that claims another is refused.
+    expect: Option<u64>,
     /// Windows asked for in a row without a byte arriving.
     idle: u32,
 }
@@ -175,8 +177,15 @@ impl Fetcher {
             have: Vec::new(),
             total: None,
             offset: 0,
+            expect: None,
             idle: 0,
         }
+    }
+
+    /// The file is known to be `size` bytes: nothing is allocated for a server that claims another.
+    pub fn expecting(mut self, size: u64) -> Self {
+        self.expect = Some(size);
+        self
     }
 
     /// Takes in what has arrived (waiting up to `wait` for the first packet, where the transport can wait) and sends
@@ -238,6 +247,9 @@ impl Fetcher {
                     return Some(Err("The file changed during the download".to_owned()));
                 }
                 if self.total.is_none() {
+                    if self.expect.is_some_and(|e| e != tot) {
+                        return Some(Err("The file is not the one the server listed".to_owned()));
+                    }
                     if tot > MAX_TOTAL {
                         return Some(Err("The file is too large".to_owned()));
                     }
@@ -495,25 +507,35 @@ mod tests {
         let mut ct = net.endpoint(SocketAddr::from(([127, 0, 0, 1], 2)));
         let ch = Challenger::new();
         let progress = Progress::default();
-        let mut got: Vec<u8> = Vec::new();
-        let mut f = Fetcher::new(&mut ct, server, "mp_x");
         let mut buf = [0u8; 2048];
-        let end = (0..1000).find_map(|_| {
-            while let Ok(Some((n, from))) = st.recv_from(&mut buf, Some(Duration::ZERO)) {
-                match serve(&ch, 0, from, Oob::parse(&buf[..n]).unwrap(), Vec::new) {
-                    Gate::Reply(r) => st.send_to(from, &r.encode()),
-                    Gate::File { offset, from, .. } => {
-                        for c in window(&src, offset).unwrap() {
-                            st.send_to(from, &c.encode());
+        let mut drive = |ct: &mut dyn Transport, f: &mut Fetcher, got: &mut Vec<u8>| {
+            (0..1000).find_map(|_| {
+                while let Ok(Some((n, from))) = st.recv_from(&mut buf, Some(Duration::ZERO)) {
+                    match serve(&ch, 0, from, Oob::parse(&buf[..n]).unwrap(), Vec::new) {
+                        Gate::Reply(r) => st.send_to(from, &r.encode()),
+                        Gate::File { offset, from, .. } => {
+                            for c in window(&src, offset).unwrap() {
+                                st.send_to(from, &c.encode());
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            f.poll(&mut ct, &mut got, &progress, Duration::ZERO)
-        });
-        assert_eq!(end, Some(Ok(())));
+                f.poll(ct, got, &progress, Duration::ZERO)
+            })
+        };
+        let mut got: Vec<u8> = Vec::new();
+        let mut f = Fetcher::new(&mut ct, server, "mp_x").expecting(bytes.len() as u64);
+        assert_eq!(drive(&mut ct, &mut f, &mut got), Some(Ok(())));
         assert_eq!(got, bytes);
+        // A server whose file is not the size the manifest listed is refused before anything is allocated.
+        let mut wrong = Fetcher::new(&mut ct, server, "mp_x").expecting(bytes.len() as u64 + 1);
+        let mut none: Vec<u8> = Vec::new();
+        assert!(matches!(
+            drive(&mut ct, &mut wrong, &mut none),
+            Some(Err(_))
+        ));
+        assert!(none.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

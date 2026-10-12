@@ -48,6 +48,14 @@ extern "C" {
     #[wasm_bindgen(js_namespace = cod4, js_name = download_progress)]
     fn page_download_progress(text: &str);
 
+    /// How many bytes this browser will still let the page store, or -1 when it does not say.
+    #[wasm_bindgen(js_namespace = cod4, js_name = storage_free)]
+    fn page_storage_free() -> f64;
+
+    /// Tells the player something for a few seconds (a setting that cannot be kept, say).
+    #[wasm_bindgen(js_namespace = cod4, js_name = notice)]
+    fn page_notice(text: &str);
+
     /// Keeps a downloaded file (install-relative `path`) in this browser for the next visit.
     #[wasm_bindgen(js_namespace = cod4, js_name = save_download)]
     fn page_save_download(path: &str, bytes: &[u8]);
@@ -187,6 +195,17 @@ pub fn pref_set(key: &str, value: &str) -> Result<(), JsValue> {
 /// Shows the page how far the fetching of files from the server has come (empty text hides it).
 pub fn show_progress(text: &str) {
     page_download_progress(text);
+}
+
+/// Bytes of storage the browser still allows this page, when it says.
+pub fn storage_free() -> Option<u64> {
+    let free = page_storage_free();
+    (free >= 0.0).then_some(free as u64)
+}
+
+/// Shows the player `text` for a few seconds.
+pub fn notice(text: &str) {
+    page_notice(text);
 }
 
 /// Has the page keep a file the client downloaded, `path` being where it lies in the install.
