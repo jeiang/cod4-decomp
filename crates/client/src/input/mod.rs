@@ -233,8 +233,10 @@ pub struct Input {
     fov_sensitivity_scale: f32,
     /// The install's files, for `exec`.
     vfs: Option<Vfs>,
-    /// The rest of the buffers `wait` held back.
-    deferred: Vec<Deferred>,
+    /// The command buffer behind a `wait`: what is left of the buffer that waited, then every command that came in
+    /// since. `wait` is the frames still to wait (`cmd_wait`).
+    backlog: VecDeque<Item>,
+    wait: Option<u32>,
     /// What commands said, for the console (see [`Input::take_messages`]).
     messages: Vec<String>,
 }
@@ -246,27 +248,28 @@ const MAX_EXPANSIONS: u32 = 1024;
 const MAX_EXEC_NAME: usize = 63;
 const MAX_MESSAGES: usize = 8192;
 
-/// The commands after a `wait`, due once `frames` more frames have passed.
-struct Deferred {
-    frames: u32,
-    cmds: Vec<Vec<String>>,
-}
-
-/// One command of a buffer: how deep in `exec`s it is, and the folder a disk file it came from sits in.
-struct Item {
-    toks: Vec<String>,
-    depth: u32,
-    dir: Option<Arc<Path>>,
+/// One command of a buffer: how deep in `exec`s it is, the folder a disk file it came from sits in, and whether
+/// the player typed it at the console (where a cvar's name alone shows it and an unknown word is said).
+pub(crate) struct Item {
+    pub(crate) toks: Vec<String>,
+    pub(crate) depth: u32,
+    pub(crate) dir: Option<Arc<Path>>,
+    pub(crate) console: bool,
 }
 
 impl Item {
-    fn new(toks: Vec<String>, depth: u32, dir: Option<Arc<Path>>) -> Self {
-        Self { toks, depth, dir }
+    pub(crate) fn new(toks: Vec<String>, depth: u32, dir: Option<Arc<Path>>) -> Self {
+        Self {
+            toks,
+            depth,
+            dir,
+            console: false,
+        }
     }
 }
 
 /// The commands of `text`, one buffer.
-fn items(text: &str, depth: u32, dir: Option<&Arc<Path>>) -> VecDeque<Item> {
+pub(crate) fn items(text: &str, depth: u32, dir: Option<&Arc<Path>>) -> VecDeque<Item> {
     text.lines()
         .flat_map(config::split_commands)
         .map(|toks| Item::new(toks, depth, dir.cloned()))
@@ -367,7 +370,8 @@ impl Input {
             debug: None,
             fov_sensitivity_scale: 1.0,
             vfs: None,
-            deferred: Vec::new(),
+            backlog: VecDeque::new(),
+            wait: None,
             messages: Vec::new(),
         }
     }
@@ -717,7 +721,26 @@ impl Input {
     fn exec_text(&mut self, text: &str, dir: Option<&Path>, sink: bool, depth: u32) {
         let dir: Option<Arc<Path>> = dir.map(Arc::from);
         let cmds = items(text, depth, dir.as_ref());
-        self.run(cmds, sink, None);
+        self.submit(cmds, sink, None);
+    }
+
+    /// New commands join the buffer behind a `wait` instead of running ahead of it (`Cbuf_AddText`).
+    fn submit(&mut self, cmds: VecDeque<Item>, sink: bool, held: Option<&mut Vec<String>>) {
+        if sink && self.busy() {
+            self.backlog.extend(cmds);
+        } else {
+            self.run(cmds, sink, held);
+        }
+    }
+
+    /// A `wait` is pending, so new commands queue behind it.
+    pub fn busy(&self) -> bool {
+        self.wait.is_some() || !self.backlog.is_empty()
+    }
+
+    /// Adds commands to the buffer behind a `wait`.
+    pub(crate) fn enqueue(&mut self, cmds: impl IntoIterator<Item = Item>) {
+        self.backlog.extend(cmds);
     }
 
     /// `Cbuf_Execute` over one command buffer. `vstr` and `exec` put their commands at the front of what is left,
@@ -725,15 +748,17 @@ impl Input {
     /// `+command` starts a button that the caller releases (a bound key); without, it is held until its `-command`.
     fn run(&mut self, mut cmds: VecDeque<Item>, sink: bool, mut held: Option<&mut Vec<String>>) {
         let mut expansions = 0;
-        while let Some(Item { toks, depth, dir }) = cmds.pop_front() {
+        while let Some(Item {
+            toks, depth, dir, ..
+        }) = cmds.pop_front()
+        {
             let name = toks[0].to_ascii_lowercase();
             match (name.as_str(), held.as_deref_mut()) {
                 ("wait", _) if sink => {
                     // `cmd_wait = atoi(arg)`: the buffer stops until that many frames have passed.
                     let n = toks.get(1).map_or(1, |a| config::atoi(a));
                     if n > 0 {
-                        let rest = cmds.into_iter().map(|i| i.toks).collect();
-                        self.defer(n.unsigned_abs(), rest);
+                        self.defer(n.unsigned_abs(), cmds);
                         return;
                     }
                 }
@@ -812,36 +837,32 @@ impl Input {
         Some((cmds, from))
     }
 
-    /// `wait` met: `cmds`, the rest of the buffer, run after `frames` frames (`cmd_wait`).
-    pub fn defer(&mut self, frames: u32, cmds: Vec<Vec<String>>) {
-        if !cmds.is_empty() {
-            self.deferred.push(Deferred {
-                frames: frames.saturating_sub(1),
-                cmds,
-            });
-        }
+    /// `wait` met: `cmds`, the rest of the buffer, now wait (`cmd_wait`); what came in meanwhile follows it.
+    pub(crate) fn defer(&mut self, frames: u32, mut cmds: VecDeque<Item>) {
+        cmds.append(&mut self.backlog);
+        self.backlog = cmds;
+        self.wait = Some(frames.saturating_sub(1));
     }
 
-    /// The buffers whose `wait` has run out, one frame later than the last call (`Cbuf_Execute` checks `cmd_wait`
-    /// first). The caller runs them through its own command handler.
-    pub fn take_due(&mut self) -> Vec<Vec<Vec<String>>> {
-        let mut due = Vec::new();
-        for mut d in std::mem::take(&mut self.deferred) {
-            if d.frames > 0 {
-                d.frames -= 1;
-                self.deferred.push(d);
-            } else {
-                due.push(d.cmds);
+    /// Once a frame: the buffer behind a `wait` once the wait has run out (`Cbuf_Execute` checks `cmd_wait` first).
+    /// The caller runs it through its own command handler.
+    pub(crate) fn take_due(&mut self) -> Option<VecDeque<Item>> {
+        match self.wait {
+            Some(n) if n > 0 => {
+                self.wait = Some(n - 1);
+                None
+            }
+            _ => {
+                self.wait = None;
+                Some(std::mem::take(&mut self.backlog)).filter(|b| !b.is_empty())
             }
         }
-        due
     }
 
     /// [`Input::take_due`], run here: for an input with no shell on top.
     pub fn run_due(&mut self) {
-        for cmds in self.take_due() {
-            let cmds = cmds.into_iter().map(|toks| Item::new(toks, 0, None));
-            self.run(cmds.collect(), true, None);
+        if let Some(cmds) = self.take_due() {
+            self.run(cmds, true, None);
         }
     }
 
@@ -864,6 +885,10 @@ impl Input {
             return Some((String::from_utf8_lossy(&bytes).into_owned(), None));
         }
         let file = config::exec_name(name);
+        if name.split(['/', '\\']).any(|p| p == "..") {
+            self.say(format!("couldn't exec {name}"));
+            return None;
+        }
         let path = dir.map_or_else(|| PathBuf::from(&file), |d| d.join(&file));
         match std::fs::read_to_string(&path) {
             Ok(t) => {
@@ -1103,6 +1128,9 @@ impl Input {
         {
             let held = started.swap_remove(i);
             self.release(&held);
+        } else {
+            // `-cmd` with no key (`IN_KeyUp`): the button is let go whoever held it, a bound key included.
+            self.release_all_of(cmd);
         }
     }
 
@@ -1148,6 +1176,13 @@ impl Input {
         held.to_owned()
     }
 
+    /// Lets go of `cmd` however many keys hold it.
+    fn release_all_of(&mut self, cmd: &str) {
+        while self.held.get(cmd).is_some_and(|h| h.count > 0) {
+            self.release(cmd);
+        }
+    }
+
     fn release(&mut self, cmd: &str) {
         let now = self.now();
         let Some(h) = self.held.get_mut(cmd) else {
@@ -1181,7 +1216,7 @@ impl Input {
         let mut started = Vec::new();
         if let Some(line) = self.binds.get(name).cloned() {
             let cmds = items(&line, 0, None);
-            self.run(cmds, true, Some(&mut started));
+            self.submit(cmds, true, Some(&mut started));
         }
         self.down.insert(name.to_owned(), started);
     }
@@ -1990,6 +2025,53 @@ mod tests {
         i.exec_line("set loop \"vstr loop\"; vstr loop; set done 1");
         assert_eq!(i.cvar("done"), None, "the runaway buffer is dropped");
         assert!(!i.take_messages().is_empty());
+    }
+
+    /// `-attack` after a `wait` lets go of a button a bound key started (`IN_KeyUp` with no key).
+    #[test]
+    fn a_deferred_minus_command_releases_the_bound_button() {
+        let mut i = Input::detached();
+        i.exec_line("bind x \"+attack; wait 2; -attack\"");
+        i.key("x", true);
+        assert_ne!(frame(&mut i).buttons & buttons::ATTACK, 0);
+        i.run_due();
+        i.run_due();
+        assert_eq!(
+            frame(&mut i).buttons & buttons::ATTACK,
+            0,
+            "released while x is held"
+        );
+        i.key("x", false);
+        assert_eq!(frame(&mut i).buttons & buttons::ATTACK, 0);
+    }
+
+    /// One buffer: commands that arrive while another waits queue behind it.
+    #[test]
+    fn new_commands_queue_behind_a_waiting_buffer() {
+        let mut i = Input::detached();
+        i.exec_line("bind a \"set v 1; wait 3; set v 2\"; bind b \"set v 3\"");
+        i.key("a", true);
+        i.key("b", true);
+        assert_eq!(i.cvar("v"), Some("1"));
+        for _ in 0..3 {
+            i.run_due();
+        }
+        assert_eq!(i.cvar("v"), Some("3"));
+    }
+
+    /// A resumed tail keeps the folder of the file it came from.
+    #[test]
+    fn a_resumed_exec_keeps_its_folder() {
+        let dir = std::env::temp_dir().join(format!("cod4e-nest-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/a.cfg"), "wait\nexec b\n").unwrap();
+        std::fs::write(dir.join("sub/b.cfg"), "set nested_b 1\n").unwrap();
+        let mut i = Input::detached();
+        i.exec_line(&format!("exec \"{}\"", dir.join("sub/a").display()));
+        assert_eq!(i.cvar("nested_b"), None);
+        i.run_due();
+        assert_eq!(i.cvar("nested_b"), Some("1"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

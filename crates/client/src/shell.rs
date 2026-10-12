@@ -9,8 +9,8 @@
 //! (dvars) and a [`ShellState`] (stats, map and gametype lists, queued [`Action`]s the app carries out).
 
 use crate::hud::{self, Feed, LiveUi, ScoreView};
-use crate::input::Input;
 use crate::input::config::atoi;
+use crate::input::{Input, Item};
 use crate::profile::{CreateError, Profiles};
 use crate::ui::assets::UiAssets;
 use crate::ui::env::World;
@@ -908,14 +908,20 @@ impl Shell {
     /// value sets it; a `wait` holds the rest of the line.
     pub fn console_line(&mut self, input: &mut Input, line: &str) {
         self.log(&format!("] {line}"));
-        let cmds = crate::input::config::split_commands(line);
-        Self::host(&mut self.st, input).run_buffer(&self.ui, cmds.into(), true);
+        let cmds = crate::input::config::split_commands(line)
+            .into_iter()
+            .map(|toks| Item {
+                console: true,
+                ..Item::new(toks, 0, None)
+            })
+            .collect();
+        Self::host(&mut self.st, input).submit(&self.ui, cmds);
     }
 
     /// Runs the buffers whose `wait` has run out, once a frame.
     pub fn run_due(&mut self, input: &mut Input) {
-        for cmds in input.take_due() {
-            Self::host(&mut self.st, input).run_buffer(&self.ui, cmds.into(), true);
+        if let Some(cmds) = input.take_due() {
+            Self::host(&mut self.st, input).run_buffer(&self.ui, cmds);
         }
     }
 
@@ -1487,22 +1493,40 @@ impl HostCx<'_> {
 
     /// One console line, as a menu script or a bind runs it.
     fn command(&mut self, ui: &Ui, line: &str) {
-        let cmds = crate::input::config::split_commands(line);
-        self.run_buffer(ui, cmds.into(), false);
+        let cmds = crate::input::config::split_commands(line)
+            .into_iter()
+            .map(|t| Item::new(t, 0, None))
+            .collect();
+        self.submit(ui, cmds);
     }
 
-    /// `Cbuf_Execute` over one buffer of commands the shell understands. `console`: the buffer came from the console
-    /// (typed, or held back by a `wait`), where a cvar's name alone shows or sets it and an unknown word is said.
-    fn run_buffer(&mut self, ui: &Ui, mut rest: VecDeque<Vec<String>>, console: bool) {
+    /// New commands queue behind a pending `wait` instead of running ahead of it (`Cbuf_AddText`).
+    fn submit(&mut self, ui: &Ui, cmds: VecDeque<Item>) {
+        if self.input.busy() {
+            self.input.enqueue(cmds);
+        } else {
+            self.run_buffer(ui, cmds);
+        }
+    }
+
+    /// `Cbuf_Execute` over one buffer of commands the shell understands. An item typed at the console (`console`)
+    /// shows or sets a cvar by its name alone, and an unknown word is said.
+    fn run_buffer(&mut self, ui: &Ui, mut rest: VecDeque<Item>) {
         const MAX_INSERTS: u32 = 64;
         let mut inserted = 0;
         let toks: Vec<String> = rest
             .iter()
-            .flatten()
+            .flat_map(|i| i.toks.iter())
             .filter(|t| *t != "(" && *t != ")" && *t != ",")
             .cloned()
             .collect();
-        while let Some(cmd) = rest.pop_front() {
+        while let Some(Item {
+            toks: cmd,
+            depth,
+            dir,
+            console,
+        }) = rest.pop_front()
+        {
             let Some(name) = cmd.first().map(|s| s.to_ascii_lowercase()) else {
                 continue;
             };
@@ -1588,7 +1612,8 @@ impl HostCx<'_> {
                 "wait" => {
                     let n = if cmd.len() > 1 { atoi(a(1)) } else { 1 };
                     if n > 0 {
-                        self.input.defer(n.unsigned_abs(), rest.drain(..).collect());
+                        self.input
+                            .defer(n.unsigned_abs(), std::mem::take(&mut rest));
                         return;
                     }
                 }
@@ -1602,11 +1627,14 @@ impl HostCx<'_> {
                 // `vstr` and `exec` run their commands in place, in this buffer.
                 "vstr" | "exec" => {
                     inserted += 1;
-                    if inserted > MAX_INSERTS {
+                    if inserted > MAX_INSERTS || (name == "exec" && depth >= 8) {
                         self.input.say(format!("{name}: too many nested commands"));
-                    } else if let Some((next, _)) = self.input.expand(&cmd, None, true) {
-                        for c in next.into_iter().rev() {
-                            rest.push_front(c);
+                    } else if let Some((next, from)) = self.input.expand(&cmd, dir.as_deref(), true)
+                    {
+                        let dir = from.map(Arc::from).or(dir);
+                        let depth = depth + u32::from(name == "exec");
+                        for toks in next.into_iter().rev() {
+                            rest.push_front(Item::new(toks, depth, dir.clone()));
                         }
                     }
                 }
@@ -2680,12 +2708,9 @@ mod tests {
         };
         h.command(&ui, "set wait_a 1; wait 2; setfromdvar wait_dst wait_src");
         assert_eq!(h.input.cvar("wait_a"), Some("1"));
-        assert!(h.input.take_due().is_empty(), "held for two frames");
-        let due = h.input.take_due();
-        assert_eq!(due.len(), 1);
-        for cmds in due {
-            h.run_buffer(&ui, cmds.into(), true);
-        }
+        assert!(h.input.take_due().is_none(), "held for two frames");
+        let due = h.input.take_due().expect("due on the second frame");
+        h.run_buffer(&ui, due);
         assert_eq!(h.input.cvar("wait_dst"), Some("7"));
     }
 
