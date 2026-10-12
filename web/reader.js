@@ -11,6 +11,8 @@
 
 const IDLE = 0, REQUEST = 1, DONE = 2, FAILED = 3;
 export const COPY_DIR = "cod4e-install";
+// Files the client downloaded from servers (saver.js): the same layout, served on top of any source.
+export const DOWNLOAD_DIR = "cod4e-downloads";
 
 let sources = [];
 
@@ -26,11 +28,12 @@ function fileSource(file) {
   };
 }
 
-async function opfsSources() {
+// The files a manifest in OPFS directory `name` lists, opened for reading; null when there is no whole copy.
+async function opfsDir(name, needComplete) {
   const root = await navigator.storage.getDirectory();
   let dir;
   try {
-    dir = await root.getDirectoryHandle(COPY_DIR);
+    dir = await root.getDirectoryHandle(name);
   } catch {
     return null;
   }
@@ -40,7 +43,7 @@ async function opfsSources() {
   } catch {
     return null;
   }
-  if (!manifest.complete) return null;
+  if (needComplete && !manifest.complete) return null;
   const out = [];
   for (const { path, size } of manifest.files) {
     const handle = await (await dir.getFileHandle(encodeURIComponent(path))).createSyncAccessHandle();
@@ -59,6 +62,17 @@ async function opfsSources() {
     });
   }
   return out;
+}
+
+const opfsSources = () => opfsDir(COPY_DIR, true);
+
+// The downloaded files whole in this browser, if any. A damaged one is skipped: it is fetched again on the next join.
+async function downloadSources() {
+  try {
+    return (await opfsDir(DOWNLOAD_DIR, false)) ?? [];
+  } catch {
+    return [];
+  }
 }
 
 function httpSources(base, index) {
@@ -114,6 +128,9 @@ self.onmessage = async ({ data: m }) => {
       const index = await (await fetch(`${m.base}/index.json`)).json();
       sources = httpSources(m.base, index);
     } else throw new Error(`unknown source ${m.source}`);
+    // Maps downloaded in earlier visits join the install; one the install has since gained wins by coming first.
+    const have = new Set(sources.map((s) => s.path.toLowerCase()));
+    sources.push(...(await downloadSources()).filter((s) => !have.has(s.path.toLowerCase())));
     postMessage({ type: "ready", files: sources.map(({ path, size }) => [path, size]) });
   } catch (e) {
     return postMessage({ type: "error", message: String(e?.message ?? e) });

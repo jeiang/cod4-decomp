@@ -57,7 +57,7 @@ pub fn crc32(bytes: &[u8]) -> u32 {
 
 /// Size and CRC-32 of the file at `path`, read in pieces.
 pub fn file_crc32(path: &std::path::Path) -> std::io::Result<(u64, u32)> {
-    let mut f = std::fs::File::open(path)?;
+    let mut f = crate::fs::File::open(path)?;
     let mut buf = vec![0u8; 1 << 16];
     let (mut crc, mut size) = (Crc32::default(), 0u64);
     loop {

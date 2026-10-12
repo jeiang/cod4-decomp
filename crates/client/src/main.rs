@@ -17,7 +17,6 @@ mod damage;
 mod decal;
 mod display;
 mod dof;
-#[cfg(not(target_arch = "wasm32"))]
 mod download;
 mod effects;
 mod events;
@@ -61,6 +60,8 @@ mod vmtour;
 mod voice;
 #[cfg(target_arch = "wasm32")]
 mod web;
+#[cfg(target_arch = "wasm32")]
+mod web_join;
 mod wire;
 
 use display::{FullscreenKind, Request};

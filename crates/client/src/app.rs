@@ -37,6 +37,9 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 /// Frames the surface size must hold before the recorder starts.
 const RECORD_AFTER_STABLE: u32 = 10;
+/// How often a browser keeps changed settings (see `config_saved_at`).
+#[cfg(target_arch = "wasm32")]
+const CONFIG_SAVE_EVERY: Duration = Duration::from_secs(2);
 /// How long joining waits for the server to say which map it plays.
 const JOIN_QUERY: Duration = Duration::from_secs(2);
 
@@ -48,8 +51,12 @@ struct Ready {
     note: Option<String>,
 }
 
-pub fn run(mut cli: Cli) -> Result<(), String> {
-    // A direct `--connect` runs the server's mod, as a join from the menus does.
+pub fn run(
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))] mut cli: Cli,
+) -> Result<(), String> {
+    // A direct `--connect` runs the server's mod, as a join from the menus does. A browser has learned that before it
+    // starts (`web_join`): it cannot wait for the server here.
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(addr) = cli.connect.clone() {
         let e = serverlist::resolve(&addr).and_then(|a| serverlist::query(a, JOIN_QUERY))?;
         e.check_protocol()?;
@@ -437,6 +444,9 @@ struct State {
     /// When the page's debug overlay was last given its values.
     #[cfg(target_arch = "wasm32")]
     overlay_at: Instant,
+    /// When the settings were last written to the page's storage: a browser has no exit to save them at.
+    #[cfg(target_arch = "wasm32")]
+    config_saved_at: Instant,
     /// How many pipelines the background compile has built, and how many draws the last frame skipped for want of one.
     #[cfg(target_arch = "wasm32")]
     warm: render::Progress,
@@ -866,7 +876,11 @@ impl Viewer {
                     .map_err(|e| format!("cannot seed the harness profile: {e}"))?;
                 Profiles::open_isolated(dir)
             }
-            None => Profiles::open(&install.root, input.config_dir(), "default"),
+            None => Profiles::open(
+                &install.root,
+                input.config_dir(),
+                crate::profile::DEFAULT_PROFILE,
+            ),
         };
         let (read, write) = profiles.config_paths();
         input.use_profile(read, write);
@@ -1008,6 +1022,8 @@ impl Viewer {
             pending_resize: None,
             #[cfg(target_arch = "wasm32")]
             overlay_at: now,
+            #[cfg(target_arch = "wasm32")]
+            config_saved_at: now,
             #[cfg(target_arch = "wasm32")]
             warm: render::Progress { done: 0, total: 0 },
             #[cfg(target_arch = "wasm32")]
@@ -1684,6 +1700,14 @@ impl Viewer {
             && let Err(e) = sh.st.profiles.save_if_changed(&sh.st.stats)
         {
             eprintln!("cannot save the profile: {e}");
+        }
+        // A native client writes the config when it exits; a tab has no such moment, so changes are kept as they come.
+        #[cfg(target_arch = "wasm32")]
+        if st.input.unsaved() && st.config_saved_at.elapsed() >= CONFIG_SAVE_EVERY {
+            st.config_saved_at = Instant::now();
+            if let Err(e) = st.input.save() {
+                eprintln!("cannot save the config: {e}");
+            }
         }
         if std::mem::take(&mut st.video_pending) && st.shell.is_some() {
             vid_restart(&self.cli, st);

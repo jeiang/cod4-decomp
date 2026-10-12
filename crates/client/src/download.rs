@@ -4,22 +4,33 @@
 //! with the one on disk (size and CRC-32) and fetches the ones that differ, over HTTP(S) when the server names a
 //! fast-download URL and over [`net::download`] when it does not (or the web server fails). A mod goes to its folder
 //! under `mods/`, a map to `usermaps/<map>/`, and nothing anywhere else: the server is not trusted with a path. The
-//! window shows the loading screen with the bytes arrived meanwhile. The browser build has no files to put it in, so
-//! this is native only.
+//! window shows the loading screen with the bytes arrived meanwhile. The browser has no worker threads or files to
+//! put them in: it shares what to ask for ([`lacks`], [`wanted`], [`plan`]) and does the transfer itself in `web_join`.
 
-use assets::crc::{Crc32, file_crc32};
+#[cfg(not(target_arch = "wasm32"))]
+use assets::crc::Crc32;
+use assets::crc::file_crc32;
+#[cfg(not(target_arch = "wasm32"))]
 use net::download::{Progress, fetch};
 use net::manifest::{self, File};
+#[cfg(not(target_arch = "wasm32"))]
 use net::{Transport, UdpTransport};
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::net::SocketAddr;
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
 /// A download in progress, and the join it is for.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Download {
     pub map: String,
     /// The mod (`fs_game`) the server runs, which the join follows once the files are here.
@@ -54,6 +65,7 @@ pub fn wanted(root: &Path, game: &str, map: &str) -> bool {
         || lacks(root, game, map).is_some()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Download {
     /// Starts fetching what the server at `server` runs (`game`, `map`) into the install at `root`.
     pub fn start(
@@ -134,6 +146,7 @@ impl Download {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Download {
     /// An abandoned download stops at its next packet and removes what it had.
     fn drop(&mut self) {
@@ -142,15 +155,17 @@ impl Drop for Download {
 }
 
 /// Whether the file at `path` is the one `file` describes.
-fn is_current(path: &Path, file: &File) -> bool {
-    std::fs::metadata(path).is_ok_and(|m| m.len() == file.size)
+pub fn is_current(path: &Path, file: &File) -> bool {
+    assets::fs::File::open(path)
+        .and_then(|f| f.metadata())
+        .is_ok_and(|m| m.len() == file.size)
         && file_crc32(path).is_ok_and(|(_, crc)| crc == file.crc)
 }
 
 /// The files of `listing` this client writes and does not have, each with its install-relative destination. A name
 /// [`manifest::dest`] refuses is dropped, as is a map's file when the install has the map from the stock game or the
 /// mod, or one of a map other than `map`.
-fn plan(root: &Path, game: &str, map: &str, listing: Vec<File>) -> Vec<(File, String)> {
+pub fn plan(root: &Path, game: &str, map: &str, listing: Vec<File>) -> Vec<(File, String)> {
     let own = format!("usermaps/{map}/");
     let has_stock_map = !assets::paths::is_usermap(root, game, map)
         && assets::paths::zone_file(root, game, map).is_some();
@@ -162,6 +177,7 @@ fn plan(root: &Path, game: &str, map: &str, listing: Vec<File>) -> Vec<(File, St
         .collect()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Fetches from `server` everything the install at `root` lacks to run `game` and play `map`.
 #[allow(clippy::too_many_arguments)]
 fn sync(
@@ -244,9 +260,11 @@ fn sync(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Room left on a disk after the download, for the player's own files.
 const SPARE: u64 = 64 << 20;
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Bytes free on the disk `root` is on, when that can be told.
 fn free_space(root: &Path) -> Option<u64> {
     let root = std::fs::canonicalize(root).ok()?;
@@ -258,6 +276,7 @@ fn free_space(root: &Path) -> Option<u64> {
         .map(sysinfo::Disk::available_space)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// `dest` (install-relative, from [`manifest::dest`]) below `root`, its folders made. A folder or file on the way that
 /// is a link is refused: a link could lead the write out of the install.
 fn place(root: &Path, dest: &str) -> Result<std::path::PathBuf, String> {
@@ -283,6 +302,7 @@ fn place(root: &Path, dest: &str) -> Result<std::path::PathBuf, String> {
     Ok(at)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Where the bytes of `dest` arrive before it is whole.
 fn part_of(dest: &Path) -> std::path::PathBuf {
     let mut part = dest.as_os_str().to_owned();
@@ -290,6 +310,7 @@ fn part_of(dest: &Path) -> std::path::PathBuf {
     part.into()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The IPv4 address an IPv6 one carries: mapped (`::ffff:a.b.c.d`), compatible (`::a.b.c.d`), NAT64 (`64:ff9b::/96`)
 /// or 6to4 (`2002:aabb:ccdd::/48`).
 fn embedded_v4(a: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
@@ -309,6 +330,7 @@ fn embedded_v4(a: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Whether `ip` is an address a download may be fetched from: the game server's own, or one on the public Internet.
 /// A web server named by the game server must not be a way to reach the player's own machine or network.
 fn allowed(ip: std::net::IpAddr, server: std::net::IpAddr) -> bool {
@@ -349,6 +371,7 @@ fn allowed(ip: std::net::IpAddr, server: std::net::IpAddr) -> bool {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The name lookup of a download: it finds what the system finds and drops the addresses [`allowed`] refuses, at the
 /// moment of the connection, so a name that changes its answer cannot slip one past.
 #[derive(Debug)]
@@ -357,6 +380,7 @@ struct PublicOnly {
     server: std::net::IpAddr,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ureq::unversioned::resolver::Resolver for PublicOnly {
     fn resolve(
         &self,
@@ -383,6 +407,7 @@ impl ureq::unversioned::resolver::Resolver for PublicOnly {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Downloads `url` into `dest` (written as `dest.part`, renamed when it is `file`: the size and CRC-32 the manifest
 /// gave). Reads no more than the size announced, whatever the web server sends. Redirects are not followed, and the
 /// web server must be at the game server's own address or a public one ([`allowed`]).
