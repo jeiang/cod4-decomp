@@ -394,6 +394,7 @@ pub struct NetPlay {
 const INTERRUPTED_MS: u64 = 2000;
 
 impl NetPlay {
+    #[allow(clippy::too_many_arguments)]
     pub fn connect(
         lib: Library,
         map: &render::MapData,

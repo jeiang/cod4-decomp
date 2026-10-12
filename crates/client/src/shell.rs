@@ -2947,7 +2947,10 @@ mod tests {
         locked.password = true;
         h.st.servers.take(locked);
         h.st.servers.take(lan_server("192.168.1.6:28960", "war"));
-        for (k, v) in [("ui_browserShowPassword", "-1"), ("ui_browserShowFull", "1")] {
+        for (k, v) in [
+            ("ui_browserShowPassword", "-1"),
+            ("ui_browserShowFull", "1"),
+        ] {
             h.set_dvar(k, v);
         }
         assert_eq!(h.feeder_count(2), 2);
