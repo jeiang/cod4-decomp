@@ -52,22 +52,22 @@ impl NetPlay {
         let push = self.pushes.remove(&e.client).unwrap_or_default();
         // `ragdoll_enable` off: the body keeps the pose its death clip ends in, as it does without a ragdoll definition.
         let enabled = self.switches.ragdoll;
+        let tun = self.switches.ragdoll_tunables;
         let live = self
             .remotes
             .get(&e.client)
             .filter(|r| enabled && r.body == set.body)
-            .and_then(|r| r.player.ragdoll(&self.lib.ragdoll, e.origin, push));
+            .and_then(|r| r.player.ragdoll(&self.lib.ragdoll, e.origin, push, tun));
         let mut ragdoll = live.or_else(|| {
             let input = pose_input(e, None, true);
             for _ in 0..SETTLE_STEPS {
                 player.update(SETTLE_STEP, &input);
             }
             enabled
-                .then(|| player.ragdoll(&self.lib.ragdoll, e.origin, push))
+                .then(|| player.ragdoll(&self.lib.ragdoll, e.origin, push, tun))
                 .flatten()
         });
         if let Some(r) = &mut ragdoll {
-            r.tune(self.switches.ragdoll_tunables);
             self.c.ragdolls += 1;
             let running = self
                 .corpses
