@@ -12,8 +12,10 @@ use std::collections::VecDeque;
 
 /// Samples per player: about a second at 30 frames per second.
 const SAMPLES: usize = 32;
-/// The furthest back in time a shot may reach, in milliseconds.
-pub const MAX_REWIND_MS: i32 = 250;
+/// The furthest back in time a shot may reach, in milliseconds. The original rewinds to the command's own clock when
+/// that is at most 400 ms old and not at all beyond; here the request is already moved back by the draw delay
+/// (the time the shooter saw, not the time of the command), so the same 400 ms of lag reaches that much further.
+pub const MAX_REWIND_MS: i32 = 400 + net::view::INTERP_DELAY_MS;
 /// A jump bigger than this between two samples is a teleport: no sliding between them.
 const TELEPORT: f32 = 256.0;
 
@@ -130,6 +132,19 @@ mod tests {
             "{}",
             s.origin[0]
         );
+    }
+
+    #[test]
+    fn a_shooter_with_400_ms_of_lag_is_rewound_to_what_they_saw() {
+        let mut r = LagRing::new(1);
+        for i in 0..20 {
+            r.record(0, sample(i * 33, i as f32 * 10.0));
+        }
+        let now = 19 * 33 + 5;
+        // 400 ms of lag and the draw delay: where the player was 500 ms before `now`, not a nearer moment.
+        let want = (now - 400 - net::view::INTERP_DELAY_MS) as f32 / 33.0 * 10.0;
+        let s = r.at(0, now - 400 - net::view::INTERP_DELAY_MS, now).unwrap();
+        assert!((s.origin[0] - want).abs() < 11.0, "{} vs {want}", s.origin[0]);
     }
 
     #[test]

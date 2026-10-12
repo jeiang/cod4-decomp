@@ -306,7 +306,8 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_privatePassword", "", 0),
         // Clients one address outside the local network may have at once (0: no limit).
         ("sv_maxClientsPerIP", "0", 0),
-        // Most bytes a second one client is sent (0: what the client asks for).
+        // Most bytes a second one client is sent (0: what the client asks for). The original defaults to 5000, which
+        // our snapshots (bigger than its delta-compressed ones) would stretch to a few a second; a limit is opt-in.
         ("sv_maxRate", "0", ARCHIVE | SERVERINFO),
         // Remote console: empty switches `rcon` off.
         ("rcon_password", "", 0),
@@ -334,7 +335,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_maxRate", 0, 25_000),
         ("sv_minPing", 0, 999),
         ("sv_maxPing", 0, 999),
-        ("sv_timeout", 1, 3600),
+        ("sv_timeout", 1, 1800),
         ("sv_connectTimeout", 1, 3600),
         ("sv_reconnectlimit", 0, 12),
         ("sv_maxClientsPerIP", 0, 64),
