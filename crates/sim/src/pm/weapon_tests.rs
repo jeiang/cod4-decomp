@@ -1254,6 +1254,21 @@ fn the_weapon_dvars_are_registered_and_sent_when_not_stock() {
 }
 
 #[test]
+fn a_weapon_dvar_value_is_held_to_the_dvars_range_wherever_it_comes_from() {
+    // What a cheat-set or hostile value replicates as: clamped by the registration's limits.
+    let p = Params::from_info(
+        "\\player_meleeRange\\99999\\perk_weapRateMultiplier\\-4\\player_breath_hold_time\\500\\perk_extraBreath\\-1",
+    );
+    assert_eq!(p.weapon.melee_range, 1000.0);
+    assert_eq!(p.weapon.perk_weap_rate_multiplier, 0.0);
+    assert_eq!(p.weapon.breath_hold_time, 30.0);
+    assert_eq!(p.weapon.perk_extra_breath, 0.0);
+    let mut q = Params::default();
+    q.set_from(|n| (n == "player_burstFireCooldown").then_some("1000"));
+    assert_eq!(q.weapon.burst_fire_cooldown, 60.0);
+}
+
+#[test]
 fn pmove_without_weapons_leaves_the_weapon_state_alone() {
     let params = Params::default();
     let world = TestWorld::floor();

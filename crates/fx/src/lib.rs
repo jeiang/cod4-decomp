@@ -2170,6 +2170,33 @@ mod tests {
         }
     }
 
+    /// A floor at z = 0 that still catches a particle resting on it.
+    struct SoftFloor;
+
+    impl World for SoftFloor {
+        fn trace(&self, a: Vec3, b: Vec3, _: Vec3, _: Vec3) -> Option<(f32, Vec3)> {
+            (a.z >= -0.01 && b.z < 0.0).then(|| ((a.z / (a.z - b.z)).clamp(0.0, 1.0), Vec3::Z))
+        }
+    }
+
+    #[test]
+    fn a_slow_element_that_lands_part_way_through_a_step_bounces_once_more_before_it_rests() {
+        // It lands about 2 ms into the first 16 ms step at a speed whose reflection is under one unit per second:
+        // slow enough to rest, but only an impact in the step's first millisecond may rest it (`FX_CollisionResponse`).
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.flags = flags::USE_COLLISION;
+        e.gravity = range(1.0, 0.0);
+        e.reflection_factor = range(0.3, 0.0);
+        e.life_span_msec = range(1000, 0);
+        let def = effect("fx/slow", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 0.02), Vec3::Z));
+        for t in (16..=400).step_by(16) {
+            fx.update(t, &SoftFloor);
+        }
+        assert!(fx.stats.impacts >= 2, "{} impact(s)", fx.stats.impacts);
+    }
+
     #[test]
     fn a_perfect_bounce_comes_back_to_the_height_it_fell_from() {
         let (def, lib) = bouncing_particle();
