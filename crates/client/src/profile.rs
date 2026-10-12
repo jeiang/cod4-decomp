@@ -6,13 +6,15 @@
 //! last used profile's name in `players/profiles/active.txt`. `mpdata` is a 0x211C byte container: a 4 byte magic, a
 //! 4 byte nonce, a 16 byte hash, a 260 byte game directory, then a CRC-32 of the stats (4 bytes) and the stats (2000
 //! byte stats, then 1498 little-endian 32 bit stats, then padding). The original encrypts everything after the nonce
-//! (magic `iwm0`, a key made from the CD key); a CoD 4 X install stores it decrypted (magic `ice0`), which is what this
-//! client reads and writes. An encrypted file needs the CD key, which this client does not have, so such a profile is
-//! listed but starts with fresh stats.
+//! (magic `iwm0`, a key made from the install's CD key; see [`crate::mpdata_crypt`]); a CoD 4 X install stores it
+//! decrypted (magic `ice0`). This client reads both: an `iwm0` file needs the CD key (the registry on Windows, the
+//! Wine prefix elsewhere) and is rejected, as the original rejects it, when its hash does not match; without the key
+//! the profile is listed but starts with fresh stats.
 //!
 //! Profiles are read from the install's `players/profiles` and from the user's own folder next to the config file
-//! (`--config` moves it). Everything this client saves goes to the user's folder, in the `ice0` format; the install is
-//! never written. A profile of the same name in the user's folder shadows the install's. The profile is `com_playerProfile`.
+//! (`--config` moves it). Everything this client saves goes to the user's folder, in the `ice0` format, so the
+//! install's own `iwm0` profile is never written and the stock game keeps reading it as it was; the stats this
+//! client changes live only in the user's copy, which shadows the install's. The profile is `com_playerProfile`.
 //!
 //! The client owns the stats like the original's: it uploads them to the server after joining ([`upload_commands`]),
 //! and the server's later changes ([`StatSync`]) flow back into the profile.
@@ -20,6 +22,8 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::mpdata_crypt::CdKey;
 
 /// Number of persistent stats the client keeps (the file holds 3498).
 pub const STAT_COUNT: usize = 4000;
@@ -47,8 +51,10 @@ const NAME_LEN: usize = 31;
 pub enum MpdataError {
     /// Wrong size or magic, or the checksum does not match.
     Corrupt,
-    /// The original's encrypted container (needs the CD key).
+    /// The original's encrypted container, and the CD key to open it is not known.
     Encrypted,
+    /// The original's encrypted container, whose hash does not match: a tampered file or another install's CD key.
+    Rejected,
 }
 
 /// A new profile's stats, as the original's first run sets them (`LiveStorage_StatsInit`): the stats version and the
@@ -189,19 +195,31 @@ pub fn checksum_ok(bytes: &[u8]) -> bool {
             == crc32(&bytes[STATS_AT..STATS_AT + CHECKED_LEN])
 }
 
-/// The stats of an `mpdata` file. Only the size and the magic must be right: the original's own check (the `iwm0`
-/// magic, the key, the hashes) is stricter, and it throws away a file written by CoD 4 X (`ice0`) as corrupt; this
-/// client reads such a file, and a file whose checksum is off, as it stands.
-pub fn decode(bytes: &[u8]) -> Result<Vec<i32>, MpdataError> {
+/// The `ice0` form of an `mpdata` file: an `iwm0` file is decrypted with `cd_key` and its hash checked as the
+/// original does (the game directory it also compares is not: see [`crate::mpdata_crypt::decrypt`]). For an `ice0`
+/// file only the size and the magic must be right: the original throws away a file written by CoD 4 X as corrupt;
+/// this client reads such a file as it stands.
+fn plain_file<'a>(
+    bytes: &'a [u8],
+    cd_key: Option<&CdKey>,
+) -> Result<std::borrow::Cow<'a, [u8]>, MpdataError> {
     if bytes.len() != FILE_LEN {
         return Err(MpdataError::Corrupt);
     }
     match &bytes[..4] {
-        b"iwm0" => return Err(MpdataError::Encrypted),
-        b"ice0" => {}
-        _ => return Err(MpdataError::Corrupt),
+        b"iwm0" => {
+            let key = cd_key.ok_or(MpdataError::Encrypted)?;
+            let plain = crate::mpdata_crypt::decrypt(bytes, key).ok_or(MpdataError::Rejected)?;
+            Ok(plain.into())
+        }
+        b"ice0" => Ok(bytes.into()),
+        _ => Err(MpdataError::Corrupt),
     }
-    // A wrong checksum is not fatal: the stats are used as they are (see `checksum_ok`).
+}
+
+/// The stats of a plain (`ice0`) file; a wrong checksum is not fatal: the stats are used as they are (see
+/// `checksum_ok`).
+fn parse_stats(bytes: &[u8]) -> Vec<i32> {
     let mut stats = vec![0; STAT_COUNT];
     for (i, s) in stats.iter_mut().enumerate().take(FILE_STATS) {
         *s = if i < BYTE_STATS {
@@ -211,7 +229,13 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<i32>, MpdataError> {
             i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
         };
     }
-    Ok(stats)
+    stats
+}
+
+/// The stats of an `mpdata` file (see [`plain_file`]); `cd_key` is only needed for an `iwm0` file.
+#[cfg(test)]
+pub fn decode(bytes: &[u8], cd_key: Option<&CdKey>) -> Result<Vec<i32>, MpdataError> {
+    plain_file(bytes, cd_key).map(|p| parse_stats(&p))
 }
 
 /// `statsync` commands that carry every nonzero stat to the server.
@@ -410,21 +434,37 @@ impl Profiles {
     }
 
     fn read_stats(&self, name: &str) -> Vec<i32> {
-        self.find_dir(name)
+        let Some(bytes) = self
+            .find_dir(name)
             .and_then(|d| std::fs::read(d.join("mpdata")).ok())
-            .and_then(|b| match decode(&b) {
-                Ok(s) => {
-                    if !checksum_ok(&b) {
-                        eprintln!("profile {name}: the stats checksum does not match; using the stats anyway");
+        else {
+            return default_stats();
+        };
+        // The CD key is looked up only for the original's encrypted files, and never printed.
+        let key = bytes.starts_with(b"iwm0").then(CdKey::read).flatten();
+        match plain_file(&bytes, key.as_ref()) {
+            Ok(plain) => {
+                if !checksum_ok(&plain) {
+                    eprintln!(
+                        "profile {name}: the stats checksum does not match; using the stats anyway"
+                    );
+                }
+                parse_stats(&plain)
+            }
+            Err(e) => {
+                let why = match e {
+                    MpdataError::Corrupt => "the file is damaged or not an mpdata file",
+                    MpdataError::Encrypted => {
+                        "it is encrypted with the CD key, which was not found (the registry on Windows, the Wine prefix in WINEPREFIX elsewhere)"
                     }
-                    Some(s)
-                }
-                Err(e) => {
-                    eprintln!("profile {name}: cannot read its stats ({e:?}); starting fresh");
-                    None
-                }
-            })
-            .unwrap_or_else(default_stats)
+                    MpdataError::Rejected => {
+                        "it is encrypted and its hash does not match (tampered, or made with another CD key)"
+                    }
+                };
+                eprintln!("profile {name}: cannot read its stats ({why}); starting fresh");
+                default_stats()
+            }
+        }
     }
 
     fn load_active(&mut self) -> Vec<i32> {
@@ -593,27 +633,54 @@ mod tests {
         let bytes = encode(&s);
         assert_eq!(bytes.len(), 0x211C);
         assert_eq!(&bytes[..4], b"ice0");
-        assert_eq!(decode(&bytes).unwrap(), s);
+        assert_eq!(decode(&bytes, None).unwrap(), s);
     }
 
     #[test]
     fn decode_rejects_damaged_and_foreign_files() {
         let good = encode(&default_stats());
-        assert_eq!(decode(&good[..100]), Err(MpdataError::Corrupt));
+        assert_eq!(decode(&good[..100], None), Err(MpdataError::Corrupt));
         let mut bad = good.clone();
         bad[STATS_AT + 5] ^= 1;
         assert!(!checksum_ok(&bad));
         assert_eq!(
-            decode(&bad).unwrap()[5],
+            decode(&bad, None).unwrap()[5],
             default_stats()[5] ^ 1,
             "a bad checksum still reads"
         );
         let mut enc = good.clone();
         enc[..4].copy_from_slice(b"iwm0");
-        assert_eq!(decode(&enc), Err(MpdataError::Encrypted));
+        assert_eq!(decode(&enc, None), Err(MpdataError::Encrypted));
+        let key = CdKey::from_registry_value("ABCD1234EFGH5678WXYZ").unwrap();
+        assert_eq!(
+            decode(&enc, Some(&key)),
+            Err(MpdataError::Rejected),
+            "no valid hash under that key"
+        );
         let mut other = good;
         other[..4].copy_from_slice(b"xxxx");
-        assert_eq!(decode(&other), Err(MpdataError::Corrupt));
+        assert_eq!(decode(&other, None), Err(MpdataError::Corrupt));
+    }
+
+    #[test]
+    fn stock_encrypted_stats_load_with_the_cd_key() {
+        let key = CdKey::from_registry_value("ABCD1234EFGH5678WXYZ").unwrap();
+        let mut s = default_stats();
+        s[2301] = 125_490;
+        s[3497] = i32::MAX;
+        let enc = crate::mpdata_crypt::encrypt(&encode(&s), &key, 0xDEAD_BEEF);
+        assert_eq!(&enc[..4], b"iwm0");
+        assert_eq!(decode(&enc, Some(&key)).unwrap(), s);
+        assert_eq!(decode(&enc, None), Err(MpdataError::Encrypted));
+        let other = CdKey::from_registry_value("ZZZZ1234EFGH5678WXYZ").unwrap();
+        assert_eq!(decode(&enc, Some(&other)), Err(MpdataError::Rejected));
+        let mut bad = enc.clone();
+        bad[0x300] ^= 1;
+        assert_eq!(
+            decode(&bad, Some(&key)),
+            Err(MpdataError::Rejected),
+            "a tampered stat"
+        );
     }
 
     #[test]
@@ -649,7 +716,7 @@ mod tests {
         mine[2301] += 5;
         assert!(p.save_if_changed(&mine).unwrap());
         assert_eq!(
-            decode(&std::fs::read(dir.join("mpdata")).unwrap()).unwrap(),
+            decode(&std::fs::read(dir.join("mpdata")).unwrap(), None).unwrap(),
             theirs
         );
         let (again, back) = Profiles::open(&install, Some(cfg), "default");

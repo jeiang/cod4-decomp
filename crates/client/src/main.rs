@@ -32,6 +32,7 @@ mod listen;
 mod loader;
 mod look;
 mod models;
+mod mpdata_crypt;
 mod netplay;
 mod ownerdraw;
 mod pointer;
