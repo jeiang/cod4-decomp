@@ -359,6 +359,8 @@ pub struct Stats {
     /// two name counts above can be held to.
     pub friends_in_sight_frames: u32,
     pub crosshair_due_frames: u32,
+    /// Frames of a killcam in which the viewer's own body was in sight, so its "you" marker was due.
+    pub killcam_you_frames: u32,
     /// Frames a vote was on screen, and the most yes and no answers its lines showed.
     pub vote_frames: u32,
     pub vote_yes_max: i32,
@@ -432,6 +434,8 @@ impl Stats {
     pub fn names_offered(&mut self, names: &names::Names, live: &LiveUi) {
         self.friends_in_sight_frames += u32::from(names.friends_in_sight > 0);
         self.crosshair_due_frames += u32::from(live.scan.crosshair.is_some());
+        self.killcam_you_frames +=
+            u32::from(live.killcam && live.scan.near.iter().any(|p| p.you && p.clear));
     }
 
     pub fn report(&self) -> Value {
@@ -454,6 +458,7 @@ impl Stats {
             "head_icons_max": self.head_icons_max,
             "head_icon_materials": self.head_icon_materials,
             "friends_in_sight_frames": self.friends_in_sight_frames,
+            "killcam_you_frames": self.killcam_you_frames,
             "crosshair_due_frames": self.crosshair_due_frames,
             "vote_frames": self.vote_frames,
             "vote_yes_max": self.vote_yes_max,
