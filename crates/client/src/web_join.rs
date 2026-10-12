@@ -244,10 +244,11 @@ pub async fn prepare(cli: &mut Cli) -> Result<(), String> {
         return Err(format!("The server runs an invalid mod ({}).", e.game));
     }
     if download::wanted(&cli.install, &e.game, &e.map) {
-        // `cl_allowDownload` is the player's, kept in the settings the client has not read yet. A browser has one
-        // profile (profiles are folders it has none of), so the active one is the default.
-        let kept =
-            web::pref_get(&profile::web_config_key(profile::DEFAULT_PROFILE).to_string_lossy());
+        // `cl_allowDownload` is the player's, kept in the settings the client has not read yet. The active profile
+        // is the one the page's storage names (see `profile::web_active_profile`).
+        let kept = web::pref_get(
+            &profile::web_config_key(&profile::web_active_profile()).to_string_lossy(),
+        );
         let allowed = kept
             .and_then(|text| config::saved_value(&text, "cl_allowDownload"))
             .is_none_or(|v| v.trim() != "0");

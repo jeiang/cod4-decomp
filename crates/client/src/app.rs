@@ -37,6 +37,14 @@ use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 /// Frames the surface size must hold before the recorder starts.
 const RECORD_AFTER_STABLE: u32 = 10;
+/// The profile a first start uses: the default, or in a browser the one it last switched to.
+fn start_profile() -> String {
+    #[cfg(target_arch = "wasm32")]
+    return crate::profile::web_active_profile();
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::profile::DEFAULT_PROFILE.to_owned()
+}
+
 /// How often a browser keeps changed settings (see `config_saved_at`).
 #[cfg(target_arch = "wasm32")]
 const CONFIG_SAVE_EVERY: Duration = Duration::from_secs(2);
@@ -879,11 +887,7 @@ impl Viewer {
                     .map_err(|e| format!("cannot seed the harness profile: {e}"))?;
                 Profiles::open_isolated(dir)
             }
-            None => Profiles::open(
-                &install.root,
-                input.config_dir(),
-                crate::profile::DEFAULT_PROFILE,
-            ),
+            None => Profiles::open(&install.root, input.config_dir(), &start_profile()),
         };
         let (read, write) = profiles.config_paths();
         input.use_profile(read, write);

@@ -15,12 +15,15 @@ const SLOTS = ["manifest.a", "manifest.b"];
 
 self.onmessage = ({ data: m }) => {
   // One at a time: each save reads the list the one before it wrote.
-  queue = queue.then(() => (m.type === "save" ? save(m.path, m.bytes) : m.type === "touch" ? touch(m.paths) : null)).catch((e) => {
+  queue = queue.then(() => exclusive(() => (m.type === "save" ? save(m.path, m.bytes) : m.type === "touch" ? touch(m.paths) : null))).catch((e) => {
     const quota = e?.name === "QuotaExceededError";
     postMessage({ type: "error", path: m.path ?? "", message: quota ? "this browser has no room to keep it" : String(e?.message ?? e) });
   });
 };
 let queue = Promise.resolve();
+
+// Another tab of this origin may be saving too: its list read, write and sweep must not interleave with ours.
+const exclusive = (fn) => (navigator.locks ? navigator.locks.request(`${DOWNLOAD_DIR}-write`, fn) : fn());
 
 async function readList(dir) {
   let best = { seq: 0, files: [] };
