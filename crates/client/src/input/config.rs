@@ -84,6 +84,17 @@ pub fn quote(s: &str) -> String {
     out
 }
 
+/// The file `exec <name>` reads: the name cut to the original's 63 characters, with `.cfg` added when it has no
+/// extension (`Cmd_Exec_f`).
+pub fn exec_name(name: &str) -> String {
+    let mut file: String = name.chars().take(63).collect();
+    let base = file.rsplit(['/', '\\']).next().unwrap_or("");
+    if !base.contains('.') && file.len() + 4 <= 63 {
+        file.push_str(".cfg");
+    }
+    file
+}
+
 /// Re-join tokens into a command line, quoting those that need it.
 pub fn join(tokens: &[String]) -> String {
     let plain = |t: &str| {

@@ -823,7 +823,10 @@ impl Viewer {
         }
         let install = server::content::Install::open_game(&self.cli.install, &self.cli.game)
             .map_err(|e| format!("cannot open the install: {e}"))?;
-        let mut input = Input::new(self.cli.config_dir.clone(), Some(&install.vfs));
+        let mut input = Input::new(
+            self.cli.config_dir.clone(),
+            Vfs::open(&self.cli.install, 0, &self.cli.game).ok(),
+        );
         input.cvars.set("fs_game", &self.cli.game, false);
         let demo_dir = input
             .config_dir()
@@ -1907,6 +1910,13 @@ impl Viewer {
         if let Some(m) = st.menu_sound.as_mut() {
             m.set_volume(crate::sound::volume_of(&st.input.cvars));
             m.frame([0.0; 3], 0.0, (interval / 1000.0) as f32);
+        }
+        // What commands said (a missing `exec` file, `dvarlist`) goes to the console.
+        let said = st.input.take_messages();
+        if let Some(sh) = st.shell.as_mut() {
+            for line in said {
+                sh.print_console(&line);
+            }
         }
         let actions = st
             .shell

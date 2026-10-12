@@ -845,16 +845,43 @@ impl Shell {
 
     /// A key typed into the chat field or the console.
     pub fn console_key(&mut self, input: &mut Input, key: UiKey) {
-        use crate::console::Entered;
-        let cvars = |prefix: &str| {
-            input
-                .cvars
-                .with_prefix(prefix)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect()
+        use crate::console::{Arg, Entered, Want};
+        let (maps, vfs) = (&self.st.maps, self.st.vfs.as_ref());
+        let complete = |w: Want| -> Vec<String> {
+            let starts = |n: &String| n.starts_with(w.prefix);
+            match w.kind {
+                Arg::Cvar => input
+                    .cvars
+                    .with_prefix(w.prefix)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect(),
+                Arg::Map => maps
+                    .iter()
+                    .map(|m| m.name.to_ascii_lowercase())
+                    .filter(starts)
+                    .collect(),
+                Arg::Cfg => vfs
+                    .map(|v| v.names_with_ext(".cfg"))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(starts)
+                    .collect(),
+                Arg::Demo => input
+                    .config_dir()
+                    .and_then(|d| std::fs::read_dir(d.join("demos")).ok())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|e| {
+                        let n = e.file_name().to_string_lossy().to_ascii_lowercase();
+                        n.strip_suffix(".c4edemo").map(str::to_owned)
+                    })
+                    .filter(starts)
+                    .collect(),
+            }
         };
-        match self.st.console.key(key, cvars) {
+        match self.st.console.key(key, complete) {
             Some(Entered::Say { team, text }) => {
                 let verb = if team { "say_team" } else { "say" };
                 self.st
@@ -1189,9 +1216,10 @@ impl HostCx<'_> {
             .st
             .vfs
             .as_ref()
-            .and_then(|v| v.read(name).ok().flatten());
+            .and_then(|v| v.read(&crate::input::config::exec_name(name)).ok().flatten());
         let Some(bytes) = bytes else {
-            eprintln!("ui: exec {name}: no such file");
+            eprintln!("couldn't exec {name}");
+            self.st.feed.console.push(format!("couldn't exec {name}"));
             return;
         };
         self.st.exec_depth += 1;
@@ -1489,7 +1517,8 @@ impl HostCx<'_> {
             .flatten()
             .filter(|t| t != "(" && t != ")" && t != ",")
             .collect();
-        for cmd in crate::input::config::split_commands(line) {
+        let mut rest = crate::input::config::split_commands(line).into_iter();
+        while let Some(cmd) = rest.next() {
             let Some(name) = cmd.first().map(|s| s.to_ascii_lowercase()) else {
                 continue;
             };
@@ -1557,9 +1586,17 @@ impl HostCx<'_> {
                         eprintln!("statClearPerkNew {name}: {e}");
                     }
                 }
-                "wait"
-                // Stays a no-op: `snd_volume` is read live every frame, and no other snd_ dvar needs a restart.
-                | "snd_restart"
+                // The rest of the line waits for later frames (`Cmd_Wait_f`).
+                "wait" => {
+                    let n = if cmd.len() > 1 { atoi(a(1)) } else { 1 };
+                    if n > 0 {
+                        let tail = rest.by_ref().collect();
+                        self.input.defer(n.unsigned_abs(), tail);
+                        return;
+                    }
+                }
+                // `snd_volume` is read live every frame, and no other snd_ dvar needs a restart: these stay no-ops.
+                "snd_restart"
                 | "updatedvarsfromprofile"
                 | "loc_warnings"
                 | "r_applypicmip"
