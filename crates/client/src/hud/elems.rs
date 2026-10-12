@@ -124,7 +124,7 @@ pub fn draw_under(ui: &Ui, p: &mut Painter, st: &ShellState) {
         crate::crosshair::draw(p.g, p.cache, r, (w as u32, h as u32));
     }
     st.feed.draw_chat(ui, p, &st.live, st.game.scoreboard);
-    super::draw_vote(ui, p, &st.live);
+    super::draw_vote(ui, p, &st.live, &st.feed.layout);
     draw_elems(ui, p, &st.live, false);
 }
 
@@ -154,7 +154,7 @@ fn draw_scope(ui: &Ui, p: &mut Painter, o: &crate::viewmodel::Overlay) {
 /// The red flash over the screen and the wedges that point at where hits came from (`CG_DrawFlashDamage`,
 /// `CG_DrawDamageDirectionIndicators`). A flashbang hides the wedges, and so does a scope unless
 /// `cg_hudDamageIconInScope` is set (they are drawn about the screen centre, where the scope's crosshair is).
-fn draw_damage(ui: &Ui, p: &mut Painter, live: &LiveUi) {
+fn draw_damage(ui: &Ui, p: &mut Painter, live: &LiveUi, layout: &super::Layout) {
     let (w, h) = ui.place.size;
     let d = &live.damage;
     if d.flash > 0.0 {
@@ -173,12 +173,13 @@ fn draw_damage(ui: &Ui, p: &mut Painter, live: &LiveUi) {
     if d.wedges.is_empty() || live.flashed || (live.scope.is_some() && !live.damage_in_scope) {
         return;
     }
-    let unit = h / 480.0;
-    let [iw, ih] = crate::damage::ICON_SIZE.map(|v| v * unit);
-    let radius = crate::damage::ICON_OFFSET * unit;
+    let (iw, ih, radius) = layout.icon_px(h);
     let img = p.named(&ui.assets, crate::damage::ICON_MATERIAL);
     let (cx, cy) = (w * 0.5, h * 0.5);
-    for &(degrees, alpha) in &d.wedges {
+    for &(degrees, age) in &d.wedges {
+        let Some(alpha) = layout.wedge_alpha(age) else {
+            continue;
+        };
         p.g.quad_rot(
             &img,
             [cx - iw * 0.5, cy + radius, iw, ih],
@@ -200,7 +201,7 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
     if live.interrupted {
         draw_interrupted(ui, p, live);
     }
-    draw_damage(ui, p, live);
+    draw_damage(ui, p, live, &st.feed.layout);
     if let Some(name) = live
         .following
         .as_deref()

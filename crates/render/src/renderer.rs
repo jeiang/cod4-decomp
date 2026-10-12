@@ -213,6 +213,10 @@ pub struct Settings {
     pub distortion: bool,
     /// `r_drawSun`: off, the map's sun sprite, lens flare and glare are not drawn.
     pub draw_sun: bool,
+    /// `r_zFeather`: off, soft particles fade nowhere (their hard edge shows where they cut into geometry).
+    pub z_feather: bool,
+    /// `r_drawWater`: off, the water height maps stay as they are at time zero instead of moving.
+    pub draw_water: bool,
     /// `r_lodScaleRigid` and `r_lodScaleSkinned`: how much farther a model counts as for its level of detail.
     pub lod_scale: [f32; 2],
     /// `r_lodBiasRigid` and `r_lodBiasSkinned`: units added to that distance.
@@ -240,6 +244,8 @@ impl Default for Settings {
             max_shadow_lights: spotshadow::TILES as usize,
             spot_fade_time: 1.0,
             draw_sun: true,
+            z_feather: true,
+            draw_water: true,
             distortion: true,
             lod_scale: [1.0; 2],
             lod_bias: [0.0; 2],
@@ -515,6 +521,8 @@ pub struct Renderer {
     /// The multisampled colour and depth of the scene pass, while `r_aaSamples` asks for more than one sample.
     msaa: Option<Msaa>,
     tex_bgs: HashMap<TexKey, Arc<wgpu::BindGroup>>,
+    /// `settings.z_feather` as the cached bind groups were made.
+    z_feather_bound: bool,
     pub clear: [f64; 3],
     pub settings: Settings,
     /// Fog, glow and film of the map.
@@ -675,6 +683,7 @@ impl Renderer {
             depth: None,
             msaa: None,
             tex_bgs: HashMap::new(),
+            z_feather_bound: true,
             clear: [0.45, 0.43, 0.38],
             settings: Settings::default(),
             art: data.art.clone(),
@@ -1091,8 +1100,8 @@ impl Renderer {
         p
     }
 
-    /// The sample count the scene pass uses: `r_aaSamples` lowered to the largest count the device supports for the
-    /// colour and depth formats.
+    /// The sample count the scene pass uses: `r_aaSamples` (at most 16) stepped down one at a time to the largest
+    /// count the device supports for the colour and depth formats (`R_ReduceWindowSettings`).
     pub fn samples(&self, format: wgpu::TextureFormat) -> u32 {
         let ok = |f: wgpu::TextureFormat, n: u32| {
             self.gpu
@@ -1101,10 +1110,9 @@ impl Renderer {
                 .flags
                 .sample_count_supported(n)
         };
-        [4u32, 2]
-            .into_iter()
-            .find(|&n| n <= self.settings.aa_samples && ok(format, n) && ok(DEPTH_FORMAT, n))
-            .unwrap_or(1)
+        pick_samples(self.settings.aa_samples, |n| {
+            ok(format, n) && ok(DEPTH_FORMAT, n)
+        })
     }
 
     fn ensure_msaa(&mut self, size: (u32, u32), format: wgpu::TextureFormat, samples: u32) {
@@ -1340,7 +1348,11 @@ impl Renderer {
                 (ctex::FLOATZ, _) => {
                     let (size, format) = self.frame_target;
                     Some((
-                        self.post_state.floatz_tex(&self.gpu, size, format),
+                        if self.settings.z_feather {
+                            self.post_state.floatz_tex(&self.gpu, size, format)
+                        } else {
+                            self.post_state.far_floatz_tex(&self.gpu)
+                        },
                         SamplerKey::ShadowRaw,
                     ))
                 }
@@ -2480,8 +2492,12 @@ impl Renderer {
         let mut laps = [0.0f32; 10];
         self.ensure_depth(size);
         self.ensure_shadow();
-        if self.post_state.invalidate(size, format) {
+        // The scene's `FLOATZ` is the far-everywhere image while `r_zFeather` is off: bind groups hold which.
+        if self.post_state.invalidate(size, format)
+            || self.z_feather_bound != self.settings.z_feather
+        {
             self.tex_bgs.clear();
+            self.z_feather_bound = self.settings.z_feather;
         }
         self.frame_target = (size, format);
         self.ring.clear();
@@ -2508,7 +2524,12 @@ impl Renderer {
         if let Some(f) = self.art.fog.as_ref().filter(|_| self.settings.fog) {
             self.clear = f.color.map(f64::from);
         }
-        self.materials.update_waters(&self.gpu, view.time);
+        let water_time = if self.settings.draw_water {
+            view.time
+        } else {
+            0.0
+        };
+        self.materials.update_waters(&self.gpu, water_time);
         frame.vec[codeconst::GAMETIME as usize] = [view.time; 4];
         frame.vec[codeconst::ZNEAR as usize] = [NEAR * 0.984_375, 0.0, 0.0, 0.0];
         frame.vec[codeconst::RENDER_TARGET_SIZE as usize] = [
@@ -2803,12 +2824,13 @@ impl Renderer {
         stats.draws += draws.len() + late.len();
 
         // The post chain: depth of field wants the scene's depth as a second list of the same surfaces.
-        // Soft particles read it too: any draw of the scene whose technique is z-feathered.
-        let z_feathered = draws
-            .iter()
-            .chain(&late)
-            .chain(&vm_draws)
-            .any(|d| d.prepared.flags & TECH_Z_FEATHER != 0);
+        // Soft particles read it too: any draw of the scene whose technique is z-feathered (unless `r_zFeather` is off).
+        let z_feathered = self.settings.z_feather
+            && draws
+                .iter()
+                .chain(&late)
+                .chain(&vm_draws)
+                .any(|d| d.prepared.flags & TECH_Z_FEATHER != 0);
         stats.floatz = z_feathered || self.post_params().dof_active();
         stats.distortion_copy = distortion;
         let floatz = stats.floatz.then(|| {
@@ -3206,6 +3228,15 @@ impl Renderer {
     }
 }
 
+/// The most samples per pixel up to `wanted` (at most 16) that `supported` accepts, stepping down by one as the
+/// original does when the device refuses a window setting; one sample when none is.
+fn pick_samples(wanted: u32, supported: impl Fn(u32) -> bool) -> u32 {
+    (2..=wanted.min(16))
+        .rev()
+        .find(|&n| supported(n))
+        .unwrap_or(1)
+}
+
 /// Record `draws` into `rp`. `sky_view` carries the target size of a scene pass, whose sky draws use the far end of
 /// the depth range.
 fn record(
@@ -3597,6 +3628,18 @@ mod tests {
         assert_eq!(pick(&[100.0, 0.0, 500.0], 300.0), Some(1));
         // Past the last range there is nothing to draw.
         assert_eq!(pick(&[100.0, 400.0], 400.0), None);
+    }
+
+    #[test]
+    fn antialiasing_steps_down_from_what_was_asked_to_what_the_device_has() {
+        let up_to = |max: u32| move |n: u32| n.is_power_of_two() && n <= max;
+        assert_eq!(pick_samples(16, up_to(16)), 16);
+        assert_eq!(pick_samples(16, up_to(8)), 8);
+        assert_eq!(pick_samples(8, up_to(4)), 4);
+        assert_eq!(pick_samples(6, up_to(16)), 4);
+        assert_eq!(pick_samples(64, up_to(16)), 16);
+        assert_eq!(pick_samples(1, up_to(16)), 1);
+        assert_eq!(pick_samples(8, up_to(1)), 1);
     }
 
     #[test]

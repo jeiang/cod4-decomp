@@ -44,6 +44,9 @@ pub struct Request {
     pub settings: Settings,
     /// Texture sizes dropped (`r_picmip`) and the most anisotropic filtering (`r_texFilterAnisoMax`).
     pub picmip: usize,
+    /// `r_picmip_bump` and `r_picmip_spec`: the same for normal maps and specular maps.
+    pub picmip_bump: usize,
+    pub picmip_spec: usize,
     pub aniso_max: u16,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser warms from its frames
     pub format: wgpu::TextureFormat,
@@ -258,7 +261,8 @@ impl Work {
             self.gpu.clone(),
             scene,
             data,
-            TextureCache::new(Some(vfs), self.req.picmip),
+            TextureCache::new(Some(vfs), self.req.picmip)
+                .with_map_picmips(self.req.picmip_bump, self.req.picmip_spec),
         );
         renderer.materials.aniso_max = self.req.aniso_max;
         renderer.settings = self.req.settings;

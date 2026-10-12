@@ -183,6 +183,12 @@ fn distortion_samples_the_scene_copy_and_soft_particles_draw_float_z() {
     r.dynamic_meshes = vec![quad_ahead(smoke, at, 100.0, 400.0)];
     let soft = r.render(&view, &tv, FORMAT, (W, H));
     assert!(soft.floatz, "{soft:?}");
+
+    // With `r_zFeather` off the soft particles read no depth: the float-Z pass is not drawn for them.
+    r.settings.z_feather = false;
+    r.settings.dof = false;
+    let hard = r.render(&view, &tv, FORMAT, (W, H));
+    assert!(!hard.floatz, "{hard:?}");
 }
 
 /// A horizontal sheet `h` units below `at`, ahead of it.

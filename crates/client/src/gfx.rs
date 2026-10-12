@@ -7,6 +7,7 @@
 
 use crate::display::{FullscreenKind, Request};
 use crate::input::Cvars;
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Gfx {
@@ -22,8 +23,11 @@ pub struct Gfx {
     pub vsync: bool,
     /// `r_aaSamples`.
     pub aa_samples: u32,
-    /// `r_picmip` unless `r_picmip_manual` is off, when the engine picks full size.
+    /// `r_picmip` unless `r_picmip_manual` is off, when the engine picks full size; and the same for `r_picmip_bump`
+    /// (normal maps) and `r_picmip_spec` (specular maps).
     pub picmip: usize,
+    pub picmip_bump: usize,
+    pub picmip_spec: usize,
     /// `r_texFilterAnisoMax`.
     pub aniso_max: u16,
     /// `sm_enable`.
@@ -54,6 +58,10 @@ pub struct Gfx {
     pub draw_sun: bool,
     /// `r_distortion`.
     pub distortion: bool,
+    /// `r_zFeather`.
+    pub z_feather: bool,
+    /// `r_drawWater`.
+    pub draw_water: bool,
 }
 
 /// `1920x1080` as a size.
@@ -111,15 +119,26 @@ impl Gfx {
         let text = |n: &str| c.get(n).unwrap_or("");
         // Unset means the engine's default: everything on.
         let on = |n: &str| c.get(n).is_none_or(|v| v.trim() != "0");
+        let picmip = |n: &str| (c.f32(n).max(0.0) as usize).min(3);
         Gfx {
             fullscreen: c.bool("r_fullscreen"),
             mode: parse_mode(text("r_mode")),
             refresh: parse_hz(text("r_displayRefresh")),
             aspect: parse_aspect(text("r_aspectRatio")),
             vsync: c.bool("r_vsync"),
-            aa_samples: text("r_aaSamples").trim().parse().unwrap_or(1).max(1),
+            aa_samples: text("r_aaSamples").trim().parse().unwrap_or(1).clamp(1, 16),
             picmip: if c.bool("r_picmip_manual") {
-                (c.f32("r_picmip").max(0.0) as usize).min(3)
+                picmip("r_picmip")
+            } else {
+                0
+            },
+            picmip_bump: if c.bool("r_picmip_manual") {
+                picmip("r_picmip_bump")
+            } else {
+                0
+            },
+            picmip_spec: if c.bool("r_picmip_manual") {
+                picmip("r_picmip_spec")
             } else {
                 0
             },
@@ -166,6 +185,8 @@ impl Gfx {
             }),
             draw_sun: on("r_drawSun"),
             distortion: on("r_distortion"),
+            z_feather: on("r_zFeather"),
+            draw_water: on("r_drawWater"),
         }
     }
 
@@ -194,6 +215,8 @@ impl Gfx {
         base.draw_sun = self.draw_sun;
         base.distortion = self.distortion;
         base.aa_samples = self.aa_samples;
+        base.z_feather = self.z_feather;
+        base.draw_water = self.draw_water;
         base.aspect = self.aspect;
         base.dlight_limit = self.dlight_limit;
         base.spot = self.spot;
@@ -217,6 +240,18 @@ impl Gfx {
             _ => cli,
         }
     }
+}
+
+/// The shortest time a frame may take (`com_maxfps`: 85 unless set, within the original's 0 to 1000), `None` for no
+/// cap. Whole milliseconds, as the original counts them (`1000 / com_maxfps`, at least one), so 85 paces at 11 ms.
+/// With vsync on the display's own pace applies as well: the slower of the two wins.
+pub fn frame_gap(c: &Cvars) -> Option<Duration> {
+    let fps = c
+        .get("com_maxfps")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(85, |v| v.clamp(0.0, 1000.0) as u32);
+    (fps > 0).then(|| Duration::from_millis(u64::from((1000 / fps).max(1))))
 }
 
 #[cfg(test)]
@@ -318,5 +353,39 @@ mod tests {
         assert_eq!(s.lod_bias, [0.0, -40.0]);
         let s = Gfx::from_cvars(&cvars(&[])).settings(render::Settings::default());
         assert_eq!((s.lod_scale, s.lod_bias), ([1.0; 2], [0.0; 2]));
+    }
+
+    #[test]
+    fn texture_quality_soft_smoke_and_water_follow_their_dvars() {
+        let g = Gfx::from_cvars(&cvars(&[
+            ("r_picmip_manual", "1"),
+            ("r_picmip", "1"),
+            ("r_picmip_bump", "2"),
+            ("r_picmip_spec", "9"),
+            ("r_zFeather", "0"),
+            ("r_drawWater", "0"),
+            ("r_aaSamples", "16"),
+        ]));
+        assert_eq!((g.picmip, g.picmip_bump, g.picmip_spec), (1, 2, 3));
+        assert_eq!(g.aa_samples, 16);
+        let s = g.settings(render::Settings::default());
+        assert!(!s.z_feather && !s.draw_water);
+        let auto = Gfx::from_cvars(&cvars(&[("r_picmip_bump", "2")]));
+        assert_eq!(auto.picmip_bump, 0, "automatic detail unless set manually");
+        assert_eq!(
+            Gfx::from_cvars(&cvars(&[("r_aaSamples", "64")])).aa_samples,
+            16
+        );
+    }
+
+    #[test]
+    fn the_frame_cap_is_whole_milliseconds_and_zero_means_none() {
+        let ms = |v: &str| frame_gap(&cvars(&[("com_maxfps", v)])).map(|d| d.as_millis());
+        assert_eq!(ms("85"), Some(11), "the stock default");
+        assert_eq!(ms("250"), Some(4));
+        assert_eq!(ms("1000"), Some(1));
+        assert_eq!(ms("5000"), Some(1), "no more than 1000");
+        assert_eq!(ms("0"), None);
+        assert_eq!(frame_gap(&cvars(&[])).map(|d| d.as_millis()), Some(11));
     }
 }

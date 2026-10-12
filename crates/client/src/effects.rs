@@ -172,6 +172,8 @@ pub struct Effects {
     /// Tracers rolled by shots, not yet launched: the shooter, their eye and the way they look.
     pending_tracers: Vec<(u16, Vec3, Vec3)>,
     tracer_cvars: tracer::Cvars,
+    /// `fx_marks`.
+    marks_on: bool,
     /// The state of the dice for the tracers.
     dice: u32,
     /// `gfx_tracer`, which the tracers are drawn with; none, none are drawn.
@@ -280,6 +282,7 @@ impl Effects {
             tracers: Tracers::default(),
             pending_tracers: Vec::new(),
             tracer_cvars: tracer::Cvars::default(),
+            marks_on: true,
             dice: 0x9e37_79b9,
             tracer_material: None,
             played: BTreeMap::new(),
@@ -788,6 +791,11 @@ impl Effects {
         self.tracer_cvars = c;
     }
 
+    /// `fx_marks`: off, bullet holes, blood and scorches are not drawn.
+    pub fn set_marks(&mut self, on: bool) {
+        self.marks_on = on;
+    }
+
     /// A random number in [0, 1).
     fn roll(&mut self) -> f32 {
         self.dice ^= self.dice << 13;
@@ -992,7 +1000,8 @@ impl Effects {
         }
 
         let mut seen = HashSet::new();
-        for dc in &d.decals {
+        let marks_on = self.marks_on;
+        for dc in d.decals.iter().filter(|_| marks_on) {
             seen.insert(dc.id);
             if !self.marks.contains_key(&dc.id) {
                 let p = Placement {

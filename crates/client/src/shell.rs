@@ -321,8 +321,9 @@ impl ShellState {
             return false;
         }
         let live = &self.live;
-        let page = hud::rows_shown(&live.scores, live.own_team, self.scores_top).max(1);
-        let total = hud::scoreboard_lines(&live.scores, live.own_team);
+        let m = &self.score_view.metrics;
+        let page = hud::rows_shown(&live.scores, live.own_team, self.scores_top, m).max(1);
+        let total = hud::scoreboard_lines(&live.scores, live.own_team, m);
         let top = self.scores_top;
         let to = match key {
             UiKey::WheelUp | UiKey::Up => top.saturating_sub(1),
@@ -381,11 +382,25 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("ui_hud_obituaries", "1"),
     // The objective icons on the minimap draw only while this is not 0 (the stock config sets 1; hardcore turns it off).
     ("ui_hud_showobjicons", "1"),
+    // The scoreboard's size and ping display (stock registers these without the archive flag).
+    ("cg_scoreboardWidth", "500"),
+    ("cg_scoreboardHeight", "435"),
+    ("cg_scoreboardItemHeight", "18"),
+    ("cg_scoreboardBannerHeight", "35"),
+    ("cg_scoreboardPingWidth", "0.036"),
+    ("cg_scoreboardPingHeight", "0.7"),
+    ("cg_scoreboardPingText", "1"),
+    ("cg_scoreboardPingGraph", "0"),
 ];
 
 /// The settings of the options menus with the stock engine's defaults: archived, so a change survives a restart.
-/// (The graphics ones only the menus read yet; `r_mode` and `r_displayRefresh` are filled from the display at start.)
+/// (`r_mode` and `r_displayRefresh` are filled from the display at start. Three have nothing to act on here and only
+/// keep the menus' value: `r_rendererPreference` and `r_multiGpu` choose a Direct3D 9 code path and SLI/Crossfire mode,
+/// and `ai_corpseCount` caps the corpses of single-player actors, which a multiplayer match has none of.)
 const OPTION_DEFAULTS: &[(&str, &str)] = &[
+    // The frame cap in frames per second, 0 for none (the stock multiplayer default).
+    ("com_maxfps", "85"),
+    ("cg_drawCrosshair", "1"),
     ("r_aspectRatio", "auto"),
     ("r_gamma", "0.8"),
     ("r_ignorehwgamma", "0"),
@@ -418,6 +433,47 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("ragdoll_enable", "1"),
     ("fx_marks", "1"),
     ("ai_corpseCount", "10"),
+    // Where the HUD puts the vote, the chat field and the chat lines (also while the scoreboard is up), and how
+    // chat behaves.
+    ("cg_hudVotePosition", "5 220"),
+    ("cg_hudSayPosition", "5 180"),
+    ("cg_hudChatPosition", "5 204"),
+    ("cg_hudChatIntermissionPosition", "5 110"),
+    ("cg_chatTime", "12000"),
+    ("cg_chatHeight", "8"),
+    // The damage wedge's size, distance from the screen centre and time on screen.
+    ("cg_hudDamageIconWidth", "128"),
+    ("cg_hudDamageIconHeight", "64"),
+    ("cg_hudDamageIconOffset", "128"),
+    ("cg_hudDamageIconTime", "2000"),
+    // The scoreboard's ping graph.
+    ("cg_ScoresPing_MaxBars", "4"),
+    ("cg_ScoresPing_Interval", "100"),
+    ("cg_ScoresPing_HighColor", "0.8 0 0 1"),
+    ("cg_ScoresPing_MedColor", "0.8 0.8 0 1"),
+    ("cg_ScoresPing_LowColor", "0 0.75 0 1"),
+    ("cg_ScoresPing_BgColor", "0.25 0.25 0.25 0.5"),
+    // The four game message windows: seconds on screen, lines, scroll, fade in and fade out.
+    ("con_gameMsgWindow0MsgTime", "5"),
+    ("con_gameMsgWindow0LineCount", "4"),
+    ("con_gameMsgWindow0ScrollTime", "0.25"),
+    ("con_gameMsgWindow0FadeInTime", "0.25"),
+    ("con_gameMsgWindow0FadeOutTime", "0.5"),
+    ("con_gameMsgWindow1MsgTime", "8"),
+    ("con_gameMsgWindow1LineCount", "5"),
+    ("con_gameMsgWindow1ScrollTime", "0.25"),
+    ("con_gameMsgWindow1FadeInTime", "0.25"),
+    ("con_gameMsgWindow1FadeOutTime", "0.01"),
+    ("con_gameMsgWindow2MsgTime", "5"),
+    ("con_gameMsgWindow2LineCount", "7"),
+    ("con_gameMsgWindow2ScrollTime", "0.25"),
+    ("con_gameMsgWindow2FadeInTime", "0.75"),
+    ("con_gameMsgWindow2FadeOutTime", "0.5"),
+    ("con_gameMsgWindow3MsgTime", "5"),
+    ("con_gameMsgWindow3LineCount", "5"),
+    ("con_gameMsgWindow3ScrollTime", "0.25"),
+    ("con_gameMsgWindow3FadeInTime", "0.25"),
+    ("con_gameMsgWindow3FadeOutTime", "0.5"),
     ("cl_freelook", "1"),
     ("m_filter", "0"),
     // The join menu's filters (`filter_popmenu`), the stock values. `ui_browserShowPure` (stock 1) has no control in
@@ -689,6 +745,7 @@ impl Shell {
     /// Carries out one thing the server asked of the UI.
     pub fn apply(&mut self, input: &mut Input, ev: net::ui::UiEvent) {
         use net::ui::UiEvent;
+        self.sync_layout(input);
         match ev {
             UiEvent::SetDvar { name, value } => input.cvars.set(&name, &value, false),
             UiEvent::OpenMenu { name, mouse } => {
@@ -831,7 +888,13 @@ impl Shell {
     }
 
     /// An `iprintln` line or announcement: into the message window it belongs to, or only the console log.
+    /// Reads the HUD placement and timing dvars, which take effect at once: the feed keeps what it last read.
+    fn sync_layout(&mut self, input: &Input) {
+        self.st.feed.layout = hud::Layout::read(&input.cvars);
+    }
+
     fn print(&mut self, input: &Input, kind: net::ui::PrintKind, text: &str) {
+        self.sync_layout(input);
         use net::ui::PrintKind;
         let text = hud::localize(&self.ui.assets, text);
         let marks: Vec<String> = hud::key_marks(&text)
@@ -862,6 +925,8 @@ impl Shell {
     /// Once a frame, after the network has been read: what follows from the live state. Opens the end-of-match
     /// menus, clears the feed between matches and says whether the scoreboard needs fresh rows.
     pub fn tick(&mut self, input: &mut Input) {
+        self.sync_layout(input);
+        self.st.score_view.metrics = hud::ScoreMetrics::read(&input.cvars);
         {
             let mut h = Self::host(&mut self.st, input);
             self.ui.check_waiting_menu(&mut h);
@@ -899,10 +964,14 @@ impl Shell {
         self.st.live.scores_wanted = self.st.scoreboard_shown(&self.ui);
         if self.st.live.active {
             let st = &mut self.st;
-            let rows = st
-                .live
-                .scores_wanted
-                .then(|| hud::rows_shown(&st.live.scores, st.live.own_team, st.scores_top));
+            let rows = st.live.scores_wanted.then(|| {
+                hud::rows_shown(
+                    &st.live.scores,
+                    st.live.own_team,
+                    st.scores_top,
+                    &st.score_view.metrics,
+                )
+            });
             st.hud_stats.frame(&st.live, rows);
             st.names_cfg = hud::names::Cfg::read(&input.cvars);
             st.names
@@ -941,6 +1010,7 @@ impl Shell {
     ) {
         self.ui2d.begin(size);
         self.st.score_view.refresh(&input.cvars);
+        self.sync_layout(input);
         self.resolve_keys(input);
         self.ui2d.team_colors = hud::team_colors(&input.cvars);
         {
@@ -966,7 +1036,13 @@ impl Shell {
             if in_game {
                 hud::draw_over(&self.ui, &mut p, &self.st);
             }
-            hud::draw_typing(&self.ui, &mut p, &self.st.console, &self.st.feed.console);
+            hud::draw_typing(
+                &self.ui,
+                &mut p,
+                &self.st.console,
+                &self.st.feed.console,
+                &self.st.feed.layout,
+            );
         }
         self.ui2d.flush(target, clear);
     }
@@ -2393,6 +2469,24 @@ pub(crate) fn singleplayer_executable(install: &Path, windows: bool) -> Result<P
 mod tests {
     use super::*;
     use crate::serverlist::{Entry, Source};
+
+    /// The registered HUD dvars say what the layout reads when they are unset, and a changed one reaches the layout.
+    #[test]
+    fn the_registered_hud_dvars_match_what_the_layout_defaults_to() {
+        let mut input = Input::detached();
+        register_defaults(&mut input);
+        assert_eq!(hud::Layout::read(&input.cvars), hud::Layout::default());
+        assert_eq!(
+            hud::ScoreMetrics::read(&input.cvars),
+            hud::ScoreMetrics::default()
+        );
+        assert_eq!(input.cvars.get("cg_hudVotePosition"), Some("5 220"));
+        input.cvars.set("cg_hudVotePosition", "40 100", true);
+        assert_eq!(hud::Layout::read(&input.cvars).vote, [40.0, 100.0]);
+        let archived: Vec<_> = input.cvars.archived().into_iter().map(|(k, _)| k).collect();
+        assert!(archived.contains(&"cg_hudsayposition"));
+        assert!(!archived.contains(&"cg_scoreboardwidth"));
+    }
 
     #[test]
     fn singleplayer_selects_install_executable_and_reports_unavailable_cases() {

@@ -7,7 +7,7 @@
 use crate::Cli;
 use crate::display::{self, hor_plus, view_fov, zoom_sensitivity};
 use crate::flythrough;
-use crate::gfx::Gfx;
+use crate::gfx::{self, Gfx};
 use crate::input::{Input, InputFrame, buttons};
 use crate::listen::{self, Listen};
 use crate::loader::{self, Load};
@@ -312,6 +312,8 @@ struct State {
     shell: Option<Shell>,
     started: Instant,
     last_frame: Instant,
+    /// When `pacereset` last ran and the frames drawn since (the harness's frame cap check).
+    pace: (Instant, u32),
     last_t: f32,
     pos: Vec3,
     yaw: f32,
@@ -902,6 +904,7 @@ impl Viewer {
             shell,
             started: now,
             last_frame: now,
+            pace: (now, 0),
             last_t: 0.0,
             pos: start.origin,
             yaw: start.yaw,
@@ -998,6 +1001,16 @@ impl Viewer {
 }
 
 impl ApplicationHandler<Ready> for Viewer {
+    /// The frame cap's timer ran out: draw the next frame (see [`next_frame`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn new_events(&mut self, _: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. })
+            && let Some(st) = self.st.as_ref()
+        {
+            st.window.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.st.is_some() {
             return;
@@ -1191,7 +1204,8 @@ impl Viewer {
                 gpu.clone(),
                 scene,
                 map,
-                TextureCache::new(Some(vfs), gfx.picmip),
+                TextureCache::new(Some(vfs), gfx.picmip)
+                    .with_map_picmips(gfx.picmip_bump, gfx.picmip_spec),
             );
             r.materials.aniso_max = gfx.aniso_max;
             r.settings = gfx.settings(self.cli.settings);
@@ -1210,6 +1224,7 @@ impl Viewer {
         st.last_frame = now;
         let dt = (t - st.last_t).min(0.1);
         st.last_t = t;
+        st.pace.1 += 1;
         if let Some(g) = st.load_gaps.as_mut() {
             g.frames += 1;
             g.max_ms = g.max_ms.max(interval);
@@ -1430,6 +1445,7 @@ impl Viewer {
                 // The original's range is 0 to 3600 s; a timeout of 0 would drop the client at once.
                 net.set_timeout(Duration::from_secs_f32(secs.clamp(1.0, 3600.0)));
             }
+            net.set_switches(crate::netplay::Switches::read(&st.input.cvars));
             let tracer = |name: &str, default: f32| {
                 st.input
                     .cvar(name)
@@ -1925,7 +1941,7 @@ impl Viewer {
             self.finish(el)?;
             el.exit();
         } else {
-            st.window.request_redraw();
+            next_frame(el, st);
         }
         Ok(())
     }
@@ -2683,6 +2699,11 @@ fn script_step(st: &mut State) -> bool {
                 done(false, sc, "no renderer".into());
             }
         }
+        // Counts the frames from here, for `gfxis=pace 1`.
+        "pacereset" => {
+            st.pace = (Instant::now(), 0);
+            done(true, sc, String::new());
+        }
         // `vid_restart` as the graphics menu's Apply does it.
         "vidrestart" => {
             if let Some(sh) = st.shell.as_mut() {
@@ -2736,7 +2757,45 @@ fn script_step(st: &mut State) -> bool {
                         .any(|m| *m != wgpu::PresentMode::Fifo);
                     Some(u8::from(st.present_mode != wgpu::PresentMode::Fifo || !free).to_string())
                 }
+                "zfeather" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.settings.z_feather).to_string()),
+                "water" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.settings.draw_water).to_string()),
+                // The picmips of colour, normal and specular maps the match's textures were loaded with.
+                "picmip" => st.renderer.as_ref().map(|r| {
+                    let [c, b, s] = r.textures.picmips();
+                    format!("{c} {b} {s}")
+                }),
+                // 1 when the frames since `pacereset` came no faster than `com_maxfps` allows (a fifth of slack).
+                "pace" => {
+                    let (since, frames) = st.pace;
+                    gfx::frame_gap(&st.input.cvars).map(|gap| {
+                        let each = since.elapsed().as_secs_f64() / f64::from(frames.max(1));
+                        u8::from(frames >= 2 && each >= gap.as_secs_f64() * 0.8).to_string()
+                    })
+                }
                 _ => None,
+            };
+            // `gfxis=aa max`: the most samples the adapter offers for the scene's colour and depth, whatever was asked.
+            let want = if (name, want) == ("aa", "max") {
+                let ok = |f: wgpu::TextureFormat, n: u32| {
+                    st.gpu
+                        .adapter
+                        .get_texture_format_features(f)
+                        .flags
+                        .sample_count_supported(n)
+                };
+                [16u32, 8, 4, 2]
+                    .into_iter()
+                    .find(|&n| ok(st.config.format, n) && ok(wgpu::TextureFormat::Depth32Float, n))
+                    .unwrap_or(1)
+                    .to_string()
+            } else {
+                want.to_owned()
             };
             match have {
                 Some(h) => done(h == want, sc, format!("{name} is {h}")),
@@ -3286,6 +3345,22 @@ pub fn game_of(input: &Input) -> String {
     }
 }
 
+/// Asks for the next frame: at once, or once `com_maxfps` allows it (`Com_Frame`'s `minMsec`, counted from the start
+/// of the frame just drawn), by waiting on the event loop rather than spinning. The browser paces its own frames.
+fn next_frame(el: &ActiveEventLoop, st: &State) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let due = gfx::frame_gap(&st.input.cvars).map(|gap| st.last_frame + gap);
+        match due.filter(|d| Instant::now() < *d) {
+            Some(due) => return el.set_control_flow(ControlFlow::WaitUntil(due)),
+            None => el.set_control_flow(ControlFlow::Poll),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = el;
+    st.window.request_redraw();
+}
+
 /// `vid_restart`: the window, the present mode and the aspect take the graphics settings now; a running match's
 /// renderer takes the ones it can change live (shadows, specular, depth of field, glow, antialiasing), and the texture
 /// size and filtering wait for the next map, which loads its textures again.
@@ -3391,6 +3466,8 @@ fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: load
         server,
         settings: gfx.settings(cli.settings),
         picmip: gfx.picmip,
+        picmip_bump: gfx.picmip_bump,
+        picmip_spec: gfx.picmip_spec,
         aniso_max: gfx.aniso_max,
         format: st.config.format,
     };

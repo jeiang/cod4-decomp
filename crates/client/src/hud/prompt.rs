@@ -2,7 +2,7 @@
 //! What the player types and what the server asks of them: the chat field (`Con_DrawSay`), the console
 //! (`Con_DrawSolidConsole`) and the vote lines (`CG_DrawVote`).
 
-use super::{LiveUi, localize};
+use super::{Layout, LiveUi, localize};
 use crate::console::{Console, Mode};
 use crate::ui::Ui;
 use crate::ui::paint::{Painter, TextDraw};
@@ -62,7 +62,7 @@ fn line(ui: &Ui, p: &mut Painter, text: &str, x: f32, y: f32, h: f32, color: [f3
 const YELLOW: [f32; 4] = [1.0, 1.0, 0.0, 1.0];
 
 /// `CG_DrawVote`: the vote's text with the seconds left, then the tallies and the keys that answer it.
-pub fn draw_vote(ui: &Ui, p: &mut Painter, live: &LiveUi) {
+pub fn draw_vote(ui: &Ui, p: &mut Painter, live: &LiveUi, layout: &Layout) {
     let Some(v) = &live.vote else { return };
     let h = font_h(ui);
     let word = |key: &str| localize(&ui.assets, &format!("&{key}"));
@@ -82,12 +82,13 @@ pub fn draw_vote(ui: &Ui, p: &mut Painter, live: &LiveUi) {
         key("vote no"),
         v.no
     );
-    line(ui, p, &head, 5.0, 220.0 + h, h, YELLOW);
-    line(ui, p, &tally, 5.0, 220.0 + 2.0 * h, h, YELLOW);
+    let (x, y) = layout.vote_at(h);
+    line(ui, p, &head, x, y, h, YELLOW);
+    line(ui, p, &tally, x, y + h, h, YELLOW);
 }
 
 /// The chat field under the chat lines, or the console over the top of the screen.
-pub fn draw_typing(ui: &Ui, p: &mut Painter, c: &Console, log: &[String]) {
+pub fn draw_typing(ui: &Ui, p: &mut Painter, c: &Console, log: &[String], layout: &Layout) {
     let with_cursor = || {
         let (a, b) = c.text.split_at(c.cursor.min(c.text.len()));
         format!(
@@ -102,7 +103,8 @@ pub fn draw_typing(ui: &Ui, p: &mut Painter, c: &Console, log: &[String]) {
         Mode::Chat { team } => {
             let key = if team { "&EXE_SAYTEAM" } else { "&EXE_SAY" };
             let text = format!("{}: {}", localize(&ui.assets, key), with_cursor());
-            line(ui, p, &text, 5.0, 204.0, h, [1.0; 4]);
+            let (x, y) = layout.typing_at();
+            line(ui, p, &text, x, y, h, [1.0; 4]);
         }
         Mode::Console => {
             let rows = 240.0;

@@ -82,6 +82,40 @@ fn fixed_fov(ps: &PlayerState) -> Option<f32> {
     }
 }
 
+/// The on/off settings of the client that change what it makes of the match (`cg_drawCrosshair`, `ragdoll_enable`,
+/// `fx_marks`); all on, as the stock defaults have them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Switches {
+    /// The weapon's crosshair is drawn.
+    pub crosshair: bool,
+    /// Corpses fall as ragdolls rather than keeping the pose their death clip ends in.
+    pub ragdoll: bool,
+    /// Bullet holes, blood and scorches are drawn.
+    pub marks: bool,
+}
+
+impl Default for Switches {
+    fn default() -> Self {
+        Self {
+            crosshair: true,
+            ragdoll: true,
+            marks: true,
+        }
+    }
+}
+
+impl Switches {
+    /// The switches the dvars say; a dvar not set is on.
+    pub fn read(c: &crate::input::Cvars) -> Self {
+        let on = |n: &str| c.get(n).is_none_or(|v| v.trim() != "0");
+        Self {
+            crosshair: on("cg_drawCrosshair"),
+            ragdoll: on("ragdoll_enable"),
+            marks: on("fx_marks"),
+        }
+    }
+}
+
 /// What the render loop draws this frame.
 pub struct NetFrame {
     /// Eye position.
@@ -360,6 +394,7 @@ pub struct NetPlay {
     server_addr: String,
     effects: Effects,
     tracer_cvars: crate::tracer::Cvars,
+    switches: Switches,
     /// The weapon rules the client plays by (`player_meleeRange` and the like): the server's defaults, which no
     /// cvar changes yet.
     weapon_params: WeaponParams,
@@ -481,6 +516,7 @@ impl NetPlay {
             max_turn: [0.0; 2],
             effects: Effects::new(&lib.content, world),
             tracer_cvars: crate::tracer::Cvars::default(),
+            switches: Switches::default(),
             weapon_params: WeaponParams::default(),
             tracer_material: None,
             shakes: Default::default(),
@@ -611,6 +647,11 @@ impl NetPlay {
     /// What the player has set about tracers (`cg_tracerchance` and the like).
     pub fn set_tracer_cvars(&mut self, c: crate::tracer::Cvars) {
         self.tracer_cvars = c;
+    }
+
+    /// What the player has switched on or off.
+    pub fn set_switches(&mut self, s: Switches) {
+        self.switches = s;
     }
 
     /// Every weapon definition of the loaded content.
@@ -1094,7 +1135,11 @@ impl NetPlay {
         self.c.damage_events += u64::from(!dead && ps.damage_event != self.c.damage_event_seen);
         self.c.damage_event_seen = ps.damage_event;
         self.c.max_damage_flash = self.c.max_damage_flash.max(self.damage_hud.flash);
-        self.c.max_damage_wedges = self.c.max_damage_wedges.max(self.damage_hud.wedges.len());
+        // Wedges younger than the stock `cg_hudDamageIconTime` of 2 s.
+        let shown = (self.damage_hud.wedges.iter())
+            .filter(|&&(_, age)| age < 2000)
+            .count();
+        self.c.max_damage_wedges = self.c.max_damage_wedges.max(shown);
         let (was_kicked, kick) = (self.c.kicked, self.kick.angles());
         self.c.kicked = kick != [0.0; 3];
         self.c.kick_settled += u64::from(was_kicked && !self.c.kicked);
@@ -1360,6 +1405,7 @@ impl NetPlay {
         (yaw, pitch, roll): (f32, f32, f32),
     ) -> crate::effects::Drawn {
         self.effects.set_tracer_cvars(self.tracer_cvars);
+        self.effects.set_marks(self.switches.marks);
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         for e in events {
@@ -1451,6 +1497,9 @@ impl NetPlay {
 
     /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
+        if !self.switches.crosshair {
+            return None;
+        }
         let index = sim::pm::viewmodel_weapon(ps);
         let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
         let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &self.weapon_params);
@@ -2701,6 +2750,25 @@ mod tests {
         assert!((both - 1.2).abs() < 1e-5, "{both}");
         let key_only = turned([0.0; 2], &frame(5.0, 0.0), cap, 0.01, wide)[1];
         assert!((key_only - 0.6).abs() < 1e-5, "{key_only}");
+    }
+
+    #[test]
+    fn the_crosshair_ragdoll_and_mark_dvars_switch_what_they_name() {
+        let mut c = crate::input::Cvars::default();
+        assert_eq!(Switches::read(&c), Switches::default(), "unset is on");
+        for (name, check) in [
+            (
+                "cg_drawCrosshair",
+                (|s: Switches| s.crosshair) as fn(Switches) -> bool,
+            ),
+            ("ragdoll_enable", |s| s.ragdoll),
+            ("fx_marks", |s| s.marks),
+        ] {
+            c.set(name, "0", false);
+            assert!(!check(Switches::read(&c)), "{name} 0 turns it off");
+            c.set(name, "1", false);
+            assert!(check(Switches::read(&c)), "{name} 1 turns it on");
+        }
     }
 
     #[test]
