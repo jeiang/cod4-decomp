@@ -306,6 +306,12 @@ impl ShellState {
     }
 }
 
+/// What the Internet list says when `cl_masters` names no master server.
+const NO_MASTER: &str = "No master server set (cl_masters)";
+
+/// What it says when none of the names in `cl_masters` could be looked up.
+const UNRESOLVED_MASTER: &str = "Cannot find the master server (cl_masters)";
+
 /// The dvars the menus expect to exist before the first frame.
 const UI_DEFAULTS: &[(&str, &str)] = &[
     ("com_playerProfile", ""),
@@ -384,6 +390,9 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("m_filter", "0"),
     // Not a stock dvar: the bots a server started from the menus plays with, on every map.
     ("bot_count", "0"),
+    // Not a stock dvar: the master servers (`host[:port]`, space separated, up to five) the Internet list asks.
+    // Empty until the user names one.
+    ("cl_masters", ""),
 ];
 
 /// Gives every dvar the menus read its stock value unless the config set it.
@@ -1209,7 +1218,8 @@ impl HostCx<'_> {
     /// A list that is already being refreshed is left to finish.
     fn start_refresh(&mut self, ui: &Ui, full: bool) {
         let source = self.net_source();
-        if !self.st.servers.refresh(source, full) {
+        let masters = self.dvar_get("cl_masters");
+        if !self.st.servers.refresh(source, full, &masters) {
             return;
         }
         self.st.servers.select(None);
@@ -1916,15 +1926,13 @@ impl Host for HostCx<'_> {
                 self.input.cvars.set("ui_gametype", &to.to_string(), false);
                 true
             }
-            // 220: the list to browse; the lists but the internet one (which needs a master server) scan again.
+            // 220: the list to browse; each list scans again.
             220 if pick => {
                 let at =
                     usize::try_from(atoi(&self.dvar_get("ui_netSource")).clamp(0, 2)).unwrap_or(0);
                 let to = next(at, 3);
                 self.input.cvars.set("ui_netSource", &to.to_string(), false);
-                if to != 1 {
-                    self.start_refresh(ui, true);
-                }
+                self.start_refresh(ui, true);
                 self.st.servers.select(None);
                 true
             }
@@ -2034,7 +2042,16 @@ impl Host for HostCx<'_> {
             247 => {
                 // While the list is being collected the line says how far it got, pulsing; after, when it was made.
                 let source = self.net_source();
-                if self.st.servers.refreshing(source) {
+                if source == crate::serverlist::Source::Internet
+                    && self.dvar_get("cl_masters").trim().is_empty()
+                {
+                    // Not a stock string: the stock game always had a master to ask.
+                    ui_text(ui, p, d, rect, color, NO_MASTER);
+                } else if source == crate::serverlist::Source::Internet
+                    && self.st.servers.masters_unresolved()
+                {
+                    ui_text(ui, p, d, rect, color, UNRESOLVED_MASTER);
+                } else if self.st.servers.refreshing(source) {
                     let n = self.st.servers.rows(source).len();
                     let text = if source == crate::serverlist::Source::Internet {
                         translate(ui, "EXE_WAITINGFORMASTERSERVERRESPONSE")

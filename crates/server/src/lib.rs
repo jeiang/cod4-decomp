@@ -17,6 +17,7 @@ pub mod fire;
 pub mod game;
 pub mod gamelog;
 pub mod gunmotion;
+pub mod heartbeat;
 pub mod items;
 pub mod lagcomp;
 pub mod link;

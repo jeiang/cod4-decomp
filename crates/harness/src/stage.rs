@@ -178,6 +178,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_rcon::run),
     },
     StageDef {
+        name: "net-master",
+        description: "a master server, two public servers and one private one: a client asking the master (getchallenge, getservers, getinfo) lists exactly the public two, and a server that is stopped drops off the list",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_master::run),
+    },
+    StageDef {
         name: "net-items",
         description: "two real UDP clients: one's rifle is dropped, both are shown the weapon in their snapshots, the other is hinted and takes it holding +activate and its inventory changes",
         needs_install: false,

@@ -4,7 +4,8 @@
 //! `cod4e-server [--install dir] [+set name value] [+exec server.cfg] [+map mp_crash]`; the install is
 //! found as `install::detect` does (`--install`, `COD4_PATH`, the path `cod4e` remembered, Steam, `./COD4`). The `--webtransport` family of flags turns on the endpoint for
 //! browser clients; each is shorthand for setting a cvar. Lines on stdin run as console commands;
-//! with `rcon_password` set, `rcon` packets do the same from the network.
+//! with `rcon_password` set, `rcon` packets do the same from the network. With `sv_public 1` and `sv_master1`..
+//! `sv_master5` set it announces itself to those master servers (`cod4e-master`).
 
 use server::server::Server;
 use std::path::PathBuf;
@@ -119,6 +120,16 @@ fn main() -> ExitCode {
         }
     });
     s.attach_console(rx);
+    s.announce_to_masters();
+    // Ctrl-C and `kill` end the loop like `quit`, so the masters get the final `flatline`.
+    #[cfg(unix)]
+    for sig in [libc::SIGINT, libc::SIGTERM] {
+        extern "C" fn stop(_: libc::c_int) {
+            server::server::request_stop();
+        }
+        // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+        unsafe { libc::signal(sig, stop as *const () as libc::sighandler_t) };
+    }
     s.run_forever();
     ExitCode::SUCCESS
 }

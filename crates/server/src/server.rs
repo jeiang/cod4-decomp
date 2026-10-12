@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, compile};
@@ -202,6 +203,17 @@ pub struct Server {
     gametype: String,
     /// The directory `g_log` names a file in.
     log_dir: PathBuf,
+    /// Whether this server may tell masters about itself (set by [`Self::announce_to_masters`]).
+    masters_allowed: bool,
+    heartbeats: crate::heartbeat::Heartbeats,
+}
+
+/// Set by a signal handler (SIGINT, SIGTERM) so the server leaves its loop and says goodbye to its masters.
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Asks every running [`Server`] to stop; safe to call from a signal handler.
+pub fn request_stop() {
+    STOP_REQUESTED.store(true, Ordering::Relaxed);
 }
 
 fn register_core_dvars(c: &mut Cvars) {
@@ -219,6 +231,14 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_mapname", "", ROM | SERVERINFO),
         ("sv_hostname", "CoD4Host", ARCHIVE | SERVERINFO),
         ("net_port", "28960", LATCH),
+        // Opt-in: a dedicated server with `sv_public 1` sends heartbeats to the masters `sv_master1`..`sv_master5`
+        // (`host[:port]`, all empty by default) so clients can find it on the Internet list.
+        ("sv_public", "0", 0),
+        ("sv_master1", "", 0),
+        ("sv_master2", "", 0),
+        ("sv_master3", "", 0),
+        ("sv_master4", "", 0),
+        ("sv_master5", "", 0),
         // WebTransport for browser clients, off when `net_wt` is empty: `[host:]port`, the
         // certificate and key PEM files (empty: a 13-day self-signed one), and the JSON file the
         // page reads for the URL and certificate hash. Command line: `--webtransport`, ...
@@ -493,6 +513,8 @@ impl Server {
             console: None,
             gametype: String::new(),
             log_dir,
+            masters_allowed: false,
+            heartbeats: Default::default(),
         };
         s.say("CoD4 MP headless server (cod4e)\n");
         s.say(&format!(
@@ -622,6 +644,29 @@ impl Server {
         Ok(joined)
     }
 
+    /// Lets this server list itself on masters when `sv_public` is set: only the dedicated server program asks, a
+    /// listen server never does.
+    pub fn announce_to_masters(&mut self) {
+        self.masters_allowed = true;
+    }
+
+    /// Sends the heartbeats and flatlines that are due.
+    fn send_heartbeats(&mut self, net: &mut NetSv) {
+        let c = &self.game.cvars;
+        let public = self.masters_allowed && c.int("sv_public") != 0;
+        let masters: Vec<String> = (1..=net::master::MASTER_SLOTS)
+            .map(|i| c.string(&format!("sv_master{i}")).to_owned())
+            .collect();
+        for (to, o) in self.heartbeats.step(
+            Instant::now(),
+            public,
+            &masters,
+            crate::heartbeat::resolve_name,
+        ) {
+            net.t.send_to(to, &o.encode());
+        }
+    }
+
     /// Where clients connect (the port is the real one when `net_port` was 0).
     pub fn net_addr(&self) -> Option<SocketAddr> {
         self.net.as_ref().map(NetSv::local_addr)
@@ -643,6 +688,7 @@ impl Server {
             std::thread::sleep(wait);
             return;
         };
+        self.send_heartbeats(&mut net);
         let info = self.server_info();
         let status = self.server_status();
         let mut remote = Vec::new();
@@ -812,6 +858,10 @@ impl Server {
             ("mapname".into(), self.map_name().unwrap_or("").to_owned()),
         ];
         let mut put = |k: &str, v: String| kv.push((k.to_owned(), v));
+        // A dedicated server that is not (or no longer) public says so, which takes it off a master's list.
+        if self.masters_allowed && c.int("sv_public") == 0 {
+            put("public", "0".into());
+        }
         if clients > 0 {
             put("clients", clients.to_string());
         }
@@ -1580,9 +1630,8 @@ impl Server {
                 self.dump_user(slot);
             }
             // This server announces itself to no master server, so there is nothing to send.
-            "heartbeat" | "gamecompletestatus" => {
-                self.say("This server has no master server to tell.\n");
-            }
+            "heartbeat" => self.heartbeats.send_now(),
+            "gamecompletestatus" => {}
             "toggle" => {
                 let n = arg(1).ok_or("usage: toggle <variable> [value1 value2 ...]")?;
                 if !self.game.cvars.exists(n) {
@@ -2538,6 +2587,9 @@ impl Server {
         let mut next = self.next_frame.unwrap_or_else(Instant::now);
         while !self.quit {
             let now = Instant::now();
+            if STOP_REQUESTED.load(Ordering::Relaxed) {
+                break;
+            }
             if end.is_some_and(|e| now >= e) {
                 break;
             }
@@ -2634,6 +2686,11 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
+        if let Some(n) = self.net.as_mut() {
+            for (to, o) in self.heartbeats.finish() {
+                n.t.send_to(to, &o.encode());
+            }
+        }
         self.shutdown_game_log();
     }
 }
