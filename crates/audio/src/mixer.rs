@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Parts of the audio channel volume groups and shell shock timeline are translated from KisakCOD (sound/snd.cpp, cgame/cg_shellshock.cpp, client_mp/cl_input.cpp; GPL-3.0).
+// Parts of the audio channel volume groups and shell shock timeline are translated from KisakCOD (sound/snd.cpp, cgame/cg_shellshock.cpp, client_mp/cl_input.cpp; GPL-3.0), as are the same-entity voice steal and the slave fade time (sound/snd.cpp; copyright the KisakCOD contributors and Activision).
 //! The mixer: voices in, interleaved stereo `f32` out.
 //!
 //! [`Mixer::fill`] is the whole audio callback. It never locks, allocates or blocks: voices live in a fixed
@@ -41,8 +41,8 @@ const CHUNK: usize = 512;
 const MASTER: f32 = 0.75;
 /// `snd_volume`'s default, so an untouched mixer is as loud as the original's.
 pub const DEFAULT_VOLUME: f32 = 0.8;
-/// How long a slave takes to duck or recover (`snd_slaveFadeTime`).
-const SLAVE_FADE_MS: f32 = 500.0;
+/// How long a slave takes to duck or recover (`snd_slaveFadeTime`'s default).
+pub const SLAVE_FADE_MS: u32 = 500;
 /// Stopping a voice fades it over this long instead of clicking.
 const STOP_FADE_MS: f32 = 5.0;
 
@@ -175,6 +175,8 @@ enum Command {
     StopEntity(u32),
     SetPosition(VoiceId, [f32; 3]),
     SetVolume(VoiceId, f32),
+    /// A loop continued: its volume and pitch for the next cycle.
+    Retune(VoiceId, f32, f32),
     /// `SND_StopSounds(SND_STOP_ALL)`: every voice, the room effect, the channel volume groups and the EQs.
     StopAll,
     /// `SND_FadeAllSounds`: the fade volume moves to `goal` over `ms` (at once for 0).
@@ -184,6 +186,10 @@ enum Command {
     },
     /// `snd_volume`.
     Master(f32),
+    /// `snd_slaveFadeTime`, ms.
+    SlaveFade(u32),
+    /// `snd_enableReverb`.
+    ReverbEnabled(bool),
     Listener(Listener),
     /// The room and wet level to fade to over `fade_ms`.
     Reverb {
@@ -313,6 +319,11 @@ impl Handle {
         self.send(Command::SetVolume(id, volume));
     }
 
+    /// Sets a playing voice's volume and pitch (`SND_ContinueLoopingSound`).
+    pub fn retune(&self, id: VoiceId, volume: f32, pitch: f32) {
+        self.send(Command::Retune(id, volume, pitch));
+    }
+
     /// Fades the reverb bus to `wet` in `room` (an index of [`crate::reverb::ROOMS`]) over `fade_ms`.
     pub fn set_reverb(&self, room: u8, wet: f32, fade_ms: u32) {
         self.send(Command::Reverb {
@@ -330,6 +341,16 @@ impl Handle {
             band,
             set,
         });
+    }
+
+    /// `snd_slaveFadeTime`: how long slaves take to duck and recover, in ms (0 is at once).
+    pub fn set_slave_fade_ms(&self, ms: u32) -> bool {
+        self.send(Command::SlaveFade(ms))
+    }
+
+    /// `snd_enableReverb`: off silences the reverb bus.
+    pub fn set_reverb_enabled(&self, on: bool) -> bool {
+        self.send(Command::ReverbEnabled(on))
     }
 
     /// The master volume, `snd_volume`: 0 to 1, scaling everything that plays.
@@ -421,7 +442,7 @@ impl Voice {
             channel: p.channel,
             entity: p.entity,
             volume: p.volume.max(0.0),
-            step: f64::from(src_rate) * f64::from(p.pitch.max(0.01)) / f64::from(out_rate),
+            step: pitch_step(src_rate, p.pitch, out_rate),
             frac: 0.0,
             a: [0.0; 2],
             b: [0.0; 2],
@@ -504,8 +525,12 @@ pub struct Mixer {
     gain: f32,
     /// `soundfade`: a second master volume, 1 unless a script fades the sound.
     fade: Fader,
-    /// 0 when no master plays, 1 when one does; slaves follow it over [`SLAVE_FADE_MS`].
+    /// 0 when no master plays, 1 when one does; slaves follow it over `slave_fade_ms`.
     slave_lerp: f32,
+    /// `snd_slaveFadeTime`: ms a slave takes to duck or recover; 0 is at once.
+    slave_fade_ms: f32,
+    /// `snd_enableReverb`.
+    reverb_on: bool,
     age: u64,
     reverb: Reverb,
     wet: f32,
@@ -604,6 +629,8 @@ pub fn mixer(rate: u32, channels: &[ChannelDef]) -> (Handle, Mixer) {
             gain: master_gain(DEFAULT_VOLUME),
             fade: Fader::new(),
             slave_lerp: 0.0,
+            slave_fade_ms: SLAVE_FADE_MS as f32,
+            reverb_on: true,
             age: 0,
             reverb: Reverb::new(rate),
             wet: 0.0,
@@ -645,7 +672,11 @@ impl Mixer {
             .flatten()
             .any(|v| v.duck == Duck::Master && !v.dying && v.delay == 0);
         let target = if master_playing { 1.0 } else { 0.0 };
-        let max_move = dt_ms / SLAVE_FADE_MS;
+        let max_move = if self.slave_fade_ms > 0.0 {
+            dt_ms / self.slave_fade_ms
+        } else {
+            1.0
+        };
         self.slave_lerp += (target - self.slave_lerp).clamp(-max_move, max_move);
 
         let (listener, lerp) = (self.listener, self.slave_lerp);
@@ -678,8 +709,9 @@ impl Mixer {
                     };
                 }
                 let t = self.reverb.run(self.send[f]);
-                out[2 * f] += t[0] * self.wet;
-                out[2 * f + 1] += t[1] * self.wet;
+                let wet = if self.reverb_on { self.wet } else { 0.0 };
+                out[2 * f] += t[0] * wet;
+                out[2 * f + 1] += t[1] * wet;
             }
         }
         let mut peak = 0.0f32;
@@ -719,7 +751,16 @@ impl Mixer {
                     v.volume = vol.max(0.0);
                 }
             }
+            Command::Retune(id, vol, pitch) => {
+                let rate = self.rate;
+                if let Some(v) = self.find(id) {
+                    v.volume = vol.max(0.0);
+                    v.step = pitch_step(v.source.rate(), pitch, rate);
+                }
+            }
             Command::Master(v) => self.gain = master_gain(v),
+            Command::SlaveFade(ms) => self.slave_fade_ms = ms as f32,
+            Command::ReverbEnabled(on) => self.reverb_on = on,
             Command::Fade { goal, ms } => self.fade.to(goal, ms),
             Command::StopAll => self.stop_all(),
             Command::ChannelVolumes {
@@ -833,9 +874,13 @@ impl Mixer {
             && let Some(f) = free
         {
             f
-        } else if let Some(victim) =
-            self.victim(pool, info.priority, p.emitter.map(|e| e.pos), p.volume)
-        {
+        } else if let Some(victim) = self.victim(
+            pool,
+            info.priority,
+            p.emitter.map(|e| e.pos),
+            p.volume,
+            p.entity,
+        ) {
             if let Some(v) = self.voices[victim].take() {
                 let _ = self.retired.push((v.id, v.source, false));
             }
@@ -851,15 +896,24 @@ impl Mixer {
         self.stats.started.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The voice of `pool` a sound of `priority` may replace: the lowest priority not above it; among equals
-    /// the farthest from the listener (positioned) or the quietest (flat), then the oldest.
-    fn victim(&self, pool: Pool, priority: u8, at: Option<[f32; 3]>, volume: f32) -> Option<usize> {
+    /// The voice of `pool` a sound of `priority` from `entity` may replace: first one of the same entity
+    /// (`SND_FindReplaceableChannel`), whatever its priority below the new one's, which it takes over without
+    /// the distance test; else the lowest priority not above it; among equals the farthest from the listener
+    /// (positioned) or the quietest (flat), then the oldest.
+    fn victim(
+        &self,
+        pool: Pool,
+        priority: u8,
+        at: Option<[f32; 3]>,
+        volume: f32,
+        entity: u32,
+    ) -> Option<usize> {
         let l = self.listener.pos;
         let metric = |v: &Voice| match &v.emitter {
             Some(e) => dist2(e.pos, l),
             None => -v.volume,
         };
-        let mut best: Option<(usize, u8, f32, u64)> = None;
+        let mut best: Option<(usize, bool, u8, f32, u64)> = None;
         for (i, v) in self.voices.iter().enumerate() {
             let Some(v) = v else { continue };
             if v.pool != pool {
@@ -870,16 +924,18 @@ impl Mixer {
                 continue;
             }
             let m = metric(v);
-            let better = best.is_none_or(|(_, bp, bm, ba)| {
-                p < bp || (p == bp && (m > bm || (m == bm && v.age < ba)))
+            let same = entity != NO_ENTITY && v.entity == entity;
+            let better = best.is_none_or(|(_, bs, bp, bm, ba)| {
+                (same && !bs)
+                    || (same == bs && (p < bp || (p == bp && (m > bm || (m == bm && v.age < ba)))))
             });
             if better {
-                best = Some((i, p, m, v.age));
+                best = Some((i, same, p, m, v.age));
             }
         }
-        let (i, p, m, _) = best?;
+        let (i, same, p, m, _) = best?;
         // Equal priority: only replace a sound that matters less than the new one.
-        if p == priority {
+        if p == priority && !same {
             let new = at.map_or(-volume, |at| dist2(at, l));
             if new >= m {
                 return None;
@@ -887,6 +943,11 @@ impl Mixer {
         }
         Some(i)
     }
+}
+
+/// Source frames read per output frame.
+fn pitch_step(src_rate: u32, pitch: f32, out_rate: u32) -> f64 {
+    f64::from(src_rate) * f64::from(pitch.max(0.01)) / f64::from(out_rate)
 }
 
 fn fade_out(v: &mut Voice, ms: f32, rate: u32) {
@@ -1411,6 +1472,35 @@ mod tests {
     }
 
     #[test]
+    fn a_full_pool_replaces_the_same_entitys_voice_before_anyone_elses() {
+        let (mut h, mut m) = mixer(RATE, &table());
+        let play = |h: &mut Handle, entity: u32, x: f32| {
+            let id = h.next_id();
+            let mut p = Play::new(id, Source::Loaded(dc(2000)), 1);
+            p.entity = entity;
+            p.emitter = at([x, 0.0, 0.0], 50.0, 1050.0);
+            h.play(p);
+        };
+        for i in 0..32 {
+            // Entity 99 owns the nearest voice, the others sit farther out.
+            play(&mut h, if i == 0 { 99 } else { i }, 100.0 + 10.0 * i as f32);
+        }
+        let mut out = vec![0.0; 96];
+        m.fill(&mut out);
+        // From another entity and farther than all, an equal-priority sound is refused ...
+        play(&mut h, 50, 5000.0);
+        m.fill(&mut out);
+        assert_eq!(h.stats.refused.load(Ordering::Relaxed), 1);
+        assert_eq!(h.stats.replaced.load(Ordering::Relaxed), 0);
+        // ... but entity 99's own sound takes its previous voice, however far.
+        play(&mut h, 99, 5000.0);
+        m.fill(&mut out);
+        assert_eq!(h.stats.refused.load(Ordering::Relaxed), 1);
+        assert_eq!(h.stats.replaced.load(Ordering::Relaxed), 1);
+        assert_eq!(h.stats.active.load(Ordering::Relaxed), 32);
+    }
+
+    #[test]
     fn a_restricted_channel_keeps_one_sound_per_entity() {
         let (mut h, mut m) = mixer(RATE, &table());
         for _ in 0..3 {
@@ -1561,6 +1651,43 @@ mod tests {
             tail(false, true) < 1e-6,
             "a no-wet sound reached the reverb"
         );
+    }
+
+    #[test]
+    fn disabling_the_reverb_silences_its_tail() {
+        let (mut h, mut m) = mixer(RATE, &table());
+        h.set_reverb(crate::reverb::room_index("hangar").unwrap(), 1.0, 1);
+        assert!(h.set_reverb_enabled(false));
+        click(&mut h, true);
+        let _ = energy(&mut m, 4800);
+        assert!(energy(&mut m, 24_000) < 1e-6);
+    }
+
+    #[test]
+    fn a_slave_fade_time_sets_how_fast_slaves_duck() {
+        // Ducked level after 100 ms of a master playing, for a fade time.
+        let ducked = |fade_ms: u32| {
+            let (mut h, mut m) = mixer(RATE, &table());
+            h.set_slave_fade_ms(fade_ms);
+            let id = h.next_id();
+            let mut slave = Play::new(id, Source::Loaded(dc(5000)), 0);
+            slave.duck = Duck::Slave(0.25);
+            slave.speaker = [[1.0, 1.0], [0.0; 2]];
+            h.play(slave);
+            let before = level(&mut m)[0];
+            let id = h.next_id();
+            let mut master = Play::new(id, Source::Loaded(dc(5000)), 0);
+            master.duck = Duck::Master;
+            master.volume = 0.0;
+            h.play(master);
+            let mut out = vec![0.0; 960];
+            for _ in 0..10 {
+                m.fill(&mut out);
+            }
+            out[0] / before
+        };
+        assert!((ducked(0) - 0.25).abs() < 0.02, "at once");
+        assert!(ducked(500) > 0.8, "slowly");
     }
 
     #[test]

@@ -833,6 +833,16 @@ impl NetPlay {
         self.sound.set_volume(volume);
     }
 
+    /// The subtitles of the sounds the server had played since the last call.
+    pub fn take_subtitles(&mut self) -> Vec<audio::engine::Subtitle> {
+        self.sound.take_subtitles()
+    }
+
+    /// `snd_slaveFadeTime` and `snd_enableReverb`, from the cvar store each frame.
+    pub fn set_sound_mix(&mut self, mix: (u32, bool)) {
+        self.sound.set_mix(mix);
+    }
+
     /// `cg_footsteps`, from the cvar store each frame.
     /// The `bg_shock_volume_<channel>` cvars: what a held breath dips the channels to.
     pub fn set_breath_volumes(&mut self, volumes: Vec<(String, f32)>) {

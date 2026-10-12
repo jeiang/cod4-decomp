@@ -1423,6 +1423,7 @@ impl Viewer {
             }
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
+            net.set_sound_mix(crate::sound::mix_of(&st.input.cvars));
             net.set_voice(st.input.cvar("cl_voice").is_none_or(|v| v.trim() != "0"));
             net.set_demo_paused(
                 st.input
@@ -1540,6 +1541,9 @@ impl Viewer {
                 }
                 for ev in net.take_ui_events() {
                     sh.apply(&mut st.input, ev);
+                }
+                for s in net.take_subtitles() {
+                    sh.subtitle(&st.input, &s.key, s.ms);
                 }
                 let now = sh.now_ms();
                 net.fill_game_facts(&mut sh.st.game, now);
@@ -1914,6 +1918,7 @@ impl Viewer {
         st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
         if let Some(m) = st.menu_sound.as_mut() {
             m.set_volume(crate::sound::volume_of(&st.input.cvars));
+            m.set_mix(crate::sound::mix_of(&st.input.cvars));
             m.frame([0.0; 3], 0.0, (interval / 1000.0) as f32);
         }
         // What commands said (a missing `exec` file, `dvarlist`) goes to the console.

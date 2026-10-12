@@ -33,6 +33,8 @@ pub struct Alias {
     /// The alias that plays where this one ends (`chainAliasName`).
     pub chain: Option<Arc<str>>,
     pub audio: Clip,
+    /// The localization key of the subtitle shown while it plays (`SUBTITLE_...`).
+    pub subtitle: Option<Arc<str>>,
     pub volume: (f32, f32),
     pub pitch: (f32, f32),
     pub dist: (f32, f32),
@@ -239,6 +241,7 @@ impl Bank {
             secondary: a.secondary_alias_name.clone().filter(|s| !s.is_empty()),
             chain: a.chain_alias_name.clone().filter(|s| !s.is_empty()),
             audio,
+            subtitle: a.subtitle.clone().filter(|s| !s.is_empty()),
             volume: volume_pair(a.vol_min, a.vol_max),
             pitch: volume_pair(a.pitch_min, a.pitch_max),
             dist: (a.dist_min, a.dist_max),
@@ -363,6 +366,7 @@ impl Alias {
             secondary: None,
             chain: None,
             audio,
+            subtitle: None,
             volume: (1.0, 1.0),
             pitch: (1.0, 1.0),
             dist: (10.0, 1000.0),

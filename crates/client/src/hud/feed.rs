@@ -52,6 +52,8 @@ fn cfg(layout: &Layout, window: usize) -> Cfg {
 /// The window an `iprintln` line goes to and the one `iprintlnbold` and announcements go to.
 pub const NOTIFY: usize = 0;
 pub const BOLD: usize = 1;
+/// The window subtitles go to.
+pub const SUBTITLE: usize = 2;
 
 /// A piece of a message line: text, or an icon whose size is in multiples of the line height.
 #[derive(Clone, Debug, PartialEq)]
@@ -204,16 +206,28 @@ impl Feed {
 
     /// Adds a message to `window` at server time `now`.
     pub fn message(&mut self, window: usize, segs: Vec<Seg>, now: i32) {
+        let ms = cfg(&self.layout, window).msg_ms;
+        self.message_for(window, segs, now, ms);
+    }
+
+    /// [`Feed::message`] that stays up `ms` instead of the window's message time (a subtitle lasts as long as its
+    /// sound).
+    pub fn message_for(&mut self, window: usize, segs: Vec<Seg>, now: i32, ms: i32) {
         let cfg = cfg(&self.layout, window);
         let w = &mut self.windows[window.min(WINDOWS - 1)];
         w.push(Msg {
             segs,
             start: now,
-            end: now + cfg.msg_ms,
+            end: now + ms,
         });
         if w.len() > cfg.lines {
             w.remove(0);
         }
+    }
+
+    /// [`Feed::text`] that stays up `ms`.
+    pub fn text_for(&mut self, window: usize, text: &str, now: i32, ms: i32) {
+        self.message_for(window, vec![Seg::Text(text.to_owned())], now, ms);
     }
 
     pub fn text(&mut self, window: usize, text: &str, now: i32) {
@@ -657,6 +671,14 @@ mod tests {
         let s = scroll_lines(&cfg, [1000, 1000 - 125, 0].into_iter(), 1000, 14.0);
         assert_eq!(s, 14.0 + 7.0);
         assert_eq!(scroll_lines(&cfg, [0].into_iter(), 1000, 14.0), 0.0);
+    }
+
+    #[test]
+    fn a_message_for_a_time_stays_up_that_long() {
+        let mut f = Feed::default();
+        f.text_for(SUBTITLE, "line", 1000, 7000);
+        assert!(f.active(SUBTITLE, 7999));
+        assert!(!f.active(SUBTITLE, 8000));
     }
 
     #[test]

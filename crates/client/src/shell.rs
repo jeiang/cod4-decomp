@@ -403,6 +403,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("cg_scoreboardPingHeight", "0.7"),
     ("cg_scoreboardPingText", "1"),
     ("cg_scoreboardPingGraph", "0"),
+    // Cheat protected: only acts with `sv_cheats` on.
+    ("snd_enableReverb", "1"),
 ];
 
 /// The settings of the options menus with the stock engine's defaults: archived, so a change survives a restart.
@@ -444,6 +446,10 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("r_texFilterAnisoMin", "1"),
     ("r_texFilterAnisoMax", "4"),
     ("snd_volume", "0.8"),
+    // Stock: archived and cheat protected (they only act with `sv_cheats` on): how long slaves take to duck.
+    ("snd_slaveFadeTime", "500"),
+    // The shortest time a subtitle stays up, seconds (stock: archived).
+    ("cg_subtitleMinTime", "3"),
     ("sm_enable", "1"),
     ("sc_enable", "0"),
     ("ragdoll_enable", "1"),
@@ -992,6 +998,17 @@ impl Shell {
         {
             input.set_cvar("ui_showEndOfGame", "0");
         }
+    }
+
+    /// A sound's subtitle (`CG_SubtitlePrint`): `key` localized, in the subtitle window for as long as the sound
+    /// lasts but at least `cg_subtitleMinTime`.
+    pub fn subtitle(&mut self, input: &Input, key: &str, sound_ms: u32) {
+        self.sync_layout(input);
+        let min = (input.cvars.f32("cg_subtitleMinTime") * 1000.0).round() as i32;
+        let ms = i32::try_from(sound_ms).unwrap_or(i32::MAX).max(min);
+        let text = hud::localize(&self.ui.assets, key);
+        let now = self.st.live.time;
+        self.st.feed.text_for(hud::SUBTITLE, &text, now, ms);
     }
 
     /// Once a frame, after the network has been read: what follows from the live state. Opens the end-of-match
