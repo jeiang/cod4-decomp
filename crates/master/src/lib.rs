@@ -93,9 +93,9 @@ struct Listed {
     verified: Instant,
 }
 
-/// A `getinfo` sent and not yet answered.
+/// A `getinfo` sent and not yet answered. The protocol a heartbeat claims is not kept: only the server's own
+/// answer decides what it is listed under, so a forged heartbeat cannot relabel a real server.
 struct Pending {
-    protocol: u32,
     deadline: Instant,
     /// Sent for a `flatline`: unanswered, the server is dropped from the list.
     flatline: bool,
@@ -163,11 +163,8 @@ impl Master {
     /// One packet from `from`; the packets to send back.
     pub fn handle(&mut self, from: SocketAddr, oob: Oob, now: Instant) -> Vec<(SocketAddr, Oob)> {
         match oob {
-            Oob::Heartbeat(protocol) => self.probe(from, protocol, false, now),
-            Oob::Flatline => match self.listed.get(&from).map(|l| l.protocol) {
-                Some(protocol) => self.probe(from, protocol, true, now),
-                None => Vec::new(),
-            },
+            Oob::Heartbeat(_) => self.probe(from, false, now),
+            Oob::Flatline if self.listed.contains_key(&from) => self.probe(from, true, now),
             Oob::InfoResponse(kv) => {
                 self.verify(from, &kv, now);
                 Vec::new()
@@ -196,13 +193,7 @@ impl Master {
     }
 
     /// Sends the challenge that proves `from` owns its address.
-    fn probe(
-        &mut self,
-        from: SocketAddr,
-        protocol: u32,
-        flatline: bool,
-        now: Instant,
-    ) -> Vec<(SocketAddr, Oob)> {
+    fn probe(&mut self, from: SocketAddr, flatline: bool, now: Instant) -> Vec<(SocketAddr, Oob)> {
         if !self.heartbeats.allow(from.ip(), now) {
             return Vec::new();
         }
@@ -214,10 +205,12 @@ impl Master {
         {
             return Vec::new();
         }
+        // A forged heartbeat must not cancel the removal a `flatline` asked for; a server that still answers is
+        // kept anyway.
+        let flatline = flatline || self.pending.get(&from).is_some_and(|p| p.flatline);
         self.pending.insert(
             from,
             Pending {
-                protocol,
                 deadline: now + PROBE_TIMEOUT,
                 flatline,
             },
@@ -228,19 +221,25 @@ impl Master {
 
     /// The answer to a `getinfo`: lists (or keeps) the server when it carries the challenge.
     fn verify(&mut self, from: SocketAddr, kv: &[(String, String)], now: Instant) {
-        let Some(p) = self.pending.get(&from) else {
+        if !self.pending.contains_key(&from) {
             return;
-        };
-        let proven = kv
-            .iter()
-            .find(|(k, _)| k == "challenge")
-            .and_then(|(_, v)| v.parse().ok())
+        }
+        let get = |k: &str| kv.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        let proven = get("challenge")
+            .and_then(|v| v.parse().ok())
             .is_some_and(|c| self.challenger.check(from, c, self.secs(now)));
         if !proven {
             return;
         }
-        let protocol = p.protocol;
         self.pending.remove(&from);
+        // A server that is no longer public (`sv_public 0`) says so in its answer: it is taken off the list.
+        if get("public") == Some("0") {
+            self.listed.remove(&from);
+            return;
+        }
+        let Some(protocol) = get("protocol").and_then(|v| v.parse().ok()) else {
+            return;
+        };
         self.listed.insert(
             from,
             Listed {
@@ -283,11 +282,15 @@ mod tests {
             panic!("no getinfo for {a}");
         };
         assert_eq!(to, a);
-        m.handle(
-            a,
-            Oob::InfoResponse(vec![("challenge".into(), c.to_string())]),
-            now,
-        );
+        m.handle(a, answer(c, PROTOCOL), now);
+    }
+
+    /// What a server's `getinfo` answer to challenge `c` looks like.
+    fn answer(c: u32, protocol: u32) -> Oob {
+        Oob::InfoResponse(vec![
+            ("protocol".into(), protocol.to_string()),
+            ("challenge".into(), c.to_string()),
+        ])
     }
 
     /// What a client at `c` is told by `getchallenge` then `getservers`.
@@ -327,17 +330,9 @@ mod tests {
         );
         let Oob::GetInfo(c) = out[0].1 else { panic!() };
         let other = addr("203.0.113.6:28960");
-        m.handle(
-            other,
-            Oob::InfoResponse(vec![("challenge".into(), c.to_string())]),
-            t,
-        );
+        m.handle(other, answer(c, PROTOCOL), t);
         assert!(m.is_empty());
-        m.handle(
-            s,
-            Oob::InfoResponse(vec![("challenge".into(), c.to_string())]),
-            t,
-        );
+        m.handle(s, answer(c, PROTOCOL), t);
         assert_eq!(m.servers(PROTOCOL), vec![s]);
     }
 
@@ -422,11 +417,7 @@ mod tests {
         let pb = m.handle(b, Oob::Flatline, t);
         let Oob::GetInfo(c) = pb[0].1 else { panic!() };
         assert!(matches!(pa[..], [(_, Oob::GetInfo(_))]));
-        m.handle(
-            b,
-            Oob::InfoResponse(vec![("challenge".into(), c.to_string())]),
-            t,
-        );
+        m.handle(b, answer(c, PROTOCOL), t);
         m.expire(t + PROBE_TIMEOUT + Duration::from_secs(1));
         assert_eq!(m.servers(PROTOCOL), vec![b]);
         // Nobody else can flatline an address that is not listed.
@@ -481,5 +472,127 @@ mod tests {
             .filter(|_| !m.handle(c, Oob::GetChallenge, t).is_empty())
             .count();
         assert!(answered < 20 && answered > 0);
+    }
+
+    #[test]
+    fn a_forged_heartbeat_cannot_relabel_a_real_server() {
+        let t = Instant::now();
+        let mut m = Master::new(t);
+        let s = addr("203.0.113.5:28960");
+        list(&mut m, s, t);
+        // Someone claims protocol 0 for the real server's address; the real server then answers the challenge.
+        let later = t + Duration::from_secs(HEARTBEAT_SECS);
+        let out = m.handle(s, Oob::Heartbeat(0), later);
+        let Oob::GetInfo(c) = out[0].1 else { panic!() };
+        m.handle(s, answer(c, PROTOCOL), later);
+        assert_eq!(m.servers(PROTOCOL), vec![s]);
+        assert!(m.servers(0).is_empty());
+        // An answer that does not name a protocol lists nothing.
+        let other = addr("203.0.113.6:28960");
+        let out = m.handle(other, Oob::Heartbeat(PROTOCOL), later);
+        let Oob::GetInfo(c) = out[0].1 else { panic!() };
+        m.handle(
+            other,
+            Oob::InfoResponse(vec![("challenge".into(), c.to_string())]),
+            later,
+        );
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn a_server_that_says_it_is_not_public_any_more_is_taken_off() {
+        let t = Instant::now();
+        let mut m = Master::new(t);
+        let s = addr("203.0.113.5:28960");
+        list(&mut m, s, t);
+        let out = m.handle(s, Oob::Flatline, t);
+        let Oob::GetInfo(c) = out[0].1 else { panic!() };
+        m.handle(
+            s,
+            Oob::InfoResponse(vec![
+                ("protocol".into(), PROTOCOL.to_string()),
+                ("public".into(), "0".into()),
+                ("challenge".into(), c.to_string()),
+            ]),
+            t,
+        );
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn a_forged_heartbeat_does_not_cancel_a_flatline() {
+        let t = Instant::now();
+        let mut m = Master::new(t);
+        let s = addr("203.0.113.5:28960");
+        list(&mut m, s, t);
+        m.handle(s, Oob::Flatline, t);
+        m.handle(s, Oob::Heartbeat(PROTOCOL), t);
+        m.expire(t + PROBE_TIMEOUT + Duration::from_secs(1));
+        assert!(m.is_empty());
+    }
+
+    /// An address for server number `i`, one server per address.
+    fn nth(i: usize) -> SocketAddr {
+        SocketAddr::from(([10 + (i >> 16) as u8, (i >> 8) as u8, i as u8, 1], 28960))
+    }
+
+    #[test]
+    fn no_more_than_max_servers_are_listed() {
+        let mut t = Instant::now();
+        let mut m = Master::new(t);
+        for i in 0..MAX_SERVERS {
+            // Slow enough for the global heartbeat limit.
+            t += Duration::from_millis(25);
+            list(&mut m, nth(i), t);
+        }
+        assert_eq!(m.len(), MAX_SERVERS);
+        t += Duration::from_millis(25);
+        assert!(
+            m.handle(nth(MAX_SERVERS), Oob::Heartbeat(PROTOCOL), t)
+                .is_empty()
+        );
+        // A listed server can still renew.
+        t += Duration::from_secs(1);
+        assert!(!m.handle(nth(0), Oob::Heartbeat(PROTOCOL), t).is_empty());
+    }
+
+    #[test]
+    fn no_more_than_max_pending_heartbeats_are_waiting_for_an_answer() {
+        let mut t = Instant::now();
+        let mut m = Master::new(t);
+        for i in 0..MAX_PENDING {
+            t += Duration::from_millis(25);
+            assert!(!m.handle(nth(i), Oob::Heartbeat(PROTOCOL), t).is_empty());
+        }
+        t += Duration::from_millis(25);
+        assert!(
+            m.handle(nth(MAX_PENDING), Oob::Heartbeat(PROTOCOL), t)
+                .is_empty()
+        );
+        // One that is already waiting is probed again, and room is made as the others time out.
+        t += Duration::from_millis(25);
+        assert!(!m.handle(nth(0), Oob::Heartbeat(PROTOCOL), t).is_empty());
+        t += PROBE_TIMEOUT * 2;
+        m.expire(t);
+        assert!(
+            !m.handle(nth(MAX_PENDING), Oob::Heartbeat(PROTOCOL), t)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_limiter_tracks_a_bounded_number_of_addresses() {
+        let t = Instant::now();
+        let mut l = Limiter::new(1.0, 0.1, 1e9, 1e9, t);
+        for i in 0..MAX_TRACKED_IPS {
+            assert!(l.allow(nth(i).ip(), t));
+        }
+        assert_eq!(l.per_ip.len(), MAX_TRACKED_IPS);
+        // Full of addresses that are not idle: a new one is refused instead of growing the table.
+        assert!(!l.allow(nth(MAX_TRACKED_IPS).ip(), t));
+        assert_eq!(l.per_ip.len(), MAX_TRACKED_IPS);
+        // Once they have refilled (idle) they are forgotten and room is made.
+        assert!(l.allow(nth(MAX_TRACKED_IPS).ip(), t + Duration::from_secs(11)));
+        assert!(l.per_ip.len() < MAX_TRACKED_IPS);
     }
 }

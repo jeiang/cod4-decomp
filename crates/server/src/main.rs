@@ -121,6 +121,15 @@ fn main() -> ExitCode {
     });
     s.attach_console(rx);
     s.announce_to_masters();
+    // Ctrl-C and `kill` end the loop like `quit`, so the masters get the final `flatline`.
+    #[cfg(unix)]
+    for sig in [libc::SIGINT, libc::SIGTERM] {
+        extern "C" fn stop(_: libc::c_int) {
+            server::server::request_stop();
+        }
+        // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+        unsafe { libc::signal(sig, stop as *const () as libc::sighandler_t) };
+    }
     s.run_forever();
     ExitCode::SUCCESS
 }

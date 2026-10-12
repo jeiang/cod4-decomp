@@ -309,6 +309,9 @@ impl ShellState {
 /// What the Internet list says when `cl_masters` names no master server.
 const NO_MASTER: &str = "No master server set (cl_masters)";
 
+/// What it says when none of the names in `cl_masters` could be looked up.
+const UNRESOLVED_MASTER: &str = "Cannot find the master server (cl_masters)";
+
 /// The dvars the menus expect to exist before the first frame.
 const UI_DEFAULTS: &[(&str, &str)] = &[
     ("com_playerProfile", ""),
@@ -1215,11 +1218,7 @@ impl HostCx<'_> {
     /// A list that is already being refreshed is left to finish.
     fn start_refresh(&mut self, ui: &Ui, full: bool) {
         let source = self.net_source();
-        let masters = if source == crate::serverlist::Source::Internet {
-            crate::serverlist::parse_masters(&self.dvar_get("cl_masters"))
-        } else {
-            Vec::new()
-        };
+        let masters = self.dvar_get("cl_masters");
         if !self.st.servers.refresh(source, full, &masters) {
             return;
         }
@@ -2048,6 +2047,10 @@ impl Host for HostCx<'_> {
                 {
                     // Not a stock string: the stock game always had a master to ask.
                     ui_text(ui, p, d, rect, color, NO_MASTER);
+                } else if source == crate::serverlist::Source::Internet
+                    && self.st.servers.masters_unresolved()
+                {
+                    ui_text(ui, p, d, rect, color, UNRESOLVED_MASTER);
                 } else if self.st.servers.refreshing(source) {
                     let n = self.st.servers.rows(source).len();
                     let text = if source == crate::serverlist::Source::Internet {

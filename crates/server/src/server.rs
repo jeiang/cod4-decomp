@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, compile};
@@ -205,6 +206,14 @@ pub struct Server {
     /// Whether this server may tell masters about itself (set by [`Self::announce_to_masters`]).
     masters_allowed: bool,
     heartbeats: crate::heartbeat::Heartbeats,
+}
+
+/// Set by a signal handler (SIGINT, SIGTERM) so the server leaves its loop and says goodbye to its masters.
+static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Asks every running [`Server`] to stop; safe to call from a signal handler.
+pub fn request_stop() {
+    STOP_REQUESTED.store(true, Ordering::Relaxed);
 }
 
 fn register_core_dvars(c: &mut Cvars) {
@@ -652,7 +661,7 @@ impl Server {
             Instant::now(),
             public,
             &masters,
-            &mut crate::heartbeat::resolve_name,
+            crate::heartbeat::resolve_name,
         ) {
             net.t.send_to(to, &o.encode());
         }
@@ -849,6 +858,10 @@ impl Server {
             ("mapname".into(), self.map_name().unwrap_or("").to_owned()),
         ];
         let mut put = |k: &str, v: String| kv.push((k.to_owned(), v));
+        // A dedicated server that is not (or no longer) public says so, which takes it off a master's list.
+        if self.masters_allowed && c.int("sv_public") == 0 {
+            put("public", "0".into());
+        }
         if clients > 0 {
             put("clients", clients.to_string());
         }
@@ -2574,6 +2587,9 @@ impl Server {
         let mut next = self.next_frame.unwrap_or_else(Instant::now);
         while !self.quit {
             let now = Instant::now();
+            if STOP_REQUESTED.load(Ordering::Relaxed) {
+                break;
+            }
             if end.is_some_and(|e| now >= e) {
                 break;
             }
