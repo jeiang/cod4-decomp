@@ -19,6 +19,7 @@ use web_time::Instant;
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::clipmap::Clipmap;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
+use assets::zone::gfx::Material;
 use assets::zone::text::StringTable;
 use assets::zone::weapon::WeaponDef;
 use assets::zone::xanim::XAnimParts;
@@ -290,12 +291,49 @@ impl Layer {
     }
 }
 
+/// A material another zone defines is stored in a model as its name behind a comma, with nothing to draw it by
+/// (`DB_FindXAssetHeader` finds the real one by name when the zone loads).
+fn is_reference(m: &Material) -> bool {
+    m.name.as_deref().is_some_and(|n| n.starts_with(','))
+}
+
+/// `model` with the materials that only name another zone's replaced by the ones defined in full among `known`, the
+/// zones loaded before it. Records the model's own materials in `known` for the zones after it.
+fn resolve_materials(
+    model: Arc<XModel>,
+    known: &mut HashMap<String, (u8, Arc<Material>)>,
+    tag: u8,
+) -> Arc<XModel> {
+    for m in model.materials.iter().flatten() {
+        if let Some(n) = m.name.as_deref().filter(|_| !is_reference(m)) {
+            put(known, tag, n, m.clone());
+        }
+    }
+    if !model.materials.iter().flatten().any(|m| is_reference(m)) {
+        return model;
+    }
+    let found = |m: &Arc<Material>| {
+        let n = m.name.as_deref()?.strip_prefix(',')?;
+        get(known, n).cloned()
+    };
+    let mut out = (*model).clone();
+    out.materials = model
+        .materials
+        .iter()
+        .map(|m| m.as_ref().map(|m| found(m).unwrap_or_else(|| m.clone())))
+        .collect();
+    Arc::new(out)
+}
+
 fn get<'a, T>(m: &'a HashMap<String, (u8, T)>, name: &str) -> Option<&'a T> {
     m.get(&name.to_ascii_lowercase()).map(|(_, v)| v)
 }
 
 #[derive(Default)]
 pub struct Content {
+    /// The materials the client's models define in full, by lowercase name: what the models of other zones that only
+    /// name them draw with.
+    materials: HashMap<String, (u8, Arc<Material>)>,
     /// A client's content: models keep their vertices and skin weights, and the view model
     /// animations are retained with the player animations.
     pub client: bool,
@@ -390,6 +428,11 @@ impl Content {
                 }
             }
             Asset::XModel(m) => {
+                let m = if client {
+                    resolve_materials(m, &mut self.materials, tag)
+                } else {
+                    m
+                };
                 if let Some(n) = m.name.clone() {
                     let bones: Arc<[Arc<str>]> =
                         m.bone_names.iter().map(|b| resolve(&strings, *b)).collect();
@@ -465,6 +508,7 @@ impl Content {
     pub fn load_map(&mut self, install: &Install, map: &str) -> Result<(), String> {
         self.map = Layer::default();
         self.map_name = None;
+        self.materials.retain(|_, (tag, _)| *tag != MAP_TAG);
         self.load_zone(install, map, MAP_TAG)?;
         self.map.merge(&self.modded);
         self.map_name = Some(map.to_owned());
