@@ -451,9 +451,9 @@ fn a_shot_is_judged_against_the_bodies_as_the_shooter_saw_them() {
     fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
     g.lag_time = None;
     assert_eq!(damage_calls(&g, victim).len(), 1);
-    // A shooter cannot reach further back than the cap: 1100 - 250 is long after he stood there.
+    // A shooter cannot reach further back than the cap: 1700 - 500 is long after he stood there.
     g.calls.clear();
-    g.level.time = 1500;
+    g.level.time = 1700;
     g.lag_time = Some(900);
     g.lag.record(
         victim,

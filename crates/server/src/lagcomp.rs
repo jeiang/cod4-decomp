@@ -143,8 +143,14 @@ mod tests {
         let now = 19 * 33 + 5;
         // 400 ms of lag and the draw delay: where the player was 500 ms before `now`, not a nearer moment.
         let want = (now - 400 - net::view::INTERP_DELAY_MS) as f32 / 33.0 * 10.0;
-        let s = r.at(0, now - 400 - net::view::INTERP_DELAY_MS, now).unwrap();
-        assert!((s.origin[0] - want).abs() < 11.0, "{} vs {want}", s.origin[0]);
+        let s = r
+            .at(0, now - 400 - net::view::INTERP_DELAY_MS, now)
+            .unwrap();
+        assert!(
+            (s.origin[0] - want).abs() < 11.0,
+            "{} vs {want}",
+            s.origin[0]
+        );
     }
 
     #[test]

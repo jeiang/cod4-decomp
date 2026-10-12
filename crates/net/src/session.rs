@@ -170,7 +170,8 @@ impl ServerLink {
                         .as_ref()
                         .filter(|s| s.num == ack)
                 {
-                    self.trips[(ack % BACKUP) as usize] = (ack, self.clock.wrapping_sub(f.server_time).max(0));
+                    self.trips[(ack % BACKUP) as usize] =
+                        (ack, self.clock.wrapping_sub(f.server_time).max(0));
                 }
                 self.acked = ack;
             }
@@ -274,8 +275,14 @@ impl ServerLink {
             .trips
             .iter()
             .filter(|(num, _)| *num != 0 && newest.wrapping_sub(*num) <= BACKUP)
-            .fold((0i64, 0i64), |(sum, n), (_, ms)| (sum + i64::from(*ms), n + 1));
-        Some(if n == 0 { MAX_PING } else { (sum / n).min(i64::from(MAX_PING)) as i32 })
+            .fold((0i64, 0i64), |(sum, n), (_, ms)| {
+                (sum + i64::from(*ms), n + 1)
+            });
+        Some(if n == 0 {
+            MAX_PING
+        } else {
+            (sum / n).min(i64::from(MAX_PING)) as i32
+        })
     }
 
     /// How many snapshots the newest one sent is ahead of the one the client acknowledged: 0 before the first ack

@@ -615,11 +615,7 @@ impl NetSv {
 
     /// The measured round trip of a connected client in ms, once it has acknowledged a snapshot.
     pub fn ping_of(&self, slot: u16) -> Option<i32> {
-        self.peers
-            .get(usize::from(slot))?
-            .as_ref()?
-            .link
-            .ping()
+        self.peers.get(usize::from(slot))?.as_ref()?.link.ping()
     }
 
     /// Address, qport and ms since the last packet of a connected client.
