@@ -12,8 +12,11 @@ use std::collections::VecDeque;
 
 /// Samples per player: about a second at 30 frames per second.
 const SAMPLES: usize = 32;
-/// The furthest back in time a shot may reach, in milliseconds.
-pub const MAX_REWIND_MS: i32 = 250;
+/// The furthest back in time a shot may reach, in milliseconds; a shot from further back is judged against the live
+/// bodies. The original rewinds to the command's own clock when that is at most 400 ms old and not at all beyond; here
+/// the request is already moved back by the draw delay (the time the shooter saw, not the time of the command), so
+/// the same 400 ms of lag lands exactly on this limit.
+pub const MAX_REWIND_MS: i32 = 400 + net::view::INTERP_DELAY_MS;
 /// A jump bigger than this between two samples is a teleport: no sliding between them.
 const TELEPORT: f32 = 256.0;
 
@@ -60,12 +63,15 @@ impl LagRing {
     }
 
     /// Where `client` was at `time`: between the two samples around it, the pose of the earlier.
-    /// `now` caps how far back: a request older than [`MAX_REWIND_MS`] gets that limit's moment.
-    /// `None` when there is no history that reaches back that far, so the caller uses the live
-    /// body.
+    /// `now` limits how far back: a request older than [`MAX_REWIND_MS`] is not compensated.
+    /// `None` when there is no history that reaches back that far or the request is outside the window, so the caller
+    /// uses the live body.
     pub fn at(&self, client: u16, time: i32, now: i32) -> Option<Sample> {
         let q = self.players.get(usize::from(client))?;
-        let time = time.max(now - MAX_REWIND_MS);
+        // Beyond the window the shooter's lag is not compensated at all, as in the original.
+        if time < now - MAX_REWIND_MS {
+            return None;
+        }
         let (first, last) = (q.front()?, q.back()?);
         if time >= last.time {
             return None;
@@ -122,12 +128,27 @@ mod tests {
         let r = ring();
         assert!(r.at(1, 33 * 9, 300).is_none());
         assert!(r.at(1, 10_000, 300).is_none());
-        // Asking for a time long before `now - MAX_REWIND_MS` gets the cap's moment.
+        // Asking for a time before `now - MAX_REWIND_MS` is not compensated; at the limit it is.
         let now = 33 * 9 + 5;
-        let s = r.at(1, -5000, now).unwrap();
+        assert!(r.at(1, now - MAX_REWIND_MS - 1, now).is_none());
+        assert!(r.at(1, now - MAX_REWIND_MS, now).is_some());
+    }
+
+    #[test]
+    fn a_shooter_with_400_ms_of_lag_is_rewound_to_what_they_saw() {
+        let mut r = LagRing::new(1);
+        for i in 0..20 {
+            r.record(0, sample(i * 33, i as f32 * 10.0));
+        }
+        let now = 19 * 33 + 5;
+        // 400 ms of lag and the draw delay: where the player was 500 ms before `now`, not a nearer moment.
+        let want = (now - 400 - net::view::INTERP_DELAY_MS) as f32 / 33.0 * 10.0;
+        let s = r
+            .at(0, now - 400 - net::view::INTERP_DELAY_MS, now)
+            .unwrap();
         assert!(
-            s.origin[0] >= (now - MAX_REWIND_MS) as f32 / 33.0 * 10.0 - 11.0,
-            "{}",
+            (s.origin[0] - want).abs() < 11.0,
+            "{} vs {want}",
             s.origin[0]
         );
     }

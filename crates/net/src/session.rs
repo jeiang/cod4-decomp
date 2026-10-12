@@ -31,6 +31,9 @@ const MAX_CMDS_PER_PACKET: u32 = 16;
 /// Voice frames one server message carries (the length field has 3 bits).
 const MAX_VOICE_OUT: usize = 7;
 
+/// The most a scoreboard ping shows, as in the original.
+pub const MAX_PING: i32 = 999;
+
 /// Bytes of reliable commands a message may carry beside a snapshot.
 const RELIABLE_BUDGET: usize = 500;
 
@@ -77,6 +80,11 @@ pub struct ServerLink {
     frames: Vec<Option<Snapshot>>,
     next_num: u32,
     acked: u32,
+    /// Server time of the newest packet the server handed in ([`Self::set_clock`]): the moment an ack arrived.
+    clock: i32,
+    /// Round trips in ms of the last [`BACKUP`] acknowledged snapshots, with the number of the snapshot each
+    /// belongs to (0 = none): what [`Self::ping`] averages.
+    trips: [(u32, i32); BACKUP as usize],
     last_cmd: u32,
     scratch: Vec<u8>,
     /// Voice frames of other players waiting for the next message.
@@ -95,6 +103,8 @@ impl ServerLink {
             frames: (0..BACKUP).map(|_| None).collect(),
             next_num: 1,
             acked: 0,
+            clock: 0,
+            trips: [(0, 0); BACKUP as usize],
             last_cmd: 0,
             scratch: Vec::new(),
             voice_out: VecDeque::new(),
@@ -154,6 +164,15 @@ impl ServerLink {
         if ack == 0 || ack < self.next_num {
             // A late packet may carry an older ack: never move backwards.
             if ack == 0 || ack.wrapping_sub(self.acked) < 1 << 31 {
+                if ack != 0
+                    && ack != self.acked
+                    && let Some(f) = self.frames[(ack % BACKUP) as usize]
+                        .as_ref()
+                        .filter(|s| s.num == ack)
+                {
+                    self.trips[(ack % BACKUP) as usize] =
+                        (ack, self.clock.wrapping_sub(f.server_time).max(0));
+                }
                 self.acked = ack;
             }
         }
@@ -239,16 +258,47 @@ impl ServerLink {
             .filter(|s| s.num == self.acked)
     }
 
-    /// Round trip estimate in ms: how old (by server time) the newest snapshot the client
-    /// acknowledged is at `now`. `None` before the first ack.
-    pub fn ping(&self, now: i32) -> Option<i32> {
+    /// Forgets which snapshots the client acknowledged, as a map change does (`deltaMessage = -1`): the next snapshot is
+    /// a full one and [`Self::unacked`] is 0 until the client acknowledges one of the new level.
+    pub fn reset_acks(&mut self) {
+        self.acked = 0;
+        self.trips = [(0, 0); BACKUP as usize];
+    }
+
+    /// Tells the link what server time it is, so an ack that arrives next is timed against it.
+    pub fn set_clock(&mut self, now: i32) {
+        self.clock = now;
+    }
+
+    /// Round trip in ms (`SV_CalcPings`): the mean over the last [`BACKUP`] snapshots of how long the client took to
+    /// acknowledge each, at most [`MAX_PING`]. `None` before the first ack; [`MAX_PING`] when none of the recent
+    /// snapshots was acknowledged.
+    pub fn ping(&self) -> Option<i32> {
         if self.acked == 0 {
             return None;
         }
-        self.frames[(self.acked % BACKUP) as usize]
-            .as_ref()
-            .filter(|s| s.num == self.acked)
-            .map(|s| now.wrapping_sub(s.server_time).max(0))
+        let newest = self.next_num;
+        let (sum, n) = self
+            .trips
+            .iter()
+            .filter(|(num, _)| *num != 0 && newest.wrapping_sub(*num) <= BACKUP)
+            .fold((0i64, 0i64), |(sum, n), (_, ms)| {
+                (sum + i64::from(*ms), n + 1)
+            });
+        Some(if n == 0 {
+            MAX_PING
+        } else {
+            (sum / n).min(i64::from(MAX_PING)) as i32
+        })
+    }
+
+    /// How many snapshots the newest one sent is ahead of the one the client acknowledged: 0 before the first ack
+    /// or before anything was sent. Grows while the client stops acknowledging.
+    pub fn unacked(&self) -> u32 {
+        if self.acked == 0 {
+            return 0;
+        }
+        self.next_num.wrapping_sub(1).wrapping_sub(self.acked)
     }
 
     /// The newest snapshot number the client acknowledged (0 = none yet).
@@ -509,6 +559,49 @@ mod tests {
             }
         }
         (srv, cli, got)
+    }
+
+    /// Runs a lossless link where the ack of snapshot `t` reaches the server `delay(t)` ms after that snapshot's
+    /// time; the client stops answering after tick `mute_after`.
+    fn ack_run(ticks: u32, mute_after: u32, delay: impl Fn(u32) -> i32) -> ServerLink {
+        let net = MemNet::new();
+        let (mut st, mut ct) = (net.endpoint(addr(1)), net.endpoint(addr(2)));
+        let mut srv = ServerLink::new(addr(2), 1);
+        let mut cli = ClientLink::new(addr(1), 1);
+        let mut buf = [0u8; 2000];
+        for t in 1..=ticks {
+            srv.send(&mut st, Some(world(t)));
+            while let Ok(Some((n, _))) = ct.recv_from(&mut buf, None) {
+                cli.receive(&buf[..n]);
+            }
+            if t > mute_after {
+                continue;
+            }
+            cli.push_cmd(cmd(t));
+            cli.send(&mut ct);
+            srv.set_clock(t as i32 * 33 + delay(t));
+            while let Ok(Some((n, _))) = st.recv_from(&mut buf, Some(Duration::ZERO)) {
+                srv.receive(&buf[..n]);
+            }
+        }
+        srv
+    }
+
+    #[test]
+    fn ping_is_the_mean_ack_time_and_caps_at_999() {
+        assert_eq!(ack_run(1, 0, |_| 0).ping(), None);
+        let srv = ack_run(60, 60, |t| if t % 2 == 0 { 40 } else { 80 });
+        assert_eq!(srv.ping(), Some(60));
+        let srv = ack_run(60, 60, |_| 5000);
+        assert_eq!(srv.ping(), Some(MAX_PING));
+    }
+
+    #[test]
+    fn a_client_that_stops_acking_shows_the_cap_and_an_unacked_run() {
+        let srv = ack_run(100, 40, |_| 50);
+        assert_eq!(srv.unacked(), 100 - 40);
+        assert_eq!(srv.ping(), Some(MAX_PING));
+        assert_eq!(ack_run(100, 100, |_| 50).unacked(), 0);
     }
 
     #[test]

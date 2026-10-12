@@ -311,7 +311,8 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_privatePassword", "", 0),
         // Clients one address outside the local network may have at once (0: no limit).
         ("sv_maxClientsPerIP", "0", 0),
-        // Most bytes a second one client is sent (0: what the client asks for).
+        // Most bytes a second one client is sent (0: what the client asks for). The original defaults to 5000, which
+        // our snapshots (bigger than its delta-compressed ones) would stretch to a few a second; a limit is opt-in.
         ("sv_maxRate", "0", ARCHIVE | SERVERINFO),
         // Remote console: empty switches `rcon` off.
         ("rcon_password", "", 0),
@@ -339,7 +340,7 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_maxRate", 0, 25_000),
         ("sv_minPing", 0, 999),
         ("sv_maxPing", 0, 999),
-        ("sv_timeout", 1, 3600),
+        ("sv_timeout", 1, 1800),
         ("sv_connectTimeout", 1, 3600),
         ("sv_reconnectlimit", 0, 12),
         ("sv_maxClientsPerIP", 0, 64),
@@ -2784,7 +2785,7 @@ impl Penalty {
     }
 }
 
-/// The `ping` column of `status`: the measured round trip (at most 9999), or the state the client is in.
+/// The `ping` column of `status`: the measured round trip (at most 999), or the state the client is in.
 fn ping_field(bot: bool, zombie: bool, connecting: bool, ping: Option<i32>) -> String {
     if bot {
         "BOT".into()
@@ -2793,7 +2794,7 @@ fn ping_field(bot: bool, zombie: bool, connecting: bool, ping: Option<i32>) -> S
     } else if connecting {
         "CNCT".into()
     } else {
-        ping.unwrap_or(0).clamp(0, 9999).to_string()
+        ping.unwrap_or(0).clamp(0, 999).to_string()
     }
 }
 
@@ -3157,7 +3158,7 @@ mod tests {
         assert_eq!(ping_field(false, true, true, Some(40)), "ZMBI");
         assert_eq!(ping_field(false, false, true, Some(40)), "CNCT");
         assert_eq!(ping_field(false, false, false, Some(40)), "40");
-        assert_eq!(ping_field(false, false, false, Some(123_456)), "9999");
+        assert_eq!(ping_field(false, false, false, Some(123_456)), "999");
         assert_eq!(ping_field(false, false, false, None), "0");
     }
 }

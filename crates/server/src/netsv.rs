@@ -124,6 +124,9 @@ pub struct Peer {
     snapshot_msec: i32,
     /// Server time before which no snapshot goes out (the rate and `snaps` pacing).
     next_snapshot: i32,
+    /// How many times in a row a snapshot went to it while [`BACKOFF_AFTER`] or more of the earlier ones were
+    /// unacknowledged (`snapshotBackoffCount`), at most [`BACKOFF_MAX`].
+    backoff: u32,
     /// Players this client muted (`mute <n>`), by bit: their voice is not relayed to it.
     muted: u64,
     /// The speaker's voice frames allowed now (a token bucket of [`VOICE_BURST`], refilled at [`VOICE_PER_SEC`]) and when
@@ -219,6 +222,8 @@ pub struct NetSv {
     pub stats: NetStats,
     /// Server time of the newest snapshot sent (what pings are measured against).
     now: i32,
+    /// Random numbers for the snapshot backoff.
+    rng: u32,
     /// The last [`crate::archive::KEEP_MS`] of the world, for killcams.
     archive: Archive,
     buf: Vec<u8>,
@@ -306,6 +311,7 @@ impl NetSv {
             inbox: Vec::new(),
             stats: NetStats::default(),
             now: 0,
+            rng: 0x9E37_79B9,
             archive: Archive::default(),
             buf: vec![0; MAX_MESSAGE],
             bans: BanList::default(),
@@ -372,6 +378,7 @@ impl NetSv {
         let Some(peer) = self.peers[usize::from(slot)].as_mut() else {
             return false;
         };
+        peer.link.set_clock(self.now);
         let Some(p) = peer.link.receive(packet) else {
             return false;
         };
@@ -608,11 +615,7 @@ impl NetSv {
 
     /// The measured round trip of a connected client in ms, once it has acknowledged a snapshot.
     pub fn ping_of(&self, slot: u16) -> Option<i32> {
-        self.peers
-            .get(usize::from(slot))?
-            .as_ref()?
-            .link
-            .ping(self.now)
+        self.peers.get(usize::from(slot))?.as_ref()?.link.ping()
     }
 
     /// Address, qport and ms since the last packet of a connected client.
@@ -642,6 +645,7 @@ impl NetSv {
             rate: 0,
             snapshot_msec: 0,
             next_snapshot: 0,
+            backoff: 0,
             muted: 0,
             voice_tokens: VOICE_BURST,
             voice_at: Instant::now(),
@@ -670,8 +674,8 @@ impl NetSv {
     }
 
     /// `SV_UserinfoChanged`: what a client's userinfo asks for. The rate is kept within 1000 to 90000 bytes a second
-    /// (a client on the local network gets 99999); `snaps` within 1 to 30 a second. Asking for neither leaves the
-    /// client with a snapshot every server frame, which is the original's behaviour only above 20 frames a second.
+    /// (a client on the local network gets 99999); `snaps` within 1 to 30 a second. A userinfo without them gets the
+    /// original's defaults, a rate of 5000 and a snapshot every 50 ms.
     pub fn set_userinfo(&mut self, slot: u16, info: &str) {
         let Some(p) = self
             .peers
@@ -683,15 +687,15 @@ impl NetSv {
         let local = is_lan(p.link.addr.ip());
         let rate = info_value(info, "rate");
         p.rate = if local {
-            99_999
+            LAN_RATE
         } else if rate.is_empty() {
-            0
+            DEFAULT_RATE
         } else {
             crate::cvar::parse_int(rate).clamp(1000, MAX_RATE)
         };
         let snaps = info_value(info, "snaps");
         p.snapshot_msec = if snaps.is_empty() {
-            0
+            DEFAULT_SNAPSHOT_MSEC
         } else {
             1000 / crate::cvar::parse_int(snaps).clamp(1, 30)
         };
@@ -719,6 +723,9 @@ impl NetSv {
         peer.snd_sent = 0;
         peer.stalled = false;
         peer.next_snapshot = 0;
+        // The new level starts from a full snapshot, and the load that follows is not a client that stopped acking.
+        peer.backoff = 0;
+        peer.link.reset_acks();
         self.peers[usize::from(slot)] = Some(peer);
     }
 
@@ -862,7 +869,7 @@ impl NetSv {
                     .peers
                     .get(usize::from(r.client))
                     .and_then(Option::as_ref)
-                    .and_then(|p| p.link.ping(self.now))
+                    .and_then(|p| p.link.ping())
                     .unwrap_or(0);
             }
         }
@@ -1048,8 +1055,8 @@ impl NetSv {
             }
             let bytes = peer.link.send(&mut self.t, Some(snap.canonical()))
                 + std::mem::take(&mut peer.voice_bytes);
-            peer.next_snapshot =
-                server_time + snapshot_delay(peer.rate, peer.snapshot_msec, bytes, max_rate);
+            self.rng = xorshift(self.rng);
+            peer.schedule_next(server_time, bytes, max_rate, self.rng);
             self.stats.snapshots_out += 1;
             self.stats.bytes_out += bytes as u64;
         }
@@ -1214,6 +1221,58 @@ fn compass_state(p: &EntityState, shot: bool) -> EntityState {
     (a.event, a.prior_events) = (p.event, p.prior_events);
     a.event_seq = p.event_seq;
     a.canonical()
+}
+
+/// The rate given to a client on the local network.
+const LAN_RATE: i32 = 99_999;
+/// What a userinfo without `rate` or `snaps` gets: the original's 5000 bytes a second and 50 ms (20 a second).
+const DEFAULT_RATE: i32 = 5000;
+const DEFAULT_SNAPSHOT_MSEC: i32 = 50;
+/// Snapshots a client may leave unacknowledged before the server spaces them out at random, and the most the spacing
+/// doubles (`SV_SendMessageToClient`).
+const BACKOFF_AFTER: u32 = 29;
+/// ...and for how long at least: 29 snapshots are 1.45 s at the original's 20 a second, but under a second at ours.
+const BACKOFF_AFTER_MS: i32 = 1450;
+/// The spacing unit of the backoff for a peer with no `snaps` of its own: one server frame at 30 a second.
+const BACKOFF_FRAME_MS: i32 = 33;
+const BACKOFF_MAX: u32 = 8;
+
+impl Peer {
+    /// Sets when the next snapshot may go out, after one of `bytes` was sent at `server_time`: by the rate and `snaps`
+    /// interval, or, while the client has left [`BACKOFF_AFTER`] snapshots (and [`BACKOFF_AFTER_MS`]) unacknowledged,
+    /// by the random backoff. `roll` is any random number.
+    fn schedule_next(&mut self, server_time: i32, bytes: usize, max_rate: i32, roll: u32) {
+        let unacked = self.link.unacked();
+        // A peer that named no `snaps` is sent a snapshot every server frame: that is its interval here.
+        let interval = if self.snapshot_msec > 0 {
+            self.snapshot_msec
+        } else {
+            BACKOFF_FRAME_MS
+        };
+        let stalled = unacked >= BACKOFF_AFTER
+            && i64::from(unacked) * i64::from(interval) >= i64::from(BACKOFF_AFTER_MS);
+        self.next_snapshot = server_time
+            + if stalled {
+                backoff_delay(&mut self.backoff, interval, roll)
+            } else {
+                self.backoff = 0;
+                snapshot_delay(self.rate, self.snapshot_msec, bytes, max_rate)
+            };
+    }
+}
+
+fn xorshift(mut x: u32) -> u32 {
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^ (x << 5)
+}
+
+/// Milliseconds until the next snapshot of a client that has stopped acknowledging: a random number of its `snaps`
+/// intervals below `2^backoff`, and `backoff` goes up one (at most [`BACKOFF_MAX`]). `roll` is any random number.
+fn backoff_delay(backoff: &mut u32, snapshot_msec: i32, roll: u32) -> i32 {
+    let slots = 1u32 << *backoff;
+    *backoff = (*backoff + 1).min(BACKOFF_MAX);
+    (roll % slots) as i32 * snapshot_msec
 }
 
 /// The `rate` of a stock profile (`seta rate "25000"`), and the most a client may ask for.
@@ -1682,6 +1741,7 @@ mod tests {
             rate: 0,
             snapshot_msec: 0,
             next_snapshot: 0,
+            backoff: 0,
             muted: 0,
             voice_tokens: VOICE_BURST,
             voice_at: Instant::now(),
@@ -1844,6 +1904,115 @@ mod tests {
         assert_eq!((near.rate, near.snapshot_msec), (99_999, 100));
         net.set_userinfo(0, "\\rate\\900000");
         assert_eq!(net.peer(0).unwrap().rate, 90_000);
+        // A userinfo that names neither gets the original's defaults, not an unpaced stream.
+        net.set_userinfo(0, "\\name\\Ann");
+        let far = net.peer(0).unwrap();
+        assert_eq!((far.rate, far.snapshot_msec), (5000, 50));
+    }
+
+    #[test]
+    fn a_client_that_stopped_acking_is_spaced_out_by_a_doubling_random_delay_up_to_a_cap() {
+        let mut count = 0;
+        // The first one is due at once (2^0 slots), then the window doubles each time.
+        assert_eq!(backoff_delay(&mut count, 50, 12345), 0);
+        for step in 1..=BACKOFF_MAX + 4 {
+            let reached = count;
+            assert_eq!(reached, step.min(BACKOFF_MAX));
+            let d = backoff_delay(&mut count, 50, u32::MAX);
+            assert_eq!(d, ((1u32 << reached) - 1) as i32 * 50, "step {step}");
+        }
+        assert_eq!(count, BACKOFF_MAX);
+        // At most 255 intervals of 50 ms.
+        assert!(backoff_delay(&mut count, 50, u32::MAX) <= 255 * 50);
+    }
+
+    /// A peer, the server's wire and a client that answers snapshots only when told to.
+    struct Stall {
+        peer: Peer,
+        st: net::transport::MemTransport,
+        ct: net::transport::MemTransport,
+        cli: net::session::ClientLink,
+    }
+
+    impl Stall {
+        fn new() -> Self {
+            let mem = net::MemNet::new();
+            let mut peer = peer();
+            peer.snapshot_msec = 33;
+            Self {
+                peer,
+                st: mem.endpoint(addr(1)),
+                ct: mem.endpoint(addr(9)),
+                cli: net::session::ClientLink::new(addr(1), 1),
+            }
+        }
+
+        /// One server frame: a snapshot goes out; the client acknowledges it if `answer`.
+        fn frame(&mut self, answer: bool) {
+            self.peer
+                .link
+                .send(&mut self.st, Some(net::Snapshot::empty()));
+            let mut buf = [0u8; 4096];
+            while let Ok(Some((n, _))) = self.ct.recv_from(&mut buf, Some(Duration::ZERO)) {
+                self.cli.receive(&buf[..n]);
+            }
+            if answer {
+                self.cli.send(&mut self.ct);
+                while let Ok(Some((n, _))) = self.st.recv_from(&mut buf, Some(Duration::ZERO)) {
+                    self.peer.link.receive(&buf[..n]);
+                }
+            }
+        }
+
+        /// The wait the server picks after the snapshot just sent, for the largest random roll.
+        fn wait(&mut self) -> i32 {
+            self.peer.schedule_next(0, 100, 0, u32::MAX);
+            self.peer.next_snapshot
+        }
+    }
+
+    #[test]
+    fn a_client_that_stops_acking_is_backed_off_and_an_ack_ends_it() {
+        let mut s = Stall::new();
+        s.frame(true);
+        // A client that keeps answering is paced by the snaps interval alone.
+        for _ in 0..60 {
+            s.frame(true);
+            assert_eq!(s.wait(), 33);
+        }
+        // It goes silent: not at once, but after 29 snapshots and 1.45 s, each wait is a random multiple of the interval
+        // that doubles to a cap.
+        for _ in 0..43 {
+            s.frame(false);
+        }
+        assert_eq!(s.wait(), 33, "{} unacked", s.peer.link.unacked());
+        s.frame(false);
+        assert_eq!(s.wait(), 0, "the first backed-off wait has one slot");
+        assert_eq!(s.wait(), 33);
+        for _ in 0..20 {
+            s.frame(false);
+            s.wait();
+        }
+        assert_eq!(s.peer.backoff, BACKOFF_MAX);
+        assert_eq!(s.wait(), 255 * 33);
+        // One ack and it is paced normally again.
+        s.frame(true);
+        assert_eq!(s.wait(), 33);
+        assert_eq!(s.peer.backoff, 0);
+    }
+
+    #[test]
+    fn a_map_change_followed_by_a_long_silence_is_not_a_client_that_stopped_acking() {
+        let mut s = Stall::new();
+        s.frame(true);
+        s.frame(true);
+        // The client loads the next level and says nothing for far longer than the backoff threshold.
+        s.peer.link.reset_acks();
+        for _ in 0..200 {
+            s.frame(false);
+            assert_eq!(s.wait(), 33);
+        }
+        assert_eq!(s.peer.backoff, 0);
     }
 
     fn print(kind: PrintKind) -> String {
