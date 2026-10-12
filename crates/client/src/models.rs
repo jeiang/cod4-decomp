@@ -203,6 +203,8 @@ impl Library {
             Install::open_game(root, game).map_err(|e| format!("cannot open the install: {e}"))?;
         install.mount_usermap(map).map_err(|e| e.to_string())?;
         let mut content = Content::for_client();
+        // The materials the models of the other zones name (`mc/lambert1`) are defined here.
+        content.load_zone(&install, "code_post_gfx_mp", 2)?;
         content.load_zone(&install, "common_mp", 4)?;
         content.load_mod(&install)?;
         content.load_map(&install, map)?;
@@ -780,5 +782,240 @@ mod tests {
         // The bones are relative to the root: the head's height over the floor is the root's and the head's.
         let h = r.root()[2] + after[head].trans[2];
         assert!((0.0..60.0).contains(&h), "the head lies at {h}");
+    }
+
+    fn read_back(gpu: &render::Gpu, tex: &wgpu::Texture, w: u32, h: u32) -> Vec<u8> {
+        let row = w * 4;
+        let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(row * h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            tex.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        slice.get_mapped_range().unwrap().to_vec()
+    }
+
+    /// The turrets (`misc_turret`, `misc_mg42`) a map's entity string places: model, origin and yaw.
+    fn placed_turrets(data: &render::MapData) -> Vec<(String, [f32; 3], f32)> {
+        let Some(ents) = data.clipmap.as_ref().and_then(|c| c.map_ents.as_ref()) else {
+            return Vec::new();
+        };
+        let text = String::from_utf8_lossy(&ents.entity_string);
+        let mut out = Vec::new();
+        for block in text.split('}') {
+            let (mut class, mut model, mut origin, mut yaw) = ("", "", None, 0.0);
+            let mut q = block.split('"').skip(1).step_by(2);
+            while let (Some(k), Some(v)) = (q.next(), q.next()) {
+                let nums = || -> Vec<f32> {
+                    v.split_whitespace()
+                        .filter_map(|x| x.parse().ok())
+                        .collect()
+                };
+                match k.to_ascii_lowercase().as_str() {
+                    "classname" => class = v,
+                    "model" => model = v,
+                    "origin" => {
+                        origin = Some(nums())
+                            .filter(|n| n.len() == 3)
+                            .map(|n| [n[0], n[1], n[2]])
+                    }
+                    "angles" => yaw = nums().get(1).copied().unwrap_or(0.0),
+                    _ => {}
+                }
+            }
+            if let Some(o) = origin
+                && matches!(
+                    class.to_ascii_lowercase().as_str(),
+                    "misc_turret" | "misc_mg42"
+                )
+                && !model.is_empty()
+            {
+                out.push((model.to_owned(), o, yaw));
+            }
+        }
+        out
+    }
+
+    /// The stock maps that place turrets: every model a turret is placed with has materials to draw it by. A model
+    /// whose material is only the name of one another zone defines has none, and is invisible in a match.
+    #[test]
+    fn a_stock_turrets_model_has_materials_to_draw() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut found = 0;
+        for map in ["mp_convoy", "mp_backlot", "mp_farm"] {
+            let data =
+                render::MapData::load(&root, "", map).unwrap_or_else(|e| panic!("{map}: {e}"));
+            let lib = Library::load(&root, "", map).expect("content");
+            for (name, ..) in placed_turrets(&data) {
+                let model = lib
+                    .content
+                    .model(&name)
+                    .expect("the turret model is loaded");
+                for m in model.materials.iter().flatten() {
+                    assert!(
+                        m.technique_set.is_some(),
+                        "{map}: turret model {name} has material {:?} with nothing to draw it by",
+                        m.name
+                    );
+                }
+                found += 1;
+            }
+        }
+        assert!(found > 0, "no stock map places a turret");
+    }
+
+    /// A turret placed by a stock map shows in a frame seen from behind it, as the gunner would, at rest and swung.
+    #[test]
+    fn a_stock_turret_is_drawn() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let Ok(gpu) = render::Gpu::new(None) else {
+            eprintln!("skipped: no GPU adapter");
+            return;
+        };
+        let gpu = Arc::new(gpu);
+        let (w, h) = (320u32, 180u32);
+        let fmt = wgpu::TextureFormat::Rgba8Unorm;
+        let mut drawn = 0;
+        for map in ["mp_convoy", "mp_backlot"] {
+            let data =
+                render::MapData::load(&root, "", map).unwrap_or_else(|e| panic!("{map}: {e}"));
+            let turrets = placed_turrets(&data);
+            let (name, at, yaw) = turrets
+                .first()
+                .cloned()
+                .unwrap_or_else(|| panic!("{map} places no turret"));
+            let mut lib = Library::load(&root, "", map).expect("content");
+            let rest = lib.rest_pose(&name, &[]).expect("the turret model");
+            let scene = render::Scene::new(&gpu, &data).expect("scene");
+            let vfs = assets::vfs::Vfs::open_stock(&root, 0).unwrap();
+            let mut r = render::Renderer::new(
+                gpu.clone(),
+                scene,
+                &data,
+                render::TextureCache::new(Some(vfs), 0),
+            );
+            r.settings.aa_samples = 1;
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: fmt,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let tv = target.create_view(&Default::default());
+            r.warm_step(fmt, std::time::Duration::from_secs(600));
+            // Behind the gun, as a gunner stands, looking the way it faces.
+            let (s, c) = yaw.to_radians().sin_cos();
+            let eye = glam::Vec3::from(at) + glam::Vec3::new(-c * 40.0, -s * 40.0, 24.0);
+            let view = render::View {
+                origin: eye,
+                yaw: yaw.to_radians(),
+                pitch: -0.3,
+                roll: 0.0,
+                fov_x: 1.5,
+                time: 0.0,
+            };
+            let mut frame = |r: &mut render::Renderer, models: Vec<render::ModelInstance>| {
+                for _ in 0..30 {
+                    r.dynamic_models = models.clone();
+                    let st = r.render(&view, &tv, fmt, (w, h));
+                    if st.pipelines_missing == 0 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                read_back(&gpu, &target, w, h)
+            };
+            let empty = frame(&mut r, Vec::new());
+            for (label, models) in [
+                ("at rest", rest.instances(at, [0.0, yaw, 0.0], [0; 4])),
+                (
+                    "swung",
+                    rest.swung([10.0, 20.0, 0.0], at, [0.0, yaw, 0.0], [0; 4]),
+                ),
+            ] {
+                let seen = frame(&mut r, models)
+                    .chunks(4)
+                    .zip(empty.chunks(4))
+                    .filter(|(p, q)| (0..3).map(|i| p[i].abs_diff(q[i]) as u32).sum::<u32>() > 24)
+                    .count();
+                eprintln!("{map} turret {name} {label}: {seen} pixels changed");
+                assert!(
+                    seen > 100,
+                    "{map}: the turret {name} {label} shows in {seen} pixels"
+                );
+            }
+            drawn += 1;
+        }
+        assert!(drawn > 0, "no stock map places a turret");
+    }
+
+    /// Every model of every stock map has materials to draw it by, except the ones that are not drawn at all.
+    #[test]
+    fn no_stock_model_is_left_with_a_material_it_cannot_draw() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let custom = assets::paths::custom_maps(&root, "");
+        let mut left = Vec::new();
+        for map in assets::paths::maps(&root, "") {
+            if custom.contains(&map) {
+                continue;
+            }
+            let lib = Library::load(&root, "", &map).unwrap_or_else(|e| panic!("{map}: {e}"));
+            for name in lib.content.model_names("") {
+                let model = lib.content.model(name).expect("a listed model");
+                for m in model.materials.iter().flatten() {
+                    if m.technique_set.is_none()
+                        || m.name.as_deref().is_some_and(|n| n.starts_with(','))
+                    {
+                        left.push(format!("{map}: {name}: {:?}", m.name));
+                    }
+                }
+            }
+        }
+        left.sort();
+        left.dedup();
+        assert!(
+            left.is_empty(),
+            "models with a material nothing defines: {left:#?}"
+        );
     }
 }

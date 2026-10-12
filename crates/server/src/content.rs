@@ -19,6 +19,7 @@ use web_time::Instant;
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::clipmap::Clipmap;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
+use assets::zone::gfx::Material;
 use assets::zone::text::StringTable;
 use assets::zone::weapon::WeaponDef;
 use assets::zone::xanim::XAnimParts;
@@ -194,12 +195,15 @@ fn is_player_anim(name: &str, client: bool) -> bool {
 /// content is for a client.
 struct ContentFilter {
     presentation: bool,
+    /// Keep the zone's materials, which the models of other zones name (`code_post_gfx_mp`).
+    materials: bool,
 }
 
 impl DecodeFilter for ContentFilter {
     fn keep(&self, ty: XAssetType) -> bool {
         // A client draws effects; the server only needs the weapons that name them.
         (self.presentation && matches!(ty, XAssetType::Fx | XAssetType::ImpactFx))
+            || (self.materials && ty == XAssetType::Material)
             // The alias names, for `soundexists`; the samples are presentation data and stay out.
             || ty == XAssetType::Sound
             || Consumer::Server.keep(ty)
@@ -290,12 +294,49 @@ impl Layer {
     }
 }
 
+/// A material another zone defines is stored in a model as its name behind a comma, with nothing to draw it by
+/// (`DB_FindXAssetHeader` finds the real one by name when the zone loads).
+fn is_reference(m: &Material) -> bool {
+    m.name.as_deref().is_some_and(|n| n.starts_with(','))
+}
+
+/// `model` with the materials that only name another zone's replaced by the ones defined in full among `known`, the
+/// zones loaded before it. Records the model's own materials in `known` for the zones after it.
+fn resolve_materials(
+    model: Arc<XModel>,
+    known: &mut HashMap<String, (u8, Arc<Material>)>,
+    tag: u8,
+) -> Arc<XModel> {
+    for m in model.materials.iter().flatten() {
+        if let Some(n) = m.name.as_deref().filter(|_| !is_reference(m)) {
+            put(known, tag, n, m.clone());
+        }
+    }
+    if !model.materials.iter().flatten().any(|m| is_reference(m)) {
+        return model;
+    }
+    let found = |m: &Arc<Material>| {
+        let n = m.name.as_deref()?.strip_prefix(',')?;
+        get(known, n).cloned()
+    };
+    let mut out = (*model).clone();
+    out.materials = model
+        .materials
+        .iter()
+        .map(|m| m.as_ref().map(|m| found(m).unwrap_or_else(|| m.clone())))
+        .collect();
+    Arc::new(out)
+}
+
 fn get<'a, T>(m: &'a HashMap<String, (u8, T)>, name: &str) -> Option<&'a T> {
     m.get(&name.to_ascii_lowercase()).map(|(_, v)| v)
 }
 
 #[derive(Default)]
 pub struct Content {
+    /// The materials the client's models define in full, by lowercase name: what the models of other zones that only
+    /// name them draw with.
+    materials: HashMap<String, (u8, Arc<Material>)>,
     /// A client's content: models keep their vertices and skin weights, and the view model
     /// animations are retained with the player animations.
     pub client: bool,
@@ -353,8 +394,14 @@ impl Content {
         let client = self.client;
         let filter = ContentFilter {
             presentation: client,
+            materials: client && zone == "code_post_gfx_mp",
         };
         z.decode(&filter, |a| match a {
+            Asset::Material(m) => {
+                if let Some(n) = m.name.clone().filter(|_| !is_reference(&m)) {
+                    put(&mut self.materials, tag, &n, m);
+                }
+            }
             Asset::RawFile(r) => {
                 if let Some(n) = &r.name {
                     // Drop the trailing NUL stored after the text.
@@ -390,6 +437,11 @@ impl Content {
                 }
             }
             Asset::XModel(m) => {
+                let m = if client {
+                    resolve_materials(m, &mut self.materials, tag)
+                } else {
+                    m
+                };
                 if let Some(n) = m.name.clone() {
                     let bones: Arc<[Arc<str>]> =
                         m.bone_names.iter().map(|b| resolve(&strings, *b)).collect();
@@ -465,6 +517,7 @@ impl Content {
     pub fn load_map(&mut self, install: &Install, map: &str) -> Result<(), String> {
         self.map = Layer::default();
         self.map_name = None;
+        self.materials.retain(|_, (tag, _)| *tag != MAP_TAG);
         self.load_zone(install, map, MAP_TAG)?;
         self.map.merge(&self.modded);
         self.map_name = Some(map.to_owned());
@@ -747,5 +800,101 @@ mod tests {
             ..reload
         };
         assert!(!pullout.gun_hand_left(0.5), "no note yet: the right hand");
+    }
+
+    fn material(name: &str, techset: bool) -> Arc<Material> {
+        Arc::new(Material {
+            name: Some(name.into()),
+            game_flags: 0,
+            sort_key: 0,
+            atlas_rows: 0,
+            atlas_columns: 0,
+            draw_surf: 0,
+            surface_type_bits: 0,
+            hash_index: 0,
+            state_bits_entry: [0; 34],
+            state_flags: 0,
+            camera_region: 0,
+            technique_set: techset.then(|| {
+                Arc::new(assets::zone::gfx::TechniqueSet {
+                    name: Some("t".into()),
+                    world_vert_format: 0,
+                    has_been_uploaded: false,
+                    techniques: Vec::new(),
+                })
+            }),
+            textures: Arc::from([]),
+            constants: Arc::from([]),
+            state_bits: Arc::from([]),
+        })
+    }
+
+    fn model(materials: Vec<Option<Arc<Material>>>) -> Arc<XModel> {
+        Arc::new(XModel {
+            name: Some("m".into()),
+            num_bones: 0,
+            num_root_bones: 0,
+            lod_ramp_type: 0,
+            bone_names: Arc::from([]),
+            parent_list: Arc::from([]),
+            quats: Arc::from([]),
+            trans: Arc::from([]),
+            part_classification: Arc::from([]),
+            base_mat: Arc::from([]),
+            surfs: Arc::from([]),
+            materials: materials.into(),
+            lod_info: std::array::from_fn(|_| assets::zone::xmodel::LodInfo {
+                dist: 0.0,
+                surf_count: 0,
+                surf_index: 0,
+                part_bits: [0; 4],
+                lod: 0,
+                smc_index_plus_one: 0,
+                smc_alloc_bits: 0,
+            }),
+            coll_surfs: Arc::from([]),
+            contents: 0,
+            bone_info: Arc::from([]),
+            radius: 0.0,
+            mins: [0.0; 3],
+            maxs: [0.0; 3],
+            num_lods: 1,
+            coll_lod: 0,
+            mem_usage: 0,
+            flags: 0,
+            bad: false,
+            phys_preset: None,
+            phys_geoms: None,
+        })
+    }
+
+    #[test]
+    fn a_model_that_only_names_a_material_gets_the_one_an_earlier_zone_defined() {
+        let mut known = HashMap::new();
+        // The earlier zone's model defines the material in full.
+        let first = model(vec![Some(material("MC/Wood", true))]);
+        assert!(Arc::ptr_eq(
+            &resolve_materials(first.clone(), &mut known, 4),
+            &first
+        ));
+        // A later zone's model names it, in any case, beside a material of its own and a surface with none.
+        let own = material("mc/own", true);
+        let later = model(vec![
+            Some(material(",mc/wood", false)),
+            Some(own.clone()),
+            None,
+        ]);
+        let got = resolve_materials(later, &mut known, 8);
+        let wood = got.materials[0].as_ref().unwrap();
+        assert!(Arc::ptr_eq(wood, first.materials[0].as_ref().unwrap()));
+        assert!(Arc::ptr_eq(got.materials[1].as_ref().unwrap(), &own));
+        assert!(got.materials[2].is_none());
+        // A name nothing defines stays as it was.
+        let lost = model(vec![Some(material(",mc/nowhere", false))]);
+        let got = resolve_materials(lost.clone(), &mut known, 8);
+        assert_eq!(
+            got.materials[0].as_ref().unwrap().name.as_deref(),
+            Some(",mc/nowhere")
+        );
     }
 }

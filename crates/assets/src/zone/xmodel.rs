@@ -62,7 +62,7 @@ pub struct Surface {
     pub tri_indices: Arc<[u16]>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LodInfo {
     pub dist: f32,
     pub surf_count: u16,
@@ -152,7 +152,7 @@ pub struct PhysGeomList {
     pub products_of_inertia: [f32; 3],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct XModel {
     pub name: Name,
     pub num_bones: u8,
