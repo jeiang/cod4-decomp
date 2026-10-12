@@ -356,6 +356,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("ui_netGametypeName", "war"),
     ("ui_netSource", "0"),
     ("ui_joinGameType", "0"),
+    // The userinfo dvar a join sends as its password (`password_popmenu` edits it); never saved.
+    ("password", ""),
     ("ui_gametype", "0"),
     ("ui_currentMap", "0"),
     ("ui_currentNetMap", "0"),
@@ -418,6 +420,17 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("ai_corpseCount", "10"),
     ("cl_freelook", "1"),
     ("m_filter", "0"),
+    // The join menu's filters (`filter_popmenu`), the stock values. `ui_browserShowPure` (stock 1) has no control in
+    // the popup and the list ignores it: see `Shell::server_filter`.
+    ("ui_browserShowFull", "1"),
+    ("ui_browserShowEmpty", "1"),
+    ("ui_browserShowPassword", "-1"),
+    ("ui_browserShowPure", "1"),
+    ("ui_browserMod", "0"),
+    ("ui_browserShowDedicated", "0"),
+    ("ui_browserFriendlyfire", "-1"),
+    ("ui_browserKillcam", "-1"),
+    ("ui_browserShowPunkBuster", "-1"),
     // Not a stock dvar: the bots a server started from the menus plays with, on every map.
     ("bot_count", "0"),
     // Not a stock dvar: the master servers (`host[:port]`, space separated, up to five) the Internet list asks.
@@ -462,7 +475,8 @@ impl Shell {
     ) -> Result<Self, String> {
         let mut assets = UiAssets::load(install)?;
         assets.note_menu_materials();
-        let st = ShellState::new(&assets, install);
+        let mut st = ShellState::new(&assets, install);
+        st.servers.load_favorites(input.config_dir());
         register_defaults(input);
         let vfs = ::assets::vfs::Vfs::open(&install.root, 0, &install.game)
             .map_err(|e| format!("cannot open the install: {e}"))?;
@@ -597,6 +611,13 @@ impl Shell {
 
     fn host<'a>(st: &'a mut ShellState, input: &'a mut Input) -> HostCx<'a> {
         HostCx { st, input }
+    }
+
+    /// The server refused a join (a wrong password, a full server, a ban): the stock error popup with the reason, over
+    /// the menus. A wrong password is forgotten and asked for again.
+    pub fn join_refused(&mut self, input: &mut Input, why: &str) {
+        let mut h = Self::host(&mut self.st, input);
+        show_refusal(&mut self.ui, &mut h, why);
     }
 
     /// Opens a menu by name (the app's `togglemenu`, the server's `openmenu`).
@@ -1266,15 +1287,35 @@ impl HostCx<'_> {
         self.st.gametypes.get(n.checked_sub(1)?)
     }
 
+    /// The filter popup's settings (`ui_browser*`). `ui_browserShowPure` is left out on purpose: the stock default 1
+    /// (and the `seta` in every stock profile) lists pure servers only, and the popup has no control to undo it, but
+    /// our servers do not verify IWDs yet (`sv_pure` is off by default, #302), so it would hide every one of them.
+    /// It counts again once `sv_pure` verifies.
+    fn server_filter(&self) -> crate::serverlist::Filter {
+        let on = |name: &str| atoi(&self.dvar_get(name)) != 0;
+        let n = |name: &str| atoi(&self.dvar_get(name));
+        crate::serverlist::Filter {
+            show_full: on("ui_browserShowFull"),
+            show_empty: on("ui_browserShowEmpty"),
+            password: n("ui_browserShowPassword"),
+            dedicated_only: on("ui_browserShowDedicated"),
+            modded: n("ui_browserMod"),
+            friendly_fire: n("ui_browserFriendlyfire"),
+            killcam: n("ui_browserKillcam"),
+            punkbuster: n("ui_browserShowPunkBuster"),
+        }
+    }
+
     /// The join list as shown: the servers of the chosen source that run the chosen game mode (a server that has not
-    /// answered does not say, so a chosen mode hides it).
+    /// answered does not say, so a chosen mode hides it) and pass the filter popup's settings.
     fn server_rows(&self) -> Vec<&crate::serverlist::Entry> {
         let mode = self.join_gametype().map(|g| g.id.as_str());
+        let filter = self.server_filter();
         self.st
             .servers
             .rows(self.net_source())
             .iter()
-            .filter(|e| mode.is_none_or(|m| e.gametype == m))
+            .filter(|e| mode.is_none_or(|m| e.gametype == m) && filter.passes(e))
             .collect()
     }
 
@@ -2033,7 +2074,7 @@ impl Host for HostCx<'_> {
                 self.st.servers.select(None);
                 true
             }
-            // 222: the server filter; the only filter there is shows every server.
+            // 222: the server filter button; the filter popup's settings apply as the list is built.
             222 if pick => {
                 self.st.servers.select(None);
                 true
@@ -2257,6 +2298,20 @@ fn civil(secs: i64) -> (i64, u32, u32, u32, u32) {
         (rem / 3600) as u32,
         (rem % 3600 / 60) as u32,
     )
+}
+
+/// [`Shell::join_refused`] on the parts that hold the menus and the dvars.
+fn show_refusal(ui: &mut Ui, h: &mut HostCx, why: &str) {
+    use crate::ui::MenuKind::Other;
+    h.input.set_cvar("com_errorMessage", why);
+    ui.open_as(h, "error_popmenu", Other);
+    if why
+        .trim_end_matches('.')
+        .eq_ignore_ascii_case("Invalid password")
+    {
+        h.input.set_cvar("password", "");
+        ui.open_as(h, "password_popmenu", Other);
+    }
 }
 
 /// One cell of the stock server list (the columns of the original's join menu).
@@ -2898,6 +2953,104 @@ mod tests {
         assert!(h.owner_key(&ui, 220, &UiKey::Mouse2));
         assert_eq!(h.dvar("ui_netSource"), "2");
         assert!(!h.owner_key(&ui, 220, &UiKey::Up));
+    }
+
+    /// The filter popup's dvars cut the join list, and its sort buttons order every column.
+    #[test]
+    fn the_filter_popup_dvars_cut_the_join_list() {
+        let Some((mut st, mut ui, mut input)) = shell_env() else {
+            return;
+        };
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        let mut locked = lan_server("192.168.1.5:28960", "war");
+        locked.password = true;
+        h.st.servers.take(locked);
+        h.st.servers.take(lan_server("192.168.1.6:28960", "war"));
+        for (k, v) in [
+            ("ui_browserShowPassword", "-1"),
+            ("ui_browserShowFull", "1"),
+        ] {
+            h.set_dvar(k, v);
+        }
+        assert_eq!(h.feeder_count(2), 2);
+        h.set_dvar("ui_browserShowPassword", "1");
+        assert_eq!(h.feeder_count(2), 1);
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.5:28960");
+        h.set_dvar("ui_browserShowPassword", "0");
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.6:28960");
+        h.set_dvar("ui_browserShowPassword", "-1");
+        // Sorting by the password column puts the open server first.
+        assert!(h.ui_script(&mut ui, "ServerSort", &["0".into()]));
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.6:28960");
+        assert!(h.ui_script(&mut ui, "ServerSort", &["0".into()]));
+        assert_eq!(h.feeder_text(2, 0, 2), "192.168.1.5:28960");
+        // A profile's `seta ui_browserShowPure 1` (the stock default) does not hide a server that is not pure.
+        h.set_dvar("ui_browserShowPure", "1");
+        assert_eq!(h.feeder_count(2), 2);
+    }
+
+    /// The browser's dvars start at their stock values, and `password` (the userinfo dvar a join sends) is not saved.
+    #[test]
+    fn browser_dvars_start_at_stock_values_and_the_password_is_not_archived() {
+        let mut input = Input::detached();
+        register_defaults(&mut input);
+        for (k, v) in [
+            ("ui_browserShowFull", "1"),
+            ("ui_browserShowEmpty", "1"),
+            ("ui_browserShowPassword", "-1"),
+            ("ui_browserShowPure", "1"),
+            ("ui_browserMod", "0"),
+            ("ui_browserShowDedicated", "0"),
+            ("ui_browserFriendlyfire", "-1"),
+            ("ui_browserKillcam", "-1"),
+            ("ui_browserShowPunkBuster", "-1"),
+            ("password", ""),
+        ] {
+            assert_eq!(input.cvar(k), Some(v), "{k}");
+        }
+        input.set_cvar("password", "secret");
+        assert!(
+            input
+                .cvars
+                .archived()
+                .iter()
+                .all(|(k, _)| !k.eq_ignore_ascii_case("password"))
+        );
+        assert!(
+            input
+                .cvars
+                .archived()
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("ui_browserKillcam"))
+        );
+    }
+
+    /// A refused join shows the reason in the error popup; a wrong password is forgotten and asked for again.
+    #[test]
+    fn a_refused_join_shows_the_error_and_a_wrong_password_asks_again() {
+        let Some((mut st, mut ui, mut input)) = shell_env() else {
+            return;
+        };
+        input.set_cvar("password", "wrong");
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        show_refusal(&mut ui, &mut h, "Server is full.");
+        assert!(ui.is_open("error_popmenu"));
+        assert!(!ui.is_open("password_popmenu"));
+        assert_eq!(
+            h.dvar("password"),
+            "wrong",
+            "another refusal keeps the password"
+        );
+        show_refusal(&mut ui, &mut h, "Invalid password.");
+        assert_eq!(h.dvar("com_errorMessage"), "Invalid password.");
+        assert!(ui.is_open("password_popmenu"));
+        assert_eq!(h.dvar("password"), "");
     }
 
     /// A refresh runs until it is stopped, and leaving the join menu while one runs stops it first (the list stays).
