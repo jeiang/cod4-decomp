@@ -1518,9 +1518,10 @@ mod tests {
             "\\sv_cheats\\1\\sv_serverid\\42".into(),
         )]));
         assert_eq!(ui.server_id(), 42);
+        let line = stamp_menu_response(&menu_response("changeclass", "assault_mp"), ui.server_id());
         assert_eq!(
-            stamp_menu_response(&menu_response("changeclass", "assault_mp"), ui.server_id()),
-            "menuresponse 42 \"changeclass\" \"assault_mp\""
+            words(&line).unwrap(),
+            ["menuresponse", "42", "changeclass", "assault_mp"]
         );
         assert_eq!(stamp_menu_response("say hi", 42), "say hi");
     }

@@ -379,6 +379,13 @@ mod tests {
     }
 
     #[test]
+    fn a_kick_by_name_matches_the_coloured_name_without_its_colours() {
+        let mut g = game();
+        assert_eq!(call(&mut g, &["kick", "Bo"]).unwrap(), ["clientkick 1"]);
+        assert!(call(&mut g, &["kick", "^1Bo"]).is_err());
+    }
+
+    #[test]
     fn bots_are_voters_and_the_abstain_weight_decides_a_vote_that_runs_out() {
         let mut g = game();
         let mut bot = Client::new(3, true, "Bot".into());

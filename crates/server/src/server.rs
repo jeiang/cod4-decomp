@@ -40,7 +40,6 @@ const STATSYNC_MAX_PAIRS: usize = 64;
 /// The least time between one person's client commands while `sv_floodProtect` is on.
 const FLOOD_MS: i32 = 800;
 
-/// What a person typed as the text of a chat line: no control characters, which steer the localizer.
 /// `Cmd_MenuResponse_f`: a client's `menuresponse <server id> <menu> <response>` as the script notify's arguments.
 /// None when the server id is not this level's (a menu the player answered across a map change: dropped). Anything
 /// but three arguments reaches the scripts as the menu `""` and the response `"bad"`.
@@ -51,6 +50,7 @@ fn menu_response_args(server_id: i32, argv: &[String]) -> Option<[String; 2]> {
     (cvar::parse_int(id) == server_id).then(|| [menu.clone(), response.clone()])
 }
 
+/// What a person typed as the text of a chat line: no control characters, which steer the localizer.
 fn plain_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }

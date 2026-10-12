@@ -274,7 +274,7 @@ impl Game {
         }
     }
 
-    /// The scoreboard rows, best first (score, then fewer deaths: `SortRanks`), without pings (the network layer knows those).
+    /// The scoreboard rows, best first (score, then fewer deaths, spectators last: `SortRanks`), without pings (the network layer knows those).
     pub fn score_rows(&self) -> Vec<ui::ScoreRow> {
         let mut rows: Vec<ui::ScoreRow> = self
             .connected_clients()
@@ -294,9 +294,11 @@ impl Game {
                 },
             })
             .collect();
+        let spectator = Team::Spectator as u8;
         rows.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
+            (a.team == spectator)
+                .cmp(&(b.team == spectator))
+                .then(b.score.cmp(&a.score))
                 .then(a.deaths.cmp(&b.deaths))
                 .then(a.client.cmp(&b.client))
         });
@@ -407,6 +409,10 @@ mod tests {
         }
         let order: Vec<u16> = g.score_rows().iter().map(|r| r.client).collect();
         assert_eq!(order, [2, 1, 0]);
+        // A spectator is last whatever its score.
+        g.clients[2].team = crate::client::Team::Spectator;
+        let order: Vec<u16> = g.score_rows().iter().map(|r| r.client).collect();
+        assert_eq!(order, [1, 0, 2]);
     }
 
     #[test]
