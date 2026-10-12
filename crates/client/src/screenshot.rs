@@ -93,7 +93,7 @@ fn tga(p: &Picture) -> Vec<u8> {
     out[16] = 24;
     out[17] = 32;
     out.reserve(p.rgb.len());
-    for px in p.rgb.chunks_exact(3) {
+    for px in p.rgb.as_chunks::<3>().0.iter() {
         out.extend_from_slice(&[px[2], px[1], px[0]]);
     }
     out

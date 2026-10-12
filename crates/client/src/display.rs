@@ -82,6 +82,7 @@ impl Default for Request {
 }
 
 /// The 0-based place in a list of `count` monitors of the 1-based `r_monitor` choice, if there is such a monitor.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn monitor_slot(choice: Option<usize>, count: usize) -> Option<usize> {
     choice.and_then(|n| n.checked_sub(1)).filter(|&i| i < count)
 }
@@ -172,6 +173,7 @@ pub fn video_modes(_: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
     (Vec::new(), Vec::new())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 const WAYLAND_NOTE: &str = "exclusive fullscreen is not available on Wayland; used borderless";
 
 /// Whether the display is Wayland, whose compositor has no video mode switch: winit ignores an exclusive request
@@ -372,6 +374,7 @@ mod tests {
         ))));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn r_monitor_counts_from_one_and_zero_or_past_the_last_picks_automatically() {
         assert_eq!(monitor_slot(None, 2), None);
