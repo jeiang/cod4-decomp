@@ -18,7 +18,7 @@ use sim::weapon::{WeaponClass, WeaponEvent, WeaponOut, WeaponParams, WeaponType}
 use crate::bullet::{
     BulletHit, BulletParams, MASK_SHOT_CLIENT, SURF_NOIMPACT, ShotTrace, dot, lerp, mad, normalized,
 };
-use crate::combat::{Damage, HITLOC_HEAD, HITLOC_HELMET, MOD_GRENADE, MOD_MELEE, MOD_SUICIDE};
+use crate::combat::{Damage, HITLOC_HEAD, MOD_GRENADE, MOD_MELEE, MOD_SUICIDE};
 use crate::game::Game;
 
 /// The knife's trace pattern: the centre, then the four corners of the swing box.
@@ -207,8 +207,8 @@ impl Game {
             return;
         }
         let surface = if hit_flesh { 7 } else { h.surface };
-        // `Bullet_Process`: a damaging hit on the head or helmet; the kill is added once the damage has landed.
-        let head = hit_flesh && h.damageable && matches!(h.hitloc, HITLOC_HELMET | HITLOC_HEAD);
+        // `finishPlayerDamage`: the event carries only whether the head was hit.
+        let head = hit_flesh && h.damageable && h.hitloc == HITLOC_HEAD;
         let now = self.level.time;
         self.tempev.add(now, crate::tempev::ev::BULLET_IMPACT, |s| {
             s.origin = h.point;

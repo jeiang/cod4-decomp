@@ -181,7 +181,6 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 shooter: 0,
                 exit: false,
                 head: false,
-                fatal: false,
             },
             &weapon,
         );
@@ -902,7 +901,6 @@ fn elements(
                         shooter: 0,
                         exit: false,
                         head: false,
-                        fatal: false,
                     },
                     weapon,
                 );

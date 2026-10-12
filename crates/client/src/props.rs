@@ -527,7 +527,6 @@ impl Props {
             shooter,
             exit: false,
             head: false,
-            fatal: false,
         });
         self.props[i].strike(|b, preset| {
             b.bullet_impact(at, f, BULLET_FORCE, preset.bullet_force_scale);

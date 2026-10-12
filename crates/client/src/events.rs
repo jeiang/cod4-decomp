@@ -23,10 +23,8 @@ pub enum ClientEvent {
         shooter: u16,
         /// A penetrating bullet came out of a wall here.
         exit: bool,
-        /// The bullet hit a player's head or helmet.
+        /// The bullet hit a player's head.
         head: bool,
-        /// The bullet killed the player it hit.
-        fatal: bool,
     },
     /// A missile blew up; `owner` is 1023 when it had none.
     Explosion {
@@ -69,8 +67,6 @@ pub enum ClientEvent {
         client: u16,
         /// The impulse to push the body with.
         push: [f32; 3],
-        /// The killing blow hit the head or helmet.
-        head: bool,
     },
     PlayerPain {
         origin: [f32; 3],
@@ -199,7 +195,6 @@ impl Events {
                 shooter: e.client,
                 exit: e.eflags & server::tempev::IMPACT_EXIT != 0,
                 head: e.eflags & server::tempev::IMPACT_HEAD != 0,
-                fatal: e.eflags & server::tempev::IMPACT_KILL != 0,
             },
             ev::EXPLOSION => ClientEvent::Explosion {
                 origin: e.origin,
@@ -237,7 +232,6 @@ impl Events {
                 origin: e.origin,
                 client: e.client,
                 push: e.velocity,
-                head: e.event_parm != 0,
             },
             ev::PLAYER_PAIN => ClientEvent::PlayerPain {
                 origin: e.origin,
@@ -304,21 +298,16 @@ mod tests {
     }
 
     #[test]
-    fn a_bullet_impact_carries_the_head_and_kill_bits() {
+    fn a_bullet_impact_carries_the_head_bit() {
         let mut ev = Events::default();
         let mut e = event(960, super::ev::BULLET_IMPACT, 1);
         e.event_parm = 7;
-        e.eflags = server::tempev::IMPACT_HEAD | server::tempev::IMPACT_KILL;
+        e.eflags = server::tempev::IMPACT_HEAD;
         let got = ev.scan(&snap(&[e]));
-        let [
-            ClientEvent::BulletImpact {
-                head, fatal, exit, ..
-            },
-        ] = got.as_slice()
-        else {
+        let [ClientEvent::BulletImpact { head, exit, .. }] = got.as_slice() else {
             panic!("{got:?}");
         };
-        assert_eq!((*head, *fatal, *exit), (true, true, false));
+        assert_eq!((*head, *exit), (true, false));
     }
 
     #[test]
