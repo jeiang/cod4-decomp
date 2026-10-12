@@ -215,7 +215,9 @@ pub struct Settings {
     pub draw_sun: bool,
     /// `r_zFeather`: off, soft particles fade nowhere (their hard edge shows where they cut into geometry).
     pub z_feather: bool,
-    /// `r_drawWater`: off, the water height maps stay as they are at time zero instead of moving.
+    /// `r_drawWater`: off, the water height maps stay as they are at time zero instead of moving. (Stock feeds the
+    /// water a constant `waterFloatTime` that only moves on when images are reloaded, so its water is as still;
+    /// the frozen frame differs, which no player can tell apart.)
     pub draw_water: bool,
     /// `r_lodScaleRigid` and `r_lodScaleSkinned`: how much farther a model counts as for its level of detail.
     pub lod_scale: [f32; 2],
@@ -523,6 +525,8 @@ pub struct Renderer {
     tex_bgs: HashMap<TexKey, Arc<wgpu::BindGroup>>,
     /// `settings.z_feather` as the cached bind groups were made.
     z_feather_bound: bool,
+    /// The last answer of [`Renderer::samples`], for the `(r_aaSamples, format)` it was asked with.
+    samples_cache: std::cell::Cell<Option<((u32, wgpu::TextureFormat), u32)>>,
     pub clear: [f64; 3],
     pub settings: Settings,
     /// Fog, glow and film of the map.
@@ -684,6 +688,7 @@ impl Renderer {
             msaa: None,
             tex_bgs: HashMap::new(),
             z_feather_bound: true,
+            samples_cache: std::cell::Cell::new(None),
             clear: [0.45, 0.43, 0.38],
             settings: Settings::default(),
             art: data.art.clone(),
@@ -1104,6 +1109,18 @@ impl Renderer {
     /// count the device supports for the colour and depth formats (`R_ReduceWindowSettings`). Past the 4 the spec
     /// guarantees, only a device made with the adapter's own format features may use what the adapter reports.
     pub fn samples(&self, format: wgpu::TextureFormat) -> u32 {
+        let key = (self.settings.aa_samples, format);
+        if let Some((k, n)) = self.samples_cache.get()
+            && k == key
+        {
+            return n;
+        }
+        let n = self.pick_sample_count(format);
+        self.samples_cache.set(Some((key, n)));
+        n
+    }
+
+    fn pick_sample_count(&self, format: wgpu::TextureFormat) -> u32 {
         let beyond_spec = self
             .gpu
             .device

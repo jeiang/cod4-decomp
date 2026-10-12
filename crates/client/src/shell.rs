@@ -394,11 +394,11 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
 ];
 
 /// The settings of the options menus with the stock engine's defaults: archived, so a change survives a restart.
-/// (`r_mode` and `r_displayRefresh` are filled from the display at start. Three have nothing to act on here and only
-/// keep the menus' value: `r_rendererPreference` and `r_multiGpu` choose a Direct3D 9 code path and SLI/Crossfire mode,
-/// and `ai_corpseCount` caps the corpses of single-player actors, which a multiplayer match has none of.)
+/// (`r_mode` and `r_displayRefresh` are filled from the display at start.)
 const OPTION_DEFAULTS: &[(&str, &str)] = &[
-    // The frame cap in frames per second, 0 for none (the stock multiplayer default).
+    // The frame cap in frames per second, 0 for none (the stock multiplayer default). Unlike stock it applies only
+    // with `r_vsync` 0: with vsync on the display paces the frames, and a cap below the refresh rate would make the
+    // cadence uneven.
     ("com_maxfps", "85"),
     ("cg_drawCrosshair", "1"),
     ("r_aspectRatio", "auto"),
@@ -411,11 +411,13 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("r_picmip_bump", "0"),
     ("r_picmip_spec", "0"),
     ("r_picmip_manual", "0"),
+    // Kept for the menus only: a Direct3D 9 code path and an SLI/Crossfire mode have nothing to act on here.
     ("r_rendererPreference", "dx9"),
     ("r_multiGpu", "0"),
     ("r_dlightLimit", "4"),
     ("r_drawSun", "1"),
     ("r_zfeather", "1"),
+    ("r_distortion", "1"),
     ("r_depthPrepassModels", "0"),
     ("r_lodScaleRigid", "1"),
     ("r_lodScaleSkinned", "1"),
@@ -432,6 +434,7 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("sc_enable", "1"),
     ("ragdoll_enable", "1"),
     ("fx_marks", "1"),
+    // Kept for the menus only: it caps single-player actor corpses, which a multiplayer match has none of.
     ("ai_corpseCount", "10"),
     // Where the HUD puts the vote, the chat field and the chat lines (also while the scoreboard is up), and how
     // chat behaves.

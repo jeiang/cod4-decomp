@@ -244,8 +244,13 @@ impl Gfx {
 
 /// The shortest time a frame may take (`com_maxfps`: 85 unless set, within the original's 0 to 1000), `None` for no
 /// cap. Whole milliseconds, as the original counts them (`1000 / com_maxfps`, at least one), so 85 paces at 11 ms.
-/// With vsync on the display's own pace applies as well: the slower of the two wins.
-pub fn frame_gap(c: &Cvars) -> Option<Duration> {
+/// Deliberately unlike the original, no cap applies while the display paces the frames (`display_paced`: the present
+/// mode waits for the vertical blank). A cap below the refresh rate (the stock 85 on a 120 or 144 Hz screen) would make
+/// frames land on every second vblank now and then, an uneven cadence; vsync alone paces them.
+pub fn frame_gap(c: &Cvars, display_paced: bool) -> Option<Duration> {
+    if display_paced {
+        return None;
+    }
     let fps = c
         .get("com_maxfps")
         .and_then(|v| v.trim().parse::<f32>().ok())
@@ -380,12 +385,22 @@ mod tests {
 
     #[test]
     fn the_frame_cap_is_whole_milliseconds_and_zero_means_none() {
-        let ms = |v: &str| frame_gap(&cvars(&[("com_maxfps", v)])).map(|d| d.as_millis());
+        let ms = |v: &str| frame_gap(&cvars(&[("com_maxfps", v)]), false).map(|d| d.as_millis());
         assert_eq!(ms("85"), Some(11), "the stock default");
         assert_eq!(ms("250"), Some(4));
         assert_eq!(ms("1000"), Some(1));
         assert_eq!(ms("5000"), Some(1), "no more than 1000");
         assert_eq!(ms("0"), None);
-        assert_eq!(frame_gap(&cvars(&[])).map(|d| d.as_millis()), Some(11));
+        assert_eq!(
+            frame_gap(&cvars(&[]), false).map(|d| d.as_millis()),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn no_cap_applies_while_the_display_paces_the_frames() {
+        let c = cvars(&[("com_maxfps", "85")]);
+        assert_eq!(frame_gap(&c, true), None, "vsync alone paces");
+        assert!(frame_gap(&c, false).is_some());
     }
 }
