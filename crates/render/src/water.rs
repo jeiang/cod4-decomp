@@ -110,6 +110,8 @@ pub struct WaterSim {
     field: WaterField,
     pub tex: Arc<Tex>,
     texture: wgpu::Texture,
+    /// The time of the last [`update`](Self::update): the same time again changes nothing.
+    at: Option<f32>,
 }
 
 impl WaterSim {
@@ -139,6 +141,7 @@ impl WaterSim {
             field,
             tex,
             texture,
+            at: None,
         };
         sim.upload(gpu);
         Some(sim)
@@ -146,6 +149,10 @@ impl WaterSim {
 
     /// Advance to `time` seconds and upload.
     pub fn update(&mut self, gpu: &Gpu, time: f32) {
+        if self.at == Some(time) {
+            return;
+        }
+        self.at = Some(time);
         self.field.update(time);
         self.upload(gpu);
     }

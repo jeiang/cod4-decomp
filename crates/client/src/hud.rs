@@ -14,6 +14,7 @@
 mod elems;
 mod feed;
 pub mod fill;
+pub mod layout;
 pub mod names;
 mod prompt;
 mod scores;
@@ -25,8 +26,11 @@ use std::collections::HashMap;
 
 pub use elems::{draw_over, draw_under, spectator_commands};
 pub use feed::{BOLD, Feed, NOTIFY, WINDOWS};
+pub use layout::Layout;
 pub use prompt::{LiveVote, draw_typing, draw_vote};
-pub use scores::{ScoreView, draw_scoreboard, rows_shown, scoreboard_lines};
+pub use scores::{
+    Metrics as ScoreMetrics, ScoreView, draw_scoreboard, rows_shown, scoreboard_lines,
+};
 
 use serde_json::{Value, json};
 

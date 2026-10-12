@@ -16,12 +16,6 @@ use sim::pm::math::{angle_normalize_360, vec_to_yaw};
 
 /// Hits whose wedges can be on screen at once.
 const SLOTS: usize = 8;
-/// `cg_hudDamageIconTime`: how long a wedge stays, ms.
-const ICON_MS: i32 = 2000;
-/// The wedge is drawn this wide and high, and this far from the screen centre, in 640x480 menu units
-/// (`cg_hudDamageIconWidth`, `Height` and `Offset`).
-pub const ICON_SIZE: [f32; 2] = [128.0, 64.0];
-pub const ICON_OFFSET: f32 = 128.0;
 /// The material of the wedge.
 pub const ICON_MATERIAL: &str = "hit_direction";
 
@@ -66,9 +60,10 @@ impl Default for DamageView {
 pub struct DamageHud {
     /// Opacity of the red screen flash, 0 for none.
     pub flash: f32,
-    /// Each wedge: degrees clockwise to turn the icon (which points down at zero) about the screen centre, and its
-    /// opacity.
-    pub wedges: Vec<(f32, f32)>,
+    /// Each wedge: degrees clockwise to turn the icon (which points down at zero) about the screen centre, and
+    /// the ms since the hit. How long a wedge shows and how it fades is up to the drawing, which reads
+    /// `cg_hudDamageIconTime` ([`crate::hud::Layout::wedge_alpha`]).
+    pub wedges: Vec<(f32, i32)>,
 }
 
 impl DamageView {
@@ -128,10 +123,8 @@ impl DamageView {
         }
         for w in &self.wedges {
             let t = now - w.time;
-            if w.time != 0 && t > 0 && t < ICON_MS {
-                // Fully there for the first half, then fading out.
-                let alpha = (2.0 - 2.0 * t as f32 / ICON_MS as f32).min(1.0);
-                out.wedges.push((view_yaw - w.yaw, alpha));
+            if w.time != 0 && t > 0 {
+                out.wedges.push((view_yaw - w.yaw, t));
             }
         }
         out
@@ -152,7 +145,8 @@ mod tests {
 
     /// The screen position of the wedge's middle, in pixels right and down of the centre, as the icon is turned.
     fn wedge_at(turn_deg: f32) -> [f32; 2] {
-        let r = ICON_OFFSET + ICON_SIZE[1] * 0.5;
+        let l = crate::hud::Layout::default();
+        let r = l.icon_offset + l.icon_size[1] * 0.5;
         let (s, c) = turn_deg.to_radians().sin_cos();
         [-s * r, c * r]
     }
@@ -191,7 +185,16 @@ mod tests {
         assert_eq!(d.hit_time, 500);
         assert!(d.hud(600, 0.0).flash > 0.0);
         assert_eq!(d.hud(1100, 0.0).flash, 0.0);
-        assert_eq!(d.hud(500 + ICON_MS, 0.0).wedges.len(), 0);
+        let l = crate::hud::Layout::default();
+        let shown = |t: i32| {
+            d.hud(500 + t, 0.0)
+                .wedges
+                .iter()
+                .filter_map(|&(_, age)| l.wedge_alpha(age))
+                .count()
+        };
+        assert_eq!(shown(1), 1);
+        assert_eq!(shown(l.icon_ms), 0);
     }
 
     #[test]

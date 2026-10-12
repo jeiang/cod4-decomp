@@ -17,6 +17,10 @@ pub struct Tex {
     pub width: u32,
 }
 
+const SEMANTIC_COLOR_MAP: u8 = 2;
+const SEMANTIC_NORMAL_MAP: u8 = 5;
+const SEMANTIC_SPECULAR_MAP: u8 = 8;
+const SEMANTIC_WATER_MAP: u8 = 11;
 const MAPTYPE_3D: u32 = 4;
 const MAPTYPE_CUBE: u32 = 5;
 const D3DFMT_A8R8G8B8: i32 = 21;
@@ -115,6 +119,8 @@ pub struct TextureCache {
     cache: HashMap<String, Option<Arc<Tex>>>,
     placeholders: HashMap<(SamplerDim, [u8; 4]), Arc<Tex>>,
     picmip: usize,
+    picmip_bump: usize,
+    picmip_spec: usize,
     /// Names of images that could not be loaded.
     pub failed: Vec<String>,
 }
@@ -128,7 +134,36 @@ impl TextureCache {
             cache: HashMap::new(),
             placeholders: HashMap::new(),
             picmip,
+            picmip_bump: picmip,
+            picmip_spec: picmip,
             failed: Vec::new(),
+        }
+    }
+
+    /// Sets the picmip of normal maps and of specular maps (`r_picmip_bump`, `r_picmip_spec`); [`new`](Self::new)
+    /// gives them the colour maps' (`r_picmip`).
+    pub fn with_map_picmips(mut self, bump: usize, spec: usize) -> Self {
+        self.picmip_bump = bump;
+        self.picmip_spec = spec;
+        self
+    }
+
+    /// The levels dropped from colour, normal and specular maps.
+    pub fn picmips(&self) -> [usize; 3] {
+        [self.picmip, self.picmip_bump, self.picmip_spec]
+    }
+
+    /// How many mip levels the image drops: the setting of its kind of map (`Image_PicmipForSemantic`), none for
+    /// 2D art, function images and those the zone marks as never dropping any.
+    fn picmip_for(&self, semantic: u8, no_picmip: bool) -> usize {
+        if no_picmip {
+            return 0;
+        }
+        match semantic {
+            SEMANTIC_COLOR_MAP | SEMANTIC_WATER_MAP => self.picmip,
+            SEMANTIC_NORMAL_MAP => self.picmip_bump,
+            SEMANTIC_SPECULAR_MAP => self.picmip_spec,
+            _ => 0,
         }
     }
 
@@ -160,7 +195,10 @@ impl TextureCache {
         }
         let tex = match &img.load_def {
             Some(d) if !d.data.is_empty() => load_inline(gpu, img),
-            _ => self.load_iwi(gpu, name),
+            _ => {
+                let picmip = self.picmip_for(img.semantic, img.no_picmip);
+                self.load_iwi(gpu, name, picmip)
+            }
         }
         .map(Arc::new);
         if tex.is_none() {
@@ -176,7 +214,7 @@ impl TextureCache {
         if let Some(t) = self.cache.get(name) {
             return t.clone();
         }
-        let tex = self.load_iwi(gpu, name).map(Arc::new);
+        let tex = self.load_iwi(gpu, name, self.picmip).map(Arc::new);
         if tex.is_none() {
             self.failed.push(name.to_owned());
         }
@@ -195,9 +233,9 @@ impl TextureCache {
         self.decoded
     }
 
-    fn load_iwi(&mut self, gpu: &Gpu, name: &str) -> Option<Tex> {
+    fn load_iwi(&mut self, gpu: &Gpu, name: &str, picmip: usize) -> Option<Tex> {
         let vfs = self.vfs.as_ref()?;
-        let image = iwi::load_picmip(vfs, name, self.picmip).ok()?;
+        let image = iwi::load_picmip(vfs, name, picmip).ok()?;
         let skip = if gpu.bc {
             0
         } else {
@@ -304,6 +342,18 @@ fn load_inline(gpu: &Gpu, img: &GfxImage) -> Option<Tex> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colour_normal_and_specular_maps_drop_their_own_number_of_levels() {
+        let c = TextureCache::new(None, 3).with_map_picmips(1, 2);
+        assert_eq!(c.picmip_for(SEMANTIC_COLOR_MAP, false), 3);
+        assert_eq!(c.picmip_for(SEMANTIC_NORMAL_MAP, false), 1);
+        assert_eq!(c.picmip_for(SEMANTIC_SPECULAR_MAP, false), 2);
+        // 2D art, function images and images marked never to drop levels keep every level.
+        assert_eq!(c.picmip_for(0, false), 0);
+        assert_eq!(c.picmip_for(1, false), 0);
+        assert_eq!(c.picmip_for(SEMANTIC_NORMAL_MAP, true), 0);
+    }
 
     fn chain(base: usize) -> impl Iterator<Item = (usize, usize)> {
         (0..)

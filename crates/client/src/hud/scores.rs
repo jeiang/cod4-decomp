@@ -6,7 +6,7 @@
 //! team's banner line, a banner per team (icon, name, player count), a coloured row per player, the viewer's own row
 //! in its own colour, teams of the viewer first, spectators last. Rows that do not fit scroll off the bottom.
 
-use super::{LiveUi, ScoreLine, localize};
+use super::{LiveUi, ScoreLine, layout, localize};
 use crate::input::Cvars;
 use crate::shell::ShellState;
 use crate::ui::Ui;
@@ -14,17 +14,13 @@ use crate::ui::paint::{Painter, TextDraw};
 use crate::ui::place::{Px, horz};
 use assets::zone::text::StringTable;
 
-pub const PANEL_W: f32 = 500.0;
-pub const PANEL_H: f32 = 435.0;
-const ITEM_H: f32 = 18.0;
-const BANNER_H: f32 = 35.0;
 const FONT_SCALE: f32 = 0.35;
 const TEXT_OFFSET: f32 = 0.5;
 /// Panel edge to list: border, shadow and a little air on the left; the list is this much narrower on both sides.
 const LIST_X: f32 = 3.0 + 2.0 + 4.0;
-const LIST_W: f32 = PANEL_W - 6.0 - 4.0 - 8.0;
 
-const COLUMNS: [(Col, f32, &str, u8); 9] = [
+/// The columns with `cg_scoreboardPingText` on (`columnInfoWithPing`).
+const COLUMNS_PING: [(Col, f32, &str, u8); 9] = [
     (Col::Rank, 0.05, "", 0),
     (Col::Status, 0.05, "", 2),
     (Col::Name, 0.35, "", 0),
@@ -35,6 +31,157 @@ const COLUMNS: [(Col, f32, &str, u8); 9] = [
     (Col::Deaths, 0.1, "CGAME_SB_DEATHS", 2),
     (Col::Ping, 0.1, "CGAME_SB_PING", 2),
 ];
+
+/// The columns without the numeric ping (`columnInfo`): the rank and the name take its room.
+const COLUMNS_NO_PING: [(Col, f32, &str, u8); 8] = [
+    (Col::Rank, 0.07, "", 0),
+    (Col::Status, 0.05, "", 2),
+    (Col::Name, 0.43, "", 0),
+    (Col::Talking, 0.05, "", 0),
+    (Col::Score, 0.1, "CGAME_SB_SCORE", 2),
+    (Col::Kills, 0.1, "CGAME_SB_KILLS", 2),
+    (Col::Assists, 0.1, "CGAME_SB_ASSISTS", 2),
+    (Col::Deaths, 0.1, "CGAME_SB_DEATHS", 2),
+];
+
+/// The scoreboard's size and ping display, from the `cg_scoreboard*` and `cg_ScoresPing_*` dvars (stock defaults
+/// while unset), clamped to the stock ranges.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Metrics {
+    /// `cg_scoreboardWidth` and `Height`: the panel, centred.
+    pub w: f32,
+    pub h: f32,
+    /// `cg_scoreboardItemHeight` and `BannerHeight`: a player row and a team banner.
+    pub item_h: f32,
+    pub banner_h: f32,
+    /// `cg_scoreboardPingText`: the ping as a number in the last column.
+    pub ping_text: bool,
+    /// `cg_scoreboardPingGraph`: the ping as bars right of the list.
+    pub ping_graph: bool,
+    /// `cg_scoreboardPingWidth` (of the list) and `PingHeight` (of a row).
+    pub ping_w: f32,
+    pub ping_h: f32,
+    /// `cg_ScoresPing_MaxBars` and `Interval` (ms a bar stands for).
+    pub max_bars: i32,
+    pub interval: i32,
+    /// `cg_ScoresPing_HighColor`, `MedColor`, `LowColor` and `BgColor`.
+    pub high: [f32; 4],
+    pub med: [f32; 4],
+    pub low: [f32; 4],
+    pub bg: [f32; 4],
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::read(&Cvars::default())
+    }
+}
+
+impl Metrics {
+    pub fn read(c: &Cvars) -> Self {
+        let color = |name: &str, d: [f32; 4]| {
+            let v: Vec<f32> = c
+                .get(name)
+                .map(|s| {
+                    s.split_whitespace()
+                        .filter_map(|t| t.parse().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if v.len() >= 3 {
+                let a = v.get(3).copied().unwrap_or(1.0);
+                [v[0], v[1], v[2], a].map(|x: f32| x.clamp(0.0, 1.0))
+            } else {
+                d
+            }
+        };
+        let flag =
+            |name: &str, d: bool| layout::float(c, name, f32::from(u8::from(d)), 0.0, 1.0) != 0.0;
+        Self {
+            w: layout::float(c, "cg_scoreboardWidth", 500.0, 0.0, f32::MAX),
+            h: layout::float(c, "cg_scoreboardHeight", 435.0, 0.0, f32::MAX),
+            item_h: layout::int(c, "cg_scoreboardItemHeight", 18, 1, 1000) as f32,
+            banner_h: layout::int(c, "cg_scoreboardBannerHeight", 35, 1, 100) as f32,
+            ping_text: flag("cg_scoreboardPingText", true),
+            ping_graph: flag("cg_scoreboardPingGraph", false),
+            ping_w: layout::float(c, "cg_scoreboardPingWidth", 0.036, 0.0, 1.0),
+            ping_h: layout::float(c, "cg_scoreboardPingHeight", 0.7, 0.0, 1.0),
+            max_bars: layout::int(c, "cg_ScoresPing_MaxBars", 4, 1, 10),
+            interval: layout::int(c, "cg_ScoresPing_Interval", 100, 1, 500),
+            high: color("cg_ScoresPing_HighColor", [0.8, 0.0, 0.0, 1.0]),
+            med: color("cg_ScoresPing_MedColor", [0.8, 0.8, 0.0, 1.0]),
+            low: color("cg_ScoresPing_LowColor", [0.0, 0.75, 0.0, 1.0]),
+            bg: color("cg_ScoresPing_BgColor", [0.25, 0.25, 0.25, 0.5]),
+        }
+    }
+
+    fn columns(&self) -> &'static [(Col, f32, &'static str, u8)] {
+        if self.ping_text {
+            &COLUMNS_PING
+        } else {
+            &COLUMNS_NO_PING
+        }
+    }
+
+    /// The panel's top edge (`CG_BackdropTop`).
+    pub fn top(&self) -> f32 {
+        ((480.0 - self.h) / 2.0).max(0.0)
+    }
+
+    /// The list's width: the panel less border, shadow and air.
+    pub fn list_w(&self) -> f32 {
+        self.w - 6.0 - 4.0 - 8.0
+    }
+
+    /// The first banner line, the header sitting on it when the list is not scrolled.
+    pub fn first_y(&self) -> f32 {
+        self.top() + 3.0 + 2.0 + 24.0 + 1.0 + self.item_h + 4.0 + 15.0
+    }
+
+    /// The lowest a line may reach.
+    pub fn bottom(&self) -> f32 {
+        self.top() + self.h - 3.0 - 2.0 - 14.0 - 1.0
+    }
+
+    /// The ping bars of a row `ping` ms away, from the list's right edge `x` and the row's top `y`
+    /// (`CG_DrawClientPing`): the background box, then the rising bars in the colour the ping earns.
+    pub(super) fn ping_graph_at(&self, ping: i32, x: f32, y: f32) -> PingGraph {
+        let max_w = self.list_w() * self.ping_w;
+        let bars = (self.max_bars - ping.max(0) / self.interval).max(1);
+        let half = (self.max_bars / 2).max(1);
+        let lerp = |a: [f32; 4], b: [f32; 4], t: f32| -> [f32; 4] {
+            std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+        };
+        let color = if bars >= self.max_bars / 2 {
+            lerp(self.med, self.low, (bars - half) as f32 / half as f32)
+        } else {
+            lerp(self.high, self.med, bars as f32 / half as f32)
+        };
+        let w = (max_w / self.max_bars as f32 - 1.0).max(1.0);
+        let mut xa = x + 8.0;
+        let bars = (1..=bars)
+            .map(|bar| {
+                let h = self.item_h * self.ping_h * bar as f32 / self.max_bars as f32;
+                let r = [xa, y + self.item_h - h, w, h];
+                xa += w + 1.0;
+                r
+            })
+            .collect();
+        PingGraph {
+            back: [x + 8.0 - 1.0, y, max_w + 2.0, self.item_h],
+            bars,
+            color,
+        }
+    }
+}
+
+/// The rectangles `[x, y, w, h]` of one row's ping graph.
+#[derive(Debug, PartialEq)]
+pub(super) struct PingGraph {
+    pub back: [f32; 4],
+    pub bars: Vec<[f32; 4]>,
+    pub color: [f32; 4],
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Col {
@@ -75,11 +222,6 @@ pub(super) struct Plan {
     pub header_y: f32,
 }
 
-const TOP: f32 = (480.0 - PANEL_H) / 2.0;
-/// The first banner line, the header sitting on it when the list is not scrolled.
-const FIRST_Y: f32 = TOP + 3.0 + 2.0 + 24.0 + 1.0 + ITEM_H + 4.0 + 15.0;
-const BOTTOM: f32 = TOP + PANEL_H - 3.0 - 2.0 - 14.0 - 1.0;
-
 /// Team order of the list: the viewer's team first (allies when the viewer has none), then the other, free players,
 /// spectators; the two sides are listed when anyone is on one.
 fn team_order(rows: &[ScoreLine], own_team: u8) -> Vec<u8> {
@@ -98,13 +240,13 @@ fn team_order(rows: &[ScoreLine], own_team: u8) -> Vec<u8> {
 }
 
 /// Lays the list out: which banners and rows are drawn and where, from line `top` (1 = not scrolled).
-pub(super) fn plan(rows: &[ScoreLine], own_team: u8, top: usize) -> Plan {
+pub(super) fn plan(rows: &[ScoreLine], own_team: u8, top: usize, m: &Metrics) -> Plan {
     let top = top.max(1);
     let order = team_order(rows, own_team);
     let total = rows.len() + order.len();
-    let header_y = FIRST_Y;
+    let header_y = m.first_y();
     let mut y = if top > 1 {
-        header_y + BANNER_H + 4.0
+        header_y + m.banner_h + 4.0
     } else {
         header_y
     };
@@ -117,7 +259,7 @@ pub(super) fn plan(rows: &[ScoreLine], own_team: u8, top: usize) -> Plan {
             return;
         }
         if line >= top {
-            if BOTTOM >= *y + h {
+            if m.bottom() >= *y + h {
                 line += 1;
                 items.push(Item { kind, y: *y });
                 *y += step;
@@ -130,10 +272,15 @@ pub(super) fn plan(rows: &[ScoreLine], own_team: u8, top: usize) -> Plan {
     };
     for (i, &team) in order.iter().enumerate() {
         let count = rows.iter().filter(|r| r.team == team).count();
-        place(Kind::Banner(team, count), BANNER_H, &mut y, BANNER_H + 4.0);
+        place(
+            Kind::Banner(team, count),
+            m.banner_h,
+            &mut y,
+            m.banner_h + 4.0,
+        );
         for (k, r) in rows.iter().enumerate() {
             if r.team == team {
-                place(Kind::Row(k), ITEM_H, &mut y, ITEM_H + 4.0);
+                place(Kind::Row(k), m.item_h, &mut y, m.item_h + 4.0);
             }
         }
         if i + 1 < order.len() {
@@ -155,6 +302,7 @@ pub struct ScoreView {
     pub team_name: [String; 4],
     pub team_color: [[f32; 3]; 4],
     pub my_color: [f32; 3],
+    pub metrics: Metrics,
 }
 
 impl Default for ScoreView {
@@ -170,6 +318,7 @@ impl Default for ScoreView {
                 [0.25, 0.25, 0.25],
             ],
             my_color: [1.0, 0.8, 0.4],
+            metrics: Metrics::default(),
         }
     }
 }
@@ -198,6 +347,7 @@ impl ScoreView {
                 self.team_color[i] = c;
             }
         }
+        self.metrics = Metrics::read(cvars);
         if let Some(c) = cvars.get("cg_scoreboardMyColor").and_then(parse_color) {
             self.my_color = c;
         }
@@ -223,13 +373,13 @@ fn fit(ui: &Ui, text: &str, width: f32) -> f32 {
 }
 
 /// Banner and row lines the list holds, the most it scrolls.
-pub fn scoreboard_lines(rows: &[ScoreLine], own_team: u8) -> usize {
-    plan(rows, own_team, 1).total
+pub fn scoreboard_lines(rows: &[ScoreLine], own_team: u8, m: &Metrics) -> usize {
+    plan(rows, own_team, 1, m).total
 }
 
 /// How many player rows the scoreboard shows for these rows scrolled to `top`.
-pub fn rows_shown(rows: &[ScoreLine], own_team: u8, top: usize) -> usize {
-    plan(rows, own_team, top)
+pub fn rows_shown(rows: &[ScoreLine], own_team: u8, top: usize, m: &Metrics) -> usize {
+    plan(rows, own_team, top, m)
         .items
         .iter()
         .filter(|i| matches!(i.kind, Kind::Row(_)))
@@ -242,9 +392,10 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
         return;
     }
     let view = &st.score_view;
-    let plan = plan(&live.scores, live.own_team, st.scores_top);
+    let m = &view.metrics;
+    let plan = plan(&live.scores, live.own_team, st.scores_top, m);
     let view_w = (ui.place.view_max.0 - ui.place.view_min.0) / ui.place.scale.0;
-    let left = ((view_w - PANEL_W) / 2.0).max(0.0);
+    let left = ((view_w - m.w) / 2.0).max(0.0);
     let x0 = left + LIST_X;
     let white = p.g.white();
     let text =
@@ -268,8 +419,8 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
     // Column headers, on the first banner line.
     let hscale = FONT_SCALE * 0.85;
     let mut x = x0;
-    for (_, frac, key, _) in COLUMNS {
-        let w = frac * LIST_W;
+    for &(_, frac, key, _) in m.columns() {
+        let w = frac * m.list_w();
         if !key.is_empty() {
             let t = localize(&ui.assets, key);
             let tw = ui.text_width(&t, 0, hscale);
@@ -278,7 +429,7 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
                 &t,
                 hscale,
                 x + (w - tw) * 0.5,
-                plan.header_y + BANNER_H,
+                plan.header_y + m.banner_h,
                 [1.0; 4],
                 3,
             );
@@ -292,18 +443,18 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
                 let mut x = x0;
                 if !icon.is_empty() {
                     let img = p.named(&ui.assets, icon);
-                    p.pic(&img, rect(x, item.y, BANNER_H, BANNER_H), [1.0; 4]);
-                    x += BANNER_H + 8.0;
+                    p.pic(&img, rect(x, item.y, m.banner_h, m.banner_h), [1.0; 4]);
+                    x += m.banner_h + 8.0;
                 }
                 let name = localize(&ui.assets, &view.team_name[usize::from(team)]);
-                text(p, &name, FONT_SCALE, x, item.y + BANNER_H, [1.0; 4], 3);
+                text(p, &name, FONT_SCALE, x, item.y + m.banner_h, [1.0; 4], 3);
                 let nx = x + ui.text_width(&name, 0, FONT_SCALE).trunc() + 8.0;
                 text(
                     p,
                     &format!("( {count} )"),
                     FONT_SCALE,
                     nx,
-                    item.y + BANNER_H,
+                    item.y + m.banner_h,
                     [1.0; 4],
                     3,
                 );
@@ -325,13 +476,13 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
     // The server address at the bottom right.
     if !live.server_addr.is_empty() {
         let tw = ui.text_width(&live.server_addr, 0, 0.35);
-        let x = left + PANEL_W - 3.0 - 2.0 - 4.0 - (tw + 4.0);
+        let x = left + m.w - 3.0 - 2.0 - 4.0 - (tw + 4.0);
         text(
             p,
             &live.server_addr,
             0.35,
             x,
-            TOP + PANEL_H - 3.0 - 2.0 - 3.0,
+            m.top() + m.h - 3.0 - 2.0 - 3.0,
             [1.0; 4],
             3,
         );
@@ -339,10 +490,10 @@ pub fn draw_scoreboard(ui: &Ui, p: &mut Painter, st: &ShellState) {
     if plan.off_bottom || st.scores_top > 1 {
         // A scroll thumb at the right of the list.
         let track = rect(
-            left + PANEL_W - 8.0,
-            FIRST_Y + BANNER_H,
+            left + m.w - 8.0,
+            m.first_y() + m.banner_h,
             4.0,
-            BOTTOM - FIRST_Y - BANNER_H,
+            m.bottom() - m.first_y() - m.banner_h,
         );
         p.pic(&white, track, [1.0, 1.0, 1.0, 0.15]);
         let shown = plan.items.len().max(1) as f32;
@@ -405,10 +556,11 @@ fn draw_row(
     text: &TextFn<'_>,
     rect: &dyn Fn(f32, f32, f32, f32) -> Px,
 ) {
+    let m = &view.metrics;
     let tc = view.team_color[usize::from(r.team.min(3))];
     p.pic(
         white,
-        rect(x0, y, LIST_W, ITEM_H),
+        rect(x0, y, m.list_w(), m.item_h),
         [tc[0], tc[1], tc[2], 0.5],
     );
     let me = r.client == live.own;
@@ -416,8 +568,8 @@ fn draw_row(
     let color = [c[0], c[1], c[2], 1.0];
     let spectator = r.team == 3;
     let mut x = x0;
-    for (col, frac, _, align) in COLUMNS {
-        let w = frac * LIST_W;
+    for &(col, frac, _, align) in m.columns() {
+        let w = frac * m.list_w();
         let value = match col {
             Col::Name => Some(r.name.clone()),
             Col::Score if !spectator => Some(r.score.to_string()),
@@ -431,8 +583,8 @@ fn draw_row(
         if col == Col::Rank {
             if let Some((icon, level)) = rank_cell(ui, r.rank, r.prestige).filter(|_| !spectator) {
                 let img = p.named(&ui.assets, &icon);
-                p.pic(&img, rect(x, y, ITEM_H, ITEM_H), [1.0; 4]);
-                let room = (w - ITEM_H).max(1.0);
+                p.pic(&img, rect(x, y, m.item_h, m.item_h), [1.0; 4]);
+                let room = (w - m.item_h).max(1.0);
                 let scale = fit(ui, &level, room);
                 let th = ui.text_height(0, scale);
                 let style = if scale < 0.2 { 0 } else { 3 };
@@ -440,8 +592,8 @@ fn draw_row(
                     p,
                     &level,
                     scale,
-                    x + ITEM_H,
-                    (th + ITEM_H) * TEXT_OFFSET + y,
+                    x + m.item_h,
+                    (th + m.item_h) * TEXT_OFFSET + y,
                     color,
                     style,
                 );
@@ -464,15 +616,28 @@ fn draw_row(
                 &s,
                 scale,
                 x + adj,
-                (th + ITEM_H) * TEXT_OFFSET + y,
+                (th + m.item_h) * TEXT_OFFSET + y,
                 color,
                 style,
             );
         } else if col == Col::Status && !r.status_icon.is_empty() {
             let img = p.named(&ui.assets, &r.status_icon);
-            p.pic(&img, rect(x + (w - ITEM_H), y, ITEM_H, ITEM_H), [1.0; 4]);
+            p.pic(
+                &img,
+                rect(x + (w - m.item_h), y, m.item_h, m.item_h),
+                [1.0; 4],
+            );
         }
         x += w;
+    }
+    // `cg_scoreboardPingGraph`: bars right of the list.
+    if m.ping_graph {
+        let g = m.ping_graph_at(r.ping, x, y);
+        let px = |[x, y, w, h]: [f32; 4]| rect(x, y, w, h);
+        p.pic(white, px(g.back), m.bg);
+        for bar in g.bars {
+            p.pic(white, px(bar), g.color);
+        }
     }
 }
 
@@ -526,7 +691,7 @@ mod tests {
     #[test]
     fn the_viewers_team_is_listed_first_and_spectators_last() {
         let rows = [row(0, 1), row(1, 2), row(2, 3), row(3, 2)];
-        let p = plan(&rows, 1, 1);
+        let p = plan(&rows, 1, 1, &Metrics::default());
         assert_eq!(
             lines(&p),
             [
@@ -540,19 +705,19 @@ mod tests {
             ]
         );
         // A viewer with no side sees allies first.
-        let p = plan(&rows, 3, 1);
+        let p = plan(&rows, 3, 1, &Metrics::default());
         assert_eq!(p.items[0].kind, Kind::Banner(2, 2));
         // Free-for-all: one banner, then the players in the order the server sent them.
         let ffa = [row(0, 0), row(1, 0)];
         assert_eq!(
-            lines(&plan(&ffa, 0, 1)),
+            lines(&plan(&ffa, 0, 1, &Metrics::default())),
             [Kind::Banner(0, 2), Kind::Row(0), Kind::Row(1)]
         );
     }
 
     #[test]
     fn both_sides_get_a_banner_when_only_one_has_players() {
-        let p = plan(&[row(0, 2)], 2, 1);
+        let p = plan(&[row(0, 2)], 2, 1, &Metrics::default());
         assert_eq!(
             lines(&p),
             [Kind::Banner(2, 1), Kind::Row(0), Kind::Banner(1, 0)]
@@ -562,25 +727,27 @@ mod tests {
     #[test]
     fn rows_flow_down_and_stop_at_the_panel_bottom() {
         let rows: Vec<_> = (0..30).map(|i| row(i, 2)).collect();
-        let p = plan(&rows, 2, 1);
+        let m = Metrics::default();
+        let p = plan(&rows, 2, 1, &m);
         assert!(p.off_bottom);
         assert!(p.items.len() < rows.len());
         let ys: Vec<f32> = p.items.iter().map(|i| i.y).collect();
-        assert_eq!(ys[0], FIRST_Y);
-        assert_eq!(ys[1], FIRST_Y + BANNER_H + 4.0);
-        assert_eq!(ys[2] - ys[1], ITEM_H + 4.0);
-        assert!(ys.iter().all(|y| *y + ITEM_H <= BOTTOM));
+        assert_eq!(ys[0], m.first_y());
+        assert_eq!(ys[1], m.first_y() + m.banner_h + 4.0);
+        assert_eq!(ys[2] - ys[1], m.item_h + 4.0);
+        assert!(ys.iter().all(|y| *y + m.item_h <= m.bottom()));
     }
 
     #[test]
     fn scrolling_skips_lines_and_gives_the_header_its_own_line() {
         let rows: Vec<_> = (0..30).map(|i| row(i, 2)).collect();
-        let top = plan(&rows, 2, 1);
-        let scrolled = plan(&rows, 2, 4);
+        let m = Metrics::default();
+        let top = plan(&rows, 2, 1, &m);
+        let scrolled = plan(&rows, 2, 4, &m);
         assert_eq!(top.total, 32);
         // Lines 1..3 (banner, two rows) are above the view: the first drawn is the third player.
         assert_eq!(scrolled.items[0].kind, Kind::Row(2));
-        assert_eq!(scrolled.items[0].y, FIRST_Y + BANNER_H + 4.0);
+        assert_eq!(scrolled.items[0].y, m.first_y() + m.banner_h + 4.0);
         let last = |p: &Plan| match p.items.last().unwrap().kind {
             Kind::Row(k) => k,
             k => panic!("{k:?}"),
@@ -590,7 +757,7 @@ mod tests {
             "scrolling brings later players into view"
         );
         // Scrolled far enough, everything fits and nothing is off the bottom.
-        assert!(!plan(&rows, 2, 25).off_bottom);
+        assert!(!plan(&rows, 2, 25, &m).off_bottom);
     }
 
     #[test]
@@ -598,5 +765,96 @@ mod tests {
         assert_eq!(parse_color("0.6 0.64 0.69"), Some([0.6, 0.64, 0.69]));
         assert_eq!(parse_color("1 2"), None);
         assert_eq!(parse_color("1 0.5 0 1"), Some([1.0, 0.5, 0.0]));
+    }
+
+    fn with(set: &[(&str, &str)]) -> Metrics {
+        let mut c = Cvars::default();
+        for (k, v) in set {
+            c.set(k, v, false);
+        }
+        Metrics::read(&c)
+    }
+
+    #[test]
+    fn the_scoreboard_dvars_size_the_panel_and_its_lines() {
+        let stock = Metrics::default();
+        assert_eq!(
+            (stock.w, stock.h, stock.item_h, stock.banner_h),
+            (500.0, 435.0, 18.0, 35.0)
+        );
+        assert_eq!(
+            stock.first_y(),
+            22.5 + 3.0 + 2.0 + 24.0 + 1.0 + 18.0 + 4.0 + 15.0
+        );
+        let m = with(&[
+            ("cg_scoreboardHeight", "300"),
+            ("cg_scoreboardItemHeight", "24"),
+            ("cg_scoreboardBannerHeight", "40"),
+            ("cg_scoreboardWidth", "400"),
+        ]);
+        assert_eq!(m.top(), 90.0);
+        assert_eq!(m.list_w(), 382.0);
+        let rows: Vec<_> = (0..30).map(|i| row(i, 2)).collect();
+        let p = plan(&rows, 2, 1, &m);
+        assert_eq!(p.items[0].y, m.first_y());
+        assert_eq!(p.items[1].y, m.first_y() + 40.0 + 4.0);
+        assert_eq!(p.items[2].y - p.items[1].y, 24.0 + 4.0);
+        assert!(
+            p.items.len() < plan(&rows, 2, 1, &stock).items.len(),
+            "a shorter panel fits fewer lines"
+        );
+        // Out of range values are clamped to the stock limits.
+        assert_eq!(
+            with(&[("cg_scoreboardBannerHeight", "500")]).banner_h,
+            100.0
+        );
+        assert_eq!(with(&[("cg_scoreboardItemHeight", "0")]).item_h, 1.0);
+    }
+
+    #[test]
+    fn ping_text_picks_the_column_set() {
+        let on = Metrics::default();
+        assert!(on.columns().iter().any(|c| c.0 == Col::Ping));
+        let off = with(&[("cg_scoreboardPingText", "0")]);
+        assert!(off.columns().iter().all(|c| c.0 != Col::Ping));
+        for m in [&on, &off] {
+            let sum: f32 = m.columns().iter().map(|c| c.1).sum();
+            assert!((sum - 1.0).abs() < 1e-5, "{sum}");
+        }
+    }
+
+    #[test]
+    fn the_ping_graph_shows_more_bars_for_a_better_ping_and_is_off_by_default() {
+        let m = with(&[("cg_scoreboardPingGraph", "1")]);
+        assert!(m.ping_graph && !Metrics::default().ping_graph);
+        let good = m.ping_graph_at(20, 100.0, 50.0);
+        let bad = m.ping_graph_at(450, 100.0, 50.0);
+        assert_eq!(good.bars.len(), 4);
+        assert_eq!(bad.bars.len(), 1, "never fewer than one bar");
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(near(good.color, m.low), "all bars is the low colour");
+        let halfway = std::array::from_fn(|i| (m.high[i] + m.med[i]) * 0.5);
+        assert!(
+            near(bad.color, halfway),
+            "one bar of four is between high and medium"
+        );
+        // Bars rise left to right and stand on the row's bottom.
+        assert!(
+            good.bars
+                .windows(2)
+                .all(|w| w[1][3] > w[0][3] && w[1][0] > w[0][0])
+        );
+        assert!(
+            good.bars
+                .iter()
+                .all(|b| (b[1] + b[3] - (50.0 + m.item_h)).abs() < 1e-4)
+        );
+        assert_eq!(good.back[0], 107.0);
+        let tall = with(&[
+            ("cg_ScoresPing_MaxBars", "8"),
+            ("cg_ScoresPing_Interval", "50"),
+        ]);
+        assert_eq!(tall.ping_graph_at(0, 0.0, 0.0).bars.len(), 8);
+        assert_eq!(tall.ping_graph_at(100, 0.0, 0.0).bars.len(), 6);
     }
 }

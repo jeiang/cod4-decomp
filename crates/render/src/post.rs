@@ -464,6 +464,8 @@ pub(crate) struct State {
     indices: wgpu::Buffer,
     /// A picture has been kept for the shell shock overlays.
     saved: bool,
+    /// A one-texel float-Z image holding the far value: what the scene's `FLOATZ` reads while soft particles are off.
+    far_floatz: Option<Arc<Tex>>,
 }
 
 #[repr(C)]
@@ -500,6 +502,7 @@ impl State {
                 wgpu::BufferUsages::INDEX,
             ),
             saved: false,
+            far_floatz: None,
         }
     }
 
@@ -511,6 +514,47 @@ impl State {
         format: wgpu::TextureFormat,
     ) -> wgpu::TextureView {
         self.floatz_tex(gpu, size, format).view.clone()
+    }
+
+    /// The image `FLOATZ` is bound to while `r_zFeather` is off: far everywhere, so no particle fades.
+    pub(crate) fn far_floatz_tex(&mut self, gpu: &Gpu) -> Arc<Tex> {
+        self.far_floatz
+            .get_or_insert_with(|| {
+                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("far float z"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: FLOATZ_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                gpu.queue.write_texture(
+                    texture.as_image_copy(),
+                    &(FLOATZ_CLEAR as f32).to_le_bytes(),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4),
+                        rows_per_image: Some(1),
+                    },
+                    wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                Arc::new(Tex {
+                    view: texture.create_view(&Default::default()),
+                    dim: SamplerDim::D2,
+                    width: 1,
+                })
+            })
+            .clone()
     }
 
     /// The float-Z image the scene's `FLOATZ` sampler reads.

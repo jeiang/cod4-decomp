@@ -7,7 +7,7 @@
 //! the window scrolls up to make room, and fade out at the end. The stock `gamemessages`, `boldgamemessages` and
 //! `subtitles` menus each hold one window item (item type 19); [`Feed::draw_window`] draws it where the menu puts it.
 
-use super::{LiveUi, localize, team_color_escape};
+use super::{Layout, LiveUi, localize, team_color_escape};
 use crate::ui::Ui;
 use crate::ui::assets::UiAssets;
 use crate::ui::paint::{Painter, TextDraw};
@@ -17,7 +17,7 @@ use net::ui::Obituary;
 
 pub const WINDOWS: usize = 4;
 
-/// Per-window settings (`con_gameMsgWindowN*` defaults).
+/// One window's settings (`con_gameMsgWindowN*`) with the width its text wraps at.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Cfg {
     /// Most lines visible at once.
@@ -32,40 +32,22 @@ struct Cfg {
     width: f32,
 }
 
-const CFG: [Cfg; WINDOWS] = [
+/// The wrap width of each window, from the stock menus.
+const WIDTH: [f32; WINDOWS] = [455.0, 390.0, 455.0, 455.0];
+
+/// The settings of `window` under `layout`.
+fn cfg(layout: &Layout, window: usize) -> Cfg {
+    let window = window.min(WINDOWS - 1);
+    let w = layout.windows[window];
     Cfg {
-        lines: 4,
-        msg_ms: 5000,
-        scroll_ms: 250,
-        fade_in_ms: 250,
-        fade_out_ms: 500,
-        width: 455.0,
-    },
-    Cfg {
-        lines: 5,
-        msg_ms: 8000,
-        scroll_ms: 250,
-        fade_in_ms: 250,
-        fade_out_ms: 10,
-        width: 390.0,
-    },
-    Cfg {
-        lines: 7,
-        msg_ms: 5000,
-        scroll_ms: 250,
-        fade_in_ms: 750,
-        fade_out_ms: 500,
-        width: 455.0,
-    },
-    Cfg {
-        lines: 5,
-        msg_ms: 5000,
-        scroll_ms: 250,
-        fade_in_ms: 250,
-        fade_out_ms: 500,
-        width: 455.0,
-    },
-];
+        lines: w.lines,
+        msg_ms: w.msg_ms,
+        scroll_ms: w.scroll_ms,
+        fade_in_ms: w.fade_in_ms,
+        fade_out_ms: w.fade_out_ms,
+        width: WIDTH[window],
+    }
+}
 
 /// The window an `iprintln` line goes to and the one `iprintlnbold` and announcements go to.
 pub const NOTIFY: usize = 0;
@@ -109,11 +91,12 @@ pub struct Feed {
     center: Option<Center>,
     /// Console-only prints (`clientprint`), newest last.
     pub console: Vec<String>,
+    /// The placement and timing dvars as of the last frame, set by the shell.
+    pub layout: Layout,
 }
 
-/// How long chat stays up and how many lines it keeps (`cg_chatTime`, `cg_chatHeight`).
-const CHAT_MS: i32 = 12_000;
-const CHAT_LINES: usize = 8;
+/// The most chat lines kept (the top of `cg_chatHeight`).
+const CHAT_MAX: usize = 8;
 /// How long the centre string stays (`cg_centertime`).
 const CENTER_MS: i32 = 5000;
 
@@ -213,12 +196,15 @@ fn fade_alpha(now: i32, start: i32, total: i32, fade: i32) -> Option<f32> {
 
 impl Feed {
     pub fn clear(&mut self) {
-        *self = Feed::default();
+        *self = Feed {
+            layout: self.layout,
+            ..Feed::default()
+        };
     }
 
     /// Adds a message to `window` at server time `now`.
     pub fn message(&mut self, window: usize, segs: Vec<Seg>, now: i32) {
-        let cfg = CFG[window.min(WINDOWS - 1)];
+        let cfg = cfg(&self.layout, window);
         let w = &mut self.windows[window.min(WINDOWS - 1)];
         w.push(Msg {
             segs,
@@ -251,7 +237,7 @@ impl Feed {
 
     pub fn chat(&mut self, text: String, now: i32) {
         self.chat.push(ChatLine { text, time: now });
-        if self.chat.len() > CHAT_LINES {
+        if self.chat.len() > CHAT_MAX {
             self.chat.remove(0);
         }
     }
@@ -307,7 +293,7 @@ impl Feed {
         for w in &mut self.windows {
             w.retain(|m| m.end > now);
         }
-        self.chat.retain(|c| now - c.time < CHAT_MS);
+        self.chat.retain(|c| now - c.time < self.layout.chat_ms);
     }
 
     /// Draws message window `window` where the item `d` of rect `r` puts it, text laid out as the item asks.
@@ -326,7 +312,7 @@ impl Feed {
             return 0;
         }
         self.cull(now);
-        let cfg = CFG[window];
+        let cfg = cfg(&self.layout, window);
         let (font, scale) = (d.font_enum, d.text_scale);
         let line_h = (scale * 48.0).round();
         let width = |s: &str| ui.text_width(s, font, scale);
@@ -432,23 +418,14 @@ impl Feed {
 
     /// Recent chat above the HUD (`CG_DrawChatMessages`): a dark bar the colour of the line, then the text.
     pub fn draw_chat(&self, ui: &Ui, p: &mut Painter, live: &LiveUi, scoreboard: bool) {
-        let (x, y0) = if scoreboard {
-            (5.0, 110.0)
-        } else {
-            (5.0, 204.0)
-        };
+        let (x, y0) = self.layout.chat_at(scoreboard);
         let tall = ui.place.size.1 <= 768.0;
         let (font_h, font_w) = if tall { (16.0, 12.0) } else { (10.0, 8.0) };
         let scale = font_h / 48.0;
-        let count = self.chat.len() as f32;
+        let shown = self.chat_shown(live.time);
+        let count = shown.len() as f32;
         let white = p.g.white();
-        for (i, line) in self.chat.iter().enumerate() {
-            let left = CHAT_MS - (live.time - line.time);
-            let a = if left <= 200 {
-                left as f32 / 200.0
-            } else {
-                1.0
-            };
+        for (i, &(line, a)) in shown.iter().enumerate() {
             if a <= 0.0 {
                 continue;
             }
@@ -472,6 +449,23 @@ impl Feed {
                 },
             );
         }
+    }
+
+    /// The newest `cg_chatHeight` chat lines with their opacity at `now` (a line fades over its last 200 ms).
+    fn chat_shown(&self, now: i32) -> Vec<(&ChatLine, f32)> {
+        let keep = self.layout.chat_lines.min(self.chat.len());
+        self.chat[self.chat.len() - keep..]
+            .iter()
+            .map(|line| {
+                let left = self.layout.chat_ms - (now - line.time);
+                let a = if left <= 200 {
+                    left as f32 / 200.0
+                } else {
+                    1.0
+                };
+                (line, a)
+            })
+            .collect()
     }
 }
 
@@ -638,7 +632,7 @@ mod tests {
 
     #[test]
     fn a_new_line_fades_in_while_the_window_scrolls_and_out_at_the_end() {
-        let cfg = CFG[0];
+        let cfg = cfg(&Layout::default(), 0);
         let (start, end) = (1000, 6000);
         assert_eq!(
             message_alpha(&cfg, start, end, 1000),
@@ -651,14 +645,14 @@ mod tests {
         assert!((fading - 0.5).abs() < 1e-6, "{fading}");
         assert_eq!(message_alpha(&cfg, start, end, 6000), 0.0);
         // The subtitle window has a slower fade in than the scroll: plain fade in from the start.
-        let sub = CFG[2];
+        let sub = super::cfg(&Layout::default(), 2);
         let q = message_alpha(&sub, 0, 5000, 375);
         assert!((q - 0.5).abs() < 1e-6, "{q}");
     }
 
     #[test]
     fn the_window_is_pushed_down_by_what_is_left_of_each_scroll() {
-        let cfg = CFG[0];
+        let cfg = cfg(&Layout::default(), 0);
         // One line just born pushes a full line; one half scrolled half; an old one nothing.
         let s = scroll_lines(&cfg, [1000, 1000 - 125, 0].into_iter(), 1000, 14.0);
         assert_eq!(s, 14.0 + 7.0);
@@ -671,7 +665,7 @@ mod tests {
         for i in 0..6 {
             f.text(NOTIFY, &format!("line {i}"), 1000 + i);
         }
-        assert_eq!(f.windows[NOTIFY].len(), CFG[0].lines);
+        assert_eq!(f.windows[NOTIFY].len(), cfg(&Layout::default(), 0).lines);
         assert_eq!(
             f.windows[NOTIFY][0].segs,
             vec![Seg::Text("line 2".into())],
@@ -755,5 +749,53 @@ mod tests {
         live.killcam = true;
         f.obituary(&o, &live, &UiAssets::default(), 300);
         assert_eq!(f.windows[NOTIFY].len(), 2);
+    }
+
+    #[test]
+    fn the_window_dvars_set_how_long_and_how_many_lines_a_window_keeps() {
+        let mut c = crate::input::Cvars::default();
+        c.set("con_gameMsgWindow0MsgTime", "2", true);
+        c.set("con_gameMsgWindow0LineCount", "2", true);
+        let mut f = Feed {
+            layout: Layout::read(&c),
+            ..Feed::default()
+        };
+        for i in 0..3 {
+            f.text(NOTIFY, &format!("line {i}"), 1000);
+        }
+        assert_eq!(f.windows[NOTIFY].len(), 2);
+        assert_eq!(f.windows[NOTIFY][0].end, 3000);
+        assert!(f.active(NOTIFY, 2999));
+        assert!(!f.active(NOTIFY, 3000));
+        // A cleared feed keeps the dvars it was given.
+        f.clear();
+        assert_eq!(f.layout.windows[0].lines, 2);
+    }
+
+    #[test]
+    fn the_chat_dvars_pick_the_lines_shown_and_how_long_they_stay() {
+        let mut c = crate::input::Cvars::default();
+        c.set("cg_chatHeight", "2", true);
+        c.set("cg_chatTime", "1000", true);
+        let mut f = Feed {
+            layout: Layout::read(&c),
+            ..Feed::default()
+        };
+        for (i, t) in [0, 100, 200].into_iter().enumerate() {
+            f.chat(format!("chat {i}"), t);
+        }
+        let shown = f.chat_shown(300);
+        let texts: Vec<_> = shown.iter().map(|(l, _)| l.text.as_str()).collect();
+        assert_eq!(texts, ["chat 1", "chat 2"], "only the newest two");
+        assert!(shown.iter().all(|&(_, a)| a == 1.0));
+        // Past `cg_chatTime` a line is gone; in its last 200 ms it fades.
+        let faded = f.chat_shown(1000 + 100);
+        assert!(faded[0].1 <= 0.0, "chat 1 is over");
+        assert!((faded[1].1 - 0.5).abs() < 1e-6, "{}", faded[1].1);
+        f.cull(1150);
+        assert_eq!(f.chat.len(), 1);
+        c.set("cg_chatHeight", "0", true);
+        f.layout = Layout::read(&c);
+        assert!(f.chat_shown(1250).is_empty(), "chat is off");
     }
 }

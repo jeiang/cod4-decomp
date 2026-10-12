@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-gfx`: the graphics settings of the options menus reach the window and the renderer. The real client sets
-//! the dvars the menu writes, applies them with `vid_restart` (vsync off, a 4:3 screen), starts a match (4x
-//! antialiasing, no specular, depth of field, glow or shadows, four dynamic lights; with it on, aiming down the sights must
+//! the dvars the menu writes, applies them with `vid_restart` (vsync off, a 4:3 screen), starts a match (the most
+//! antialiasing the adapter has when asked for 16x, lowered normal and specular map quality, no soft smoke edges or water
+//! animation, no specular, depth of field, glow or shadows, four dynamic lights; with it on, aiming down the sights must
 //! blur the picture, and a hip-fired view must not), then turns the match's settings back with a second
 //! `vid_restart` in the running match. Every `gfxis=` check reads the renderer's and the surface's own state. A frame
 //! with a bright test light in front of the player must also be clearly brighter than the same frame without it (the
@@ -17,12 +18,14 @@ use std::time::Duration;
 const NAME: &str = "client-gfx";
 const LIMIT: Duration = Duration::from_secs(300);
 
-const STEPS: &str = "set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 4,\
+const STEPS: &str = "set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 16,\
+set=set r_picmip_manual 1,set=set r_picmip 0,set=set r_picmip_bump 1,set=set r_picmip_spec 1,set=set r_zFeather 0,set=set r_drawWater 0,\
 set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_enable 0,set=set r_dlightLimit 4,\
 vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
 menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\
-gfxis=aa 4,gfxis=specular 0,gfxis=dof 0,gfxis=blur 0,gfxis=glow 0,gfxis=shadows 0,shot=gfx-on,\
+gfxis=aa max,gfxis=picmip 0 1 1,gfxis=zfeather 0,gfxis=water 0,gfxis=specular 0,gfxis=dof 0,gfxis=blur 0,gfxis=glow 0,gfxis=shadows 0,shot=gfx-on,\
+set=set com_maxfps 20,wait=1,pacereset,wait=2,gfxis=pace 1,set=set com_maxfps 0,\
 set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
 set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
 set=set r_fullscreen 0,vidrestart,wait=2,gfxis=fullscreen 0,\
@@ -30,7 +33,8 @@ fxdemo=distortion/distortion_tank_muzzleflash,wait=2,shotd=distort-on,\
 set=set r_distortion 0,vidrestart,wait=2,shot=distort-off,set=set r_distortion 1,vidrestart,wait=2,fxdemo=off,\
 dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1,shot=dlight-on,dlight=0,\
 set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\
-set=set r_aspectRatio auto,vidrestart,wait=2,\
+set=set r_zFeather 1,set=set r_drawWater 1,\
+set=set r_aspectRatio auto,vidrestart,wait=2,gfxis=zfeather 1,gfxis=water 1,\
 gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,wait=2,gfxis=blur 1,releasekey=mouse2,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
 losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered";
 
