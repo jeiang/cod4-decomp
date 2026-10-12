@@ -564,6 +564,10 @@ pub struct ServerList {
     /// Tests only: a window that no machine load can outlast, in place of the real ones.
     #[cfg(test)]
     pub(crate) window_override: Option<Duration>,
+    /// Tests only: no socket is opened, so nothing is sent and only rows a test injects can appear (a real scan
+    /// would be answered by any server running on the machine).
+    #[cfg(test)]
+    pub(crate) offline: bool,
     /// The server a `getstatus` is out to, when it was last sent and how often.
     status_req: Option<(SocketAddr, Instant, u32)>,
     /// An answer that arrived and has not been taken yet.
@@ -626,6 +630,23 @@ fn favorites_text(favorites: &[Entry], other: &[String]) -> String {
 }
 
 impl ServerList {
+    /// The list a shell starts with: in unit tests one that never touches the network.
+    pub fn for_shell() -> Self {
+        Self {
+            #[cfg(test)]
+            offline: true,
+            ..Self::default()
+        }
+    }
+
+    fn open_browser(&self) -> Option<Browser> {
+        #[cfg(test)]
+        if self.offline {
+            return None;
+        }
+        Browser::new().ok()
+    }
+
     /// Scans again for the list `source` shows: the LAN (`full` first forgets what it found, otherwise the answers
     /// update it in place), the favorites, or the Internet (the masters `master_text` names are looked up, asked,
     /// then the servers they name).
@@ -637,7 +658,7 @@ impl ServerList {
         }
         self.refresh_started = Some((Instant::now(), source));
         if self.browser.is_none() {
-            self.browser = Browser::new().ok();
+            self.browser = self.open_browser();
         }
         if full && source == Source::Lan {
             self.lan.clear();
@@ -706,7 +727,7 @@ impl ServerList {
         self.status = None;
         self.status_req = None;
         if self.browser.is_none() {
-            self.browser = Browser::new().ok();
+            self.browser = self.open_browser();
         }
         if let Some(b) = self.browser.as_mut() {
             b.ask_status(addr);
@@ -730,7 +751,7 @@ impl ServerList {
         self.favorites.push(Entry::unanswered(addr));
         self.save_favorites();
         if self.browser.is_none() {
-            self.browser = Browser::new().ok();
+            self.browser = self.open_browser();
         }
         if let Some(b) = self.browser.as_mut() {
             b.restart();
