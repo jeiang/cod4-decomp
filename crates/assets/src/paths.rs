@@ -5,7 +5,8 @@
 //! Where the install keeps what is not in the VFS: fastfiles, mods and custom maps.
 //!
 //! Fastfiles are looked up the way the original's `DB_TryLoadXFileInternal` does for a running mod: in the `fs_game`
-//! directory first, then `zone/<language>`.
+//! directory first, then `zone/<language>`. A custom map built with the stock tools lives in `usermaps/<map>/`
+//! (`<map>.ff`, `<map>_load.ff`, `<map>.iwd`), which is searched last.
 
 use crate::vfs::LANGUAGES;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,14 @@ pub fn valid_game(game: &str) -> bool {
             && game.starts_with("mods/")
             && !game.contains("..")
             && !game.contains([':', '\\']))
+}
+
+/// A map name that cannot name a path: lowercase letters, digits and `_`.
+pub fn valid_map(map: &str) -> bool {
+    !map.is_empty()
+        && map
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// `name` in `dir`, matched case-insensitively.
@@ -55,14 +64,28 @@ pub fn zone_dir(root: &Path) -> Option<PathBuf> {
     find_path(root, &format!("zone/{}", LANGUAGES[language_index(root)]))
 }
 
-/// The fastfile `name`: `<game>/<name>.ff`, then `zone/<language>/<name>.ff`.
+/// `usermaps/<map>` of the install at `root`, the folder of a custom map (`mp_x_load` is part of `mp_x`'s).
+pub fn usermap_dir(root: &Path, zone: &str) -> Option<PathBuf> {
+    let map = zone.strip_suffix("_load").unwrap_or(zone);
+    valid_map(map).then_some(())?;
+    find_path(root, &format!("usermaps/{map}"))
+}
+
+/// The fastfile `name`: `<game>/<name>.ff`, `zone/<language>/<name>.ff`, then `usermaps/<map>/<name>.ff`.
 pub fn zone_file(root: &Path, game: &str, name: &str) -> Option<PathBuf> {
     let file = format!("{name}.ff");
     let in_game = || {
         let dir = find_path(root, game).filter(|_| !game.is_empty() && valid_game(game))?;
         find_ci(&dir, &file)
     };
-    in_game().or_else(|| find_ci(&zone_dir(root)?, &file))
+    in_game()
+        .or_else(|| find_ci(&zone_dir(root)?, &file))
+        .or_else(|| find_ci(&usermap_dir(root, name)?, &file))
+}
+
+/// The IWD of the custom map `map`, `usermaps/<map>/<map>.iwd`.
+pub fn usermap_iwd(root: &Path, map: &str) -> Option<PathBuf> {
+    find_ci(&usermap_dir(root, map)?, &format!("{map}.iwd"))
 }
 
 /// The directory of `game` as it is named on disk, relative to `root` (`mods/Synth` for `mods/synth` on a
@@ -129,7 +152,7 @@ fn ff_maps(dir: &Path) -> impl Iterator<Item = String> {
         })
 }
 
-/// Every map the install can run under `game`: the stock zone folder and the game directory, sorted.
+/// Every map the install can run under `game`: the stock zone folder, the game directory and `usermaps/`, sorted.
 pub fn maps(root: &Path, game: &str) -> Vec<String> {
     let mut v: Vec<String> = zone_dir(root)
         .into_iter()
@@ -141,11 +164,24 @@ pub fn maps(root: &Path, game: &str) -> Vec<String> {
     v
 }
 
-/// The maps that are not stock: the ones in the game directory, sorted.
+/// The maps that are not stock: the ones in the game directory and in `usermaps/`, sorted.
 pub fn custom_maps(root: &Path, game: &str) -> Vec<String> {
     let mut v = Vec::new();
     if let Some(dir) = find_path(root, game).filter(|_| !game.is_empty() && valid_game(game)) {
         v.extend(ff_maps(&dir));
+    }
+    if let Some(dir) = find_ci(root, "usermaps") {
+        v.extend(
+            crate::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| {
+                    let map = e.file_name().to_string_lossy().to_ascii_lowercase();
+                    (valid_map(&map) && find_ci(&e.path(), &format!("{map}.ff")).is_some())
+                        .then_some(map)
+                }),
+        );
     }
     v.sort();
     v.dedup();
@@ -197,24 +233,31 @@ mod tests {
     }
 
     #[test]
-    fn a_fastfile_is_found_in_the_mod_then_the_zone_folder() {
+    fn a_fastfile_is_found_in_the_mod_then_the_zone_folder_then_usermaps() {
         let t = Tmp::new("zones");
         t.file("zone/english/mp_a.ff", b"stock");
         t.file("mods/m/mp_a.ff", b"mod");
         t.file("mods/m/mod.ff", b"");
-        t.file("mods/m/mp_m.ff", b"");
+        t.file("usermaps/mp_u/mp_u.ff", b"");
+        t.file("usermaps/mp_u/mp_u_load.ff", b"");
+        t.file("usermaps/mp_u/MP_U.iwd", b"");
         let at = |game, name| zone_file(&t.0, game, name).map(|p| std::fs::read(p).unwrap());
         assert_eq!(at("", "mp_a").unwrap(), b"stock");
         assert_eq!(at("mods/m", "mp_a").unwrap(), b"mod");
-        assert!(at("", "mp_m").is_none(), "a mod's own map is not stock");
         assert_eq!(game_rel(&t.0, "mods/m").as_deref(), Some("mods/m"));
         assert!(game_rel(&t.0, "mods/gone").is_none());
+        assert!(at("", "mp_u").is_some() && at("", "mp_u_load").is_some());
+        assert!(usermap_iwd(&t.0, "mp_u").is_some() && usermap_iwd(&t.0, "mp_a").is_none());
+        assert!(
+            usermap_iwd(&t.0, "../mp_u").is_none(),
+            "a map name cannot name a path"
+        );
         assert!(mod_zone(&t.0, "mods/m").is_some() && mod_zone(&t.0, "").is_none());
         assert!(
             zone_file(&t.0, "mods/../zone", "mp_a").is_some(),
             "a bad game is ignored"
         );
-        assert_eq!(maps(&t.0, "mods/m"), ["mp_a", "mp_m"]);
+        assert_eq!(maps(&t.0, "mods/m"), ["mp_a", "mp_u"]);
     }
 
     #[test]

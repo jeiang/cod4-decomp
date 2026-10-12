@@ -46,6 +46,8 @@ pub struct Install {
     pub language: &'static str,
     /// `fs_game`: the mod directory (`mods/<name>`) the search path and the fastfile lookups include; empty for stock.
     pub game: String,
+    /// The custom map whose `usermaps/<map>` package the search path includes.
+    usermap: Option<String>,
 }
 
 /// `zone/<language>` of the install at `root`, matched case-insensitively; where a downloaded map zone goes.
@@ -65,13 +67,32 @@ impl Install {
         let language = assets::paths::language_index(root);
         Ok(Self {
             root: root.to_owned(),
-            vfs: Vfs::open(root, language, game)?,
+            vfs: Vfs::open(root, language, game, None)?,
             language: LANGUAGES[language],
             game: game.to_owned(),
+            usermap: None,
         })
     }
 
-    /// The fastfile `name`: in the mod directory, then `zone/<language>`.
+    /// Puts the package of `map` (`usermaps/<map>`: its IWDs and loose files) on the search path, or takes the previous
+    /// map's off when `map` has none.
+    pub fn mount_usermap(&mut self, map: &str) -> io::Result<()> {
+        let map = map.strip_suffix("_load").unwrap_or(map);
+        let want = assets::paths::usermap_dir(&self.root, map).map(|_| map.to_owned());
+        if want != self.usermap {
+            let language = LANGUAGES.iter().position(|l| *l == self.language);
+            self.vfs = Vfs::open(
+                &self.root,
+                language.unwrap_or(0),
+                &self.game,
+                want.as_deref(),
+            )?;
+            self.usermap = want;
+        }
+        Ok(())
+    }
+
+    /// The fastfile `name`: in the mod directory, then `zone/<language>`, then a custom map's `usermaps/<map>`.
     pub fn zone_path(&self, name: &str) -> Option<PathBuf> {
         assets::paths::zone_file(&self.root, &self.game, name)
     }

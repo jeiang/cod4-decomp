@@ -987,7 +987,8 @@ fn load(install: &Path, game: &str, map: &str) -> Result<Bank, String> {
         .iter()
         .position(|l| *l == install.language)
         .unwrap_or(0);
-    let vfs = Arc::new(Vfs::open(&install.root, lang, game).map_err(|e| e.to_string())?);
+    let usermap = Some(map).filter(|m| !m.is_empty());
+    let vfs = Arc::new(Vfs::open(&install.root, lang, game, usermap).map_err(|e| e.to_string())?);
     // No map: the menus' own tables (the front end's `mouse_click`, `mouse_over`, ... are in the SP code zone).
     let wanted: &[&str] = if map.is_empty() {
         &["code_post_gfx_mp", "code_post_gfx"]
