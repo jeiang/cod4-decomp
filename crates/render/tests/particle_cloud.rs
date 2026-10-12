@@ -99,7 +99,7 @@ fn a_particle_cloud_is_drawn_where_it_is_placed() {
         eprintln!("skipped: no GPU adapter");
         return;
     };
-    let Ok(data) = MapData::load(&root, "mp_crash") else {
+    let Ok(data) = MapData::load(&root, "", "mp_crash") else {
         eprintln!("skipped: no mp_crash");
         return;
     };

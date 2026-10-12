@@ -113,7 +113,7 @@ fn distortion_samples_the_scene_copy_and_soft_particles_draw_float_z() {
         eprintln!("skipped: no GPU adapter");
         return;
     };
-    let Ok(data) = MapData::load(&root, "mp_crash") else {
+    let Ok(data) = MapData::load(&root, "", "mp_crash") else {
         eprintln!("skipped: no mp_crash");
         return;
     };
@@ -231,7 +231,7 @@ fn a_smoke_sheet_fades_out_where_it_meets_the_floor() {
         eprintln!("skipped: no GPU adapter");
         return;
     };
-    let Ok(data) = MapData::load(&root, "mp_crash") else {
+    let Ok(data) = MapData::load(&root, "", "mp_crash") else {
         eprintln!("skipped: no mp_crash");
         return;
     };

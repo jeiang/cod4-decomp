@@ -6,7 +6,8 @@
 //! load. Zones are decoded with the [`Consumer::Server`] filter and only the assets the
 //! simulation reads are retained. An asset name defined by two zones resolves to the zone with
 //! the higher tag, the later load winning ties (boot-load research section 6.1); the map zone
-//! (tag 8) is always the highest and is dropped when the next map loads.
+//! (tag 8) is dropped when the next map loads. A mod's `mod.ff` (tag 16, `DB_ZONE_MOD`) is loaded
+//! after the boot zones and outranks them and the map zone.
 
 use std::collections::HashMap;
 use std::io;
@@ -36,68 +37,48 @@ pub const BOOT_ZONES: [(&str, u8); 4] = [
     ("localized_common_mp", 1),
 ];
 pub const MAP_TAG: u8 = 8;
+/// `DB_ZONE_MOD`: the mod's `mod.ff` outranks every other zone, the map's included.
+pub const MOD_TAG: u8 = 16;
 
 pub struct Install {
     pub root: PathBuf,
     pub vfs: Vfs,
     pub language: &'static str,
-}
-
-/// The install's language: line 1 of `localization.txt` (default `english`), as an index into [`LANGUAGES`].
-fn language_index(root: &Path) -> usize {
-    assets::fs::read_to_string(root.join("localization.txt"))
-        .ok()
-        .and_then(|t| t.lines().next().map(|l| l.trim().to_ascii_lowercase()))
-        .and_then(|l| LANGUAGES.iter().position(|n| *n == l))
-        .unwrap_or(0)
+    /// `fs_game`: the mod directory (`mods/<name>`) the search path and the fastfile lookups include; empty for stock.
+    pub game: String,
 }
 
 /// `zone/<language>` of the install at `root`, matched case-insensitively; where a downloaded map zone goes.
 pub fn zone_dir(root: &Path) -> Option<PathBuf> {
-    let mut dir = root.to_owned();
-    for part in ["zone", LANGUAGES[language_index(root)]] {
-        dir = find_ci(&dir, part)?;
-    }
-    Some(dir)
-}
-
-/// `zone/<language>/<name>.ff` of the install at `root`, if it is there.
-pub fn zone_file(root: &Path, name: &str) -> Option<PathBuf> {
-    find_ci(&zone_dir(root)?, &format!("{name}.ff"))
+    assets::paths::zone_dir(root)
 }
 
 impl Install {
-    /// Opens the install: language from line 1 of `localization.txt` (default `english`) and
-    /// the stock search path.
+    /// Opens the stock install: language from line 1 of `localization.txt` (default `english`) and the stock search
+    /// path.
     pub fn open(root: &Path) -> io::Result<Self> {
-        let language = language_index(root);
+        Self::open_game(root, "")
+    }
+
+    /// [`Self::open`] with the mod `game` (`fs_game`) on top of the stock search path.
+    pub fn open_game(root: &Path, game: &str) -> io::Result<Self> {
+        let language = assets::paths::language_index(root);
         Ok(Self {
             root: root.to_owned(),
-            vfs: Vfs::open_stock(root, language)?,
+            vfs: Vfs::open(root, language, game)?,
             language: LANGUAGES[language],
+            game: game.to_owned(),
         })
     }
 
-    /// `zone/<language>/<name>.ff`, matched case-insensitively.
+    /// The fastfile `name`: in the mod directory, then `zone/<language>`.
     pub fn zone_path(&self, name: &str) -> Option<PathBuf> {
-        zone_file(&self.root, name)
+        assets::paths::zone_file(&self.root, &self.game, name)
     }
 
     pub fn map_exists(&self, map: &str) -> bool {
         self.zone_path(map).is_some()
     }
-}
-
-fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
-    let direct = dir.join(name);
-    if assets::fs::exists(&direct) {
-        return Some(direct);
-    }
-    assets::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name))
-        .map(|e| e.path())
 }
 
 /// Content of one layer: the boot zones, or the current map's zone.
@@ -208,7 +189,7 @@ impl DecodeFilter for ContentFilter {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Layer {
     /// Lowercase name to (tag, asset).
     raw: HashMap<String, (u8, Arc<[u8]>)>,
@@ -249,6 +230,45 @@ fn put<T>(m: &mut HashMap<String, (u8, T)>, tag: u8, name: &str, v: T) {
     }
 }
 
+/// Takes the entries of `src` that outrank (or tie) those of `dst`.
+fn merge_map<T: Clone>(dst: &mut HashMap<String, (u8, T)>, src: &HashMap<String, (u8, T)>) {
+    for (k, (tag, v)) in src {
+        if dst.get(k).is_none_or(|(t, _)| t <= tag) {
+            dst.insert(k.clone(), (*tag, v.clone()));
+        }
+    }
+}
+
+impl Layer {
+    /// Adds what `other` holds that outranks what is here: a mod's assets over a zone's.
+    fn merge(&mut self, other: &Layer) {
+        merge_map(&mut self.raw, &other.raw);
+        merge_map(&mut self.tables, &other.tables);
+        merge_map(&mut self.weapons, &other.weapons);
+        merge_map(&mut self.models, &other.models);
+        merge_map(&mut self.skeletons, &other.skeletons);
+        merge_map(&mut self.anims, &other.anims);
+        merge_map(&mut self.player_anims, &other.player_anims);
+        merge_map(&mut self.model_bones, &other.model_bones);
+        merge_map(&mut self.hide_tags, &other.hide_tags);
+        merge_map(&mut self.note_sounds, &other.note_sounds);
+        merge_map(&mut self.motions, &other.motions);
+        merge_map(&mut self.localize, &other.localize);
+        merge_map(&mut self.fx, &other.fx);
+        merge_map(&mut self.sounds, &other.sounds);
+        if let Some((tag, c)) = &other.clipmap
+            && self.clipmap.as_ref().is_none_or(|(t, _)| t <= tag)
+        {
+            self.clipmap = Some((*tag, c.clone()));
+        }
+        if let Some((tag, i)) = &other.impact
+            && self.impact.as_ref().is_none_or(|(t, _)| t <= tag)
+        {
+            self.impact = Some((*tag, i.clone()));
+        }
+    }
+}
+
 fn get<'a, T>(m: &'a HashMap<String, (u8, T)>, name: &str) -> Option<&'a T> {
     m.get(&name.to_ascii_lowercase()).map(|(_, v)| v)
 }
@@ -260,6 +280,8 @@ pub struct Content {
     pub client: bool,
     base: Layer,
     map: Layer,
+    /// What `mod.ff` defines, kept apart so each map's layer can take it again.
+    modded: Layer,
     pub map_name: Option<String>,
     /// Per-zone decode time, for the boot log.
     pub timings: Vec<(String, Duration)>,
@@ -280,13 +302,31 @@ impl Content {
         let path = install
             .zone_path(zone)
             .ok_or_else(|| format!("Could not find zone '{zone}'"))?;
+        self.decode_zone(&path, zone, tag)
+    }
+
+    /// Loads the mod's `mod.ff` when the install's `fs_game` has one; whether it did.
+    pub fn load_mod(&mut self, install: &Install) -> Result<bool, String> {
+        let Some(path) = assets::paths::mod_zone(&install.root, &install.game) else {
+            return Ok(false);
+        };
+        self.modded = Layer::default();
+        self.decode_zone(&path, "mod", MOD_TAG)?;
+        self.base.merge(&self.modded);
+        if self.map_name.is_some() {
+            self.map.merge(&self.modded);
+        }
+        Ok(true)
+    }
+
+    fn decode_zone(&mut self, path: &Path, zone: &str, tag: u8) -> Result<(), String> {
         let t = Instant::now();
-        let file = assets::fs::buffered(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let file = assets::fs::buffered(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let z = Zone::open(file).map_err(|e| format!("{zone}: {e}"))?;
-        let layer = if tag == MAP_TAG {
-            &mut self.map
-        } else {
-            &mut self.base
+        let layer = match tag {
+            MAP_TAG => &mut self.map,
+            MOD_TAG => &mut self.modded,
+            _ => &mut self.base,
         };
         let strings = z.script_strings().to_vec();
         let client = self.client;
@@ -396,6 +436,7 @@ impl Content {
         for (zone, tag) in BOOT_ZONES {
             self.load_zone(install, zone, tag)?;
         }
+        self.load_mod(install)?;
         Ok(())
     }
 
@@ -404,6 +445,7 @@ impl Content {
         self.map = Layer::default();
         self.map_name = None;
         self.load_zone(install, map, MAP_TAG)?;
+        self.map.merge(&self.modded);
         self.map_name = Some(map.to_owned());
         Ok(())
     }
@@ -605,6 +647,64 @@ impl Content {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mod_ff_rawfiles_override_the_stock_scripts_whatever_the_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mod.ff");
+        std::fs::write(
+            &path,
+            assets::zone::testing::rawfile_zone(&[
+                ("maps/mp/gametypes/dm.gsc", "mod dm"),
+                ("mod/new.gsc", "new"),
+            ]),
+        )
+        .unwrap();
+        let mut c = Content::default();
+        c.add_test_rawfile("maps/mp/gametypes/dm.gsc", "stock dm");
+        c.add_test_rawfile("maps/mp/gametypes/war.gsc", "stock war");
+        c.map.raw.insert(
+            "maps/mp/gametypes/dm.gsc".into(),
+            (MAP_TAG, Arc::from(&b"map dm"[..])),
+        );
+        c.map_name = Some("mp_x".into());
+        c.decode_zone(&path, "mod", MOD_TAG).unwrap();
+        c.base.merge(&c.modded);
+        c.map.merge(&c.modded);
+        assert_eq!(c.rawfile("maps/mp/gametypes/dm.gsc").unwrap(), b"mod dm");
+        assert_eq!(
+            c.rawfile("maps/mp/gametypes/war.gsc").unwrap(),
+            b"stock war"
+        );
+        assert_eq!(c.rawfile("mod/new.gsc").unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_mods_assets_outrank_the_maps_and_the_stock_zones() {
+        let mut stock = Layer::default();
+        put(&mut stock.raw, 4, "maps/mp/a.gsc", Arc::from(&b"stock"[..]));
+        put(&mut stock.raw, 4, "maps/mp/b.gsc", Arc::from(&b"stock"[..]));
+        let mut map = Layer::default();
+        put(
+            &mut map.raw,
+            MAP_TAG,
+            "maps/mp/a.gsc",
+            Arc::from(&b"map"[..]),
+        );
+        let mut modded = Layer::default();
+        put(
+            &mut modded.raw,
+            MOD_TAG,
+            "maps/mp/A.gsc",
+            Arc::from(&b"mod"[..]),
+        );
+        stock.merge(&modded);
+        map.merge(&modded);
+        let text = |l: &Layer, n: &str| get(&l.raw, n).map(|b| b.to_vec());
+        assert_eq!(text(&map, "maps/mp/a.gsc").unwrap(), b"mod");
+        assert_eq!(text(&stock, "maps/mp/a.gsc").unwrap(), b"mod");
+        assert_eq!(text(&stock, "maps/mp/b.gsc").unwrap(), b"stock");
+    }
 
     #[test]
     fn the_gun_changes_hands_at_the_gunhand_notetracks() {

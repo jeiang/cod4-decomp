@@ -114,8 +114,8 @@ pub fn run(
     views: usize,
     out: Option<&Path>,
 ) -> Result<(Value, Vec<String>), String> {
-    let lib = Library::load(install, map)?;
-    let data = MapData::load(install, map).map_err(|e| format!("{e:?}"))?;
+    let lib = Library::load(install, "", map)?;
+    let data = MapData::load(install, "", map).map_err(|e| format!("{e:?}"))?;
     let def = lib
         .content
         .weapon(WEAPON)

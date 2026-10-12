@@ -20,6 +20,7 @@ pub struct Config {
     pub gametype: Option<String>,
     pub rotation: Option<String>,
     pub port: u16,
+    pub game: String,
     pub dvars: Vec<(String, String)>,
 }
 

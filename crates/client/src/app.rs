@@ -21,7 +21,6 @@ use crate::showcase::Showcase;
 use crate::ui::UiKey;
 use crate::ui::loading::LoadingView;
 use crate::video::Recorder;
-use assets::vfs::Vfs;
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, TextureCache, View};
 use serde_json::{Value, json};
@@ -67,7 +66,7 @@ pub fn run(cli: Cli) -> Result<(), String> {
         None
     } else {
         Some(
-            MapData::load(&cli.install, &cli.map)
+            MapData::load(&cli.install, &cli.game, &cli.map)
                 .map_err(|e| format!("cannot load {}: {e}", cli.map))?,
         )
     };
@@ -659,8 +658,7 @@ impl Viewer {
         if gpu.lost().is_some() {
             return Err(gpu.explain("the window's surface could not be configured"));
         }
-        let vfs = Vfs::open_stock(&self.cli.install, 0)
-            .map_err(|e| format!("cannot open the install: {e}"))?;
+        let vfs = loader::open_vfs(&self.cli.install, &self.cli.game)?;
         // Native warms it again once the library is loaded (see below); the browser builds its pipelines by frames.
         #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut renderer = match &self.map {
@@ -705,7 +703,7 @@ impl Viewer {
         let showcase = match self.cli.show_models {
             Some(n) => {
                 let t = Instant::now();
-                let mut lib = Library::load(&self.cli.install, &self.cli.map)?;
+                let mut lib = Library::load(&self.cli.install, &self.cli.game, &self.cli.map)?;
                 let r = renderer.as_ref().ok_or("no map")?;
                 let w = &r.scene.world;
                 let collision = r
@@ -752,6 +750,7 @@ impl Viewer {
                             gametype: self.cli.gametype.clone(),
                             rotation: None,
                             port: 0,
+                            game: self.cli.game.clone(),
                             dvars: Vec::new(),
                         },
                     )?;
@@ -765,7 +764,7 @@ impl Viewer {
                     a
                 }
             };
-            let lib = Library::load(&self.cli.install, &self.cli.map)?;
+            let lib = Library::load(&self.cli.install, &self.cli.game, &self.cli.map)?;
             // What the match draws that the map does not hold (players, weapons) gets its pipelines now, not at
             // first sight; what the scripts then dress players in is compiled beside the frames.
             #[cfg(not(target_arch = "wasm32"))]
@@ -784,6 +783,7 @@ impl Viewer {
                 self.cli.autoplay,
                 crate::sound::ClientSound::start(
                     &self.cli.install,
+                    &self.cli.game,
                     &self.cli.map,
                     !self.cli.no_sound,
                 ),
@@ -794,9 +794,10 @@ impl Viewer {
             }
             net = Some(n);
         }
-        let install = server::content::Install::open(&self.cli.install)
+        let install = server::content::Install::open_game(&self.cli.install, &self.cli.game)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         let mut input = Input::new(self.cli.config_dir.clone(), Some(&install.vfs));
+        input.cvars.set("fs_game", &self.cli.game, false);
         let demo_dir = input
             .config_dir()
             .unwrap_or_else(|| self.cli.install.clone())
@@ -1167,8 +1168,7 @@ impl Viewer {
                 .to_string();
             begin_load(&self.cli, st, &name, &gametype, loader::Server::Keep);
         } else if let Some(map) = &self.map {
-            let vfs = Vfs::open_stock(&self.cli.install, 0)
-                .map_err(|e| format!("cannot open the install: {e}"))?;
+            let vfs = loader::open_vfs(&self.cli.install, &game_of(&st.input))?;
             let scene = Scene::new(&gpu, map)?;
             let gfx = Gfx::from_cvars(&st.input.cvars);
             let mut r = Renderer::new(
@@ -1935,8 +1935,15 @@ impl Viewer {
                         .and_then(|a| serverlist::query(a, JOIN_QUERY).map(|e| (a, e)));
                     match found {
                         Ok((a, e)) => {
+                            // The server's mod is the client's too (`CL_SystemInfoChanged` sets `fs_game`).
+                            if let Err(why) =
+                                follow_server_game(&self.cli, &mut self.map, st, &e.game)
+                            {
+                                show_error(st, &why);
+                                continue;
+                            }
                             #[cfg(not(target_arch = "wasm32"))]
-                            if crate::download::missing(&self.cli.install, &e.map) {
+                            if crate::download::missing(&self.cli.install, &e.game, &e.map) {
                                 // The install lacks the server's map: fetch it first, if the player allows it.
                                 if st
                                     .input
@@ -2030,14 +2037,22 @@ impl Viewer {
                         n.send_command(&format!("menuresponse {menu} {response}"));
                     }
                 }
-                Action::VidRestart => vid_restart(&self.cli, st),
+                Action::VidRestart => {
+                    vid_restart(&self.cli, st);
+                    restart_files(&self.cli, st);
+                }
                 Action::Console(line) => console_action(st, &line),
                 // Menu sounds live in the zones of the front end (`code_post_gfx`), which the match's tables
                 // do not load, so they have their own small sound system.
                 Action::SoundLoop(alias) if !self.cli.no_sound => {
                     st.menu_sound
                         .get_or_insert_with(|| {
-                            crate::sound::ClientSound::start(&self.cli.install, "", true)
+                            crate::sound::ClientSound::start(
+                                &self.cli.install,
+                                &game_of(&st.input),
+                                "",
+                                true,
+                            )
                         })
                         .menu_loop(&alias);
                 }
@@ -2051,7 +2066,12 @@ impl Viewer {
                     if !self.cli.no_sound {
                         st.menu_sound
                             .get_or_insert_with(|| {
-                                crate::sound::ClientSound::start(&self.cli.install, "", true)
+                                crate::sound::ClientSound::start(
+                                    &self.cli.install,
+                                    &game_of(&st.input),
+                                    "",
+                                    true,
+                                )
                             })
                             .play_ui(&alias);
                     }
@@ -3163,6 +3183,66 @@ fn dynamic_light(l: &fx::Light, spot: &render::SpotParams) -> Option<render::Dyn
     }
 }
 
+/// `FS_Restart` after `fs_game` changed: the menus run the mod now in the cvar (not while a match runs: it applies at the
+/// next restart). A mod that cannot be opened is dropped from the cvar.
+fn restart_files(cli: &Cli, st: &mut State) {
+    let Some(sh) = st.shell.as_mut() else { return };
+    if st.net.is_some() || !sh.game_changed(&st.input) {
+        return;
+    }
+    let game = game_of(&st.input);
+    let size = (st.config.width, st.config.height);
+    let restarted = server::content::Install::open_game(&cli.install, &game)
+        .map_err(|e| format!("cannot open the install: {e}"))
+        .and_then(|install| sh.restart_files(&install, size, &mut st.input));
+    if let Err(why) = restarted {
+        st.input.cvars.set("fs_game", &sh.st.fs_game, false);
+        show_error(st, &why);
+        return;
+    }
+    // The menu sounds are read again, with the mod's.
+    st.menu_sound = None;
+}
+
+/// Before a join: the client runs the mod the server runs. Disconnects and restarts the file system when they differ;
+/// the mod must be installed (its folder under `mods/`), the client has no way to fetch one.
+fn follow_server_game(
+    cli: &Cli,
+    map_slot: &mut Option<MapData>,
+    st: &mut State,
+    game: &str,
+) -> Result<(), String> {
+    if game == game_of(&st.input) {
+        return Ok(());
+    }
+    if !assets::paths::valid_game(game) {
+        return Err(format!("The server runs an invalid mod ({game})."));
+    }
+    if !game.is_empty() && !assets::paths::game_dir(&cli.install, game) {
+        return Err(format!(
+            "You do not have the mod {game} this server is running."
+        ));
+    }
+    end_session(map_slot, st);
+    st.input.cvars.set("fs_game", game, false);
+    restart_files(cli, st);
+    if game_of(&st.input) == game {
+        Ok(())
+    } else {
+        Err(format!("Cannot run the mod {game}."))
+    }
+}
+
+/// `fs_game`, the mod the player runs: what `fs_game` holds when it is a mod folder, else none.
+pub fn game_of(input: &Input) -> String {
+    let game = input.cvars.get("fs_game").unwrap_or_default();
+    if assets::paths::valid_game(game) {
+        game.to_owned()
+    } else {
+        String::new()
+    }
+}
+
 /// `vid_restart`: the window, the present mode and the aspect take the graphics settings now; a running match's
 /// renderer takes the ones it can change live (shadows, specular, depth of field, glow, antialiasing), and the texture
 /// size and filtering wait for the next map, which loads its textures again.
@@ -3263,6 +3343,7 @@ fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: load
     let gfx = Gfx::from_cvars(&st.input.cvars);
     let req = loader::Request {
         install: cli.install.clone(),
+        game: game_of(&st.input),
         map: map.to_owned(),
         server,
         settings: gfx.settings(cli.settings),
@@ -3299,7 +3380,8 @@ fn finish_load(
         ms,
     } = loaded;
     let map = &load.map;
-    let sound = crate::sound::ClientSound::start(&cli.install, map, !cli.no_sound);
+    let sound =
+        crate::sound::ClientSound::start(&cli.install, &game_of(&st.input), map, !cli.no_sound);
     if let Some(g) = st.load_gaps.as_mut() {
         g.load_ms = Some(ms);
     }
@@ -3361,6 +3443,7 @@ fn listen_config(st: &State, map: &str, gametype: &str, bots: Option<usize>) -> 
         gametype: Some(gametype.to_owned()),
         rotation: Some(rotation(gametype, &maps, map)),
         port: listen::free_standard_port(),
+        game: game_of(&st.input),
         dvars: st.input.cvars.with_prefix("scr_"),
     }
 }

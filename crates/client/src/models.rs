@@ -195,11 +195,13 @@ pub struct Library {
 }
 
 impl Library {
-    /// Decodes `common_mp` and `map` of the install at `root`.
-    pub fn load(root: &Path, map: &str) -> Result<Library, String> {
-        let install = Install::open(root).map_err(|e| format!("cannot open the install: {e}"))?;
+    /// Decodes `common_mp`, the mod `game`'s `mod.ff` (`fs_game`; empty for none) and `map` of the install at `root`.
+    pub fn load(root: &Path, game: &str, map: &str) -> Result<Library, String> {
+        let install =
+            Install::open_game(root, game).map_err(|e| format!("cannot open the install: {e}"))?;
         let mut content = Content::for_client();
         content.load_zone(&install, "common_mp", 4)?;
+        content.load_mod(&install)?;
         content.load_map(&install, map)?;
         let ragdoll = match install.vfs.read("ragdoll.cfg") {
             Ok(Some(bytes)) => Def::parse(&String::from_utf8_lossy(&bytes)),
@@ -579,7 +581,8 @@ mod tests {
             eprintln!("COD4_PATH not set; skipping");
             return;
         };
-        let mut lib = Library::load(std::path::Path::new(&root), "mp_backlot").expect("content");
+        let mut lib =
+            Library::load(std::path::Path::new(&root), "", "mp_backlot").expect("content");
         let held = lib
             .content
             .weapon("m4_mp")
@@ -611,7 +614,8 @@ mod tests {
             eprintln!("COD4_PATH not set; untested");
             return;
         };
-        let mut lib = Library::load(std::path::Path::new(&root), "mp_backlot").expect("content");
+        let mut lib =
+            Library::load(std::path::Path::new(&root), "", "mp_backlot").expect("content");
         let set = lib
             .scripted_models(
                 "body_mp_arab_regular_assault",
@@ -673,7 +677,8 @@ mod tests {
             eprintln!("COD4_PATH not set; untested");
             return;
         };
-        let mut lib = Library::load(std::path::Path::new(&root), "mp_backlot").expect("content");
+        let mut lib =
+            Library::load(std::path::Path::new(&root), "", "mp_backlot").expect("content");
         assert!(!lib.ragdoll.is_empty(), "the install has a ragdoll.cfg");
         let set = lib.team_models(Team::Allies).expect("allied models");
         let mut p = lib.player(&set).expect("player");

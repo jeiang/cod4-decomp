@@ -29,7 +29,7 @@ fn main() {
     });
     let gpu = Arc::new(Gpu::new(None).unwrap());
     let t = std::time::Instant::now();
-    let data = MapData::load(install, &a[2]).unwrap();
+    let data = MapData::load(install, "", &a[2]).unwrap();
     let scene = Scene::new(&gpu, &data).expect("scene");
     let vfs = Vfs::open_stock(install, 0).unwrap();
     let mut r = Renderer::new(gpu.clone(), scene, &data, TextureCache::new(Some(vfs), 0));

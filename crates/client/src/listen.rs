@@ -37,6 +37,8 @@ pub struct Config {
     /// UDP port; 0 picks a free one. A menu-started server takes a standard port ([`crate::serverlist::PORTS`]) when one
     /// is free so the LAN list finds it.
     pub port: u16,
+    /// `fs_game`: the mod the server runs (the client's own), empty for stock; read once at boot.
+    pub game: String,
     /// Server dvars the player set on the client (`scr_*`: time and score limits, ...), applied before the map starts.
     pub dvars: Vec<(String, String)>,
 }
@@ -142,9 +144,12 @@ fn run(
     tx: &mpsc::Sender<Result<SocketAddr, String>>,
 ) -> Value {
     let started = || -> Result<(Server, SocketAddr), String> {
-        let args: Vec<String> = ["+set", "net_port", &cfg.port.to_string()]
+        let mut args: Vec<String> = ["+set", "net_port", &cfg.port.to_string()]
             .map(String::from)
             .to_vec();
+        if !cfg.game.is_empty() {
+            args.extend(["+set", "fs_game", &cfg.game].map(String::from));
+        }
         let mut s = Server::boot(install, &args, false)?;
         let addr = s.net_addr().ok_or("cannot bind a UDP socket")?;
         let gt = cfg.gametype.as_deref().unwrap_or("war");

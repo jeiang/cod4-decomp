@@ -20,6 +20,7 @@ pub mod menu;
 pub mod phys;
 pub mod sound;
 mod stream;
+pub mod testing;
 pub mod text;
 pub mod weapon;
 pub mod world;

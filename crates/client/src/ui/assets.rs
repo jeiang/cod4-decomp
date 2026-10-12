@@ -2,7 +2,8 @@
 //! What the menus draw from: the boot zones' menu lists, fonts, localized strings, string tables and materials.
 //!
 //! The original loads `code_post_gfx_mp`, `localized_code_post_gfx_mp`, `ui_mp`, `common_mp` and
-//! `localized_common_mp` at boot; the UI reads its assets from that set, by lower-case name.
+//! `localized_common_mp` at boot, then the running mod's `mod.ff` (`fs_game`); the UI reads its assets from that set,
+//! by lower-case name, a later zone's replacing an earlier one's.
 
 use assets::zone::gfx::Material;
 use assets::zone::menu::MenuDef;
@@ -81,6 +82,9 @@ impl UiAssets {
         for zone in UI_ZONES {
             a.load_zone(install, zone)?;
         }
+        if let Some(path) = ::assets::paths::mod_zone(&install.root, &install.game) {
+            a.load_file(&path, "mod")?;
+        }
         Ok(a)
     }
 
@@ -107,7 +111,11 @@ impl UiAssets {
         let path = install
             .zone_path(zone)
             .ok_or_else(|| format!("Could not find zone '{zone}'"))?;
-        let file = ::assets::fs::buffered(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        self.load_file(&path, zone)
+    }
+
+    fn load_file(&mut self, path: &std::path::Path, zone: &str) -> Result<(), String> {
+        let file = ::assets::fs::buffered(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let z = Zone::open(file).map_err(|e| format!("{zone}: {e}"))?;
         z.decode(&UiFilter, |a| self.add(a))
             .map_err(|e| format!("{zone}: {e}"))?;
@@ -124,7 +132,7 @@ impl UiAssets {
                 for m in l.menus.iter().flatten() {
                     if let Some(n) = &m.window.name {
                         let k = n.to_ascii_lowercase();
-                        if is_hud {
+                        if is_hud && !self.hud_order.contains(&k) {
                             self.hud_order.push(k.clone());
                         }
                         if self.menus.insert(k.clone(), m.clone()).is_none() {

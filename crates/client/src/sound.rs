@@ -99,9 +99,10 @@ pub struct Who<'a> {
 }
 
 impl ClientSound {
-    /// Starts loading the sound tables of `map`. `device = false` mixes without a sound card.
-    pub fn start(install: &Path, map: &str, device: bool) -> Self {
-        let state = Self::begin(install, map, device);
+    /// Starts loading the sound tables of `map` (and of the mod `game`, `fs_game`; empty for none). `device = false`
+    /// mixes without a sound card.
+    pub fn start(install: &Path, game: &str, map: &str, device: bool) -> Self {
+        let state = Self::begin(install, game, map, device);
         Self {
             state,
             device,
@@ -121,21 +122,21 @@ impl ClientSound {
 
     /// The browser has no threads to spare: the tables load here and now, once per map.
     #[cfg(target_arch = "wasm32")]
-    fn begin(install: &Path, map: &str, device: bool) -> State {
-        match load(install, map) {
+    fn begin(install: &Path, game: &str, map: &str, device: bool) -> State {
+        match load(install, game, map) {
             Ok(bank) => State::Ready(Box::new(Sound::new(bank, device))),
             Err(e) => State::Failed(e),
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn begin(install: &Path, map: &str, _: bool) -> State {
-        let (install, map) = (install.to_owned(), map.to_owned());
+    fn begin(install: &Path, game: &str, map: &str, _: bool) -> State {
+        let (install, game, map) = (install.to_owned(), game.to_owned(), map.to_owned());
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("sound-load".into())
             .spawn(move || {
-                let _ = tx.send(load(&install, &map));
+                let _ = tx.send(load(&install, &game, &map));
             });
         match spawned {
             Ok(_) => State::Loading(rx),
@@ -979,20 +980,23 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn load(install: &Path, map: &str) -> Result<Bank, String> {
-    let install = Install::open(install).map_err(|e| format!("cannot open the install: {e}"))?;
+fn load(install: &Path, game: &str, map: &str) -> Result<Bank, String> {
+    let install =
+        Install::open_game(install, game).map_err(|e| format!("cannot open the install: {e}"))?;
     let lang = LANGUAGES
         .iter()
         .position(|l| *l == install.language)
         .unwrap_or(0);
-    let vfs = Arc::new(Vfs::open_stock(&install.root, lang).map_err(|e| e.to_string())?);
+    let vfs = Arc::new(Vfs::open(&install.root, lang, game).map_err(|e| e.to_string())?);
     // No map: the menus' own tables (the front end's `mouse_click`, `mouse_over`, ... are in the SP code zone).
     let wanted: &[&str] = if map.is_empty() {
         &["code_post_gfx_mp", "code_post_gfx"]
     } else {
         &["code_post_gfx_mp", "localized_common_mp", map]
     };
-    let zones: Vec<PathBuf> = wanted.iter().filter_map(|z| install.zone_path(z)).collect();
+    let mut zones: Vec<PathBuf> = wanted.iter().filter_map(|z| install.zone_path(z)).collect();
+    // The mod's alias lists replace the stock ones of the same name.
+    zones.extend(assets::paths::mod_zone(&install.root, game));
     Bank::load(vfs, &zones)
 }
 
@@ -1301,8 +1305,8 @@ fn loop_selftest(cs: &mut ClientSound) -> Vec<(String, bool)> {
 /// Returns what was measured, or what failed.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
-    let bank = load(install, map).map_err(|e| vec![e])?;
-    let menus = load(install, "").map_err(|e| vec![format!("menu sounds: {e}")])?;
+    let bank = load(install, "", map).map_err(|e| vec![e])?;
+    let menus = load(install, "", "").map_err(|e| vec![format!("menu sounds: {e}")])?;
     let mut s = Sound::new(bank, false);
     s.set_listener([0.0; 3], 0.0);
     let mut bad = Vec::new();
@@ -1660,7 +1664,7 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     }
     // Movement events through the client's event path: each plays the alias for its own surface, a hard landing
     // adds the damage sound, and a Dead Silence player plays the `q` families.
-    match load(install, map) {
+    match load(install, "", map) {
         Ok(bank) => {
             let names = movement_selftest(bank);
             for (what, ok) in names {

@@ -20,7 +20,7 @@ fn spent_budget_skips_draws_until_warm_step_has_built_them() {
         eprintln!("skipped: no GPU adapter");
         return;
     };
-    let Ok(data) = MapData::load(&root, "mp_crash") else {
+    let Ok(data) = MapData::load(&root, "", "mp_crash") else {
         eprintln!("skipped: no mp_crash");
         return;
     };
