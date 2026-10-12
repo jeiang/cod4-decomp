@@ -178,6 +178,9 @@ fn a_mod_that_is_not_installed_fails_the_boot() {
     };
     let t = scratch(&root);
     for game in ["mods/nonexist", "Mods/x", "mods/../main"] {
-        assert!(boot(t.path(), &["+set", "fs_game", game]).is_err(), "{game}");
+        assert!(
+            boot(t.path(), &["+set", "fs_game", game]).is_err(),
+            "{game}"
+        );
     }
 }
