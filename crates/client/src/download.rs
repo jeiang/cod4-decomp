@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Fetching a map the server is playing and the install lacks (`cl_allowDownload`): a worker thread asks the server
-//! for the map's zone (and its loading screen's) over [`net::download`] and the window shows the loading screen with
-//! the bytes arrived meanwhile. The browser build has no files to put it in, so this is native only.
+//! for the map's zone, its loading screen's and its IWD over [`net::download`] and puts them in `usermaps/<map>/` (the
+//! layout of a custom map), and the window shows the loading screen with the bytes arrived meanwhile. The browser build has no files to put it in, so this is native only.
 
 use net::UdpTransport;
 use net::download::{Progress, fetch};
@@ -22,12 +22,31 @@ pub struct Download {
 }
 
 /// Whether the install at `root` lacks the zone of `map` (and could take it: it has a zone folder), looking where the
-/// mod `game` would have it too.
+/// mod `game` and a custom map's `usermaps/<map>` would have it.
 pub fn missing(root: &std::path::Path, game: &str, map: &str) -> bool {
     net::download::valid_name(map)
         && map.starts_with("mp_")
         && assets::paths::zone_file(root, game, map).is_none()
         && server::content::zone_dir(root).is_some()
+}
+
+/// Whether a custom map the install has lacks files the server may still give (its IWD, its loading screen): a download
+/// that stopped after the zone. A finished download leaves a marker, so a map that never had them is not asked for again.
+pub fn incomplete(root: &std::path::Path, game: &str, map: &str) -> bool {
+    if !net::download::valid_name(map) || !assets::paths::is_usermap(root, game, map) {
+        return false;
+    }
+    let Some(dir) = assets::paths::usermap_dir(root, map) else {
+        return false;
+    };
+    let has = |f: &str| assets::fs::exists(&dir.join(f));
+    // A finished download lists the files the server gave; one of them gone is fetched again, and a file the server
+    // refused is not listed, so not asked for again.
+    match assets::paths::usermap_marker(root, map).and_then(|m| assets::fs::read_to_string(m).ok())
+    {
+        Some(list) => list.lines().any(|f| !f.is_empty() && !has(f)),
+        None => !(has(&format!("{map}.iwd")) && has(&format!("{map}_load.ff"))),
+    }
 }
 
 impl Download {
@@ -38,8 +57,10 @@ impl Download {
         map: &str,
         gametype: &str,
     ) -> Result<Self, String> {
-        let dir = server::content::zone_dir(root)
+        server::content::zone_dir(root)
             .ok_or("the install has no zone folder to put the map in")?;
+        let dir = root.join("usermaps").join(map);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let progress = Arc::new(Progress::default());
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
@@ -57,6 +78,11 @@ impl Download {
             cancel,
             rx,
         })
+    }
+
+    /// Blocks until the worker is done (a direct `--connect`, which has no window to show progress in yet).
+    pub fn wait(self) -> Result<(), String> {
+        self.rx.recv().map_err(|e| e.to_string())?
     }
 
     /// The outcome, once the worker is done.
@@ -112,18 +138,92 @@ fn run(
 ) -> Result<(), String> {
     let mut t =
         UdpTransport::bind(SocketAddr::from(([0, 0, 0, 0], 0))).map_err(|e| e.to_string())?;
-    let load = format!("{map}_load");
-    for (name, optional) in [(map, false), (load.as_str(), true)] {
-        let dest: PathBuf = dir.join(format!("{name}.ff"));
+    let (load, iwd) = (format!("{map}_load"), format!("{map}.iwd"));
+    let mut given = String::new();
+    for (name, optional) in [(map, false), (load.as_str(), true), (iwd.as_str(), true)] {
+        let file = if name.ends_with(".iwd") {
+            name.to_owned()
+        } else {
+            format!("{name}.ff")
+        };
+        let dest: PathBuf = dir.join(file);
         if dest.exists() {
+            given.push_str(&format!(
+                "{}\n",
+                dest.file_name().unwrap().to_string_lossy()
+            ));
             continue;
         }
         progress.done.store(0, Ordering::Relaxed);
         progress.total.store(0, Ordering::Relaxed);
         match fetch(&mut t, server, name, &dest, progress, cancel) {
             Err(e) if optional && e == net::download::NOT_AVAILABLE => {}
-            r => r?,
+            r => {
+                r?;
+                given.push_str(&format!(
+                    "{}\n",
+                    dest.file_name().unwrap().to_string_lossy()
+                ));
+            }
         }
     }
+    std::fs::write(dir.join(format!("{map}.complete")), given).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{incomplete, missing};
+
+    #[test]
+    fn a_map_in_usermaps_or_the_mod_folder_is_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for f in [
+            "zone/english/mp_stock.ff",
+            "usermaps/mp_custom/mp_custom.ff",
+            "mods/m/mp_inmod.ff",
+        ] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
+        }
+        assert!(!missing(root, "", "mp_stock"));
+        assert!(!missing(root, "", "mp_custom"));
+        assert!(missing(root, "", "mp_inmod"), "the mod is not running");
+        assert!(!missing(root, "mods/m", "mp_inmod"));
+        assert!(missing(root, "", "mp_gone"));
+        // The zone is there but the IWD and loading zone never came: a download that stopped.
+        assert!(incomplete(root, "", "mp_custom"));
+        assert!(
+            !incomplete(root, "", "mp_stock"),
+            "a stock map is never fetched"
+        );
+        assert!(!incomplete(root, "mods/m", "mp_inmod"));
+        let dir = root.join("usermaps/mp_custom");
+        std::fs::write(dir.join("mp_custom.complete"), "mp_custom.ff\n").unwrap();
+        assert!(
+            !incomplete(root, "", "mp_custom"),
+            "finished, the server had no IWD"
+        );
+        std::fs::write(dir.join("mp_custom.iwd"), b"").unwrap();
+        std::fs::write(
+            dir.join("mp_custom.complete"),
+            "mp_custom.ff\nmp_custom.iwd\n",
+        )
+        .unwrap();
+        assert!(!incomplete(root, "", "mp_custom"));
+        std::fs::remove_file(dir.join("mp_custom.iwd")).unwrap();
+        assert!(
+            incomplete(root, "", "mp_custom"),
+            "a downloaded IWD that is gone is fetched again"
+        );
+        std::fs::remove_file(dir.join("mp_custom.complete")).unwrap();
+        std::fs::write(dir.join("mp_custom.iwd"), b"").unwrap();
+        std::fs::write(dir.join("mp_custom_load.ff"), b"").unwrap();
+        assert!(
+            !incomplete(root, "", "mp_custom"),
+            "installed by hand, whole"
+        );
+    }
 }

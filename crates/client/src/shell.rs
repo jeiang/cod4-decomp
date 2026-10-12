@@ -209,7 +209,7 @@ impl ShellState {
                 });
             }
         }
-        // A mod's own maps the tables do not list are offered under their file name.
+        // Custom maps (`usermaps/`, a mod's own) the tables do not list are offered under their file name.
         for name in ::assets::paths::custom_maps(&install.root, &install.game) {
             if !maps
                 .iter()
@@ -297,7 +297,7 @@ impl ShellState {
             servers: Default::default(),
             status_rows: Vec::new(),
             reselect_map: None,
-            vfs: ::assets::vfs::Vfs::open(&install.root, 0, &install.game).ok(),
+            vfs: ::assets::vfs::Vfs::open(&install.root, 0, &install.game, None).ok(),
             root: install.root.clone(),
             fs_game: install.game.clone(),
             mods: Vec::new(),
@@ -478,7 +478,7 @@ impl Shell {
         let mut st = ShellState::new(&assets, install);
         st.servers.load_favorites(input.config_dir());
         register_defaults(input);
-        let vfs = ::assets::vfs::Vfs::open(&install.root, 0, &install.game)
+        let vfs = ::assets::vfs::Vfs::open(&install.root, 0, &install.game, None)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         let mut shell = Shell {
             ui: Ui::new(assets, size),
@@ -500,7 +500,7 @@ impl Shell {
         format: wgpu::TextureFormat,
         install: &std::path::Path,
     ) -> Result<(), String> {
-        let vfs = ::assets::vfs::Vfs::open(install, 0, &self.st.fs_game)
+        let vfs = ::assets::vfs::Vfs::open(install, 0, &self.st.fs_game, None)
             .map_err(|e| format!("cannot open the install: {e}"))?;
         self.ui2d = Ui2d::new(gpu, format);
         self.cache = TextureCache::new(Some(vfs), 0);
@@ -526,7 +526,7 @@ impl Shell {
         assets.note_menu_materials();
         let (maps, map_sel, gametypes) = ShellState::catalog(&assets, install);
         let open = || {
-            ::assets::vfs::Vfs::open(&install.root, 0, &install.game)
+            ::assets::vfs::Vfs::open(&install.root, 0, &install.game, None)
                 .map_err(|e| format!("cannot open the install: {e}"))
         };
         self.cache = TextureCache::new(Some(open()?), 0);
@@ -3214,7 +3214,7 @@ mod tests {
         clear_stat_bits(&mut stats, -1, 1);
         clear_stat_bits(&mut stats, 9999, 1);
     }
-    /// A scratch install: the real `main` and `zone` linked in, a `mods/` of its own.
+    /// A scratch install: the real `main` and `zone` linked in, a `mods/` and a `usermaps/` of its own.
     #[cfg(unix)]
     struct Scratch(std::path::PathBuf);
 
@@ -3270,7 +3270,7 @@ mod tests {
             )]),
         );
         scratch.file("mods/beta/mod.ff", b"");
-        scratch.file("mods/alpha/mp_modown.ff", b"");
+        scratch.file("usermaps/mp_user/mp_user.ff", b"");
 
         // Stock first: nothing of the mod is there.
         let stock = Install::open(&scratch.0).unwrap();
@@ -3290,8 +3290,8 @@ mod tests {
         );
         let mut st = ShellState::new(&assets, &install);
         assert!(
-            st.maps.iter().any(|m| m.name == "mp_modown"),
-            "a map in the mod folder is offered"
+            st.maps.iter().any(|m| m.name == "mp_user"),
+            "a usermaps map is offered"
         );
         let mut ui = Ui::new(assets, (1280, 720));
         let mut input = Input::detached();

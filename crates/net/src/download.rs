@@ -36,7 +36,8 @@ const MAX_RETRIES: u32 = 25;
 /// Largest file a client accepts: above any stock zone, below what a hostile server could use to fill a disk or memory.
 pub const MAX_TOTAL: u64 = 256 << 20;
 
-/// A map name a client may ask for: lower-case letters, digits and `_`, so it cannot name a path.
+/// A map name a client may ask for (a custom map's IWD is that name and `.iwd`): lower-case letters, digits and `_`, so
+/// it cannot name a path.
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -166,7 +167,7 @@ fn challenge(
     Err("The server does not answer".into())
 }
 
-/// Downloads the map zone `name` from `server` into `dest` (written as `dest.part` and renamed when whole). Blocks
+/// Downloads the file `name` (a map zone, or a custom map's `<map>.iwd`) from `server` into `dest` (written as `dest.part` and renamed when whole). Blocks
 /// until it is done, fails or `cancel` is set; `progress` is updated as pieces arrive.
 pub fn fetch(
     t: &mut dyn Transport,
@@ -176,7 +177,9 @@ pub fn fetch(
     progress: &Progress,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let part = dest.with_extension("ff.part");
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    let part = std::path::PathBuf::from(part);
     let mut out = File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
     let result = fetch_into(t, server, name, &mut out, progress, cancel);
     drop(out);

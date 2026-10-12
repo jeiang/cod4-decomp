@@ -197,8 +197,9 @@ pub struct Library {
 impl Library {
     /// Decodes `common_mp`, the mod `game`'s `mod.ff` (`fs_game`; empty for none) and `map` of the install at `root`.
     pub fn load(root: &Path, game: &str, map: &str) -> Result<Library, String> {
-        let install =
+        let mut install =
             Install::open_game(root, game).map_err(|e| format!("cannot open the install: {e}"))?;
+        install.mount_usermap(map).map_err(|e| e.to_string())?;
         let mut content = Content::for_client();
         content.load_zone(&install, "common_mp", 4)?;
         content.load_mod(&install)?;

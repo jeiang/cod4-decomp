@@ -100,7 +100,8 @@ impl std::error::Error for LoadError {}
 
 impl MapData {
     /// Decode `<map>.ff`, `common_mp.ff` and `code_post_gfx_mp.ff` of the install at `install`, each from the mod
-    /// directory `game` (`fs_game`, empty for none), else `zone/<language>` ([`assets::paths::zone_file`]).
+    /// directory `game` (`fs_game`, empty for none), else `zone/<language>`, else `usermaps/<map>`
+    /// ([`assets::paths::zone_file`]).
     pub fn load(install: &Path, game: &str, map: &str) -> Result<MapData, LoadError> {
         let mut world = None;
         let mut com_world = None;

@@ -783,11 +783,12 @@ impl Server {
         if !self.game.cvars.bool("sv_allowDownload") {
             return net.refuse(from, "Downloads are not enabled on this server");
         }
-        // Only map zones (`mp_*` and their loading screens), named plainly: nothing else of the install is offered.
-        if !net::download::valid_name(name) || !name.starts_with("mp_") {
-            return net.refuse(from, net::download::NOT_AVAILABLE);
-        }
-        match self.install.zone_path(name) {
+        match download_path(
+            &self.install.root,
+            &self.install.game,
+            self.game.content.map_name.as_deref(),
+            name,
+        ) {
             Some(path) => net.send_file(from, &path, offset),
             None => net.refuse(from, net::download::NOT_AVAILABLE),
         }
@@ -2037,6 +2038,9 @@ impl Server {
         self.say(&format!("Server: {map}\n"));
         let restart = game_var.is_some();
         if !restart || self.game.content.map_name.as_deref() != Some(map) {
+            self.install
+                .mount_usermap(map)
+                .map_err(|e| format!("ERROR: {e}"))?;
             self.game
                 .content
                 .load_map(&self.install, map)
@@ -2806,6 +2810,22 @@ fn quote_word(w: &str) -> String {
     }
 }
 
+/// The file a `getfile` for `name` is given: only map zones (`mp_*` and their loading screens) and a custom map's IWD
+/// (`mp_*.iwd`, only the running map's), named plainly; nothing else of the install is offered.
+fn download_path(root: &Path, game: &str, running: Option<&str>, name: &str) -> Option<PathBuf> {
+    match name.strip_suffix(".iwd") {
+        // Only the running map's: that is the one a joining client needs.
+        Some(map) => assets::paths::usermap_iwd(root, map).filter(|_| {
+            net::download::valid_name(map)
+                && map.starts_with("mp_")
+                && running.is_some_and(|r| r.eq_ignore_ascii_case(map))
+        }),
+        None => (net::download::valid_name(name) && name.starts_with("mp_"))
+            .then(|| assets::paths::zone_file(root, game, name))
+            .flatten(),
+    }
+}
+
 fn known_maps(install: &Install) -> Vec<String> {
     assets::paths::maps(&install.root, &install.game)
 }
@@ -2848,7 +2868,44 @@ fn rss_line() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RotationPlan, flood_drops, ping_field, plain_text, plan_rotation};
+    use super::{RotationPlan, download_path, flood_drops, ping_field, plain_text, plan_rotation};
+
+    #[test]
+    fn a_getfile_gives_a_maps_zones_and_a_custom_maps_iwd_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for f in [
+            "zone/english/mp_stock.ff",
+            "zone/english/common_mp.ff",
+            "usermaps/mp_custom/mp_custom.ff",
+            "usermaps/mp_custom/mp_custom_load.ff",
+            "usermaps/mp_custom/mp_custom.iwd",
+            "main/iw_00.iwd",
+        ] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"").unwrap();
+        }
+        let file = |n: &str| {
+            download_path(root, "", Some("mp_custom"), n).map(|p| p.file_name().unwrap().to_owned())
+        };
+        for name in ["mp_stock", "mp_custom", "mp_custom_load", "mp_custom.iwd"] {
+            assert!(file(name).is_some(), "{name}");
+        }
+        assert!(
+            download_path(root, "", Some("mp_stock"), "mp_custom.iwd").is_none(),
+            "the IWD of a map that is not running"
+        );
+        for name in [
+            "common_mp",
+            "iw_00.iwd",
+            "mp_stock.iwd",
+            "../mp_custom.iwd",
+            "mp_gone",
+        ] {
+            assert!(file(name).is_none(), "{name}");
+        }
+    }
 
     #[test]
     fn the_rotation_skips_a_word_it_does_not_know_and_goes_on() {

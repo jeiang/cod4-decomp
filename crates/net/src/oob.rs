@@ -45,7 +45,7 @@ pub enum Oob {
     },
     /// `print\n<text>`: console output the server redirected to the sender of an `rcon`.
     Print(String),
-    /// `getfile`: asks for the bytes of the map zone `name` from `offset` on. The server answers with up to
+    /// `getfile`: asks for the bytes of the map zone `name` (or the custom map IWD `<map>.iwd`) from `offset` on. The server answers with up to
     /// [`crate::download::WINDOW`] [`Oob::FileChunk`]s, or an [`Oob::Error`].
     GetFile {
         challenge: u32,
