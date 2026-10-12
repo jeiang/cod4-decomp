@@ -164,6 +164,37 @@ fn later_sorted_iwd_wins_and_main_rejects_non_iw() {
 }
 
 #[test]
+fn main_accepts_the_cod4x_exempt_iwd_names() {
+    let t = Tmp::new();
+    t.iwd("main/iw_00.iwd", &[]);
+    t.iwd("main/jcod4x_00.iwd", &[("j_only.cfg", b"j")]);
+    t.iwd("main/XBASE_00.iwd", &[("x_only", b"x")]);
+    t.iwd("main/xbase.iwd", &[("no_underscore", b"n")]);
+    let v = Vfs::open_stock(&t.0, 0).unwrap();
+    assert_eq!(get(&v, "j_only.cfg"), "j");
+    assert_eq!(get(&v, "x_only"), "x");
+    assert!(v.read("no_underscore").unwrap().is_none());
+    assert_eq!(v.names_with_ext(".cfg"), ["j_only.cfg"]);
+}
+
+#[test]
+fn lookups_cannot_leave_the_search_path() {
+    let t = Tmp::new();
+    t.iwd("main/iw_00.iwd", &[]);
+    t.file("secret.cfg", b"outside");
+    t.file("main/inside.cfg", b"inside");
+    let v = Vfs::open_stock(&t.0, 0).unwrap();
+    assert_eq!(get(&v, "inside.cfg"), "inside");
+    assert!(v.read("../secret.cfg").unwrap().is_none());
+    assert!(v.read("sub/../../secret.cfg").unwrap().is_none());
+    assert!(
+        v.read(&t.0.join("secret.cfg").to_string_lossy())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn main_without_iwds_is_an_error() {
     let t = Tmp::new();
     t.iwd("main/zz.iwd", &[("a", b"")]);

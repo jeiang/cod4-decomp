@@ -40,6 +40,16 @@ const STATSYNC_MAX_PAIRS: usize = 64;
 /// The least time between one person's client commands while `sv_floodProtect` is on.
 const FLOOD_MS: i32 = 800;
 
+/// `Cmd_MenuResponse_f`: a client's `menuresponse <server id> <menu> <response>` as the script notify's arguments.
+/// None when the server id is not this level's (a menu the player answered across a map change: dropped). Anything
+/// but three arguments reaches the scripts as the menu `""` and the response `"bad"`.
+fn menu_response_args(server_id: i32, argv: &[String]) -> Option<[String; 2]> {
+    let [_, id, menu, response] = argv else {
+        return Some([String::new(), "bad".into()]);
+    };
+    (cvar::parse_int(id) == server_id).then(|| [menu.clone(), response.clone()])
+}
+
 /// What a person typed as the text of a chat line: no control characters, which steer the localizer.
 fn plain_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
@@ -1164,17 +1174,17 @@ impl Server {
                 let text = format!("\x15{}", plain_text(&argv[1..].join(" ")));
                 self.game.chat(slot, &text, cmd == "say_team");
             }
-            Some("menuresponse") if argv.len() >= 3 => {
-                if let Some(run) = self.run.as_mut() {
+            Some("menuresponse") => {
+                if let Some(args) = menu_response_args(self.game.server_id, &argv)
+                    && let Some(run) = self.run.as_mut()
+                {
                     run.vm.notify_entity(
                         slot,
                         "menuresponse",
-                        &[Value::str(&argv[1]), Value::str(&argv[2])],
+                        &[Value::str(&args[0]), Value::str(&args[1])],
                     );
                 }
             }
-            // A response without a menu and an answer is nothing to the scripts.
-            Some("menuresponse") => {}
             // The client's profile stats (`statsync <index> <value> ...`): the person's own, as the
             // original's stats file is kept on the client.
             Some("statsync") => {
@@ -2931,9 +2941,29 @@ mod tests {
     use super::may_speak;
     use super::{
         PERK_PARABOLIC, RotationPlan, VoiceRules, download_path, flood_drops, hears_voice,
-        ping_field, plain_text, plan_rotation,
+        menu_response_args, ping_field, plain_text, plan_rotation,
     };
     use crate::client::{Client, Conn, Session, Team};
+
+    #[test]
+    fn a_menu_response_from_an_earlier_level_is_dropped() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let answer = menu_response_args(
+            7,
+            &v(&["menuresponse", "7", "team_marinesopfor", "autoassign"]),
+        );
+        assert_eq!(
+            answer,
+            Some(["team_marinesopfor".into(), "autoassign".into()])
+        );
+        assert_eq!(
+            menu_response_args(8, &v(&["menuresponse", "7", "m", "r"])),
+            None
+        );
+        let bad = Some([String::new(), "bad".to_string()]);
+        assert_eq!(menu_response_args(7, &v(&["menuresponse", "m", "r"])), bad);
+        assert_eq!(menu_response_args(7, &v(&["menuresponse"])), bad);
+    }
 
     fn player(num: u16, team: Team, session: Session) -> Client {
         let mut c = Client::new(num, false, format!("p{num}"));

@@ -587,6 +587,11 @@ impl Game {
         let time = self.level.time;
         let max_clients = self.max_clients as u16;
         self.release_turret(n);
+        // The deadline a spawn starts with is the limit's; with none, the disabled path's minute.
+        let wait = match self.cvars.int("g_inactivity") {
+            limit if limit > 0 => limit.saturating_mul(1000),
+            _ => 60_000,
+        };
         let Some(c) = self.client_mut(n) else { return };
         let keep = c.ps.e_flags & 0x10_0002;
         let spawn_count = c.spawn_count + 1;
@@ -606,7 +611,7 @@ impl Game {
         c.last_weapon = 0;
         c.spawn_count = spawn_count;
         c.last_spawn_time = time;
-        (c.inactivity_at, c.inactivity_warned) = (time + 60_000, false);
+        (c.inactivity_at, c.inactivity_warned) = (time.saturating_add(wait), false);
         c.last_stand = false;
         c.last_stand_time = 0;
         // Blood the last life's killing blow left is not the new life's.
@@ -1312,5 +1317,33 @@ mod spectate_tests {
     fn spectate_names_map_to_bits() {
         assert_eq!(spec::from_name("freelook"), Some(spec::FREELOOK));
         assert_eq!(spec::from_name("both"), None);
+    }
+}
+
+#[cfg(test)]
+mod spawn_inactivity_tests {
+    use super::*;
+    use crate::content::Content;
+    use crate::cvar::Cvars;
+
+    #[test]
+    fn a_spawned_player_is_dropped_after_g_inactivity_not_a_minute() {
+        let p = gsc::compile(
+            &[("t.gsc", "main() {}")],
+            &gsc::Builtins::stock_mp(),
+            gsc::Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(p).unwrap();
+        for (limit, expect) in [("20", 20_000), ("0", 60_000)] {
+            let mut g = Game::new(Cvars::new(), Content::default());
+            g.cvars.set("g_inactivity", limit);
+            g.reset_level(4);
+            let n = g.connect_client(&mut vm, true, "Ann").expect("slot");
+            g.client_mut(n).unwrap().conn = Conn::Connected;
+            g.client_spawn(&mut vm, n, [0.0; 3], [0.0; 3]);
+            let at = g.client(n).unwrap().inactivity_at;
+            assert_eq!(at, g.level.time + expect, "g_inactivity {limit}");
+        }
     }
 }

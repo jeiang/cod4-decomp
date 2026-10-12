@@ -20,7 +20,7 @@
 //! `*_at` helpers of [`HudElem`].
 //!
 //! Client to server, the only UI command is `menuresponse <menu name> <response>`
-//! ([`menu_response`]); the server maps it to the script `menuresponse` notify.
+//! ([`menu_response`]); the server maps it to the script `menuresponse` notify (the client adds the level's server id).
 
 use crate::bits::{BitReader, BitWriter, Overflow};
 use crate::field::{Field, Kind, changed_count, read_delta, write_delta};
@@ -1070,6 +1070,15 @@ pub struct AutoJoin {
     classes: usize,
 }
 
+/// Puts the level's server id after the verb of a [`menu_response`] (`menuresponse <server id> <menu> <response>`);
+/// any other command stays as it is.
+pub fn stamp_menu_response(cmd: &str, server_id: i32) -> String {
+    match cmd.strip_prefix("menuresponse ") {
+        Some(rest) => format!("menuresponse {server_id} {rest}"),
+        None => cmd.to_owned(),
+    }
+}
+
 /// The stock classes a script `menuresponse "changeclass"` accepts.
 pub const STOCK_CLASSES: [&str; 5] = [
     "assault_mp",
@@ -1421,6 +1430,17 @@ impl ClientUiState {
         &self.objectives
     }
 
+    /// `sv_serverid` from the system info: which start of the level this is (0 when not told yet).
+    pub fn server_id(&self) -> i32 {
+        let mut kv = self.config(cs::SYSTEMINFO).split('\\').skip(1);
+        while let (Some(k), Some(v)) = (kv.next(), kv.next()) {
+            if k.eq_ignore_ascii_case("sv_serverid") {
+                return v.trim().parse().unwrap_or(0);
+            }
+        }
+        0
+    }
+
     /// The configstring at `index` (empty when unset or out of range).
     pub fn config(&self, index: u16) -> &str {
         self.cs.get(usize::from(index)).map_or("", String::as_str)
@@ -1488,6 +1508,23 @@ impl ClientUiState {
 mod tests {
     use super::*;
     use crate::Snapshot;
+
+    #[test]
+    fn a_menu_response_carries_the_level_it_was_answered_in() {
+        let mut ui = ClientUiState::new();
+        assert_eq!(ui.server_id(), 0);
+        ui.apply(ServerCmd::ConfigStrings(vec![(
+            cs::SYSTEMINFO,
+            "\\sv_cheats\\1\\sv_serverid\\42".into(),
+        )]));
+        assert_eq!(ui.server_id(), 42);
+        let line = stamp_menu_response(&menu_response("changeclass", "assault_mp"), ui.server_id());
+        assert_eq!(
+            words(&line).unwrap(),
+            ["menuresponse", "42", "changeclass", "assault_mp"]
+        );
+        assert_eq!(stamp_menu_response("say hi", 42), "say hi");
+    }
 
     fn samples() -> Vec<ServerCmd> {
         vec![

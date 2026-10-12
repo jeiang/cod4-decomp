@@ -17,6 +17,8 @@ const COMMANDS: &[&str] = &[
     "connect",
     "devmap",
     "disconnect",
+    "dvardump",
+    "dvarlist",
     "exec",
     "map",
     "playdemo",
@@ -28,11 +30,40 @@ const COMMANDS: &[&str] = &[
     "set",
     "seta",
     "stoprecord",
+    "toggle",
     "unbind",
     "unbindall",
     "vid_restart",
     "vote",
+    "vstr",
 ];
+
+/// What a console word names: what Tab completes it from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arg {
+    Cvar,
+    Map,
+    Demo,
+    /// A config file of the install (`exec`).
+    Cfg,
+}
+
+/// A completion request: the names of `kind` that start with the lowercase `prefix`.
+pub struct Want<'a> {
+    pub kind: Arg,
+    pub prefix: &'a str,
+}
+
+/// What the first argument of a command names, if it completes.
+fn arg_kind(command: &str) -> Option<Arg> {
+    match command {
+        "map" | "devmap" => Some(Arg::Map),
+        "playdemo" | "demo" => Some(Arg::Demo),
+        "exec" => Some(Arg::Cfg),
+        "set" | "seta" | "sets" | "setu" | "toggle" | "vstr" | "setfromdvar" => Some(Arg::Cvar),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -104,7 +135,7 @@ impl Console {
     }
 
     /// One key. `complete` lists the names a console word may be completed to (cvars; the commands are known here).
-    pub fn key(&mut self, key: UiKey, complete: impl Fn(&str) -> Vec<String>) -> Option<Entered> {
+    pub fn key(&mut self, key: UiKey, complete: impl Fn(Want) -> Vec<String>) -> Option<Entered> {
         let console = self.mode == Mode::Console;
         let max = if console { 255 } else { CHAT_MAX };
         match key {
@@ -175,19 +206,44 @@ impl Console {
         None
     }
 
-    /// Tab: the first word becomes the longest start the commands and cvars that begin with it share.
-    fn complete_word(&mut self, cvars: &impl Fn(&str) -> Vec<String>) {
+    /// Tab: the first word becomes the longest start the commands and cvars that begin with it share; the word
+    /// after a command that takes a map, demo, config or cvar name completes to those.
+    fn complete_word(&mut self, complete: &impl Fn(Want) -> Vec<String>) {
         let line = self.field();
-        if line.contains(char::is_whitespace) || line.is_empty() {
+        if line.is_empty() {
             return;
         }
-        let want = line.to_ascii_lowercase();
-        let mut names: Vec<String> = COMMANDS
-            .iter()
-            .filter(|c| c.starts_with(&want))
-            .map(|c| (*c).to_owned())
-            .chain(cvars(&want))
-            .collect();
+        let (head, mut names) = match line.split_once(char::is_whitespace) {
+            None => {
+                let want = line.to_ascii_lowercase();
+                let names = COMMANDS
+                    .iter()
+                    .filter(|c| c.starts_with(&want))
+                    .map(|c| (*c).to_owned())
+                    .chain(complete(Want {
+                        kind: Arg::Cvar,
+                        prefix: &want,
+                    }))
+                    .collect();
+                (String::new(), names)
+            }
+            Some((command, rest)) => {
+                let Some(kind) = arg_kind(&command.to_ascii_lowercase()) else {
+                    return;
+                };
+                if rest.contains(char::is_whitespace) {
+                    return;
+                }
+                let prefix = rest.to_ascii_lowercase();
+                (
+                    format!("{command} "),
+                    complete(Want {
+                        kind,
+                        prefix: &prefix,
+                    }),
+                )
+            }
+        };
         names.sort();
         names.dedup();
         let Some(first) = names.first() else { return };
@@ -201,7 +257,7 @@ impl Console {
                     .count(),
             );
         }
-        let mut done = first[..common].to_owned();
+        let mut done = format!("{head}{}", &first[..common]);
         if names.len() == 1 {
             done.push(' ');
         }
@@ -233,8 +289,11 @@ const OWN_COMMANDS: &[&str] = &[
     "chatmodeteam",
     "connect",
     "devmap",
+    "demo",
     "disconnect",
     "drawvehicles",
+    "dvardump",
+    "dvarlist",
     "exec",
     "gocrouch",
     "goprone",
@@ -245,6 +304,7 @@ const OWN_COMMANDS: &[&str] = &[
     "quit",
     "r_applypicmip",
     "rcon",
+    "reconnect",
     "record",
     "seta",
     "selectstringtableentryindvar",
@@ -261,6 +321,7 @@ const OWN_COMMANDS: &[&str] = &[
     "statset",
     "statsetusingtable",
     "stoprecord",
+    "toggle",
     "toggleconsole",
     "togglefullscreen",
     "togglemenu",
@@ -268,6 +329,7 @@ const OWN_COMMANDS: &[&str] = &[
     "unbindall",
     "updatedvarsfromprofile",
     "vid_restart",
+    "vstr",
     "wait",
     "weapnext",
     "weapprev",
@@ -399,22 +461,40 @@ mod tests {
 
     #[test]
     fn tab_completes_commands_and_cvars_to_what_they_share() {
-        let cvars = |p: &str| {
-            ["cg_fov", "cg_fovscale"]
-                .into_iter()
-                .filter(|n| n.starts_with(p))
-                .map(str::to_owned)
+        let names = |w: Want| -> Vec<String> {
+            let all: &[&str] = match w.kind {
+                Arg::Cvar => &["cg_fov", "cg_fovscale"],
+                Arg::Map => &["mp_crossfire", "mp_crossroads", "mp_strike"],
+                Arg::Cfg => &["default_mp.cfg"],
+                Arg::Demo => &[],
+            };
+            all.iter()
+                .filter(|n| n.starts_with(w.prefix))
+                .map(|n| (*n).to_owned())
                 .collect()
         };
         let mut c = Console::default();
         c.toggle();
         type_in(&mut c, "cg_f");
-        c.key(UiKey::Tab, cvars);
+        c.key(UiKey::Tab, names);
         assert_eq!(c.field(), "cg_fov", "two names share cg_fov");
         c.clear();
         type_in(&mut c, "disc");
-        c.key(UiKey::Tab, cvars);
+        c.key(UiKey::Tab, names);
         assert_eq!(c.field(), "disconnect ", "one match completes the word");
+        // The word after `map` is a map, after `exec` a config file; a command with no such argument stays.
+        c.clear();
+        type_in(&mut c, "map mp_cr");
+        c.key(UiKey::Tab, names);
+        assert_eq!(c.field(), "map mp_cross", "two maps share mp_cross");
+        c.clear();
+        type_in(&mut c, "exec def");
+        c.key(UiKey::Tab, names);
+        assert_eq!(c.field(), "exec default_mp.cfg ");
+        c.clear();
+        type_in(&mut c, "say mp_cr");
+        c.key(UiKey::Tab, names);
+        assert_eq!(c.field(), "say mp_cr");
     }
 
     #[test]
