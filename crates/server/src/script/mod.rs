@@ -133,12 +133,22 @@ impl ScriptHost<'_> {
     /// Runs the script calls the game queued (`Scr_ExecEntThread`): each runs to its first
     /// wait before this returns, and may queue more. Errors are kept for the server's report.
     pub fn run_calls(&mut self, vm: &mut Vm) {
-        while !self.game.calls.is_empty() {
-            for c in std::mem::take(&mut self.game.calls) {
-                let this = c.this.map(|n| vm.entity(n, EntClass::Entity));
-                if let Err(e) = vm.call(&mut *self, c.func, this, &c.args) {
-                    self.game.nested_errors.push(e);
+        loop {
+            while !self.game.calls.is_empty() {
+                for c in std::mem::take(&mut self.game.calls) {
+                    let this = c.this.map(|n| vm.entity(n, EntClass::Entity));
+                    if let Err(e) = vm.call(&mut *self, c.func, this, &c.args) {
+                        self.game.nested_errors.push(e);
+                    }
                 }
+            }
+            // A test client a script added begins once its connect callback has run and is waiting for it.
+            let begins = std::mem::take(&mut self.game.pending_begin);
+            if begins.is_empty() {
+                break;
+            }
+            for n in begins {
+                self.game.client_begin(vm, n);
             }
         }
     }

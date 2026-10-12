@@ -203,7 +203,6 @@ pub struct Server {
     pub level_loads: u32,
     pub boot_ms: f64,
     pub ticks: u64,
-    bot_serial: u32,
     bot_shared: BotShared,
     /// While set, console output is collected here instead of printed (`rcon` replies).
     redirect: Option<String>,
@@ -524,7 +523,6 @@ impl Server {
             level_loads: 0,
             boot_ms: 0.0,
             ticks: 0,
-            bot_serial: 0,
             bot_shared: BotShared::default(),
             redirect: None,
             rcon_throttle: Throttle::default(),
@@ -2198,6 +2196,7 @@ impl Server {
         let level_main = find(&format!("maps/mp/{map}"), "main");
         let dispatch = Dispatch::new(&prog);
         let mut vm = Vm::new(prog).map_err(|e| format!("script load: {e}"))?;
+        vm.set_tick_rate(self.game.cvars.int("sv_fps").clamp(10, 1000) as u32);
         vm.set_loading(true);
         if let Some(g) = game_var {
             vm.set_game(g);
@@ -2510,12 +2509,12 @@ impl Server {
         }
         host.game.ensure_nav();
         for _ in 0..n {
-            let name = format!("bot{}", self.bot_serial);
+            let name = format!("bot{}", host.game.bot_serial);
             let Some(num) = host.game.connect_client(&mut run.vm, true, &name) else {
                 self.say("bots: no free client slot\n");
                 break;
             };
-            self.bot_serial += 1;
+            host.game.bot_serial += 1;
             host.run_calls(&mut run.vm);
             host.game.client_begin(&mut run.vm, num);
             host.game.clients[usize::from(num)].bot_brain = Some(Box::new(Brain::new(num)));

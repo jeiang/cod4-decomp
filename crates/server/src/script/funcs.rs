@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// `asin`, `acos`, `getsubstr`, `strtok`, `addtestclient`, `spawnturret` and `precacheturret` translated in part from KisakCOD (game_mp/g_scr_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Builtin functions (no entity receiver).
 
 use std::rc::Rc;
@@ -22,8 +23,6 @@ const fn r(f: FuncFn) -> Impl<FuncFn> {
     Real(f)
 }
 
-const M3: &str = "M3 bots, pmove, traces, weapons";
-const M7: &str = "M7 audio";
 const M8: &str = "M8 FX, decals, post";
 
 pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
@@ -103,11 +102,11 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ),
     (
         "asin",
-        r(|_, _, a| Ok(Value::Float(a.float(0)?.asin().to_degrees()))),
+        r(|_, _, a| Ok(Value::Float(unit_range(a.float(0)?)?.asin().to_degrees()))),
     ),
     (
         "acos",
-        r(|_, _, a| Ok(Value::Float(a.float(0)?.acos().to_degrees()))),
+        r(|_, _, a| Ok(Value::Float(unit_range(a.float(0)?)?.acos().to_degrees()))),
     ),
     (
         "atan",
@@ -210,7 +209,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
         "precachelocationselector",
         r(|g, _, a| precache(g, a, Table::Material)),
     ),
-    ("precacheturret", r(|_, _, _| Ok(Value::Undefined))),
+    ("precacheturret", r(precache_turret)),
     ("loadfx", r(load_fx)),
     // entities and world
     ("getent", r(get_ent)),
@@ -312,7 +311,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
         "isvalidgametype",
         r(|g, _, a| Ok(bool_v(g.valid_gametype(a.string(0)?)))),
     ),
-    ("addtestclient", Later("M3 bots")),
+    ("addtestclient", r(add_test_client)),
     ("objective_add", r(uicmd::objective_add)),
     ("objective_delete", r(uicmd::objective_delete)),
     ("objective_state", r(uicmd::objective_state)),
@@ -347,9 +346,12 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("musicplay", Real(super::sound::music_play)),
     ("musicstop", Real(super::sound::music_stop)),
     ("soundfade", Real(super::sound::sound_fade)),
-    ("playrumbleonposition", Later(M7)),
-    ("playrumblelooponposition", Later(M7)),
-    ("stopallrumbles", Later(M7)),
+    ("playrumbleonposition", r(|_, _, _| Ok(Value::Undefined))),
+    (
+        "playrumblelooponposition",
+        r(|_, _, _| Ok(Value::Undefined)),
+    ),
+    ("stopallrumbles", r(|_, _, _| Ok(Value::Undefined))),
     // collision, weapons, bots
     ("bullettrace", r(bullet_trace)),
     ("bullettracepassed", r(bullet_trace_passed)),
@@ -358,7 +360,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ("playerphysicstrace", r(player_physics_trace)),
     ("spawnhelicopter", r(spawn_helicopter)),
     ("spawnplane", r(spawn_plane)),
-    ("spawnturret", Later(M3)),
+    ("spawnturret", r(spawn_turret)),
 ];
 
 /// `Com_SurfaceTypeToName`: the surface type (bits 20..24 of the surface flags) as the scripts
@@ -669,23 +671,22 @@ fn set_archive(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
-fn get_dvar(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    let n = a.string(0)?;
-    match g.cvars.get(n) {
-        Some(v) => Ok(Value::str(&v.value)),
-        None => Ok(a.opt(1).cloned().unwrap_or_else(|| Value::str(""))),
+/// `asin` and `acos` take `[-1, 1]` and end the thread on anything else (`GScr_asin`).
+fn unit_range(x: f32) -> Result<f32, String> {
+    if (-1.0..=1.0).contains(&x) {
+        Ok(x)
+    } else {
+        Err(format!("{} out of range", super::args::format_float(x)))
     }
 }
 
+/// A missing dvar reads as "" (and 0); the stock builtins ignore any second argument.
+fn get_dvar(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    Ok(Value::str(g.cvars.string(a.string(0)?)))
+}
+
 fn dvar_typed(g: &mut Game, a: Args, f: fn(&str) -> Value) -> R {
-    let n = a.string(0)?;
-    match g.cvars.get(n) {
-        Some(v) => Ok(f(&v.value)),
-        None => Ok(match a.opt(1) {
-            Some(d) => d.clone(),
-            None => f(""),
-        }),
-    }
+    Ok(f(g.cvars.string(a.string(0)?)))
 }
 
 fn set_dvar(g: &mut Game, _: &mut Vm, a: Args) -> R {
@@ -697,6 +698,9 @@ fn set_dvar(g: &mut Game, _: &mut Vm, a: Args) -> R {
         Value::Vector(v) => display(&Value::Vector(*v)),
         o => return Err(format!("type {} is not a string", o.type_name())),
     };
+    if !n.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+        return Err(format!("Dvar {n} has an invalid dvar name"));
+    }
     g.script_set_dvar(n, &v);
     Ok(Value::Undefined)
 }
@@ -855,13 +859,21 @@ fn point_on_segment(_: &mut Game, _: &mut Vm, a: Args) -> R {
     ]))
 }
 
+/// The original's temporary string buffer for `getsubstr` and `strtok`: 1024 bytes.
+const MAX_SUBSTR: usize = 1024;
+
 fn get_substr(_: &mut Game, _: &mut Vm, a: Args) -> R {
     let s = a.string(0)?;
     let start = a.int(1)?.max(0) as usize;
     let end = match a.opt(2) {
-        Some(_) => (a.int(2)?.max(0) as usize).min(s.len()),
-        None => s.len(),
+        Some(_) => a.int(2)?.max(0) as usize,
+        None => usize::MAX,
     };
+    // The original copies into a 1024-byte buffer and refuses to go on once it is full.
+    if end.saturating_sub(start) > MAX_SUBSTR && s.len() >= start + MAX_SUBSTR {
+        return Err("string too long".into());
+    }
+    let end = end.min(s.len());
     if start >= end {
         return Ok(Value::str(""));
     }
@@ -878,6 +890,9 @@ fn str_tok(_: &mut Game, _: &mut Vm, a: Args) -> R {
         .filter(|t| !t.is_empty())
         .enumerate()
     {
+        if t.len() >= MAX_SUBSTR {
+            return Err("string too long".into());
+        }
         out.set(Key::Int(i as i32), Value::str(t));
     }
     Ok(Value::Array(Rc::new(out)))
@@ -1291,6 +1306,65 @@ fn spawn_helicopter(g: &mut Game, vm: &mut Vm, a: Args) -> R {
         a.string(3)?,
         a.string(4)?,
     )?;
+    Ok(g.entity_value(vm, n))
+}
+
+/// `addtestclient()`: a test client joins and the new player entity comes back, or nothing when the server is full.
+/// As in the original it has no brain: it stands still while the `TestClient` script picks its team and class (only
+/// `bots N` makes roaming bots). Unlike the original, which runs the connect callback and `begin` before this
+/// returns, both wait until the calling thread yields (`ScriptHost::run_calls`).
+fn add_test_client(g: &mut Game, vm: &mut Vm, _: Args) -> R {
+    let name = format!("bot{}", g.bot_serial);
+    let Some(n) = g.connect_client(vm, true, &name) else {
+        return Ok(Value::Undefined);
+    };
+    g.bot_serial += 1;
+    g.pending_begin.push(n);
+    Ok(g.entity_value(vm, n))
+}
+
+/// The most turrets the level holds (`turretInfo[32]`).
+const MAX_TURRETS: usize = 32;
+
+/// `precacheturret(weaponinfo)`: registers a turret's weapon; only the level's first run may.
+fn precache_turret(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if !g.level.initializing {
+        return Err(
+            "precacheTurret must be called before any wait statements in the level script\n".into(),
+        );
+    }
+    let n = a.string(0)?;
+    if g.content.weapon(n).is_none() {
+        return Err(format!("bad weaponinfo '{n}' specified for turret"));
+    }
+    g.items.index(n);
+    Ok(Value::Undefined)
+}
+
+/// `spawnturret(classname, origin, weaponinfo)`: a turret players can mount; a script sets its model and angles.
+fn spawn_turret(g: &mut Game, vm: &mut Vm, a: Args) -> R {
+    let (class, origin, weapon) = (a.string(0)?, a.vector(1)?, a.string(2)?);
+    if g.turrets().count() >= MAX_TURRETS {
+        return Err(format!(
+            "G_SpawnTurret: max number of turrets ({MAX_TURRETS}) exceeded"
+        ));
+    }
+    let mut e = Ent::new(EntKind::Plain, class);
+    e.origin = origin;
+    let n = g.spawn(e)?;
+    g.init_clip(n, None);
+    let vars = vec![("weaponinfo".to_owned(), weapon.to_owned())];
+    let made = g.init_turret(n, &vars).and_then(|()| {
+        if g.level.initializing || g.items.find(weapon) != 0 {
+            Ok(())
+        } else {
+            Err(format!("turret '{weapon}' not precached"))
+        }
+    });
+    if let Err(e) = made {
+        g.free_entity(vm, n);
+        return Err(e);
+    }
     Ok(g.entity_value(vm, n))
 }
 
@@ -1723,5 +1797,123 @@ mod world_fx_tests {
         earthquake(&mut g, &mut vm, Args::new("earthquake", &a)).unwrap();
         let q = Earthquake::decode(g.tempev.live(g.level.time).last().unwrap()).unwrap();
         assert_eq!((q.duration_ms, q.radius), (16383, 16383.0));
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    use gsc::{Builtins, Options, compile};
+
+    fn setup() -> (Game, Vm) {
+        let prog = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        (
+            Game::new(crate::cvar::Cvars::new(), Default::default()),
+            Vm::new(prog).unwrap(),
+        )
+    }
+
+    fn builtin(name: &str) -> FuncFn {
+        match TABLE.iter().find(|(n, _)| *n == name) {
+            Some((_, Real(f))) => *f,
+            _ => panic!("{name} is not a real builtin"),
+        }
+    }
+
+    fn call(f: fn(&mut Game, &mut Vm, Args) -> R, args: &[Value]) -> R {
+        let (mut g, mut vm) = setup();
+        f(&mut g, &mut vm, Args::new("t", args))
+    }
+
+    fn text(r: R) -> String {
+        match r.unwrap() {
+            Value::Str(s) => s.to_string(),
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn asin_and_acos_end_the_thread_outside_the_unit_range() {
+        for x in [1.5, -2.0] {
+            let a = [Value::Float(x)];
+            for name in ["asin", "acos"] {
+                let f = builtin(name);
+                let (mut g, mut vm) = setup();
+                let e = f(&mut g, &mut vm, Args::new(name, &a)).unwrap_err();
+                assert!(e.contains("out of range"), "{e}");
+            }
+        }
+    }
+
+    #[test]
+    fn getdvar_ignores_a_default_and_reads_a_missing_dvar_as_empty() {
+        let (mut g, mut vm) = setup();
+        let a = [Value::str("nope"), Value::str("fallback")];
+        assert_eq!(
+            text(get_dvar(&mut g, &mut vm, Args::new("getdvar", &a))),
+            ""
+        );
+        let r = dvar_typed(&mut g, Args::new("getdvarint", &a), |s| {
+            Value::Int(cvar::parse_int(s))
+        });
+        assert!(matches!(r, Ok(Value::Int(0))));
+    }
+
+    #[test]
+    fn setdvar_refuses_a_name_the_original_refuses() {
+        let (mut g, mut vm) = setup();
+        let bad = [Value::str("bad name"), Value::Int(1)];
+        let e = set_dvar(&mut g, &mut vm, Args::new("setdvar", &bad)).unwrap_err();
+        assert!(e.contains("invalid dvar name"), "{e}");
+        let ok = [Value::str("good_name1"), Value::Int(1)];
+        set_dvar(&mut g, &mut vm, Args::new("setdvar", &ok)).unwrap();
+        assert_eq!(g.cvars.string("good_name1"), "1");
+    }
+
+    #[test]
+    fn a_script_added_test_client_is_a_numbered_bot_that_begins_later() {
+        let (mut g, mut vm) = setup();
+        g.reset_level(4);
+        for want in ["bot0", "bot1"] {
+            let v = add_test_client(&mut g, &mut vm, Args::new("addtestclient", &[])).unwrap();
+            let Value::Object(o) = v else {
+                panic!("an entity, not {v:?}")
+            };
+            let n = o.entity().expect("an entity").num;
+            assert!(g.clients[usize::from(n)].bot);
+            assert_eq!(g.clients[usize::from(n)].name, want);
+            assert!(g.pending_begin.contains(&n));
+        }
+    }
+
+    #[test]
+    fn getsubstr_and_strtok_stop_at_the_original_buffer() {
+        let long = "a".repeat(2000);
+        let args = |s: &str, from: i32, to: Option<i32>| {
+            let mut v = vec![Value::str(s), Value::Int(from)];
+            v.extend(to.map(Value::Int));
+            v
+        };
+        assert_eq!(text(call(get_substr, &args("hello", 1, Some(3)))), "el");
+        assert_eq!(
+            text(call(get_substr, &args(&long, 0, Some(1024)))).len(),
+            1024
+        );
+        assert!(call(get_substr, &args(&long, 0, Some(1025))).is_err());
+        assert!(call(get_substr, &args(&long, 0, None)).is_err());
+        // A short string under a huge end is fine.
+        assert_eq!(text(call(get_substr, &args("hello", 2, Some(5000)))), "llo");
+        let tok = [Value::str(&long), Value::str(",")];
+        assert!(call(str_tok, &tok).is_err());
+        let ok = [
+            Value::str(&format!("{},b", "a".repeat(1023))),
+            Value::str(","),
+        ];
+        assert!(call(str_tok, &ok).is_ok());
     }
 }
