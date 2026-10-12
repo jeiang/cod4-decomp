@@ -890,12 +890,12 @@ impl Shell {
         }
     }
 
-    /// An `iprintln` line or announcement: into the message window it belongs to, or only the console log.
     /// Reads the HUD placement and timing dvars, which take effect at once: the feed keeps what it last read.
     fn sync_layout(&mut self, input: &Input) {
         self.st.feed.layout = hud::Layout::read(&input.cvars);
     }
 
+    /// An `iprintln` line or announcement: into the message window it belongs to, or only the console log.
     fn print(&mut self, input: &Input, kind: net::ui::PrintKind, text: &str) {
         self.sync_layout(input);
         use net::ui::PrintKind;

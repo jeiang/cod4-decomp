@@ -2770,15 +2770,28 @@ fn script_step(st: &mut State) -> bool {
                     let [c, b, s] = r.textures.picmips();
                     format!("{c} {b} {s}")
                 }),
-                // 1 when the frames since `pacereset` came no faster than `com_maxfps` allows (a fifth of slack).
+                // 1 when the frames since `pacereset` came no faster than `com_maxfps` allows (a fifth of slack). The
+                // check needs a present mode that does not wait for the display (`r_vsync 0`): it fails when the
+                // display paces the frames although the surface offers a mode that would not.
                 "pace" => {
                     let (since, frames) = st.pace;
-                    // With the display pacing the frames no cap applies, and the check holds trivially.
-                    let gap = gfx::frame_gap(&st.input.cvars, display_paced(st.present_mode));
-                    Some(gap.map_or("1".to_owned(), |gap| {
-                        let each = since.elapsed().as_secs_f64() / f64::from(frames.max(1));
-                        u8::from(frames >= 2 && each >= gap.as_secs_f64() * 0.8).to_string()
-                    }))
+                    let free = st.surface.as_ref().is_some_and(|s| {
+                        s.get_capabilities(&st.gpu.adapter)
+                            .present_modes
+                            .iter()
+                            .any(|m| !display_paced(*m))
+                    });
+                    Some(
+                        match gfx::frame_gap(&st.input.cvars, display_paced(st.present_mode)) {
+                            Some(gap) => {
+                                let each = since.elapsed().as_secs_f64() / f64::from(frames.max(1));
+                                u8::from(frames >= 2 && each >= gap.as_secs_f64() * 0.8)
+                            }
+                            // Fifo is all the surface has: the display paces, the cap cannot be shown.
+                            None => u8::from(!free),
+                        }
+                        .to_string(),
+                    )
                 }
                 _ => None,
             };
