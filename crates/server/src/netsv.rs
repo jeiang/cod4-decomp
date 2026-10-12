@@ -642,12 +642,8 @@ impl NetSv {
             last_ack: 0,
             ack_moved: Instant::now(),
             stalled: false,
-            rate: if is_lan(req.from.ip()) {
-                LAN_RATE
-            } else {
-                DEFAULT_RATE
-            },
-            snapshot_msec: DEFAULT_SNAPSHOT_MSEC,
+            rate: 0,
+            snapshot_msec: 0,
             next_snapshot: 0,
             backoff: 0,
             muted: 0,
@@ -1237,6 +1233,8 @@ const DEFAULT_SNAPSHOT_MSEC: i32 = 50;
 const BACKOFF_AFTER: u32 = 29;
 /// ...and for how long at least: 29 snapshots are 1.45 s at the original's 20 a second, but under a second at ours.
 const BACKOFF_AFTER_MS: i32 = 1450;
+/// The spacing unit of the backoff for a peer with no `snaps` of its own: one server frame at 30 a second.
+const BACKOFF_FRAME_MS: i32 = 33;
 const BACKOFF_MAX: u32 = 8;
 
 impl Peer {
@@ -1245,11 +1243,17 @@ impl Peer {
     /// by the random backoff. `roll` is any random number.
     fn schedule_next(&mut self, server_time: i32, bytes: usize, max_rate: i32, roll: u32) {
         let unacked = self.link.unacked();
+        // A peer that named no `snaps` is sent a snapshot every server frame: that is its interval here.
+        let interval = if self.snapshot_msec > 0 {
+            self.snapshot_msec
+        } else {
+            BACKOFF_FRAME_MS
+        };
         let stalled = unacked >= BACKOFF_AFTER
-            && i64::from(unacked) * i64::from(self.snapshot_msec) >= i64::from(BACKOFF_AFTER_MS);
+            && i64::from(unacked) * i64::from(interval) >= i64::from(BACKOFF_AFTER_MS);
         self.next_snapshot = server_time
             + if stalled {
-                backoff_delay(&mut self.backoff, self.snapshot_msec, roll)
+                backoff_delay(&mut self.backoff, interval, roll)
             } else {
                 self.backoff = 0;
                 snapshot_delay(self.rate, self.snapshot_msec, bytes, max_rate)
