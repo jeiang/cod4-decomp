@@ -24,14 +24,13 @@ harness=""
 display=""
 [ -n "${COD4E_LINUX_WAYLAND_DISPLAY:-}" ] && display="WAYLAND_DISPLAY=$(printf '%q' "$COD4E_LINUX_WAYLAND_DISPLAY") "
 [ -n "${COD4E_LINUX_XDG_RUNTIME_DIR:-}" ] && display="${display}XDG_RUNTIME_DIR=$(printf '%q' "$COD4E_LINUX_XDG_RUNTIME_DIR") "
-[ $run = 1 ] && harness="nice -n 19 cargo build --release -p harness -p client -p server && flock ~/Projects/cod4e/.stage-lock env ${display}COD4E_NO_PROMPT=1 target/release/cod4e-harness run --out bundles $(printf '%q ' "$@")"
+[ $run = 1 ] && harness="&& nice -n 19 cargo build --release -p harness -p client -p server && flock ~/Projects/cod4e/.stage-lock env ${display}COD4E_NO_PROMPT=1 target/release/cod4e-harness run --out bundles $(printf '%q ' "$@")"
 
 git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -C $dir'"
 status=0
 ssh "$host" "bash -c 'cd $dir && COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 nix develop -c bash -ec \"
 nice -n 19 cargo build --workspace && nice -n 19 cargo test --workspace &&
-nice -n 19 cargo clippy --workspace -- -D warnings && cargo fmt --check
-$harness
+nice -n 19 cargo clippy --workspace -- -D warnings && cargo fmt --check $harness
 \"'" || status=$?
 mkdir -p bundles
 ssh "$host" "bash -c 'cd $dir && [ -d bundles ] && tar c bundles || true'" | tar x -C . 2>/dev/null || true
