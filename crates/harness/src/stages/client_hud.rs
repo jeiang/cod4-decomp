@@ -122,11 +122,12 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     if n("crosshair_due_frames") > 0 && n("crosshair_name_frames") == 0 {
         bad.push("the crosshair was on a player but never named them");
     }
-    // The killcam shows the viewer's own body, which carries the "you" marker over its head.
+    // The killcam shows the viewer's own body, which carries the "you" marker over its head; whether it is in
+    // sight depends on how the kill happened, so the marker is held to account only when it was due.
     let marked = h["head_icon_materials"]
         .as_array()
         .is_some_and(|m| m.iter().any(|v| v == "headiconyouinkillcam"));
-    if n("killcam_frames") > 0 && !marked {
+    if n("killcam_you_frames") > 0 && !marked {
         bad.push("the killcam drew no head icon over the viewer's body");
     }
     // A message or hint that is still a string key (MP_CHANGE_CLASS_NEXT_SPAWN) was not localized.
@@ -165,6 +166,9 @@ pub(crate) fn untested(report: &Value) -> Vec<&'static str> {
     }
     if n("crosshair_due_frames") == 0 {
         out.push("crosshair names untested: the crosshair was never on a player in range");
+    }
+    if n("killcam_frames") > 0 && n("killcam_you_frames") == 0 {
+        out.push("killcam \"you\" marker untested: the viewer's body was never in sight");
     }
     out
 }
@@ -234,7 +238,7 @@ mod tests {
             "hud_draw": {
                 "elems_max": 12, "scoreboard_frames": 90, "scoreboard_rows_max": 10,
                 "messages": [2, 0, 0, 0], "obituaries": 3, "window_lines": [40, 0, 0, 0],
-                "killcam_frames": 120, "names_max": 3, "crosshair_name_frames": 40,
+                "killcam_frames": 120, "killcam_you_frames": 30, "names_max": 3, "crosshair_name_frames": 40,
                 "friends_in_sight_frames": 50, "crosshair_due_frames": 60,
                 "head_icon_materials": ["headiconyouinkillcam"], "chat": 1
             },
@@ -284,6 +288,10 @@ mod tests {
         let mut r = good();
         r["hud_draw"]["head_icon_materials"] = json!([]);
         assert!(verdict(&r).unwrap().contains("head icon"));
+        // The body never in sight: nothing was due, which is said to be untested.
+        r["hud_draw"]["killcam_you_frames"] = json!(0);
+        assert_eq!(verdict(&r), None);
+        assert!(untested(&r).iter().any(|u| u.contains("killcam")));
         let mut r = good();
         r["hud_draw"]["unresolved"] = json!(["MP_CHANGE_CLASS_NEXT_SPAWN"]);
         r["hud"] = json!({"unresolved_text": ["PLATFORM_HOLD_TO_PLANT_EXPLOSIVES"]});
