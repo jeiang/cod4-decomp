@@ -62,12 +62,16 @@ fn brush_surfaces(world: &assets::zone::gfxworld::GfxWorld) -> Vec<bool> {
     world.models.iter().map(|m| m.surface_count > 0).collect()
 }
 
-/// Alive in the world: the weapon switching of the original (`pm_type < PM_DEAD`) leaves spectators and the dead alone.
 /// How loud a received voice plays: silent when `cl_voice` is off or the speaker is muted.
-fn voice_gain(voice_on: bool, speaker_muted: bool) -> f32 {
-    if voice_on && !speaker_muted { 1.0 } else { 0.0 }
+fn voice_gain(voice_on: bool, muted: &HashSet<u16>, speaker: u8) -> f32 {
+    if voice_on && !muted.contains(&u16::from(speaker)) {
+        1.0
+    } else {
+        0.0
+    }
 }
 
+/// Alive in the world: the weapon switching of the original (`pm_type < PM_DEAD`) leaves spectators and the dead alone.
 fn alive(ps: &PlayerState) -> bool {
     matches!(
         ps.pm_type,
@@ -795,7 +799,7 @@ impl NetPlay {
         }
         let sound = &mut self.sound;
         for v in self.net.take_voice() {
-            let gain = voice_gain(self.voice_on, self.muted.contains(&u16::from(v.speaker)));
+            let gain = voice_gain(self.voice_on, &self.muted, v.speaker);
             if gain > 0.0 {
                 self.hearing.feed(&v, gain, now, || sound.open_voice_pipe());
             }
@@ -2737,9 +2741,10 @@ fn turned(
 mod tests {
     #[test]
     fn received_voice_is_silent_with_cl_voice_off_or_a_muted_speaker() {
-        assert_eq!(super::voice_gain(true, false), 1.0);
-        assert_eq!(super::voice_gain(false, false), 0.0);
-        assert_eq!(super::voice_gain(true, true), 0.0);
+        let muted: std::collections::HashSet<u16> = [3].into();
+        assert_eq!(super::voice_gain(true, &muted, 2), 1.0);
+        assert_eq!(super::voice_gain(false, &muted, 2), 0.0);
+        assert_eq!(super::voice_gain(true, &muted, 3), 0.0);
     }
 
     #[test]

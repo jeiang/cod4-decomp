@@ -770,11 +770,7 @@ impl Server {
         let time = self.game.level.time;
         for (speaker, seq, frame) in frames {
             // Only a person who has joined talks: not a bot, not a slot still connecting.
-            if !self
-                .game
-                .client(speaker)
-                .is_some_and(|c| c.conn == Conn::Connected && !c.bot)
-            {
+            if !self.game.client(speaker).is_some_and(may_speak) {
                 continue;
             }
             if let Some(c) = self.game.client_mut(speaker) {
@@ -2890,6 +2886,11 @@ struct VoiceRules {
     parabolic_angle: f32,
 }
 
+/// Only a person who has joined talks: not a bot, not a slot still connecting.
+fn may_speak(c: &Client) -> bool {
+    c.conn == Conn::Connected && !c.bot
+}
+
 /// Perk bit of `specialty_parabolic` (Eavesdrop).
 const PERK_PARABOLIC: u32 = 1 << 9;
 
@@ -2898,8 +2899,7 @@ const PERK_PARABOLIC: u32 = 1 << 9;
 // or it has Eavesdrop and the speaker is within its view cone and radius. An audience member then hears only a
 // speaker in the same session state, unless `voice_deadChat` lets the dead and the living talk.
 fn hears_voice(rules: &VoiceRules, talker: &Client, listener: &Client) -> bool {
-    let same_team =
-        talker.team == listener.team && matches!(talker.team, Team::Axis | Team::Allies);
+    let same_team = talker.team != Team::Free && talker.team == listener.team;
     let eavesdrops = || {
         if listener.ps.perks & PERK_PARABOLIC == 0 {
             return false;
@@ -2927,11 +2927,12 @@ fn hears_voice(rules: &VoiceRules, talker: &Client, listener: &Client) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::may_speak;
     use super::{
         PERK_PARABOLIC, RotationPlan, VoiceRules, download_path, flood_drops, hears_voice,
         ping_field, plain_text, plan_rotation,
     };
-    use crate::client::{Client, Session, Team};
+    use crate::client::{Client, Conn, Session, Team};
 
     fn player(num: u16, team: Team, session: Session) -> Client {
         let mut c = Client::new(num, false, format!("p{num}"));
@@ -2964,6 +2965,27 @@ mod tests {
         assert!(hears_voice(&chat, &dead_mate, &mate));
         assert!(hears_voice(&chat, &alive, &dead_mate));
         assert!(!hears_voice(&chat, &dead_mate, &enemy), "still the team");
+    }
+
+    #[test]
+    fn spectators_hear_spectators_and_not_the_players() {
+        let spec = player(0, Team::Spectator, Session::Spectator);
+        let other = player(1, Team::Spectator, Session::Spectator);
+        let ally = player(2, Team::Allies, Session::Playing);
+        assert!(hears_voice(&RULES, &spec, &other));
+        assert!(!hears_voice(&RULES, &spec, &ally));
+    }
+
+    #[test]
+    fn a_bot_or_a_connecting_slot_does_not_speak() {
+        let mut c = player(0, Team::Allies, Session::Playing);
+        c.conn = Conn::Connected;
+        assert!(may_speak(&c));
+        c.bot = true;
+        assert!(!may_speak(&c));
+        c.bot = false;
+        c.conn = Conn::Connecting;
+        assert!(!may_speak(&c));
     }
 
     #[test]
