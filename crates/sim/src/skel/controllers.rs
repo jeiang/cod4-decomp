@@ -46,7 +46,7 @@ pub struct ControllerInput {
     pub waist_pitch: f32,
     /// `ps.leanf`, -1 (left) to 1 (right).
     pub lean: f32,
-    /// Mounted on a turret, mantling or on a ladder: the controllers stay at rest.
+    /// Mounted on a turret (`eFlags & 0x300`): the controllers stay at rest. Mantle, ladder and death run the calc.
     pub no_aim: bool,
 }
 

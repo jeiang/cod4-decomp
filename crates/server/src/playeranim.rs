@@ -1190,7 +1190,7 @@ impl PlayerPoseInput {
             torso_pitch: self.torso_pitch,
             waist_pitch: self.waist_pitch,
             lean: self.lean,
-            no_aim: self.turret || self.mantle || self.ladder || self.dead,
+            no_aim: self.turret,
         };
         (swing, ctl)
     }
@@ -1778,7 +1778,7 @@ impl PlayerPoseState {
             self.swing.settle(&swing_in);
         }
         let goal = controllers::goal(&ctl_in, &self.swing);
-        if self.ctl_ready && !input.dead {
+        if self.ctl_ready {
             controllers::ease(&mut self.ctl, &goal, ms);
         } else {
             self.ctl = goal;
@@ -3331,6 +3331,48 @@ mod tests {
         };
         let i = PlayerPoseInput::from_ps(&ps, true, None);
         assert!(i.walking && i.lean == 1.0);
+    }
+
+    #[test]
+    fn only_a_turret_zeroes_the_controllers() {
+        let moved =
+            |s: &PlayerPoseState| s.ctl.angles.iter().any(|a| a.iter().any(|v| v.abs() > 0.1));
+        let base = PlayerPoseInput {
+            view_pitch: 40.0,
+            anim_type: anim_type::AUTORIFLE,
+            ..Default::default()
+        };
+        for (name, input, aims) in [
+            (
+                "mantle",
+                PlayerPoseInput {
+                    mantle: true,
+                    ..base
+                },
+                true,
+            ),
+            (
+                "ladder",
+                PlayerPoseInput {
+                    ladder: true,
+                    ..base
+                },
+                true,
+            ),
+            ("dead", PlayerPoseInput { dead: true, ..base }, true),
+            (
+                "turret",
+                PlayerPoseInput {
+                    turret: true,
+                    ..base
+                },
+                false,
+            ),
+        ] {
+            let mut s = PlayerPoseState::default();
+            frames(&mut s, &NoClips, 30, 0.016, &input);
+            assert_eq!(moved(&s), aims, "{name}");
+        }
     }
 
     #[test]
