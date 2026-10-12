@@ -2359,6 +2359,7 @@ impl NetPlay {
             };
             r.seen = now;
             let input = pose_input(e, weapon.as_deref(), false);
+            r.player.place(e.origin);
             r.player.update(dt, &input);
             guns.insert(
                 e.client,

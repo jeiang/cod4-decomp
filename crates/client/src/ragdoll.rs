@@ -11,6 +11,13 @@
 //! limits (measured from the bind pose, as the original's joint zero is), and joint friction holds the limbs stiff at
 //! first and lets go over [`Tunables::jointlerp_time`] seconds. Capsules collide with the map by box sweeps of their radius.
 //! Bones' twist is part of the body orientation, so it is kept.
+//!
+//! The bodies use `ragdoll.cfg`'s definition 1 (`Ragdoll_CreateRagdollForDObj` binds it for every corpse): a three-bone
+//! spine, a neck, two arms and two legs. The bones that carry no body of their own and are listed as baselerp bones (the
+//! head, wrists, ankles and the twist bones) are held where the body they hang from puts them at first and move to their
+//! place in the bind pose over their lerp time, which keeps the ends of a limb from staying twisted wherever the death
+//! pose left them. A body takes the velocity its animation had on the last frame it was posed, as the original estimates
+//! it before handing the pose to physics.
 
 use fx::{Impact, MIN_IMPACT_MOMENTUM, Rng};
 use glam::{Mat3, Quat, Vec3};
@@ -22,8 +29,8 @@ use crate::props::Blast;
 const STEP: f32 = 1.0 / 60.0;
 const SUBSTEPS: usize = 3;
 const GRAVITY: f32 = 800.0;
-/// Constraint passes per substep.
-const ITERATIONS: usize = 4;
+/// Constraint passes per substep: enough to hold the spine's hinges to their few degrees through a hard landing.
+const ITERATIONS: usize = 8;
 
 /// The ragdoll dvars (`Ragdoll_InitDvars`), as the player set them.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,6 +48,8 @@ pub struct Tunables {
     pub explode_upbias: f32,
     /// `ragdoll_self_collision_scale`: how much larger than the bone the capsules that keep limbs apart are.
     pub self_collision_scale: f32,
+    /// `ragdoll_rotvel_scale`: scales the turning rate a bone has from its animation when the body is handed to physics.
+    pub rotvel_scale: f32,
 }
 
 impl Default for Tunables {
@@ -52,6 +61,7 @@ impl Default for Tunables {
             explode_force: 18000.0,
             explode_upbias: 0.8,
             self_collision_scale: 1.2,
+            rotvel_scale: 1.0,
         }
     }
 }
@@ -90,6 +100,7 @@ impl Tunables {
                 0.1,
                 10.0,
             ),
+            rotvel_scale: cheat("ragdoll_rotvel_scale", stock.rotvel_scale, 0.0, 2000.0),
         }
     }
 }
@@ -117,12 +128,16 @@ const HIT_SPEED: f32 = 30.0;
 /// Seconds between two hits a body is heard making.
 const HIT_GAP: f32 = 0.25;
 
-/// A ragdoll definition: `ragdoll.cfg`'s first (the one the game's bodies use).
+/// The definition every body uses: `ragdoll.cfg`'s second (`Ragdoll_CreateRagdollForDObj` always binds 1).
+const DEFINITION: &str = "1";
+
+/// A ragdoll definition, as the lines of `ragdoll.cfg` about [`DEFINITION`] build it.
 #[derive(Debug, Default, Clone)]
 pub struct Def {
     bones: Vec<BoneDef>,
     joints: Vec<JointDef>,
     pairs: Vec<[usize; 2]>,
+    lerps: Vec<LerpDef>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,23 +170,35 @@ struct LimitDef {
     max: f32,
 }
 
+/// A skeleton bone that takes its place relative to a body from the pose it is in to the bind pose
+/// (`ragdoll_baselerp_bone`, and `ragdoll_pin_bone` with no time).
+#[derive(Debug, Clone)]
+struct LerpDef {
+    bone: String,
+    /// The body whose first joint the bone is placed against.
+    parent: usize,
+    /// Milliseconds to reach the bind pose. A line with no time reads it as `atoi("")`, 0, which the command holds to
+    /// its 100 ms floor (`ragdoll_baselerp_time` is only used by a path the command's argument count never reaches).
+    millis: u32,
+}
+
 impl Def {
-    /// Reads the `ragdoll_bone`, `ragdoll_joint`, `ragdoll_limit` and `ragdoll_selfpair` lines about definition 0
-    /// (`ragdoll_clear 0` empties it). A line that does not parse, or refers to what is not there yet, is skipped as
-    /// the original's console command would.
+    /// Reads the `ragdoll_bone`, `ragdoll_joint`, `ragdoll_limit`, `ragdoll_selfpair`, `ragdoll_baselerp_bone` and
+    /// `ragdoll_pin_bone` lines about definition 1 (`ragdoll_clear 1` empties it). A line that does not parse, or
+    /// refers to what is not there yet, is skipped as the original's console command would.
     pub fn parse(text: &str) -> Def {
         let mut d = Def::default();
         for line in text.lines() {
             let line = line.split("//").next().unwrap_or("");
             let a: Vec<&str> = line.split_whitespace().collect();
             match a.as_slice() {
-                ["ragdoll_clear", "0"] => d = Def::default(),
-                ["ragdoll_bone", "0", cols @ ..] => {
+                ["ragdoll_clear", DEFINITION] => d = Def::default(),
+                ["ragdoll_bone", DEFINITION, cols @ ..] => {
                     if let Some(b) = d.bone(cols) {
                         d.bones.push(b);
                     }
                 }
-                ["ragdoll_joint", "0", bone, kind, ..] => {
+                ["ragdoll_joint", DEFINITION, bone, kind, ..] => {
                     let hinge = match *kind {
                         "hinge" => true,
                         "swivel" | "ball" => false,
@@ -188,7 +215,16 @@ impl Def {
                         });
                     }
                 }
-                ["ragdoll_limit", "0", joint, axis, friction, min, max, ..] => {
+                [
+                    "ragdoll_limit",
+                    DEFINITION,
+                    joint,
+                    axis,
+                    friction,
+                    min,
+                    max,
+                    ..,
+                ] => {
                     let (Ok(joint), Some(axis)) = (joint.parse::<usize>(), axis_of(axis)) else {
                         continue;
                     };
@@ -214,12 +250,28 @@ impl Def {
                         });
                     }
                 }
-                ["ragdoll_selfpair", "0", x, y, ..] => {
+                ["ragdoll_selfpair", DEFINITION, x, y, ..] => {
                     if let (Ok(x), Ok(y)) = (x.parse::<usize>(), y.parse::<usize>())
                         && x < d.bones.len()
                         && y < d.bones.len()
                     {
                         d.pairs.push([x, y]);
+                    }
+                }
+                ["ragdoll_baselerp_bone", DEFINITION, name, rest @ ..] => {
+                    let millis = rest
+                        .first()
+                        .and_then(|t| t.parse::<i32>().ok())
+                        .unwrap_or(0)
+                        .clamp(100, 6000) as u32;
+                    let parent = rest.get(1).map_or(Some(0), |p| p.parse::<usize>().ok());
+                    if let Some(parent) = parent {
+                        d.lerp((*name).to_owned(), parent, millis);
+                    }
+                }
+                ["ragdoll_pin_bone", DEFINITION, name, parent] => {
+                    if let Ok(parent) = parent.parse::<usize>() {
+                        d.lerp((*name).to_owned(), parent, 0);
                     }
                 }
                 _ => {}
@@ -249,6 +301,16 @@ impl Def {
         })
     }
 
+    /// One baselerp or pinned bone against body `parent`: at most nine, as the original has room for.
+    fn lerp(&mut self, bone: String, parent: usize, millis: u32) {
+        if parent < self.bones.len() && self.lerps.len() < 9 {
+            self.lerps.push(LerpDef {
+                bone,
+                parent,
+                millis,
+            });
+        }
+    }
     /// True when the definition has nothing to simulate.
     pub fn is_empty(&self) -> bool {
         self.bones.is_empty()
@@ -303,6 +365,8 @@ struct Body {
     ends: [Vec3; 2],
     /// Where the map is probed: both ends and the middle.
     probes: [Vec3; 3],
+    /// The turn from the bone's orientation to the body's: half a turn about z for a mirrored bone, else none.
+    flip: Quat,
 }
 
 impl Body {
@@ -365,12 +429,26 @@ struct Follow {
     p: Vec3,
 }
 
+/// A baselerp bone: where it sits against its body's first joint in the bind pose, and how long it takes to get there.
+struct Lerp {
+    bone: usize,
+    body: usize,
+    secs: f32,
+    rest: Quat,
+    at: Vec3,
+}
+
 pub struct Ragdoll {
     bodies: Vec<Body>,
     joints: Vec<Joint>,
     pairs: Vec<[usize; 2]>,
     follow: Vec<Follow>,
     alias: Vec<Option<usize>>,
+    lerps: Vec<Lerp>,
+    /// For every skeleton bone, the baselerp bone it hangs from before any body's bone does.
+    anchor: Vec<Option<usize>>,
+    /// Seconds simulated, which the baselerp bones' blend runs on (a blast does not restart it).
+    lerp_age: f32,
     yaw: Quat,
     age: f32,
     carry: f32,
@@ -387,19 +465,44 @@ fn quat_of(b: &BoneMat) -> Quat {
     Quat::from_xyzw(b.quat[0], b.quat[1], b.quat[2], b.quat[3]).normalize()
 }
 
+/// The frame before the one a body is made in, in the same terms as [`Birth`]'s own: the entity moved and turned as well
+/// as the pose changed, and the body keeps the velocity of both (`Ragdoll_EstimateInitialVelocities` compares world
+/// positions).
+pub struct Motion<'a> {
+    pub pose: &'a [BoneMat],
+    pub origin: [f32; 3],
+    pub yaw_degrees: f32,
+    /// Seconds between the two frames.
+    pub secs: f32,
+}
+
+/// What a body is made from.
+pub struct Birth<'a> {
+    /// The pose (entity space) the body goes in.
+    pub pose: &'a [BoneMat],
+    /// The skeleton's bind pose, the zero of the joints' angles and the baselerp bones' goal.
+    pub base: &'a [BoneMat],
+    pub origin: [f32; 3],
+    pub yaw_degrees: f32,
+    /// Velocity (units per second) the death throws the body with.
+    pub push: [f32; 3],
+    /// The frame before `pose`: the velocity the body had on its way in.
+    pub motion: Option<Motion<'a>>,
+    pub tun: Tunables,
+}
+
 impl Ragdoll {
-    /// A body for an entity at `origin` facing `yaw_degrees`, in the pose `pose` (entity space) thrown with velocity
-    /// `push` (units per second). `base` is the skeleton's bind pose, the zero of the joints' angles. `None` when
-    /// the skeleton lacks a bone the definition names.
-    pub fn new(
-        def: &Def,
-        skel: &Skel,
-        pose: &[BoneMat],
-        base: &[BoneMat],
-        origin: [f32; 3],
-        yaw_degrees: f32,
-        push: [f32; 3],
-    ) -> Option<Self> {
+    /// A body for an entity made from `birth`. `None` when the skeleton lacks a bone the definition names.
+    pub fn new(def: &Def, skel: &Skel, birth: Birth) -> Option<Self> {
+        let Birth {
+            pose,
+            base,
+            origin,
+            yaw_degrees,
+            push,
+            motion,
+            tun,
+        } = birth;
         let n = skel.names.len();
         if def.is_empty() || pose.len() < n || base.len() < n {
             return None;
@@ -451,6 +554,7 @@ impl Ragdoll {
                 radius: r,
                 ends: caps,
                 probes: [caps[0], (caps[0] + caps[1]) * 0.5, caps[1]],
+                flip: mirror(b),
             });
             frames.push(p0);
             bind.push((quat_of(&base[from]) * mirror(b)).normalize());
@@ -519,6 +623,19 @@ impl Ragdoll {
                 })
             })
             .collect();
+        let mut lerps = Vec::with_capacity(def.lerps.len());
+        for l in &def.lerps {
+            let bone = find(&l.bone)?;
+            let from = ends.get(l.parent)?.0;
+            let to_parent = quat_of(&base[from]).inverse();
+            lerps.push(Lerp {
+                bone,
+                body: l.parent,
+                secs: l.millis as f32 / 1000.0,
+                rest: (to_parent * quat_of(&base[bone])).normalize(),
+                at: to_parent * (Vec3::from(base[bone].trans) - Vec3::from(base[from].trans)),
+            });
+        }
         // Every bone follows the nearest body at or above it.
         let owner: Vec<Option<usize>> =
             (0..n).map(|i| ends.iter().position(|e| e.0 == i)).collect();
@@ -548,9 +665,54 @@ impl Ragdoll {
                 }
             })
             .collect();
+        // A bone with no body of its own and no baselerp bone above it follows its body alone; below a baselerp bone it
+        // goes with that bone.
+        let anchor = (0..n)
+            .map(|i| {
+                let mut cur = source(i);
+                let mut hops = 0;
+                loop {
+                    if let Some(k) = lerps.iter().position(|l| l.bone == cur) {
+                        break Some(k);
+                    }
+                    if owner[cur].is_some() {
+                        break None;
+                    }
+                    match skel.parent[cur].filter(|p| *p < n) {
+                        Some(p) if hops < n => {
+                            cur = source(p);
+                            hops += 1;
+                        }
+                        _ => break None,
+                    }
+                }
+            })
+            .collect();
         let v = Vec3::from(push).clamp_length_max(MAX_SPEED);
-        for b in &mut bodies {
+        for (b, &(from, _)) in bodies.iter_mut().zip(&ends) {
             b.v = v;
+            let Some(m) = motion
+                .as_ref()
+                .filter(|m| m.pose.len() >= n && m.secs > EPS)
+            else {
+                continue;
+            };
+            // The bone's own motion in the world: how far it moved and turned since the last frame, the entity's
+            // travel included, so a running victim keeps running.
+            let yaw0 = Quat::from_rotation_z(m.yaw_degrees.to_radians());
+            let (p0, q0) = (
+                Vec3::from(m.origin) + yaw0 * Vec3::from(m.pose[from].trans),
+                yaw0 * quat_of(&m.pose[from]),
+            );
+            let (p1, q1) = world[from];
+            let speed = (p1 - p0) / m.secs;
+            // A snap (a respawn, a teleport) is not motion.
+            if speed.length() > MAX_SPEED {
+                continue;
+            }
+            let q0 = if q0.dot(q1) < 0.0 { -q0 } else { q0 };
+            b.v += speed;
+            b.w = (q1 * q0.inverse()).normalize().to_scaled_axis() * (tun.rotvel_scale / m.secs);
         }
         let seed = (origin.x.to_bits() ^ origin.y.to_bits().rotate_left(11)) as u64;
         Some(Self {
@@ -559,6 +721,9 @@ impl Ragdoll {
             pairs: def.pairs.clone(),
             follow,
             alias: skel.alias.clone(),
+            lerps,
+            anchor,
+            lerp_age: 0.0,
             yaw,
             age: 0.0,
             carry: 0.0,
@@ -567,7 +732,7 @@ impl Ragdoll {
             rng: Rng::new(seed),
             impact: None,
             quiet: 0.0,
-            tun: Tunables::default(),
+            tun,
         })
     }
 
@@ -664,6 +829,7 @@ impl Ragdoll {
             self.carry -= STEP;
             self.step(world);
             self.age += STEP;
+            self.lerp_age += STEP;
             self.quiet -= STEP;
         }
     }
@@ -886,17 +1052,54 @@ impl Ragdoll {
     pub fn bones(&self) -> Vec<BoneMat> {
         let un = self.yaw.inverse();
         let root = self.root_point();
+        let world = |i: usize| {
+            let f = self.follow[i];
+            let b = &self.bodies[f.body];
+            (b.q * f.q, b.x + b.q * f.p)
+        };
+        // Each baselerp bone: where it is against its body's joint now, moved toward where it is in the bind pose.
+        // What hangs below it is moved by the same amount.
+        let moves: Vec<(Quat, Vec3)> = self
+            .lerps
+            .iter()
+            .map(|l| {
+                let b = &self.bodies[l.body];
+                let (pq, pp) = (b.q * b.flip, b.at(b.ends[0]));
+                let (cq, cp) = world(l.bone);
+                let (lq, lp) = (pq.inverse() * cq, pq.inverse() * (cp - pp));
+                let t = if l.secs > 0.0 {
+                    (self.lerp_age / l.secs).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let (q, p) = if lp.length() <= 400.0 {
+                    let goal = if lq.dot(l.rest) < 0.0 {
+                        -l.rest
+                    } else {
+                        l.rest
+                    };
+                    (lq.lerp(goal, t).normalize(), lp.lerp(l.at, t))
+                } else {
+                    (l.rest, l.at)
+                };
+                let (nq, np) = (pq * q, pp + pq * p);
+                let dq = nq * cq.inverse();
+                (dq, np - dq * cp)
+            })
+            .collect();
         (0..self.follow.len())
             .map(|i| {
-                let f = self.follow[self.alias[i]
+                let i = self.alias[i]
                     .filter(|a| *a < self.follow.len())
-                    .unwrap_or(i)];
-                let b = &self.bodies[f.body];
-                let q = un * (b.q * f.q);
-                let t = un * (b.x + b.q * f.p - root);
+                    .unwrap_or(i);
+                let (mut q, mut p) = world(i);
+                if let Some(k) = self.anchor[i] {
+                    let (dq, dp) = moves[k];
+                    (q, p) = (dq * q, dq * p + dp);
+                }
                 BoneMat {
-                    quat: q.to_array(),
-                    trans: t.to_array(),
+                    quat: (un * q).to_array(),
+                    trans: (un * (p - root)).to_array(),
                 }
             })
             .collect()
@@ -1009,71 +1212,99 @@ mod tests {
         }
     }
 
-    /// A small definition of the same shape as the stock one: a torso, a head, two arms and two legs, with swivel
-    /// shoulders and hips and hinge elbows and knees, in this file's own numbers.
+    /// A small definition of the same shape as the stock one, in this file's own numbers: a three-bone spine, a neck,
+    /// two arms and two legs, with swivel shoulders and hips and hinge elbows and knees, and baselerp bones. Definition
+    /// 0, which comes first in the stock file and which no body uses, is here too.
     const DEF: &str = "
         ragdoll_clear 0
         ragdoll_bone 0 j_mainroot j_neck 5.0 0.5 3.0 0.3 -1 0 capsule
         ragdoll_bone 0 j_neck j_head 3.5 0.5 0.3 0.3 0 0 capsule
-        ragdoll_bone 0 j_shoulder_le j_elbow_le 2.5 0.5 0.6 0.3 0 0 capsule
-        ragdoll_bone 0 j_elbow_le j_wrist_le 2.5 0.5 0.45 0.3 2 0 capsule
-        ragdoll_bone 0 j_shoulder_ri j_elbow_ri 2.5 0.5 0.6 0.3 0 1 capsule
-        ragdoll_bone 0 j_elbow_ri j_wrist_ri 2.5 0.5 0.45 0.3 4 1 capsule
-        ragdoll_bone 0 j_hip_le j_knee_le 3.0 0.5 0.8 0.3 0 0 capsule
-        ragdoll_bone 0 j_knee_le j_ankle_le 2.8 0.5 0.6 0.3 6 0 capsule
-        ragdoll_bone 0 j_hip_ri j_knee_ri 3.0 0.5 0.8 0.3 0 1 capsule
-        ragdoll_bone 0 j_knee_ri j_ankle_ri 2.8 0.5 0.6 0.3 8 1 capsule
-        ragdoll_selfpair 0 0 3
-        ragdoll_selfpair 0 0 5
-        ragdoll_selfpair 0 3 7
-        ragdoll_selfpair 0 7 9
-        ragdoll_joint 0 1 swivel // neck
-        ragdoll_joint 0 2 swivel // shoulder
-        ragdoll_joint 0 3 hinge // elbow
-        ragdoll_joint 0 4 swivel
-        ragdoll_joint 0 5 hinge
-        ragdoll_joint 0 6 swivel // hip
-        ragdoll_joint 0 7 hinge // knee
-        ragdoll_joint 0 8 swivel
-        ragdoll_joint 0 9 hinge
-        ragdoll_limit 0 0 x 60 -50 50
-        ragdoll_limit 0 0 y 60 -45 45
-        ragdoll_limit 0 0 z 60 -20 30
-        ragdoll_limit 0 1 x 80 -90 90
-        ragdoll_limit 0 1 y 100 -45 20
-        ragdoll_limit 0 1 z 100 0 95
-        ragdoll_limit 0 2 z 60 -120 -5
-        ragdoll_limit 0 3 x 80 -90 90
-        ragdoll_limit 0 3 y 100 -45 20
-        ragdoll_limit 0 3 z 100 0 95
-        ragdoll_limit 0 4 z 60 -120 -5
-        ragdoll_limit 0 5 x 80 -30 30
-        ragdoll_limit 0 5 y 100 -25 25
-        ragdoll_limit 0 5 z 200 0 50
-        ragdoll_limit 0 6 z 100 -140 2
-        ragdoll_limit 0 7 x 80 -30 30
-        ragdoll_limit 0 7 y 100 -25 25
-        ragdoll_limit 0 7 z 200 0 50
-        ragdoll_limit 0 8 z 100 -140 2
+        ragdoll_selfpair 0 0 1
+        ragdoll_clear 1
+        ragdoll_bone 1 j_mainroot j_spinelower 4.5 0.5 20.0 0.7 -1 0 capsule
+        ragdoll_bone 1 j_spinelower j_spineupper 4.5 0.5 20.0 0.7 0 0 capsule
+        ragdoll_bone 1 j_spineupper j_neck 4.5 0.5 20.0 0.7 1 0 capsule
+        ragdoll_bone 1 j_neck j_head 3.6 0.5 5.0 0.6 2 0 capsule
+        ragdoll_bone 1 j_shoulder_le j_elbow_le 2.8 0.5 8.0 0.5 2 0 capsule
+        ragdoll_bone 1 j_elbow_le j_wrist_le 2.2 0.5 6.8 0.5 4 0 capsule
+        ragdoll_bone 1 j_shoulder_ri j_elbow_ri 2.8 0.5 8.0 0.5 2 1 capsule
+        ragdoll_bone 1 j_elbow_ri j_wrist_ri 2.2 0.5 6.8 0.5 6 1 capsule
+        ragdoll_bone 1 j_hip_le j_knee_le 3.4 0.5 12.0 0.5 0 0 capsule
+        ragdoll_bone 1 j_knee_le j_ankle_le 3.1 0.5 10.0 0.5 8 0 capsule
+        ragdoll_bone 1 j_hip_ri j_knee_ri 3.4 0.5 12.0 0.5 0 1 capsule
+        ragdoll_bone 1 j_knee_ri j_ankle_ri 3.1 0.5 10.0 0.5 10 1 capsule
+        ragdoll_selfpair 1 0 4
+        ragdoll_selfpair 1 1 4
+        ragdoll_selfpair 1 0 5
+        ragdoll_selfpair 1 1 5
+        ragdoll_selfpair 1 8 4
+        ragdoll_selfpair 1 10 8
+        ragdoll_joint 1 1 hinge // lower spine
+        ragdoll_joint 1 2 hinge // upper spine
+        ragdoll_joint 1 3 swivel // neck
+        ragdoll_joint 1 4 swivel // shoulder
+        ragdoll_joint 1 5 hinge // elbow
+        ragdoll_joint 1 6 swivel
+        ragdoll_joint 1 7 hinge
+        ragdoll_joint 1 8 swivel // hip
+        ragdoll_joint 1 9 hinge // knee
+        ragdoll_joint 1 10 swivel
+        ragdoll_joint 1 11 hinge
+        ragdoll_limit 1 0 z 100 -6 6
+        ragdoll_limit 1 1 z 100 -6 6
+        ragdoll_limit 1 2 x 80 -30 30
+        ragdoll_limit 1 2 y 80 -30 30
+        ragdoll_limit 1 2 z 80 -10 30
+        ragdoll_limit 1 3 x 95 -100 100
+        ragdoll_limit 1 3 y 95 -90 35
+        ragdoll_limit 1 3 z 95 -110 16
+        ragdoll_limit 1 4 z 90 -100 2
+        ragdoll_limit 1 5 x 95 -100 100
+        ragdoll_limit 1 5 y 95 -35 90
+        ragdoll_limit 1 5 z 95 -110 16
+        ragdoll_limit 1 6 z 90 -100 2
+        ragdoll_limit 1 7 x 90 -45 45
+        ragdoll_limit 1 7 y 100 -30 30
+        ragdoll_limit 1 7 z 120 -4 100
+        ragdoll_limit 1 8 z 130 -120 3.5
+        ragdoll_limit 1 9 x 90 -45 45
+        ragdoll_limit 1 9 y 100 -30 30
+        ragdoll_limit 1 9 z 120 -4 100
+        ragdoll_limit 1 10 z 130 -120 3.5
+        ragdoll_baselerp_bone 1 j_head 2000
+        ragdoll_baselerp_bone 1 j_wrist_le 1000
+        ragdoll_baselerp_bone 1 j_wrist_ri 1000
+        ragdoll_baselerp_bone 1 j_ankle_le 1000
+        ragdoll_baselerp_bone 1 j_ankle_ri 1000
+        ragdoll_baselerp_bone 1 j_shouldertwist_le 1000 4
+        ragdoll_baselerp_bone 1 j_shouldertwist_ri 1000 6
+        ragdoll_baselerp_bone 1 j_hiptwist_le 1000 8
+        ragdoll_baselerp_bone 1 j_hiptwist_ri 1000 10
     ";
 
     /// Joint positions of a standing body, by bone: name, parent and place.
-    const BONES: [(&str, Option<usize>, [f32; 3]); 15] = [
+    const BONES: [(&str, Option<usize>, [f32; 3]); 21] = [
         ("j_mainroot", None, [0.0, 0.0, 40.0]),
-        ("j_neck", Some(0), [0.0, 0.0, 58.0]),
-        ("j_head", Some(1), [0.0, 0.0, 66.0]),
-        ("j_shoulder_le", Some(0), [0.0, 8.0, 56.0]),
-        ("j_elbow_le", Some(3), [0.0, 8.0, 42.0]),
-        ("j_wrist_le", Some(4), [0.0, 8.0, 30.0]),
-        ("j_shoulder_ri", Some(0), [0.0, -8.0, 56.0]),
-        ("j_elbow_ri", Some(6), [0.0, -8.0, 42.0]),
-        ("j_wrist_ri", Some(7), [0.0, -8.0, 30.0]),
+        ("j_spinelower", Some(0), [0.0, 0.0, 46.0]),
+        ("j_spineupper", Some(1), [0.0, 0.0, 52.0]),
+        ("j_neck", Some(2), [0.0, 0.0, 58.0]),
+        ("j_head", Some(3), [0.0, 0.0, 66.0]),
+        ("j_shoulder_le", Some(2), [0.0, 8.0, 56.0]),
+        ("j_elbow_le", Some(5), [0.0, 8.0, 42.0]),
+        ("j_wrist_le", Some(6), [0.0, 8.0, 30.0]),
+        ("j_shoulder_ri", Some(2), [0.0, -8.0, 56.0]),
+        ("j_elbow_ri", Some(8), [0.0, -8.0, 42.0]),
+        ("j_wrist_ri", Some(9), [0.0, -8.0, 30.0]),
         ("j_hip_le", Some(0), [0.0, 4.0, 38.0]),
-        ("j_knee_le", Some(9), [0.0, 4.0, 20.0]),
-        ("j_ankle_le", Some(10), [0.0, 4.0, 3.0]),
+        ("j_knee_le", Some(11), [0.0, 4.0, 20.0]),
+        ("j_ankle_le", Some(12), [0.0, 4.0, 3.0]),
         ("j_hip_ri", Some(0), [0.0, -4.0, 38.0]),
-        ("j_knee_ri", Some(12), [0.0, -4.0, 20.0]),
-        ("j_ankle_ri", Some(13), [0.0, -4.0, 3.0]),
+        ("j_knee_ri", Some(14), [0.0, -4.0, 20.0]),
+        ("j_ankle_ri", Some(15), [0.0, -4.0, 3.0]),
+        ("j_shouldertwist_le", Some(5), [0.0, 8.0, 50.0]),
+        ("j_shouldertwist_ri", Some(8), [0.0, -8.0, 50.0]),
+        ("j_hiptwist_le", Some(11), [0.0, 4.0, 32.0]),
+        ("j_hiptwist_ri", Some(14), [0.0, -4.0, 32.0]),
     ];
 
     fn skel() -> Skel {
@@ -1091,17 +1322,11 @@ mod tests {
         for (i, p) in moved {
             at[*i] = Vec3::from(*p);
         }
-        let child = |i: usize| BONES.iter().position(|b| b.1 == Some(i) && at[i] != at[0]);
+        let child = |i: usize| BONES.iter().position(|b| b.1 == Some(i));
         (0..BONES.len())
             .map(|i| {
-                // The child that continues the limb: the elbow of a shoulder, the neck of the root.
-                let c = match i {
-                    0 => Some(1),
-                    1 => Some(2),
-                    _ => child(i),
-                };
-                let right = [6, 7, 8, 12, 13, 14].contains(&i);
-                let q = c.map_or(Quat::IDENTITY, |c| {
+                let right = [8, 9, 10, 14, 15, 16].contains(&i);
+                let q = child(i).map_or(Quat::IDENTITY, |c| {
                     let d = (at[c] - at[i]).normalize();
                     Quat::from_rotation_arc(Vec3::X, if right { -d } else { d })
                 });
@@ -1113,9 +1338,33 @@ mod tests {
             .collect()
     }
 
-    fn make(pose: &[BoneMat], origin: [f32; 3], push: [f32; 3]) -> Ragdoll {
+    /// A body made from `pose` (the bind pose is the standing one), with the animation's motion since `before` if any.
+    fn make_moving(
+        pose: &[BoneMat],
+        origin: [f32; 3],
+        push: [f32; 3],
+        before: Option<Motion>,
+        tun: Tunables,
+    ) -> Ragdoll {
         let def = Def::parse(DEF);
-        Ragdoll::new(&def, &skel(), pose, &standing(&[]), origin, 0.0, push).expect("a ragdoll")
+        Ragdoll::new(
+            &def,
+            &skel(),
+            Birth {
+                pose,
+                base: &standing(&[]),
+                origin,
+                yaw_degrees: 0.0,
+                push,
+                motion: before,
+                tun,
+            },
+        )
+        .expect("a ragdoll")
+    }
+
+    fn make(pose: &[BoneMat], origin: [f32; 3], push: [f32; 3]) -> Ragdoll {
+        make_moving(pose, origin, push, None, Tunables::default())
     }
 
     impl Ragdoll {
@@ -1197,6 +1446,9 @@ mod tests {
             Tunables::read(&c).jointlerp_time,
             Tunables::default().jointlerp_time
         );
+        c.set("ragdoll_rotvel_scale", "5000", false);
+        let t = Tunables::read(&c);
+        assert_eq!(t.rotvel_scale, 2000.0, "held to the dvar's limit");
     }
 
     #[test]
@@ -1219,27 +1471,72 @@ mod tests {
     }
 
     #[test]
-    fn the_definition_reads_bones_joints_limits_and_pairs() {
+    fn the_definition_reads_definition_one_and_leaves_zero_alone() {
         let d = Def::parse(DEF);
-        assert_eq!((d.bones.len(), d.joints.len(), d.pairs.len()), (10, 9, 4));
-        assert!(d.joints[2].hinge && !d.joints[1].hinge);
-        // Three axes on a shoulder, one on an elbow; a negated axis flips its limits.
-        assert_eq!((d.joints[1].limits.len(), d.joints[2].limits.len()), (3, 1));
-        assert!((d.joints[2].limits[0].max + 5f32.to_radians()).abs() < 1e-5);
+        // Definition 0's two bones and its pair are not here: `ragdoll_clear 1` and the lines about 1 make the body.
+        assert_eq!(
+            (d.bones.len(), d.joints.len(), d.pairs.len(), d.lerps.len()),
+            (12, 11, 6, 9)
+        );
+        assert_eq!(
+            (d.bones[3].from.as_str(), d.bones[3].to.as_str()),
+            ("j_neck", "j_head")
+        );
+        assert!(d.joints[4].hinge && !d.joints[3].hinge);
+        // Three axes on a shoulder, one on an elbow, one on a spine hinge.
+        assert_eq!(
+            (
+                d.joints[3].limits.len(),
+                d.joints[4].limits.len(),
+                d.joints[0].limits.len()
+            ),
+            (3, 1, 1)
+        );
+        assert!((d.joints[0].limits[0].max - 6f32.to_radians()).abs() < 1e-5);
+        // A baselerp bone's time is held to 100..6000 ms, and its body is the root's unless the line says.
+        assert_eq!(
+            (
+                d.lerps[0].bone.as_str(),
+                d.lerps[0].parent,
+                d.lerps[0].millis
+            ),
+            ("j_head", 0, 2000)
+        );
+        assert_eq!((d.lerps[5].parent, d.lerps[8].parent), (4, 10));
+        let lines = Def::parse(
+            "ragdoll_bone 1 a b 1 0.5 1 0.3 -1 0 capsule
+             ragdoll_baselerp_bone 1 c 5
+             ragdoll_baselerp_bone 1 d 99999 0
+             ragdoll_baselerp_bone 1 e
+             ragdoll_baselerp_bone 1 f 1000 7
+             ragdoll_pin_bone 1 g 0",
+        );
+        let got: Vec<_> = lines
+            .lerps
+            .iter()
+            .map(|l| (l.bone.as_str(), l.millis))
+            .collect();
+        assert_eq!(
+            got,
+            [("c", 100), ("d", 6000), ("e", 100), ("g", 0)],
+            "a time is held to 100..6000 ms and a missing one reads as 0, so 100; a bone against a body that is not there is left out; a pinned bone has no time"
+        );
         let flipped = Def::parse(
-            "ragdoll_bone 0 a b 1 0.5 1 0.3 -1 0 capsule
-             ragdoll_bone 0 b c 1 0.5 1 0.3 0 0 capsule
-             ragdoll_joint 0 1 swivel
-             ragdoll_limit 0 0 -y 1 -10 40",
+            "ragdoll_bone 1 a b 1 0.5 1 0.3 -1 0 capsule
+             ragdoll_bone 1 b c 1 0.5 1 0.3 0 0 capsule
+             ragdoll_joint 1 1 swivel
+             ragdoll_limit 1 0 -y 1 -10 40",
         );
         assert_eq!(flipped.joints[0].limits[0].axis, -Vec3::Y);
         // A bone naming a parent that does not exist yet, and a joint on the root, are left out.
         let bad = Def::parse(
-            "ragdoll_bone 0 a b 1 0.5 1 0.3 3 0 capsule
-             ragdoll_bone 0 a b 1 0.5 1 0.3 -1 0 capsule
-             ragdoll_joint 0 0 hinge",
+            "ragdoll_bone 1 a b 1 0.5 1 0.3 3 0 capsule
+             ragdoll_bone 1 a b 1 0.5 1 0.3 -1 0 capsule
+             ragdoll_joint 1 0 hinge",
         );
         assert_eq!((bad.bones.len(), bad.joints.len()), (1, 0));
+        // A file of definition 0 alone gives nothing to simulate.
+        assert!(Def::parse("ragdoll_bone 0 a b 1 0.5 1 0.3 -1 0 capsule").is_empty());
     }
 
     #[test]
@@ -1248,8 +1545,8 @@ mod tests {
         settle(&mut r, &Floor, 600);
         assert!(r.at_rest());
         let (lo, hi) = r.bounds();
-        // A capsule's axis cannot get nearer the floor than its radius (the thinnest bone is 2.5).
-        assert!(lo.z > 2.2, "{lo}");
+        // A capsule's axis cannot get nearer the floor than its radius (the thinnest bone is 2.2).
+        assert!(lo.z > 2.0, "{lo}");
         assert!(hi.z < 30.0, "lying, not standing: {hi}");
         assert!(
             r.torso().x > 5.0,
@@ -1279,7 +1576,7 @@ mod tests {
     #[test]
     fn a_pose_outside_the_limits_is_pulled_back_into_them() {
         // The left forearm folded forward at the elbow, the wrong way for the hinge.
-        let pose = standing(&[(5, [14.0, 8.0, 44.0])]);
+        let pose = standing(&[(7, [14.0, 8.0, 44.0])]);
         let mut r = make(&pose, [0.0, 0.0, 100.0], [0.0; 3]);
         let before = r.violation();
         assert!(before > 30f32.to_radians(), "{}°", before.to_degrees());
@@ -1294,12 +1591,12 @@ mod tests {
     #[test]
     fn limbs_that_would_pass_through_the_torso_are_held_a_capsule_apart() {
         // The left forearm laid across the torso's axis.
-        let pose = standing(&[(4, [0.0, 3.0, 50.0]), (5, [0.0, -4.0, 44.0])]);
+        let pose = standing(&[(6, [0.0, 3.0, 50.0]), (7, [0.0, -4.0, 44.0])]);
         let mut r = make(&pose, [0.0, 0.0, 100.0], [0.0; 3]);
-        let before = r.gap(0, 3);
+        let before = r.gap(1, 5);
         assert!(before < 1.0, "{before}");
         settle(&mut r, &Void, 90);
-        assert!(r.gap(0, 3) > 5.0, "{}", r.gap(0, 3));
+        assert!(r.gap(1, 5) > 5.0, "{}", r.gap(1, 5));
     }
 
     #[test]
@@ -1318,9 +1615,14 @@ mod tests {
         // Within reach, behind it: it wakes and goes the other way and up.
         assert!(r.explode(rest + Vec3::new(-60.0, 0.0, 0.0), &blast(256.0)));
         assert!(!r.at_rest());
-        settle(&mut r, &Floor, 30);
+        let mut highest = rest.z;
+        for _ in 0..30 {
+            r.update(STEP, &Floor);
+            highest = highest.max(r.torso().z);
+        }
         let moved = r.torso() - rest;
-        assert!(moved.x > 20.0 && moved.z > 5.0, "{moved}");
+        assert!(moved.x > 8.0, "{moved}");
+        assert!(highest > rest.z + 0.5, "{} over {}", highest, rest.z);
         settle(&mut r, &Floor, 600);
         assert!(r.at_rest(), "it settles again");
         assert!(
@@ -1410,5 +1712,116 @@ mod tests {
                 .all(|h| h.normal == Vec3::Z && h.momentum >= MIN_IMPACT_MOMENTUM)
         );
         assert!(late.is_empty(), "lying still makes no sound: {late:?}");
+    }
+
+    #[test]
+    fn a_baselerp_bone_goes_from_its_death_pose_to_the_bind_pose_over_its_lerp_time() {
+        // The left shoulder's twist bone is 3 units forward of where the bind pose has it, against its body.
+        let (twist, shoulder) = (17, 5);
+        let dist = |r: &Ragdoll| {
+            let b = r.bones();
+            Vec3::from(b[twist].trans).distance(Vec3::from(b[shoulder].trans))
+        };
+        let bind = standing(&[]);
+        let bind = Vec3::from(bind[twist].trans).distance(Vec3::from(bind[shoulder].trans));
+        let mut r = make(
+            &standing(&[(twist, [3.0, 8.0, 50.0])]),
+            [0.0, 0.0, 100.0],
+            [0.0; 3],
+        );
+        let start = (dist(&r) - bind).abs();
+        assert!(
+            start > 0.5,
+            "the death pose differs from the bind pose: {start}"
+        );
+        settle(&mut r, &Void, 30);
+        let mid = (dist(&r) - bind).abs();
+        settle(&mut r, &Void, 40);
+        let end = (dist(&r) - bind).abs();
+        assert!(start > mid && mid > end, "{start} {mid} {end}");
+        assert!(
+            end < 0.05,
+            "past its second the bone is where the bind pose has it: {end}"
+        );
+    }
+
+    #[test]
+    fn a_body_takes_the_velocity_and_turn_its_animation_had_scaled_by_the_rotvel_dvar() {
+        let pose = standing(&[]);
+        // A tenth of a second ago every bone was a unit back and the root bone a tenth of a radian round z.
+        let mut before = pose.clone();
+        for b in &mut before {
+            b.trans[0] -= 1.0;
+        }
+        before[0].quat = (Quat::from_rotation_z(-0.1) * quat_of(&pose[0])).to_array();
+        let made = |scale: f32| {
+            make_moving(
+                &pose,
+                [0.0; 3],
+                [0.0, 5.0, 0.0],
+                Some(Motion {
+                    pose: &before,
+                    origin: [0.0; 3],
+                    yaw_degrees: 0.0,
+                    secs: 0.1,
+                }),
+                Tunables {
+                    rotvel_scale: scale,
+                    ..Tunables::default()
+                },
+            )
+        };
+        let r = made(1.0);
+        assert!(
+            (r.bodies[4].v - Vec3::new(10.0, 5.0, 0.0)).length() < 1e-2,
+            "the push and the animation's own: {}",
+            r.bodies[4].v
+        );
+        assert!(
+            (r.bodies[0].w - Vec3::Z).length() < 1e-2,
+            "{}",
+            r.bodies[0].w
+        );
+        assert!(
+            r.bodies[4].w.length() < 1e-2,
+            "the other bones did not turn"
+        );
+        assert!((made(2.0).bodies[0].w.z - 2.0).abs() < 1e-2);
+        assert_eq!(made(0.0).bodies[0].w, Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_body_keeps_the_travel_of_its_entity_and_a_teleport_is_not_travel() {
+        let pose = standing(&[]);
+        let made = |was: [f32; 3]| {
+            make_moving(
+                &pose,
+                [30.0, 0.0, 0.0],
+                [0.0; 3],
+                Some(Motion {
+                    pose: &pose,
+                    origin: was,
+                    yaw_degrees: 0.0,
+                    secs: 0.1,
+                }),
+                Tunables::default(),
+            )
+        };
+        // The same pose, but the entity was 3 units back a tenth of a second ago: 30 units a second on.
+        let r = made([27.0, 0.0, 0.0]);
+        assert!(
+            r.bodies
+                .iter()
+                .all(|b| (b.v - Vec3::X * 30.0).length() < 1e-2),
+            "{}",
+            r.bodies[0].v
+        );
+        // It was 500 units away a tenth of a second ago: a respawn, so no velocity at all.
+        let r = made([-470.0, 0.0, 0.0]);
+        assert!(
+            r.bodies
+                .iter()
+                .all(|b| b.v == Vec3::ZERO && b.w == Vec3::ZERO)
+        );
     }
 }

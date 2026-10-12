@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::ragdoll::{Def, Ragdoll, Skel};
+use crate::ragdoll::{Birth, Def, Motion, Ragdoll, Skel, Tunables};
 use render::{ModelInstance, ModelKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,6 +304,11 @@ impl Library {
             anims,
             state: PlayerPoseState::default(),
             pose: Pose::default(),
+            before: Vec::new(),
+            step: 0.0,
+            before_at: ([0.0; 3], 0.0),
+            at: [0.0; 3],
+            prev_at: [0.0; 3],
             yaw: 0.0,
         };
         player.set_hand(self.hand(&set.hand)?);
@@ -408,12 +413,32 @@ pub struct Player {
     hand: Vec<Held>,
     /// The hidden bones (`hidepart`), over the bones of all the models.
     hidden: [u32; 4],
+    /// The skeleton's bones before the last [`Player::update`] and the seconds it advanced: what the animation's own
+    /// velocity is made from when the body is handed to a ragdoll.
+    before: Vec<sim::skel::BoneMat>,
+    step: f32,
+    /// Where the entity and which way it faced when `before` was posed.
+    before_at: ([f32; 3], f32),
+    /// Where the entity is, as of the last [`Player::place`].
+    at: [f32; 3],
+    prev_at: [f32; 3],
     yaw: f32,
 }
 
 impl Player {
+    /// Tells the player where its entity is for the next [`Player::update`]: the frame before is where the entity was
+    /// when the last one was placed, which a ragdoll made from it needs to keep the entity's travel.
+    pub fn place(&mut self, origin: [f32; 3]) {
+        self.prev_at = self.at;
+        self.at = origin;
+    }
+
     /// Advances the animation by `dt` seconds for `input` and poses the skeleton.
     pub fn update(&mut self, dt: f32, input: &PlayerPoseInput) {
+        self.before.clear();
+        self.before.extend_from_slice(self.pose.bones());
+        self.step = dt;
+        self.before_at = (self.prev_at, self.yaw);
         self.state.update(&*self.anims, dt, input);
         self.state.pose(&self.anims, &mut self.pose);
         self.yaw = input.yaw;
@@ -467,9 +492,15 @@ impl Player {
         ))
     }
 
-    /// A ragdoll of the body as the last [`Player::update`] posed it, thrown with velocity `push`. `None` when the
-    /// definition names a bone the skeleton lacks.
-    pub fn ragdoll(&self, def: &Def, origin: [f32; 3], push: [f32; 3]) -> Option<Ragdoll> {
+    /// A ragdoll of the body as the last [`Player::update`] posed it, thrown with velocity `push` on top of the
+    /// animation's own. `None` when the definition names a bone the skeleton lacks.
+    pub fn ragdoll(
+        &self,
+        def: &Def,
+        origin: [f32; 3],
+        push: [f32; 3],
+        tun: Tunables,
+    ) -> Option<Ragdoll> {
         let rig = self.anims.rig();
         let skel = Skel {
             names: (0..rig.len())
@@ -483,11 +514,20 @@ impl Player {
         Ragdoll::new(
             def,
             &skel,
-            self.pose.bones(),
-            bind.bones(),
-            origin,
-            self.yaw,
-            push,
+            Birth {
+                pose: self.pose.bones(),
+                base: bind.bones(),
+                origin,
+                yaw_degrees: self.yaw,
+                push,
+                motion: Some(Motion {
+                    pose: self.before.as_slice(),
+                    origin: self.before_at.0,
+                    yaw_degrees: self.before_at.1,
+                    secs: self.step,
+                }),
+                tun,
+            },
         )
     }
 
@@ -695,12 +735,18 @@ mod tests {
             rig.bone_index("j_head").expect("head"),
         );
         let mut r = p
-            .ragdoll(&lib.ragdoll, [0.0; 3], [120.0, 0.0, 0.0])
+            .ragdoll(
+                &lib.ragdoll,
+                [0.0; 3],
+                [120.0, 0.0, 0.0],
+                crate::ragdoll::Tunables::default(),
+            )
             .expect("a ragdoll");
         let len = |b: &[sim::skel::BoneMat]| {
             glam::Vec3::from(b[root_bone].trans).distance(glam::Vec3::from(b[neck].trans))
         };
-        let before = len(&r.bones());
+        let initial = r.bones();
+        let before = len(&initial);
         for _ in 0..900 {
             r.update(1.0 / 60.0, &Floor);
         }
@@ -712,7 +758,27 @@ mod tests {
             len(&after)
         );
         assert!(after.iter().all(|b| b.trans.iter().all(|v| v.is_finite())));
-        let h = after[head].trans;
-        assert!((0.0..60.0).contains(&h[2]), "the head lies at {h:?}");
+        // The baselerp bones (hands, feet, head) are put where the bind pose has them against the pelvis, as stock does:
+        // they may leave the limb they hang from some, never fly off it.
+        let apart = |b: &[sim::skel::BoneMat], end: &str, joint: &str| {
+            let (e, j) = (
+                rig.bone_index(end).expect(end),
+                rig.bone_index(joint).expect(joint),
+            );
+            glam::Vec3::from(b[e].trans).distance(glam::Vec3::from(b[j].trans))
+        };
+        for (end, joint) in [
+            ("j_wrist_le", "j_elbow_le"),
+            ("j_wrist_ri", "j_elbow_ri"),
+            ("j_ankle_le", "j_knee_le"),
+            ("j_ankle_ri", "j_knee_ri"),
+            ("j_head", "j_neck"),
+        ] {
+            let (was, now) = (apart(&initial, end, joint), apart(&after, end, joint));
+            assert!(now < was * 2.0, "{end} {was} -> {now}");
+        }
+        // The bones are relative to the root: the head's height over the floor is the root's and the head's.
+        let h = r.root()[2] + after[head].trans[2];
+        assert!((0.0..60.0).contains(&h), "the head lies at {h}");
     }
 }
