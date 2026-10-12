@@ -30,6 +30,20 @@ pub fn missing(root: &std::path::Path, game: &str, map: &str) -> bool {
         && server::content::zone_dir(root).is_some()
 }
 
+/// Whether a custom map the install has lacks files the server may still give (its IWD, its loading screen): a download
+/// that stopped after the zone. A finished download leaves a marker, so a map that never had them is not asked for again.
+pub fn incomplete(root: &std::path::Path, game: &str, map: &str) -> bool {
+    if !net::download::valid_name(map) || !assets::paths::is_usermap(root, game, map) {
+        return false;
+    }
+    let Some(dir) = assets::paths::usermap_dir(root, map) else {
+        return false;
+    };
+    let has = |f: String| assets::fs::exists(&dir.join(f));
+    !assets::paths::usermap_marker(root, map).is_some_and(|m| assets::fs::exists(&m))
+        && !(has(format!("{map}.iwd")) && has(format!("{map}_load.ff")))
+}
+
 impl Download {
     /// Starts fetching `map` from `server` into the install at `root`.
     pub fn start(
@@ -59,6 +73,11 @@ impl Download {
             cancel,
             rx,
         })
+    }
+
+    /// Blocks until the worker is done (a direct `--connect`, which has no window to show progress in yet).
+    pub fn wait(self) -> Result<(), String> {
+        self.rx.recv().map_err(|e| e.to_string())?
     }
 
     /// The outcome, once the worker is done.
@@ -132,12 +151,13 @@ fn run(
             r => r?,
         }
     }
+    std::fs::write(dir.join(format!("{map}.complete")), b"").map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::missing;
+    use super::{incomplete, missing};
 
     #[test]
     fn a_map_in_usermaps_or_the_mod_folder_is_not_missing() {
@@ -157,5 +177,25 @@ mod tests {
         assert!(missing(root, "", "mp_inmod"), "the mod is not running");
         assert!(!missing(root, "mods/m", "mp_inmod"));
         assert!(missing(root, "", "mp_gone"));
+        // The zone is there but the IWD and loading zone never came: a download that stopped.
+        assert!(incomplete(root, "", "mp_custom"));
+        assert!(
+            !incomplete(root, "", "mp_stock"),
+            "a stock map is never fetched"
+        );
+        assert!(!incomplete(root, "mods/m", "mp_inmod"));
+        let dir = root.join("usermaps/mp_custom");
+        std::fs::write(dir.join("mp_custom.complete"), b"").unwrap();
+        assert!(
+            !incomplete(root, "", "mp_custom"),
+            "finished, whatever the server had"
+        );
+        std::fs::remove_file(dir.join("mp_custom.complete")).unwrap();
+        std::fs::write(dir.join("mp_custom.iwd"), b"").unwrap();
+        std::fs::write(dir.join("mp_custom_load.ff"), b"").unwrap();
+        assert!(
+            !incomplete(root, "", "mp_custom"),
+            "installed by hand, whole"
+        );
     }
 }

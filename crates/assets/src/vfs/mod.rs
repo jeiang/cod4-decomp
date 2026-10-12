@@ -193,9 +193,17 @@ impl Vfs {
     }
 }
 
-/// Adds the files below `dir/<prefix>` ending in `suffix`, named from `dir` on (lowercase, `/`).
+/// Adds the files below `dir` whose name starts with `prefix` and ends with `suffix`, named from `dir` on (lowercase,
+/// `/`). Every directory whose name folds to the same lowercase one is walked, as the file system of a platform that
+/// ignores case would see one.
 fn walk(dir: &Path, prefix: &str, suffix: &str, out: &mut std::collections::BTreeSet<String>) {
-    fn rec(path: &Path, name: &str, suffix: &str, out: &mut std::collections::BTreeSet<String>) {
+    fn rec(
+        path: &Path,
+        name: &str,
+        prefix: &str,
+        suffix: &str,
+        out: &mut std::collections::BTreeSet<String>,
+    ) {
         let Ok(entries) = crate::fs::read_dir(path) else {
             return;
         };
@@ -206,39 +214,16 @@ fn walk(dir: &Path, prefix: &str, suffix: &str, out: &mut std::collections::BTre
             );
             let p = e.path();
             if crate::fs::is_dir(&p) {
-                rec(&p, &format!("{n}/"), suffix, out);
-            } else if n.ends_with(suffix) {
+                let d = format!("{n}/");
+                if prefix.starts_with(&d) || d.starts_with(prefix) {
+                    rec(&p, &d, prefix, suffix, out);
+                }
+            } else if n.starts_with(prefix) && n.ends_with(suffix) {
                 out.insert(n);
             }
         }
     }
-    let rel = prefix.trim_end_matches('/');
-    let start = if rel.is_empty() {
-        Some(dir.to_path_buf())
-    } else {
-        find_dir(dir, rel)
-    };
-    if let Some(start) = start {
-        let name = if rel.is_empty() {
-            String::new()
-        } else {
-            format!("{rel}/")
-        };
-        rec(&start, &name, suffix, out);
-    }
-}
-
-/// `rel` below `dir`, each part matched case-insensitively, when it is a directory.
-fn find_dir(dir: &Path, rel: &str) -> Option<PathBuf> {
-    let mut cur = dir.to_path_buf();
-    for part in rel.split('/').filter(|p| !p.is_empty()) {
-        cur = crate::fs::read_dir(&cur)
-            .ok()?
-            .flatten()
-            .find(|e| e.file_name().to_string_lossy().to_ascii_lowercase() == part)?
-            .path();
-    }
-    crate::fs::is_dir(&cur).then_some(cur)
+    rec(dir, "", prefix, suffix, out);
 }
 
 /// Case-insensitive path lookup below `dir` (the install may sit on a

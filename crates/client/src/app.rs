@@ -63,6 +63,15 @@ pub fn run(mut cli: Cli) -> Result<(), String> {
             }
             cli.game = e.game;
         }
+        // The server's map is fetched first when the install lacks it (or part of it), as a join from the menus does.
+        #[cfg(not(target_arch = "wasm32"))]
+        if crate::download::missing(&cli.install, &cli.game, &e.map)
+            || crate::download::incomplete(&cli.install, &cli.game, &e.map)
+        {
+            let a = serverlist::resolve(&addr)?;
+            crate::download::Download::start(&cli.install, a, &e.map, &e.gametype)?.wait()?;
+        }
+        cli.map = e.map;
     }
     let el = EventLoop::<Ready>::with_user_event()
         .build()
@@ -1183,7 +1192,15 @@ impl Viewer {
                 .to_string();
             begin_load(&self.cli, st, &name, &gametype, loader::Server::Keep);
         } else if let Some(map) = &self.map {
-            let vfs = loader::open_vfs(&self.cli.install, &game_of(&st.input), &self.cli.map)?;
+            let vfs = loader::open_vfs(
+                &self.cli.install,
+                &game_of(&st.input),
+                if st.map_name.is_empty() {
+                    &self.cli.map
+                } else {
+                    &st.map_name
+                },
+            )?;
             let scene = Scene::new(&gpu, map)?;
             let gfx = Gfx::from_cvars(&st.input.cvars);
             let mut r = Renderer::new(
@@ -1958,7 +1975,9 @@ impl Viewer {
                                 continue;
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            if crate::download::missing(&self.cli.install, &e.game, &e.map) {
+                            if crate::download::missing(&self.cli.install, &e.game, &e.map)
+                                || crate::download::incomplete(&self.cli.install, &e.game, &e.map)
+                            {
                                 // The install lacks the server's map: fetch it first, if the player allows it.
                                 if st
                                     .input

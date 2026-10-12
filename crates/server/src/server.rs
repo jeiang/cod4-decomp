@@ -783,7 +783,12 @@ impl Server {
         if !self.game.cvars.bool("sv_allowDownload") {
             return net.refuse(from, "Downloads are not enabled on this server");
         }
-        match download_path(&self.install.root, &self.install.game, name) {
+        match download_path(
+            &self.install.root,
+            &self.install.game,
+            self.game.content.map_name.as_deref(),
+            name,
+        ) {
             Some(path) => net.send_file(from, &path, offset),
             None => net.refuse(from, net::download::NOT_AVAILABLE),
         }
@@ -2806,11 +2811,15 @@ fn quote_word(w: &str) -> String {
 }
 
 /// The file a `getfile` for `name` is given: only map zones (`mp_*` and their loading screens) and a custom map's IWD
-/// (`mp_*.iwd`), named plainly; nothing else of the install is offered.
-fn download_path(root: &Path, game: &str, name: &str) -> Option<PathBuf> {
+/// (`mp_*.iwd`, only the running map's), named plainly; nothing else of the install is offered.
+fn download_path(root: &Path, game: &str, running: Option<&str>, name: &str) -> Option<PathBuf> {
     match name.strip_suffix(".iwd") {
-        Some(map) => assets::paths::usermap_iwd(root, map)
-            .filter(|_| net::download::valid_name(map) && map.starts_with("mp_")),
+        // Only the running map's: that is the one a joining client needs.
+        Some(map) => assets::paths::usermap_iwd(root, map).filter(|_| {
+            net::download::valid_name(map)
+                && map.starts_with("mp_")
+                && running.is_some_and(|r| r.eq_ignore_ascii_case(map))
+        }),
         None => (net::download::valid_name(name) && name.starts_with("mp_"))
             .then(|| assets::paths::zone_file(root, game, name))
             .flatten(),
@@ -2877,10 +2886,16 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, b"").unwrap();
         }
-        let file = |n: &str| download_path(root, "", n).map(|p| p.file_name().unwrap().to_owned());
+        let file = |n: &str| {
+            download_path(root, "", Some("mp_custom"), n).map(|p| p.file_name().unwrap().to_owned())
+        };
         for name in ["mp_stock", "mp_custom", "mp_custom_load", "mp_custom.iwd"] {
             assert!(file(name).is_some(), "{name}");
         }
+        assert!(
+            download_path(root, "", Some("mp_stock"), "mp_custom.iwd").is_none(),
+            "the IWD of a map that is not running"
+        );
         for name in [
             "common_mp",
             "iw_00.iwd",

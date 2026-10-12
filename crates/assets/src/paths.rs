@@ -83,6 +83,22 @@ pub fn zone_file(root: &Path, game: &str, name: &str) -> Option<PathBuf> {
         .or_else(|| find_ci(&usermap_dir(root, name)?, &file))
 }
 
+/// Whether `map` resolves to a custom map's zone: no mod folder or `zone/<language>` has it, `usermaps/<map>` does.
+pub fn is_usermap(root: &Path, game: &str, map: &str) -> bool {
+    let file = format!("{map}.ff");
+    let stock = find_path(root, game)
+        .filter(|_| !game.is_empty() && valid_game(game))
+        .and_then(|d| find_ci(&d, &file))
+        .or_else(|| find_ci(&zone_dir(root)?, &file));
+    stock.is_none() && usermap_dir(root, map).is_some_and(|d| find_ci(&d, &file).is_some())
+}
+
+/// The file in a custom map's folder that says its download finished, so a map with no IWD or loading zone is not asked
+/// for again.
+pub fn usermap_marker(root: &Path, map: &str) -> Option<PathBuf> {
+    Some(usermap_dir(root, map)?.join(format!("{map}.complete")))
+}
+
 /// The IWD of the custom map `map`, `usermaps/<map>/<map>.iwd`.
 pub fn usermap_iwd(root: &Path, map: &str) -> Option<PathBuf> {
     find_ci(&usermap_dir(root, map)?, &format!("{map}.iwd"))
@@ -252,6 +268,9 @@ mod tests {
             usermap_iwd(&t.0, "../mp_u").is_none(),
             "a map name cannot name a path"
         );
+        assert!(is_usermap(&t.0, "", "mp_u") && !is_usermap(&t.0, "", "mp_a"));
+        t.file("usermaps/mp_a/mp_a.ff", b"");
+        assert!(!is_usermap(&t.0, "", "mp_a"), "a stock map is not shadowed");
         assert!(mod_zone(&t.0, "mods/m").is_some() && mod_zone(&t.0, "").is_none());
         assert!(
             zone_file(&t.0, "mods/../zone", "mp_a").is_some(),

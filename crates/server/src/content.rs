@@ -78,7 +78,7 @@ impl Install {
     /// map's off when `map` has none.
     pub fn mount_usermap(&mut self, map: &str) -> io::Result<()> {
         let map = map.strip_suffix("_load").unwrap_or(map);
-        let want = assets::paths::usermap_dir(&self.root, map).map(|_| map.to_owned());
+        let want = assets::paths::is_usermap(&self.root, &self.game, map).then(|| map.to_owned());
         if want != self.usermap {
             let language = LANGUAGES.iter().position(|l| *l == self.language);
             self.vfs = Vfs::open(
