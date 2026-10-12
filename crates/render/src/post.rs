@@ -38,7 +38,7 @@ const TECH_UNLIT: usize = 4;
 pub const FLOATZ_CLEAR: f64 = 2_000_000.0;
 pub const FLOATZ_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 /// The original's `r_dof_bias` default.
-const DOF_BIAS: f32 = 0.5;
+pub const DOF_BIAS: f32 = 0.5;
 /// The original's `r_znear_depthhack` default, the near clip of the view model.
 const VIEW_MODEL_NEAR: f32 = 0.1;
 /// Quads one frame can draw: the longest chain is a dozen passes of depth of field, 33 of glow and 33 of blur.
@@ -82,29 +82,31 @@ impl Dof {
 
     /// `CONST_SRC_CODE_DOF_EQUATION_VIEWMODEL_AND_FAR_BLUR`: the view model's near equation with no far part, and the
     /// far blur radius relative to the near one (after the bias power) in `w`.
-    pub fn view_model_equation(&self) -> [f32; 4] {
-        let [scale, bias] =
+    pub fn view_model_equation(&self, bias: f32) -> [f32; 4] {
+        let [scale, offset] =
             near_equation(self.view_model_start, self.view_model_end, VIEW_MODEL_NEAR);
         [
             scale,
             0.0,
-            bias,
-            (self.far_blur / self.near_blur).powf(DOF_BIAS),
+            offset,
+            (self.far_blur / self.near_blur).powf(bias),
         ]
     }
 
     /// `RB_GetDepthOfFieldBlurFraction`: the share of the near blur radius a blur of `pixel_radius` pixels at the
     /// scene height covers.
-    fn blur_fraction(&self, pixel_radius: f32, scene_height: u32) -> f32 {
-        (pixel_radius * 480.0 / scene_height as f32 / self.near_blur).powf(DOF_BIAS)
+    fn blur_fraction(&self, pixel_radius: f32, scene_height: u32, bias: f32) -> f32 {
+        (pixel_radius * 480.0 / scene_height as f32 / self.near_blur).powf(bias)
     }
 
     /// `DOF_LERP_SCALE` and `DOF_LERP_BIAS`: how the blur fraction picks between the sharp image and the two blurred
     /// ones (about 1.4 and 3.6 pixels of radius), and the near-blur image.
-    pub fn lerp_constants(&self, scene_height: u32) -> ([f32; 4], [f32; 4]) {
+    pub fn lerp_constants(&self, scene_height: u32, bias: f32) -> ([f32; 4], [f32; 4]) {
         // The original asserts 0 < small < medium < 1, which small scenes break; keep the divisions finite.
-        let medium = self.blur_fraction(3.6, scene_height).min(0.99);
-        let small = self.blur_fraction(1.4, scene_height).min(medium * 0.5);
+        let medium = self.blur_fraction(3.6, scene_height, bias).min(0.99);
+        let small = self
+            .blur_fraction(1.4, scene_height, bias)
+            .min(medium * 0.5);
         (
             [
                 -1.0 / small,
@@ -161,6 +163,8 @@ pub struct PostParams {
     pub glow: Glow,
     pub film: Film,
     pub dof: Option<Dof>,
+    /// `r_dof_bias`: the power the blur fraction is raised to; below one is sharper.
+    pub dof_bias: f32,
     pub shell_shock: Option<ShellShock>,
     /// Blur of the whole screen, in virtual 640x480 pixels (the `blurRadius` of the scene parameters).
     pub blur_radius: f32,
@@ -175,6 +179,7 @@ impl PostParams {
             glow: art.glow,
             film: art.film,
             dof: None,
+            dof_bias: DOF_BIAS,
             shell_shock: None,
             blur_radius: 0.0,
             save_screen: false,
@@ -932,10 +937,10 @@ pub(crate) fn build(
         if let Some(d) = dof {
             // RB_GetDepthOfFieldInputImages: a quarter-size downsample of the scene, blurred by the near radius, the
             // near circle of confusion taken from the two, and a small blur of that.
-            let (scale, bias) = d.lerp_constants(h);
+            let (scale, bias) = d.lerp_constants(h, p.dof_bias);
             b.base.vec[codeconst::DOF_EQUATION_SCENE as usize] = d.scene_equation(z_near);
             b.base.vec[codeconst::DOF_EQUATION_VIEWMODEL_AND_FAR_BLUR as usize] =
-                d.view_model_equation();
+                d.view_model_equation(p.dof_bias);
             b.base.vec[codeconst::DOF_ROW_DELTA as usize] = [0.0, 1.0 / h as f32, 0.0, 0.0];
             b.base.vec[codeconst::DOF_LERP_SCALE as usize] = scale;
             b.base.vec[codeconst::DOF_LERP_BIAS as usize] = bias;
@@ -1350,16 +1355,27 @@ mod tests {
         let mut d = dof();
         d.view_model_start = 0.2;
         d.view_model_end = 12.0;
-        let e = d.view_model_equation();
+        let e = d.view_model_equation(DOF_BIAS);
         assert_eq!(e[1], 0.0);
         assert!((e[3] - 0.5f32.sqrt()).abs() < 1e-6);
         assert!((e[0] * 0.2 + e[2] - 1.0).abs() < 1e-5 && (e[0] * 12.0 + e[2]).abs() < 1e-5);
     }
 
+    /// A bias below one sharpens: the same blur radius covers a smaller share of the near blur.
+    #[test]
+    fn dof_bias_is_the_power_of_the_blur_fraction() {
+        let d = dof();
+        assert!((d.view_model_equation(1.0)[3] - 0.5).abs() < 1e-6);
+        assert!((d.view_model_equation(2.0)[3] - 0.25).abs() < 1e-6);
+        let (sharp, _) = d.lerp_constants(720, 1.0);
+        let (soft, _) = d.lerp_constants(720, 0.5);
+        assert_ne!(sharp, soft);
+    }
+
     /// The lerp constants map the blur fraction onto weights that sum to one at every fraction.
     #[test]
     fn dof_lerp_weights_partition_unity() {
-        let (scale, bias) = dof().lerp_constants(720);
+        let (scale, bias) = dof().lerp_constants(720, DOF_BIAS);
         for fraction in [0.0, 0.1, 0.3, 0.6, 0.9, 1.0] {
             let w: Vec<f32> = (0..4)
                 .map(|i| (fraction * scale[i] + bias[i]).clamp(0.0, 1.0))

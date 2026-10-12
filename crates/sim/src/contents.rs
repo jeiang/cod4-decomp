@@ -39,6 +39,10 @@ pub const MASK_SOLID: i32 = SOLID;
 pub const MASK_WATER: i32 = WATER;
 pub const MASK_PLAYERSOLID: i32 = SOLID | GLASS | PLAYERCLIP | VEHICLE | PLAYER;
 pub const MASK_SHOT: i32 = SOLID | GLASS | WATER | SKY | CLIPSHOT | ACTOR | VEHICLE | PLAYER;
+/// What the aim-down-sights blur focuses on: like a shot, but players do not block it (only the aim-assist targets
+/// bring them in) and item clips do.
+pub const MASK_ADS_DOF_TRACE: i32 =
+    SOLID | GLASS | WATER | ITEMCLIP | SKY | CLIPSHOT | ACTOR | VEHICLE;
 pub const MASK_CHARACTER: i32 = PLAYER | ACTOR | FAKE_ACTOR;
 pub const MASK_IGNORE_CHARACTERS: i32 = !MASK_CHARACTER;
 pub const MASK_DEADSOLID: i32 = MASK_PLAYERSOLID & !PLAYER;

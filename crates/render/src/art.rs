@@ -39,6 +39,9 @@ pub struct Glow {
     pub bloom_cutoff: f32,
     pub bloom_desaturation: f32,
     pub bloom_intensity: f32,
+    /// `r_glowSkyBleedIntensity0`. Carried through the vision sets but drawn by nothing: the stock renderer's glow
+    /// (`GfxGlow`: radius, cutoff, desaturation, intensity) and its `GLOW_SETUP`/`GLOW_APPLY` constants have no sky
+    /// term, and no dvar registered by the renderer reads it.
     pub sky_bleed_intensity: f32,
 }
 

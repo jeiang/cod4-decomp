@@ -187,6 +187,10 @@ pub struct Settings {
     pub specular: bool,
     /// `r_dof_enable`: off, the map's and the game's depth of field is not drawn.
     pub dof: bool,
+    /// `r_dof_bias`.
+    pub dof_bias: f32,
+    /// `r_dof_tweak`: the depth of field the `r_dof_*` dvars set, replacing the game's and overriding `dof`.
+    pub dof_tweak: Option<crate::post::Dof>,
     /// `r_glow_allowed`: off, the glow is not drawn.
     pub glow: bool,
     /// `r_aaSamples`: samples per pixel of the scene pass; the renderer uses the most the device offers up to this.
@@ -234,6 +238,8 @@ impl Default for Settings {
             show_missing_light_grid: false,
             specular: true,
             dof: true,
+            dof_bias: crate::post::DOF_BIAS,
+            dof_tweak: None,
             glow: true,
             aa_samples: 1,
             aspect: None,
@@ -1096,7 +1102,10 @@ impl Renderer {
     /// The post parameters as the settings allow them: depth of field and glow can be switched off.
     pub(crate) fn post_params(&self) -> crate::post::PostParams {
         let mut p = self.post.clone();
-        if !self.settings.dof {
+        p.dof_bias = self.settings.dof_bias;
+        if self.settings.dof_tweak.is_some() {
+            p.dof = self.settings.dof_tweak;
+        } else if !self.settings.dof {
             p.dof = None;
         }
         if !self.settings.glow {
@@ -1555,12 +1564,13 @@ impl Renderer {
             };
             let origin = Vec3::from(inst.origin);
             let dist = origin.distance(eye);
-            // Static models always use the rigid ramp, and a scaled model is judged at its unscaled distance.
-            let adjusted = self.lod.scaled(false, dist / inst.scale.max(f32::EPSILON));
-            if inst.cull_dist > 0.0 && adjusted >= inst.cull_dist {
+            // Static models always use the rigid ramp.
+            let Some(lod_dist) =
+                static_lod_dist(self.lod.scaled(false, dist), inst.scale, inst.cull_dist)
+            else {
                 continue;
-            }
-            let Some(lod) = pick_lod(&model, adjusted) else {
+            };
+            let Some(lod) = pick_lod(&model, lod_dist) else {
                 continue;
             };
             let info = &model.lod_info[lod];
@@ -3545,6 +3555,13 @@ impl LodParms {
     }
 }
 
+/// The distance a static model's LOD is picked at, or `None` when it is culled: `ramped` is the distance after the
+/// LOD ramp. The cull takes it as it is; only the LOD pick divides it by the placement `scale`
+/// (`R_AddAllStaticModelSurfacesCamera`).
+fn static_lod_dist(ramped: f32, scale: f32, cull_dist: f32) -> Option<f32> {
+    (cull_dist <= 0.0 || ramped < cull_dist).then(|| ramped / scale.max(f32::EPSILON))
+}
+
 /// The first LOD that reaches as far as `dist` (`XModelGetLodForDist`): one with no range reaches everywhere, and
 /// beyond the last LOD's range the model is not drawn.
 fn pick_lod(model: &XModel, dist: f32) -> Option<usize> {
@@ -3665,6 +3682,17 @@ mod tests {
         assert_eq!(pick_samples(64, up_to(16)), 16);
         assert_eq!(pick_samples(1, up_to(16)), 1);
         assert_eq!(pick_samples(8, up_to(1)), 1);
+    }
+
+    #[test]
+    fn a_scaled_static_model_is_culled_unscaled_and_picks_its_lod_scaled() {
+        // At ramped distance 150 of a cull distance 200, a double-size model is still drawn (not culled at 75 or
+        // 300) and its LOD is judged as at 75.
+        assert_eq!(static_lod_dist(150.0, 2.0, 200.0), Some(75.0));
+        // Past the cull distance it goes whatever its scale; a cull distance of 0 never culls.
+        assert_eq!(static_lod_dist(250.0, 2.0, 200.0), None);
+        assert_eq!(static_lod_dist(250.0, 0.5, 200.0), None);
+        assert_eq!(static_lod_dist(250.0, 1.0, 0.0), Some(250.0));
     }
 
     #[test]
