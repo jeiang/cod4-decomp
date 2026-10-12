@@ -1308,6 +1308,22 @@ impl Viewer {
         {
             grab_pointer(st);
         }
+        // A refused join (a wrong password, a full server, a ban) goes back to the menus with the reason; a scripted
+        // run has no one to read it and ends.
+        if !self.cli.autoplay
+            && let Some(why) = st
+                .net
+                .as_ref()
+                .and_then(NetPlay::refused)
+                .map(str::to_owned)
+            && st.shell.is_some()
+        {
+            eprintln!("join refused: {why}");
+            end_session(&mut self.map, st);
+            if let Some(sh) = st.shell.as_mut() {
+                sh.join_refused(&mut st.input, &why);
+            }
+        }
         if let Some(why) = st
             .net
             .as_ref()

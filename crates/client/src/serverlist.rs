@@ -497,8 +497,8 @@ pub struct Filter {
     pub show_empty: bool,
     /// `ui_browserShowPassword`: 1 only passworded servers, 0 only open ones.
     pub password: i32,
-    /// `ui_browserShowPure` and `ui_browserShowDedicated`: only pure servers, only dedicated ones.
-    pub pure_only: bool,
+    /// `ui_browserShowDedicated`: only dedicated servers. (`ui_browserShowPure` is not a filter here: see
+    /// `Shell::server_filter`.)
     pub dedicated_only: bool,
     /// `ui_browserMod`, `ui_browserFriendlyfire`, `ui_browserKillcam` and `ui_browserShowPunkBuster`: the value the
     /// server's `mod`, `ff`, `kc` or `pb` must hold.
@@ -515,7 +515,6 @@ impl Default for Filter {
             show_full: true,
             show_empty: true,
             password: -1,
-            pure_only: false,
             dedicated_only: false,
             modded: -1,
             friendly_fire: -1,
@@ -535,7 +534,6 @@ impl Filter {
         (self.show_empty || e.clients != 0)
             && (self.show_full || e.clients != e.max_clients)
             && is(self.password, e.password)
-            && (!self.pure_only || e.pure)
             && (!self.dedicated_only || (1..=3).contains(&e.hardware))
             && is(self.modded, e.modded)
             && (self.friendly_fire < 0 || self.friendly_fire == e.friendly_fire)
@@ -570,34 +568,56 @@ pub struct ServerList {
     /// Where the favorites are kept (`None`: nowhere, they last until the client exits). A browser has no files.
     #[cfg(not(target_arch = "wasm32"))]
     store: Option<std::path::PathBuf>,
+    /// The lines of the favorites file that are not listed favorites, written back as they were.
+    #[cfg(not(target_arch = "wasm32"))]
+    kept_lines: Vec<String>,
 }
 
 /// The favorites file in the user's folder. The stock game keeps them in `servercache.dat`, a dump of its in-memory
-/// server structs together with the Internet cache; ours is a text file of one `address:port` a line (`#` starts a
-/// comment) that a person can read and edit, and that is not tied to this client's data layout.
+/// server structs together with the Internet cache; ours is a text file of one `address:port` a line that a person
+/// can read and edit, and that is not tied to this client's data layout. A line that is no usable address (a host
+/// name, say) is kept as it is.
 #[cfg(not(target_arch = "wasm32"))]
 pub const FAVORITES_FILE: &str = "favorites.txt";
 
-/// The addresses a favorites file lists, in order and without repeats; lines that are not an address are skipped.
+/// Most favorites kept (`MAX_FAVOURITESERVERS`).
+pub const MAX_FAVORITES: usize = 128;
 #[cfg(not(target_arch = "wasm32"))]
-pub fn parse_favorites(text: &str) -> Vec<SocketAddr> {
-    let mut out: Vec<SocketAddr> = Vec::new();
-    for line in text.lines().map(str::trim) {
-        if let Ok(a) = line.parse::<SocketAddr>()
-            && !out.contains(&a)
-        {
-            out.push(a);
-        }
-    }
-    out
+const FAVORITES_HEADER: &str = "# Favorite servers, one address:port a line.";
+
+/// Whether `a` can be asked: a port and a host to send to.
+fn askable(a: &SocketAddr) -> bool {
+    a.port() != 0 && !a.ip().is_unspecified()
 }
 
-/// The text of a favorites file for `favorites`.
+/// What a favorites file holds: the addresses it lists (in order, without repeats, at most [`MAX_FAVORITES`]) and
+/// every other line (a host name not yet resolved, a comment, an address that cannot be asked, the surplus), kept
+/// so that saving the file again does not lose them.
 #[cfg(not(target_arch = "wasm32"))]
-fn favorites_text(favorites: &[Entry]) -> String {
-    let mut s = String::from("# Favorite servers, one address:port a line.\n");
+fn parse_favorites(text: &str) -> (Vec<SocketAddr>, Vec<String>) {
+    let mut found: Vec<SocketAddr> = Vec::new();
+    let mut other = Vec::new();
+    for line in text.lines().map(str::trim) {
+        match line.parse::<SocketAddr>() {
+            Ok(a) if askable(&a) && found.contains(&a) => {}
+            Ok(a) if askable(&a) && found.len() < MAX_FAVORITES => found.push(a),
+            Ok(a) if askable(&a) => other.push(line.to_owned()),
+            _ if line.is_empty() || line == FAVORITES_HEADER => {}
+            _ => other.push(line.to_owned()),
+        }
+    }
+    (found, other)
+}
+
+/// The text of a favorites file for `favorites` and the `other` lines of the file read.
+#[cfg(not(target_arch = "wasm32"))]
+fn favorites_text(favorites: &[Entry], other: &[String]) -> String {
+    let mut s = format!("{FAVORITES_HEADER}\n");
     for f in favorites {
         s += &format!("{}\n", f.addr);
+    }
+    for l in other {
+        s += &format!("{l}\n");
     }
     s
 }
@@ -696,7 +716,10 @@ impl ServerList {
 
     /// Adds a favorite (once) and asks it.
     pub fn add_favorite(&mut self, addr: SocketAddr) {
-        if self.favorites.iter().any(|f| f.addr == addr) {
+        if !askable(&addr)
+            || self.favorites.len() >= MAX_FAVORITES
+            || self.favorites.iter().any(|f| f.addr == addr)
+        {
             return;
         }
         self.favorites.push(Entry::unanswered(addr));
@@ -722,18 +745,24 @@ impl ServerList {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_favorites(&mut self, dir: Option<std::path::PathBuf>) {
-        self.store = dir.map(|d| d.join(FAVORITES_FILE));
-        if let Some(text) = self
-            .store
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-        {
-            for a in parse_favorites(&text) {
-                if !self.favorites.iter().any(|f| f.addr == a) {
-                    self.favorites.push(Entry::unanswered(a));
-                }
+        let Some(path) = dir.map(|d| d.join(FAVORITES_FILE)) else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let (found, other) = parse_favorites(&text);
+                self.favorites
+                    .extend(found.into_iter().map(Entry::unanswered));
+                self.kept_lines = other;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // A file that cannot be read is left alone: saving over it would destroy what it holds.
+            Err(e) => {
+                eprintln!("cannot read the favorites in {}: {e}", path.display());
+                return;
             }
         }
+        self.store = Some(path);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -745,7 +774,9 @@ impl ServerList {
             let written = path
                 .parent()
                 .map_or(Ok(()), std::fs::create_dir_all)
-                .and_then(|()| std::fs::write(path, favorites_text(&self.favorites)));
+                .and_then(|()| {
+                    std::fs::write(path, favorites_text(&self.favorites, &self.kept_lines))
+                });
             if let Err(e) = written {
                 eprintln!("cannot save the favorites to {}: {e}", path.display());
             }
@@ -1332,13 +1363,6 @@ mod tests {
         );
         assert!(
             !shown(Filter {
-                pure_only: true,
-                ..base
-            })
-            .contains(&9)
-        );
-        assert!(
-            !shown(Filter {
                 dedicated_only: true,
                 ..base
             })
@@ -1365,7 +1389,6 @@ mod tests {
         let silent = Entry::unanswered(addr("10.0.0.9:28960"));
         assert!(
             Filter {
-                pure_only: true,
                 password: 1,
                 ..base
             }
@@ -1412,11 +1435,61 @@ mod tests {
             .map(|e| e.addr)
             .collect();
         assert_eq!(kept, [addr("10.0.0.2:28961")]);
-        // Comments, blanks and junk in the file are skipped.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A host name, a comment and an address nobody can ask are not favorites but are not thrown away by a save;
+    /// a file that cannot be read is never overwritten; the list stops at the stock 128.
+    #[test]
+    fn favorites_file_keeps_what_it_cannot_list_and_is_never_overwritten_unread() {
+        let dir = std::env::temp_dir().join(format!("cod4e-favorites-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(FAVORITES_FILE);
+        std::fs::write(
+            &file,
+            "# mine\nplay.example.org:28960\n0.0.0.0:28960\n10.0.0.5:0\n10.0.0.3:28960\n",
+        )
+        .unwrap();
+        let mut l = ServerList::default();
+        l.load_favorites(Some(dir.clone()));
+        let listed: Vec<_> = l.rows(Source::Favorites).iter().map(|e| e.addr).collect();
+        assert_eq!(listed, [addr("10.0.0.3:28960")]);
+        l.add_favorite(addr("0.0.0.0:28960"));
+        l.add_favorite(addr("10.0.0.6:0"));
+        l.add_favorite(addr("10.0.0.4:28960"));
+        let saved = std::fs::read_to_string(&file).unwrap();
+        for line in [
+            "# mine",
+            "play.example.org:28960",
+            "0.0.0.0:28960",
+            "10.0.0.5:0",
+            "10.0.0.4:28960",
+        ] {
+            assert!(saved.lines().any(|l| l == line), "{line} survives a save");
+        }
         assert_eq!(
-            parse_favorites("# note\n\n10.0.0.3:28960\nnot an address\n 10.0.0.3:28960 \n"),
-            [addr("10.0.0.3:28960")]
+            l.rows(Source::Favorites).len(),
+            2,
+            "unaskable addresses are not added"
         );
         let _ = std::fs::remove_dir_all(&dir);
+
+        // A favorites path that is a directory cannot be read: nothing is written over it.
+        let dir = std::env::temp_dir().join(format!("cod4e-favorites-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(FAVORITES_FILE)).unwrap();
+        let mut l = ServerList::default();
+        l.load_favorites(Some(dir.clone()));
+        l.add_favorite(addr("10.0.0.1:28960"));
+        assert!(dir.join(FAVORITES_FILE).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The cap.
+        let mut l = ServerList::default();
+        for i in 0..MAX_FAVORITES + 5 {
+            l.add_favorite(addr(&format!("10.1.{}.{}:28960", i / 200, i % 200 + 1)));
+        }
+        assert_eq!(l.rows(Source::Favorites).len(), MAX_FAVORITES);
     }
 }
