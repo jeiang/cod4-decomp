@@ -380,11 +380,6 @@ impl Profiles {
             })
     }
 
-    /// Where the named profile lives: the user's folder wins, then the install's.
-    fn find_dir(&self, name: &str) -> Option<PathBuf> {
-        Self::find_in(&self.user_root, name).or_else(|| Self::find_in(&self.install_root, name))
-    }
-
     /// The active profile's `config_mp.cfg`: the file to read (the user's copy, else the install's) and the file
     /// to write (always the user's folder). `None` where there is no such place.
     pub fn config_paths(&self) -> (Option<PathBuf>, Option<PathBuf>) {
@@ -434,9 +429,11 @@ impl Profiles {
     }
 
     fn read_stats(&self, name: &str) -> Vec<i32> {
-        let Some(bytes) = self
-            .find_dir(name)
-            .and_then(|d| std::fs::read(d.join("mpdata")).ok())
+        // The user's copy wins only when it holds an mpdata: a folder with just a config (saved by the options) must
+        // not hide the install's stats.
+        let Some(bytes) = [&self.user_root, &self.install_root]
+            .into_iter()
+            .find_map(|r| std::fs::read(Self::find_in(r, name)?.join("mpdata")).ok())
         else {
             return default_stats();
         };
@@ -455,7 +452,7 @@ impl Profiles {
                 let why = match e {
                     MpdataError::Corrupt => "the file is damaged or not an mpdata file",
                     MpdataError::Encrypted => {
-                        "it is encrypted with the CD key, which was not found (the registry on Windows, the Wine prefix in WINEPREFIX elsewhere)"
+                        "it is encrypted with the CD key, which was not found (the registry on Windows, the Wine prefix in WINEPREFIX elsewhere; a Steam install has no key there, so its stock profile cannot be read)"
                     }
                     MpdataError::Rejected => {
                         "it is encrypted and its hash does not match (tampered, or made with another CD key)"
@@ -722,6 +719,32 @@ mod tests {
         let (again, back) = Profiles::open(&install, Some(cfg), "default");
         assert_eq!(again.active(), "Lagahoo");
         assert_eq!(back, mine, "the user's copy shadows the install's");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_user_folder_with_only_a_config_does_not_hide_the_installs_stats() {
+        let root = tmp("configonly");
+        let (install, cfg) = (root.join("install"), root.join("cfg"));
+        let dir = install.join("players/profiles/Lagahoo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut theirs = default_stats();
+        theirs[2301] = 125_490;
+        std::fs::write(dir.join("mpdata"), encode(&theirs)).unwrap();
+        std::fs::write(install.join("players/profiles/active.txt"), "Lagahoo").unwrap();
+        // What saving the options leaves behind: the profile folder with a config and no stats.
+        let mine = cfg.join("players/profiles/Lagahoo");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("config_mp.cfg"), "seta x 1").unwrap();
+
+        let (mut p, stats) = Profiles::open(&install, Some(cfg.clone()), "default");
+        assert_eq!(stats, theirs);
+        assert!(
+            !p.save_if_changed(&stats).unwrap(),
+            "unchanged stats write nothing"
+        );
+        let (_, again) = Profiles::open(&install, Some(cfg), "default");
+        assert_eq!(again, theirs);
         let _ = std::fs::remove_dir_all(root);
     }
 

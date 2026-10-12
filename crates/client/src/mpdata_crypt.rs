@@ -83,8 +83,11 @@ const KEY_PATHS: [&str; 2] = [
 
 #[cfg(windows)]
 fn registry_windows() -> Option<CdKey> {
+    use std::os::windows::process::CommandExt;
     KEY_PATHS.iter().find_map(|path| {
-        let out = std::process::Command::new("reg")
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let out = std::process::Command::new(std::path::Path::new(&root).join("System32\\reg.exe"))
+            .creation_flags(0x0800_0000)
             .args(["query", &format!("HKLM\\{path}"), "/v", "codkey"])
             .output()
             .ok()?;
