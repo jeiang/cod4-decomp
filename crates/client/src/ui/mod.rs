@@ -1152,31 +1152,10 @@ impl Ui {
         }
     }
 
-    /// Whether the mouse/keyboard can focus the item: visible, not decoration, an interactive type.
+    /// Whether the mouse/keyboard can focus the item: visible and not a decoration (`Item_SetFocus`); any type.
     fn selectable(&mut self, host: &mut dyn Host, m: usize, i: usize) -> bool {
         let d = &self.menus[m].def.items[i];
         if d.window.static_flags & statf::DECORATION != 0 {
-            return false;
-        }
-        use ity::*;
-        let t = d.ty;
-        if !matches!(
-            t,
-            BUTTON
-                | EDITFIELD
-                | LISTBOX
-                | NUMERICFIELD
-                | SLIDER
-                | YESNO
-                | MULTI
-                | DVARENUM
-                | BIND
-                | VALIDFILEFIELD
-                | DECIMALFIELD
-                | UPREDITFIELD
-        ) && !(t == OWNERDRAW && d.action.as_deref().is_some_and(|a| !a.trim().is_empty()))
-            && !(t == TEXT && d.action.as_deref().is_some_and(|a| !a.trim().is_empty()))
-        {
             return false;
         }
         self.item_visible(host, m, i)
@@ -1204,7 +1183,11 @@ impl Ui {
             it.editing = false;
         }
         self.menus[m].cursor = Some(i);
-        self.menus[m].items[i].dyn_flags |= dynf::HASFOCUS;
+        // A static text item is highlighted only while the pointer is over its text.
+        let (cx, cy) = self.cursor;
+        if self.menus[m].def.items[i].ty != ity::TEXT || self.over_text(&*host, m, i, cx, cy) {
+            self.menus[m].items[i].dyn_flags |= dynf::HASFOCUS;
+        }
         let d = self.menus[m].def.clone();
         // A static text item takes focus without running `onFocus` (`Item_SetFocus`).
         if d.items[i].ty != ity::TEXT
@@ -1219,10 +1202,23 @@ impl Ui {
         if n == 0 {
             return;
         }
-        let start = self.menus[m]
-            .cursor
-            .map_or(if dir > 0 { -1 } else { n }, |c| c as i32);
-        let mut i = start;
+        let Some(c) = self.menus[m].cursor else {
+            // From no focus the original starts on the first (last) item but tests the second (second to last)
+            // first, and does not wrap (`Menu_SetNextCursorItem`, `Menu_SetPrevCursorItem`).
+            let order: Vec<usize> = if dir > 0 {
+                (1..n as usize).collect()
+            } else {
+                (0..n as usize - 1).rev().collect()
+            };
+            for i in order {
+                if self.selectable(host, m, i) {
+                    self.set_focus(host, m, i);
+                    return;
+                }
+            }
+            return;
+        };
+        let mut i = c as i32;
         for _ in 0..n {
             i = (i + dir).rem_euclid(n);
             if self.selectable(host, m, i as usize) {
@@ -1292,11 +1288,12 @@ impl Ui {
     /// are walked from the top down until one takes focus or is full screen.
     pub fn mouse_move(&mut self, host: &mut dyn Host, x: f32, y: f32) {
         self.cursor = (x, y);
-        let Some(&top) = self.stack.last() else {
+        let Some(&last) = self.stack.last() else {
             return;
         };
-        if self.menus[top].def.window.static_flags & statf::POPUP != 0 {
-            self.menu_mouse_move(host, top);
+        let focused = self.focused_menu().unwrap_or(last);
+        if self.menus[focused].def.window.static_flags & statf::POPUP != 0 {
+            self.menu_mouse_move(host, focused);
             return;
         }
         for m in self.stack.clone().into_iter().rev() {
@@ -1438,8 +1435,8 @@ impl Ui {
         if self.menus[m].items[i].dyn_flags & dynf::HASFOCUS != 0 {
             return true;
         }
-        if let Some(&top) = self.stack.last()
-            && top != m
+        if self.menus[m].dyn_flags & dynf::HASFOCUS == 0
+            && let Some(top) = self.focused_menu()
             && self.menu_contains(top, x, y)
             && self.menu_contains(m, x, y)
         {
@@ -1447,6 +1444,15 @@ impl Ui {
         }
         self.set_focus(host, m, i);
         true
+    }
+
+    /// `Menu_GetFocused`: the topmost open menu that has the focus.
+    fn focused_menu(&self) -> Option<usize> {
+        self.stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|&m| self.menus[m].dyn_flags & dynf::HASFOCUS != 0)
     }
 
     fn menu_contains(&self, m: usize, x: f32, y: f32) -> bool {
@@ -1682,6 +1688,13 @@ impl Ui {
             return true;
         }
         let def = self.menus[m].def.clone();
+        // A mouse button ends the edit wherever it lands, before the out-of-bounds handling (`Menu_HandleKey`
+        // clears `g_editingField` on a mouse key and carries on).
+        if matches!(key, UiKey::Mouse1 | UiKey::Mouse2) {
+            for it in &mut self.menus[m].items {
+                it.editing = false;
+            }
+        }
         if oob
             && matches!(key, UiKey::Mouse1 | UiKey::Mouse2)
             && def.window.static_flags & statf::POPUP == 0
@@ -1737,33 +1750,34 @@ impl Ui {
                 Some(s) if !s.trim().is_empty() && s.trim() != ";" => {
                     self.run_script(host, Some(m), None, s)
                 }
-                // No handler: the original closes every menu unless a full-screen one is up (the way back into the
-                // game from options and vote menus that have no `onESC`), and closes a popup or a blank handler's menu.
-                _ => {
-                    let stack = self.stack.clone();
-                    let full = stack
-                        .iter()
-                        .any(|&o| self.menus[o].def.full_screen != 0 && self.menu_visible(host, o));
-                    if def.on_esc.is_none() && !full && host.in_game() {
+                // No handler at all: the original closes every menu unless a full-screen one is up (the way back
+                // into the game from options and vote menus that have no `onESC`). A blank handler is a handler:
+                // the menu stays.
+                None => {
+                    let full =
+                        self.stack.clone().into_iter().any(|o| {
+                            self.menus[o].def.full_screen != 0 && self.menu_visible(host, o)
+                        });
+                    if !full {
                         self.close_all(host);
-                    } else if def.window.static_flags & statf::POPUP != 0 || def.on_esc.is_some() {
-                        self.close(host, m);
                     }
                 }
+                Some(_) => {}
             }
             return true;
         }
         let Some(i) = self.menus[m].cursor else {
+            // `Menu_HandleKey`: Up and Left step back, Tab, Down and Right forward; Enter acts on the focused item only.
             return match key {
-                UiKey::Up
-                | UiKey::Down
-                | UiKey::Tab
-                | UiKey::Enter
-                | UiKey::Left
-                | UiKey::Right => {
+                UiKey::Up | UiKey::Left => {
+                    self.move_focus(host, m, -1);
+                    true
+                }
+                UiKey::Down | UiKey::Tab | UiKey::Right => {
                     self.move_focus(host, m, 1);
                     true
                 }
+                UiKey::Enter => true,
                 _ => def.window.static_flags & statf::POPUP != 0,
             };
         };
@@ -2412,6 +2426,8 @@ mod tests {
         rows: usize,
         now: i32,
         selected: Vec<(i32, usize)>,
+        /// At the main menu rather than in a match.
+        main_menu: bool,
     }
     impl env::World for Dummy {
         fn key_bindings(&self, c: &str) -> Vec<String> {
@@ -2446,7 +2462,7 @@ mod tests {
             false
         }
         fn in_game(&self) -> bool {
-            true
+            !self.main_menu
         }
         fn time_ms(&self) -> i32 {
             self.now
@@ -2500,6 +2516,278 @@ mod tests {
         ui.open_by_name(&mut host, "popup_leavegame");
         assert!(ui.cursor_visible, "the next menu opened without a pointer");
         assert!(ui.captures_input());
+    }
+
+    // ---- key and mouse handling on synthetic menus ----------------------------------------------------------
+
+    use ::assets::zone::menu::{Statement, WindowDef};
+
+    fn window(rect: Rect, static_flags: u32) -> WindowDef {
+        WindowDef {
+            name: None,
+            rect,
+            rect_client: rect,
+            group: None,
+            style: 0,
+            border: 0,
+            owner_draw: 0,
+            owner_draw_flags: 0,
+            border_size: 0.0,
+            static_flags,
+            dynamic_flags: dynf::VISIBLE,
+            next_time: 0,
+            fore_color: [1.0; 4],
+            back_color: [0.0; 4],
+            border_color: [0.0; 4],
+            outline_color: [0.0; 4],
+            background: None,
+        }
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect {
+            x,
+            y,
+            w,
+            h,
+            horz_align: 0,
+            vert_align: 0,
+        }
+    }
+
+    /// An item of type `ty` whose `action` sets the dvar `ran` to its own name.
+    fn item(name: &str, ty: i32, r: Rect) -> ItemDef {
+        ItemDef {
+            window: window(r, 0),
+            text_rect: r,
+            ty,
+            data_type: 0,
+            alignment: 0,
+            font_enum: 0,
+            text_align_mode: 0,
+            text_align_x: 0.0,
+            text_align_y: 0.0,
+            text_scale: 1.0,
+            text_style: 0,
+            game_msg_window_index: 0,
+            game_msg_window_mode: 0,
+            text: None,
+            item_flags: 0,
+            mouse_enter_text: None,
+            mouse_exit_text: None,
+            mouse_enter: None,
+            mouse_exit: None,
+            action: Some(format!("setDvar ran {name}").into()),
+            on_accept: None,
+            on_focus: None,
+            leave_focus: None,
+            dvar: None,
+            dvar_test: None,
+            on_key: Vec::new(),
+            enable_dvar: None,
+            dvar_flags: 0,
+            focus_sound: None,
+            special: 0.0,
+            image_track: 0,
+            data: ItemData::None,
+            visible_exp: Statement::default(),
+            text_exp: Statement::default(),
+            material_exp: Statement::default(),
+            rect_x_exp: Statement::default(),
+            rect_y_exp: Statement::default(),
+            rect_w_exp: Statement::default(),
+            rect_h_exp: Statement::default(),
+            forecolor_a_exp: Statement::default(),
+        }
+    }
+
+    struct Spec {
+        name: &'static str,
+        rect: Rect,
+        static_flags: u32,
+        full_screen: i32,
+        on_esc: Option<&'static str>,
+        items: Vec<ItemDef>,
+    }
+
+    fn spec(name: &'static str) -> Spec {
+        Spec {
+            name,
+            rect: rect(0.0, 0.0, 640.0, 480.0),
+            static_flags: 0,
+            full_screen: 0,
+            on_esc: None,
+            items: Vec::new(),
+        }
+    }
+
+    fn menu(s: Spec) -> Arc<MenuDef> {
+        let mut w = window(s.rect, s.static_flags);
+        w.name = Some(s.name.into());
+        w.dynamic_flags = 0;
+        Arc::new(MenuDef {
+            window: w,
+            font: None,
+            full_screen: s.full_screen,
+            font_index: 0,
+            fade_cycle: 0,
+            fade_clamp: 0.0,
+            fade_amount: 0.0,
+            fade_in_amount: 0.0,
+            blur_radius: 0.0,
+            on_open: None,
+            on_close: None,
+            on_esc: s.on_esc.map(Into::into),
+            on_key: Vec::new(),
+            visible_exp: Statement::default(),
+            allowed_binding: None,
+            sound_name: None,
+            image_track: 0,
+            focus_color: [1.0; 4],
+            disable_color: [1.0; 4],
+            rect_x_exp: Statement::default(),
+            rect_y_exp: Statement::default(),
+            items: s.items,
+        })
+    }
+
+    fn synthetic(menus: Vec<Spec>) -> Ui {
+        let mut assets = UiAssets::default();
+        for s in menus {
+            assets.menu_order.push(s.name.into());
+            assets.menus.insert(s.name.into(), menu(s));
+        }
+        Ui::new(assets, (640, 480))
+    }
+
+    /// `n` buttons stacked down the left of a menu.
+    fn buttons(n: usize) -> Vec<ItemDef> {
+        (0..n)
+            .map(|i| {
+                item(
+                    &i.to_string(),
+                    ity::BUTTON,
+                    rect(10.0, 10.0 + 30.0 * i as f32, 100.0, 20.0),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_click_outside_the_menu_ends_the_edit_field() {
+        let mut field = item("f", ity::EDITFIELD, rect(10.0, 10.0, 100.0, 20.0));
+        field.dvar = Some("name".into());
+        let mut s = spec("a");
+        s.rect = rect(0.0, 0.0, 200.0, 100.0);
+        s.items = vec![field];
+        let mut ui = synthetic(vec![s]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "a");
+        ui.set_focus(&mut host, 0, 0);
+        ui.begin_edit(&mut host, 0, 0);
+        ui.cursor = (600.0, 450.0);
+        ui.key(&mut host, UiKey::Mouse1);
+        assert!(!ui.menus[0].items[0].editing);
+    }
+
+    #[test]
+    fn keys_with_nothing_focused_start_from_the_second_item_and_enter_does_nothing() {
+        let mut s = spec("a");
+        s.items = buttons(4);
+        let mut ui = synthetic(vec![s]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "a");
+        assert_eq!(ui.menus[0].cursor, None);
+        ui.key(&mut host, UiKey::Enter);
+        assert_eq!(ui.menus[0].cursor, None, "Enter does not take focus");
+        assert_eq!(host.dvar("ran"), "", "and runs nothing");
+        ui.key(&mut host, UiKey::Down);
+        assert_eq!(ui.menus[0].cursor, Some(1));
+        ui.menus[0].cursor = None;
+        ui.key(&mut host, UiKey::Up);
+        assert_eq!(ui.menus[0].cursor, Some(2));
+    }
+
+    #[test]
+    fn escape_leaves_a_menu_with_a_blank_handler_open() {
+        let mut s = spec("a");
+        s.on_esc = Some("");
+        s.items = buttons(1);
+        let mut ui = synthetic(vec![s]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "a");
+        ui.key(&mut host, UiKey::Escape);
+        assert!(ui.is_open("a"));
+    }
+
+    #[test]
+    fn escape_closes_every_menu_even_outside_a_match() {
+        let mut s = spec("a");
+        s.items = buttons(1);
+        let mut ui = synthetic(vec![s]);
+        let mut host = Dummy {
+            main_menu: true,
+            ..Dummy::default()
+        };
+        ui.open_by_name(&mut host, "a");
+        ui.key(&mut host, UiKey::Escape);
+        assert!(!ui.captures_input());
+    }
+
+    #[test]
+    fn escape_does_not_close_a_popup_over_a_full_screen_menu() {
+        let mut full = spec("full");
+        full.full_screen = 1;
+        full.items = buttons(1);
+        let mut popup = spec("popup");
+        popup.static_flags = statf::POPUP;
+        popup.rect = rect(200.0, 100.0, 200.0, 200.0);
+        popup.items = buttons(1);
+        let mut ui = synthetic(vec![full, popup]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "full");
+        ui.open_by_name(&mut host, "popup");
+        ui.key(&mut host, UiKey::Escape);
+        assert!(ui.is_open("popup") && ui.is_open("full"));
+    }
+
+    #[test]
+    fn any_visible_item_that_is_not_a_decoration_takes_focus() {
+        let mut owner = item("o", ity::OWNERDRAW, rect(10.0, 10.0, 100.0, 20.0));
+        owner.action = None;
+        // Radio button (2): a type the old whitelist never knew.
+        let radio = item("r", 2, rect(10.0, 40.0, 100.0, 20.0));
+        let mut deco = item("d", ity::BUTTON, rect(10.0, 70.0, 100.0, 20.0));
+        deco.window.static_flags = statf::DECORATION;
+        let mut s = spec("a");
+        s.items = vec![deco, owner, radio];
+        let mut ui = synthetic(vec![s]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "a");
+        ui.menus[0].cursor = Some(2);
+        ui.key(&mut host, UiKey::Up);
+        assert_eq!(ui.menus[0].cursor, Some(1), "an owner-draw without action");
+        ui.key(&mut host, UiKey::Up);
+        assert_eq!(ui.menus[0].cursor, Some(2), "wraps past the decoration");
+    }
+
+    #[test]
+    fn hover_follows_the_focused_popup_not_the_stack_top() {
+        let mut popup = spec("popup");
+        popup.static_flags = statf::POPUP;
+        popup.items = buttons(1);
+        let mut top = spec("top");
+        top.items = buttons(1);
+        let mut ui = synthetic(vec![popup, top]);
+        let mut host = Dummy::default();
+        ui.open_by_name(&mut host, "popup");
+        ui.open_by_name(&mut host, "top");
+        // The popup holds the focus though another menu was pushed over it.
+        ui.menus[1].dyn_flags &= !dynf::HASFOCUS;
+        ui.menus[0].dyn_flags |= dynf::HASFOCUS;
+        ui.mouse_move(&mut host, 60.0, 20.0);
+        assert_eq!(ui.menus[0].cursor, Some(0));
+        assert_eq!(ui.menus[1].cursor, None);
     }
 
     fn multi(count: i32, str_def: i32) -> ::assets::zone::menu::MultiDef {
