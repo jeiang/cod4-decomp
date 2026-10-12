@@ -16,8 +16,9 @@ use sim::contents;
 use sim::pm::PmType;
 use sim::skel::{LocHit, Stance, box_hit_location};
 use sim::weapon::damage::{
-    MAX_BULLET_EXTENSIONS, MAX_PENETRATIONS, PENETRATION_ADVANCE, PENETRATION_REVERSE_ADVANCE,
-    PenetrationTable, RIFLE_BODY_DAMAGE_SCALE, advance_trace, bullet_damage, penetrate_multiplier,
+    MAX_BULLET_EXTENSIONS, MAX_PENETRATIONS, PENETRATION_ADVANCE, PENETRATION_MIN_FX_DIST,
+    PENETRATION_REVERSE_ADVANCE, PenetrationTable, RIFLE_BODY_DAMAGE_SCALE, advance_trace,
+    bullet_damage, penetrate_multiplier,
 };
 use sim::weapon::fire::{AimBasis, bullet_shots};
 use sim::weapon::{PenetrateType, WeaponInfo, WeaponParams};
@@ -361,6 +362,12 @@ impl Br {
     }
 }
 
+/// Whether the wall between two hit points is thick enough to show its impacts (`bullet_penetrationMinFxDist`).
+fn thick_enough(a: Vec3, b: Vec3) -> bool {
+    let d = sub(a, b);
+    dot(d, d) > PENETRATION_MIN_FX_DIST * PENETRATION_MIN_FX_DIST
+}
+
 /// `BG_AdvanceTrace`: restarts the bullet past the surface it hit.
 fn advance(bp: &mut Bp, br: &Br, dist: f32) -> bool {
     bp.ignore = br.t.hit;
@@ -389,7 +396,7 @@ impl Game {
         if !t.is_hit() {
             return None;
         }
-        if t.hit != ENTITYNUM_WORLD && t.surface_flags == 0 {
+        if t.surface_flags == 0 && t.hit != ENTITYNUM_WORLD && self.is_client(t.hit) {
             t.surface_flags = SURF_TYPE_FLESH;
         }
         let hit_pos = lerp(bp.start, bp.end, t.fraction);
@@ -414,6 +421,7 @@ impl Game {
         br: &Br,
         p: &BulletParams,
         dflag: i32,
+        fx: bool,
         out: &mut Vec<BulletHit>,
     ) {
         let target = br.hit_ent.unwrap_or(ENTITYNUM_WORLD);
@@ -430,7 +438,7 @@ impl Game {
             damageable,
             normal: br.t.normal,
             surface: surface_type(br.t.surface_flags) as u8,
-            no_impact: br.t.surface_flags & (SURF_NOIMPACT | SURF_SKY) != 0,
+            no_impact: !fx || br.t.surface_flags & (SURF_NOIMPACT | SURF_SKY) != 0,
             exit: false,
             start: bp.start,
             point: br.hit_pos,
@@ -445,7 +453,7 @@ impl Game {
     /// The exit impact of a penetrating bullet at `br`, found by tracing back through the wall from `bp`.
     fn bullet_exit(&self, bp: &Bp, br: &Br, p: &BulletParams, out: &mut Vec<BulletHit>) {
         let before = out.len();
-        self.bullet_process(bp, br, p, 0, out);
+        self.bullet_process(bp, br, p, 0, true, out);
         // Only the impact: no damage, and the shot's own direction rather than the reverse trace's.
         for h in &mut out[before..] {
             h.exit = true;
@@ -462,7 +470,7 @@ impl Game {
             let Some(br) = self.bullet_trace(bp, p, 0) else {
                 return;
             };
-            self.bullet_process(bp, &br, p, 0, out);
+            self.bullet_process(bp, &br, p, 0, true, out);
             if br.t.contents & contents::GLASS != 0 {
                 if !advance(bp, &br, PENETRATION_ADVANCE) {
                     return;
@@ -492,7 +500,7 @@ impl Game {
         let Some(mut br) = self.bullet_trace(bp, p, 0) else {
             return;
         };
-        self.bullet_process(bp, &br, p, 0, out);
+        self.bullet_process(bp, &br, p, 0, true, out);
         let depth_of = |surface: usize| p.penetration.depth_for(p.info, surface, p.perks, p.params);
         for _ in 0..MAX_PENETRATIONS {
             let mut max_depth = depth_of(br.depth_surface);
@@ -542,14 +550,18 @@ impl Game {
                     return;
                 }
                 // `Bullet_ImpactEffect(.. impactFlags | 4)`: where the bullet came out of the wall.
-                if !all_solid && (!trace_hit || br.t.surface_flags & SURF_SKY == 0) {
-                    self.bullet_exit(&rev_bp, &rev_br, p, out);
-                }
-                if !all_solid && trace_hit {
-                    self.bullet_process(bp, &br, p, dflags::PENETRATION, out);
+                if !all_solid {
+                    let fx = thick_enough(rev_br.hit_pos, br.hit_pos);
+                    if fx && (!trace_hit || br.t.surface_flags & SURF_SKY == 0) {
+                        self.bullet_exit(&rev_bp, &rev_br, p, out);
+                    }
+                    if trace_hit {
+                        self.bullet_process(bp, &br, p, dflags::PENETRATION, fx, out);
+                    }
                 }
             } else if trace_hit {
-                self.bullet_process(bp, &br, p, dflags::PENETRATION, out);
+                let fx = thick_enough(last_hit, br.hit_pos);
+                self.bullet_process(bp, &br, p, dflags::PENETRATION, fx, out);
             }
             if !trace_hit {
                 return;
@@ -589,5 +601,17 @@ impl Game {
                 self.bullet_fire_extended(&mut bp, p, out);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fx_tests {
+    use super::thick_enough;
+
+    #[test]
+    fn a_thin_wall_shows_no_impacts_and_a_thick_one_does() {
+        assert!(!thick_enough([0.0; 3], [29.0, 0.0, 0.0]));
+        assert!(!thick_enough([0.0; 3], [30.0, 0.0, 0.0]));
+        assert!(thick_enough([0.0; 3], [0.0, 31.0, 0.0]));
     }
 }

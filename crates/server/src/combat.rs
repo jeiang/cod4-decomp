@@ -73,6 +73,7 @@ pub fn mod_from_name(s: &str) -> Option<u8> {
 
 /// Hit location names and their indices (`hitLocation_t`).
 pub const HITLOC_NONE: u8 = 0;
+pub const HITLOC_HELMET: u8 = 1;
 pub const HITLOC_HEAD: u8 = 2;
 pub const HITLOCS: [&str; 19] = [
     "none",
@@ -584,11 +585,16 @@ impl Game {
             d.dir.map_or([0.0; 3], normalize),
         );
         let now = self.level.time;
+        let head = matches!(d.hitloc, HITLOC_HELMET | HITLOC_HEAD);
         self.tempev.add(now, crate::tempev::ev::PLAYER_DEATH, |s| {
             s.origin = at;
             s.client = n;
             s.velocity = [push[0] * 240.0, push[1] * 240.0, push[2] * 240.0];
+            s.event_parm = u8::from(head);
         });
+        if let (Some(a), Some(p)) = (d.attacker, d.point) {
+            self.tempev.mark_fatal_impact(a, p);
+        }
         if d.attacker.is_some_and(|a| a != n && self.is_client(a)) {
             self.stats.kills += 1;
         }

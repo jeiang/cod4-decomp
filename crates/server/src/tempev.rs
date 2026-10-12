@@ -53,6 +53,10 @@ pub const FIRE_LAST_SHOT: u8 = 1;
 
 /// `eflags` of a [`ev::BULLET_IMPACT`] where a penetrating bullet left a wall: the `_exit` sounds.
 pub const IMPACT_EXIT: u32 = 1;
+/// `eflags` of a [`ev::BULLET_IMPACT`] on a player's head or helmet (the head column of the flesh effects).
+pub const IMPACT_HEAD: u32 = 2;
+/// `eflags` of a [`ev::BULLET_IMPACT`] whose bullet killed the player it hit (the fatal column of the flesh effects).
+pub const IMPACT_KILL: u32 = 4;
 
 /// Script numbers that travel in a velocity component, which the wire keeps to a quarter unit: scaled up to keep the
 /// precision scripts use (0.4 of an earthquake, a jitter of 0.05).
@@ -240,6 +244,32 @@ impl TempEvents {
         });
     }
 
+    /// The bullet that struck at `point` for `shooter` killed its target: marks that impact event [`IMPACT_KILL`], if
+    /// it is still live. The kill is only known once the script has applied the damage, after the impact was recorded.
+    pub fn mark_fatal_impact(&mut self, shooter: u16, point: [f32; 3]) {
+        let at = EntityState {
+            origin: point,
+            ..EntityState::new(0)
+        }
+        .canonical()
+        .origin;
+        let newest = self
+            .slots
+            .iter_mut()
+            .flatten()
+            .filter(|s| {
+                let e = &s.state;
+                e.event == ev::BULLET_IMPACT
+                    && e.eflags & (IMPACT_EXIT | IMPACT_KILL) == 0
+                    && e.client == shooter
+                    && e.origin == at
+            })
+            .max_by_key(|s| s.expires);
+        if let Some(s) = newest {
+            s.state.eflags |= IMPACT_KILL;
+        }
+    }
+
     /// Records a physics world event at `origin`.
     pub fn add_physics(&mut self, now: i32, origin: [f32; 3], p: &Physics) {
         self.add(now, p.kind(), |s| {
@@ -276,6 +306,25 @@ pub fn dir_to_angles(d: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kill_marks_the_impact_at_its_point_for_its_shooter_only() {
+        let mut t = TempEvents::default();
+        let hit = |t: &mut TempEvents, shooter, point, eflags| {
+            t.add(1000, ev::BULLET_IMPACT, |s| {
+                s.origin = point;
+                s.client = shooter;
+                s.eflags = eflags;
+            });
+        };
+        hit(&mut t, 2, [1.1, 2.2, 3.3], IMPACT_HEAD);
+        hit(&mut t, 2, [5.0, 5.0, 5.0], 0);
+        hit(&mut t, 3, [1.1, 2.2, 3.3], 0);
+        hit(&mut t, 2, [1.1, 2.2, 3.3], IMPACT_EXIT);
+        t.mark_fatal_impact(2, [1.1, 2.2, 3.3]);
+        let flags: Vec<u32> = t.live(1000).map(|s| s.eflags).collect();
+        assert_eq!(flags, [IMPACT_HEAD | IMPACT_KILL, 0, 0, IMPACT_EXIT]);
+    }
 
     #[test]
     fn events_live_for_the_lifetime_and_get_distinct_sequences() {
