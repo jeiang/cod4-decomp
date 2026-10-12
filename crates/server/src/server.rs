@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The voice audience and session checks (`hears_voice`) are translated from KisakCOD (server_mp/sv_voice_mp.cpp G_BroadcastVoice, game_mp/g_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The headless server: boot, map load, console commands and the frame loop.
 //!
 //! Boot follows the original's dedicated start: command-line `set`s first, `default_mp.cfg`
@@ -17,7 +18,7 @@ use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, 
 
 use crate::ban::BanList;
 use crate::bot::{BotShared, Brain};
-use crate::client::{Conn, Team};
+use crate::client::{Client, Conn, Session, Team};
 use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
 use crate::cvar::{self, Cvars};
@@ -289,6 +290,10 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_privateClients", "0", SERVERINFO),
         ("sv_pure", "0", SERVERINFO | SYSTEMINFO),
         ("sv_voice", "0", ARCHIVE | SERVERINFO | SYSTEMINFO),
+        ("voice_global", "0", ARCHIVE),
+        ("voice_deadChat", "0", ARCHIVE),
+        ("perk_parabolicRadius", "400", CHEAT),
+        ("perk_parabolicAngle", "180", CHEAT),
         ("sv_allowDownload", "0", ARCHIVE | SERVERINFO),
         ("sv_punkbuster", "0", ARCHIVE | SERVERINFO),
         ("sv_allowAnonymous", "0", SERVERINFO),
@@ -749,31 +754,39 @@ impl Server {
         }
     }
 
-    /// Forwards the voice frames clients sent (`sv_voice`; off drops them): each goes to the speaker's team and to
-    /// spectators, minus the players who muted the speaker. The speaker counts as talking for a moment.
+    /// Forwards the voice frames clients sent (`sv_voice`; off drops them) to whoever [`hears_voice`] says may hear
+    /// the speaker, minus the players who muted the speaker. The speaker counts as talking for a moment.
     fn relay_voice(&mut self, net: &mut NetSv) {
         let frames = net.take_voice();
         if self.game.cvars.int("sv_voice") == 0 {
             return;
         }
+        let rules = VoiceRules {
+            global: self.game.cvars.bool("voice_global"),
+            dead_chat: self.game.cvars.bool("voice_deadChat"),
+            parabolic_radius: self.game.cvars.float("perk_parabolicRadius"),
+            parabolic_angle: self.game.cvars.float("perk_parabolicAngle"),
+        };
         let time = self.game.level.time;
         for (speaker, seq, frame) in frames {
             // Only a person who has joined talks: not a bot, not a slot still connecting.
-            let Some(team) = self
+            if !self
                 .game
                 .client(speaker)
-                .filter(|c| c.conn == Conn::Connected && !c.bot)
-                .map(|c| c.team)
-            else {
+                .is_some_and(|c| c.conn == Conn::Connected && !c.bot)
+            {
                 continue;
-            };
+            }
             if let Some(c) = self.game.client_mut(speaker) {
                 c.talking_until = time + crate::netsv::TALKING_MS;
             }
             let game = &self.game;
+            let Some(talker) = game.client(speaker) else {
+                continue;
+            };
             net.relay_voice(speaker, seq, frame, |listener| {
                 game.client(listener)
-                    .is_some_and(|c| c.team == team || c.team == Team::Spectator)
+                    .is_some_and(|l| hears_voice(&rules, talker, l))
             });
         }
     }
@@ -2866,9 +2879,123 @@ fn rss_line() -> Option<String> {
     Some(format!("memory: {cur}peak {} MiB\n", peak >> 20))
 }
 
+/// The voice dvars `G_BroadcastVoice` reads.
+struct VoiceRules {
+    /// `voice_global`: everybody hears everybody.
+    global: bool,
+    /// `voice_deadChat`: the dead and the living hear each other.
+    dead_chat: bool,
+    /// `perk_parabolicRadius` and `perk_parabolicAngle`: how far and how wide Eavesdrop listens.
+    parabolic_radius: f32,
+    parabolic_angle: f32,
+}
+
+/// Perk bit of `specialty_parabolic` (Eavesdrop).
+const PERK_PARABOLIC: u32 = 1 << 9;
+
+// The audience and session checks of `G_BroadcastVoice` (KisakCOD `server_mp/sv_voice_mp.cpp`): a listener is in the
+// audience when it is in intermission, voice is global, it shares the speaker's team, the speaker is in a free-for-all
+// or it has Eavesdrop and the speaker is within its view cone and radius. An audience member then hears only a
+// speaker in the same session state, unless `voice_deadChat` lets the dead and the living talk.
+fn hears_voice(rules: &VoiceRules, talker: &Client, listener: &Client) -> bool {
+    let same_team =
+        talker.team == listener.team && matches!(talker.team, Team::Axis | Team::Allies);
+    let eavesdrops = || {
+        if listener.ps.perks & PERK_PARABOLIC == 0 {
+            return false;
+        }
+        let (forward, _, _) = sim::pm::math::angle_vectors(&listener.ps.viewangles);
+        let delta = [
+            talker.ps.origin[0] - listener.ps.origin[0],
+            talker.ps.origin[1] - listener.ps.origin[1],
+            talker.ps.origin[2] - listener.ps.origin[2],
+        ];
+        let (dir, dist) = sim::pm::math::normalize_to(&delta);
+        let dot = dir[0] * forward[0] + dir[1] * forward[1] + dir[2] * forward[2];
+        rules.parabolic_angle.to_radians().cos() <= dot && rules.parabolic_radius >= dist
+    };
+    let in_audience = listener.session == Session::Intermission
+        || rules.global
+        || same_team
+        || talker.team == Team::Free
+        || eavesdrops();
+    in_audience
+        && (listener.session == talker.session
+            || (listener.session == Session::Dead || talker.session == Session::Dead)
+                && rules.dead_chat)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{RotationPlan, download_path, flood_drops, ping_field, plain_text, plan_rotation};
+    use super::{
+        PERK_PARABOLIC, RotationPlan, VoiceRules, download_path, flood_drops, hears_voice,
+        ping_field, plain_text, plan_rotation,
+    };
+    use crate::client::{Client, Session, Team};
+
+    fn player(num: u16, team: Team, session: Session) -> Client {
+        let mut c = Client::new(num, false, format!("p{num}"));
+        c.team = team;
+        c.session = session;
+        c
+    }
+
+    const RULES: VoiceRules = VoiceRules {
+        global: false,
+        dead_chat: false,
+        parabolic_radius: 400.0,
+        parabolic_angle: 180.0,
+    };
+
+    #[test]
+    fn voice_reaches_the_team_in_the_same_state_and_not_the_dead_unless_dead_chat_is_on() {
+        let alive = player(0, Team::Allies, Session::Playing);
+        let mate = player(1, Team::Allies, Session::Playing);
+        let dead_mate = player(2, Team::Allies, Session::Dead);
+        let enemy = player(3, Team::Axis, Session::Playing);
+        assert!(hears_voice(&RULES, &alive, &mate));
+        assert!(!hears_voice(&RULES, &alive, &enemy));
+        assert!(!hears_voice(&RULES, &dead_mate, &mate), "dead to living");
+        assert!(!hears_voice(&RULES, &alive, &dead_mate), "living to dead");
+        let chat = VoiceRules {
+            dead_chat: true,
+            ..RULES
+        };
+        assert!(hears_voice(&chat, &dead_mate, &mate));
+        assert!(hears_voice(&chat, &alive, &dead_mate));
+        assert!(!hears_voice(&chat, &dead_mate, &enemy), "still the team");
+    }
+
+    #[test]
+    fn global_voice_crosses_teams_and_a_free_for_all_speaker_is_heard_by_all() {
+        let ally = player(0, Team::Allies, Session::Playing);
+        let enemy = player(1, Team::Axis, Session::Playing);
+        let global = VoiceRules {
+            global: true,
+            ..RULES
+        };
+        assert!(hears_voice(&global, &ally, &enemy));
+        let ffa = player(2, Team::Free, Session::Playing);
+        assert!(hears_voice(&RULES, &ffa, &enemy));
+    }
+
+    #[test]
+    fn eavesdrop_hears_enemies_in_front_and_in_range_only() {
+        let mut enemy = player(0, Team::Axis, Session::Playing);
+        enemy.ps.origin = [200.0, 0.0, 0.0];
+        let mut spy = player(1, Team::Allies, Session::Playing);
+        assert!(!hears_voice(&RULES, &enemy, &spy), "no perk");
+        spy.ps.perks |= PERK_PARABOLIC;
+        assert!(hears_voice(&RULES, &enemy, &spy));
+        enemy.ps.origin = [500.0, 0.0, 0.0];
+        assert!(!hears_voice(&RULES, &enemy, &spy), "out of range");
+        enemy.ps.origin = [-200.0, 0.0, 0.0];
+        let cone = VoiceRules {
+            parabolic_angle: 90.0,
+            ..RULES
+        };
+        assert!(!hears_voice(&cone, &enemy, &spy), "behind");
+    }
 
     #[test]
     fn a_getfile_gives_a_maps_zones_and_a_custom_maps_iwd_and_nothing_else() {
