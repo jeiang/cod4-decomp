@@ -754,12 +754,10 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
-    fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    /// A headless device, or `None` without an adapter. The `Gpu` keeps its instance alive for as long as the device
+    /// is used (the instance is dropped first otherwise).
+    fn device() -> Option<render::Gpu> {
+        render::Gpu::new(None).ok()
     }
 
     /// Count `stsz` sample_count in the moov of an MP4 (our own muxer's layout).
@@ -796,10 +794,13 @@ mod tests {
 
     #[test]
     fn records_three_seconds_of_moving_pattern() {
-        let Some((device, queue)) = device() else {
+        // No other test's device starts or stops while this one's does: the DX12 runner crashed once with two at once.
+        let _one_device = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(gpu) = device() else {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
+        let (device, queue) = (&gpu.device, &gpu.queue);
         let (w, h) = (1920u32, 1080u32);
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -859,13 +860,13 @@ mod tests {
                     depth_or_array_layers: 1,
                 },
             );
-            if rec.capture(&device, &queue, &tex, now) {
+            if rec.capture(device, queue, &tex, now) {
                 captured += 1;
             }
             ticks += 1;
         }
         let t_cap = t0.elapsed();
-        let stats = rec.finish(&device).unwrap();
+        let stats = rec.finish(device).unwrap();
         let t_all = t0.elapsed();
         eprintln!(
             "captured {captured}, encoded {} dropped {} -> {}x{} {} bytes; capture loop {:?}, total {:?} ({:.1} encoded fps)",

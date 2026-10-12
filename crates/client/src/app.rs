@@ -4063,6 +4063,7 @@ mod gpu_log_tests {
     /// Needs an adapter: skips without.
     #[test]
     fn losses_are_recovered_from_a_few_times_then_end_the_run() {
+        let _one_device = crate::GPU_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Ok(gpu) = Gpu::new(None) else {
             eprintln!("skipped: no GPU adapter");
             return;
