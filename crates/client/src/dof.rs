@@ -205,11 +205,22 @@ mod tests {
     #[test]
     fn a_player_who_cannot_aim_assist_has_no_screen_targets() {
         assert!(targets_allowed(&aiming(1.0)));
-        for t in [PmType::Spectator, PmType::Dead, PmType::Noclip, PmType::Intermission] {
-            let ps = PlayerState { pm_type: t, ..aiming(1.0) };
+        for t in [
+            PmType::Spectator,
+            PmType::Dead,
+            PmType::Noclip,
+            PmType::Intermission,
+        ] {
+            let ps = PlayerState {
+                pm_type: t,
+                ..aiming(1.0)
+            };
             assert!(!targets_allowed(&ps), "{t:?}");
         }
-        let ps = PlayerState { other_flags: 2, ..aiming(1.0) };
+        let ps = PlayerState {
+            other_flags: 2,
+            ..aiming(1.0)
+        };
         assert!(!targets_allowed(&ps));
     }
 
