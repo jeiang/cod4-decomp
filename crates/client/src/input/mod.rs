@@ -2159,8 +2159,11 @@ mod tests {
     fn stock_configs_exec_through_the_install() {
         let root =
             std::env::var_os("COD4_PATH").map_or_else(|| "COD4".into(), std::path::PathBuf::from);
-        let Ok(vfs) = Vfs::open_stock(&root, 0) else {
-            eprintln!("COD4_PATH not set; skipping");
+        let Some(vfs) = Vfs::open_stock(&root, 0)
+            .ok()
+            .filter(|v| v.locate("default_mp.cfg").is_some())
+        else {
+            eprintln!("no stock install with default_mp.cfg; skipping");
             return;
         };
         let mut i = Input::detached();
