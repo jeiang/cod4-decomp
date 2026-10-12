@@ -178,6 +178,23 @@ fn main_accepts_the_cod4x_exempt_iwd_names() {
 }
 
 #[test]
+fn lookups_cannot_leave_the_search_path() {
+    let t = Tmp::new();
+    t.iwd("main/iw_00.iwd", &[]);
+    t.file("secret.cfg", b"outside");
+    t.file("main/inside.cfg", b"inside");
+    let v = Vfs::open_stock(&t.0, 0).unwrap();
+    assert_eq!(get(&v, "inside.cfg"), "inside");
+    assert!(v.read("../secret.cfg").unwrap().is_none());
+    assert!(v.read("sub/../../secret.cfg").unwrap().is_none());
+    assert!(
+        v.read(&t.0.join("secret.cfg").to_string_lossy())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn main_without_iwds_is_an_error() {
     let t = Tmp::new();
     t.iwd("main/zz.iwd", &[("a", b"")]);

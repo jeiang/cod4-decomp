@@ -825,7 +825,7 @@ impl Viewer {
             .map_err(|e| format!("cannot open the install: {e}"))?;
         let mut input = Input::new(
             self.cli.config_dir.clone(),
-            Vfs::open(&self.cli.install, 0, &self.cli.game).ok(),
+            Vfs::open(&self.cli.install, 0, &self.cli.game, None).ok(),
         );
         input.cvars.set("fs_game", &self.cli.game, false);
         let demo_dir = input
@@ -1244,7 +1244,15 @@ impl Viewer {
         st.last_frame = now;
         let dt = (t - st.last_t).min(0.1);
         st.last_t = t;
+<<<<<<< HEAD
         st.pace.1 += 1;
+=======
+        // The commands a `wait` held back run before this frame's input is read.
+        match st.shell.as_mut() {
+            Some(sh) => sh.run_due(&mut st.input),
+            None => st.input.run_due(),
+        }
+>>>>>>> 884bb28 (fix: one command buffer for wait/exec/vstr across console, menus and binds; exec limits, VFS path checks, toggle not-found (Refs #298))
         if let Some(g) = st.load_gaps.as_mut() {
             g.frames += 1;
             g.max_ms = g.max_ms.max(interval);

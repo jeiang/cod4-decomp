@@ -51,6 +51,11 @@ fn normalize(name: &str) -> String {
         .collect()
 }
 
+/// A lookup key that names something below a search-path node: not absolute, no drive, no `..`.
+fn stays_inside(norm: &str) -> bool {
+    !norm.starts_with('/') && !norm.contains(':') && !norm.split('/').any(|p| p == "..")
+}
+
 fn language_index(name: &str) -> Option<usize> {
     LANGUAGES.iter().position(|l| l.eq_ignore_ascii_case(name))
 }
@@ -149,6 +154,9 @@ impl Vfs {
     /// Like [`Vfs::locate`], also returning the index into [`Vfs::nodes`].
     pub fn locate_node(&self, name: &str) -> Option<(usize, Hit<'_>)> {
         let norm = normalize(name);
+        if !stays_inside(&norm) {
+            return None;
+        }
         self.nodes.iter().enumerate().find_map(|(i, node)| {
             if node.language.is_some_and(|l| l != self.language) {
                 return None;

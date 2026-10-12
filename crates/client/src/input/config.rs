@@ -84,15 +84,18 @@ pub fn quote(s: &str) -> String {
     out
 }
 
-/// The file `exec <name>` reads: the name cut to the original's 63 characters, with `.cfg` added when it has no
-/// extension (`Cmd_Exec_f`).
+/// The file `exec <name>` reads: `.cfg` is added when the name has no extension (`Com_DefaultExtension`).
 pub fn exec_name(name: &str) -> String {
-    let mut file: String = name.chars().take(63).collect();
-    let base = file.rsplit(['/', '\\']).next().unwrap_or("");
-    if !base.contains('.') && file.len() + 4 <= 63 {
+    let mut file = name.to_owned();
+    if !file.rsplit(['/', '\\']).next().unwrap_or("").contains('.') {
         file.push_str(".cfg");
     }
     file
+}
+
+/// `atoi`: the integer part of a number, 0 for anything else.
+pub fn atoi(s: &str) -> i32 {
+    s.trim().parse::<f64>().map_or(0, |v| v as i32)
 }
 
 /// Re-join tokens into a command line, quoting those that need it.

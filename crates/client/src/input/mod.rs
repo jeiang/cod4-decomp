@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The command buffer follows KisakCOD (qcommon/cmd.cpp: Cmd_Wait_f, Cmd_Vstr_f, Cmd_Exec_f, Cmd_ExecFromDisk; universal/dvar_cmds.cpp: Dvar_ToggleInternal, Dvar_List_f, Dvar_Dump_f; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Player input: keys, mouse, wheel and gamepad resolved through the bind table into one [`InputFrame`] per frame.
 //!
 //! Decoupled from networking: the netplay layer turns an `InputFrame` into a usercmd. Commands keep their original
@@ -37,6 +38,7 @@ pub use rawmouse::RawMouse;
 use assets::vfs::Vfs;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use web_time::Instant;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::keyboard::PhysicalKey;
@@ -231,18 +233,44 @@ pub struct Input {
     fov_sensitivity_scale: f32,
     /// The install's files, for `exec`.
     vfs: Option<Vfs>,
-    /// The rest of a command line `wait` held back.
+    /// The rest of the buffers `wait` held back.
     deferred: Vec<Deferred>,
     /// What commands said, for the console (see [`Input::take_messages`]).
     messages: Vec<String>,
 }
 
 const MAX_EXEC_DEPTH: u32 = 8;
+/// `vstr` expansions in one run of a buffer (a cvar that runs itself stops here).
+const MAX_EXPANSIONS: u32 = 1024;
+/// The longest name `exec` looks up in the install's files (`Cmd_Exec_f`'s buffer).
+const MAX_EXEC_NAME: usize = 63;
+const MAX_MESSAGES: usize = 8192;
 
 /// The commands after a `wait`, due once `frames` more frames have passed.
 struct Deferred {
     frames: u32,
-    cmds: VecDeque<Vec<String>>,
+    cmds: Vec<Vec<String>>,
+}
+
+/// One command of a buffer: how deep in `exec`s it is, and the folder a disk file it came from sits in.
+struct Item {
+    toks: Vec<String>,
+    depth: u32,
+    dir: Option<Arc<Path>>,
+}
+
+impl Item {
+    fn new(toks: Vec<String>, depth: u32, dir: Option<Arc<Path>>) -> Self {
+        Self { toks, depth, dir }
+    }
+}
+
+/// The commands of `text`, one buffer.
+fn items(text: &str, depth: u32, dir: Option<&Arc<Path>>) -> VecDeque<Item> {
+    text.lines()
+        .flat_map(config::split_commands)
+        .map(|toks| Item::new(toks, depth, dir.cloned()))
+        .collect()
 }
 
 impl DebugCounter {
@@ -280,6 +308,15 @@ impl Input {
         i
     }
 
+    /// [`Input::detached`] with the install's files, for what a script `exec`s.
+    #[cfg(test)]
+    pub(crate) fn detached_with(vfs: Vfs) -> Self {
+        let mut i = Self::bare();
+        i.vfs = Some(vfs);
+        i.load_defaults();
+        i
+    }
+
     /// Fallback binds and cvars only; no devices, no file, no install. Focused and cursor-captured.
     pub fn detached() -> Self {
         let mut i = Self::bare();
@@ -295,8 +332,7 @@ impl Input {
             .is_some_and(|v| v.locate("default_mp.cfg").is_some());
         if stock {
             // `Com_ExecStartupConfigs`: default_mp.cfg, then language.cfg (the profile's config follows).
-            self.exec_file("default_mp.cfg", None, false, 0);
-            self.exec_file("language.cfg", None, false, 0);
+            self.exec_text("exec default_mp.cfg\nexec language.cfg\n", None, false, 0);
         } else {
             self.exec_text(include_str!("fallback_mp.cfg"), None, false, 0);
         }
@@ -411,7 +447,6 @@ impl Input {
 
     /// Everything the player asked for since the previous call.
     pub fn frame(&mut self, dt: f32) -> InputFrame {
-        self.run_deferred();
         for (name, down) in self.pad.poll() {
             if self.focused && self.cvars.bool("in_gamepad") {
                 self.key(name, down);
@@ -680,57 +715,44 @@ impl Input {
     }
 
     fn exec_text(&mut self, text: &str, dir: Option<&Path>, sink: bool, depth: u32) {
-        let cmds = text.lines().flat_map(config::split_commands).collect();
-        self.run(cmds, dir, sink, depth, None);
+        let dir: Option<Arc<Path>> = dir.map(Arc::from);
+        let cmds = items(text, depth, dir.as_ref());
+        self.run(cmds, sink, None);
     }
 
-    /// `Cbuf_Execute` over one command buffer. `vstr` puts its cvar's commands at the front of what is left, and
-    /// `wait` (interactive only) holds the rest back for later frames. With `held`, a `+command` starts a button
-    /// that the caller releases (a bound key); without, it is held until its `-command`.
-    fn run(
-        &mut self,
-        mut cmds: VecDeque<Vec<String>>,
-        dir: Option<&Path>,
-        sink: bool,
-        depth: u32,
-        mut held: Option<&mut Vec<String>>,
-    ) {
+    /// `Cbuf_Execute` over one command buffer. `vstr` and `exec` put their commands at the front of what is left,
+    /// so a `wait` anywhere in them holds the whole rest back for later frames (interactive only). With `held`, a
+    /// `+command` starts a button that the caller releases (a bound key); without, it is held until its `-command`.
+    fn run(&mut self, mut cmds: VecDeque<Item>, sink: bool, mut held: Option<&mut Vec<String>>) {
         let mut expansions = 0;
-        while let Some(toks) = cmds.pop_front() {
+        while let Some(Item { toks, depth, dir }) = cmds.pop_front() {
             let name = toks[0].to_ascii_lowercase();
             match (name.as_str(), held.as_deref_mut()) {
                 ("wait", _) if sink => {
-                    let n = toks
-                        .get(1)
-                        .map_or(1, |a| a.trim().parse::<i32>().unwrap_or(0));
                     // `cmd_wait = atoi(arg)`: the buffer stops until that many frames have passed.
+                    let n = toks.get(1).map_or(1, |a| config::atoi(a));
                     if n > 0 {
-                        if !cmds.is_empty() {
-                            let frames = n.unsigned_abs() - 1;
-                            self.deferred.push(Deferred { frames, cmds });
-                        }
+                        let rest = cmds.into_iter().map(|i| i.toks).collect();
+                        self.defer(n.unsigned_abs(), rest);
                         return;
                     }
                 }
-                ("vstr", _) => {
-                    let [_, var] = toks.as_slice() else {
-                        self.say("vstr <variablename> : execute a variable command");
-                        continue;
-                    };
+                ("vstr" | "exec", _) => {
+                    let exec = name == "exec";
                     expansions += 1;
-                    if expansions > MAX_EXEC_DEPTH * 8 {
-                        self.say("vstr: too many nested vstr commands");
+                    if (exec && depth >= MAX_EXEC_DEPTH) || expansions > MAX_EXPANSIONS {
+                        self.say(format!("{name}: too many nested commands"));
+                        if exec {
+                            continue;
+                        }
                         return;
                     }
-                    match self.cvars.get(var).map(str::to_owned) {
-                        Some(text) => {
-                            let next: Vec<_> =
-                                text.lines().flat_map(config::split_commands).collect();
-                            for c in next.into_iter().rev() {
-                                cmds.push_front(c);
-                            }
+                    if let Some((next, from)) = self.expand(&toks, dir.as_deref(), sink) {
+                        let dir = from.map(Arc::from).or_else(|| dir.clone());
+                        let depth = depth + u32::from(exec);
+                        for toks in next.into_iter().rev() {
+                            cmds.push_front(Item::new(toks, depth, dir.clone()));
                         }
-                        None => self.say(format!("{var} doesn't exist")),
                     }
                 }
                 ("+actionslot", Some(_)) => {
@@ -741,28 +763,15 @@ impl Input {
                     let h = self.hold(&toks[0][1..]);
                     started.push(h);
                 }
-                _ => self.exec_tokens(&toks, dir, sink, depth),
+                _ => self.exec_tokens(&toks, sink),
             }
         }
     }
 
     /// Console output for the shell to print (what a command says: a missing file, a cvar list).
-    fn say(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        eprintln!("{text}");
-        if self.messages.len() < 1024 {
-            self.messages.push(text);
-        }
-    }
-
-    /// `wait` met in a line the shell is running: `cmds` run after `frames` more frames.
-    pub fn defer(&mut self, frames: u32, cmds: Vec<Vec<String>>) {
-        if !cmds.is_empty() {
-            let frames = frames.saturating_sub(1);
-            self.deferred.push(Deferred {
-                frames,
-                cmds: cmds.into(),
-            });
+    pub fn say(&mut self, text: impl Into<String>) {
+        if self.messages.len() < MAX_MESSAGES {
+            self.messages.push(text.into());
         }
     }
 
@@ -771,46 +780,118 @@ impl Input {
         std::mem::take(&mut self.messages)
     }
 
-    /// Commands held back by `wait` run once their frames have passed (`Cbuf_Execute` checks `cmd_wait` first).
-    fn run_deferred(&mut self) {
+    /// The commands a `vstr <cvar>` or `exec <file>` stands for: they run in its place, in the buffer it is in, so a
+    /// `wait` among them holds the rest of that buffer (`Cbuf_InsertText`). Also the folder of a disk file, for the
+    /// files it runs. `None` (after saying why) when there is nothing to run.
+    pub fn expand(
+        &mut self,
+        toks: &[String],
+        dir: Option<&Path>,
+        sink: bool,
+    ) -> Option<(Vec<Vec<String>>, Option<PathBuf>)> {
+        let name = toks[0].to_ascii_lowercase();
+        let (text, from) = match (name.as_str(), &toks[1..]) {
+            ("vstr", [var]) => {
+                let Some(text) = self.cvars.get(var).map(str::to_owned) else {
+                    self.say(format!("{var} doesn't exist"));
+                    return None;
+                };
+                (text, None)
+            }
+            ("vstr", _) => {
+                self.say("vstr <variablename> : execute a variable command");
+                return None;
+            }
+            ("exec", [file]) => self.read_exec(file, dir, sink)?,
+            _ => {
+                self.say("exec <filename> : execute a script file");
+                return None;
+            }
+        };
+        let cmds = text.lines().flat_map(config::split_commands).collect();
+        Some((cmds, from))
+    }
+
+    /// `wait` met: `cmds`, the rest of the buffer, run after `frames` frames (`cmd_wait`).
+    pub fn defer(&mut self, frames: u32, cmds: Vec<Vec<String>>) {
+        if !cmds.is_empty() {
+            self.deferred.push(Deferred {
+                frames: frames.saturating_sub(1),
+                cmds,
+            });
+        }
+    }
+
+    /// The buffers whose `wait` has run out, one frame later than the last call (`Cbuf_Execute` checks `cmd_wait`
+    /// first). The caller runs them through its own command handler.
+    pub fn take_due(&mut self) -> Vec<Vec<Vec<String>>> {
+        let mut due = Vec::new();
         for mut d in std::mem::take(&mut self.deferred) {
             if d.frames > 0 {
                 d.frames -= 1;
                 self.deferred.push(d);
             } else {
-                self.run(d.cmds, None, true, 0, None);
+                due.push(d.cmds);
             }
+        }
+        due
+    }
+
+    /// [`Input::take_due`], run here: for an input with no shell on top.
+    pub fn run_due(&mut self) {
+        for cmds in self.take_due() {
+            let cmds = cmds.into_iter().map(|toks| Item::new(toks, 0, None));
+            self.run(cmds.collect(), true, None);
         }
     }
 
-    /// `exec <name>`: the install's files first (the IWDs hold the stock configs), then the disk (the user's own, by
-    /// the path given, relative to `dir`). `.cfg` is added to a name without an extension.
-    fn exec_file(&mut self, name: &str, dir: Option<&Path>, sink: bool, depth: u32) {
-        let file = config::exec_name(name);
-        let text = self
+    /// The text of `exec <name>`: the install's files first (the IWDs hold the stock configs; a name past the
+    /// original's 63 characters is cut there), then the disk (the user's own, by the path given, relative to
+    /// `dir`). `.cfg` is added to a name without an extension. Also the folder a disk file sits in, for the files
+    /// it runs. Says `couldn't exec` when there is none.
+    fn read_exec(
+        &mut self,
+        name: &str,
+        dir: Option<&Path>,
+        sink: bool,
+    ) -> Option<(String, Option<PathBuf>)> {
+        let in_install = config::exec_name(&name.chars().take(MAX_EXEC_NAME).collect::<String>());
+        let stock = self
             .vfs
             .as_ref()
-            .and_then(|v| v.read(&file).ok().flatten())
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .or_else(|| {
-                let path = dir.map_or_else(|| PathBuf::from(&file), |d| d.join(&file));
-                std::fs::read_to_string(path).ok()
-            });
-        match text {
-            Some(t) => {
+            .and_then(|v| v.read(&in_install).ok().flatten());
+        if let Some(bytes) = stock {
+            return Some((String::from_utf8_lossy(&bytes).into_owned(), None));
+        }
+        let file = config::exec_name(name);
+        let path = dir.map_or_else(|| PathBuf::from(&file), |d| d.join(&file));
+        match std::fs::read_to_string(&path) {
+            Ok(t) => {
                 if sink {
                     self.say(format!("execing {file} from disk"));
                 }
-                self.exec_text(&t, dir, sink, depth + 1);
+                Some((t, path.parent().map(Path::to_path_buf)))
             }
-            None => self.say(format!("couldn't exec {name}")),
+            Err(_) => {
+                eprintln!("couldn't exec {name}");
+                self.say(format!("couldn't exec {name}"));
+                None
+            }
         }
     }
 
     /// `toggle <cvar> [values...]` (`Dvar_ToggleInternal`): with no values a number flips between 0 and 1; with
-    /// values it takes the one after the current, or the first. A cvar this store has not met reads as 0.
+    /// values it takes the one after the current (numbers compare as numbers), or the first. The cvar's domain
+    /// (a float's range, an enum's names) is not modelled: this store keeps text.
     fn toggle(&mut self, name: &str, values: &[&str]) {
-        let current = self.cvars.get(name).unwrap_or("0").to_owned();
+        let Some(current) = self.cvars.get(name).map(str::to_owned) else {
+            self.say(format!("toggle failed: dvar '{name}' not found."));
+            return;
+        };
+        let same = |a: &str, b: &str| {
+            a.eq_ignore_ascii_case(b)
+                || matches!((a.trim().parse::<f64>(), b.trim().parse::<f64>()), (Ok(x), Ok(y)) if x == y)
+        };
         let next = match values {
             [] => match current.trim().parse::<f64>() {
                 Ok(0.0) => "1",
@@ -825,7 +906,7 @@ impl Input {
             },
             [first, ..] => values[..values.len() - 1]
                 .iter()
-                .position(|v| v.eq_ignore_ascii_case(&current))
+                .position(|v| same(v, &current))
                 .map_or(*first, |i| values[i + 1]),
         };
         self.cvars.set(name, next, false);
@@ -859,7 +940,7 @@ impl Input {
     }
 
     /// `sink`: unknown commands go to `pending` (interactive); off while loading files.
-    fn exec_tokens(&mut self, toks: &[String], dir: Option<&Path>, sink: bool, depth: u32) {
+    fn exec_tokens(&mut self, toks: &[String], sink: bool) {
         let args: Vec<&str> = toks[1..].iter().map(String::as_str).collect();
         let name = toks[0].to_ascii_lowercase();
         match (name.as_str(), args.as_slice()) {
@@ -880,15 +961,13 @@ impl Input {
                 self.cvars.set(n, v, name == "seta");
                 self.dirty = true;
             }
-            ("exec", [file]) if depth < MAX_EXEC_DEPTH => self.exec_file(file, dir, sink, depth),
             ("toggle", [n, values @ ..]) => self.toggle(n, values),
             ("toggle", []) => self.say("USAGE: toggle <variable> <optional value sequence>"),
             ("dvarlist", []) => self.dvar_list(None),
             ("dvarlist", [m]) => self.dvar_list(Some(m)),
             ("dvardump", []) => self.dvar_dump(None),
             ("dvardump", [m]) => self.dvar_dump(Some(m)),
-            ("exec", []) => self.say("exec <filename> : execute a script file"),
-            ("bind" | "unbind" | "unbindall" | "set" | "seta" | "sets" | "setu" | "exec", _) => {
+            ("bind" | "unbind" | "unbindall" | "set" | "seta" | "sets" | "setu", _) => {
                 eprintln!("bad arguments: {}", config::join(toks));
             }
             // The stance commands set (goprone, gocrouch) or step (the rest) the latched stance, as the original's.
@@ -1101,8 +1180,8 @@ impl Input {
         }
         let mut started = Vec::new();
         if let Some(line) = self.binds.get(name).cloned() {
-            let cmds = line.lines().flat_map(config::split_commands).collect();
-            self.run(cmds, None, true, 0, Some(&mut started));
+            let cmds = items(&line, 0, None);
+            self.run(cmds, true, Some(&mut started));
         }
         self.down.insert(name.to_owned(), started);
     }
@@ -1864,12 +1943,75 @@ mod tests {
         i.key("x", true);
         // The rest of the buffer, `set after 1` included, waits behind the first `wait`.
         assert_eq!((i.cvar("z"), i.cvar("after")), (Some("1"), None));
-        frame(&mut i);
+        i.run_due();
         assert_eq!((i.cvar("z"), i.cvar("after")), (Some("2"), None));
-        frame(&mut i);
+        i.run_due();
         assert_eq!(i.cvar("z"), Some("2"), "wait 2 holds for two frames");
-        frame(&mut i);
+        i.run_due();
         assert_eq!((i.cvar("z"), i.cvar("after")), (Some("3"), Some("1")));
+    }
+
+    /// One buffer, as `Cbuf` has: a `wait` in an exec'd file holds what follows the `exec` too, and the message
+    /// about the disk is for disk files only.
+    #[test]
+    fn a_wait_in_an_exec_d_file_holds_the_outer_buffer() {
+        let dir = std::env::temp_dir().join(format!("cod4e-wait-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("w.cfg");
+        std::fs::write(&file, "set w_in 1\nwait\nset w_in2 1\n").unwrap();
+        let mut i = Input::detached();
+        i.take_messages();
+        i.exec_line(&format!(
+            "set w_before 1; exec \"{}\"; set w_after 1",
+            file.display()
+        ));
+        assert_eq!(i.cvar("w_in"), Some("1"));
+        assert_eq!((i.cvar("w_in2"), i.cvar("w_after")), (None, None));
+        assert!(i.take_messages().iter().any(|m| m.contains("from disk")));
+        i.run_due();
+        assert_eq!((i.cvar("w_in2"), i.cvar("w_after")), (Some("1"), Some("1")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A path longer than the original's 63-character name buffer still reads from the disk; a self-running cvar
+    /// stops instead of hanging.
+    #[test]
+    fn long_disk_paths_and_self_running_cvars() {
+        let dir = std::env::temp_dir()
+            .join(format!("cod4e-long-{}", std::process::id()))
+            .join("a_directory_name_long_enough_to_pass_the_name_buffer_of_the_original");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("far.cfg"), "set far_away 1\n").unwrap();
+        let mut i = Input::detached();
+        i.exec_line(&format!("exec \"{}\"", dir.join("far").display()));
+        assert_eq!(i.cvar("far_away"), Some("1"));
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+        i.take_messages();
+        i.exec_line("set loop \"vstr loop\"; vstr loop; set done 1");
+        assert_eq!(i.cvar("done"), None, "the runaway buffer is dropped");
+        assert!(!i.take_messages().is_empty());
+    }
+
+    #[test]
+    fn a_typed_line_waits_for_the_rest() {
+        let mut i = Input::detached();
+        i.exec_line("set t_a 1; wait 3; set t_b 1");
+        assert_eq!((i.cvar("t_a"), i.cvar("t_b")), (Some("1"), None));
+        i.run_due();
+        i.run_due();
+        assert_eq!(i.cvar("t_b"), None);
+        i.run_due();
+        assert_eq!(i.cvar("t_b"), Some("1"));
+    }
+
+    #[test]
+    fn toggle_says_when_the_cvar_is_not_there_and_compares_numbers() {
+        let mut i = Input::detached();
+        i.exec_line("toggle no_such_cvar_at_all");
+        assert!(i.take_messages().iter().any(|m| m.contains("not found")));
+        assert_eq!(i.cvar("no_such_cvar_at_all"), None);
+        i.exec_line("set n 1.0; toggle n 1 0");
+        assert_eq!(i.cvar("n"), Some("0"));
     }
 
     #[test]
@@ -1925,6 +2067,7 @@ mod tests {
         i.exec_text(&profile, None, false, 0);
         // The stock profile binds Pause to `toggle cl_paused` and the vote keys to the server's commands.
         if i.bound("pause") == Some("toggle cl_paused") {
+            i.exec_line("set cl_paused 0"); // the engine registers it; this store only knows what is set
             i.key("pause", true);
             assert_eq!(i.cvar("cl_paused"), Some("1"));
             i.key("pause", false);
