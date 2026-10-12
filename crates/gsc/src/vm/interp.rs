@@ -591,7 +591,7 @@ impl Vm {
                 Op::ReturnUndefined => do_return!(Value::Undefined),
                 Op::Wait => {
                     let v = pop!();
-                    let ticks = tri!(wait_ticks(&v)) as u32;
+                    let ticks = tri!(wait_ticks(&v, self.tick_rate)) as u32;
                     if ticks > 0 {
                         self.reset_timeout();
                     }

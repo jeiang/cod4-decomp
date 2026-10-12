@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// `precachemenu`'s slot rule translated from KisakCOD (game_mp/g_scr_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! What the game tells players' screens: hud elements, objectives, configstrings and the
 //! one-shot commands (`openmenu`, `iprintln`, `setclientdvar`, ...). Scripts write into
 //! [`ServerUi`]; [`crate::netsv::NetSv`] turns it into reliable commands and snapshot state
@@ -152,12 +153,15 @@ impl Game {
         } else {
             list.index(name)
         };
-        if i >= usize::from(count) {
+        // The returned index is unused for menus (scripts name them). The other tables keep slot 0 for "none"; the script menus use every slot from 0.
+        let first = u16::from(table != Table::Menu);
+        let max = usize::from(count - 1 + (1 - first));
+        if i > max {
             list.truncate(known);
-            return Err(format!("too many {what} (max {})", count - 1));
+            return Err(format!("too many {what} (max {max})"));
         }
         if i > known {
-            self.set_configstring(base + i as u16, name);
+            self.set_configstring(base + i as u16 - 1 + first, name);
         }
         Ok(i as u16)
     }
@@ -365,6 +369,21 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_thirty_two_script_menus_fit_from_slot_zero() {
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        for i in 0..usize::from(cs::SCRIPT_MENUS_COUNT) {
+            g.precache(Table::Menu, &format!("m{i}")).unwrap();
+        }
+        assert_eq!(g.configstrings[&u32::from(cs::SCRIPT_MENUS)], "m0");
+        assert!(g.precache(Table::Menu, "one_too_many").is_err());
+        assert_eq!(
+            g.precache(Table::Menu, "M5"),
+            Ok(6),
+            "a repeat is not a new entry"
+        );
+    }
 
     #[test]
     fn a_changed_server_info_dvar_goes_to_the_screens() {

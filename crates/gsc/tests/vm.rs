@@ -675,11 +675,21 @@ fn every_hundredth_of_a_second_converts_like_exact_arithmetic() {
         let x = k as f32 / 100.0;
         let want = ((k * 3) / 10).max(1);
         assert_eq!(
-            gsc::vm::wait_ticks(&Value::Float(x)),
+            gsc::vm::wait_ticks(&Value::Float(x), 30),
             Ok(u64::from(want)),
             "wait {x}"
         );
     }
+}
+
+#[test]
+fn the_per_frame_wait_idiom_is_one_frame_at_20_and_30_hz() {
+    for rate in [20, 30] {
+        assert_eq!(gsc::vm::wait_ticks(&Value::Float(0.05), rate), Ok(1));
+    }
+    assert_eq!(gsc::vm::wait_ticks(&Value::Float(0.76), 20), Ok(15));
+    assert_eq!(gsc::vm::wait_ticks(&Value::Int(2), 20), Ok(40));
+    assert_eq!(gsc::vm::wait_ticks(&Value::Int(2), 60), Ok(120));
 }
 
 #[test]
@@ -690,9 +700,12 @@ fn bad_waits_are_errors() {
         (Value::Int(600_000), "wait is too long"),
         (Value::str("x"), "string is not a number"),
     ] {
-        assert_eq!(gsc::vm::wait_ticks(&v), Err(msg.to_string()));
+        assert_eq!(gsc::vm::wait_ticks(&v, 30), Err(msg.to_string()));
     }
-    assert_eq!(gsc::vm::wait_ticks(&Value::Int(558_000)), Ok(16_740_000));
+    assert_eq!(
+        gsc::vm::wait_ticks(&Value::Int(558_000), 30),
+        Ok(16_740_000)
+    );
 }
 
 #[test]
@@ -935,4 +948,30 @@ fn what_game_holds_survives_a_restart_and_nothing_else_does() {
     assert!(matches!(kept.get("n"), Some(Value::Int(5))));
     // The game array, the kept object, and their two values: the cycle is gone.
     assert_eq!(gsc::value::pool_usage(), (2, 2));
+}
+
+#[test]
+fn a_number_promotes_to_a_vector_when_compared_with_one() {
+    let log = run(r#"
+        main() {
+            v = (2, 2, 2);
+            println(v == 2);
+            println(2.0 == v);
+            println(v != 2);
+            println((1, 2, 3) == 1);
+        }
+    "#);
+    assert_eq!(log, ["1", "1", "0", "0"]);
+}
+
+#[test]
+fn waits_follow_the_hosts_frame_rate() {
+    let mut e = env(r#"main() { wait 1; println("done"); }"#);
+    e.vm.set_tick_rate(20);
+    e.call("main");
+    // A tick's threads run when the next tick is announced: 20 ticks pass, the 21st delivers the wait.
+    e.ticks(20);
+    assert!(e.take().is_empty());
+    e.ticks(1);
+    assert_eq!(e.take(), ["done"]);
 }

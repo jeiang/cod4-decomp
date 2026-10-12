@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// `devaddpitch`, `devaddyaw` and `devaddroll` translated from KisakCOD (game/g_scr_mover.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The remaining builtins: server administration, the developer file functions, queries with
 //! fixed answers on a dedicated server, and the names that only matter once their milestone
 //! lands (accepted and logged once).
@@ -22,7 +23,6 @@ const fn m(f: MethFn) -> Impl<MethFn> {
 }
 
 const M5: &str = "M5 connect and play";
-const M7: &str = "M7 audio";
 const M8: &str = "M8 FX, decals, post";
 const VEH: &str = "M8 vehicles";
 
@@ -53,16 +53,20 @@ pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
 pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("setstablemissile", m(set_stable_missile)),
     ("sendleaderboards", Later(M5)),
-    ("playrumbleonentity", Later(M7)),
-    ("playrumblelooponentity", Later(M7)),
-    ("stoprumble", Later(M7)),
+    // Null subs in the original, which has no rumble.
+    ("playrumbleonentity", m(|_, _, _, _| Ok(Value::Undefined))),
+    (
+        "playrumblelooponentity",
+        m(|_, _, _, _| Ok(Value::Undefined)),
+    ),
+    ("stoprumble", m(|_, _, _, _| Ok(Value::Undefined))),
     ("enableaimassist", Later(M5)),
     ("disableaimassist", Later(M5)),
     ("laseron", Later(M8)),
     ("laseroff", Later(M8)),
-    ("devaddpitch", Later(M5)),
-    ("devaddyaw", Later(M5)),
-    ("devaddroll", Later(M5)),
+    ("devaddpitch", m(|g, _, e, a| dev_add_rotate(g, e, a, 1))),
+    ("devaddyaw", m(|g, _, e, a| dev_add_rotate(g, e, a, 2))),
+    ("devaddroll", m(|g, _, e, a| dev_add_rotate(g, e, a, 0))),
     ("buttonpressed", m(|_, _, _, _| Ok(Value::Int(0)))),
     ("settargetent", Later(VEH)),
     ("cleartargetent", Later(VEH)),
@@ -105,6 +109,45 @@ fn load_map(g: &mut Game, _: &mut Vm, a: Args) -> R {
 /// `soundexists(alias)`: whether the loaded zones have an alias of that name.
 pub(super) fn sound_exists(g: &mut Game, _: &mut Vm, a: Args) -> R {
     Ok(Value::Int(i32::from(g.content.sound_exists(a.string(0)?))))
+}
+
+/// `ScriptEnt_DevAddRotate`: turns a script model, brush model, origin or light by `degrees` about one of its own
+/// axes (0 forward, 1 left, 2 up) at once, ending any rotation in progress.
+fn dev_add_rotate(g: &mut Game, e: EntRef, a: Args, axis: usize) -> R {
+    live(g, e)?;
+    let class = g
+        .ent(e.num)
+        .map(|e| e.classname.clone())
+        .unwrap_or_default();
+    if !matches!(
+        &*class,
+        "script_brushmodel" | "script_model" | "script_origin" | "light"
+    ) {
+        return Err(format!(
+            "entity {} is not a script_brushmodel, script_model, script_origin, or light",
+            e.num
+        ));
+    }
+    if a.len() != 1 {
+        return Err("ScriptEnt_ProtoAddRotate: expect exactly one parameter.".into());
+    }
+    let (s, c) = f64::from(a.float(0)?).to_radians().sin_cos();
+    let (sin, cos) = (s as f32, c as f32);
+    let Some(ent) = g.ent_mut(e.num) else {
+        return Ok(Value::Undefined);
+    };
+    let from = crate::tags::angles_to_axis(ent.angles);
+    let (b, c2) = ((axis + 1) % 3, (axis + 2) % 3);
+    let mut out = from;
+    for i in 0..3 {
+        out[b][i] = from[b][i] * cos + from[c2][i] * sin;
+        out[c2][i] = from[c2][i] * cos - from[b][i] * sin;
+    }
+    ent.angles = crate::tags::axis_to_angles(&out);
+    ent.mv.ang.tr.kind = sim::traj::TrType::Stationary;
+    ent.mv.ang.tr.base = ent.angles;
+    g.relink(e.num);
+    Ok(Value::Undefined)
 }
 
 fn set_stable_missile(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {

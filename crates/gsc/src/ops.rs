@@ -192,7 +192,13 @@ fn equality(a: &Value, b: &Value) -> Result<bool, String> {
         (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
             Ok((to_f32(a).expect("number") - to_f32(b).expect("number")).abs() < 0.000_001)
         }
-        (Value::Vector(x), Value::Vector(y)) => Ok(x == y),
+        // A number promotes to a vector of three copies (`Scr_CastWeakerPair`).
+        (Value::Vector(_), Value::Int(_) | Value::Float(_))
+        | (Value::Int(_) | Value::Float(_), Value::Vector(_))
+        | (Value::Vector(_), Value::Vector(_)) => match weaker(a, b)? {
+            Pair::Vector(x, y) => Ok(x == y),
+            _ => unreachable!("a vector pairs as a vector"),
+        },
         _ => Err(unmatching(a, b)),
     }
 }

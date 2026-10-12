@@ -410,6 +410,10 @@ pub struct Game {
     pub ui: crate::ui::ServerUi,
     /// `setarchive(true)`: the network layer keeps the history killcams replay.
     pub archive_enabled: bool,
+    /// Numbers the next test client's name (`bot0`, `bot1`, ...), whoever adds it.
+    pub bot_serial: u32,
+    /// Test clients a script added (`addtestclient`) whose `begin` waits until their connect callback has run.
+    pub pending_begin: Vec<u16>,
     pub field_types: HashMap<String, FieldTy>,
     pub models: Precache,
     pub shaders: Precache,
@@ -489,6 +493,8 @@ impl Game {
             world: None,
             ui: crate::ui::ServerUi::default(),
             archive_enabled: false,
+            bot_serial: 0,
+            pending_begin: Vec::new(),
             field_types: HashMap::new(),
             models: Precache::default(),
             shaders: Precache::default(),
@@ -619,6 +625,7 @@ impl Game {
         self.world = None;
         self.ui = crate::ui::ServerUi::default();
         self.archive_enabled = false;
+        self.pending_begin.clear();
         self.models = Precache::default();
         self.shaders = Precache::default();
         self.strings = Precache::default();

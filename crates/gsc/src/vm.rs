@@ -34,7 +34,7 @@ pub const MAX_STACK: usize = 2046;
 pub const TICK_MASK: u32 = 0xFF_FFFF;
 /// Longest `wait`, in ticks.
 pub const MAX_WAIT: u64 = 0xFF_FFFE;
-/// Script ticks per second of `wait`.
+/// Script ticks per second of `wait` until the host says what its frame rate is ([`Vm::set_tick_rate`]).
 pub const TICKS_PER_SECOND: u32 = 30;
 /// Wall-clock limit between timeout resets (original 1.7 MP: 2500 ms).
 pub const LOOP_TIMEOUT: Duration = Duration::from_millis(2500);
@@ -171,6 +171,8 @@ pub struct Vm {
     free_slots: Vec<u32>,
     buckets: HashMap<u32, VecDeque<ThreadId>>,
     time: u32,
+    /// Ticks per second of `wait`: the host's frame rate.
+    tick_rate: u32,
     level: Obj,
     anim: Obj,
     game: Value,
@@ -203,18 +205,22 @@ fn script_error(msg: impl Into<String>) -> VmError {
     }
 }
 
-/// `wait n` in ticks: `n * 30`, at least 1 unless `n` is zero.
+/// `wait n` in ticks at `rate` ticks per second: `n * rate` floored, at least 1 unless `n` is zero.
+///
+/// The original rounds to the nearest tick (`Q_rint(n * 20)`) because its frame is 50 ms and `wait 0.05` is one frame.
+/// Here a frame is 1/`rate` s, and rounding would turn the stock per-frame idiom `wait 0.05` into two frames at the
+/// default 30 Hz, halving every such loop. Flooring keeps it at one frame and longer waits accurate in real time.
 ///
 /// The operand is a 32-bit float, so `0.7` is really 0.699999988; flooring its product would
 /// lose a tick. The epsilon is relative (a few float ulps) plus the original's absolute 2^-30.
-pub fn wait_ticks(v: &Value) -> Result<u64, String> {
+pub fn wait_ticks(v: &Value, rate: u32) -> Result<u64, String> {
     let ticks = match v {
         Value::Int(n) if *n < 0 => return Err("negative wait is not allowed".into()),
-        Value::Int(n) => *n as u64 * u64::from(TICKS_PER_SECOND),
+        Value::Int(n) => *n as u64 * u64::from(rate),
         Value::Float(x) if *x < 0.0 => return Err("negative wait is not allowed".into()),
         Value::Float(x) if *x == 0.0 => 0,
         Value::Float(x) => {
-            let p = f64::from(*x) * f64::from(TICKS_PER_SECOND);
+            let p = f64::from(*x) * f64::from(rate);
             ((p + p * 2f64.powi(-22) + 2f64.powi(-30)).floor() as u64).max(1)
         }
         other => return Err(format!("{} is not a number", other.type_name())),
@@ -249,6 +255,7 @@ impl Vm {
             free_slots: Vec::new(),
             buckets: HashMap::new(),
             time: 0,
+            tick_rate: TICKS_PER_SECOND,
             level: Obj::new(Kind::Level),
             anim: Obj::new(Kind::Anim),
             game: Value::Array(Rc::new(Array::new())),
@@ -273,6 +280,11 @@ impl Vm {
     /// The script tick (24 bits); unrelated to `level.time`.
     pub fn time(&self) -> u32 {
         self.time
+    }
+
+    /// One tick is one server frame: `wait 1` lasts `rate` of them.
+    pub fn set_tick_rate(&mut self, rate: u32) {
+        self.tick_rate = rate.max(1);
     }
 
     pub fn level(&self) -> Obj {

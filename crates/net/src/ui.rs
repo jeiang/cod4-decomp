@@ -1464,9 +1464,13 @@ impl ClientUiState {
         self.ranged(cs::MATERIALS, cs::MATERIALS_COUNT, n)
     }
 
-    /// Name of a menu index registered by `precachemenu`.
+    /// Name of a menu index registered by `precachemenu`; unlike the other tables its slot 0 is a menu.
     pub fn menu(&self, n: u16) -> &str {
-        self.ranged(cs::SCRIPT_MENUS, cs::SCRIPT_MENUS_COUNT, n)
+        if n >= cs::SCRIPT_MENUS_COUNT {
+            ""
+        } else {
+            self.config(cs::SCRIPT_MENUS + n)
+        }
     }
 
     /// Name of a model index (`EntityState::model`).
@@ -1476,7 +1480,7 @@ impl ClientUiState {
 
     /// Every menu the scripts registered.
     pub fn menus(&self) -> impl Iterator<Item = &str> {
-        (1..cs::SCRIPT_MENUS_COUNT)
+        (0..cs::SCRIPT_MENUS_COUNT)
             .map(|n| self.menu(n))
             .filter(|s| !s.is_empty())
     }
@@ -1664,7 +1668,7 @@ mod tests {
         ui.apply(ServerCmd::ConfigStrings(vec![
             (cs::LOCALIZED + 3, "MP_WAITING".into()),
             (cs::MATERIALS + 2, "white".into()),
-            (cs::SCRIPT_MENUS + 1, "team_marinesopfor".into()),
+            (cs::SCRIPT_MENUS, "team_marinesopfor".into()),
             (
                 cs::CLIENTINFO + 5,
                 client_info_string(&ClientInfo {
@@ -1689,7 +1693,7 @@ mod tests {
         assert_eq!(ui.localized(3), "MP_WAITING");
         assert_eq!(ui.localized(0), "");
         assert_eq!(ui.material(2), "white");
-        assert_eq!(ui.menu(1), "team_marinesopfor");
+        assert_eq!(ui.menu(0), "team_marinesopfor");
         assert_eq!(ui.menus().collect::<Vec<_>>(), ["team_marinesopfor"]);
         assert_eq!(ui.dvar("G_SCRIPTMAINMENU"), Some("class"));
         assert_eq!(
