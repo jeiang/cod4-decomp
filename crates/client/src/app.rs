@@ -2774,7 +2774,7 @@ fn script_step(st: &mut State) -> bool {
                 "pace" => {
                     let (since, frames) = st.pace;
                     // With the display pacing the frames no cap applies, and the check holds trivially.
-                    let gap = gfx::frame_gap(&st.input.cvars, display_paced(st));
+                    let gap = gfx::frame_gap(&st.input.cvars, display_paced(st.present_mode));
                     Some(gap.map_or("1".to_owned(), |gap| {
                         let each = since.elapsed().as_secs_f64() / f64::from(frames.max(1));
                         u8::from(frames >= 2 && each >= gap.as_secs_f64() * 0.8).to_string()
@@ -3355,9 +3355,9 @@ pub fn game_of(input: &Input) -> String {
 }
 
 /// Whether the present mode waits for the display, which then paces the frames (no `com_maxfps` cap on top).
-fn display_paced(st: &State) -> bool {
+fn display_paced(mode: wgpu::PresentMode) -> bool {
     matches!(
-        st.present_mode,
+        mode,
         wgpu::PresentMode::Fifo | wgpu::PresentMode::FifoRelaxed
     )
 }
@@ -3367,7 +3367,8 @@ fn display_paced(st: &State) -> bool {
 fn next_frame(el: &ActiveEventLoop, st: &State) {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let due = gfx::frame_gap(&st.input.cvars, display_paced(st)).map(|gap| st.last_frame + gap);
+        let due = gfx::frame_gap(&st.input.cvars, display_paced(st.present_mode))
+            .map(|gap| st.last_frame + gap);
         match due.filter(|d| Instant::now() < *d) {
             Some(due) => return el.set_control_flow(ControlFlow::WaitUntil(due)),
             None => el.set_control_flow(ControlFlow::Poll),
