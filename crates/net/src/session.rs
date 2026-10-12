@@ -258,6 +258,13 @@ impl ServerLink {
             .filter(|s| s.num == self.acked)
     }
 
+    /// Forgets which snapshots the client acknowledged, as a map change does (`deltaMessage = -1`): the next snapshot is
+    /// a full one and [`Self::unacked`] is 0 until the client acknowledges one of the new level.
+    pub fn reset_acks(&mut self) {
+        self.acked = 0;
+        self.trips = [(0, 0); BACKUP as usize];
+    }
+
     /// Tells the link what server time it is, so an ack that arrives next is timed against it.
     pub fn set_clock(&mut self, now: i32) {
         self.clock = now;

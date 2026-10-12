@@ -2776,7 +2776,7 @@ impl Penalty {
     }
 }
 
-/// The `ping` column of `status`: the measured round trip (at most 9999), or the state the client is in.
+/// The `ping` column of `status`: the measured round trip (at most 999), or the state the client is in.
 fn ping_field(bot: bool, zombie: bool, connecting: bool, ping: Option<i32>) -> String {
     if bot {
         "BOT".into()
@@ -2785,7 +2785,7 @@ fn ping_field(bot: bool, zombie: bool, connecting: bool, ping: Option<i32>) -> S
     } else if connecting {
         "CNCT".into()
     } else {
-        ping.unwrap_or(0).clamp(0, 9999).to_string()
+        ping.unwrap_or(0).clamp(0, 999).to_string()
     }
 }
 
@@ -3009,7 +3009,7 @@ mod tests {
         assert_eq!(ping_field(false, true, true, Some(40)), "ZMBI");
         assert_eq!(ping_field(false, false, true, Some(40)), "CNCT");
         assert_eq!(ping_field(false, false, false, Some(40)), "40");
-        assert_eq!(ping_field(false, false, false, Some(123_456)), "9999");
+        assert_eq!(ping_field(false, false, false, Some(123_456)), "999");
         assert_eq!(ping_field(false, false, false, None), "0");
     }
 }
