@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The volume clamp and looping-sound continuation are translated from KisakCOD (sound/snd.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The game-facing sound system: alias names in, voices out.
 //!
 //! [`Sound::play`] does what the original's `SND_PlaySoundAlias` does on the game thread: picks a variant,
@@ -39,6 +40,8 @@ pub struct Cue {
     pub stoppable: bool,
     /// Plays as a master whatever the alias says (`playSoundAsMaster`): the slaves duck while it does.
     pub master: bool,
+    /// Shows the alias's subtitle for as long as it plays (`CG_PlaySoundAlias*`): script and local sounds.
+    pub subtitle: bool,
 }
 
 impl Default for Cue {
@@ -50,6 +53,7 @@ impl Default for Cue {
             fade_in_ms: 0,
             stoppable: false,
             master: false,
+            subtitle: false,
         }
     }
 }
@@ -91,6 +95,13 @@ pub struct Played {
     pub music_ignored: u64,
 }
 
+/// A subtitle to show: its localization key and how long the sound lasts in ms (0 when the file does not say).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Subtitle {
+    pub key: Arc<str>,
+    pub ms: u32,
+}
+
 enum Out {
     /// Held to keep the stream running.
     Device(#[cfg_attr(not(target_arch = "wasm32"), expect(dead_code))] Output),
@@ -128,6 +139,11 @@ pub struct Sound {
     shock_loops: [Option<VoiceId>; 2],
     /// `snd_volume` as last sent to the mixer.
     volume: f32,
+    /// Subtitles of sounds that started, until [`Sound::take_subtitles`].
+    subtitles: Vec<Subtitle>,
+    /// `snd_slaveFadeTime` and `snd_enableReverb` as last sent to the mixer.
+    slave_fade_ms: u32,
+    reverb: bool,
 }
 
 /// The write end of a voice opened by [`Sound::open_pipe`].
@@ -274,6 +290,9 @@ impl Sound {
             effects: [None; ENV_PRIORITIES],
             shock_loops: [None; 2],
             volume: crate::mixer::DEFAULT_VOLUME,
+            subtitles: Vec::new(),
+            slave_fade_ms: crate::mixer::SLAVE_FADE_MS,
+            reverb: true,
         }
     }
 
@@ -300,6 +319,20 @@ impl Sound {
         // Only remembered once queued, so a full queue is retried next frame.
         if volume != self.volume && self.handle.set_master_volume(volume) {
             self.volume = volume;
+        }
+    }
+
+    /// `snd_slaveFadeTime`, ms. Cheap to call every frame.
+    pub fn set_slave_fade_ms(&mut self, ms: u32) {
+        if ms != self.slave_fade_ms && self.handle.set_slave_fade_ms(ms) {
+            self.slave_fade_ms = ms;
+        }
+    }
+
+    /// `snd_enableReverb`. Cheap to call every frame.
+    pub fn set_reverb_enabled(&mut self, on: bool) {
+        if on != self.reverb && self.handle.set_reverb_enabled(on) {
+            self.reverb = on;
         }
     }
 
@@ -373,6 +406,11 @@ impl Sound {
         }
     }
 
+    /// The subtitles of the sounds started with [`Cue::subtitle`] since the last call.
+    pub fn take_subtitles(&mut self) -> Vec<Subtitle> {
+        std::mem::take(&mut self.subtitles)
+    }
+
     pub fn play(&mut self, alias: &str, cue: Cue) -> Option<VoiceId> {
         self.play_chain(alias, cue, 0)
     }
@@ -386,6 +424,10 @@ impl Sound {
         if let Some(sec) = alias.secondary.as_deref()
             && depth < MAX_CHAIN
         {
+            let cue = Cue {
+                subtitle: false,
+                ..cue
+            };
             self.play_chain(sec, cue, depth + 1);
         }
         id
@@ -432,6 +474,12 @@ impl Sound {
             if let Some(e) = emitter {
                 self.handle.set_position(id, e.pos);
             }
+            // A continued loop takes the alias's lower bounds, not a new roll (`SND_ContinueLoopingSound`).
+            self.handle.retune(
+                id,
+                (alias.volume.0 * cue.volume).clamp(0.0, 1.0),
+                alias.pitch.0,
+            );
             return Some(id);
         }
         // A looping or randomly started sound begins at a random point of its file.
@@ -440,9 +488,13 @@ impl Sound {
         } else {
             0.0
         };
-        let (source, stereo) = match &alias.audio {
+        let (source, stereo, length_ms) = match &alias.audio {
             Clip::Silent => return None,
-            Clip::Loaded(p) => (Source::Loaded(p.clone()), p.channels == 2),
+            Clip::Loaded(p) => (
+                Source::Loaded(p.clone()),
+                p.channels == 2,
+                u32::try_from(p.frames() as u64 * 1000 / u64::from(p.rate.max(1))).unwrap_or(0),
+            ),
             Clip::Streamed(path) => {
                 let opened = self.bank.read_stream(path).and_then(|b| {
                     StreamJob::open(b, decode::extension(path), alias.looping, start)
@@ -450,8 +502,9 @@ impl Sound {
                 match opened {
                     Ok((job, stream)) => {
                         let stereo = stream.channels == 2;
+                        let length_ms = job.length_ms().unwrap_or(0);
                         self.streams.add(job);
-                        (Source::Stream(stream), stereo)
+                        (Source::Stream(stream), stereo, length_ms)
                     }
                     Err(e) => {
                         if self.played.failed.len() < 16 {
@@ -465,7 +518,7 @@ impl Sound {
         let id = self.handle.next_id();
         let mut p = Play::new(id, source, alias.channel);
         p.entity = cue.entity;
-        p.volume = self.bank.between(alias.volume) * cue.volume;
+        p.volume = (self.bank.between(alias.volume) * cue.volume).clamp(0.0, 1.0);
         p.pitch = self.bank.between(alias.pitch);
         p.looping = alias.looping;
         p.start = start;
@@ -482,6 +535,15 @@ impl Sound {
         p.speaker = alias.speaker[usize::from(stereo)];
         p.wet = !alias.no_wet;
         self.handle.play(p);
+        if cue.subtitle
+            && !alias.looping
+            && let Some(key) = &alias.subtitle
+        {
+            self.subtitles.push(Subtitle {
+                key: key.clone(),
+                ms: length_ms,
+            });
+        }
         if alias.looping && cue.entity != NO_ENTITY {
             self.loops.insert(key, id);
         } else if cue.stoppable {
@@ -867,6 +929,90 @@ mod tests {
     fn run(s: &mut Sound, ms: u64) {
         s.render(48 * ms as usize);
         s.tick(Duration::from_millis(ms));
+    }
+
+    /// Mean output magnitude over 50 ms of rendering.
+    fn heard(s: &mut Sound) -> f32 {
+        let out = s.render(48 * 50);
+        out.iter().map(|x| x.abs()).sum::<f32>() / out.len() as f32
+    }
+
+    #[test]
+    fn a_subtitled_sound_asked_to_show_it_reports_its_text_and_length_once_started() {
+        let mut a = Alias::test("line", 0, dc(1500));
+        a.subtitle = Some("SUBTITLE_LINE".into());
+        let mut s = engine(vec![("line", vec![a])]);
+        s.play("line", Cue::default());
+        assert!(s.take_subtitles().is_empty(), "only a sound asked for it");
+        s.play(
+            "line",
+            Cue {
+                subtitle: true,
+                ..Cue::default()
+            },
+        );
+        let got = s.take_subtitles();
+        assert_eq!(
+            got,
+            [Subtitle {
+                key: "SUBTITLE_LINE".into(),
+                ms: 1500
+            }]
+        );
+        assert!(s.take_subtitles().is_empty());
+        // A sound that was not played (out of range) shows nothing.
+        let mut far = Alias::test("far", 1, dc(500));
+        far.subtitle = Some("SUBTITLE_FAR".into());
+        let mut s = engine(vec![("far", vec![far])]);
+        s.play(
+            "far",
+            Cue {
+                origin: Some([5000.0, 0.0, 0.0]),
+                subtitle: true,
+                ..Cue::default()
+            },
+        );
+        assert!(s.take_subtitles().is_empty());
+    }
+
+    #[test]
+    fn a_drawn_volume_never_exceeds_full_scale() {
+        let loud = |volume: f32| {
+            let mut a = Alias::test("a", 0, dc(500));
+            a.volume = (volume, volume);
+            let mut s = engine(vec![("a", vec![a])]);
+            s.play("a", Cue::default());
+            heard(&mut s)
+        };
+        assert!(loud(1.0) > 0.0);
+        assert_eq!(
+            loud(3.0),
+            loud(1.0),
+            "the volume is clamped to 1 before it is mixed"
+        );
+    }
+
+    #[test]
+    fn a_continued_loop_takes_the_alias_lower_bounds_not_its_first_roll() {
+        let looped = |volume: (f32, f32)| {
+            let mut a = Alias::test("hum", 0, dc(500));
+            a.looping = true;
+            a.volume = volume;
+            engine(vec![("hum", vec![a])])
+        };
+        let cue = Cue {
+            entity: 7,
+            ..Cue::default()
+        };
+        let mut reference = looped((0.2, 0.2));
+        reference.play("hum", cue);
+        let want = heard(&mut reference);
+        // The first roll lands anywhere in [0.2, 1]; the continuation settles on 0.2.
+        let mut s = looped((0.2, 1.0));
+        s.play("hum", cue);
+        s.play("hum", cue);
+        let got = heard(&mut s);
+        assert!((got - want).abs() < want * 0.01, "{got} vs {want}");
     }
 
     #[test]

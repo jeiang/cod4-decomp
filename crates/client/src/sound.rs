@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Movement event sounds translated in part from KisakCOD (cgame/cg_event.cpp, cgame_mp/cg_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Movement event sounds translated in part from KisakCOD (cgame/cg_event.cpp, cgame/cg_weapons.cpp, cgame_mp/cg_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! What the player hears: the `audio` crate fed from the match. Sound tables load on a thread while the
 //! match connects; sounds asked for before they are ready are dropped.
 //!
@@ -14,6 +14,7 @@ use crate::events::ClientEvent;
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::weapon::WeaponDef;
 use audio::bank::Bank;
+use audio::engine::Subtitle;
 use audio::{Cue, NO_ENTITY, Sound};
 use serde_json::{Value, json};
 use server::content::Install;
@@ -41,6 +42,23 @@ pub fn volume_of(cvars: &crate::input::Cvars) -> f32 {
         .get("snd_volume")
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(audio::mixer::DEFAULT_VOLUME)
+}
+
+/// `snd_slaveFadeTime` (ms) and `snd_enableReverb`. Both are CHEAT dvars, so like the other cheat dvars here they
+/// only act with `sv_cheats` on; otherwise the stock 500 ms and reverb on stand.
+pub fn mix_of(cvars: &crate::input::Cvars) -> (u32, bool) {
+    if !cvars.bool("sv_cheats") {
+        return (audio::mixer::SLAVE_FADE_MS, true);
+    }
+    let fade = cvars
+        .get("snd_slaveFadeTime")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map_or(audio::mixer::SLAVE_FADE_MS, |v| v.clamp(0, 5000) as u32);
+    let reverb = cvars
+        .get("snd_enableReverb")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .is_none_or(|v| v != 0);
+    (fade, reverb)
 }
 
 /// `snd_enveffectsprio_shellshock`, and the channel volume priority of `snd_channelvolprio_shellshock`.
@@ -190,6 +208,22 @@ impl ClientSound {
     pub fn set_volume(&mut self, volume: f32) {
         if let Some(s) = self.ready() {
             s.set_volume(volume);
+        }
+    }
+
+    /// The subtitles of the script and local sounds that started since the last call (`CG_PlaySoundAlias*`).
+    pub fn take_subtitles(&mut self) -> Vec<Subtitle> {
+        match &mut self.state {
+            State::Ready(s) => s.take_subtitles(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `snd_slaveFadeTime` and `snd_enableReverb` (see [`mix_of`]).
+    pub fn set_mix(&mut self, (slave_fade_ms, reverb): (u32, bool)) {
+        if let Some(s) = self.ready() {
+            s.set_slave_fade_ms(slave_fade_ms);
+            s.set_reverb_enabled(reverb);
         }
     }
 
@@ -795,6 +829,7 @@ impl ClientSound {
                     Cue {
                         origin: pos(),
                         entity,
+                        subtitle: true,
                         ..Cue::default()
                     },
                 );
@@ -807,6 +842,7 @@ impl ClientSound {
                         origin: pos(),
                         entity,
                         master: true,
+                        subtitle: true,
                         ..Cue::default()
                     },
                 );
@@ -818,6 +854,7 @@ impl ClientSound {
                     Cue {
                         entity,
                         stoppable: true,
+                        subtitle: true,
                         ..Cue::default()
                     },
                 );
@@ -1035,10 +1072,11 @@ fn movement_sounds(event: u8, parm: u8, own: bool, quiet: bool) -> Option<Vec<Ve
             .collect()
     };
     let rattle = |kind: &str| vec![format!("{q}gear_rattle{plr}_{kind}")];
-    // `landSound[event - EV_LANDING_FIRST]`: surface 0 is not a landing.
+    // `landSound[event - EV_LANDING_FIRST]`: the stock bounds are exclusive, so neither surface 0 nor 28
+    // (paintedmetal) sounds; the server still sends the event, and the damage applies to surface 28.
     let landing = |first: u8| {
         let surface = event.checked_sub(first)?;
-        (1..=28).contains(&surface).then_some(surface)
+        (1..=27).contains(&surface).then_some(surface)
     };
     Some(match event {
         ev::FOOTSTEP_SPRINT => vec![by_surface("step_sprint", parm), rattle("sprint")],
@@ -1101,6 +1139,21 @@ fn goggle_sound(who: &Who, event: u8) -> Option<&'static str> {
     (who.own && (who.turret || !animated)).then_some(name)
 }
 
+/// The shot alias (`CG_FireWeapon`): the first-person one for the own view, else the plain one; the last shot
+/// takes the first-person last-shot alias (own view), else the last-shot alias, else that shot alias.
+/// `names` are `[fire, fire_player, fire_last, fire_last_player]`.
+fn shot_sound(names: [&Option<Arc<str>>; 4], last: bool, own: bool) -> Option<String> {
+    let [fire, fire_player, fire_last, fire_last_player] =
+        names.map(|n| n.as_deref().filter(|n| !n.is_empty()));
+    let shot = if own { fire_player.or(fire) } else { fire };
+    let last_shot = if own {
+        fire_last_player.or(fire_last)
+    } else {
+        fire_last
+    };
+    (if last { last_shot.or(shot) } else { shot }).map(str::to_owned)
+}
+
 /// The weapon's sound alias for a player event, `_player` (first-person) variants for the own player.
 fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
     let s = &w?.sounds;
@@ -1111,9 +1164,16 @@ fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
         n.filter(|n| !n.is_empty()).map(|n| n.to_string())
     };
     match event {
-        ev::FIRE_WEAPON => pick(&s.fire_sound_player, &s.fire_sound),
-        ev::FIRE_WEAPON_LASTSHOT => pick(&s.fire_last_sound_player, &s.fire_last_sound)
-            .or_else(|| pick(&s.fire_sound_player, &s.fire_sound)),
+        ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT => shot_sound(
+            [
+                &s.fire_sound,
+                &s.fire_sound_player,
+                &s.fire_last_sound,
+                &s.fire_last_sound_player,
+            ],
+            event == ev::FIRE_WEAPON_LASTSHOT,
+            own,
+        ),
         // A clip-only weapon, or one that stays up when empty, does not click.
         ev::NOAMMO if w?.clip_only != 0 || w?.cancel_auto_holster_when_empty != 0 => None,
         ev::NOAMMO => pick(&s.empty_fire_sound_player, &s.empty_fire_sound),
@@ -1694,8 +1754,24 @@ mod tests {
     }
 
     #[test]
+    fn the_cheat_sound_dvars_act_only_with_sv_cheats() {
+        let cvars = |pairs: &[(&str, &str)]| {
+            let mut c = crate::input::Cvars::default();
+            for (k, v) in pairs {
+                c.set(k, v, false);
+            }
+            c
+        };
+        let set = [("snd_slaveFadeTime", "100"), ("snd_enableReverb", "0")];
+        assert_eq!(mix_of(&cvars(&[])), (500, true));
+        assert_eq!(mix_of(&cvars(&set)), (500, true));
+        let on: Vec<_> = set.iter().copied().chain([("sv_cheats", "1")]).collect();
+        assert_eq!(mix_of(&cvars(&on)), (100, false));
+    }
+
+    #[test]
     fn every_landing_plays_its_own_surface() {
-        for surface in 1..=28u8 {
+        for surface in 1..=27u8 {
             let name = SURFACE_TYPE_NAMES[usize::from(surface)];
             let g = movement_sounds(ev::LANDING_FIRST + surface, 0, false, false).unwrap();
             assert_eq!(first(&g, 0), format!("land_{name}"), "surface {surface}");
@@ -1714,12 +1790,14 @@ mod tests {
     }
 
     #[test]
-    fn landing_range_is_surfaces_one_to_twenty_eight() {
+    fn landing_range_is_surfaces_one_to_twenty_seven() {
         assert!(movement_sounds(ev::LANDING_FIRST, 0, false, false).is_none());
-        assert!(movement_sounds(ev::LANDING_FIRST + 28, 0, false, false).is_some());
+        assert!(movement_sounds(ev::LANDING_FIRST + 27, 0, false, false).is_some());
+        // Paintedmetal (28) has no landing sound.
+        assert!(movement_sounds(ev::LANDING_FIRST + 28, 0, false, false).is_none());
         assert!(movement_sounds(ev::LANDING_PAIN_FIRST, 0, false, false).is_none());
-        assert!(movement_sounds(ev::LANDING_PAIN_FIRST + 28, 0, false, false).is_some());
-        assert!(movement_sounds(ev::LANDING_PAIN_FIRST + 29, 0, false, false).is_none());
+        assert!(movement_sounds(ev::LANDING_PAIN_FIRST + 27, 0, false, false).is_some());
+        assert!(movement_sounds(ev::LANDING_PAIN_FIRST + 28, 0, false, false).is_none());
     }
 
     #[test]
@@ -1789,6 +1867,48 @@ mod tests {
             .map(|w| format!("{:?}", w.internal_name))
             .collect();
         assert!(silent.is_empty(), "{silent:?}");
+    }
+
+    #[test]
+    fn the_own_shot_falls_back_to_the_non_player_alias() {
+        let n = |n: &str| Some(Arc::<str>::from(n));
+        let none = None;
+        let shot = |f: &Option<Arc<str>>,
+                    fp: &Option<Arc<str>>,
+                    l: &Option<Arc<str>>,
+                    lp: &Option<Arc<str>>,
+                    last,
+                    own| shot_sound([f, fp, l, lp], last, own);
+        let (fire, fire_plr, last, last_plr) = (n("fire"), n("fire_plr"), n("last"), n("last_plr"));
+        assert_eq!(
+            shot(&fire, &none, &none, &none, false, true).as_deref(),
+            Some("fire")
+        );
+        assert_eq!(
+            shot(&fire, &fire_plr, &none, &none, false, true).as_deref(),
+            Some("fire_plr")
+        );
+        assert_eq!(
+            shot(&fire, &fire_plr, &none, &none, false, false).as_deref(),
+            Some("fire")
+        );
+        assert_eq!(
+            shot(&fire, &fire_plr, &none, &none, true, true).as_deref(),
+            Some("fire_plr")
+        );
+        assert_eq!(
+            shot(&fire, &fire_plr, &last, &none, true, true).as_deref(),
+            Some("last")
+        );
+        assert_eq!(
+            shot(&fire, &fire_plr, &last, &last_plr, true, true).as_deref(),
+            Some("last_plr")
+        );
+        assert_eq!(
+            shot(&fire, &fire_plr, &last, &last_plr, true, false).as_deref(),
+            Some("last")
+        );
+        assert_eq!(shot(&none, &none, &none, &none, false, true), None);
     }
 
     #[test]

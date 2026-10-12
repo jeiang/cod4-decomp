@@ -75,6 +75,12 @@ impl Decoder {
         Ok(d)
     }
 
+    /// The file's length in ms, when the container says.
+    pub fn length_ms(&self) -> Option<u32> {
+        let (frames, rate) = self.length?;
+        u32::try_from(frames * 1000 / u64::from(rate)).ok()
+    }
+
     /// Skips to `fraction` (0 to 1) of the file's length, when the container tells its length and can seek; the
     /// file plays from the start otherwise.
     pub fn seek_fraction(&mut self, fraction: f32) {
@@ -203,6 +209,11 @@ impl StreamJob {
             },
             stream,
         ))
+    }
+
+    /// The file's length in ms, when the container says.
+    pub fn length_ms(&self) -> Option<u32> {
+        self.dec.length_ms()
     }
 
     /// Decodes while the ring has room. Returns `false` when the job is over (finished, failed or the mixer
