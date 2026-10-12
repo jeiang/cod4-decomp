@@ -83,8 +83,11 @@ impl Gpu {
             .await
             .map_err(|e| GpuError::NoAdapter(e.to_string()))?;
         let have = adapter.features();
-        let want =
-            (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TIMESTAMP_QUERY) & have;
+        // The adapter-specific format features are what lets the device use more than the 4 samples the spec guarantees.
+        let want = (wgpu::Features::TEXTURE_COMPRESSION_BC
+            | wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+            & have;
         // The WebGL2 fallback runs on the downlevel limits; the adapter's own are already that tier.
         let adapter_backend = adapter.get_info().backend;
         let base = if cfg!(target_arch = "wasm32") && adapter_backend == wgpu::Backend::Gl {

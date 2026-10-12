@@ -1101,14 +1101,22 @@ impl Renderer {
     }
 
     /// The sample count the scene pass uses: `r_aaSamples` (at most 16) stepped down one at a time to the largest
-    /// count the device supports for the colour and depth formats (`R_ReduceWindowSettings`).
+    /// count the device supports for the colour and depth formats (`R_ReduceWindowSettings`). Past the 4 the spec
+    /// guarantees, only a device made with the adapter's own format features may use what the adapter reports.
     pub fn samples(&self, format: wgpu::TextureFormat) -> u32 {
+        let beyond_spec = self
+            .gpu
+            .device
+            .features()
+            .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
         let ok = |f: wgpu::TextureFormat, n: u32| {
-            self.gpu
-                .adapter
-                .get_texture_format_features(f)
-                .flags
-                .sample_count_supported(n)
+            (n <= 4 || beyond_spec)
+                && self
+                    .gpu
+                    .adapter
+                    .get_texture_format_features(f)
+                    .flags
+                    .sample_count_supported(n)
         };
         pick_samples(self.settings.aa_samples, |n| {
             ok(format, n) && ok(DEPTH_FORMAT, n)

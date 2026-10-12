@@ -2782,12 +2782,19 @@ fn script_step(st: &mut State) -> bool {
             };
             // `gfxis=aa max`: the most samples the adapter offers for the scene's colour and depth, whatever was asked.
             let want = if (name, want) == ("aa", "max") {
+                let beyond_spec = st
+                    .gpu
+                    .device
+                    .features()
+                    .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
                 let ok = |f: wgpu::TextureFormat, n: u32| {
-                    st.gpu
-                        .adapter
-                        .get_texture_format_features(f)
-                        .flags
-                        .sample_count_supported(n)
+                    (n <= 4 || beyond_spec)
+                        && st
+                            .gpu
+                            .adapter
+                            .get_texture_format_features(f)
+                            .flags
+                            .sample_count_supported(n)
                 };
                 [16u32, 8, 4, 2]
                     .into_iter()
