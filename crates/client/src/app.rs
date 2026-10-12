@@ -2799,7 +2799,11 @@ fn script_step(st: &mut State) -> bool {
                 } else if waited > secs {
                     sh.st.scores_forced = false;
                     let have = sh.st.live.scores.len();
-                    done(false, sc, format!("timed out; {have} of {want} players listed"));
+                    done(
+                        false,
+                        sc,
+                        format!("timed out; {have} of {want} players listed"),
+                    );
                 } else {
                     sh.st.scores_forced = true;
                 }
