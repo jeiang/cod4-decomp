@@ -2203,6 +2203,7 @@ fn ui_text(ui: &Ui, p: &mut Painter, d: &ItemDef, rect: Px, color: [f32; 4], tex
 }
 
 /// Select the stock Single Player executable or explain why it cannot be started here.
+/// The shipped CoD4 client names `iw3sp.exe`; KisakCOD's `cod3sp.exe` is a CoD3 leftover.
 pub(crate) fn singleplayer_executable(install: &Path, windows: bool) -> Result<PathBuf, String> {
     if !windows {
         return Err("Single Player can only be launched on Windows.".into());
@@ -2220,7 +2221,6 @@ pub(crate) fn singleplayer_executable(install: &Path, windows: bool) -> Result<P
 }
 
 #[cfg(test)]
-
 mod tests {
     use super::*;
     use crate::serverlist::{Entry, Source};

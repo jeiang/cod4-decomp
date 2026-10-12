@@ -82,6 +82,8 @@ pub fn run(cli: Cli) -> Result<(), String> {
         error: None,
         gpu_log: GpuLog::default(),
         proxy: None,
+        #[cfg(not(target_arch = "wasm32"))]
+        start_singleplayer: None,
         #[cfg(target_arch = "wasm32")]
         starting: false,
     };
@@ -117,7 +119,21 @@ pub fn run(cli: Cli) -> Result<(), String> {
                 json!({"status": "error", "error": e}).to_string(),
             );
         }
-        v.error.map_or(Ok(()), Err)
+        let result = v.error.take().map_or(Ok(()), Err);
+        let start_singleplayer = v
+            .start_singleplayer
+            .take()
+            .map(|executable| (executable, v.cli.install.clone()));
+        drop(v);
+        drop(el);
+        result?;
+        if let Some((executable, install)) = start_singleplayer {
+            std::process::Command::new(executable)
+                .current_dir(install)
+                .spawn()
+                .map_err(|e| format!("cannot start Single Player: {e}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -538,6 +554,9 @@ struct Viewer {
     gpu_log: GpuLog,
     /// Where the GPU arrives on the web.
     proxy: Option<winit::event_loop::EventLoopProxy<Ready>>,
+    /// Launched only once, after the event loop and client state shut down.
+    #[cfg(not(target_arch = "wasm32"))]
+    start_singleplayer: Option<PathBuf>,
     /// The browser window is open and the GPU has been asked for.
     #[cfg(target_arch = "wasm32")]
     starting: bool,
@@ -1974,15 +1993,15 @@ impl Viewer {
                     ) {
                         Ok(executable) => match std::fs::canonicalize(executable) {
                             Ok(executable) => {
-                                if let Err(err) = std::process::Command::new(executable)
-                                    .current_dir(&self.cli.install)
-                                    .spawn()
-                                {
-                                    show_error(
+                                self.start_singleplayer = Some(executable);
+                                if st.script.is_some() {
+                                    write_script_report(
                                         st,
-                                        &format!("Could not start Single Player: {err}"),
+                                        self.cli.out.clone().unwrap_or_default(),
+                                        true,
                                     );
                                 }
+                                el.exit();
                             }
                             Err(err) => show_error(
                                 st,
@@ -1994,9 +2013,11 @@ impl Viewer {
                 }
                 #[cfg(target_arch = "wasm32")]
                 Action::StartSingleplayer => {
-                    let message = crate::shell::singleplayer_executable(&self.cli.install, false)
-                        .expect_err("Single Player is not supported in the browser");
-                    show_error(st, &message);
+                    if let Err(message) =
+                        crate::shell::singleplayer_executable(&self.cli.install, false)
+                    {
+                        show_error(st, &message);
+                    }
                 }
                 Action::PlayDemo(name) => {
                     if let Err(e) = play_demo(&self.cli, &mut self.map, st, &name) {
