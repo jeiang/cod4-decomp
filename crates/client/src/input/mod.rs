@@ -813,7 +813,7 @@ impl Input {
         let current = self.cvars.get(name).unwrap_or("0").to_owned();
         let next = match values {
             [] => match current.trim().parse::<f64>() {
-                Ok(v) if v == 0.0 => "1",
+                Ok(0.0) => "1",
                 Ok(_) => "0",
                 Err(_) if current.trim().is_empty() => "1",
                 Err(_) => {
@@ -845,13 +845,17 @@ impl Input {
     /// `dvardump [match]`: the same with the stock banner.
     fn dvar_dump(&mut self, filter: Option<&str>) {
         let rows = self.cvars.entries(filter);
-        self.say("=============================== DVAR DUMP ========================================");
+        self.say(
+            "=============================== DVAR DUMP ========================================",
+        );
         for (name, value, _) in &rows {
             self.say(format!("      {name} \"{value}\""));
         }
         let n = self.cvars.entries(None).len();
         self.say(format!("\n{} total dvars\n{n} dvar indexes", rows.len()));
-        self.say("=============================== END DVAR DUMP =====================================");
+        self.say(
+            "=============================== END DVAR DUMP =====================================",
+        );
     }
 
     /// `sink`: unknown commands go to `pending` (interactive); off while loading files.
@@ -1853,7 +1857,9 @@ mod tests {
     #[test]
     fn a_bound_vstr_chain_waits_between_commands() {
         let mut i = Input::detached();
-        i.exec_line("set first \"set z 1; wait; vstr second\"; set second \"set z 2; wait 2; set z 3\"");
+        i.exec_line(
+            "set first \"set z 1; wait; vstr second\"; set second \"set z 2; wait 2; set z 3\"",
+        );
         i.exec_line("bind x \"vstr first; set after 1\"");
         i.key("x", true);
         // The rest of the buffer, `set after 1` included, waits behind the first `wait`.

@@ -1212,11 +1212,11 @@ impl HostCx<'_> {
         if self.st.exec_depth >= MAX_DEPTH {
             return;
         }
-        let bytes = self
-            .st
-            .vfs
-            .as_ref()
-            .and_then(|v| v.read(&crate::input::config::exec_name(name)).ok().flatten());
+        let bytes = self.st.vfs.as_ref().and_then(|v| {
+            v.read(&crate::input::config::exec_name(name))
+                .ok()
+                .flatten()
+        });
         let Some(bytes) = bytes else {
             eprintln!("couldn't exec {name}");
             self.st.feed.console.push(format!("couldn't exec {name}"));
@@ -1621,8 +1621,7 @@ impl HostCx<'_> {
                     || n == "name"
                     || crate::console::is_server_verb(n) =>
                 {
-                    self
-                        .st
+                    self.st
                         .actions
                         .push(Action::Console(crate::input::config::join(&cmd)))
                 }

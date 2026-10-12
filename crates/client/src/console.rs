@@ -235,7 +235,13 @@ impl Console {
                     return;
                 }
                 let prefix = rest.to_ascii_lowercase();
-                (format!("{command} "), complete(Want { kind, prefix: &prefix }))
+                (
+                    format!("{command} "),
+                    complete(Want {
+                        kind,
+                        prefix: &prefix,
+                    }),
+                )
             }
         };
         names.sort();
