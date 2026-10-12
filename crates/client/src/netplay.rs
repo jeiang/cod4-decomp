@@ -40,7 +40,7 @@ use sim::contents;
 use sim::pm::{ANGLE_UNIT, Params, PlayerState, PmType, UserCmd, pmf};
 use sim::weapon::fire::aim_spread_degrees;
 use sim::weapon::gun::ViewFx;
-use sim::weapon::{PlayerWeapons, WeaponParams, WeaponTable};
+use sim::weapon::{PlayerWeapons, WeaponTable};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -91,8 +91,8 @@ fn fixed_fov(ps: &PlayerState) -> Option<f32> {
     }
 }
 
-/// The on/off settings of the client that change what it makes of the match (`cg_drawCrosshair`, `ragdoll_enable`,
-/// `fx_marks`); all on, as the stock defaults have them.
+/// The settings of the client that change what it makes of the match: the on/off ones (`cg_drawCrosshair`,
+/// `ragdoll_enable`, `fx_marks`; all on, as the stock defaults have them) and the physics tunables.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Switches {
     /// The weapon's crosshair is drawn.
@@ -101,6 +101,10 @@ pub struct Switches {
     pub ragdoll: bool,
     /// Bullet holes, blood and scorches are drawn.
     pub marks: bool,
+    /// The `ragdoll_*` dvars.
+    pub ragdoll_tunables: crate::ragdoll::Tunables,
+    /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
+    pub bullet: fx::BulletTune,
 }
 
 impl Default for Switches {
@@ -109,6 +113,8 @@ impl Default for Switches {
             crosshair: true,
             ragdoll: true,
             marks: true,
+            ragdoll_tunables: crate::ragdoll::Tunables::default(),
+            bullet: fx::BulletTune::default(),
         }
     }
 }
@@ -121,7 +127,24 @@ impl Switches {
             crosshair: on("cg_drawCrosshair"),
             ragdoll: on("ragdoll_enable"),
             marks: on("fx_marks"),
+            ragdoll_tunables: crate::ragdoll::Tunables::read(c),
+            bullet: bullet_tune(c),
         }
+    }
+}
+
+/// `phys_bulletUpBias` and `phys_bulletSpinScale`, held to the original's limits; one not set has its stock value.
+fn bullet_tune(c: &crate::input::Cvars) -> fx::BulletTune {
+    let stock = fx::BulletTune::default();
+    let get = |name: &str, stock: f32, lo: f32, hi: f32| {
+        c.get(name)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+            .map_or(stock, |v| v.clamp(lo, hi))
+    };
+    fx::BulletTune {
+        up_bias: get("phys_bulletUpBias", stock.up_bias, 0.0, 2.0),
+        spin_scale: get("phys_bulletSpinScale", stock.spin_scale, -1.0, 100.0),
     }
 }
 
@@ -404,9 +427,6 @@ pub struct NetPlay {
     effects: Effects,
     tracer_cvars: crate::tracer::Cvars,
     switches: Switches,
-    /// The weapon rules the client plays by (`player_meleeRange` and the like): the server's defaults, which no
-    /// cvar changes yet.
-    weapon_params: WeaponParams,
     tracer_material: Option<std::sync::Arc<assets::zone::gfx::Material>>,
     /// Earthquakes shaking the view.
     shakes: sim::shake::CameraShakes,
@@ -526,7 +546,6 @@ impl NetPlay {
             effects: Effects::new(&lib.content, world),
             tracer_cvars: crate::tracer::Cvars::default(),
             switches: Switches::default(),
-            weapon_params: WeaponParams::default(),
             tracer_material: None,
             shakes: Default::default(),
             lib,
@@ -660,6 +679,7 @@ impl NetPlay {
 
     /// What the player has switched on or off.
     pub fn set_switches(&mut self, s: Switches) {
+        self.props.set_bullet(s.bullet);
         self.switches = s;
     }
 
@@ -1461,7 +1481,12 @@ impl NetPlay {
                     .cloned()
             };
             self.props.event(e, &def, self.boxes.world());
-            corpses::blast(&mut self.corpses, e, &def);
+            corpses::blast(
+                &mut self.corpses,
+                e,
+                &def,
+                self.switches.ragdoll_tunables.max_simulating,
+            );
             self.effects.event(e, &def);
         }
         if let Some((name, last)) = &mut self.fx_demo
@@ -1532,7 +1557,7 @@ impl NetPlay {
         }
         let index = sim::pm::viewmodel_weapon(ps);
         let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
-        let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &self.weapon_params);
+        let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &self.params.weapon);
         Some(Reticle {
             weapon,
             spread_deg,
@@ -1614,7 +1639,7 @@ impl NetPlay {
         self.sound.hold_breath(
             (dt * 1000.0) as i32,
             ps.weapon_flags & sim::pm::wf::HOLD_BREATH != 0,
-            (WeaponParams::default().breath_hold_time * 1000.0) as i32,
+            (self.params.weapon.breath_hold_time * 1000.0) as i32,
         );
         let def = self.lib.content.weapon(self.weapons.name(ps.weapon as u16));
         self.sound.own_events(
@@ -2012,7 +2037,8 @@ impl NetPlay {
             match self.lib.content.model(name).cloned() {
                 Some(model) => {
                     let posed = if e.eflags & eflags::PHYSICS_LAUNCH != 0 {
-                        self.launches.pose(e, &model, dt, self.boxes.world())
+                        self.launches
+                            .pose(e, &model, dt, self.boxes.world(), self.switches.bullet)
                     } else {
                         Some((e.origin, e.angles))
                     };
@@ -2807,6 +2833,16 @@ mod tests {
             c.set(name, "1", false);
             assert!(check(Switches::read(&c)), "{name} 1 turns it on");
         }
+    }
+
+    #[test]
+    fn the_bullet_dvars_tune_the_hits_within_their_limits() {
+        let mut c = crate::input::Cvars::default();
+        assert_eq!(Switches::read(&c).bullet, fx::BulletTune::default());
+        c.set("phys_bulletUpBias", "1.5", false);
+        c.set("phys_bulletSpinScale", "500", false);
+        let t = Switches::read(&c).bullet;
+        assert_eq!((t.up_bias, t.spin_scale), (1.5, 100.0));
     }
 
     #[test]

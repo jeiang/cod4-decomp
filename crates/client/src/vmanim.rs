@@ -62,7 +62,9 @@ struct Player<'a> {
 impl Player<'_> {
     fn step(&mut self, buttons: i32) {
         let mut pm = Pmove::new(std::mem::take(&mut self.ps), &self.params);
-        pm.weapons = Some(WeaponCtx::new(self.table, &mut self.inv));
+        let mut weapons = WeaponCtx::new(self.table, &mut self.inv);
+        weapons.params = self.params.weapon;
+        pm.weapons = Some(weapons);
         pm.cmd = UserCmd {
             buttons,
             weapon: self.want as u8,

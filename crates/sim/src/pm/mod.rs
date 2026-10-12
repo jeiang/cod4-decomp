@@ -251,7 +251,9 @@ pub fn run_usercmd(
     // The weapon the player asked for: a script's `switchtoweapon`, else what it holds or last held.
     cmd.weapon = u8::try_from(inv.wanted(ps.weapon as u16)).unwrap_or(0);
     let mut pm = Pmove::new(std::mem::take(ps), params);
-    pm.weapons = Some(WeaponCtx::new(table, inv));
+    let mut weapons = WeaponCtx::new(table, inv);
+    weapons.params = params.weapon;
+    pm.weapons = Some(weapons);
     pm.cmd = cmd;
     pm.oldcmd = old_cmd;
     pm.tracemask = match pm.ps.pm_type {

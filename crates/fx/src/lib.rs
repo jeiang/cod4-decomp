@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 mod rigid;
 mod rng;
-pub use rigid::{Body, GRAVITY as PHYS_GRAVITY, Impact, MIN_IMPACT_MOMENTUM, Mass, Shape};
+pub use rigid::{
+    Body, BulletTune, GRAVITY as PHYS_GRAVITY, Impact, MIN_IMPACT_MOMENTUM, Mass, Shape,
+};
 pub use rng::Rng;
 
 /// Longest single integration step.
@@ -321,7 +323,7 @@ struct TrailPoint {
 struct Elem {
     /// Index into the effect definition's elements.
     def: usize,
-    r: [f32; 24],
+    r: [f32; key::COUNT],
     begin: i32,
     life: f32,
     /// World position now, and its velocity not counting the element's own samples.
@@ -380,6 +382,27 @@ pub struct Fx {
     camera: Option<Camera>,
     /// The sight blockers of the last [`Fx::draw`].
     blockers: Vec<VisBlocker>,
+}
+
+/// Slots of an element's random draws, numbered as the original's `FX_RAND_*` keys. Two parameters share a slot only
+/// where the original shares it (the colour and the initial rotation).
+mod key {
+    pub const ANGLES_PITCH: usize = 12;
+    pub const ANGLES_YAW: usize = 13;
+    pub const ANGLES_ROLL: usize = 14;
+    pub const GRAVITY: usize = 15;
+    pub const REFLECTION_FACTOR: usize = 16;
+    pub const LIFE_SPAN: usize = 17;
+    pub const SPAWN_DELAY: usize = 18;
+    pub const EMIT_DIST: usize = 20;
+    pub const VISUAL: usize = 21;
+    pub const TILE_START: usize = 22;
+    pub const COLOR: usize = 23;
+    pub const ROTATION_DELTA: usize = 25;
+    pub const SIZE_0: usize = 26;
+    pub const SIZE_1: usize = 27;
+    pub const SCALE: usize = 28;
+    pub const COUNT: usize = 29;
 }
 
 fn pick(r: f32, range: &assets::zone::fx::Range<f32>) -> f32 {
@@ -701,14 +724,16 @@ impl Fx {
             return;
         }
         let d = &e.def.elems[k];
-        let mut r = [0.0f32; 24];
+        let mut r = [0.0f32; key::COUNT];
         for v in &mut r {
             *v = self.rng.f();
         }
-        let delay = d.spawn_delay_msec.base as f32 + d.spawn_delay_msec.amplitude as f32 * r[17];
+        let delay = d.spawn_delay_msec.base as f32
+            + d.spawn_delay_msec.amplitude as f32 * r[key::SPAWN_DELAY];
         let begin = time + delay.max(0.0) as i32;
-        let life =
-            (d.life_span_msec.base as f32 + d.life_span_msec.amplitude as f32 * r[18]).max(1.0);
+        let life = (d.life_span_msec.base as f32
+            + d.life_span_msec.amplitude as f32 * r[key::LIFE_SPAN])
+            .max(1.0);
         // The spawn point.
         let f = &e.frame;
         let (pos, offset) = spawn_origin(d, &r, f);
@@ -966,7 +991,7 @@ impl Fx {
     ) {
         match (&d.visuals, d.elem_type) {
             (FxVisuals::Effects(names), elem::RUNNER) if !names.is_empty() => {
-                let n = ((el.r[16] * names.len() as f32) as usize).min(names.len() - 1);
+                let n = ((el.r[key::VISUAL] * names.len() as f32) as usize).min(names.len() - 1);
                 if let Some(name) = names[n].as_deref()
                     && let Some(def) = self.lib.get(name)
                 {
@@ -982,7 +1007,7 @@ impl Fx {
                 el.done = true;
             }
             (FxVisuals::Sounds(names), elem::SOUND) if !names.is_empty() => {
-                let n = ((el.r[16] * names.len() as f32) as usize).min(names.len() - 1);
+                let n = ((el.r[key::VISUAL] * names.len() as f32) as usize).min(names.len() - 1);
                 if let Some(name) = names[n].as_deref() {
                     self.sounds.push(SoundPlay {
                         alias: name.to_owned(),
@@ -1048,7 +1073,8 @@ impl Fx {
         let v = velocity(d, el, t) + el.base_vel;
         let from = el.pos;
         let mut to = from + v * dt;
-        let g = pick(el.r[15], &d.gravity) * GRAVITY * dt;
+        let gravity = pick(el.r[key::GRAVITY], &d.gravity) * GRAVITY;
+        let g = gravity * dt;
         to.z -= g * dt * 0.5;
         el.base_vel.z -= g;
         if d.flags & flags::USE_COLLISION != 0
@@ -1075,15 +1101,21 @@ impl Fx {
                 el.done = true;
                 return;
             }
-            let pre = v;
-            let reflect = pick(el.r[16], &d.reflection_factor);
+            // The step took the whole step's gravity; the part after the impact is given back, so the speed at the
+            // impact is the one gravity built up to that moment (`FX_CollisionResponse`).
+            let after = (ms - (at - el.at)) as f32 * 0.001;
+            el.base_vel.z += gravity * after;
+            let pre = v - Vec3::Z * (gravity * (dt - after));
+            let reflect = pick(el.r[key::REFLECTION_FACTOR], &d.reflection_factor);
             let scaled = pre * reflect;
             if let Some(def) = impact
                 && pre.length_squared() > 1.0
             {
                 spawned.push((def, Frame::facing(el.pos, normal), at));
             }
-            if scaled.length_squared() <= 1.0 && normal.z > 0.7 {
+            // Only an impact in the first millisecond of the step rests: a slow element that has just landed bounces
+            // once more first.
+            if at == el.at && scaled.length_squared() <= 1.0 && normal.z > 0.7 {
                 el.at_rest = true;
                 return;
             }
@@ -1119,7 +1151,7 @@ impl Fx {
         if len == 0.0 {
             return;
         }
-        let spacing = d.emit_dist_variance.base + pick(el.r[19], &d.emit_dist);
+        let spacing = d.emit_dist_variance.base + pick(el.r[key::EMIT_DIST], &d.emit_dist);
         let max_spacing = spacing + d.emit_dist_variance.amplitude;
         let forward = (to - from) / len;
         let side = perpendicular(forward);
@@ -1304,7 +1336,7 @@ impl Fx {
 
 /// Where an element of `d` with random draws `r` spawns for an effect at `f`, and the offset from the frame's spawn
 /// point that the run direction may follow.
-fn spawn_origin(d: &FxElemDef, r: &[f32; 24], f: &Frame) -> (Vec3, Vec3) {
+fn spawn_origin(d: &FxElemDef, r: &[f32; key::COUNT], f: &Frame) -> (Vec3, Vec3) {
     let off = Vec3::new(
         pick(r[6], &d.spawn_origin[0]),
         pick(r[7], &d.spawn_origin[1]),
@@ -1468,7 +1500,7 @@ impl Fx {
 }
 
 fn pick_index(el: &Elem, count: usize) -> usize {
-    ((el.r[20] * count as f32) as usize).min(count.saturating_sub(1))
+    ((el.r[key::VISUAL] * count as f32) as usize).min(count.saturating_sub(1))
 }
 
 fn random_dir(a: f32, b: f32) -> Vec3 {
@@ -1528,7 +1560,7 @@ fn visual_state(d: &FxElemDef, el: &Elem, t: f32) -> Vis {
     let i = (sp as usize).min(n - 1);
     let l = sp - i as f32;
     let (p, q) = (&d.vis_samples[i], &d.vis_samples[i + 1]);
-    let vl = el.r[23];
+    let vl = el.r[key::COLOR];
     let mut color = [0u8; 4];
     for (c, out) in color.iter_mut().enumerate() {
         let from = f32::from(p.base.color[c]) * (1.0 - vl) + f32::from(p.amplitude.color[c]) * vl;
@@ -1542,19 +1574,19 @@ fn visual_state(d: &FxElemDef, el: &Elem, t: f32) -> Vis {
         let to = r * q.amplitude.size[ch] + q.base.size[ch];
         from * (1.0 - l) + to * l
     };
-    let s0 = size(0, el.r[21]);
+    let s0 = size(0, el.r[key::SIZE_0]);
     let s1 = if d.flags & flags::NONUNIFORM_SCALE != 0 {
-        size(1, el.r[22])
+        size(1, el.r[key::SIZE_1])
     } else {
         s0
     };
     let scale = {
-        let from = el.r[12] * p.amplitude.scale + p.base.scale;
-        let to = el.r[12] * q.amplitude.scale + q.base.scale;
+        let from = el.r[key::SCALE] * p.amplitude.scale + p.base.scale;
+        let to = el.r[key::SCALE] * q.amplitude.scale + q.base.scale;
         from * (1.0 - l) + to * l
     };
     // Rotation: the initial angle plus the integral of the rotation rate over the life so far.
-    let rr = el.r[13];
+    let rr = el.r[key::ROTATION_DELTA];
     let w1 = l * l * 0.5;
     let w0 = l - w1;
     let total = rr * p.amplitude.rotation_total
@@ -1575,7 +1607,11 @@ fn element_axis(d: &FxElemDef, el: &Elem, elapsed: f32) -> [Vec3; 3] {
     let a = |k: usize, rs: usize, rv: usize| {
         pick(el.r[rs], &d.spawn_angles[k]) + elapsed * pick(el.r[rv], &d.angular_velocity[k])
     };
-    let (pitch, yaw, roll) = (a(0, 12, 3), a(1, 13, 4), a(2, 14, 5));
+    let (pitch, yaw, roll) = (
+        a(0, key::ANGLES_PITCH, 3),
+        a(1, key::ANGLES_YAW, 4),
+        a(2, key::ANGLES_ROLL, 5),
+    );
     let (cp, sp) = (pitch.cos(), pitch.sin());
     let (cy, sy) = (yaw.cos(), yaw.sin());
     let (cr, sr) = (roll.cos(), roll.sin());
@@ -1635,7 +1671,7 @@ fn atlas(d: &FxElemDef, el: &Elem, t: f32, elapsed_ms: f32) -> (f32, f32, f32, f
     let [behavior, index, fps, loops, col_bits, row_bits] = d.atlas;
     let mut i = match behavior & 3 {
         0 => i32::from(index),
-        1 => (count as f32 * el.r[10]) as i32,
+        1 => (count as f32 * el.r[key::TILE_START]) as i32,
         _ => (el.id as i32) & (count - 1),
     };
     if behavior & 4 != 0 {
@@ -2080,6 +2116,78 @@ mod tests {
         let mut fx = Fx::new(lib(vec![def.clone()]));
         fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
         assert_eq!(model_at(&mut fx, 50, &Floor), None);
+    }
+
+    /// A particle dropped from 100 units that bounces off the floor with a reflection factor of 1; the impact effect's
+    /// sound marks each bounce.
+    fn bouncing_particle() -> (Arc<FxEffectDef>, Arc<Library>) {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.flags = flags::USE_COLLISION;
+        e.gravity = range(1.0, 0.0);
+        e.reflection_factor = range(1.0, 0.0);
+        e.life_span_msec = range(5000, 0);
+        e.effect_on_impact = Some("fx/landed".into());
+        let def = effect("fx/bounce", 0, 1, 0, vec![e]);
+        let landed = effect("fx/landed", 0, 1, 0, vec![sound("thud")]);
+        (def.clone(), lib(vec![def, landed]))
+    }
+
+    #[test]
+    fn each_random_parameter_of_an_element_has_its_own_draw() {
+        // Elements of one definition would look alike in more than one way at once if two parameters shared a draw: the
+        // scale following the spawn pitch, the spin following the yaw.
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [40, 0];
+        let def = effect("fx/many", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
+        let elems = &fx.effects[0].elems;
+        assert_eq!(elems.len(), 40);
+        let slots = [
+            key::ANGLES_PITCH,
+            key::ANGLES_YAW,
+            key::ANGLES_ROLL,
+            key::GRAVITY,
+            key::REFLECTION_FACTOR,
+            key::LIFE_SPAN,
+            key::SPAWN_DELAY,
+            key::EMIT_DIST,
+            key::VISUAL,
+            key::TILE_START,
+            key::COLOR,
+            key::ROTATION_DELTA,
+            key::SIZE_0,
+            key::SIZE_1,
+            key::SCALE,
+        ];
+        for (i, &a) in slots.iter().enumerate() {
+            for &b in &slots[i + 1..] {
+                assert!(
+                    elems.iter().any(|el| el.r[a] != el.r[b]),
+                    "parameters {a} and {b} draw the same number"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_perfect_bounce_comes_back_to_the_height_it_fell_from() {
+        let (def, lib) = bouncing_particle();
+        let mut fx = Fx::new(lib);
+        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
+        // The impacts, as far as 16 ms frames tell.
+        let mut at = Vec::new();
+        for t in (16..=2200).step_by(16) {
+            fx.update(t, &Floor);
+            while at.len() < fx.stats.impacts as usize {
+                at.push(t);
+            }
+        }
+        // Free fall from 100 units takes sqrt(2 * 100 / 800) = 0.5 s and the way back up as long, so the second
+        // impact is a second after the first.
+        let (a, b) = (at[0], at[1]);
+        assert!((a - 500).abs() <= 20, "first impact at {a} ms");
+        assert!(((b - a) - 1000).abs() <= 16, "bounce took {} ms", b - a);
     }
 
     #[test]

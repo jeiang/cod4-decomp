@@ -13,7 +13,7 @@ use sim::cm::{ENTITYNUM_NONE, ENTITYNUM_WORLD};
 use sim::pm::{PlayerState, math};
 use sim::weapon::damage::melee_damage;
 use sim::weapon::fire::{AimBasis, aim_spread_degrees};
-use sim::weapon::{WeaponClass, WeaponEvent, WeaponOut, WeaponParams, WeaponType};
+use sim::weapon::{WeaponClass, WeaponEvent, WeaponOut, WeaponType};
 
 use crate::bullet::{
     BulletHit, BulletParams, MASK_SHOT_CLIENT, SURF_NOIMPACT, ShotTrace, dot, lerp, mad, normalized,
@@ -87,7 +87,7 @@ impl Game {
         let Some(c) = self.client(n) else { return };
         let aim_angles = c.fire_angles();
         let aim = AimBasis::from_angles(view_origin(&c.ps), &aim_angles);
-        let spread = aim_spread_degrees(info, &c.ps, &WeaponParams::default());
+        let spread = aim_spread_degrees(info, &c.ps, &self.pm_params.weapon);
         let fuse_left = c.ps.grenade_time_left;
         self.stats.shots += 1;
         if let Some(c) = self.client_mut(n) {
@@ -142,7 +142,7 @@ impl Game {
     ) {
         self.ensure_player_anims();
         let penetration = self.penetration_table();
-        let params = WeaponParams::default();
+        let params = self.pm_params.weapon;
         let mut hits: Vec<BulletHit> = Vec::new();
         {
             let (Some(info), Some(c)) = (self.weapons.get(weapon), self.client(n)) else {
@@ -293,7 +293,7 @@ impl Game {
         let Some(info) = self.weapons.get(weapon) else {
             return;
         };
-        let params = WeaponParams::default();
+        let params = self.pm_params.weapon;
         let (range, width, height) = (params.melee_range, params.melee_width, params.melee_height);
         let _ = info;
         let Some(c) = self.client(n) else { return };

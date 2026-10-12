@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Movement tunables (the original's dvars) and the per-weapon values movement reads.
+//! Movement and weapon tunables (the original's dvars) and the per-weapon values movement reads.
 //!
 //! Defaults are the multiplayer registration defaults of `iw3mp.exe` 1.7 (fact source: the
 //! dvar registration calls in `Jump_RegisterDvars`, `Mantle_RegisterDvars`, `BG_RegisterDvars`,
 //! `G_RegisterDvars`).
 
 use super::mantle::MantleAnims;
+use crate::weapon::WeaponParams;
 
-/// Movement dvars. `Params::default()` is a stock server.
+/// Movement and weapon dvars. `Params::default()` is a stock server.
 #[derive(Debug, Clone)]
 pub struct Params {
     // Core movement.
@@ -63,6 +64,8 @@ pub struct Params {
     // Aim down sights.
     pub player_ads_exit_delay: i32,
     pub player_scope_exit_on_damage: bool,
+    /// The dvars the weapon code reads (breath, melee, burst cooldown, penetration, perks).
+    pub weapon: WeaponParams,
     /// Mantle animation tracks; mantling is unavailable until set.
     pub mantle_anims: Option<MantleAnims>,
 }
@@ -113,6 +116,7 @@ impl Default for Params {
             player_melee_charge_friction: 1200.0,
             player_ads_exit_delay: 0,
             player_scope_exit_on_damage: false,
+            weapon: WeaponParams::default(),
             mantle_anims: None,
         }
     }
@@ -148,8 +152,8 @@ impl Tunable<'_> {
 }
 
 impl Params {
-    /// Every tunable with the dvar it is, as `Jump_RegisterDvars`, `Mantle_RegisterDvars`, `BG_RegisterDvars` and
-    /// `G_RegisterDvars` name them.
+    /// Every tunable with the dvar it is, as `Jump_RegisterDvars`, `Mantle_RegisterDvars`, `BG_RegisterDvars`,
+    /// `BG_RegisterPerks` and `G_RegisterDvars` name them.
     fn tunables(&mut self) -> Vec<(&'static str, Tunable<'_>)> {
         use Tunable::{Bool, Float, Int};
         vec![
@@ -270,6 +274,67 @@ impl Params {
             (
                 "player_scopeExitOnDamage",
                 Bool(&mut self.player_scope_exit_on_damage),
+            ),
+            // The weapon dvars (`BG_RegisterDvars`, `BG_RegisterPerks`, `G_RegisterDvars`), all cheat protected.
+            (
+                "bg_aimSpreadMoveSpeedThreshold",
+                Float(&mut self.weapon.aim_spread_move_speed_threshold),
+            ),
+            (
+                "player_burstFireCooldown",
+                Float(&mut self.weapon.burst_fire_cooldown),
+            ),
+            ("player_sustainAmmo", Bool(&mut self.weapon.sustain_ammo)),
+            (
+                "perk_weapSpreadMultiplier",
+                Float(&mut self.weapon.perk_weap_spread_multiplier),
+            ),
+            (
+                "perk_weapReloadMultiplier",
+                Float(&mut self.weapon.perk_weap_reload_multiplier),
+            ),
+            (
+                "perk_weapRateMultiplier",
+                Float(&mut self.weapon.perk_weap_rate_multiplier),
+            ),
+            (
+                "perk_bulletPenetrationMultiplier",
+                Float(&mut self.weapon.perk_bullet_penetration_multiplier),
+            ),
+            ("player_meleeRange", Float(&mut self.weapon.melee_range)),
+            ("player_meleeWidth", Float(&mut self.weapon.melee_width)),
+            ("player_meleeHeight", Float(&mut self.weapon.melee_height)),
+            (
+                "bullet_penetrationEnabled",
+                Bool(&mut self.weapon.bullet_penetration_enabled),
+            ),
+            (
+                "player_breath_hold_time",
+                Float(&mut self.weapon.breath_hold_time),
+            ),
+            (
+                "player_breath_gasp_time",
+                Float(&mut self.weapon.breath_gasp_time),
+            ),
+            (
+                "player_breath_fire_delay",
+                Float(&mut self.weapon.breath_fire_delay),
+            ),
+            (
+                "player_breath_gasp_scale",
+                Float(&mut self.weapon.breath_gasp_scale),
+            ),
+            (
+                "player_breath_hold_lerp",
+                Float(&mut self.weapon.breath_hold_lerp),
+            ),
+            (
+                "player_breath_gasp_lerp",
+                Float(&mut self.weapon.breath_gasp_lerp),
+            ),
+            (
+                "perk_extraBreath",
+                Float(&mut self.weapon.perk_extra_breath),
             ),
         ]
     }

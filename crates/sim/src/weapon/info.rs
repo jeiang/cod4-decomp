@@ -552,12 +552,9 @@ impl WeaponInfo {
             .anims
             .get(ANIM_MELEE_CHARGE)
             .is_some_and(|n| n.as_deref().is_some_and(|s| !s.is_empty()));
-        let oo_pos_anim_length =
-            if def.oo_pos_anim_length[0] > 0.0 && def.oo_pos_anim_length[1] > 0.0 {
-                def.oo_pos_anim_length
-            } else {
-                transition_rates(def.ads_trans_in_time, def.ads_trans_out_time)
-            };
+        // Always from the transition times, as `BG_SetupTransitionTimes` does after a load; the pair the zone stores
+        // is the same for every stock weapon.
+        let oo_pos_anim_length = transition_rates(def.ads_trans_in_time, def.ads_trans_out_time);
         let [max_damage_range, min_damage_range] =
             damage_ranges(def.max_damage_range, def.min_damage_range);
         let pair = |a: f32, b: f32| [a, b];
