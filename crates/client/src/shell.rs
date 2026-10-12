@@ -1708,13 +1708,7 @@ impl HostCx<'_> {
                     gametype: self.dvar_get("g_gametype"),
                 }),
                 // The server's, or the app's own: not for the input layer, whose `pending_commands` a menu drops.
-                n if n == "togglemenu"
-                    || n == "rcon"
-                    || n == "record"
-                    || n == "stoprecord"
-                    || n == "name"
-                    || crate::console::is_server_verb(n) =>
-                {
+                n if crate::console::is_app_verb(n) => {
                     self.st
                         .actions
                         .push(Action::Console(crate::input::config::join(&cmd)))

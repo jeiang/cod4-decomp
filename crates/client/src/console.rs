@@ -349,6 +349,13 @@ pub fn is_command(name: &str) -> bool {
     n.starts_with(['+', '-']) || is_server_verb(&n) || OWN_COMMANDS.contains(&n.as_str())
 }
 
+/// Whether the shell hands `name` to the app as a console action (`console_action`) instead of the input layer:
+/// the server's verbs and the commands the app answers itself.
+pub fn is_app_verb(name: &str) -> bool {
+    const OWN: &[&str] = &["togglemenu", "rcon", "record", "stoprecord", "name", "bots"];
+    is_server_verb(name) || OWN.iter().any(|v| name.eq_ignore_ascii_case(v))
+}
+
 /// Whether `name` (a command's first word) goes to the server.
 pub fn is_server_verb(name: &str) -> bool {
     SERVER_VERBS.iter().any(|v| name.eq_ignore_ascii_case(v))
@@ -534,6 +541,8 @@ mod tests {
         );
         assert_eq!(server_line(&w(&["vote"])).as_deref(), Some("vote"));
         assert!(is_server_verb("Say_Team") && is_server_verb("kill") && !is_server_verb("map"));
+        // `bots` once fell through to the input layer, which ignored it without a word.
+        assert!(is_app_verb("bots") && is_app_verb("RCON") && is_app_verb("say") && !is_app_verb("map"));
         assert!(is_command("MAP") && is_command("+attack") && is_command("rcon"));
         assert!(!is_command("frobnicate"));
         // The video commands and the screenshot ones are known, so the console answers them itself.
