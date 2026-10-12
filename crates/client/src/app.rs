@@ -385,6 +385,10 @@ struct State {
     script: Option<UiScript>,
     /// A screenshot to take after the next paint (name without extension).
     shot_request: Option<String>,
+    /// `screenshot` or `screenshotJpeg` ran: the next frame is written to the screenshots folder.
+    screenshot: Option<crate::screenshot::Request>,
+    /// Where the numbered screenshots go on from (the original's `lastNumber`).
+    screenshot_next: u32,
     /// `shotd=`: the screenshot waits for a frame that copied the scene for distortion.
     shot_gate: bool,
     /// The last frame copied the scene for distortion materials.
@@ -873,7 +877,8 @@ impl Viewer {
         }
         if let Some(sh) = shell.as_mut() {
             sh.set_profiles(&mut input, profiles, stats);
-            let (modes, rates) = display::video_modes(&window);
+            let (modes, rates) =
+                display::video_modes(&window, Gfx::from_cvars(&input.cvars).monitor);
             sh.set_display(
                 &mut input,
                 modes,
@@ -972,6 +977,8 @@ impl Viewer {
                 results: Vec::new(),
             }),
             shot_request: None,
+            screenshot: None,
+            screenshot_next: 0,
             shot_gate: false,
             distortion_now: false,
             test_light: false,
@@ -1372,6 +1379,8 @@ impl Viewer {
         {
             connection_lost(&mut self.map, st, &why);
         }
+        // A bind item waits for a key: the pad's next button is the binding, as a key press is.
+        st.input.capture_pad = st.shell.as_ref().is_some_and(|s| s.ui.bind_pending());
         let mut new_level = None;
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
@@ -1399,6 +1408,7 @@ impl Viewer {
                 }
             };
             open_chat(st.shell.as_mut(), &mut st.input, &f);
+            screenshot_commands(st.shell.as_mut(), &f);
             if f.quit() {
                 el.exit();
             }
@@ -1651,6 +1661,11 @@ impl Viewer {
                 fly(st, &f, dt);
             }
         }
+        if let Some(n) = st.input.take_pad_press()
+            && let Some(sh) = st.shell.as_mut()
+        {
+            sh.bind_key(&mut st.input, &n);
+        }
         if let Some(name) = new_level
             && let Err(e) = enter_level(&self.cli, &mut self.map, st, &name)
         {
@@ -1887,6 +1902,12 @@ impl Viewer {
                     serde_json::to_vec_pretty(&report).unwrap_or_default(),
                 );
                 el.exit();
+            }
+        }
+        if let Some(req) = st.screenshot.take() {
+            let said = take_screenshot(st, &frame.texture, &req);
+            if let (Some(sh), Some(text)) = (st.shell.as_mut(), said) {
+                sh.print_console(&text);
             }
         }
         let shot_ready = !st.shot_gate || st.distortion_now;
@@ -2134,6 +2155,7 @@ impl Viewer {
                         n.send_command(&format!("menuresponse {menu} {response}"));
                     }
                 }
+                Action::Screenshot(r) => st.screenshot = Some(r),
                 Action::VidRestart => {
                     vid_restart(&self.cli, st);
                     restart_files(&self.cli, st);
@@ -3072,6 +3094,23 @@ fn open_chat(shell: Option<&mut Shell>, input: &mut Input, f: &InputFrame) {
     }
 }
 
+/// `screenshot` and `screenshotJpeg` from a bind (F12) or the console.
+fn screenshot_commands(shell: Option<&mut Shell>, f: &InputFrame) {
+    let Some(sh) = shell else { return };
+    for c in &f.pending_commands {
+        for cmd in crate::input::config::split_commands(c) {
+            let format = match cmd[0].to_ascii_lowercase().as_str() {
+                "screenshot" => crate::screenshot::Format::Tga,
+                "screenshotjpeg" => crate::screenshot::Format::Jpeg,
+                _ => continue,
+            };
+            if let Some(r) = crate::screenshot::Request::parse(format, &cmd[1..]) {
+                sh.st.actions.push(Action::Screenshot(r));
+            }
+        }
+    }
+}
+
 /// A console line a menu, a bind or the console itself produced. What the server carries out goes to it (without the
 /// shell's command loop, which the line may have come from); the rest is the input layer's.
 /// The `rate` (bytes a second) and `snaps` (snapshots a second) the player's cvars ask the server for.
@@ -3437,6 +3476,15 @@ fn vid_restart(cli: &Cli, st: &mut State) {
     let g = Gfx::from_cvars(&st.input.cvars);
     if let Some(note) = display::apply(&st.window, &g.request(&cli.request)) {
         st.notes.push(note);
+    }
+    let (modes, rates) = display::video_modes(&st.window, g.monitor);
+    if let Some(sh) = st.shell.as_mut() {
+        if !modes.is_empty() {
+            sh.st.video_modes = modes;
+        }
+        if !rates.is_empty() {
+            sh.st.refresh_rates = rates;
+        }
     }
     let caps = st.surface().get_capabilities(&st.gpu.adapter);
     let (mode, _) = pick_present(g.present(&cli.present), &caps.present_modes);
@@ -3879,12 +3927,69 @@ fn rss() -> u64 {
 }
 
 /// Copy `tex` to the CPU and write it as an opaque PNG.
+/// What `screenshot` and `screenshotJpeg` write: the frame, to the screenshots folder of the user's folder. The
+/// line to print, none for `silent`.
+fn take_screenshot(
+    st: &mut State,
+    tex: &wgpu::Texture,
+    req: &crate::screenshot::Request,
+) -> Option<String> {
+    let fail = || (!req.silent).then(|| "ScreenShot: Couldn't create a file".to_owned());
+    let Some(dir) = st.input.config_dir().map(|d| d.join("screenshots")) else {
+        return fail();
+    };
+    let Some(path) = crate::screenshot::target(&dir, req, &mut st.screenshot_next) else {
+        return fail();
+    };
+    let Ok(rgba) = read_rgba(&st.gpu, tex, st.config.format) else {
+        return fail();
+    };
+    let rgb = rgba
+        .1
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let pic = crate::screenshot::Picture {
+        width: tex.width(),
+        height: tex.height(),
+        rgb,
+    };
+    if let Err(e) = crate::screenshot::write(&path, req.format, &pic) {
+        eprintln!("screenshot {}: {e}", path.display());
+        return fail();
+    }
+    let shown = path
+        .file_name()
+        .map(|n| format!("screenshots/{}", n.to_string_lossy()))?;
+    (!req.silent).then(|| format!("Wrote {shown}"))
+}
+
 fn save_png(
     gpu: &Gpu,
     tex: &wgpu::Texture,
     format: wgpu::TextureFormat,
     path: &Path,
 ) -> Result<f64, String> {
+    let (w, h) = (tex.width(), tex.height());
+    let (lit, rgba) = read_rgba(gpu, tex, format)?;
+    let file = std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?);
+    let mut e = png::Encoder::new(file, w, h);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header()
+        .and_then(|mut w| w.write_image_data(&rgba))
+        .map_err(|e| e.to_string())?;
+    Ok(lit)
+}
+
+/// The frame's pixels as opaque RGBA, with the share of them that is not near black.
+fn read_rgba(
+    gpu: &Gpu,
+    tex: &wgpu::Texture,
+    format: wgpu::TextureFormat,
+) -> Result<(f64, Vec<u8>), String> {
     let (w, h) = (tex.width(), tex.height());
     let bpr = (w * 4).next_multiple_of(256);
     let buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -3936,14 +4041,7 @@ fn save_png(
             });
         }
     }
-    let file = std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?);
-    let mut e = png::Encoder::new(file, w, h);
-    e.set_color(png::ColorType::Rgba);
-    e.set_depth(png::BitDepth::Eight);
-    e.write_header()
-        .and_then(|mut w| w.write_image_data(&rgba))
-        .map_err(|e| e.to_string())?;
-    Ok(lit as f64 / f64::from(w * h))
+    Ok((lit as f64 / f64::from(w * h), rgba))
 }
 
 #[cfg(test)]

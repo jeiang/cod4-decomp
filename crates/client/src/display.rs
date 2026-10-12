@@ -8,6 +8,8 @@ use winit::dpi::{PhysicalSize, Size};
 use winit::event_loop::ActiveEventLoop;
 #[cfg(not(target_arch = "wasm32"))]
 use winit::monitor::{MonitorHandle, VideoModeHandle};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
 use winit::window::Window;
 #[cfg(not(target_arch = "wasm32"))]
 use winit::window::{Fullscreen, WindowAttributes};
@@ -16,7 +18,7 @@ use winit::window::{Fullscreen, WindowAttributes};
 pub enum FullscreenKind {
     Windowed,
     Borderless,
-    /// Falls back to borderless where the OS has no exclusive mode switch (Wayland, macOS Spaces).
+    /// Falls back to borderless where there is no mode to switch to, and on Wayland, which has no mode switch.
     Exclusive,
 }
 
@@ -63,6 +65,9 @@ pub struct Request {
     pub size: Option<(u32, u32)>,
     /// Hertz; `None` picks the highest the size offers.
     pub refresh: Option<f64>,
+    /// `r_monitor`: the 1-based number of the monitor fullscreen goes to; `None` (0 in the dvar) or a number past the
+    /// last monitor picks automatically.
+    pub monitor: Option<usize>,
 }
 
 impl Default for Request {
@@ -71,8 +76,15 @@ impl Default for Request {
             kind: FullscreenKind::Windowed,
             size: Some((1280, 720)),
             refresh: None,
+            monitor: None,
         }
     }
+}
+
+/// The 0-based place in a list of `count` monitors of the 1-based `r_monitor` choice, if there is such a monitor.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn monitor_slot(choice: Option<usize>, count: usize) -> Option<usize> {
+    choice.and_then(|n| n.checked_sub(1)).filter(|&i| i < count)
 }
 
 /// Horizontal field of view for a display of `aspect` (width / height) when `fov_4_3` degrees is the horizontal
@@ -140,11 +152,8 @@ pub fn monitors_json(el: &ActiveEventLoop) -> Value {
 
 #[cfg(not(target_arch = "wasm32"))]
 /// The sizes and refresh rates (Hz) the window's monitor offers, for the graphics menus.
-pub fn video_modes(window: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
-    let Some(m) = window
-        .current_monitor()
-        .or_else(|| window.primary_monitor())
-    else {
+pub fn video_modes(window: &Window, choice: Option<usize>) -> (Vec<(u32, u32)>, Vec<u32>) {
+    let Some(m) = chosen_monitor(window, choice) else {
         return (Vec::new(), Vec::new());
     };
     let modes: Vec<VideoModeHandle> = m.video_modes().collect();
@@ -157,14 +166,46 @@ pub fn video_modes(window: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
 
 /// A page has no video modes to offer.
 #[cfg(target_arch = "wasm32")]
-pub fn video_modes(_: &Window) -> (Vec<(u32, u32)>, Vec<u32>) {
+pub fn video_modes(_: &Window, _: Option<usize>) -> (Vec<(u32, u32)>, Vec<u32>) {
     (Vec::new(), Vec::new())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn monitor(el: &ActiveEventLoop) -> Option<MonitorHandle> {
-    el.primary_monitor()
-        .or_else(|| el.available_monitors().next())
+const WAYLAND_NOTE: &str = "exclusive fullscreen is not available on Wayland; used borderless";
+
+/// Whether the display is Wayland, whose compositor has no video mode switch: winit ignores an exclusive request
+/// there and the window would stay as it was.
+#[cfg(not(target_arch = "wasm32"))]
+fn wayland(display: &impl HasDisplayHandle) -> bool {
+    display
+        .display_handle()
+        .is_ok_and(|h| is_wayland(h.as_raw()))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_wayland(raw: RawDisplayHandle) -> bool {
+    matches!(raw, RawDisplayHandle::Wayland(_))
+}
+
+/// The monitor `r_monitor` names for fullscreen, else the one the window is on (the stock `R_ChooseMonitor` falls
+/// back to the monitor at the window's position).
+#[cfg(not(target_arch = "wasm32"))]
+fn chosen_monitor(window: &Window, choice: Option<usize>) -> Option<MonitorHandle> {
+    let all: Vec<MonitorHandle> = window.available_monitors().collect();
+    monitor_slot(choice, all.len())
+        .map(|i| all[i].clone())
+        .or_else(|| window.current_monitor())
+        .or_else(|| window.primary_monitor())
+}
+
+/// The monitor `choice` names (`r_monitor`), else the primary one.
+#[cfg(not(target_arch = "wasm32"))]
+fn monitor(el: &ActiveEventLoop, choice: Option<usize>) -> Option<MonitorHandle> {
+    let all: Vec<MonitorHandle> = el.available_monitors().collect();
+    monitor_slot(choice, all.len())
+        .map(|i| all[i].clone())
+        .or_else(|| el.primary_monitor())
+        .or_else(|| all.into_iter().next())
 }
 
 /// The video mode closest to the request on `m`: the size asked for (else native), then the refresh nearest to the
@@ -193,7 +234,7 @@ pub fn create_window(
     req: &Request,
 ) -> Result<(Window, Option<String>), String> {
     let mut attrs: WindowAttributes = Window::default_attributes().with_title("cod4e");
-    let mon = monitor(el);
+    let mon = monitor(el, req.monitor);
     let mut note = None;
     match req.kind {
         FullscreenKind::Windowed => {
@@ -206,6 +247,10 @@ pub fn create_window(
         FullscreenKind::Exclusive => {
             let mode = mon.as_ref().and_then(|m| pick_mode(m, req));
             attrs = match mode {
+                _ if wayland(el) => {
+                    note = Some(WAYLAND_NOTE.to_owned());
+                    attrs.with_fullscreen(Some(Fullscreen::Borderless(mon)))
+                }
                 Some(m) => attrs.with_fullscreen(Some(Fullscreen::Exclusive(m))),
                 None => {
                     note = Some("no matching video mode; fell back to borderless".to_owned());
@@ -222,9 +267,7 @@ pub fn create_window(
 /// note about any fallback taken. The window answers with a resize, which the surface follows.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn apply(window: &Window, req: &Request) -> Option<String> {
-    let mon = window
-        .current_monitor()
-        .or_else(|| window.primary_monitor());
+    let mon = chosen_monitor(window, req.monitor);
     match req.kind {
         FullscreenKind::Windowed => {
             window.set_fullscreen(None);
@@ -237,6 +280,10 @@ pub fn apply(window: &Window, req: &Request) -> Option<String> {
             None
         }
         FullscreenKind::Exclusive => match mon.as_ref().and_then(|m| pick_mode(m, req)) {
+            _ if wayland(window) => {
+                window.set_fullscreen(Some(Fullscreen::Borderless(mon)));
+                Some(WAYLAND_NOTE.to_owned())
+            }
             Some(m) => {
                 window.set_fullscreen(Some(Fullscreen::Exclusive(m)));
                 None
@@ -318,6 +365,28 @@ mod tests {
         assert!((f(4.0 / 3.0) - 80.0).abs() < 1e-3);
         assert!(f(16.0 / 9.0) > 95.0 && f(16.0 / 9.0) < 105.0);
         assert!(f(21.0 / 9.0) > f(16.0 / 9.0));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn only_a_wayland_display_has_no_exclusive_fullscreen() {
+        use winit::raw_window_handle::{WaylandDisplayHandle, XlibDisplayHandle};
+        let wl = WaylandDisplayHandle::new(std::ptr::NonNull::<std::ffi::c_void>::dangling());
+        assert!(is_wayland(RawDisplayHandle::Wayland(wl)));
+        assert!(!is_wayland(RawDisplayHandle::Xlib(XlibDisplayHandle::new(
+            None, 0
+        ))));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn r_monitor_counts_from_one_and_zero_or_past_the_last_picks_automatically() {
+        assert_eq!(monitor_slot(None, 2), None);
+        assert_eq!(monitor_slot(Some(0), 2), None);
+        assert_eq!(monitor_slot(Some(1), 2), Some(0));
+        assert_eq!(monitor_slot(Some(2), 2), Some(1));
+        assert_eq!(monitor_slot(Some(3), 2), None);
+        assert_eq!(monitor_slot(Some(1), 0), None);
     }
 
     #[test]

@@ -27,6 +27,8 @@ const COMMANDS: &[&str] = &[
     "record",
     "say",
     "say_team",
+    "screenshot",
+    "screenshotjpeg",
     "set",
     "seta",
     "stoprecord",
@@ -287,6 +289,7 @@ const OWN_COMMANDS: &[&str] = &[
     "bots",
     "chatmodepublic",
     "chatmodeteam",
+    "cinematic",
     "connect",
     "devmap",
     "demo",
@@ -298,6 +301,7 @@ const OWN_COMMANDS: &[&str] = &[
     "gocrouch",
     "goprone",
     "loc_warnings",
+    "logo",
     "map",
     "name",
     "playdemo",
@@ -306,6 +310,8 @@ const OWN_COMMANDS: &[&str] = &[
     "rcon",
     "reconnect",
     "record",
+    "screenshot",
+    "screenshotjpeg",
     "seta",
     "selectstringtableentryindvar",
     "set",
@@ -326,6 +332,7 @@ const OWN_COMMANDS: &[&str] = &[
     "togglefullscreen",
     "togglemenu",
     "unbind",
+    "unskippablecinematic",
     "unbindall",
     "updatedvarsfromprofile",
     "vid_restart",
@@ -529,5 +536,11 @@ mod tests {
         assert!(is_server_verb("Say_Team") && is_server_verb("kill") && !is_server_verb("map"));
         assert!(is_command("MAP") && is_command("+attack") && is_command("rcon"));
         assert!(!is_command("frobnicate"));
+        // The video commands and the screenshot ones are known, so the console answers them itself.
+        assert!(
+            ["cinematic", "logo", "screenshotJpeg"]
+                .iter()
+                .all(|c| is_command(c))
+        );
     }
 }
