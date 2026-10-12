@@ -14,6 +14,7 @@ path = "src/main.rs"
 assets = { version = "0.0.0", path = "../assets" }
 server = { version = "0.0.0", path = "../server" }
 net = { version = "0.0.0", path = "../net" }
+master = { path = "../master" }
 install = { path = "../install", features = ["prompt"] }
 sim = { version = "0.0.0", path = "../sim" }
 crash-handler = "0.8.1"

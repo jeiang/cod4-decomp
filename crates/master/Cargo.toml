@@ -1,0 +1,20 @@
+[package]
+name = "master"
+description = "The cod4e master server: a list of the public servers that sent it a heartbeat."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "cod4e-master"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+net = { path = "../net" }
+
+[lints]
+workspace = true

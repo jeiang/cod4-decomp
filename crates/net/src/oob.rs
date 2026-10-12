@@ -8,7 +8,7 @@ use std::hash::BuildHasher;
 use std::net::SocketAddr;
 
 /// Bumped when the wire format changes; a server refuses other versions.
-pub const PROTOCOL: u32 = 18;
+pub const PROTOCOL: u32 = 19;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Oob {
@@ -58,7 +58,24 @@ pub enum Oob {
         offset: u64,
         data: Vec<u8>,
     },
+    /// `heartbeat <protocol>`: a public server tells a master it is up. The master answers with a `getinfo` to the
+    /// sender and lists the server only if the [`Oob::InfoResponse`] carries its challenge.
+    Heartbeat(u32),
+    /// `flatline`: the server is going away. The master probes the sender with a `getinfo` and drops it unless it
+    /// still answers, so a forged `flatline` removes nothing.
+    Flatline,
+    /// `getservers <challenge> <protocol>`: asks a master for the servers of that protocol; the challenge is the
+    /// one its [`Oob::Challenge`] gave, so a forged source address gets no list.
+    GetServers {
+        challenge: u32,
+        protocol: u32,
+    },
+    /// `getserversResponse <ip:port>...`: some of the master's servers; a long list comes in several packets.
+    Servers(Vec<SocketAddr>),
 }
+
+/// Most addresses one [`Oob::Servers`] packet carries (`MAX_SERVERS_PER_PACKET`: well under one MTU).
+pub const SERVERS_PER_PACKET: usize = 40;
 
 /// One player of a [`Oob::StatusResponse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +209,19 @@ impl Oob {
                 offset,
             } => format!("getfile {challenge} {offset} {}", quote(name)),
             Oob::FileChunk { .. } => unreachable!("encoded above"),
+            Oob::Heartbeat(p) => format!("heartbeat {p}"),
+            Oob::Flatline => "flatline".to_owned(),
+            Oob::GetServers {
+                challenge,
+                protocol,
+            } => format!("getservers {challenge} {protocol}"),
+            Oob::Servers(list) => {
+                let mut s = "getserversResponse".to_owned();
+                for a in list {
+                    s.push_str(&format!(" {a}"));
+                }
+                s
+            }
         };
         let mut v = OOB_MARKER.to_le_bytes().to_vec();
         v.extend_from_slice(text.as_bytes());
@@ -265,6 +295,21 @@ impl Oob {
                 }
             }
             "error" => Oob::Error(rest.to_owned()),
+            "heartbeat" => Oob::Heartbeat(rest.trim().parse().ok()?),
+            "flatline" => Oob::Flatline,
+            "getservers" => {
+                let mut w = rest.split_whitespace();
+                Oob::GetServers {
+                    challenge: w.next()?.parse().ok()?,
+                    protocol: w.next()?.parse().ok()?,
+                }
+            }
+            "getserversResponse" => Oob::Servers(
+                rest.split_whitespace()
+                    .filter_map(|w| w.parse().ok())
+                    .take(SERVERS_PER_PACKET)
+                    .collect(),
+            ),
             "rcon" => {
                 let rest = rest.trim_start();
                 // The password is one word, quoted or not; the command is everything after it.
@@ -383,6 +428,17 @@ mod tests {
                 command: "set a \"b c\"; status".into(),
             },
             Oob::Print("line one\nline two\n".into()),
+            Oob::Heartbeat(PROTOCOL),
+            Oob::Flatline,
+            Oob::GetServers {
+                challenge: 77,
+                protocol: PROTOCOL,
+            },
+            Oob::Servers(vec![
+                SocketAddr::from(([203, 0, 113, 5], 28960)),
+                SocketAddr::from(([10, 0, 0, 9], 28961)),
+            ]),
+            Oob::Servers(Vec::new()),
         ] {
             let parsed = Oob::parse(&o.encode()).unwrap();
             let expect = match &o {

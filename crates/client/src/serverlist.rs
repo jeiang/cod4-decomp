@@ -6,10 +6,13 @@
 //! ports ([`PORTS`], so a client-hosted `--listen` server shows up too) and to every favorite, then collects the
 //! replies without ever blocking: a reply is a [`Entry`], its ping the time since the request went out.
 //! [`query`] is the blocking form for joining a typed address: it must learn the map before the client can load it.
+//! The Internet list asks the masters named by `cl_masters` for their servers ([`net::master`]) and then sends each
+//! of those a `getinfo` just as the LAN scan does.
 //! The Server Info popup asks the selected server for a `getstatus` instead: its full info string and its players
 //! ([`Status`]), shown through [`status_rows`].
 
 use net::oob::{Oob, StatusPlayer};
+use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::ToSocketAddrs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
@@ -26,6 +29,8 @@ const MAX_ENTRIES: usize = 256;
 /// How long a refresh waits for answers before the list counts as complete: a LAN server answers within a few
 /// milliseconds, so what has not come by then is not coming.
 const REFRESH_WINDOW: Duration = Duration::from_millis(1500);
+/// The Internet list waits longer: a master and then every server it names are a round trip each.
+const INTERNET_WINDOW: Duration = Duration::from_secs(5);
 /// A `getstatus` unanswered for this long is sent again (`UI_BuildServerStatus` retries every 500 ms)...
 const STATUS_RETRY: Duration = Duration::from_millis(500);
 /// ...this many times, then the popup stays empty.
@@ -174,6 +179,8 @@ pub struct Status {
 pub enum Reply {
     Info(Entry),
     Status(Status),
+    /// A challenge or a server list from `from`, which the master query handles.
+    Master(SocketAddr, Oob),
 }
 
 /// A non-blocking `getinfo` client.
@@ -208,6 +215,11 @@ impl Browser {
         let _ = self
             .sock
             .send_to(&Oob::GetInfo(self.challenge).encode(), to);
+    }
+
+    /// Sends one packet.
+    fn send(&mut self, to: SocketAddr, oob: &Oob) {
+        let _ = self.sock.send_to(&oob.encode(), to);
     }
 
     /// Asks `to` for its status.
@@ -250,6 +262,7 @@ impl Browser {
                         players,
                     }));
                 }
+                Some(o @ (Oob::Challenge(_) | Oob::Servers(_))) => out.push(Reply::Master(from, o)),
                 _ => {}
             }
         }
@@ -394,7 +407,40 @@ pub fn status_rows(
     rows
 }
 
-/// Which stock list is shown (`ui_netSource`): 0 local network, 1 internet (no master server, so empty), 2 favorites.
+/// The masters `text` (`cl_masters`: `host[:port]` words) names. A name that does not resolve is left out; a browser
+/// cannot resolve names or send datagrams, so there the list is empty.
+pub fn parse_masters(text: &str) -> Vec<SocketAddr> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = text;
+        Vec::new()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut out = Vec::new();
+        for w in text.split_whitespace().take(net::master::MASTER_SLOTS) {
+            let with_port = if w
+                .rsplit_once(':')
+                .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
+            {
+                w.to_owned()
+            } else {
+                format!("{w}:{}", net::master::MASTER_PORT)
+            };
+            if let Some(a) = with_port
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut i| i.find(SocketAddr::is_ipv4))
+                && !out.contains(&a)
+            {
+                out.push(a);
+            }
+        }
+        out
+    }
+}
+
+/// Which stock list is shown (`ui_netSource`): 0 local network, 1 internet (the masters' servers), 2 favorites.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Source {
     Lan,
@@ -418,6 +464,10 @@ pub struct ServerList {
     browser: Option<Browser>,
     lan: Vec<Entry>,
     favorites: Vec<Entry>,
+    internet: Vec<Entry>,
+    /// The masters asked for the Internet list, and the servers they named (only those may fill it).
+    masters: Vec<SocketAddr>,
+    wanted: HashSet<SocketAddr>,
     /// Column the list is sorted by and whether it runs downwards.
     sort: Option<(usize, bool)>,
     selected: Option<SocketAddr>,
@@ -431,21 +481,24 @@ pub struct ServerList {
 
 impl ServerList {
     /// Scans again for the list `source` shows: the LAN (`full` first forgets what it found, otherwise the answers
-    /// update it in place) or the favorites. The internet list has no master server to ask. A refresh of a list that
-    /// is already being refreshed is ignored (`false`), so a button held down does not flood the network.
-    pub fn refresh(&mut self, source: Source, full: bool) -> bool {
+    /// update it in place), the favorites, or the Internet (the `masters` are asked, then the servers they name).
+    /// A refresh of a list that is already being refreshed is ignored (`false`), so a button held down does not
+    /// flood the network.
+    pub fn refresh(&mut self, source: Source, full: bool, masters: &[SocketAddr]) -> bool {
         if self.refreshing(source) {
             return false;
         }
         self.refresh_started = Some((Instant::now(), source));
-        if source == Source::Internet {
-            return true;
-        }
         if self.browser.is_none() {
             self.browser = Browser::new().ok();
         }
         if full && source == Source::Lan {
             self.lan.clear();
+        }
+        if source == Source::Internet {
+            self.internet.clear();
+            self.wanted.clear();
+            self.masters = masters.to_vec();
         }
         let Some(b) = self.browser.as_mut() else {
             return true;
@@ -453,6 +506,7 @@ impl ServerList {
         b.restart();
         match source {
             Source::Lan => b.ask_lan(),
+            Source::Internet => net::master::begin(masters, |to, o| b.send(to, &o)),
             _ => {
                 for f in &self.favorites {
                     b.ask(f.addr);
@@ -464,8 +518,14 @@ impl ServerList {
 
     /// Whether a refresh of `source` is still collecting answers (the join menu then shows how far it got).
     pub fn refreshing(&self, source: Source) -> bool {
-        self.refresh_started
-            .is_some_and(|(t, s)| s == source && t.elapsed() < REFRESH_WINDOW)
+        self.refresh_started.is_some_and(|(t, s)| {
+            let window = if s == Source::Internet {
+                INTERNET_WINDOW
+            } else {
+                REFRESH_WINDOW
+            };
+            s == source && t.elapsed() < window
+        })
     }
 
     /// Ends the running refresh (`StopRefresh`); answers that come later still land in the lists.
@@ -518,6 +578,7 @@ impl ServerList {
         for r in b.poll() {
             match r {
                 Reply::Info(e) => self.take(e),
+                Reply::Master(from, o) => self.master_reply(from, o),
                 Reply::Status(st) => {
                     if self.status_req.is_some_and(|(a, ..)| a == st.addr) {
                         self.status_req = None;
@@ -542,10 +603,33 @@ impl ServerList {
         }
     }
 
+    /// A master's challenge is answered; a list of servers is asked for its servers' info.
+    fn master_reply(&mut self, from: SocketAddr, o: Oob) {
+        let Some(b) = self.browser.as_mut() else {
+            return;
+        };
+        let Some(list) = net::master::reply(&self.masters, from, o, |to, o| b.send(to, &o)) else {
+            return;
+        };
+        // Pings count from here, not from the request to the master.
+        b.restart();
+        for a in list {
+            if self.wanted.len() < MAX_ENTRIES && self.wanted.insert(a) {
+                b.ask(a);
+            }
+        }
+    }
+
     /// One reply: it refreshes a favorite of that address, and (for a LAN address) is listed on the LAN.
     pub(crate) fn take(&mut self, e: Entry) {
         if let Some(f) = self.favorites.iter_mut().find(|f| f.addr == e.addr) {
             *f = e.clone();
+        }
+        if self.wanted.contains(&e.addr) {
+            match self.internet.iter_mut().find(|o| o.addr == e.addr) {
+                Some(o) => *o = e.clone(),
+                None => self.internet.push(e.clone()),
+            }
         }
         if !is_lan(&e.addr) {
             return;
@@ -567,7 +651,7 @@ impl ServerList {
     pub fn rows(&self, source: Source) -> &[Entry] {
         match source {
             Source::Lan => &self.lan,
-            Source::Internet => &[],
+            Source::Internet => &self.internet,
             Source::Favorites => &self.favorites,
         }
     }
@@ -583,7 +667,7 @@ impl ServerList {
 
     fn resort(&mut self) {
         let Some((col, down)) = self.sort else { return };
-        for list in [&mut self.lan, &mut self.favorites] {
+        for list in [&mut self.lan, &mut self.favorites, &mut self.internet] {
             list.sort_by(|a, b| {
                 let o = match col {
                     2 => a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()),
@@ -849,19 +933,112 @@ mod tests {
     fn a_refresh_runs_until_stopped() {
         let mut l = ServerList::default();
         assert!(!l.refreshing(Source::Lan));
-        l.refresh(Source::Lan, true);
+        l.refresh(Source::Lan, true, &[]);
         assert!(l.refreshing(Source::Lan));
         assert!(!l.refreshing(Source::Favorites), "each list has its own");
         // A second request for the same list is ignored: what the list holds now is kept.
         l.take(entry("192.168.1.9:28960", "Me", "mp_crash", 2));
-        l.refresh(Source::Lan, true);
+        l.refresh(Source::Lan, true, &[]);
         assert_eq!(l.rows(Source::Lan).len(), 1);
         l.stop_refresh();
         assert!(!l.refreshing(Source::Lan));
-        // A favorites refresh leaves the LAN list alone; the internet one has nothing to ask but still takes its time.
-        l.refresh(Source::Favorites, true);
+        // A favorites refresh leaves the LAN list alone; the internet one with no master has nothing to ask but still takes its time.
+        l.refresh(Source::Favorites, true, &[]);
         assert_eq!(l.rows(Source::Lan).len(), 1);
-        l.refresh(Source::Internet, true);
+        l.refresh(Source::Internet, true, &[]);
         assert!(l.refreshing(Source::Internet));
+    }
+
+    /// A master and a server that sends it heartbeats, on loopback threads.
+    #[test]
+    fn the_internet_list_shows_the_servers_a_master_names() {
+        use net::{Transport, UdpTransport};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let stop = Arc::new(AtomicBool::new(false));
+        let listed = Arc::new(AtomicUsize::new(0));
+        let lo = SocketAddr::from(([127, 0, 0, 1], 0));
+        let mut mt = UdpTransport::bind(lo).unwrap();
+        let master = mt.local_addr();
+        let master_thread = {
+            let (stop, listed) = (stop.clone(), listed.clone());
+            std::thread::spawn(move || {
+                let mut m = master::Master::new(Instant::now());
+                let mut buf = vec![0u8; 2048];
+                while !stop.load(Ordering::Relaxed) {
+                    let got = mt.recv_from(&mut buf, Some(Duration::from_millis(20)));
+                    let now = Instant::now();
+                    if let Ok(Some((n, from))) = got
+                        && let Some(o) = Oob::parse(&buf[..n])
+                    {
+                        for (to, r) in m.handle(from, o, now) {
+                            mt.send_to(to, &r.encode());
+                        }
+                    }
+                    listed.store(m.len(), Ordering::Relaxed);
+                }
+            })
+        };
+        let mut st = UdpTransport::bind(lo).unwrap();
+        let server = st.local_addr();
+        let server_thread = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                st.send_to(master, &Oob::Heartbeat(net::oob::PROTOCOL).encode());
+                let mut buf = vec![0u8; 2048];
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(Some((n, from))) =
+                        st.recv_from(&mut buf, Some(Duration::from_millis(20)))
+                        && let Some(Oob::GetInfo(c)) = Oob::parse(&buf[..n])
+                    {
+                        let info = kv(&[
+                            ("hostname", "Far Away"),
+                            ("mapname", "mp_crash"),
+                            ("gametype", "war"),
+                            ("challenge", &c.to_string()),
+                        ]);
+                        st.send_to(from, &Oob::InfoResponse(info).encode());
+                    }
+                }
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while listed.load(Ordering::Relaxed) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut l = ServerList::default();
+        assert!(l.refresh(Source::Internet, true, &[master]));
+        while l.rows(Source::Internet).is_empty() && Instant::now() < deadline {
+            l.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::Relaxed);
+        master_thread.join().unwrap();
+        server_thread.join().unwrap();
+        let rows = l.rows(Source::Internet);
+        assert_eq!(rows.len(), 1, "the master's server is listed");
+        assert_eq!(
+            (rows[0].addr, rows[0].hostname.as_str()),
+            (server, "Far Away")
+        );
+    }
+
+    #[test]
+    fn a_server_nobody_asked_for_never_lands_on_the_internet_list() {
+        let mut l = ServerList::default();
+        l.take(entry("8.8.8.8:28960", "Far", "mp_bog", 3));
+        assert!(l.rows(Source::Internet).is_empty());
+    }
+
+    #[test]
+    fn master_names_default_their_port_and_skip_the_unresolvable() {
+        assert_eq!(
+            parse_masters("127.0.0.1 127.0.0.1:99 127.0.0.1 not.a.host.invalid"),
+            vec![
+                addr(&format!("127.0.0.1:{}", net::master::MASTER_PORT)),
+                addr("127.0.0.1:99")
+            ]
+        );
+        assert!(parse_masters("  ").is_empty());
     }
 }
