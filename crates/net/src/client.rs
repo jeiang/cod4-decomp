@@ -451,10 +451,18 @@ impl<T: Transport> NetClient<T> {
         self.command(&crate::ui::menu_response(menu, response));
     }
 
-    /// Queues a console command for the server (reliable, in order).
+    /// The `sv_serverid` of the level this client last heard of, 0 before it has heard of one.
+    fn server_id(&self) -> i32 {
+        self.ui_ref().map_or(0, ClientUiState::server_id)
+    }
+
+    /// Queues a console command for the server (reliable, in order). A `menuresponse <menu> <response>` carries the
+    /// server id of the level the client is in (`Cmd_MenuResponse_f`), so the server can tell an answer from before
+    /// a map change.
     pub fn command(&mut self, cmd: &str) {
+        let stamped = crate::ui::stamp_menu_response(cmd, self.server_id());
         if let Phase::Playing(l) = &mut self.phase {
-            let _ = l.command(cmd);
+            let _ = l.command(&stamped);
         }
     }
 

@@ -166,13 +166,17 @@ impl Game {
             what @ ("kick" | "tempbanuser" | "clientkick" | "tempbanclient") => {
                 // `clientkick` and `tempBanClient` take a slot; `kick` and `tempBanUser` (the stock menu) a name.
                 let by_number = matches!(what, "clientkick" | "tempbanclient");
-                let target = self.connected_clients().find(|(k, c)| {
-                    if by_number {
-                        arg(1).parse::<u16>().ok() == Some(*k)
-                    } else {
-                        clean_name(&c.name).eq_ignore_ascii_case(&clean_name(arg(1)))
-                    }
-                });
+                // By name the last client with it is the one (`Cmd_CallVote_f`), and the name is compared as typed.
+                let target = self
+                    .connected_clients()
+                    .filter(|(k, c)| {
+                        if by_number {
+                            arg(1).parse::<u16>().ok() == Some(*k)
+                        } else {
+                            clean_name(&c.name).eq_ignore_ascii_case(arg(1))
+                        }
+                    })
+                    .last();
                 let Some((k, c)) = target else {
                     return Err("That client is not on the server.".into());
                 };
@@ -364,6 +368,14 @@ mod tests {
         g.start_vote(0, &argv)?;
         let v = g.vote.current.take().expect("a vote started");
         Ok(v.commands)
+    }
+
+    #[test]
+    fn a_kick_by_name_takes_the_last_client_with_that_name() {
+        let mut g = game();
+        g.clients[2].name = "Ann".into();
+        assert_eq!(call(&mut g, &["kick", "Ann"]).unwrap(), ["clientkick 2"]);
+        assert_eq!(call(&mut g, &["kick", "Bo"]).unwrap(), ["clientkick 1"]);
     }
 
     #[test]

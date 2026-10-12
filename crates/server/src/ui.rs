@@ -274,7 +274,7 @@ impl Game {
         }
     }
 
-    /// The scoreboard rows, best first, without pings (the network layer knows those).
+    /// The scoreboard rows, best first (score, then fewer deaths: `SortRanks`), without pings (the network layer knows those).
     pub fn score_rows(&self) -> Vec<ui::ScoreRow> {
         let mut rows: Vec<ui::ScoreRow> = self
             .connected_clients()
@@ -297,7 +297,6 @@ impl Game {
         rows.sort_by(|a, b| {
             b.score
                 .cmp(&a.score)
-                .then(b.kills.cmp(&a.kills))
                 .then(a.deaths.cmp(&b.deaths))
                 .then(a.client.cmp(&b.client))
         });
@@ -387,6 +386,27 @@ mod tests {
             [("shown", "1"), ("shown", "0")],
             "only changes, only server info"
         );
+    }
+
+    #[test]
+    fn equal_scores_are_ordered_by_deaths_not_kills() {
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        g.clients = ["Ann", "Bo", "Cy"]
+            .iter()
+            .enumerate()
+            .map(|(n, name)| crate::client::Client::new(n as u16, false, (*name).to_owned()))
+            .collect();
+        // (score, kills, deaths): Ann has the most kills but the most deaths of the tied pair.
+        for (c, (score, kills, deaths)) in
+            g.clients
+                .iter_mut()
+                .zip([(10, 9, 5), (10, 2, 1), (20, 1, 9)])
+        {
+            c.conn = crate::client::Conn::Connected;
+            (c.score, c.kills, c.deaths) = (score, kills, deaths);
+        }
+        let order: Vec<u16> = g.score_rows().iter().map(|r| r.client).collect();
+        assert_eq!(order, [2, 1, 0]);
     }
 
     #[test]

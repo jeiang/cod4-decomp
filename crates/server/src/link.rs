@@ -554,8 +554,9 @@ impl Game {
     }
 
     /// `GScr_PlaceSpawnPoint`: raises the entity by up to 128 units, then drops it to the
-    /// floor with the player hull. The ground entity flag the original sets on what it lands
-    /// on is not set here: a spawned player finds its ground on its first command, which is when movers start carrying it.
+    /// floor with the player hull. The original also records the entity it lands on as the spawn point's ground
+    /// entity and flags that entity `FL_GROUND_ENT`; nothing reads either (the flag is only ever set, and a spawn
+    /// point is not run), and a spawned player finds its ground on its first command, so neither is kept here.
     pub fn place_spawn_point(&mut self, n: u16) {
         let Some(origin) = self.ent(n).map(|e| e.origin) else {
             return;
