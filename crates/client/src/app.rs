@@ -504,6 +504,9 @@ const TOUR_FRAMES: u32 = 6;
 struct UiScript {
     /// The map a `maprotate` step started from.
     marker: Option<String>,
+    /// A `killcam` or `dead` step has seen the player die: a later `respawn` step counts that death, since the
+    /// player may already be back when it starts (the killcam is short and the steps before it take seconds).
+    died: bool,
     steps: Vec<String>,
     index: usize,
     /// When the current step began and, for waits, how long it may take.
@@ -968,6 +971,7 @@ impl Viewer {
             listen,
             script: self.cli.ui_script.as_ref().map(|s| UiScript {
                 marker: None,
+                died: false,
                 steps: s
                     .split(',')
                     .map(|x| x.trim().to_owned())
@@ -2455,6 +2459,7 @@ fn script_step(st: &mut State) -> bool {
                 _ => (0..crate::hud::WINDOWS).any(|w| f.active(w, l.time)),
             });
             if reached {
+                sc.died |= matches!(key, "killcam" | "dead");
                 done(true, sc, String::new());
             } else if waited > arg.parse::<f32>().unwrap_or(120.0) {
                 done(false, sc, "timed out".into());
@@ -2467,7 +2472,7 @@ fn script_step(st: &mut State) -> bool {
                 return true;
             };
             let h = &sh.st.game.hud;
-            if sc.marker.is_none() && h.pm_dead {
+            if sc.marker.is_none() && (h.pm_dead || sc.died) {
                 sc.marker = Some("dead".into());
             }
             if sc.marker.is_some() && h.live && !h.pm_dead && !sh.st.live.killcam && h.health > 0 {
