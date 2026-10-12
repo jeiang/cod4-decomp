@@ -1506,7 +1506,7 @@ fn legs_hold(clip: &str, clips: &dyn Clips) -> f32 {
 
 /// `ev::LANDING_*` events: the landings the script's `land` event answers (a fall of at least 12 units).
 fn is_landing(event: u8) -> bool {
-    (ev::LANDING_FIRST..ev::LANDING_PAIN_FIRST + 29).contains(&event)
+    (ev::LANDING_FIRST..=ev::LANDING_PAIN_LAST).contains(&event)
 }
 
 /// The torso clip playing over the legs.

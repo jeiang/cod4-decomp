@@ -20,8 +20,8 @@ use gsc::Vm;
 use sim::Vec3;
 use sim::contents;
 use sim::pm::math;
+use sim::weapon::WeaponType;
 use sim::weapon::fire::AimBasis;
-use sim::weapon::{WeaponParams, WeaponType};
 
 use crate::bullet::{BulletHit, BulletParams, dot, length, lerp, mad, normalized, sub};
 use crate::game::{Ent, EntKind, Game};
@@ -857,7 +857,7 @@ impl Game {
     fn vehicle_bullets(&mut self, vm: &mut Vm, n: u16, weapon: u16, aim: &AimBasis) {
         self.ensure_player_anims();
         let penetration = self.penetration_table();
-        let params = WeaponParams::default();
+        let params = self.pm_params.weapon;
         let mut hits: Vec<BulletHit> = Vec::new();
         {
             let Some(info) = self.weapons.get(weapon) else {

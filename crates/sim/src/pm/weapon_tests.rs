@@ -1197,6 +1197,78 @@ fn ammo_use_can_be_sustained() {
 }
 
 #[test]
+fn the_weapon_dvars_of_the_movement_params_reach_a_command_run_by_run_usercmd() {
+    let fire = |params: &Params| {
+        let mut r = Rig::new(vec![ak()]);
+        let a = r.hold("ak47_mp");
+        let cmd = UserCmd {
+            buttons: ATTACK,
+            weapon: a as u8,
+            server_time: r.ps.command_time + 10,
+            ..UserCmd::default()
+        };
+        run_usercmd(
+            &mut r.ps,
+            &mut r.inv,
+            cmd,
+            UserCmd::default(),
+            190,
+            &r.table,
+            params,
+            &r.world,
+        );
+        r.clip(a)
+    };
+    assert_eq!(fire(&Params::default()), 29, "a shot uses a round");
+    // The same dvar the server sends its clients in the movement info string.
+    let sustained = Params::from_info("\\player_sustainAmmo\\1");
+    assert_eq!(fire(&sustained), 30);
+}
+
+#[test]
+fn the_weapon_dvars_are_registered_and_sent_when_not_stock() {
+    let names: Vec<_> = Params::dvars().into_iter().map(|(n, _)| n).collect();
+    for n in [
+        "bullet_penetrationEnabled",
+        "player_burstFireCooldown",
+        "player_sustainAmmo",
+        "player_breath_hold_time",
+        "player_breath_gasp_time",
+        "player_breath_fire_delay",
+        "player_breath_gasp_scale",
+        "player_breath_hold_lerp",
+        "player_breath_gasp_lerp",
+        "perk_extraBreath",
+        "player_meleeRange",
+        "player_meleeWidth",
+        "player_meleeHeight",
+    ] {
+        assert!(names.contains(&n), "{n}");
+    }
+    assert_eq!(Params::default().info_diff(), "", "stock sends nothing");
+    let mut p = Params::default();
+    p.weapon.melee_range = 100.0;
+    p.weapon.bullet_penetration_enabled = false;
+    let back = Params::from_info(&p.info_diff());
+    assert_eq!(back.weapon, p.weapon);
+}
+
+#[test]
+fn a_weapon_dvar_value_is_held_to_the_dvars_range_wherever_it_comes_from() {
+    // What a cheat-set or hostile value replicates as: clamped by the registration's limits.
+    let p = Params::from_info(
+        "\\player_meleeRange\\99999\\perk_weapRateMultiplier\\-4\\player_breath_hold_time\\500\\perk_extraBreath\\-1",
+    );
+    assert_eq!(p.weapon.melee_range, 1000.0);
+    assert_eq!(p.weapon.perk_weap_rate_multiplier, 0.0);
+    assert_eq!(p.weapon.breath_hold_time, 30.0);
+    assert_eq!(p.weapon.perk_extra_breath, 0.0);
+    let mut q = Params::default();
+    q.set_from(|n| (n == "player_burstFireCooldown").then_some("1000"));
+    assert_eq!(q.weapon.burst_fire_cooldown, 60.0);
+}
+
+#[test]
 fn pmove_without_weapons_leaves_the_weapon_state_alone() {
     let params = Params::default();
     let world = TestWorld::floor();

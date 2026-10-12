@@ -18,7 +18,7 @@ use assets::zone::fx::FxEffectDef;
 use assets::zone::phys::PhysPreset;
 use assets::zone::weapon::WeaponDef;
 use assets::zone::xmodel::XModel;
-use fx::{Body, Frame, Impact, Mass, Shape};
+use fx::{Body, BulletTune, Frame, Impact, Mass, Shape};
 use glam::Vec3;
 use render::{ModelInstance, ModelKind};
 use server::tempev::Physics;
@@ -196,6 +196,8 @@ pub struct Props {
     /// What broke props threw.
     pieces: Vec<Piece>,
     out: Happened,
+    /// `phys_bulletUpBias` and `phys_bulletSpinScale`, for the hits that strike props and the pieces they throw.
+    bullet: BulletTune,
 }
 
 /// What a frame of prop interaction asks the rest of the client to play.
@@ -270,7 +272,7 @@ fn spawn_pieces(
     (origin, axes): (Vec3, [Vec3; 3]),
     hit: Vec3,
     dir: Vec3,
-    seed: &mut u32,
+    (seed, bullet): (&mut u32, BulletTune),
 ) {
     for piece in pieces.pieces.iter() {
         let Some(model) = &piece.model else { continue };
@@ -286,7 +288,7 @@ fn spawn_pieces(
         let mut body = Body::new(preset, &Shape::of_model(model), at, axes, up);
         let noise = Vec3::new(random(seed), random(seed), random(seed));
         let force = dir.lerp(noise, preset.pieces_spread_fraction.clamp(0.0, 1.0));
-        body.bullet_impact(hit, force, PIECES_FORCE, preset.bullet_force_scale);
+        body.bullet_impact(hit, force, PIECES_FORCE, preset.bullet_force_scale, bullet);
         out.push(Piece {
             model: model.clone(),
             body,
@@ -347,6 +349,7 @@ impl Props {
             seed: 0x9E37_79B9,
             pieces: Vec::new(),
             out: Happened::default(),
+            bullet: BulletTune::default(),
         }
     }
 
@@ -403,6 +406,11 @@ impl Props {
         self.woken += (self.props.iter().filter(|p| p.body.is_some()).count() - before) as u64;
     }
 
+    /// The player's `phys_bulletUpBias` and `phys_bulletSpinScale`.
+    pub fn set_bullet(&mut self, bullet: BulletTune) {
+        self.bullet = bullet;
+    }
+
     /// What the props asked the client to play since the last call.
     pub fn take(&mut self) -> Happened {
         std::mem::take(&mut self.out)
@@ -449,10 +457,11 @@ impl Props {
             } else if force < EXPLODE_MIN_FORCE {
                 continue;
             } else {
+                // From the blast to the prop's origin, not the middle of its bounds.
                 let away = if b.cylinder {
-                    (centre - at).with_z(0.0)
+                    (p.origin() - at).with_z(0.0)
                 } else {
-                    centre - at
+                    p.origin() - at
                 };
                 (away.normalize_or(Vec3::Z) + Vec3::Z * EXPLODE_UP_BIAS).normalize()
             };
@@ -481,7 +490,14 @@ impl Props {
             self.out.fx.push((def, frame));
         }
         if let Some(pieces) = p.destroy_pieces.clone() {
-            spawn_pieces(&mut self.pieces, &pieces, pose, hit, dir, &mut self.seed);
+            spawn_pieces(
+                &mut self.pieces,
+                &pieces,
+                pose,
+                hit,
+                dir,
+                (&mut self.seed, self.bullet),
+            );
         }
     }
 
@@ -528,8 +544,9 @@ impl Props {
             exit: false,
             head: false,
         });
+        let bullet = self.bullet;
         self.props[i].strike(|b, preset| {
-            b.bullet_impact(at, f, BULLET_FORCE, preset.bullet_force_scale);
+            b.bullet_impact(at, f, BULLET_FORCE, preset.bullet_force_scale, bullet);
         });
         self.hurt(i, at, f, damage);
     }
@@ -703,7 +720,12 @@ struct Launch {
 }
 
 impl Launch {
-    fn new(e: &net::entity::EntityState, model: &XModel, key: [f32; 12]) -> Launch {
+    fn new(
+        e: &net::entity::EntityState,
+        model: &XModel,
+        key: [f32; 12],
+        bullet: BulletTune,
+    ) -> Launch {
         let body = model.phys_preset.as_ref().map(|preset| {
             let (f, r, u) = sim::pm::math::angle_vectors(&e.angles);
             let axes = [Vec3::from(f), -Vec3::from(r), Vec3::from(u)];
@@ -720,6 +742,7 @@ impl Launch {
                 force.normalize_or_zero(),
                 force.length(),
                 preset.bullet_force_scale,
+                bullet,
             );
             b
         });
@@ -743,15 +766,16 @@ impl Launches {
         model: &XModel,
         dt: f32,
         world: &dyn Collide,
+        bullet: BulletTune,
     ) -> Option<([f32; 3], [f32; 3])> {
         let [a, b, c, d] = [e.origin, e.angles, e.velocity, e.launch_point];
         let key: [f32; 12] = std::array::from_fn(|i| [a, b, c, d][i / 3][i % 3]);
         let launch = self
             .0
             .entry(e.number)
-            .or_insert_with(|| Launch::new(e, model, key));
+            .or_insert_with(|| Launch::new(e, model, key, bullet));
         if launch.key != key {
-            *launch = Launch::new(e, model, key);
+            *launch = Launch::new(e, model, key, bullet);
         }
         launch.seen = true;
         launch.age += dt;
@@ -999,31 +1023,46 @@ mod tests {
         e.velocity = [0.0, 0.0, 300.0];
         let mut l = Launches::default();
         let still = crate_model(None);
-        assert!(l.pose(&e, &still, 0.5, &Void).is_some());
+        assert!(
+            l.pose(&e, &still, 0.5, &Void, BulletTune::default())
+                .is_some()
+        );
         l.finish_frame(0.5);
         assert!(
-            l.pose(&e, &still, 0.4, &Void).is_some(),
+            l.pose(&e, &still, 0.4, &Void, BulletTune::default())
+                .is_some(),
             "held for a second"
         );
         l.finish_frame(0.4);
-        assert!(l.pose(&e, &still, 0.2, &Void).is_none(), "then given up");
+        assert!(
+            l.pose(&e, &still, 0.2, &Void, BulletTune::default())
+                .is_none(),
+            "then given up"
+        );
 
         // A model with a preset falls from where it was launched; out of view for 3 s it keeps its body, for 6 s not.
         let m = crate_model(Some(preset()));
         let mut l = Launches::default();
         for _ in 0..30 {
-            l.pose(&e, &m, 1.0 / 60.0, &Void);
+            l.pose(&e, &m, 1.0 / 60.0, &Void, BulletTune::default());
             l.finish_frame(1.0 / 60.0);
         }
-        let (fell, _) = l.pose(&e, &m, 0.0, &Void).unwrap();
+        let (fell, _) = l.pose(&e, &m, 0.0, &Void, BulletTune::default()).unwrap();
         assert!(fell[2] < 3.0, "{fell:?}");
         for _ in 0..3 {
             l.finish_frame(1.0);
         }
-        assert_eq!(l.pose(&e, &m, 0.0, &Void).unwrap().0, fell, "kept");
+        assert_eq!(
+            l.pose(&e, &m, 0.0, &Void, BulletTune::default()).unwrap().0,
+            fell,
+            "kept"
+        );
         let mut moved = e.clone();
         moved.velocity = [0.0, 0.0, 600.0];
-        let again = l.pose(&moved, &m, 0.0, &Void).unwrap().0;
+        let again = l
+            .pose(&moved, &m, 0.0, &Void, BulletTune::default())
+            .unwrap()
+            .0;
         assert_eq!(again, [1.0, 2.0, 3.0], "a new launch starts over");
         for _ in 0..6 {
             l.finish_frame(1.0);
@@ -1038,6 +1077,7 @@ mod tests {
             seed: 1,
             pieces: Vec::new(),
             out: Happened::default(),
+            bullet: BulletTune::default(),
         }
     }
 
@@ -1128,6 +1168,28 @@ mod tests {
             woken[..EXPLODE_MAX_ENTS].iter().all(|w| *w),
             "the nearest wake"
         );
+    }
+
+    #[test]
+    fn a_blast_pushes_away_from_the_blast_along_the_props_origin_not_its_bounds_middle() {
+        // The model's bounds sit far off to one side of where the prop is placed.
+        let mut model = crate_model(None);
+        let m = Arc::get_mut(&mut model).unwrap();
+        m.mins = [-10.0, 190.0, 0.0];
+        m.maxs = [10.0, 210.0, 30.0];
+        let mut prop = at_x(100.0);
+        prop.shape = Shape::of_model(&model);
+        prop.model = model;
+        let mut p = props_of(vec![prop]);
+        p.blast(
+            Vec3::ZERO,
+            Blast {
+                outer: 500.0,
+                ..Blast::default()
+            },
+        );
+        let v = p.props[0].body.as_ref().expect("woken").velocity();
+        assert!(v.x > 0.0 && v.x.abs() > v.y.abs(), "pushed along +x: {v}");
     }
 
     fn barrel(health: i32) -> Prop {
@@ -1241,7 +1303,7 @@ mod tests {
             (Vec3::new(0.0, 0.0, 100.0), [Vec3::X, Vec3::Y, Vec3::Z]),
             Vec3::new(0.0, 0.0, 100.0),
             Vec3::X,
-            &mut 1,
+            (&mut 1, BulletTune::default()),
         );
         assert_eq!(props.pieces.len(), 1);
         assert_eq!(props.instances().count(), 1);

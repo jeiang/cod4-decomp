@@ -8,7 +8,7 @@
 use super::{NetPlay, pose_input};
 use crate::models::Player;
 use crate::props::blast_of;
-use crate::ragdoll::{MAX_SIMULATING, Ragdoll};
+use crate::ragdoll::Ragdoll;
 use net::entity::{EntityState, etype};
 use render::ModelInstance;
 use std::collections::HashMap;
@@ -67,13 +67,14 @@ impl NetPlay {
                 .flatten()
         });
         if let Some(r) = &mut ragdoll {
+            r.tune(self.switches.ragdoll_tunables);
             self.c.ragdolls += 1;
             let running = self
                 .corpses
                 .values()
                 .filter(|b| b.ragdoll.as_ref().is_some_and(|r| !r.at_rest()))
                 .count();
-            if running >= MAX_SIMULATING {
+            if running >= self.switches.ragdoll_tunables.max_simulating {
                 r.freeze();
             }
         }
@@ -116,6 +117,7 @@ impl NetPlay {
             drawn += 1;
             match &mut b.ragdoll {
                 Some(r) => {
+                    r.tune(self.switches.ragdoll_tunables);
                     r.update(dt, self.boxes.world());
                     if let Some(hit) = r.take_impact() {
                         self.ragdoll_hits.push(crate::props::heard(
@@ -156,6 +158,7 @@ pub(super) fn blast(
     corpses: &mut HashMap<u16, Body>,
     ev: &crate::events::ClientEvent,
     weapon: &dyn Fn(u16) -> Option<std::sync::Arc<assets::zone::weapon::WeaponDef>>,
+    max_simulating: usize,
 ) {
     let Some((at, b)) = blast_of(ev, weapon) else {
         return;
@@ -166,7 +169,7 @@ pub(super) fn blast(
         .count();
     for r in corpses.values_mut().filter_map(|c| c.ragdoll.as_mut()) {
         // A sleeping body wakes only if there is room for it to simulate.
-        if r.at_rest() && awake >= MAX_SIMULATING {
+        if r.at_rest() && awake >= max_simulating {
             continue;
         }
         let was_asleep = r.at_rest();

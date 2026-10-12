@@ -94,7 +94,7 @@ impl NetPlay {
         }
         let screens = self.screen_targets(st, own, eye, feet, [self.angles[0], self.angles[1]]);
         if melee && !prone {
-            self.melee_charge = automelee::charge(&screens, eye, self.weapon_params.melee_range);
+            self.melee_charge = automelee::charge(&screens, eye, self.params.weapon.melee_range);
         }
         let pull = self.automelee.step(
             self.meleeing,

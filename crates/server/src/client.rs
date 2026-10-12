@@ -980,15 +980,10 @@ impl Game {
             }
             _ => {}
         }
-        if (ev::LANDING_PAIN_FIRST..ev::LANDING_PAIN_FIRST + 28).contains(&event) {
-            let frac = if parm < 100 {
-                f32::from(parm) * 0.01
-            } else {
-                1.1
-            };
-            if frac != 0.0 {
-                let max = self.client(n).map_or(100, |c| c.max_health);
-                let damage = (max as f32 * frac) as i32;
+        if (ev::LANDING_PAIN_FIRST..=ev::LANDING_PAIN_LAST).contains(&event) {
+            let max = self.client(n).map_or(100, |c| c.max_health);
+            let damage = landing_pain_damage(max, parm);
+            if damage != 0 {
                 self.damage_fall(vm, n, damage);
             }
         }
@@ -1191,9 +1186,35 @@ impl Game {
     }
 }
 
+/// The fall damage of a landing-pain event: `ClientEvent`'s `default:` case computes the fraction
+/// and the product in double precision and truncates once, so 50 of 100 HP is 49 and a parm of 1
+/// hurts nothing.
+fn landing_pain_damage(max_health: i32, parm: u8) -> i32 {
+    let frac = if parm < 100 {
+        f64::from(parm) * 0.009999999776482582
+    } else {
+        1.1
+    };
+    (f64::from(max_health) * frac) as i32
+}
+
 /// `Key` for an integer index, for building arrays.
 pub fn int_key(i: usize) -> Key {
     Key::Int(i as i32)
+}
+
+#[cfg(test)]
+mod landing_pain_tests {
+    use super::landing_pain_damage;
+
+    #[test]
+    fn fall_damage_truncates_a_double_product() {
+        assert_eq!(landing_pain_damage(100, 50), 49);
+        assert_eq!(landing_pain_damage(100, 1), 0);
+        assert_eq!(landing_pain_damage(100, 99), 98);
+        assert_eq!(landing_pain_damage(100, 100), 110);
+        assert_eq!(landing_pain_damage(100, 0), 0);
+    }
 }
 
 #[cfg(test)]

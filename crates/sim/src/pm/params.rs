@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Movement tunables (the original's dvars) and the per-weapon values movement reads.
+//! Movement and weapon tunables (the original's dvars) and the per-weapon values movement reads.
 //!
 //! Defaults are the multiplayer registration defaults of `iw3mp.exe` 1.7 (fact source: the
 //! dvar registration calls in `Jump_RegisterDvars`, `Mantle_RegisterDvars`, `BG_RegisterDvars`,
 //! `G_RegisterDvars`).
 
 use super::mantle::MantleAnims;
+use crate::weapon::WeaponParams;
 
-/// Movement dvars. `Params::default()` is a stock server.
+/// Movement and weapon dvars. `Params::default()` is a stock server.
 #[derive(Debug, Clone)]
 pub struct Params {
     // Core movement.
@@ -63,6 +64,8 @@ pub struct Params {
     // Aim down sights.
     pub player_ads_exit_delay: i32,
     pub player_scope_exit_on_damage: bool,
+    /// The dvars the weapon code reads (breath, melee, burst cooldown, penetration, perks).
+    pub weapon: WeaponParams,
     /// Mantle animation tracks; mantling is unavailable until set.
     pub mantle_anims: Option<MantleAnims>,
 }
@@ -113,6 +116,7 @@ impl Default for Params {
             player_melee_charge_friction: 1200.0,
             player_ads_exit_delay: 0,
             player_scope_exit_on_damage: false,
+            weapon: WeaponParams::default(),
             mantle_anims: None,
         }
     }
@@ -121,6 +125,8 @@ impl Default for Params {
 /// One tunable's storage, so [`Params`] has a single table of dvar names.
 enum Tunable<'a> {
     Float(&'a mut f32),
+    /// A float the dvar's registration holds to a range (`min`, `max`).
+    Ranged(&'a mut f32, f32, f32),
     Int(&'a mut i32),
     Bool(&'a mut bool),
 }
@@ -128,7 +134,7 @@ enum Tunable<'a> {
 impl Tunable<'_> {
     fn text(&self) -> String {
         match self {
-            Tunable::Float(v) => v.to_string(),
+            Tunable::Float(v) | Tunable::Ranged(v, ..) => v.to_string(),
             Tunable::Int(v) => v.to_string(),
             Tunable::Bool(v) => u8::from(**v).to_string(),
         }
@@ -141,6 +147,7 @@ impl Tunable<'_> {
         let Ok(n) = text.parse::<f32>() else { return };
         match self {
             Tunable::Float(v) => **v = n,
+            Tunable::Ranged(v, lo, hi) => **v = n.clamp(*lo, *hi),
             Tunable::Int(v) => **v = n as i32,
             Tunable::Bool(v) => **v = n != 0.0,
         }
@@ -148,10 +155,10 @@ impl Tunable<'_> {
 }
 
 impl Params {
-    /// Every tunable with the dvar it is, as `Jump_RegisterDvars`, `Mantle_RegisterDvars`, `BG_RegisterDvars` and
-    /// `G_RegisterDvars` name them.
+    /// Every tunable with the dvar it is, as `Jump_RegisterDvars`, `Mantle_RegisterDvars`, `BG_RegisterDvars`,
+    /// `BG_RegisterPerks` and `G_RegisterDvars` name them.
     fn tunables(&mut self) -> Vec<(&'static str, Tunable<'_>)> {
-        use Tunable::{Bool, Float, Int};
+        use Tunable::{Bool, Float, Int, Ranged};
         vec![
             ("friction", Float(&mut self.friction)),
             ("stopspeed", Float(&mut self.stopspeed)),
@@ -270,6 +277,80 @@ impl Params {
             (
                 "player_scopeExitOnDamage",
                 Bool(&mut self.player_scope_exit_on_damage),
+            ),
+            // The weapon dvars (`BG_RegisterDvars`, `BG_RegisterPerks`, `G_RegisterDvars`), all cheat protected.
+            (
+                "bg_aimSpreadMoveSpeedThreshold",
+                Ranged(&mut self.weapon.aim_spread_move_speed_threshold, 0.0, 300.0),
+            ),
+            (
+                "player_burstFireCooldown",
+                Ranged(&mut self.weapon.burst_fire_cooldown, 0.0, 60.0),
+            ),
+            ("player_sustainAmmo", Bool(&mut self.weapon.sustain_ammo)),
+            (
+                "perk_weapSpreadMultiplier",
+                Ranged(&mut self.weapon.perk_weap_spread_multiplier, 0.0, 1.0),
+            ),
+            (
+                "perk_weapReloadMultiplier",
+                Ranged(&mut self.weapon.perk_weap_reload_multiplier, 0.0, 1.0),
+            ),
+            (
+                "perk_weapRateMultiplier",
+                Ranged(&mut self.weapon.perk_weap_rate_multiplier, 0.0, 1.0),
+            ),
+            (
+                "perk_bulletPenetrationMultiplier",
+                Ranged(
+                    &mut self.weapon.perk_bullet_penetration_multiplier,
+                    0.0,
+                    30.0,
+                ),
+            ),
+            (
+                "player_meleeRange",
+                Ranged(&mut self.weapon.melee_range, 0.0, 1000.0),
+            ),
+            (
+                "player_meleeWidth",
+                Ranged(&mut self.weapon.melee_width, 0.0, 1000.0),
+            ),
+            (
+                "player_meleeHeight",
+                Ranged(&mut self.weapon.melee_height, 0.0, 1000.0),
+            ),
+            (
+                "bullet_penetrationEnabled",
+                Bool(&mut self.weapon.bullet_penetration_enabled),
+            ),
+            (
+                "player_breath_hold_time",
+                Ranged(&mut self.weapon.breath_hold_time, 0.0, 30.0),
+            ),
+            (
+                "player_breath_gasp_time",
+                Ranged(&mut self.weapon.breath_gasp_time, 0.0, 30.0),
+            ),
+            (
+                "player_breath_fire_delay",
+                Ranged(&mut self.weapon.breath_fire_delay, 0.0, 30.0),
+            ),
+            (
+                "player_breath_gasp_scale",
+                Ranged(&mut self.weapon.breath_gasp_scale, 0.0, 50.0),
+            ),
+            (
+                "player_breath_hold_lerp",
+                Ranged(&mut self.weapon.breath_hold_lerp, 0.0, 50.0),
+            ),
+            (
+                "player_breath_gasp_lerp",
+                Ranged(&mut self.weapon.breath_gasp_lerp, 0.0, 50.0),
+            ),
+            (
+                "perk_extraBreath",
+                Ranged(&mut self.weapon.perk_extra_breath, 0.0, f32::MAX),
             ),
         ]
     }

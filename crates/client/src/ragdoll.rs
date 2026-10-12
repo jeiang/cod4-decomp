@@ -9,7 +9,7 @@
 //! The original runs ODE; this is a position-based solver of the same bodies: each body has a position, an orientation
 //! and velocities, a joint pulls the child's anchor back onto the parent's and turns the child back inside its angle
 //! limits (measured from the bind pose, as the original's joint zero is), and joint friction holds the limbs stiff at
-//! first and lets go over [`JOINT_LERP`] seconds. Capsules collide with the map by box sweeps of their radius.
+//! first and lets go over [`Tunables::jointlerp_time`] seconds. Capsules collide with the map by box sweeps of their radius.
 //! Bones' twist is part of the body orientation, so it is kept.
 
 use fx::{Impact, MIN_IMPACT_MOMENTUM, Rng};
@@ -24,17 +24,75 @@ const SUBSTEPS: usize = 3;
 const GRAVITY: f32 = 800.0;
 /// Constraint passes per substep.
 const ITERATIONS: usize = 4;
-/// `ragdoll_max_life`: seconds a body simulates, at most, before it is frozen where it lies.
-const MAX_LIFE: f32 = 4.5;
-/// `ragdoll_max_simulating`: bodies simulating at once, across the client.
-pub const MAX_SIMULATING: usize = 16;
-/// `ragdoll_explode_force` and `ragdoll_explode_upbias`.
-const EXPLODE_FORCE: f32 = 18000.0;
-const EXPLODE_UPBIAS: f32 = 0.8;
-/// `ragdoll_self_collision_scale`: how much larger than the bone the capsules that keep limbs apart are.
-const SELF_SCALE: f32 = 1.2;
-/// `ragdoll_jointlerp_time` (seconds): joint friction falls from its full value to a tenth over this time.
-const JOINT_LERP: f32 = 3.0;
+
+/// The ragdoll dvars (`Ragdoll_InitDvars`), as the player set them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tunables {
+    /// `ragdoll_max_life` (seconds): how long a body simulates, at most, before it is frozen where it lies.
+    pub max_life: f32,
+    /// `ragdoll_max_simulating`: bodies simulating at once, across the client.
+    pub max_simulating: usize,
+    /// `ragdoll_jointlerp_time` (seconds): joint friction starts at its full value and is a tenth of it after this
+    /// time, and then rises again toward its start the longer the body lives.
+    pub jointlerp_time: f32,
+    /// `ragdoll_explode_force`: the momentum a blast gives a body at its centre.
+    pub explode_force: f32,
+    /// `ragdoll_explode_upbias`: added to a blast's push direction's up component before it is normalised.
+    pub explode_upbias: f32,
+    /// `ragdoll_self_collision_scale`: how much larger than the bone the capsules that keep limbs apart are.
+    pub self_collision_scale: f32,
+}
+
+impl Default for Tunables {
+    fn default() -> Self {
+        Self {
+            max_life: 4.5,
+            max_simulating: 16,
+            jointlerp_time: 3.0,
+            explode_force: 18000.0,
+            explode_upbias: 0.8,
+            self_collision_scale: 1.2,
+        }
+    }
+}
+
+impl Tunables {
+    /// What the dvars say, held to the original's limits; one not set (or not a number) has its stock value. All but
+    /// `ragdoll_max_simulating` are cheat protected: they act only while `sv_cheats` is on.
+    pub fn read(c: &crate::input::Cvars) -> Self {
+        let stock = Self::default();
+        let get = |name: &str| {
+            c.get(name)
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+        };
+        let cheats = c.bool("sv_cheats");
+        let cheat = |name: &str, stock: f32, lo: f32, hi: f32| {
+            get(name)
+                .filter(|_| cheats)
+                .map_or(stock, |v| v.clamp(lo, hi))
+        };
+        Self {
+            max_life: cheat("ragdoll_max_life", stock.max_life * 1000.0, 0.0, f32::MAX) / 1000.0,
+            max_simulating: get("ragdoll_max_simulating")
+                .map_or(stock.max_simulating, |v| v.clamp(0.0, 32.0) as usize),
+            jointlerp_time: cheat(
+                "ragdoll_jointlerp_time",
+                stock.jointlerp_time * 1000.0,
+                100.0,
+                6000.0,
+            ) / 1000.0,
+            explode_force: cheat("ragdoll_explode_force", stock.explode_force, 0.0, 60000.0),
+            explode_upbias: cheat("ragdoll_explode_upbias", stock.explode_upbias, 0.0, 2.0),
+            self_collision_scale: cheat(
+                "ragdoll_self_collision_scale",
+                stock.self_collision_scale,
+                0.1,
+                10.0,
+            ),
+        }
+    }
+}
 /// The torque a unit of the file's joint friction holds (`Ragdoll_CreatePhysJoint` scales it by 15).
 const FRICTION_TORQUE: f32 = 15.0;
 /// What the ground and the other limbs grip with.
@@ -197,6 +255,14 @@ impl Def {
     }
 }
 
+/// How much of the file's joint friction a body `age` seconds old has (`Ragdoll_UpdateFriction`): all of it at first,
+/// a tenth at `lerp_time`. The original does not clamp the fall, so past `lerp_time` the grip comes back: 0.325 of the
+/// file's at 1.5 times the time.
+fn friction_scale(age: f32, lerp_time: f32) -> f32 {
+    let t = 1.0 - age / lerp_time;
+    t * t * 0.9 + 0.1
+}
+
 /// `x`, `y`, `z` or one of them negated, as a unit vector.
 fn axis_of(s: &str) -> Option<Vec3> {
     let (sign, name) = match s.strip_prefix('-') {
@@ -314,6 +380,7 @@ pub struct Ragdoll {
     /// The hardest unheard hit, and the time before another may be heard.
     impact: Option<Impact>,
     quiet: f32,
+    tun: Tunables,
 }
 
 fn quat_of(b: &BoneMat) -> Quat {
@@ -500,6 +567,7 @@ impl Ragdoll {
             rng: Rng::new(seed),
             impact: None,
             quiet: 0.0,
+            tun: Tunables::default(),
         })
     }
 
@@ -508,7 +576,7 @@ impl Ragdoll {
         self.impact.take()
     }
 
-    /// True once the body has stopped (or been simulated for [`MAX_LIFE`] seconds).
+    /// True once the body has stopped (or been simulated for [`Tunables::max_life`] seconds).
     pub fn at_rest(&self) -> bool {
         self.asleep
     }
@@ -516,6 +584,11 @@ impl Ragdoll {
     /// The yaw (degrees) of the entity the bones are relative to.
     pub fn yaw(&self) -> f32 {
         self.yaw.to_euler(glam::EulerRot::ZYX).0.to_degrees()
+    }
+
+    /// The dvars the body follows from now on.
+    pub fn tune(&mut self, tun: Tunables) {
+        self.tun = tun;
     }
 
     /// Stops the body where it is, as when too many bodies simulate.
@@ -560,8 +633,8 @@ impl Ragdoll {
             } else {
                 flat(d).normalize_or_zero()
             };
-            let dir = (dir + Vec3::Z * EXPLODE_UPBIAS).normalize_or(Vec3::Z);
-            let j = dir * (scale * EXPLODE_FORCE * share);
+            let dir = (dir + Vec3::Z * self.tun.explode_upbias).normalize_or(Vec3::Z);
+            let j = dir * (scale * self.tun.explode_force * share);
             body.v = (body.v + j * body.inv_m).clamp_length_max(MAX_SPEED);
             body.w =
                 (body.w + body.inv_inertia((centre - body.x).cross(j))).clamp_length_max(MAX_SPIN);
@@ -597,8 +670,7 @@ impl Ragdoll {
 
     fn step(&mut self, world: &dyn Collide) {
         let dt = STEP / SUBSTEPS as f32;
-        let t = (1.0 - self.age / JOINT_LERP).clamp(0.0, 1.0);
-        let friction_scale = t * t * 0.9 + 0.1;
+        let friction_scale = friction_scale(self.age, self.tun.jointlerp_time);
         for _ in 0..SUBSTEPS {
             for b in &mut self.bodies {
                 b.x0 = b.x;
@@ -635,7 +707,7 @@ impl Ragdoll {
         if self.impact.is_some() {
             self.quiet = HIT_GAP;
         }
-        if self.idle >= IDLE_TIME || self.age >= MAX_LIFE {
+        if self.idle >= IDLE_TIME || self.age >= self.tun.max_life {
             self.asleep = true;
         }
     }
@@ -717,7 +789,7 @@ impl Ragdoll {
             bb.at(bb.ends[0]),
             bb.at(bb.ends[1]),
         );
-        let reach = (ba.radius + bb.radius) * SELF_SCALE;
+        let reach = (ba.radius + bb.radius) * self.tun.self_collision_scale;
         let d = pa - pb;
         let dist = d.length();
         if dist < reach && dist > EPS {
@@ -777,7 +849,7 @@ impl Ragdoll {
         }
     }
 
-    /// Joint friction: the torque the file gives the joint, scaled down over [`JOINT_LERP`], takes the relative spin
+    /// Joint friction: the torque the file gives the joint, scaled over [`Tunables::jointlerp_time`], takes the relative spin
     /// of the two bodies away until it is spent.
     fn hold_joint(&mut self, j: usize, scale: f32, dt: f32) {
         let jt = &self.joints[j];
@@ -1095,6 +1167,55 @@ mod tests {
         for _ in 0..frames {
             r.update(STEP, world);
         }
+    }
+
+    #[test]
+    fn joint_friction_falls_to_a_tenth_and_then_comes_back() {
+        assert_eq!(friction_scale(0.0, 3.0), 1.0);
+        assert!((friction_scale(3.0, 3.0) - 0.1).abs() < 1e-6);
+        assert!((friction_scale(4.5, 3.0) - 0.325).abs() < 1e-6);
+        assert!(friction_scale(4.5, 3.0) > friction_scale(3.0, 3.0));
+    }
+
+    #[test]
+    fn the_ragdoll_dvars_set_the_tunables_and_the_cheat_ones_need_sv_cheats() {
+        let mut c = crate::input::Cvars::default();
+        assert_eq!(Tunables::read(&c), Tunables::default(), "stock values");
+        c.set("ragdoll_max_simulating", "4", false);
+        c.set("ragdoll_explode_force", "99999", false);
+        c.set("ragdoll_max_life", "2000", false);
+        let t = Tunables::read(&c);
+        assert_eq!(t.max_simulating, 4, "not a cheat dvar");
+        assert_eq!(t.explode_force, Tunables::default().explode_force);
+        assert_eq!(t.max_life, Tunables::default().max_life);
+        c.set("sv_cheats", "1", false);
+        let t = Tunables::read(&c);
+        assert_eq!(t.explode_force, 60000.0, "held to the dvar's limit");
+        assert_eq!(t.max_life, 2.0);
+        c.set("ragdoll_jointlerp_time", "junk", false);
+        assert_eq!(
+            Tunables::read(&c).jointlerp_time,
+            Tunables::default().jointlerp_time
+        );
+    }
+
+    #[test]
+    fn a_stronger_blast_force_throws_a_body_faster() {
+        let thrown = |force: f32| {
+            let mut r = make(&standing(&[]), [0.0; 3], [0.0; 3]);
+            r.tune(Tunables {
+                explode_force: force,
+                ..Tunables::default()
+            });
+            let b = Blast {
+                outer: 400.0,
+                ..Blast::default()
+            };
+            let at = r.bodies[0].x + Vec3::new(-30.0, 0.0, 0.0);
+            assert!(r.explode(at, &b));
+            r.bodies[0].v.length()
+        };
+        assert!(thrown(36000.0) > thrown(18000.0));
     }
 
     #[test]

@@ -177,6 +177,8 @@ pub mod ev {
     pub const LANDING_FIRST: u8 = 0x4D;
     /// `LANDING_PAIN_FIRST + surface type`: a landing that hurt; the event parm is the damage.
     pub const LANDING_PAIN_FIRST: u8 = 0x6A;
+    /// The last landing-pain event (surface type 28), inclusive.
+    pub const LANDING_PAIN_LAST: u8 = 0x86;
 }
 
 /// `weaponstate_t` values movement looks at.

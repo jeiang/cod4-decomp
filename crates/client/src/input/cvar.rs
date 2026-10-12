@@ -37,6 +37,16 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("in_gamepad_deadzone", "0.2", true),
     ("in_gamepad_yawrate", "140", true),
     ("in_gamepad_pitchrate", "100", true),
+    // The ragdoll and rigid body physics tunables (`Ragdoll_InitDvars`, `Phys_Init`); the `ragdoll_*` ones but
+    // `ragdoll_max_simulating` are cheat protected and act only with `sv_cheats` on.
+    ("ragdoll_max_life", "4500", false),
+    ("ragdoll_max_simulating", "16", true),
+    ("ragdoll_jointlerp_time", "3000", false),
+    ("ragdoll_explode_force", "18000", false),
+    ("ragdoll_explode_upbias", "0.8", false),
+    ("ragdoll_self_collision_scale", "1.2", false),
+    ("phys_bulletupbias", "0.5", false),
+    ("phys_bulletspinscale", "3", true),
 ];
 
 struct Cvar {

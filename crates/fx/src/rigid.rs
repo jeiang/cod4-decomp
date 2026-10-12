@@ -33,9 +33,24 @@ const RIM_POINTS: usize = 16;
 /// `phys_minImpactMomentum`: a hit with less momentum than this makes no sound.
 pub const MIN_IMPACT_MOMENTUM: f32 = 250.0;
 const BULLET_MASS: f32 = 0.5;
-/// `phys_bulletUpBias` and `phys_bulletSpinScale`.
-const BULLET_UP_BIAS: f32 = 0.5;
-const BULLET_SPIN_SCALE: f32 = 3.0;
+/// `phys_bulletUpBias` and `phys_bulletSpinScale`: how a bullet's hit is tilted up and how far from the centre of mass
+/// it lands, as the player set them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BulletTune {
+    /// Added to the hit direction's up component (0 to 2).
+    pub up_bias: f32,
+    /// How far past the hit point, in multiples of its offset from the centre of mass, the force acts (-1 to 100).
+    pub spin_scale: f32,
+}
+
+impl Default for BulletTune {
+    fn default() -> Self {
+        Self {
+            up_bias: 0.5,
+            spin_scale: 3.0,
+        }
+    }
+}
 /// Geometry type of a box in [`assets::zone::xmodel::PhysGeom::kind`]; anything else without a brush is a cylinder.
 const GEOM_BOX: i32 = 1;
 
@@ -353,11 +368,11 @@ impl Body {
 
     /// A bullet of `speed` travelling along `dir` hits the world point `at` (`Phys_ObjBulletImpact`); `scale` is the
     /// preset's bullet force scale.
-    pub fn bullet_impact(&mut self, at: Vec3, dir: Vec3, speed: f32, scale: f32) {
+    pub fn bullet_impact(&mut self, at: Vec3, dir: Vec3, speed: f32, scale: f32, tune: BulletTune) {
         let mut dir = dir;
-        dir.z += BULLET_UP_BIAS;
+        dir.z += tune.up_bias;
         let dir = dir.normalize_or(Vec3::Z);
-        let at = at + (at - self.pos) * BULLET_SPIN_SCALE;
+        let at = at + (at - self.pos) * tune.spin_scale;
         let relative = speed - self.vel.dot(dir);
         let mut axis = (at - self.pos).cross(dir);
         let radius = axis.length();
@@ -624,9 +639,45 @@ mod tests {
         run(&mut b, 3.0);
         assert!(b.asleep());
         let at = b.origin();
-        b.bullet_impact(at + Vec3::new(-5.0, 0.0, 2.0), Vec3::X, 1000.0, 1.0);
+        b.bullet_impact(
+            at + Vec3::new(-5.0, 0.0, 2.0),
+            Vec3::X,
+            1000.0,
+            1.0,
+            BulletTune::default(),
+        );
         assert!(!b.asleep());
         assert!(b.velocity().x > 5.0, "{:?}", b.velocity());
+    }
+
+    #[test]
+    fn the_bullet_tunables_tilt_the_hit_up_and_move_where_it_acts() {
+        let hit = |tune: BulletTune| {
+            let mut b = cube(&preset(5.0, 0.0, 0.5));
+            let at = b.origin();
+            b.bullet_impact(at + Vec3::new(-5.0, 0.0, 2.0), Vec3::X, 1000.0, 1.0, tune);
+            (b.velocity(), b.angular_velocity())
+        };
+        let flat = BulletTune {
+            up_bias: 0.0,
+            ..BulletTune::default()
+        };
+        let steep = BulletTune {
+            up_bias: 2.0,
+            ..BulletTune::default()
+        };
+        assert!(
+            hit(flat).0.z.abs() < hit(steep).0.z,
+            "up bias lifts the hit"
+        );
+        let no_spin = BulletTune {
+            spin_scale: 0.0,
+            ..BulletTune::default()
+        };
+        assert!(
+            hit(no_spin).1.length() < hit(BulletTune::default()).1.length(),
+            "a longer lever spins the body more"
+        );
     }
 
     #[test]
