@@ -407,37 +407,30 @@ pub fn status_rows(
     rows
 }
 
-/// The masters `text` (`cl_masters`: `host[:port]` words) names. A name that does not resolve is left out; a browser
-/// cannot resolve names or send datagrams, so there the list is empty.
-pub fn parse_masters(text: &str) -> Vec<SocketAddr> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = text;
-        Vec::new()
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let mut out = Vec::new();
-        for w in text.split_whitespace().take(net::master::MASTER_SLOTS) {
-            let with_port = if w
-                .rsplit_once(':')
-                .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
-            {
-                w.to_owned()
-            } else {
-                format!("{w}:{}", net::master::MASTER_PORT)
-            };
-            if let Some(a) = with_port
-                .to_socket_addrs()
-                .ok()
-                .and_then(|mut i| i.find(SocketAddr::is_ipv4))
-                && !out.contains(&a)
-            {
-                out.push(a);
-            }
+/// The masters `text` (`cl_masters`: `host[:port]` words) names. A name that does not resolve is left out. Blocking;
+/// the list runs it on a thread. (A browser cannot send datagrams, so it has no masters.)
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_masters(text: &str) -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    for w in text.split_whitespace().take(net::master::MASTER_SLOTS) {
+        let with_port = if w
+            .rsplit_once(':')
+            .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
+        {
+            w.to_owned()
+        } else {
+            format!("{w}:{}", net::master::MASTER_PORT)
+        };
+        if let Some(a) = with_port
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut i| i.find(SocketAddr::is_ipv4))
+            && !out.contains(&a)
+        {
+            out.push(a);
         }
-        out
     }
+    out
 }
 
 /// Which stock list is shown (`ui_netSource`): 0 local network, 1 internet (the masters' servers), 2 favorites.
@@ -1070,6 +1063,7 @@ mod tests {
         assert!(l.rows(Source::Internet).is_empty());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn master_names_default_their_port_and_skip_the_unresolvable() {
         assert_eq!(
