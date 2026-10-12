@@ -168,6 +168,9 @@ struct Running {
 /// The bot's menu choices as script (the stock `_dev` script has them behind developer mode).
 const TEST_CLIENT_GSC: &str = include_str!("testclient.gsc");
 
+/// What a client is told when its IWDs are not the server's and `sv_pure` is on.
+pub const IMPURE: &str = "Unpure client detected: your IWD files differ from this server's (sv_pure is on). Verify your game files, and remove extra .iwd files from main and the mod folder.";
+
 pub struct Server {
     pub game: Game,
     install: Install,
@@ -198,6 +201,9 @@ pub struct Server {
     /// People who joined and have not yet sent their profile (`statsdone`): the slot, and the level time after which
     /// they begin without it. The original holds a client's game state, so its `begin`, until its stats arrived.
     begin_waits: Vec<(u16, i32)>,
+    /// The files a joining client may download for the running mod and map, built when first asked for and kept until
+    /// the map changes or a file does.
+    offers: crate::fastdl::Offers,
     pub map_load_ms: f64,
     /// Levels started so far: a map change or restart, each of which resets the script pool.
     pub level_loads: u32,
@@ -304,6 +310,12 @@ fn register_core_dvars(c: &mut Cvars) {
         ("perk_parabolicRadius", "400", CHEAT),
         ("perk_parabolicAngle", "180", CHEAT),
         ("sv_allowDownload", "0", ARCHIVE | SERVERINFO),
+        // Fast download: clients are sent to `sv_wwwBaseURL` for the files `sv_allowDownload` lets them have.
+        // Clients here always download before they connect, so `sv_wwwDlDisconnected` (stock: should a client leave
+        // the server while it downloads) has nothing to change; it is kept for configs that set it.
+        ("sv_wwwDownload", "0", ARCHIVE),
+        ("sv_wwwBaseURL", "", ARCHIVE),
+        ("sv_wwwDlDisconnected", "0", ARCHIVE),
         ("sv_punkbuster", "0", ARCHIVE | SERVERINFO),
         ("sv_allowAnonymous", "0", SERVERINFO),
         ("sv_disableClientConsole", "0", SERVERINFO),
@@ -519,6 +531,7 @@ impl Server {
             heli_view: None,
             net: None,
             begin_waits: Vec::new(),
+            offers: crate::fastdl::Offers::default(),
             map_load_ms: 0.0,
             level_loads: 0,
             boot_ms: 0.0,
@@ -731,6 +744,7 @@ impl Server {
                 Inbound::GetFile { from, name, offset } => {
                     self.net_file(&mut net, from, &name, offset);
                 }
+                Inbound::GetManifest { from } => self.net_manifest(&mut net, from),
             }
         }
         self.relay_voice(&mut net);
@@ -796,17 +810,48 @@ impl Server {
         }
     }
 
-    /// A `getfile`: the zone of a map this server may give away, from `offset` on (see [`net::download`]).
-    fn net_file(&mut self, net: &mut NetSv, from: SocketAddr, name: &str, offset: u64) {
-        if !self.game.cvars.bool("sv_allowDownload") {
-            return net.refuse(from, "Downloads are not enabled on this server");
-        }
-        match download_path(
+    /// The files on offer for the running map, once listed (see [`crate::fastdl::Offers`]); `recheck` lists them
+    /// again when one changed.
+    fn offer(&mut self, recheck: bool) -> Option<&crate::fastdl::Offer> {
+        self.offers.refresh(
             &self.install.root,
             &self.install.game,
             self.game.content.map_name.as_deref(),
-            name,
-        ) {
+            recheck,
+        );
+        for note in self.offers.take_notes() {
+            self.say(&note);
+        }
+        self.offers.offer()
+    }
+
+    /// A `getmanifest`: the files this server gives for its mod and map, and the fast-download base when it has one
+    /// (see [`net::manifest`]). Unanswered while the list is being made: the client asks again.
+    fn net_manifest(&mut self, net: &mut NetSv, from: SocketAddr) {
+        if !self.game.cvars.bool("sv_allowDownload") {
+            return net.refuse(from, net::manifest::DOWNLOADS_OFF);
+        }
+        let www = self.game.cvars.string("sv_wwwBaseURL").trim().to_owned();
+        let www = if self.game.cvars.bool("sv_wwwDownload") && net::manifest::valid_www(&www) {
+            www
+        } else {
+            String::new()
+        };
+        if let Some(offer) = self.offer(true) {
+            let files = offer.files.clone();
+            net.send_manifest(from, &files, &www);
+        }
+    }
+
+    /// A `getfile`: one of the files of the manifest, from `offset` on (see [`net::download`]).
+    fn net_file(&mut self, net: &mut NetSv, from: SocketAddr, name: &str, offset: u64) {
+        if !self.game.cvars.bool("sv_allowDownload") {
+            return net.refuse(from, net::manifest::DOWNLOADS_OFF);
+        }
+        let Some(offer) = self.offer(false) else {
+            return;
+        };
+        match offer.path(name).map(Path::to_owned) {
             Some(path) => net.send_file(from, &path, offset),
             None => net.refuse(from, net::download::NOT_AVAILABLE),
         }
@@ -995,6 +1040,9 @@ impl Server {
         if net.bans.is_banned(ip, Instant::now()) {
             return refuse(net, "You are banned from this server.");
         }
+        if self.game.cvars.bool("sv_pure") && req.pure != self.pure_digest() {
+            return refuse(net, IMPURE);
+        }
         let given = req.password.as_str();
         let private = self.game.cvars.string("sv_privatePassword");
         let privileged = !private.is_empty() && private == given;
@@ -1043,6 +1091,11 @@ impl Server {
             "{name} connected as client {slot} from {}\n",
             req.from
         ));
+    }
+
+    /// What a client's IWDs must add up to on an `sv_pure` server: this server's own search path.
+    fn pure_digest(&self) -> u32 {
+        assets::vfs::pure_digest(&self.install.vfs.pure_iwds(&self.install.root))
     }
 
     /// Gives a person a client slot like a bot gets one: the scripts see a connect. With `stats` (a person kept across
@@ -2829,22 +2882,6 @@ fn quote_word(w: &str) -> String {
     }
 }
 
-/// The file a `getfile` for `name` is given: only map zones (`mp_*` and their loading screens) and a custom map's IWD
-/// (`mp_*.iwd`, only the running map's), named plainly; nothing else of the install is offered.
-fn download_path(root: &Path, game: &str, running: Option<&str>, name: &str) -> Option<PathBuf> {
-    match name.strip_suffix(".iwd") {
-        // Only the running map's: that is the one a joining client needs.
-        Some(map) => assets::paths::usermap_iwd(root, map).filter(|_| {
-            net::download::valid_name(map)
-                && map.starts_with("mp_")
-                && running.is_some_and(|r| r.eq_ignore_ascii_case(map))
-        }),
-        None => (net::download::valid_name(name) && name.starts_with("mp_"))
-            .then(|| assets::paths::zone_file(root, game, name))
-            .flatten(),
-    }
-}
-
 fn known_maps(install: &Install) -> Vec<String> {
     assets::paths::maps(&install.root, &install.game)
 }
@@ -2939,8 +2976,8 @@ fn hears_voice(rules: &VoiceRules, talker: &Client, listener: &Client) -> bool {
 mod tests {
     use super::may_speak;
     use super::{
-        PERK_PARABOLIC, RotationPlan, VoiceRules, download_path, flood_drops, hears_voice,
-        menu_response_args, ping_field, plain_text, plan_rotation,
+        PERK_PARABOLIC, RotationPlan, VoiceRules, flood_drops, hears_voice, menu_response_args,
+        ping_field, plain_text, plan_rotation,
     };
     use crate::client::{Client, Conn, Session, Team};
 
@@ -3047,43 +3084,6 @@ mod tests {
             ..RULES
         };
         assert!(!hears_voice(&cone, &enemy, &spy), "behind");
-    }
-
-    #[test]
-    fn a_getfile_gives_a_maps_zones_and_a_custom_maps_iwd_and_nothing_else() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        for f in [
-            "zone/english/mp_stock.ff",
-            "zone/english/common_mp.ff",
-            "usermaps/mp_custom/mp_custom.ff",
-            "usermaps/mp_custom/mp_custom_load.ff",
-            "usermaps/mp_custom/mp_custom.iwd",
-            "main/iw_00.iwd",
-        ] {
-            let p = root.join(f);
-            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-            std::fs::write(p, b"").unwrap();
-        }
-        let file = |n: &str| {
-            download_path(root, "", Some("mp_custom"), n).map(|p| p.file_name().unwrap().to_owned())
-        };
-        for name in ["mp_stock", "mp_custom", "mp_custom_load", "mp_custom.iwd"] {
-            assert!(file(name).is_some(), "{name}");
-        }
-        assert!(
-            download_path(root, "", Some("mp_stock"), "mp_custom.iwd").is_none(),
-            "the IWD of a map that is not running"
-        );
-        for name in [
-            "common_mp",
-            "iw_00.iwd",
-            "mp_stock.iwd",
-            "../mp_custom.iwd",
-            "mp_gone",
-        ] {
-            assert!(file(name).is_none(), "{name}");
-        }
     }
 
     #[test]

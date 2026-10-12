@@ -13,6 +13,7 @@ pub mod demo;
 pub mod download;
 pub mod entity;
 pub mod field;
+pub mod manifest;
 pub mod master;
 pub mod netchan;
 pub mod oob;

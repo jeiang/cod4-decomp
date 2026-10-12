@@ -252,6 +252,14 @@ impl<T: Transport> NetClient<T> {
         self.userinfo = Some(command);
     }
 
+    /// The [`assets::vfs::pure_digest`] of the IWDs this client runs, which the `connect` carries for an `sv_pure`
+    /// server to check. Set before the first poll; a client that sets none counts as impure.
+    pub fn set_pure(&mut self, digest: u32) {
+        if let Phase::Connecting(c) = &mut self.phase {
+            c.set_pure(digest);
+        }
+    }
+
     pub fn now_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
     }

@@ -8,7 +8,7 @@ use std::hash::BuildHasher;
 use std::net::SocketAddr;
 
 /// Bumped when the wire format changes; a server refuses other versions.
-pub const PROTOCOL: u32 = 22;
+pub const PROTOCOL: u32 = 23;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Oob {
@@ -20,6 +20,9 @@ pub enum Oob {
         protocol: u32,
         /// Random per-client value the server echoes inside every later packet.
         qport: u16,
+        /// [`assets::vfs::pure_digest`] of the IWDs the client runs; an `sv_pure` server refuses one that differs
+        /// from its own. 0 when the client sends none.
+        pure: u32,
         name: String,
         password: String,
     },
@@ -57,6 +60,20 @@ pub enum Oob {
         total: u64,
         offset: u64,
         data: Vec<u8>,
+    },
+    /// `getmanifest`: asks for the files the server gives for the mod and map it runs; answered with [`Oob::Manifest`]
+    /// packets, one per file, or an [`Oob::Error`].
+    GetManifest {
+        challenge: u32,
+    },
+    /// `manifest`: file `index` of `count` the server gives (see [`crate::manifest`]). `www` is the fast-download
+    /// base URL, empty when the server gives its files over this protocol only. A server with no files sends one
+    /// packet with `count` 0 and no file.
+    Manifest {
+        index: u16,
+        count: u16,
+        file: crate::manifest::File,
+        www: String,
     },
     /// `heartbeat <protocol>`: a public server tells a master it is up. The master answers with a `getinfo` to the
     /// sender and lists the server only if the [`Oob::InfoResponse`] carries its challenge.
@@ -181,10 +198,11 @@ impl Oob {
                 challenge,
                 protocol,
                 qport,
+                pure,
                 name,
                 password,
             } => format!(
-                "connect {challenge} {protocol} {qport} {} {}",
+                "connect {challenge} {protocol} {qport} {pure} {} {}",
                 quote(name),
                 quote(password)
             ),
@@ -209,6 +227,19 @@ impl Oob {
                 offset,
             } => format!("getfile {challenge} {offset} {}", quote(name)),
             Oob::FileChunk { .. } => unreachable!("encoded above"),
+            Oob::GetManifest { challenge } => format!("getmanifest {challenge}"),
+            Oob::Manifest {
+                index,
+                count,
+                file,
+                www,
+            } => format!(
+                "manifest {index} {count} {} {} {} {}",
+                file.size,
+                file.crc,
+                quote(&file.name),
+                quote(www)
+            ),
             Oob::Heartbeat(p) => format!("heartbeat {p}"),
             Oob::Flatline => "flatline".to_owned(),
             Oob::GetServers {
@@ -277,8 +308,9 @@ impl Oob {
                     challenge: w.first()?.parse().ok()?,
                     protocol: w.get(1)?.parse().ok()?,
                     qport: w.get(2)?.parse().ok()?,
-                    name: w.get(3)?.clone(),
-                    password: w.get(4).cloned().unwrap_or_default(),
+                    pure: w.get(3)?.parse().ok()?,
+                    name: w.get(4)?.clone(),
+                    password: w.get(5).cloned().unwrap_or_default(),
                 }
             }
             "connectResponse" => Oob::ConnectResponse,
@@ -292,6 +324,22 @@ impl Oob {
                     challenge: w.first()?.parse().ok()?,
                     offset: w.get(1)?.parse().ok()?,
                     name: w.get(2)?.clone(),
+                }
+            }
+            "getmanifest" => Oob::GetManifest {
+                challenge: rest.trim().parse().ok()?,
+            },
+            "manifest" => {
+                let w = unquote_words(rest);
+                Oob::Manifest {
+                    index: w.first()?.parse().ok()?,
+                    count: w.get(1)?.parse().ok()?,
+                    file: crate::manifest::File {
+                        size: w.get(2)?.parse().ok()?,
+                        crc: w.get(3)?.parse().ok()?,
+                        name: w.get(4)?.clone(),
+                    },
+                    www: w.get(5).cloned().unwrap_or_default(),
                 }
             }
             "error" => Oob::Error(rest.to_owned()),
@@ -381,6 +429,7 @@ mod tests {
                 challenge: 7,
                 protocol: PROTOCOL,
                 qport: 4242,
+                pure: 0xdead_beef,
                 name: "Mr Quote \" Space".into(),
                 password: String::new(),
             },
@@ -415,6 +464,23 @@ mod tests {
                 challenge: 5,
                 name: "mp_a b".into(),
                 offset: 1 << 40,
+            },
+            Oob::GetManifest { challenge: 8 },
+            Oob::Manifest {
+                index: 1,
+                count: 3,
+                file: crate::manifest::File {
+                    name: "mods/a b/z.iwd".into(),
+                    size: 1 << 33,
+                    crc: u32::MAX,
+                },
+                www: "https://example.org/fastdl".into(),
+            },
+            Oob::Manifest {
+                index: 0,
+                count: 0,
+                file: crate::manifest::File::default(),
+                www: String::new(),
             },
             Oob::FileChunk {
                 total: 99,

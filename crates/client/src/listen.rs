@@ -144,9 +144,17 @@ fn run(
     tx: &mpsc::Sender<Result<SocketAddr, String>>,
 ) -> Value {
     let started = || -> Result<(Server, SocketAddr), String> {
-        let mut args: Vec<String> = ["+set", "net_port", &cfg.port.to_string()]
-            .map(String::from)
-            .to_vec();
+        // The server a player starts runs pure, as the stock one does: its clients' IWDs must be its own.
+        let mut args: Vec<String> = [
+            "+set",
+            "sv_pure",
+            "1",
+            "+set",
+            "net_port",
+            &cfg.port.to_string(),
+        ]
+        .map(String::from)
+        .to_vec();
         if !cfg.game.is_empty() {
             args.extend(["+set", "fs_game", &cfg.game].map(String::from));
         }

@@ -30,7 +30,9 @@ gilrs = "0.11"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 install = { path = "../install", features = ["prompt"] }
 rav1e = { version = "0.8", default-features = false, features = ["threading", "asm"] }
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system", "disk"] }
+# Fast download (`sv_wwwDownload`): HTTP(S) with rustls (ring), as the server's WebTransport already uses.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 # The browser build: wgpu gets its WebGL2 fallback next to WebGPU, and the page talks to the wasm through wasm-bindgen.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

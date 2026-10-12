@@ -12,6 +12,8 @@ use std::net::SocketAddr;
 pub struct ConnectRequest {
     pub from: SocketAddr,
     pub qport: u16,
+    /// The client's [`assets::vfs::pure_digest`]; 0 when it sent none.
+    pub pure: u32,
     pub name: String,
     pub password: String,
 }
@@ -28,6 +30,8 @@ pub enum Gate {
         name: String,
         offset: u64,
     },
+    /// A `getmanifest` that passed the challenge check: the server answers with its file list.
+    Manifest { from: SocketAddr },
     /// Nothing to do. A connectionless `disconnect` is one of these: anybody can forge a source address, so only
     /// the sequence-checked reliable `disconnect` of a connected client ends a session.
     Ignore,
@@ -52,6 +56,7 @@ pub fn serve(
             challenge,
             protocol,
             qport,
+            pure,
             name,
             password,
         } => {
@@ -65,6 +70,7 @@ pub fn serve(
                 Gate::Accept(ConnectRequest {
                     from,
                     qport,
+                    pure,
                     name,
                     password,
                 })
@@ -77,6 +83,13 @@ pub fn serve(
         } => {
             if challenger.check(from, challenge, now_secs) {
                 Gate::File { from, name, offset }
+            } else {
+                Gate::Reply(Oob::Error(crate::download::BAD_CHALLENGE.into()))
+            }
+        }
+        Oob::GetManifest { challenge } => {
+            if challenger.check(from, challenge, now_secs) {
+                Gate::Manifest { from }
             } else {
                 Gate::Reply(Oob::Error(crate::download::BAD_CHALLENGE.into()))
             }
@@ -101,6 +114,7 @@ pub struct Connector {
     pub qport: u16,
     name: String,
     password: String,
+    pure: u32,
     state: ConnectState,
     last_send_ms: Option<u64>,
     sent: u32,
@@ -117,10 +131,16 @@ impl Connector {
             qport,
             name: name.to_owned(),
             password: password.to_owned(),
+            pure: 0,
             state: ConnectState::Challenging,
             last_send_ms: None,
             sent: 0,
         }
+    }
+
+    /// Sets the [`assets::vfs::pure_digest`] the `connect` carries.
+    pub fn set_pure(&mut self, pure: u32) {
+        self.pure = pure;
     }
 
     /// The server has not answered after [`MAX_ATTEMPTS`] requests.
@@ -147,6 +167,7 @@ impl Connector {
                 challenge: *c,
                 protocol: PROTOCOL,
                 qport: self.qport,
+                pure: self.pure,
                 name: self.name.clone(),
                 password: self.password.clone(),
             },
@@ -241,6 +262,7 @@ mod tests {
             challenge: 12345,
             protocol: PROTOCOL,
             qport: 1,
+            pure: 0,
             name: "x".into(),
             password: String::new(),
         };
@@ -253,6 +275,7 @@ mod tests {
             challenge: good,
             protocol: PROTOCOL + 1,
             qport: 1,
+            pure: 0,
             name: "x".into(),
             password: String::new(),
         };

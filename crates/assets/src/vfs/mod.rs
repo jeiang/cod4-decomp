@@ -230,6 +230,42 @@ impl Vfs {
         out.dedup();
         out
     }
+
+    /// The IWDs of the search path, by name below `root` (lowercase, `/`) and [`Iwd::pack_checksum`], sorted by name:
+    /// what `sv_pure` compares. Localized IWDs are left out: they depend on the player's language.
+    pub fn pure_iwds(&self, root: &Path) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = self
+            .nodes
+            .iter()
+            .filter(|n| n.language.is_none())
+            .filter_map(|n| match &n.kind {
+                NodeKind::Iwd { path, iwd } => {
+                    let rel = path.strip_prefix(root).unwrap_or(path);
+                    Some((
+                        rel.to_string_lossy()
+                            .replace('\\', "/")
+                            .to_ascii_lowercase(),
+                        iwd.pack_checksum(),
+                    ))
+                }
+                NodeKind::Dir(_) => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+}
+
+/// One number for a [`Vfs::pure_iwds`] list: the client sends it with its `connect` and an `sv_pure` server compares it
+/// with its own. Never 0, which is what a client that sends none counts as.
+pub fn pure_digest(iwds: &[(String, u32)]) -> u32 {
+    let mut c = crate::crc::Crc32::default();
+    for (name, sum) in iwds {
+        c.update(name.as_bytes());
+        c.update(&[0]);
+        c.update(&sum.to_le_bytes());
+    }
+    c.finish().max(1)
 }
 
 /// Adds the files below `dir` whose name starts with `prefix` and ends with `suffix`, named from `dir` on (lowercase,
