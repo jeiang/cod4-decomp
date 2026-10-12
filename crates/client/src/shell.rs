@@ -953,16 +953,26 @@ impl Shell {
             self.st.feed.clear();
         }
         // `DrawIntermission`: at the end of a match the scoreboard (or the end-of-game menu when the scripts ask
-        // for it) is up for as long as the server holds the players there.
+        // for it) is up for as long as the server holds the players there, unless a menu the server opened is up
+        // (the unlock and summary popups `_globallogic.gsc::endGame` opens): that one is left alone. Outside
+        // an intermission the end-of-game request is forgotten.
         if self.st.live.intermission {
-            let show_end = input
-                .cvars
-                .get("ui_showEndOfGame")
-                .is_some_and(|v| v.trim() == "1");
-            let want = if show_end { "endofgame" } else { "scoreboard" };
-            if !self.ui.is_open(want) {
-                self.open(input, want);
+            if !self.ui.script_popup_up() {
+                let show_end = input
+                    .cvars
+                    .get("ui_showEndOfGame")
+                    .is_some_and(|v| v.trim() == "1");
+                let want = if show_end { "endofgame" } else { "scoreboard" };
+                if !self.ui.is_open(want) {
+                    self.open(input, want);
+                }
             }
+        } else if input
+            .cvars
+            .get("ui_showEndOfGame")
+            .is_some_and(|v| v.trim() != "0")
+        {
+            input.set_cvar("ui_showEndOfGame", "0");
         }
         self.st.live.scores_wanted = self.st.scoreboard_shown(&self.ui);
         if self.st.live.active {
