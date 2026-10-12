@@ -537,6 +537,10 @@ mod tests {
         assert!(is_command("MAP") && is_command("+attack") && is_command("rcon"));
         assert!(!is_command("frobnicate"));
         // The video commands and the screenshot ones are known, so the console answers them itself.
-        assert!(["cinematic", "logo", "screenshotJpeg"].iter().all(|c| is_command(c)));
+        assert!(
+            ["cinematic", "logo", "screenshotJpeg"]
+                .iter()
+                .all(|c| is_command(c))
+        );
     }
 }

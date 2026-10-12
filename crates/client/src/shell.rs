@@ -1683,12 +1683,11 @@ impl HostCx<'_> {
                 "vid_restart" => self.st.actions.push(Action::VidRestart),
                 // The stock videos are Bink; there is no decoder, so the player is told rather than left to a
                 // "Unknown command".
-                "cinematic" | "unskippablecinematic" | "logo" => {
-                    self.st
-                        .feed
-                        .console
-                        .push(format!("{name}: not supported (Bink video)"))
-                }
+                "cinematic" | "unskippablecinematic" | "logo" => self
+                    .st
+                    .feed
+                    .console
+                    .push(format!("{name}: not supported (Bink video)")),
                 "screenshot" | "screenshotjpeg" => {
                     let format = if name == "screenshot" {
                         crate::screenshot::Format::Tga
