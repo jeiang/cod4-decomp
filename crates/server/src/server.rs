@@ -163,7 +163,15 @@ struct Running {
     dispatch: Dispatch,
     /// `TestClient` of the engine's bot script: the team and class picks of a test client.
     test_client: u32,
+    /// Level time before which a test client only waits (see `BOT_JOIN_MS`).
+    bots_idle_until: i32,
 }
+
+/// Level time a test client waits for before it picks a team on a freshly loaded level. The stock scripts add
+/// their test clients (`_dev::addTestClients`) after `wait 5`, long after the spawn logic's first sweep of the
+/// level's spawn points (one point per frame, over a second on a large map) has given every point its player
+/// count; a bot picking a team in the first second is placed by `getSpawnpoint_NearTeam` before that.
+const BOT_JOIN_MS: i32 = 5000;
 
 /// The bot's menu choices as script (the stock `_dev` script has them behind developer mode).
 const TEST_CLIENT_GSC: &str = include_str!("testclient.gsc");
@@ -2242,6 +2250,7 @@ impl Server {
 
     /// `G_InitGame`: scripts, entities, gametype and level init.
     fn init_game(&mut self, map: &str, game_var: Option<Value>) -> Result<(), String> {
+        let restart = game_var.is_some();
         let gametype = self.game.cvars.string("g_gametype").to_ascii_lowercase();
         self.gametype.clone_from(&gametype);
         self.open_game_log();
@@ -2374,6 +2383,8 @@ impl Server {
             vm,
             dispatch,
             test_client,
+            // A restart keeps the match going: its bots join as the round starts.
+            bots_idle_until: if restart { 0 } else { BOT_JOIN_MS },
         });
         self.flush_game_output();
         Ok(())
@@ -2667,7 +2678,7 @@ impl Server {
                 &mut host,
                 run.test_client,
                 Some(obj),
-                &[Value::str("autoassign")],
+                &[Value::str("autoassign"), Value::Int(run.bots_idle_until)],
             ) {
                 Ok(_) => {}
                 Err(e) => errors.push(e),

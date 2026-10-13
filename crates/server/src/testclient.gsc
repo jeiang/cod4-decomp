@@ -1,7 +1,11 @@
-// Menu choices of a bot: pick a team, then a stock class each time it is about to spawn.
-TestClient(team)
+// Menu choices of a bot: pick a team, then a stock class each time it is about to spawn. The bot starts at level
+// time `notBefore` (the stock scripts add their test clients after `wait 5`).
+TestClient(team, notBefore)
 {
 	self endon("disconnect");
+
+	while (gettime() < notBefore)
+		wait 0.05;
 
 	while (!isdefined(self.pers["team"]))
 		wait 0.05;
