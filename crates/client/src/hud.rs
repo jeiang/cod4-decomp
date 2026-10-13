@@ -373,6 +373,13 @@ impl Stats {
     /// Notes text the HUD is about to show that is still a bare string key, for the harness.
     pub fn note_text(&mut self, text: &str) {
         if is_unresolved_key(text) && !self.unresolved.iter().any(|t| t == text) {
+            // The text came from the server: a constant key keeps a flood of them to a few events.
+            logging::dedup!(
+                WARN,
+                "unresolved-text",
+                text,
+                "hud text is a string key nothing localizes, showing it as it is"
+            );
             self.unresolved.push(text.to_owned());
         }
     }

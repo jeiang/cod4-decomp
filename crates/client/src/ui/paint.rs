@@ -96,7 +96,16 @@ pub fn pick_font(assets: &UiAssets, font_enum: i32, scale: f32, unit: f32) -> Op
             }
         }
     };
-    assets.fonts.get(name)
+    let font = assets.fonts.get(name);
+    if font.is_none() {
+        logging::dedup!(
+            WARN,
+            name,
+            font = name,
+            "font is not loaded, its text is not drawn"
+        );
+    }
+    font
 }
 
 /// `Fade`: every `cycle` ms an item that is fading out loses `out` of the alpha `f` (and goes invisible at nothing), one
@@ -416,7 +425,7 @@ impl Ui {
         match raw.strip_prefix('@') {
             Some(k) => self
                 .assets
-                .translate(k)
+                .translate_ref(k)
                 .map_or(raw.clone(), |s| s.to_string()),
             None => raw,
         }
@@ -695,7 +704,12 @@ impl Ui {
                 let text = self.item_text(&*host, m, i, d);
                 host.owner_draw(&*self, p, d, px, color, &text);
             }
-            _ => {}
+            ty => logging::dedup!(
+                DEBUG,
+                "item-type",
+                ty,
+                "item type has no painter, nothing drawn"
+            ),
         }
     }
 
@@ -987,7 +1001,7 @@ impl Ui {
                 if let Some(k) = text.strip_prefix('@') {
                     text = self
                         .assets
-                        .translate(k)
+                        .translate_ref(k)
                         .map_or(text.clone(), |s| s.to_string());
                 }
                 if *max_chars > 0 {

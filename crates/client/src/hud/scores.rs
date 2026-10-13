@@ -521,12 +521,18 @@ fn table_cell(t: &StringTable, key: u8, col: usize) -> Option<&str> {
 /// `LCT_RANK_ICON`: the icon material (`mp/rankIconTable.csv`, column `prestige + 1`) and the display level
 /// (`mp/rankTable.csv` column 14) of a rank. Upstream draws both only when the icon material exists.
 pub(super) fn rank_cell(ui: &Ui, rank: u8, prestige: u8) -> Option<(String, String)> {
-    rank_cell_in(
-        ui.assets.table("mp/rankiconTable.csv")?,
-        ui.assets.table("mp/rankTable.csv")?,
-        rank,
-        prestige,
-    )
+    let (Some(icons), Some(ranks)) = (
+        ui.assets.table("mp/rankiconTable.csv"),
+        ui.assets.table("mp/rankTable.csv"),
+    ) else {
+        logging::dedup!(
+            DEBUG,
+            "rank-tables",
+            "rank string tables are not loaded, no rank icons"
+        );
+        return None;
+    };
+    rank_cell_in(icons, ranks, rank, prestige)
 }
 
 fn rank_cell_in(

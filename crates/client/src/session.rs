@@ -13,11 +13,13 @@ pub enum LevelChange {
 }
 
 pub fn level_change(current: &str, new: &str) -> LevelChange {
-    if current.eq_ignore_ascii_case(new) {
+    let change = if current.eq_ignore_ascii_case(new) {
         LevelChange::Same
     } else {
         LevelChange::Load
-    }
+    };
+    tracing::debug!(%current, %new, ?change, "level change decided");
+    change
 }
 
 /// `sv_mapRotation` for a server that starts on `current`: the maps after it in `maps` order, wrapping around to
@@ -26,7 +28,13 @@ pub fn rotation(gametype: &str, maps: &[String], current: &str) -> String {
     let at = maps
         .iter()
         .position(|m| m.eq_ignore_ascii_case(current))
-        .map_or(0, |i| i + 1);
+        .map_or_else(
+            || {
+                tracing::debug!(map = %current, "the current map is not in the rotation's list");
+                0
+            },
+            |i| i + 1,
+        );
     let mut order: Vec<&str> = maps[at.min(maps.len())..]
         .iter()
         .chain(&maps[..at.min(maps.len())])
@@ -81,5 +89,11 @@ mod tests {
             r,
             "gametype war map mp_a gametype war map mp_b gametype war map mp_x"
         );
+    }
+
+    #[test]
+    fn an_unlisted_current_map_is_logged() {
+        let (_, events) = logging::capture(|| rotation("war", &maps(&["mp_a"]), "mp_x"));
+        assert!(events.iter().any(|e| e.field("map") == Some("mp_x")));
     }
 }

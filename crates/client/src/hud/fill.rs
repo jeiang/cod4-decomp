@@ -194,14 +194,38 @@ pub fn note_kill_icons(
         if o.weapon.is_empty() || icons.contains_key(&o.weapon) {
             continue;
         }
-        let icon = content.weapon(&o.weapon).and_then(|d| {
-            let m = d.kill_icon.as_ref()?.name.clone()?;
-            Some(KillIcon {
-                material: m.to_string(),
-                ratio: d.kill_icon_ratio,
-                flip: d.flip_kill_icon != 0,
-            })
-        });
+        let icon = match content.weapon(&o.weapon) {
+            Some(d) => {
+                let icon = d
+                    .kill_icon
+                    .as_ref()
+                    .and_then(|m| m.name.clone())
+                    .map(|m| KillIcon {
+                        material: m.to_string(),
+                        ratio: d.kill_icon_ratio,
+                        flip: d.flip_kill_icon != 0,
+                    });
+                if icon.is_none() {
+                    logging::dedup!(
+                        DEBUG,
+                        "kill-icon",
+                        weapon = o.weapon.as_str(),
+                        "weapon has no kill icon, the death icon is used"
+                    );
+                }
+                icon
+            }
+            None => {
+                // The server named the weapon: a constant key keeps a flood of names to a few events.
+                logging::dedup!(
+                    WARN,
+                    "kill-weapon",
+                    weapon = o.weapon.as_str(),
+                    "obituary weapon is not in the content, the death icon is used"
+                );
+                None
+            }
+        };
         icons.insert(o.weapon.clone(), icon.unwrap_or_default());
     }
 }

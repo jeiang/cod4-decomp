@@ -110,7 +110,7 @@ impl Ui {
         if !v.status.is_empty() {
             let text = self
                 .assets
-                .translate(v.status)
+                .translate_ref(v.status)
                 .map_or_else(|| v.status.to_owned(), |s| s.to_string());
             // The dots are drawn after the text, which is centred without them.
             let width = self.text_width(&text, 6, 0.5);

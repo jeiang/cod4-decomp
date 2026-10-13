@@ -368,6 +368,14 @@ impl ViewModel {
                         .map_or_else(Vec::new, |i| i.notes.clone()),
                     anim: a.clone(),
                 });
+            } else {
+                logging::dedup!(
+                    DEBUG,
+                    name,
+                    anim = name,
+                    slot = i,
+                    "weapon animation not loaded"
+                );
             }
         }
         if slots[slot::IDLE].is_none() {

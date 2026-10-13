@@ -69,6 +69,9 @@ pub fn target(dir: &Path, req: &Request, next: &mut u32) -> Option<PathBuf> {
         Some(n) => {
             let ok =
                 !n.is_empty() && !n.contains(['/', '\\', ':']) && !n.split('.').all(str::is_empty);
+            if !ok {
+                tracing::warn!(name = %n, "screenshot: the name cannot be a file in the screenshots folder");
+            }
             ok.then(|| dir.join(format!("{n}.{ext}")))
         }
         None => {
@@ -79,6 +82,7 @@ pub fn target(dir: &Path, req: &Request, next: &mut u32) -> Option<PathBuf> {
                 }
                 *next += 1;
             }
+            tracing::warn!(dir = %dir.display(), "screenshot: every numbered file name is taken");
             None
         }
     }
@@ -165,6 +169,18 @@ mod tests {
             let req = Request::parse(Format::Tga, &words(bad)).unwrap();
             assert_eq!(target(dir, &req, &mut n), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn a_name_that_leaves_the_folder_is_logged() {
+        let req = Request::parse(Format::Tga, &words("../x")).unwrap();
+        let (path, events) = logging::capture(|| target(Path::new("screenshots"), &req, &mut 0));
+        assert_eq!(path, None);
+        let e = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(e.field("name"), Some("../x"));
     }
 
     #[test]

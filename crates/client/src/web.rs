@@ -133,6 +133,12 @@ pub fn wire_open() -> bool {
 pub fn wire_failure() -> Option<String> {
     (net_state() == "closed").then(|| {
         let e = net_error();
+        logging::dedup!(
+            WARN,
+            "wire",
+            error = e.as_str(),
+            "the session to the server closed"
+        );
         if e.is_empty() {
             "the connection to the server closed".to_owned()
         } else {
@@ -152,7 +158,10 @@ pub fn server_addr(target: &str) -> SocketAddr {
         .rsplit(':')
         .next()
         .and_then(|p| p.trim_end_matches('/').parse().ok())
-        .unwrap_or(443);
+        .unwrap_or_else(|| {
+            tracing::debug!(addr = target, "no port in the server address; using 443");
+            443
+        });
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
@@ -215,6 +224,7 @@ pub fn save_download(path: &str, bytes: &[u8]) {
 
 /// Tells the page the client has stopped, and why.
 pub fn fatal(message: &str) {
+    tracing::error!(error = message, "the client has stopped");
     page_fatal(message);
 }
 
@@ -253,7 +263,7 @@ pub fn start() {
         page_fatal(&format!("the client crashed: {info}"));
     }));
     if let Err(e) = boot() {
-        page_fatal(&e);
+        fatal(&e);
     }
 }
 
@@ -288,7 +298,7 @@ fn boot() -> Result<(), String> {
             .await
             .and_then(|()| crate::app::run(cli));
         if let Err(e) = started {
-            page_fatal(&e);
+            fatal(&e);
         }
     });
     Ok(())

@@ -220,6 +220,8 @@ impl ShellState {
                     image: cell(4),
                 });
             }
+        } else {
+            tracing::warn!("mp/mapstable.csv not found: no stock maps to offer");
         }
         // Custom maps (`usermaps/`, a mod's own) the tables do not list are offered under their file name.
         for name in ::assets::paths::custom_maps(&install.root, &install.game) {
@@ -267,6 +269,8 @@ impl ShellState {
                     title: assets.translate(&title).map_or(title, |t| t.to_string()),
                 });
             }
+        } else {
+            tracing::warn!("mp/gametypestable.csv not found: no game modes to offer");
         }
         // The original's chooser steps through the modes in this order, not the table's.
         const MODE_ORDER: [&str; 6] = ["dm", "dom", "sd", "sab", "war", "koth"];
@@ -310,7 +314,14 @@ impl ShellState {
             servers: crate::serverlist::ServerList::for_shell(),
             status_rows: Vec::new(),
             reselect_map: None,
-            vfs: ::assets::vfs::Vfs::open(&install.root, 0, &install.game, None).ok(),
+            vfs: ::assets::vfs::Vfs::open(&install.root, 0, &install.game, None)
+                .map_err(|e| {
+                    tracing::warn!(
+                        root = %install.root.display(),
+                        "install files unavailable to the shell: {e}"
+                    )
+                })
+                .ok(),
             root: install.root.clone(),
             fs_game: install.game.clone(),
             mods: Vec::new(),
@@ -1261,6 +1272,8 @@ fn clear_new_flag(stats: &mut [i32], index: i32) -> Result<(), String> {
 fn clear_stat_bits(stats: &mut [i32], stat: i32, mask: i32) {
     if let Some(s) = usize::try_from(stat).ok().and_then(|i| stats.get_mut(i)) {
         *s &= !mask;
+    } else {
+        logging::dedup!(WARN, "statclearbitmask", stat, "stat index out of range");
     }
 }
 
@@ -1313,7 +1326,14 @@ impl HostCx<'_> {
     }
 
     fn dvar_get(&self, name: &str) -> String {
-        self.input.cvars.get(name).unwrap_or("").to_owned()
+        self.input
+            .cvars
+            .get(name)
+            .unwrap_or_else(|| {
+                logging::dedup!(DEBUG, name, dvar = name, "dvar not set, read as empty");
+                ""
+            })
+            .to_owned()
     }
 
     /// Re-reads the profile list into the menu's order and publishes the count.
@@ -1360,7 +1380,7 @@ impl HostCx<'_> {
                     return;
                 }
                 if let Err(e) = self.input.save() {
-                    eprintln!("cannot save the settings: {e}");
+                    tracing::error!("cannot save the settings: {e}");
                 }
                 if let Some(stats) = self.st.profiles.switch(&self.st.stats, &want) {
                     self.st.stats = stats;
@@ -1582,6 +1602,7 @@ impl HostCx<'_> {
             let Some(name) = cmd.first().map(|s| s.to_ascii_lowercase()) else {
                 continue;
             };
+            let _span = tracing::debug_span!("command", name = name.as_str()).entered();
             if console {
                 if let Some(value) = self.input.cvars.get(&name).map(str::to_owned) {
                     if cmd.len() > 1 {
@@ -1592,6 +1613,7 @@ impl HostCx<'_> {
                     continue;
                 }
                 if !crate::console::is_command(&name) {
+                    crate::console::note_unknown(&name);
                     self.st.log(&format!("Unknown command \"{}\"", cmd[0]));
                     continue;
                 }
@@ -1608,26 +1630,44 @@ impl HostCx<'_> {
                 }
                 "selectstringtableentryindvar" => {
                     // `<table> <column> <dvar>`: a random row's cell.
-                    if let Some(t) = ui.assets.table(a(1)) {
-                        let rows = t.row_count.max(1) as usize;
-                        let r = (self.st.started.elapsed().as_millis() as usize / 1000) % rows;
-                        let c =
-                            (atoi(a(2)) as usize).min(t.column_count.saturating_sub(1) as usize);
-                        let v = t.values[r * t.column_count as usize + c]
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_owned();
-                        self.input.cvars.set(a(3), &v, false);
-                    }
+                    let Some(t) = ui.assets.table(a(1)) else {
+                        logging::dedup!(
+                            WARN,
+                            a(1),
+                            table = a(1),
+                            "selectStringTableEntryInDvar: table not found"
+                        );
+                        continue;
+                    };
+                    let rows = t.row_count.max(1) as usize;
+                    let r = (self.st.started.elapsed().as_millis() as usize / 1000) % rows;
+                    let c = (atoi(a(2)) as usize).min(t.column_count.saturating_sub(1) as usize);
+                    let v = t.values[r * t.column_count as usize + c]
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_owned();
+                    self.input.cvars.set(a(3), &v, false);
                 }
                 "statset" => {
                     if let Some(s) = self.st.stats.get_mut(atoi(a(1)) as usize) {
                         *s = atoi(a(2));
+                    } else {
+                        logging::dedup!(WARN, "statset", stat = a(1), "stat index out of range");
                     }
                 }
                 "statgetindvar" => {
-                    let v = self.st.stats.get(atoi(a(1)) as usize).copied().unwrap_or(0);
-                    self.input.cvars.set(a(2), &v.to_string(), false);
+                    let v = self.st.stats.get(atoi(a(1)) as usize).copied();
+                    if v.is_none() {
+                        logging::dedup!(
+                            WARN,
+                            "statgetindvar",
+                            stat = a(1),
+                            "stat index out of range, read as 0"
+                        );
+                    }
+                    self.input
+                        .cvars
+                        .set(a(2), &v.unwrap_or(0).to_string(), false);
                 }
                 "statsetusingtable" => {
                     // statsetusingtable ( stat , tablelookup ( file , searchColumn , value , returnColumn ) )
@@ -1636,7 +1676,21 @@ impl HostCx<'_> {
                         let v = ui.table_lookup(flat[3], atoi(flat[4]), flat[5], atoi(flat[6]));
                         if let Some(s) = self.st.stats.get_mut(atoi(flat[1]) as usize) {
                             *s = atoi(&v);
+                        } else {
+                            logging::dedup!(
+                                WARN,
+                                "statsetusingtable",
+                                stat = flat[1].as_str(),
+                                "stat index out of range"
+                            );
                         }
+                    } else {
+                        logging::dedup!(
+                            WARN,
+                            "statsetusingtable",
+                            args = flat.len(),
+                            "statsetusingtable: too few arguments"
+                        );
                     }
                 }
                 // statClearBitMask <stat dvar> <mask dvar>: the dvars hold the stat number and the bits to clear.
@@ -1657,7 +1711,7 @@ impl HostCx<'_> {
                         .map_or("", String::as_str);
                     let index = atoi(&ui.table_lookup("mp/statstable.csv", 4, name, 1));
                     if let Err(e) = clear_new_flag(&mut self.st.stats, index) {
-                        eprintln!("statClearPerkNew {name}: {e}");
+                        tracing::warn!(perk = name, "statClearPerkNew: {e}");
                     }
                 }
                 // The rest of the buffer waits for later frames (`Cmd_Wait_f`).
@@ -1704,8 +1758,9 @@ impl HostCx<'_> {
                     } else {
                         crate::screenshot::Format::Jpeg
                     };
-                    if let Some(r) = crate::screenshot::Request::parse(format, &cmd[1..]) {
-                        self.st.actions.push(Action::Screenshot(r));
+                    match crate::screenshot::Request::parse(format, &cmd[1..]) {
+                        Some(r) => self.st.actions.push(Action::Screenshot(r)),
+                        None => tracing::warn!(command = name.as_str(), "bad screenshot arguments"),
                     }
                 }
                 "quit" => self.st.actions.push(Action::Quit),
@@ -1924,6 +1979,7 @@ impl Host for HostCx<'_> {
     }
 
     fn ui_script(&mut self, ui: &mut Ui, name: &str, args: &[String]) -> bool {
+        let _span = tracing::debug_span!("menu_action", name).entered();
         let a = |i: usize| args.get(i).map_or("", String::as_str);
         match name.to_ascii_lowercase().as_str() {
             "openmenuondvar" | "openmenuondvarnot" | "closemenuondvar" | "closemenuondvarnot" => {
@@ -1951,12 +2007,16 @@ impl Host for HostCx<'_> {
                 true
             }
             "startserver" => {
-                let map = self
-                    .st
-                    .maps
-                    .get(self.st.map_sel)
-                    .map(|m| m.name.clone())
-                    .unwrap_or_else(|| "mp_crash".into());
+                let map = match self.st.maps.get(self.st.map_sel) {
+                    Some(m) => m.name.clone(),
+                    None => {
+                        tracing::warn!(
+                            sel = self.st.map_sel,
+                            "startserver: no map selected, using mp_crash"
+                        );
+                        "mp_crash".into()
+                    }
+                };
                 let gametype = self
                     .st
                     .gametypes
@@ -2013,8 +2073,9 @@ impl Host for HostCx<'_> {
             "createfavorite" => {
                 // The popup's typed address; the stock script adds it only while the favorites list is showing.
                 let typed = self.dvar_get("ui_favoriteAddress");
-                if let Ok(addr) = crate::serverlist::resolve(&typed) {
-                    self.st.servers.add_favorite(addr);
+                match crate::serverlist::resolve(&typed) {
+                    Ok(addr) => self.st.servers.add_favorite(addr),
+                    Err(e) => tracing::warn!(address = typed, "createfavorite: bad address: {e}"),
                 }
                 true
             }
@@ -2061,6 +2122,8 @@ impl Host for HostCx<'_> {
                     if ::assets::paths::valid_game(&game) {
                         self.input.cvars.set("fs_game", &game, false);
                         self.st.actions.push(Action::VidRestart);
+                    } else {
+                        tracing::warn!(game, "runmod: not a valid mod folder name");
                     }
                 }
                 true
@@ -2155,7 +2218,15 @@ impl Host for HostCx<'_> {
             }
             24 => self.st.profile_names.len(),
             7 | 20 => self.players().len(),
-            _ => 0,
+            _ => {
+                logging::dedup!(
+                    DEBUG,
+                    &feeder.to_string(),
+                    feeder,
+                    "unknown list feeder, no rows"
+                );
+                0
+            }
         }
     }
 
@@ -2201,7 +2272,16 @@ impl Host for HostCx<'_> {
                 .get(row)
                 .map(|&i| self.st.maps[i].title.clone())
                 .unwrap_or_default(),
-            _ => String::new(),
+            _ => {
+                logging::dedup!(
+                    DEBUG,
+                    &feeder.to_string(),
+                    feeder,
+                    col,
+                    "no text for this list feeder"
+                );
+                String::new()
+            }
         }
     }
 

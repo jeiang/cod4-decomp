@@ -91,7 +91,10 @@ pub fn begin(install: &Path, cfg: Config) -> Result<Booting, String> {
     let thread = std::thread::Builder::new()
         .name("listen-server".into())
         .spawn(move || run(&install, &cfg, &stop2, &tx))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "cannot start the listen server's thread");
+            e.to_string()
+        })?;
     Ok(Booting {
         rx,
         stop,
@@ -102,10 +105,10 @@ pub fn begin(install: &Path, cfg: Config) -> Result<Booting, String> {
 impl Booting {
     /// Blocks until the server listens.
     pub fn wait(mut self) -> Result<Listen, String> {
-        let addr = self
-            .rx
-            .recv()
-            .map_err(|_| "the listen server died while starting".to_string())??;
+        let addr = self.rx.recv().map_err(|_| {
+            tracing::error!("the listen server died while starting");
+            "the listen server died while starting".to_string()
+        })??;
         Ok(Listen {
             addr,
             stop: self.stop.clone(),
@@ -129,7 +132,11 @@ impl Listen {
         self.stop.store(true, Ordering::Relaxed);
         self.thread
             .take()
-            .and_then(|t| t.join().ok())
+            .and_then(|t| {
+                t.join()
+                    .inspect_err(|_| tracing::error!("the listen server's thread panicked"))
+                    .ok()
+            })
             .unwrap_or(Value::Null)
     }
 }
@@ -195,7 +202,10 @@ fn run(
     let (mut server, addr) = match started() {
         Ok(v) => v,
         Err(e) => {
-            let _ = tx.send(Err(e));
+            tracing::error!(map = %cfg.map, error = %e, "the listen server cannot start");
+            if tx.send(Err(e)).is_err() {
+                tracing::debug!("nobody waits for the listen server's boot");
+            }
             return Value::Null;
         }
     };
@@ -204,7 +214,10 @@ fn run(
         let ticks = ticks.clone();
         server.on_tick = Some(Box::new(move |t| ticks.borrow_mut().push(*t)));
     }
-    let _ = tx.send(Ok(addr));
+    tracing::info!(map = %cfg.map, %addr, "the listen server is up");
+    if tx.send(Ok(addr)).is_err() {
+        tracing::debug!("nobody waits for the listen server's boot");
+    }
     // The first person's counters, kept while they are connected (the slot is freed when they leave).
     let mut person = json!(null);
     let mut reported_errors = 0;
@@ -214,12 +227,16 @@ fn run(
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default();
         for line in lines {
-            let _ = server.exec_line(&line);
+            if let Err(e) = server.exec_line(&line) {
+                // The verb only: a console line may carry a password.
+                let verb = line.split_whitespace().next().unwrap_or("");
+                tracing::warn!(%verb, error = %e, "the listen server's console refused a line");
+            }
         }
         server.run_for(Duration::from_millis(100));
         // A script error ends a thread chain silently for the player; the client log is where it shows.
         for (map, text) in server.all_script_errors.iter().skip(reported_errors) {
-            eprintln!("[{map}] {text}");
+            tracing::warn!(%map, error = %text, "script error on the listen server");
         }
         reported_errors = server.all_script_errors.len();
         if let Ok(mut o) = OBJECTIVES.lock() {

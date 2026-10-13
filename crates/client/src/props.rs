@@ -302,6 +302,7 @@ impl Props {
         let mut props = Vec::new();
         for d in defs.iter().flat_map(|l| l.iter()) {
             let Some(model) = d.model.clone() else {
+                logging::dedup!(WARN, "dynent", "dynamic entity without a model skipped");
                 continue;
             };
             let (mins, maxs) = (Vec3::from(model.mins), Vec3::from(model.maxs));

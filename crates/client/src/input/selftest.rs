@@ -5,8 +5,14 @@
 
 use super::{Feedback, Input, RawMouse, buttons};
 
+/// One result line on stdout: the harness reads it.
+#[allow(clippy::print_stdout)]
+fn report(line: &str) {
+    println!("{line}");
+}
+
 fn check(out: &mut Vec<String>, name: &str, ok: bool) {
-    println!("{} {name}", if ok { "pass" } else { "FAIL" });
+    report(&format!("{} {name}", if ok { "pass" } else { "FAIL" }));
     if !ok {
         out.push(name.to_owned());
     }
@@ -226,9 +232,9 @@ pub fn run() -> Vec<String> {
     );
     let _ = std::fs::remove_dir_all(&dir);
 
-    println!(
+    report(&format!(
         "raw mouse source: {} (informational)",
         super::rawmouse::RawMouse::new().source()
-    );
+    ));
     bad
 }

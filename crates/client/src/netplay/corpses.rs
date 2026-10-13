@@ -44,7 +44,7 @@ impl NetPlay {
         let mut player = match self.lib.player(&set) {
             Ok(p) => p,
             Err(f) => {
-                self.c.player_faults.insert(f);
+                super::player_fault(&mut self.c.player_faults, e.client, f);
                 return None;
             }
         };

@@ -327,6 +327,10 @@ impl Input {
         i.clock = None;
         i.pad = pad::Pad::new();
         i.config_dir = config_dir.or_else(config::default_dir);
+        #[cfg(not(target_arch = "wasm32"))]
+        if i.config_dir.is_none() {
+            tracing::warn!("no config folder found: settings and profiles will not be saved");
+        }
         i.dirty = false;
         // The window takes the pointer on the first click; until then the cursor is free.
         i.captured = false;
@@ -413,10 +417,7 @@ impl Input {
     /// Tell the input whether the cursor is grabbed. Mouse look only applies while it is.
     pub fn set_captured(&mut self, captured: bool) {
         if self.debug.is_some() && captured != self.captured {
-            eprintln!(
-                "input: pointer lock {}",
-                if captured { "taken" } else { "released" }
-            );
+            tracing::info!(captured, "input: pointer lock");
         }
         self.captured = captured;
     }
@@ -458,7 +459,7 @@ impl Input {
             }
             WindowEvent::Focused(f) => {
                 if self.debug.is_some() {
-                    eprintln!("input: window {}", if *f { "focused" } else { "unfocused" });
+                    tracing::info!(focused = *f, "input: window focus");
                 }
                 self.focused = *f;
                 if !*f {
@@ -692,7 +693,9 @@ impl Input {
             match read_config(&p) {
                 Ok(text) => self.exec_text(&text, p.parent(), false, 0),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => eprintln!("cannot read {}: {e}", p.display()),
+                Err(e) => {
+                    tracing::warn!(path = %p.display(), "cannot read the profile config: {e}")
+                }
             }
         }
         self.config_path = save;
@@ -819,6 +822,7 @@ impl Input {
                     let exec = name == "exec";
                     expansions += 1;
                     if (exec && depth >= MAX_EXEC_DEPTH) || expansions > MAX_EXPANSIONS {
+                        tracing::warn!(command = name.as_str(), depth, "too many nested commands");
                         self.say(format!("{name}: too many nested commands"));
                         if exec {
                             continue;
@@ -943,6 +947,7 @@ impl Input {
         }
         let file = config::exec_name(name);
         if name.split(['/', '\\']).any(|p| p == "..") {
+            tracing::warn!(name, "couldn't exec: path escapes the config folder");
             self.say(format!("couldn't exec {name}"));
             return None;
         }
@@ -954,8 +959,8 @@ impl Input {
                 }
                 Some((t, path.parent().map(Path::to_path_buf)))
             }
-            Err(_) => {
-                eprintln!("couldn't exec {name}");
+            Err(e) => {
+                tracing::warn!(name, path = %path.display(), "couldn't exec: {e}");
                 self.say(format!("couldn't exec {name}"));
                 None
             }
@@ -1050,7 +1055,8 @@ impl Input {
             ("dvardump", []) => self.dvar_dump(None),
             ("dvardump", [m]) => self.dvar_dump(Some(m)),
             ("bind" | "unbind" | "unbindall" | "set" | "seta" | "sets" | "setu", _) => {
-                eprintln!("bad arguments: {}", config::join(toks));
+                // Verb only: a `set` line may carry a password.
+                tracing::warn!(command = name.as_str(), args = args.len(), "bad arguments");
             }
             // The stance commands set (goprone, gocrouch) or step (the rest) the latched stance, as the original's.
             ("goprone", []) if sink => self.set_stance(buttons::PRONE),
@@ -1067,7 +1073,14 @@ impl Input {
             ("-actionslot", _) => {}
             _ if name.starts_with('+') && sink => self.console_hold(&name[1..], true),
             _ if name.starts_with('-') && sink => self.console_hold(&name[1..], false),
-            _ if sink => self.pending.push(config::join(toks)),
+            _ if sink => {
+                // The last stop of a bind or a menu's command that nothing here runs: the consumers of the pending
+                // list know only the commands `console::is_command` lists.
+                if !crate::console::is_command(&name) {
+                    crate::console::note_unknown(&name);
+                }
+                self.pending.push(config::join(toks))
+            }
             _ => {}
         }
     }
@@ -1324,7 +1337,7 @@ impl Input {
         if el >= 1.0 {
             let (t, b) = (self.mouse.totals(), d.base);
             let per = |n: u64| n as f64 / el;
-            eprintln!(
+            tracing::info!(
                 "input: src={} gc/s={:.0} winit/s={:.0} used/s={:.0} sum=({:+.1},{:+.1}) look={} \
                  focused={} pointer_lock={} frames={} mice={} {}",
                 self.mouse.source(),
@@ -2217,6 +2230,34 @@ mod tests {
         i.take_messages();
         i.exec_line("exec no_such_config_anywhere");
         assert!(!i.take_messages().is_empty(), "a failed exec is not silent");
+    }
+
+    #[test]
+    fn failed_exec_and_bad_arguments_warn_without_the_arguments() {
+        let mut i = Input::detached();
+        let (_, events) = logging::capture(|| {
+            i.exec_line("exec no_such_config_anywhere");
+            i.exec_line("set onlyname");
+        });
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN
+            && e.field("name") == Some("no_such_config_anywhere")));
+        assert!(events.iter().any(|e| e.field("command") == Some("set")));
+    }
+
+    #[test]
+    fn an_unknown_bound_or_menu_command_warns_by_name() {
+        let mut i = Input::detached();
+        let (_, events) = logging::capture(|| {
+            i.exec_line("no_such_bound_cmd_x with args");
+            i.exec_line("weapnext");
+        });
+        let w: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0].field("command"), Some("no_such_bound_cmd_x"));
+        assert!(!format!("{w:?}").contains("with args"));
     }
 
     #[test]

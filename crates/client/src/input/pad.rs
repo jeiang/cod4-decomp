@@ -40,7 +40,7 @@ impl Pad {
         let mut p = Self::none();
         match Gilrs::new() {
             Ok(g) => p.gilrs = Some(g),
-            Err(e) => eprintln!("gamepad support unavailable: {e}"),
+            Err(e) => tracing::warn!("gamepad support unavailable: {e}"),
         }
         p
     }

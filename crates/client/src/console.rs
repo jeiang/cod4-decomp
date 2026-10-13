@@ -349,6 +349,12 @@ pub fn is_command(name: &str) -> bool {
     n.starts_with(['+', '-']) || is_server_verb(&n) || OWN_COMMANDS.contains(&n.as_str())
 }
 
+/// An unknown word typed at the console: a warning keyed by the command name (never its arguments, which may be a
+/// password).
+pub fn note_unknown(name: &str) {
+    logging::dedup!(WARN, name, command = name, "unknown command");
+}
+
 /// Whether `name` is a command the app answers itself in `console_action` (not the server's, not the input layer's).
 pub fn is_own_verb(name: &str) -> bool {
     const OWN: &[&str] = &["rcon", "record", "stoprecord", "name", "bots"];
@@ -403,6 +409,14 @@ mod tests {
         for ch in s.chars() {
             c.key(UiKey::Char(ch), |_| Vec::new());
         }
+    }
+
+    #[test]
+    fn an_unknown_command_warns_by_name() {
+        let (_, events) = logging::capture(|| note_unknown("no_such_cmd_x"));
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert!(e.level == tracing::Level::WARN && e.field("command") == Some("no_such_cmd_x"));
     }
 
     fn enter(c: &mut Console) -> Option<Entered> {

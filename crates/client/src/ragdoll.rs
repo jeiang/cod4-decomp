@@ -193,11 +193,10 @@ impl Def {
             let a: Vec<&str> = line.split_whitespace().collect();
             match a.as_slice() {
                 ["ragdoll_clear", DEFINITION] => d = Def::default(),
-                ["ragdoll_bone", DEFINITION, cols @ ..] => {
-                    if let Some(b) = d.bone(cols) {
-                        d.bones.push(b);
-                    }
-                }
+                ["ragdoll_bone", DEFINITION, cols @ ..] => match d.bone(cols) {
+                    Some(b) => d.bones.push(b),
+                    None => tracing::debug!(bones = d.bones.len(), "ragdoll_bone line skipped"),
+                },
                 ["ragdoll_joint", DEFINITION, bone, kind, ..] => {
                     let hinge = match *kind {
                         "hinge" => true,

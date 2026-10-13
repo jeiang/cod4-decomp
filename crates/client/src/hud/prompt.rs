@@ -21,7 +21,17 @@ pub struct LiveVote {
 impl LiveVote {
     /// `time` is `<end ms> <server id>`, empty when no vote runs.
     pub fn parse(time: &str, text: &str, yes: &str, no: &str) -> Option<Self> {
-        let end_ms = time.split_whitespace().next()?.parse().ok()?;
+        let word = time.split_whitespace().next()?;
+        let Ok(end_ms) = word.parse::<i32>() else {
+            // The server sent it: a constant key keeps a flood of them to a few events.
+            logging::dedup!(
+                WARN,
+                "vote-time",
+                time,
+                "vote end time is not a number, no vote shown"
+            );
+            return None;
+        };
         let count = |s: &str| s.trim().parse().unwrap_or(0);
         Some(Self {
             end_ms,
@@ -142,5 +152,12 @@ mod tests {
         assert_eq!(v.seconds_left(40_500), 4);
         assert_eq!(v.seconds_left(50_000), 0, "never negative");
         assert_eq!(LiveVote::parse("", "Kick Bo", "2", "1"), None);
+    }
+
+    #[test]
+    fn a_vote_time_that_is_not_a_number_warns() {
+        let (v, events) = logging::capture(|| LiveVote::parse("soon 3", "Kick Bo", "2", "1"));
+        assert_eq!(v, None);
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
     }
 }

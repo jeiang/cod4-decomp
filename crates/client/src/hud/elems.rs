@@ -24,7 +24,16 @@ fn font_of(e: &HudElem) -> (i32, f32) {
         3 => (6, 0.25),
         4 => (2, 0.25),
         5 => (3, 0.25),
-        _ => (0, 0.25),
+        0 => (0, 0.25),
+        font => {
+            logging::dedup!(
+                WARN,
+                "hud-font",
+                font,
+                "hud element names an unknown font number, using the default"
+            );
+            (0, 0.25)
+        }
     };
     (enum_, base * e.font_scale)
 }

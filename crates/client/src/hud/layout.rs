@@ -54,10 +54,17 @@ const WINDOW_NAMES: [&str; 4] = [
 ];
 
 fn number(cvars: &Cvars, name: &str) -> Option<f32> {
-    cvars
-        .get(name)
-        .and_then(|v| v.trim().parse::<f32>().ok())
-        .filter(|v| v.is_finite())
+    let v = cvars.get(name)?;
+    let n = v.trim().parse::<f32>().ok().filter(|v| v.is_finite());
+    if n.is_none() {
+        logging::dedup!(
+            WARN,
+            name,
+            cvar = name,
+            "hud dvar is not a number, using its default"
+        );
+    }
+    n
 }
 
 /// A float dvar clamped to `min..=max`.
@@ -79,6 +86,14 @@ fn vec2(cvars: &Cvars, name: &str, default: [f32; 2], min: f32, max: f32) -> [f3
         let (x, y) = (it.next()?.ok()?, it.next()?.ok()?);
         (x.is_finite() && y.is_finite()).then_some([x, y])
     });
+    if parsed.is_none() && cvars.get(name).is_some() {
+        logging::dedup!(
+            WARN,
+            name,
+            cvar = name,
+            "hud dvar is not two numbers, using its default"
+        );
+    }
     parsed.unwrap_or(default).map(|v| v.clamp(min, max))
 }
 

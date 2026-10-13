@@ -310,17 +310,30 @@ impl Effects {
     /// The effect a table or a weapon points at. Tables in one zone name effects of another by a placeholder (the
     /// name with a comma in front and nothing in it); the effect itself is in the library under the plain name.
     fn resolve(&self, d: &Arc<FxEffectDef>) -> Arc<FxEffectDef> {
-        d.name
-            .as_deref()
-            .and_then(|n| n.strip_prefix(','))
-            .and_then(|n| self.fx.library().get(n))
-            .unwrap_or(d)
+        let Some(plain) = d.name.as_deref().and_then(|n| n.strip_prefix(',')) else {
+            return d.clone();
+        };
+        self.fx
+            .library()
+            .get(plain)
+            .unwrap_or_else(|| {
+                logging::dedup!(
+                    WARN,
+                    plain,
+                    effect = plain,
+                    "effect placeholder has no definition"
+                );
+                d
+            })
             .clone()
     }
 
     fn play(&mut self, kind: &'static str, def: Option<Arc<FxEffectDef>>, at: Vec3, dir: Vec3) {
         if let Some(d) = def {
             let d = self.resolve(&d);
+            let _span =
+                tracing::debug_span!("fx_spawn", kind, effect = d.name.as_deref().unwrap_or(""))
+                    .entered();
             self.fx.play(&d, Frame::facing(at, dir));
             *self.played.entry(kind).or_default() += 1;
         }
@@ -329,6 +342,9 @@ impl Effects {
     /// Plays `def` oriented by `frame` (a broken prop's destroy effect).
     pub fn play_frame(&mut self, kind: &'static str, def: &Arc<FxEffectDef>, frame: Frame) {
         let d = self.resolve(def);
+        let _span =
+            tracing::debug_span!("fx_spawn", kind, effect = d.name.as_deref().unwrap_or(""))
+                .entered();
         self.fx.play(&d, frame);
         *self.played.entry(kind).or_default() += 1;
     }
@@ -437,6 +453,16 @@ impl Effects {
                     *self.played.entry("play_fx").or_default() += 1;
                 }
                 None => {
+                    if name.is_empty() {
+                        logging::dedup!(DEBUG, "unnamed", "play_fx event without an effect name");
+                    } else {
+                        logging::dedup!(
+                            WARN,
+                            "effect-missing",
+                            effect = name.as_str(),
+                            "effect not in the library"
+                        );
+                    }
                     self.missing.insert(name.clone());
                 }
             },
@@ -461,7 +487,15 @@ impl Effects {
                 vehicle,
                 last_shot,
             } => {
-                let Some(d) = weapon(*w) else { return };
+                let Some(d) = weapon(*w) else {
+                    logging::dedup!(
+                        WARN,
+                        "weapon_fire",
+                        weapon = *w,
+                        "fire event for a weapon with no data"
+                    );
+                    return;
+                };
                 let mine = *shooter == self.own && !vehicle;
                 let (flash, eject) = if mine {
                     (&d.view_flash_effect, &d.view_shell_eject_effect)
@@ -541,7 +575,15 @@ impl Effects {
                 }
             }
             ClientEvent::EjectBrass { weapon: w, shooter } => {
-                let Some(d) = weapon(*w) else { return };
+                let Some(d) = weapon(*w) else {
+                    logging::dedup!(
+                        WARN,
+                        "eject_brass",
+                        weapon = *w,
+                        "brass event for a weapon with no data"
+                    );
+                    return;
+                };
                 let def = if *shooter == self.own {
                     &d.view_shell_eject_effect
                 } else {
@@ -620,6 +662,9 @@ impl Effects {
         follow: bool,
     ) {
         let d = self.resolve(def);
+        let _span =
+            tracing::debug_span!("fx_spawn", kind, effect = d.name.as_deref().unwrap_or(""))
+                .entered();
         *self.played.entry(kind).or_default() += 1;
         if !follow {
             self.fx.play(&d, at);
@@ -749,10 +794,24 @@ impl Effects {
 
     /// The definition of effect `index`, noting the name when the content lacks it.
     fn world_fx_def(&mut self, names: &Events, index: u16) -> Option<Arc<FxEffectDef>> {
-        let name = names.fx_name(usize::from(index))?;
+        let Some(name) = names.fx_name(usize::from(index)) else {
+            logging::dedup!(
+                DEBUG,
+                "unannounced",
+                fx_index = index,
+                "script effect name not announced"
+            );
+            return None;
+        };
         match self.fx.library().get(name).cloned() {
             Some(d) => Some(self.resolve(&d)),
             None => {
+                logging::dedup!(
+                    WARN,
+                    "script-effect-missing",
+                    effect = name,
+                    "script effect not in the library"
+                );
                 if !self.missing.contains(name) {
                     self.missing.insert(name.to_owned());
                 }

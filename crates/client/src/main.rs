@@ -2,8 +2,7 @@
 //! `cod4e`, the player-facing client. For now: a fly camera over a map, and the scripted flythrough the harness
 //! drives as stage 3 (`--flythrough`), which records frame times, a video and a screenshot.
 
-// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
-#![allow(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 
 /// Held by every test that creates a GPU device, so no two devices start or stop at once in the test process.
 #[cfg(test)]
@@ -353,7 +352,17 @@ fn main() {
     web::start();
 }
 
+/// Keeps a selftest's JSON result in `dir` for the harness; a failure is logged, the result is on stdout too.
 #[cfg(not(target_arch = "wasm32"))]
+fn write_report(dir: &std::path::Path, name: &str, json: &str) {
+    if let Err(e) = std::fs::create_dir_all(dir).and_then(|()| std::fs::write(dir.join(name), json))
+    {
+        tracing::error!(dir = %dir.display(), file = name, error = %e, "cannot write the selftest report");
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::print_stdout, clippy::print_stderr)] // usage, selftest results and fatal start-up errors are the program's output
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut cli = match parse(&args) {
@@ -422,8 +431,7 @@ fn main() -> ExitCode {
             Ok(m) => {
                 let json = serde_json::to_string_pretty(&m).unwrap_or_default();
                 if let Some(out) = &cli.out {
-                    let _ = std::fs::create_dir_all(out);
-                    let _ = std::fs::write(out.join("audio.json"), &json);
+                    write_report(out, "audio.json", &json);
                 }
                 println!("{json}");
                 ExitCode::SUCCESS
@@ -439,8 +447,7 @@ fn main() -> ExitCode {
             Ok((m, bad)) => {
                 let json = serde_json::to_string_pretty(&m).unwrap_or_default();
                 if let Some(out) = &cli.out {
-                    let _ = std::fs::create_dir_all(out);
-                    let _ = std::fs::write(out.join("viewmodel.json"), &json);
+                    write_report(out, "viewmodel.json", &json);
                 }
                 println!("{json}");
                 if bad.is_empty() {
@@ -461,8 +468,7 @@ fn main() -> ExitCode {
             Ok(m) => {
                 let json = serde_json::to_string_pretty(&m).unwrap_or_default();
                 if let Some(out) = &cli.out {
-                    let _ = std::fs::create_dir_all(out);
-                    let _ = std::fs::write(out.join("fx.json"), &json);
+                    write_report(out, "fx.json", &json);
                 }
                 println!("{json}");
                 ExitCode::SUCCESS

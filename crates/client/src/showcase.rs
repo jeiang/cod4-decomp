@@ -198,13 +198,14 @@ impl Showcase {
         lit: &dyn Fn(Vec3) -> bool,
     ) -> Result<Showcase, String> {
         let reach = 190.0 + 40.0 * (count.div_ceil(7).saturating_sub(1)) as f32;
-        let (eye, yaw, pitch) = find_camera(world, tour, reach, lit)
-            .ok_or("no clear spot for the stage on the flythrough path")?;
-        let def = lib
-            .content
-            .weapon(weapon)
-            .cloned()
-            .ok_or_else(|| format!("weapon {weapon} not loaded"))?;
+        let (eye, yaw, pitch) = find_camera(world, tour, reach, lit).ok_or_else(|| {
+            tracing::error!(count, "no clear spot for the stage on the flythrough path");
+            "no clear spot for the stage on the flythrough path"
+        })?;
+        let def = lib.content.weapon(weapon).cloned().ok_or_else(|| {
+            tracing::error!(%weapon, "the showcase weapon is not loaded");
+            format!("weapon {weapon} not loaded")
+        })?;
         let held = def
             .world_models
             .first()
@@ -222,6 +223,9 @@ impl Showcase {
             .map(armed)
             .ok_or("no allied player models in the loaded zones")?;
         let axis = lib.team_models(Team::Axis).map(armed);
+        if axis.is_none() {
+            tracing::warn!("no axis player models in the loaded zones; the allied ones stand in");
+        }
         let poses = poses();
         let (fx, fy) = (yaw.cos(), yaw.sin());
         let ground_z = eye.z - 60.0;

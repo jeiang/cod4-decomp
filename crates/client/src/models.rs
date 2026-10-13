@@ -199,6 +199,7 @@ pub struct Library {
 impl Library {
     /// Decodes `common_mp`, the mod `game`'s `mod.ff` (`fs_game`; empty for none) and `map` of the install at `root`.
     pub fn load(root: &Path, game: &str, map: &str) -> Result<Library, String> {
+        let _span = tracing::debug_span!("library_load", map, game).entered();
         let mut install =
             Install::open_game(root, game).map_err(|e| format!("cannot open the install: {e}"))?;
         install.mount_usermap(map).map_err(|e| e.to_string())?;
@@ -210,7 +211,14 @@ impl Library {
         content.load_map(&install, map)?;
         let ragdoll = match install.vfs.read("ragdoll.cfg") {
             Ok(Some(bytes)) => Def::parse(&String::from_utf8_lossy(&bytes)),
-            _ => Def::default(),
+            Ok(None) => {
+                tracing::debug!("no ragdoll.cfg in the install; bodies keep their death pose");
+                Def::default()
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "ragdoll.cfg unreadable; bodies keep their death pose");
+                Def::default()
+            }
         };
         let pure_digest = assets::vfs::pure_digest(&install.vfs.pure_iwds(&install.root));
         Ok(Library {
@@ -233,12 +241,26 @@ impl Library {
     /// The models of a player the scripts dressed: the body they chose (`setmodel`) with what they attached, the head
     /// among it. Attachments the loaded zones lack are left out. `None` when the body is not in the loaded zones.
     pub fn scripted_models(&self, body: &str, attached: &[Attachment]) -> Option<PlayerModelSet> {
-        self.content.model(body)?;
+        if self.content.model(body).is_none() {
+            logging::dedup!(DEBUG, body, model = body, "scripted body model not loaded");
+            return None;
+        }
         Some(PlayerModelSet {
             body: body.to_owned(),
             attach: attached
                 .iter()
-                .filter(|(m, _)| self.content.model(m).is_some())
+                .filter(|(m, _)| {
+                    let loaded = self.content.model(m).is_some();
+                    if !loaded {
+                        logging::dedup!(
+                            WARN,
+                            m,
+                            model = m.as_str(),
+                            "attached model not loaded; left out"
+                        );
+                    }
+                    loaded
+                })
                 .cloned()
                 .collect(),
             hand: Vec::new(),
@@ -602,6 +624,12 @@ impl Player {
         let rig = self.anims.rig();
         for h in &self.hand {
             let Some(tag) = rig.bone_index(&h.tag).and_then(|i| bones.get(i)) else {
+                logging::dedup!(
+                    WARN,
+                    &h.tag,
+                    tag = h.tag.as_str(),
+                    "held model's tag bone missing"
+                );
                 continue;
             };
             let mut m = ModelInstance::new(h.model.clone(), ModelKind::World);
@@ -619,6 +647,25 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scripted_body_missing_from_the_zones_is_noted_and_not_drawn() {
+        let lib = Library {
+            content: Content::for_client(),
+            ragdoll: Def::default(),
+            pure_digest: 0,
+            anims: HashMap::new(),
+            rests: HashMap::new(),
+            teams: Default::default(),
+        };
+        let (got, events) = logging::capture(|| lib.scripted_models("body_not_in_any_zone", &[]));
+        assert!(got.is_none());
+        let e = events
+            .iter()
+            .find(|e| e.field("model") == Some("body_not_in_any_zone"))
+            .expect("a log line naming the model");
+        assert!(e.level <= tracing::Level::DEBUG);
+    }
 
     /// A player holding a weapon draws its world model, in the hands: the gun is the third instance and its first
     /// bone sits at hand height beside the body, not at the feet.
@@ -951,7 +998,7 @@ mod tests {
                 fov_x: 1.5,
                 time: 0.0,
             };
-            let mut frame = |r: &mut render::Renderer, models: Vec<render::ModelInstance>| {
+            let frame = |r: &mut render::Renderer, models: Vec<render::ModelInstance>| {
                 for _ in 0..30 {
                     r.dynamic_models = models.clone();
                     let st = r.render(&view, &tv, fmt, (w, h));
