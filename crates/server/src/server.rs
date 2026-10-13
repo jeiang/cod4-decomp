@@ -237,6 +237,7 @@ fn register_core_dvars(c: &mut Cvars) {
     for (n, d, f) in [
         ("dedicated", "2", LATCH),
         ("developer", "0", 0),
+        ("log_filter", "", 0),
         ("developer_script", "0", 0),
         // The stock server runs 20; this one deliberately keeps 30 (README: the game runs at 30 Hz).
         ("sv_fps", "30", 0),

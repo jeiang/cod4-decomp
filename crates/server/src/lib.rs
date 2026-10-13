@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Authoritative match simulation; no GPU, window, or audio dependencies.
 
+// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
+
 pub mod activate;
 pub mod anim;
 pub mod archive;

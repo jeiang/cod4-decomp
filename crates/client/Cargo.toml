@@ -11,6 +11,8 @@ name = "cod4e"
 path = "src/main.rs"
 
 [dependencies]
+logging = { path = "../logging" }
+tracing = "0.1.44"
 assets = { path = "../assets" }
 sim = { path = "../sim" }
 net = { path = "../net" }

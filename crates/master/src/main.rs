@@ -2,6 +2,9 @@
 //! `cod4e-master [--port N] [--bind addr]`: the master server public cod4e servers announce themselves to and
 //! clients ask for the Internet list. It needs no game files.
 
+// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
+
 use master::Master;
 use net::master::MASTER_PORT;
 use net::oob::Oob;
@@ -11,6 +14,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 fn main() -> ExitCode {
+    let _log = logging::init(logging::Config::new("master"));
     let mut bind = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
     let mut port = MASTER_PORT;
     let mut args = std::env::args().skip(1);

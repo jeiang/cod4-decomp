@@ -557,6 +557,8 @@ impl Shell {
         let mut assets = UiAssets::load(install)?;
         assets.note_menu_materials();
         let mut st = ShellState::new(&assets, install);
+        // Warnings and errors reach the console as the stock engine's `Com_PrintWarning`/`Com_Error` text does.
+        logging::forward_to_console();
         st.servers.load_favorites(input.config_dir());
         register_defaults(input);
         let vfs = ::assets::vfs::Vfs::open(&install.root, 0, &install.game, None)
@@ -939,6 +941,14 @@ impl Shell {
 
     /// Runs the buffers whose `wait` has run out, once a frame.
     pub fn run_due(&mut self, input: &mut Input) {
+        for (level, line) in logging::drain_console() {
+            let (colour, word) = if level == tracing::Level::ERROR {
+                ("^1", "ERROR")
+            } else {
+                ("^3", "WARNING")
+            };
+            self.st.log(&format!("{colour}{word}: {line}"));
+        }
         if let Some(cmds) = input.take_due() {
             Self::host(&mut self.st, input).run_buffer(&self.ui, cmds);
         }

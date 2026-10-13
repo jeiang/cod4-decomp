@@ -8,6 +8,9 @@ use std::collections::HashMap;
 
 /// `(name, default, archived)`. Every cvar the input layer reads has an entry so a read never misses.
 const DEFAULTS: &[(&str, &str, bool)] = &[
+    // The log level (stock `developer`: 1 is `debug`, 2 is `trace`) and a filter in `RUST_LOG` syntax; see `logging`.
+    ("developer", "0", false),
+    ("log_filter", "", false),
     ("sensitivity", "5", true),
     ("m_pitch", "0.022", true),
     ("m_yaw", "0.022", true),
@@ -101,6 +104,13 @@ impl Cvars {
             });
         value.clone_into(&mut c.value);
         c.archive |= archive;
+        if name.eq_ignore_ascii_case("developer") {
+            logging::set_developer(value.trim().parse().unwrap_or(0));
+        } else if name.eq_ignore_ascii_case("log_filter")
+            && let Err(e) = logging::set_filter(value)
+        {
+            tracing::warn!(filter = value, "log_filter does not parse: {e}");
+        }
     }
 
     /// `(name, value, archived)` of every cvar whose name matches the glob `filter` (`*` and `?`, any case; all

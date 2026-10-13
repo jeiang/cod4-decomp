@@ -145,6 +145,8 @@ pub fn run_stage(run: &StageRun) -> StageReport {
         Selection::Script(p) => cmd.arg("--script").arg(p),
     };
     cmd.arg("--dir").arg(dir);
+    // The stage's own log and those of the client and server it starts land in the bundle.
+    cmd.env("COD4E_LOG_DIR", dir.join("logs"));
     if let Some(i) = run.install {
         cmd.arg("--install").arg(i);
     }

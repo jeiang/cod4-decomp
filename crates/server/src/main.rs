@@ -7,6 +7,9 @@
 //! with `rcon_password` set, `rcon` packets do the same from the network. With `sv_public 1` and `sv_master1`..
 //! `sv_master5` set it announces itself to those master servers (`cod4e-master`).
 
+// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
+
 use server::server::Server;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -82,6 +85,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The server writes no log file unless COD4E_LOG_DIR says where.
+    let _log = logging::init(logging::Config::new("server"));
     if args.iter().any(|a| a == "-h" || a == "--help") {
         println!(
             "usage: cod4e-server [--install dir] [+set name value] [+exec file.cfg] [+map name]\n\

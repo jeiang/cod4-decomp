@@ -2,10 +2,9 @@
 //! The child side: runs one stage in its own process so a crash or hang
 //! cannot take the watchdog with it.
 use crate::stage::{self, Kind, StageCtx, StageReport, Status};
-use crate::trace::{self, LogLayer};
+use crate::trace;
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing_subscriber::layer::SubscriberExt;
 
 /// One span window per stage, capped so the trace stays small.
 const TRACE_WINDOW: Duration = Duration::from_secs(30);
@@ -29,8 +28,9 @@ pub fn run(args: ChildArgs) -> i32 {
     let _crash_guard = args.dump_socket.as_deref().and_then(attach_crash_handler);
 
     let (layer, trace_handle) = trace::chrome_trace(TRACE_WINDOW, TRACE_CAP);
-    let subscriber = tracing_subscriber::registry().with(LogLayer).with(layer);
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    let mut log = logging::Config::new("harness-stage");
+    log.extra.push(Box::new(layer));
+    let _log = logging::init(log);
 
     let ctx = StageCtx {
         dir: args.dir.clone(),
