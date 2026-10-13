@@ -133,11 +133,13 @@ impl ScriptHost<'_> {
     /// Runs the script calls the game queued (`Scr_ExecEntThread`): each runs to its first
     /// wait before this returns, and may queue more. Errors are kept for the server's report.
     pub fn run_calls(&mut self, vm: &mut Vm) {
+        let _span = tracing::debug_span!("script_calls").entered();
         loop {
             while !self.game.calls.is_empty() {
                 for c in std::mem::take(&mut self.game.calls) {
                     let this = c.this.map(|n| vm.entity(n, EntClass::Entity));
                     if let Err(e) = vm.call(&mut *self, c.func, this, &c.args) {
+                        tracing::debug!(entity = ?c.this, "queued script call failed: {}", e.message);
                         self.game.nested_errors.push(e);
                     }
                 }
@@ -156,6 +158,13 @@ impl ScriptHost<'_> {
     fn stub(&mut self, name: &str, milestone: &str) {
         let n = self.game.stub_calls.entry(name.to_owned()).or_insert(0);
         *n += 1;
+        logging::dedup!(
+            WARN,
+            "stub-builtin",
+            builtin = name,
+            milestone,
+            "script called a builtin that is not implemented yet; ignored"
+        );
         if *n == 1 {
             self.game.print(format!(
                 "script: {name} is not implemented yet ({milestone}); ignored\n"
@@ -167,6 +176,7 @@ impl ScriptHost<'_> {
 impl Host for ScriptHost<'_> {
     fn call_function(&mut self, vm: &mut Vm, index: u16, args: &[Value]) -> Result<Value, String> {
         let (name, imp) = &self.dispatch.funcs[usize::from(index)];
+        let _span = tracing::trace_span!("builtin", name = &**name).entered();
         match imp {
             Some(Impl::Real(f)) => {
                 let r = f(self.game, vm, Args::new(name, args));
@@ -177,7 +187,15 @@ impl Host for ScriptHost<'_> {
                 self.stub(name, m);
                 Ok(Value::Undefined)
             }
-            None => Err(format!("builtin function '{name}' is not implemented")),
+            None => {
+                logging::dedup!(
+                    ERROR,
+                    "missing-builtin",
+                    builtin = &**name,
+                    "script called a builtin function nothing provides; the thread dies"
+                );
+                Err(format!("builtin function '{name}' is not implemented"))
+            }
         }
     }
 
@@ -189,6 +207,7 @@ impl Host for ScriptHost<'_> {
         args: &[Value],
     ) -> Result<Value, String> {
         let (name, imp) = &self.dispatch.methods[usize::from(index)];
+        let _span = tracing::trace_span!("builtin", name = &**name, entity = ent.num).entered();
         match imp {
             Some(Impl::Real(f)) => {
                 let r = f(self.game, vm, ent, Args::new(name, args));
@@ -199,7 +218,15 @@ impl Host for ScriptHost<'_> {
                 self.stub(name, m);
                 Ok(Value::Undefined)
             }
-            None => Err(format!("builtin method '{name}' is not implemented")),
+            None => {
+                logging::dedup!(
+                    ERROR,
+                    "missing-method",
+                    method = &**name,
+                    "script called a builtin method nothing provides; the thread dies"
+                );
+                Err(format!("builtin method '{name}' is not implemented"))
+            }
         }
     }
 

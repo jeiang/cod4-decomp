@@ -273,14 +273,20 @@ impl Fetcher {
                     || at >= window_end
                     || data.len() != expected
                 {
-                    logging::dedup!(
-                        WARN,
-                        "chunk",
-                        at,
-                        len = data.len(),
-                        expected,
-                        "unexpected download chunk dropped"
-                    );
+                    // A repeat of a chunk from a window already acknowledged is what a resend after loss looks
+                    // like; anything else (misaligned, wrong length, past the window) is a broken sender.
+                    if at < self.offset && at % CHUNK as u64 == 0 && data.len() == expected {
+                        tracing::debug!(at, "stale download chunk dropped");
+                    } else {
+                        logging::dedup!(
+                            WARN,
+                            "chunk",
+                            at,
+                            len = data.len(),
+                            expected,
+                            "unexpected download chunk dropped"
+                        );
+                    }
                     return None;
                 }
                 if !self.have[idx] {
@@ -481,7 +487,14 @@ mod tests {
         let progress = Progress::default();
         let dest = dir.join("got").join("mp_x.ff");
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        fetch(&mut ct, server, "mp_x", &dest, &progress, &cancel).unwrap();
+        let (got, events) =
+            logging::capture(|| fetch(&mut ct, server, "mp_x", &dest, &progress, &cancel));
+        got.unwrap();
+        // The resend after the lost piece is normal traffic, not a broken sender.
+        assert!(
+            events.iter().all(|e| e.level > tracing::Level::WARN),
+            "{events:?}"
+        );
         assert_eq!(std::fs::read(&dest).unwrap(), bytes);
         assert_eq!(progress.done.load(Ordering::Relaxed), bytes.len() as u64);
         assert!(!dest.with_extension("ff.part").exists());
