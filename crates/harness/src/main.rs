@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+
+// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
 use harness::child::{self, ChildArgs};
 use harness::diff;
 use harness::stage;
@@ -68,6 +71,7 @@ fn value(it: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, St
 }
 
 fn run_main(args: &[String], double_click: bool) -> ExitCode {
+    let _log = logging::init(logging::Config::new("harness"));
     let mut cfg = Config {
         selections: Vec::new(),
         cod4: None,

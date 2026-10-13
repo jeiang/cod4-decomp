@@ -10,6 +10,9 @@
 //!
 //! [`Master`] holds the state and takes the clock as an argument, so the rules are testable without sockets.
 
+// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
+
 use net::master::HEARTBEAT_SECS;
 use net::oob::{Challenger, Oob, SERVERS_PER_PACKET};
 use std::collections::HashMap;

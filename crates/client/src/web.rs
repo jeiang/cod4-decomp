@@ -247,6 +247,7 @@ pub fn memory_bytes() -> u64 {
 
 /// Entry point: mounts the install the page prepared and runs the client with the page's arguments.
 pub fn start() {
+    let _ = logging::init(logging::Config::new("client"));
     std::panic::set_hook(Box::new(|info| {
         console_error_panic_hook::hook(info);
         page_fatal(&format!("the client crashed: {info}"));

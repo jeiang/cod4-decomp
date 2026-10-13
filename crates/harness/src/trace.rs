@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `tracing` plumbing: a layer that logs events to stderr (captured by the
-//! watchdog into the bundle) and a layer that records spans for one window
-//! as a Chrome trace, which Perfetto opens directly.
+//! `tracing` plumbing: a layer that records spans for one window as a Chrome trace, which Perfetto opens directly.
+//! Events go to stderr through the `logging` crate (the watchdog captures them into the bundle).
 use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
@@ -28,26 +27,6 @@ impl Visit for Fields {
             self.args
                 .insert(field.name().to_owned(), format!("{value:?}").into());
         }
-    }
-}
-
-/// Prints `LEVEL target: message key=value ...` to stderr.
-pub struct LogLayer;
-
-impl<S: Subscriber> Layer<S> for LogLayer {
-    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-        let mut f = Fields::default();
-        event.record(&mut f);
-        let mut line = format!(
-            "{} {}: {}",
-            event.metadata().level(),
-            event.metadata().target(),
-            f.message
-        );
-        for (k, v) in &f.args {
-            let _ = write!(line, " {k}={}", v.as_str().unwrap_or_default());
-        }
-        eprintln!("{line}");
     }
 }
 

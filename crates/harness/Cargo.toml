@@ -11,6 +11,7 @@ name = "cod4e-harness"
 path = "src/main.rs"
 
 [dependencies]
+logging = { path = "../logging" }
 assets = { version = "0.0.0", path = "../assets" }
 server = { version = "0.0.0", path = "../server" }
 net = { version = "0.0.0", path = "../net" }

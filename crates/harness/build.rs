@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Embeds the git revision so a bundle identifies the build that produced it.
+// Cargo build-script directives are stdout.
+#![allow(clippy::print_stdout)]
+
 use std::process::Command;
 
 fn git(args: &[&str]) -> Option<String> {

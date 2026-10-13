@@ -2,6 +2,9 @@
 //! `cod4e`, the player-facing client. For now: a fly camera over a map, and the scripted flythrough the harness
 //! drives as stage 3 (`--flythrough`), which records frame times, a video and a screenshot.
 
+// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
+
 /// Held by every test that creates a GPU device, so no two devices start or stop at once in the test process.
 #[cfg(test)]
 static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -364,6 +367,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The run's log file sits next to the profiles: `--config-dir`, else the platform's config folder.
+    let mut log = logging::Config::new("client");
+    log.dir = cli
+        .config_dir
+        .clone()
+        .or_else(install::default_config_dir)
+        .map(|d| d.join("logs"));
+    let _log = logging::init(log);
     if cli.input_selftest {
         let bad = input::selftest::run();
         return if bad.is_empty() {
