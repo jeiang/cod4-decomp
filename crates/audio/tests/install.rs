@@ -142,6 +142,11 @@ fn every_stock_map_alias_resolves_to_playable_audio() {
             false,
         );
         sound.set_listener([0.0; 3], 0.0);
+        assert!(
+            sound.bank.stats.pcm_bytes <= 128 * 1024 * 1024,
+            "{map}: decoded {} PCM bytes, exceeding the 128 MiB per-map budget",
+            sound.bank.stats.pcm_bytes
+        );
         for list in sound.bank.names().map(str::to_owned).collect::<Vec<_>>() {
             for alias in sound.bank.aliases_of(&list) {
                 if matches!(alias.audio, Clip::Silent) {
