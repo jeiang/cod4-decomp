@@ -22,7 +22,7 @@ fn a_called_in_helicopter_flies_fires_and_is_shot_down() {
         "set scr_heli_armor 20",
         "map mp_crash",
         "bots 8",
-        "until spawns 8 60",
+        "until playing 8 60",
         "devhardpoint 0 helicopter_mp",
         "until helicopters 1 200",
     ] {
