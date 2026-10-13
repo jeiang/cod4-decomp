@@ -222,9 +222,9 @@ mod tests {
         // With north at yaw 90 east is +x and south is -y.
         let m = MapInfo::parse("\"a\" 0 0 200 -100", "90").unwrap();
         close(m.world_size, [200.0, 100.0]);
-        assert!(MapInfo::parse("\"a\" 0 0 100 100", "0").is_none());
-        assert!(MapInfo::parse("", "0").is_none());
-        assert!(MapInfo::parse("\"a\" 1 2 3", "0").is_none());
+        assert!(MapInfo::read("\"a\" 0 0 100 100", "0").is_none());
+        assert!(MapInfo::read("", "0").is_none());
+        assert!(MapInfo::read("\"a\" 1 2 3", "0").is_none());
     }
 
     #[test]
