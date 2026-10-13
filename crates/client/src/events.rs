@@ -148,6 +148,8 @@ impl Events {
                     self.fx.resize(i, String::new());
                 }
                 self.fx[i - 1] = name.to_owned();
+            } else {
+                logging::dedup!(WARN, "fx", "malformed fx announcement dropped");
             }
         }
         rest
@@ -224,7 +226,15 @@ impl Events {
                 up: sim::pm::math::angle_vectors(&e.angles).2,
                 name: self
                     .fx_name(usize::from(e.model))
-                    .unwrap_or_default()
+                    .unwrap_or_else(|| {
+                        logging::dedup!(
+                            DEBUG,
+                            "playfx",
+                            fx_index = e.model,
+                            "effect played before its name was announced"
+                        );
+                        ""
+                    })
                     .to_owned(),
                 entity: e.client,
             },
@@ -243,11 +253,22 @@ impl Events {
             | ev::PHYSICS_JOLT
             | ev::PHYSICS_JITTER => ClientEvent::Physics {
                 origin: e.origin,
-                what: Physics::decode(e)?,
+                what: Physics::decode(e).or_else(|| {
+                    logging::dedup!(
+                        WARN,
+                        "physics",
+                        event = e.event,
+                        "undecodable physics event dropped"
+                    );
+                    None
+                })?,
             },
             ev::EARTHQUAKE => ClientEvent::Earthquake {
                 origin: e.origin,
-                quake: Earthquake::decode(e)?,
+                quake: Earthquake::decode(e).or_else(|| {
+                    logging::dedup!(WARN, "earthquake", "undecodable earthquake event dropped");
+                    None
+                })?,
             },
             ev::WEAPON_FIRE => ClientEvent::WeaponFire {
                 eye: e.origin,
@@ -269,7 +290,16 @@ impl Events {
                 victim: e.model,
                 knife: e.event_parm != 0,
             },
-            _ => return None,
+            other => {
+                logging::dedup!(
+                    WARN,
+                    "event",
+                    event = other,
+                    entity = e.number,
+                    "unknown entity event type dropped"
+                );
+                return None;
+            }
         })
     }
 }
@@ -495,6 +525,21 @@ mod tests {
         p.event_seq = 9;
         let unknown = event(963, 0x7f, 1);
         assert!(ev.scan(&snap(&[p, unknown])).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_event_type_and_a_malformed_fx_announcement_warn() {
+        let (_, events) = logging::capture(|| {
+            let mut ev = Events::default();
+            ev.scan(&snap(&[event(965, 0x7e, 1)]));
+            ev.take_commands(&mut vec!["fx notanumber".to_owned()]);
+        });
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(warns.len(), 2, "{events:?}");
+        assert_eq!(warns[0].field("event"), Some("126"));
     }
 
     #[test]

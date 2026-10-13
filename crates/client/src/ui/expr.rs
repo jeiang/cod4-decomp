@@ -951,7 +951,10 @@ fn call(op: Op, args: &[Node], env: &dyn ExprEnv) -> Value {
                 .find(|(k, _)| k.eq_ignore_ascii_case(n))
             {
                 Some((_, f)) => env.player_field(*f),
-                None => Int(0),
+                None => {
+                    logging::dedup!(WARN, n, field = n, "player field is unknown, using 0");
+                    Int(0)
+                }
             },
             Value::str(""),
         ),
@@ -971,6 +974,7 @@ fn call(op: Op, args: &[Node], env: &dyn ExprEnv) -> Value {
                     } else if n.eq_ignore_ascii_case("name") {
                         env.team_field(sel, TeamField::Name)
                     } else {
+                        logging::dedup!(WARN, n, field = n, "team field is unknown, using 0");
                         Int(0)
                     }
                 },
@@ -1060,6 +1064,13 @@ fn call(op: Op, args: &[Node], env: &dyn ExprEnv) -> Value {
                 .find(|(k, _)| k.eq_ignore_ascii_case(n))
                 .map(|(_, e)| e)
             });
+            if element.is_none() {
+                logging::dedup!(
+                    WARN,
+                    "hudfade",
+                    "hudfade() names an unknown element, using 0"
+                );
+            }
             Float(element.map_or(0.0, |e| env.hud_fade(e)))
         }
         Op::MaxPlayers => Int(env.max_players()),

@@ -122,14 +122,21 @@ impl Load {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (st, c) = (state.clone(), cancel.clone());
+            let st_map = map.clone();
             let failed = tx.clone();
             let spawned = std::thread::Builder::new()
                 .name("map-load".into())
                 .spawn(move || {
-                    let _ = tx.send(run(req, gpu, &st, &c));
+                    let _span = tracing::info_span!("map_load", map = %st_map).entered();
+                    if tx.send(run(req, gpu, &st, &c)).is_err() {
+                        tracing::debug!("the map load finished after it was abandoned");
+                    }
                 });
             if let Err(e) = spawned {
-                let _ = failed.send(Err(e.to_string()));
+                tracing::error!(error = %e, "cannot start the map-load thread");
+                if failed.send(Err(e.to_string())).is_err() {
+                    tracing::debug!("nobody waits for the map-load thread");
+                }
             }
         }
         // The browser has no threads: the pieces run one per poll, the page repainting in between.
@@ -154,7 +161,10 @@ impl Load {
         match self.rx.try_recv() {
             Ok(r) => Some(r),
             Err(mpsc::TryRecvError::Empty) => None,
-            Err(e) => Some(Err(e.to_string())),
+            Err(e) => {
+                tracing::error!(map = %self.map, error = %e, "the map-load thread ended without a result");
+                Some(Err(e.to_string()))
+            }
         }
     }
 
@@ -236,8 +246,10 @@ impl Work {
                 .map_err(|e| format!("cannot load {map}: {e}"));
             (
                 data,
-                lib.join()
-                    .unwrap_or_else(|_| Err("content decode panicked".into())),
+                lib.join().unwrap_or_else(|_| {
+                    tracing::error!(map = %map, "the content decode panicked");
+                    Err("content decode panicked".into())
+                }),
             )
         });
         #[cfg(target_arch = "wasm32")]
@@ -336,7 +348,12 @@ pub fn add_match_models(renderer: &mut Renderer, library: &Library) {
     // The script_models the map places (cars, props), by the `model` key of its entity string.
     if let Some(ents) = library.content.clipmap().and_then(|c| c.map_ents.as_ref()) {
         for name in entity_models(&ents.entity_string) {
-            models.extend(library.content.model(&name).cloned());
+            match library.content.model(&name) {
+                Some(m) => models.push(m.clone()),
+                None => {
+                    tracing::warn!(model = %name, "the map places a model the content does not have")
+                }
+            }
         }
     }
     // What effects draw: clouds, sprites (quads) and models.
@@ -393,6 +410,7 @@ fn run(
 ) -> Result<Loaded, String> {
     let check = || {
         if cancel.load(Ordering::Relaxed) {
+            tracing::debug!("the map load was abandoned");
             Err("cancelled".to_owned())
         } else {
             Ok(())
@@ -457,9 +475,14 @@ fn draw_once(
     });
     // Both teams' players, so their meshes and materials are uploaded too.
     for (i, team) in [Team::Allies, Team::Axis].into_iter().enumerate() {
-        let player = library
-            .team_models(team)
-            .and_then(|set| library.player(&set).ok());
+        let player = library.team_models(team).and_then(|set| {
+            library
+                .player(&set)
+                .inspect_err(
+                    |e| tracing::warn!(?team, error = %e, "cannot build the warm-up player"),
+                )
+                .ok()
+        });
         if let Some(mut p) = player {
             p.update(0.0, &Default::default());
             let at = [eye.x + 80.0 + 40.0 * i as f32, eye.y, eye.z - 60.0];

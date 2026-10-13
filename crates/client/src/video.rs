@@ -99,6 +99,7 @@ impl Recorder {
         let thread = std::thread::Builder::new()
             .name("video-encoder".into())
             .spawn(move || job.run())?;
+        tracing::info!(path = %path.display(), width = ow, height = oh, fps, "video recording started");
         Ok(Recorder {
             path,
             src,
@@ -177,12 +178,19 @@ impl Recorder {
                 self.free.push(i);
             }
         }
-        let _ = device.poll(wgpu::PollType::Poll);
+        if let Err(e) = device.poll(wgpu::PollType::Poll) {
+            logging::dedup!(WARN, "video_poll", error = %e, "the device poll failed during the video recording");
+        }
         self.drain(false);
 
         let Some(idx) = self.free.pop() else {
             // The slot is spent either way, so a dropped frame is counted once, not per retry.
             self.last_slot = Some(slot);
+            logging::dedup!(
+                WARN,
+                "video_ring",
+                "the video readback ring is full; a frame was dropped"
+            );
             self.dropped += 1;
             return false;
         };
@@ -211,6 +219,8 @@ impl Recorder {
         st.buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
             if r.is_ok() {
                 ready.store(true, Ordering::Release);
+            } else if let Err(e) = r {
+                logging::dedup!(WARN, "video_map", error = %e, "a video frame could not be read back");
             }
         });
         self.pending.push_back((idx, slot));
@@ -237,10 +247,17 @@ impl Recorder {
                 data,
             };
             if block {
-                let _ = self.tx.send(frame);
+                if self.tx.send(frame).is_err() {
+                    tracing::error!("the video encoder is gone; a frame was lost");
+                }
             } else if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
                 self.tx.try_send(frame)
             {
+                logging::dedup!(
+                    WARN,
+                    "video_queue",
+                    "the video encoder is behind; a frame was dropped"
+                );
                 self.dropped += 1;
             }
         }
@@ -267,6 +284,7 @@ impl Recorder {
         let (frames, bytes) = thread
             .join()
             .map_err(|_| other("encoder thread panicked"))??;
+        tracing::info!(path = %path.display(), frames, dropped, bytes, "video recording finished");
         Ok(VideoStats {
             path,
             frames,
@@ -353,7 +371,9 @@ impl EncodeJob {
             }
         }
         drop(ctx_rx);
-        let _ = converter.join();
+        if converter.join().is_err() {
+            tracing::error!("the video converter thread panicked");
+        }
         result?;
         self.ctx.flush();
         self.pump(&slots)?;

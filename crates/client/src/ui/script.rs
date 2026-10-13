@@ -82,11 +82,21 @@ fn words(src: &str) -> Vec<Word> {
             '"' => {
                 let start = i + 1;
                 let mut end = src.len();
+                let mut closed = false;
                 for (j, d) in it.by_ref() {
                     if d == '"' {
                         end = j;
+                        closed = true;
                         break;
                     }
+                }
+                if !closed {
+                    logging::dedup!(
+                        WARN,
+                        "script-quote",
+                        script = src,
+                        "menu script has a quote that never closes, taking the rest as one word"
+                    );
                 }
                 out.push(Word::Text(src[start..end].to_owned()));
             }
@@ -178,5 +188,12 @@ mod tests {
         assert_eq!(c[1], ["open", "x"]);
         assert_eq!(c[2].len(), 7);
         assert_eq!(c[3], ["close", "self"]);
+    }
+
+    #[test]
+    fn a_quote_that_never_closes_warns() {
+        let (c, events) = logging::capture(|| parse("open \"main"));
+        assert_eq!(c, [["open", "main"]]);
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
     }
 }

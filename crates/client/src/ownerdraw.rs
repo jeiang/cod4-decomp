@@ -115,7 +115,7 @@ pub fn ammo_texts(clip: i32, stock: i32) -> (Option<String>, Option<String>) {
 /// A localized string: the key's text, or the key itself when the strings do not have it.
 fn tr(ui: &Ui, key: &str) -> String {
     ui.assets
-        .translate(key)
+        .translate_ref(key)
         .map_or_else(|| key.to_owned(), |s| s.to_string())
 }
 
@@ -883,6 +883,12 @@ fn cursor_hint(dc: &mut Dc, h: &mut HudFacts, key: &str, frag_key: &str) {
         );
     }
     if crate::hud::is_unresolved_key(&text) {
+        logging::dedup!(
+            WARN,
+            "unresolved-hint",
+            text = text.as_str(),
+            "cursor hint is a string key nothing localizes"
+        );
         h.unresolved_text.insert(text.clone());
     }
     let r = dc.r;

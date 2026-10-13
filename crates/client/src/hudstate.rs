@@ -208,7 +208,16 @@ impl Counter {
             3 => Self::Shotgun,
             4 => Self::Rocket,
             5 => Self::Beltfed,
-            _ => Self::None,
+            0 => Self::None,
+            v => {
+                logging::dedup!(
+                    WARN,
+                    "ammo-counter",
+                    value = v,
+                    "weapon has an unknown ammo counter style, drawing none"
+                );
+                Self::None
+            }
         }
     }
 

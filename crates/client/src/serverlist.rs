@@ -234,21 +234,29 @@ impl Browser {
 
     /// Asks `to`; failures to send (no route, no broadcast) are ignored, the server simply does not answer.
     pub fn ask(&mut self, to: SocketAddr) {
-        let _ = self
+        if let Err(e) = self
             .sock
-            .send_to(&Oob::GetInfo(self.challenge).encode(), to);
+            .send_to(&Oob::GetInfo(self.challenge).encode(), to)
+        {
+            logging::dedup!(DEBUG, "getinfo", server = %to, "cannot send getinfo: {e}");
+        }
     }
 
     /// Sends one packet.
     fn send(&mut self, to: SocketAddr, oob: &Oob) {
-        let _ = self.sock.send_to(&oob.encode(), to);
+        if let Err(e) = self.sock.send_to(&oob.encode(), to) {
+            logging::dedup!(WARN, "master", server = %to, "cannot send to the master: {e}");
+        }
     }
 
     /// Asks `to` for its status.
     pub fn ask_status(&mut self, to: SocketAddr) {
-        let _ = self
+        if let Err(e) = self
             .sock
-            .send_to(&Oob::GetStatus(self.challenge).encode(), to);
+            .send_to(&Oob::GetStatus(self.challenge).encode(), to)
+        {
+            logging::dedup!(WARN, "getstatus", server = %to, "cannot send getstatus: {e}");
+        }
     }
 
     /// The LAN scan: broadcast and loopback on every standard port.
@@ -275,7 +283,15 @@ impl Browser {
             };
             match Oob::parse(&self.buf[..n]) {
                 Some(Oob::InfoResponse(kv)) if mine(&kv) => {
-                    out.extend(Entry::from_info(from, &kv, ping).map(Reply::Info));
+                    match Entry::from_info(from, &kv, ping) {
+                        Some(e) => out.push(Reply::Info(e)),
+                        None => logging::dedup!(
+                            DEBUG,
+                            "infoResponse",
+                            server = %from,
+                            "infoResponse names no map; ignored"
+                        ),
+                    }
                 }
                 Some(Oob::StatusResponse { info, players }) if mine(&info) => {
                     out.push(Reply::Status(Status {
@@ -443,13 +459,17 @@ fn parse_masters(text: &str) -> Vec<SocketAddr> {
         } else {
             format!("{w}:{}", net::master::MASTER_PORT)
         };
-        if let Some(a) = with_port
-            .to_socket_addrs()
-            .ok()
-            .and_then(|mut i| i.find(SocketAddr::is_ipv4))
-            && !out.contains(&a)
-        {
-            out.push(a);
+        let found = match with_port.to_socket_addrs() {
+            Ok(mut i) => i.find(SocketAddr::is_ipv4),
+            Err(e) => {
+                tracing::warn!(master = w, "cannot resolve the master: {e}");
+                continue;
+            }
+        };
+        match found {
+            Some(a) if !out.contains(&a) => out.push(a),
+            Some(_) => {}
+            None => tracing::warn!(master = w, "the master has no IPv4 address"),
         }
     }
     out
@@ -663,7 +683,9 @@ impl ServerList {
         if self.offline {
             return None;
         }
-        Browser::new().ok()
+        Browser::new()
+            .map_err(|e| tracing::error!("server browser cannot open a UDP socket: {e}"))
+            .ok()
     }
 
     /// Scans again for the list `source` shows: the LAN (`full` first forgets what it found, otherwise the answers
@@ -761,10 +783,15 @@ impl ServerList {
 
     /// Adds a favorite (once) and asks it.
     pub fn add_favorite(&mut self, addr: SocketAddr) {
-        if !askable(&addr)
-            || self.favorites.len() >= MAX_FAVORITES
-            || self.favorites.iter().any(|f| f.addr == addr)
-        {
+        if !askable(&addr) || self.favorites.len() >= MAX_FAVORITES {
+            tracing::warn!(
+                server = %addr,
+                count = self.favorites.len(),
+                "favorite not added: unusable address or list full"
+            );
+            return;
+        }
+        if self.favorites.iter().any(|f| f.addr == addr) {
             return;
         }
         self.favorites.push(Entry::unanswered(addr));
@@ -803,7 +830,7 @@ impl ServerList {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             // A file that cannot be read is left alone: saving over it would destroy what it holds.
             Err(e) => {
-                eprintln!("cannot read the favorites in {}: {e}", path.display());
+                tracing::warn!(path = %path.display(), "cannot read the favorites: {e}");
                 return;
             }
         }
@@ -823,7 +850,7 @@ impl ServerList {
                     std::fs::write(path, favorites_text(&self.favorites, &self.kept_lines))
                 });
             if let Err(e) = written {
-                eprintln!("cannot save the favorites to {}: {e}", path.display());
+                tracing::error!(path = %path.display(), "cannot save the favorites: {e}");
             }
         }
     }
@@ -833,6 +860,9 @@ impl ServerList {
         if let Some(Ok(found)) = self.resolving.as_ref().map(|rx| rx.try_recv()) {
             self.resolving = None;
             self.unresolved = found.is_empty();
+            if found.is_empty() {
+                tracing::warn!("no master from cl_masters could be resolved");
+            }
             self.masters = found;
             if let Some(b) = self.browser.as_mut() {
                 b.restart();
@@ -858,6 +888,11 @@ impl ServerList {
             && sent.elapsed() >= STATUS_RETRY
         {
             if *tries >= STATUS_TRIES {
+                tracing::warn!(
+                    server = %addr,
+                    tries = *tries,
+                    "server status request got no answer"
+                );
                 self.status_req = None;
             } else if let Some(b) = self.browser.as_mut() {
                 b.ask_status(*addr);
@@ -1545,5 +1580,22 @@ mod tests {
             l.add_favorite(addr(&format!("10.1.{}.{}:28960", i / 200, i % 200 + 1)));
         }
         assert_eq!(l.rows(Source::Favorites).len(), MAX_FAVORITES);
+    }
+
+    #[test]
+    fn favorites_that_cannot_be_read_or_saved_are_logged() {
+        let dir = std::env::temp_dir().join(format!("cod4e-favorites-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(FAVORITES_FILE)).unwrap();
+        let mut l = ServerList::for_shell();
+        let (_, read) = logging::capture(|| l.load_favorites(Some(dir.clone())));
+        assert!(read.iter().any(|e| e.level == tracing::Level::WARN));
+        // A parent that is a file: the folder for the list cannot be made.
+        let file = dir.join("blocker");
+        std::fs::write(&file, b"x").unwrap();
+        l.store = Some(file.join(FAVORITES_FILE));
+        let (_, save) = logging::capture(|| l.add_favorite(addr("10.0.0.1:28960")));
+        assert!(save.iter().any(|e| e.level == tracing::Level::ERROR));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

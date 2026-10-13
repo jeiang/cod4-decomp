@@ -84,12 +84,27 @@ impl Download {
         std::thread::Builder::new()
             .name("map-download".into())
             .spawn(move || {
+                let _span = tracing::info_span!(
+                    "download",
+                    %server,
+                    map = map_name.as_str(),
+                    game = game_name.as_str()
+                )
+                .entered();
+                tracing::info!("download start");
                 let result = UdpTransport::bind(SocketAddr::from(([0, 0, 0, 0], 0)))
                     .map_err(|e| e.to_string())
                     .and_then(|mut t| {
                         sync(&mut t, server, &root, &game_name, &map_name, &p, &c, &s)
                     });
-                let _ = tx.send(result);
+                match &result {
+                    Ok(()) => tracing::info!("download done"),
+                    Err(e) if !c.load(Ordering::Relaxed) => tracing::error!("download failed: {e}"),
+                    Err(_) => tracing::info!("download cancelled"),
+                }
+                if tx.send(result).is_err() {
+                    tracing::debug!("download result dropped: nobody is waiting");
+                }
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -171,7 +186,18 @@ pub fn plan(root: &Path, game: &str, map: &str, listing: Vec<File>) -> Vec<(File
         && assets::paths::zone_file(root, game, map).is_some();
     listing
         .into_iter()
-        .filter_map(|f| manifest::dest(game, &f.name).map(|d| (f, d)))
+        .filter_map(|f| match manifest::dest(game, &f.name) {
+            Some(d) => Some((f, d)),
+            None => {
+                logging::dedup!(
+                    WARN,
+                    "refused",
+                    file = f.name.as_str(),
+                    "download: file name refused"
+                );
+                None
+            }
+        })
         .filter(|(_, d)| !d.starts_with("usermaps/") || (d.starts_with(&own) && !has_stock_map))
         .filter(|(f, d)| !is_current(&root.join(d), f))
         .collect()
@@ -228,7 +254,10 @@ fn sync(
         let path = place(root, &dest)?;
         if path.exists() {
             // A file of the same name that is not the server's: the server's replaces it, and the player is told.
-            eprintln!("download: replacing {dest}, which differs from the server's copy");
+            tracing::warn!(
+                dest,
+                "download: replacing a file that differs from the server's copy"
+            );
         }
         if let Some(www) = &www {
             match http(
@@ -242,9 +271,9 @@ fn sync(
                 Ok(()) => continue,
                 Err(why) if cancel.load(Ordering::Relaxed) => return Err(why),
                 // The server's own transfer takes over, as the original falls back to its own.
-                Err(why) => eprintln!(
-                    "fast download of {} failed ({why}); asking the server",
-                    file.name
+                Err(why) => tracing::warn!(
+                    file = file.name.as_str(),
+                    "fast download failed ({why}); asking the server"
                 ),
             }
             progress.done.store(0, Ordering::Relaxed);
@@ -253,7 +282,12 @@ fn sync(
         std::fs::remove_file(part_of(&path)).ok();
         fetch(t, server, &file.name, &path, progress, cancel)?;
         if !is_current(&path, &file) {
-            let _ = std::fs::remove_file(&path);
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    "cannot remove the mismatched download: {e}"
+                );
+            }
             return Err(format!("{} does not match the server's copy", file.name));
         }
     }

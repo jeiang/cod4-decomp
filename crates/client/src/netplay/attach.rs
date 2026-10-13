@@ -25,7 +25,13 @@ pub(super) fn attachments_of(
     let mut out = Vec::new();
     for (model, tag) in e.attachments() {
         let name = ui.model(model);
-        let tag = tag_name(content, &models, tag).map_or_else(String::new, |t| t.to_string());
+        let tag = tag_name(content, &models, tag).map_or_else(
+            || {
+                logging::dedup!(WARN, name, model = name, "attachment tag did not resolve");
+                String::new()
+            },
+            |t| t.to_string(),
+        );
         out.push((name.to_owned(), tag));
         models.push(name);
     }

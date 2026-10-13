@@ -119,6 +119,14 @@ impl UiAssets {
         let z = Zone::open(file).map_err(|e| format!("{zone}: {e}"))?;
         z.decode(&UiFilter, |a| self.add(a))
             .map_err(|e| format!("{zone}: {e}"))?;
+        tracing::debug!(
+            zone,
+            menus = self.menu_order.len(),
+            fonts = self.fonts.len(),
+            strings = self.localize.len(),
+            materials = self.materials.len(),
+            "ui zone loaded"
+        );
         Ok(())
     }
 
@@ -208,6 +216,21 @@ impl UiAssets {
         self.localize
             .get(&key.trim_start_matches('@').to_ascii_uppercase())
     }
+
+    /// [`UiAssets::translate`] for a reference the data means to resolve (`@KEY`): a miss shows the key and is
+    /// logged once per key.
+    pub fn translate_ref(&self, key: &str) -> Option<&Arc<str>> {
+        let t = self.translate(key);
+        if t.is_none() {
+            logging::dedup!(
+                WARN,
+                key,
+                key,
+                "localized string is missing, showing its key"
+            );
+        }
+        t
+    }
 }
 
 #[cfg(test)]
@@ -263,5 +286,20 @@ mod tests {
             let m = a.material(name).unwrap_or_else(|| panic!("{name}"));
             assert!(!m.textures.is_empty(), "{name} has its image");
         }
+    }
+
+    #[test]
+    fn a_localized_reference_that_is_missing_warns_with_its_key() {
+        let (none, events) = logging::capture(|| {
+            UiAssets::default()
+                .translate_ref("@NO_SUCH_KEY_TEST")
+                .is_none()
+        });
+        assert!(none);
+        let e = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(e.field("key"), Some("@NO_SUCH_KEY_TEST"));
     }
 }

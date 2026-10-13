@@ -142,8 +142,11 @@ impl ClientSound {
     #[cfg(target_arch = "wasm32")]
     fn begin(install: &Path, game: &str, map: &str, device: bool) -> State {
         match load(install, game, map) {
-            Ok(bank) => State::Ready(Box::new(Sound::new(bank, device))),
-            Err(e) => State::Failed(e),
+            Ok(bank) => ready_state(bank, device),
+            Err(e) => {
+                tracing::error!(error = e.as_str(), "sound tables failed to load; no sound");
+                State::Failed(e)
+            }
         }
     }
 
@@ -158,7 +161,10 @@ impl ClientSound {
             });
         match spawned {
             Ok(_) => State::Loading(rx),
-            Err(e) => State::Failed(e.to_string()),
+            Err(e) => {
+                tracing::error!(error = %e, "cannot start the sound loader; no sound");
+                State::Failed(e.to_string())
+            }
         }
     }
 
@@ -192,10 +198,16 @@ impl ClientSound {
     fn ready(&mut self) -> Option<&mut Sound> {
         if let State::Loading(rx) = &self.state {
             match rx.try_recv() {
-                Ok(Ok(bank)) => self.state = State::Ready(Box::new(Sound::new(bank, self.device))),
-                Ok(Err(e)) => self.state = State::Failed(e),
+                Ok(Ok(bank)) => self.state = ready_state(bank, self.device),
+                Ok(Err(e)) => {
+                    tracing::error!(error = e.as_str(), "sound tables failed to load; no sound");
+                    self.state = State::Failed(e);
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(e) => self.state = State::Failed(e.to_string()),
+                Err(e) => {
+                    tracing::error!(error = %e, "sound loader ended without a result; no sound");
+                    self.state = State::Failed(e.to_string());
+                }
             }
         }
         match &mut self.state {
@@ -243,7 +255,10 @@ impl ClientSound {
     fn play(&mut self, alias: &str, cue: Cue) {
         match self.ready() {
             Some(s) => {
-                s.play(alias, cue);
+                let _span = tracing::debug_span!("sound_alias", alias).entered();
+                if s.play(alias, cue).is_none() && !alias.is_empty() && !s.bank.has(alias) {
+                    logging::dedup!(WARN, alias, sound = alias, "sound alias not in the tables");
+                }
             }
             None => self.dropped += 1,
         }
@@ -800,12 +815,20 @@ impl ClientSound {
                     self.names.resize(i, String::new());
                 }
                 self.names[i - 1] = name.to_owned();
+            } else {
+                logging::dedup!(WARN, "sndname", "malformed sndname command dropped");
             }
             return;
         }
         if self.ready().is_none() {
             if self.pending.len() < 64 {
                 self.pending.push(line.to_owned());
+            } else {
+                logging::dedup!(
+                    WARN,
+                    "pending",
+                    "sound command dropped while the tables load"
+                );
             }
             return;
         }
@@ -912,7 +935,9 @@ impl ClientSound {
                     s.deactivate_reverb(p, fade.parse().unwrap_or(0));
                 }
             }
-            _ => {}
+            _ => {
+                logging::dedup!(WARN, cmd, command = cmd, "malformed sound command dropped");
+            }
         }
     }
 
@@ -1017,7 +1042,18 @@ fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+/// The loaded tables with a mixer; a missing sound card is noted, the mixer then runs silent.
+fn ready_state(bank: Bank, device: bool) -> State {
+    let s = Sound::new(bank, device);
+    match s.device_note.as_deref() {
+        Some(note) if device => tracing::warn!(error = note, "no sound device; mixing silently"),
+        _ => tracing::info!("sound tables loaded"),
+    }
+    State::Ready(Box::new(s))
+}
+
 fn load(install: &Path, game: &str, map: &str) -> Result<Bank, String> {
+    let _span = tracing::debug_span!("sound_load", game, map).entered();
     let install =
         Install::open_game(install, game).map_err(|e| format!("cannot open the install: {e}"))?;
     let lang = LANGUAGES
@@ -1761,6 +1797,40 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sound system whose tables failed to load: enough to test what is dropped.
+    fn failed() -> ClientSound {
+        ClientSound {
+            state: State::Failed("test".into()),
+            device: false,
+            seen: HashMap::new(),
+            own_entity: NO_ENTITY,
+            dropped: 0,
+            pending: Vec::new(),
+            eye: [0.0; 3],
+            footsteps: true,
+            missile_loops: HashSet::new(),
+            names: Vec::new(),
+            entity_loops: HashMap::new(),
+            breath: crate::breath::Breath::default(),
+            breath_volumes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn malformed_server_sound_commands_warn() {
+        let mut s = failed();
+        let (_, events) = logging::capture(|| {
+            s.command("sndname notanumber");
+            s.run("snd 1");
+        });
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(warns.len(), 2, "{events:?}");
+        assert_eq!(warns[1].field("command"), Some("snd"));
+    }
 
     fn first(groups: &[Vec<String>], i: usize) -> &str {
         &groups[i][0]

@@ -85,7 +85,7 @@ impl RawMouse {
         let (d, reattach) = self.select(gc, w, wn);
         #[cfg(target_os = "macos")]
         if reattach {
-            eprintln!("input: GCMouse silent while winit sees motion; re-installing handlers");
+            tracing::warn!("input: GCMouse silent while winit sees motion; re-installing handlers");
             self.gc.reattach();
         }
         #[cfg(not(target_os = "macos"))]
@@ -339,7 +339,7 @@ mod gc {
             self.attached.retain(|a| {
                 let listed = mice.iter().any(|m| std::ptr::eq(&*m, &**a));
                 if !listed {
-                    eprintln!("input: GCMouse detached: {}", name(a));
+                    tracing::info!(mouse = %name(a), "input: GCMouse detached");
                 }
                 listed
             });
@@ -362,7 +362,7 @@ mod gc {
                     m.setHandlerQueue(dq);
                     input.setMouseMovedHandler(&*block as *const DynBlock<_> as *mut _);
                 }
-                eprintln!("input: GCMouse attached: {}", name(&m));
+                tracing::info!(mouse = %name(&m), "input: GCMouse attached");
                 self.attached.push(m);
             }
         }

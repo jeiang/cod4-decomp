@@ -372,6 +372,9 @@ impl Profiles {
             n.as_ref()
                 .and_then(|n| listed.iter().find(|l| l.eq_ignore_ascii_case(n)).cloned())
         };
+        if named.is_some() && find(&named).is_none() {
+            tracing::warn!(profile = ?named, "active.txt names a profile that does not exist");
+        }
         p.active = match find(&named).or_else(|| find(&fallback)) {
             Some(n) => n,
             None if listed.is_empty() => fallback.unwrap_or_else(|| "default".into()),
@@ -468,6 +471,7 @@ impl Profiles {
             .into_iter()
             .find_map(|r| std::fs::read(Self::find_in(r, name)?.join("mpdata")).ok())
         else {
+            tracing::debug!(profile = name, "no mpdata file: default stats");
             return default_stats();
         };
         // The CD key is looked up only for the original's encrypted files, and never printed.
@@ -475,8 +479,9 @@ impl Profiles {
         match plain_file(&bytes, key.as_ref()) {
             Ok(plain) => {
                 if !checksum_ok(&plain) {
-                    eprintln!(
-                        "profile {name}: the stats checksum does not match; using the stats anyway"
+                    tracing::warn!(
+                        profile = name,
+                        "the stats checksum does not match; using the stats anyway"
                     );
                 }
                 parse_stats(&plain)
@@ -491,7 +496,10 @@ impl Profiles {
                         "it is encrypted and its hash does not match (tampered, or made with another CD key)"
                     }
                 };
-                eprintln!("profile {name}: cannot read its stats ({why}); starting fresh");
+                tracing::warn!(
+                    profile = name,
+                    "cannot read its stats ({why}); starting fresh"
+                );
                 default_stats()
             }
         }
@@ -528,23 +536,41 @@ impl Profiles {
     /// Makes `name` the active profile: the current stats are saved first, the new profile's stats are returned, and
     /// `active.txt` records the choice. `None` if the name is not a profile.
     pub fn switch(&mut self, current: &[i32], name: &str) -> Option<Vec<i32>> {
-        let name = self
+        let Some(name) = self
             .list()
             .into_iter()
-            .find(|n| n.eq_ignore_ascii_case(name))?;
+            .find(|n| n.eq_ignore_ascii_case(name))
+        else {
+            tracing::warn!(profile = name, "switch to a profile that does not exist");
+            return None;
+        };
         if let Err(e) = self.save_if_changed(current) {
-            eprintln!("cannot save the profile: {e}");
+            tracing::error!(
+                profile = self.active.as_str(),
+                "cannot save the profile: {e}"
+            );
         }
+        tracing::info!(
+            from = self.active.as_str(),
+            to = name.as_str(),
+            "profile switch"
+        );
         self.active = name;
         #[cfg(target_arch = "wasm32")]
         if let Err(e) = crate::web::pref_set("players/profiles/active.txt", &self.active) {
-            eprintln!("cannot record the active profile: {e:?}");
+            tracing::warn!(
+                profile = self.active.as_str(),
+                "cannot record the active profile: {e:?}"
+            );
         }
         if let Some(root) = &self.user_root
-            && std::fs::create_dir_all(root).is_ok()
-            && let Err(e) = std::fs::write(root.join("active.txt"), &self.active)
+            && let Err(e) = std::fs::create_dir_all(root)
+                .and_then(|()| std::fs::write(root.join("active.txt"), &self.active))
         {
-            eprintln!("cannot record the active profile: {e}");
+            tracing::warn!(
+                profile = self.active.as_str(),
+                "cannot record the active profile: {e}"
+            );
         }
         Some(self.load_active())
     }
@@ -559,10 +585,24 @@ impl Profiles {
         if listed.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
             return Err(CreateError::Exists);
         }
-        let dir = Self::dir_of(&self.user_root, &name).ok_or(CreateError::Failed)?;
-        std::fs::create_dir_all(&dir).map_err(|_| CreateError::Failed)?;
-        std::fs::write(dir.join("mpdata"), encode(&default_stats()))
-            .map_err(|_| CreateError::Failed)?;
+        let Some(dir) = Self::dir_of(&self.user_root, &name) else {
+            tracing::warn!(
+                profile = name.as_str(),
+                "no config folder: cannot create the profile"
+            );
+            return Err(CreateError::Failed);
+        };
+        let made = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(dir.join("mpdata"), encode(&default_stats())));
+        if let Err(e) = made {
+            tracing::error!(
+                profile = name.as_str(),
+                path = %dir.display(),
+                "cannot create the profile: {e}"
+            );
+            return Err(CreateError::Failed);
+        }
+        tracing::info!(profile = name.as_str(), "profile created");
         Ok(name)
     }
 
@@ -575,9 +615,14 @@ impl Profiles {
         let Some(dir) = clean_name(name).map(|n| user.join(n)) else {
             return false;
         };
-        if !dir.is_dir() || std::fs::remove_dir_all(&dir).is_err() {
+        if !dir.is_dir() {
             return false;
         }
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(profile = name, path = %dir.display(), "cannot delete the profile: {e}");
+            return false;
+        }
+        tracing::info!(profile = name, "profile deleted");
         if self.active.eq_ignore_ascii_case(name) {
             self.active.clear();
             self.saved.clear();
@@ -909,6 +954,25 @@ mod tests {
         assert!(!p.save_if_changed(&s).unwrap());
         assert!(!p.delete("Ann"));
         assert_eq!(p.create("x"), Err(CreateError::Failed));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_profile_that_cannot_be_saved_logs_an_error() {
+        let root = tmp("unsaveable");
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg = root.join("cfg");
+        std::fs::create_dir_all(&cfg).unwrap();
+        // `players` is a file, so no profile folder can be made under it.
+        std::fs::write(cfg.join("players"), b"x").unwrap();
+        let (mut p, mut s) = Profiles::open(&root.join("install"), Some(cfg), "default");
+        s[2301] = 1;
+        let (_, events) = logging::capture(|| p.switch(&s, "default"));
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == tracing::Level::ERROR && e.field("profile") == Some("default"))
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

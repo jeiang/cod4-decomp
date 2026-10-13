@@ -140,7 +140,7 @@ pub fn run(
         if let Some(st) = v.st.as_mut()
             && let Err(e) = st.input.save()
         {
-            eprintln!("cannot save the config: {e}");
+            tracing::error!(error = %e, "cannot save the config");
         }
         if let Some(st) = v.st.as_mut() {
             if let Some(n) = st.net.as_mut() {
@@ -151,12 +151,15 @@ pub fn run(
             }
         }
         let out = v.cli.out.clone();
-        if let (Some(e), Some(out)) = (&v.error, out) {
-            let _ = std::fs::create_dir_all(&out);
-            let _ = std::fs::write(
-                out.join("client.json"),
-                json!({"status": "error", "error": e}).to_string(),
-            );
+        if let (Some(e), Some(out)) = (&v.error, out)
+            && let Err(err) = std::fs::create_dir_all(&out).and_then(|()| {
+                std::fs::write(
+                    out.join("client.json"),
+                    json!({"status": "error", "error": e}).to_string(),
+                )
+            })
+        {
+            tracing::error!(dir = %out.display(), error = %err, "cannot write client.json");
         }
         let result = v.error.take().map_or(Ok(()), Err);
         let start_singleplayer = v
@@ -292,6 +295,13 @@ fn gpu_json(g: &Gpu) -> Value {
     })
 }
 
+/// The `--list-display-modes` result the harness reads from stdout.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::print_stdout)]
+fn print_list_json(v: &Value) {
+    println!("{v}");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct Lister {
     error: Option<String>,
@@ -315,7 +325,7 @@ impl ApplicationHandler<Ready> for Lister {
             }))
         })();
         match result {
-            Ok(v) => println!("{v}"),
+            Ok(v) => print_list_json(&v),
             Err(e) => self.error = Some(e),
         }
         el.exit();
@@ -574,7 +584,7 @@ impl GpuLog {
                 self.losses.join("; ")
             ));
         }
-        eprintln!("recovering from the lost graphics device ({context}: {why})");
+        tracing::warn!(context, why = %why, "recovering from the lost graphics device");
         Ok(())
     }
 
@@ -667,7 +677,11 @@ impl Viewer {
             .await;
             match ready {
                 Ok(r) => {
-                    let _ = proxy.send_event(r);
+                    if proxy.send_event(r).is_err() {
+                        tracing::error!(
+                            "the event loop is gone; the graphics cannot be handed over"
+                        );
+                    }
                 }
                 Err(e) => crate::web::fatal(&format!("no usable graphics: {e}")),
             }
@@ -711,7 +725,9 @@ impl Viewer {
         };
         surface.configure(&gpu.device, &config);
         if gpu.lost().is_some() {
-            return Err(gpu.explain("the window's surface could not be configured"));
+            let why = gpu.explain("the window's surface could not be configured");
+            tracing::error!(error = %why, "surface configuration failed");
+            return Err(why);
         }
         let vfs = loader::open_vfs(&self.cli.install, &self.cli.game, &self.cli.map)?;
         // Native warms it again once the library is loaded (see below); the browser builds its pipelines by frames.
@@ -854,7 +870,11 @@ impl Viewer {
             .map_err(|e| format!("cannot open the install: {e}"))?;
         let mut input = Input::new(
             self.cli.config_dir.clone(),
-            assets::vfs::Vfs::open(&self.cli.install, 0, &self.cli.game, None).ok(),
+            assets::vfs::Vfs::open(&self.cli.install, 0, &self.cli.game, None)
+                .inspect_err(|e| {
+                    tracing::warn!(game = %self.cli.game, error = %e, "cannot open the file system for the config");
+                })
+                .ok(),
         );
         input.cvars.set("fs_game", &self.cli.game, false);
         let demo_dir = input
@@ -1071,6 +1091,7 @@ impl ApplicationHandler<Ready> for Viewer {
                 self.st = Some(s);
             }
             Err(e) => {
+                tracing::error!(error = %e, "the window or graphics could not start");
                 #[cfg(target_arch = "wasm32")]
                 crate::web::fatal(&e);
                 self.error = Some(e);
@@ -1093,6 +1114,7 @@ impl ApplicationHandler<Ready> for Viewer {
                 self.st = Some(s);
             }
             Err(e) => {
+                tracing::error!(error = %e, "the window or graphics could not start");
                 #[cfg(target_arch = "wasm32")]
                 crate::web::fatal(&e);
                 self.error = Some(e);
@@ -1137,12 +1159,16 @@ impl ApplicationHandler<Ready> for Viewer {
             toggle_fullscreen(&st.window);
         }
         match ev {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                tracing::info!("window close requested");
+                el.exit();
+            }
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
                 if st.loading.is_some() {
                     st.pending_resize = Some((s.width, s.height));
                 } else {
                     if let Err(e) = apply_resize(st, (s.width, s.height)) {
+                        tracing::error!(error = %e, "cannot resize the window's surface");
                         self.error = Some(e);
                         el.exit();
                     }
@@ -1159,6 +1185,7 @@ impl ApplicationHandler<Ready> for Viewer {
             WindowEvent::Focused(false) => release_pointer(st),
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.frame(el) {
+                    tracing::error!(error = %e, "the frame failed");
                     #[cfg(target_arch = "wasm32")]
                     crate::web::fatal(&e);
                     self.error = Some(e);
@@ -1274,6 +1301,7 @@ impl Viewer {
     }
 
     fn frame(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
+        let _frame = tracing::debug_span!("frame").entered();
         let st = self.st.as_mut().ok_or("no window")?;
         let now = Instant::now();
         let t = st.started.elapsed().as_secs_f32();
@@ -1314,12 +1342,12 @@ impl Viewer {
                     } else if let Err(err) =
                         start_session(&self.cli, &mut self.map, st, &d.map, &gametype, Some(addr))
                     {
-                        eprintln!("cannot join {addr}: {err}");
+                        tracing::error!(%addr, error = %err, "cannot join");
                         end_session(&mut self.map, st);
                     }
                 }
                 Err(why) => {
-                    eprintln!("cannot download {}: {why}", d.map);
+                    tracing::error!(map = %d.map, error = %why, "cannot download the map");
                     show_error(st, &format!("Could not download from the server: {why}"));
                 }
             }
@@ -1329,7 +1357,7 @@ impl Viewer {
         {
             let result = done.and_then(|l| finish_load(&self.cli, &mut self.map, st, &load, l));
             if let Err(e) = result {
-                eprintln!("cannot load {}: {e}", load.map);
+                tracing::error!(map = %load.map, error = %e, "cannot load the map");
                 // A level change on a lost device is loaded again on the new one; a session that was starting ends.
                 #[cfg(not(target_arch = "wasm32"))]
                 if st.net.is_some() && st.gpu.lost().is_some() {
@@ -1398,7 +1426,7 @@ impl Viewer {
                 .map(str::to_owned)
             && st.shell.is_some()
         {
-            eprintln!("join refused: {why}");
+            tracing::warn!(reason = %why, "join refused");
             end_session(&mut self.map, st);
             if let Some(sh) = st.shell.as_mut() {
                 sh.join_refused(&mut st.input, &why);
@@ -1705,13 +1733,13 @@ impl Viewer {
         if let Some(name) = new_level
             && let Err(e) = enter_level(&self.cli, &mut self.map, st, &name)
         {
-            eprintln!("cannot enter {name}: {e}");
+            tracing::error!(map = %name, error = %e, "cannot enter the level");
             end_session(&mut self.map, st);
         }
         if let Some(sh) = st.shell.as_mut()
             && let Err(e) = sh.st.profiles.save_if_changed(&sh.st.stats)
         {
-            eprintln!("cannot save the profile: {e}");
+            tracing::error!(error = %e, "cannot save the profile");
         }
         // A native client writes the config when it exits; a tab has no such moment, so changes are kept as they come.
         #[cfg(target_arch = "wasm32")]
@@ -1721,7 +1749,7 @@ impl Viewer {
         {
             st.config_saved_at = Instant::now();
             if let Err(e) = st.input.save() {
-                eprintln!("cannot save the config: {e}");
+                tracing::error!(error = %e, "cannot save the config");
                 st.config_failed = true;
                 crate::web::notice(
                     "Your settings cannot be saved in this browser (storage is full or off).",
@@ -1890,7 +1918,10 @@ impl Viewer {
                 .join("flythrough.mp4");
             match Recorder::start(&path, st.rec_size, 720, 30) {
                 Ok(r) => st.recorder = Some(r),
-                Err(e) => st.notes.push(format!("video: {e}")),
+                Err(e) => {
+                    tracing::error!(path = %path.display(), error = %e, "cannot start the video recording");
+                    st.notes.push(format!("video: {e}"));
+                }
             }
         }
         if let Some(r) = st.recorder.as_mut() {
@@ -1927,7 +1958,10 @@ impl Viewer {
                 &out.join("screenshot.png"),
             ) {
                 Ok(_) => st.shot_ok = true,
-                Err(e) => st.notes.push(format!("screenshot failed: {e}")),
+                Err(e) => {
+                    tracing::error!(error = %e, "screenshot failed");
+                    st.notes.push(format!("screenshot failed: {e}"));
+                }
             }
         }
         if let Some(t) = st.ui_tour.as_mut() {
@@ -1948,10 +1982,12 @@ impl Viewer {
                     .map(|s| s.missing().to_vec())
                     .unwrap_or_default();
                 let report = json!({"status": "ok", "menus": t.results, "missing_images": missing});
-                let _ = std::fs::write(
+                if let Err(e) = std::fs::write(
                     dir.join("ui.json"),
                     serde_json::to_vec_pretty(&report).unwrap_or_default(),
-                );
+                ) {
+                    tracing::error!(error = %e, "cannot write ui.json");
+                }
                 el.exit();
             }
         }
@@ -1965,13 +2001,18 @@ impl Viewer {
         if shot_ready && let Some(name) = st.shot_request.take() {
             st.shot_gate = false;
             let out = self.cli.out.clone().unwrap_or_default();
-            let _ = std::fs::create_dir_all(&out);
+            if let Err(e) = std::fs::create_dir_all(&out) {
+                tracing::error!(dir = %out.display(), error = %e, "cannot create the output directory");
+            }
             let lit = save_png(
                 &st.gpu,
                 &frame.texture,
                 st.config.format,
                 &out.join(format!("{name}.png")),
             );
+            if let Err(e) = &lit {
+                tracing::error!(shot = %name, error = %e, "screenshot failed");
+            }
             let ok = lit.is_ok();
             let hud = st.shell.as_ref().map(|s| s.st.game.hud.report());
             if let Some(sc) = st.script.as_mut() {
@@ -1997,7 +2038,9 @@ impl Viewer {
         let said = st.input.take_messages();
         match st.shell.as_mut() {
             Some(sh) => said.iter().for_each(|l| sh.print_console(l)),
-            None => said.iter().for_each(|l| eprintln!("{l}")),
+            None => said
+                .iter()
+                .for_each(|l| tracing::info!(text = %l, "command output")),
         }
         let actions = st
             .shell
@@ -2080,11 +2123,13 @@ impl Viewer {
                     if let Err(e) =
                         start_session(&self.cli, &mut self.map, st, &map, &gametype, None)
                     {
-                        eprintln!("cannot start the server: {e}");
+                        tracing::error!(%map, error = %e, "cannot start the server");
                         end_session(&mut self.map, st);
                     }
                 }
                 Action::Join(addr) => {
+                    let _connect = tracing::info_span!("connect", %addr).entered();
+                    tracing::info!("joining the server");
                     st.last_server = Some(addr.clone());
                     // The client loads what the server is playing, so it asks first.
                     let found = serverlist::resolve(&addr)
@@ -2154,12 +2199,12 @@ impl Viewer {
                                 &e.gametype,
                                 Some(a),
                             ) {
-                                eprintln!("cannot join {addr}: {err}");
+                                tracing::error!(%addr, error = %err, "cannot join");
                                 end_session(&mut self.map, st);
                             }
                         }
                         Err(err) => {
-                            eprintln!("cannot join {addr}: {err}");
+                            tracing::error!(%addr, error = %err, "cannot join");
                             show_error(st, &err);
                         }
                     }
@@ -2200,11 +2245,12 @@ impl Viewer {
                 }
                 Action::PlayDemo(name) => {
                     if let Err(e) = play_demo(&self.cli, &mut self.map, st, &name) {
-                        eprintln!("cannot play the demo {name}: {e}");
+                        tracing::error!(demo = %name, error = %e, "cannot play the demo");
                         show_error(st, &format!("Cannot play the demo {name}: {e}"));
                     }
                 }
                 Action::Disconnect => {
+                    tracing::info!("disconnect requested");
                     end_session(&mut self.map, st);
                     // An `fs_game` changed during the match applies now.
                     restart_files(&self.cli, st);
@@ -2216,6 +2262,7 @@ impl Viewer {
                 }
                 Action::Screenshot(r) => st.screenshot = Some(r),
                 Action::VidRestart => {
+                    tracing::info!("vid_restart requested");
                     vid_restart(&self.cli, st);
                     restart_files(&self.cli, st);
                 }
@@ -2381,11 +2428,14 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
         "load": st.load_report,
         "objectives": {"plants": listen::objectives().0, "defuses": listen::objectives().1, "airstrikes": listen::objectives().2, "helicopters": listen::objectives().3, "heli_shots": listen::objectives().4},
     });
-    let _ = std::fs::create_dir_all(&out);
-    let _ = std::fs::write(
-        out.join("ui-script.json"),
-        serde_json::to_vec_pretty(&report).unwrap_or_default(),
-    );
+    if let Err(e) = std::fs::create_dir_all(&out).and_then(|()| {
+        std::fs::write(
+            out.join("ui-script.json"),
+            serde_json::to_vec_pretty(&report).unwrap_or_default(),
+        )
+    }) {
+        tracing::error!(dir = %out.display(), error = %e, "cannot write ui-script.json");
+    }
 }
 
 /// One frame of the `--ui-script`; `true` once every step has run.
@@ -3240,6 +3290,7 @@ fn saved_bot_count_lines(bots_flag: Option<usize>, input: &Input) -> Vec<String>
 fn console_action(st: &mut State, line: &str) {
     let count_before = bot_count(&st.input);
     for cmd in crate::input::config::split_commands(line) {
+        let _command = tracing::debug_span!("command", name = %cmd[0]).entered();
         if cmd[0].eq_ignore_ascii_case("bots") {
             // `bots <n>` brings the listen server's bots to n at once (the command is the listen server's console's).
             match (
@@ -3430,6 +3481,7 @@ fn recover_surface(
         return Ok(SurfaceAction::Retry);
     }
     st.surface_failures += 1;
+    tracing::warn!(outcome = ?outcome, failures = st.surface_failures, "the window's surface gave no frame");
     if st.surface_failures > SURFACE_RETRIES {
         return Err(st
             .gpu
@@ -3454,7 +3506,10 @@ fn fresh_surface(st: &mut State) -> Result<(), String> {
         .gpu
         .instance
         .create_surface(st.window.clone())
-        .map_err(|e| format!("cannot make the window's surface again: {e}"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "cannot make the window's surface again");
+            format!("cannot make the window's surface again: {e}")
+        })?;
     surface.configure(&st.gpu.device, &st.config);
     st.surface = Some(surface);
     Ok(())
@@ -3492,10 +3547,12 @@ fn restart_files(cli: &Cli, st: &mut State) {
         .map_err(|e| format!("cannot open the install: {e}"))
         .and_then(|install| sh.restart_files(&install, size, &mut st.input));
     if let Err(why) = restarted {
+        tracing::warn!(%game, error = %why, "cannot restart the file system");
         st.input.cvars.set("fs_game", &sh.st.fs_game, false);
         show_error(st, &why);
         return;
     }
+    tracing::info!(%game, "file system restarted");
     // The menu sounds are read again, with the mod's.
     st.menu_sound = None;
 }
@@ -3568,6 +3625,7 @@ fn next_frame(el: &ActiveEventLoop, st: &State) {
 /// renderer takes the ones it can change live (shadows, specular, depth of field, glow, antialiasing), and the texture
 /// size and filtering wait for the next map, which loads its textures again.
 fn vid_restart(cli: &Cli, st: &mut State) {
+    let _span = tracing::info_span!("vid_restart").entered();
     let g = Gfx::from_cvars(&st.input.cvars);
     if let Some(note) = display::apply(&st.window, &g.request(&cli.request)) {
         st.notes.push(note);
@@ -3602,6 +3660,7 @@ fn vid_restart(cli: &Cli, st: &mut State) {
             r.warm(st.config.format);
         }
     }
+    tracing::info!(present_mode = ?mode, resurface = reconfigure_surface, "vid_restart applied");
     if reconfigure_surface {
         // Applied by the next frame once no load is running (see `apply_resize`).
         st.pending_resize = Some((w, h));
@@ -3672,6 +3731,7 @@ fn start_session(
 fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: loader::Server) {
     // A warning that repeats per load logs again for this one.
     logging::new_window();
+    tracing::info!(%map, "map load started");
     let gfx = Gfx::from_cvars(&st.input.cvars);
     let req = loader::Request {
         install: cli.install.clone(),
@@ -3714,6 +3774,8 @@ fn finish_load(
         ms,
     } = loaded;
     let map = &load.map;
+    let _span = tracing::info_span!("map_load", %map).entered();
+    tracing::info!(load_ms = ms, level_change = load.level_change, "map loaded");
     let sound =
         crate::sound::ClientSound::start(&cli.install, &game_of(&st.input), map, !cli.no_sound);
     if let Some(g) = st.load_gaps.as_mut() {
@@ -3859,7 +3921,10 @@ fn record_command(st: &mut State, name: Option<&str>) {
     });
     match result {
         Ok(path) => say(st, &format!("Recording the demo to {}.", path.display())),
-        Err(e) => say(st, &format!("record: {e}")),
+        Err(e) => {
+            tracing::warn!(demo = %name, error = %e, "record: cannot start the demo");
+            say(st, &format!("record: {e}"));
+        }
     }
 }
 
@@ -3899,7 +3964,12 @@ fn show_error(st: &mut State, message: &str) {
 
 /// The server kicked us or went silent: back to the main menu with the reason up (`reconnect` rejoins).
 fn connection_lost(map_slot: &mut Option<MapData>, st: &mut State, why: &str) {
-    eprintln!("connection lost: {why}");
+    // A demo that ran out is no failure.
+    if why == net::client::DEMO_ENDED {
+        tracing::info!("the demo ended");
+    } else {
+        tracing::warn!(reason = %why, "connection lost");
+    }
     end_session(map_slot, st);
     // A demo that ran out is no failure: the menu, without an error over it.
     if why != net::client::DEMO_ENDED {
@@ -3909,6 +3979,9 @@ fn connection_lost(map_slot: &mut Option<MapData>, st: &mut State, why: &str) {
 
 /// Back to the main menu: drops the connection, the server and the world.
 fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
+    if st.net.is_some() {
+        tracing::info!(map = %st.map_name, "session ended");
+    }
     if let Some(n) = st.net.as_mut() {
         n.disconnect();
     }
@@ -4033,13 +4106,19 @@ fn take_screenshot(
 ) -> Option<String> {
     let fail = || (!req.silent).then(|| "ScreenShot: Couldn't create a file".to_owned());
     let Some(dir) = st.input.config_dir().map(|d| d.join("screenshots")) else {
+        tracing::error!("screenshot: there is no config folder to write to");
         return fail();
     };
     let Some(path) = crate::screenshot::target(&dir, req, &mut st.screenshot_next) else {
+        tracing::error!(dir = %dir.display(), "screenshot: no free file name");
         return fail();
     };
-    let Ok(rgba) = read_rgba(&st.gpu, tex, st.config.format) else {
-        return fail();
+    let rgba = match read_rgba(&st.gpu, tex, st.config.format) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "screenshot: cannot read the frame back");
+            return fail();
+        }
     };
     let rgb = rgba
         .1
@@ -4054,7 +4133,7 @@ fn take_screenshot(
         rgb,
     };
     if let Err(e) = crate::screenshot::write(&path, req.format, &pic) {
-        eprintln!("screenshot {}: {e}", path.display());
+        tracing::error!(path = %path.display(), error = %e, "screenshot: cannot write the file");
         return fail();
     }
     let shown = path

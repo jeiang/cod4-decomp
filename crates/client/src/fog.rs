@@ -76,7 +76,15 @@ impl FogState {
                 },
                 ms as i32,
             ),
-            _ => (Settings::default(), first as i32),
+            _ => {
+                if !rest.is_empty() {
+                    tracing::warn!(
+                        values = rest.len(),
+                        "fog configstring malformed; fog cleared"
+                    );
+                }
+                (Settings::default(), first as i32)
+            }
         };
         // From nothing there is nothing to blend: the fog is simply there.
         let from = self.now(time);
@@ -170,5 +178,13 @@ mod tests {
             "thinner half way: {thin}"
         );
         assert_eq!(f.at(1100), None);
+    }
+
+    #[test]
+    fn a_malformed_fog_string_warns() {
+        let mut f = FogState::default();
+        let (_, events) = logging::capture(|| f.follow("100 0.001 0.5", 0));
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
+        assert_eq!(f.at(0), None);
     }
 }

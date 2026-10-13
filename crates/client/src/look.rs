@@ -356,7 +356,11 @@ impl Look {
                         self.day = (art.glow, art.film);
                         self.go(now_ms, *ms);
                     }
-                    None => self.missing.push(format!("vision/{name}.vision")),
+                    None => {
+                        let f = format!("vision/{name}.vision");
+                        logging::dedup!(WARN, f.as_str(), file = f.as_str(), "vision file missing");
+                        self.missing.push(f);
+                    }
                 }
                 self.naked = Some(name.clone());
                 true
@@ -369,7 +373,11 @@ impl Look {
                         let art = MapArt::parse(None, Some(&text));
                         self.night_set = Some((art.glow, art.film));
                     }
-                    None => self.missing.push(format!("vision/{name}.vision")),
+                    None => {
+                        let f = format!("vision/{name}.vision");
+                        logging::dedup!(WARN, f.as_str(), file = f.as_str(), "vision file missing");
+                        self.missing.push(f);
+                    }
                 }
                 self.night = Some(name.clone());
                 true
@@ -392,7 +400,16 @@ impl Look {
                             });
                             self.shocks += 1;
                         }
-                        None => self.missing.push(format!("shock/{name}.shock")),
+                        None => {
+                            let f = format!("shock/{name}.shock");
+                            logging::dedup!(
+                                WARN,
+                                f.as_str(),
+                                file = f.as_str(),
+                                "shell shock file missing"
+                            );
+                            self.missing.push(f);
+                        }
                     }
                 }
                 true

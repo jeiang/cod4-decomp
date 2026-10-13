@@ -84,9 +84,15 @@ impl Cvars {
 
     /// The value as a float; 0 when unset or not a number.
     pub fn f32(&self, name: &str) -> f32 {
-        self.get(name)
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0.0)
+        let Some(v) = self.get(name) else {
+            return 0.0;
+        };
+        v.trim().parse().unwrap_or_else(|_| {
+            if !v.trim().is_empty() {
+                logging::dedup!(WARN, name, cvar = name, "dvar is not a number, read as 0");
+            }
+            0.0
+        })
     }
 
     pub fn bool(&self, name: &str) -> bool {

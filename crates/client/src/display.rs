@@ -288,18 +288,23 @@ pub fn create_window(
             let mode = mon.as_ref().and_then(|m| pick_mode(m, req));
             attrs = match mode {
                 _ if wayland(el) => {
+                    tracing::warn!("{WAYLAND_NOTE}");
                     note = Some(WAYLAND_NOTE.to_owned());
                     attrs.with_fullscreen(Some(Fullscreen::Borderless(mon)))
                 }
                 Some(m) => attrs.with_fullscreen(Some(Fullscreen::Exclusive(m))),
                 None => {
+                    tracing::warn!(size = ?req.size, "no matching video mode; fell back to borderless");
                     note = Some("no matching video mode; fell back to borderless".to_owned());
                     attrs.with_fullscreen(Some(Fullscreen::Borderless(mon)))
                 }
             };
         }
     }
-    let window = el.create_window(attrs).map_err(|e| e.to_string())?;
+    let window = el.create_window(attrs).map_err(|e| {
+        tracing::error!(error = %e, "cannot create the window");
+        e.to_string()
+    })?;
     Ok((window, note))
 }
 
@@ -322,6 +327,7 @@ pub fn apply(window: &Window, req: &Request) -> Option<String> {
         FullscreenKind::Exclusive => match mon.as_ref().and_then(|m| pick_mode(m, req)) {
             _ if wayland(window) => {
                 window.set_fullscreen(Some(Fullscreen::Borderless(mon)));
+                tracing::warn!("{WAYLAND_NOTE}");
                 Some(WAYLAND_NOTE.to_owned())
             }
             Some(m) => {
@@ -330,6 +336,7 @@ pub fn apply(window: &Window, req: &Request) -> Option<String> {
             }
             None => {
                 window.set_fullscreen(Some(Fullscreen::Borderless(mon)));
+                tracing::warn!(size = ?req.size, "no matching video mode; fell back to borderless");
                 Some("no matching video mode; fell back to borderless".to_owned())
             }
         },
@@ -381,7 +388,10 @@ pub fn create_window(
         .with_title("cod4e")
         .with_canvas(Some(page_canvas()?))
         .with_prevent_default(true);
-    let window = el.create_window(attrs).map_err(|e| e.to_string())?;
+    let window = el.create_window(attrs).map_err(|e| {
+        tracing::error!(error = %e, "cannot create the window");
+        e.to_string()
+    })?;
     Ok((window, None))
 }
 
@@ -393,7 +403,10 @@ fn page_canvas() -> Result<web_sys::HtmlCanvasElement, String> {
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id("cod4e-canvas"))
         .and_then(|e| e.dyn_into().ok())
-        .ok_or_else(|| "the page has no canvas".to_owned())
+        .ok_or_else(|| {
+            tracing::error!("the page has no canvas element cod4e-canvas");
+            "the page has no canvas".to_owned()
+        })
 }
 
 #[cfg(test)]

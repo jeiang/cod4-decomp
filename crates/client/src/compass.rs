@@ -27,6 +27,19 @@ impl MapInfo {
     /// Reads `"<material>" <ulx> <uly> <lrx> <lry>`. `None` when it is not there yet or the corners are not
     /// south-east of each other along the north yaw (the original refuses such a map).
     pub fn parse(minimap: &str, north_yaw: &str) -> Option<Self> {
+        let map = Self::read(minimap, north_yaw);
+        if map.is_none() && !minimap.trim().is_empty() {
+            logging::dedup!(
+                WARN,
+                "minimap",
+                minimap,
+                "minimap configstring does not describe a usable map, no compass map"
+            );
+        }
+        map
+    }
+
+    fn read(minimap: &str, north_yaw: &str) -> Option<Self> {
         let rest = minimap.trim().strip_prefix('"')?;
         let (material, rest) = rest.split_once('"')?;
         let n: Vec<f32> = rest
@@ -312,5 +325,15 @@ mod tests {
         assert_eq!(norm360(-90.0), 270.0);
         let (l, r) = tape_span(90.0, 0.0, 0.5);
         assert!((l + 0.5).abs() < 1e-6 && (r - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_minimap_that_cannot_be_used_warns_but_an_absent_one_does_not() {
+        let (m, events) = logging::capture(|| MapInfo::parse("\"a\" 1 2 3", "0"));
+        assert!(m.is_none());
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
+        let (m, events) = logging::capture(|| MapInfo::parse("", "0"));
+        assert!(m.is_none());
+        assert!(events.is_empty());
     }
 }

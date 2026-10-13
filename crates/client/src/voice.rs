@@ -42,6 +42,7 @@ impl Talker {
                     }
                     Err(e) => {
                         self.failed_at = Some(now);
+                        tracing::warn!(error = %e, "microphone cannot be opened");
                         self.note = Some(format!("voice chat: {e}"));
                     }
                 }
@@ -51,6 +52,7 @@ impl Talker {
         if let Some(e) = self.mic.as_mut().and_then(Capture::failure) {
             self.mic = None;
             self.failed_at = Some(now);
+            tracing::warn!(error = %e, "microphone failed");
             self.note = Some(format!("voice chat: {e}"));
         }
         let Some(mic) = self.mic.as_mut() else {
@@ -112,16 +114,36 @@ impl Hearing {
         open: impl FnOnce() -> Option<audio::engine::Pipe>,
     ) {
         let Some(pcm) = voice::decode(&v.frame) else {
+            logging::dedup!(
+                WARN,
+                "decode",
+                speaker = v.speaker,
+                "undecodable voice frame dropped"
+            );
             return;
         };
         let full = self.speakers.len() >= MAX_SPEAKERS;
         let sp = match self.speakers.entry(v.speaker) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(_) if full => {
+                logging::dedup!(
+                    WARN,
+                    "speakers",
+                    speaker = v.speaker,
+                    "too many speakers; voice dropped"
+                );
                 return;
             }
             std::collections::hash_map::Entry::Vacant(e) => {
-                let Some(pipe) = open() else { return };
+                let Some(pipe) = open() else {
+                    logging::dedup!(
+                        WARN,
+                        "pipe",
+                        speaker = v.speaker,
+                        "no mixer voice for a speaker"
+                    );
+                    return;
+                };
                 e.insert(Speaker {
                     pipe,
                     held: Vec::new(),
@@ -175,5 +197,30 @@ impl Hearing {
         for (_, s) in self.speakers.drain() {
             close(s.pipe);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_undecodable_voice_frame_is_dropped_with_a_warning() {
+        let v = Voice {
+            speaker: 3,
+            seq: 0,
+            frame: [0xff; net::voice::FRAME_BYTES],
+        };
+        let mut hearing = Hearing::default();
+        let (_, events) = logging::capture(|| {
+            hearing.feed(&v, 1.0, Instant::now(), || {
+                panic!("no pipe for a bad frame")
+            });
+        });
+        let w = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(w.field("speaker"), Some("3"));
     }
 }

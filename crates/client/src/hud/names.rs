@@ -62,10 +62,18 @@ pub struct Cfg {
 impl Cfg {
     pub fn read(cvars: &Cvars) -> Self {
         let f = |name: &str, default: f32| {
-            cvars
-                .get(name)
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(default)
+            let Some(v) = cvars.get(name) else {
+                return default;
+            };
+            v.trim().parse().unwrap_or_else(|_| {
+                logging::dedup!(
+                    WARN,
+                    name,
+                    cvar = name,
+                    "hud dvar is not a number, using its default"
+                );
+                default
+            })
         };
         let i = |name: &str, default: i32| f(name, default as f32) as i32;
         let b = |name: &str, default: bool| f(name, f32::from(u8::from(default))) != 0.0;

@@ -126,7 +126,7 @@ impl ExprEnv for Env<'_> {
         let mut s = if first.is_ref {
             self.ui
                 .assets
-                .translate(&first.text)
+                .translate_ref(&first.text)
                 .map_or_else(|| first.text.clone(), |t| t.to_string())
         } else {
             first.text.clone()
@@ -135,7 +135,7 @@ impl ExprEnv for Env<'_> {
             let v = if p.is_ref {
                 self.ui
                     .assets
-                    .translate(&p.text)
+                    .translate_ref(&p.text)
                     .map_or_else(|| p.text.clone(), |t| t.to_string())
             } else {
                 p.text.clone()
@@ -203,11 +203,21 @@ impl Ui {
         return_column: i32,
     ) -> String {
         let Some(t) = self.assets.table(file) else {
+            logging::dedup!(WARN, file, table = file, "string table is not loaded");
             return String::new();
         };
         let (cols, rows) = (t.column_count as i32, t.row_count as i32);
         if search_column < 0 || search_column >= cols || return_column < 0 || return_column >= cols
         {
+            logging::dedup!(
+                WARN,
+                file,
+                table = file,
+                search_column,
+                return_column,
+                columns = cols,
+                "string table lookup column is out of range"
+            );
             return String::new();
         }
         for r in 0..rows {

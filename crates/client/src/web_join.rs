@@ -131,7 +131,10 @@ async fn list(wire: &mut Wire, server: SocketAddr) -> Result<(Vec<File>, String)
                     sent = None;
                 }
                 Some(Oob::Error(why)) => return Err(why),
-                _ => {}
+                other => tracing::debug!(
+                    unexpected = other.is_some(),
+                    "ignored a message while listing the server's files"
+                ),
             }
         }
         if let Some(why) = web::wire_failure() {
@@ -222,6 +225,7 @@ async fn sync(
     }
     for (i, (file, dest)) in todo.into_iter().enumerate() {
         let note = format!("Downloading {} ({} of {count})", file.name, i + 1);
+        tracing::info!(file = %file.name, size = file.size, "downloading from the server");
         let bytes = download(wire, server, &file, &note).await?;
         web::save_download(&dest, &bytes);
         assets::fs::add(&dest, Arc::new(bytes) as Arc<dyn ReadAt>);
@@ -238,8 +242,13 @@ pub async fn prepare(cli: &mut Cli) -> Result<(), String> {
     };
     let server = serverlist::resolve(&target)?;
     let mut wire = Wire::open(&web::server_target(), server);
-    opened().await?;
-    let e = query(&mut wire, server).await?;
+    opened().await.inspect_err(|why| {
+        tracing::error!(%server, error = %why, "the session to the server did not open");
+    })?;
+    let e = query(&mut wire, server).await.inspect_err(|why| {
+        tracing::error!(%server, error = %why, "the server did not say what it runs");
+    })?;
+    tracing::info!(%server, game = %e.game, map = %e.map, "joining: the server answered");
     if !assets::paths::valid_game(&e.game) {
         return Err(format!("The server runs an invalid mod ({}).", e.game));
     }

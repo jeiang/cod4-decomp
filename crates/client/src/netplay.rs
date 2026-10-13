@@ -922,6 +922,8 @@ impl NetPlay {
             self.net.send();
             return None;
         };
+        let _apply =
+            tracing::debug_span!("snapshot_apply", server_time = st, client = own).entered();
         self.live_time = st;
         if let Some(fog) = self.net.ui_ref().map(|u| u.config(net::ui::cs::FOGVARS)) {
             self.fog.follow(fog, st);
@@ -1960,6 +1962,13 @@ impl NetPlay {
                 }
                 // Weapon 0 is "none": the player has no body yet.
                 Err(e) if index != 0 => {
+                    logging::dedup!(
+                        WARN,
+                        &name,
+                        weapon = name.as_str(),
+                        error = e.as_str(),
+                        "view model unavailable"
+                    );
                     self.c.unknown_weapon.insert(format!("{index}:{name}"), e);
                 }
                 Err(_) => {}
@@ -2008,7 +2017,13 @@ impl NetPlay {
                 && e.client == snap.ps.client_num
         })?;
         let name = self.net.ui()?.model(e.model).to_owned();
-        let rest = self.lib.rest_pose(&name, &[]).ok()?;
+        let rest = self
+            .lib
+            .rest_pose(&name, &[])
+            .inspect_err(|e| {
+                logging::dedup!(WARN, &name, model = name.as_str(), error = %e, "turret rest pose failed");
+            })
+            .ok()?;
         Some(sim::skel::turret::Seat {
             rig: rest.rig().clone(),
             origin: e.origin,
@@ -2051,7 +2066,11 @@ impl NetPlay {
                     // What the scripts attached rides on the model, at the tags they named.
                     let attached = attach::attachments_of(ui, &self.lib.content, e, name);
                     let before = out.len();
-                    match self.lib.rest_pose(name, &attached) {
+                    let rest = self.lib.rest_pose(name, &attached);
+                    if let Err(e) = &rest {
+                        logging::dedup!(WARN, name, model = name, error = %e, "script model rest pose failed");
+                    }
+                    match rest {
                         // A turret's gun swings with its gunner's view.
                         Ok(rest) if e.gun_angles != [0.0; 3] => {
                             out.extend(rest.swung(e.gun_angles, origin, angles, e.part_bits));
@@ -2076,6 +2095,7 @@ impl NetPlay {
                     }
                 }
                 None => {
+                    logging::dedup!(WARN, name, model = name, "script model not loaded");
                     self.c.script_models_unloaded.insert(name.to_owned());
                 }
             }
@@ -2119,6 +2139,12 @@ impl NetPlay {
         let mut out = Vec::new();
         for e in snap.entities.iter().filter(|e| e.etype == etype::ITEM) {
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
+                logging::dedup!(
+                    WARN,
+                    self.weapons.name(e.weapon),
+                    weapon = self.weapons.name(e.weapon),
+                    "item weapon data missing"
+                );
                 continue;
             };
             let Some(model) = def
@@ -2146,6 +2172,12 @@ impl NetPlay {
         let mut looping = Vec::new();
         for e in flying {
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
+                logging::dedup!(
+                    WARN,
+                    self.weapons.name(e.weapon),
+                    weapon = self.weapons.name(e.weapon),
+                    "projectile weapon data missing"
+                );
                 continue;
             };
             if let Some(alias) = def
@@ -2193,13 +2225,20 @@ impl NetPlay {
             }
             let name = ui.model(e.model);
             let Some(model) = self.lib.content.model(name) else {
+                logging::dedup!(WARN, name, model = name, "vehicle model not loaded");
                 self.c.vehicles_unloaded.insert(name.to_owned());
                 continue;
             };
             let rotors = self
                 .rotors
                 .entry(name.to_owned())
-                .or_insert_with(|| Rotors::new(&self.lib.content, model).ok());
+                .or_insert_with(|| {
+                    Rotors::new(&self.lib.content, model)
+                        .inspect_err(|e| {
+                            logging::dedup!(WARN, name, model = name, error = %e, "vehicle rotors unavailable");
+                        })
+                        .ok()
+                });
             let mut m = ModelInstance::new(model.clone(), render::ModelKind::World);
             m.origin = e.origin;
             m.angles = e.angles;
@@ -2294,11 +2333,18 @@ impl NetPlay {
                 .and_then(|m| m.name.as_deref().map(str::to_owned));
             // A player the scripts have not given a model yet (just joined) is not drawn.
             let Some(dressed) = self.body_set(e) else {
+                logging::dedup!(
+                    DEBUG,
+                    "body",
+                    client = e.client,
+                    "remote player has no model set yet"
+                );
                 continue;
             };
             self.c
                 .player_attachments
                 .extend(dressed.attach.iter().map(|(m, _)| m.clone()));
+            let client = e.client;
             let set = dressed.armed(held, knife);
             match self.remotes.get_mut(&e.client) {
                 Some(r) if r.body != set.body => {
@@ -2311,7 +2357,7 @@ impl NetPlay {
                             r.hand.clone_from(&set.hand);
                         }
                         Err(e) => {
-                            self.c.player_faults.insert(e);
+                            player_fault(&mut self.c.player_faults, client, e);
                         }
                     }
                 }
@@ -2330,7 +2376,7 @@ impl NetPlay {
                         );
                     }
                     Err(e) => {
-                        self.c.player_faults.insert(e);
+                        player_fault(&mut self.c.player_faults, client, e);
                     }
                 },
                 Some(r) if r.attach != set.attach => match self.lib.player(&set) {
@@ -2340,7 +2386,7 @@ impl NetPlay {
                         r.hand.clone_from(&set.hand);
                     }
                     Err(e) => {
-                        self.c.player_faults.insert(e);
+                        player_fault(&mut self.c.player_faults, client, e);
                     }
                 },
                 Some(r) if r.hand != set.hand => match self.lib.hand(&set.hand) {
@@ -2349,7 +2395,7 @@ impl NetPlay {
                         r.hand.clone_from(&set.hand);
                     }
                     Err(e) => {
-                        self.c.player_faults.insert(e);
+                        player_fault(&mut self.c.player_faults, client, e);
                     }
                 },
                 Some(_) => {}
@@ -2523,6 +2569,18 @@ impl NetPlay {
     fn feet(&self) -> [f32; 3] {
         self.c.end
     }
+}
+
+/// Notes a remote player's model that could not be built: logged once per distinct fault, kept for the report.
+fn player_fault(faults: &mut std::collections::BTreeSet<String>, client: u16, error: String) {
+    logging::dedup!(
+        WARN,
+        &error,
+        client,
+        error = error.as_str(),
+        "remote player model failed"
+    );
+    faults.insert(error);
 }
 
 fn team_of(flags: u32) -> Option<Team> {
@@ -2846,6 +2904,20 @@ mod tests {
         c.set("phys_bulletSpinScale", "500", false);
         let t = Switches::read(&c).bullet;
         assert_eq!((t.up_bias, t.spin_scale), (1.5, 100.0));
+    }
+
+    #[test]
+    fn a_remote_player_model_fault_warns_and_is_kept() {
+        let mut faults = std::collections::BTreeSet::new();
+        let (_, events) = logging::capture(|| {
+            player_fault(&mut faults, 7, "model body_test_fault not loaded".into());
+        });
+        let w = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(w.field("client"), Some("7"));
+        assert_eq!(faults.len(), 1);
     }
 
     #[test]

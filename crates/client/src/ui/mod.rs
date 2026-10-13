@@ -476,16 +476,27 @@ struct MenuRt {
     cursor: Option<usize>,
 }
 
-fn compile(s: &::assets::zone::menu::Statement) -> Option<Compiled> {
+/// Compiles one expression of `menu`; one that does not parse stays `None`, which the callers read as its default.
+fn compile(menu: &str, what: &str, s: &::assets::zone::menu::Statement) -> Option<Compiled> {
     if s.entries.is_empty() {
-        None
-    } else {
-        Compiled::new(s).ok()
+        return None;
+    }
+    match Compiled::new(s) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!(
+                menu,
+                expr = what,
+                error = %e,
+                "menu expression does not parse, using its default"
+            );
+            None
+        }
     }
 }
 
 impl ItemRt {
-    fn new(d: &ItemDef) -> Self {
+    fn new(d: &ItemDef, menu: &str) -> Self {
         ItemRt {
             dyn_flags: d.window.dynamic_flags,
             fore: d.window.fore_color,
@@ -493,14 +504,14 @@ impl ItemRt {
             border: d.window.border_color,
             next_time: 0,
             rect: d.window.rect,
-            visible: compile(&d.visible_exp),
-            text: compile(&d.text_exp),
-            material: compile(&d.material_exp),
-            rect_x: compile(&d.rect_x_exp),
-            rect_y: compile(&d.rect_y_exp),
-            rect_w: compile(&d.rect_w_exp),
-            rect_h: compile(&d.rect_h_exp),
-            fore_a: compile(&d.forecolor_a_exp),
+            visible: compile(menu, "item_visible", &d.visible_exp),
+            text: compile(menu, "item_text", &d.text_exp),
+            material: compile(menu, "item_material", &d.material_exp),
+            rect_x: compile(menu, "item_rect_x", &d.rect_x_exp),
+            rect_y: compile(menu, "item_rect_y", &d.rect_y_exp),
+            rect_w: compile(menu, "item_rect_w", &d.rect_w_exp),
+            rect_h: compile(menu, "item_rect_h", &d.rect_h_exp),
+            fore_a: compile(menu, "item_fore_a", &d.forecolor_a_exp),
             list_cursor: 0,
             list_start: 0,
             edit: String::new(),
@@ -513,21 +524,22 @@ impl ItemRt {
 
 impl MenuRt {
     fn new(def: &Arc<MenuDef>) -> Self {
+        let name = def
+            .window
+            .name
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         MenuRt {
-            name: def
-                .window
-                .name
-                .as_deref()
-                .unwrap_or("")
-                .to_ascii_lowercase(),
             dyn_flags: def.window.dynamic_flags,
             rect: def.window.rect,
-            visible: compile(&def.visible_exp),
-            rect_x: compile(&def.rect_x_exp),
-            rect_y: compile(&def.rect_y_exp),
-            items: def.items.iter().map(ItemRt::new).collect(),
+            visible: compile(&name, "visible", &def.visible_exp),
+            rect_x: compile(&name, "rect_x", &def.rect_x_exp),
+            rect_y: compile(&name, "rect_y", &def.rect_y_exp),
+            items: def.items.iter().map(|d| ItemRt::new(d, &name)).collect(),
             cursor: None,
             def: def.clone(),
+            name,
         }
     }
 }
@@ -610,7 +622,7 @@ pub struct Ui {
 impl Ui {
     fn note_unknown(&mut self, what: String) {
         if !self.unknown.contains(&what) {
-            eprintln!("ui: unknown {what}");
+            tracing::warn!(what = %what, "menu script uses something nothing implements");
             self.unknown.push(what);
         }
     }
@@ -698,6 +710,11 @@ impl Ui {
         item: Option<usize>,
         src: &str,
     ) {
+        let _span = tracing::debug_span!(
+            "menu_action",
+            menu = menu.map_or("", |m| self.menus[m].name.as_str())
+        )
+        .entered();
         for cmd in script::parse(src) {
             self.run_command(host, menu, item, &cmd);
         }
@@ -707,10 +724,44 @@ impl Ui {
         match w.strip_prefix('@') {
             Some(k) => self
                 .assets
-                .translate(k)
+                .translate_ref(k)
                 .map_or_else(|| w.to_owned(), |s| s.to_string()),
             None => w.to_owned(),
         }
+    }
+
+    /// A menu a script names; one that is not loaded is logged once per name.
+    fn script_menu(&self, name: &str) -> Option<usize> {
+        let m = self.menu_index(name);
+        if m.is_none() {
+            logging::dedup!(
+                WARN,
+                name,
+                menu = name,
+                "script names a menu that is not loaded"
+            );
+        }
+        m
+    }
+
+    /// The item of menu `m` a script names; one that does not exist is logged once per name.
+    fn script_item(&self, m: usize, want: &str) -> Option<usize> {
+        let found = self.menus[m].def.items.iter().position(|d| {
+            d.window
+                .name
+                .as_deref()
+                .is_some_and(|n| n.eq_ignore_ascii_case(want))
+        });
+        if found.is_none() {
+            logging::dedup!(
+                WARN,
+                want,
+                menu = self.menus[m].name.as_str(),
+                item = want,
+                "script names an item the menu does not have"
+            );
+        }
+        found
     }
 
     fn run_command(
@@ -734,24 +785,24 @@ impl Ui {
                     if let Some(m) = menu {
                         self.close(host, m);
                     }
-                } else if let Some(m) = self.menu_index(&a) {
+                } else if let Some(m) = self.script_menu(&a) {
                     self.close(host, m);
                 }
             }
             "closemenu" => self.close_by_name(host, &arg(0)),
             "ingameopen" if host.in_game() => self.open_by_name(host, &arg(0)),
             "ingameclose" if host.in_game() => {
-                if let Some(m) = self.menu_index(&arg(0)) {
+                if let Some(m) = self.script_menu(&arg(0)) {
                     self.close(host, m);
                 }
             }
             "showmenu" => {
-                if let Some(m) = self.menu_index(&arg(0)) {
+                if let Some(m) = self.script_menu(&arg(0)) {
                     self.menus[m].dyn_flags |= dynf::VISIBLE;
                 }
             }
             "hidemenu" => {
-                if let Some(m) = self.menu_index(&arg(0)) {
+                if let Some(m) = self.script_menu(&arg(0)) {
                     self.menus[m].dyn_flags &= !dynf::VISIBLE;
                 }
             }
@@ -811,13 +862,7 @@ impl Ui {
             }
             "setfocus" => {
                 if let Some(m) = menu {
-                    let want = arg(0).to_ascii_lowercase();
-                    let found = self.menus[m].def.items.iter().position(|d| {
-                        d.window
-                            .name
-                            .as_deref()
-                            .is_some_and(|n| n.eq_ignore_ascii_case(&want))
-                    });
+                    let found = self.script_item(m, &arg(0));
                     if let Some(i) = found {
                         self.set_focus(host, m, i);
                     }
@@ -898,13 +943,7 @@ impl Ui {
             "feedertop" | "feederbottom" => {
                 if let Some(m) = menu {
                     let top = name.eq_ignore_ascii_case("feedertop");
-                    let want = arg(0).to_ascii_lowercase();
-                    let found = self.menus[m].def.items.iter().position(|d| {
-                        d.window
-                            .name
-                            .as_deref()
-                            .is_some_and(|n| n.eq_ignore_ascii_case(&want))
-                    });
+                    let found = self.script_item(m, &arg(0));
                     if let Some(i) = found {
                         let n = host.feeder_count(self.menus[m].def.items[i].special as i32) as i32;
                         let it = &mut self.menus[m].items[i];
@@ -935,7 +974,8 @@ impl Ui {
     /// Sets one colour of an item. `setcolor` also marks the fore and back colours as set; `setitemcolor` marks only the
     /// fore colour.
     fn set_item_color(&mut self, m: usize, i: usize, which: &str, rgba: [f32; 4], mark_back: bool) {
-        let it = &mut self.menus[m].items[i];
+        let menu = &mut self.menus[m];
+        let it = &mut menu.items[i];
         match which.to_ascii_lowercase().as_str() {
             "forecolor" => {
                 it.fore = rgba;
@@ -948,7 +988,13 @@ impl Ui {
                 }
             }
             "bordercolor" => it.border = rgba,
-            _ => {}
+            _ => logging::dedup!(
+                WARN,
+                which,
+                menu = menu.name.as_str(),
+                color = which,
+                "setcolor names an unknown color"
+            ),
         }
     }
 
@@ -1009,11 +1055,12 @@ impl Ui {
     pub fn open_by_name(&mut self, host: &mut dyn Host, name: &str) {
         match self.menu_index(name) {
             Some(m) => self.open(host, m),
-            None => eprintln!("ui: could not find menu '{name}'"),
+            None => logging::dedup!(WARN, name, menu = name, "menu to open does not exist"),
         }
     }
 
     pub fn open(&mut self, host: &mut dyn Host, m: usize) {
+        let _span = tracing::debug_span!("menu_open", menu = %self.menus[m].name).entered();
         // A menu is mouse-driven unless the server opened it with `openmenunomouse` (which says so after this call).
         // Leaving the flag as the last menu set it hid the pointer of every later menu, the Escape menu included.
         self.cursor_visible = true;
@@ -1051,6 +1098,13 @@ impl Ui {
     /// menu that waited before is answered `noop`.
     pub fn open_script_menu(&mut self, host: &mut dyn Host, name: &str, mouse: bool) {
         if self.menu_index(name).is_none() {
+            // The server named it: a constant key keeps a flood of names to a few events.
+            logging::dedup!(
+                WARN,
+                "open-script-menu",
+                menu = name,
+                "server opened a menu this client does not have, answering bad"
+            );
             host.menu_response(name, "bad");
         } else if !self.popup_script_menu(host, name, mouse) {
             if let Some((old, _)) = self.waiting_menu.take() {
@@ -3820,5 +3874,87 @@ mod tests {
         // PageUp / PageDown step like Left / Right.
         ui.key(&mut host, UiKey::PageUp);
         assert!(host.dvar(&dv).parse::<f32>().unwrap() < v);
+    }
+
+    fn bare_ui() -> Ui {
+        Ui::new(assets::UiAssets::default(), (640, 480))
+    }
+
+    #[test]
+    fn opening_a_menu_that_is_not_loaded_warns_with_its_name() {
+        let (_, events) = logging::capture(|| {
+            bare_ui().open_by_name(&mut Dummy::default(), "no_such_menu_for_open_test");
+        });
+        let e = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(e.field("menu"), Some("no_such_menu_for_open_test"));
+    }
+
+    #[test]
+    fn a_script_naming_a_missing_menu_or_command_warns() {
+        let mut ui = bare_ui();
+        let mut host = Dummy::default();
+        let (_, events) = logging::capture(|| {
+            ui.run_script(&mut host, None, None, "close no_such_menu_for_close_test");
+            ui.run_script(&mut host, None, None, "frobnicate_test_command 1");
+        });
+        let warns: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert!(
+            warns
+                .iter()
+                .any(|e| e.field("menu") == Some("no_such_menu_for_close_test"))
+        );
+        assert!(warns.iter().any(|e| {
+            e.field("what")
+                .is_some_and(|w| w.contains("frobnicate_test_command"))
+        }));
+        assert_eq!(ui.unknown.len(), 1);
+    }
+
+    #[test]
+    fn the_server_opening_a_menu_the_client_lacks_warns_and_is_answered_bad() {
+        let mut ui = bare_ui();
+        let mut host = Dummy::default();
+        let (_, events) =
+            logging::capture(|| ui.open_script_menu(&mut host, "missing_popup", true));
+        assert_eq!(host.responses, [("missing_popup".into(), "bad".into())]);
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
+    }
+
+    #[test]
+    fn an_expression_that_does_not_parse_warns_and_falls_back_to_none() {
+        use ::assets::zone::menu::{ExpressionEntry, Statement};
+        let bad = Statement {
+            entries: vec![Arc::new(ExpressionEntry::Operator(200))],
+        };
+        let (c, events) = logging::capture(|| compile("test_menu", "item_visible", &bad));
+        assert!(c.is_none());
+        let e = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(e.field("menu"), Some("test_menu"));
+        assert_eq!(e.field("expr"), Some("item_visible"));
+        // An empty statement is "no expression", not a failure.
+        let (_, events) = logging::capture(|| compile("m", "x", &Statement::default()));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_string_table_that_is_not_loaded_warns_once_per_name() {
+        let ui = bare_ui();
+        let (v, events) =
+            logging::capture(|| ui.table_lookup("mp/no_such_table_test.csv", 0, "a", 1));
+        assert_eq!(v, "");
+        let e = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(e.field("table"), Some("mp/no_such_table_test.csv"));
     }
 }
