@@ -1601,6 +1601,16 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_profile_keeps_the_stock_melee_and_voice_keys() {
+        let Some(mut i) = stock_input() else { return };
+        i.use_profile(None, None);
+        assert_eq!(i.bound("v"), Some("+melee"));
+        assert_eq!(i.bound("z"), Some("+talk"));
+        i.key("v", true);
+        assert_eq!(frame(&mut i).buttons, buttons::MELEE);
+    }
+
+    #[test]
     fn stock_stance_keys_set_the_latch_and_jump_stands() {
         let Some(mut i) = stock_input() else { return };
         i.key("ctrl", true);
