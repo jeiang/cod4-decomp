@@ -275,5 +275,6 @@ pub fn run_stage(run: &StageRun) -> StageReport {
     .into_iter()
     .map(|f| format!("{}/{f}", run.rel))
     .collect();
+    crate::logcheck::apply(&mut report, dir, name);
     report
 }
