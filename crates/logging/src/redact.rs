@@ -22,14 +22,29 @@ fn is_value(b: u8) -> bool {
     !(b.is_ascii_whitespace() || matches!(b, b'"' | b'\'' | b'\\' | b','))
 }
 
-/// The value starting after the separators at `from`: its byte range.
+/// The value starting after the separators at `from`: its byte range. A value that opens with a quote runs to the
+/// closing quote (`rcon_password "a b"`), a bare one to the next space or quote.
 fn value_after(bytes: &[u8], from: usize) -> Option<(usize, usize)> {
-    let start = from
-        + bytes[from..]
-            .iter()
-            .take_while(|&&b| is_separator(b))
-            .count();
-    let len = bytes[start..].iter().take_while(|&&b| is_value(b)).count();
+    let seps = bytes[from..]
+        .iter()
+        .take_while(|&&b| is_separator(b))
+        .count();
+    let start = from + seps;
+    let quote = bytes[from..start]
+        .iter()
+        .rev()
+        .find(|&&b| b == b'"' || b == b'\'')
+        .copied()
+        .filter(|&b| b != b'\\');
+    let len = match quote {
+        // To the closing quote; a backslash escaping it (a Debug-formatted field) stays out of the mask.
+        Some(q) => {
+            let n = bytes[start..].iter().position(|&b| b == q);
+            let n = n.unwrap_or(bytes.len() - start);
+            n - usize::from(n > 0 && bytes[start + n - 1] == b'\\')
+        }
+        None => bytes[start..].iter().take_while(|&&b| is_value(b)).count(),
+    };
     (len > 0).then_some((start, start + len))
 }
 
@@ -104,6 +119,14 @@ mod tests {
             ),
             ("seta cdkey ABCD-1234", "seta cdkey ***"),
             ("Connect HOST PW", "Connect HOST ***"),
+            (
+                "set rcon_password \"a b c\" map x",
+                "set rcon_password \"***\" map x",
+            ),
+            (
+                "cmd=\"set rcon_password \\\"a b\\\"\"",
+                "cmd=\"set rcon_password \\\"***\\\"\"",
+            ),
             ("unknown command foo", "unknown command foo"),
             ("connected to 10.0.0.1", "connected to 10.0.0.1"),
         ] {
