@@ -94,6 +94,14 @@ impl Heartbeats {
                     let (name, tx) = (m.to_owned(), self.started.clone());
                     std::thread::spawn(move || {
                         let found = lookup(&name);
+                        if found.is_none() {
+                            logging::dedup!(
+                                WARN,
+                                &name,
+                                master = name.as_str(),
+                                "master name did not resolve"
+                            );
+                        }
                         let _ = tx.send((name, found));
                     });
                 }

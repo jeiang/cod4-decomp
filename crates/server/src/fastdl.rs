@@ -74,8 +74,12 @@ impl Offer {
         if dest(game, name).is_none() || self.paths.contains_key(name) {
             return;
         }
-        let Ok(meta) = std::fs::metadata(path) else {
-            return;
+        let meta = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(file = name, error = %e, "download file not offered: unreadable");
+                return;
+            }
         };
         let why = if meta.len() > net::download::MAX_TOTAL {
             Some("it is larger than a client takes in one file")
@@ -91,16 +95,21 @@ impl Offer {
                 .push(format!("download: not offering {name}: {why}\n"));
             return;
         }
-        if let Ok((size, crc)) = file_crc32(path) {
-            self.bytes += size;
-            self.files.push(File {
-                name: name.to_owned(),
-                size,
-                crc,
-            });
-            self.paths.insert(name.to_owned(), path.to_owned());
-            self.stamps
-                .push((path.to_owned(), meta.len(), meta.modified().ok()));
+        match file_crc32(path) {
+            Ok((size, crc)) => {
+                self.bytes += size;
+                self.files.push(File {
+                    name: name.to_owned(),
+                    size,
+                    crc,
+                });
+                self.paths.insert(name.to_owned(), path.to_owned());
+                self.stamps
+                    .push((path.to_owned(), meta.len(), meta.modified().ok()));
+            }
+            Err(e) => {
+                tracing::warn!(file = name, error = %e, "download file not offered: cannot read it")
+            }
         }
     }
 
@@ -153,6 +162,10 @@ impl Offers {
                 .is_ok();
             if spawned {
                 self.current = Some((name, State::Building(rx)));
+            } else {
+                tracing::error!(
+                    "cannot start the download-list thread; downloads stay unavailable"
+                );
             }
         }
         if let Some((_, state)) = self.current.as_mut()

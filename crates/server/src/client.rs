@@ -662,11 +662,23 @@ impl Game {
             return;
         };
         if !c.connected() {
+            tracing::debug!(client = n, "usercmd for a client that is not connected");
             return;
         }
-        cmd.server_time = cmd.server_time.clamp(level_time - 1000, level_time + 200);
+        let clamped = cmd.server_time.clamp(level_time - 1000, level_time + 200);
+        if clamped != cmd.server_time {
+            logging::dedup!(
+                WARN,
+                "usercmd_time",
+                client = n,
+                drift = cmd.server_time - level_time,
+                "usercmd time out of range; clamped"
+            );
+        }
+        cmd.server_time = clamped;
         let msec = cmd.server_time - c.ps.command_time;
         if msec < 1 {
+            tracing::trace!(client = n, msec, "stale usercmd dropped");
             return;
         }
         // The weapon a person asked for (the weapon keys, action slots): honoured unless a script has

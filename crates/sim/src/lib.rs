@@ -4,8 +4,7 @@
 //! Everything here is plain data and pure functions: it builds for `wasm32` (client prediction
 //! in the browser) and does not allocate per trace or per `pmove` call.
 
-// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
-#![allow(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 
 pub mod cm;
 pub mod contents;

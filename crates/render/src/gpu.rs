@@ -112,7 +112,7 @@ impl Gpu {
         let h = health.clone();
         device.set_device_lost_callback(move |reason, message| {
             let text = format!("{reason:?}: {message}");
-            eprintln!("graphics device lost ({text})");
+            tracing::error!("graphics device lost ({text})");
             *h.lost.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
         });
         // A window outlives a bad frame, so its device keeps the errors (the client reports them and the harness fails
@@ -121,7 +121,7 @@ impl Gpu {
         if surface.is_some() && cfg!(not(target_arch = "wasm32")) {
             let h = health.clone();
             device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-                eprintln!("graphics error: {e}");
+                tracing::error!("graphics error: {e}");
                 let mut errors = h.errors.lock().unwrap_or_else(|e| e.into_inner());
                 if errors.len() < KEPT_ERRORS {
                     errors.push(e.to_string());

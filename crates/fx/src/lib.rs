@@ -588,6 +588,12 @@ impl Fx {
         at: i32,
     ) -> Option<Effect> {
         if live >= MAX_EFFECTS {
+            logging::dedup!(
+                WARN,
+                "effect-pool-full",
+                live,
+                "effect dropped: the effect pool is full"
+            );
             self.stats.dropped += 1;
             return None;
         }
@@ -704,7 +710,10 @@ impl Fx {
                 self.play(&d, frame);
                 true
             }
-            None => false,
+            None => {
+                logging::dedup!(WARN, name, effect = name, "effect is not in the library");
+                false
+            }
         }
     }
 
@@ -1024,6 +1033,11 @@ impl Fx {
                     .and_then(|m| m.as_ref())
                     .and_then(|m| m.phys_preset.as_ref().map(|p| (m, p)));
                 let Some((model, preset)) = preset else {
+                    logging::dedup!(
+                        WARN,
+                        "no-phys-preset",
+                        "model element dropped: its model has no PhysPreset"
+                    );
                     el.done = true;
                     return;
                 };
@@ -1091,7 +1105,13 @@ impl Fx {
             let impact = d
                 .effect_on_impact
                 .as_deref()
-                .and_then(|n| self.lib.get(n))
+                .and_then(|n| {
+                    let def = self.lib.get(n);
+                    if def.is_none() {
+                        logging::dedup!(WARN, n, effect = n, "impact effect is not in the library");
+                    }
+                    def
+                })
                 .cloned();
             let at = el.at + (ms as f32 * frac) as i32;
             if d.flags & flags::DIE_ON_TOUCH != 0 {
@@ -1123,6 +1143,16 @@ impl Fx {
             let post = scaled - normal * (2.0 * along);
             el.base_vel += post - pre;
             return;
+        }
+        if let Some(name) = d.effect_emitted.as_deref()
+            && self.lib.get(name).is_none()
+        {
+            logging::dedup!(
+                WARN,
+                name,
+                effect = name,
+                "emitted effect is not in the library"
+            );
         }
         if let Some(def) = d
             .effect_emitted
@@ -1214,6 +1244,11 @@ impl Fx {
                         elem::SPRITE_BILLBOARD | elem::SPRITE_ORIENTED | elem::TAIL,
                     ) => {
                         let Some(Some(material)) = mats.get(pick_index(el, mats.len())) else {
+                            logging::dedup!(
+                                WARN,
+                                "no-sprite-material",
+                                "sprite element skipped: its material did not resolve"
+                            );
                             continue;
                         };
                         if vis.color[3] == 0 || off_screen(vis.size[0].max(vis.size[1])) {
@@ -1246,6 +1281,11 @@ impl Fx {
                     }
                     (FxVisuals::Materials(mats), elem::CLOUD) => {
                         let Some(Some(material)) = mats.get(pick_index(el, mats.len())) else {
+                            logging::dedup!(
+                                WARN,
+                                "no-cloud-material",
+                                "cloud element skipped: its material did not resolve"
+                            );
                             continue;
                         };
                         if vis.scale == 0.0
@@ -1269,6 +1309,11 @@ impl Fx {
                     }
                     (FxVisuals::Models(models), elem::MODEL) => {
                         let Some(Some(model)) = models.get(pick_index(el, models.len())) else {
+                            logging::dedup!(
+                                WARN,
+                                "no-model",
+                                "model element skipped: its model did not resolve"
+                            );
                             continue;
                         };
                         let scale = vis.scale;
@@ -1289,6 +1334,11 @@ impl Fx {
                     (FxVisuals::Decals(mats), elem::DECAL) => {
                         let Some([Some(material), world]) = mats.get(pick_index(el, mats.len()))
                         else {
+                            logging::dedup!(
+                                WARN,
+                                "no-decal-material",
+                                "decal element skipped: its material did not resolve"
+                            );
                             continue;
                         };
                         let rot = vis.rotation;
@@ -1421,6 +1471,11 @@ impl Fx {
                 continue;
             };
             let Some(Some(material)) = mats.get(pick_index(last, mats.len())) else {
+                logging::dedup!(
+                    WARN,
+                    "no-trail-material",
+                    "trail skipped: its material did not resolve"
+                );
                 continue;
             };
             let repeat = td.repeat_dist.max(1) as f32;

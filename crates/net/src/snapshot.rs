@@ -145,6 +145,7 @@ pub fn write_snapshot(w: &mut BitWriter, base: Option<&Snapshot>, snap: &Snapsho
 }
 
 /// The snapshot `num` just read says which base it needs: `lookup(num - delta)` supplies it.
+#[tracing::instrument(level = "debug", skip_all)]
 pub fn read_snapshot<'a>(
     r: &mut BitReader,
     lookup: impl FnOnce(u32) -> Option<&'a Snapshot>,
@@ -154,7 +155,18 @@ pub fn read_snapshot<'a>(
     let base = if delta == 0 {
         None
     } else {
-        Some(lookup(num.wrapping_sub(delta)).ok_or(SnapshotError::MissingBase)?)
+        let want = num.wrapping_sub(delta);
+        let Some(b) = lookup(want) else {
+            logging::dedup!(
+                WARN,
+                "missing-base",
+                num,
+                want,
+                "snapshot delta from a base that is not available"
+            );
+            return Err(SnapshotError::MissingBase);
+        };
+        Some(b)
     };
     let server_time = match base {
         Some(b) => b.server_time.wrapping_add(r.read_ivar()?),

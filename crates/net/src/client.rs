@@ -170,7 +170,9 @@ impl<T: Transport> NetClient<T> {
     pub fn stop_record(&mut self) -> bool {
         match self.recorder.take() {
             Some((w, _)) => {
-                let _ = w.finish();
+                if let Err(e) = w.finish() {
+                    tracing::error!(error = %e, "demo recording could not be finished");
+                }
                 true
             }
             None => false,
@@ -352,12 +354,19 @@ impl<T: Transport> NetClient<T> {
         }
         if let Phase::Connecting(c) = &mut self.phase {
             if c.gave_up() {
+                tracing::error!(server = %self.server, "connection attempt timed out");
                 self.phase = Phase::Dropped(TIMED_OUT.into());
             } else {
                 c.poll(now, &mut self.t);
             }
         }
-        while let Ok(Some((n, from))) = self.t.recv_from(&mut self.buf, Some(wait)) {
+        while let Some((n, from)) = match self.t.recv_from(&mut self.buf, Some(wait)) {
+            Ok(got) => got,
+            Err(e) => {
+                logging::dedup!(WARN, "recv", error = %e, "receive failed");
+                None
+            }
+        } {
             wait = Duration::ZERO;
             let packet = &self.buf[..n];
             if let Some(o) = Oob::parse(packet) {
@@ -381,8 +390,12 @@ impl<T: Transport> NetClient<T> {
                     }
                 } else if from == self.server && matches!(self.phase, Phase::Playing(_)) {
                     match o {
-                        Oob::Error(why) => self.phase = Phase::Dropped(why),
+                        Oob::Error(why) => {
+                            tracing::warn!(server = %self.server, reason = %why, "dropped by the server");
+                            self.phase = Phase::Dropped(why);
+                        }
                         Oob::Disconnect => {
+                            tracing::info!(server = %self.server, "disconnected by the server");
                             self.phase = Phase::Dropped("Disconnected by the server".to_owned());
                         }
                         // The reply to an `rcon`: the console output the server redirected to us.
@@ -419,6 +432,7 @@ impl<T: Transport> NetClient<T> {
                     }
                     if !ok {
                         // The disk filled or went away: the demo stops where it is.
+                        tracing::error!("demo recording failed to write; recording stopped");
                         self.recorder = None;
                     }
                 }
@@ -469,8 +483,14 @@ impl<T: Transport> NetClient<T> {
     /// a map change.
     pub fn command(&mut self, cmd: &str) {
         let stamped = crate::ui::stamp_menu_response(cmd, self.server_id());
-        if let Phase::Playing(l) = &mut self.phase {
-            let _ = l.command(&stamped);
+        if let Phase::Playing(l) = &mut self.phase
+            && l.command(&stamped).is_err()
+        {
+            logging::dedup!(
+                WARN,
+                "command-overflow",
+                "reliable command dropped: the send queue is full"
+            );
         }
     }
 

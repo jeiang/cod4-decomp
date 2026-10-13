@@ -77,6 +77,7 @@ impl WeaponTable {
         infos.sort_by(|a, b| cmp_ci(&a.name, &b.name));
         infos.dedup_by(|b, a| cmp_ci(&a.name, &b.name) == Ordering::Equal);
         if infos.len() > MAX_WEAPONS {
+            tracing::error!(count = infos.len(), max = MAX_WEAPONS, "too many weapons");
             return Err(TableError::TooManyWeapons(infos.len()));
         }
 
@@ -117,9 +118,11 @@ impl WeaponTable {
         }
         let (ammo_types, clip_types) = (ammo.len() + 1, clips.len() + 1);
         if ammo_types > MAX_AMMO {
+            tracing::error!(count = ammo_types, max = MAX_AMMO, "too many ammo types");
             return Err(TableError::TooManyAmmoTypes(ammo_types));
         }
         if clip_types > MAX_CLIPS {
+            tracing::error!(count = clip_types, max = MAX_CLIPS, "too many clip types");
             return Err(TableError::TooManyClipTypes(clip_types));
         }
 
@@ -139,6 +142,11 @@ impl WeaponTable {
                 match keys.binary_search_by(|k| cmp_ci(k, &w.alt_weapon_name)) {
                     Ok(i) => i as u16 + 1,
                     Err(_) => {
+                        tracing::warn!(
+                            weapon = %w.name,
+                            alt = %w.alt_weapon_name,
+                            "alt weapon is not in the table"
+                        );
                         unresolved_alts.push((w.name.clone(), w.alt_weapon_name.clone()));
                         0
                     }
@@ -297,6 +305,18 @@ mod tests {
         assert_eq!(t.info(t.index("m4_gl_mp")).alt_weapon, t.index("gl_mp"));
         assert_eq!(t.info(t.index("orphan_mp")).alt_weapon, 0);
         assert_eq!(t.unresolved_alts().len(), 1);
+    }
+
+    #[test]
+    fn unresolved_alt_weapon_logs_a_warning() {
+        let mut orphan = rifle("orphan_mp", "ar");
+        orphan.alt_weapon_name = "missing_mp".into();
+        let (_, events) = logging::capture(|| WeaponTable::from_infos(vec![orphan]).unwrap());
+        let w = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(w.field("alt"), Some("missing_mp"));
     }
 
     #[test]

@@ -587,6 +587,7 @@ impl Game {
             .find(|&i| self.ents[i].is_none())
             .unwrap_or_else(|| self.ents.len().max(first));
         if slot >= limit {
+            logging::dedup!(ERROR, "spawn", limit, "G_Spawn: no free entities");
             return Err("G_Spawn: no free entities".into());
         }
         if slot >= self.ents.len() {
@@ -835,6 +836,7 @@ impl Game {
 
         for vars in rest {
             let Some(class) = get(vars, "classname") else {
+                tracing::warn!("map entity without a classname");
                 self.print("G_CallSpawn: NULL classname\n");
                 continue;
             };
@@ -873,11 +875,17 @@ impl Game {
                 );
             }
             if class.starts_with("trigger_use") {
-                if let Some(h) =
-                    get(vars, "cursorhint").and_then(|h| crate::script::hint_value(h, true))
-                    && let Some(e) = self.ent_mut(num)
-                {
-                    e.x.cursor_hint = h;
+                if let Some(h) = get(vars, "cursorhint") {
+                    match crate::script::hint_value(h, true) {
+                        Some(v) => {
+                            if let Some(e) = self.ent_mut(num) {
+                                e.x.cursor_hint = v;
+                            }
+                        }
+                        None => {
+                            logging::dedup!(WARN, h, hint = h, entity = num, "unknown cursor hint");
+                        }
+                    }
                 }
                 if let Some(text) = get(vars, "hintstring") {
                     let slot = self.hint_string_index(text)?;

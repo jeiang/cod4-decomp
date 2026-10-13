@@ -24,13 +24,13 @@ pub const TRACE_FILE: &str = "trace.json";
 /// Run the stage; returns the process exit code. The report is written to
 /// `result.json` before returning.
 pub fn run(args: ChildArgs) -> i32 {
-    // Keeps the crash handler attached for the life of the stage.
-    let _crash_guard = args.dump_socket.as_deref().and_then(attach_crash_handler);
-
     let (layer, trace_handle) = trace::chrome_trace(TRACE_WINDOW, TRACE_CAP);
     let mut log = logging::Config::new("harness-stage");
     log.extra.push(Box::new(layer));
     let _log = logging::init(log);
+
+    // Keeps the crash handler attached for the life of the stage (after logging starts, so its failures are logged).
+    let _crash_guard = args.dump_socket.as_deref().and_then(attach_crash_handler);
 
     let ctx = StageCtx {
         dir: args.dir.clone(),
@@ -67,8 +67,13 @@ pub fn run(args: ChildArgs) -> i32 {
     };
     let mut report = report;
     report.wall_ms = started.elapsed().as_secs_f64() * 1000.0;
-    if !trace_handle.is_empty() && trace_handle.write(&args.dir.join(TRACE_FILE)).is_ok() {
-        report.files.push(TRACE_FILE.into());
+    if !trace_handle.is_empty() {
+        match trace_handle.write(&args.dir.join(TRACE_FILE)) {
+            Ok(()) => report.files.push(TRACE_FILE.into()),
+            Err(e) => {
+                tracing::warn!(path = %args.dir.join(TRACE_FILE).display(), "cannot write {TRACE_FILE}: {e}")
+            }
+        }
     }
     match serde_json::to_vec_pretty(&report)
         .map_err(std::io::Error::other)
@@ -76,7 +81,7 @@ pub fn run(args: ChildArgs) -> i32 {
     {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("cannot write {RESULT_FILE}: {e}");
+            tracing::error!(path = %args.dir.join(RESULT_FILE).display(), "cannot write {RESULT_FILE}: {e}");
             1
         }
     }
@@ -86,7 +91,7 @@ fn attach_crash_handler(socket: &str) -> Option<crash_handler::CrashHandler> {
     let client = match minidumper::Client::with_name(minidumper::SocketName::path(socket)) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("crash capture unavailable in child: {e}");
+            tracing::warn!("crash capture unavailable in child: {e}");
             return None;
         }
     };
@@ -100,7 +105,7 @@ fn attach_crash_handler(socket: &str) -> Option<crash_handler::CrashHandler> {
     match crash_handler::CrashHandler::attach(event) {
         Ok(h) => Some(h),
         Err(e) => {
-            eprintln!("crash handler not attached: {e}");
+            tracing::warn!("crash handler not attached: {e}");
             None
         }
     }

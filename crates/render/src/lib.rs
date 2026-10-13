@@ -2,8 +2,7 @@
 //! wgpu renderer: draws a map's `GfxWorld` with the original techsets (translated from D3D9 SM3 at load), lightmaps,
 //! reflection probes, the model-lighting volume, sky, and static models.
 
-// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
-#![allow(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 
 pub mod art;
 pub mod codeconst;

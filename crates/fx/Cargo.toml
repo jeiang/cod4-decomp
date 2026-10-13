@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+logging = { path = "../logging" }
 assets = { path = "../assets" }
 glam = "0.34.1"
 

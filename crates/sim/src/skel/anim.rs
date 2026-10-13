@@ -129,16 +129,39 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
+    /// Reads past the end of an animation's data (corrupt asset) give 0.
+    fn overrun(&self, table: &str, i: usize) {
+        let name = self.a.name.as_deref().unwrap_or("?");
+        logging::dedup!(
+            WARN,
+            name,
+            "animation data read out of range, using 0",
+            anim = name,
+            table = table,
+            index = i
+        );
+    }
+
     fn short(&self, i: usize) -> i16 {
-        self.a.data_short.get(i).copied().unwrap_or(0)
+        self.a.data_short.get(i).copied().unwrap_or_else(|| {
+            self.overrun("data_short", i);
+            0
+        })
     }
 
     fn rs(&self, i: usize) -> i16 {
-        self.a.random_data_short.get(i).copied().unwrap_or(0)
+        self.a.random_data_short.get(i).copied().unwrap_or_else(|| {
+            self.overrun("random_data_short", i);
+            0
+        })
     }
 
     fn float(&self, i: usize) -> f32 {
-        f32::from_bits(self.a.data_int.get(i).copied().unwrap_or(0) as u32)
+        let bits = self.a.data_int.get(i).copied().unwrap_or_else(|| {
+            self.overrun("data_int", i);
+            0
+        });
+        f32::from_bits(bits as u32)
     }
 
     fn fine(&self, at: usize, i: usize) -> u32 {

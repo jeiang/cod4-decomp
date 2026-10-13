@@ -123,7 +123,7 @@ mod native {
                         }
                     }
                 },
-                |e| eprintln!("audio capture: {e}"),
+                |e| tracing::warn!("audio capture stream: {e}"),
                 None,
             )
             .map_err(|e| format!("cannot open the microphone: {e}"))

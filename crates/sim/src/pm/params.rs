@@ -144,7 +144,13 @@ impl Tunable<'_> {
     /// would give 0, but a dvar only holds what its registration accepts).
     fn set(&mut self, text: &str) {
         let text = text.trim();
-        let Ok(n) = text.parse::<f32>() else { return };
+        let Ok(n) = text.parse::<f32>() else {
+            tracing::warn!(
+                value = text,
+                "tunable value is not a number, kept as it was"
+            );
+            return;
+        };
         match self {
             Tunable::Float(v) => **v = n,
             Tunable::Ranged(v, lo, hi) => **v = n.clamp(*lo, *hi),

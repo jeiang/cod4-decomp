@@ -40,9 +40,11 @@ impl ServerHandler for Handler {
         match result {
             Ok(mut dump) => {
                 use std::io::Write;
-                let _ = dump.file.flush();
+                if let Err(e) = dump.file.flush() {
+                    tracing::warn!(path = %dump.path.display(), "flushing minidump: {e}");
+                }
             }
-            Err(e) => eprintln!("minidump failed: {e}"),
+            Err(e) => tracing::error!("minidump failed: {e}"),
         }
         LoopAction::Continue
     }
@@ -61,7 +63,7 @@ impl DumpServer {
             .name("minidump-server".into())
             .spawn(move || {
                 if let Err(e) = server.run(Box::new(handler), &flag, None) {
-                    eprintln!("minidump server stopped: {e}");
+                    tracing::error!("minidump server stopped: {e}");
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -81,7 +83,9 @@ impl DumpServer {
 impl Drop for DumpServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        let _ = fs::remove_file(&self.socket_file);
+        if let Err(e) = fs::remove_file(&self.socket_file) {
+            tracing::debug!(path = %self.socket_file.display(), "removing dump socket: {e}");
+        }
     }
 }
 
@@ -102,10 +106,13 @@ fn copy_to_file(
     mut from: impl io::Read + Send + 'static,
     path: PathBuf,
 ) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        if let Ok(mut f) = File::create(path) {
-            let _ = io::copy(&mut from, &mut f);
+    std::thread::spawn(move || match File::create(&path) {
+        Ok(mut f) => {
+            if let Err(e) = io::copy(&mut from, &mut f) {
+                tracing::warn!(path = %path.display(), "copying child output: {e}");
+            }
         }
+        Err(e) => tracing::warn!(path = %path.display(), "cannot create child output file: {e}"),
     })
 }
 
@@ -130,6 +137,7 @@ pub fn run_stage(run: &StageRun) -> StageReport {
     let StageRun { name, dir, .. } = *run;
     let fail = |status, reason: String| StageReport::new(name, status).with_reason(reason);
     if let Err(e) = fs::create_dir_all(dir) {
+        tracing::error!(stage = name, path = %dir.display(), "cannot create stage dir: {e}");
         return fail(
             Status::Failed,
             format!("cannot create {}: {e}", dir.display()),
@@ -159,7 +167,10 @@ pub fn run_stage(run: &StageRun) -> StageReport {
     let started = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return fail(Status::Failed, format!("cannot launch child: {e}")),
+        Err(e) => {
+            tracing::error!(stage = name, "cannot launch child: {e}");
+            return fail(Status::Failed, format!("cannot launch child: {e}"));
+        }
     };
     let readers = [
         child
@@ -177,7 +188,9 @@ pub fn run_stage(run: &StageRun) -> StageReport {
             Ok(Some(s)) => break Ok(s),
             Ok(None) if started.elapsed() >= run.timeout => {
                 hung = true;
-                let _ = child.kill();
+                if let Err(e) = child.kill() {
+                    tracing::warn!(stage = name, "cannot kill hung child: {e}");
+                }
                 break child.wait();
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
@@ -185,12 +198,17 @@ pub fn run_stage(run: &StageRun) -> StageReport {
         }
     };
     for r in readers.into_iter().flatten() {
-        let _ = r.join();
+        if r.join().is_err() {
+            tracing::warn!(stage = name, "output copy thread panicked");
+        }
     }
     let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
     let status = match status {
         Ok(s) => s,
-        Err(e) => return fail(Status::Failed, format!("waiting for child: {e}")),
+        Err(e) => {
+            tracing::error!(stage = name, "waiting for child: {e}");
+            return fail(Status::Failed, format!("waiting for child: {e}"));
+        }
     };
 
     let abnormal = died_abnormally(&status);
@@ -202,9 +220,15 @@ pub fn run_stage(run: &StageRun) -> StageReport {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-    let child_report = fs::read(dir.join(RESULT_FILE))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<StageReport>(&b).ok());
+    let child_report = match fs::read(dir.join(RESULT_FILE)) {
+        Ok(b) => serde_json::from_slice::<StageReport>(&b)
+            .inspect_err(|e| tracing::warn!(stage = name, "unreadable {RESULT_FILE}: {e}"))
+            .ok(),
+        Err(e) => {
+            tracing::warn!(stage = name, path = %dir.join(RESULT_FILE).display(), "no {RESULT_FILE} from child: {e}");
+            None
+        }
+    };
 
     let mut report = if hung {
         let mut r = child_report.unwrap_or_else(|| StageReport::new(name, Status::Hung));

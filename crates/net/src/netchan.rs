@@ -56,6 +56,7 @@ impl Netchan {
 
     /// Sends `message` as one datagram, or as fragments when it does not fit one. `send` gets each
     /// datagram in order.
+    #[tracing::instrument(level = "debug", skip_all, fields(out_seq = self.out_seq, len = message.len()))]
     pub fn transmit(&mut self, message: &[u8], mut send: impl FnMut(&[u8])) {
         debug_assert!(message.len() <= MAX_MESSAGE);
         self.out_seq = self.out_seq.wrapping_add(1) & !FRAGMENT_BIT;
@@ -102,8 +103,15 @@ impl Netchan {
 
     /// Takes one received datagram. Returns true and fills `out` with the whole message when it
     /// completes one that is newer than anything accepted so far.
+    #[tracing::instrument(level = "debug", skip_all, fields(in_seq = self.in_seq, len = packet.len()))]
     pub fn process(&mut self, packet: &[u8], out: &mut Vec<u8>) -> bool {
         if packet.len() < HEADER {
+            logging::dedup!(
+                WARN,
+                "short",
+                len = packet.len(),
+                "netchan datagram shorter than its header dropped"
+            );
             return false;
         }
         self.bytes_in += packet.len() as u64;
@@ -113,6 +121,11 @@ impl Netchan {
         // Wrap-safe "is newer": the 31-bit forward distance is in the first half.
         let ahead = seq.wrapping_sub(self.in_seq) & !FRAGMENT_BIT;
         if ahead == 0 || ahead >= 1 << 30 {
+            tracing::debug!(
+                seq,
+                in_seq = self.in_seq,
+                "stale or duplicate datagram dropped"
+            );
             return false;
         }
         if word & FRAGMENT_BIT == 0 {
@@ -123,21 +136,46 @@ impl Netchan {
             return true;
         }
         if packet.len() < HEADER + 4 {
+            logging::dedup!(
+                WARN,
+                "frag-short",
+                len = packet.len(),
+                "truncated netchan fragment header dropped"
+            );
             return false;
         }
         let start = usize::from(u16::from_le_bytes([packet[4], packet[5]]));
         let len = usize::from(u16::from_le_bytes([packet[6], packet[7]]));
         let body = &packet[FRAGMENT_HEADER..];
         if body.len() < len || len > FRAGMENT_SIZE {
+            logging::dedup!(
+                WARN,
+                "frag-len",
+                len,
+                have = body.len(),
+                "netchan fragment with a bad length dropped"
+            );
             return false;
         }
         // Fragments may arrive out of order (WebTransport streams and datagrams race); a fragment
         // of an older message than the one being collected is stale.
         let behind = self.frag_seq.wrapping_sub(seq) & !FRAGMENT_BIT;
         if self.frag_mask != 0 && behind != 0 && behind < 1 << 30 {
+            tracing::debug!(
+                seq,
+                collecting = self.frag_seq,
+                "stale netchan fragment dropped"
+            );
             return false;
         }
         if start % FRAGMENT_SIZE != 0 || start + len > MAX_MESSAGE {
+            logging::dedup!(
+                WARN,
+                "frag-bounds",
+                start,
+                len,
+                "netchan fragment out of bounds dropped"
+            );
             return false;
         }
         if seq != self.frag_seq {
@@ -287,5 +325,27 @@ mod tests {
             assert_eq!(out, m, "{n}");
             assert!(!b.process(&old[0], &mut out), "an older message is stale");
         }
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_datagrams_are_warned() {
+        let mut c = Netchan::new();
+        let mut out = Vec::new();
+        let (ok, events) = logging::capture(|| c.process(&[1, 2], &mut out));
+        assert!(!ok);
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
+        // A fragment whose length field claims more than the packet holds.
+        let mut p = (1u32 | FRAGMENT_BIT).to_le_bytes().to_vec();
+        p.extend_from_slice(&0u16.to_le_bytes());
+        p.extend_from_slice(&900u16.to_le_bytes());
+        let (ok, events) = logging::capture(|| c.process(&p, &mut out));
+        assert!(!ok);
+        let warn = events.iter().find(|e| e.level == tracing::Level::WARN);
+        assert_eq!(warn.and_then(|e| e.field("len")), Some("900"));
     }
 }

@@ -128,7 +128,9 @@ pub fn write(work: &Path, out: &Path, scrub: &Scrubber, cap: u64) -> io::Result<
             });
         }
         let Some(class) = classes.next() else {
-            let _ = fs::remove_file(&tmp);
+            if let Err(e) = fs::remove_file(&tmp) {
+                tracing::warn!(path = %tmp.display(), "cannot remove partial bundle: {e}");
+            }
             return Err(io::Error::other(format!(
                 "bundle is {size} bytes after dropping everything optional; cap is {cap}"
             )));

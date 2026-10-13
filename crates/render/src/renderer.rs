@@ -1721,9 +1721,13 @@ impl Renderer {
                 let at = self.dyn_bytes.len() as u64;
                 skin::skin_surface(surf, &mats, &mut self.dyn_bytes);
                 if !skin::check_skinned(&self.dyn_bytes[at as usize..], model.radius, inst.kind) {
-                    eprintln!(
-                        "skinning fault: surface {idx} of {} left the model",
-                        model.name.as_deref().unwrap_or("?")
+                    let name = model.name.as_deref().unwrap_or("?");
+                    logging::dedup!(
+                        WARN,
+                        name,
+                        "skinning fault: surface left the model",
+                        surface = idx,
+                        model = name
                     );
                     // Leave the surface out rather than stretch triangles across the screen.
                     self.dyn_bytes.truncate(at as usize);
@@ -2908,6 +2912,7 @@ impl Renderer {
         let mut enc = self.gpu.device.create_command_encoder(&Default::default());
         if let (Some(ss), Some(sh)) = (&sun, &self.shadow) {
             let _ = ss;
+            let _pass = tracing::debug_span!("pass", name = "sun shadow").entered();
             let color_att = sh.color.as_ref().map(|v| wgpu::RenderPassColorAttachment {
                 view: v,
                 depth_slice: None,
@@ -2940,6 +2945,7 @@ impl Renderer {
             }
         }
         if let (false, Some(atlas)) = (cookies.is_empty(), &self.cookie) {
+            let _pass = tracing::debug_span!("pass", name = "shadow cookies").entered();
             let timestamps = self.timer.as_mut().and_then(|t| t.pass("shadow cookies"));
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow cookies"),
@@ -2984,6 +2990,7 @@ impl Renderer {
             }
         }
         if let (false, Some(sh)) = (spot_lists.is_empty(), &self.spot_shadow) {
+            let _pass = tracing::debug_span!("pass", name = "spot shadow").entered();
             let color_att = sh.color.as_ref().map(|v| wgpu::RenderPassColorAttachment {
                 view: v,
                 depth_slice: None,
@@ -3017,6 +3024,7 @@ impl Renderer {
         }
         if let Some((zview, list)) = &floatz {
             let depth = &self.depth.as_ref().expect("depth").0;
+            let _pass = tracing::debug_span!("pass", name = "floatz").entered();
             let timestamps = self.timer.as_mut().and_then(|t| t.pass("floatz"));
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("floatz"),
@@ -3054,6 +3062,7 @@ impl Renderer {
                 Some(m) => (&m.depth, &m.color, Some(final_view)),
                 None => (&self.depth.as_ref().expect("depth").0, final_view, None),
             };
+            let _pass = tracing::debug_span!("pass", name = "scene").entered();
             let timestamps = self.timer.as_mut().and_then(|t| t.pass("scene"));
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scene"),

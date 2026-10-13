@@ -140,11 +140,20 @@ impl ServerLink {
 
     /// Takes a packet from this client's address.
     pub fn receive(&mut self, packet: &[u8]) -> Option<ClientPacket> {
+        let _span =
+            tracing::debug_span!("netchan_receive", client = %self.addr, qport = self.qport)
+                .entered();
         let mut msg = std::mem::take(&mut self.scratch);
         let out = if self.chan.process(packet, &mut msg) {
             self.stats.bytes_in += packet.len() as u64;
             self.stats.packets_in += 1;
-            self.parse(&msg).ok()
+            match self.parse(&msg) {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    logging::dedup!(WARN, "client-packet", client = %self.addr, "malformed client packet dropped (bad qport or truncated)");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -207,6 +216,8 @@ impl ServerLink {
     /// Sends the reliable commands and, when given, a snapshot (its `num` is assigned here).
     /// Returns the snapshot's size in bytes (0 without one).
     pub fn send(&mut self, t: &mut dyn Transport, snap: Option<Snapshot>) -> usize {
+        let _span =
+            tracing::debug_span!("netchan_send", client = %self.addr, qport = self.qport).entered();
         let mut w = BitWriter::with_capacity(FRAGMENT_SIZE);
         w.write_u32(self.rel_in.received());
         self.rel_out.write(&mut w, RELIABLE_BUDGET);
@@ -396,11 +407,18 @@ impl ClientLink {
 
     /// Takes a datagram from the server.
     pub fn receive(&mut self, packet: &[u8]) -> Option<ServerMessage> {
+        let _span = tracing::debug_span!("netchan_receive", remote = %self.server).entered();
         let mut msg = std::mem::take(&mut self.scratch);
         let out = if self.chan.process(packet, &mut msg) {
             self.stats.bytes_in += packet.len() as u64;
             self.stats.packets_in += 1;
-            self.parse(&msg).ok()
+            match self.parse(&msg) {
+                Ok(m) => Some(m),
+                Err(_) => {
+                    logging::dedup!(WARN, "server-message", server = %self.server, "malformed server message dropped");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -444,7 +462,10 @@ impl ClientLink {
                     // The rest of the message sits behind a snapshot that could not be read.
                     readable = false;
                 }
-                Err(SnapshotError::Malformed) => return Err(Overflow),
+                Err(SnapshotError::Malformed) => {
+                    logging::dedup!(WARN, "snapshot-malformed", server = %self.server, "malformed snapshot dropped");
+                    return Err(Overflow);
+                }
             }
         }
         if readable {
@@ -465,6 +486,7 @@ impl ClientLink {
 
     /// Sends the reliable commands, the snapshot ack and the newest commands.
     pub fn send(&mut self, t: &mut dyn Transport) {
+        let _span = tracing::debug_span!("netchan_send", remote = %self.server).entered();
         let mut w = BitWriter::with_capacity(256);
         w.write_u16(self.qport);
         w.write_u32(self.rel_in.received());
