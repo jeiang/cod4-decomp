@@ -94,3 +94,19 @@ fn maps_run_in_sequence_in_one_server_with_their_bots_raise_no_script_errors() {
         }
     }
 }
+
+#[test]
+fn a_restart_of_a_koth_level_with_its_bots_raises_no_script_errors() {
+    let Some(mut s) = boot() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    configure(&mut s, "koth");
+    // The largest spawn set, where the first sweep of the points takes longest.
+    s.exec_line("map mp_bloc").unwrap();
+    s.exec_line(&format!("bots {BOTS}")).unwrap();
+    s.run_frames(10 * 30);
+    let before = s.game.stats.spawns;
+    s.exec_line("map_restart").unwrap();
+    expect_spawned(&mut s, "mp_bloc restarted", before);
+}
