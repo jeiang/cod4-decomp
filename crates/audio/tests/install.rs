@@ -9,11 +9,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 fn root() -> Option<PathBuf> {
-    let root = std::env::var_os("COD4_PATH")
+    let configured = std::env::var_os("COD4_PATH");
+    let root = configured
+        .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../COD4")));
     if root.join("zone/english").is_dir() {
         Some(root)
+    } else if configured.is_some() {
+        panic!(
+            "COD4_PATH has no zone/english directory: {}",
+            root.display()
+        );
     } else {
         eprintln!("skipping: no original install at {}", root.display());
         None
@@ -105,6 +112,76 @@ fn every_streamed_alias_names_a_decodable_file() {
         &missing[..missing.len().min(5)]
     );
     assert!(mp3 > 5, "the map's music and ambience are MP3 ({mp3})");
+}
+
+#[test]
+fn every_stock_map_alias_resolves_to_playable_audio() {
+    let Some(root) = root() else { return };
+    let custom: std::collections::HashSet<_> =
+        assets::paths::custom_maps(&root, "").into_iter().collect();
+    let maps: Vec<_> = assets::paths::maps(&root, "")
+        .into_iter()
+        .filter(|map| !custom.contains(map))
+        .collect();
+    assert!(!maps.is_empty(), "no stock maps found");
+
+    let vfs = Arc::new(Vfs::open_stock(&root, 0).unwrap());
+    let mut unresolved = Vec::new();
+    for map in &maps {
+        let zones: Vec<PathBuf> = ["code_post_gfx_mp", "localized_common_mp", map.as_str()]
+            .iter()
+            .map(|zone| root.join(format!("zone/english/{zone}.ff")))
+            .collect();
+        let bank = Bank::load(vfs.clone(), &zones).unwrap_or_else(|e| panic!("{map}: {e}"));
+        for list in bank.names() {
+            for alias in bank.aliases_of(list) {
+                if matches!(alias.audio, Clip::Silent) {
+                    unresolved.push(format!("{map}: {list}/{}", alias.name));
+                }
+            }
+        }
+    }
+    assert!(
+        unresolved.is_empty(),
+        "{} unresolved aliases, e.g. {:?}",
+        unresolved.len(),
+        &unresolved[..unresolved.len().min(20)]
+    );
+}
+
+#[test]
+fn localized_front_end_menu_aliases_have_audio() {
+    let Some(root) = root() else { return };
+    let vfs = Arc::new(Vfs::open_stock(&root, 0).unwrap());
+    let zones: Vec<PathBuf> = [
+        "code_post_gfx_mp",
+        "code_post_gfx",
+        "localized_code_post_gfx_mp",
+    ]
+    .iter()
+    .map(|zone| root.join(format!("zone/english/{zone}.ff")))
+    .collect();
+    let mut sound = Sound::new(Bank::load(vfs, &zones).unwrap(), false);
+    sound.set_listener([0.0; 3], 0.0);
+    for name in [
+        "mouse_click",
+        "mouse_over",
+        "mouse_submenu_over",
+        "music_mainmenu_mp",
+    ] {
+        let aliases = sound.bank.aliases_of(name);
+        assert!(!aliases.is_empty(), "missing menu alias {name}");
+        assert!(
+            aliases
+                .iter()
+                .any(|alias| !matches!(alias.audio, Clip::Null | Clip::Silent)),
+            "menu alias {name} has no playable audio"
+        );
+        assert!(
+            sound.play(name, Cue::default()).is_some(),
+            "menu alias {name} did not start"
+        );
+    }
 }
 
 #[test]

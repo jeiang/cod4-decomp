@@ -489,7 +489,7 @@ impl Sound {
             0.0
         };
         let (source, stereo, length_ms) = match &alias.audio {
-            Clip::Silent => return None,
+            Clip::Null | Clip::Silent => return None,
             Clip::Loaded(p) => (
                 Source::Loaded(p.clone()),
                 p.channels == 2,

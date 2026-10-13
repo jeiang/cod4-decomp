@@ -22,7 +22,9 @@ pub enum Clip {
     Loaded(Arc<Pcm>),
     /// A file in the search path, decoded as it plays.
     Streamed(String),
-    /// A placeholder that makes no sound (`,null.wav`) or whose data the zone does not hold.
+    /// An intentional null.wav alias placeholder.
+    Null,
+    /// A sound whose data is absent and has no earlier definition.
     Silent,
 }
 
@@ -143,6 +145,15 @@ fn pcm_of(l: &assets::zone::sound::LoadedSound) -> Option<Pcm> {
     })
 }
 
+/// A leading comma marks a name-only reference to a loaded sound defined by an earlier zone.
+fn loaded_key(name: &str) -> String {
+    name.strip_prefix(',').unwrap_or(name).to_ascii_lowercase()
+}
+
+fn earlier_sound(loaded: &HashMap<String, Arc<Pcm>>, name: &str) -> Option<Arc<Pcm>> {
+    loaded.get(&loaded_key(name)).cloned()
+}
+
 impl Bank {
     /// Reads the zones in order (a later zone's list replaces an earlier one of the same name).
     pub fn load(vfs: Arc<Vfs>, zones: &[PathBuf]) -> Result<Self, String> {
@@ -207,18 +218,25 @@ impl Bank {
         let name = a.name.clone()?;
         let audio = match a.sound_file.as_deref().map(|f| &f.source) {
             Some(SoundSource::Loaded(Some(l))) => {
-                let key = l.name.as_deref().unwrap_or("").to_ascii_lowercase();
-                match loaded.get(&key) {
-                    Some(p) => Clip::Loaded(p.clone()),
-                    None => match pcm_of(l) {
+                let loaded_name = l.name.as_deref().unwrap_or("");
+                if let Some(p) = earlier_sound(loaded, loaded_name) {
+                    Clip::Loaded(p)
+                } else {
+                    match pcm_of(l) {
                         Some(p) => {
                             let p = Arc::new(p);
                             self.stats.pcm_bytes += p.samples.len() * 2;
-                            loaded.insert(key, p.clone());
+                            loaded.insert(loaded_key(loaded_name), p.clone());
                             Clip::Loaded(p)
                         }
+                        None if loaded_name
+                            .trim_start_matches(',')
+                            .eq_ignore_ascii_case("null.wav") =>
+                        {
+                            Clip::Null
+                        }
                         None => Clip::Silent,
-                    },
+                    }
                 }
             }
             Some(SoundSource::Streamed {
@@ -230,7 +248,7 @@ impl Bank {
         match audio {
             Clip::Loaded(_) => self.stats.loaded += 1,
             Clip::Streamed(_) => self.stats.streamed += 1,
-            Clip::Silent => self.stats.silent += 1,
+            Clip::Null | Clip::Silent => self.stats.silent += 1,
         }
         let curve = a
             .volume_falloff_curve
@@ -382,5 +400,24 @@ impl Alias {
             probability: 1.0,
             speaker: speaker_gains(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_only_loaded_sound_resolves_to_an_earlier_definition() {
+        let pcm = Arc::new(Pcm {
+            rate: 48_000,
+            channels: 1,
+            samples: vec![1, -1].into_boxed_slice(),
+        });
+        let loaded = HashMap::from([("sound/explosion.wav".to_owned(), pcm.clone())]);
+
+        let resolved = earlier_sound(&loaded, ",SOUND/EXPLOSION.WAV").unwrap();
+        assert!(Arc::ptr_eq(&resolved, &pcm));
+        assert!(earlier_sound(&loaded, ",missing.wav").is_none());
     }
 }
