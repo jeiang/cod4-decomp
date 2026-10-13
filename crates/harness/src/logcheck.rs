@@ -128,9 +128,9 @@ pub const ALLOWED: &[Allow] = &[
         contains: &[
             "cod4e::ui",
             "script names a menu that is not loaded",
-            "options_view",
+            "menu=\"options_",
         ],
-        reason: "client-ui opens every stock menu; options_view is not in the shipped zones",
+        reason: "the options screens name menus (options_view, options_defaults, options_driverinfo, options_credits) the loaded UI zones lack (#372)",
         stages: &["client-ui"],
     },
     Allow {
