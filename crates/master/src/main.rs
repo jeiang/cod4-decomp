@@ -2,8 +2,7 @@
 //! `cod4e-master [--port N] [--bind addr]`: the master server public cod4e servers announce themselves to and
 //! clients ask for the Internet list. It needs no game files.
 
-// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
-#![allow(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 
 use master::Master;
 use net::master::MASTER_PORT;
@@ -13,6 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+#[allow(clippy::print_stdout, clippy::print_stderr)] // CLI help and argument errors are the program's output
 fn main() -> ExitCode {
     let _log = logging::init(logging::Config::new("master"));
     let mut bind = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
@@ -51,11 +51,11 @@ fn main() -> ExitCode {
     let mut sock = match UdpTransport::bind(SocketAddr::new(bind, port)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("cannot bind udp {bind}:{port}: {e}");
+            tracing::error!(%bind, port, error = %e, "cannot bind udp");
             return ExitCode::FAILURE;
         }
     };
-    println!("cod4e-master listening on udp {}", sock.local_addr());
+    tracing::info!(addr = %sock.local_addr(), "cod4e-master listening on udp");
     let mut m = Master::new(Instant::now());
     let mut buf = vec![0u8; 2048];
     let mut next_expire = Instant::now();
@@ -63,12 +63,19 @@ fn main() -> ExitCode {
     loop {
         let got = sock.recv_from(&mut buf, Some(Duration::from_millis(250)));
         let now = Instant::now();
-        if let Ok(Some((n, from))) = got
-            && let Some(oob) = Oob::parse(&buf[..n])
-        {
-            for (to, reply) in m.handle(from, oob, now) {
-                sock.send_to(to, &reply.encode());
-            }
+        match got {
+            Ok(Some((n, from))) => match Oob::parse(&buf[..n]) {
+                Some(oob) => {
+                    for (to, reply) in m.handle(from, oob, now) {
+                        sock.send_to(to, &reply.encode());
+                    }
+                }
+                None => {
+                    logging::dedup!(WARN, "malformed", %from, len = n, "malformed out-of-band packet dropped")
+                }
+            },
+            Ok(None) => {}
+            Err(e) => logging::dedup!(WARN, "recv", error = %e, "udp receive failed"),
         }
         if now >= next_expire {
             m.expire(now);
@@ -76,7 +83,7 @@ fn main() -> ExitCode {
         }
         if m.len() != listed {
             listed = m.len();
-            println!("{listed} servers listed");
+            tracing::info!(listed, "servers listed");
         }
     }
 }

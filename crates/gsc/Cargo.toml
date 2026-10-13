@@ -7,8 +7,6 @@ license.workspace = true
 publish = false
 
 [dependencies]
-tracing = "0.1.44"
-logging = { path = "../logging" }
 
 [dev-dependencies]
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

@@ -273,6 +273,14 @@ impl Fetcher {
                     || at >= window_end
                     || data.len() != expected
                 {
+                    logging::dedup!(
+                        WARN,
+                        "chunk",
+                        at,
+                        len = data.len(),
+                        expected,
+                        "unexpected download chunk dropped"
+                    );
                     return None;
                 }
                 if !self.have[idx] {

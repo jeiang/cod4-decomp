@@ -693,7 +693,7 @@ impl Materials {
                 mat.name.as_deref().unwrap_or("?"),
                 "material has no usable technique, its draws are skipped",
                 material = mat.name.as_deref().unwrap_or("?"),
-                techset = set.name.as_deref().unwrap_or("?"),
+                techset = set.name.as_deref().unwrap_or("?")
             );
             self.failures.insert(
                 mat.name.as_deref().unwrap_or("?").to_owned(),

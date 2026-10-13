@@ -445,12 +445,26 @@ impl Game {
     /// `G_EntAttach`; `false` when the table is full or the model is unknown.
     pub fn attach_model(&mut self, n: u16, model: &str, tag: &str, ignore_collision: bool) -> bool {
         if self.content.model(model).is_none() {
+            logging::dedup!(WARN, model, model, entity = n, "attach of an unknown model");
             return false;
         }
         let Some(e) = self.ent_mut(n) else {
+            logging::dedup!(
+                WARN,
+                "attach_ent",
+                entity = n,
+                "attach to an entity that does not exist"
+            );
             return false;
         };
         if e.x.attached.len() >= MAX_ATTACH {
+            logging::dedup!(
+                WARN,
+                "attach_full",
+                entity = n,
+                model,
+                "too many attached models on one entity"
+            );
             return false;
         }
         e.x.attached.push(Attach {

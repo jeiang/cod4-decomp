@@ -163,18 +163,30 @@ fn candidates(
 
 /// The path an earlier run remembered, if the file is there.
 fn recall(config_dir: &Path) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(config_dir.join(REMEMBERED)).ok()?;
+    let file = config_dir.join(REMEMBERED);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) => t,
+        // No file is the normal first run.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            tracing::warn!(file = %file.display(), error = %e, "remembered install path unreadable");
+            return None;
+        }
+    };
     let line = text.lines().next()?.trim();
     (!line.is_empty()).then(|| PathBuf::from(line))
 }
 
 /// Keeps `install` for the next run. Failing to write is no reason to stop a run: the next one asks again.
 fn remember(config_dir: &Path, install: &Path) {
-    let _ = std::fs::create_dir_all(config_dir);
-    let _ = std::fs::write(
-        config_dir.join(REMEMBERED),
-        format!("{}\n", install.display()),
-    );
+    if let Err(e) = std::fs::create_dir_all(config_dir) {
+        tracing::warn!(dir = %config_dir.display(), error = %e, "cannot create the config folder; install path not remembered");
+        return;
+    }
+    let file = config_dir.join(REMEMBERED);
+    if let Err(e) = std::fs::write(&file, format!("{}\n", install.display())) {
+        tracing::warn!(file = %file.display(), error = %e, "install path not remembered");
+    }
 }
 
 /// The prompt needs a display; headless Linux has none.
@@ -360,6 +372,16 @@ mod tests {
         let stale = detect_from(&options(None), None, Some(cfg.path()));
         assert!(stale.tried.iter().any(|t| t.starts_with("remembered path")));
         assert!(stale.install.is_none_or(|i| i.source != "remembered path"));
+    }
+
+    #[test]
+    fn a_failed_save_is_warned() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file where the config folder should be: nothing can be written under it.
+        let blocker = dir.path().join("cfg");
+        std::fs::write(&blocker, "x").unwrap();
+        let ((), events) = logging::capture(|| remember(&blocker, dir.path()));
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
     }
 
     #[test]

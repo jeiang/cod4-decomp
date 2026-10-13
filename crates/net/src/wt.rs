@@ -241,9 +241,19 @@ async fn session(
     inbox: Inbox,
     closed: Closed,
 ) {
-    let Ok(request) = incoming.await else { return };
-    let Ok(conn) = request.accept().await else {
-        return;
+    let request = match incoming.await {
+        Ok(r) => r,
+        Err(e) => {
+            logging::dedup!(WARN, "wt-incoming", error = %e, "webtransport session request failed");
+            return;
+        }
+    };
+    let conn = match request.accept().await {
+        Ok(c) => c,
+        Err(e) => {
+            logging::dedup!(WARN, "wt-accept", error = %e, "webtransport session accept failed");
+            return;
+        }
     };
     let peer = conn.remote_address();
     let (queue, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -283,16 +293,28 @@ async fn streams(conn: &Connection, peer: SocketAddr, inbox: &Inbox) {
         let read = async {
             let mut msg = Vec::new();
             let mut chunk = [0u8; 2048];
-            while let Some(n) = rx.read(&mut chunk).await.ok()? {
-                msg.extend_from_slice(&chunk[..n]);
+            loop {
+                match rx.read(&mut chunk).await {
+                    Ok(Some(n)) => msg.extend_from_slice(&chunk[..n]),
+                    Ok(None) => break,
+                    Err(e) => {
+                        logging::dedup!(WARN, "wt-read", %peer, error = %e, "webtransport stream read failed; message dropped");
+                        return None;
+                    }
+                }
                 if msg.len() > MAX_MESSAGE {
+                    logging::dedup!(WARN, "wt-big", %peer, "webtransport stream message over the size limit dropped");
                     return None;
                 }
             }
             Some(msg)
         };
-        if let Ok(Some(msg)) = tokio::time::timeout(STREAM_TIMEOUT, read).await {
-            inbox.push(peer, &msg);
+        match tokio::time::timeout(STREAM_TIMEOUT, read).await {
+            Ok(Some(msg)) => inbox.push(peer, &msg),
+            Ok(None) => {}
+            Err(_) => {
+                logging::dedup!(WARN, "wt-timeout", %peer, "webtransport stream timed out; message dropped");
+            }
         }
     }
 }
@@ -306,14 +328,29 @@ async fn send_streams(
 ) {
     while let Some(data) = rx.recv().await {
         queued.fetch_sub(1, Ordering::SeqCst);
-        let Ok(opening) = conn.open_uni().await else {
-            return;
+        let opening = match conn.open_uni().await {
+            Ok(o) => o,
+            Err(e) => {
+                logging::dedup!(WARN, "wt-open", error = %e, "webtransport stream open failed; sending stopped");
+                return;
+            }
         };
-        let Ok(mut tx) = opening.await else { return };
-        if tx.write_all(&data).await.is_ok() {
-            tokio::spawn(async move {
-                let _ = tx.finish().await;
-            });
+        let mut tx = match opening.await {
+            Ok(tx) => tx,
+            Err(e) => {
+                logging::dedup!(WARN, "wt-open", error = %e, "webtransport stream open failed; sending stopped");
+                return;
+            }
+        };
+        match tx.write_all(&data).await {
+            Ok(()) => {
+                tokio::spawn(async move {
+                    let _ = tx.finish().await;
+                });
+            }
+            Err(e) => {
+                logging::dedup!(WARN, "wt-write", len = data.len(), error = %e, "webtransport stream write failed; message dropped");
+            }
         }
     }
 }
@@ -330,13 +367,18 @@ impl Transport for WtTransport {
             queued,
         }) = self.sessions.lock().unwrap().get(&to).cloned()
         else {
+            tracing::debug!(%to, "webtransport send to a peer without a session dropped");
             return;
         };
         if data.len() <= datagram_limit(&conn) {
-            let _ = conn.send_datagram(data);
+            if let Err(e) = conn.send_datagram(data) {
+                logging::dedup!(WARN, "wt-datagram", %to, error = %e, "webtransport datagram send failed");
+            }
         } else if data.len() <= MAX_MESSAGE && queued.load(Ordering::SeqCst) < MAX_QUEUED {
             queued.fetch_add(1, Ordering::SeqCst);
             let _ = queue.send(data.to_vec());
+        } else {
+            logging::dedup!(WARN, "wt-queue", %to, len = data.len(), "webtransport message dropped: too large or send queue full");
         }
     }
 

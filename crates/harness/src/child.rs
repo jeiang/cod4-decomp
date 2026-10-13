@@ -70,7 +70,9 @@ pub fn run(args: ChildArgs) -> i32 {
     if !trace_handle.is_empty() {
         match trace_handle.write(&args.dir.join(TRACE_FILE)) {
             Ok(()) => report.files.push(TRACE_FILE.into()),
-            Err(e) => tracing::warn!(path = %args.dir.join(TRACE_FILE).display(), "cannot write {TRACE_FILE}: {e}"),
+            Err(e) => {
+                tracing::warn!(path = %args.dir.join(TRACE_FILE).display(), "cannot write {TRACE_FILE}: {e}")
+            }
         }
     }
     match serde_json::to_vec_pretty(&report)

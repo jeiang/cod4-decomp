@@ -229,7 +229,9 @@ name = "assets"
 version = "0.0.0"
 dependencies = [
  "flate2",
+ "logging",
  "miniz_oxide 0.9.1",
+ "tracing",
 ]
 
 [[package]]
@@ -247,6 +249,7 @@ dependencies = [
  "crossbeam-queue",
  "js-sys",
  "symphonia",
+ "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -1052,6 +1055,7 @@ version = "0.0.0"
 dependencies = [
  "assets",
  "glam",
+ "logging",
 ]
 
 [[package]]
@@ -1452,8 +1456,10 @@ dependencies = [
 name = "install"
 version = "0.0.0"
 dependencies = [
+ "logging",
  "rfd",
  "tempfile",
+ "tracing",
  "winreg",
 ]
 
@@ -1713,6 +1719,7 @@ version = "0.0.0"
 dependencies = [
  "logging",
  "net",
+ "tracing",
 ]
 
 [[package]]
@@ -1929,9 +1936,11 @@ name = "net"
 version = "0.0.0"
 dependencies = [
  "assets",
+ "logging",
  "sim",
  "socket2",
  "tokio",
+ "tracing",
  "web-time",
  "wtransport",
 ]
@@ -3069,10 +3078,12 @@ dependencies = [
  "assets",
  "bytemuck",
  "glam",
+ "logging",
  "png",
  "pollster 1.0.1",
  "sim",
  "sm3",
+ "tracing",
  "web-time",
  "wgpu",
 ]
@@ -3415,6 +3426,8 @@ name = "sim"
 version = "0.0.0"
 dependencies = [
  "assets",
+ "logging",
+ "tracing",
 ]
 
 [[package]]
@@ -3470,6 +3483,7 @@ dependencies = [
  "flate2",
  "naga",
  "pollster 1.0.1",
+ "tracing",
  "wgpu",
 ]
 

@@ -145,7 +145,10 @@ impl Tunable<'_> {
     fn set(&mut self, text: &str) {
         let text = text.trim();
         let Ok(n) = text.parse::<f32>() else {
-            tracing::warn!(value = text, "tunable value is not a number, kept as it was");
+            tracing::warn!(
+                value = text,
+                "tunable value is not a number, kept as it was"
+            );
             return;
         };
         match self {

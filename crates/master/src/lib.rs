@@ -10,8 +10,7 @@
 //!
 //! [`Master`] holds the state and takes the clock as an argument, so the rules are testable without sockets.
 
-// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
-#![allow(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 
 use net::master::HEARTBEAT_SECS;
 use net::oob::{Challenger, Oob, SERVERS_PER_PACKET};
@@ -181,6 +180,7 @@ impl Master {
                 protocol,
             } if self.queries.allow(from.ip(), now) => {
                 if !self.challenger.check(from, challenge, self.secs(now)) {
+                    logging::dedup!(WARN, "bad-challenge", %from, "getservers with a bad challenge dropped");
                     return vec![(from, Oob::Error("Bad challenge.".into()))];
                 }
                 let all = self.servers(protocol);
@@ -191,13 +191,25 @@ impl Master {
                     .map(|c| (from, Oob::Servers(c.to_vec())))
                     .collect()
             }
-            _ => Vec::new(),
+            Oob::GetChallenge | Oob::GetServers { .. } => {
+                logging::dedup!(WARN, "query-limited", %from, "query dropped: rate limit");
+                Vec::new()
+            }
+            Oob::Flatline => {
+                logging::dedup!(WARN, "flatline-unlisted", %from, "flatline from an unlisted address dropped");
+                Vec::new()
+            }
+            _ => {
+                logging::dedup!(WARN, "unexpected", %from, "unexpected packet for a master dropped");
+                Vec::new()
+            }
         }
     }
 
     /// Sends the challenge that proves `from` owns its address.
     fn probe(&mut self, from: SocketAddr, flatline: bool, now: Instant) -> Vec<(SocketAddr, Oob)> {
         if !self.heartbeats.allow(from.ip(), now) {
+            logging::dedup!(WARN, "heartbeat-limited", %from, "heartbeat dropped: rate limit");
             return Vec::new();
         }
         let known = self.listed.contains_key(&from);
@@ -206,6 +218,7 @@ impl Master {
                 || self.pending.len() >= MAX_PENDING && !self.pending.contains_key(&from)
                 || self.count_ip(from.ip()) >= MAX_PER_IP && !self.pending.contains_key(&from))
         {
+            logging::dedup!(WARN, "heartbeat-refused", %from, listed = self.listed.len(), pending = self.pending.len(), "heartbeat dropped: list or per-address limit reached");
             return Vec::new();
         }
         // A forged heartbeat must not cancel the removal a `flatline` asked for; a server that still answers is
@@ -225,6 +238,7 @@ impl Master {
     /// The answer to a `getinfo`: lists (or keeps) the server when it carries the challenge.
     fn verify(&mut self, from: SocketAddr, kv: &[(String, String)], now: Instant) {
         if !self.pending.contains_key(&from) {
+            logging::dedup!(WARN, "unsolicited-info", %from, "getinfo answer from an address never probed dropped");
             return;
         }
         let get = |k: &str| kv.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
@@ -232,6 +246,7 @@ impl Master {
             .and_then(|v| v.parse().ok())
             .is_some_and(|c| self.challenger.check(from, c, self.secs(now)));
         if !proven {
+            logging::dedup!(WARN, "bad-info-challenge", %from, "getinfo answer without the challenge dropped");
             return;
         }
         self.pending.remove(&from);
@@ -241,6 +256,7 @@ impl Master {
             return;
         }
         let Some(protocol) = get("protocol").and_then(|v| v.parse().ok()) else {
+            logging::dedup!(WARN, "no-protocol", %from, "getinfo answer without a protocol dropped");
             return;
         };
         self.listed.insert(
@@ -597,5 +613,24 @@ mod tests {
         // Once they have refilled (idle) they are forgotten and room is made.
         assert!(l.allow(nth(MAX_TRACKED_IPS).ip(), t + Duration::from_secs(11)));
         assert!(l.per_ip.len() < MAX_TRACKED_IPS);
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn dropped_packets_are_warned() {
+        let t = Instant::now();
+        let mut m = Master::new(t);
+        let s: SocketAddr = "203.0.113.9:28960".parse().unwrap();
+        let (out, events) = logging::capture(|| m.handle(s, Oob::Disconnect, t));
+        assert!(out.is_empty());
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
+        // An answer to a getinfo that was never sent is dropped too.
+        let reply = Oob::InfoResponse(vec![("challenge".into(), "1".into())]);
+        let (_, events) = logging::capture(|| m.handle(s, reply, t));
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
     }
 }

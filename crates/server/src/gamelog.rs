@@ -35,8 +35,14 @@ impl GameLog {
     pub fn print(&mut self, level_time_ms: i32, text: &str) {
         let Some(f) = self.file.as_mut() else { return };
         let line = Self::stamped(level_time_ms, text);
-        if f.write_all(line.as_bytes()).is_ok() && self.sync {
-            let _ = f.sync_data();
+        match f.write_all(line.as_bytes()) {
+            Ok(()) if self.sync => {
+                if let Err(e) = f.sync_data() {
+                    logging::dedup!(ERROR, "sync", error = %e, "game log sync failed");
+                }
+            }
+            Ok(()) => {}
+            Err(e) => logging::dedup!(ERROR, "write", error = %e, "game log write failed"),
         }
     }
 

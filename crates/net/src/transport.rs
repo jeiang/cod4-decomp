@@ -106,7 +106,9 @@ impl Transport for UdpTransport {
     }
 
     fn send_to(&mut self, to: SocketAddr, data: &[u8]) {
-        let _ = self.socket.send_to(data, to);
+        if let Err(e) = self.socket.send_to(data, to) {
+            logging::dedup!(WARN, "udp-send", %to, len = data.len(), error = %e, "udp send failed");
+        }
     }
 
     fn recv_from(
@@ -177,6 +179,8 @@ impl Inbox {
         if q.len() < self.cap {
             q.push_back((from, data.to_vec()));
             self.q.1.notify_one();
+        } else {
+            logging::dedup!(WARN, "inbox-full", %from, cap = self.cap, "datagram dropped: receive queue full");
         }
     }
 
@@ -235,7 +239,10 @@ impl Joined {
                                     | io::ErrorKind::TimedOut
                                     | io::ErrorKind::ConnectionReset
                             ) => {}
-                        Err(_) => break,
+                        Err(e) => {
+                            tracing::error!(error = %e, "udp receive thread stopped: no more datagrams will arrive");
+                            break;
+                        }
                     }
                 }
             })?;
@@ -334,8 +341,9 @@ impl Transport for MemTransport {
 
     fn send_to(&mut self, to: SocketAddr, data: &[u8]) {
         let dest = self.net.routes.lock().unwrap().get(&to).cloned();
-        if let Some(q) = dest {
-            q.push(self.addr, data);
+        match dest {
+            Some(q) => q.push(self.addr, data),
+            None => tracing::debug!(%to, "datagram to an address nobody holds dropped"),
         }
     }
 

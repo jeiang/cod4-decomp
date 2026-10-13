@@ -192,6 +192,12 @@ impl Rig {
         for (mi, m) in models.iter().enumerate() {
             let n = usize::from(m.model.num_bones);
             if m.bone_names.len() != n {
+                tracing::error!(
+                    model = m.model.name.as_deref().unwrap_or("?"),
+                    bones = n,
+                    names = m.bone_names.len(),
+                    "rig model bone names do not match its bones"
+                );
                 return Err(format!(
                     "model {} has {n} bones but {} names",
                     m.model.name.as_deref().unwrap_or("?"),
@@ -200,6 +206,7 @@ impl Rig {
             }
             let base = bones.len();
             if base + n > MAX_BONES {
+                tracing::error!(max = MAX_BONES, "rig exceeds the bone limit");
                 return Err(format!("rig exceeds {MAX_BONES} bones"));
             }
             let find_before = |name: &str, bones_len: usize, names: &[Box<str>]| {

@@ -22,8 +22,15 @@ impl BanList {
     /// The list kept in `file`; a missing or unreadable file is an empty list. Lines that are not
     /// addresses (and `#` comments) are skipped.
     pub fn load(file: PathBuf) -> Self {
-        let permanent = std::fs::read_to_string(&file)
-            .unwrap_or_default()
+        let text = match std::fs::read_to_string(&file) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                tracing::warn!(file = %file.display(), error = %e, "ban list unreadable; starting empty");
+                String::new()
+            }
+        };
+        let permanent = text
             .lines()
             .filter_map(|l| l.split('#').next()?.trim().parse().ok())
             .collect();

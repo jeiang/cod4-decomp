@@ -161,6 +161,7 @@ impl Peer {
             return;
         }
         if self.link.command(line).is_err() {
+            logging::dedup!(WARN, "overflow", addr = %self.link.addr, "client cannot take another reliable command; flagged for dropping");
             self.overflowed = true;
         }
     }
@@ -391,6 +392,13 @@ impl NetSv {
         for (_, c) in p.cmds {
             if peer.cmds.len() < MAX_QUEUED_CMDS {
                 peer.cmds.push_back(c);
+            } else {
+                logging::dedup!(
+                    WARN,
+                    "usercmds",
+                    client = slot,
+                    "usercmd queue full; command dropped"
+                );
             }
         }
         self.inbox.extend(p.reliable.into_iter().map(|l| (slot, l)));
@@ -466,6 +474,7 @@ impl NetSv {
                 let query = matches!(o, Oob::GetChallenge | Oob::GetInfo(_) | Oob::GetStatus(_));
                 if query && !self.query_limit.allow(from.ip(), Instant::now()) {
                     self.stats.queries_limited += 1;
+                    logging::dedup!(WARN, "queries", from = %from, "query dropped by the rate limit");
                     continue;
                 }
                 if let Oob::GetStatus(c) = o {
@@ -496,20 +505,35 @@ impl NetSv {
                     Gate::File { from, name, offset } => {
                         if self.file_allowed(from) {
                             out.push(Inbound::GetFile { from, name, offset });
+                        } else {
+                            logging::dedup!(WARN, "getfile", from = %from, "file request refused: banned or over budget");
                         }
                     }
                     Gate::Manifest { from } => {
                         if self.file_allowed(from) {
                             out.push(Inbound::GetManifest { from });
+                        } else {
+                            logging::dedup!(WARN, "getmanifest", from = %from, "manifest request refused: banned or over budget");
                         }
                     }
-                    Gate::Ignore => {}
+                    Gate::Ignore => {
+                        tracing::debug!(from = %from, "out-of-band packet ignored");
+                    }
                 }
             } else if let Some(slot) = self.slot_of(from) {
-                self.deliver(slot, packet);
+                if !self.deliver(slot, packet) {
+                    logging::dedup!(
+                        WARN,
+                        "rejected",
+                        client = slot,
+                        bytes = n,
+                        "client packet rejected (old, forged or malformed)"
+                    );
+                }
             } else if !self.deliver_moved(from, packet) {
                 // A client the server no longer has (kicked, timed out, the server restarted) is told, so it does
                 // not sit in a match that is gone.
+                logging::dedup!(WARN, "unknown", from = %from, bytes = n, "packet from an address with no client");
                 self.t
                     .send_to(from, &Oob::Error(NOT_CONNECTED.into()).encode());
             }
@@ -575,6 +599,13 @@ impl NetSv {
     /// `mute <n>` / `unmute <n>` from `slot`: stops (or resumes) relaying player `who` to it.
     pub fn set_muted(&mut self, slot: u16, who: u16, muted: bool) {
         if who >= 64 {
+            logging::dedup!(
+                WARN,
+                "mute",
+                client = slot,
+                who,
+                "mute of a client number out of range"
+            );
             return;
         }
         if let Some(p) = self
@@ -601,7 +632,10 @@ impl NetSv {
                     self.t.send_to(to, &bytes);
                 }
             }
-            Err(e) => self.refuse(to, &format!("Cannot read the file: {e}")),
+            Err(e) => {
+                logging::dedup!(WARN, "send_file", to = %to, error = %e, "download file unreadable");
+                self.refuse(to, &format!("Cannot read the file: {e}"));
+            }
         }
     }
 
@@ -1038,7 +1072,12 @@ impl NetSv {
                 }
                 continue;
             }
-            let Some(snap) = self.snapshot_for(game, slot as u16, server_time, &entities) else {
+            let snap = {
+                let _span = tracing::debug_span!("snapshot", client = slot as u16).entered();
+                self.snapshot_for(game, slot as u16, server_time, &entities)
+            };
+            let Some(snap) = snap else {
+                tracing::debug!(client = slot as u16, "no snapshot: client slot is empty");
                 continue;
             };
             let peer = self.peers[slot].as_mut().expect("peer");
@@ -1567,6 +1606,15 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 // drawn.
                 let model = game.models.find(&e.model);
                 if model == 0 {
+                    if !e.model.is_empty() {
+                        logging::dedup!(
+                            WARN,
+                            &e.model,
+                            model = &*e.model,
+                            entity = n,
+                            "script_model not drawn: model was never precached"
+                        );
+                    }
                     continue;
                 }
                 if e.hidden {
@@ -1605,6 +1653,15 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                     continue;
                 };
                 if e.hidden || model == 0 {
+                    if model == 0 {
+                        logging::dedup!(
+                            WARN,
+                            &e.model,
+                            model = &*e.model,
+                            entity = n,
+                            "vehicle not drawn: model was never precached"
+                        );
+                    }
                     continue;
                 }
                 // Helicopters show on every compass whatever the walls: sent to everyone.
@@ -2253,5 +2310,17 @@ mod tests {
         spoof.send_to(server, &Oob::Disconnect.encode());
         assert!(poll(&mut n).is_empty());
         assert_eq!(n.slot_of(player), Some(0));
+    }
+
+    #[test]
+    fn a_packet_from_an_address_with_no_client_warns() {
+        let (mut n, mem) = net_sv(2);
+        let server = n.local_addr();
+        let stranger = SocketAddr::from(([9, 9, 9, 9], 7));
+        let mut s = mem.endpoint(stranger);
+        s.send_to(server, &[1, 2, 3, 4, 5]);
+        let (_, events) = logging::capture(|| poll(&mut n));
+        let w = events.iter().find(|e| e.level == tracing::Level::WARN);
+        assert_eq!(w.and_then(|e| e.field("from")), Some("9.9.9.9:7"));
     }
 }

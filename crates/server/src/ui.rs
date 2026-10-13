@@ -158,6 +158,14 @@ impl Game {
         let max = usize::from(count - 1 + (1 - first));
         if i > max {
             list.truncate(known);
+            logging::dedup!(
+                ERROR,
+                name,
+                table = what,
+                name,
+                max,
+                "precache table is full; name not registered"
+            );
             return Err(format!("too many {what} (max {max})"));
         }
         if i > known {
@@ -383,6 +391,18 @@ mod tests {
             Ok(6),
             "a repeat is not a new entry"
         );
+    }
+
+    #[test]
+    fn a_full_precache_table_logs_an_error_with_the_name() {
+        let mut g = Game::new(crate::cvar::Cvars::new(), Default::default());
+        for i in 0..usize::from(cs::SCRIPT_MENUS_COUNT) {
+            g.precache(Table::Menu, &format!("m{i}")).unwrap();
+        }
+        let (r, events) = logging::capture(|| g.precache(Table::Menu, "logtest_overflow"));
+        assert!(r.is_err());
+        let e = events.iter().find(|e| e.level == tracing::Level::ERROR);
+        assert_eq!(e.and_then(|e| e.field("name")), Some("logtest_overflow"));
     }
 
     #[test]

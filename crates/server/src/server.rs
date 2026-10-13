@@ -1213,7 +1213,13 @@ impl Server {
         if let (Some(v), Some(c)) = (verb.as_deref(), self.game.client_mut(slot))
             && flood_drops(v, loopback, flood, now, &mut c.next_cmd_at)
         {
-            logging::dedup!(WARN, v, client = slot, cmd = v, "client command dropped by flood protection");
+            logging::dedup!(
+                WARN,
+                v,
+                client = slot,
+                cmd = v,
+                "client command dropped by flood protection"
+            );
             return;
         }
         match verb.as_deref() {
@@ -1222,7 +1228,13 @@ impl Server {
                 match argv.get(1).and_then(|n| n.parse::<u16>().ok()) {
                     Some(who) => net.set_muted(slot, who, v == "mute"),
                     None => {
-                        logging::dedup!(WARN, v, client = slot, cmd = v, "mute without a client number");
+                        logging::dedup!(
+                            WARN,
+                            v,
+                            client = slot,
+                            cmd = v,
+                            "mute without a client number"
+                        );
                     }
                 }
             }
@@ -2371,7 +2383,10 @@ impl Server {
         }
         // A file name in the working directory, never a path out of it.
         if path.contains(['/', '\\', ':']) || path.contains("..") {
-            tracing::error!(file = path.as_str(), "game log not opened: not a plain file name");
+            tracing::error!(
+                file = path.as_str(),
+                "game log not opened: not a plain file name"
+            );
             return;
         }
         let file = self.log_dir.join(&path);
@@ -2415,6 +2430,7 @@ impl Server {
     /// One `G_RunFrame` at the current `svs_time`.
     fn run_frame(&mut self) -> TickSample {
         let t0 = Instant::now();
+        let _span = tracing::debug_span!("server_frame", time = self.svs_time).entered();
         let (mut gsc, mut bot, mut client) = (Duration::ZERO, Duration::ZERO, Duration::ZERO);
         self.game.level.frame += 1;
         self.game.level.frametime = self.frame_ms;
@@ -2534,6 +2550,11 @@ impl Server {
                 }
             }
             for (n, text, why) in &gone {
+                tracing::info!(
+                    client = *n,
+                    reason = why.text(),
+                    "client dropped by the game"
+                );
                 net.remove_peer(*n, why.notice());
                 net.print_to_others(*n, text);
                 gone_lines.push(format!("{n}:{}\n", crate::vote::clean_name(text)));
@@ -2620,7 +2641,7 @@ impl Server {
         for _ in 0..n {
             let name = format!("bot{}", host.game.bot_serial);
             let Some(num) = host.game.connect_client(&mut run.vm, true, &name) else {
-                self.say("bots: no free client slot\n");
+                tracing::warn!(bot = name.as_str(), "no free client slot for a bot");
                 break;
             };
             host.game.bot_serial += 1;
@@ -3245,5 +3266,20 @@ mod tests {
         assert_eq!(ping_field(false, false, false, Some(40)), "40");
         assert_eq!(ping_field(false, false, false, Some(123_456)), "999");
         assert_eq!(ping_field(false, false, false, None), "0");
+    }
+
+    /// Needs a game install (`COD4_PATH`); skips without one.
+    #[test]
+    fn an_unknown_console_command_warns_with_its_name_but_not_its_arguments() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let args = ["+set", "net_port", "0"].map(String::from);
+        let mut s = super::Server::boot(&root, &args, false).expect("boot");
+        let (_, events) = logging::capture(|| s.exec_line("logtest_nosuchcmd hunter2"));
+        let w = events.iter().find(|e| e.level == tracing::Level::WARN);
+        assert_eq!(w.and_then(|e| e.field("cmd")), Some("logtest_nosuchcmd"));
+        assert!(events.iter().all(|e| !e.message.contains("hunter2")));
     }
 }

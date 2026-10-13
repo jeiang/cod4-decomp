@@ -71,7 +71,17 @@ impl Default for Dedup {
 /// any `&str` (an asset or command name); the limiter is one per call site. Costs nothing when the level is off.
 #[macro_export]
 macro_rules! dedup {
-    ($level:ident, $key:expr, $($arg:tt)+) => {{
+    // The message first, then fields (`"what", asset = name`): tracing wants the fields first, so move the message last.
+    ($level:ident, $key:expr, $msg:literal, $($rest:tt)+) => {
+        $crate::dedup!(@go $level, $key, ($($rest)+), $msg)
+    };
+    ($level:ident, $key:expr, $($arg:tt)+) => {
+        $crate::dedup!(@raw $level, $key, $($arg)+)
+    };
+    (@go $level:ident, $key:expr, ($($fields:tt)+), $msg:literal) => {
+        $crate::dedup!(@raw $level, $key, $($fields)+, $msg)
+    };
+    (@raw $level:ident, $key:expr, $($arg:tt)+) => {{
         static LIMITER: $crate::Dedup = $crate::Dedup::new();
         if $crate::tracing::enabled!($crate::tracing::Level::$level) {
             if let Some(seen) = LIMITER.hit($key) {

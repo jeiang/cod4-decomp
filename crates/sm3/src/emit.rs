@@ -227,6 +227,7 @@ impl Ctx<'_> {
     }
 
     fn fail(&mut self, m: String) {
+        tracing::warn!(reason = %m, "unsupported shader construct");
         self.err.get_or_insert(Error::Unsupported(m));
     }
 

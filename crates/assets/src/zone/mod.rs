@@ -280,11 +280,7 @@ impl<'a> Zone<'a> {
 
     /// Decode every asset body in order. Assets the filter keeps go to `sink`.
     /// Fails with [`ZoneError::Unsupported`] at the first type with no decoder.
-    pub fn decode(
-        self,
-        filter: &dyn DecodeFilter,
-        sink: impl FnMut(Asset),
-    ) -> Result<ZoneStats> {
+    pub fn decode(self, filter: &dyn DecodeFilter, sink: impl FnMut(Asset)) -> Result<ZoneStats> {
         let _span = tracing::debug_span!("zone_decode", assets = self.assets.len()).entered();
         self.decode_assets(filter, sink)
             .inspect_err(|e| tracing::error!(error = %e, "cannot decode fastfile"))

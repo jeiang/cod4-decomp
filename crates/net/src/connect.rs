@@ -61,10 +61,12 @@ pub fn serve(
             password,
         } => {
             if protocol != PROTOCOL {
+                logging::dedup!(WARN, "connect-protocol", %from, protocol, "connect refused: protocol mismatch");
                 Gate::Reply(Oob::Error(format!(
                     "Server uses protocol {PROTOCOL}, you have {protocol}."
                 )))
             } else if !challenger.check(from, challenge, now_secs) {
+                logging::dedup!(WARN, "connect-challenge", %from, "connect with a bad challenge refused");
                 Gate::Reply(Oob::Error("Bad challenge.".into()))
             } else {
                 Gate::Accept(ConnectRequest {
@@ -84,6 +86,7 @@ pub fn serve(
             if challenger.check(from, challenge, now_secs) {
                 Gate::File { from, name, offset }
             } else {
+                logging::dedup!(WARN, "getfile-challenge", %from, "getfile with a bad challenge refused");
                 Gate::Reply(Oob::Error(crate::download::BAD_CHALLENGE.into()))
             }
         }
@@ -91,11 +94,15 @@ pub fn serve(
             if challenger.check(from, challenge, now_secs) {
                 Gate::Manifest { from }
             } else {
+                logging::dedup!(WARN, "getmanifest-challenge", %from, "getmanifest with a bad challenge refused");
                 Gate::Reply(Oob::Error(crate::download::BAD_CHALLENGE.into()))
             }
         }
         // No `Oob::Disconnect` arm: see `Gate::Ignore`.
-        _ => Gate::Ignore,
+        _ => {
+            tracing::debug!(%from, "out-of-band packet the server does not serve ignored");
+            Gate::Ignore
+        }
     }
 }
 
@@ -180,6 +187,7 @@ impl Connector {
 
     pub fn handle(&mut self, from: SocketAddr, oob: Oob) {
         if from != self.server {
+            logging::dedup!(WARN, "connector-stranger", %from, server = %self.server, "connect reply from an address other than the server dropped");
             return;
         }
         match (&self.state, oob) {
@@ -189,11 +197,15 @@ impl Connector {
             }
             (ConnectState::Connecting(_), Oob::ConnectResponse) => {
                 self.state = ConnectState::Connected;
+                tracing::info!(server = %self.server, "connected");
             }
             (ConnectState::Challenging | ConnectState::Connecting(_), Oob::Error(e)) => {
+                tracing::error!(server = %self.server, reason = %e, "connection refused");
                 self.state = ConnectState::Refused(e);
             }
-            _ => {}
+            _ => {
+                tracing::debug!(server = %self.server, "connect packet that does not fit the state ignored")
+            }
         }
     }
 }
