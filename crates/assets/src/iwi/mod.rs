@@ -410,7 +410,7 @@ pub fn load(vfs: &Vfs, name: &str) -> Result<Image, Error> {
 pub fn load_picmip(vfs: &Vfs, name: &str, picmip: usize) -> Result<Image, Error> {
     let path = format!("images/{name}.iwi");
     let Some(bytes) = vfs.read(&path)? else {
-        tracing::debug!(image = name, "image not in the search path");
+        tracing::warn!(image = name, "image not in the search path");
         return Err(Error::NotFound(path));
     };
     Image::parse_picmip(&bytes, picmip)

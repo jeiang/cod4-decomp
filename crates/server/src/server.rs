@@ -595,7 +595,7 @@ impl Server {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!(port, error = %e, "cannot bind udp port");
-                return;
+                return self.say(&format!("WARNING: cannot bind udp port {port}: {e}\n"));
             }
         };
         let max = usize::try_from(self.game.cvars.int("sv_maxclients")).unwrap_or(32);
@@ -608,7 +608,7 @@ impl Server {
                 Ok(j) => Box::new(j),
                 Err(e) => {
                     tracing::error!(bind = %wt, error = %e, "webtransport endpoint did not start");
-                    return;
+                    return self.say(&format!("WARNING: webtransport {wt}: {e}\n"));
                 }
             }
         };
@@ -866,7 +866,7 @@ impl Server {
         match offer.path(name).map(Path::to_owned) {
             Some(path) => net.send_file(from, &path, offset),
             None => {
-                logging::dedup!(WARN, name, %from, file = name, "download of a file not on offer");
+                logging::dedup!(WARN, "not-on-offer", %from, file = name, "download of a file not on offer");
                 net.refuse(from, net::download::NOT_AVAILABLE);
             }
         }
@@ -1328,7 +1328,13 @@ impl Server {
             ) => tracing::debug!(client = slot, cmd = v, "client command not carried out"),
             // What the original says to a client for a verb it does not know.
             Some(cmd) => {
-                logging::dedup!(WARN, cmd, client = slot, cmd, "unknown client command");
+                logging::dedup!(
+                    WARN,
+                    "unknown-client-command",
+                    client = slot,
+                    cmd,
+                    "unknown client command"
+                );
                 self.game.send(
                     Dest::Client(slot),
                     ServerCmd::Print {
@@ -1906,7 +1912,7 @@ impl Server {
                         }
                     }
                 } else {
-                    logging::dedup!(WARN, &lname, cmd = lname.as_str(), "unknown command");
+                    logging::dedup!(WARN, "unknown", cmd = lname.as_str(), "unknown command");
                     self.say(&format!("Unknown command \"{name}\"\n"));
                 }
             }
@@ -2387,6 +2393,9 @@ impl Server {
                 file = path.as_str(),
                 "game log not opened: not a plain file name"
             );
+            self.say(&format!(
+                "WARNING: Couldn't open logfile: {path}: not a plain file name\n"
+            ));
             return;
         }
         let file = self.log_dir.join(&path);
@@ -2398,7 +2407,10 @@ impl Server {
                     .log_print("------------------------------------------------------------\n");
                 self.game.log_print(&format!("InitGame: {info}\n"));
             }
-            Err(e) => tracing::error!(file = path.as_str(), error = %e, "game log not opened"),
+            Err(e) => {
+                tracing::error!(file = path.as_str(), error = %e, "game log not opened");
+                self.say(&format!("WARNING: Couldn't open logfile: {path}: {e}\n"));
+            }
         }
     }
 
@@ -2638,10 +2650,12 @@ impl Server {
             self.bot_shared.scratch = None;
         }
         host.game.ensure_nav();
+        let mut full = false;
         for _ in 0..n {
             let name = format!("bot{}", host.game.bot_serial);
             let Some(num) = host.game.connect_client(&mut run.vm, true, &name) else {
                 tracing::warn!(bot = name.as_str(), "no free client slot for a bot");
+                full = true;
                 break;
             };
             host.game.bot_serial += 1;
@@ -2661,6 +2675,9 @@ impl Server {
             host.run_calls(&mut run.vm);
         }
         self.record_errors(errors);
+        if full {
+            self.say("bots: no free client slot\n");
+        }
         self.flush_game_output();
         Ok(())
     }

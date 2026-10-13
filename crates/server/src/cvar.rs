@@ -155,7 +155,13 @@ impl Cvars {
     fn set_checked(&mut self, name: &str, value: &str, external: bool) -> Result<(), Refused> {
         let r = self.try_set(name, value, external);
         if let Err(why) = &r {
-            logging::dedup!(WARN, name, cvar = name, external, "cvar set refused: {why}");
+            logging::dedup!(
+                WARN,
+                "refused",
+                cvar = name,
+                external,
+                "cvar set refused: {why}"
+            );
         }
         r
     }

@@ -12,6 +12,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+/// The program's stdout lines (a supervisor reads them); the log has them too.
+#[allow(clippy::print_stdout)]
+fn say(line: &str) {
+    println!("{line}");
+}
+
 #[allow(clippy::print_stdout, clippy::print_stderr)] // CLI help and argument errors are the program's output
 fn main() -> ExitCode {
     let _log = logging::init(logging::Config::new("master"));
@@ -56,6 +62,10 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!(addr = %sock.local_addr(), "cod4e-master listening on udp");
+    say(&format!(
+        "cod4e-master listening on udp {}",
+        sock.local_addr()
+    ));
     let mut m = Master::new(Instant::now());
     let mut buf = vec![0u8; 2048];
     let mut next_expire = Instant::now();
@@ -84,6 +94,7 @@ fn main() -> ExitCode {
         if m.len() != listed {
             listed = m.len();
             tracing::info!(listed, "servers listed");
+            say(&format!("{listed} servers listed"));
         }
     }
 }

@@ -294,7 +294,10 @@ fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
 
 fn load_install_map(map: &str) -> Option<Arc<Clipmap>> {
     let Some(root) = std::env::var_os("COD4_PATH") else {
-        eprintln!("COD4_PATH not set; skipping");
+        #[allow(clippy::print_stderr)] // a test helper's skip notice
+        {
+            eprintln!("COD4_PATH not set; skipping");
+        }
         return None;
     };
     let english = find_ci(&PathBuf::from(root).join("zone"), "english")?;

@@ -130,6 +130,7 @@ fn run_in(
     let dumps = DumpServer::start(scratch);
     if let Err(e) = &dumps {
         tracing::warn!("crash capture unavailable: {e}");
+        log.say(format!("crash capture unavailable: {e}"));
     }
     let exe = std::env::current_exe()?;
     let mut reports = Vec::new();
