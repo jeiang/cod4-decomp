@@ -163,9 +163,6 @@ What the browser keeps: the settings and binds are written as a `config_mp.cfg` 
 | `master` | `cod4e-master`, the master server: the list of public servers (no game files needed) |
 | `sm3` | D3D9 SM3 bytecode to WGSL |
 | `render` | wgpu renderer |
-| `audio` | sound alias tables, realtime-safe mixer (`Mixer::fill`, AudioWorklet-ready), WAV/MP3 decoding, cpal output (AudioWorklet in the browser) |
-| `client` | `cod4e`, the player-facing client |
-
-| `audio` | sound alias tables, realtime-safe mixer (`Mixer::fill`, AudioWorklet-ready), WAV/MP3 decoding, cpal output |
+| `audio` | ordered-zone sound alias tables (including name-only sample references), realtime-safe mixer (`Mixer::fill`, AudioWorklet-ready), WAV/MP3 decoding, cpal output (AudioWorklet in the browser) |
 | `client` | `cod4e`, the player-facing client (native, and wasm for `web/`) |
 | `harness` | `cod4e-harness`, scenario runner and run bundles |

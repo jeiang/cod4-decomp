@@ -1026,11 +1026,20 @@ fn load(install: &Path, game: &str, map: &str) -> Result<Bank, String> {
         .unwrap_or(0);
     let usermap = Some(map).filter(|m| !m.is_empty());
     let vfs = Arc::new(Vfs::open(&install.root, lang, game, usermap).map_err(|e| e.to_string())?);
-    // No map: the menus' own tables (the front end's `mouse_click`, `mouse_over`, ... are in the SP code zone).
+    // The front end's tables span MP, SP and localized zones; load them in engine order.
     let wanted: &[&str] = if map.is_empty() {
-        &["code_post_gfx_mp", "code_post_gfx"]
+        &[
+            "code_post_gfx_mp",
+            "code_post_gfx",
+            "localized_code_post_gfx_mp",
+        ]
     } else {
-        &["code_post_gfx_mp", "localized_common_mp", map]
+        &[
+            "code_post_gfx_mp",
+            "localized_code_post_gfx_mp",
+            "localized_common_mp",
+            map,
+        ]
     };
     let mut zones: Vec<PathBuf> = wanted.iter().filter_map(|z| install.zone_path(z)).collect();
     // The mod's alias lists replace the stock ones of the same name.
@@ -1408,20 +1417,24 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         );
         check(first.is_some(), format!("no hold-breath sound {name}"));
     }
-    // The front end's click and hover sounds sit in the SP code zone, which MP-only installs lack.
-    let has_sp = Install::open(install)
-        .map(|i| i.zone_path("code_post_gfx").is_some())
-        .unwrap_or(false);
-    m.insert("menu_sounds_available".into(), u8::from(has_sp).into());
-    if has_sp {
-        for name in ["mouse_click", "mouse_over"] {
-            let on_menu = menus
-                .aliases_of(name)
-                .first()
-                .is_some_and(|a| menus.channels[usize::from(a.channel)].name == "menu");
-            check(on_menu, format!("no menu sound {name}"));
-        }
+    let mut menu_sounds_available = true;
+    for name in [
+        "mouse_click",
+        "mouse_over",
+        "mouse_submenu_over",
+        "music_mainmenu_mp",
+    ] {
+        let aliases = menus.aliases_of(name);
+        let playable = !aliases.is_empty()
+            && aliases.iter().any(|a| {
+                !matches!(a.audio, audio::bank::Clip::Null | audio::bank::Clip::Silent)
+                    && (name == "music_mainmenu_mp"
+                        || menus.channels[usize::from(a.channel)].name == "menu")
+            });
+        menu_sounds_available &= playable;
+        check(playable, format!("no playable menu sound {name}"));
     }
+    m.insert("menu_sounds_available".into(), menu_sounds_available.into());
 
     // Direction and falloff of a weapon shot: the listener faces +x, its left is +y.
     let shot = "weap_ak47_fire_npc";

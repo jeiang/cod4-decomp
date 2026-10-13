@@ -9,11 +9,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 fn root() -> Option<PathBuf> {
-    let root = std::env::var_os("COD4_PATH")
+    let configured = std::env::var_os("COD4_PATH");
+    let root = configured
+        .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../COD4")));
     if root.join("zone/english").is_dir() {
         Some(root)
+    } else if configured.is_some() {
+        panic!(
+            "COD4_PATH has no zone/english directory: {}",
+            root.display()
+        );
     } else {
         eprintln!("skipping: no original install at {}", root.display());
         None
@@ -105,6 +112,211 @@ fn every_streamed_alias_names_a_decodable_file() {
         &missing[..missing.len().min(5)]
     );
     assert!(mp3 > 5, "the map's music and ambience are MP3 ({mp3})");
+}
+
+#[test]
+fn every_stock_map_alias_resolves_to_playable_audio() {
+    let Some(root) = root() else { return };
+    let custom: std::collections::HashSet<_> =
+        assets::paths::custom_maps(&root, "").into_iter().collect();
+    let maps: Vec<_> = assets::paths::maps(&root, "")
+        .into_iter()
+        .filter(|map| !custom.contains(map))
+        .collect();
+    assert!(!maps.is_empty(), "no stock maps found");
+
+    let vfs = Arc::new(Vfs::open_stock(&root, 0).unwrap());
+    let mut unresolved = Vec::new();
+    for map in &maps {
+        let zones: Vec<PathBuf> = [
+            "code_post_gfx_mp",
+            "localized_code_post_gfx_mp",
+            "localized_common_mp",
+            map.as_str(),
+        ]
+        .iter()
+        .map(|zone| root.join(format!("zone/english/{zone}.ff")))
+        .collect();
+        let mut sound = Sound::new(
+            Bank::load(vfs.clone(), &zones).unwrap_or_else(|e| panic!("{map}: {e}")),
+            false,
+        );
+        sound.set_listener([0.0; 3], 0.0);
+        assert!(
+            sound.bank.stats.pcm_bytes <= 128 * 1024 * 1024,
+            "{map}: decoded {} PCM bytes, exceeding the 128 MiB per-map budget",
+            sound.bank.stats.pcm_bytes
+        );
+        for list in sound.bank.names().map(str::to_owned).collect::<Vec<_>>() {
+            for alias in sound.bank.aliases_of(&list) {
+                if matches!(alias.audio, Clip::Silent) {
+                    unresolved.push(format!("{map}: {list}/{}", alias.name));
+                }
+            }
+        }
+        for name in [
+            "mp_player_join",
+            "mp_player_leave",
+            "match_countdown_tick",
+            "mp_experience_tick",
+            "enter_prestige",
+        ] {
+            let aliases = sound.bank.aliases_of(name);
+            assert!(!aliases.is_empty(), "{map}: missing match alias {name}");
+            assert!(
+                aliases
+                    .iter()
+                    .any(|alias| !matches!(alias.audio, Clip::Null | Clip::Silent)),
+                "{map}: match alias {name} has no playable audio"
+            );
+            assert!(
+                sound.play(name, Cue::default()).is_some(),
+                "{map}: match alias {name} did not start"
+            );
+        }
+    }
+    assert!(
+        unresolved.is_empty(),
+        "{} unresolved aliases, e.g. {:?}",
+        unresolved.len(),
+        &unresolved[..unresolved.len().min(20)]
+    );
+}
+
+#[test]
+fn localized_front_end_menu_aliases_have_audio() {
+    let Some(root) = root() else { return };
+    let vfs = Arc::new(Vfs::open_stock(&root, 0).unwrap());
+    let zones: Vec<PathBuf> = [
+        "code_post_gfx_mp",
+        "code_post_gfx",
+        "localized_code_post_gfx_mp",
+    ]
+    .iter()
+    .map(|zone| root.join(format!("zone/english/{zone}.ff")))
+    .collect();
+    let mut sound = Sound::new(Bank::load(vfs, &zones).unwrap(), false);
+    sound.set_listener([0.0; 3], 0.0);
+    for list in sound.bank.names().map(str::to_owned).collect::<Vec<_>>() {
+        for alias in sound.bank.aliases_of(&list) {
+            assert!(
+                !matches!(alias.audio, Clip::Silent),
+                "stock menu list {list}/{} is unresolved",
+                alias.name
+            );
+        }
+    }
+    for name in [
+        "mouse_click",
+        "mouse_over",
+        "mouse_submenu_over",
+        "music_mainmenu_mp",
+    ] {
+        let aliases = sound.bank.aliases_of(name);
+        assert!(!aliases.is_empty(), "missing menu alias {name}");
+        assert!(
+            aliases
+                .iter()
+                .any(|alias| !matches!(alias.audio, Clip::Null | Clip::Silent)),
+            "menu alias {name} has no playable audio"
+        );
+        assert!(
+            sound.play(name, Cue::default()).is_some(),
+            "menu alias {name} did not start"
+        );
+    }
+}
+
+fn stock_zone_loaded_sounds(path: &PathBuf) -> std::collections::HashMap<String, Arc<[u8]>> {
+    struct SoundsOnly;
+    impl assets::zone::DecodeFilter for SoundsOnly {
+        fn keep(&self, ty: assets::zone::XAssetType) -> bool {
+            ty == assets::zone::XAssetType::Sound
+        }
+    }
+
+    let zone = assets::zone::Zone::open(std::io::BufReader::new(
+        std::fs::File::open(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+    ))
+    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut sounds = std::collections::HashMap::new();
+    zone.decode(&SoundsOnly, |asset| {
+        if let assets::zone::Asset::Sound(list) = asset {
+            for alias in list.aliases.iter() {
+                let Some(name) = alias.name.as_deref() else {
+                    continue;
+                };
+                if name.starts_with(',') {
+                    continue;
+                }
+                let Some(assets::zone::sound::SoundSource::Loaded(Some(loaded))) =
+                    alias.sound_file.as_deref().map(|file| &file.source)
+                else {
+                    continue;
+                };
+                if !loaded.data.is_empty() {
+                    sounds.insert(name.to_ascii_lowercase(), loaded.data.clone());
+                }
+            }
+        }
+    })
+    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    sounds
+}
+
+#[test]
+fn stock_match_zones_override_earlier_loaded_sound_data() {
+    let Some(root) = root() else { return };
+    let custom: std::collections::HashSet<_> =
+        assets::paths::custom_maps(&root, "").into_iter().collect();
+    let maps: Vec<_> = assets::paths::maps(&root, "")
+        .into_iter()
+        .filter(|map| !custom.contains(map))
+        .collect();
+    assert!(!maps.is_empty(), "no stock maps found");
+
+    let shared_zones = [
+        "code_post_gfx_mp",
+        "localized_code_post_gfx_mp",
+        "localized_common_mp",
+    ];
+    let shared_sounds: Vec<_> = shared_zones
+        .iter()
+        .map(|zone| {
+            let path = root.join(format!("zone/english/{zone}.ff"));
+            ((*zone).to_owned(), stock_zone_loaded_sounds(&path))
+        })
+        .collect();
+    let mut conflicts = Vec::new();
+    for map in maps {
+        let mut known = std::collections::HashMap::new();
+        for (zone, sounds) in &shared_sounds {
+            for (name, data) in sounds {
+                if known
+                    .get(name)
+                    .is_some_and(|previous: &Arc<[u8]>| previous.as_ref() != data.as_ref())
+                {
+                    conflicts.push(format!("{map}: {zone}/{name}"));
+                }
+                known.insert(name.clone(), data.clone());
+            }
+        }
+        let map_sounds = stock_zone_loaded_sounds(&root.join(format!("zone/english/{map}.ff")));
+        for (name, data) in map_sounds {
+            if known
+                .get(&name)
+                .is_some_and(|previous: &Arc<[u8]>| previous.as_ref() != data.as_ref())
+            {
+                conflicts.push(format!("{map}: {name}"));
+            }
+        }
+    }
+    assert!(
+        conflicts
+            .iter()
+            .any(|conflict| conflict == "mp_crash_snow: veh_mig29_close_loop2"),
+        "expected stock mp_crash_snow to redefine veh_mig29_close_loop2 with later PCM; found {conflicts:?}"
+    );
 }
 
 #[test]

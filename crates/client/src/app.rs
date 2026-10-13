@@ -2220,8 +2220,8 @@ impl Viewer {
                     restart_files(&self.cli, st);
                 }
                 Action::Console(line) => console_action(st, &line),
-                // Menu sounds live in the zones of the front end (`code_post_gfx`), which the match's tables
-                // do not load, so they have their own small sound system.
+                // The front end uses a separate sound system with MP, SP and localized code zones.
+                // Match sound tables are loaded per map.
                 Action::SoundLoop(alias) if !self.cli.no_sound => {
                     st.menu_sound
                         .get_or_insert_with(|| {
