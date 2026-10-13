@@ -153,6 +153,14 @@ impl Cvars {
     }
 
     fn set_checked(&mut self, name: &str, value: &str, external: bool) -> Result<(), Refused> {
+        let r = self.try_set(name, value, external);
+        if let Err(why) = &r {
+            logging::dedup!(WARN, name, cvar = name, external, "cvar set refused: {why}");
+        }
+        r
+    }
+
+    fn try_set(&mut self, name: &str, value: &str, external: bool) -> Result<(), Refused> {
         let cheats = self.bool("sv_cheats");
         let v = self.vars.entry(key(name)).or_insert_with(|| Cvar {
             name: name.to_owned(),
@@ -345,6 +353,16 @@ mod tests {
         assert!(!c.set("mapname", "x"));
         c.force("mapname", "mp_crash");
         assert_eq!(c.info_string(SERVERINFO), "\\mapname\\mp_crash");
+    }
+
+    #[test]
+    fn a_refused_set_warns_with_the_variable() {
+        let mut c = Cvars::new();
+        c.register("logtest_rom", "", ROM);
+        let (ok, events) = logging::capture(|| c.set("logtest_rom", "x"));
+        assert!(!ok);
+        let w = events.iter().find(|e| e.level == tracing::Level::WARN);
+        assert_eq!(w.and_then(|e| e.field("cvar")), Some("logtest_rom"));
     }
 
     #[test]

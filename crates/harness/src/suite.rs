@@ -47,10 +47,14 @@ pub fn default_selections() -> Vec<Selection> {
 struct Log(Mutex<File>);
 
 impl Log {
+    /// Stage progress and the verdict are the harness's output: terminal and `harness.log`.
+    #[allow(clippy::print_stdout)]
     fn say(&self, msg: impl AsRef<str>) {
         let msg = msg.as_ref();
         println!("{msg}");
-        let _ = writeln!(self.0.lock().unwrap(), "{msg}");
+        if let Err(e) = writeln!(self.0.lock().unwrap(), "{msg}") {
+            tracing::warn!("cannot write harness.log: {e}");
+        }
     }
 }
 
@@ -76,7 +80,9 @@ pub fn run(cfg: &Config) -> io::Result<Outcome> {
     let work = scratch.join("bundle");
     fs::create_dir_all(&work)?;
     let result = run_in(cfg, started, &stamp, &scratch, &work);
-    let _ = fs::remove_dir_all(&scratch);
+    if let Err(e) = fs::remove_dir_all(&scratch) {
+        tracing::warn!(path = %scratch.display(), "cannot remove scratch dir: {e}");
+    }
     result
 }
 
@@ -114,12 +120,16 @@ fn run_in(
     }
     let mp_zones = install_path
         .as_deref()
-        .and_then(|p| asset_load::mp_zones(p).ok())
+        .and_then(|p| {
+            asset_load::mp_zones(p)
+                .inspect_err(|e| tracing::warn!(path = %p.display(), "cannot list mp zones: {e}"))
+                .ok()
+        })
         .map(|z| z.len());
 
     let dumps = DumpServer::start(scratch);
     if let Err(e) = &dumps {
-        log.say(format!("crash capture unavailable: {e}"));
+        tracing::warn!("crash capture unavailable: {e}");
     }
     let exe = std::env::current_exe()?;
     let mut reports = Vec::new();

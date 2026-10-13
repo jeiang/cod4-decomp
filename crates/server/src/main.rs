@@ -7,8 +7,7 @@
 //! with `rcon_password` set, `rcon` packets do the same from the network. With `sv_public 1` and `sv_master1`..
 //! `sv_master5` set it announces itself to those master servers (`cod4e-master`).
 
-// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
-#![allow(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 
 use server::server::Server;
 use std::path::PathBuf;
@@ -70,6 +69,8 @@ fn take_install(args: Vec<String>) -> Result<(Vec<String>, Option<PathBuf>), Str
     Ok((rest, dir))
 }
 
+// Argument errors, `--help` and "install not found" are the command line's own output, not diagnostics.
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 fn main() -> ExitCode {
     let (args, explicit) = match take_install(std::env::args().skip(1).collect()) {
         Ok(v) => v,
@@ -117,7 +118,7 @@ fn main() -> ExitCode {
     let mut s = match Server::boot(&root, &args, true) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{e}");
+            tracing::error!(error = %e, "server failed to start");
             return ExitCode::FAILURE;
         }
     };

@@ -152,6 +152,12 @@ pub struct CommandReport {
     pub outcome: Outcome,
 }
 
+/// `echo` is script output: it reaches the stage's stdout.log.
+#[allow(clippy::print_stdout)]
+fn echo(args: &[String]) {
+    println!("{}", args.join(" "));
+}
+
 /// Run `cmds`. `sleep` performs waits (tests substitute a fake).
 ///
 /// Once a command has been skipped and no engine command has run, there is nothing real to
@@ -167,7 +173,7 @@ pub fn run(
         .map(|c| {
             let outcome = match c.name.as_str() {
                 "echo" => {
-                    println!("{}", c.args.join(" "));
+                    echo(&c.args);
                     Outcome::Done
                 }
                 "wait" => match c.args.as_slice() {

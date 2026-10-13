@@ -527,6 +527,7 @@ impl Ui2d {
         let image = match loaded {
             Some((tex, state)) => self.make_image(tex, blend, state),
             None => {
+                tracing::warn!(material = %name, "ui material has no image, drawing white");
                 self.missing.push(name.clone());
                 let tex = self.white.0._tex.clone();
                 self.make_image(tex, blend, 0xE2)
@@ -547,6 +548,7 @@ impl Ui2d {
             .named(&self.gpu, &key)
             .filter(|t| t.dim == SamplerDim::D2);
         let tex = tex.unwrap_or_else(|| {
+            tracing::warn!(image = %key, "ui image cannot be loaded, drawing white");
             self.missing.push(key.clone());
             self.white.0._tex.clone()
         });

@@ -36,10 +36,22 @@ macro_rules! raw_enum {
             /// The value for a decoded integer; out-of-range values (corrupt data) fall back to
             /// the first variant, as the original's zeroed definition does.
             pub fn from_raw(v: i32) -> Self {
-                usize::try_from(v)
+                match usize::try_from(v)
                     .ok()
                     .and_then(|i| Self::ALL.get(i).copied())
-                    .unwrap_or_default()
+                {
+                    Some(x) => x,
+                    None => {
+                        logging::dedup!(
+                            WARN,
+                            stringify!($name),
+                            "weapon enum value out of range, using the first",
+                            kind = stringify!($name),
+                            value = v
+                        );
+                        Self::default()
+                    }
+                }
             }
 
             /// The decoded integer.

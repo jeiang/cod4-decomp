@@ -74,6 +74,7 @@ pub struct CollisionWorld {
 
 impl CollisionWorld {
     pub fn new(cm: Arc<Clipmap>) -> Self {
+        let _span = tracing::debug_span!("collision_world", nodes = cm.nodes.len()).entered();
         let plane = |i: Option<u32>| i.and_then(|i| cm.planes.get(i as usize));
         let nodes = cm
             .nodes
@@ -85,12 +86,15 @@ impl CollisionWorld {
                     kind: p.kind.min(3),
                     children: n.children,
                 },
-                None => Node {
-                    normal: [0.0, 0.0, 1.0],
-                    dist: NEVER,
-                    kind: 2,
-                    children: n.children,
-                },
+                None => {
+                    logging::dedup!(WARN, "node", "node has no plane, it never splits");
+                    Node {
+                        normal: [0.0, 0.0, 1.0],
+                        dist: NEVER,
+                        kind: 2,
+                        children: n.children,
+                    }
+                }
             })
             .collect();
         let sides = cm
@@ -102,11 +106,14 @@ impl CollisionWorld {
                     dist: p.dist,
                     material: s.material,
                 },
-                None => Side {
-                    normal: [0.0, 0.0, 1.0],
-                    dist: NEVER,
-                    material: s.material,
-                },
+                None => {
+                    logging::dedup!(WARN, "side", "brush side has no plane, it never hits");
+                    Side {
+                        normal: [0.0, 0.0, 1.0],
+                        dist: NEVER,
+                        material: s.material,
+                    }
+                }
             })
             .collect();
         let mut lb_list = Vec::new();

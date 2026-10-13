@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-// Not yet converted to `tracing` (#377): the print lints come on for this crate when its prints are gone.
-#![allow(clippy::print_stderr, clippy::print_stdout)]
+#![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 use harness::child::{self, ChildArgs};
 use harness::diff;
 use harness::stage;
@@ -30,8 +29,20 @@ run options:
 
 exit status: 0 all stages passed or skipped, 1 a stage failed, crashed or hung, 2 usage or I/O error";
 
+/// Program output: the `stages` listing, usage, and the run's verdict.
+#[allow(clippy::print_stdout)]
+fn say(msg: std::fmt::Arguments) {
+    println!("{msg}");
+}
+
+/// A CLI error for the user, before (or without) logging being set up.
+#[allow(clippy::print_stderr)]
+fn complain(msg: std::fmt::Arguments) {
+    eprintln!("{msg}");
+}
+
 fn usage_error(msg: &str) -> ExitCode {
-    eprintln!("error: {msg}\n\n{USAGE}");
+    complain(format_args!("error: {msg}\n\n{USAGE}"));
     ExitCode::from(2)
 }
 
@@ -42,7 +53,7 @@ fn main() -> ExitCode {
         Some("diff") => diff_main(&args[1..]),
         Some("stages") => {
             for s in stage::STAGES {
-                println!(
+                say(format_args!(
                     "{:<20}{}{}",
                     s.name,
                     s.description,
@@ -51,12 +62,12 @@ fn main() -> ExitCode {
                     } else {
                         " (not in the default suite)"
                     }
-                );
+                ));
             }
             ExitCode::SUCCESS
         }
         Some("-h" | "--help" | "help") => {
-            println!("{USAGE}");
+            say(format_args!("{USAGE}"));
             ExitCode::SUCCESS
         }
         Some("run") => run_main(&args[1..], false),
@@ -123,32 +134,37 @@ fn run_main(args: &[String], double_click: bool) -> ExitCode {
     let result = suite::run(&cfg);
     let code = match &result {
         Ok(o) => {
-            println!(
+            say(format_args!(
                 "\nbundle: {} ({:.1} MB)",
                 o.bundle.path.display(),
                 o.bundle.size as f64 / 1_048_576.0
-            );
+            ));
             if !o.bundle.dropped.is_empty() {
-                println!("left out to fit 100 MB: {}", o.bundle.dropped.join(", "));
+                say(format_args!(
+                    "left out to fit 100 MB: {}",
+                    o.bundle.dropped.join(", ")
+                ));
             }
-            println!(
+            say(format_args!(
                 "{}",
                 if o.ok() {
                     "all stages passed or were skipped"
                 } else {
                     "some stages failed; the bundle says why"
                 }
-            );
+            ));
             ExitCode::from(u8::from(!o.ok()))
         }
         Err(e) => {
-            eprintln!("error: could not write the bundle: {e}");
+            tracing::error!("could not write the bundle: {e}");
             ExitCode::from(2)
         }
     };
     if double_click && cfg!(windows) {
         // A double-clicked console closes on exit; keep the result readable.
-        println!("\nSend the zip above to whoever asked for it. Press Enter to close.");
+        say(format_args!(
+            "\nSend the zip above to whoever asked for it. Press Enter to close."
+        ));
         let _ = std::io::stdin().read_line(&mut String::new());
     }
     code
@@ -165,7 +181,7 @@ fn diff_main(args: &[String]) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("error: {e}");
+            complain(format_args!("error: {e}"));
             ExitCode::from(2)
         }
     }

@@ -444,7 +444,11 @@ impl Materials {
             alpha_test: alpha,
             ..Options::default()
         };
-        let mut translated = sm3::translate(&bytes, &opts).ok();
+        let mut translated = sm3::translate(&bytes, &opts)
+            .inspect_err(|e| {
+                tracing::error!(error = %e, "shader translation failed, its draws are skipped");
+            })
+            .ok();
         if hsm
             && vertex.is_none()
             && let Some(tr) = &translated
@@ -684,6 +688,13 @@ impl Materials {
             let have: Vec<usize> = (0..set.techniques.len())
                 .filter(|&i| set.techniques[i].is_some())
                 .collect();
+            logging::dedup!(
+                WARN,
+                mat.name.as_deref().unwrap_or("?"),
+                "material has no usable technique, its draws are skipped",
+                material = mat.name.as_deref().unwrap_or("?"),
+                techset = set.name.as_deref().unwrap_or("?"),
+            );
             self.failures.insert(
                 mat.name.as_deref().unwrap_or("?").to_owned(),
                 format!(
@@ -706,6 +717,11 @@ impl Materials {
         let p = match built {
             Ok(p) => Some(Arc::new(p)),
             Err(e) => {
+                tracing::error!(
+                    material = %name,
+                    error = %e,
+                    "cannot prepare material, its draws are skipped"
+                );
                 self.failures.insert(name, e);
                 None
             }

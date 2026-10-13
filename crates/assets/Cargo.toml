@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tracing = "0.1.44"
+logging = { path = "../logging" }
 miniz_oxide = "0.9.1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 

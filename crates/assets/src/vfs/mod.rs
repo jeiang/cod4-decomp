@@ -85,8 +85,12 @@ pub enum Hit<'a> {
 impl Hit<'_> {
     pub fn read(&self) -> io::Result<Vec<u8>> {
         match self {
-            Hit::Iwd { iwd, entry } => iwd.read(entry),
-            Hit::File(path) => crate::fs::read(path),
+            Hit::Iwd { iwd, entry } => iwd.read(entry).inspect_err(
+                |e| tracing::warn!(file = %entry.name, error = %e, "cannot read iwd entry"),
+            ),
+            Hit::File(path) => crate::fs::read(path).inspect_err(
+                |e| tracing::warn!(file = %path.display(), error = %e, "cannot read file"),
+            ),
         }
     }
 }
@@ -386,7 +390,10 @@ impl Builder {
                 (Some(l), _) => Some(l),
                 (None, Some(rest)) => match language_index(rest.split('_').next().unwrap_or("")) {
                     Some(l) => Some(l),
-                    None => continue, // invalid localized name: original warns and skips
+                    None => {
+                        tracing::warn!(iwd = %name, "invalid localized iwd name, skipped");
+                        continue;
+                    }
                 },
                 (None, None) => None,
             };
@@ -407,6 +414,7 @@ impl Builder {
             found.truncate(MAX_IWDS);
         }
         if found.is_empty() && subfolder_lang.is_none() && game_dir.eq_ignore_ascii_case("main") {
+            tracing::error!("no iwd files found in main");
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "No IWD files found in /main",
@@ -415,7 +423,9 @@ impl Builder {
         found.sort_by_cached_key(|(n, lang)| iwd_sort_key(n, *lang));
         for (name, language) in found {
             let iwd_path = path.join(name);
-            let iwd = Iwd::open(&iwd_path)?;
+            let iwd = Iwd::open(&iwd_path).inspect_err(
+                |e| tracing::error!(iwd = %iwd_path.display(), error = %e, "cannot open iwd"),
+            )?;
             self.push(Node {
                 kind: NodeKind::Iwd {
                     path: iwd_path,

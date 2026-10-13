@@ -202,6 +202,7 @@ impl TextureCache {
         }
         .map(Arc::new);
         if tex.is_none() {
+            tracing::debug!(image = name, "image unavailable");
             self.failed.push(name.to_owned());
         }
         self.cache.insert(name.to_owned(), tex.clone());
@@ -216,6 +217,7 @@ impl TextureCache {
         }
         let tex = self.load_iwi(gpu, name, self.picmip).map(Arc::new);
         if tex.is_none() {
+            tracing::debug!(image = name, "image unavailable");
             self.failed.push(name.to_owned());
         }
         self.cache.insert(name.to_owned(), tex.clone());
@@ -235,7 +237,13 @@ impl TextureCache {
 
     fn load_iwi(&mut self, gpu: &Gpu, name: &str, picmip: usize) -> Option<Tex> {
         let vfs = self.vfs.as_ref()?;
-        let image = iwi::load_picmip(vfs, name, picmip).ok()?;
+        let image = match iwi::load_picmip(vfs, name, picmip) {
+            Ok(image) => image,
+            Err(e) => {
+                tracing::warn!(image = name, error = %e, "cannot load image, using a solid colour");
+                return None;
+            }
+        };
         let skip = if gpu.bc {
             0
         } else {

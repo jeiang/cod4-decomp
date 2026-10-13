@@ -163,7 +163,11 @@ pub struct Zone<'a> {
 impl<'a> Zone<'a> {
     /// Read the container header, the XFile header, the script-string table
     /// and the asset list.
-    pub fn open(mut r: impl Read + 'a) -> Result<Self> {
+    pub fn open(r: impl Read + 'a) -> Result<Self> {
+        Self::read_header(r).inspect_err(|e| tracing::error!(error = %e, "cannot open fastfile"))
+    }
+
+    fn read_header(mut r: impl Read + 'a) -> Result<Self> {
         let mut pre = [0u8; 12];
         r.read_exact(&mut pre)?;
         let magic: [u8; 8] = pre[..8].try_into().unwrap();
@@ -277,6 +281,16 @@ impl<'a> Zone<'a> {
     /// Decode every asset body in order. Assets the filter keeps go to `sink`.
     /// Fails with [`ZoneError::Unsupported`] at the first type with no decoder.
     pub fn decode(
+        self,
+        filter: &dyn DecodeFilter,
+        sink: impl FnMut(Asset),
+    ) -> Result<ZoneStats> {
+        let _span = tracing::debug_span!("zone_decode", assets = self.assets.len()).entered();
+        self.decode_assets(filter, sink)
+            .inspect_err(|e| tracing::error!(error = %e, "cannot decode fastfile"))
+    }
+
+    fn decode_assets(
         mut self,
         filter: &dyn DecodeFilter,
         mut sink: impl FnMut(Asset),
@@ -451,6 +465,17 @@ mod tests {
         assert_eq!(kept, 2);
         assert!(!Consumer::Server.keep(XAssetType::Image));
         assert!(Consumer::Client.keep(XAssetType::Image));
+    }
+
+    #[test]
+    fn bad_fastfile_logs_an_error() {
+        let (r, events) = logging::capture(|| Zone::open(&b"not a fastfile at all"[..]).map(drop));
+        assert!(matches!(r, Err(ZoneError::BadMagic(_))));
+        let e = events
+            .iter()
+            .find(|e| e.level == tracing::Level::ERROR)
+            .expect("an error event");
+        assert!(e.field("error").is_some());
     }
 
     #[test]

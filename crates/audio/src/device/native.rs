@@ -88,7 +88,7 @@ where
                     }
                 }
             },
-            |e| eprintln!("audio: {e}"),
+            |e| tracing::warn!("audio output stream: {e}"),
             None,
         )
         .map_err(|e| format!("cannot open the output stream: {e}"))

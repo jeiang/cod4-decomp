@@ -11,6 +11,8 @@ publish = false
 prompt = ["dep:rfd"]
 
 [dependencies]
+tracing = "0.1.44"
+logging = { path = "../logging" }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
 
 [lints]

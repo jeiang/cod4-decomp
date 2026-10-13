@@ -567,12 +567,13 @@ impl Server {
         for (z, d) in s.game.content.timings.clone() {
             s.say(&format!("zone {z}: {:.0} ms\n", d.as_secs_f64() * 1000.0));
         }
-        s.game.field_types = s
-            .game
-            .content
-            .rawfile("radiant/keys.txt")
-            .map(|t| game::parse_field_types(&String::from_utf8_lossy(t)))
-            .unwrap_or_default();
+        s.game.field_types = match s.game.content.rawfile("radiant/keys.txt") {
+            Some(t) => game::parse_field_types(&String::from_utf8_lossy(t)),
+            None => {
+                tracing::warn!(asset = "radiant/keys.txt", "entity field types missing");
+                Default::default()
+            }
+        };
         s.bind_socket();
         s.boot_ms = t0.elapsed().as_secs_f64() * 1000.0;
         s.say(&format!(
@@ -592,7 +593,10 @@ impl Server {
         let addr = SocketAddr::from(([0, 0, 0, 0], u16::try_from(port).unwrap_or(28960)));
         let udp = match net::UdpTransport::bind(addr) {
             Ok(t) => t,
-            Err(e) => return self.say(&format!("WARNING: cannot bind udp port {port}: {e}\n")),
+            Err(e) => {
+                tracing::error!(port, error = %e, "cannot bind udp port");
+                return;
+            }
         };
         let max = usize::try_from(self.game.cvars.int("sv_maxclients")).unwrap_or(32);
         let wt = self.game.cvars.string("net_wt").trim().to_owned();
@@ -602,7 +606,10 @@ impl Server {
         } else {
             match self.start_webtransport(udp, &wt) {
                 Ok(j) => Box::new(j),
-                Err(e) => return self.say(&format!("WARNING: webtransport {wt}: {e}\n")),
+                Err(e) => {
+                    tracing::error!(bind = %wt, error = %e, "webtransport endpoint did not start");
+                    return;
+                }
             }
         };
         // The WebTransport endpoint needs a runtime the browser build does not have (a browser never serves).
@@ -613,6 +620,7 @@ impl Server {
         };
         let mut n = NetSv::new(t, max.clamp(1, 64));
         n.bans = BanList::load(PathBuf::from(self.game.cvars.string("sv_banFile")));
+        tracing::info!(port = n.local_addr().port(), "listening on udp");
         self.say(&format!(
             "listening on udp port {}\n",
             n.local_addr().port()
@@ -841,6 +849,8 @@ impl Server {
         if let Some(offer) = self.offer(true) {
             let files = offer.files.clone();
             net.send_manifest(from, &files, &www);
+        } else {
+            tracing::debug!(%from, "manifest requested before the file list is ready");
         }
     }
 
@@ -850,11 +860,15 @@ impl Server {
             return net.refuse(from, net::manifest::DOWNLOADS_OFF);
         }
         let Some(offer) = self.offer(false) else {
+            tracing::debug!(%from, file = name, "file requested before the file list is ready");
             return;
         };
         match offer.path(name).map(Path::to_owned) {
             Some(path) => net.send_file(from, &path, offset),
-            None => net.refuse(from, net::download::NOT_AVAILABLE),
+            None => {
+                logging::dedup!(WARN, name, %from, file = name, "download of a file not on offer");
+                net.refuse(from, net::download::NOT_AVAILABLE);
+            }
         }
     }
 
@@ -862,6 +876,7 @@ impl Server {
     /// commands run now with their console output sent back as print packets.
     fn remote_command(&mut self, from: SocketAddr, password: &str, command: &str) {
         if !self.rcon_throttle.allow(Instant::now()) {
+            logging::dedup!(WARN, "rcon", %from, "rcon request dropped by the throttle");
             return;
         }
         let verdict = rcon::check(self.game.cvars.string("rcon_password"), password);
@@ -870,6 +885,9 @@ impl Server {
         } else {
             "Bad "
         };
+        if verdict != Verdict::Granted {
+            tracing::warn!(%from, ?verdict, "rcon with a bad password");
+        }
         self.say(&format!("{bad}Rcon from {from}:\n{command}\n"));
         self.redirect = Some(String::new());
         match verdict {
@@ -1016,7 +1034,9 @@ impl Server {
         req: &net::connect::ConnectRequest,
         challenge_ping: Option<u32>,
     ) {
+        // A refused connect is an expected outcome; the reason is the dedup key so a flood costs a few lines.
         let refuse = |net: &mut NetSv, why: &str| {
+            logging::dedup!(INFO, why, from = %req.from, why, "connect refused");
             net.t
                 .send_to(req.from, &net::Oob::Error(why.into()).encode());
         };
@@ -1088,6 +1108,7 @@ impl Server {
         if let Some(a) = &self.game.ambient {
             net.command(slot, a);
         }
+        tracing::info!(client = slot, name = %name, from = %req.from, "client connected");
         self.say(&format!(
             "{name} connected as client {slot} from {}\n",
             req.from
@@ -1163,6 +1184,7 @@ impl Server {
     /// Takes a client out of the match: the others and the console hear why, the client is told (`SV_DropClient`).
     fn net_drop(&mut self, net: &mut NetSv, slot: u16, why: DropReason) {
         self.begin_waits.retain(|(n, _)| *n != slot);
+        tracing::info!(client = slot, reason = why.text(), "client dropped");
         if let Some(c) = self.game.client(slot).filter(|c| c.connected()) {
             let text = format!("{}^7 {}", c.name, why.text());
             net.print_to_others(slot, &text);
@@ -1191,13 +1213,17 @@ impl Server {
         if let (Some(v), Some(c)) = (verb.as_deref(), self.game.client_mut(slot))
             && flood_drops(v, loopback, flood, now, &mut c.next_cmd_at)
         {
+            logging::dedup!(WARN, v, client = slot, cmd = v, "client command dropped by flood protection");
             return;
         }
         match verb.as_deref() {
             Some("disconnect") => self.net_drop(net, slot, DropReason::Left),
             Some(v @ ("mute" | "unmute")) => {
-                if let Some(who) = argv.get(1).and_then(|n| n.parse::<u16>().ok()) {
-                    net.set_muted(slot, who, v == "mute");
+                match argv.get(1).and_then(|n| n.parse::<u16>().ok()) {
+                    Some(who) => net.set_muted(slot, who, v == "mute"),
+                    None => {
+                        logging::dedup!(WARN, v, client = slot, cmd = v, "mute without a client number");
+                    }
                 }
             }
             Some(net::ui::SCORES_REQUEST) => net.send_scoreboard(slot, &self.game),
@@ -1267,7 +1293,9 @@ impl Server {
                         game: &mut self.game,
                         dispatch: &run.dispatch,
                     };
-                    let _ = host.game.kill_self(&mut run.vm, slot);
+                    if let Err(e) = host.game.kill_self(&mut run.vm, slot) {
+                        logging::dedup!(WARN, "kill", client = slot, error = %e, "kill command failed");
+                    }
                     host.run_calls(&mut run.vm);
                 }
             }
@@ -1282,18 +1310,21 @@ impl Server {
             Some("where") => self.game.where_am_i(slot),
             // Verbs the original's `ClientCommand` knows that are not carried out here: dropped without a word.
             Some(
-                "statsdone" | "mr" | "give" | "take" | "god" | "demigod" | "notarget" | "noclip"
-                | "ufo" | "setviewpos" | "entitycount" | "printentities" | "visionsetnaked"
-                | "visionsetnight",
-            ) => {}
+                v @ ("statsdone" | "mr" | "give" | "take" | "god" | "demigod" | "notarget"
+                | "noclip" | "ufo" | "setviewpos" | "entitycount" | "printentities"
+                | "visionsetnaked" | "visionsetnight"),
+            ) => tracing::debug!(client = slot, cmd = v, "client command not carried out"),
             // What the original says to a client for a verb it does not know.
-            Some(cmd) => self.game.send(
-                Dest::Client(slot),
-                ServerCmd::Print {
-                    kind: PrintKind::Console,
-                    text: format!("GAME_UNKNOWNCLIENTCOMMAND\x15{cmd}\n"),
-                },
-            ),
+            Some(cmd) => {
+                logging::dedup!(WARN, cmd, client = slot, cmd, "unknown client command");
+                self.game.send(
+                    Dest::Client(slot),
+                    ServerCmd::Print {
+                        kind: PrintKind::Console,
+                        text: format!("GAME_UNKNOWNCLIENTCOMMAND\x15{cmd}\n"),
+                    },
+                );
+            }
             None => {}
         }
     }
@@ -1318,6 +1349,8 @@ impl Server {
     }
 
     /// Prints a console line: to the log and, when enabled, stdout.
+    // The dedicated server's console output (command results, chat) is its stdout, not a diagnostic.
+    #[allow(clippy::print_stdout)]
     pub fn say(&mut self, s: &str) {
         if let Some(r) = self.redirect.as_mut() {
             r.push_str(s);
@@ -1384,6 +1417,8 @@ impl Server {
             return Ok(());
         };
         let lname = name.to_ascii_lowercase();
+        // The name only: the arguments may hold a password.
+        let _span = tracing::debug_span!("command", cmd = lname.as_str()).entered();
         let arg = |i: usize| argv.get(i).map(String::as_str);
         match lname.as_str() {
             "set" | "seta" | "sets" | "setu" => {
@@ -1838,7 +1873,9 @@ impl Server {
                 let s = self.game.cvars.info_string(cvar::SERVERINFO);
                 self.say(&format!("Server info settings:\n{s}\n"));
             }
-            _ if CLIENT_ONLY.contains(&lname.as_str()) => {}
+            _ if CLIENT_ONLY.contains(&lname.as_str()) => {
+                tracing::debug!(cmd = lname.as_str(), "client-only command ignored");
+            }
             _ => {
                 if self.game.cvars.exists(name) {
                     match arg(1) {
@@ -1857,6 +1894,7 @@ impl Server {
                         }
                     }
                 } else {
+                    logging::dedup!(WARN, &lname, cmd = lname.as_str(), "unknown command");
                     self.say(&format!("Unknown command \"{name}\"\n"));
                 }
             }
@@ -1877,16 +1915,16 @@ impl Server {
             .flatten()
             .map(|b| ("fastfile", b.to_vec()));
         let found = zone
-            .or_else(|| {
-                self.install
-                    .vfs
-                    .read(&file)
-                    .ok()
-                    .flatten()
-                    .map(|b| ("disk", b))
+            .or_else(|| match self.install.vfs.read(&file) {
+                Ok(found) => found.map(|b| ("disk", b)),
+                Err(e) => {
+                    tracing::warn!(file = file.as_str(), error = %e, "config unreadable in the search path");
+                    None
+                }
             })
             .or_else(|| std::fs::read(&file).ok().map(|b| ("disk", b)));
         let Some((src, bytes)) = found else {
+            tracing::warn!(file = file.as_str(), "config not found");
             return Err(format!("couldn't exec {file}"));
         };
         self.say(&format!("execing {file} from {src}\n"));
@@ -1973,6 +2011,7 @@ impl Server {
                 }
                 Penalty::Permanent => {
                     if let Err(e) = net.bans.ban(ip) {
+                        tracing::error!(%ip, error = %e, "ban not saved; it will not outlast this run");
                         self.say(&format!(
                             "WARNING: the ban will not outlast this run: {e}\n"
                         ));
@@ -2084,7 +2123,19 @@ impl Server {
         self.start_game(map, game_var)
     }
 
+    /// Loads a level; the `map_load` span and the lifecycle lines wrap [`Self::load_level`].
     fn start_game(&mut self, map: &str, game_var: Option<Value>) -> Result<(), String> {
+        let _span = tracing::info_span!("map_load", map).entered();
+        tracing::info!("map load started");
+        let r = self.load_level(map, game_var);
+        match &r {
+            Ok(()) => tracing::info!(ms = self.map_load_ms, "map loaded"),
+            Err(e) => tracing::error!(error = %e, "map load failed"),
+        }
+        r
+    }
+
+    fn load_level(&mut self, map: &str, game_var: Option<Value>) -> Result<(), String> {
         let t0 = Instant::now();
         // People stay connected across a map change; the level they were in is gone.
         self.begin_waits.clear();
@@ -2154,6 +2205,7 @@ impl Server {
                     net.put_peer(slot, peer);
                 }
             } else if let (Err(why), Some(net)) = (j, self.net.as_mut()) {
+                tracing::warn!(name = %name, why, "client could not rejoin after the map change");
                 net.notify(peer.link.addr, why);
             }
         }
@@ -2188,8 +2240,13 @@ impl Server {
             if !self.install.game.is_empty() {
                 let vfs = &self.install.vfs;
                 for name in vfs.list("", ".gsc") {
-                    let Ok(Some(bytes)) = vfs.read(&name) else {
-                        continue;
+                    let bytes = match vfs.read(&name) {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => continue,
+                        Err(e) => {
+                            tracing::warn!(script = name.as_str(), error = %e, "mod script unreadable");
+                            continue;
+                        }
                     };
                     let text = String::from_utf8_lossy(&bytes).into_owned();
                     match sources.iter_mut().find(|(n, _)| *n == name) {
@@ -2314,9 +2371,7 @@ impl Server {
         }
         // A file name in the working directory, never a path out of it.
         if path.contains(['/', '\\', ':']) || path.contains("..") {
-            self.say(&format!(
-                "WARNING: Couldn't open logfile: {path}: not a plain file name\n"
-            ));
+            tracing::error!(file = path.as_str(), "game log not opened: not a plain file name");
             return;
         }
         let file = self.log_dir.join(&path);
@@ -2328,7 +2383,7 @@ impl Server {
                     .log_print("------------------------------------------------------------\n");
                 self.game.log_print(&format!("InitGame: {info}\n"));
             }
-            Err(e) => self.say(&format!("WARNING: Couldn't open logfile: {path}: {e}\n")),
+            Err(e) => tracing::error!(file = path.as_str(), error = %e, "game log not opened"),
         }
     }
 
