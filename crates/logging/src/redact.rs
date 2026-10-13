@@ -66,7 +66,8 @@ pub fn redact(text: &str) -> Cow<'_, str> {
             .any(|k| word.contains(k));
         // `rcon` and `connect` are commands only as a word of their own followed by an argument: not in `net::connect:`
         // or a span name like `net-rcon}`.
-        let verb = i == 0 || !matches!(bytes[i - 1], b':' | b'-' | b'.' | b'/' | b'{' | b'=' | b'_');
+        let verb =
+            i == 0 || !matches!(bytes[i - 1], b':' | b'-' | b'.' | b'/' | b'{' | b'=' | b'_');
         let spaced = matches!(bytes.get(end), Some(b' ' | b'\t'));
         let found = if secret || (word == "rcon" && verb && spaced) {
             value_after(bytes, end)
@@ -131,7 +132,10 @@ mod tests {
                 "cmd=\"set rcon_password \\\"a b\\\"\"",
                 "cmd=\"set rcon_password \\\"***\\\"\"",
             ),
-            ("net::connect: connection refused", "net::connect: connection refused"),
+            (
+                "net::connect: connection refused",
+                "net::connect: connection refused",
+            ),
             ("stage{name=net-rcon}: x y", "stage{name=net-rcon}: x y"),
             ("unknown command foo", "unknown command foo"),
             ("connected to 10.0.0.1", "connected to 10.0.0.1"),

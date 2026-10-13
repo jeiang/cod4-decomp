@@ -47,7 +47,11 @@ pub const ALLOWED: &[Allow] = &[
         stages: &[],
     },
     Allow {
-        contains: &["cod4e::netplay::attach", "attachment tag did not resolve", "model=\"head_"],
+        contains: &[
+            "cod4e::netplay::attach",
+            "attachment tag did not resolve",
+            "model=\"head_",
+        ],
         reason: "player head models: the tag the server numbered is not in the body's tag table",
         stages: &[],
     },
@@ -57,7 +61,11 @@ pub const ALLOWED: &[Allow] = &[
         stages: &[],
     },
     Allow {
-        contains: &["cod4e::ui::assets", "localized string is missing", "key=\"\""],
+        contains: &[
+            "cod4e::ui::assets",
+            "localized string is missing",
+            "key=\"\"",
+        ],
         reason: "menus show an empty `@` reference (#372)",
         stages: &[],
     },
@@ -109,17 +117,27 @@ pub const ALLOWED: &[Allow] = &[
         stages: &["net-vote"],
     },
     Allow {
-        contains: &["server::netsv", "file request refused: banned or over budget"],
+        contains: &[
+            "server::netsv",
+            "file request refused: banned or over budget",
+        ],
         reason: "web-download exceeds the download budget on purpose",
         stages: &["web-download"],
     },
     Allow {
-        contains: &["cod4e::ui", "script names a menu that is not loaded", "options_view"],
+        contains: &[
+            "cod4e::ui",
+            "script names a menu that is not loaded",
+            "options_view",
+        ],
         reason: "client-ui opens every stock menu; options_view is not in the shipped zones",
         stages: &["client-ui"],
     },
     Allow {
-        contains: &["cod4e::display", "exclusive fullscreen is not available on Wayland"],
+        contains: &[
+            "cod4e::display",
+            "exclusive fullscreen is not available on Wayland",
+        ],
         reason: "client-gfx asks for exclusive fullscreen; Wayland has none, borderless is used",
         stages: &["client-gfx"],
     },
