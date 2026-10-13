@@ -1073,7 +1073,14 @@ impl Input {
             ("-actionslot", _) => {}
             _ if name.starts_with('+') && sink => self.console_hold(&name[1..], true),
             _ if name.starts_with('-') && sink => self.console_hold(&name[1..], false),
-            _ if sink => self.pending.push(config::join(toks)),
+            _ if sink => {
+                // The last stop of a bind or a menu's command that nothing here runs: the consumers of the pending
+                // list know only the commands `console::is_command` lists.
+                if !crate::console::is_command(&name) {
+                    crate::console::note_unknown(&name);
+                }
+                self.pending.push(config::join(toks))
+            }
             _ => {}
         }
     }
@@ -2235,6 +2242,22 @@ mod tests {
         assert!(events.iter().any(|e| e.level == tracing::Level::WARN
             && e.field("name") == Some("no_such_config_anywhere")));
         assert!(events.iter().any(|e| e.field("command") == Some("set")));
+    }
+
+    #[test]
+    fn an_unknown_bound_or_menu_command_warns_by_name() {
+        let mut i = Input::detached();
+        let (_, events) = logging::capture(|| {
+            i.exec_line("no_such_bound_cmd_x with args");
+            i.exec_line("weapnext");
+        });
+        let w: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w[0].field("command"), Some("no_such_bound_cmd_x"));
+        assert!(!format!("{w:?}").contains("with args"));
     }
 
     #[test]

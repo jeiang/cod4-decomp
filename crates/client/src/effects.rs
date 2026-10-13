@@ -458,7 +458,7 @@ impl Effects {
                     } else {
                         logging::dedup!(
                             WARN,
-                            name,
+                            "effect-missing",
                             effect = name.as_str(),
                             "effect not in the library"
                         );
@@ -808,7 +808,7 @@ impl Effects {
             None => {
                 logging::dedup!(
                     WARN,
-                    name,
+                    "script-effect-missing",
                     effect = name,
                     "script effect not in the library"
                 );

@@ -1587,6 +1587,18 @@ impl NetPlay {
                 && !net::ui::ServerCmd::parse(c).is_some_and(|c| look.command(&c, now, &file))
         });
         let commands = self.events.take_commands(&mut self.net.commands);
+        // Nothing reads these yet (`Frame::commands`): a server command no system here takes is a gap, not a no-op.
+        for c in &commands {
+            if !ClientSound::is_command(c) {
+                let verb = c.split_whitespace().next().unwrap_or("");
+                logging::dedup!(
+                    WARN,
+                    "server-command",
+                    verb,
+                    "server command not handled by the client"
+                );
+            }
+        }
         let events = self.events.scan(snap);
         for e in &events {
             *self.c.events.entry(e.kind()).or_default() += 1;
@@ -1964,7 +1976,7 @@ impl NetPlay {
                 Err(e) if index != 0 => {
                     logging::dedup!(
                         WARN,
-                        &name,
+                        "view-model",
                         weapon = name.as_str(),
                         error = e.as_str(),
                         "view model unavailable"
@@ -2021,7 +2033,7 @@ impl NetPlay {
             .lib
             .rest_pose(&name, &[])
             .inspect_err(|e| {
-                logging::dedup!(WARN, &name, model = name.as_str(), error = %e, "turret rest pose failed");
+                logging::dedup!(WARN, "turret-pose", model = name.as_str(), error = %e, "turret rest pose failed");
             })
             .ok()?;
         Some(sim::skel::turret::Seat {
@@ -2068,7 +2080,7 @@ impl NetPlay {
                     let before = out.len();
                     let rest = self.lib.rest_pose(name, &attached);
                     if let Err(e) = &rest {
-                        logging::dedup!(WARN, name, model = name, error = %e, "script model rest pose failed");
+                        logging::dedup!(WARN, "script-pose", model = name, error = %e, "script model rest pose failed");
                     }
                     match rest {
                         // A turret's gun swings with its gunner's view.
@@ -2095,7 +2107,12 @@ impl NetPlay {
                     }
                 }
                 None => {
-                    logging::dedup!(WARN, name, model = name, "script model not loaded");
+                    logging::dedup!(
+                        WARN,
+                        "script-model",
+                        model = name,
+                        "script model not loaded"
+                    );
                     self.c.script_models_unloaded.insert(name.to_owned());
                 }
             }
@@ -2141,7 +2158,7 @@ impl NetPlay {
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
                 logging::dedup!(
                     WARN,
-                    self.weapons.name(e.weapon),
+                    "item-weapon",
                     weapon = self.weapons.name(e.weapon),
                     "item weapon data missing"
                 );
@@ -2174,7 +2191,7 @@ impl NetPlay {
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
                 logging::dedup!(
                     WARN,
-                    self.weapons.name(e.weapon),
+                    "projectile-weapon",
                     weapon = self.weapons.name(e.weapon),
                     "projectile weapon data missing"
                 );
@@ -2225,7 +2242,12 @@ impl NetPlay {
             }
             let name = ui.model(e.model);
             let Some(model) = self.lib.content.model(name) else {
-                logging::dedup!(WARN, name, model = name, "vehicle model not loaded");
+                logging::dedup!(
+                    WARN,
+                    "vehicle-model",
+                    model = name,
+                    "vehicle model not loaded"
+                );
                 self.c.vehicles_unloaded.insert(name.to_owned());
                 continue;
             };
@@ -2235,7 +2257,7 @@ impl NetPlay {
                 .or_insert_with(|| {
                     Rotors::new(&self.lib.content, model)
                         .inspect_err(|e| {
-                            logging::dedup!(WARN, name, model = name, error = %e, "vehicle rotors unavailable");
+                            logging::dedup!(WARN, "vehicle-rotors", model = name, error = %e, "vehicle rotors unavailable");
                         })
                         .ok()
                 });
@@ -2575,7 +2597,7 @@ impl NetPlay {
 fn player_fault(faults: &mut std::collections::BTreeSet<String>, client: u16, error: String) {
     logging::dedup!(
         WARN,
-        &error,
+        "player-model",
         client,
         error = error.as_str(),
         "remote player model failed"

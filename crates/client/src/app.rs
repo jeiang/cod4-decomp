@@ -1426,7 +1426,7 @@ impl Viewer {
                 .map(str::to_owned)
             && st.shell.is_some()
         {
-            tracing::warn!(reason = %why, "join refused");
+            tracing::error!(reason = %why, "join refused");
             end_session(&mut self.map, st);
             if let Some(sh) = st.shell.as_mut() {
                 sh.join_refused(&mut st.input, &why);
@@ -3968,7 +3968,7 @@ fn connection_lost(map_slot: &mut Option<MapData>, st: &mut State, why: &str) {
     if why == net::client::DEMO_ENDED {
         tracing::info!("the demo ended");
     } else {
-        tracing::warn!(reason = %why, "connection lost");
+        tracing::error!(reason = %why, "connection lost");
     }
     end_session(map_slot, st);
     // A demo that ran out is no failure: the menu, without an error over it.

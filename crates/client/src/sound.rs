@@ -257,7 +257,12 @@ impl ClientSound {
             Some(s) => {
                 let _span = tracing::debug_span!("sound_alias", alias).entered();
                 if s.play(alias, cue).is_none() && !alias.is_empty() && !s.bank.has(alias) {
-                    logging::dedup!(WARN, alias, sound = alias, "sound alias not in the tables");
+                    logging::dedup!(
+                        WARN,
+                        "sound-alias",
+                        sound = alias,
+                        "sound alias not in the tables"
+                    );
                 }
             }
             None => self.dropped += 1,
@@ -936,7 +941,12 @@ impl ClientSound {
                 }
             }
             _ => {
-                logging::dedup!(WARN, cmd, command = cmd, "malformed sound command dropped");
+                logging::dedup!(
+                    WARN,
+                    "sound-command",
+                    command = cmd,
+                    "malformed sound command dropped"
+                );
             }
         }
     }

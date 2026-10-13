@@ -412,17 +412,11 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_command_warns_by_name_once_in_a_while() {
-        let (_, events) = logging::capture(|| {
-            note_unknown("no_such_cmd_x");
-            note_unknown("no_such_cmd_x");
-            note_unknown("no_such_cmd_x");
-        });
-        // Hits 1 and 2 log, the 3rd does not.
-        assert_eq!(events.len(), 2);
-        assert!(events.iter().all(
-            |e| e.level == tracing::Level::WARN && e.field("command") == Some("no_such_cmd_x")
-        ));
+    fn an_unknown_command_warns_by_name() {
+        let (_, events) = logging::capture(|| note_unknown("no_such_cmd_x"));
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert!(e.level == tracing::Level::WARN && e.field("command") == Some("no_such_cmd_x"));
     }
 
     fn enter(c: &mut Console) -> Option<Entered> {

@@ -358,7 +358,12 @@ impl Look {
                     }
                     None => {
                         let f = format!("vision/{name}.vision");
-                        logging::dedup!(WARN, f.as_str(), file = f.as_str(), "vision file missing");
+                        logging::dedup!(
+                            WARN,
+                            "vision-file",
+                            file = f.as_str(),
+                            "vision file missing"
+                        );
                         self.missing.push(f);
                     }
                 }
@@ -375,7 +380,12 @@ impl Look {
                     }
                     None => {
                         let f = format!("vision/{name}.vision");
-                        logging::dedup!(WARN, f.as_str(), file = f.as_str(), "vision file missing");
+                        logging::dedup!(
+                            WARN,
+                            "vision-file",
+                            file = f.as_str(),
+                            "vision file missing"
+                        );
                         self.missing.push(f);
                     }
                 }
@@ -404,7 +414,7 @@ impl Look {
                             let f = format!("shock/{name}.shock");
                             logging::dedup!(
                                 WARN,
-                                f.as_str(),
+                                "shock-file",
                                 file = f.as_str(),
                                 "shell shock file missing"
                             );
