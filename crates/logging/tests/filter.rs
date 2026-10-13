@@ -41,6 +41,11 @@ fn developer_and_filter_change_what_is_enabled() {
     assert!(!tracing::enabled!(target: "logging", Level::INFO));
 
     logging::set_filter("").unwrap();
+    assert!(
+        std::fs::read_to_string(guard.path().unwrap())
+            .unwrap()
+            .starts_with("# test pid")
+    );
     tracing::warn!(target: "logging", thing = "x", "something unexpected");
     let text = std::fs::read_to_string(guard.path().expect("a log file")).unwrap();
     assert!(

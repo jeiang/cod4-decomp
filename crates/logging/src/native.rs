@@ -85,7 +85,9 @@ pub fn layers(
     let rotate = env_dir.is_none();
     let dir = env_dir.or(dir)?;
     match open(app, &dir, rotate) {
-        Ok((file, path)) => {
+        Ok((mut file, path)) => {
+            // A header, so a run that logged nothing still leaves a file saying whose it is.
+            let _ = writeln!(file, "# {app} pid {} started", std::process::id());
             let shared = SharedFile(Arc::new(Mutex::new(Capped { file, written: 0 })));
             out.push(Box::new(
                 fmt::layer()
