@@ -154,6 +154,27 @@ fn earlier_sound(loaded: &HashMap<String, Arc<Pcm>>, name: &str) -> Option<Arc<P
     loaded.get(&loaded_key(name)).cloned()
 }
 
+/// Resolve a name-only reference from prior zones, or retain a full definition over any earlier one.
+fn resolve_loaded<F>(
+    loaded: &mut HashMap<String, Arc<Pcm>>,
+    name: &str,
+    decode: F,
+) -> Option<Arc<Pcm>>
+where
+    F: FnOnce() -> Option<Pcm>,
+{
+    let reference = name.starts_with(',');
+    if reference && let Some(pcm) = earlier_sound(loaded, name) {
+        return Some(pcm);
+    }
+
+    let pcm = Arc::new(decode()?);
+    if !reference {
+        loaded.insert(loaded_key(name), pcm.clone());
+    }
+    Some(pcm)
+}
+
 impl Bank {
     /// Reads the zones in order (a later zone's list replaces an earlier one of the same name).
     pub fn load(vfs: Arc<Vfs>, zones: &[PathBuf]) -> Result<Self, String> {
@@ -219,24 +240,20 @@ impl Bank {
         let audio = match a.sound_file.as_deref().map(|f| &f.source) {
             Some(SoundSource::Loaded(Some(l))) => {
                 let loaded_name = l.name.as_deref().unwrap_or("");
-                if let Some(p) = earlier_sound(loaded, loaded_name) {
-                    Clip::Loaded(p)
-                } else {
-                    match pcm_of(l) {
-                        Some(p) => {
-                            let p = Arc::new(p);
+                match resolve_loaded(loaded, loaded_name, || pcm_of(l)) {
+                    Some(p) => {
+                        if !loaded_name.starts_with(',') {
                             self.stats.pcm_bytes += p.samples.len() * 2;
-                            loaded.insert(loaded_key(loaded_name), p.clone());
-                            Clip::Loaded(p)
                         }
-                        None if loaded_name
-                            .trim_start_matches(',')
-                            .eq_ignore_ascii_case("null.wav") =>
-                        {
-                            Clip::Null
-                        }
-                        None => Clip::Silent,
+                        Clip::Loaded(p)
                     }
+                    None if loaded_name
+                        .trim_start_matches(',')
+                        .eq_ignore_ascii_case("null.wav") =>
+                    {
+                        Clip::Null
+                    }
+                    None => Clip::Silent,
                 }
             }
             Some(SoundSource::Streamed {
@@ -408,16 +425,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn name_only_loaded_sound_resolves_to_an_earlier_definition() {
-        let pcm = Arc::new(Pcm {
-            rate: 48_000,
-            channels: 1,
-            samples: vec![1, -1].into_boxed_slice(),
-        });
-        let loaded = HashMap::from([("sound/explosion.wav".to_owned(), pcm.clone())]);
+    fn name_only_loaded_sounds_resolve_earlier_and_full_definitions_override() {
+        let mut loaded = HashMap::new();
+        let earlier = resolve_loaded(&mut loaded, "sound/explosion.wav", || {
+            Some(Pcm {
+                rate: 48_000,
+                channels: 1,
+                samples: vec![1, -1].into_boxed_slice(),
+            })
+        })
+        .unwrap();
+        let resolved = resolve_loaded(&mut loaded, ",SOUND/EXPLOSION.WAV", || {
+            panic!("name-only references reuse the earlier PCM")
+        })
+        .unwrap();
+        assert!(Arc::ptr_eq(&resolved, &earlier));
 
-        let resolved = earlier_sound(&loaded, ",SOUND/EXPLOSION.WAV").unwrap();
-        assert!(Arc::ptr_eq(&resolved, &pcm));
-        assert!(earlier_sound(&loaded, ",missing.wav").is_none());
+        let later = resolve_loaded(&mut loaded, "sound/explosion.wav", || {
+            Some(Pcm {
+                rate: 48_000,
+                channels: 1,
+                samples: vec![2, -2].into_boxed_slice(),
+            })
+        })
+        .unwrap();
+        assert!(!Arc::ptr_eq(&later, &earlier));
+        let resolved = resolve_loaded(&mut loaded, ",sound/explosion.wav", || {
+            panic!("name-only references reuse the latest PCM")
+        })
+        .unwrap();
+        assert!(Arc::ptr_eq(&resolved, &later));
+        assert!(resolve_loaded(&mut loaded, ",missing.wav", || None).is_none());
     }
 }

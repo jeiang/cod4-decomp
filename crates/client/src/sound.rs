@@ -1034,7 +1034,12 @@ fn load(install: &Path, game: &str, map: &str) -> Result<Bank, String> {
             "localized_code_post_gfx_mp",
         ]
     } else {
-        &["code_post_gfx_mp", "localized_common_mp", map]
+        &[
+            "code_post_gfx_mp",
+            "localized_code_post_gfx_mp",
+            "localized_common_mp",
+            map,
+        ]
     };
     let mut zones: Vec<PathBuf> = wanted.iter().filter_map(|z| install.zone_path(z)).collect();
     // The mod's alias lists replace the stock ones of the same name.
@@ -1412,6 +1417,7 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         );
         check(first.is_some(), format!("no hold-breath sound {name}"));
     }
+    let mut menu_sounds_available = true;
     for name in [
         "mouse_click",
         "mouse_over",
@@ -1425,8 +1431,10 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                     && (name == "music_mainmenu_mp"
                         || menus.channels[usize::from(a.channel)].name == "menu")
             });
+        menu_sounds_available &= playable;
         check(playable, format!("no playable menu sound {name}"));
     }
+    m.insert("menu_sounds_available".into(), menu_sounds_available.into());
 
     // Direction and falloff of a weapon shot: the listener faces +x, its left is +y.
     let shot = "weap_ak47_fire_npc";
