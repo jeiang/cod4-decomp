@@ -199,7 +199,10 @@ fn localized_front_end_menu_aliases_have_audio() {
         match assets::paths::zone_file(&root, "", zone) {
             Some(path) => zones.push(path),
             None if zone.ends_with("_mp") => {
-                panic!("install lacks required zone {zone}.ff under {}", root.display())
+                panic!(
+                    "install lacks required zone {zone}.ff under {}",
+                    root.display()
+                )
             }
             None => eprintln!("note: install has no {zone}.ff (single-player zone); skipping it"),
         }
