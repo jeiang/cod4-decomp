@@ -187,14 +187,23 @@ fn every_stock_map_alias_resolves_to_playable_audio() {
 fn localized_front_end_menu_aliases_have_audio() {
     let Some(root) = root() else { return };
     let vfs = Arc::new(Vfs::open_stock(&root, 0).unwrap());
-    let zones: Vec<PathBuf> = [
+    // The front end's zones, as the client loads them: an install without the single-player
+    // zone (`code_post_gfx.ff`, e.g. a multiplayer-only copy) is still valid, so absent
+    // optional zones are noted and skipped. The multiplayer zones are required.
+    let mut zones: Vec<PathBuf> = Vec::new();
+    for zone in [
         "code_post_gfx_mp",
         "code_post_gfx",
         "localized_code_post_gfx_mp",
-    ]
-    .iter()
-    .map(|zone| root.join(format!("zone/english/{zone}.ff")))
-    .collect();
+    ] {
+        match assets::paths::zone_file(&root, "", zone) {
+            Some(path) => zones.push(path),
+            None if zone.ends_with("_mp") => {
+                panic!("install lacks required zone {zone}.ff under {}", root.display())
+            }
+            None => eprintln!("note: install has no {zone}.ff (single-player zone); skipping it"),
+        }
+    }
     let mut sound = Sound::new(Bank::load(vfs, &zones).unwrap(), false);
     sound.set_listener([0.0; 3], 0.0);
     for list in sound.bank.names().map(str::to_owned).collect::<Vec<_>>() {
