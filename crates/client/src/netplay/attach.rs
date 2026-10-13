@@ -27,12 +27,15 @@ pub(super) fn attachments_of(
         let name = ui.model(model);
         let tag = tag_name(content, &models, tag).map_or_else(
             || {
-                logging::dedup!(
-                    WARN,
-                    "attach-tag",
-                    model = name,
-                    "attachment tag did not resolve"
-                );
+                // An unused attachment slot has no model, so no tag either.
+                if !name.is_empty() {
+                    logging::dedup!(
+                        WARN,
+                        "attach-tag",
+                        model = name,
+                        "attachment tag did not resolve"
+                    );
+                }
                 String::new()
             },
             |t| t.to_string(),

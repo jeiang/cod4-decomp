@@ -24,7 +24,116 @@ pub struct Allow {
 }
 
 /// The reviewed list. Keep it short: fix the cause when the fix is small.
-pub const ALLOWED: &[Allow] = &[];
+pub const ALLOWED: &[Allow] = &[
+    // Known gaps: the code is right to say so; the cause is not fixed yet.
+    Allow {
+        contains: &["render::material", "no usable technique"],
+        reason: "materials whose techset has no technique we translate yet (decals, glass, unlit and shadow-caster sets); their draws are skipped",
+        stages: &[],
+    },
+    Allow {
+        contains: &["sim::skel::anim", "animation data read out of range"],
+        reason: "random_data_short reads past the table for some takeoff and ads animations (gap in the animation table decode)",
+        stages: &[],
+    },
+    Allow {
+        contains: &["server::server", "unknown command", "con_showchannel"],
+        reason: "the stock configs run con_showchannel, which we do not implement (#365)",
+        stages: &[],
+    },
+    Allow {
+        contains: &["fx:", "model element skipped"],
+        reason: "effects with a model element whose xmodel is not in the loaded zones",
+        stages: &[],
+    },
+    Allow {
+        contains: &["cod4e::netplay::attach", "attachment tag did not resolve", "model=\"head_"],
+        reason: "player head models: the tag the server numbered is not in the body's tag table",
+        stages: &[],
+    },
+    Allow {
+        contains: &["cod4e::models", "held model's tag bone missing"],
+        reason: "a held model whose tag bone is not in the rig",
+        stages: &[],
+    },
+    Allow {
+        contains: &["cod4e::ui::assets", "localized string is missing", "key=\"\""],
+        reason: "menus show an empty `@` reference (#372)",
+        stages: &[],
+    },
+    // Timing of the harness's own clients and bots.
+    Allow {
+        contains: &["server::netsv", "packet from an address with no client"],
+        reason: "a client's packet before it connected or after the server dropped it",
+        stages: &[],
+    },
+    Allow {
+        contains: &["server::client", "usercmd time out of range; clamped"],
+        reason: "a client that stalled (map load, window stall) catches its clock up",
+        stages: &[],
+    },
+    // Stages that provoke the event on purpose.
+    Allow {
+        contains: &["net::connect", "Server is full"],
+        reason: "net-hardening fills the server to check the refusal",
+        stages: &["net-hardening"],
+    },
+    Allow {
+        contains: &["server::server", "rcon", "a bad password"],
+        reason: "net-rcon sends a wrong password on purpose",
+        stages: &["net-rcon"],
+    },
+    Allow {
+        contains: &["server::server", "rcon", "dropped by the throttle"],
+        reason: "net-rcon floods rcon to check the throttle",
+        stages: &["net-rcon"],
+    },
+    Allow {
+        contains: &["net::connect", "You are banned from this server"],
+        reason: "net-rcon bans a client and reconnects it",
+        stages: &["net-rcon"],
+    },
+    Allow {
+        contains: &["server::netsv", "usercmd queue full"],
+        reason: "net-rcon holds a client's packets back while it is kicked",
+        stages: &["net-rcon"],
+    },
+    Allow {
+        contains: &["net::client", "dropped by the server", "Player kicked"],
+        reason: "net-rcon and net-vote kick a client on purpose",
+        stages: &["net-rcon", "net-vote"],
+    },
+    Allow {
+        contains: &["server::server", "unknown client command", "frobnicate"],
+        reason: "net-vote sends an unknown client command to check the answer",
+        stages: &["net-vote"],
+    },
+    Allow {
+        contains: &["server::netsv", "file request refused: banned or over budget"],
+        reason: "web-download exceeds the download budget on purpose",
+        stages: &["web-download"],
+    },
+    Allow {
+        contains: &["cod4e::ui", "script names a menu that is not loaded", "options_view"],
+        reason: "client-ui opens every stock menu; options_view is not in the shipped zones",
+        stages: &["client-ui"],
+    },
+    Allow {
+        contains: &["cod4e::display", "exclusive fullscreen is not available on Wayland"],
+        reason: "client-gfx asks for exclusive fullscreen; Wayland has none, borderless is used",
+        stages: &["client-gfx"],
+    },
+    Allow {
+        contains: &["render::gpu", "graphics device lost"],
+        reason: "client-gfx destroys the device to check recovery",
+        stages: &["client-gfx"],
+    },
+    Allow {
+        contains: &["cod4e::app", "recovering from the lost graphics device"],
+        reason: "client-gfx destroys the device to check recovery",
+        stages: &["client-gfx"],
+    },
+];
 
 /// A `WARN` or `ERROR` event read from a log.
 #[derive(Debug, PartialEq, Eq)]

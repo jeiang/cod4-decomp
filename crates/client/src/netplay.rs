@@ -2106,6 +2106,8 @@ impl NetPlay {
                         self.c.script_models_names.insert(name.to_owned());
                     }
                 }
+                // An entity with no model set (an origin, a trigger) has the empty name: nothing to load.
+                None if name.is_empty() => {}
                 None => {
                     logging::dedup!(
                         WARN,
