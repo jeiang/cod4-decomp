@@ -184,6 +184,7 @@ impl Cvars {
             return Err(Refused::CheatProtected(v.name.clone()));
         }
         Self::store(&mut self.modified, v, value, false);
+        apply_logging(name, value);
         Ok(())
     }
 
@@ -199,6 +200,7 @@ impl Cvars {
             registered: false,
         });
         Self::store(&mut self.modified, v, value, true);
+        apply_logging(name, value);
     }
 
     fn store(modified: &mut u32, v: &mut Cvar, value: &str, force: bool) {
@@ -269,6 +271,17 @@ impl Cvars {
             .filter(|v| v.flags & ARCHIVE != 0)
             .map(|v| format!("seta {} \"{}\"", v.name, v.value))
             .collect()
+    }
+}
+
+/// `developer` and `log_filter` steer the log level (see `logging`).
+fn apply_logging(name: &str, value: &str) {
+    if name.eq_ignore_ascii_case("developer") {
+        logging::set_developer(i64::from(parse_int(value)));
+    } else if name.eq_ignore_ascii_case("log_filter")
+        && let Err(e) = logging::set_filter(value)
+    {
+        tracing::warn!(filter = value, "log_filter does not parse: {e}");
     }
 }
 

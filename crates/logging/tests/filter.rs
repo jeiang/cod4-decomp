@@ -12,11 +12,22 @@ fn developer_and_filter_change_what_is_enabled() {
     let guard = logging::init(cfg);
 
     assert!(tracing::enabled!(target: "logging", Level::INFO));
+    // Binary-only crates log under the binary's name.
+    assert!(tracing::enabled!(target: "cod4e::shell", Level::INFO));
+    assert!(tracing::enabled!(target: "cod4e_server", Level::INFO));
+    assert!(tracing::enabled!(target: "cod4e_master::x", Level::INFO));
+    assert!(tracing::enabled!(target: "cod4e_harness", Level::INFO));
+    assert!(!tracing::enabled!(target: "wgpu_core", Level::INFO));
     assert!(!tracing::enabled!(target: "logging", Level::DEBUG));
     logging::set_developer(1);
     assert!(tracing::enabled!(target: "logging", Level::DEBUG));
     assert!(!tracing::enabled!(target: "logging", Level::TRACE));
     logging::set_developer(2);
+    assert!(tracing::enabled!(target: "logging", Level::TRACE));
+    // An explicit log_filter wins over developer, and clearing it hands back to developer.
+    logging::set_filter("logging=error").unwrap();
+    assert!(!tracing::enabled!(target: "logging", Level::INFO));
+    logging::set_filter("").unwrap();
     assert!(tracing::enabled!(target: "logging", Level::TRACE));
     logging::set_developer(0);
     assert!(!tracing::enabled!(target: "logging", Level::DEBUG));

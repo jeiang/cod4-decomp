@@ -15,6 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 logging = { path = "../logging" }
+tracing = "0.1.44"
 assets = { path = "../assets" }
 gsc = { path = "../gsc" }
 sim = { path = "../sim" }

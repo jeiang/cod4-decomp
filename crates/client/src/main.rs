@@ -367,13 +367,23 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // The run's log file sits next to the profiles: `--config-dir`, else the platform's config folder.
+    // A player's run writes a log file next to the profiles (`--config-dir`, else the platform's config folder). Runs
+    // that only answer a question (`--list-display-modes`, the self-tests) and automation runs (`--out`) write none
+    // of their own: the harness names a directory with `COD4E_LOG_DIR` for the runs it wants kept.
+    let session = !(cli.list
+        || cli.input_selftest
+        || cli.audio_selftest
+        || cli.fx_selftest
+        || cli.viewmodel_tour.is_some()
+        || cli.out.is_some());
     let mut log = logging::Config::new("client");
-    log.dir = cli
-        .config_dir
-        .clone()
-        .or_else(install::default_config_dir)
-        .map(|d| d.join("logs"));
+    if session {
+        log.dir = cli
+            .config_dir
+            .clone()
+            .or_else(install::default_config_dir)
+            .map(|d| d.join("logs"));
+    }
     let _log = logging::init(log);
     if cli.input_selftest {
         let bad = input::selftest::run();

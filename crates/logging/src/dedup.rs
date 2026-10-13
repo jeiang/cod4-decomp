@@ -4,13 +4,27 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Most distinct keys one [`Dedup`] remembers; beyond it new keys are dropped silently (the callers' keys are asset or
-/// command names, so this only bounds a pathological stream).
+static WINDOW: AtomicU64 = AtomicU64::new(0);
+
+/// Starts a new counting window for every limiter: a map change or a new session, so a warning that belongs to each
+/// load logs again instead of staying quiet after its first few hits.
+pub fn new_window() {
+    WINDOW.fetch_add(1, Ordering::Relaxed);
+}
+
+struct Seen {
+    window: u64,
+    counts: HashMap<Box<str>, u64>,
+}
+
+/// Most distinct keys one [`Dedup`] remembers; at the limit it forgets all of them and starts a window of its own, so a
+/// pathological stream of keys costs bounded memory and still logs (the callers' keys are asset or command names).
 const MAX_KEYS: usize = 4096;
 
 pub struct Dedup {
-    seen: Mutex<Option<HashMap<Box<str>, u64>>>,
+    seen: Mutex<Option<Seen>>,
 }
 
 impl Dedup {
@@ -24,18 +38,24 @@ impl Dedup {
     /// Allocates only the first time a key is seen.
     pub fn hit(&self, key: &str) -> Option<u64> {
         let mut guard = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        let map = guard.get_or_insert_with(HashMap::new);
-        let full = map.len() >= MAX_KEYS;
-        let n = match map.get_mut(key) {
+        let window = WINDOW.load(Ordering::Relaxed);
+        let seen = guard.get_or_insert_with(|| Seen {
+            window,
+            counts: HashMap::new(),
+        });
+        if seen.window != window || seen.counts.len() >= MAX_KEYS {
+            seen.window = window;
+            seen.counts.clear();
+        }
+        let n = match seen.counts.get_mut(key) {
             Some(n) => {
                 *n += 1;
                 *n
             }
-            None if !full => {
-                map.insert(key.into(), 1);
+            None => {
+                seen.counts.insert(key.into(), 1);
                 1
             }
-            None => return None,
         };
         n.is_power_of_two().then_some(n)
     }
@@ -84,5 +104,15 @@ mod tests {
             ]
         );
         assert_eq!(d.hit("b"), Some(1));
+    }
+
+    #[test]
+    fn too_many_keys_start_over_instead_of_going_silent() {
+        let d = Dedup::new();
+        for i in 0..MAX_KEYS {
+            d.hit(&i.to_string());
+        }
+        assert_eq!(d.hit("fresh"), Some(1));
+        assert_eq!(d.hit("0"), Some(1));
     }
 }

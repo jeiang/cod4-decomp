@@ -3379,6 +3379,7 @@ dependencies = [
  "sim",
  "tempfile",
  "tokio",
+ "tracing",
  "web-time",
  "wtransport",
 ]

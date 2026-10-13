@@ -10,7 +10,11 @@ pub struct ConsoleOut;
 impl<S: Subscriber> Layer<S> for ConsoleOut {
     fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
         let m = event.metadata();
-        let text = JsValue::from_str(&format!("{} {}", m.target(), crate::format::line(event)));
+        let text = JsValue::from_str(&format!(
+            "{} {}",
+            m.target(),
+            crate::redact(&crate::format::line(event))
+        ));
         match *m.level() {
             Level::ERROR => web_sys::console::error_1(&text),
             Level::WARN => web_sys::console::warn_1(&text),

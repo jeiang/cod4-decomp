@@ -3670,6 +3670,8 @@ fn start_session(
 
 /// Starts the background load of `map` and the measuring of its frame gaps.
 fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: loader::Server) {
+    // A warning that repeats per load logs again for this one.
+    logging::new_window();
     let gfx = Gfx::from_cvars(&st.input.cvars);
     let req = loader::Request {
         install: cli.install.clone(),
