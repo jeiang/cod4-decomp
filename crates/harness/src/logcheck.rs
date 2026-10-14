@@ -27,44 +27,45 @@ pub struct Allow {
 }
 
 /// The reviewed list. Keep it short: fix the cause when the fix is small. `max` is per stage, from the default suite
-/// measured on the Linux host (largest stage, plus a margin): it catches a gross regression, not a one-off.
+/// measured on the Linux host (the largest stage; each entry says its measurement and date) plus a margin: 10% for the
+/// material classes, 25% or more for the rest. It catches a gross regression, not a one-off.
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
     Allow {
         contains: &["render::material", "no usable technique", "_l_hsm_"],
         reason: "materials on lit techsets (`*_l_hsm_*`: decals, signs, glass, trash) have no technique we translate yet; their draws are skipped",
         stages: &[],
-        max: None,
+        max: Some(2200), // measured 1985 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["render::material", "no usable technique", "_unlit"],
         reason: "materials on unlit techsets (`*_unlit*`: stains, graffiti, godrays, light bulbs) have no technique we translate yet; their draws are skipped",
         stages: &[],
-        max: None,
+        max: Some(1310), // measured 1185 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["render::material", "no usable technique", "mc_effect"],
         reason: "materials on effect techsets (`mc_effect*`: floodlight beams, lens flares, tight glow) have no technique we translate yet; their draws are skipped",
         stages: &[],
-        max: None,
+        max: Some(190), // measured 171 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["render::material", "no usable technique", "mc_shadowcaster"],
         reason: "the tree shadow-caster techset has no technique we translate yet; its draws are skipped",
         stages: &[],
-        max: None,
+        max: Some(66), // measured 60 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["render::material", "no usable technique", "wc_sky"],
         reason: "the sky techset has no technique we translate yet; its draws are skipped",
         stages: &[],
-        max: None,
+        max: Some(72), // measured 65 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["render::material", "no usable technique"],
         reason: "any other techset (sun, default3d, reflex sights, flags, laptop screens) has no technique we translate yet; draws skipped",
         stages: &[],
-        max: None,
+        max: Some(53), // measured 48 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["sim::skel::anim", "animation data read out of range"],
@@ -76,7 +77,7 @@ pub const ALLOWED: &[Allow] = &[
         contains: &["server::server", "unknown command", "con_showchannel"],
         reason: "the stock configs run con_showchannel, which we do not implement (#365)",
         stages: &[],
-        max: None,
+        max: Some(5), // measured 4 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["fx: model element skipped: its model did not resolve"],
@@ -98,7 +99,7 @@ pub const ALLOWED: &[Allow] = &[
         contains: &["cod4e::models", "held model's tag bone missing"],
         reason: "a held model whose tag bone is not in the rig (#389)",
         stages: &[],
-        max: None,
+        max: Some(3), // measured 2 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &[
@@ -108,7 +109,7 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "menus show an empty `@` reference (#372)",
         stages: &[],
-        max: None,
+        max: Some(9), // measured 7 on the Linux host, 2026-10-14,
     },
     // Timing of the harness's own clients and bots.
     Allow {
@@ -128,43 +129,43 @@ pub const ALLOWED: &[Allow] = &[
         contains: &["net::connect", "Server is full"],
         reason: "net-hardening fills the server to check the refusal",
         stages: &["net-hardening"],
-        max: None,
+        max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["server::server", "rcon", "a bad password"],
         reason: "net-rcon sends a wrong password on purpose",
         stages: &["net-rcon"],
-        max: None,
+        max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["server::server", "rcon", "dropped by the throttle"],
         reason: "net-rcon floods rcon to check the throttle",
         stages: &["net-rcon"],
-        max: None,
+        max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["net::connect", "You are banned from this server"],
         reason: "net-rcon bans a client and reconnects it",
         stages: &["net-rcon"],
-        max: None,
+        max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["server::netsv", "usercmd queue full"],
         reason: "net-rcon holds a client's packets back while it is kicked",
         stages: &["net-rcon"],
-        max: None,
+        max: Some(9), // measured 7 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["net::client", "dropped by the server", "Player kicked"],
         reason: "net-rcon and net-vote kick a client on purpose",
         stages: &["net-rcon", "net-vote"],
-        max: None,
+        max: Some(3), // measured 2 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["server::server", "unknown client command", "frobnicate"],
         reason: "net-vote sends an unknown client command to check the answer",
         stages: &["net-vote"],
-        max: None,
+        max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &[
@@ -173,7 +174,7 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "web-download exceeds the download budget on purpose",
         stages: &["web-download"],
-        max: None,
+        max: Some(9), // measured 7 on the Linux host, 2026-10-14
     },
     Allow {
         contains: &[
@@ -183,7 +184,7 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "the options screens name menus (options_view, options_defaults, options_driverinfo, options_credits) the loaded UI zones lack (#372)",
         stages: &["client-ui"],
-        max: None,
+        max: Some(10), // measured 8 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &[
@@ -192,19 +193,19 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "client-gfx asks for exclusive fullscreen; Wayland has none, borderless is used",
         stages: &["client-gfx"],
-        max: None,
+        max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["render::gpu", "graphics device lost"],
         reason: "client-gfx destroys the device to check recovery",
         stages: &["client-gfx"],
-        max: None,
+        max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &["cod4e::app", "recovering from the lost graphics device"],
         reason: "client-gfx destroys the device to check recovery",
         stages: &["client-gfx"],
-        max: None,
+        max: Some(2), // measured 1 on the Linux host, 2026-10-14,
     },
 ];
 
