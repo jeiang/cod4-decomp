@@ -523,6 +523,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::selftest::hang),
     },
     StageDef {
+        name: "selftest-warn",
+        description: "passes after logging a warning nobody allowed (the log gate fails it)",
+        needs_install: false,
+        timeout: Duration::from_secs(60),
+        default: false,
+        kind: Kind::Builtin(crate::stages::selftest::warn),
+    },
+    StageDef {
         name: "selftest-panic",
         description: "panics",
         needs_install: false,

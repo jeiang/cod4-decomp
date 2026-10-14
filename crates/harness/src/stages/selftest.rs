@@ -17,6 +17,15 @@ pub fn hang(_: &StageCtx) -> io::Result<StageReport> {
     }
 }
 
+/// Passes, but logs a warning nobody allowed: the log gate must fail it.
+pub fn warn(_: &StageCtx) -> io::Result<StageReport> {
+    tracing::warn!("selftest injected an unexpected warning");
+    Ok(StageReport::new(
+        "selftest-warn",
+        crate::stage::Status::Passed,
+    ))
+}
+
 pub fn panic(_: &StageCtx) -> io::Result<StageReport> {
     panic!("selftest panic");
 }

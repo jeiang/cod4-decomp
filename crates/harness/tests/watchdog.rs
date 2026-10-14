@@ -47,6 +47,22 @@ fn no_install_still_writes_a_bundle_that_says_so() {
 }
 
 #[test]
+fn a_stage_that_logs_an_unreviewed_warning_does_not_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, b) = run(dir.path(), &["--stage", "selftest-warn"]);
+    assert_eq!(code, 1);
+    assert_eq!(b.stages[0].status, Status::Failed);
+    let why = b.stages[0].reason.as_deref().unwrap();
+    assert!(why.contains("injected an unexpected warning"), "{why}");
+    // The warning is in the stage's own log file in the bundle.
+    assert!(
+        b.logs
+            .iter()
+            .any(|(n, t)| n.contains("logs/") && t.contains("injected"))
+    );
+}
+
+#[test]
 fn crash_hang_and_panic_are_caught_and_the_suite_continues() {
     let dir = tempfile::tempdir().unwrap();
     let (code, b) = run(

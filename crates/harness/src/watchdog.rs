@@ -155,6 +155,9 @@ pub fn run_stage(run: &StageRun) -> StageReport {
     cmd.arg("--dir").arg(dir);
     // The stage's own log and those of the client and server it starts land in the bundle.
     cmd.env("COD4E_LOG_DIR", dir.join("logs"));
+    // The gate reads these logs, so their filter is the default, whatever the harness's environment says.
+    cmd.env("COD4E_LOG", logging::default_spec());
+    cmd.env_remove("RUST_LOG");
     if let Some(i) = run.install {
         cmd.arg("--install").arg(i);
     }
@@ -275,5 +278,6 @@ pub fn run_stage(run: &StageRun) -> StageReport {
     .into_iter()
     .map(|f| format!("{}/{f}", run.rel))
     .collect();
+    crate::logcheck::apply(&mut report, dir, name);
     report
 }

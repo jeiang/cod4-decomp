@@ -17,11 +17,22 @@ pub fn new_window() {
 struct Seen {
     window: u64,
     counts: HashMap<Box<str>, u64>,
+    overflow: u64,
 }
 
-/// Most distinct keys one [`Dedup`] remembers; at the limit it forgets all of them and starts a window of its own, so a
-/// pathological stream of keys costs bounded memory and still logs (the callers' keys are asset or command names).
-const MAX_KEYS: usize = 4096;
+/// Most distinct keys one [`Dedup`] counts apart. Keys are asset or command names, some of them sent by a remote
+/// peer, so beyond this the new keys are counted together and logged as such (see [`Hit::Overflow`]): a hostile
+/// stream of names costs a handful of lines, not one per name.
+const MAX_KEYS: usize = 512;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Hit {
+    /// Log the event; the count of this key so far.
+    Log(u64),
+    /// A new key past the cap: log that there are too many distinct keys here; the count of such hits so far.
+    Overflow(u64),
+    Skip,
+}
 
 pub struct Dedup {
     seen: Mutex<Option<Seen>>,
@@ -34,30 +45,45 @@ impl Dedup {
         }
     }
 
-    /// Counts one more hit of `key`. Returns the count when it is time to log (a power of two), else `None`.
-    /// Allocates only the first time a key is seen.
-    pub fn hit(&self, key: &str) -> Option<u64> {
+    /// Counts one more hit of `key`: when to log (a power of two) and with what count. Allocates only the first time
+    /// a key is seen.
+    pub fn hit(&self, key: &str) -> Hit {
         let mut guard = self.seen.lock().unwrap_or_else(|e| e.into_inner());
         let window = WINDOW.load(Ordering::Relaxed);
         let seen = guard.get_or_insert_with(|| Seen {
             window,
             counts: HashMap::new(),
+            overflow: 0,
         });
-        if seen.window != window || seen.counts.len() >= MAX_KEYS {
+        if seen.window != window {
             seen.window = window;
             seen.counts.clear();
+            seen.overflow = 0;
         }
+        let full = seen.counts.len() >= MAX_KEYS;
         let n = match seen.counts.get_mut(key) {
             Some(n) => {
                 *n += 1;
                 *n
+            }
+            None if full => {
+                seen.overflow += 1;
+                return if seen.overflow.is_power_of_two() {
+                    Hit::Overflow(seen.overflow)
+                } else {
+                    Hit::Skip
+                };
             }
             None => {
                 seen.counts.insert(key.into(), 1);
                 1
             }
         };
-        n.is_power_of_two().then_some(n)
+        if n.is_power_of_two() {
+            Hit::Log(n)
+        } else {
+            Hit::Skip
+        }
     }
 }
 
@@ -68,7 +94,8 @@ impl Default for Dedup {
 }
 
 /// Logs at `$level` the first time, and each time the count of this `$key` doubles, with a `seen` field. The key is
-/// any `&str` (an asset or command name); the limiter is one per call site. Costs nothing when the level is off.
+/// any `&str` (an asset or command name, or a constant); the limiter is one per call site. Costs nothing when the
+/// level is off.
 #[macro_export]
 macro_rules! dedup {
     // The message first, then fields (`"what", asset = name`): tracing wants the fields first, so move the message last.
@@ -84,8 +111,18 @@ macro_rules! dedup {
     (@raw $level:ident, $key:expr, $($arg:tt)+) => {{
         static LIMITER: $crate::Dedup = $crate::Dedup::new();
         if $crate::tracing::enabled!($crate::tracing::Level::$level) {
-            if let Some(seen) = LIMITER.hit($key) {
-                $crate::tracing::event!($crate::tracing::Level::$level, seen, $($arg)+);
+            match LIMITER.hit($key) {
+                $crate::Hit::Log(seen) => {
+                    $crate::tracing::event!($crate::tracing::Level::$level, seen, $($arg)+);
+                }
+                $crate::Hit::Overflow(seen) => {
+                    $crate::tracing::event!(
+                        $crate::tracing::Level::$level,
+                        seen,
+                        "too many distinct keys at this call site; the rest are counted together"
+                    );
+                }
+                $crate::Hit::Skip => {}
             }
         }
     }};
@@ -95,12 +132,20 @@ macro_rules! dedup {
 mod tests {
     use super::*;
 
+    fn counts(d: &Dedup, key: &str, n: usize) -> Vec<Option<u64>> {
+        (0..n)
+            .map(|_| match d.hit(key) {
+                Hit::Log(n) => Some(n),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn logs_on_powers_of_two_per_key() {
         let d = Dedup::new();
-        let hits: Vec<_> = (0..9).map(|_| d.hit("a")).collect();
         assert_eq!(
-            hits,
+            counts(&d, "a", 9),
             [
                 Some(1),
                 Some(2),
@@ -113,16 +158,19 @@ mod tests {
                 None
             ]
         );
-        assert_eq!(d.hit("b"), Some(1));
+        assert_eq!(counts(&d, "b", 1), [Some(1)]);
     }
 
     #[test]
-    fn too_many_keys_start_over_instead_of_going_silent() {
+    fn too_many_keys_are_counted_together_and_said_so() {
         let d = Dedup::new();
         for i in 0..MAX_KEYS {
-            d.hit(&i.to_string());
+            assert!(matches!(d.hit(&i.to_string()), Hit::Log(1)));
         }
-        assert_eq!(d.hit("fresh"), Some(1));
-        assert_eq!(d.hit("0"), Some(1));
+        // New keys past the cap share one counter that logs on its own doublings; kept keys still count.
+        assert!(matches!(d.hit("fresh-1"), Hit::Overflow(1)));
+        assert!(matches!(d.hit("fresh-2"), Hit::Overflow(2)));
+        assert!(matches!(d.hit("fresh-3"), Hit::Skip));
+        assert!(matches!(d.hit("0"), Hit::Log(2)));
     }
 }

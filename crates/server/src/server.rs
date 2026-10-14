@@ -2448,6 +2448,16 @@ impl Server {
                 VmErrorKind::Fault => "script VM fault",
             };
             let text = format!("******* {kind} *******\n{e}\n");
+            let at = e.trace.first().map_or("", String::as_str);
+            // The same error at the same place every frame is one line, then a count.
+            match e.kind {
+                VmErrorKind::Script => {
+                    logging::dedup!(WARN, at, at, "script runtime error: {}", e.message);
+                }
+                VmErrorKind::Fault => {
+                    logging::dedup!(ERROR, at, at, "script VM fault: {}", e.message);
+                }
+            }
             self.say(&text);
             let map = self.map_name().unwrap_or("").to_owned();
             self.all_script_errors.push((map, text.clone()));
@@ -3320,5 +3330,30 @@ mod tests {
         let w = events.iter().find(|e| e.level == tracing::Level::WARN);
         assert_eq!(w.and_then(|e| e.field("cmd")), Some("logtest_nosuchcmd"));
         assert!(events.iter().all(|e| !e.message.contains("hunter2")));
+    }
+
+    /// Needs a game install (`COD4_PATH`); skips without one.
+    #[test]
+    fn script_errors_are_logged_by_kind() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let args = ["+set", "net_port", "0"].map(String::from);
+        let mut s = super::Server::boot(&root, &args, false).expect("boot");
+        let err = |kind| super::VmError {
+            kind,
+            message: "boom".into(),
+            trace: vec!["maps/mp/x::y line 3".into()],
+        };
+        let (_, events) = logging::capture(|| {
+            s.record_errors(vec![
+                err(super::VmErrorKind::Script),
+                err(super::VmErrorKind::Fault),
+            ]);
+        });
+        let levels: Vec<_> = events.iter().map(|e| e.level).collect();
+        assert_eq!(levels, [tracing::Level::WARN, tracing::Level::ERROR]);
+        assert_eq!(events[0].field("at"), Some("maps/mp/x::y line 3"));
     }
 }

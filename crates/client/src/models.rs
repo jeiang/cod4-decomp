@@ -251,7 +251,8 @@ impl Library {
                 .iter()
                 .filter(|(m, _)| {
                     let loaded = self.content.model(m).is_some();
-                    if !loaded {
+                    // An unused attachment slot has the empty name: nothing to load, nothing missing.
+                    if !loaded && !m.is_empty() {
                         logging::dedup!(
                             WARN,
                             m,

@@ -17,9 +17,15 @@ Without Nix, install rustup; `rust-toolchain.toml` selects the toolchain.
 
 The engine reads a CoD4 1.7 install directly: `main/*.iwd`, `zone/<language>/*.ff`, and `localization.txt`. `cod4e`, `cod4e-server` and the harness find it the same way (`crates/install`): `--install <dir>` (the harness: `--cod4`), `COD4_PATH`, the folder remembered from an earlier prompt, the Windows registry and Steam libraries, then `./COD4`, which is gitignored. `cod4e` and the harness ask for the folder in a dialog when none is found and remember the answer (always in the platform's default config dir, `--config-dir` or not); `cod4e-server` never asks and prints where it looked. Never commit or upload anything from the install. Tests that need the install skip when it is missing.
 
+## Logging
+
+Every binary logs through `tracing` (crate `logging`): events go to stderr, to a log file per run (the client writes `<config dir>/logs/client-*.log` for a player's session, the newest 10 are kept; `COD4E_LOG_DIR` names another folder), and to the browser console in the web client. `warn` and `error` events from this workspace also reach the in-game console. The filter is `COD4E_LOG` or `RUST_LOG` (`EnvFilter` syntax; default `info` for our crates, `warn` for the rest); at run time the `developer` cvar (1 is `debug`, 2 is `trace`) and the `log_filter` cvar change it, in the client and in the dedicated server. Levels: `error` loses a feature or the session, `warn` is unexpected or missing state with a fallback, `info` is lifecycle, `debug` and `trace` are per-frame detail. Repeating warnings go through `logging::dedup!` (the 1st, 2nd, 4th... hit of a key with a `seen` count). Passwords, `rcon` arguments and CD keys are masked in every sink.
+
 ## Harness
 
 `cod4e-harness` runs the staged suite under a watchdog (each stage in a child process; crashes, hangs and panics are caught) and writes `cod4e-run-<date>.zip` (at most 100 MB, user and host names scrubbed) with `manifest.json`, `summary.json`, logs, CSVs, a Perfetto-readable `trace.json` and minidumps.
+
+Every process of a stage writes its log to `<stage>/logs/` in the bundle. A stage that passes but logged a `warn` or `error` that is not in the reviewed allow-list (`crates/harness/src/logcheck.rs`, one reason per entry) is failed, with the first events in its reason; allowed events are counted in the stage's notes. `selftest-warn` proves the gate.
 
 ```sh
 nix develop -c cargo run --release -p harness -- run --out bundles   # default suite

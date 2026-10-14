@@ -19,7 +19,7 @@ mod redact;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
-pub use dedup::{Dedup, new_window};
+pub use dedup::{Dedup, Hit, new_window};
 pub use format::Record;
 pub use redact::redact;
 pub use tracing;
@@ -33,6 +33,9 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::registry::Registry;
 use tracing_subscriber::reload;
+
+/// What a log file says when it hits its size cap and drops the rest (the harness fails a stage whose log has it).
+pub const TRUNCATION_MARK: &str = "[log file reached";
 
 /// How many log files of one app are kept; the oldest go when a run starts.
 pub const KEEP: usize = 10;
@@ -127,7 +130,8 @@ fn spec_for(level: &str) -> String {
     s
 }
 
-fn default_spec() -> String {
+/// The filter a binary starts with when the environment names none: `info` for our crates, `warn` for the rest.
+pub fn default_spec() -> String {
     spec_for("info")
 }
 
@@ -291,6 +295,21 @@ mod tests {
         assert_eq!(w.message, "missing");
         assert_eq!(w.field("asset"), Some("x"));
         assert!(events.iter().any(|e| e.level == Level::TRACE));
+    }
+
+    #[test]
+    fn a_stream_of_distinct_keys_logs_a_bounded_number_of_lines() {
+        let (_, events) = capture(|| {
+            for i in 0..5000 {
+                dedup!(WARN, &i.to_string(), "no such thing");
+            }
+        });
+        assert!(events.len() < 600, "{}", events.len());
+        assert!(
+            events
+                .iter()
+                .any(|e| e.message.contains("too many distinct"))
+        );
     }
 
     #[test]

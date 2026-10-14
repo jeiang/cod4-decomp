@@ -5,6 +5,7 @@
 pub mod bundle;
 pub mod child;
 pub mod diff;
+pub mod logcheck;
 pub mod manifest;
 pub mod perf;
 pub mod script;
