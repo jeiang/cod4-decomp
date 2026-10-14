@@ -4,7 +4,7 @@
 // This crate is where output is written.
 #![allow(clippy::print_stderr)]
 
-use crate::{BoxLayer, KEEP, redact};
+use crate::{BoxLayer, KEEP, TRUNCATION_MARK, redact};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ impl Write for SharedFile {
         c.written += buf.len() as u64;
         if c.written >= MAX_FILE {
             let note = format!(
-                "\n[log file reached {} MiB: the rest is dropped]\n",
+                "\n{TRUNCATION_MARK} {} MiB: the rest is dropped]\n",
                 MAX_FILE >> 20
             );
             let _ = c

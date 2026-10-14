@@ -64,14 +64,17 @@ pub fn redact(text: &str) -> Cow<'_, str> {
         let secret = ["password", "passwd", "cdkey", "cd_key"]
             .iter()
             .any(|k| word.contains(k));
-        // `rcon` and `connect` are commands only as a word of their own followed by an argument: not in `net::connect:`
-        // or a span name like `net-rcon}`.
-        let verb =
-            i == 0 || !matches!(bytes[i - 1], b':' | b'-' | b'.' | b'/' | b'{' | b'=' | b'_');
-        let spaced = matches!(bytes.get(end), Some(b' ' | b'\t'));
-        let found = if secret || (word == "rcon" && verb && spaced) {
+        // `rcon` and `connect` are commands when they stand as a word: after a space, `=`, `:` or a quote, not inside
+        // a longer path or span token (`net::connect:`, `{name=net-rcon}`).
+        let verb = i == 0
+            || match bytes[i - 1] {
+                b':' => i < 2 || bytes[i - 2] != b':',
+                b'-' | b'.' | b'/' | b'{' | b'_' => false,
+                _ => true,
+            };
+        let found = if secret || (word == "rcon" && verb) {
             value_after(bytes, end)
-        } else if word == "connect" && verb && spaced {
+        } else if word == "connect" && verb {
             value_after(bytes, end).and_then(|(_, e)| value_after(bytes, e))
         } else {
             None
@@ -132,6 +135,10 @@ mod tests {
                 "cmd=\"set rcon_password \\\"a b\\\"\"",
                 "cmd=\"set rcon_password \\\"***\\\"\"",
             ),
+            ("cmd=rcon hunter2 map x", "cmd=rcon *** map x"),
+            ("cmd=connect 1.2.3.4 hunter2", "cmd=connect 1.2.3.4 ***"),
+            ("rcon=hunter2", "rcon=***"),
+            ("rcon: hunter2", "rcon: ***"),
             (
                 "net::connect: connection refused",
                 "net::connect: connection refused",

@@ -2449,11 +2449,14 @@ impl Server {
             };
             let text = format!("******* {kind} *******\n{e}\n");
             let at = e.trace.first().map_or("", String::as_str);
+            // The same error at the same place every frame is one line, then a count.
             match e.kind {
                 VmErrorKind::Script => {
-                    tracing::warn!(at, "script runtime error: {}", e.message);
+                    logging::dedup!(WARN, at, at, "script runtime error: {}", e.message);
                 }
-                VmErrorKind::Fault => tracing::error!(at, "script VM fault: {}", e.message),
+                VmErrorKind::Fault => {
+                    logging::dedup!(ERROR, at, at, "script VM fault: {}", e.message);
+                }
             }
             self.say(&text);
             let map = self.map_name().unwrap_or("").to_owned();

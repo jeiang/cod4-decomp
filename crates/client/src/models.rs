@@ -242,12 +242,7 @@ impl Library {
     /// among it. Attachments the loaded zones lack are left out. `None` when the body is not in the loaded zones.
     pub fn scripted_models(&self, body: &str, attached: &[Attachment]) -> Option<PlayerModelSet> {
         if self.content.model(body).is_none() {
-            logging::dedup!(
-                DEBUG,
-                "scripted-body",
-                model = body,
-                "scripted body model not loaded"
-            );
+            logging::dedup!(DEBUG, body, model = body, "scripted body model not loaded");
             return None;
         }
         Some(PlayerModelSet {
@@ -260,7 +255,7 @@ impl Library {
                     if !loaded && !m.is_empty() {
                         logging::dedup!(
                             WARN,
-                            "attached-model",
+                            m,
                             model = m.as_str(),
                             "attached model not loaded; left out"
                         );

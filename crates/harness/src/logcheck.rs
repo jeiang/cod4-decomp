@@ -21,6 +21,9 @@ pub struct Allow {
     pub reason: &'static str,
     /// The stages it is expected in; empty means any.
     pub stages: &'static [&'static str],
+    /// The most events of this entry one stage may log (measured, with a margin); more fails the stage, so a
+    /// regression that makes the same warning fire far more often is not hidden by the entry.
+    pub max: Option<usize>,
 }
 
 /// The reviewed list. Keep it short: fix the cause when the fix is small.
@@ -30,35 +33,41 @@ pub const ALLOWED: &[Allow] = &[
         contains: &["render::material", "no usable technique"],
         reason: "materials whose techset has no technique we translate yet (decals, glass, unlit and shadow-caster sets); their draws are skipped",
         stages: &[],
+        max: None,
     },
     Allow {
         contains: &["sim::skel::anim", "animation data read out of range"],
-        reason: "random_data_short reads past the table for some takeoff and ads animations (gap in the animation table decode)",
+        reason: "random_data_short reads past the table for some takeoff and ads animations (#387)",
         stages: &[],
+        max: None,
     },
     Allow {
         contains: &["server::server", "unknown command", "con_showchannel"],
         reason: "the stock configs run con_showchannel, which we do not implement (#365)",
         stages: &[],
+        max: None,
     },
     Allow {
-        contains: &["fx:", "model element skipped"],
-        reason: "effects with a model element whose xmodel is not in the loaded zones",
+        contains: &["fx: model element skipped: its model did not resolve"],
+        reason: "effects with a model element whose xmodel is not in the loaded zones (#389)",
         stages: &[],
+        max: None,
     },
     Allow {
         contains: &[
             "cod4e::netplay::attach",
             "attachment tag did not resolve",
-            "model=\"head_",
+            "model=\"head_mp_",
         ],
-        reason: "player head models: the tag the server numbered is not in the body's tag table",
+        reason: "head models do not find their attach tag (#388); seen: head_mp_arab_regular_{headwrap,ski_mask,suren,asad,sadiq}, head_mp_usmc_{shaved_head,tactical_mich,tactical_mich_stripes_nomex}; any head_mp_ model is the same bug",
         stages: &[],
+        max: None,
     },
     Allow {
         contains: &["cod4e::models", "held model's tag bone missing"],
-        reason: "a held model whose tag bone is not in the rig",
+        reason: "a held model whose tag bone is not in the rig (#389)",
         stages: &[],
+        max: None,
     },
     Allow {
         contains: &[
@@ -68,53 +77,63 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "menus show an empty `@` reference (#372)",
         stages: &[],
+        max: None,
     },
     // Timing of the harness's own clients and bots.
     Allow {
         contains: &["server::netsv", "packet from an address with no client"],
         reason: "a client's packet before it connected or after the server dropped it",
         stages: &[],
+        max: None,
     },
     Allow {
         contains: &["server::client", "usercmd time out of range; clamped"],
         reason: "a client that stalled (map load, window stall) catches its clock up",
         stages: &[],
+        max: None,
     },
     // Stages that provoke the event on purpose.
     Allow {
         contains: &["net::connect", "Server is full"],
         reason: "net-hardening fills the server to check the refusal",
         stages: &["net-hardening"],
+        max: None,
     },
     Allow {
         contains: &["server::server", "rcon", "a bad password"],
         reason: "net-rcon sends a wrong password on purpose",
         stages: &["net-rcon"],
+        max: None,
     },
     Allow {
         contains: &["server::server", "rcon", "dropped by the throttle"],
         reason: "net-rcon floods rcon to check the throttle",
         stages: &["net-rcon"],
+        max: None,
     },
     Allow {
         contains: &["net::connect", "You are banned from this server"],
         reason: "net-rcon bans a client and reconnects it",
         stages: &["net-rcon"],
+        max: None,
     },
     Allow {
         contains: &["server::netsv", "usercmd queue full"],
         reason: "net-rcon holds a client's packets back while it is kicked",
         stages: &["net-rcon"],
+        max: None,
     },
     Allow {
         contains: &["net::client", "dropped by the server", "Player kicked"],
         reason: "net-rcon and net-vote kick a client on purpose",
         stages: &["net-rcon", "net-vote"],
+        max: None,
     },
     Allow {
         contains: &["server::server", "unknown client command", "frobnicate"],
         reason: "net-vote sends an unknown client command to check the answer",
         stages: &["net-vote"],
+        max: None,
     },
     Allow {
         contains: &[
@@ -123,6 +142,7 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "web-download exceeds the download budget on purpose",
         stages: &["web-download"],
+        max: None,
     },
     Allow {
         contains: &[
@@ -132,6 +152,7 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "the options screens name menus (options_view, options_defaults, options_driverinfo, options_credits) the loaded UI zones lack (#372)",
         stages: &["client-ui"],
+        max: None,
     },
     Allow {
         contains: &[
@@ -140,16 +161,19 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "client-gfx asks for exclusive fullscreen; Wayland has none, borderless is used",
         stages: &["client-gfx"],
+        max: None,
     },
     Allow {
         contains: &["render::gpu", "graphics device lost"],
         reason: "client-gfx destroys the device to check recovery",
         stages: &["client-gfx"],
+        max: None,
     },
     Allow {
         contains: &["cod4e::app", "recovering from the lost graphics device"],
         reason: "client-gfx destroys the device to check recovery",
         stages: &["client-gfx"],
+        max: None,
     },
 ];
 
@@ -187,8 +211,8 @@ pub fn events(text: &str) -> Vec<Event> {
         .collect()
 }
 
-fn allowed<'a>(list: &'a [Allow], stage: &str, e: &Event) -> Option<&'a Allow> {
-    list.iter().find(|a| {
+fn allowed(list: &[Allow], stage: &str, e: &Event) -> Option<usize> {
+    list.iter().position(|a| {
         (a.stages.is_empty() || a.stages.contains(&stage))
             && a.contains.iter().all(|c| e.text.contains(c))
     })
@@ -198,7 +222,8 @@ fn allowed<'a>(list: &'a [Allow], stage: &str, e: &Event) -> Option<&'a Allow> {
 #[derive(Default, Debug)]
 pub struct Findings {
     pub unexpected: Vec<Event>,
-    pub allowed: BTreeMap<&'static str, usize>,
+    /// Events per allow-list entry (by index).
+    pub allowed: BTreeMap<usize, usize>,
 }
 
 /// Reads `<dir>/logs/*.log` and sorts its `WARN`/`ERROR` events against `list`.
@@ -221,11 +246,32 @@ pub fn scan(dir: &Path, stage: &str, list: &'static [Allow]) -> Findings {
                 continue;
             }
         };
+        if text.contains(logging::TRUNCATION_MARK) {
+            // Events after the cap are lost, so nothing in this log can be vouched for.
+            let name = p
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            f.unexpected.push(Event {
+                error: true,
+                text: format!("{name} stopped at its size cap, later events are lost"),
+            });
+        }
         for e in events(&text) {
             match allowed(list, stage, &e) {
-                Some(a) => *f.allowed.entry(a.reason).or_default() += 1,
+                Some(i) => *f.allowed.entry(i).or_default() += 1,
                 None => f.unexpected.push(e),
             }
+        }
+    }
+    for (&i, &n) in &f.allowed {
+        if let Some(max) = list[i].max.filter(|&m| n > m) {
+            f.unexpected.push(Event {
+                error: false,
+                text: format!(
+                    "allow-list entry fired {n} times, more than its max {max}: {}",
+                    list[i].reason
+                ),
+            });
         }
     }
     f
@@ -238,10 +284,10 @@ pub fn apply(report: &mut StageReport, dir: &Path, stage: &str) {
 
 fn apply_with(report: &mut StageReport, dir: &Path, stage: &str, list: &'static [Allow]) {
     let f = scan(dir, stage, list);
-    for (reason, n) in &f.allowed {
+    for (&i, n) in &f.allowed {
         report
             .notes
-            .push(format!("allowed log events: {n} x {reason}"));
+            .push(format!("allowed log events: {n} x {}", list[i].reason));
     }
     if f.unexpected.is_empty() {
         return;
@@ -286,11 +332,13 @@ mod tests {
             contains: &["render::material", "no usable technique"],
             reason: "decals",
             stages: &[],
+            max: None,
         },
         Allow {
             contains: &["only in a stage"],
             reason: "narrow",
             stages: &["a"],
+            max: None,
         },
     ];
 
@@ -345,6 +393,37 @@ mod tests {
         let mut r = StageReport::new("b", Status::Passed);
         apply_with(&mut r, stage_dir(line).path(), "b", LIST);
         assert_eq!(r.status, Status::Failed);
+    }
+
+    const CAPPED: &[Allow] = &[Allow {
+        contains: &["render::material"],
+        reason: "capped",
+        stages: &[],
+        max: Some(2),
+    }];
+
+    #[test]
+    fn an_entry_over_its_max_fails_the_stage() {
+        let line = "2026-10-13T17:34:38.1Z  WARN render::material: x\n";
+        let mut r = StageReport::new("a", Status::Passed);
+        apply_with(&mut r, stage_dir(&line.repeat(2)).path(), "a", CAPPED);
+        assert_eq!(r.status, Status::Passed);
+        let mut r = StageReport::new("a", Status::Passed);
+        apply_with(&mut r, stage_dir(&line.repeat(3)).path(), "a", CAPPED);
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.reason.unwrap().contains("more than its max 2"));
+    }
+
+    #[test]
+    fn a_log_that_hit_its_size_cap_fails_the_stage() {
+        let log = format!(
+            "# x\n{} 64 MiB: the rest is dropped]\n",
+            logging::TRUNCATION_MARK
+        );
+        let mut r = StageReport::new("a", Status::Passed);
+        apply_with(&mut r, stage_dir(&log).path(), "a", LIST);
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.reason.unwrap().contains("size cap"));
     }
 
     #[test]
