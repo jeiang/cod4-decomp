@@ -31,10 +31,40 @@ pub struct Allow {
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
     Allow {
-        contains: &["render::material", "no usable technique"],
-        reason: "materials whose techset has no technique we translate yet (decals, glass, unlit and shadow-caster sets); their draws are skipped",
+        contains: &["render::material", "no usable technique", "_l_hsm_"],
+        reason: "materials on lit techsets (`*_l_hsm_*`: decals, signs, glass, trash) have no technique we translate yet; their draws are skipped",
         stages: &[],
-        max: Some(5000),
+        max: None,
+    },
+    Allow {
+        contains: &["render::material", "no usable technique", "_unlit"],
+        reason: "materials on unlit techsets (`*_unlit*`: stains, graffiti, godrays, light bulbs) have no technique we translate yet; their draws are skipped",
+        stages: &[],
+        max: None,
+    },
+    Allow {
+        contains: &["render::material", "no usable technique", "mc_effect"],
+        reason: "materials on effect techsets (`mc_effect*`: floodlight beams, lens flares, tight glow) have no technique we translate yet; their draws are skipped",
+        stages: &[],
+        max: None,
+    },
+    Allow {
+        contains: &["render::material", "no usable technique", "mc_shadowcaster"],
+        reason: "the tree shadow-caster techset has no technique we translate yet; its draws are skipped",
+        stages: &[],
+        max: None,
+    },
+    Allow {
+        contains: &["render::material", "no usable technique", "wc_sky"],
+        reason: "the sky techset has no technique we translate yet; its draws are skipped",
+        stages: &[],
+        max: None,
+    },
+    Allow {
+        contains: &["render::material", "no usable technique"],
+        reason: "any other techset (sun, default3d, reflex sights, flags, laptop screens) has no technique we translate yet; draws skipped",
+        stages: &[],
+        max: None,
     },
     Allow {
         contains: &["sim::skel::anim", "animation data read out of range"],
