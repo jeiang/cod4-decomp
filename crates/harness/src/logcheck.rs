@@ -26,20 +26,21 @@ pub struct Allow {
     pub max: Option<usize>,
 }
 
-/// The reviewed list. Keep it short: fix the cause when the fix is small.
+/// The reviewed list. Keep it short: fix the cause when the fix is small. `max` is per stage, from the default suite
+/// measured on the Linux host (largest stage, plus a margin): it catches a gross regression, not a one-off.
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
     Allow {
         contains: &["render::material", "no usable technique"],
         reason: "materials whose techset has no technique we translate yet (decals, glass, unlit and shadow-caster sets); their draws are skipped",
         stages: &[],
-        max: None,
+        max: Some(5000),
     },
     Allow {
         contains: &["sim::skel::anim", "animation data read out of range"],
         reason: "random_data_short reads past the table for some takeoff and ads animations (#387)",
         stages: &[],
-        max: None,
+        max: Some(40),
     },
     Allow {
         contains: &["server::server", "unknown command", "con_showchannel"],
@@ -51,7 +52,7 @@ pub const ALLOWED: &[Allow] = &[
         contains: &["fx: model element skipped: its model did not resolve"],
         reason: "effects with a model element whose xmodel is not in the loaded zones (#389)",
         stages: &[],
-        max: None,
+        max: Some(20),
     },
     Allow {
         contains: &[
@@ -61,7 +62,7 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "head models do not find their attach tag (#388); seen: head_mp_arab_regular_{headwrap,ski_mask,suren,asad,sadiq}, head_mp_usmc_{shaved_head,tactical_mich,tactical_mich_stripes_nomex}; any head_mp_ model is the same bug",
         stages: &[],
-        max: None,
+        max: Some(60),
     },
     Allow {
         contains: &["cod4e::models", "held model's tag bone missing"],
@@ -84,13 +85,13 @@ pub const ALLOWED: &[Allow] = &[
         contains: &["server::netsv", "packet from an address with no client"],
         reason: "a client's packet before it connected or after the server dropped it",
         stages: &[],
-        max: None,
+        max: Some(16),
     },
     Allow {
         contains: &["server::client", "usercmd time out of range; clamped"],
         reason: "a client that stalled (map load, window stall) catches its clock up",
         stages: &[],
-        max: None,
+        max: Some(20),
     },
     // Stages that provoke the event on purpose.
     Allow {
