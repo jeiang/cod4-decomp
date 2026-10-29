@@ -195,46 +195,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         if listed.len() < 4 {
             return Err(format!("{} entities, want 4", listed.len()));
         }
-        let bots = listed
+        let players = listed
             .iter()
-            .filter(|e| e["name"].as_str().is_some_and(|n| !n.is_empty()))
+            .filter(|e| e["kind"].as_str() == Some("player"))
             .count();
         report
             .metrics
-            .insert("named_entities".to_owned(), bots as f64);
-
-        id += 1;
-        ask(
-            &mut sock,
-            id,
-            json!({"cmd": "key", "bind": "+scores", "action": "down"}),
-        )?;
-        // The server answers the scoreboard on the frame after the key goes down.
-        let _ = until(
-            &mut sock,
-            &mut id,
-            json!({"scoreboard.rows.0": {"exists": true}}),
-            "the scoreboard did not arrive",
-            Duration::from_secs(20),
-        );
-        id += 1;
-        let board = ask(&mut sock, id, json!({"cmd": "state", "what": "scoreboard"}))?;
-        id += 1;
-        ask(
-            &mut sock,
-            id,
-            json!({"cmd": "key", "bind": "+scores", "action": "up"}),
-        )?;
-        let rows = board["scoreboard"]["rows"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        report
-            .metrics
-            .insert("scoreboard_rows".to_owned(), rows.len() as f64);
-        if rows.len() < 4 {
-            return Err(format!("{} scoreboard rows, want 4: {board}", rows.len()));
-        }
+            .insert("player_entities".to_owned(), players as f64);
 
         // A capture of the frame on screen, with no window of the stage's own.
         id += 1;
@@ -286,6 +253,39 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         report
             .notes
             .push(format!("clicked {name} at {x:.0},{y:.0}"));
+
+        id += 1;
+        ask(
+            &mut sock,
+            id,
+            json!({"cmd": "key", "bind": "+scores", "action": "down"}),
+        )?;
+        // The server answers the scoreboard on the frame after the key goes down.
+        let _ = until(
+            &mut sock,
+            &mut id,
+            json!({"scoreboard.rows.0": {"exists": true}}),
+            "the scoreboard did not arrive",
+            Duration::from_secs(20),
+        );
+        id += 1;
+        let board = ask(&mut sock, id, json!({"cmd": "state", "what": "scoreboard"}))?;
+        id += 1;
+        ask(
+            &mut sock,
+            id,
+            json!({"cmd": "key", "bind": "+scores", "action": "up"}),
+        )?;
+        let rows = board["scoreboard"]["rows"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        report
+            .metrics
+            .insert("scoreboard_rows".to_owned(), rows.len() as f64);
+        if rows.len() < 4 {
+            return Err(format!("{} scoreboard rows, want 4: {board}", rows.len()));
+        }
 
         id += 1;
         ask(&mut sock, id, json!({"cmd": "quit"}))?;
