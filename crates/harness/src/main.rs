@@ -140,9 +140,17 @@ fn run_main(args: &[String], double_click: bool) -> ExitCode {
                 o.bundle.size as f64 / 1_048_576.0
             ));
             if !o.bundle.dropped.is_empty() {
+                let first: Vec<&str> = o
+                    .bundle
+                    .dropped
+                    .iter()
+                    .take(3)
+                    .map(String::as_str)
+                    .collect();
                 say(format_args!(
-                    "left out to fit 100 MB: {}",
-                    o.bundle.dropped.join(", ")
+                    "left out to fit 100 MB: {} files, starting with {} (DROPPED.txt lists all)",
+                    o.bundle.dropped.len(),
+                    first.join(", ")
                 ));
             }
             say(format_args!(
