@@ -28,7 +28,9 @@ mod transport;
 
 pub use channel::{Channel, Handler, Outcome};
 pub use protocol::{Reply, Request, base64, lookup, matches, num, reply, text_lines};
-pub use transport::{QueueTransport, StdioTransport, TcpTransport, Transport};
+pub use transport::{QueueTransport, Transport};
+#[cfg(not(target_arch = "wasm32"))]
+pub use transport::{StdioTransport, TcpTransport};
 
 /// The most bytes one request or reply line may hold; a longer line is refused rather than buffered for ever.
 pub const MAX_LINE: usize = 4 * 1024 * 1024;

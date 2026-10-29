@@ -7,6 +7,7 @@
 //! - [`StdioTransport`]: stdin and stdout, for a process someone is already talking to.
 //! - [`QueueTransport`]: two queues, no socket: the browser page polls the requests and posts the replies.
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::MAX_LINE;
 use std::collections::{HashMap, VecDeque};
 
