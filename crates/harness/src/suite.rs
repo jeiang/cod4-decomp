@@ -23,17 +23,40 @@ pub struct Config {
     pub prompt: bool,
     /// Directory holding the executable, searched for an install.
     pub exe_dir: Option<PathBuf>,
+    /// Stages whose `Skipped` status the caller accepts (`--allow-skip`). A stage that skips without being named
+    /// here fails the run: a skipped stage proves nothing, so it is not a pass.
+    pub allow_skip: Vec<String>,
 }
 
 pub struct Outcome {
     pub bundle: Written,
     pub reports: Vec<StageReport>,
+    /// Every stage that skipped, named or not.
+    pub skipped: Vec<String>,
+    /// The skips `--allow-skip` did not name: these fail the run.
+    pub unexpected_skips: Vec<String>,
 }
 
 impl Outcome {
+    /// The run's verdict: every stage passed, and every skip was named by `--allow-skip`.
     pub fn ok(&self) -> bool {
-        !self.reports.iter().any(|r| r.status.is_bad())
+        !self.reports.iter().any(|r| r.status.is_bad()) && self.unexpected_skips.is_empty()
     }
+}
+
+/// Sorts the skips against the allowed list: `(all skips, the ones nothing allowed)`, both in stage order.
+pub fn skips(reports: &[StageReport], allow: &[String]) -> (Vec<String>, Vec<String>) {
+    let skipped: Vec<String> = reports
+        .iter()
+        .filter(|r| r.status == Status::Skipped)
+        .map(|r| r.name.clone())
+        .collect();
+    let unexpected = skipped
+        .iter()
+        .filter(|n| !allow.iter().any(|a| a == *n))
+        .cloned()
+        .collect();
+    (skipped, unexpected)
 }
 
 pub fn default_selections() -> Vec<Selection> {
@@ -185,12 +208,31 @@ fn run_in(
         &reports,
     );
     fs::write(work.join("manifest.json"), serde_json::to_vec_pretty(&man)?)?;
+    let (skipped, unexpected_skips) = skips(&reports, &cfg.allow_skip);
+    let allowed_skips: Vec<&String> = skipped
+        .iter()
+        .filter(|n| !unexpected_skips.contains(n))
+        .collect();
+    for r in &mut reports {
+        if r.status == Status::Skipped {
+            r.notes.push(if unexpected_skips.contains(&r.name) {
+                "skipped: a skip fails the run unless --allow-skip names the stage".into()
+            } else {
+                "skipped: --allow-skip names the stage, so the run accepts it".into()
+            });
+        }
+    }
+    let ok = !reports.iter().any(|r| r.status.is_bad()) && unexpected_skips.is_empty();
     let summary = json!({
         "schema": manifest::SCHEMA,
         "started": crate::time::iso(started),
         "finished": crate::time::iso(finished),
         "build": manifest::build_hash(),
-        "ok": !reports.iter().any(|r| r.status.is_bad()),
+        // A skipped stage is not a pass: `ok` needs every stage to have run, or to be named by --allow-skip.
+        "ok": ok,
+        "skipped": skipped,
+        "allowed_skips": allowed_skips,
+        "unexpected_skips": unexpected_skips,
         "stages": reports,
     });
     fs::write(
@@ -203,5 +245,48 @@ fn run_in(
     fs::create_dir_all(&cfg.out_dir)?;
     let zip = cfg.out_dir.join(format!("cod4e-run-{stamp}.zip"));
     let bundle = bundle::write(work, &zip, &Scrubber::from_env(), bundle::CAP)?;
-    Ok(Outcome { bundle, reports })
+    Ok(Outcome {
+        bundle,
+        reports,
+        skipped,
+        unexpected_skips,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reports(statuses: &[(&str, Status)]) -> Vec<StageReport> {
+        statuses
+            .iter()
+            .map(|(n, s)| StageReport::new(n, *s))
+            .collect()
+    }
+
+    #[test]
+    fn a_skip_nothing_allows_is_unexpected() {
+        let r = reports(&[
+            ("asset-load", Status::Passed),
+            ("client-hud", Status::Skipped),
+            ("net-match", Status::Failed),
+        ]);
+        let (skipped, unexpected) = skips(&r, &[]);
+        assert_eq!(skipped, ["client-hud"]);
+        assert_eq!(unexpected, ["client-hud"]);
+    }
+
+    #[test]
+    fn an_allowed_skip_is_reported_but_not_unexpected() {
+        let r = reports(&[
+            ("asset-load", Status::Passed),
+            ("client-hud", Status::Skipped),
+            ("web-client", Status::Skipped),
+        ]);
+        let (skipped, unexpected) = skips(&r, &["web-client".to_owned()]);
+        assert_eq!(skipped, ["client-hud", "web-client"]);
+        assert_eq!(unexpected, ["client-hud"]);
+        let (_, none) = skips(&r, &["client-hud".to_owned(), "web-client".to_owned()]);
+        assert!(none.is_empty());
+    }
 }

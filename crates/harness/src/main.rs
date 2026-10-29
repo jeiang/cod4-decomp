@@ -25,9 +25,11 @@ run options:
   --cod4 <dir>        CoD4 install (else COD4_PATH, the remembered folder, registry, Steam, ./COD4, a folder prompt)
   --out <dir>         where to write the zip (default: ./bundles)
   --timeout <secs>    per-stage timeout, replacing each stage's own
+  --allow-skip <name> accept a stage that reports Skipped (repeatable, or comma separated); without it a skip fails
   --no-prompt         never ask for the install folder (also: COD4E_NO_PROMPT=1)
 
-exit status: 0 all stages passed or skipped, 1 a stage failed, crashed or hung, 2 usage or I/O error";
+exit status: 0 every stage ran and passed (a stage that skipped fails unless --allow-skip names it),
+             1 a stage failed, skipped, crashed or hung, 2 usage or I/O error";
 
 /// Program output: the `stages` listing, usage, and the run's verdict.
 #[allow(clippy::print_stdout)]
@@ -92,6 +94,7 @@ fn run_main(args: &[String], double_click: bool) -> ExitCode {
         exe_dir: std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(PathBuf::from)),
+        allow_skip: Vec::new(),
     };
     if let Some(dir) = cfg.exe_dir.clone().filter(|_| double_click) {
         cfg.out_dir = dir;
@@ -119,6 +122,21 @@ fn run_main(args: &[String], double_click: bool) -> ExitCode {
                         .map_err(|_| "--timeout takes whole seconds")?;
                     cfg.timeout = Some(Duration::from_secs(s));
                 }
+                "--allow-skip" => {
+                    for name in value(&mut it, &a)?.split(',') {
+                        let name = name.trim();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        // A script stage is named by its file (`script:<stem>`), so any name is accepted for it.
+                        if stage::find(name).is_none() && !name.starts_with("script:") {
+                            return Err(format!(
+                                "--allow-skip: unknown stage {name:?} (see `cod4e-harness stages`)"
+                            ));
+                        }
+                        cfg.allow_skip.push(name.to_owned());
+                    }
+                }
                 "--no-prompt" => cfg.prompt = false,
                 other => return Err(format!("unknown option {other:?}")),
             }
@@ -145,14 +163,34 @@ fn run_main(args: &[String], double_click: bool) -> ExitCode {
                     o.bundle.dropped.join(", ")
                 ));
             }
-            say(format_args!(
-                "{}",
-                if o.ok() {
-                    "all stages passed or were skipped"
+            let verdict = if o.ok() {
+                if o.skipped.is_empty() {
+                    "all stages passed".to_owned()
                 } else {
-                    "some stages failed; the bundle says why"
+                    format!(
+                        "all stages passed; skipped as --allow-skip named them: {}",
+                        o.skipped.join(", ")
+                    )
                 }
-            ));
+            } else {
+                let mut why = Vec::new();
+                if o.reports.iter().any(|r| r.status.is_bad()) {
+                    why.push("some stages failed");
+                }
+                if !o.unexpected_skips.is_empty() {
+                    why.push("some stages were skipped and nothing allows them");
+                }
+                let mut line = format!("{}; the bundle says why", why.join("; "));
+                if !o.unexpected_skips.is_empty() {
+                    line.push_str(&format!(
+                        "\nskipped: {} (pass --allow-skip {} to accept a stage that cannot run here)",
+                        o.unexpected_skips.join(", "),
+                        o.unexpected_skips.join(",")
+                    ));
+                }
+                line
+            };
+            say(format_args!("{verdict}"));
             ExitCode::from(u8::from(!o.ok()))
         }
         Err(e) => {

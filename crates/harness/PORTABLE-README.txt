@@ -62,9 +62,12 @@ RUN THE TEST STAGES
    that choice afterwards.
 3. Wait for it to finish (about 10 minutes once all stages exist; the first
    stages are quick). The client stages need a GPU and a display; they record
-   a short video (a few MB) per display mode, and are skipped when the client
-   or a display is missing. The stage client-dedicated starts cod4e-server and
-   joins it with cod4e, as in the steps above. It writes
-   cod4e-run-<date>.zip next to the program.
+   a short video (a few MB) per display mode. A stage that cannot run on your
+   PC (no display or GPU, or the browser client this folder does not ship)
+   reports "Skipped" and fails the run: the console names them, and
+   cod4e-harness.exe run --allow-skip <stage>[,<stage>...] accepts them (for
+   example --allow-skip web-client,web-join,web-download). The stage
+   client-dedicated starts cod4e-server and joins it with cod4e, as in the
+   steps above. It writes cod4e-run-<date>.zip next to the program.
 4. Send that zip. It is scrubbed of your user name, home folder and host name,
    and holds no game files. It stays under 100 MB.
