@@ -394,6 +394,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_hud::run),
     },
     StageDef {
+        name: "client-commands",
+        description: "the in-match commands a bind, menu or console line runs: the Pause key is refused as read only, centerview levels the view, record writes a demo, Call Vote > Restart Map and the quick message key reach the server, setFromLocString and cmd work from the console",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_commands::run),
+    },
+    StageDef {
         name: "client-ingame-menu",
         description: "changing class and team mid-round through the stock menus with the mouse: Escape and each pick return to the game, the team changes and the new class spawns",
         needs_install: false,

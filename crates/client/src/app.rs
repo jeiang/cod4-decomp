@@ -2876,6 +2876,42 @@ fn script_step(st: &mut State) -> bool {
                 );
             }
         }
+        // A cvar's value against a localized string's (`cvarloc=customclass3 CLASS_CUSTOM3`).
+        "cvarloc" => {
+            let (name, key) = arg.split_once(' ').unwrap_or((arg, ""));
+            let want = st
+                .shell
+                .as_ref()
+                .and_then(|s| s.ui.assets.translate_ref(key))
+                .map(|t| t.to_string())
+                .unwrap_or_default();
+            let have = st.input.cvar(name).unwrap_or("").to_owned();
+            done(
+                !want.is_empty() && have == want,
+                sc,
+                format!("{name} is {have:?}, {key} is {want:?}"),
+            );
+        }
+        // The view pitch, in degrees down, within a range (`pitchis=30 90`).
+        "pitchis" => {
+            let mut it = arg
+                .split_whitespace()
+                .map(|v| v.parse::<f32>().unwrap_or(0.0));
+            let (lo, hi) = (it.next().unwrap_or(0.0), it.next().unwrap_or(0.0));
+            let pitch = st.pitch.to_degrees();
+            done(
+                (lo..=hi).contains(&pitch),
+                sc,
+                format!("pitch {pitch:.1} (want {lo}..{hi})"),
+            );
+        }
+        // A character key to the menus, as a key press reaches an open menu (`uikey=1`).
+        "uikey" => {
+            if let (Some(sh), Some(c)) = (st.shell.as_mut(), arg.chars().next()) {
+                sh.key(&mut st.input, UiKey::Char(c));
+            }
+            done(true, sc, format!("key {arg}"));
+        }
         // A cvar's value (`cvaris=ui_netGametypeName dom`).
         "cvaris" => {
             let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));

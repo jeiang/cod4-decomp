@@ -2961,6 +2961,32 @@ mod tests {
             }
         }
         assert!(ui.unknown.is_empty(), "unimplemented: {:?}", ui.unknown);
+        // Nor does any `exec` of theirs end as a word nobody runs: the app would forward it to the server as
+        // unknown (`CL_ForwardCommandToServer`), and the input layer's pending list holds only its own commands.
+        let forwarded: Vec<&String> =
+            h.st.actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::Console(l) => Some(l),
+                    _ => None,
+                })
+                .filter(|l| {
+                    let w = l.split_whitespace().next().unwrap_or("");
+                    !crate::console::is_app_verb(w) && !crate::console::is_command(w)
+                })
+                .collect();
+        assert!(forwarded.is_empty(), "exec of unknown words: {forwarded:?}");
+        let pending: Vec<String> = h
+            .input
+            .frame(0.016)
+            .pending_commands
+            .into_iter()
+            .filter(|l| !crate::console::is_command(l.split_whitespace().next().unwrap_or("")))
+            .collect();
+        assert!(
+            pending.is_empty(),
+            "dropped in the input layer: {pending:?}"
+        );
     }
 
     /// A menu script's `wait` holds the rest of its buffer, which then runs through the shell's own commands (a
