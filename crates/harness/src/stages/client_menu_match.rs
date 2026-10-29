@@ -137,7 +137,9 @@ mod tests {
         let r = |note: &str, map: &str| {
             json!({
                 "steps": ok_steps(json!({"step": "maprotate=120", "ok": true, "note": note})),
-                "net": {"spawned": true},
+                // The server's team menu filled with bots: players to draw, and every one of them drawn.
+                "net": {"spawned": true, "players_seen_max": 5, "players_drawn_max": 5,
+                    "remote_weapon_frames": 90, "torso_clips": ["pt_reload_stand_rifle"]},
                 "hud": {"live": true, "health": 100, "max_health": 100, "weapon": {"clip": 30},
                     "map": "compass_map_x",
                     "drawn": {"112": 1, "117": 1, "159": 1, "150": 1}},
