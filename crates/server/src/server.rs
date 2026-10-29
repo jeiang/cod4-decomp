@@ -2150,12 +2150,7 @@ impl Server {
             .cvars
             .set_external(name, value)
             .map_err(|e| e.to_string())?;
-        if self
-            .game
-            .cvars
-            .get(name)
-            .is_some_and(|c| c.latched.is_some())
-        {
+        if self.game.cvars.pending(name).is_some() {
             self.say(&format!("{name} will be changed upon restarting.\n"));
         }
         Ok(())
@@ -2171,9 +2166,7 @@ impl Server {
             .get("g_gametype")
             .and_then(|c| c.latched.as_deref())
             .is_some_and(|g| !g.eq_ignore_ascii_case(&self.gametype));
-        let clients_change = cvars
-            .get("sv_maxclients")
-            .is_some_and(|c| c.latched.is_some());
+        let clients_change = cvars.pending("sv_maxclients").is_some();
         if !fast || gametype_changes || clients_change {
             self.game.level.save_persist = false;
             return self.spawn_server(&map);

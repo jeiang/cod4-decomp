@@ -219,7 +219,10 @@ impl Cvars {
 
     fn store(modified: &mut u32, v: &mut Cvar, value: &str, force: bool) {
         if v.flags & LATCH != 0 && !force && v.registered {
-            if v.value != value {
+            // A latched write goes to the pending value unless it is already that, even when it equals the one
+            // running: the pending value is what the next map applies, so a config that lowered a dvar and a later
+            // `set` back to the running value must not leave the lower one waiting (`Dvar_SetLatchedValue`).
+            if v.latched.as_deref() != Some(value) {
                 v.latched = Some(value.to_owned());
             }
             return;
@@ -252,6 +255,12 @@ impl Cvars {
                 v.value = l;
             }
         }
+    }
+
+    /// The value `name` takes at the next map load, when that is not the value it has now.
+    pub fn pending(&self, name: &str) -> Option<&str> {
+        let v = self.get(name)?;
+        v.latched.as_deref().filter(|l| *l != v.value)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Cvar> {
@@ -339,6 +348,25 @@ pub fn parse_float(s: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_latched_write_replaces_the_pending_value_even_with_the_running_one() {
+        // `default_mp_gamesettings.cfg` lowers `sv_maxclients` from 32; a later `set sv_maxclients 32` must leave
+        // nothing waiting, and the map keeps 32 (`Dvar_SetLatchedValue`, dvar.cpp).
+        let mut c = Cvars::new();
+        c.register("sv_maxclients", "32", ARCHIVE | SERVERINFO | LATCH);
+        c.set("sv_maxclients", "24");
+        assert_eq!(c.string("sv_maxclients"), "32", "latched, not applied");
+        assert_eq!(c.pending("sv_maxclients"), Some("24"));
+        c.set("sv_maxclients", "32");
+        assert_eq!(c.pending("sv_maxclients"), None);
+        c.apply_latched();
+        assert_eq!(c.string("sv_maxclients"), "32");
+        c.set("sv_maxclients", "40");
+        assert_eq!(c.pending("sv_maxclients"), Some("40"));
+        c.apply_latched();
+        assert_eq!(c.int("sv_maxclients"), 40);
+    }
 
     #[test]
     fn set_before_register_survives_and_latch_waits() {
