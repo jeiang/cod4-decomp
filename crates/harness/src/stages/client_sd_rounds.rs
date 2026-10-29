@@ -11,7 +11,7 @@
 //! round three. The team survives into the final scoreboard. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::{run_client, verdict};
+use super::client_session::{gpu_problem, run_client, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::io;
@@ -40,11 +40,18 @@ fn steps() -> String {
     )
 }
 
-/// Why the run failed, or `None`: every step passed, the player spawned, and the steps that make the check were all
-/// there (two restarts, the role swapped once and back once, the team checked after each).
+/// Why the run failed, or `None`: the graphics device stayed healthy, every step passed, the player spawned, and the
+/// steps that make the check were all there (two restarts, the role swapped once and back once, the team checked after
+/// each). The run ends at the final scoreboard, where no weapon is held, so the HUD is not judged here.
 fn rounds_verdict(report: &Value) -> Option<String> {
-    if let Some(w) = verdict(report) {
+    if let Some(w) = gpu_problem(&report["gpu_health"]) {
         return Some(w);
+    }
+    if let Some(w) = steps_problem(report) {
+        return Some(w);
+    }
+    if report["net"]["spawned"] != Value::Bool(true) {
+        return Some("the player never spawned (left floating as a spectator)".into());
     }
     let count = |prefix: &str| {
         report["steps"]
@@ -143,11 +150,10 @@ mod tests {
             .collect();
         json!({
             "steps": steps,
-            "net": {"spawned": true, "players_seen_max": 5, "players_drawn_max": 5,
-                "remote_weapon_frames": 90, "torso_clips": ["pt_reload_stand_rifle"]},
-            "hud": {"live": true, "health": 100, "max_health": 100, "weapon": {"clip": 30},
-                "map": "compass_map_x",
-                "drawn": {"112": 1, "117": 1, "159": 1, "150": 1}},
+            "gpu_health": {"errors": []},
+            // The run ends at the scoreboard: no weapon is held then.
+            "net": {"spawned": true},
+            "hud": {"live": true, "health": 100, "weapon": null},
             "map": "mp_backlot",
         })
     }
