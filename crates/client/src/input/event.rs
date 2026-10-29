@@ -55,16 +55,3 @@ pub enum InputEvent {
     /// The window took or lost the keyboard's focus.
     Focus(bool),
 }
-
-impl InputEvent {
-    /// A key press or release by physical key, with the text it types when `text` is given.
-    pub fn key(code: KeyCode, state: ElementState) -> Self {
-        Self::Key {
-            code,
-            logical: None,
-            text: None,
-            state,
-            repeat: false,
-        }
-    }
-}
