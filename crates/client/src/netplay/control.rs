@@ -38,9 +38,9 @@ fn player(st: &NetPlay) -> Value {
         "team": team,
         "health": ps.health,
         "max_health": ps.max_health,
-        "origin": [ps.origin.x, ps.origin.y, ps.origin.z],
-        "velocity": [ps.velocity.x, ps.velocity.y, ps.velocity.z],
-        "angles": [ps.viewangles.x, ps.viewangles.y, ps.viewangles.z],
+        "origin": ps.origin,
+        "velocity": ps.velocity,
+        "angles": ps.viewangles,
         "weapon": st.weapon(),
         "weapon_index": ps.weapon,
         "ads": ps.weapon_pos_frac,
@@ -131,7 +131,6 @@ fn connection(st: &NetPlay) -> Value {
         "packets_in": s.map(|s| s.packets_in),
         "bytes_in": s.map(|s| s.bytes_in),
         "bytes_out": s.map(|s| s.bytes_out),
-        "snapshots": st.snapshots(),
     })
 }
 

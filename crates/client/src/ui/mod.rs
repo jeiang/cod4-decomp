@@ -1600,8 +1600,9 @@ impl Ui {
                 let name = self.menus[m].def.items[i]
                     .window
                     .name
-                    .clone()
-                    .unwrap_or_default();
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_owned();
                 let p = self.item_pixels(m, i);
                 (name, [p.x as f32, p.y as f32, p.w as f32, p.h as f32])
             })
@@ -1615,8 +1616,9 @@ impl Ui {
         let name = self.menus[m].def.items[i]
             .window
             .name
-            .clone()
-            .unwrap_or_default();
+            .as_deref()
+            .unwrap_or("")
+            .to_owned();
         let p = self.item_pixels(m, i);
         Some((
             self.menus[m].name.clone(),

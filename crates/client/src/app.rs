@@ -24,6 +24,7 @@ use crate::video::Recorder;
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, TextureCache, View};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -3266,6 +3267,7 @@ fn typed_ui_keys(ev: &crate::input::InputEvent) -> Vec<UiKey> {
 /// The window's event as the engine's own, for the queue: the fields the engine reads, and no more.
 fn translate(ev: &WindowEvent) -> Option<crate::input::InputEvent> {
     use crate::input::InputEvent;
+    use winit::event::MouseScrollDelta;
     Some(match ev {
         WindowEvent::KeyboardInput { event, .. } => {
             let PhysicalKey::Code(code) = event.physical_key else {
@@ -3478,6 +3480,7 @@ fn console_action(st: &mut State, line: &str) {
 /// Routes a window event to the menus (a menu is open and owns the keyboard and mouse).
 fn ui_event(st: &mut State, ev: &crate::input::InputEvent) {
     use crate::input::InputEvent;
+    use winit::event::ElementState;
     let Some(sh) = st.shell.as_mut() else { return };
     // A bind item is waiting: the next key or button is the binding (Escape cancels, via the menus).
     if sh.ui.bind_pending() {
@@ -4485,6 +4488,12 @@ struct ControlHost<'a> {
     st: &'a mut State,
 }
 
+impl devctrl::Handler for ControlHost<'_> {
+    fn handle(&mut self, req: &devctrl::Request) -> devctrl::Outcome {
+        crate::control::handle(self, req)
+    }
+}
+
 impl crate::control::Control for ControlHost<'_> {
     fn frames(&self) -> u64 {
         self.st.samples.len() as u64
@@ -4623,20 +4632,20 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "lines": st.shell.as_ref().map(|sh| sh.st.feed.console.clone()),
                 "messages": st.input.messages(),
             }),
-            "cvars" => Value::Object(
-                st.input
-                    .all_cvars()
-                    .into_iter()
-                    .map(|(k, v)| (k, Value::String(v)))
-                    .collect(),
-            ),
-            "binds" => Value::Object(
-                st.input
-                    .all_binds()
-                    .into_iter()
-                    .map(|(k, v)| (k, Value::String(v)))
-                    .collect(),
-            ),
+            "cvars" => {
+                let mut m = serde_json::Map::new();
+                for (k, v) in st.input.all_cvars() {
+                    m.insert(k, Value::String(v));
+                }
+                Value::Object(m)
+            }
+            "binds" => {
+                let mut m = serde_json::Map::new();
+                for (k, v) in st.input.all_binds() {
+                    m.insert(k.to_owned(), Value::String(v.to_owned()));
+                }
+                Value::Object(m)
+            }
             "view" => json!({
                 "origin": [st.pos.x, st.pos.y, st.pos.z],
                 "pitch": st.pitch.to_degrees(),
@@ -4676,7 +4685,7 @@ fn menu_state(st: &mut State) -> Value {
             sh.ui
                 .item_report(menu)
                 .into_iter()
-                .map(|(name, rect)| json!({"menu": menu, "name": name, "rect": rect}))
+                .map(|(name, rect)| json!({"menu": menu.clone(), "name": name, "rect": rect}))
         })
         .collect();
     json!({"open": open, "focused": focused, "items": items})

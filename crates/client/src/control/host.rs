@@ -14,7 +14,7 @@ use winit::keyboard::{Key, KeyCode, NamedKey};
 
 /// The doors the requests open into the game. The app implements it (`crates/client/src/app.rs`); a test can drive
 /// [`handle`] with a fake.
-pub(crate) trait Control {
+pub trait Control {
     /// Frames drawn so far.
     fn frames(&self) -> u64;
 
@@ -59,7 +59,7 @@ pub(crate) trait Control {
 
 /// Answers one request. `Wait` means the request stays at the front of the channel's queue and is offered again next
 /// frame: a wait, a capture between frames, or a step with frames left.
-pub(crate) fn handle<H: Control + ?Sized>(h: &mut H, req: &Request) -> Outcome {
+pub fn handle<H: Control + ?Sized>(h: &mut H, req: &Request) -> Outcome {
     match req.cmd.as_str() {
         "capture" => {
             return match h.capture(req.str("dir"), req.bool("base64").unwrap_or(false)) {
