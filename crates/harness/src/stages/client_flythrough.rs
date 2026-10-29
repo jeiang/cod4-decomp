@@ -19,6 +19,11 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = "client-flythrough";
 const DEFAULT_SECS: u64 = 12;
+/// Frames per second a recording must keep for its footage to be reviewable. The encoder runs on the host's spare
+/// cores and returns its buffers to the render thread, so its loss rate follows the frame size and the load on the
+/// machine (measured 0.6-1.7% at a 2536x1416 window, 34.9-37.8% at 5120x1440 with the host to itself, up to 56% at
+/// 1920x1080 beside two other runs); a recording below this is not footage.
+const MIN_VIDEO_FPS: f64 = 8.0;
 /// The client's per-frame phase columns beside `frames.csv` (`client/src/app.rs` `PHASES`).
 const PHASES_CSV: &str = "frames.phases.csv";
 /// How long past the flythrough a child may take (startup, zone load, video
@@ -390,7 +395,7 @@ fn run_one(
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let result = consume(&out, plan, status, report)?;
+    let result = consume(&out, plan, opts.secs, status, report)?;
     for f in ["client.log", "client.json"] {
         if out.join(f).exists() {
             report.files.push(format!("{}/{f}", plan.slug));
@@ -402,6 +407,7 @@ fn run_one(
 fn consume(
     out: &Path,
     plan: &RunPlan,
+    secs: u64,
     status: std::process::ExitStatus,
     report: &mut StageReport,
 ) -> io::Result<Result<(), String>> {
@@ -501,21 +507,28 @@ fn consume(
                     report
                         .metrics
                         .insert(format!("{slug}.video_dropped"), d as f64);
-                    // The recorder's encoder runs on whatever cores the host has left, so how many 30 fps slots it
-                    // loses measures the host, not the client: measured 1% with the host to itself and 23-63% beside
-                    // two other runs, with the same client. Each sample carries its own duration, so the file stays
-                    // in sync; the share is a note and a metric, and the footage review says whether it is usable.
+                    // The recorder's encoder returns a readback buffer and encodes it off the render thread, so a slot
+                    // it loses is a frame the video skips while each sample keeps its duration. How many it loses
+                    // depends on the frame size (37% at 5120x1440 against 0.6-1.7% at 2536x1416 and 1280x720 on the
+                    // same serial run) and on the cores the run has (up to 56% beside two other runs at 1920x1080);
+                    // the native-resolution shortfall is #442. What the footage cannot do is lose most of its frames.
                     let slots = v.frames + d;
                     if slots > 0 {
                         let share = d as f64 / slots as f64;
+                        let fps = v.frames as f64 / secs.max(1) as f64;
                         report
                             .metrics
                             .insert(format!("{slug}.video_dropped_share"), share);
+                        report.metrics.insert(format!("{slug}.video_fps"), fps);
                         report.notes.push(format!(
-                            "{slug}: the recording lost {d} of {slots} slots ({:.0}%): the encoder kept {:.0} fps beside the client",
-                            share * 100.0,
-                            v.frames as f64 / DEFAULT_SECS as f64
+                            "{slug}: the recording lost {d} of {slots} slots ({:.0}%): the encoder kept {fps:.1} fps beside the client",
+                            share * 100.0
                         ));
+                        if fps < MIN_VIDEO_FPS {
+                            problems.push(format!(
+                                "the recording kept {fps:.1} fps of {secs} s ({d} of {slots} slots lost): too few frames for the footage review"
+                            ));
+                        }
                     }
                 }
             }

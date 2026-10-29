@@ -1784,8 +1784,9 @@ impl Viewer {
                 f
             }
             other => {
+                let first_fail = st.surface_stalled_ms == 0.0;
                 st.surface_stalled_ms += t_acquire.elapsed().as_secs_f64() * 1000.0;
-                if let SurfaceAction::DeviceLost = recover_surface(st, &other)? {
+                if let SurfaceAction::DeviceLost = recover_surface(st, &other, first_fail)? {
                     #[cfg(not(target_arch = "wasm32"))]
                     return self.recover_device();
                     #[cfg(target_arch = "wasm32")]
@@ -3468,6 +3469,7 @@ enum SurfaceAction {
 fn recover_surface(
     st: &mut State,
     outcome: &wgpu::CurrentSurfaceTexture,
+    first_fail: bool,
 ) -> Result<SurfaceAction, String> {
     use wgpu::CurrentSurfaceTexture as C;
     // A load runs on the device: configuring the surface under it fails, and its end shows what the device is.
@@ -3482,53 +3484,55 @@ fn recover_surface(
             st.surface_stalled_ms = 0.0;
             return Ok(SurfaceAction::Retry);
         }
-        if !st.presented && st.surface_stalled_ms == 0.0 {
-            // Nothing has reached the screen yet: a compositor that has not mapped the window hands no image back,
-            // and asking for it is the only thing a client can do about it (a no-op once it is mapped). A window on
-            // a workspace the compositor is not showing is not a client's to move (`focus_window` is unsupported on
-            // Wayland), which is why the error below names the monitor.
-            st.window.set_visible(true);
-            st.window.request_redraw();
-        }
-        if let Some(limit) = st.surface_stall_limit
-            && st.surface_stalled_ms > limit.as_secs_f64() * 1000.0
-        {
-            // A swapchain can keep timing out in a way a reconfiguration fixes: a compositor that stopped handing
-            // its images back, or a window that was re-created under it. Give it one new surface and the same time
-            // again before the run ends, and say what the window was when it does.
-            if !st.surface_retried && st.window.is_minimized() != Some(true) {
-                st.surface_retried = true;
-                st.surface_stalled_ms = 0.0;
-                tracing::info!(
-                    outcome = ?outcome,
-                    size = ?st.window.inner_size(),
-                    scale = st.window.scale_factor(),
-                    fullscreen = ?st.window.fullscreen(),
-                    "the window's surface gave no frame; making the surface again"
-                );
-                fresh_surface(st)?;
-                return Ok(SurfaceAction::Retry);
+        if let Some(limit) = st.surface_stall_limit {
+            if first_fail && !st.presented {
+                // Nothing has reached the screen yet: a compositor that has not mapped the window hands no image
+                // back, and asking for it is the only thing a client can do about it (a no-op once it is mapped). A
+                // window on a workspace the compositor is not showing is not a client's to move (`focus_window` is
+                // unsupported on Wayland), which is why the error below names the monitor. A player's window is left
+                // alone: `surface_stall_limit` is `None` for it, since they can switch desktops for as long as they
+                // like.
+                st.window.set_visible(true);
+                st.window.request_redraw();
             }
-            let size = st.window.inner_size();
-            let scale = st.window.scale_factor();
-            let monitor = st
-                .window
-                .current_monitor()
-                .map(|m| format!("{:?}", m.name()))
-                .unwrap_or_else(|| "none".into());
-            let presented = if st.presented {
-                "handed no image back"
-            } else {
-                "never presented a frame"
-            };
-            return Err(st.gpu.explain(&format!(
-                "the window's surface gave no frame in {:.0} s of waiting ({outcome:?}): the window is {}x{} at \
-                 scale {scale} ({:?}) on monitor {monitor}, not minimized, and its compositor {presented}",
-                st.surface_stalled_ms / 1000.0,
-                size.width,
-                size.height,
-                st.window.fullscreen()
-            )));
+            if st.surface_stalled_ms > limit.as_secs_f64() * 1000.0 {
+                // A swapchain can keep timing out in a way a reconfiguration fixes: a compositor that stopped handing
+                // its images back, or a window that was re-created under it. Give it one new surface and the same time
+                // again before the run ends, and say what the window was when it does.
+                if !st.surface_retried && st.window.is_minimized() != Some(true) {
+                    st.surface_retried = true;
+                    st.surface_stalled_ms = 0.0;
+                    tracing::info!(
+                        outcome = ?outcome,
+                        size = ?st.window.inner_size(),
+                        scale = st.window.scale_factor(),
+                        fullscreen = ?st.window.fullscreen(),
+                        "the window's surface gave no frame; making the surface again"
+                    );
+                    fresh_surface(st)?;
+                    return Ok(SurfaceAction::Retry);
+                }
+                let size = st.window.inner_size();
+                let scale = st.window.scale_factor();
+                let monitor = st
+                    .window
+                    .current_monitor()
+                    .map(|m| format!("{:?}", m.name()))
+                    .unwrap_or_else(|| "none".into());
+                let presented = if st.presented {
+                    "handed no image back"
+                } else {
+                    "never presented a frame"
+                };
+                return Err(st.gpu.explain(&format!(
+                    "the window's surface gave no frame in {:.0} s of waiting ({outcome:?}): the window is {}x{} \
+                     at scale {scale} ({:?}) on monitor {monitor}, not minimized, and its compositor {presented}",
+                    st.surface_stalled_ms / 1000.0,
+                    size.width,
+                    size.height,
+                    st.window.fullscreen()
+                )));
+            }
         }
         return Ok(SurfaceAction::Retry);
     }

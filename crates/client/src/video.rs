@@ -269,10 +269,11 @@ impl Recorder {
             } else if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
                 self.tx.try_send(frame)
             {
-                // A recording is the harness's, and the encoder runs on whatever cores the host has left: how many
-                // slots it loses measures the host, not the client (measured 1% beside nothing, 63% beside two other
-                // runs). Each sample carries its own duration, so the file stays in sync; the count is in `finish`'s
-                // summary and in the stage's metrics.
+                // A recording is the harness's, and the encoder runs on whatever cores the host has left: the slots
+                // it loses follow the frame size and that load (0.6-1.7% at a 2536x1416 window, 34.9-37.8% at
+                // 5120x1440 with the host to itself, up to 56% at 1920x1080 beside two other runs). Each sample
+                // carries its own duration, so the file stays in sync; the count is in `finish`'s summary and in the
+                // stage's metrics.
                 logging::dedup!(
                     DEBUG,
                     "video_queue",
