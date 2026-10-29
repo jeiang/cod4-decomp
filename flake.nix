@@ -66,6 +66,7 @@
               pkgs.binaryen # wasm-opt for web/ release builds
               pkgs.python3 # web/serve.py
               pkgs.nodejs # web/install.test.mjs (the page's install rules)
+              pkgs.ffmpeg-headless # scripts/footage-review.py video frames
             ]
             # gilrs (gamepads) links libudev on Linux.
             ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
