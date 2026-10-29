@@ -76,13 +76,31 @@ pub(super) fn run_client(
     };
     if !status.success() {
         return Err(format!(
-            "client exited with {status} (see {}/client.log)",
+            "client exited with {status}{} (see {}/client.log)",
+            last_error(&dir.join("client.log")),
             dir.display()
         ));
     }
     let bytes =
         fs::read(dir.join("ui-script.json")).map_err(|e| format!("no ui-script.json: {e}"))?;
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+
+/// The last line the client logged at ERROR or above, as `: <line>`, so a failed run says what it died of.
+fn last_error(log: &Path) -> String {
+    let Ok(bytes) = fs::read(log) else {
+        return String::new();
+    };
+    let tail = &bytes[bytes.len().saturating_sub(8 * 1024)..];
+    let text = String::from_utf8_lossy(tail);
+    let line = text
+        .lines()
+        .rfind(|l| l.contains("ERROR") || l.contains("WARN"))
+        .map(str::trim);
+    match line {
+        Some(l) => format!(": {l}"),
+        None => String::new(),
+    }
 }
 
 /// Why a run's graphics device is a failure, or `None`: any error it reported outside a scope is. A device that was

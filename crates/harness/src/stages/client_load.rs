@@ -62,7 +62,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         let mut why = String::new();
         for attempt in 0..ATTEMPTS {
             let dir = ctx.dir.join(format!("{map}-{attempt}"));
-            let steps = format!("start={map},ingame=120,wait=1");
+            let steps = format!("start={map},ingame=80,wait=1");
             let report = match run_client(
                 &client,
                 install,
