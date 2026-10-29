@@ -97,20 +97,27 @@ pub(super) fn gpu_problem(health: &Value) -> Option<String> {
     (!errors.is_empty()).then(|| format!("graphics errors: {}", errors.join("; ")))
 }
 
+/// Why a run's steps do not vouch for it, or `None`: every step the script ran must have passed, and a report without
+/// steps proves nothing (a run that ended before its script reached a step).
+pub(super) fn steps_problem(report: &Value) -> Option<String> {
+    let Some(steps) = report["steps"].as_array().filter(|s| !s.is_empty()) else {
+        return Some("the run reported no steps, so nothing was exercised".into());
+    };
+    let failed: Vec<String> = steps
+        .iter()
+        .filter(|s| s["ok"] != Value::Bool(true))
+        .map(|s| format!("{} ({})", s["step"], s["note"]))
+        .collect();
+    (!failed.is_empty()).then(|| format!("steps failed: {}", failed.join(", ")))
+}
+
 /// Why a run failed, or `None` when every step passed and the player spawned.
 pub(super) fn verdict(report: &Value) -> Option<String> {
     if let Some(w) = gpu_problem(&report["gpu_health"]) {
         return Some(w);
     }
-    let failed: Vec<String> = report["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|s| s["ok"] != Value::Bool(true))
-        .map(|s| format!("{} ({})", s["step"], s["note"]))
-        .collect();
-    if !failed.is_empty() {
-        return Some(format!("steps failed: {}", failed.join(", ")));
+    if let Some(w) = steps_problem(report) {
+        return Some(w);
     }
     if report["net"]["spawned"] != Value::Bool(true) {
         return Some("the player never spawned (left floating as a spectator)".into());
@@ -125,24 +132,35 @@ pub(super) fn verdict(report: &Value) -> Option<String> {
 }
 
 /// Why the other players were not in the picture, or `None`: every player the server announced must have been built
-/// and drawn in some frame (a mode without teams once drew nobody).
+/// and drawn in some frame. A mode without teams once drew nobody, and one that drew some of them was left to pass
+/// with `drawn == 0` checked only; a partial draw is the same bug seen earlier.
 fn players_problem(net: &Value) -> Option<String> {
     let seen = net["players_seen_max"].as_u64().unwrap_or(0);
     let drawn = net["players_drawn_max"].as_u64().unwrap_or(0);
     if let Some(f) = net["player_faults"].as_array().filter(|f| !f.is_empty()) {
         return Some(format!("other players could not be drawn: {f:?}"));
     }
-    (seen > 0 && drawn == 0)
-        .then(|| format!("{seen} other players were announced and none was ever drawn"))
+    if seen == 0 {
+        return Some("the server announced no other player to draw".into());
+    }
+    (drawn < seen).then(|| {
+        format!("{drawn} of the {seen} other players the server announced were ever drawn")
+    })
 }
 
 /// Why the bots' weapon handling never showed on their bodies, or `None`: when another player was seen reloading,
-/// swinging the knife or throwing a grenade, some upper-body clip must have played on one. A run in which nobody did
-/// (a scene without fighting) is untested, not failed.
+/// swinging the knife or throwing a grenade, some upper-body clip must have played on one, and the report must carry
+/// the counters at all.
 fn torso_problem(net: &Value) -> Option<String> {
     let acted = net["remote_weapon_frames"].as_u64().unwrap_or(0);
-    let clips = net["torso_clips"].as_array()?;
-    (acted > 0 && clips.is_empty())
+    let Some(clips) = net["torso_clips"].as_array() else {
+        return Some("the run reported no torso clips counter".into());
+    };
+    if acted == 0 {
+        return Some("no other player was seen handling a weapon, so their torso animation was never checked".into());
+    }
+    clips
+        .is_empty()
         .then(|| format!("other players handled weapons for {acted} frames but none ever played a torso animation"))
 }
 
@@ -239,19 +257,30 @@ mod tests {
 
     #[test]
     fn announced_players_must_be_drawn() {
-        assert_eq!(players_problem(&json!({})), None);
+        assert_eq!(
+            players_problem(&json!({"players_seen_max": 0, "players_drawn_max": 0})).unwrap(),
+            "the server announced no other player to draw"
+        );
         assert_eq!(
             players_problem(
-                &json!({"players_seen_max": 3, "players_drawn_max": 2, "player_faults": []})
+                &json!({"players_seen_max": 3, "players_drawn_max": 3, "player_faults": []})
             ),
             None
+        );
+        // A partial draw is the same bug caught earlier.
+        assert!(
+            players_problem(
+                &json!({"players_seen_max": 3, "players_drawn_max": 2, "player_faults": []})
+            )
+            .unwrap()
+            .contains("2 of the 3")
         );
         assert!(
             players_problem(
                 &json!({"players_seen_max": 3, "players_drawn_max": 0, "player_faults": []})
             )
             .unwrap()
-            .contains("none was ever drawn")
+            .contains("0 of the 3")
         );
         assert!(
             players_problem(&json!({"players_seen_max": 3, "players_drawn_max": 3, "player_faults": ["no body"]}))
@@ -261,17 +290,16 @@ mod tests {
     }
 
     #[test]
-    fn a_torso_clip_is_required_only_where_weapons_were_handled() {
-        assert_eq!(torso_problem(&json!({})), None);
+    fn a_torso_clip_is_required_wherever_players_were_drawn() {
+        assert!(torso_problem(&json!({})).unwrap().contains("counter"));
         let seen = |frames: u64, clips: Value| {
             torso_problem(
                 &json!({"players_drawn_max": 2, "remote_weapon_frames": frames, "torso_clips": clips}),
             )
         };
-        assert_eq!(
-            seen(0, json!([])),
-            None,
-            "a scene without fighting is untested"
+        assert!(
+            seen(0, json!([])).unwrap().contains("never checked"),
+            "a scene in which nobody handled a weapon proves nothing about torso animation"
         );
         assert_eq!(seen(5, json!(["pt_reload_stand_rifle"])), None);
         assert!(seen(5, json!([])).unwrap().contains("torso"));

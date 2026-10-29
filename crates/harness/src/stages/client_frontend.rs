@@ -6,7 +6,7 @@
 //! `players/` folder must be exactly as it was after the run. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::run_client;
+use super::client_session::{run_client, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use std::fs;
 use std::io;
@@ -143,16 +143,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 out.files.push(format!("{f}.png"));
             }
             // The run reads the steps' own verdicts; the player never spawns here.
-            let failed: Vec<String> = report["steps"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|s| s["ok"] != serde_json::Value::Bool(true))
-                .map(|s| format!("{} ({})", s["step"], s["note"]))
-                .collect();
-            if !failed.is_empty() {
+            if let Some(w) = steps_problem(&report) {
                 out.status = Status::Failed;
-                out.reason = Some(format!("steps failed: {}", failed.join(", ")));
+                out.reason = Some(w);
             }
         }
         Err(e) => {

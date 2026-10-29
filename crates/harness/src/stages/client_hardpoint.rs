@@ -6,7 +6,7 @@
 //! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::run_client;
+use super::client_session::{run_client, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use std::io;
 use std::time::Duration;
@@ -54,13 +54,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let strikes = report["objectives"]["airstrikes"].as_u64().unwrap_or(0);
     out.metrics.insert("airstrikes".into(), strikes as f64);
     let mut problems = Vec::new();
-    if let Some(steps) = report["steps"].as_array() {
-        for s in steps
-            .iter()
-            .filter(|s| s["ok"] != serde_json::Value::Bool(true))
-        {
-            problems.push(format!("step {} failed ({})", s["step"], s["note"]));
-        }
+    if let Some(w) = steps_problem(&report) {
+        problems.push(w);
     }
     for id in ["166", "168", "169", "186"] {
         let n = report["hud"]["drawn"][id].as_u64().unwrap_or(0);

@@ -4,7 +4,7 @@
 //! display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::run_client;
+use super::client_session::{run_client, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use std::io;
 use std::time::Duration;
@@ -41,19 +41,21 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut out = StageReport::new(NAME, Status::Passed);
     out.files.push("brush/ui-script.json".into());
     let drawn = report["net"]["brush_models_max"].as_u64().unwrap_or(0);
+    let seen = report["net"]["brush_models_seen"].as_u64().unwrap_or(0);
     out.metrics
         .insert("brush_models_drawn".into(), drawn as f64);
+    out.metrics.insert("brush_models_seen".into(), seen as f64);
     let mut problems = Vec::new();
-    if let Some(steps) = report["steps"].as_array() {
-        for s in steps
-            .iter()
-            .filter(|s| s["ok"] != serde_json::Value::Bool(true))
-        {
-            problems.push(format!("step {} failed ({})", s["step"], s["note"]));
-        }
+    if let Some(w) = steps_problem(&report) {
+        problems.push(w);
     }
-    if drawn == 0 {
-        problems.push("the client drew no brush model on a map that has them".into());
+    // Every `script_brushmodel` the server announced to the client must have reached the renderer.
+    if seen == 0 {
+        problems.push("the server announced no script_brushmodel to draw".into());
+    } else if drawn < seen {
+        problems.push(format!(
+            "{drawn} of the {seen} script_brushmodels the server announced were drawn"
+        ));
     }
     if !problems.is_empty() {
         return Ok(out
