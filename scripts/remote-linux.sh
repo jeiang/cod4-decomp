@@ -23,7 +23,8 @@ ref=HEAD
 if [ $# -gt 0 ] && [ "$1" != -- ]; then ref=$1; shift; fi
 host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test machine}
 dir="~/Projects/cod4e/run-$(hostname -s)-$$"  # per invocation: parallel runs must not wipe each other
-vars="COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 "
+# The shipped tree has no .git, so the harness's build script cannot name the commit; pass it in.
+vars="COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 COD4E_BUILD_HASH=$(git rev-parse --short=12 "$ref^{commit}") "
 [ -n "${COD4E_LINUX_SLOT:-}" ] && vars="${vars}COD4E_SLOT=$(printf '%q' "$COD4E_LINUX_SLOT") "
 opts=""
 [ "${COD4E_LINUX_CHECKS:-1}" = 0 ] && opts="--no-checks "
