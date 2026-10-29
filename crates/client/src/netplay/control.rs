@@ -73,7 +73,7 @@ fn kind(e: &net::entity::EntityState) -> &'static str {
 /// The entities the newest snapshot carried, and the actors the compass knows, one object each.
 fn entities(st: &NetPlay) -> Value {
     let Some(snap) = st.net.latest() else {
-        return json!([]);
+        return json!({"count": 0, "list": []});
     };
     let visible: std::collections::HashSet<u16> = snap.entities.iter().map(|e| e.number).collect();
     let mut out = Vec::with_capacity(snap.entities.len() + snap.actors.len());
@@ -91,7 +91,8 @@ fn entities(st: &NetPlay) -> Value {
             "actor": !visible.contains(&e.number),
         }));
     }
-    Value::Array(out)
+    // The count first: a `wait` on `entities.count` is what an agent asks for, not the list itself.
+    json!({"count": out.len(), "list": out})
 }
 
 /// The scoreboard the server last sent, with each row's numbers.

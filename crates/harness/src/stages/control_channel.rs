@@ -185,7 +185,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         )?;
         id += 1;
         let ents = ask(&mut sock, id, json!({"cmd": "state", "what": "entities"}))?;
-        let listed = ents["entities"].as_array().cloned().unwrap_or_default();
+        let listed = ents["entities"]["list"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         report
             .metrics
             .insert("entities".to_owned(), listed.len() as f64);
@@ -214,16 +217,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             id,
             json!({"cmd": "key", "bind": "+scores", "action": "up"}),
         )?;
-        let rows = board["rows"]
+        let rows = board["scoreboard"]["rows"]
             .as_array()
-            .or_else(|| board["scoreboard"]["rows"].as_array())
-            .map(Vec::len)
-            .unwrap_or(0);
+            .cloned()
+            .unwrap_or_default();
         report
             .metrics
-            .insert("scoreboard_rows".to_owned(), rows as f64);
-        if rows < 4 {
-            return Err(format!("{rows} scoreboard rows, want 4: {board}"));
+            .insert("scoreboard_rows".to_owned(), rows.len() as f64);
+        if rows.len() < 4 {
+            return Err(format!("{} scoreboard rows, want 4: {board}", rows.len()));
         }
 
         // A capture of the frame on screen, with no window of the stage's own.
