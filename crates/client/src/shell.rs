@@ -1768,9 +1768,14 @@ impl HostCx<'_> {
                 "connect" => self.st.actions.push(Action::Join(a(1).to_owned())),
                 "playdemo" | "demo" => self.st.actions.push(Action::PlayDemo(a(1).to_owned())),
                 "reconnect" => self.st.actions.push(Action::Reconnect),
+                // The server's `g_gametype` defaults to `war` (`SV_Init` registers it so); a client that has not
+                // played yet has none set, and `set g_gametype` with nothing would fail the server's start.
                 "map" | "devmap" => self.st.actions.push(Action::StartServer {
                     map: a(1).to_owned(),
-                    gametype: self.dvar_get("g_gametype"),
+                    gametype: match self.dvar_get("g_gametype") {
+                        g if g.is_empty() => "war".to_owned(),
+                        g => g,
+                    },
                 }),
                 // The server's, or the app's own: not for the input layer, whose `pending_commands` a menu drops.
                 n if crate::console::is_app_verb(n) => self

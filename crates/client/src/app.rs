@@ -2134,7 +2134,18 @@ impl Viewer {
                     el.exit();
                 }
                 Action::StartServer { map, gametype } => {
-                    start_session(&self.cli, &mut self.map, st, &map, &gametype, None);
+                    // `SV_Map_f` looks for the map's zone before anything else (`DB_FileSize`, KisakCOD
+                    // `server_mp/sv_ccmds_mp.cpp`): a map the install lacks starts no server and shows no loading
+                    // screen. The original prints its `Can't find map` to the console; here it is the error popup's
+                    // reason, so a menu player sees it too (#368). A match being played goes on, as there.
+                    if assets::paths::zone_file(&self.cli.install, &game_of(&st.input), &map)
+                        .is_none()
+                    {
+                        tracing::warn!(%map, "map not found: the install has no zone for it");
+                        show_error(st, &format!("Can't find map \"{map}\"."));
+                    } else {
+                        start_session(&self.cli, &mut self.map, st, &map, &gametype, None);
+                    }
                 }
                 Action::Join(addr) => {
                     let _connect = tracing::info_span!("connect", %addr).entered();

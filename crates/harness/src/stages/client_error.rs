@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-error`: every failed start, load or join ends in the stock error popup with its reason, over the main
-//! menu, as `Com_Error(ERR_DROP)` does it. Run 1 is the front end: `map` and `devmap` of a map the install lacks,
-//! then a join of an address nothing answers. Run 2 joins a server that answers `getinfo` but never the connect:
-//! the connection attempt times out. Run 3 plays a match on a listen server until the server kicks the player.
-//! Each must open `error_popmenu` with the reason in `com_errorMessage`, with no match left behind.
-//! Needs a display and the install; skips without.
+//! menu, as `Com_Error(ERR_DROP)` does it. Run 1 is the front end: `map` and `devmap` of a map the install lacks
+//! (refused before any loading screen, as `SV_Map_f` looks for the zone first), then a join of an address nothing
+//! answers. Run 2 joins a server that answers `getinfo` but never the connect: the connection attempt times out.
+//! Run 3 starts a match with `map` typed at the console, spawns through the team and class menus, and plays until
+//! the server kicks the player. Each must open `error_popmenu` with the reason in `com_errorMessage`, with no match
+//! left behind. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, steps_problem};
@@ -20,25 +21,27 @@ use std::time::Duration;
 const NAME: &str = "client-error";
 const LIMIT: Duration = Duration::from_secs(240);
 
-/// The zone the loader reports missing (`Could not find zone`, as the original's `DB_LoadXAssets` says it).
+/// A map no install has: `SV_Map_f` says `Can't find map` and starts nothing.
 const BAD_MAP: &str = "nosuchmap";
 /// An address nothing listens on: the standard ports are 28960 to 28963.
 const NOBODY: &str = "127.0.0.1:28999";
 
 /// The front end: a typed `map` and `devmap` of a missing map, and a join nobody answers. The popup is dismissed as a
 /// player does, with Escape, which empties the message, so each check is its own.
-const FRONTEND_STEPS: &str = "wait=2,console=map nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Could not find zone 'nosuchmap',home=5,shot=badmap,\
-key=escape,wait=1,cvaris=com_errorMessage ,console=devmap nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Could not find zone 'nosuchmap',home=5,\
+const FRONTEND_STEPS: &str = "wait=2,console=map nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Can't find map \"nosuchmap\".,home=5,shot=badmap,\
+key=escape,wait=1,cvaris=com_errorMessage ,console=devmap nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Can't find map \"nosuchmap\".,home=5,\
 key=escape,wait=1,cvaris=com_errorMessage ,connect=127.0.0.1:28999,menu=error_popmenu:30,cvaris=com_errorMessage 127.0.0.1:28999 did not answer,home=5,shot=refused";
 
-/// A match on a listen server, which then kicks the player by name (`--name` defaults to `player`).
-const KICKED_ARGS: &[&str] = &["--listen"];
-const KICKED_STEPS: &str = "ingame=120,wait=2,server=kick player,menu=error_popmenu:30,cvaris=com_errorMessage Player kicked,home=5,shot=kicked";
+/// A match started with `map` at the console (the server's `g_gametype` default, war, with no gametype played yet),
+/// spawned through the stock team and class menus; the server then kicks the player by name (`--name` defaults to
+/// `player`).
+const KICKED_STEPS: &str = "wait=2,console=map mp_crash,menu=team_marinesopfor:120,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,\
+ingame=120,wait=2,server=kick player,menu=error_popmenu:30,cvaris=com_errorMessage Player kicked,home=5,shot=kicked";
 
 /// The steps whose outcome the stage is about: a run that stopped before them proves nothing.
 const REQUIRED: &[&[&str]] = &[
     &[
-        "cvaris=com_errorMessage Could not find zone 'nosuchmap'",
+        "cvaris=com_errorMessage Can't find map \"nosuchmap\".",
         "cvaris=com_errorMessage 127.0.0.1:28999 did not answer",
         "shot=refused",
     ],
@@ -148,14 +151,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             REQUIRED[0],
             &["badmap", "refused"],
         ),
-        ("timeout", &[], &timeout_steps, REQUIRED[1], &["timeout"]),
         (
-            "kicked",
-            KICKED_ARGS,
-            KICKED_STEPS,
-            REQUIRED[2],
-            &["kicked"],
+            "timeout",
+            &[],
+            timeout_steps.as_str(),
+            REQUIRED[1],
+            &["timeout"],
         ),
+        ("kicked", &[], KICKED_STEPS, REQUIRED[2], &["kicked"]),
     ];
     for (label, args, steps, required, shots) in runs {
         let dir = ctx.dir.join(label);
@@ -182,7 +185,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     drop(mute);
     out.notes.push(format!(
-        "map and devmap of {BAD_MAP}, a join of {NOBODY}, a join whose connect is never answered, and a kick each opened error_popmenu with the reason over the main menu, with no match left"
+        "map and devmap of {BAD_MAP}, a join of {NOBODY}, a join whose connect is never answered, and a kick from a match started with map at the console each opened error_popmenu with the reason over the main menu, with no match left"
     ));
     if !problems.is_empty() {
         out.status = Status::Failed;
