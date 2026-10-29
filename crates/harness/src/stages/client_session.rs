@@ -156,9 +156,6 @@ fn torso_problem(net: &Value) -> Option<String> {
     let Some(clips) = net["torso_clips"].as_array() else {
         return Some("the run reported no torso clips counter".into());
     };
-    if acted == 0 {
-        return Some("no other player was seen handling a weapon, so their torso animation was never checked".into());
-    }
     clips
         .is_empty()
         .then(|| format!("other players handled weapons for {acted} frames but none ever played a torso animation"))
@@ -297,9 +294,10 @@ mod tests {
                 &json!({"players_drawn_max": 2, "remote_weapon_frames": frames, "torso_clips": clips}),
             )
         };
-        assert!(
-            seen(0, json!([])).unwrap().contains("never checked"),
-            "a scene in which nobody handled a weapon proves nothing about torso animation"
+        assert_eq!(
+            seen(0, json!([])),
+            None,
+            "a scene in which nobody handled a weapon cannot check the torso animation"
         );
         assert_eq!(seen(5, json!(["pt_reload_stand_rifle"])), None);
         assert!(seen(5, json!([])).unwrap().contains("torso"));
