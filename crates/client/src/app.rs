@@ -454,6 +454,9 @@ struct State {
     surface_stalled: Option<Instant>,
     /// The stalled surface was recreated once and the window is still giving no frame; the next expiry is the end.
     surface_retried: bool,
+    /// A frame has been presented on the surface of the moment: before that the compositor has not mapped the window
+    /// yet, and a timeout says nothing about a stall.
+    presented: bool,
     /// The next resize takes a new surface from the window: the present mode changed, and a live swapchain is not
     /// handed over to another mode (see [`vid_restart`]).
     fresh_surface: bool,
@@ -1045,6 +1048,7 @@ impl Viewer {
             surface_failures: 0,
             surface_stalled: None,
             surface_retried: false,
+            presented: false,
             surface_stall_limit: (self.cli.timed() || self.cli.ui_script.is_some())
                 .then_some(SURFACE_STALL),
             fresh_surface: false,
@@ -1262,6 +1266,7 @@ impl Viewer {
         st.surface_failures = 0;
         st.surface_stalled = None;
         st.surface_retried = false;
+        st.presented = false;
         st.fresh_surface = false;
         if st.net.is_some() {
             let name = if st.map_name.is_empty() {
@@ -2032,6 +2037,7 @@ impl Viewer {
         }
         let t_present = Instant::now();
         st.gpu.queue.present(frame);
+        st.presented = true;
         st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
         if let Some(m) = st.menu_sound.as_mut() {
             m.set_volume(crate::sound::volume_of(&st.input.cvars));
@@ -3473,6 +3479,12 @@ fn recover_surface(
             st.surface_stalled = None;
             return Ok(SurfaceAction::Retry);
         }
+        if !st.presented && st.surface_stalled.is_none() {
+            // Nothing has reached the screen yet: a compositor that has not mapped the window hands no image back,
+            // and asking for one is the only thing a client can do about it (a no-op once it is mapped).
+            st.window.set_visible(true);
+            st.window.request_redraw();
+        }
         let since = *st.surface_stalled.get_or_insert_with(Instant::now);
         if let Some(limit) = st.surface_stall_limit
             && since.elapsed() > limit
@@ -3495,9 +3507,19 @@ fn recover_surface(
             }
             let size = st.window.inner_size();
             let scale = st.window.scale_factor();
+            let monitor = st
+                .window
+                .current_monitor()
+                .map(|m| format!("{:?}", m.name()))
+                .unwrap_or_else(|| "none".into());
+            let presented = if st.presented {
+                "handed no image back"
+            } else {
+                "never presented a frame"
+            };
             return Err(st.gpu.explain(&format!(
                 "the window's surface gave no frame for {} s ({outcome:?}): the window is {}x{} at scale {scale} \
-                 ({:?}), not minimized, and its compositor handed no image back",
+                 ({:?}) on monitor {monitor}, not minimized, and its compositor {presented}",
                 limit.as_secs(),
                 size.width,
                 size.height,
