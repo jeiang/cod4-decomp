@@ -442,6 +442,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_menu_match::run),
     },
     StageDef {
+        name: "client-sd-rounds",
+        description: "the client starts a three-round Search and Destroy from the stock menus and picks a team and class once: each round restart spawns the player again on the same team with no team menu, the attacker and defender roles swap after rounds one and two and are back after the third, and the team survives into the final scoreboard",
+        needs_install: false,
+        timeout: Duration::from_secs(12 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_sd_rounds::run),
+    },
+    StageDef {
         name: "client-fx",
         description: "effects on the real content, headless: an explosion draws and ends, an impact leaves a decal, a shot flashes and ejects a shell, a burst of tracers draws a beam each, vision and shock files work",
         needs_install: false,

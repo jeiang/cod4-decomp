@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gsc::{Builtins, CallOutcome, Obj, Options, Value, Vm, VmError, VmErrorKind, compile};
+use gsc::{
+    Builtins, CallOutcome, EntClass, Obj, Options, Value, Vm, VmError, VmErrorKind, compile,
+};
 
 use crate::ban::BanList;
 use crate::bot::{BotShared, Brain};
@@ -23,7 +25,7 @@ use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
 use crate::cvar::{self, Cvars};
 use crate::game::{self, Game};
-use crate::netsv::{Inbound, NetSv, is_lan};
+use crate::netsv::{Inbound, NetSv, Peer, is_lan};
 use crate::rcon::{self, Throttle, Verdict};
 use crate::script::{Dispatch, ScriptHost};
 use crate::ui::Dest;
@@ -39,6 +41,16 @@ const STATS_WAIT_MS: i32 = 5000;
 const STATSYNC_MAX_PAIRS: usize = 64;
 /// The least time between one person's client commands while `sv_floodProtect` is on.
 const FLOOD_MS: i32 = 800;
+
+/// What a person keeps when the level changes under them (`SV_MapRestart`, `SV_SpawnServer`): their slot
+/// (`svs.clients[i]` is reconnected in place), their profile stats, and their `self.pers` script array when the level
+/// was left with `savepersist` (`client_t::scriptId`, which `G_ShutdownGame` frees otherwise).
+struct Kept {
+    slot: u16,
+    name: String,
+    stats: std::collections::HashMap<i32, i32>,
+    pers: Option<Value>,
+}
 
 /// `Cmd_MenuResponse_f`: a client's `menuresponse <server id> <menu> <response>` as the script notify's arguments.
 /// None when the server id is not this level's (a menu the player answered across a map change: dropped). Anything
@@ -1157,14 +1169,31 @@ impl Server {
         assets::vfs::pure_digest(&self.install.vfs.pure_iwds(&self.install.root))
     }
 
-    /// Gives a person a client slot like a bot gets one: the scripts see a connect. With `stats` (a person kept across
-    /// a map change) they begin at once; a new person begins when their profile has arrived ([`Self::begin_client`]).
+    /// Gives a person a client slot like a bot gets one: the scripts see a connect. With `kept` (a person kept across
+    /// a level change) they take their old slot back and begin at once; a new person begins when their profile has
+    /// arrived ([`Self::begin_client`]).
     fn join_human(
         &mut self,
         name: &str,
-        stats: Option<std::collections::HashMap<i32, i32>>,
+        kept: Option<Kept>,
         privileged: bool,
     ) -> Result<u16, &'static str> {
+        let known = kept.is_some();
+        // A kept person's slot is free again (the level reset every slot) and is the first one tried from it, as the
+        // original reconnects `svs.clients[i]` in place. A person who gave the private password may take a private
+        // slot, which the others may not.
+        let (first, stats, pers) = match kept {
+            Some(k) => (usize::from(k.slot), k.stats, k.pers),
+            None => (
+                if privileged {
+                    0
+                } else {
+                    usize::try_from(self.game.cvars.int("sv_privateClients")).unwrap_or(0)
+                },
+                Default::default(),
+                None,
+            ),
+        };
         let Some(run) = self.run.as_mut() else {
             return Err("No map is loaded.");
         };
@@ -1172,16 +1201,12 @@ impl Server {
             game: &mut self.game,
             dispatch: &run.dispatch,
         };
-        // A person who gave the private password may take a private slot, which the others may not.
-        let joined = if privileged {
-            host.game.connect_client_from(&mut run.vm, false, name, 0)
-        } else {
-            host.game.connect_client(&mut run.vm, false, name)
-        };
-        let Some(slot) = joined else {
+        let Some(slot) = host
+            .game
+            .connect_client_from(&mut run.vm, false, name, first, pers)
+        else {
             return Err("Server is full.");
         };
-        let known = stats.is_some();
         if let Some(c) = host.game.client_mut(slot) {
             // The stock scripts kick a client whose profile stats are zero (the original's stand-in for a checksum);
             // a person has no profile until it uploads one (`statsync`), so it starts with the nonzero defaults.
@@ -1190,7 +1215,7 @@ impl Server {
             for i in 0..5 {
                 c.stats.insert(205 + i * 10, 1);
             }
-            c.stats.extend(stats.unwrap_or_default());
+            c.stats.extend(stats);
         }
         host.run_calls(&mut run.vm);
         if known {
@@ -2235,16 +2260,31 @@ impl Server {
 
     fn load_level(&mut self, map: &str, game_var: Option<Value>) -> Result<(), String> {
         let t0 = Instant::now();
-        // People stay connected across a map change; the level they were in is gone.
+        // People stay connected across a map change; the level they were in is gone. Each keeps their slot and
+        // profile stats, and their `self.pers` array when the script asked for `savepersist` (a round's
+        // `map_restart(true)`): `G_ShutdownGame` frees the pers arrays otherwise, so a new map starts everyone at the
+        // team menu while a round restart spawns them back on their team with their class.
         self.begin_waits.clear();
-        let humans: Vec<_> = self
+        let keep_pers = game_var.is_some();
+        let humans: Vec<(Peer, Kept)> = self
             .net
             .as_mut()
             .map_or_else(Vec::new, NetSv::take_peers)
             .into_iter()
             .map(|(slot, peer, name)| {
                 let stats = self.game.client(slot).map(|c| c.stats.clone());
-                (peer, name, stats.unwrap_or_default())
+                let pers = self.run.as_mut().filter(|_| keep_pers).and_then(|r| {
+                    let pers = r.vm.entity(slot, EntClass::Entity).get("pers")?;
+                    r.vm.persist(pers.clone());
+                    Some(pers)
+                });
+                let kept = Kept {
+                    slot,
+                    name,
+                    stats: stats.unwrap_or_default(),
+                    pers,
+                };
+                (peer, kept)
             })
             .collect();
         self.shutdown_game_log();
@@ -2285,8 +2325,9 @@ impl Server {
             self.run_frame();
         }
         self.flush_game_output();
-        for (mut peer, name, stats) in humans {
-            let j = self.join_human(&name, Some(stats), peer.privileged);
+        for (mut peer, kept) in humans {
+            let name = kept.name.clone();
+            let j = self.join_human(&name, Some(kept), peer.privileged);
             if let Ok(slot) = j {
                 if let Some(c) = self.game.client_mut(slot) {
                     c.local = peer.link.addr.ip().is_loopback();

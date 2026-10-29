@@ -420,12 +420,15 @@ fn reachable(v: &Value, seen: &mut HashSet<*const Object>) {
     }
 }
 
-/// Empties every object on this thread except those `keep` reaches, which breaks the
+/// Empties every object on this thread except those `keep` or `also` reach, which breaks the
 /// reference cycles that would otherwise outlive the level (the original's pool reset).
 /// One level's objects exist at a time.
-pub fn release_objects(keep: &Value) {
+pub fn release_objects(keep: &Value, also: &[Value]) {
     let mut kept = HashSet::new();
     reachable(keep, &mut kept);
+    for v in also {
+        reachable(v, &mut kept);
+    }
     let all: Vec<Rc<Object>> = LIVE.with_borrow_mut(|(live, limit)| {
         let all = live.iter().filter_map(Weak::upgrade).collect();
         live.clear();
