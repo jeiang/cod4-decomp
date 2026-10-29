@@ -147,6 +147,131 @@ pub fn keypad_nav_name(code: KeyCode, logical: &winit::keyboard::Key) -> Option<
     })
 }
 
+/// The physical key the bind table calls `name`, for injecting a key press by name. The inverse of
+/// [`key_name`] over [`CODES`]; `None` for a name no physical key has (a gamepad button, say).
+pub fn key_code(name: &str) -> Option<KeyCode> {
+    CODES.iter().copied().find(|&c| key_name(c) == Some(name))
+}
+
+/// Every physical key [`key_name`] names. A test checks it is the whole of that table.
+static CODES: &[KeyCode] = {
+    use KeyCode::*;
+    &[
+        KeyA,
+        KeyB,
+        KeyC,
+        KeyD,
+        KeyE,
+        KeyF,
+        KeyG,
+        KeyH,
+        KeyI,
+        KeyJ,
+        KeyK,
+        KeyL,
+        KeyM,
+        KeyN,
+        KeyO,
+        KeyP,
+        KeyQ,
+        KeyR,
+        KeyS,
+        KeyT,
+        KeyU,
+        KeyV,
+        KeyW,
+        KeyX,
+        KeyY,
+        KeyZ,
+        Digit0,
+        Digit1,
+        Digit2,
+        Digit3,
+        Digit4,
+        Digit5,
+        Digit6,
+        Digit7,
+        Digit8,
+        Digit9,
+        F1,
+        F2,
+        F3,
+        F4,
+        F5,
+        F6,
+        F7,
+        F8,
+        F9,
+        F10,
+        F11,
+        F12,
+        F13,
+        F14,
+        F15,
+        F16,
+        F17,
+        F18,
+        F19,
+        F20,
+        F21,
+        F22,
+        F23,
+        F24,
+        Space,
+        Enter,
+        Escape,
+        Tab,
+        Backspace,
+        ShiftLeft,
+        ControlLeft,
+        AltLeft,
+        SuperLeft,
+        SuperRight,
+        ArrowUp,
+        ArrowDown,
+        ArrowLeft,
+        ArrowRight,
+        Insert,
+        Delete,
+        Home,
+        End,
+        PageUp,
+        PageDown,
+        CapsLock,
+        Pause,
+        ScrollLock,
+        NumLock,
+        Minus,
+        Equal,
+        BracketLeft,
+        BracketRight,
+        Semicolon,
+        Quote,
+        Comma,
+        Period,
+        Slash,
+        Backslash,
+        Backquote,
+        Numpad0,
+        Numpad1,
+        Numpad2,
+        Numpad3,
+        Numpad4,
+        Numpad5,
+        Numpad6,
+        Numpad7,
+        Numpad8,
+        Numpad9,
+        NumpadEnter,
+        NumpadAdd,
+        NumpadSubtract,
+        NumpadMultiply,
+        NumpadDivide,
+        NumpadDecimal,
+        NumpadEqual,
+    ]
+};
+
 /// The id the original's UI localizes a key by: `Q` for a character key, `KEY_MOUSE1`, `KEY_CTRL`, ... otherwise.
 /// Gamepad buttons have no stock string and keep their upper-case name.
 pub fn key_id(name: &str) -> String {
@@ -205,6 +330,26 @@ mod tests {
         assert_eq!(key_id("ctrl"), "KEY_CTRL");
         assert_eq!(key_id("semicolon"), "KEY_SEMICOLON");
         assert_eq!(key_id("pad_a"), "PAD_A");
+    }
+
+    /// The reverse table names every key the forward one does, so a request can press any key by its bind name.
+    #[test]
+    fn every_named_key_has_a_code() {
+        for &c in CODES {
+            let name = key_name(c).expect("every code in the table has a name");
+            assert_eq!(key_code(name), Some(c), "{name}");
+        }
+        for (name, code) in [
+            ("w", KeyCode::KeyW),
+            ("escape", KeyCode::Escape),
+            ("~", KeyCode::Backquote),
+            ("semicolon", KeyCode::Semicolon),
+            ("f12", KeyCode::F12),
+        ] {
+            assert_eq!(key_code(name), Some(code));
+        }
+        assert_eq!(key_code("mouse1"), None);
+        assert_eq!(key_code("pad_a"), None);
     }
 
     /// Either physical modifier is the one named key, so the stock sprint and stance binds answer to both.

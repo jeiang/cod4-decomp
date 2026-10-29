@@ -20,6 +20,7 @@ audio = { path = "../audio" }
 fx = { path = "../fx" }
 render = { path = "../render" }
 server = { path = "../server" }
+devctrl = { path = "../devctrl" }
 wgpu = "30.0.1"
 glam = "0.34.1"
 png = "0.18.1"

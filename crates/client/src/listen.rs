@@ -63,6 +63,67 @@ pub fn objectives() -> (u64, u64, u64, u64, u64) {
     OBJECTIVES.lock().map_or((0, 0, 0, 0, 0), |o| *o)
 }
 
+/// Requests for the running listen server's state and console, keyed by the control channel's request number.
+static REQUESTS: std::sync::Mutex<Vec<(u64, serde_json::Map<String, Value>)>> =
+    std::sync::Mutex::new(Vec::new());
+/// The answers to those requests, keyed the same way; the channel takes one on a later pass.
+static REPLIES: std::sync::Mutex<Vec<(u64, Result<Value, String>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Asks the listen server one request (`op`: `state`, `exec`, `cvar`). `None` until its answer comes back: the server
+/// answers between its frames, and the channel offers the request again on the next one.
+pub fn request(seq: u64, req: &serde_json::Map<String, Value>) -> Option<Result<Value, String>> {
+    if let Ok(mut replies) = REPLIES.lock()
+        && let Some(i) = replies.iter().position(|(s, _)| *s == seq)
+    {
+        return Some(replies.remove(i).1);
+    }
+    let queued = REQUESTS.lock().ok().is_some_and(|mut q| {
+        let seen = q.iter().any(|(s, _)| *s == seq);
+        if !seen {
+            q.push((seq, req.clone()));
+        }
+        true
+    });
+    if !queued {
+        return Some(Err("the listen server's request queue is gone".to_owned()));
+    }
+    None
+}
+
+/// Answers one request against the running server.
+fn answer(s: &mut Server, req: &serde_json::Map<String, Value>) -> Result<Value, String> {
+    let op = req.get("op").and_then(Value::as_str).unwrap_or("state");
+    match op {
+        "state" => {
+            let what = req.get("what").and_then(Value::as_str);
+            Ok(s.control_state(what))
+        }
+        "exec" => {
+            let line = req
+                .get("line")
+                .and_then(Value::as_str)
+                .ok_or("exec needs the line")?;
+            s.exec_line(line)?;
+            Ok(json!({"ok": true, "line": line}))
+        }
+        "cvar" => {
+            let name = req
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("cvar needs a name")?;
+            match req.get("value").and_then(Value::as_str) {
+                None => Ok(json!({"name": name, "value": s.control_cvar(name)})),
+                Some(v) => {
+                    s.exec_line(&format!("set {name} \"{}\"", v.replace('"', "'")))?;
+                    Ok(json!({"name": name, "value": s.control_cvar(name)}))
+                }
+            }
+        }
+        other => Err(format!("no such server request: {other}")),
+    }
+}
+
 /// Queues `line` for the listen server's console.
 pub fn send(line: &str) {
     if let Ok(mut q) = CONSOLE.lock() {
@@ -226,6 +287,16 @@ fn run(
             .lock()
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default();
+        let asked = REQUESTS
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default();
+        for (seq, req) in asked {
+            let reply = answer(&mut server, &req);
+            if let Ok(mut replies) = REPLIES.lock() {
+                replies.push((seq, reply));
+            }
+        }
         for line in lines {
             if let Err(e) = server.exec_line(&line) {
                 // The verb only: a console line may carry a password.

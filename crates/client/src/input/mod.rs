@@ -11,12 +11,20 @@
 
 pub mod config;
 mod cvar;
+mod event;
 mod feedback;
 mod keys;
+
+pub use event::InputEvent;
 
 /// The input layer's name of a physical key, for binding it from a menu.
 pub fn physical_key_name(code: winit::keyboard::KeyCode) -> Option<String> {
     keys::key_name(code).map(str::to_owned)
+}
+
+/// The physical key a bind name (`w`, `escape`, `~`) is, for pressing it by name.
+pub fn key_code(name: &str) -> Option<winit::keyboard::KeyCode> {
+    keys::key_code(name)
 }
 
 /// The input layer's name of a mouse button.
@@ -40,8 +48,6 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use web_time::Instant;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
-use winit::keyboard::PhysicalKey;
 
 /// `usercmd.buttons` bits: the sim crate's, as `u32`.
 pub mod buttons {
@@ -435,38 +441,96 @@ impl Input {
         }
     }
 
-    pub fn window_event(&mut self, ev: &WindowEvent) {
+    /// One key press or release, from the window system or the control channel, through the bind table.
+    pub fn stroke(
+        &mut self,
+        code: winit::keyboard::KeyCode,
+        logical: Option<&winit::keyboard::Key>,
+        pressed: bool,
+        repeat: bool,
+    ) {
+        if repeat {
+            return;
+        }
+        let named = match logical {
+            Some(l) => keys::keypad_nav_name(code, l).or_else(|| keys::key_name(code)),
+            None => keys::key_name(code),
+        };
+        if let Some(n) = named {
+            self.key(n, pressed);
+        }
+    }
+
+    /// A mouse button press or release, through the bind table (`mouse1`, ...).
+    pub fn mouse_button(&mut self, button: winit::event::MouseButton, pressed: bool) {
+        self.key(&keys::mouse_name(button), pressed);
+    }
+
+    /// The wheel turned `y` lines (positive up): a pulse of `mwheelup` or `mwheeldown`.
+    pub fn wheel(&mut self, y: f32) {
+        if y != 0.0 {
+            self.pulse(if y > 0.0 { "mwheelup" } else { "mwheeldown" });
+        }
+    }
+
+    /// Raw pointer motion, what a captured pointer's look reads.
+    pub fn mouse_motion(&mut self, dx: f64, dy: f64) {
+        self.mouse.winit_motion((dx, dy));
+    }
+
+    /// The window's keyboard focus, as `WindowEvent::Focused` reports it.
+    pub fn focus(&mut self, focused: bool) {
+        if self.debug.is_some() {
+            tracing::info!(focused, "input: window focus");
+        }
+        self.focused = focused;
+        if !focused {
+            self.release_all();
+        }
+    }
+
+    /// One gamepad button edge, as the pad backend would report it.
+    pub fn pad_button(&mut self, name: &str, down: bool) {
+        self.pad_event(name, down);
+    }
+
+    /// A gamepad stick's position (`left` or `right`), -1 to 1 on each axis.
+    pub fn pad_axis(&mut self, stick: &str, dx: f32, dy: f32) {
+        match stick {
+            "left" => self.pad.left = (dx, dy),
+            "right" => self.pad.right = (dx, dy),
+            other => tracing::warn!(stick = other, "control: no such stick"),
+        }
+    }
+
+    /// One engine input event, from the window or the control channel: the game's half of it (the bind table).
+    ///
+    /// The menus and the console read the same events first (`crate::app::dispatch_input`).
+    pub fn event(&mut self, ev: &InputEvent) {
         match ev {
-            WindowEvent::KeyboardInput { event, .. } if !event.repeat => {
-                if let PhysicalKey::Code(c) = event.physical_key
-                    && let Some(n) =
-                        keys::keypad_nav_name(c, &event.logical_key).or_else(|| keys::key_name(c))
-                {
-                    self.key(n, event.state == ElementState::Pressed);
-                }
+            InputEvent::Key {
+                code,
+                logical,
+                state,
+                repeat,
+                ..
+            } => self.stroke(
+                *code,
+                logical.as_ref(),
+                *state == ElementState::Pressed,
+                *repeat,
+            ),
+            InputEvent::Button { button, state } => {
+                self.mouse_button(*button, *state == ElementState::Pressed);
             }
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.key(&keys::mouse_name(*button), *state == ElementState::Pressed);
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let y = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => *y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
-                };
-                if y != 0.0 {
-                    self.pulse(if y > 0.0 { "mwheelup" } else { "mwheeldown" });
-                }
-            }
-            WindowEvent::Focused(f) => {
-                if self.debug.is_some() {
-                    tracing::info!(focused = *f, "input: window focus");
-                }
-                self.focused = *f;
-                if !*f {
-                    self.release_all();
-                }
-            }
-            _ => {}
+            InputEvent::Wheel { y } => self.wheel(*y),
+            InputEvent::Motion { dx, dy } => self.mouse_motion(*dx, *dy),
+            InputEvent::Pad { name, down } => self.pad_button(name, *down),
+            InputEvent::PadAxis { stick, dx, dy } => self.pad_axis(stick, *dx, *dy),
+            InputEvent::Focus(f) => self.focus(*f),
+            // The pointer's position is the menus'; the game reads the raw motion above. Text is the console's and
+            // the menus' too: nothing in the game types.
+            InputEvent::Cursor { .. } | InputEvent::Text(_) => {}
         }
     }
 
@@ -746,6 +810,25 @@ impl Input {
     #[cfg(target_arch = "wasm32")]
     pub fn unsaved(&self) -> bool {
         self.dirty && self.config_path.is_some()
+    }
+
+    /// Every key bind the config holds: key name to command, in name order.
+    pub fn all_binds(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.binds.iter().map(|(k, c)| (k.as_str(), c.as_str()))
+    }
+
+    /// Every cvar and its value, as the console's `dvarlist` would print them.
+    pub fn all_cvars(&self) -> Vec<(String, String)> {
+        self.cvars
+            .entries(None)
+            .into_iter()
+            .map(|(n, v, _)| (n, v))
+            .collect()
+    }
+
+    /// The lines commands have printed since the last frame (`take_messages` drains them).
+    pub fn messages(&self) -> &[String] {
+        &self.messages
     }
 
     /// Keys bound to `command`, in name order.
@@ -1551,7 +1634,7 @@ mod tests {
         let mut i = Input::detached();
         i.key("w", true);
         i.key("mouse1", true);
-        i.window_event(&WindowEvent::Focused(false));
+        i.focus(false);
         let f = frame(&mut i);
         assert_eq!((f.buttons, f.move_forward), (0, 0.0));
         i.mouse.winit_motion((5.0, 5.0));
@@ -2025,9 +2108,9 @@ mod tests {
         i.set_captured(false);
         assert_eq!(i.look_gate(), Some("pointer free"));
         i.set_captured(true);
-        i.window_event(&WindowEvent::Focused(false));
+        i.focus(false);
         assert_eq!(i.look_gate(), Some("unfocused"));
-        i.window_event(&WindowEvent::Focused(true));
+        i.focus(true);
         i.exec_line("set in_mouse 0");
         assert_eq!(i.look_gate(), Some("in_mouse 0"));
     }

@@ -1428,6 +1428,105 @@ impl Server {
         }
     }
 
+    /// One section of the state document the dev control channel reads (see `docs/control-channel.md`): the game's
+    /// real state rather than what a client drew. `None` for the whole document.
+    pub fn control_state(&mut self, what: Option<&str>) -> serde_json::Value {
+        use serde_json::{Value, json};
+        let clients = || -> Value {
+            let mut out = Vec::new();
+            for (n, c) in self.game.connected_clients() {
+                out.push(json!({
+                    "slot": n,
+                    "session": c.session.index(),
+                    "name": c.name,
+                    "bot": c.bot,
+                    "team": c.team as u8,
+                    "score": c.score,
+                    "kills": c.kills,
+                    "deaths": c.deaths,
+                    "ping": 0,
+                    "health": c.ps.health,
+                    "origin": [c.ps.origin.x, c.ps.origin.y, c.ps.origin.z],
+                    "weapon": c.ps.weapon,
+                    "alive": c.ps.pm_type < sim::pm::PmType::Dead,
+                    "spawn_count": c.spawn_count,
+                }));
+            }
+            Value::Array(out)
+        };
+        let entities = || -> Value {
+            let mut out = Vec::new();
+            for (n, e) in self.game.ents.iter().enumerate() {
+                let Some(e) = e else { continue };
+                out.push(json!({
+                    "number": n,
+                    "classname": &*e.classname,
+                    "origin": e.origin,
+                    "health": e.health,
+                    "hidden": e.hidden,
+                }));
+            }
+            Value::Array(out)
+        };
+        let cvars = || -> Value {
+            Value::Object(
+                self.game
+                    .cvars
+                    .iter()
+                    .map(|c| (c.name.clone(), Value::String(c.value.clone())))
+                    .collect(),
+            )
+        };
+        let section = |name: &str| -> Value {
+            match name {
+                "map" => json!({
+                    "map": self.map_name().unwrap_or(""),
+                    "gametype": self.gametype,
+                    "time_ms": self.level_time(),
+                    "level_loads": self.level_loads,
+                    "running": self.is_running(),
+                }),
+                "clients" | "scoreboard" => json!({
+                    "clients": clients(),
+                    "axis_score": self.game.team_score[1],
+                    "allies_score": self.game.team_score[2],
+                }),
+                "entities" => entities(),
+                "cvars" => cvars(),
+                "console" => {
+                    json!({"lines": self.log.iter().rev().take(256).rev().collect::<Vec<_>>()})
+                }
+                "script" => json!({"errors": self.all_script_errors}),
+                "net" => {
+                    let s = self.net_stats();
+                    json!({
+                        "addr": self.net_addr().map(|a| a.to_string()),
+                        "clients": self.net_clients(),
+                        "snapshots_out": s.map(|s| s.snapshots_out),
+                        "bytes_in": s.map(|s| s.bytes_in),
+                        "bytes_out": s.map(|s| s.bytes_out),
+                    })
+                }
+                _ => Value::Null,
+            }
+        };
+        match what {
+            Some(name) => section(name),
+            None => {
+                let mut m = serde_json::Map::new();
+                for name in ["map", "clients", "entities", "net", "console", "script"] {
+                    m.insert(name.to_owned(), section(name));
+                }
+                Value::Object(m)
+            }
+        }
+    }
+
+    /// A cvar's value as the server holds it, for the control channel.
+    pub fn control_cvar(&self, name: &str) -> Option<String> {
+        self.game.cvars.get(name).map(|c| c.value.clone())
+    }
+
     pub fn map_name(&self) -> Option<&str> {
         self.game.content.map_name.as_deref()
     }
