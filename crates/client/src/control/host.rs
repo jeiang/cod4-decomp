@@ -84,6 +84,14 @@ pub fn handle<H: Control + ?Sized>(h: &mut H, req: &Request) -> Outcome {
                 _ => Outcome::Wait,
             };
         }
+        // A listen server answers between its own frames: the request waits for its reply.
+        "server" => {
+            let id = req.id.clone();
+            return match h.server(req.seq, &req.args) {
+                None => Outcome::Wait,
+                Some(r) => Outcome::Done(reply(&id, r)),
+            };
+        }
         _ => {}
     }
     Outcome::Done(reply(&req.id, answer(h, req)))
@@ -204,14 +212,7 @@ fn answer<H: Control + ?Sized>(h: &mut H, req: &Request) -> Result<Value, String
             }
             h.view(origin, angles)
         }
-        // A listen server answers between its own frames: the request waits for its reply.
-        "server" => {
-            let id = req.id.clone();
-            return match h.server(req.seq, &req.args) {
-                None => Outcome::Wait,
-                Some(r) => Outcome::Done(reply(&id, r)),
-            };
-        }
+
         "quit" => {
             h.quit();
             Ok(json!({"quitting": true}))
