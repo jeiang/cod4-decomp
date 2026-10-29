@@ -94,7 +94,7 @@ fn translators_agree_on_the_synthetic_frame() {
     let (Some(mojo), Some(vkd3d)) = (driver("COD4E_MOJOSHADER_DRV"), driver("COD4E_VKD3D_DRV"))
     else {
         eprintln!(
-            "skipped: set COD4E_MOJOSHADER_DRV and COD4E_VKD3D_DRV to the built drivers (scripts/build-crosscheck-tools.sh)"
+            "skipped: set COD4E_MOJOSHADER_DRV and COD4E_VKD3D_DRV to the built drivers (just crosscheck-tools)"
         );
         return;
     };

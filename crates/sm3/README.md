@@ -33,7 +33,7 @@ asserts that every pixel of every color target agrees within `TOLERANCE` (2/255)
 blobs, pairs and comparisons, the max difference per reference, and every pair over tolerance.
 
 ```sh
-scripts/build-crosscheck-tools.sh            # fetches + builds the two drivers into target/crosscheck-tools (needs nix, git, curl)
+just crosscheck-tools                        # fetches + builds the two drivers into target/crosscheck-tools (needs nix, git, curl)
 B=$PWD/target/crosscheck-tools/bin
 COD4_PATH=/path/to/COD4 COD4E_MOJOSHADER_DRV=$B/mojo_drv COD4E_VKD3D_DRV=$B/vkd3d_drv \
   cargo test -p sm3 --test crosscheck --release -- --nocapture

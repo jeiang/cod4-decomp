@@ -5,9 +5,9 @@ so the headroom criterion is p99 <= 16.7 ms.
 
 ## Method
 
-`scripts/budget.sh <map> <gametype> <minutes>` plays 32 server-side bots for 15 minutes with
+`just budget <map> <gametype> <minutes>` (`scripts/budget.sh`) plays 32 server-side bots for 15 minutes with
 the round, time and score limits off, pinned to one CPU with `MemoryMax=512M` and no swap
-(`systemd-run --user --scope`, `taskset`). `scripts/budget-table.py` summarises the bundles.
+(`systemd-run --user --scope`, `taskset`). `just budget-table` summarises the bundles.
 Every tick is recorded in `ticks.csv` (total, per-subsystem, process RSS sampled once a second);
 the peak is the kernel high-water mark (`getrusage`), steady is the median of the second half of
 the samples. Every server stage fails the run if peak RSS is over 512 MiB.

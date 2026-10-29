@@ -13,19 +13,25 @@ Read first: `README.md` (what the engine does, feature by feature),
 
 - Run every repository command through the flake: `nix develop -c <cmd>`.
   `rust-toolchain.toml` is the one toolchain pin.
+- Repository tools are `just` recipes (`just --list`); run them as
+  `nix develop -c just <recipe>`. Parallel runs on the Linux host use slots
+  1–3 (`just slot`, `just slot-exec`); each slot has its own headless
+  display, network namespace and target dir. `just serial` runs
+  timing-gated stages with the host to itself.
 - The original install is `./COD4/` (or `COD4_PATH`). It is copyrighted and
   user-owned: never commit, upload, paste or quote its files, and never put
   its content in an issue, a bundle or a log. Tests that need it skip
   without it.
-- Linux checks run on the Linux test host: `scripts/remote-linux.sh <ref> --
-  <harness run options>` with `COD4E_LINUX_HOST` set. On that host, project
+- Linux checks run on the Linux test host: `just remote <ref> -- <harness
+  run options>` or `just slot <n> <ref> <stages>` (`COD4E_LINUX_HOST`,
+  default `artemis.jeiang.vpn`). On that host, project
   work lives under `~/Projects/cod4e/`: `shared/COD4` (install),
   `original-reference/` (the original game under Proton), and one folder per
   task.
 - Windows is reached only through GitHub Actions and the remote tester's run
   bundle. The open Windows defects (#290, #331, #46) cannot be worked on
   locally; do not try to close them without a Windows run.
-- `scripts/footage-review.py` reviews a bundle's screenshots and videos with
+- `just review` reviews a bundle's screenshots and videos with
   vision models (`COD4E_EMBED_URL`, `COD4E_REVIEW_URL`). Its findings are
   leads to check by eye, not evidence.
 
