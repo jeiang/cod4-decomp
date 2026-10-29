@@ -89,9 +89,9 @@ slot-full n ref stages:
 slot-exec n ref +cmd:
     COD4E_LINUX_HOST={{host}} COD4E_LINUX_SLOT="$1" COD4E_LINUX_CHECKS=0 COD4E_LINUX_EXEC=1 scripts/remote-linux.sh "$2" -- "${@:3}"
 
-# Run stages (default suite when empty) serially on the host's real display
+# Run stages (default suite when empty) with the host to itself, on a headless display
 serial ref stages="":
-    COD4E_LINUX_HOST={{host}} COD4E_LINUX_WAYLAND_DISPLAY=wayland-1 COD4E_LINUX_XDG_RUNTIME_DIR=/run/user/1000 scripts/remote-linux.sh "$1" -- ${2:+--stage "$2"}
+    COD4E_LINUX_HOST={{host}} scripts/remote-linux.sh "$1" -- ${2:+--stage "$2"}
 
 # Run a bash command on the Linux host in ~/Projects/cod4e
 host +cmd:
