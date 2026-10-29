@@ -544,8 +544,7 @@ pub fn find(name: &str) -> Option<&'static StageDef> {
     STAGES.iter().find(|s| s.name == name)
 }
 
-/// Run a script in the current process and report it. `Skipped` when it holds
-/// engine commands and none could run.
+/// Run a script in the current process and report it.
 pub fn run_script(name: &str, src: &str) -> StageReport {
     run_script_on(name, src, &mut NoEngine, std::thread::sleep)
 }
@@ -565,31 +564,12 @@ pub fn run_script_on(
     let failed = reports
         .iter()
         .find(|r| matches!(r.outcome, Outcome::Failed(_)));
-    let engine_missing: Vec<&str> = reports
-        .iter()
-        .zip(&cmds)
-        .filter(|(r, _)| matches!(&r.outcome, Outcome::Skipped(m) if m.starts_with("command not implemented")))
-        .map(|(_, c)| c.name.as_str())
-        .collect();
-    let ran_engine = reports
-        .iter()
-        .zip(&cmds)
-        .any(|(r, c)| r.outcome == Outcome::Done && !matches!(c.name.as_str(), "echo" | "wait"));
-    let (status, reason) = if let Some(f) = failed {
-        (
+    let (status, reason) = match failed {
+        Some(f) => (
             Status::Failed,
             Some(format!("line {}: {}", f.line, f.command)),
-        )
-    } else if !engine_missing.is_empty() && !ran_engine {
-        let mut uniq = engine_missing.clone();
-        uniq.sort_unstable();
-        uniq.dedup();
-        (
-            Status::Skipped,
-            Some(format!("engine cannot run it yet: no {}", uniq.join(", "))),
-        )
-    } else {
-        (Status::Passed, None)
+        ),
+        None => (Status::Passed, None),
     };
     let mut r = StageReport::new(name, status);
     r.reason = reason;
@@ -611,11 +591,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn engine_scripts_skip_until_the_engine_has_their_commands() {
+    fn a_script_the_console_cannot_run_fails() {
+        // `NoEngine` accepts nothing, so the first engine line fails the stage instead of skipping it (#375).
         let r = run_script("t", "map mp_crash; wait 10s; screenshot");
-        assert_eq!(r.status, Status::Skipped);
-        assert!(r.reason.unwrap().contains("map, screenshot"));
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.reason.unwrap().contains("map mp_crash"));
         assert_eq!(r.commands.len(), 3);
+        assert!(
+            matches!(&r.commands[0].outcome, Outcome::Failed(m) if m.contains("unknown command"))
+        );
     }
 
     #[test]

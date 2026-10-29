@@ -5,7 +5,7 @@
 //! status 0. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::run_client;
+use super::client_session::{run_client, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::io;
@@ -20,16 +20,27 @@ click=Quit,menu=quit_popmenu:5,click=Yes,wait=5";
 /// The least share of the frame the front end lights up (a black screen is 0).
 const MIN_LIT: f64 = 0.02;
 
+/// The steps whose outcome this stage is about: a report that stopped before them proves nothing.
+const REQUIRED_STEPS: &[&str] = &[
+    "click=Leave Game",
+    "menu=popup_leavegame:5",
+    "shot=home",
+    "click=Quit",
+];
+
 /// Why the run failed, or `None`.
 fn verdict(report: &Value) -> Option<String> {
+    if let Some(w) = steps_problem(report) {
+        return Some(w);
+    }
     let steps = report["steps"].as_array().map_or(&[][..], Vec::as_slice);
-    let failed: Vec<String> = steps
+    let missing: Vec<&str> = REQUIRED_STEPS
         .iter()
-        .filter(|s| s["ok"] != Value::Bool(true))
-        .map(|s| format!("{} ({})", s["step"], s["note"]))
+        .copied()
+        .filter(|want| !steps.iter().any(|s| s["step"] == *want))
         .collect();
-    if !failed.is_empty() {
-        return Some(format!("steps failed: {}", failed.join(", ")));
+    if !missing.is_empty() {
+        return Some(format!("the run never reached {}", missing.join(", ")));
     }
     let lit = steps
         .iter()
@@ -93,8 +104,11 @@ mod tests {
 
     fn report(lit: f64, quit: bool) -> Value {
         json!({"quit": quit, "steps": [
-            {"step": "click=Quit", "ok": true},
+            {"step": "ingame=120", "ok": true},
+            {"step": "click=Leave Game", "ok": true},
+            {"step": "menu=popup_leavegame:5", "ok": true},
             {"step": "shot=home", "ok": true, "lit_fraction": lit},
+            {"step": "click=Quit", "ok": true},
         ]})
     }
 
@@ -107,5 +121,17 @@ mod tests {
     fn quit_must_reach_the_exit() {
         assert!(verdict(&report(0.3, false)).unwrap().contains("Quit"));
         assert!(verdict(&report(0.3, true)).is_none());
+    }
+
+    #[test]
+    fn a_run_that_never_reached_leaving_fails() {
+        let short = json!({"quit": true, "steps": [{"step": "ingame=120", "ok": true}]});
+        let why = verdict(&short).unwrap();
+        assert!(why.contains("Leave Game") && why.contains("Quit"), "{why}");
+        assert!(
+            verdict(&json!({"quit": true, "steps": []}))
+                .unwrap()
+                .contains("no steps")
+        );
     }
 }

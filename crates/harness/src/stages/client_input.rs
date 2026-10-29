@@ -6,6 +6,8 @@ use std::io;
 use std::process::Command;
 
 const NAME: &str = "client-input";
+/// The checks the selftest prints (about 20 today): fewer pass lines than this means it barely ran.
+const MIN_CHECKS: usize = 10;
 
 pub fn run(_: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = super::client_flythrough::locate_client() else {
@@ -38,6 +40,13 @@ pub fn run(_: &StageCtx) -> io::Result<StageReport> {
             "{} ({})",
             failed.join("; "),
             String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    } else if passed < MIN_CHECKS {
+        // The selftest prints one line per check and exits 0 when none failed, so a run that printed no `pass`
+        // line (or almost none) exited 0 having checked nothing (#375).
+        r.status = Status::Failed;
+        r.reason = Some(format!(
+            "the selftest passed only {passed} of the {MIN_CHECKS}+ checks it has"
         ));
     }
     Ok(r)

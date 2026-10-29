@@ -8,7 +8,7 @@
 //! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::profile_args;
+use super::client_session::{profile_args, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::fs::{self, File};
@@ -66,15 +66,8 @@ fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String
 
 /// What is wrong with the HUD of a finished run, or `None`.
 pub(crate) fn verdict(report: &Value) -> Option<String> {
-    let failed: Vec<String> = report["steps"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|s| s["ok"] != Value::Bool(true))
-        .map(|s| format!("{} ({})", s["step"], s["note"]))
-        .collect();
-    if !failed.is_empty() {
-        return Some(format!("steps failed: {}", failed.join(", ")));
+    if let Some(w) = steps_problem(report) {
+        return Some(w);
     }
     let h = &report["hud_draw"];
     let n = |k: &str| h[k].as_u64().unwrap_or(0);
@@ -115,19 +108,26 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     if v("dof_frames") == 0 {
         bad.push("depth of field never blurred a frame");
     }
-    // A name is held to account only when the match gave the HUD something to name; `untested` says when not.
-    if n("friends_in_sight_frames") > 0 && n("names_max") == 0 {
+    // A name is held to account: the match is 400 s of team deathmatch with nine bots, so a teammate stood in
+    // sight and a player stood under the crosshair at some point; a run in which neither happened exercised
+    // neither check and proves nothing (#375).
+    if n("friends_in_sight_frames") == 0 {
+        bad.push("no teammate was ever in sight, so the overhead names were never checked");
+    } else if n("names_max") == 0 {
         bad.push("a teammate was in sight but no overhead name was drawn");
     }
-    if n("crosshair_due_frames") > 0 && n("crosshair_name_frames") == 0 {
+    if n("crosshair_due_frames") == 0 {
+        bad.push("the crosshair was never on a player in range, so none was ever named");
+    } else if n("crosshair_name_frames") == 0 {
         bad.push("the crosshair was on a player but never named them");
     }
-    // The killcam shows the viewer's own body, which carries the "you" marker over its head; whether it is in
-    // sight depends on how the kill happened, so the marker is held to account only when it was due.
+    // The killcam shows the viewer's own body, which carries the "you" marker over its head.
     let marked = h["head_icon_materials"]
         .as_array()
         .is_some_and(|m| m.iter().any(|v| v == "headiconyouinkillcam"));
-    if n("killcam_you_frames") > 0 && !marked {
+    if n("killcam_frames") > 0 && n("killcam_you_frames") == 0 {
+        bad.push("the killcam never had the viewer's body in sight, so the \"you\" marker was never checked");
+    } else if n("killcam_you_frames") > 0 && !marked {
         bad.push("the killcam drew no head icon over the viewer's body");
     }
     // A message or hint that is still a string key (MP_CHANGE_CLASS_NEXT_SPAWN) was not localized.
@@ -154,23 +154,6 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
         bad.push(&missing);
     }
     (!bad.is_empty()).then(|| bad.join(", "))
-}
-
-/// What the run gave the names nothing to do with, so those checks said nothing.
-pub(crate) fn untested(report: &Value) -> Vec<&'static str> {
-    let h = &report["hud_draw"];
-    let n = |k: &str| h[k].as_u64().unwrap_or(0);
-    let mut out = Vec::new();
-    if n("friends_in_sight_frames") == 0 {
-        out.push("overhead names untested: no teammate was in sight");
-    }
-    if n("crosshair_due_frames") == 0 {
-        out.push("crosshair names untested: the crosshair was never on a player in range");
-    }
-    if n("killcam_frames") > 0 && n("killcam_you_frames") == 0 {
-        out.push("killcam \"you\" marker untested: the viewer's body was never in sight");
-    }
-    out
 }
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -209,8 +192,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     out.metrics.insert(format!("hud.{k}"), v);
                 }
             }
-            out.notes
-                .extend(untested(&report).into_iter().map(String::from));
             if let Some(why) = verdict(&report) {
                 out.status = Status::Failed;
                 out.reason = Some(why);
@@ -269,11 +250,14 @@ mod tests {
             why.contains("overhead name") && why.contains("crosshair"),
             "{why}"
         );
-        // Nothing in sight to name: not a failure, but said to be untested.
+        // The match gave nobody to name: a failure now, because the scenario is meant to put someone there.
         r["hud_draw"]["friends_in_sight_frames"] = json!(0);
         r["hud_draw"]["crosshair_due_frames"] = json!(0);
-        assert_eq!(verdict(&r), None);
-        assert_eq!(untested(&r).len(), 2);
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("no teammate was ever in sight") && why.contains("never on a player"),
+            "{why}"
+        );
         let mut r = good();
         r["net"]["view"]["death_view_frames"] = json!(0);
         r["net"]["view"]["dof_frames"] = json!(0);
@@ -288,10 +272,9 @@ mod tests {
         let mut r = good();
         r["hud_draw"]["head_icon_materials"] = json!([]);
         assert!(verdict(&r).unwrap().contains("head icon"));
-        // The body never in sight: nothing was due, which is said to be untested.
+        // The viewer's body never in sight in the killcam: a failure too, the killcam must show it.
         r["hud_draw"]["killcam_you_frames"] = json!(0);
-        assert_eq!(verdict(&r), None);
-        assert!(untested(&r).iter().any(|u| u.contains("killcam")));
+        assert!(verdict(&r).unwrap().contains("never had the viewer's body"));
         let mut r = good();
         r["hud_draw"]["unresolved"] = json!(["MP_CHANGE_CLASS_NEXT_SPAWN"]);
         r["hud"] = json!({"unresolved_text": ["PLATFORM_HOLD_TO_PLANT_EXPLOSIVES"]});

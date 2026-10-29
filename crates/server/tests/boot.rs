@@ -247,3 +247,34 @@ fn getinfo_and_getstatus_carry_the_server_settings() {
     );
     assert!(players.is_empty());
 }
+
+/// Every command the console's table lists (`COMMANDS`, which the harness's `has_command` reads) reaches a handler:
+/// none of them may fall through to "Unknown command" and get logged as one (#375).
+#[test]
+fn every_listed_command_has_a_handler() {
+    let Some(mut s) = boot(&[
+        "+set",
+        "net_port",
+        "0",
+        "+set",
+        "g_gametype",
+        "war",
+        "+map",
+        "mp_crash",
+    ]) else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let (_, events) = logging::capture(|| {
+        for name in server::server::COMMANDS {
+            // No arguments: a handler answers with its usage error, the catch-all with "Unknown command".
+            let _ = s.exec_line(name);
+        }
+    });
+    let unknown: Vec<&str> = events
+        .iter()
+        .filter(|e| e.message.contains("unknown command"))
+        .map(|e| e.field("cmd").unwrap_or("?"))
+        .collect();
+    assert!(unknown.is_empty(), "listed but not handled: {unknown:?}");
+}

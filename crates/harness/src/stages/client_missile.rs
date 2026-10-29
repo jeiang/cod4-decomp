@@ -4,7 +4,7 @@
 //! cue. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::run_client;
+use super::client_session::{run_client, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use std::io;
 use std::time::Duration;
@@ -52,13 +52,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     out.metrics.insert("explosion_events".into(), blasts as f64);
     out.metrics.insert("explosion_cues".into(), cues as f64);
     let mut problems = Vec::new();
-    if let Some(steps) = report["steps"].as_array() {
-        for s in steps
-            .iter()
-            .filter(|s| s["ok"] != serde_json::Value::Bool(true))
-        {
-            problems.push(format!("step {} failed ({})", s["step"], s["note"]));
-        }
+    if let Some(w) = steps_problem(&report) {
+        problems.push(w);
     }
     if drawn == 0 {
         problems.push("the client drew no projectile model for the thrown grenade".into());
@@ -66,7 +61,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if blasts == 0 {
         problems.push("the client never received the grenade's explosion".into());
     }
-    if sound_ready && cues == 0 {
+    // The mix is what is checked here (`run_client` mixes with `--no-sound`, so no sound card is needed), and a
+    // sound bank that never loaded leaves the explosion silent without failing anything.
+    if !sound_ready {
+        problems.push(format!(
+            "the sound tables never loaded, so the explosion's cue was never checked: {}",
+            report["net"]["sound"]["error"]
+        ));
+    } else if cues == 0 {
         problems.push("the explosion made no sound cue".into());
     }
     if !problems.is_empty() {
