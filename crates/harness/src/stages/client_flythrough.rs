@@ -19,6 +19,10 @@ use std::time::{Duration, Instant};
 
 const NAME: &str = "client-flythrough";
 const DEFAULT_SECS: u64 = 12;
+/// Share of its 30 fps slots a recording may go without a frame before the run fails. The encoder runs on the host's
+/// free cores beside the client; a few slots lost to a scheduler stall keep the file in sync (each sample carries its
+/// own duration), but a rate this high means it never kept up.
+const MAX_VIDEO_DROPPED: f64 = 0.05;
 /// How long past the flythrough a child may take (startup, zone load, video
 /// finish) before it is killed.
 const DEFAULT_GRACE: Duration = Duration::from_secs(120);
@@ -326,6 +330,8 @@ struct ModeJson {
 #[derive(Deserialize)]
 struct VideoJson {
     file: String,
+    #[serde(default)]
+    frames: u64,
     dropped: Option<u64>,
 }
 
@@ -493,6 +499,23 @@ fn consume(
                     report
                         .metrics
                         .insert(format!("{slug}.video_dropped"), d as f64);
+                    // The recorder drops a frame when its encoder cannot keep up with the 30 fps it records
+                    // (crates/client/src/video.rs); the file stays in sync either way, so only a rate this high means
+                    // the encoder fell far behind the render.
+                    let slots = v.frames + d;
+                    if slots > 0 {
+                        let share = d as f64 / slots as f64;
+                        report
+                            .metrics
+                            .insert(format!("{slug}.video_dropped_share"), share);
+                        if share > MAX_VIDEO_DROPPED {
+                            problems.push(format!(
+                                "the video dropped {d} of {slots} frames ({:.1}%, limit {:.0}%): the encoder fell behind",
+                                share * 100.0,
+                                MAX_VIDEO_DROPPED * 100.0
+                            ));
+                        }
+                    }
                 }
             }
         }
