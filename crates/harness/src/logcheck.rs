@@ -27,54 +27,10 @@ pub struct Allow {
 }
 
 /// The reviewed list. Keep it short: fix the cause when the fix is small. `max` is per stage, from the default suite
-/// measured on the Linux host (the largest stage; each entry says its measurement and date) plus a margin: 10% for the
-/// material classes, 25% or more for the rest. It catches a gross regression, not a one-off.
+/// measured on the Linux host (the largest stage; each entry says its measurement and date) plus a margin of 25% or
+/// more. It catches a gross regression, not a one-off.
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
-    Allow {
-        contains: &["render::material", "no usable technique", "_l_hsm_"],
-        reason: "materials on lit techsets (`*_l_hsm_*`: decals, signs, glass, trash) have no technique we translate yet; their draws are skipped",
-        stages: &[],
-        max: Some(2200), // measured 1985 on the Linux host, 2026-10-14,
-    },
-    Allow {
-        contains: &["render::material", "no usable technique", "_unlit"],
-        reason: "materials on unlit techsets (`*_unlit*`: stains, graffiti, godrays, light bulbs) have no technique we translate yet; their draws are skipped",
-        stages: &[],
-        max: Some(1310), // measured 1185 on the Linux host, 2026-10-14,
-    },
-    Allow {
-        contains: &["render::material", "no usable technique", "mc_effect"],
-        reason: "materials on effect techsets (`mc_effect*`: floodlight beams, lens flares, tight glow) have no technique we translate yet; their draws are skipped",
-        stages: &[],
-        max: Some(190), // measured 171 on the Linux host, 2026-10-14,
-    },
-    Allow {
-        contains: &["render::material", "no usable technique", "mc_shadowcaster"],
-        reason: "the tree shadow-caster techset has no technique we translate yet; its draws are skipped",
-        stages: &[],
-        max: Some(66), // measured 60 on the Linux host, 2026-10-14,
-    },
-    Allow {
-        contains: &["render::material", "no usable technique", "wc_sky"],
-        reason: "the sky techset has no technique we translate yet; its draws are skipped",
-        stages: &[],
-        max: Some(72), // measured 65 on the Linux host, 2026-10-14,
-    },
-    Allow {
-        contains: &["render::material", "no usable technique"],
-        reason: "any other techset (sun, default3d, reflex sights, flags, laptop screens) has no technique we translate yet; draws skipped",
-        stages: &["client-equipment"],
-        max: Some(70), // client-equipment draws the same map twice in one stage: 57, 60 and 64 measured on the
-                       // Linux host, 2026-10-29, in bundles/slot-3-cod4e-run-20261029-201530.zip, -202858.zip
-                       // and -210759.zip
-    },
-    Allow {
-        contains: &["render::material", "no usable technique"],
-        reason: "any other techset (sun, default3d, reflex sights, flags, laptop screens) has no technique we translate yet; draws skipped",
-        stages: &[],
-        max: Some(53), // measured 48 on the Linux host, 2026-10-14
-    },
     Allow {
         contains: &["sim::skel::anim", "animation data read out of range"],
         reason: "random_data_short reads past the table for some takeoff and ads animations (#387)",
