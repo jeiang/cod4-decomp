@@ -508,7 +508,9 @@ pub static STAGES: &[StageDef] = &[
     StageDef {
         name: "control-channel",
         description: "the client's dev control channel (#378): a real client starts a listen server, the console is opened with the player's key and `bots 3` typed into it, four players are waited for, the entity list and the scoreboard are read, a menu item is clicked at the centre of its own rectangle, and the presented frame is captured offscreen",
-        needs_install: true,
+        // Like every stage but asset-load, it says why it skips (`install not found`) instead of being failed for a
+        // missing install: `suite::run` reports `Failed` for a `needs_install` stage with no install.
+        needs_install: false,
         timeout: Duration::from_secs(8 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::control_channel::run),
