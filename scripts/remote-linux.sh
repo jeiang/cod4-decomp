@@ -28,7 +28,8 @@ vars="COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 "
 opts=""
 [ "${COD4E_LINUX_CHECKS:-1}" = 0 ] && opts="--no-checks "
 [ "${COD4E_LINUX_EXEC:-0}" = 1 ] && opts="${opts}--exec "
-if [ "${1:-}" = -- ]; then shift; opts="${opts}-- $(printf '%q ' "$@")"; fi
+# A bare `--` must add no argument: printf with no arguments still prints its format once, as `''`.
+if [ "${1:-}" = -- ]; then shift; opts="${opts}-- "; [ $# -gt 0 ] && opts="${opts}$(printf '%q ' "$@")"; fi
 
 # `tar x -m` stamps every file with the extraction time: git archive carries commit times, and a slot's target dir
 # outlives a run, so an older ref's sources would look older than the last build and cargo would reuse its binaries.
