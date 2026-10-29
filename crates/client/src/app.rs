@@ -4534,7 +4534,12 @@ impl crate::control::Control for ControlHost<'_> {
     }
 
     fn binds_of(&self, command: &str) -> Vec<String> {
-        self.st.input.binding_keys(command)
+        self.st
+            .input
+            .binding_keys(command)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     }
 
     fn cvar(&self, name: &str) -> Option<String> {

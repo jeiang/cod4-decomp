@@ -48,6 +48,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use web_time::Instant;
+use winit::event::ElementState;
 
 /// `usercmd.buttons` bits: the sim crate's, as `u32`.
 pub mod buttons {

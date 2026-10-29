@@ -13,7 +13,7 @@ fn player(st: &NetPlay) -> Value {
     let Some(snap) = st.net.latest() else {
         return Value::Null;
     };
-    let ps = snap.ps;
+    let ps = &snap.ps;
     let own = snap.own();
     let team = snap
         .entity(own)
