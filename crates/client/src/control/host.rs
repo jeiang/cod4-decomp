@@ -369,8 +369,8 @@ fn key_code(name: &str) -> Option<KeyCode> {
         "down" => KeyCode::ArrowDown,
         "left" => KeyCode::ArrowLeft,
         "right" => KeyCode::ArrowRight,
-        "~" | "backquote" | "tilde" => KeyCode::Backquote,
-        "/" | "forwardslash" => KeyCode::Slash,
+        "grave" | "~" | "backquote" | "tilde" => KeyCode::Backquote,
+        "slash" | "/" | "forwardslash" => KeyCode::Slash,
         _ => return None,
     })
 }
