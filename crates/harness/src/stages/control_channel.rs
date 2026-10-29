@@ -69,6 +69,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(install) = &ctx.install else {
         return Ok(skipped("no install"));
     };
+    // A run told where the install is when it is not there fails `asset-load`; every stage that needs it says so
+    // rather than starting a client that cannot load.
+    if !install.is_dir() {
+        return Ok(skipped("install not found"));
+    }
     let Some(client) = locate_client() else {
         return Ok(skipped("no client binary"));
     };
