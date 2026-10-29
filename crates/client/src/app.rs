@@ -450,8 +450,10 @@ struct State {
     /// How long a surface may time out or be occluded before a harness run gives up; `None` for a player's window,
     /// which a workspace switch or a cover can hide for any time.
     surface_stall_limit: Option<Duration>,
-    /// Since when the surface has only timed out or been occluded without the window being minimized.
-    surface_stalled: Option<Instant>,
+    /// How long the surface has only timed out or been occluded without the window being minimized, counted only
+    /// while a frame is waiting for its image: a client that blocks for seconds is a stall of its own, priced
+    /// elsewhere, and must not read as a surface that gave nothing.
+    surface_stalled_ms: f64,
     /// The stalled surface was recreated once and the window is still giving no frame; the next expiry is the end.
     surface_retried: bool,
     /// A frame has been presented on the surface of the moment: before that the compositor has not mapped the window
@@ -1046,7 +1048,7 @@ impl Viewer {
             autojoin_next: false,
             prev_cost: [0.0; 4],
             surface_failures: 0,
-            surface_stalled: None,
+            surface_stalled_ms: 0.0,
             surface_retried: false,
             presented: false,
             surface_stall_limit: (self.cli.timed() || self.cli.ui_script.is_some())
@@ -1264,7 +1266,7 @@ impl Viewer {
             sh.replace_gpu(gpu.clone(), format, &self.cli.install)?;
         }
         st.surface_failures = 0;
-        st.surface_stalled = None;
+        st.surface_stalled_ms = 0.0;
         st.surface_retried = false;
         st.presented = false;
         st.fresh_surface = false;
@@ -1778,10 +1780,11 @@ impl Viewer {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
                 st.surface_failures = 0;
-                st.surface_stalled = None;
+                st.surface_stalled_ms = 0.0;
                 f
             }
             other => {
+                st.surface_stalled_ms += t_acquire.elapsed().as_secs_f64() * 1000.0;
                 if let SurfaceAction::DeviceLost = recover_surface(st, &other)? {
                     #[cfg(not(target_arch = "wasm32"))]
                     return self.recover_device();
@@ -3476,25 +3479,24 @@ fn recover_surface(
     }
     if matches!(outcome, C::Timeout | C::Occluded) {
         if matches!(outcome, C::Occluded) && st.window.is_minimized() == Some(true) {
-            st.surface_stalled = None;
+            st.surface_stalled_ms = 0.0;
             return Ok(SurfaceAction::Retry);
         }
-        if !st.presented && st.surface_stalled.is_none() {
+        if !st.presented && st.surface_stalled_ms == 0.0 {
             // Nothing has reached the screen yet: a compositor that has not mapped the window hands no image back,
             // and asking for one is the only thing a client can do about it (a no-op once it is mapped).
             st.window.set_visible(true);
             st.window.request_redraw();
         }
-        let since = *st.surface_stalled.get_or_insert_with(Instant::now);
         if let Some(limit) = st.surface_stall_limit
-            && since.elapsed() > limit
+            && st.surface_stalled_ms > limit.as_secs_f64() * 1000.0
         {
             // A swapchain can keep timing out in a way a reconfiguration fixes: a compositor that stopped handing
             // its images back, or a window that was re-created under it. Give it one new surface and the same time
             // again before the run ends, and say what the window was when it does.
             if !st.surface_retried && st.window.is_minimized() != Some(true) {
                 st.surface_retried = true;
-                st.surface_stalled = Some(Instant::now());
+                st.surface_stalled_ms = 0.0;
                 tracing::info!(
                     outcome = ?outcome,
                     size = ?st.window.inner_size(),
@@ -3518,9 +3520,9 @@ fn recover_surface(
                 "never presented a frame"
             };
             return Err(st.gpu.explain(&format!(
-                "the window's surface gave no frame for {} s ({outcome:?}): the window is {}x{} at scale {scale} \
-                 ({:?}) on monitor {monitor}, not minimized, and its compositor {presented}",
-                limit.as_secs(),
+                "the window's surface gave no frame in {:.0} s of waiting ({outcome:?}): the window is {}x{} at \
+                 scale {scale} ({:?}) on monitor {monitor}, not minimized, and its compositor {presented}",
+                st.surface_stalled_ms / 1000.0,
                 size.width,
                 size.height,
                 st.window.fullscreen()
