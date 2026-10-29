@@ -520,10 +520,12 @@ fn consume(
                             .metrics
                             .insert(format!("{slug}.video_dropped_share"), share);
                         report.metrics.insert(format!("{slug}.video_fps"), fps);
-                        report.notes.push(format!(
-                            "{slug}: the recording lost {d} of {slots} slots ({:.0}%): the encoder kept {fps:.1} fps beside the client",
-                            share * 100.0
-                        ));
+                        if d > 0 {
+                            report.notes.push(format!(
+                                "{slug}: the recording lost {d} of {slots} slots ({:.0}%): the encoder kept {fps:.1} fps beside the client",
+                                share * 100.0
+                            ));
+                        }
                         if fps < MIN_VIDEO_FPS {
                             problems.push(format!(
                                 "the recording kept {fps:.1} fps of {secs} s ({d} of {slots} slots lost): too few frames for the footage review"
