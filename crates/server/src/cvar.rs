@@ -221,7 +221,8 @@ impl Cvars {
         if v.flags & LATCH != 0 && !force && v.registered {
             // A latched write goes to the pending value unless it is already that, even when it equals the one
             // running: the pending value is what the next map applies, so a config that lowered a dvar and a later
-            // `set` back to the running value must not leave the lower one waiting (`Dvar_SetLatchedValue`).
+            // `set` back to the running value must not leave the lower one waiting (`Dvar_SetLatchedValue`,
+            // `dvar.cpp:1485-1521`, KisakCOD).
             if v.latched.as_deref() != Some(value) {
                 v.latched = Some(value.to_owned());
             }
@@ -258,6 +259,9 @@ impl Cvars {
     }
 
     /// The value `name` takes at the next map load, when that is not the value it has now.
+    ///
+    /// Stock reports the difference only when the two values differ (`dvar.cpp:1392-1396`, KisakCOD), and only a
+    /// difference changes the next map, so a latched value equal to the running one is not pending.
     pub fn pending(&self, name: &str) -> Option<&str> {
         let v = self.get(name)?;
         v.latched.as_deref().filter(|l| *l != v.value)
@@ -352,7 +356,7 @@ mod tests {
     #[test]
     fn a_latched_write_replaces_the_pending_value_even_with_the_running_one() {
         // `default_mp_gamesettings.cfg` lowers `sv_maxclients` from 32; a later `set sv_maxclients 32` must leave
-        // nothing waiting, and the map keeps 32 (`Dvar_SetLatchedValue`, dvar.cpp).
+        // nothing waiting, and the map keeps 32 (`Dvar_SetLatchedValue`, `dvar.cpp:1485-1521`, KisakCOD).
         let mut c = Cvars::new();
         c.register("sv_maxclients", "32", ARCHIVE | SERVERINFO | LATCH);
         c.set("sv_maxclients", "24");

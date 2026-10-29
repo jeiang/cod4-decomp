@@ -3487,7 +3487,8 @@ fn recover_surface(
         if let Some(limit) = st.surface_stall_limit {
             if first_fail && !st.presented {
                 // Nothing has reached the screen yet: a compositor that has not mapped the window hands no image
-                // back, and asking for it is the only thing a client can do about it (a no-op once it is mapped). A
+                // back, and asking for it is the only thing a client can do about it (a no-op once it is mapped;
+                // `set_visible` is itself Unsupported on Wayland and Web, so `request_redraw` is what acts there). A
                 // window on a workspace the compositor is not showing is not a client's to move (`focus_window` is
                 // unsupported on Wayland), which is why the error below names the monitor. A player's window is left
                 // alone: `surface_stall_limit` is `None` for it, since they can switch desktops for as long as they
