@@ -119,7 +119,11 @@ fn answer<H: Control + ?Sized>(h: &mut H, req: &Request) -> Result<Value, String
             }
         }
         "cvars" => {
-            let all = h.state(Some("cvars"));
+            // The section is the variables themselves, not the document that names it.
+            let all = match h.state(Some("cvars")) {
+                Value::Object(mut m) => m.remove("cvars").unwrap_or(Value::Null),
+                v => v,
+            };
             match req.str("filter") {
                 None => Ok(all),
                 Some(f) => {
