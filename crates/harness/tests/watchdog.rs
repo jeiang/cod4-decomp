@@ -6,12 +6,6 @@ use harness::stage::Status;
 use std::path::Path;
 use std::process::Command;
 
-/// A bundle's `summary.json`.
-fn summary(zip: &Path) -> serde_json::Value {
-    let mut z = zip::ZipArchive::new(std::fs::File::open(zip).unwrap()).unwrap();
-    serde_json::from_reader(z.by_name("summary.json").unwrap()).unwrap()
-}
-
 fn run(out: &Path, args: &[&str]) -> (i32, diff::Bundle, std::path::PathBuf) {
     let st = Command::new(env!("CARGO_BIN_EXE_cod4e-harness"))
         .args(["--no-prompt", "--out"])
@@ -100,38 +94,28 @@ fn crash_hang_and_panic_are_caught_and_the_suite_continues() {
 }
 
 #[test]
-fn script_scenario_runs_and_skips_missing_commands() {
+fn script_scenario_fails_commands_the_console_lacks() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("mine.cfg");
     std::fs::write(&script, "echo hello; wait 10ms; map mp_crash; wait 1h").unwrap();
     let cmd = script.to_str().unwrap();
-    let (code, b, zip) = run(dir.path(), &["--script", cmd]);
-    // `map` does not exist, so the script is skipped as a whole after echo/wait ran; a skip nothing allows
-    // fails the run (#375).
+    let (code, b, _) = run(dir.path(), &["--script", cmd]);
+    // No engine answers `--script`, so `map` is an unknown command: the scenario fails rather than passing on
+    // the lines that did run, and --allow-skip cannot turn a failure into a pass (#375).
     assert_eq!(code, 1);
     assert_eq!(b.stages[0].name, "script:mine");
-    assert_eq!(b.stages[0].status, Status::Skipped);
-    assert_eq!(b.stages[0].commands.len(), 4);
+    assert_eq!(b.stages[0].status, Status::Failed);
     assert!(
-        summary(&zip)["unexpected_skips"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|n| n == "script:mine")),
-        "the skip is not reported as unexpected: {}",
-        summary(&zip)
+        b.stages[0].reason.as_deref().unwrap_or("").contains("map"),
+        "{:?}",
+        b.stages[0].reason
     );
-    // Named on the command line, the same skip passes.
+    assert_eq!(b.stages[0].commands.len(), 4);
     let allowed = tempfile::tempdir().unwrap();
-    let (code, b, zip) = run(
+    let (code, b, _) = run(
         allowed.path(),
         &["--script", cmd, "--allow-skip", "script:mine"],
     );
-    assert_eq!(code, 0, "{:?}", b.stages[0].reason);
-    assert_eq!(b.stages[0].status, Status::Skipped);
-    assert!(
-        summary(&zip)["allowed_skips"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|n| n == "script:mine")),
-        "--allow-skip did not record the skip: {}",
-        summary(&zip)
-    );
+    assert_eq!(code, 1);
+    assert_eq!(b.stages[0].status, Status::Failed);
 }
