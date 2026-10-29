@@ -161,7 +161,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             break;
         }
     }
-    // B stands at it holding +activate: the hint names the weapon, then it is taken.
+    // B stands at it holding +activate: the hint names the weapon, then it is taken. B is put on the dropped
+    // weapon's own spot (where A stood when it died) rather than beside it: the map's 30 units to the side of a
+    // body can be the inside of a wall, and the hint's line-of-sight test then starts in solid and drops it.
     people[1].hold_use = true;
     let hint = u16::from(WEAPON_HINT_OFFSET) + weapon;
     let mut hinted = false;
@@ -172,7 +174,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 server.game.client(b).map(|c| c.ps.origin)
             ));
         }
-        server.game.teleport(b, [at[0] - 30.0, at[1], at[2]]);
+        server.game.teleport(b, at);
         for _ in 0..10 {
             frame(&mut server, &mut people);
             hinted |= server.game.client(b).is_some_and(|c| {
