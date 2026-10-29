@@ -38,6 +38,8 @@ use devctrl::Channel;
 /// Opens the channel the command line asked for. `None` when it did not: the channel is off unless a flag turns it
 /// on, and then it is bound to loopback or to this process's stdin.
 pub fn open(cli: &Cli) -> Option<Channel> {
+    #[cfg(target_arch = "wasm32")]
+    let _ = cli;
     #[cfg(not(target_arch = "wasm32"))]
     {
         if let Some(port) = cli.control {

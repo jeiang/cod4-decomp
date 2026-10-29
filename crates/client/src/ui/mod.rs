@@ -1604,7 +1604,7 @@ impl Ui {
                     .unwrap_or("")
                     .to_owned();
                 let p = self.item_pixels(m, i);
-                (name, [p.x as f32, p.y as f32, p.w as f32, p.h as f32])
+                (name, [p.x, p.y, p.w, p.h])
             })
             .collect()
     }
@@ -1620,11 +1620,7 @@ impl Ui {
             .unwrap_or("")
             .to_owned();
         let p = self.item_pixels(m, i);
-        Some((
-            self.menus[m].name.clone(),
-            name,
-            [p.x as f32, p.y as f32, p.w as f32, p.h as f32],
-        ))
+        Some((self.menus[m].name.clone(), name, [p.x, p.y, p.w, p.h]))
     }
 
     /// True while a bind item waits for the key to bind (the next key press goes to [`Ui::bind_capture`]).

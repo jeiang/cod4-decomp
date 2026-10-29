@@ -226,7 +226,7 @@ fn answer<H: Control + ?Sized>(h: &mut H, req: &Request) -> Result<Value, String
 }
 
 /// The state a `wait` or an `assert` expects.
-fn expectation<'a>(req: &'a Request) -> Option<&'a Value> {
+fn expectation(req: &Request) -> Option<&Value> {
     req.value("state")
         .or_else(|| req.value("until"))
         .or_else(|| req.value("expect"))
@@ -241,7 +241,7 @@ fn observed(doc: &Value, spec: &Value) -> Value {
     for path in want.keys() {
         out.insert(
             path.clone(),
-            lookup(&doc, path).cloned().unwrap_or(Value::Null),
+            lookup(doc, path).cloned().unwrap_or(Value::Null),
         );
     }
     Value::Object(out)

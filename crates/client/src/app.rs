@@ -4745,10 +4745,7 @@ fn hud_state(st: &mut State) -> Value {
 
 /// Takes the capture the channel asked for from the frame just drawn and answers its request.
 fn take_control_shot(cli: &Cli, st: &mut State, tex: &wgpu::Texture) -> Result<Value, String> {
-    let (dir, inline) = match st.control_shot.take() {
-        Some(want) => want,
-        None => (None, false),
-    };
+    let (dir, inline) = st.control_shot.take().unwrap_or_default();
     let dir = dir
         .map(PathBuf::from)
         .or_else(|| cli.out.clone())
