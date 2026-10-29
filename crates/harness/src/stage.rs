@@ -506,6 +506,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::web_join::run_download),
     },
     StageDef {
+        name: "control-channel",
+        description: "the client's dev control channel (#378): a real client starts a listen server, the console is opened with the player's key and `bots 3` typed into it, four players are waited for, the entity list and the scoreboard are read, a menu item is clicked at the centre of its own rectangle, and the presented frame is captured offscreen",
+        needs_install: true,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::control_channel::run),
+    },
+    StageDef {
         name: "headless-bots-32",
         description: "headless server with 32 bots (the 32-player server budget)",
         needs_install: false,

@@ -515,6 +515,22 @@ mod tests {
     }
 
     #[test]
+    fn the_control_channel_is_off_unless_asked() {
+        // Nothing binds a socket, and nothing writes a port file, without the flag: the channel is a dev tool.
+        let c = parse(&args("--listen")).unwrap();
+        assert_eq!(c.control, None);
+        assert_eq!(c.control_file, None);
+        assert!(!c.control_stdio);
+        let on = parse(&args("--control 0 --control-file /tmp/a.addr")).unwrap();
+        assert_eq!(on.control, Some(0));
+        assert_eq!(
+            on.control_file.as_deref(),
+            Some(std::path::Path::new("/tmp/a.addr"))
+        );
+        assert_eq!(parse(&args("--control-stdio")).unwrap().control_stdio, true);
+    }
+
+    #[test]
     fn a_listen_server_has_no_bots_unless_asked() {
         assert_eq!(parse(&args("--listen")).unwrap().bots, None);
         assert_eq!(parse(&args("--listen --bots 4")).unwrap().bots, Some(4));
