@@ -1,47 +1,51 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-only
-# Usage: scripts/remote-linux.sh [git-ref] [-- run-options...]
-# Ships a git ref to the Linux test host, runs build/test/clippy/fmt in the devshell with
-# COD4_PATH=~/Projects/cod4e/shared/COD4, and, when run-options are given, runs
-# `cod4e-harness run --out bundles <run-options>` (a bare `--` runs the default
-# suite). The harness writes cod4e-run-<date>.zip into bundles/ on that host; that
-# directory is copied back to ./bundles/ and the bundles are listed.
-# The client is built in release next to the harness so stage 3 can drive it. The browser client (web/pkg) is built
-# too when a web-* stage (or the whole suite) is run, and a Chromium already on the host is found
-# (scripts/find-chromium.sh), so the web-* stages run instead of skipping.
-# Stage 3 needs a window: set COD4E_LINUX_WAYLAND_DISPLAY (e.g. wayland-1) and
-# COD4E_LINUX_XDG_RUNTIME_DIR (e.g. /run/user/1000) to use the host's Wayland
-# session; they are exported as WAYLAND_DISPLAY / XDG_RUNTIME_DIR for the run.
-# Without them the stage reports `no display` and is skipped.
-# The host is shared: builds and tests run at nice 19, and the stages run one
-# invocation at a time under a host-wide lock, so timing checks see a quiet CPU.
+# Usage: scripts/remote-linux.sh [git-ref] [-- run-options... | -- command...]
+# Ships a git ref to the Linux test host and runs scripts/host-run.sh there in the devshell with
+# COD4_PATH=~/Projects/cod4e/shared/COD4: build/test/clippy/fmt and, when run-options are given,
+# `cod4e-harness run --out bundles <run-options>` (a bare `--` runs the default suite). The host's bundles/ and
+# out/ are copied back to ./bundles/ (a slot run's zips named slot-<n>-<zip>) and ./out/ and the bundles are listed.
+# The release client and server are built next to the harness so the client stages can drive them; the browser
+# client (web/pkg) is built when a web-* stage (or the whole suite) is run, and a Chromium already on the host is
+# used (scripts/find-chromium.sh).
+# Environment:
+#   COD4E_LINUX_HOST              ssh host of the Linux test machine (required).
+#   COD4E_LINUX_SLOT=1..3         run in a harness slot: own target dir, headless display and network namespace;
+#                                 up to three slots run at once.
+#   COD4E_LINUX_EXEC=1            (slot only) run the command after `--` in the slot instead of the harness, with
+#                                 the release binaries on PATH; it writes into out/.
+#   COD4E_LINUX_CHECKS=0          skip test/clippy/fmt (the build still runs).
+#   COD4E_LINUX_WAYLAND_DISPLAY,
+#   COD4E_LINUX_XDG_RUNTIME_DIR   (serial runs) the host's Wayland session for the client stages, e.g. wayland-1
+#                                 and /run/user/1000; without them those stages report `no display` and skip.
+# Without a slot the run is serial: it takes the host-wide stage lock exclusively, after the running slots finish
+# and before new ones start, so timing checks see a quiet host. Builds and tests run at nice 19.
 set -euo pipefail
 ref=HEAD
 if [ $# -gt 0 ] && [ "$1" != -- ]; then ref=$1; shift; fi
-run=0
-if [ "${1:-}" = -- ]; then run=1; shift; fi
 host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test machine}
 dir="~/Projects/cod4e/run-$(hostname -s)-$$"  # per invocation: parallel runs must not wipe each other
-harness=""
-display=""
-[ -n "${COD4E_LINUX_WAYLAND_DISPLAY:-}" ] && display="WAYLAND_DISPLAY=$(printf '%q' "$COD4E_LINUX_WAYLAND_DISPLAY") "
-[ -n "${COD4E_LINUX_XDG_RUNTIME_DIR:-}" ] && display="${display}XDG_RUNTIME_DIR=$(printf '%q' "$COD4E_LINUX_XDG_RUNTIME_DIR") "
-# The browser client is built only for a run that has a web-* stage or the full suite (no --stage given).
-web=""
-case " $* " in
-  *" --stage "*|*" --stage="*) case " $* " in *web-*) web="&& nice -n 19 web/build.sh >/dev/null " ;; esac ;;
-  *) web="&& nice -n 19 web/build.sh >/dev/null " ;;
-esac
-[ $run = 1 ] && harness="${web}&& nice -n 19 cargo build --release -p harness -p client -p server && flock ~/Projects/cod4e/.stage-lock env ${display}COD4E_NO_PROMPT=1 \$(scripts/find-chromium.sh) target/release/cod4e-harness run --out bundles $(printf '%q ' "$@")"
+vars="COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 "
+[ -n "${COD4E_LINUX_SLOT:-}" ] && vars="${vars}COD4E_SLOT=$(printf '%q' "$COD4E_LINUX_SLOT") "
+[ -n "${COD4E_LINUX_WAYLAND_DISPLAY:-}" ] && vars="${vars}WAYLAND_DISPLAY=$(printf '%q' "$COD4E_LINUX_WAYLAND_DISPLAY") "
+[ -n "${COD4E_LINUX_XDG_RUNTIME_DIR:-}" ] && vars="${vars}XDG_RUNTIME_DIR=$(printf '%q' "$COD4E_LINUX_XDG_RUNTIME_DIR") "
+opts=""
+[ "${COD4E_LINUX_CHECKS:-1}" = 0 ] && opts="--no-checks "
+[ "${COD4E_LINUX_EXEC:-0}" = 1 ] && opts="${opts}--exec "
+if [ "${1:-}" = -- ]; then shift; opts="${opts}-- $(printf '%q ' "$@")"; fi
 
 git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -C $dir'"
 status=0
-ssh "$host" "bash -c 'cd $dir && COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 nix develop -c bash -ec \"
-nice -n 19 cargo build --workspace && nice -n 19 cargo test --workspace &&
-nice -n 19 cargo clippy --workspace -- -D warnings && cargo fmt --check $harness
-\"'" || status=$?
-mkdir -p bundles
-ssh "$host" "bash -c 'cd $dir && [ -d bundles ] && tar c bundles || true'" | tar x -C . 2>/dev/null || true
+ssh "$host" "bash -c 'cd $dir && ${vars}nix develop -c scripts/host-run.sh $opts'" || status=$?
+mkdir -p bundles out
+# Slot bundles get a slot-<n>- prefix: runs in two slots can start in the same second and name their zips alike.
+tmp=$(mktemp -d)
+ssh "$host" "bash -c 'cd $dir && [ -d bundles ] && tar c bundles || true'" | tar x -C "$tmp" 2>/dev/null || true
+for z in "$tmp"/bundles/*; do
+  [ -e "$z" ] && mv "$z" "bundles/${COD4E_LINUX_SLOT:+slot-$COD4E_LINUX_SLOT-}$(basename "$z")"
+done
+rm -rf "$tmp"
+ssh "$host" "bash -c 'cd $dir && [ -d out ] && tar c out || true'" | tar x -C . 2>/dev/null || true
 ssh "$host" "bash -c 'rm -rf $dir'" || true
 ls -l bundles/*.zip 2>/dev/null || true
 exit $status
