@@ -586,7 +586,7 @@ mod tests {
             r#"{"id":1,"cmd":"wait","state":{"player.health":100},"timeout_ms":1000}"#,
         );
         assert_eq!(first["ok"], json!(true));
-        assert_eq!(first["waited_ms"], json!(0));
+        assert_eq!(first["waited_ms"].as_f64(), Some(0.0));
         // Not yet true and the clock has not run out: the request waits.
         let held = run(
             &mut f,
@@ -601,7 +601,7 @@ mod tests {
         );
         assert_eq!(timed_out["ok"], json!(false));
         assert_eq!(timed_out["timeout"], json!(true));
-        assert_eq!(timed_out["observed"]["player.health"], json!(100));
+        assert_eq!(timed_out["observed"]["player.health"].as_f64(), Some(100.0));
         let asserted = run(
             &mut f,
             r#"{"id":4,"cmd":"assert","state":{"player.health":{"gt":99}}}"#,
@@ -644,15 +644,16 @@ mod tests {
         run(&mut f, r#"{"id":4,"cmd":"mouse","x":10,"y":20}"#);
         run(&mut f, r#"{"id":5,"cmd":"mouse","dx":5,"dy":-3}"#);
         run(&mut f, r#"{"id":6,"cmd":"wheel","y":1}"#);
+        assert_eq!(f.events.len(), 3);
         assert!(matches!(
-            f.events[2],
+            f.events[0],
             InputEvent::Cursor { x: 10.0, y: 20.0 }
         ));
         assert!(matches!(
-            f.events[3],
+            f.events[1],
             InputEvent::Motion { dx: 5.0, dy: -3.0 }
         ));
-        assert!(matches!(f.events[4], InputEvent::Wheel { y: 1.0 }));
+        assert!(matches!(f.events[2], InputEvent::Wheel { y: 1.0 }));
     }
 
     #[test]
