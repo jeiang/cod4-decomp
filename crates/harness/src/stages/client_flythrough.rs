@@ -23,6 +23,8 @@ const DEFAULT_SECS: u64 = 12;
 /// free cores beside the client; a few slots lost to a scheduler stall keep the file in sync (each sample carries its
 /// own duration), but a rate this high means it never kept up.
 const MAX_VIDEO_DROPPED: f64 = 0.05;
+/// The client's per-frame phase columns beside `frames.csv` (`client/src/app.rs` `PHASES`).
+const PHASES_CSV: &str = "frames.phases.csv";
 /// How long past the flythrough a child may take (startup, zone load, video
 /// finish) before it is killed.
 const DEFAULT_GRACE: Duration = Duration::from_secs(120);
@@ -441,6 +443,10 @@ fn consume(
     let series = rec.finish()?;
     fs::remove_file(&raw)?;
     report.files.push(format!("{slug}/frames.csv"));
+    // Where each frame's time went, which is what tells a hitch's cause.
+    if out.join(PHASES_CSV).is_file() {
+        report.files.push(format!("{slug}/{PHASES_CSV}"));
+    }
     if series.is_empty() {
         return Ok(Err("no frames recorded".into()));
     }
