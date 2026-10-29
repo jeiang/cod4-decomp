@@ -115,7 +115,9 @@ impl TickSample {
 /// The statistics `expect` and `until` read.
 const STATS: &str = "kills|deaths|spawns|respawns|shots|hits|rounds|plants|defuses|hardpoints|airstrikes|helicopters|heli_shots|heli_hits|heli_crashes|playing";
 
-/// Commands the console accepts, for `Console::has_command`.
+/// Commands the console accepts, for `Console::has_command`: one entry per arm of [`Server::exec_command`], plus the
+/// client-only verbs it ignores. The harness asks [`accepts`] before it runs a scenario line, and a line whose verb it
+/// does not accept fails the stage, so an arm missing here shows up as a red stage and not as a skipped line.
 pub const COMMANDS: &[&str] = &[
     "set",
     "seta",
@@ -123,29 +125,50 @@ pub const COMMANDS: &[&str] = &[
     "setu",
     "exec",
     "echo",
+    "wait",
     "quit",
+    "killserver",
+    "vstr",
     "map",
     "devmap",
     "map_restart",
     "fast_restart",
     "map_rotate",
     "status",
-    "vstr",
     "serverinfo",
-    "wait",
-    "killserver",
+    "systeminfo",
     "bots",
     "expect",
     "until",
+    // Test hooks: `devtele`, `devrun`, `devgrenade`, `devhardpoint`, `devradar`, `devheli`, `devkill`, `devshoot`.
     "devtele",
     "devrun",
+    "devgrenade",
+    "devhardpoint",
+    "devradar",
+    "devheli",
+    "devkill",
+    "devshoot",
+    // Players and administration.
     "clientkick",
     "tempbanclient",
-    "devhardpoint",
-    "devheli",
-    "devgrenade",
-    "devradar",
     "devperk",
+    "banclient",
+    "onlykick",
+    "kick",
+    "tempbanuser",
+    "banuser",
+    "unbanuser",
+    "dumpuser",
+    "say",
+    "tell",
+    "heartbeat",
+    "gamecompletestatus",
+    // Variables.
+    "toggle",
+    "reset",
+    "setfromdvar",
+    "cvarlist",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -158,6 +181,12 @@ const CLIENT_ONLY: &[&str] = &[
     "seta_noop",
     "exec_noop",
 ];
+
+/// Whether the console has a handler for `name`: a command of [`COMMANDS`], or a client-only verb it ignores.
+pub fn accepts(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    COMMANDS.contains(&l.as_str()) || CLIENT_ONLY.contains(&l.as_str())
+}
 
 struct Running {
     vm: Vm,
@@ -1436,6 +1465,13 @@ impl Server {
             self.flush_game_output();
         }
         Ok(())
+    }
+
+    /// Whether this console would run `name`: a command of [`COMMANDS`], a client-only verb it ignores, or a
+    /// variable ([`Server::exec_command`]'s last arm reads and writes one). The harness asks this before each
+    /// scenario line, so a verb nothing handles fails the stage instead of being skipped.
+    pub fn has_command(&self, name: &str) -> bool {
+        accepts(name) || self.game.cvars.exists(name)
     }
 
     fn exec_command(&mut self, argv: &Argv) -> Result<(), String> {

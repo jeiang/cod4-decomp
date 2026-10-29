@@ -160,14 +160,17 @@ fn echo(args: &[String]) {
 
 /// Run `cmds`. `sleep` performs waits (tests substitute a fake).
 ///
-/// Once a command has been skipped and no engine command has run, there is nothing real to
-/// wait for, so later waits are skipped as well instead of idling.
+/// A command the console does not accept fails the script: a skipped line proves nothing, and a scenario that drives
+/// a verb the console lacks (a table that drifted from the dispatch) must say so loudly (#375).
+///
+/// Once a command has failed and no console command has run, there is nothing real to wait for, so later waits are
+/// skipped as well instead of idling.
 pub fn run(
     cmds: &[Command],
     console: &mut dyn Console,
     mut sleep: impl FnMut(Duration),
 ) -> Vec<CommandReport> {
-    let mut skipped_any = false;
+    let mut missing_any = false;
     let mut ran_engine = false;
     cmds.iter()
         .map(|c| {
@@ -178,7 +181,7 @@ pub fn run(
                 }
                 "wait" => match c.args.as_slice() {
                     [d] => match parse_duration(d) {
-                        _ if skipped_any && !ran_engine => {
+                        _ if missing_any && !ran_engine => {
                             Outcome::Skipped("nothing to wait for".into())
                         }
                         Some(d) => {
@@ -190,8 +193,10 @@ pub fn run(
                     _ => Outcome::Failed("usage: wait <duration>".into()),
                 },
                 name if !console.has_command(name) => {
-                    skipped_any = true;
-                    Outcome::Skipped(format!("command not implemented: {name}"))
+                    missing_any = true;
+                    Outcome::Failed(format!(
+                        "unknown command {name:?}: the console does not accept it"
+                    ))
                 }
                 _ => match console.exec(c) {
                     Ok(()) => {
@@ -250,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_commands_skip_and_waits_after_them_do_not_idle() {
+    fn unknown_commands_fail_and_waits_after_them_do_not_idle() {
         let cmds = parse("echo hi; wait 1s; map mp_crash; wait 30s; screenshot").unwrap();
         let mut slept = Vec::new();
         let r = run(&cmds, &mut NoEngine, |d| slept.push(d));
@@ -258,9 +263,9 @@ mod tests {
         let out: Vec<_> = r.iter().map(|r| r.outcome.clone()).collect();
         assert_eq!(out[0], Outcome::Done);
         assert_eq!(out[1], Outcome::Done);
-        assert!(matches!(&out[2], Outcome::Skipped(m) if m.contains("map")));
+        assert!(matches!(&out[2], Outcome::Failed(m) if m.contains("map")));
         assert!(matches!(&out[3], Outcome::Skipped(_)));
-        assert!(matches!(&out[4], Outcome::Skipped(_)));
+        assert!(matches!(&out[4], Outcome::Failed(_)));
     }
 
     #[test]

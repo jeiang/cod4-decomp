@@ -2,13 +2,13 @@
 //! Stage 2: the headless server driven by a console scenario.
 //!
 //! The harness runs the server in this process through its console: `map` boots a map, `wait`
-//! runs the 30 Hz loop for that long, commands the server lacks are
-//! reported as skipped. Every tick feeds `ticks.csv`; RSS is sampled once a second. Script
-//! runtime errors fail the stage.
+//! runs the 30 Hz loop for that long, and a command the server's console does not accept fails
+//! the stage. Every tick feeds `ticks.csv`; RSS is sampled once a second. Script runtime errors
+//! fail the stage.
 use crate::perf::{Percentiles, TickRecorder, cgroup_peak, peak_rss, process_rss};
 use crate::script::{Command, Console};
 use crate::stage::{self, StageCtx, StageReport, Status};
-use server::server::{COMMANDS, Server, TICK_SUBSYSTEMS, TickSample};
+use server::server::{Server, TICK_SUBSYSTEMS, TickSample};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -23,7 +23,8 @@ struct ServerConsole {
 
 impl Console for ServerConsole {
     fn has_command(&self, name: &str) -> bool {
-        COMMANDS.contains(&name)
+        // The server's own table decides, so a scenario line and the dispatch cannot disagree (#375).
+        self.server.borrow().has_command(name)
     }
 
     fn exec(&mut self, cmd: &Command) -> Result<(), String> {
@@ -204,4 +205,37 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
         .map(|c| (c.name.clone(), c.value.clone()))
         .collect::<std::collections::BTreeMap<_, _>>() }));
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::script;
+    use crate::stage::{Kind, STAGES};
+
+    /// Every verb a built-in scenario uses must be one the server's console accepts: a line the console does not
+    /// accept now fails its stage (#375), so this catches the table drifting from the dispatch before a run does.
+    #[test]
+    fn every_scenario_verb_is_one_the_console_accepts() {
+        let mut checked = 0;
+        let mut unknown = Vec::new();
+        for def in STAGES {
+            let Kind::Server(src) = def.kind else {
+                continue;
+            };
+            for c in script::parse(src).expect("a scenario parses") {
+                if matches!(c.name.as_str(), "echo" | "wait") {
+                    continue;
+                }
+                checked += 1;
+                if !server::server::accepts(&c.name) {
+                    unknown.push(format!("{}: {}", def.name, c.name));
+                }
+            }
+        }
+        assert!(checked > 0, "no server scenario verbs were found");
+        assert!(
+            unknown.is_empty(),
+            "scenario verbs the console does not accept: {unknown:?}"
+        );
+    }
 }
