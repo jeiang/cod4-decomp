@@ -1437,7 +1437,7 @@ impl Server {
             for (n, c) in self.game.connected_clients() {
                 out.push(json!({
                     "slot": n,
-                    "session": c.session.index(),
+                    "session": c.session.name(),
                     "name": c.name,
                     "bot": c.bot,
                     "team": c.team as u8,
@@ -1446,7 +1446,7 @@ impl Server {
                     "deaths": c.deaths,
                     "ping": 0,
                     "health": c.ps.health,
-                    "origin": [c.ps.origin.x, c.ps.origin.y, c.ps.origin.z],
+                    "origin": c.ps.origin,
                     "weapon": c.ps.weapon,
                     "alive": c.ps.pm_type < sim::pm::PmType::Dead,
                     "spawn_count": c.spawn_count,
