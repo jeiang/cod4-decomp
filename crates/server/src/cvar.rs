@@ -240,9 +240,12 @@ impl Cvars {
         std::mem::take(&mut self.modified)
     }
 
+    /// Adds flags; the variable counts as changed for them, so a newly published one (`CODINFO` from a script's
+    /// `makedvarserverinfo`) goes out at the next frame.
     pub fn add_flags(&mut self, name: &str, flags: u32) {
         if let Some(v) = self.vars.get_mut(&key(name)) {
             v.flags |= flags;
+            self.modified |= flags;
         }
     }
 

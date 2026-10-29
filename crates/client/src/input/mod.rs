@@ -767,6 +767,11 @@ impl Input {
         self.dirty = false;
     }
 
+    /// The install's files, when there is an install.
+    pub fn vfs(&self) -> Option<&Vfs> {
+        self.vfs.as_ref()
+    }
+
     /// Cvar value as text.
     pub fn cvar(&self, name: &str) -> Option<&str> {
         self.cvars.get(name)

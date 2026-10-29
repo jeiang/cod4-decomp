@@ -13,6 +13,7 @@ mod automelee;
 mod breath;
 mod camera;
 mod compass;
+mod configure;
 mod console;
 mod control;
 mod crosshair;

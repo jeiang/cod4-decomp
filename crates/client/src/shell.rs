@@ -90,6 +90,10 @@ pub struct ShellState {
     /// The menu `soundLoop`s playing now.
     pub menu_loops: Vec<String>,
     pub in_game: bool,
+    /// The GPU's name, for `setRecommended`'s match against `configure_mp.csv`.
+    pub gpu_description: String,
+    /// The languages the install has files for (`g_languages[].bPresent`), for the language menu.
+    pub languages_present: Vec<usize>,
     pub started: Instant,
     pub maps: Vec<MapEntry>,
     pub gametypes: Vec<GameTypeEntry>,
@@ -292,6 +296,8 @@ impl ShellState {
             actions: Vec::new(),
             menu_loops: Vec::new(),
             in_game: false,
+            gpu_description: String::new(),
+            languages_present: vec![0],
             started: Instant::now(),
             maps,
             gametypes,
@@ -574,6 +580,8 @@ impl Shell {
         register_defaults(input);
         let vfs = ::assets::vfs::Vfs::open(&install.root, 0, &install.game, None)
             .map_err(|e| format!("cannot open the install: {e}"))?;
+        st.gpu_description = gpu.adapter.get_info().name;
+        st.languages_present = vfs.languages_present();
         let mut shell = Shell {
             ui: Ui::new(assets, size),
             st,
@@ -742,6 +750,17 @@ impl Shell {
     pub fn close_all(&mut self, input: &mut Input) {
         let mut h = Self::host(&mut self.st, input);
         self.ui.close_all(&mut h);
+    }
+
+    /// Runs a console line as a bind or a menu does (no echo; a cvar's name alone shows it).
+    pub fn exec_line(&mut self, input: &mut Input, line: &str) {
+        Self::host(&mut self.st, input).command(&self.ui, line);
+    }
+
+    /// The pointer to the middle of the screen (`UI_Popup`'s quick message menu starts it there).
+    pub fn center_cursor(&mut self, input: &mut Input) {
+        let (w, h) = self.ui.screen_size();
+        self.mouse_move(input, w / 2.0, h / 2.0);
     }
 
     pub fn key(&mut self, input: &mut Input, key: UiKey) -> bool {
@@ -1336,6 +1355,29 @@ impl HostCx<'_> {
             .to_owned()
     }
 
+    /// `UI_VerifyLanguage`: `ui_language` moves to the next language the install has files for
+    /// (`SEH_VerifyLanguageSelection`), and `ui_languagechanged` says whether it differs from `loc_language`.
+    fn verify_language(&mut self) {
+        let old = atoi(&self.dvar_get("loc_language"));
+        let new = atoi(&self.dvar_get("ui_language"));
+        let n = ::assets::vfs::LANGUAGES.len() as i32;
+        let present = &self.st.languages_present;
+        let verified = (0..n)
+            .map(|i| (i + new).rem_euclid(n))
+            .find(|l| present.contains(&(*l as usize)))
+            .unwrap_or(0);
+        if verified != new {
+            self.input
+                .cvars
+                .set("ui_language", &verified.to_string(), false);
+        }
+        self.input.cvars.set(
+            "ui_languagechanged",
+            if new == old { "0" } else { "1" },
+            false,
+        );
+    }
+
     /// Re-reads the profile list into the menu's order and publishes the count.
     fn refresh_profile_names(&mut self) {
         self.st.profile_names = self.st.profiles.list();
@@ -1603,21 +1645,7 @@ impl HostCx<'_> {
                 continue;
             };
             let _span = tracing::debug_span!("command", name = name.as_str()).entered();
-            if console {
-                if let Some(value) = self.input.cvars.get(&name).map(str::to_owned) {
-                    if cmd.len() > 1 {
-                        self.input.set_cvar(&name, &cmd[1..].join(" "));
-                    } else {
-                        self.st.log(&format!("\"{name}\" is \"{value}\""));
-                    }
-                    continue;
-                }
-                if !crate::console::is_command(&name) {
-                    crate::console::note_unknown(&name);
-                    self.st.log(&format!("Unknown command \"{}\"", cmd[0]));
-                    continue;
-                }
-            }
+            let _ = console;
             let a = |i: usize| cmd.get(i).map_or("", String::as_str);
             match name.as_str() {
                 "setfromdvar" => {
@@ -1772,12 +1800,56 @@ impl HostCx<'_> {
                     map: a(1).to_owned(),
                     gametype: self.dvar_get("g_gametype"),
                 }),
+                // `setFromLocString <dvar> <string>` (`Dvar_SetFromLocalizedStr_f`): an `@` reference is localized.
+                "setfromlocstring" => {
+                    if cmd.len() < 3 {
+                        self.st
+                            .log("USAGE: setFromLocalizedString <variable> <string>");
+                    } else if !a(1).chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        self.st.log(&format!("invalid variable name: {}", a(1)));
+                    } else {
+                        let combined = cmd[2..].join(" ");
+                        let value = combined
+                            .strip_prefix('@')
+                            .and_then(|k| ui.assets.translate_ref(k))
+                            .map(|t| t.to_string())
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or(combined);
+                        self.input.exec_line(&format!(
+                            "set {} {}",
+                            a(1),
+                            crate::input::config::quote(&value)
+                        ));
+                    }
+                }
                 // The server's, or the app's own: not for the input layer, whose `pending_commands` a menu drops.
                 n if crate::console::is_app_verb(n) => self
                     .st
                     .actions
                     .push(Action::Console(crate::input::config::join(&cmd))),
-                _ => self.input.exec_line(&crate::input::config::join(&cmd)),
+                // The input layer's own (`bind`, `set`, `toggle`, the `+` commands, what it hands on).
+                n if crate::console::is_command(n) => {
+                    self.input.exec_line(&crate::input::config::join(&cmd))
+                }
+                // `Cmd_ExecuteSingleCommand` past the commands: a cvar's name shows or sets it (`Dvar_Command`);
+                // anything else is the app's to forward to the server or call unknown
+                // (`CL_ForwardCommandToServer`), not the input layer's, whose pending list a menu drops.
+                _ => {
+                    if let Some(value) = self.input.cvars.get(&name).map(str::to_owned) {
+                        if cmd.len() > 1 {
+                            self.input.exec_line(&format!(
+                                "set {name} {}",
+                                crate::input::config::quote(&cmd[1..].join(" "))
+                            ));
+                        } else {
+                            self.st.log(&format!("\"{name}\" is \"{value}\""));
+                        }
+                    } else {
+                        self.st
+                            .actions
+                            .push(Action::Console(crate::input::config::join(&cmd)));
+                    }
+                }
             }
         }
     }
@@ -2101,8 +2173,69 @@ impl Host for HostCx<'_> {
                 ui.select_feeder_row(self, 4, row);
                 true
             }
-            "setpbclstatus" | "getlanguage" | "verifylanguage" | "setrecommended" | "getcdkey"
-            | "verifycdkey" => true,
+            // No PunkBuster and no CD key check here: the menus' buttons say so instead of doing nothing.
+            "setpbclstatus" => {
+                self.st.log("setPbClStatus: not supported (no PunkBuster)");
+                true
+            }
+            "getcdkey" | "verifycdkey" => {
+                self.st
+                    .log(&format!("{name}: not supported (no CD key check)"));
+                true
+            }
+            // The language menu (`UI_RunMenuScript`): the selection starts at the current language, is checked
+            // against the languages present (`SEH_VerifyLanguageSelection`), and `updateLanguage` makes it current
+            // and restarts the renderer.
+            "getlanguage" => {
+                let cur = self.dvar_get("loc_language");
+                self.input.cvars.set("ui_language", &cur, false);
+                self.verify_language();
+                true
+            }
+            "verifylanguage" => {
+                self.verify_language();
+                true
+            }
+            "updatelanguage" => {
+                let sel = self.dvar_get("ui_language");
+                self.input.cvars.set("loc_language", &sel, true);
+                self.verify_language();
+                self.st.actions.push(Action::VidRestart);
+                true
+            }
+            // `Com_SetRecommended`: the settings `configure_mp.csv` names for this CPU class and GPU.
+            "setrecommended" => {
+                let gpu = self.st.gpu_description.clone();
+                let csv = self
+                    .input
+                    .vfs()
+                    .and_then(|v| v.read("configure_mp.csv").ok().flatten());
+                self.st.log("========= autoconfigure");
+                match csv {
+                    Some(bytes) => {
+                        match crate::configure::recommended(&String::from_utf8_lossy(&bytes), &gpu)
+                        {
+                            Ok(r) => {
+                                self.st.log(&r.cpu_line);
+                                self.st.log(&r.gpu_line);
+                                self.command(ui, "exec configure_mp.cfg");
+                                for (n, v) in r.dvars {
+                                    self.input.exec_line(&format!(
+                                        "seta {n} {}",
+                                        crate::input::config::quote(&v)
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(gpu, "setRecommended: {e}");
+                                self.st.log(&format!("configure_mp.csv: {e}"));
+                            }
+                        }
+                    }
+                    None => self.st.log("configure_mp.csv: not found"),
+                }
+                true
+            }
             // `UI_LoadMods`: the folders of `mods/` with their descriptions (the mods menu's list, feeder 9).
             "loadmods" => {
                 self.st.mods = ::assets::paths::list_mods(&self.st.root);
@@ -2145,8 +2278,12 @@ impl Host for HostCx<'_> {
                 self.profile_script(ui, &name.to_ascii_lowercase());
                 true
             }
-            // No single-player, mods, player list or language switch here; the menus still run these.
-            "clearloaderrorssummary" | "playerstart" | "updatelanguage" => true,
+            // `clearLoadErrorsSummary` closes every menu (`Menus_CloseAll`); `playerstart` is single-player's and
+            // unknown to the multiplayer menus, as it is here.
+            "clearloaderrorssummary" => {
+                ui.close_all(self);
+                true
+            }
             "muteplayer" => {
                 if let Some((n, _)) = self.players().get(self.st.mute_sel).cloned()
                     && !self.st.muted.remove(&n)

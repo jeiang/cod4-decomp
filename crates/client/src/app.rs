@@ -1500,6 +1500,7 @@ impl Viewer {
             };
             open_chat(st.shell.as_mut(), &mut st.input, &f);
             screenshot_commands(st.shell.as_mut(), &f);
+            shell_commands(st.shell.as_mut(), &mut st.input, &f);
             if let Some(sh) = st.shell.as_mut() {
                 sh.st.actions.extend(own_commands(&f));
             }
@@ -3425,15 +3426,29 @@ fn screenshot_commands(shell: Option<&mut Shell>, f: &InputFrame) {
     }
 }
 
-/// `bots`, `rcon`, `name`, `record` and `stoprecord` from a bind or a config line: the app's own commands, which
-/// `console_action` carries out (the input layer only hands them over).
+/// The app's own commands (`bots`, `rcon`, `name`, `record`, `cmd`, ...) and every word nobody runs, from a bind or
+/// a config line: `console_action` carries them out or forwards them (the input layer only hands them over).
 fn own_commands(f: &InputFrame) -> Vec<Action> {
     f.pending_commands
         .iter()
         .flat_map(|c| crate::input::config::split_commands(c))
-        .filter(|cmd| crate::console::is_own_verb(&cmd[0]))
+        .filter(|cmd| crate::console::is_own_verb(&cmd[0]) || !crate::console::is_command(&cmd[0]))
         .map(|cmd| Action::Console(crate::input::config::join(&cmd)))
         .collect()
+}
+
+/// The shell's commands (`setfromdvar`, `vid_restart`, `setFromLocString`, ...) from a bind: run through its
+/// command loop, as a menu's would be.
+fn shell_commands(shell: Option<&mut Shell>, input: &mut Input, f: &InputFrame) {
+    let Some(sh) = shell else { return };
+    for cmd in f
+        .pending_commands
+        .iter()
+        .flat_map(|c| crate::input::config::split_commands(c))
+        .filter(|cmd| crate::console::is_shell_verb(&cmd[0]))
+    {
+        sh.exec_line(input, &crate::input::config::join(&cmd));
+    }
 }
 
 /// A console line a menu, a bind or the console itself produced. What the server carries out goes to it (without the
@@ -3471,62 +3486,114 @@ fn console_action(st: &mut State, line: &str) {
     let count_before = bot_count(&st.input);
     for cmd in crate::input::config::split_commands(line) {
         let _command = tracing::debug_span!("command", name = %cmd[0]).entered();
-        if cmd[0].eq_ignore_ascii_case("bots") {
-            // `bots <n>` brings the listen server's bots to n at once (the command is the listen server's console's).
-            match (
-                cmd.get(1).and_then(|n| n.parse::<usize>().ok()),
-                st.listen.is_some(),
-            ) {
-                (Some(n), true) => {
-                    // The count is the player's setting too: the next map start keeps it.
-                    st.input.exec_line(&format!("seta bot_count {}", n.min(64)));
-                    listen::send(&format!("bots {n}"));
+        let verb = cmd[0].to_ascii_lowercase();
+        match verb.as_str() {
+            "bots" => {
+                // `bots <n>` brings the listen server's bots to n at once (the command is the listen server's console's).
+                match (
+                    cmd.get(1).and_then(|n| n.parse::<usize>().ok()),
+                    st.listen.is_some(),
+                ) {
+                    (Some(n), true) => {
+                        // The count is the player's setting too: the next map start keeps it.
+                        st.input.exec_line(&format!("seta bot_count {}", n.min(64)));
+                        listen::send(&format!("bots {n}"));
+                    }
+                    (None, true) => say(st, "usage: bots <count>"),
+                    (_, false) => say(st, "bots: only on a server started from this client"),
                 }
-                (None, true) => say(st, "usage: bots <count>"),
-                (_, false) => say(st, "bots: only on a server started from this client"),
             }
-        } else if cmd[0].eq_ignore_ascii_case("rcon") {
-            // `rcon <command>` with the password in `rconpassword`, answered as console output.
-            let password = st.input.cvar("rconpassword").unwrap_or("").to_owned();
-            if let Some(net) = st.net.as_mut() {
-                net.send_rcon(&password, &cmd[1..].join(" "));
-            } else if let Some(sh) = st.shell.as_mut() {
-                sh.print_console("rcon: not connected to a server");
-            }
-        } else if cmd[0].eq_ignore_ascii_case("name") {
-            // `name <text>`: the server reads the new name from the userinfo, with the rate and snapshot rate.
-            let Some(new) = cmd.get(1) else {
-                if let Some(sh) = st.shell.as_mut() {
-                    let n = st.input.cvar("name").unwrap_or("").to_owned();
-                    sh.print_console(&format!("\"name\" is \"{n}\""));
+            "rcon" => {
+                // `rcon <command>` with the password in `rconpassword`, answered as console output.
+                let password = st.input.cvar("rconpassword").unwrap_or("").to_owned();
+                if let Some(net) = st.net.as_mut() {
+                    net.send_rcon(&password, &cmd[1..].join(" "));
+                } else if let Some(sh) = st.shell.as_mut() {
+                    sh.print_console("rcon: not connected to a server");
                 }
-                continue;
-            };
-            st.input.exec_line(&format!("set name \"{new}\""));
-            let (rate, snaps) = netplay_rates(&st.input);
-            if let Some(net) = st.net.as_mut() {
-                net.send_command(&net::client::userinfo_command(new, rate, snaps));
             }
-        } else if !crate::console::is_server_verb(&cmd[0]) {
-            st.input.exec_line(&crate::input::config::join(&cmd));
-        } else if cmd[0].eq_ignore_ascii_case("record") {
-            record_command(st, cmd.get(1).map(String::as_str));
-        } else if cmd[0].eq_ignore_ascii_case("stoprecord") {
-            let stopped = st.net.as_mut().is_some_and(NetPlay::stop_record);
-            say(
-                st,
-                if stopped {
-                    "Stopped recording the demo."
-                } else {
-                    "Not recording a demo."
-                },
-            );
-        } else if let Some(net) = st.net.as_mut() {
-            if let Some(wire) = crate::console::server_line(&cmd) {
-                net.send_command(&wire);
+            "name" => {
+                // `name <text>`: the server reads the new name from the userinfo, with the rate and snapshot rate.
+                let Some(new) = cmd.get(1) else {
+                    if let Some(sh) = st.shell.as_mut() {
+                        let n = st.input.cvar("name").unwrap_or("").to_owned();
+                        sh.print_console(&format!("\"name\" is \"{n}\""));
+                    }
+                    continue;
+                };
+                st.input.exec_line(&format!("set name \"{new}\""));
+                let (rate, snaps) = netplay_rates(&st.input);
+                if let Some(net) = st.net.as_mut() {
+                    net.send_command(&net::client::userinfo_command(new, rate, snaps));
+                }
             }
-        } else if let Some(sh) = st.shell.as_mut() {
-            sh.print_console(&format!("{}: not connected to a server", cmd[0]));
+            "record" => record_command(st, cmd.get(1).map(String::as_str)),
+            "stoprecord" => {
+                let stopped = st.net.as_mut().is_some_and(NetPlay::stop_record);
+                say(
+                    st,
+                    if stopped {
+                        "Stopped demo."
+                    } else {
+                        "Not recording a demo."
+                    },
+                );
+            }
+            // `CL_ForwardToServer_f`: the words after `cmd` go to the server as one reliable command.
+            "cmd" => match st.net.as_mut().filter(|n| n.in_match()) {
+                Some(net) => {
+                    if cmd.len() > 1 {
+                        net.send_command(&cmd[1..].join(" "));
+                    }
+                }
+                None => say(st, "Not connected to a server."),
+            },
+            // `CG_QuickMessage_f`: a player in the match gets the quick message menu (`UI_Popup`: every other menu
+            // closes first, and the cursor starts at the middle of the screen).
+            "mp_quickmessage" => {
+                if st.net.as_ref().is_some_and(NetPlay::is_player)
+                    && let Some(sh) = st.shell.as_mut()
+                {
+                    sh.close_all(&mut st.input);
+                    sh.open(&mut st.input, "quickmessage");
+                    sh.center_cursor(&mut st.input);
+                }
+            }
+            "centerview" => {
+                if let Some(net) = st.net.as_mut() {
+                    net.center_view();
+                }
+            }
+            v if crate::console::is_server_verb(v) => {
+                if let Some(net) = st.net.as_mut() {
+                    if let Some(wire) = crate::console::server_line(&cmd) {
+                        net.send_command(&wire);
+                    }
+                } else if let Some(sh) = st.shell.as_mut() {
+                    sh.print_console(&format!("{}: not connected to a server", cmd[0]));
+                }
+            }
+            v if crate::console::is_command(v) => {
+                st.input.exec_line(&crate::input::config::join(&cmd));
+            }
+            // `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which
+            // answers an unknown one); otherwise, or for a `+` word, it is unknown.
+            v => {
+                if v.starts_with('-') {
+                    continue;
+                }
+                match st
+                    .net
+                    .as_mut()
+                    .filter(|n| !v.starts_with('+') && n.in_match())
+                {
+                    Some(net) => net.send_command(&crate::input::config::join(&cmd)),
+                    None => {
+                        crate::console::note_unknown(v);
+                        say(st, &format!("Unknown command \"{}\"", cmd[0]));
+                    }
+                }
+            }
         }
     }
     // The server of this process reads `bot_count` at its next map start.
@@ -4136,7 +4203,7 @@ fn record_command(st: &mut State, name: Option<&str>) {
             .map(|()| path)
     });
     match result {
-        Ok(path) => say(st, &format!("Recording the demo to {}.", path.display())),
+        Ok(path) => say(st, &format!("recording to {}.", path.display())),
         Err(e) => {
             tracing::warn!(demo = %name, error = %e, "record: cannot start the demo");
             say(st, &format!("record: {e}"));
