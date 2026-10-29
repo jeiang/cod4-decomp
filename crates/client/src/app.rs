@@ -1350,11 +1350,8 @@ impl Viewer {
                     // The mod is here now, so the client can run it as the server does.
                     if let Err(why) = follow_server_game(&self.cli, &mut self.map, st, &d.game) {
                         show_error(st, &why);
-                    } else if let Err(err) =
-                        start_session(&self.cli, &mut self.map, st, &d.map, &gametype, Some(addr))
-                    {
-                        tracing::error!(%addr, error = %err, "cannot join");
-                        end_session(&mut self.map, st);
+                    } else {
+                        start_session(&self.cli, &mut self.map, st, &d.map, &gametype, Some(addr));
                     }
                 }
                 Err(why) => {
@@ -1374,7 +1371,7 @@ impl Viewer {
                 if st.net.is_some() && st.gpu.lost().is_some() {
                     return self.recover_device();
                 }
-                end_session(&mut self.map, st);
+                drop_session(&mut self.map, st, &e);
             }
         }
 
@@ -1745,7 +1742,7 @@ impl Viewer {
             && let Err(e) = enter_level(&self.cli, &mut self.map, st, &name)
         {
             tracing::error!(map = %name, error = %e, "cannot enter the level");
-            end_session(&mut self.map, st);
+            drop_session(&mut self.map, st, &e);
         }
         if let Some(sh) = st.shell.as_mut()
             && let Err(e) = sh.st.profiles.save_if_changed(&sh.st.stats)
@@ -2137,12 +2134,7 @@ impl Viewer {
                     el.exit();
                 }
                 Action::StartServer { map, gametype } => {
-                    if let Err(e) =
-                        start_session(&self.cli, &mut self.map, st, &map, &gametype, None)
-                    {
-                        tracing::error!(%map, error = %e, "cannot start the server");
-                        end_session(&mut self.map, st);
-                    }
+                    start_session(&self.cli, &mut self.map, st, &map, &gametype, None);
                 }
                 Action::Join(addr) => {
                     let _connect = tracing::info_span!("connect", %addr).entered();
@@ -2208,17 +2200,14 @@ impl Viewer {
                                 show_error(st, &why);
                                 continue;
                             }
-                            if let Err(err) = start_session(
+                            start_session(
                                 &self.cli,
                                 &mut self.map,
                                 st,
                                 &e.map,
                                 &e.gametype,
                                 Some(a),
-                            ) {
-                                tracing::error!(%addr, error = %err, "cannot join");
-                                end_session(&mut self.map, st);
-                            }
+                            );
                         }
                         Err(err) => {
                             tracing::error!(%addr, error = %err, "cannot join");
@@ -3774,7 +3763,7 @@ fn start_session(
     map: &str,
     gametype: &str,
     join: Option<std::net::SocketAddr>,
-) -> Result<(), String> {
+) {
     end_session(map_slot, st);
     let server = match join {
         Some(a) => loader::Server::Join(a),
@@ -3784,7 +3773,6 @@ fn start_session(
     if let Some(sh) = st.shell.as_mut() {
         sh.close_all(&mut st.input);
     }
-    Ok(())
 }
 
 /// Starts the background load of `map` and the measuring of its frame gaps.
@@ -4024,17 +4012,23 @@ fn show_error(st: &mut State, message: &str) {
 
 /// The server kicked us or went silent: back to the main menu with the reason up (`reconnect` rejoins).
 fn connection_lost(map_slot: &mut Option<MapData>, st: &mut State, why: &str) {
-    // A demo that ran out is no failure.
+    // A demo that ran out is no failure: the menu, without an error over it.
     if why == net::client::DEMO_ENDED {
         tracing::info!("the demo ended");
+        end_session(map_slot, st);
     } else {
         tracing::error!(reason = %why, "connection lost");
+        drop_session(map_slot, st, why);
     }
+}
+
+/// `Com_Error(ERR_DROP, why)`: the session ends and the main menu comes back with the error popup over it, as
+/// `Com_ErrorCleanup` sets `com_errorMessage` and `UI_SetActiveMenu(UIMENU_MAIN)` then opens `error_popmenu`
+/// (KisakCOD `qcommon/common.cpp` `Com_ErrorCleanup`, `ui_mp/ui_main_mp.cpp` `UI_SetActiveMenu`). Every failed start,
+/// load, level change or lost connection ends here, so the player is told why and `reconnect` has a server to go to.
+fn drop_session(map_slot: &mut Option<MapData>, st: &mut State, why: &str) {
     end_session(map_slot, st);
-    // A demo that ran out is no failure: the menu, without an error over it.
-    if why != net::client::DEMO_ENDED {
-        show_error(st, why);
-    }
+    show_error(st, why);
 }
 
 /// Back to the main menu: drops the connection, the server and the world.

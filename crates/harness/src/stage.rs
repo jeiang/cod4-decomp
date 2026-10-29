@@ -418,6 +418,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_leave::run),
     },
     StageDef {
+        name: "client-error",
+        description: "a failed start, load or join ends in the stock error popup with the reason: map and devmap of a missing map, a join nobody answers, a connect that times out, and a kick each open error_popmenu over the main menu with no match left",
+        needs_install: false,
+        timeout: Duration::from_secs(12 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_error::run),
+    },
+    StageDef {
         name: "client-custom-class",
         description: "a saved profile's custom class spawns with its weapon (a P90), the profile's perk and experience survive the join, a class change in the grace period applies, and the other players are drawn",
         needs_install: false,
