@@ -430,9 +430,11 @@ impl PassKind {
         matches!(self, PassKind::DynLight { .. })
     }
 
-    /// Passes of techniques that a material may lack (the others fall back to simpler ones, or are the lit pass).
+    /// Passes of techniques that a material may lack: the surface is left out of the pass, as the original's
+    /// `R_SetMaterial` and `R_SetPrepassMaterial` (KisakCOD `r_draw_material.cpp`) return without a draw when
+    /// `Material_GetTechnique` is null. The scene pass instead falls back down the chain to the unlit technique.
     fn optional_tech(self) -> bool {
-        !matches!(self, PassKind::Scene | PassKind::FloatZ)
+        self != PassKind::Scene
     }
 }
 
