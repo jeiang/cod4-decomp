@@ -503,6 +503,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             m.insert("client.frame_interval_ms_p99".into(), p.p99);
             m.insert("client.frame_interval_ms_max".into(), p.max);
         }
+        // Where each frame's milliseconds went: the only way to read what a hitch was (#436).
+        if dir.join("frames.phases.csv").is_file() {
+            report.files.push("match/frames.phases.csv".into());
+        }
     }
     report.notes.push(format!(
         "{BOTS} bots, {SECS} s: {:.1} KB/s down, {:.1} KB/s up, server tick p50 {:.2} ms p99 {:.2} ms, {shots} shots {hits} hits",

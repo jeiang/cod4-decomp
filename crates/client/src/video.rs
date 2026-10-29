@@ -60,6 +60,10 @@ pub struct Recorder {
     last_slot: Option<u64>,
     dropped: u64,
     tx: SyncSender<Frame8>,
+    /// Readback buffers the encoder thread has finished with, and the channel it returns them over: a 5120x1440
+    /// frame is 30 MB, so allocating one per frame would page-fault the render thread for milliseconds.
+    spare: Vec<Vec<u8>>,
+    spare_rx: mpsc::Receiver<Vec<u8>>,
     thread: JoinHandle<io::Result<(u64, u64)>>,
 }
 
@@ -87,11 +91,13 @@ impl Recorder {
         let mux = Mux::begin(&mut file, ow, oh, fps, &seq_header)?;
 
         let (tx, rx) = mpsc::sync_channel::<Frame8>(QUEUE);
+        let (spare_tx, spare_rx) = mpsc::channel::<Vec<u8>>();
         let job = EncodeJob {
             ctx,
             file,
             mux,
             rx,
+            spare: spare_tx,
             src,
             out: (ow, oh),
             stride: stride as usize,
@@ -114,6 +120,8 @@ impl Recorder {
             last_slot: None,
             dropped: 0,
             tx,
+            spare: Vec::new(),
+            spare_rx,
             thread,
         })
     }
@@ -231,15 +239,23 @@ impl Recorder {
     /// Move finished readbacks to the encoder. `block` = wait for all (finish) and use a
     /// blocking send; otherwise a full queue drops the frame.
     fn drain(&mut self, block: bool) {
+        while let Ok(v) = self.spare_rx.try_recv() {
+            if self.spare.len() < 2 {
+                self.spare.push(v);
+            }
+        }
         while let Some(&(idx, slot)) = self.pending.front() {
-            let st = &self.ring[idx];
-            if !st.ready.load(Ordering::Acquire) {
+            if !self.ring[idx].ready.load(Ordering::Acquire) {
                 break;
             }
             self.pending.pop_front();
-            let data = st.buf.slice(..).get_mapped_range().unwrap().to_vec();
-            st.buf.unmap();
-            st.ready.store(false, Ordering::Release);
+            let mapped = self.ring[idx].buf.slice(..).get_mapped_range().unwrap();
+            let mut data = self.spare.pop().unwrap_or_default();
+            data.clear();
+            data.extend_from_slice(&mapped);
+            drop(mapped);
+            self.ring[idx].buf.unmap();
+            self.ring[idx].ready.store(false, Ordering::Release);
             self.free.push(idx);
             let frame = Frame8 {
                 bgra: self.bgra,
@@ -253,8 +269,13 @@ impl Recorder {
             } else if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
                 self.tx.try_send(frame)
             {
+                // A recording is the harness's, and the encoder runs on whatever cores the host has left: the slots
+                // it loses follow the frame size and that load (0.6-1.7% at a 2536x1416 window, 34.9-37.8% at
+                // 5120x1440 with the host to itself, up to 56% at 1920x1080 beside two other runs). Each sample
+                // carries its own duration, so the file stays in sync; the count is in `finish`'s summary and in the
+                // stage's metrics.
                 logging::dedup!(
-                    WARN,
+                    DEBUG,
                     "video_queue",
                     "the video encoder is behind; a frame was dropped"
                 );
@@ -330,6 +351,8 @@ struct EncodeJob {
     file: BufWriter<File>,
     mux: Mux,
     rx: mpsc::Receiver<Frame8>,
+    /// Returns each frame's buffer to the recorder once converted, so the render thread reuses it.
+    spare: mpsc::Sender<Vec<u8>>,
     src: (u32, u32),
     out: (u32, u32),
     stride: usize,
@@ -343,11 +366,14 @@ impl EncodeJob {
         let conv = Converter::new(self.src, self.out, self.stride);
         let rx = std::mem::replace(&mut self.rx, mpsc::sync_channel(0).1);
         let (ctx_tx, ctx_rx) = mpsc::sync_channel::<(u64, [Vec<u8>; 3])>(2);
+        let spare = self.spare.clone();
         let converter = std::thread::Builder::new()
             .name("video-convert".into())
             .spawn(move || {
                 while let Ok(f) = rx.recv() {
                     let planes = conv.convert(&f.data, f.bgra, ow, oh);
+                    // The frame's readback buffer is the recorder's again; `f` is dropped here either way.
+                    let _ = spare.send(f.data);
                     if ctx_tx.send((f.slot, planes)).is_err() {
                         break;
                     }
