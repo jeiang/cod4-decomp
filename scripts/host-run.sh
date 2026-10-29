@@ -26,6 +26,9 @@ if [ "${1:-}" = -- ]; then run=1; shift; fi
 if [ -n "${COD4E_SLOT:-}" ]; then
   case $COD4E_SLOT in 1|2|3) ;; *) echo "COD4E_SLOT must be 1..3" >&2; exit 2 ;; esac
   export CARGO_TARGET_DIR=$root/slot-$COD4E_SLOT/target
+  # The slot is held from the build on: two runs in one slot would otherwise rebuild each other's binaries.
+  exec 9>"$root/.slot-$COD4E_SLOT.lock"
+  flock -x 9
 elif [ $exec_mode = 1 ]; then
   echo "--exec needs a slot" >&2
   exit 2
@@ -39,11 +42,10 @@ if [ $checks = 1 ]; then
 fi
 [ $run = 1 ] || exit 0
 
-# Slot runs wait out a pending serial run, then share the stage lock and take their slot's lock.
+# Slot runs (holding their slot's lock since the build) wait out a pending serial run, then share the stage lock.
 slot_wrap() {
   while [ -e "$root/.serial-pending" ]; do sleep 10; done
-  flock -s "$root/.stage-lock" flock -x "$root/.slot-$COD4E_SLOT.lock" \
-    scripts/virtual-display.sh "$COD4E_SLOT" -- scripts/netns.sh -- "$@"
+  flock -s "$root/.stage-lock" scripts/virtual-display.sh "$COD4E_SLOT" -- scripts/netns.sh -- "$@"
 }
 
 if [ $exec_mode = 1 ]; then

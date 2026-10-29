@@ -34,7 +34,9 @@ opts=""
 [ "${COD4E_LINUX_EXEC:-0}" = 1 ] && opts="${opts}--exec "
 if [ "${1:-}" = -- ]; then shift; opts="${opts}-- $(printf '%q ' "$@")"; fi
 
-git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -C $dir'"
+# `tar x -m` stamps every file with the extraction time: git archive carries commit times, and a slot's target dir
+# outlives a run, so an older ref's sources would look older than the last build and cargo would reuse its binaries.
+git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -m -C $dir'"
 status=0
 # The command goes to the host as a file: the login shell there is fish, and printf %q output for arguments with
 # quotes, newlines or other specials ($'...') must be parsed by bash alone.
