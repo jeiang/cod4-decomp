@@ -29,6 +29,11 @@ if [ -n "${COD4E_SLOT:-}" ]; then
   # The slot is held from the build on: two runs in one slot would otherwise rebuild each other's binaries.
   exec 9>"$root/.slot-$COD4E_SLOT.lock"
   flock -x 9
+  # The stage lock is shared from the build on too, so a serial run's timing stages never share the host with a
+  # slot's compile. A pending serial run keeps new slot runs (and their builds) from starting.
+  while [ -e "$root/.serial-pending" ]; do sleep 10; done
+  exec 8>>"$root/.stage-lock"
+  flock -s 8
 elif [ $exec_mode = 1 ]; then
   echo "--exec needs a slot" >&2
   exit 2
@@ -42,10 +47,8 @@ if [ $checks = 1 ]; then
 fi
 [ $run = 1 ] || exit 0
 
-# Slot runs (holding their slot's lock since the build) wait out a pending serial run, then share the stage lock.
 slot_wrap() {
-  while [ -e "$root/.serial-pending" ]; do sleep 10; done
-  flock -s "$root/.stage-lock" scripts/virtual-display.sh "$COD4E_SLOT" -- scripts/netns.sh -- "$@"
+  scripts/virtual-display.sh "$COD4E_SLOT" -- scripts/netns.sh -- "$@"
 }
 
 if [ $exec_mode = 1 ]; then
