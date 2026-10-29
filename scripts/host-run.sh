@@ -7,9 +7,9 @@
 # binaries on PATH, writing into out/.
 # COD4E_SLOT=1..3 selects a harness slot: its own target dir, headless display (scripts/virtual-display.sh) and
 # loopback-only network namespace (scripts/netns.sh). Slot runs hold the host-wide stage lock shared, so up to three
-# run at once. Without a slot the run is serial: it holds the stage lock exclusively and uses the display in
-# WAYLAND_DISPLAY/XDG_RUNTIME_DIR, so timing-gated stages see a quiet host. A pending serial run
-# (~/Projects/cod4e/.serial-pending) keeps new slot runs from starting.
+# run at once. Without a slot the run is serial: it holds the stage lock exclusively, so timing-gated stages see a
+# quiet host, and runs on its own headless display like a slot (the desktop session's state cannot stall its
+# windows). A pending serial run (~/Projects/cod4e/.serial-pending) keeps new slot runs from starting.
 set -euo pipefail
 root=$HOME/Projects/cod4e
 checks=1
@@ -70,6 +70,6 @@ else
   touch "$root/.serial-pending"
   trap 'rm -f "$root/.serial-pending"' EXIT
   # shellcheck disable=SC2086
-  flock -x "$root/.stage-lock" env ${WAYLAND_DISPLAY:+WAYLAND_DISPLAY=$WAYLAND_DISPLAY} \
-    ${XDG_RUNTIME_DIR:+XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR} COD4E_NO_PROMPT=1 $chrome "$h" run --out bundles "$@"
+  flock -x "$root/.stage-lock" scripts/virtual-display.sh serial -- \
+    env COD4E_NO_PROMPT=1 $chrome "$h" run --out bundles "$@"
 fi

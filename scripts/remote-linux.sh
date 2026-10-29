@@ -15,11 +15,9 @@
 #   COD4E_LINUX_EXEC=1            (slot only) run the command after `--` in the slot instead of the harness, with
 #                                 the release binaries on PATH; it writes into out/.
 #   COD4E_LINUX_CHECKS=0          skip test/clippy/fmt (the build still runs).
-#   COD4E_LINUX_WAYLAND_DISPLAY,
-#   COD4E_LINUX_XDG_RUNTIME_DIR   (serial runs) the host's Wayland session for the client stages, e.g. wayland-1
-#                                 and /run/user/1000; without them those stages report `no display` and skip.
 # Without a slot the run is serial: it takes the host-wide stage lock exclusively, after the running slots finish
-# and before new ones start, so timing checks see a quiet host. Builds and tests run at nice 19.
+# and before new ones start, so timing checks see a quiet host; it gets its own headless display like a slot.
+# Builds and tests run at nice 19.
 set -euo pipefail
 ref=HEAD
 if [ $# -gt 0 ] && [ "$1" != -- ]; then ref=$1; shift; fi
@@ -27,8 +25,6 @@ host=${COD4E_LINUX_HOST:?set COD4E_LINUX_HOST to the ssh host of the Linux test 
 dir="~/Projects/cod4e/run-$(hostname -s)-$$"  # per invocation: parallel runs must not wipe each other
 vars="COD4_PATH=\$HOME/Projects/cod4e/shared/COD4 "
 [ -n "${COD4E_LINUX_SLOT:-}" ] && vars="${vars}COD4E_SLOT=$(printf '%q' "$COD4E_LINUX_SLOT") "
-[ -n "${COD4E_LINUX_WAYLAND_DISPLAY:-}" ] && vars="${vars}WAYLAND_DISPLAY=$(printf '%q' "$COD4E_LINUX_WAYLAND_DISPLAY") "
-[ -n "${COD4E_LINUX_XDG_RUNTIME_DIR:-}" ] && vars="${vars}XDG_RUNTIME_DIR=$(printf '%q' "$COD4E_LINUX_XDG_RUNTIME_DIR") "
 opts=""
 [ "${COD4E_LINUX_CHECKS:-1}" = 0 ] && opts="--no-checks "
 [ "${COD4E_LINUX_EXEC:-0}" = 1 ] && opts="${opts}--exec "
