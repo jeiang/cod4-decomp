@@ -50,6 +50,7 @@ const OURS: &[&str] = &[
     "cod4e_harness",
     "cod4e_master",
     "cod4e_server",
+    "devctrl",
     "fx",
     "gsc",
     "harness",

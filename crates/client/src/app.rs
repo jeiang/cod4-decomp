@@ -24,6 +24,7 @@ use crate::video::Recorder;
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, TextureCache, View};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -419,6 +420,20 @@ struct State {
     shot_gate: bool,
     /// The last frame copied the scene for distortion materials.
     distortion_now: bool,
+    /// Input events waiting for this frame's dispatch: the window's and the control channel's, in arrival order.
+    events: Vec<crate::input::InputEvent>,
+    /// The dev control channel (`--control`, `--control-stdio`); `None` unless a flag turned it on.
+    control: Option<devctrl::Channel>,
+    /// The channel's clock and step count per waiting request.
+    control_waits: HashMap<u64, ControlWait>,
+    /// A capture the channel asked for: (directory override, base64 in the reply), taken after the frame is presented.
+    control_shot: Option<(Option<String>, bool)>,
+    /// The capture that was taken, offered to its request on the next pass.
+    control_shot_done: Option<Result<Value, String>>,
+    /// The channel asked for the run to end (`quit`).
+    control_quit: bool,
+    /// Numbers the captures the channel takes (`control-<n>.png`).
+    shot_serial: u32,
     /// `dlight=1`: a bright light a little way in front of the camera, for the harness.
     test_light: bool,
     /// Dynamic lights the last frame drew.
@@ -1034,6 +1049,13 @@ impl Viewer {
             screenshot_next: 0,
             shot_gate: false,
             distortion_now: false,
+            events: Vec::new(),
+            control: crate::control::open(&self.cli),
+            control_waits: HashMap::new(),
+            control_shot: None,
+            control_shot_done: None,
+            control_quit: false,
+            shot_serial: 0,
             test_light: false,
             lights_drawn: 0,
             menu_sound: None,
@@ -1134,31 +1156,10 @@ impl ApplicationHandler<Ready> for Viewer {
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
         let Some(st) = self.st.as_mut() else { return };
-        if let WindowEvent::KeyboardInput { event, .. } = &ev
-            && event.state == ElementState::Pressed
-            && !event.repeat
-            && event.physical_key == PhysicalKey::Code(KeyCode::Backquote)
-            && let Some(sh) = st.shell.as_mut()
-        {
-            // `~` opens and closes the console wherever the player is; its key is never typed into it.
-            sh.st.console.toggle();
-            st.input.release_all();
-            return;
-        }
-        let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
-        let captured = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
-        if typing {
-            if let (Some(sh), WindowEvent::KeyboardInput { event, .. }) = (st.shell.as_mut(), &ev)
-                && event.state == ElementState::Pressed
-            {
-                for k in typed_keys(event) {
-                    sh.console_key(&mut st.input, k);
-                }
-            }
-        } else if captured {
-            ui_event(st, &ev);
-        } else {
-            st.input.window_event(&ev);
+        // The event joins the frame's queue, where the control channel's events are too: both take the same route
+        // (see [`dispatch_input`]), so an injected key press is the player's key press.
+        if let Some(e) = translate(&ev) {
+            st.events.push(e);
         }
         if let WindowEvent::KeyboardInput { event, .. } = &ev
             && event.state == ElementState::Pressed
@@ -1187,7 +1188,10 @@ impl ApplicationHandler<Ready> for Viewer {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } if !self.cli.timed() && !captured && st.renderer.is_some() => {
+            } if !self.cli.timed()
+                && !st.shell.as_ref().is_some_and(|s| s.ui.captures_input())
+                && st.renderer.is_some() =>
+            {
                 st.gate.click();
                 grab_pointer(st);
             }
@@ -1321,6 +1325,18 @@ impl Viewer {
         let dt = (t - st.last_t).min(0.1);
         st.last_t = t;
         st.pace.1 += 1;
+        // The control channel, when a flag opened one: its requests are answered against this frame's state, and the
+        // events it injects join the window's in the queue below.
+        if st.control.is_some() {
+            service_control(&self.cli, st);
+            if std::mem::take(&mut st.control_quit) {
+                el.exit();
+            }
+        }
+        // This frame's input: the window's events and the channel's, in the order they arrived.
+        for ev in std::mem::take(&mut st.events) {
+            dispatch_input(st, &ev);
+        }
         // The commands a `wait` held back run before this frame's input is read.
         match st.shell.as_mut() {
             Some(sh) => sh.run_due(&mut st.input),
@@ -2041,6 +2057,12 @@ impl Viewer {
         if st.script.is_some() && script_step(st) {
             write_script_report(st, self.cli.out.clone().unwrap_or_default(), false);
             el.exit();
+        }
+        // A capture the channel asked for is taken from the frame that was just drawn; its request answers on the
+        // next pass of the channel.
+        if st.control_shot.is_some() {
+            let shot = take_control_shot(&self.cli, st, &frame.texture);
+            st.control_shot_done = Some(shot);
         }
         let t_present = Instant::now();
         st.gpu.queue.present(frame);
@@ -3205,29 +3227,112 @@ fn tour_step(
 }
 
 /// What a key press types or does in a text field: a named key, else the characters it produced.
-fn typed_keys(event: &winit::event::KeyEvent) -> Vec<UiKey> {
+fn typed_ui_keys(ev: &crate::input::InputEvent) -> Vec<UiKey> {
     use winit::keyboard::{Key, NamedKey};
-    let named = match &event.logical_key {
-        Key::Named(NamedKey::ArrowUp) => Some(UiKey::Up),
-        Key::Named(NamedKey::ArrowDown) => Some(UiKey::Down),
-        Key::Named(NamedKey::ArrowLeft) => Some(UiKey::Left),
-        Key::Named(NamedKey::ArrowRight) => Some(UiKey::Right),
-        Key::Named(NamedKey::Enter) => Some(UiKey::Enter),
-        Key::Named(NamedKey::Escape) => Some(UiKey::Escape),
-        Key::Named(NamedKey::Tab) => Some(UiKey::Tab),
-        Key::Named(NamedKey::Backspace) => Some(UiKey::Backspace),
-        Key::Named(NamedKey::Delete) => Some(UiKey::Delete),
-        Key::Named(NamedKey::Insert) => Some(UiKey::Insert),
-        Key::Named(NamedKey::Home) => Some(UiKey::Home),
-        Key::Named(NamedKey::End) => Some(UiKey::End),
-        Key::Named(NamedKey::PageUp) => Some(UiKey::PageUp),
-        Key::Named(NamedKey::PageDown) => Some(UiKey::PageDown),
-        _ => None,
-    };
-    match (named, &event.text) {
-        (Some(k), _) => vec![k],
-        (None, Some(t)) => t.chars().map(UiKey::Char).collect(),
-        (None, None) => Vec::new(),
+    match ev {
+        crate::input::InputEvent::Text(t) => t.chars().map(UiKey::Char).collect(),
+        crate::input::InputEvent::Key {
+            logical,
+            text,
+            state: ElementState::Pressed,
+            ..
+        } => {
+            let named = match logical {
+                Some(Key::Named(NamedKey::ArrowUp)) => Some(UiKey::Up),
+                Some(Key::Named(NamedKey::ArrowDown)) => Some(UiKey::Down),
+                Some(Key::Named(NamedKey::ArrowLeft)) => Some(UiKey::Left),
+                Some(Key::Named(NamedKey::ArrowRight)) => Some(UiKey::Right),
+                Some(Key::Named(NamedKey::Enter)) => Some(UiKey::Enter),
+                Some(Key::Named(NamedKey::Escape)) => Some(UiKey::Escape),
+                Some(Key::Named(NamedKey::Tab)) => Some(UiKey::Tab),
+                Some(Key::Named(NamedKey::Backspace)) => Some(UiKey::Backspace),
+                Some(Key::Named(NamedKey::Delete)) => Some(UiKey::Delete),
+                Some(Key::Named(NamedKey::Insert)) => Some(UiKey::Insert),
+                Some(Key::Named(NamedKey::Home)) => Some(UiKey::Home),
+                Some(Key::Named(NamedKey::End)) => Some(UiKey::End),
+                Some(Key::Named(NamedKey::PageUp)) => Some(UiKey::PageUp),
+                Some(Key::Named(NamedKey::PageDown)) => Some(UiKey::PageDown),
+                _ => None,
+            };
+            match (named, text) {
+                (Some(k), _) => vec![k],
+                (None, Some(t)) => t.chars().map(UiKey::Char).collect(),
+                (None, None) => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The window's event as the engine's own, for the queue: the fields the engine reads, and no more.
+fn translate(ev: &WindowEvent) -> Option<crate::input::InputEvent> {
+    use crate::input::InputEvent;
+    use winit::event::MouseScrollDelta;
+    Some(match ev {
+        WindowEvent::KeyboardInput { event, .. } => {
+            let PhysicalKey::Code(code) = event.physical_key else {
+                return None;
+            };
+            InputEvent::Key {
+                code,
+                logical: Some(event.logical_key.clone()),
+                text: event.text.as_ref().map(|t| t.to_string()),
+                state: event.state,
+                repeat: event.repeat,
+            }
+        }
+        WindowEvent::MouseInput { state, button, .. } => InputEvent::Button {
+            button: *button,
+            state: *state,
+        },
+        WindowEvent::MouseWheel { delta, .. } => {
+            let y = match delta {
+                MouseScrollDelta::LineDelta(_, y) => *y,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            if y == 0.0 {
+                return None;
+            }
+            InputEvent::Wheel { y }
+        }
+        WindowEvent::CursorMoved { position, .. } => InputEvent::Cursor {
+            x: position.x as f32,
+            y: position.y as f32,
+        },
+        WindowEvent::Focused(f) => InputEvent::Focus(*f),
+        _ => return None,
+    })
+}
+
+/// Routes one input event the way the player's own would go: the console's key, then the console's typing, the
+/// menus, or the game. The window's events and the control channel's both come through here.
+fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
+    use crate::input::InputEvent;
+    if let InputEvent::Key {
+        code: KeyCode::Backquote,
+        state: ElementState::Pressed,
+        repeat: false,
+        ..
+    } = ev
+        && let Some(sh) = st.shell.as_mut()
+    {
+        // `~` opens and closes the console wherever the player is; its key is never typed into it.
+        sh.st.console.toggle();
+        st.input.release_all();
+        return;
+    }
+    let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
+    let captured = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
+    if typing {
+        if let Some(sh) = st.shell.as_mut() {
+            for k in typed_ui_keys(ev) {
+                sh.console_key(&mut st.input, k);
+            }
+        }
+    } else if captured {
+        ui_event(st, ev);
+    } else {
+        st.input.event(ev);
     }
 }
 
@@ -3373,32 +3478,29 @@ fn console_action(st: &mut State, line: &str) {
 }
 
 /// Routes a window event to the menus (a menu is open and owns the keyboard and mouse).
-fn ui_event(st: &mut State, ev: &WindowEvent) {
+fn ui_event(st: &mut State, ev: &crate::input::InputEvent) {
+    use crate::input::InputEvent;
+    use winit::event::ElementState;
     let Some(sh) = st.shell.as_mut() else { return };
     // A bind item is waiting: the next key or button is the binding (Escape cancels, via the menus).
     if sh.ui.bind_pending() {
         let name = match ev {
-            WindowEvent::MouseInput {
+            InputEvent::Button {
                 state: ElementState::Pressed,
                 button,
-                ..
             } => Some(crate::input::mouse_key_name(*button)),
-            WindowEvent::MouseWheel { delta, .. } => {
-                let y = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
-                };
-                (y != 0.0).then(|| if y > 0.0 { "mwheelup" } else { "mwheeldown" }.to_owned())
+            InputEvent::Wheel { y } => {
+                Some(if *y > 0.0 { "mwheelup" } else { "mwheeldown" }.to_owned())
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && !event.repeat =>
-            {
-                match event.physical_key {
-                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => None,
-                    winit::keyboard::PhysicalKey::Code(c) => crate::input::physical_key_name(c),
-                    _ => None,
-                }
-            }
+            InputEvent::Key {
+                code,
+                state: ElementState::Pressed,
+                repeat: false,
+                ..
+            } => match code {
+                KeyCode::Escape => None,
+                c => crate::input::physical_key_name(*c),
+            },
             _ => None,
         };
         if let Some(n) = name {
@@ -3407,13 +3509,12 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
         }
     }
     match ev {
-        WindowEvent::CursorMoved { position, .. } => {
-            sh.mouse_move(&mut st.input, position.x as f32, position.y as f32);
+        InputEvent::Cursor { x, y } => {
+            sh.mouse_move(&mut st.input, *x, *y);
         }
-        WindowEvent::MouseInput {
+        InputEvent::Button {
             state: ElementState::Pressed,
             button,
-            ..
         } => {
             let key = match button {
                 MouseButton::Left => UiKey::Mouse1,
@@ -3422,29 +3523,26 @@ fn ui_event(st: &mut State, ev: &WindowEvent) {
             };
             sh.key(&mut st.input, key);
         }
-        WindowEvent::MouseInput {
+        InputEvent::Button {
             state: ElementState::Released,
             button: MouseButton::Left | MouseButton::Right,
-            ..
         } => sh.mouse_up(),
-        WindowEvent::MouseWheel { delta, .. } => {
-            let y = match delta {
-                winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
-                winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
-            };
-            if y != 0.0 {
-                sh.key(
-                    &mut st.input,
-                    if y > 0.0 {
-                        UiKey::WheelUp
-                    } else {
-                        UiKey::WheelDown
-                    },
-                );
-            }
+        InputEvent::Wheel { y } => {
+            sh.key(
+                &mut st.input,
+                if *y > 0.0 {
+                    UiKey::WheelUp
+                } else {
+                    UiKey::WheelDown
+                },
+            );
         }
-        WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-            for k in typed_keys(event) {
+        InputEvent::Key {
+            state: ElementState::Pressed,
+            ..
+        }
+        | InputEvent::Text(_) => {
+            for k in typed_ui_keys(ev) {
                 sh.key(&mut st.input, k);
             }
         }
@@ -4349,4 +4447,322 @@ mod bot_count_tests {
         input.exec_line("seta bot_count 0");
         assert!(saved_bot_count_lines(None, &input).is_empty());
     }
+}
+
+// ---- the dev control channel --------------------------------------------------------------------------------
+//
+// The channel answers requests against the running game; see `crate::control` and `docs/control-channel.md`. Its
+// requests reach the same code the player's own actions do: `key` and `text` go into the frame's input queue, `exec`
+// into the console, a capture takes the frame that was just drawn.
+
+/// The clock and step count of one request the channel is holding.
+struct ControlWait {
+    at: Instant,
+    steps: u64,
+}
+
+/// Answers this frame's channel requests. Injected events land in `st.events`, so they are dispatched with the
+/// window's on this same frame.
+fn service_control(cli: &Cli, st: &mut State) {
+    let Some(mut ch) = st.control.take() else {
+        return;
+    };
+    let answered = {
+        let mut host = ControlHost { cli, st };
+        ch.service(&mut host)
+    };
+    if answered > 0 {
+        tracing::debug!(answered, "control: requests answered");
+    }
+    let front = ch.front().map(|r| r.seq);
+    st.control = Some(ch);
+    match front {
+        Some(min) => st.control_waits.retain(|s, _| *s >= min),
+        None => st.control_waits.clear(),
+    }
+}
+
+/// The game behind the channel's requests: the app's own state.
+struct ControlHost<'a> {
+    cli: &'a Cli,
+    st: &'a mut State,
+}
+
+impl devctrl::Handler for ControlHost<'_> {
+    fn handle(&mut self, req: &devctrl::Request) -> devctrl::Outcome {
+        crate::control::handle(self, req)
+    }
+}
+
+impl crate::control::Control for ControlHost<'_> {
+    fn frames(&self) -> u64 {
+        self.st.samples.len() as u64
+    }
+
+    fn waited(&mut self, seq: u64) -> f64 {
+        self.st
+            .control_waits
+            .entry(seq)
+            .or_insert_with(|| ControlWait {
+                at: Instant::now(),
+                steps: 0,
+            })
+            .at
+            .elapsed()
+            .as_secs_f64()
+    }
+
+    fn step_left(&mut self, seq: u64, frames: u64) -> u64 {
+        let w = self
+            .st
+            .control_waits
+            .entry(seq)
+            .or_insert_with(|| ControlWait {
+                at: Instant::now(),
+                steps: 0,
+            });
+        w.steps += 1;
+        frames.saturating_sub(w.steps)
+    }
+
+    fn state(&mut self, what: Option<&str>) -> Value {
+        let parts: Vec<&str> = match what {
+            Some(w) => vec![w],
+            None => crate::control::PARTS.to_vec(),
+        };
+        state_document(self.cli, self.st, &parts)
+    }
+
+    fn binds_of(&self, command: &str) -> Vec<String> {
+        self.st
+            .input
+            .binding_keys(command)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn cvar(&self, name: &str) -> Option<String> {
+        self.st.input.cvar(name).map(str::to_owned)
+    }
+
+    fn set_cvar(&mut self, name: &str, value: &str) -> Result<(), String> {
+        let line =
+            crate::input::config::join(&["set".to_owned(), name.to_owned(), value.to_owned()]);
+        let before = self.st.input.cvar(name).map(str::to_owned);
+        self.st.input.exec_line(&line);
+        let after = self.st.input.cvar(name).map(str::to_owned);
+        if before == after && after.as_deref() != Some(value) {
+            return Err(format!("{name} did not take the value"));
+        }
+        Ok(())
+    }
+
+    fn inject(&mut self, ev: crate::input::InputEvent) {
+        self.st.events.push(ev);
+    }
+
+    fn exec(&mut self, line: &str) {
+        match self.st.shell.as_mut() {
+            Some(sh) => sh.console_line(&mut self.st.input, line),
+            None => self.st.input.exec_line(line),
+        }
+    }
+
+    fn capture(&mut self, dir: Option<&str>, base64: bool) -> Option<Result<Value, String>> {
+        if let Some(done) = self.st.control_shot_done.take() {
+            return Some(done);
+        }
+        self.st.control_shot = Some((dir.map(str::to_owned), base64));
+        None
+    }
+
+    fn view(
+        &mut self,
+        origin: Option<[f32; 3]>,
+        angles: Option<[f32; 3]>,
+    ) -> Result<Value, String> {
+        if let Some(o) = origin {
+            self.st.pos = Vec3::new(o[0], o[1], o[2]);
+        }
+        if let Some(a) = angles {
+            self.st.pitch = a[0].to_radians();
+            self.st.yaw = a[1].to_radians();
+            self.st.roll = a[2].to_radians();
+        }
+        let in_match = self.st.net.is_some();
+        Ok(json!({
+            "origin": [self.st.pos.x, self.st.pos.y, self.st.pos.z],
+            "angles": [self.st.pitch.to_degrees(), self.st.yaw.to_degrees(), self.st.roll.to_degrees()],
+            // In a match the server's position and the player's own aim replace this on the next frame.
+            "held": !in_match,
+        }))
+    }
+
+    fn server(
+        &mut self,
+        seq: u64,
+        req: &serde_json::Map<String, Value>,
+    ) -> Option<Result<Value, String>> {
+        // Only a client that runs a listen server has one to ask: a `--connect` client answers at once, so a
+        // request cannot wedge the queue waiting for a server that will never drain it.
+        if self.st.listen.is_none() {
+            return Some(Err("this client runs no listen server".to_owned()));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::listen::request(seq, req)
+        }
+        // The browser hosts no server yet (#378's Phase 5 step 2 makes hosting say so).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (seq, req);
+            Some(Err("the browser hosts no server".to_owned()))
+        }
+    }
+
+    fn quit(&mut self) {
+        self.st.control_quit = true;
+    }
+}
+
+/// The state document: the game's real state, section by section. Only the sections asked for are built, so a `wait`
+/// on `player.health` does not build the entity list every frame.
+fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
+    let mut m = serde_json::Map::new();
+    for part in parts {
+        let v = match *part {
+            "client" => json!({
+                "map": if st.map_name.is_empty() { cli.map.clone() } else { st.map_name.clone() },
+                "frames": st.samples.len(),
+                "seconds": st.started.elapsed().as_secs_f64(),
+                "size": [st.config.width, st.config.height],
+                "loading": st.loading.is_some(),
+                "in_world": st.renderer.is_some(),
+                "out": cli.out.as_ref().map(|p| p.display().to_string()),
+                "backends": cli.backend.clone(),
+                "present": cli.present.clone(),
+            }),
+            "menu" => menu_state(st),
+            "hud" => hud_state(st),
+            "console" => json!({
+                "open": st.shell.as_ref().is_some_and(|sh| sh.st.console.active()),
+                "field": st.shell.as_ref().map(|sh| sh.st.console.field()),
+                "lines": st.shell.as_ref().map(|sh| sh.st.feed.console.clone()),
+                "messages": st.input.messages(),
+            }),
+            "cvars" => {
+                let mut m = serde_json::Map::new();
+                for (k, v) in st.input.all_cvars() {
+                    m.insert(k, Value::String(v));
+                }
+                Value::Object(m)
+            }
+            "binds" => {
+                let mut m = serde_json::Map::new();
+                for (k, v) in st.input.all_binds() {
+                    m.insert(k.to_owned(), Value::String(v.to_owned()));
+                }
+                Value::Object(m)
+            }
+            "view" => json!({
+                "origin": [st.pos.x, st.pos.y, st.pos.z],
+                "pitch": st.pitch.to_degrees(),
+                "yaw": st.yaw.to_degrees(),
+                "roll": st.roll.to_degrees(),
+                "drawn_frames": st.samples.len(),
+            }),
+            "draw" => json!({
+                "surfaces": st.surfaces_drawn.last().copied(),
+                "lights": st.lights_drawn,
+                "distortion_copy": st.distortion_now,
+                "late": st.late,
+            }),
+            other => match st.net.as_mut() {
+                Some(net) => net.control_state(other),
+                None => Value::Null,
+            },
+        };
+        m.insert((*part).to_owned(), v);
+    }
+    Value::Object(m)
+}
+
+/// The menus on the stack, and the item that has the focus with the rectangle a click is tested against.
+fn menu_state(st: &mut State) -> Value {
+    let Some(sh) = st.shell.as_ref() else {
+        return Value::Null;
+    };
+    let open: Vec<String> = sh.ui.open_menus().iter().map(|m| (*m).to_owned()).collect();
+    let focused = sh
+        .ui
+        .focused_report()
+        .map(|(menu, item, rect)| json!({"menu": menu, "item": item, "rect": rect}));
+    let items: Vec<Value> = open
+        .iter()
+        .flat_map(|menu| {
+            sh.ui
+                .item_report(menu)
+                .into_iter()
+                .map(|(name, rect)| json!({"menu": menu.clone(), "name": name, "rect": rect}))
+        })
+        .collect();
+    json!({"open": open, "focused": focused, "items": items})
+}
+
+/// What the HUD drew and counted, and the game facts the scoreboard reads.
+fn hud_state(st: &mut State) -> Value {
+    let Some(sh) = st.shell.as_ref() else {
+        return Value::Null;
+    };
+    let g = &sh.st.game;
+    json!({
+        "report": sh.st.game.hud.report(),
+        "stats": {
+            "messages": sh.st.hud_stats.messages,
+            "obituaries": sh.st.hud_stats.obituaries,
+            "scoreboard_frames": sh.st.hud_stats.scoreboard_frames,
+            "killcam_frames": sh.st.hud_stats.killcam_frames,
+            "names_max": sh.st.hud_stats.names_max,
+            "unresolved": sh.st.hud_stats.unresolved,
+        },
+        "scoreboard_shown": g.scoreboard,
+        "dead": g.dead,
+        "intermission": g.intermission,
+        "team": g.team,
+        "gametype": g.gametype,
+        "time_left": g.time_left,
+        "allies_score": g.allies_score,
+        "axis_score": g.axis_score,
+        "score": g.score,
+        "kills": g.kills,
+        "deaths": g.deaths,
+        "ping": g.ping,
+        "clip_ammo": g.clip_ammo,
+        "open_menus": sh.ui.open_menus(),
+    })
+}
+
+/// Takes the capture the channel asked for from the frame just drawn and answers its request.
+fn take_control_shot(cli: &Cli, st: &mut State, tex: &wgpu::Texture) -> Result<Value, String> {
+    let (dir, inline) = st.control_shot.take().unwrap_or_default();
+    let dir = dir
+        .map(PathBuf::from)
+        .or_else(|| cli.out.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    st.shot_serial += 1;
+    let path = dir.join(format!("control-{}.png", st.shot_serial));
+    let lit = save_png(&st.gpu, tex, st.config.format, &path)?;
+    let mut reply = json!({
+        "path": path.display().to_string(),
+        "width": tex.width(),
+        "height": tex.height(),
+        "lit_fraction": lit,
+    });
+    if inline {
+        let bytes = std::fs::read(&path).map_err(|e| format!("cannot read the capture: {e}"))?;
+        reply["png_base64"] = Value::String(devctrl::base64(&bytes));
+    }
+    Ok(reply)
 }

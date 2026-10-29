@@ -9,6 +9,7 @@
 //! the moment the server rewinds them to when it judges this client's shots.
 
 mod attach;
+mod control;
 mod corpses;
 mod hud;
 mod melee;

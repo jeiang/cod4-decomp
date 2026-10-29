@@ -117,7 +117,7 @@ pub const ALLOWED: &[Allow] = &[
         ],
         reason: "menus show an empty `@` reference (#372)",
         stages: &[],
-        max: Some(9), // measured 7 on the Linux host, 2026-10-14,
+        max: Some(12), // measured 7 (2026-10-14) and 11 with the class menu drawn (control-channel, 2026-10-29)
     },
     // Timing of the harness's own clients and bots.
     Allow {

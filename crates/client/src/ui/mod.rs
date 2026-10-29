@@ -1589,6 +1589,40 @@ impl Ui {
         self.item_pixels(m, i).contains(x, y)
     }
 
+    /// The items of one open menu, for the control channel's state document: each item's name and its rectangle in
+    /// window pixels (`[x, y, w, h]`), which is what a click is tested against.
+    pub fn item_report(&self, menu: &str) -> Vec<(String, [f32; 4])> {
+        let Some(m) = self.menu_index(menu) else {
+            return Vec::new();
+        };
+        (0..self.menus[m].items.len())
+            .map(|i| {
+                let name = self.menus[m].def.items[i]
+                    .window
+                    .name
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_owned();
+                let p = self.item_pixels(m, i);
+                (name, [p.x, p.y, p.w, p.h])
+            })
+            .collect()
+    }
+
+    /// The item of the focused menu that has the focus: its menu, its name and its rectangle.
+    pub fn focused_report(&self) -> Option<(String, String, [f32; 4])> {
+        let m = self.focused_menu()?;
+        let i = self.focused_item(m)?;
+        let name = self.menus[m].def.items[i]
+            .window
+            .name
+            .as_deref()
+            .unwrap_or("")
+            .to_owned();
+        let p = self.item_pixels(m, i);
+        Some((self.menus[m].name.clone(), name, [p.x, p.y, p.w, p.h]))
+    }
+
     /// True while a bind item waits for the key to bind (the next key press goes to [`Ui::bind_capture`]).
     pub fn bind_pending(&self) -> bool {
         self.bind_pending.is_some()

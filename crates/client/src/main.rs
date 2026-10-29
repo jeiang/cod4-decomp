@@ -14,6 +14,7 @@ mod breath;
 mod camera;
 mod compass;
 mod console;
+mod control;
 mod crosshair;
 mod damage;
 mod decal;
@@ -114,6 +115,9 @@ usage: cod4e [options]
                          map=<name>[:secs], maprotate[=secs], and waits for killcam|dead|intermission|feed[=secs];
                          writes ui-script.json (and shots) to --out, then exits (harness)
   --no-autojoin          do not answer the server's team and class menus by default (direct --listen/--connect)
+  --control <port>       open the dev control channel on 127.0.0.1:<port> (0 picks one; off unless given); see docs/control-channel.md
+  --control-file <path>  write the port --control 0 took to <path>, as host:port
+  --control-stdio        talk the control channel over stdin and stdout instead of a socket
   --fx-demo <name>       play the named effect (fx/...) in front of the player every 1.5 s, for looking at effects
   --autoplay             a scripted player instead of the keyboard, for --duration seconds (harness stage 4)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
@@ -176,6 +180,12 @@ pub struct Cli {
     /// Answer the server's team and class menus with the default choices (direct `--listen`/`--connect`, until the player
     /// picks); off with `--no-autojoin` and in menu-started matches.
     pub autojoin: bool,
+    /// `--control <port>`: the dev control channel listens on loopback TCP there (0 picks a free port).
+    pub control: Option<u16>,
+    /// `--control-file`: where the port `--control 0` took is written, as `host:port`.
+    pub control_file: Option<PathBuf>,
+    /// `--control-stdio`: the channel reads stdin and writes stdout instead of listening.
+    pub control_stdio: bool,
 }
 
 impl Cli {
@@ -237,6 +247,9 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         ui_tour: None,
         ui_script: None,
         autojoin: true,
+        control: None,
+        control_file: None,
+        control_stdio: false,
     };
     let mut it = args.iter();
     let mut size_given = false;
@@ -324,6 +337,11 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--ui-tour" => c.ui_tour = Some(val(a)?.into()),
             "--ui-script" => c.ui_script = Some(val(a)?),
             "--no-autojoin" => c.autojoin = false,
+            "--control" => {
+                c.control = Some(val(a)?.parse().map_err(|_| "--control takes a port")?);
+            }
+            "--control-file" => c.control_file = Some(val(a)?.into()),
+            "--control-stdio" => c.control_stdio = true,
             "--list-display-modes" => c.list = true,
             "--json" => {}
             "-h" | "--help" => return Err(String::new()),
@@ -494,6 +512,22 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn the_control_channel_is_off_unless_asked() {
+        // Nothing binds a socket, and nothing writes a port file, without the flag: the channel is a dev tool.
+        let c = parse(&args("--listen")).unwrap();
+        assert_eq!(c.control, None);
+        assert_eq!(c.control_file, None);
+        assert!(!c.control_stdio);
+        let on = parse(&args("--control 0 --control-file /tmp/a.addr")).unwrap();
+        assert_eq!(on.control, Some(0));
+        assert_eq!(
+            on.control_file.as_deref(),
+            Some(std::path::Path::new("/tmp/a.addr"))
+        );
+        assert_eq!(parse(&args("--control-stdio")).unwrap().control_stdio, true);
     }
 
     #[test]
