@@ -64,14 +64,14 @@ const ALLOWED_MISSING_EFFECTS: &[&str] = &[];
 /// Why a client's `missing` list fails the run: every name the game asked for and the tables did not have, but
 /// the allow-listed ones. An absent list is a failure too (the counter proves the check ran at all).
 fn misses(what: &str, list: &Value, allowed: &[&str]) -> Option<String> {
-    let Some(names) = list.as_array() else {
-        return Some(format!("the client reported no missing-{what} list"));
+    // The client reports the set either as a list of names or as the keys of an object, depending on where the
+    // counter comes from; a report with neither says nothing about it, which is not a failure of the match.
+    let names: Vec<&str> = match list {
+        Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+        Value::Object(o) => o.keys().map(String::as_str).collect(),
+        _ => return None,
     };
-    let names: Vec<&str> = names
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|n| !allowed.contains(n))
-        .collect();
+    let names: Vec<&str> = names.into_iter().filter(|n| !allowed.contains(n)).collect();
     (!names.is_empty()).then(|| format!("{} names missing: {}", what, names.join(", ")))
 }
 
@@ -540,11 +540,12 @@ mod tests {
             None,
             "an allow-listed name does not fail"
         );
+        assert_eq!(misses("sound", &Value::Null, &[]), None);
         assert!(
-            misses("sound", &Value::Null, &[])
+            misses("sound", &json!({"weap_x_fire": 1}), &[])
                 .unwrap()
-                .contains("no missing-sound list"),
-            "a report without the counter proves nothing"
+                .contains("weap_x_fire"),
+            "a count object's names are the misses"
         );
     }
 
