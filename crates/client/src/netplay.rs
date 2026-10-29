@@ -312,6 +312,8 @@ struct Counters {
     vehicles_unloaded: std::collections::BTreeSet<String>,
     vehicles_max: usize,
     projectiles_max: usize,
+    /// Missiles seen, one entry per entity and weapon: a weapon's count is how many projectiles of it appeared.
+    missiles_seen: std::collections::BTreeSet<(u16, u16)>,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
@@ -594,6 +596,24 @@ impl NetPlay {
     /// The name of the weapon in hand, as the view model last drew it.
     pub fn weapon(&self) -> String {
         self.c.weapon.clone()
+    }
+
+    /// The `MISSILE` entities of the newest snapshot: the grenades, rockets and packs in flight or at rest.
+    pub fn missiles(&self) -> usize {
+        self.net
+            .latest()
+            .map(|s| {
+                s.entities
+                    .iter()
+                    .filter(|e| e.etype == etype::MISSILE)
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Explosions received so far.
+    pub fn explosions(&self) -> u64 {
+        self.c.events.get("explosion").copied().unwrap_or(0)
     }
 
     /// Where the join stands, for the browser overlay: "connecting", "connected" (snapshots arrive) or "spawned".
@@ -1702,9 +1722,20 @@ impl NetPlay {
                 }
             }
             at::ALT_MODE => {
-                let alt = self.weapons.info(cur).alt_weapon;
-                if alt != 0 && inv.has(alt) {
-                    self.select_weapon(alt);
+                // `ToggleWeaponAltMode`: not while an alternate is already being raised or the weapon lowered.
+                if !matches!(
+                    snap.ps.weapon_state,
+                    sim::pm::weapon_state::RAISING_ALTSWITCH
+                        | sim::pm::weapon_state::DROPPING
+                        | sim::pm::weapon_state::DROPPING_QUICK
+                ) {
+                    // `CG_AltWeaponToggleIndex` reads the weapon last picked (the one in hand at rest), not the
+                    // inventory's script selection: the grenade launcher is the M16's own alternate fire mode.
+                    let cur = self.selected_weapon(&inv, &snap.ps);
+                    let alt = inv.alt_mode_target(&self.weapons, cur);
+                    if alt != 0 && inv.has(alt) {
+                        self.select_weapon(alt);
+                    }
                 }
             }
             at::NIGHT_VISION => self.nv_press = true,
@@ -2190,6 +2221,7 @@ impl NetPlay {
         let mut out = Vec::new();
         let mut looping = Vec::new();
         for e in flying {
+            self.c.missiles_seen.insert((e.number, e.weapon));
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
                 logging::dedup!(
                     WARN,
@@ -2555,6 +2587,13 @@ impl NetPlay {
         report["view_kick_in_cmd_max"] = json!(self.c.max_kick_in_cmd);
         report["view_kick_settled"] = json!(self.c.kick_settled);
         report["projectiles_max_drawn"] = self.c.projectiles_max.into();
+        report["missiles_seen"] = json!(self.c.missiles_seen.iter().fold(
+            std::collections::BTreeMap::<&str, u64>::new(),
+            |mut m, (_, w)| {
+                *m.entry(self.weapons.name(*w)).or_default() += 1;
+                m
+            }
+        ));
         report["brush_models_seen"] = self.c.brush_models_seen.into();
         report["brush_models_max"] = self.c.brush_models_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();

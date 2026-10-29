@@ -2017,7 +2017,10 @@ impl Viewer {
             let hud = st.shell.as_ref().map(|s| s.st.game.hud.report());
             if let Some(sc) = st.script.as_mut() {
                 sc.results.push(json!({"step": format!("shot={name}"), "ok": ok, "hud": hud,
-                    "lit_fraction": lit.as_ref().ok(), "menus": st.shell.as_ref().map(|s| s.ui.open_menus().join(","))}));
+                    "lit_fraction": lit.as_ref().ok(), "menus": st.shell.as_ref().map(|s| s.ui.open_menus().join(",")),
+                    "weapon": st.net.as_ref().map(NetPlay::weapon),
+                    "missiles": st.net.as_ref().map(NetPlay::missiles),
+                    "explosions": st.net.as_ref().map(NetPlay::explosions)}));
                 sc.index += 1;
                 sc.began = Instant::now();
             }

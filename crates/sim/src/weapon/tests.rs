@@ -459,6 +459,38 @@ fn running_dry_stays_put_when_dead_or_when_the_weapon_stays_up() {
     assert_eq!(go(false, 0, false, ak), None);
 }
 
+/// `CG_AltWeaponToggleIndex`: the alt-mode action slot raises the alternate fire mode of the weapon in hand, and of a
+/// primary the inventory holds when the weapon in hand has none.
+#[test]
+fn the_alt_mode_slot_raises_the_underbarrel_launcher() {
+    let mut gl = rifle("gl_mp", "gl");
+    gl.inventory_type = InventoryType::AltMode;
+    let mut m4 = rifle("m4_gl_mp", "ar");
+    m4.alt_weapon_name = "gl_mp".into();
+    m4.inventory_type = InventoryType::Primary;
+    let s = Setup::new(vec![m4, gl, rifle("deserteagle_mp", "pistol")]);
+    let mut inv = PlayerWeapons::new();
+    let mut ps = PlayerState::default();
+    for w in ["m4_gl_mp", "gl_mp", "deserteagle_mp"] {
+        inv.give_raw(&s.table, &mut ps, s.idx(w), 0);
+    }
+    assert_eq!(
+        inv.alt_mode_target(&s.table, s.idx("m4_gl_mp")),
+        s.idx("gl_mp"),
+        "the rifle in hand raises its own launcher"
+    );
+    assert_eq!(
+        inv.alt_mode_target(&s.table, s.idx("deserteagle_mp")),
+        s.idx("gl_mp"),
+        "a pistol in hand raises the launcher of the rifle the inventory holds"
+    );
+    assert_eq!(
+        inv.alt_mode_target(&s.table, 0),
+        s.idx("gl_mp"),
+        "nothing in hand still finds the launcher"
+    );
+}
+
 #[test]
 fn an_alt_mode_without_its_original_raises_nothing() {
     let mut gl = rifle("gl_mp", "gl");

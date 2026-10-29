@@ -172,8 +172,11 @@ fn hud_problem(hud: &Value) -> Option<String> {
             hud["health"], hud["max_health"]
         ));
     }
-    if hud["weapon"]["clip"].as_i64().unwrap_or(-1) <= 0 {
-        return Some("the HUD has no ammunition for the held weapon".into());
+    // A weapon with no magazine (the C4) is drawn with its count instead, and reports -1.
+    match hud["weapon"]["clip"].as_i64() {
+        Some(-1) => {}
+        Some(0) | None => return Some("the HUD has no ammunition for the held weapon".into()),
+        Some(_) => {}
     }
     if hud["map"].as_str().is_none_or(str::is_empty) {
         return Some("the map's minimap (setMiniMap) never reached the client".into());

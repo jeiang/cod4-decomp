@@ -234,6 +234,40 @@ impl PlayerWeapons {
         }
     }
 
+    /// `CG_AltWeaponToggleIndex`: the weapon the alt-mode action slot raises from `selected` (the weapon last picked,
+    /// which at rest is the one in hand). The selected weapon's own alternate fire mode when it has one, else the
+    /// alternate of a primary in the inventory (one with ammunition first, then one without).
+    pub fn alt_mode_target(&self, table: &WeaponTable, selected: u16) -> u16 {
+        let alt = table.info(selected).alt_weapon;
+        if alt != 0 {
+            return alt;
+        }
+        // `NextWeapInCycle(WEAPINVENTORY_PRIMARY, ..., skipHaveNoAlts)`, empties skipped first.
+        let n = table.len() as u16;
+        if n < 2 {
+            return 0;
+        }
+        for ignore_empty in [true, false] {
+            let start = selected.max(1);
+            let mut i = start;
+            loop {
+                i = i % n + 1;
+                if i == start {
+                    break;
+                }
+                let w = table.info(i);
+                if self.has(i)
+                    && w.inventory_type == InventoryType::Primary
+                    && w.alt_weapon != 0
+                    && (!ignore_empty || self.weapon_ammo(table, i) != 0)
+                {
+                    return w.alt_weapon;
+                }
+            }
+        }
+        0
+    }
+
     /// What `CG_OutOfAmmoChange` raises when the weapon in hand `held` has nothing left; `Some(0)` raises nothing, none
     /// stays put. The dead and the weapons that stay up when empty (`stays`, `cancelAutoHolsterWhenEmpty`) stay put.
     pub fn out_of_ammo_target(
