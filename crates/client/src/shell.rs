@@ -2278,10 +2278,14 @@ impl Host for HostCx<'_> {
                 self.profile_script(ui, &name.to_ascii_lowercase());
                 true
             }
-            // `clearLoadErrorsSummary` closes every menu (`Menus_CloseAll`); `playerstart` is single-player's and
-            // unknown to the multiplayer menus, as it is here.
+            // `clearLoadErrorsSummary` closes every menu (`Menus_CloseAll`); `playerstart` is single-player's, and
+            // the multiplayer `UI_RunMenuScript` says so on the console.
             "clearloaderrorssummary" => {
                 ui.close_all(self);
+                true
+            }
+            "playerstart" => {
+                self.st.log("unknown UI script playerstart in block");
                 true
             }
             "muteplayer" => {
