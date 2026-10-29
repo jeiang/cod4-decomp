@@ -41,7 +41,7 @@ printf 'png' > "$out/screenshot.png"
 [ "$beh" = fellback ] && [ "$kind" = exclusive ] && kind=borderless
 health='{"device_losses":[],"errors":[]}'
 [ "$beh" = gpuerror ] && health='{"device_losses":[],"errors":["Buffer is invalid"]}'
-echo '{"status":"ok","frames":3,"video":{"file":"flythrough.ivf","frames":3,"dropped":0,"bytes":5},"screenshot":"screenshot.png","zone_load_ms":42.0,"world":{"surfaces_drawn_p50":7},"mode":{"fullscreen":"'$kind'"},"gpu_health":'$health'}' > "$out/client.json"
+echo '{"status":"ok","frames":3,"video":{"file":"flythrough.ivf","frames":360,"dropped":0,"bytes":5},"screenshot":"screenshot.png","zone_load_ms":42.0,"world":{"surfaces_drawn_p50":7},"mode":{"fullscreen":"'$kind'"},"gpu_health":'$health'}' > "$out/client.json"
 "#;
 
 struct Fake {
@@ -110,6 +110,8 @@ fn runs_every_planned_mode_and_aggregates() {
         assert_eq!(r.series[&format!("{s}.frame.gpu_ms")].n, 2);
         assert_eq!(r.metrics[&format!("{s}.zone_load_ms")], 42.0);
         assert_eq!(r.metrics[&format!("{s}.video_bytes")], 5.0);
+        // 360 frames over the 3 s the run was given.
+        assert_eq!(r.metrics[&format!("{s}.video_fps")], 120.0);
     }
     let args = fs::read_to_string(dir.join("exclusive-2560x1440-30000mhz/args.txt")).unwrap();
     for want in [
