@@ -358,9 +358,21 @@ fn press<H: Control + ?Sized>(h: &mut H, name: &str, action: &str) -> Result<(),
     Ok(())
 }
 
-/// The physical key a bind name is, for pressing it by name (`w`, `escape`, `~`).
+/// The physical key a bind name is, for pressing it by name (`w`, `escape`, `~`): the bind table's own names, then
+/// the short ones people type for the keys whose stock name is longer (`up` for `uparrow`, `~` for `grave`).
 fn key_code(name: &str) -> Option<KeyCode> {
-    crate::input::key_code(name)
+    if let Some(c) = crate::input::key_code(name) {
+        return Some(c);
+    }
+    Some(match name {
+        "up" => KeyCode::ArrowUp,
+        "down" => KeyCode::ArrowDown,
+        "left" => KeyCode::ArrowLeft,
+        "right" => KeyCode::ArrowRight,
+        "~" | "backquote" | "tilde" => KeyCode::Backquote,
+        "/" | "forwardslash" => KeyCode::Slash,
+        _ => return None,
+    })
 }
 
 /// The mouse button a request's name is: the engine's names, and the short ones people type.
