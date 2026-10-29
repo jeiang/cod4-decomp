@@ -145,6 +145,7 @@ pub const COMMANDS: &[&str] = &[
     "devheli",
     "devgrenade",
     "devradar",
+    "devperk",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -1649,6 +1650,40 @@ impl Server {
                     .client_mut(n)
                     .ok_or("devradar: no such client")?
                     .has_radar = cvar::parse_int(on) != 0;
+            }
+            // Test hook: `devperk <client|human|bot> <0|1>` sets or clears the GPS jammer perk
+            // (`specialty_gpsjammer`, bit 0 of `ps.perks`), which keeps a player off the radar.
+            "devperk" => {
+                let (Some(who), Some(on)) = (arg(1), arg(2)) else {
+                    return Err("usage: devperk <client|human|bot> <0|1>".into());
+                };
+                let set = cvar::parse_int(on) != 0;
+                let targets: Vec<u16> = if who == "bot" {
+                    self.game
+                        .connected_clients()
+                        .filter(|(_, c)| c.bot)
+                        .map(|(n, _)| n)
+                        .collect()
+                } else if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| vec![n])
+                        .ok_or("devperk: no human is connected")?
+                } else {
+                    vec![cvar::parse_int(who) as u16]
+                };
+                if targets.is_empty() {
+                    return Err("devperk: no such client".into());
+                }
+                for n in targets {
+                    let c = self.game.client_mut(n).ok_or("devperk: no such client")?;
+                    if set {
+                        c.ps.perks |= 1;
+                    } else {
+                        c.ps.perks &= !1;
+                    }
+                }
             }
             // Test hook: `devheli view <client|human> [distance]` makes the player a chase camera: every frame it
             // floats `distance` (700) units behind and to the side of the first script vehicle, a little below it, looking at it.
