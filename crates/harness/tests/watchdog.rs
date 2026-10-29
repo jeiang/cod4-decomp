@@ -6,7 +6,13 @@ use harness::stage::Status;
 use std::path::Path;
 use std::process::Command;
 
-fn run(out: &Path, args: &[&str]) -> (i32, diff::Bundle) {
+/// A bundle's `summary.json`.
+fn summary(zip: &Path) -> serde_json::Value {
+    let mut z = zip::ZipArchive::new(std::fs::File::open(zip).unwrap()).unwrap();
+    serde_json::from_reader(z.by_name("summary.json").unwrap()).unwrap()
+}
+
+fn run(out: &Path, args: &[&str]) -> (i32, diff::Bundle, std::path::PathBuf) {
     let st = Command::new(env!("CARGO_BIN_EXE_cod4e-harness"))
         .args(["--no-prompt", "--out"])
         .arg(out)
@@ -24,13 +30,13 @@ fn run(out: &Path, args: &[&str]) -> (i32, diff::Bundle) {
         .map(|e| e.path())
         .find(|p| p.extension().is_some_and(|e| e == "zip"))
         .expect("a bundle was written");
-    (st.code().unwrap(), diff::open(&zip).unwrap())
+    (st.code().unwrap(), diff::open(&zip).unwrap(), zip)
 }
 
 #[test]
 fn no_install_still_writes_a_bundle_that_says_so() {
     let dir = tempfile::tempdir().unwrap();
-    let (code, b) = run(dir.path(), &["--cod4", "/definitely/not/here"]);
+    let (code, b, _) = run(dir.path(), &["--cod4", "/definitely/not/here"]);
     assert_eq!(code, 1);
     assert_eq!(b.stages[0].name, "asset-load");
     assert_eq!(b.stages[0].status, Status::Failed);
@@ -49,7 +55,7 @@ fn no_install_still_writes_a_bundle_that_says_so() {
 #[test]
 fn a_stage_that_logs_an_unreviewed_warning_does_not_pass() {
     let dir = tempfile::tempdir().unwrap();
-    let (code, b) = run(dir.path(), &["--stage", "selftest-warn"]);
+    let (code, b, _) = run(dir.path(), &["--stage", "selftest-warn"]);
     assert_eq!(code, 1);
     assert_eq!(b.stages[0].status, Status::Failed);
     let why = b.stages[0].reason.as_deref().unwrap();
@@ -65,7 +71,7 @@ fn a_stage_that_logs_an_unreviewed_warning_does_not_pass() {
 #[test]
 fn crash_hang_and_panic_are_caught_and_the_suite_continues() {
     let dir = tempfile::tempdir().unwrap();
-    let (code, b) = run(
+    let (code, b, _) = run(
         dir.path(),
         &[
             "--stage",
@@ -98,10 +104,34 @@ fn script_scenario_runs_and_skips_missing_commands() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("mine.cfg");
     std::fs::write(&script, "echo hello; wait 10ms; map mp_crash; wait 1h").unwrap();
-    let (code, b) = run(dir.path(), &["--script", script.to_str().unwrap()]);
-    assert_eq!(code, 0);
+    let cmd = script.to_str().unwrap();
+    let (code, b, zip) = run(dir.path(), &["--script", cmd]);
+    // `map` does not exist, so the script is skipped as a whole after echo/wait ran; a skip nothing allows
+    // fails the run (#375).
+    assert_eq!(code, 1);
     assert_eq!(b.stages[0].name, "script:mine");
-    // `map` does not exist yet, so the script is skipped as a whole after echo/wait ran.
     assert_eq!(b.stages[0].status, Status::Skipped);
     assert_eq!(b.stages[0].commands.len(), 4);
+    assert!(
+        summary(&zip)["unexpected_skips"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|n| n == "script:mine")),
+        "the skip is not reported as unexpected: {}",
+        summary(&zip)
+    );
+    // Named on the command line, the same skip passes.
+    let allowed = tempfile::tempdir().unwrap();
+    let (code, b, zip) = run(
+        allowed.path(),
+        &["--script", cmd, "--allow-skip", "script:mine"],
+    );
+    assert_eq!(code, 0, "{:?}", b.stages[0].reason);
+    assert_eq!(b.stages[0].status, Status::Skipped);
+    assert!(
+        summary(&zip)["allowed_skips"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|n| n == "script:mine")),
+        "--allow-skip did not record the skip: {}",
+        summary(&zip)
+    );
 }
