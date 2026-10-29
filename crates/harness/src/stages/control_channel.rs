@@ -246,15 +246,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
         id += 1;
         let menu = ask(&mut sock, id, json!({"cmd": "state", "what": "menu"}))?;
-        let items = menu["items"].as_array().cloned().unwrap_or_default();
-        let Some(item) = items.iter().find(|i| {
-            i["name"].as_str().is_some_and(|n| !n.is_empty())
-                && i["rect"][2].as_f64().unwrap_or(0.0) > 0.0
-        }) else {
-            return Err(format!("no menu item to click: {menu}"));
-        };
-        let name = item["name"].as_str().unwrap_or_default().to_owned();
-        let r = item["rect"].as_array().cloned().unwrap_or_default();
+        // The item the menu put the focus on is the one whose rectangle is a click's target.
+        let focused = &menu["focused"];
+        let name = focused["item"].as_str().unwrap_or_default().to_owned();
+        let r = focused["rect"].as_array().cloned().unwrap_or_default();
+        if name.is_empty() || r.len() != 4 {
+            return Err(format!("no focused menu item to click: {menu}"));
+        }
         let (x, y) = (
             r[0].as_f64().unwrap_or(0.0) + r[2].as_f64().unwrap_or(0.0) / 2.0,
             r[1].as_f64().unwrap_or(0.0) + r[3].as_f64().unwrap_or(0.0) / 2.0,
