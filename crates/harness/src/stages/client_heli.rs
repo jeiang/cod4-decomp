@@ -2,9 +2,10 @@
 //! `client-heli`: the real client sees a helicopter. A bot is given the helicopter reward (`devhardpoint`) and
 //! calls it in; once the server counts it, the player is put behind the helicopter looking at it
 //! (`devheli view`) and a screenshot is saved. The client must have drawn at least one `VEHICLE` entity, and the
-//! picture must differ from the same view with vehicles left out (`drawvehicles 0`). The compass must have known the
-//! helicopter (the stock menus only place its owner-draw in the unused `compass_old`), and once the player is given radar (`devradar`) it must have swept and shown the enemies it caught. Needs a display and the
-//! install; skips without.
+//! picture must differ from the same view with vehicles left out (`drawvehicles 0`). The HUD must have known an enemy
+//! helicopter (the compass mark itself, owner-draw 155/156, is only placed in the unused `compass_old` by the stock
+//! menus and is refused by the owner-draw allow-list: #371), and once the player is given radar (`devradar`) it must
+//! have swept and shown the enemies it caught. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
 use super::client_session::run_client;
@@ -17,9 +18,12 @@ const LIMIT: Duration = Duration::from_secs(300);
 const ARGS: &[&str] = &["--listen", "--bots", "3"];
 // The bot selects its action slot 4 weapon some seconds after spawning when it is not fighting. `devheli view`
 // holds the player behind the helicopter every frame; the waits let that reach the client before each picture.
+// The bots pick a stealth class, which carries the GPS jammer (`specialty_gpsjammer`, bit 0 of `ps.perks`): a
+// jammed player never shows on the radar in the stock game either, so the perk is cleared off the bots to give
+// the sweep enemies to catch.
 const STEPS: &str = "ingame=120,wait=2,server=devhardpoint bot helicopter_mp,counter=helicopters:1:120,wait=2,\
 server=devheli view human,wait=1,shot=heli,set=drawvehicles 0,wait=1,shot=bare,wait=1,\
-server=devradar human 1,wait=6";
+server=devperk bot 0,server=devradar human 1,wait=6";
 /// Share of the picture that must differ with the helicopter in it, and by how much per channel.
 const MIN_CHANGED: f64 = 0.002;
 const CHANNEL_DELTA: i32 = 24;
@@ -71,10 +75,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if helicopters == 0 {
         problems.push("the helicopter was never called in".into());
     }
-    // The compass lists the helicopter (owner-draw 155 draws it where a menu places it) and, with the player's radar on, sweeps and catches enemies.
+    // The HUD's vehicle list, which the compass marks are drawn from (owner-draw 155/156: not drawn yet, the menu
+    // places them only in the unused `compass_old` and the allow-list refuses them, #371) must have held the
+    // helicopter, and with the player's radar on the sweep must have caught and marked the enemies it passed.
     let hud = |k: &str| count(&report["hud"][k]);
     for (key, what) in [
-        ("vehicles_max", "the compass never knew of the helicopter"),
+        ("vehicles_max", "the HUD never knew of the helicopter"),
         ("radar_lines", "the minimap never drew the radar sweep"),
         ("radar_pings", "the radar sweep never caught an enemy"),
         (
