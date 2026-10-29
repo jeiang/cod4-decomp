@@ -64,8 +64,16 @@ pub const ALLOWED: &[Allow] = &[
     Allow {
         contains: &["render::material", "no usable technique"],
         reason: "any other techset (sun, default3d, reflex sights, flags, laptop screens) has no technique we translate yet; draws skipped",
+        stages: &["client-equipment"],
+        max: Some(70), // client-equipment draws the same map twice in one stage: 57, 60 and 64 measured on the
+                       // Linux host, 2026-10-29, in bundles/slot-3-cod4e-run-20261029-201530.zip, -202858.zip
+                       // and -210759.zip
+    },
+    Allow {
+        contains: &["render::material", "no usable technique"],
+        reason: "any other techset (sun, default3d, reflex sights, flags, laptop screens) has no technique we translate yet; draws skipped",
         stages: &[],
-        max: Some(53), // measured 48 on the Linux host, 2026-10-14,
+        max: Some(53), // measured 48 on the Linux host, 2026-10-14
     },
     Allow {
         contains: &["sim::skel::anim", "animation data read out of range"],

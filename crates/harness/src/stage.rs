@@ -426,6 +426,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_custom_class::run),
     },
     StageDef {
+        name: "client-equipment",
+        description: "the player's own keys work the equipment: key 5 raises the Assault rifle's underbarrel launcher and its shell is fired, and the Spec Ops C4 is planted with the throw button and set off with the attack button",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_equipment::run),
+    },
+    StageDef {
         name: "client-menu-match",
         description: "the client with no flags plays a whole match from the stock menus (Start New Server with a short score limit, team, class), sees the end-of-match scoreboard, follows the server's map rotation into the next map in the same process and spawns there again",
         needs_install: false,
