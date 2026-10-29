@@ -68,7 +68,7 @@ pub use native::{StdioTransport, TcpTransport};
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -282,7 +282,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn tcp_answers_on_the_connection_that_asked() {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::{BufRead, BufReader, Read, Write};
         let mut t = TcpTransport::bind(0, None).unwrap();
         let mut c = TcpStream::connect(t.addr()).unwrap();
         c.write_all(b"{\"cmd\":\"ping\"}\n").unwrap();
