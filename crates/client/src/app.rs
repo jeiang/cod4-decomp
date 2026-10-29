@@ -3484,7 +3484,9 @@ fn recover_surface(
         }
         if !st.presented && st.surface_stalled_ms == 0.0 {
             // Nothing has reached the screen yet: a compositor that has not mapped the window hands no image back,
-            // and asking for one is the only thing a client can do about it (a no-op once it is mapped).
+            // and asking for it is the only thing a client can do about it (a no-op once it is mapped). A window on
+            // a workspace the compositor is not showing is not a client's to move (`focus_window` is unsupported on
+            // Wayland), which is why the error below names the monitor.
             st.window.set_visible(true);
             st.window.request_redraw();
         }

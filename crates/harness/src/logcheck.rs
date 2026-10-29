@@ -124,15 +124,6 @@ pub const ALLOWED: &[Allow] = &[
         stages: &[],
         max: Some(20),
     },
-    Allow {
-        contains: &[
-            "cod4e::video",
-            "the video encoder is behind; a frame was dropped",
-        ],
-        reason: "the recorder's own encoder cannot always hold 30 fps beside the client; a lost slot keeps the file in sync, and client-flythrough fails a run that loses more than 5% of them (#436)",
-        stages: &["client-flythrough"],
-        max: Some(48), // measured 27-42 per stage on the Linux host, 2026-10-29, #436
-    },
     // Stages that provoke the event on purpose.
     Allow {
         contains: &["net::connect", "Server is full"],

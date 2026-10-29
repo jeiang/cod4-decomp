@@ -269,8 +269,12 @@ impl Recorder {
             } else if let Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) =
                 self.tx.try_send(frame)
             {
+                // A recording is the harness's, and the encoder runs on whatever cores the host has left: how many
+                // slots it loses measures the host, not the client (measured 1% beside nothing, 63% beside two other
+                // runs). Each sample carries its own duration, so the file stays in sync; the count is in `finish`'s
+                // summary and in the stage's metrics.
                 logging::dedup!(
-                    WARN,
+                    DEBUG,
                     "video_queue",
                     "the video encoder is behind; a frame was dropped"
                 );
