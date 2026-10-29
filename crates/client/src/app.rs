@@ -452,6 +452,8 @@ struct State {
     surface_stall_limit: Option<Duration>,
     /// Since when the surface has only timed out or been occluded without the window being minimized.
     surface_stalled: Option<Instant>,
+    /// The stalled surface was recreated once and the window is still giving no frame; the next expiry is the end.
+    surface_retried: bool,
     /// The next resize takes a new surface from the window: the present mode changed, and a live swapchain is not
     /// handed over to another mode (see [`vid_restart`]).
     fresh_surface: bool,
@@ -1042,6 +1044,7 @@ impl Viewer {
             prev_cost: [0.0; 4],
             surface_failures: 0,
             surface_stalled: None,
+            surface_retried: false,
             surface_stall_limit: (self.cli.timed() || self.cli.ui_script.is_some())
                 .then_some(SURFACE_STALL),
             fresh_surface: false,
@@ -1258,6 +1261,7 @@ impl Viewer {
         }
         st.surface_failures = 0;
         st.surface_stalled = None;
+        st.surface_retried = false;
         st.fresh_surface = false;
         if st.net.is_some() {
             let name = if st.map_name.is_empty() {
@@ -3473,9 +3477,31 @@ fn recover_surface(
         if let Some(limit) = st.surface_stall_limit
             && since.elapsed() > limit
         {
+            // A swapchain can keep timing out in a way a reconfiguration fixes: a compositor that stopped handing
+            // its images back, or a window that was re-created under it. Give it one new surface and the same time
+            // again before the run ends, and say what the window was when it does.
+            if !st.surface_retried && st.window.is_minimized() != Some(true) {
+                st.surface_retried = true;
+                st.surface_stalled = Some(Instant::now());
+                tracing::info!(
+                    outcome = ?outcome,
+                    size = ?st.window.inner_size(),
+                    scale = st.window.scale_factor(),
+                    fullscreen = ?st.window.fullscreen(),
+                    "the window's surface gave no frame; making the surface again"
+                );
+                fresh_surface(st)?;
+                return Ok(SurfaceAction::Retry);
+            }
+            let size = st.window.inner_size();
+            let scale = st.window.scale_factor();
             return Err(st.gpu.explain(&format!(
-                "the window's surface gave no frame for {} s ({outcome:?})",
-                limit.as_secs()
+                "the window's surface gave no frame for {} s ({outcome:?}): the window is {}x{} at scale {scale} \
+                 ({:?}), not minimized, and its compositor handed no image back",
+                limit.as_secs(),
+                size.width,
+                size.height,
+                st.window.fullscreen()
             )));
         }
         return Ok(SurfaceAction::Retry);
