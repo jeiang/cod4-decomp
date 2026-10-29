@@ -143,31 +143,25 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     );
     let mut out = StageReport::new(NAME, Status::Passed);
     let mut problems = Vec::new();
-    let runs: [(&str, &[&str], &str, &[&str], &[&str]); 3] = [
+    // Every run starts at the main menu with no flags; the steps do the rest.
+    let runs: [(&str, &str, &[&str], &[&str]); 3] = [
         (
             "frontend",
-            &[],
             FRONTEND_STEPS,
             REQUIRED[0],
             &["badmap", "refused"],
         ),
-        (
-            "timeout",
-            &[],
-            timeout_steps.as_str(),
-            REQUIRED[1],
-            &["timeout"],
-        ),
-        ("kicked", &[], KICKED_STEPS, REQUIRED[2], &["kicked"]),
+        ("timeout", timeout_steps.as_str(), REQUIRED[1], &["timeout"]),
+        ("kicked", KICKED_STEPS, REQUIRED[2], &["kicked"]),
     ];
-    for (label, args, steps, required, shots) in runs {
+    for (label, steps, required, shots) in runs {
         let dir = ctx.dir.join(label);
         match run_client(
             &client,
             install,
             &dir,
             &dir.join("config"),
-            args,
+            &[],
             steps,
             LIMIT,
         ) {
