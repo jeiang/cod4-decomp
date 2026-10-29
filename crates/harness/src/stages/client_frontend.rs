@@ -117,15 +117,27 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if let Some(r) = no_display(&client, NAME)? {
         return Ok(r);
     }
-    let before = snapshot(&players).unwrap_or_default();
+    let before = match snapshot(&players) {
+        Ok(rows) => rows,
+        Err(e) => {
+            // Without the before-picture the untouched-install claim cannot be made, and the LAN scan cannot be
+            // asked for: the run would prove less than the stage says it does.
+            return Ok(StageReport::new(NAME, Status::Failed)
+                .with_reason(format!("cannot list {}: {e}", players.display())));
+        }
+    };
     let mut out = StageReport::new(NAME, Status::Passed);
-    let lan = LanServer::start(install);
+    let Some(lan) = LanServer::start(install) else {
+        let mut r = StageReport::new(NAME, Status::Failed);
+        r.reason = Some(
+            "the stage's LAN server did not start, so the join menu's LAN list was never scanned"
+                .into(),
+        );
+        return Ok(r);
+    };
     let steps = STEPS.replacen(
         "cvaris=ui_netSource 0,",
-        &format!(
-            "cvaris=ui_netSource 0,{}",
-            if lan.is_some() { LAN_STEP } else { "" }
-        ),
+        &format!("cvaris=ui_netSource 0,{LAN_STEP}"),
         1,
     );
     match run_client(
@@ -154,7 +166,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     }
     drop(lan);
-    if snapshot(&players).unwrap_or_default() != before {
+    if snapshot(&players).ok().as_deref() != Some(before.as_slice()) {
         out.status = Status::Failed;
         out.reason = Some("the run changed the install's players folder".into());
     }

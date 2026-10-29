@@ -55,6 +55,26 @@ const SPIKE_SHARE: f64 = 0.01;
 /// jump moves everything it drives by up to the snapshot gap at once.
 const MAX_CLOCK_JUMPS: u64 = 3;
 
+/// Sound aliases a match may ask for and the tables not have, with the reason each is benign. Empty: no miss is
+/// expected in a stock match, so a new entry needs the alias and why it is sound to leave it out.
+const ALLOWED_MISSING_SOUND: &[&str] = &[];
+/// The same for the effect names the scripts and the engine ask for (`PlayFx`).
+const ALLOWED_MISSING_EFFECTS: &[&str] = &[];
+
+/// Why a client's `missing` list fails the run: every name the game asked for and the tables did not have, but
+/// the allow-listed ones. An absent list is a failure too (the counter proves the check ran at all).
+fn misses(what: &str, list: &Value, allowed: &[&str]) -> Option<String> {
+    let Some(names) = list.as_array() else {
+        return Some(format!("the client reported no missing-{what} list"));
+    };
+    let names: Vec<&str> = names
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|n| !allowed.contains(n))
+        .collect();
+    (!names.is_empty()).then(|| format!("{} names missing: {}", what, names.join(", ")))
+}
+
 /// Why the frames hitched, if they did. `cpu_ms` is every frame's own cost. The report's `late_builds` lists what
 /// was built after the load, as "frame what": a pipeline listed was missing when a frame drew (its draws were
 /// skipped for the frames the compile took), so the load's warm-up missed it. None may be, whatever the runner's
@@ -351,6 +371,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         if snd["failed"].as_array().is_some_and(|f| !f.is_empty()) {
             failures.push(format!("sound files failed: {}", snd["failed"]));
         }
+        // An alias or effect name the game asks for that the tables do not have is the turret-class bug: it is
+        // counted by the client and was never asserted. `ALLOWED_MISSING` names the ones a run may have (empty:
+        // every miss is a defect today, and a known-benign one is added here with its reason).
+        failures.extend(misses("sound", &snd["missing"], ALLOWED_MISSING_SOUND));
     }
     // What the shots did must have reached the client as events.
     let (impacts, pains) = (
@@ -390,6 +414,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             fx["look_missing"]
         ));
     }
+    failures.extend(misses("effect", &fx["missing"], ALLOWED_MISSING_EFFECTS));
     if num(net, &["skin_faults"]) > 0.0 {
         failures.push(format!(
             "{} skinned surfaces had vertices outside their model (stretched triangles)",
@@ -501,6 +526,27 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_name_the_tables_lack_fails_and_an_absent_list_fails() {
+        assert_eq!(misses("sound", &json!([]), &[]), None);
+        assert!(
+            misses("sound", &json!(["weap_ak47_fire"]), &[])
+                .unwrap()
+                .contains("weap_ak47_fire")
+        );
+        assert_eq!(
+            misses("sound", &json!(["benign_alias"]), &["benign_alias"]),
+            None,
+            "an allow-listed name does not fail"
+        );
+        assert!(
+            misses("sound", &Value::Null, &[])
+                .unwrap()
+                .contains("no missing-sound list"),
+            "a report without the counter proves nothing"
+        );
+    }
 
     #[test]
     fn a_pipeline_missing_while_playing_is_a_hitch_a_pass_is_not() {
