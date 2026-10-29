@@ -8,3 +8,4 @@
 /.worktrees/
 games_mp.log
 __pycache__/
+/out/

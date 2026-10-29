@@ -111,7 +111,7 @@ fn run_backend(
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let skip = |why: &str| Ok(StageReport::new(NAME, Status::Skipped).with_reason(why));
     let Some(web) = find_web_dir() else {
-        return skip("web/pkg is not built (web/build.sh) or web/ is not next to the harness");
+        return skip("web/pkg is not built (just web-build) or web/ is not next to the harness");
     };
     let Some(chrome) = find_chrome() else {
         return skip("no Chromium found (set COD4E_CHROME)");

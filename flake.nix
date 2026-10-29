@@ -66,6 +66,7 @@
               pkgs.binaryen # wasm-opt for web/ release builds
               pkgs.python3 # web/serve.py
               pkgs.nodejs # web/install.test.mjs (the page's install rules)
+              pkgs.just # justfile recipes
               pkgs.ffmpeg-headless # scripts/footage-review.py video frames
             ]
             # gilrs (gamepads) links libudev on Linux.
@@ -74,6 +75,9 @@
               pkgs.udev
               # cpal (sound) links ALSA on Linux.
               pkgs.alsa-lib
+              # scripts/virtual-display.sh and scripts/netns.sh (harness slots)
+              pkgs.sway
+              pkgs.iproute2
             ];
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux (pkgs.lib.makeLibraryPath (windowLibs ++ [ pkgs.udev pkgs.alsa-lib ]));
           };
