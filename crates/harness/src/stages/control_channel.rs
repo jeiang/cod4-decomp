@@ -118,7 +118,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         if Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(skipped("the client did not open its control channel"));
+            return Err(io::Error::other(
+                "the client did not open its control channel",
+            ));
         }
         std::thread::sleep(Duration::from_millis(250));
     };
@@ -131,7 +133,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         Err(e) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Ok(skipped(&format!("the channel did not answer: {e}")));
+            return Err(io::Error::other(format!("the channel did not answer: {e}")));
         }
     };
 
@@ -222,32 +224,56 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             return Err(format!("{path} is {bytes} bytes"));
         }
 
-        // A menu item clicked at the centre of its own rectangle is the item under the pointer.
-        // The menu the player opens in a match: the key bound to `togglemenu`, or the command itself when the bind
-        // table has no such key (a stock bind does).
+        // A menu item clicked at the centre of its own rectangle is the item under the pointer. The menu is one the
+        // stage opens itself: `togglemenu` opens the menu `g_scriptMainMenu` names, which a listen server does not set
+        // here, so the stage names the class menu first and then presses the bind the player presses.
         id += 1;
-        let opened = ask(
+        ask(
+            &mut sock,
+            id,
+            json!({"cmd": "exec", "line": "set g_scriptMainMenu class"}),
+        )?;
+        if ask(
+            &mut sock,
+            id + 1000,
+            json!({"cmd": "state", "what": "menu"}),
+        )
+        .map(|m| m["menu"]["open"].as_array().is_some_and(|o| !o.is_empty()))
+        .unwrap_or(false)
+        {
+            // A menu the server opened (the class menu of the spawn flow) is closed first, so what the wait below
+            // sees is the stage's own key press.
+            id += 1;
+            ask(
+                &mut sock,
+                id,
+                json!({"cmd": "key", "bind": "togglemenu", "action": "tap"}),
+            )?;
+        }
+        until(
+            &mut sock,
+            &mut id,
+            json!({"menu.open": {"len": 0}}),
+            "the open menu did not close",
+            Duration::from_secs(5),
+        )?;
+        id += 1;
+        ask(
             &mut sock,
             id,
             json!({"cmd": "key", "bind": "togglemenu", "action": "tap"}),
-        )
-        .is_ok()
-            && until(
-                &mut sock,
-                &mut id,
-                json!({"menu.open.0": {"exists": true}}),
-                "the menu did not open",
-                Duration::from_secs(5),
-            )
-            .is_ok();
-        if !opened {
-            id += 1;
-            ask(&mut sock, id, json!({"cmd": "exec", "line": "togglemenu"}))?;
-        }
+        )?;
+        until(
+            &mut sock,
+            &mut id,
+            json!({"menu.open.0": {"exists": true}}),
+            "the menu did not open",
+            Duration::from_secs(10),
+        )?;
         id += 1;
         let menu = ask(&mut sock, id, json!({"cmd": "state", "what": "menu"}))?;
         // The item the menu put the focus on is the one whose rectangle is a click's target.
-        let focused = &menu["focused"];
+        let focused = &menu["menu"]["focused"];
         let name = focused["item"].as_str().unwrap_or_default().to_owned();
         let r = focused["rect"].as_array().cloned().unwrap_or_default();
         if name.is_empty() || r.len() != 4 {
@@ -261,15 +287,33 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ask(&mut sock, id, json!({"cmd": "mouse", "x": x, "y": y}))?;
         id += 1;
         let hovered = ask(&mut sock, id, json!({"cmd": "state", "what": "menu"}))?;
-        let hit = hovered["focused"]["item"].as_str().unwrap_or_default();
-        if !name.is_empty() && hit != name {
+        let hit = hovered["menu"]["focused"]["item"]
+            .as_str()
+            .unwrap_or_default();
+        if hit != name {
             return Err(format!(
-                "clicked {name} at {x:.0},{y:.0} and {hit} was under the pointer: {hovered}"
+                "moved to the centre of {name} at {x:.0},{y:.0} and {hit} was under the pointer: {hovered}"
             ));
         }
         report
             .notes
             .push(format!("clicked {name} at {x:.0},{y:.0}"));
+
+        // The menu is closed again before the scoreboard: an open menu takes the keys, so `+scores` would never
+        // reach the bind table.
+        id += 1;
+        ask(
+            &mut sock,
+            id,
+            json!({"cmd": "key", "bind": "togglemenu", "action": "tap"}),
+        )?;
+        until(
+            &mut sock,
+            &mut id,
+            json!({"menu.open": {"len": 0}}),
+            "the menu did not close again",
+            Duration::from_secs(5),
+        )?;
 
         id += 1;
         ask(
@@ -277,14 +321,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             id,
             json!({"cmd": "key", "bind": "+scores", "action": "down"}),
         )?;
-        // The server answers the scoreboard on the frame after the key goes down.
-        let _ = until(
+        // The client asks the server for the scoreboard once the bind reaches the input frame; its rows arrive a
+        // frame or two later. A timeout here is the stage's failure, with the reason the predicate saw.
+        until(
             &mut sock,
             &mut id,
             json!({"scoreboard.rows.0": {"exists": true}}),
             "the scoreboard did not arrive",
             Duration::from_secs(20),
-        );
+        )?;
         id += 1;
         let board = ask(&mut sock, id, json!({"cmd": "state", "what": "scoreboard"}))?;
         id += 1;

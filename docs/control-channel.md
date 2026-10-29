@@ -34,7 +34,7 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `wait {state, timeout_ms}` | answer when the state document matches (or the clock runs out: `ok` false with `observed`) |
 | `assert {state}` | one look: `ok` false unless the state matches now |
 | `step frames` | answer after that many frames |
-| `server {op}` | the listen server: `state`, `exec`, `cvar` |
+| `server {op}` | the listen server: `state`, `exec`, `cvar` (a client started with `--connect` runs no listen server and answers with an error, so the queue never waits on it) |
 | `quit` | end the run as `quit` does |
 
 The injected events enter the same queue the window's events do (`crates/client/src/input/event.rs`), so a key

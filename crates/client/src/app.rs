@@ -4604,6 +4604,11 @@ impl crate::control::Control for ControlHost<'_> {
         seq: u64,
         req: &serde_json::Map<String, Value>,
     ) -> Option<Result<Value, String>> {
+        // Only a client that runs a listen server has one to ask: a `--connect` client answers at once, so a
+        // request cannot wedge the queue waiting for a server that will never drain it.
+        if self.st.listen.is_none() {
+            return Some(Err("this client runs no listen server".to_owned()));
+        }
         crate::listen::request(seq, req)
     }
 
