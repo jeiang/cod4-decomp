@@ -557,6 +557,8 @@ const TOUR_FRAMES: u32 = 6;
 struct UiScript {
     /// The map a `maprotate` step started from.
     marker: Option<String>,
+    /// What `cvar=save` and `round=next` remembered, by name.
+    saved: HashMap<String, String>,
     /// A `killcam` or `dead` step has seen the player die: a later `respawn` step counts that death, since the
     /// player may already be back when it starts (the killcam is short and the steps before it take seconds).
     died: bool,
@@ -1034,6 +1036,7 @@ impl Viewer {
             listen,
             script: self.cli.ui_script.as_ref().map(|s| UiScript {
                 marker: None,
+                saved: HashMap::new(),
                 died: false,
                 steps: s
                     .split(',')
@@ -2739,7 +2742,8 @@ fn script_step(st: &mut State) -> bool {
             }
         }
         // Waits until the server says the player is on team `n` (1 axis, 2 allies, 3 spectator): `team=2:20`.
-        // `team=save` remembers the team; `team=other:secs` waits for a different one.
+        // `team=save` remembers the team; `team=other:secs` waits for a different one, `team=same:secs` for the
+        // remembered one.
         "team" | "weapon" => {
             let (want, secs) = arg
                 .split_once(':')
@@ -2757,12 +2761,66 @@ fn script_step(st: &mut State) -> bool {
                 done(true, sc, format!("team {have}"));
             } else if match (key, want) {
                 ("team", "other") => saved.is_some_and(|t| t != have && have != "0"),
+                ("team", "same") => saved.is_some_and(|t| t == have),
                 ("team", _) => have == want,
                 _ => have.contains(want),
             } {
                 done(true, sc, format!("{key} {have}"));
             } else if waited > secs {
                 done(false, sc, format!("timed out; {key} is {have:?}"));
+            }
+        }
+        // A dvar the server set on the client (`setclientdvar`), remembered and compared across rounds:
+        // `cvar=save cg_objectiveText` keeps its value; `cvar=same cg_objectiveText:5` and `cvar=other ...:5` wait up
+        // to the seconds for the value to be the remembered one, or a different one.
+        "cvar" => {
+            let (what, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+            let (name, secs) = rest
+                .split_once(':')
+                .map_or((rest, 5.0), |(n, s)| (n, s.parse().unwrap_or(5.0)));
+            let have = st.input.cvar(name).unwrap_or("").to_owned();
+            let saved = sc.saved.get(name).cloned();
+            match what {
+                "save" => {
+                    sc.saved.insert(name.to_owned(), have.clone());
+                    done(true, sc, format!("{name} is {have:?}"));
+                }
+                "same" | "other" => {
+                    let ok = saved
+                        .as_ref()
+                        .is_some_and(|s| (*s == have) == (what == "same"));
+                    if ok {
+                        done(true, sc, format!("{name} is {have:?}"));
+                    } else if waited > secs {
+                        done(
+                            false,
+                            sc,
+                            format!("timed out; {name} is {have:?}, saved {saved:?}"),
+                        );
+                    }
+                }
+                _ => done(false, sc, format!("unknown cvar step {what:?}")),
+            }
+        }
+        // Waits for the next level to begin (a round restart or a map change) since the step started (`round=next:150`):
+        // the player is then out of the world again until the server spawns them (`ingame=` waits for that).
+        "round" => {
+            let (_, secs) = arg
+                .split_once(':')
+                .map_or((arg, 150.0), |(n, s)| (n, s.parse().unwrap_or(150.0)));
+            let have = st.net.as_ref().map_or(0, NetPlay::levels);
+            let from = sc
+                .saved
+                .entry("round".into())
+                .or_insert_with(|| have.to_string())
+                .parse::<u32>()
+                .unwrap_or(have);
+            if have > from {
+                sc.saved.remove("round");
+                done(true, sc, format!("level {from} -> {have}"));
+            } else if waited > secs {
+                sc.saved.remove("round");
+                done(false, sc, format!("timed out; still in level {have}"));
             }
         }
         // Waits until a counter of the listen server reaches a minimum: `counter=helicopters:1:60` (the name, the

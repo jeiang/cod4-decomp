@@ -187,6 +187,8 @@ pub struct Vm {
     guard_warnings: u32,
     jumps: u32,
     ops: u64,
+    /// Values the host keeps past this level besides `game` ([`Self::persist`]).
+    persist: Vec<Value>,
 }
 
 fn fault(msg: impl Into<String>) -> VmError {
@@ -233,7 +235,7 @@ pub fn wait_ticks(v: &Value, rate: u32) -> Result<u64, String> {
 
 impl Drop for Vm {
     fn drop(&mut self) {
-        crate::value::release_objects(&self.game);
+        crate::value::release_objects(&self.game, &self.persist);
     }
 }
 
@@ -270,6 +272,7 @@ impl Vm {
             guard_warnings: 0,
             jumps: 0,
             ops: 0,
+            persist: Vec::new(),
         })
     }
 
@@ -302,6 +305,12 @@ impl Vm {
     /// Replaces the `game` variable; the server carries it over `map_restart`.
     pub fn set_game(&mut self, v: Value) {
         self.game = v;
+    }
+
+    /// Marks a value the host carries into the next level besides `game` (a client's `pers` array over a
+    /// `savepersist` restart): what it reaches is spared when this level's objects are released.
+    pub fn persist(&mut self, v: Value) {
+        self.persist.push(v);
     }
 
     /// Opcodes executed so far.

@@ -444,6 +444,8 @@ pub struct NetPlay {
     fx_demo: Option<(String, Option<i32>)>,
     /// The server announced a level the app has not acted on yet.
     new_level: Option<String>,
+    /// Levels begun since the join: each map change or round restart ([`Self::new_level`]) counts one.
+    levels: u32,
     stat_sync: crate::profile::StatSync,
     /// The rotor rig of each helicopter model drawn (`None` when the model or its animation is missing), and the
     /// seconds the rotors have turned.
@@ -562,6 +564,7 @@ impl NetPlay {
             server_addr: server.to_string(),
             fx_demo: None,
             new_level: None,
+            levels: 0,
             stat_sync: crate::profile::StatSync::default(),
             rotors: HashMap::new(),
             rotor_clock: 0.0,
@@ -716,6 +719,11 @@ impl NetPlay {
         self.new_level.take()
     }
 
+    /// How many levels the client has begun since the join (a round restart counts).
+    pub fn levels(&self) -> u32 {
+        self.levels
+    }
+
     /// Starts over for a new level: the old one's prediction, models, events and clock are meaningless. With `world`
     /// (another map was loaded) the collision, models and sound are replaced too. The connection stays.
     pub fn new_level(
@@ -760,6 +768,7 @@ impl NetPlay {
         self.scan = crate::hud::NameScan::default();
         self.c.spawned = false;
         self.c.start = None;
+        self.levels += 1;
         Ok(())
     }
 

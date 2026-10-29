@@ -22,6 +22,7 @@ pub mod client_menu_match;
 pub mod client_missile;
 pub mod client_models;
 pub mod client_objective;
+pub mod client_sd_rounds;
 pub mod client_session;
 pub mod client_ui;
 pub mod client_viewmodel;

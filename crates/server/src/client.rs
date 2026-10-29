@@ -357,17 +357,20 @@ impl Game {
     /// `CodeCallback_PlayerConnect`. The caller runs the queued call, then [`Game::client_begin`].
     pub fn connect_client(&mut self, vm: &mut Vm, bot: bool, name: &str) -> Option<u16> {
         let private = usize::try_from(self.cvars.int("sv_privateClients")).unwrap_or(0);
-        self.connect_client_from(vm, bot, name, private)
+        self.connect_client_from(vm, bot, name, private, None)
     }
 
     /// [`Self::connect_client`] for the lowest free slot from `first` up: 0 for a person who may use the private
-    /// slots.
+    /// slots, their own slot for a person kept across a level change. `pers` is the `self.pers` array a kept person
+    /// brings along (the original's `scriptPersId`, which `SV_MapRestart` and `SV_SpawnServer` hand back to
+    /// `ClientConnect`); a new person, and anyone after a level change without `savepersist`, starts with an empty one.
     pub fn connect_client_from(
         &mut self,
         vm: &mut Vm,
         bot: bool,
         name: &str,
         first: usize,
+        pers: Option<Value>,
     ) -> Option<u16> {
         let n = self
             .clients
@@ -383,13 +386,19 @@ impl Game {
         self.level.num_entities = self.level.num_entities.max(usize::from(n) + 1);
         self.clients[usize::from(n)] = Client::new(n, bot, name.to_owned());
         let obj = vm.entity(n, EntClass::Entity);
-        let mut pers = Array::new();
-        if bot {
-            // The dev script marks its test clients this way; the stat integrity check at
-            // connect skips them.
-            pers.set(Key::Str("isBot".into()), Value::Int(1));
-        }
-        obj.set(&"pers".into(), Value::Array(std::rc::Rc::new(pers)));
+        let pers = match pers {
+            Some(kept @ Value::Array(_)) => kept,
+            _ => {
+                let mut pers = Array::new();
+                if bot {
+                    // The dev script marks its test clients this way; the stat integrity check at
+                    // connect skips them.
+                    pers.set(Key::Str("isBot".into()), Value::Int(1));
+                }
+                Value::Array(std::rc::Rc::new(pers))
+            }
+        };
+        obj.set(&"pers".into(), pers);
         if let Some(f) = self.callbacks.player_connect {
             self.calls.push(ScriptCall {
                 func: f,
