@@ -259,10 +259,21 @@ pub struct Findings {
 }
 
 /// Reads `<dir>/logs/*.log` and sorts its `WARN`/`ERROR` events against `list`.
+///
+/// The gate vouches for the logs it read, so a `logs/` that is missing, unreadable or empty, and a log file it cannot
+/// read, are findings of their own: every process of a stage writes its log there, so none means the gate could not
+/// check what the stage did (issue #396).
 pub fn scan(dir: &Path, stage: &str, list: &'static [Allow]) -> Findings {
     let mut f = Findings::default();
-    let Ok(rd) = std::fs::read_dir(dir.join("logs")) else {
-        return f;
+    let err = |text: String| Event { error: true, text };
+    let rd = match std::fs::read_dir(dir.join("logs")) {
+        Ok(rd) => rd,
+        Err(e) => {
+            f.unexpected.push(err(format!(
+                "logs/ cannot be read ({e}), so no warn or error line was checked"
+            )));
+            return f;
+        }
     };
     let mut files: Vec<_> = rd
         .filter_map(Result::ok)
@@ -270,23 +281,30 @@ pub fn scan(dir: &Path, stage: &str, list: &'static [Allow]) -> Findings {
         .filter(|p| p.extension().is_some_and(|e| e == "log"))
         .collect();
     files.sort();
+    if files.is_empty() {
+        f.unexpected.push(err(
+            "logs/ holds no log file, so no warn or error line was checked".into(),
+        ));
+        return f;
+    }
     for p in files {
+        let name = p
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         let text = match std::fs::read(&p) {
             Ok(b) => String::from_utf8_lossy(&b).into_owned(),
             Err(e) => {
-                tracing::warn!(stage, path = %p.display(), "cannot read a stage log: {e}");
+                f.unexpected.push(err(format!(
+                    "{name} cannot be read ({e}), so its warn and error lines were not checked"
+                )));
                 continue;
             }
         };
         if text.contains(logging::TRUNCATION_MARK) {
             // Events after the cap are lost, so nothing in this log can be vouched for.
-            let name = p
-                .file_name()
-                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-            f.unexpected.push(Event {
-                error: true,
-                text: format!("{name} stopped at its size cap, later events are lost"),
-            });
+            f.unexpected.push(err(format!(
+                "{name} stopped at its size cap, later events are lost"
+            )));
         }
         for e in events(&text) {
             match allowed(list, stage, &e) {
@@ -459,14 +477,49 @@ mod tests {
     }
 
     #[test]
-    fn a_stage_without_logs_or_already_failed_keeps_its_status() {
+    fn a_missing_logs_dir_fails_a_passed_stage() {
+        // No process wrote a log, so the gate can vouch for nothing (a skip is not a pass either).
         let d = tempfile::tempdir().unwrap();
         let mut r = StageReport::new("a", Status::Passed);
         apply_with(&mut r, d.path(), "a", LIST);
-        assert_eq!(r.status, Status::Passed);
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.reason.unwrap().contains("logs/ cannot be read"));
         let mut r = StageReport::new("a", Status::Crashed);
-        apply_with(&mut r, stage_dir(LOG).path(), "a", LIST);
+        apply_with(&mut r, d.path(), "a", LIST);
         assert_eq!(r.status, Status::Crashed);
-        assert!(r.notes.iter().any(|n| n.contains("unexpected log event")));
+        assert!(r.notes.iter().any(|n| n.contains("logs/ cannot be read")));
+    }
+
+    #[test]
+    fn an_unreadable_logs_dir_fails_a_passed_stage() {
+        // `logs` is a file, so the directory cannot be opened (the same on every platform).
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("logs"), b"not a directory").unwrap();
+        let mut r = StageReport::new("a", Status::Passed);
+        apply_with(&mut r, d.path(), "a", LIST);
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.reason.unwrap().contains("logs/ cannot be read"));
+    }
+
+    #[test]
+    fn an_empty_logs_dir_for_a_stage_that_started_processes_fails_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("logs")).unwrap();
+        let mut r = StageReport::new("a", Status::Passed);
+        apply_with(&mut r, d.path(), "a", LIST);
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.reason.unwrap().contains("holds no log file"));
+    }
+
+    #[test]
+    fn an_unreadable_log_file_fails_a_passed_stage() {
+        // A directory named `x.log`: reading it fails on every platform.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("logs/x.log")).unwrap();
+        let mut r = StageReport::new("a", Status::Passed);
+        apply_with(&mut r, d.path(), "a", LIST);
+        assert_eq!(r.status, Status::Failed);
+        let why = r.reason.unwrap();
+        assert!(why.contains("x.log cannot be read"), "{why}");
     }
 }
