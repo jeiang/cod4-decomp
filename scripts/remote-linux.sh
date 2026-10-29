@@ -36,7 +36,11 @@ if [ "${1:-}" = -- ]; then shift; opts="${opts}-- $(printf '%q ' "$@")"; fi
 
 git archive "$ref" | ssh "$host" "bash -c 'rm -rf $dir && mkdir -p $dir && tar x -C $dir'"
 status=0
-ssh "$host" "bash -c 'cd $dir && ${vars}nix develop -c scripts/host-run.sh $opts'" || status=$?
+# The command goes to the host as a file: the login shell there is fish, and printf %q output for arguments with
+# quotes, newlines or other specials ($'...') must be parsed by bash alone.
+printf 'cd %s && %snix develop -c scripts/host-run.sh %s\n' "$dir" "$vars" "$opts" |
+  ssh "$host" "bash -c 'cat > $dir/.host-cmd'"
+ssh "$host" "bash -c 'bash $dir/.host-cmd'" || status=$?
 mkdir -p bundles out
 # Slot bundles get a slot-<n>- prefix: runs in two slots can start in the same second and name their zips alike.
 tmp=$(mktemp -d)
