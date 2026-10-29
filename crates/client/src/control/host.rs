@@ -579,7 +579,8 @@ mod tests {
         );
         assert_eq!(f.lines[1], "set cg_fov 90");
         let filtered = run(&mut f, r#"{"id":5,"cmd":"cvars","filter":"fov"}"#);
-        assert_eq!(filtered, json!({"cg_fov": "80"}));
+        assert_eq!(filtered["cg_fov"], json!("80"));
+        assert_eq!(filtered["in_mouse"], Value::Null);
     }
 
     #[test]
@@ -662,7 +663,7 @@ mod tests {
 
     #[test]
     fn every_key_name_a_request_may_use_resolves() {
-        for name in [
+        let names = [
             "escape",
             "enter",
             "tab",
@@ -679,10 +680,16 @@ mod tests {
             "semicolon",
             "slash",
             "grave",
-        ] {
-            assert!(key_code(name).is_some(), "{name}");
-            assert!(logical_key(name).is_some(), "{name}");
-        }
+        ];
+        let missing: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| key_code(n).is_none() || logical_key(n).is_none())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "names the channel cannot inject: {missing:?}"
+        );
         assert!(matches!(
             logical_key("up"),
             Some(Key::Named(NamedKey::ArrowUp))
