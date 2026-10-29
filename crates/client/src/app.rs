@@ -4609,7 +4609,16 @@ impl crate::control::Control for ControlHost<'_> {
         if self.st.listen.is_none() {
             return Some(Err("this client runs no listen server".to_owned()));
         }
-        crate::listen::request(seq, req)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::listen::request(seq, req)
+        }
+        // The browser hosts no server yet (#378's Phase 5 step 2 makes hosting say so).
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (seq, req);
+            Some(Err("the browser hosts no server".to_owned()))
+        }
     }
 
     fn quit(&mut self) {
