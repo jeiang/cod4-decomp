@@ -72,8 +72,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
         return Ok(skipped("no client binary"));
     };
-    if no_display() {
-        return Ok(skipped("no display"));
+    if let Some(report) = no_display(&client, NAME)? {
+        return Ok(report);
     }
     let dir = ctx.dir.join("control");
     fs::create_dir_all(&dir)?;
