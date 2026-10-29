@@ -137,9 +137,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let outcome = (|| -> Result<(), String> {
         id += 1;
         let ping = ask(&mut sock, id, json!({"cmd": "ping"}))?;
-        report
-            .metrics
-            .insert("frames_at_ping", ping["frames"].as_f64().unwrap_or(0.0));
+        report.metrics.insert(
+            "frames_at_ping".to_owned(),
+            ping["frames"].as_f64().unwrap_or(0.0),
+        );
 
         // The console, with the key the player presses, then the line typed into it.
         id += 1;
@@ -180,7 +181,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         id += 1;
         let ents = ask(&mut sock, id, json!({"cmd": "state", "what": "entities"}))?;
         let listed = ents["entities"].as_array().cloned().unwrap_or_default();
-        report.metrics.insert("entities", listed.len() as f64);
+        report
+            .metrics
+            .insert("entities".to_owned(), listed.len() as f64);
         if listed.len() < 4 {
             return Err(format!("{} entities, want 4", listed.len()));
         }
@@ -188,7 +191,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             .iter()
             .filter(|e| e["name"].as_str().is_some_and(|n| !n.is_empty()))
             .count();
-        report.metrics.insert("named_entities", bots as f64);
+        report
+            .metrics
+            .insert("named_entities".to_owned(), bots as f64);
 
         id += 1;
         ask(
@@ -209,7 +214,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             .or_else(|| board["scoreboard"]["rows"].as_array())
             .map(Vec::len)
             .unwrap_or(0);
-        report.metrics.insert("scoreboard_rows", rows as f64);
+        report
+            .metrics
+            .insert("scoreboard_rows".to_owned(), rows as f64);
         if rows < 4 {
             return Err(format!("{rows} scoreboard rows, want 4: {board}"));
         }
@@ -226,7 +233,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "control/{}",
             png.file_name().unwrap_or_default().to_string_lossy()
         ));
-        report.metrics.insert("capture_bytes", bytes as f64);
+        report
+            .metrics
+            .insert("capture_bytes".to_owned(), bytes as f64);
         if bytes < 1024 {
             return Err(format!("{path} is {bytes} bytes"));
         }
