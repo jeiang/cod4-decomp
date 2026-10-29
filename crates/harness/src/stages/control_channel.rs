@@ -223,8 +223,27 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
 
         // A menu item clicked at the centre of its own rectangle is the item under the pointer.
+        // The menu the player opens in a match: the key bound to `togglemenu`, or the command itself when the bind
+        // table has no such key (a stock bind does).
         id += 1;
-        ask(&mut sock, id, json!({"cmd": "key", "name": "escape"}))?;
+        let opened = ask(
+            &mut sock,
+            id,
+            json!({"cmd": "key", "bind": "togglemenu", "action": "tap"}),
+        )
+        .is_ok()
+            && until(
+                &mut sock,
+                &mut id,
+                json!({"menu.open.0": {"exists": true}}),
+                "the menu did not open",
+                Duration::from_secs(5),
+            )
+            .is_ok();
+        if !opened {
+            id += 1;
+            ask(&mut sock, id, json!({"cmd": "exec", "line": "togglemenu"}))?;
+        }
         id += 1;
         let menu = ask(&mut sock, id, json!({"cmd": "state", "what": "menu"}))?;
         let items = menu["items"].as_array().cloned().unwrap_or_default();
