@@ -2892,7 +2892,7 @@ fn script_step(st: &mut State) -> bool {
                 format!("{name} is {have:?}, {key} is {want:?}"),
             );
         }
-        // The view pitch, in degrees down, within a range (`pitchis=30 90`).
+        // The view pitch in degrees (negative looks down), within a range (`pitchis=-90 -20`).
         "pitchis" => {
             let mut it = arg
                 .split_whitespace()

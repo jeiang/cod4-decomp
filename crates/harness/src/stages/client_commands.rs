@@ -19,7 +19,7 @@ const DEMO: &str = "stagedemo";
 const STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
 mouse=Marines,menu=changeclass:30,wait=1,mouse=Assault,ingame=120,wait=3,team=2:5,\
 holdkey=pause,releasekey=pause,saw=cl_paused is read only.:5,cvaris=cl_paused 0,\
-set=bind f9 centerview,holdkey=downarrow,wait=1,releasekey=downarrow,wait=0.5,pitchis=20 90,shot=lookdown,\
+set=bind f9 centerview,holdkey=downarrow,wait=1,releasekey=downarrow,wait=0.5,pitchis=-90 -20,shot=lookdown,\
 holdkey=f9,releasekey=f9,wait=0.5,pitchis=-3 3,shot=centered,\
 console=record stagedemo,saw=recording to:5,wait=2,console=stoprecord,saw=Stopped demo.:5,console=stoprecord,saw=Not recording a demo.:5,\
 console=cmd say line_through_cmd,saw=line_through_cmd:6,\
