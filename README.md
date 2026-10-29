@@ -23,7 +23,7 @@ Every binary logs through `tracing` (crate `logging`): events go to stderr, to a
 
 ## Harness
 
-`cod4e-harness` runs the staged suite under a watchdog (each stage in a child process; crashes, hangs and panics are caught) and writes `cod4e-run-<date>.zip` (at most 100 MB, user and host names scrubbed) with `manifest.json`, `summary.json`, logs, CSVs, a Perfetto-readable `trace.json` and minidumps.
+`cod4e-harness` runs the staged suite under a watchdog (each stage in a child process; crashes, hangs and panics are caught) and writes `cod4e-run-<date>.zip` (at most 100 MB, user and host names scrubbed) with `manifest.json`, `summary.json`, logs, CSVs, a Perfetto-readable `trace.json` and minidumps. A run too big for that gives up files until it fits: videos first, then screenshots, then traces and CSVs, the largest file of each kind first so the most evidence stays; the smallest screenshot of each stage goes last of all, so a stage keeps a frame for `just review` as long as the cap allows. `DROPPED.txt` in the zip lists what was left out.
 
 Every process of a stage writes its log to `<stage>/logs/` in the bundle. A stage that passes but logged a `warn` or `error` that is not in the reviewed allow-list (`crates/harness/src/logcheck.rs`, one reason per entry) is failed, with the first events in its reason; allowed events are counted in the stage's notes. `selftest-warn` proves the gate.
 
