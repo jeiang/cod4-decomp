@@ -156,8 +156,7 @@ fn torso_problem(net: &Value) -> Option<String> {
     let Some(clips) = net["torso_clips"].as_array() else {
         return Some("the run reported no torso clips counter".into());
     };
-    clips
-        .is_empty()
+    (acted > 0 && clips.is_empty())
         .then(|| format!("other players handled weapons for {acted} frames but none ever played a torso animation"))
 }
 
