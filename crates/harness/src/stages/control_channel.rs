@@ -209,6 +209,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             id,
             json!({"cmd": "key", "bind": "+scores", "action": "down"}),
         )?;
+        // The server answers the scoreboard on the frame after the key goes down.
+        let _ = until(
+            &mut sock,
+            &mut id,
+            json!({"scoreboard.rows.0": {"exists": true}}),
+            "the scoreboard did not arrive",
+            Duration::from_secs(20),
+        );
         id += 1;
         let board = ask(&mut sock, id, json!({"cmd": "state", "what": "scoreboard"}))?;
         id += 1;
