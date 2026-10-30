@@ -430,9 +430,11 @@ impl PassKind {
         matches!(self, PassKind::DynLight { .. })
     }
 
-    /// Passes of techniques that a material may lack (the others fall back to simpler ones, or are the lit pass).
+    /// Passes of techniques that a material may lack: the surface is left out of the pass, as the original's
+    /// `R_SetMaterial` and `R_SetPrepassMaterial` (KisakCOD `r_draw_material.cpp`) return without a draw when
+    /// `Material_GetTechnique` is null. The scene pass instead falls back down the chain to the unlit technique.
     fn optional_tech(self) -> bool {
-        !matches!(self, PassKind::Scene | PassKind::FloatZ)
+        self != PassKind::Scene
     }
 }
 
@@ -776,9 +778,12 @@ impl Renderer {
         self.settings.shadows == ShadowMode::Depth
     }
 
-    /// Translate and prepare every technique the map's surfaces can use, so frames do not hitch on first sight.
+    /// Translate and prepare every technique the map's surfaces can use, so frames do not hitch on first sight. The
+    /// scene chains end in the unlit technique, so a material that has none of them is a genuine gap and says so; the
+    /// optional passes only probe the techsets that have their slot.
     fn prewarm(&mut self) {
         let hsm = self.hsm();
+        let shadow_tech = [self.shadow_tech()];
         for m in self.scene.materials() {
             for kind in [VertexKind::World, VertexKind::Model] {
                 for techs in [
@@ -790,14 +795,14 @@ impl Renderer {
                 ] {
                     self.prepare(&m, techs, kind, hsm);
                 }
-                self.prepare(&m, &[self.shadow_tech()], kind, hsm);
+                self.prepare_optional(&m, &shadow_tech, kind, hsm);
             }
         }
         if self.cookies_possible() {
             for m in self.scene.materials() {
-                self.prepare(&m, &COOKIE_CASTER_TECHS, VertexKind::Model, hsm);
+                self.prepare_optional(&m, &COOKIE_CASTER_TECHS, VertexKind::Model, hsm);
                 for kind in [VertexKind::World, VertexKind::Model] {
-                    self.prepare(&m, &COOKIE_RECEIVER_TECHS, kind, hsm);
+                    self.prepare_optional(&m, &COOKIE_RECEIVER_TECHS, kind, hsm);
                 }
             }
         }
@@ -812,9 +817,7 @@ impl Renderer {
         if self.settings.dlight_limit > 0 {
             for m in self.scene.materials() {
                 for kind in [VertexKind::World, VertexKind::Model] {
-                    if self.materials.has_technique(&m, TECH_LIGHT_OMNI, hsm) {
-                        self.prepare(&m, &LIGHT_OMNI_TECHS, kind, hsm);
-                    }
+                    self.prepare_optional(&m, &LIGHT_OMNI_TECHS, kind, hsm);
                 }
             }
         }
@@ -890,11 +893,10 @@ impl Renderer {
             depth: Some(DEPTH_FORMAT),
             samples: 1,
         };
+        let shadow_tech = [self.shadow_tech()];
         for m in &materials {
             for kind in [VertexKind::World, VertexKind::Model] {
-                if self.materials.has_technique(m, TECH_BUILD_FLOATZ, hsm)
-                    && let Some(p) = self.prepare(m, &[TECH_BUILD_FLOATZ], kind, hsm)
-                {
+                if let Some(p) = self.prepare_optional(m, &[TECH_BUILD_FLOATZ], kind, hsm) {
                     jobs.push((p, floatz));
                 }
                 for techs in [
@@ -909,7 +911,7 @@ impl Renderer {
                     }
                 }
                 if self.settings.shadows != ShadowMode::Off
-                    && let Some(p) = self.prepare(m, &[self.shadow_tech()], kind, hsm)
+                    && let Some(p) = self.prepare_optional(m, &shadow_tech, kind, hsm)
                 {
                     jobs.push((p, self.shadow_target()));
                 }
@@ -944,11 +946,13 @@ impl Renderer {
         // The shadow cookies of a frame without shadow maps.
         if self.cookies_possible() {
             for m in &materials {
-                if let Some(p) = self.prepare(m, &COOKIE_CASTER_TECHS, VertexKind::Model, hsm) {
+                if let Some(p) =
+                    self.prepare_optional(m, &COOKIE_CASTER_TECHS, VertexKind::Model, hsm)
+                {
                     jobs.push((p, Self::cookie_target()));
                 }
                 for kind in [VertexKind::World, VertexKind::Model] {
-                    if let Some(p) = self.prepare(m, &COOKIE_RECEIVER_TECHS, kind, hsm) {
+                    if let Some(p) = self.prepare_optional(m, &COOKIE_RECEIVER_TECHS, kind, hsm) {
                         jobs.push((p, scene));
                     }
                 }
@@ -958,9 +962,7 @@ impl Renderer {
         if self.settings.dlight_limit > 0 {
             for m in &materials {
                 for kind in [VertexKind::World, VertexKind::Model] {
-                    if self.materials.has_technique(m, TECH_LIGHT_OMNI, hsm)
-                        && let Some(p) = self.prepare(m, &LIGHT_OMNI_TECHS, kind, hsm)
-                    {
+                    if let Some(p) = self.prepare_optional(m, &LIGHT_OMNI_TECHS, kind, hsm) {
                         jobs.push((p, scene));
                     }
                 }
@@ -1097,6 +1099,27 @@ impl Renderer {
     ) -> Option<Arc<Prepared>> {
         self.materials
             .prepare(&self.gpu, &mut self.textures, m, techs, kind, hsm)
+    }
+
+    /// [`Renderer::prepare`] for a pass the material may lack (a shadow map, a shadow cookie, a dynamic light, the
+    /// floatz): silent `None` when the techset has none of `techs`. The original only asks such a material for the
+    /// technique where it has one (KisakCOD `r_material_load_obj.cpp` `MTL_GAMEFLAG_CASTS_SHADOW` from
+    /// `TECHNIQUE_BUILD_SHADOWMAP_DEPTH`, `r_light.cpp` `Material_GetTechnique(TECHNIQUE_LIGHT_OMNI)`,
+    /// `r_shadowcookie.cpp` the cookie flags), so a techset that omits the slot is not a failure: the pass skips it.
+    fn prepare_optional(
+        &mut self,
+        m: &Arc<Material>,
+        techs: &[usize],
+        kind: VertexKind,
+        hsm: bool,
+    ) -> Option<Arc<Prepared>> {
+        if !techs
+            .iter()
+            .any(|&t| self.materials.has_technique(m, t, hsm))
+        {
+            return None;
+        }
+        self.prepare(m, techs, kind, hsm)
     }
 
     /// The post parameters as the settings allow them: depth of field and glow can be switched off.
