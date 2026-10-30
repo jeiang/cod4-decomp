@@ -5,12 +5,13 @@
 //! and the stock `_class.gsc` reads the class off the stats at the first spawn. The stage then reads the server's
 //! player state for the measurable effects:
 //!
-//! - the perk bits of the player state are exactly the class's (`register_perks` → `setPerk`);
+//! - the perk bits of the player state are exactly the class's (`register_perks` → `setPerk`; the grenade kit perks
+//!   are counts, never bits);
 //! - Frag x3 gives three frags and Special Grenades x3 three flashbangs, Bandolier a full stock;
 //! - Juggernaut takes a 40 rifle hit down to 30, Stopping Power raises it to 56, Sonic Boom raises a 20 grenade
 //!   splash to 25 (`cac_modified_damage`);
 //! - Last Stand: a lethal rifle hit leaves the player at 1 health with only the pistol and no frag, crawling
-//!   (`PM_LASTSTAND`), without a heal, and the bleed-out kills them ten seconds later with the kill credited to
+//!   (`PM_LASTSTAND`), with the health held down by `lastStandKeepOverlay`, and the bleed-out kills them ten seconds later with the kill credited to
 //!   the attacker (`Callback_PlayerLastStand`, `lastStandTimer`, `LastStandBleedOut`); a grenade kill is no Last
 //!   Stand at all (`mayDoLastStand`);
 //! - Martyrdom drops a live short-fuse frag where the player died (`DeathGrenadeDrop`).
@@ -95,9 +96,12 @@ fn perk_bit(name: &str) -> Option<u32> {
         .map(|i| 1 << i)
 }
 
+/// The bits `register_perks` sets for a class: the grenade kit perks (Frag x3, Special Grenades x3) never reach
+/// `setPerk` in the stock `get_specialtydata`, which keeps them as counts only.
 fn perk_bits(c: &Class) -> u32 {
     c.perks
         .iter()
+        .filter(|p| !matches!(**p, "specialty_fraggrenade" | "specialty_specialgrenade"))
         .filter_map(|p| perk_bit(p))
         .fold(0, |a, b| a | b)
 }
@@ -426,8 +430,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         format!("{} flashbangs without the perk, want 1", vb.flash),
     );
     check(
-        vb.p90_stock == 150,
-        format!("P90 stock {} without Bandolier, want 150", vb.p90_stock),
+        vb.p90_stock == 100,
+        format!(
+            "P90 stock {} without Bandolier, want 100 (150 start ammo less the 50 in the magazine)",
+            vb.p90_stock
+        ),
     );
     check(
         vb.weapons.iter().any(|w| w == "p90_mp") && vb.weapons.iter().any(|w| w == "beretta_mp"),
@@ -492,8 +499,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     );
     // The victim picks its second class now: the bleed-out's respawn gives it.
     m.v.choose("custom2");
-    // No heal through the bleed-out, which comes at ten seconds and credits the attacker.
-    let (mut max_health, mut died_at) = (vb.health, None);
+    // No heal through the bleed-out, which comes at ten seconds and credits the attacker. The stock
+    // `lastStandKeepOverlay` writes the health back to 1 twice a second, so the regeneration of `_healthoverlay.gsc`
+    // never keeps what it adds: the health is at 1 or 2 again within a second of any climb, and never full.
+    let (mut max_health, mut died_at, mut low_at) = (vb.health, None, hit_at);
     for _ in 0..LAST_STAND_FRAMES {
         m.frame();
         let b = body(&m.server, vn)?;
@@ -502,11 +511,21 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             break;
         }
         max_health = max_health.max(b.health);
+        if b.health <= 2 {
+            low_at = m.server.game.level.time;
+        }
     }
+    let held_down = died_at.is_some_and(|ms| hit_at + ms - low_at <= 1000);
     check(
-        max_health <= 2,
-        format!("Last Stand: the health climbed to {max_health} before the bleed-out"),
+        max_health < 100 && held_down,
+        format!(
+            "Last Stand: the health climbed to {max_health} and was last at 1 {} ms before the end, want it held down",
+            died_at.map_or(0, |ms| hit_at + ms - low_at)
+        ),
     );
+    report
+        .metrics
+        .insert("laststand.max_health".into(), f64::from(max_health));
     match died_at {
         Some(ms) => {
             check(
