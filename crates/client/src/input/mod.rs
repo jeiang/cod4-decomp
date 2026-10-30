@@ -885,6 +885,7 @@ impl Input {
 
     /// A `wait` ended its buffer and nothing came after it: `take_due` has nothing to count down for until the
     /// next submission (`Cbuf_Execute` counts the wait down only while text is pending).
+    #[cfg(test)]
     pub(crate) fn waiting_on_nothing(&self) -> bool {
         self.wait.is_some() && self.backlog.is_empty()
     }
