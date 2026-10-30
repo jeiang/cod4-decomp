@@ -133,7 +133,8 @@ impl Meter {
         self.last = Some(now);
     }
 
-    /// A frame time, as a test or a replay feeds it.
+    /// A frame time, as a test feeds it.
+    #[cfg(test)]
     pub fn push(&mut self, ms: u32) {
         self.times[self.index % WINDOW] = ms;
         self.index += 1;
