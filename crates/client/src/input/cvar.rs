@@ -179,7 +179,7 @@ impl Default for Cvars {
             .iter()
             .map(|&(n, v, archive)| {
                 let value = v.to_owned();
-                (n.to_owned(), Cvar { value, archive })
+                (n.to_ascii_lowercase(), Cvar { value, archive })
             })
             .collect();
         Self { map }
