@@ -688,9 +688,19 @@ impl Ui {
         self.menu_kind == MenuKind::ScriptPopup && !self.stack.is_empty()
     }
 
-    /// True when any menu on the stack wants the mouse and keyboard (the game does not get them).
+    /// True when a menu on the stack wants the mouse and keyboard (the game does not get them). The scoreboard held
+    /// up by `+scores` is not one: the original shows it (`CG_ScoresDown`'s `showScores`) while the player's keys keep
+    /// moving them, and the key up runs `-scores` as every held bind's release does (`CL_KeyEvent`, KisakCOD
+    /// `client/cl_keys.cpp`).
     pub fn captures_input(&self) -> bool {
-        !self.stack.is_empty()
+        !self.stack.is_empty() && !self.scoreboard_alone()
+    }
+
+    /// The `+scores` scoreboard is the only menu up.
+    pub fn scoreboard_alone(&self) -> bool {
+        self.menu_kind == MenuKind::Scoreboard
+            && self.stack.len() == 1
+            && self.menus[self.stack[0]].name == "scoreboard"
     }
 
     pub fn open_menus(&self) -> Vec<&str> {
@@ -3603,6 +3613,27 @@ mod tests {
         assert!(ui.is_open("popup_summary") && ui.script_popup_up());
         ui.close_all(&mut host);
         assert!(!ui.script_popup_up(), "nothing is up once they are closed");
+    }
+
+    /// The `+scores` scoreboard is drawn over the game and takes nothing from it (`CG_ScoresDown`); a menu over it
+    /// does, and so does the scoreboard opened any other way.
+    #[test]
+    fn the_held_scoreboard_does_not_capture_input() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        assert!(!ui.captures_input());
+        ui.open_as(&mut host, "scoreboard", MenuKind::Scoreboard);
+        assert!(ui.is_open("scoreboard") && ui.scoreboard_alone());
+        assert!(!ui.captures_input());
+        ui.open_as(&mut host, "popup_unlock", MenuKind::Ingame);
+        assert!(!ui.scoreboard_alone());
+        assert!(ui.captures_input());
+        ui.close_all(&mut host);
+        ui.open_as(&mut host, "scoreboard", MenuKind::Other);
+        assert!(ui.captures_input(), "opened as an ordinary menu it is one");
     }
 
     fn group_items(ui: &Ui, m: usize, group: &str) -> Vec<usize> {

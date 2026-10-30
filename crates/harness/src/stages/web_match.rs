@@ -634,48 +634,13 @@ fn play(
             "the player is on team {team}, not the Marines (2) that were clicked"
         ));
     }
-    let clip0 = num(&page.state(server, "hud")?, "clip_ammo");
 
-    // Moving: W (the `+forward` bind) held moves the origin at least 64 units. Held until it has, not for a wall
-    // time: a software-rendered page runs a few frames a second right after the spawn (its pipelines build in the
-    // frame), and a command's time is capped, so a second of the wall is less than a second of movement there.
-    let origin0 = [num(&p0, "origin.0"), num(&p0, "origin.1")];
-    page.bind(server, "+forward", "down")?;
-    let t_move = Instant::now();
-    let end = Instant::now() + Duration::from_secs(30);
-    let mut dist = 0.0;
-    let mut p1 = p0.clone();
-    while dist < 64.0 && Instant::now() < end {
-        page.ask(server, json!({"cmd": "step", "frames": 3}))?;
-        p1 = page.state(server, "player")?;
-        dist = (num(&p1, "origin.0") - origin0[0]).hypot(num(&p1, "origin.1") - origin0[1]);
-    }
-    page.bind(server, "+forward", "up")?;
-    report.metrics.insert("moved".into(), dist);
-    report
-        .metrics
-        .insert("walk_ms".into(), t_move.elapsed().as_secs_f64() * 1000.0);
-    report.notes.push(format!(
-        "walk timing: server level {}, snapshot {}, client command {}, server command {}; alive {}",
-        server.level_time(),
-        p1["server_time"],
-        p1["client_command_time"],
-        p1["command_time"],
-        p1["alive"]
-    ));
-    if !(dist >= 64.0) {
-        return Err(format!(
-            "W held for 30 s moved the player {dist:.0} units (from {origin0:?} to {}), want 64",
-            p1["origin"]
-        ));
-    }
-    page.capture(server, report, dir, "04-moved")?;
-
-    // Turning: a real click through Chromium's input pipeline grants the page pointer lock, as a player's click
-    // does; the delta itself goes through the same control-channel request as native (`CL_MouseMove`).
+    // The pointer: a real click through Chromium's input pipeline grants the page the pointer lock, as a player's
+    // click does (a headless page gets it no other way); from then on the mouse deltas go through the same
+    // control-channel request as native (`CL_MouseMove`), and the yaw the server echoes follows them.
     cdp.click()?;
     page.ask(server, json!({"cmd": "step", "frames": 2}))?;
-    let yaw0 = num(&p1, "angles.1");
+    let yaw0 = num(&p0, "angles.1");
     let turn = |y: f64| ((y - yaw0 + 540.0).rem_euclid(360.0) - 180.0).abs();
     page.ask(server, json!({"cmd": "mouse", "dx": 120, "dy": 0}))?;
     let turned = page.poll(
@@ -685,8 +650,57 @@ fn play(
         |y| turn(y) >= 2.0,
         "the control-channel mouse delta did not turn the view after pointer capture",
         Duration::from_secs(15),
-    );
-    report.metrics.insert("turned_deg".into(), turn(turned?));
+    )?;
+    report.metrics.insert("turned_deg".into(), turn(turned));
+
+    // Moving: W (the `+forward` bind) held moves the origin at least 64 units. Held until it has, not for a wall
+    // time: a software-rendered page runs a few frames a second right after the spawn (its pipelines build in the
+    // frame), and a command's time is capped, so a second of the wall is less than a second of movement there. A
+    // spawn can face a wall (the 2026-10-30 run `slot-1-cod4e-run-20261030-040632` walked 25 units in 30 s into
+    // one): when a second of walking gains nothing the view turns a quarter, as `net-match`'s walker does.
+    let origin0 = [num(&p0, "origin.0"), num(&p0, "origin.1")];
+    page.bind(server, "+forward", "down")?;
+    let t_move = Instant::now();
+    let end = Instant::now() + Duration::from_secs(45);
+    let mut dist = 0.0;
+    let mut p1 = p0.clone();
+    let mut last_gain = (Instant::now(), 0.0);
+    let mut turns = 0;
+    while dist < 64.0 && Instant::now() < end {
+        page.ask(server, json!({"cmd": "step", "frames": 3}))?;
+        p1 = page.state(server, "player")?;
+        dist = (num(&p1, "origin.0") - origin0[0]).hypot(num(&p1, "origin.1") - origin0[1]);
+        if dist > last_gain.1 + 4.0 {
+            last_gain = (Instant::now(), dist);
+        } else if last_gain.0.elapsed() > Duration::from_secs(2) {
+            page.ask(server, json!({"cmd": "mouse", "dx": 820, "dy": 0}))?;
+            turns += 1;
+            last_gain = (Instant::now(), dist);
+        }
+    }
+    page.bind(server, "+forward", "up")?;
+    report.metrics.insert("moved".into(), dist);
+    report.metrics.insert("walk_turns".into(), f64::from(turns));
+    report
+        .metrics
+        .insert("walk_ms".into(), t_move.elapsed().as_secs_f64() * 1000.0);
+    report.notes.push(format!(
+        "walk timing: server level {}, snapshot {}, client command {}, server command {}; alive {}; turned {turns} times",
+        server.level_time(),
+        p1["server_time"],
+        p1["client_command_time"],
+        p1["command_time"],
+        p1["alive"]
+    ));
+    if !(dist >= 64.0) {
+        return Err(format!(
+            "W held for 45 s moved the player {dist:.0} units (from {origin0:?} to {}), want 64",
+            p1["origin"]
+        ));
+    }
+    page.capture(server, report, dir, "04-moved")?;
+    // The clip as it is now: the trusted click above went through the window's path too, as a player's would.
+    let clip0 = num(&page.state(server, "hud")?, "clip_ammo");
 
     // Firing: mouse1 lowers the clip and the own fire event is delivered.
     page.button(server, "mouse1", "down")?;

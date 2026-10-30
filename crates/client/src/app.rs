@@ -365,8 +365,6 @@ struct State {
     /// lock a moment after the request and drops it on its own (Escape, a lost activation).
     grab_at: Instant,
     lock_seen: bool,
-    /// A menu was open at the last frame.
-    menu_was_open: bool,
     samples: Vec<[f64; 3]>,
     /// Per frame, parallel to `samples`: where the milliseconds went (`frames.phases.csv`), see [`PHASES`].
     phases: Vec<[f32; 18]>,
@@ -1002,7 +1000,6 @@ impl Viewer {
             gate: Default::default(),
             grab_at: now,
             lock_seen: false,
-            menu_was_open: false,
             samples: Vec::new(),
             phases: Vec::new(),
             late: [0.0; 4],
@@ -1417,13 +1414,9 @@ impl Viewer {
         if menu_open {
             // A locked cursor never moves, so the menu could not be clicked.
             release_pointer(st);
-            // The menu takes the window's events: a button or key let go while it is open never reaches the input,
-            // and a right click held when it opened would keep the sights up for good.
-            if !st.menu_was_open {
-                st.input.release_all();
-            }
+            // The keys held when it opened stay held, as the original's do: their release reaches the bind table
+            // through the menu (`dispatch_input`).
         }
-        st.menu_was_open = menu_open;
         sync_os_cursor(st);
         // In a match the pointer is the game's whenever no menu wants it; a click is not required.
         let in_match = st.net.is_some()
@@ -3456,6 +3449,16 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
     }
     let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
     let captured = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
+    let released = matches!(
+        ev,
+        InputEvent::Key {
+            state: ElementState::Released,
+            ..
+        } | InputEvent::Button {
+            state: ElementState::Released,
+            ..
+        }
+    );
     if typing {
         if let Some(sh) = st.shell.as_mut() {
             for k in typed_ui_keys(ev) {
@@ -3463,8 +3466,22 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
             }
         }
     } else if captured {
+        // A key let go runs its `-` bind whatever menu is up, so a button held when the menu opened is let go of
+        // with the key (`CL_KeyEvent`, KisakCOD `client/cl_keys.cpp`); the menu sees the release too.
+        if released {
+            st.input.event(ev);
+        }
         ui_event(st, ev);
     } else {
+        // The scoreboard up on `+scores` scrolls on its keys (`Scoreboard_HandleInput`) and leaves the rest to the game.
+        if let Some(sh) = st.shell.as_mut()
+            && sh.st.scoreboard_shown(&sh.ui)
+            && typed_ui_keys(ev)
+                .iter()
+                .any(|k| sh.st.scroll_scores(&sh.ui, k))
+        {
+            return;
+        }
         st.input.event(ev);
     }
 }
