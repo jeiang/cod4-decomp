@@ -13,10 +13,18 @@ use std::time::Duration;
 
 const NAME: &str = "client-objective";
 const LIMIT: Duration = Duration::from_secs(240);
-const ARGS: &[&str] = &["--listen", "--gametype", "sd", "--bots", "4"];
-// The attackers' bomb zone and the bomb itself; the player's team may be the defenders, in which case the
-// server refuses the move and the run reports it.
-const STEPS: &str = "ingame=120,server=set bot_idle 1,wait=1,server=devtele human sd_bomb_pickup,wait=3,\
+const ARGS: &[&str] = &[
+    "--listen",
+    "--gametype",
+    "sd",
+    "--bots",
+    "4",
+    "--no-autojoin",
+];
+// mp_crash's stock SD setup makes the Marines the attackers. Pick that team through its menu instead of letting
+// auto-assign sometimes put the player on defense, where no pickup trigger exists and a plant cannot be exercised.
+const STEPS: &str = "menu=team_marinesopfor:90,mouse=Marines,menu=changeclass:30,mouse=Assault,ingame=120,\
+server=set bot_idle 1,wait=1,server=devtele human sd_bomb_pickup,wait=3,\
 server=devtele human bombzone,wait=2,set=+activate,wait=2,shot=hint,wait=8,set=-activate,wait=1";
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
