@@ -7,7 +7,7 @@ use super::stream::{Addr, Block, Fields, Ptr, Stream};
 use std::sync::Arc;
 
 /// A named group of alternative sounds.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SoundAliasList {
     pub name: Name,
     pub aliases: Arc<[SoundAlias]>,
@@ -252,7 +252,7 @@ fn speaker_map_body(s: &mut Stream, h: &[u8]) -> Result<SpeakerMap> {
 }
 
 /// A volume falloff curve of up to eight (distance, volume) knots.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SndCurve {
     pub name: Name,
     pub knot_count: i32,
@@ -278,7 +278,7 @@ fn curve_at(s: &mut Stream, slot: Option<Addr>, p: Ptr) -> Result<Option<Arc<Snd
 }
 
 /// A PCM/ADPCM sound held in the zone.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LoadedSound {
     pub name: Name,
     pub format: i32,

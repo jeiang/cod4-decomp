@@ -227,10 +227,10 @@ impl<'a> Stream<'a> {
 
     /// `DB_AddXAsset` for a decoded asset: linked across zones when the decode is linked and the consumer links its
     /// type, else as decoded.
-    fn link<T: Linkable>(&mut self, v: Arc<T>) -> Arc<T> {
+    fn link<T: Linkable>(&mut self, v: Arc<T>) -> Result<Arc<T>> {
         match &mut self.linker {
             Some(l) if l.filter.link(T::TYPE) => l.db.link(l.tag, v),
-            _ => v,
+            _ => Ok(v),
         }
     }
 
@@ -549,7 +549,7 @@ impl<'a> Stream<'a> {
         push_virtual: bool,
         f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
     ) -> Result<Option<Arc<T>>> {
-        self.temp_ptr_link(slot, p, align, size, push_virtual, f, |_, v| v)
+        self.temp_ptr_link(slot, p, align, size, push_virtual, f, |_, v| Ok(v))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -561,7 +561,7 @@ impl<'a> Stream<'a> {
         size: u32,
         push_virtual: bool,
         f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
-        link: impl FnOnce(&mut Self, Arc<T>) -> Arc<T>,
+        link: impl FnOnce(&mut Self, Arc<T>) -> Result<Arc<T>>,
     ) -> Result<Option<Arc<T>>> {
         match p {
             Ptr::Null => Ok(None),
@@ -581,7 +581,7 @@ impl<'a> Stream<'a> {
                 if push_virtual {
                     self.pop()?;
                 }
-                let v = link(self, v);
+                let v = link(self, v)?;
                 if let Some(s) = slot {
                     self.register(s, v.clone());
                 }

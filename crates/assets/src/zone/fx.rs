@@ -59,7 +59,7 @@ pub struct Range<T> {
     pub amplitude: T,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FxEffectDef {
     pub name: Name,
     pub flags: i32,

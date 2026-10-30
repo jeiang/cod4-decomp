@@ -51,7 +51,7 @@ pub struct ImageLoadDef {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GfxImage {
     pub map_type: u32,
     pub picmip: [u8; 2],
@@ -236,7 +236,7 @@ pub struct ConstantDef {
     pub literal: [f32; 4],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Material {
     pub name: Name,
     pub game_flags: u8,
@@ -517,7 +517,7 @@ fn shader_args(s: &mut Stream, n: u32) -> Result<Vec<ShaderArg>> {
     Ok(out)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TechniqueSet {
     pub name: Name,
     pub world_vert_format: u8,

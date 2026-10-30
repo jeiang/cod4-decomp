@@ -6,7 +6,7 @@ use super::gfx::Name;
 use super::stream::{Addr, Fields, Ptr, Stream};
 use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PhysPreset {
     pub name: Name,
     pub kind: i32,
