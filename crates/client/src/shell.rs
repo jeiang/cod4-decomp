@@ -424,6 +424,12 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("cg_scoreboardPingGraph", "0"),
     // Cheat protected: only acts with `sv_cheats` on.
     ("snd_enableReverb", "1"),
+    // How the colour buffer is cleared (`R_GetClearColor`): the stock default never clears, so pixels nothing draws
+    // are black here, not the fog colour (#356). `r_clear` takes the stock names or indices 0 to 4; the colours are
+    // `r g b a` in 0..1.
+    ("r_clear", "dev-only blink"),
+    ("r_clearColor", "0 0 0 0"),
+    ("r_clearColor2", "0 0 0 0"),
 ];
 
 /// The settings of the options menus with the stock engine's defaults: archived, so a change survives a restart.

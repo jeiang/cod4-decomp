@@ -3,6 +3,7 @@
 pub mod asset_load;
 pub mod audio;
 pub mod client_brush;
+pub mod client_clear;
 pub mod client_commands;
 pub mod client_custom_class;
 pub mod client_dedicated;
