@@ -54,6 +54,14 @@ The exported HUD includes `sprint_facts` (weapon, weapon duration scale, `ps.per
 
 Stage 3 (`client-flythrough`) needs a GPU and a display: it runs the `cod4e` client (`$COD4E_CLIENT`, else next to the harness) on mp_crash once per display mode (native borderless, windowed 1080p and 720p, plus an exclusive run at another native-size refresh when the monitor has one), 12 s each (`COD4E_FLYTHROUGH_SECS`), and records one short video (a few MB), a screenshot and per-frame timings per mode. It also runs mp_crash uncapped at native size (`--present immediate` and `mailbox`) and two more stock maps (mp_bog, mp_crash_snow), so the bundle shows sun shadows, fog and the film/glow post effects on three maps. `frames.csv` carries GPU pass time from timestamp queries where the device has them (`gpu_ms`, a few frames behind the render call, matched by frame number). The video is recorded at 30 fps on a background encoder thread that drops the slots it cannot keep up with; each sample carries its own duration, so the file stays in sync. The loss follows the frame size and the cores the run has: 0.6-1.7% at a 2536x1416 window and at 1280x720, 34.9-37.8% at 5120x1440, all with the host to itself, and up to 56% at 1920x1080 beside two other runs. The stage records the lost share per mode as a metric and fails only a recording that kept under 8 fps, too few frames to review; the native-resolution shortfall is #442. Without the client, an install or a display it is skipped.
 
+`client-garage` covers the parked green car and loose tyre at mp_crash's garage (#357). It starts a real match with
+the player's `devmap`, team/class selection, `noclip` and `setviewpos` commands, then compares the issue-pose image
+against the same camera with script models and dynamic props separately hidden (`drawscriptmodels 0`,
+`drawprops 0`, diagnostic commands analogous to `drawvehicles`). Both objects must change their own image regions.
+The serverless `--flythrough` is a tour of the static world, not a match: it does not spawn script models or
+client-side dynamic props, so their absence there is not evidence of a missing model in play. The control state
+names snapshot models (`entities.list[].model_name`) and live dynamic props (`net.props`) for diagnosis.
+
 ## Headless server
 
 ```sh

@@ -354,6 +354,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_models::run),
     },
     StageDef {
+        name: "client-garage",
+        description: "mp_crash garage in a live devmap match: the parked script-model car and loose dynamic tyre must change separate image regions at the issue #357 pose",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_garage::run),
+    },
+    StageDef {
         name: "client-viewmodel",
         description: "cod4e --viewmodel-tour on three maps: the first-person weapon and hands drawn from spawn points and paths must not be one colour (a wrong reflection probe painted them red) nor black; an off-hand throw must show the grenade, and the last round and an empty reload their own animations",
         needs_install: false,
