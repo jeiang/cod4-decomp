@@ -1859,7 +1859,7 @@ impl HostCx<'_> {
                         g if g.is_empty() => "war".to_owned(),
                         g => g,
                     },
-                    cheats: lname == "devmap",
+                    cheats: name == "devmap",
                 }),
                 // `setFromLocString <dvar> <string>` (`Dvar_SetFromLocalizedStr_f`): an `@` reference is localized.
                 "setfromlocstring" => {
