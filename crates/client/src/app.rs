@@ -401,7 +401,7 @@ struct State {
     menu_was_open: bool,
     samples: Vec<[f64; 3]>,
     /// Per frame, parallel to `samples`: where the milliseconds went (`frames.phases.csv`), see [`PHASES`].
-    phases: Vec<[f32; 18]>,
+    phases: Vec<[f32; 21]>,
     /// What the last render built on the frame path: pipelines, their ms, passes, their ms.
     late: [f32; 4],
     laps: [f32; 10],
@@ -489,9 +489,10 @@ struct State {
     load_report: Option<Value>,
     /// The next session answers the team and class menus by itself (a script's `start=` step).
     autojoin_next: bool,
-    /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
-    /// to explain a slow gap.
-    prev_cost: [f64; 4],
+    /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture, presenting,
+    /// the input and polls before the network frame, the late warm-up, and the UI painted between the renderer
+    /// and the present (`PHASES`), to explain a slow gap.
+    prev_cost: [f64; 7],
     /// Frames in a row the surface gave no texture although it was configured again; see [`recover_surface`].
     surface_failures: u32,
     /// How long a surface may time out or be occluded before a harness run gives up; `None` for a player's window,
@@ -586,6 +587,12 @@ const TOUR_MENUS: &[&str] = &[
 /// seconds if done at once): the frames before every pipeline exists skip the draws that lack one.
 #[cfg(target_arch = "wasm32")]
 const WARM_BUDGET: Duration = Duration::from_millis(6);
+
+/// What a native frame spends preparing the passes of models the server precached after the load
+/// (`Renderer::warm_late`): a material's few passes fit in it, so the list is spread over a second or two of frames
+/// rather than stalling the first one that sees it.
+#[cfg(not(target_arch = "wasm32"))]
+const WARM_LATE_BUDGET: Duration = Duration::from_millis(2);
 
 /// Frames a tour menu is shown before its screenshot (fades and expressions settle).
 const TOUR_FRAMES: u32 = 6;
@@ -978,6 +985,7 @@ impl Viewer {
                             port: 0,
                             game: self.cli.game.clone(),
                             dvars: Vec::new(),
+                            cheats: false,
                         },
                     )?;
                     let a = l.addr;
@@ -1205,7 +1213,7 @@ impl Viewer {
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
-            prev_cost: [0.0; 4],
+            prev_cost: [0.0; 7],
             surface_failures: 0,
             surface_stalled_ms: 0.0,
             surface_retried: false,
@@ -1359,8 +1367,11 @@ impl ApplicationHandler<Ready> for Viewer {
 }
 
 /// The columns of `frames.phases.csv`: network and prediction, surface acquire, render, present, then what the
-/// render built on the frame path (pipelines and passes: count, ms each).
-const PHASES: &str = "net_ms,acquire_ms,render_ms,present_ms,late_pipelines,late_pipeline_ms,late_passes,late_pass_ms,r_setup,r_dynamic,r_sun_shadow,r_spot_shadow,r_main_draws,r_lights,r_floatz,r_post_upload,r_encode,r_submit";
+/// render built on the frame path (pipelines and passes: count, ms each), the render's own laps, and last the
+/// input and polls before the network frame, the late warm-up (`Renderer::warm_late`) and the UI painted between
+/// the render and the present. With the acquire left out, the columns but the laps add up to `cpu_ms` of
+/// `frames.raw.csv` but for the frame's tail (console lines, menu sound, actions).
+const PHASES: &str = "net_ms,acquire_ms,render_ms,present_ms,late_pipelines,late_pipeline_ms,late_passes,late_pass_ms,r_setup,r_dynamic,r_sun_shadow,r_spot_shadow,r_main_draws,r_lights,r_floatz,r_post_upload,r_encode,r_submit,input_ms,warm_ms,ui_ms";
 
 impl Viewer {
     /// The graphics device is lost and cannot be used again: a new one is made for the window, and everything that
@@ -1481,6 +1492,8 @@ impl Viewer {
             Some(sh) => sh.run_due(&mut st.input),
             None => st.input.run_due(),
         }
+        // What the listen server made of the host's console lines since the last frame (#366).
+        host_console_replies(st);
         if let Some(g) = st.load_gaps.as_mut() {
             g.frames += 1;
             g.max_ms = g.max_ms.max(interval);
@@ -1492,8 +1505,15 @@ impl Viewer {
                     "render_ms": st.prev_cost[1].round(),
                     "acquire_ms": st.prev_cost[2].round(),
                     "present_ms": st.prev_cost[3].round(),
+                    "input_ms": st.prev_cost[4].round(),
+                    "warm_ms": st.prev_cost[5].round(),
+                    "ui_ms": st.prev_cost[6].round(),
                 }));
             }
+        }
+        // The costs a frame may not reach (no network frame, nothing to warm) read as zero, not as the last frame's.
+        for i in [0, 4, 5, 6] {
+            st.prev_cost[i] = 0.0;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(done) = st.download.as_mut().and_then(|d| d.poll())
@@ -1506,7 +1526,14 @@ impl Viewer {
                     if let Err(why) = follow_server_game(&self.cli, &mut self.map, st, &d.game) {
                         show_error(st, &why);
                     } else {
-                        start_session(&self.cli, &mut self.map, st, &d.map, &gametype, Some(addr));
+                        start_session(
+                            &self.cli,
+                            &mut self.map,
+                            st,
+                            &d.map,
+                            &gametype,
+                            loader::Server::Join(addr),
+                        );
                     }
                 }
                 Err(why) => {
@@ -1748,17 +1775,19 @@ impl Viewer {
                 }));
             }
             // What the server precached beyond what the load warmed (planes, vehicles the scripts call in): its
-            // pipelines are built beside the frames now rather than at first sight.
+            // passes are prepared a material per frame and its pipelines built beside the frames, not at first sight.
             #[cfg(not(target_arch = "wasm32"))]
-            {
+            if let Some(r) = st.renderer.as_mut() {
                 let models = net.unwarmed_models();
-                if let (false, Some(r)) = (models.is_empty(), st.renderer.as_mut()) {
+                if !models.is_empty() {
                     r.warm_models(&models);
                     if let Some(sh) = st.shell.as_ref() {
                         r.warm_sprites(sh.ui.assets.material("gfx_tracer").cloned());
                     }
-                    r.warm_in_background(st.config.format);
                 }
+                let t_warm = Instant::now();
+                r.warm_late(st.config.format, WARM_LATE_BUDGET);
+                st.prev_cost[5] = t_warm.elapsed().as_secs_f64() * 1000.0;
             }
             new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {
@@ -1929,6 +1958,10 @@ impl Viewer {
             apply_resize(st, size)?;
         }
         let t_acquire = Instant::now();
+        // What the frame did before asking for its texture, beyond the network frame and the warm-up: the control
+        // channel, the input, the due commands, the load and download polls.
+        let pre_ms = t_acquire.duration_since(now).as_secs_f64() * 1000.0;
+        st.prev_cost[4] = (pre_ms - st.prev_cost[0] - st.prev_cost[5]).max(0.0);
         let frame = match st.surface().get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
@@ -1950,6 +1983,7 @@ impl Viewer {
             }
         };
         st.prev_cost[2] = t_acquire.elapsed().as_secs_f64() * 1000.0;
+        // `cpu_ms` is the frame's own work: everything but the wait for the surface texture.
         let cpu_start = Instant::now();
         let aspect = st
             .aspect
@@ -2023,6 +2057,8 @@ impl Viewer {
             st.distortion_now = stats.distortion_copy;
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
+        // The UI and captures between the world and the present: menus, HUD, screenshots, the video recorder.
+        let t_ui = Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
         let downloading = st
             .download
@@ -2202,6 +2238,7 @@ impl Viewer {
             st.control_shot_done = Some(shot);
         }
         let t_present = Instant::now();
+        st.prev_cost[6] = t_present.duration_since(t_ui).as_secs_f64() * 1000.0;
         st.gpu.queue.present(frame);
         st.presented = true;
         st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
@@ -2225,7 +2262,7 @@ impl Viewer {
             .unwrap_or_default();
         self.apply_actions(el, actions)?;
         let st = self.st.as_mut().ok_or("no window")?;
-        let cpu_ms = cpu_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_ms = pre_ms + cpu_start.elapsed().as_secs_f64() * 1000.0;
         if st.samples.len() % 30 == 0 {
             st.rss = rss();
         }
@@ -2258,6 +2295,9 @@ impl Viewer {
             lap(7),
             lap(8),
             lap(9),
+            c[4] as f32,
+            c[5] as f32,
+            c[6] as f32,
         ]);
         #[cfg(target_arch = "wasm32")]
         if st.overlay_at.elapsed() >= Duration::from_millis(500) {
@@ -2295,7 +2335,11 @@ impl Viewer {
                     }
                     el.exit();
                 }
-                Action::StartServer { map, gametype } => {
+                Action::StartServer {
+                    map,
+                    gametype,
+                    cheats,
+                } => {
                     // `SV_Map_f` looks for the map's zone before anything else (`DB_FileSize`, KisakCOD
                     // `server_mp/sv_ccmds_mp.cpp`): a map the install lacks starts no server and shows no loading
                     // screen. The original prints its `Can't find map` to the console; here it is the error popup's
@@ -2306,7 +2350,14 @@ impl Viewer {
                         tracing::warn!(%map, "map not found: the install has no zone for it");
                         show_error(st, &format!("Can't find map \"{map}\"."));
                     } else {
-                        start_session(&self.cli, &mut self.map, st, &map, &gametype, None);
+                        let boot = loader::Server::Boot(listen_config(
+                            st,
+                            &map,
+                            &gametype,
+                            self.cli.bots,
+                            cheats,
+                        ));
+                        start_session(&self.cli, &mut self.map, st, &map, &gametype, boot);
                     }
                 }
                 Action::Join(addr) => {
@@ -2379,7 +2430,7 @@ impl Viewer {
                                 st,
                                 &e.map,
                                 &e.gametype,
-                                Some(a),
+                                loader::Server::Join(a),
                             );
                         }
                         Err(err) => {
@@ -2710,6 +2761,7 @@ fn script_step(st: &mut State) -> bool {
             sh.st.actions.push(Action::StartServer {
                 map: arg.to_owned(),
                 gametype: "war".to_owned(),
+                cheats: false,
             });
             st.autojoin_next = true;
             done(true, sc, String::new());
@@ -3744,7 +3796,6 @@ fn saved_bot_count_lines(bots_flag: Option<usize>, input: &Input) -> Vec<String>
 }
 
 fn console_action(st: &mut State, line: &str) {
-    let count_before = bot_count(&st.input);
     for cmd in crate::input::config::split_commands(line) {
         let _command = tracing::debug_span!("command", name = %cmd[0]).entered();
         let verb = cmd[0].to_ascii_lowercase();
@@ -3837,29 +3888,60 @@ fn console_action(st: &mut State, line: &str) {
             v if crate::console::is_command(v) => {
                 st.input.exec_line(&crate::input::config::join(&cmd));
             }
-            // `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which
-            // answers an unknown one); otherwise, or for a `+` word, it is unknown.
+            // `Cmd_ExecuteSingleCommand` past the client's commands: on a listen server the host's console runs the
+            // server's commands and variables too (`status`, `kick`, `map_restart`; one command table in the
+            // original), and what the server knows neither is forwarded as a client command
+            // (`CL_ForwardCommandToServer`) once it says so (`host_console_replies`). Without a server of this
+            // process the word is forwarded at once, or is unknown; a `+` word always is.
             v => {
                 if v.starts_with('-') {
                     continue;
                 }
-                match st
-                    .net
-                    .as_mut()
-                    .filter(|n| !v.starts_with('+') && n.in_match())
-                {
-                    Some(net) => net.send_command(&crate::input::config::join(&cmd)),
-                    None => {
-                        crate::console::note_unknown(v);
-                        say(st, &format!("Unknown command \"{}\"", cmd[0]));
+                if !v.starts_with('+') && st.listen.is_some() {
+                    let line = crate::input::config::join(&cmd);
+                    if listen::host_line(&line) {
+                        continue;
                     }
                 }
+                forward_to_server(st, &cmd);
             }
         }
     }
-    // The server of this process reads `bot_count` at its next map start.
-    if st.listen.is_some() && bot_count(&st.input) != count_before {
-        listen::send(&format!("set bot_count {}", bot_count(&st.input)));
+}
+
+/// `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which answers an
+/// unknown one); otherwise, or for a `+` word, it is unknown.
+fn forward_to_server(st: &mut State, cmd: &[String]) {
+    let Some(v) = cmd.first() else { return };
+    match st
+        .net
+        .as_mut()
+        .filter(|n| !v.starts_with('+') && n.in_match())
+    {
+        Some(net) => net.send_command(&crate::input::config::join(cmd)),
+        None => {
+            crate::console::note_unknown(v);
+            say(st, &format!("Unknown command \"{v}\""));
+        }
+    }
+}
+
+/// The listen server's answers to what the host typed: its output goes to the console, and a line it did not know
+/// is forwarded to it as a client command, as to any server (#366).
+fn host_console_replies(st: &mut State) {
+    if st.listen.is_none() {
+        return;
+    }
+    for reply in listen::host_replies() {
+        if reply.forward {
+            if let Some(cmd) = crate::input::config::split_commands(&reply.line).first() {
+                forward_to_server(st, cmd);
+            }
+        } else {
+            for line in reply.output.lines() {
+                say(st, line);
+            }
+        }
     }
 }
 
@@ -4248,22 +4330,18 @@ fn apply_resize(st: &mut State, (w, h): (u32, u32)) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts (`join` of `None`) or joins a match from the menus: begins loading the map in the background. The window
-/// keeps drawing the loading screen; [`finish_load`] connects once the load is done.
-/// For a join, `map` is what the server said it is playing.
+/// Starts or joins a match from the menus: begins loading the map in the background. The window keeps drawing the
+/// loading screen; [`finish_load`] connects once the load is done. For a join, `map` is what the server said it is
+/// playing.
 fn start_session(
     cli: &Cli,
     map_slot: &mut Option<MapData>,
     st: &mut State,
     map: &str,
     gametype: &str,
-    join: Option<std::net::SocketAddr>,
+    server: loader::Server,
 ) {
     end_session(map_slot, st);
-    let server = match join {
-        Some(a) => loader::Server::Join(a),
-        None => loader::Server::Boot(listen_config(st, map, gametype, cli.bots)),
-    };
     begin_load(cli, st, map, gametype, server);
     if let Some(sh) = st.shell.as_mut() {
         sh.close_all(&mut st.input);
@@ -4373,7 +4451,13 @@ fn finish_load(
 
 /// The menu-started server: the chosen map then the other stock maps in turn, the dvars the player set (time and score
 /// limits), on a standard port when one is free so the LAN list finds it.
-fn listen_config(st: &State, map: &str, gametype: &str, bots: Option<usize>) -> listen::Config {
+fn listen_config(
+    st: &State,
+    map: &str,
+    gametype: &str,
+    bots: Option<usize>,
+    cheats: bool,
+) -> listen::Config {
     let maps: Vec<String> = st
         .shell
         .as_ref()
@@ -4388,6 +4472,7 @@ fn listen_config(st: &State, map: &str, gametype: &str, bots: Option<usize>) -> 
         port: listen::free_standard_port(),
         game: game_of(&st.input),
         dvars: st.input.cvars.with_prefix("scr_"),
+        cheats,
     }
 }
 
@@ -5081,7 +5166,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
 
 /// The menus on the stack, and the item that has the focus with the rectangle a click is tested against.
 fn menu_state(st: &mut State) -> Value {
-    let Some(sh) = st.shell.as_ref() else {
+    let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
     };
     let open: Vec<String> = sh.ui.open_menus().iter().map(|m| (*m).to_owned()).collect();
@@ -5089,15 +5174,12 @@ fn menu_state(st: &mut State) -> Value {
         .ui
         .focused_report()
         .map(|(menu, item, rect)| json!({"menu": menu, "item": item, "rect": rect}));
-    let items: Vec<Value> = open
-        .iter()
-        .flat_map(|menu| {
-            sh.ui
-                .item_report(menu)
-                .into_iter()
-                .map(|(name, rect)| json!({"menu": menu.clone(), "name": name, "rect": rect}))
-        })
-        .collect();
+    let mut items = Vec::new();
+    for menu in &open {
+        for (name, text, rect) in sh.item_report(&mut st.input, menu) {
+            items.push(json!({"menu": menu, "name": name, "text": text, "rect": rect}));
+        }
+    }
     json!({"open": open, "focused": focused, "items": items})
 }
 

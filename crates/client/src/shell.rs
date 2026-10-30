@@ -31,10 +31,11 @@ use web_time::Instant;
 /// What the app does on the menus' behalf after a UI call.
 #[derive(Debug, PartialEq)]
 pub enum Action {
-    /// Start a listen server on `map` with `gametype` and join it.
+    /// Start a listen server on `map` with `gametype` and join it; `cheats` is `devmap`'s `sv_cheats 1`.
     StartServer {
         map: String,
         gametype: String,
+        cheats: bool,
     },
     /// Connect to `host:port`.
     Join(String),
@@ -424,6 +425,12 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("cg_scoreboardPingGraph", "0"),
     // Cheat protected: only acts with `sv_cheats` on.
     ("snd_enableReverb", "1"),
+    // How the colour buffer is cleared (`R_GetClearColor`): the stock default never clears, so pixels nothing draws
+    // are black here, not the fog colour (#356). `r_clear` takes the stock names or indices 0 to 4; the colours are
+    // `r g b a` in 0..1.
+    ("r_clear", "dev-only blink"),
+    ("r_clearColor", "0 0 0 0"),
+    ("r_clearColor2", "0 0 0 0"),
 ];
 
 /// The settings of the options menus with the stock engine's defaults: archived, so a change survives a restart.
@@ -804,6 +811,16 @@ impl Shell {
     pub fn click(&mut self, input: &mut Input, want: &str) -> bool {
         let mut h = Self::host(&mut self.st, input);
         self.ui.click(&mut h, want)
+    }
+
+    /// The items of an open menu with their names, texts and rectangles ([`Ui::item_report`]).
+    pub fn item_report(
+        &mut self,
+        input: &mut Input,
+        menu: &str,
+    ) -> Vec<(String, String, [f32; 4])> {
+        let h = Self::host(&mut self.st, input);
+        self.ui.item_report(&h, menu)
     }
 
     /// Carries out one thing the server asked of the UI.
@@ -1806,6 +1823,7 @@ impl HostCx<'_> {
                         g if g.is_empty() => "war".to_owned(),
                         g => g,
                     },
+                    cheats: name == "devmap",
                 }),
                 // `setFromLocString <dvar> <string>` (`Dvar_SetFromLocalizedStr_f`): an `@` reference is localized.
                 "setfromlocstring" => {
@@ -2101,7 +2119,11 @@ impl Host for HostCx<'_> {
                     .gametypes
                     .get(self.gametype_sel())
                     .map_or_else(|| "war".into(), |g| g.id.clone());
-                self.st.actions.push(Action::StartServer { map, gametype });
+                self.st.actions.push(Action::StartServer {
+                    map,
+                    gametype,
+                    cheats: false,
+                });
                 true
             }
             // The list is made again; a quick refresh asks the servers it has again without forgetting them. Opening the

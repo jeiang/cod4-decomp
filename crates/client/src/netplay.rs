@@ -49,6 +49,55 @@ use web_time::Instant;
 
 /// The shortest interval between two usercmds.
 const CMD_INTERVAL: Duration = Duration::from_millis(8);
+/// A network frame over this many milliseconds logs where its steps went, so a stall in it (a sound bank read, a
+/// model's first animation, a skeleton built for every bot at once) is named rather than guessed from the frame's
+/// cost. The first [`SLOW_NET_FRAMES_LOGGED`] of them: a starved process has slow frames by the hundred.
+const SLOW_NET_FRAME_MS: f32 = 10.0;
+const SLOW_NET_FRAMES_LOGGED: u32 = 16;
+
+/// The steps of one network frame and the milliseconds each took.
+struct Laps {
+    began: Instant,
+    last: Instant,
+    steps: Vec<(&'static str, f32)>,
+}
+
+impl Laps {
+    fn start() -> Self {
+        let now = Instant::now();
+        Self {
+            began: now,
+            last: now,
+            steps: Vec::with_capacity(16),
+        }
+    }
+
+    fn lap(&mut self, step: &'static str) {
+        let now = Instant::now();
+        self.steps
+            .push((step, (now - self.last).as_secs_f32() * 1000.0));
+        self.last = now;
+    }
+
+    /// Logs the steps once, if the frame was slow and the cap is not reached.
+    fn finish(self, logged: &mut u32) {
+        let total = self.began.elapsed().as_secs_f32() * 1000.0;
+        if total < SLOW_NET_FRAME_MS || *logged >= SLOW_NET_FRAMES_LOGGED {
+            return;
+        }
+        *logged += 1;
+        let mut steps = self.steps;
+        steps.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let steps: Vec<String> = steps
+            .iter()
+            .take(6)
+            .filter(|(_, ms)| *ms >= 0.5)
+            .map(|(s, ms)| format!("{s} {ms:.1}"))
+            .collect();
+        tracing::info!(total_ms = format!("{total:.1}"), steps = %steps.join(", "), "a slow network frame: where its milliseconds went");
+    }
+}
+
 /// How often the scoreboard asks for fresh rows while it is up (`UpdateScores`).
 const SCORES_INTERVAL: Duration = Duration::from_secs(2);
 /// How long a player model is kept after the snapshots stop mentioning it.
@@ -346,8 +395,10 @@ pub struct NetPlay {
     voice_on: bool,
     muted: HashSet<u16>,
     lib: Library,
-    /// The models the server precached have had their pipelines asked for (native).
-    models_warmed: bool,
+    /// The model configstrings (`CS_MODELS` slots) whose models the renderer has been handed to warm (native).
+    models_warmed: HashSet<u16>,
+    /// Slow network frames logged with their steps so far ([`SLOW_NET_FRAMES_LOGGED`]).
+    slow_net_frames: u32,
     weapons: WeaponTable,
     params: Params,
     /// The `MOVEMENT` configstring [`Self::params`] was made from.
@@ -558,7 +609,8 @@ impl NetPlay {
             tracer_material: None,
             shakes: Default::default(),
             lib,
-            models_warmed: false,
+            models_warmed: HashSet::new(),
+            slow_net_frames: 0,
             events: Events::default(),
             live_time: 0,
             kill_icons: HashMap::new(),
@@ -646,21 +698,28 @@ impl NetPlay {
         self.net.stats().map_or(0, |s| s.packets_in)
     }
 
-    /// The server has put the player in the world (alive at least once).
-    /// Once the player has spawned: the models the server precached (`precachemodel`: planes, vehicles, props the
-    /// scripts make) that the loaded zones have, for the renderer to get pipelines for before they first show.
+    /// The models the server precached (`precachemodel`: planes, vehicles, props the scripts make) whose names
+    /// arrived since the last call and that the loaded zones have, for the renderer to get passes and pipelines
+    /// for before they first show. The original registers them all in `CG_RegisterGraphics` once the gamestate
+    /// is in (KisakCOD `cgame_mp/cg_main_mp.cpp`); here the configstrings come as the server sends them, so each
+    /// is handed over as it comes.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn unwarmed_models(&mut self) -> Vec<std::sync::Arc<assets::zone::xmodel::XModel>> {
-        if !self.c.spawned || std::mem::replace(&mut self.models_warmed, true) {
-            return Vec::new();
-        }
         let Some(ui) = self.net.ui_ref() else {
             return Vec::new();
         };
-        (1..net::ui::cs::MODELS_COUNT)
-            .filter_map(|n| self.lib.content.model(ui.model(n)))
-            .cloned()
-            .collect()
+        let mut out = Vec::new();
+        for n in 1..net::ui::cs::MODELS_COUNT {
+            let name = ui.model(n);
+            if name.is_empty() || self.models_warmed.contains(&n) {
+                continue;
+            }
+            self.models_warmed.insert(n);
+            if let Some(m) = self.lib.content.model(name) {
+                out.push(m.clone());
+            }
+        }
+        out
     }
 
     pub fn spawned(&self) -> bool {
@@ -741,7 +800,7 @@ impl NetPlay {
         if let Some((lib, map, sound)) = world {
             self.weapons = WeaponTable::new(&lib.content.weapons())
                 .map_err(|e| format!("weapon table: {e:?}"))?;
-            self.models_warmed = false;
+            self.models_warmed.clear();
             let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
             self.effects = Effects::new(&lib.content, map.world.clone());
             self.effects
@@ -971,14 +1030,18 @@ impl NetPlay {
 
     /// Runs one render frame of play. `None` until the server has given the player a body.
     pub fn frame(&mut self, dt: f32, input: &InputFrame) -> Option<NetFrame> {
+        let mut laps = Laps::start();
         self.net.pump(Duration::ZERO);
+        laps.lap("pump");
         self.voice_step(input.held_other.iter().any(|c| c == "talk"));
         self.answer_menus();
+        laps.lap("voice+menus");
         let now_ms = self.net.now_ms();
         let st = self.net.snaps.server_time(now_ms);
         let own = self.net.latest().map(|s| s.own());
         let (Some(st), Some(own)) = (st, own) else {
             self.net.send();
+            laps.finish(&mut self.slow_net_frames);
             return None;
         };
         let _apply =
@@ -1043,7 +1106,7 @@ impl NetPlay {
         } else {
             self.net.send();
         }
-
+        laps.lap("input+cmd");
         let snap = self.net.latest()?.clone();
         if snap.follow.is_some() || self.net.playing_demo() {
             // Watching another player (a killcam or a followed spectator) or a recording: the snapshot's
@@ -1141,8 +1204,10 @@ impl NetPlay {
                 render,
                 (yaw, pitch, seen[2].to_radians()),
             );
+            laps.lap("follow: kill_cam+players+models+fx");
             models.extend(self.props.instances());
             models.extend(drawn.models);
+            laps.finish(&mut self.slow_net_frames);
             return Some(NetFrame {
                 origin: render,
                 yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),
@@ -1173,6 +1238,7 @@ impl NetPlay {
             time: st,
         };
         let p = self.pred.predict(&snap, &env);
+        laps.lap("predict");
         self.c.predictions += 1;
         let ps = p.ps;
         self.meleeing = ps.weapon_state == sim::pm::weapon_state::MELEE_INIT;
@@ -1315,6 +1381,7 @@ impl NetPlay {
             render += self.hands_camera(&ps, &mut seen);
             view_model = Some(crate::dof::view_model(&ps, ads_dof));
         }
+        laps.lap("kick+camera+view_model");
         // The listener hears from the drawn eye (`SND_SetListener(.., refdef.vieworg, ..)`).
         self.hear(dt, render, &ps, &events, &snap);
         if new_life(&mut self.last_spawn, ps.spawn_count) {
@@ -1327,29 +1394,35 @@ impl NetPlay {
             self.out_of_ammo_change(&ps, &p.inv);
         }
         self.feedback.merge(fb);
-
+        laps.lap("hear+feedback");
         let (events, commands) = self.take_events(&snap);
         let look = self.look.frame(st);
         self.shock_effects(&look);
+        laps.lap("events+look");
         let mut models = self.remote_players(dt, st, own, dead);
         let view = if dead {
             (0.0, ps.viewangles[1])
         } else {
             (aim[0], aim[1])
         };
+        laps.lap("remote_players");
         self.scan_names(st, own, eye, view, dead);
         models.extend(self.script_models(dt, st, own));
         let brush_models = self.brush_models(&snap, st);
         models.extend(self.items(&snap));
         models.extend(self.vehicles(dt, st, own));
+        laps.lap("script_models+items+vehicles");
         models.extend(hands);
         let (yaw, pitch) = (seen[1].to_radians(), -(seen[0] + hit_view[0]).to_radians());
         let roll = (seen[2] + kick[2] + hit_view[1]).to_radians();
         let dof = self.scene_dof(st, &snap.ps, &ps, view_model, (render, (yaw, pitch)), dt);
         self.c.dof_frames += u64::from(dof.active());
+        laps.lap("dof");
         let drawn = self.fx_frame(dt, st, own, &events, render, (yaw, pitch, roll));
+        laps.lap("fx");
         models.extend(self.props.instances());
         models.extend(drawn.models);
+        laps.finish(&mut self.slow_net_frames);
         Some(NetFrame {
             origin: render,
             yaw: yaw + (look.kick[1] + drawn.sway[1]).to_radians(),

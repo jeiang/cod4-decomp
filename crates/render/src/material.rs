@@ -668,7 +668,8 @@ impl Materials {
         })
     }
 
-    /// The first technique of `techs` the material's techset has, as a drawable pass. Cached per material.
+    /// The first technique of `techs` the material's techset has, as a drawable pass. Cached per material. A pass
+    /// built here is a late one (see [`Materials::take_late`]): a frame prepared it at first sight.
     pub fn prepare(
         &mut self,
         gpu: &Gpu,
@@ -677,6 +678,33 @@ impl Materials {
         techs: &[usize],
         kind: VertexKind,
         hsm: bool,
+    ) -> Option<Arc<Prepared>> {
+        self.prepare_counted(gpu, textures, mat, techs, kind, hsm, true)
+    }
+
+    /// [`Materials::prepare`] for a warm-up: a pass built ahead of its first draw is not late.
+    pub fn prepare_ahead(
+        &mut self,
+        gpu: &Gpu,
+        textures: &mut TextureCache,
+        mat: &Arc<Material>,
+        techs: &[usize],
+        kind: VertexKind,
+        hsm: bool,
+    ) -> Option<Arc<Prepared>> {
+        self.prepare_counted(gpu, textures, mat, techs, kind, hsm, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_counted(
+        &mut self,
+        gpu: &Gpu,
+        textures: &mut TextureCache,
+        mat: &Arc<Material>,
+        techs: &[usize],
+        kind: VertexKind,
+        hsm: bool,
+        counted: bool,
     ) -> Option<Arc<Prepared>> {
         let Some(set) = self.techset(mat, hsm) else {
             // Once per material: an effect asks for its sprite material every frame. A name behind a comma is a
@@ -726,9 +754,11 @@ impl Materials {
         let name = mat.name.as_deref().unwrap_or("?").to_owned();
         let began = Instant::now();
         let built = self.build(gpu, textures, mat, tech, kind, hsm);
-        self.late[2].fetch_add(1, Ordering::Relaxed);
-        self.late[3].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
-        lock(&self.late_names).push(format!("pass {name} tech {tech} {kind:?}"));
+        if counted {
+            self.late[2].fetch_add(1, Ordering::Relaxed);
+            self.late[3].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
+            lock(&self.late_names).push(format!("pass {name} tech {tech} {kind:?}"));
+        }
         let p = match built {
             Ok(p) => Some(Arc::new(p)),
             Err(e) => {

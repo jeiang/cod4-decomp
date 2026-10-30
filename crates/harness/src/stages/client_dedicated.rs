@@ -7,7 +7,7 @@
 //! the player is gone: a clean disconnect frees the slot at once, a dropped connection would keep it until the
 //! timeout. Needs a display, the install, and `cod4e-server` next to the harness; skips cleanly without them.
 use super::client_flythrough::locate_client;
-use super::client_match::{Counters, column, hitches, spike_share};
+use super::client_match::{Counters, Phases, column, hitches, spike_share};
 use super::client_models::no_display;
 use super::client_session::{profile_args, render_problem};
 use crate::stage::{StageCtx, StageReport, Status};
@@ -314,9 +314,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let cpu = fs::read_to_string(dir.join("frames.raw.csv"))
         .map(|csv| column(&csv, 0))
         .unwrap_or_default();
+    let phases =
+        Phases::parse(&fs::read_to_string(dir.join("frames.phases.csv")).unwrap_or_default());
     // Frame times are `client-match`'s to gate: here the server and the host's other load compete with the client.
-    // Late pipelines and clock jumps (the server's pace) stay gates; the spike share is only reported.
-    failures.extend(hitches(&json, &cpu, None));
+    // Late pipelines, a precache list prepared in one frame and clock jumps (the server's pace) stay gates; the
+    // spike share is only reported.
+    failures.extend(hitches(&json, &cpu, &phases, None));
 
     // The client has quit. A clean disconnect has freed its slot; a lost connection would still list it.
     let mut left = false;

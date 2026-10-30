@@ -394,6 +394,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_gfx::run),
     },
     StageDef {
+        name: "client-clear",
+        description: "pixels nothing draws are black, as stock leaves its uncleared colour buffer (`r_clear` dev-only blink), not the fog colour: the client is held at the #356 viewpoints on mp_crash and mp_backlot and the undrawn regions and a drawn wall are sampled",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_clear::run),
+    },
+    StageDef {
         name: "client-hud",
         description: "the HUD the client draws over the stock menus in a team deathmatch against bots: scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam, a typed chat line and a console vote call coming back from the server",
         needs_install: false,
@@ -546,6 +554,14 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(8 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::control_channel::run),
+    },
+    StageDef {
+        name: "client-host-console",
+        description: "the host of a listen server at the console (#366, #370): status, kick and map_restart reach the server of this process from the host's console; without sv_cheats noclip, ufo, god, give, take and setviewpos are refused in the player's language; after devmap typed at the console they act, as the server's own client state shows",
+        needs_install: false,
+        timeout: Duration::from_secs(12 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_host_console::run),
     },
     StageDef {
         name: "headless-bots-32",

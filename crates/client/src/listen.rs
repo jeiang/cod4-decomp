@@ -41,6 +41,8 @@ pub struct Config {
     pub game: String,
     /// Server dvars the player set on the client (`scr_*`: time and score limits, ...), applied before the map starts.
     pub dvars: Vec<(String, String)>,
+    /// Started with `devmap`: `sv_cheats` is on for the map (`SV_Map_f`'s cheat flag).
+    pub cheats: bool,
 }
 
 /// The first standard port nothing is listening on, else 0 (any).
@@ -129,6 +131,45 @@ pub fn send(line: &str) {
     if let Ok(mut q) = CONSOLE.lock() {
         q.push(line.to_owned());
     }
+}
+
+/// Whether a listen server's thread is up to take the host's console lines.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Lines the host typed at the client's console, for the server's command table and dvar store (see
+/// [`host_replies`]).
+static HOST_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The server's answers to the host's lines, in order.
+static HOST_REPLIES: std::sync::Mutex<Vec<HostReply>> = std::sync::Mutex::new(Vec::new());
+
+/// What the listen server made of a line the host typed (`Server::host_line`).
+pub struct HostReply {
+    pub line: String,
+    /// What the server printed, for the host's console.
+    pub output: String,
+    /// The server knows neither the command nor the variable: the client forwards the line as a client command.
+    pub forward: bool,
+}
+
+/// Hands a line the host typed to the listen server, as the original's one command table would run it (#366).
+/// `false` when no listen server runs: the line is the client's alone.
+pub fn host_line(line: &str) -> bool {
+    if !RUNNING.load(Ordering::Relaxed) {
+        return false;
+    }
+    if let Ok(mut q) = HOST_LINES.lock() {
+        q.push(line.to_owned());
+    }
+    true
+}
+
+/// The answers to the host's lines so far.
+pub fn host_replies() -> Vec<HostReply> {
+    HOST_REPLIES
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
 }
 
 /// A listen server that is still booting (map zone, scripts, navigation); see [`begin`].
@@ -242,7 +283,8 @@ fn run(
             .clone()
             .unwrap_or_else(|| format!("gametype {gt} map {}", cfg.map));
         lines.push(format!("set sv_mapRotation \"{rotation}\""));
-        lines.push(format!("map {}", cfg.map));
+        let start = if cfg.cheats { "devmap" } else { "map" };
+        lines.push(format!("{start} {}", cfg.map));
         for line in lines {
             s.exec_line(&line).map_err(|e| format!("{line}: {e}"))?;
         }
@@ -275,6 +317,7 @@ fn run(
         let ticks = ticks.clone();
         server.on_tick = Some(Box::new(move |t| ticks.borrow_mut().push(*t)));
     }
+    RUNNING.store(true, Ordering::Relaxed);
     tracing::info!(map = %cfg.map, %addr, "the listen server is up");
     if tx.send(Ok(addr)).is_err() {
         tracing::debug!("nobody waits for the listen server's boot");
@@ -304,6 +347,20 @@ fn run(
                 tracing::warn!(%verb, error = %e, "the listen server's console refused a line");
             }
         }
+        let typed = HOST_LINES
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default();
+        for line in typed {
+            let answer = server.host_line(&line);
+            if let Ok(mut replies) = HOST_REPLIES.lock() {
+                replies.push(HostReply {
+                    forward: answer.is_none(),
+                    output: answer.unwrap_or_default(),
+                    line,
+                });
+            }
+        }
         server.run_for(Duration::from_millis(100));
         // A script error ends a thread chain silently for the player; the client log is where it shows.
         for (map, text) in server.all_script_errors.iter().skip(reported_errors) {
@@ -325,6 +382,10 @@ fn run(
                 "kills": c.kills, "deaths": c.deaths,
             });
         }
+    }
+    RUNNING.store(false, Ordering::Relaxed);
+    if let Ok(mut q) = HOST_LINES.lock() {
+        q.clear();
     }
     let t = ticks.borrow();
     let pct = |mut v: Vec<f64>, p: f64| {

@@ -1326,7 +1326,7 @@ impl Server {
                 let text = format!("\x15{}", plain_text(&argv[1..].join(" ")));
                 self.game.chat(slot, &text, cmd == "say_team");
             }
-            Some("menuresponse") => {
+            Some("menuresponse" | "mr") => {
                 if let Some(args) = menu_response_args(self.game.server_id, &argv)
                     && let Some(run) = self.run.as_mut()
                 {
@@ -1353,23 +1353,14 @@ impl Server {
             Some("statsdone") if self.begin_waits.iter().any(|(n, _)| *n == slot) => {
                 self.begin_client(slot);
             }
-            // The original's `Cmd_Kill_f` needs `CheatsOk`: without `sv_cheats` it says so.
-            Some("kill") if !self.game.cvars.bool("sv_cheats") => self.game.send(
-                Dest::Client(slot),
-                ServerCmd::Print {
-                    kind: PrintKind::Console,
-                    text: "GAME_CHEATSNOTENABLED\n".to_owned(),
-                },
-            ),
+            // `Cmd_Kill_f` needs a playing client and `CheatsOk`: without `sv_cheats` it says so.
             Some("kill") => {
                 if let Some(run) = self.run.as_mut() {
                     let mut host = ScriptHost {
                         game: &mut self.game,
                         dispatch: &run.dispatch,
                     };
-                    if let Err(e) = host.game.kill_self(&mut run.vm, slot) {
-                        logging::dedup!(WARN, "kill", client = slot, error = %e, "kill command failed");
-                    }
+                    host.game.cmd_kill(&mut run.vm, slot);
                     host.run_calls(&mut run.vm);
                 }
             }
@@ -1382,12 +1373,36 @@ impl Server {
                 }
             }
             Some("where") => self.game.where_am_i(slot),
-            // Verbs the original's `ClientCommand` knows that are not carried out here: dropped without a word.
-            Some(
-                v @ ("statsdone" | "mr" | "give" | "take" | "god" | "demigod" | "notarget"
-                | "noclip" | "ufo" | "setviewpos" | "entitycount" | "printentities"
-                | "visionsetnaked" | "visionsetnight"),
-            ) => tracing::debug!(client = slot, cmd = v, "client command not carried out"),
+            // The cheat and developer commands (`crates/server/src/cheats.rs`), each behind `CheatsOk`.
+            Some("give") => self.game.cmd_give(slot, &argv),
+            Some("take") => self.game.cmd_take(slot, &argv),
+            Some("god") => self.game.cmd_toggle_flag(
+                slot,
+                crate::cheats::FL_GODMODE,
+                "GAME_GODMODE_ON",
+                "GAME_GODMODE_OFF",
+            ),
+            Some("demigod") => self.game.cmd_toggle_flag(
+                slot,
+                crate::cheats::FL_DEMI_GODMODE,
+                "GAME_DEMI_GODMODE_ON",
+                "GAME_DEMI_GODMODE_OFF",
+            ),
+            Some("notarget") => self.game.cmd_toggle_flag(
+                slot,
+                crate::cheats::FL_NOTARGET,
+                "GAME_NOTARGETON",
+                "GAME_NOTARGETOFF",
+            ),
+            Some("noclip") => self.game.cmd_noclip(slot, false),
+            Some("ufo") => self.game.cmd_noclip(slot, true),
+            Some("setviewpos") => self.game.cmd_set_viewpos(slot, &argv),
+            Some("entitycount") => self.game.cmd_entity_count(),
+            Some("printentities") => self.game.cmd_print_entities(),
+            Some("visionsetnaked") => self.game.cmd_vision_set(&argv, false),
+            Some("visionsetnight") => self.game.cmd_vision_set(&argv, true),
+            // A `statsdone` from a client that is not waiting to begin: nothing to do.
+            Some("statsdone") => {}
             // What the original says to a client for a verb it does not know.
             Some(cmd) => {
                 logging::dedup!(
@@ -1460,6 +1475,11 @@ impl Server {
         let clients = || -> Value {
             let mut out = Vec::new();
             for (n, c) in self.game.connected_clients() {
+                let flags = self.game.ent(n).map_or(0, |e| e.flags);
+                let weapons: Vec<&str> = (1..=self.game.weapons.len() as u16)
+                    .filter(|&w| c.inv.has(w))
+                    .map(|w| self.game.weapons.name(w))
+                    .collect();
                 out.push(json!({
                     "slot": n,
                     "session": c.session.name(),
@@ -1473,8 +1493,15 @@ impl Server {
                     "health": c.ps.health,
                     "origin": c.ps.origin,
                     "weapon": c.ps.weapon,
+                    "weapons": weapons,
                     "alive": c.ps.pm_type < sim::pm::PmType::Dead,
                     "spawn_count": c.spawn_count,
+                    // The cheat commands' state (`noclip`, `ufo`, `god`, `demigod`, `notarget`; #370).
+                    "noclip": c.noclip,
+                    "ufo": c.ufo,
+                    "godmode": flags & crate::cheats::FL_GODMODE != 0,
+                    "demigod": flags & crate::cheats::FL_DEMI_GODMODE != 0,
+                    "notarget": flags & crate::cheats::FL_NOTARGET != 0,
                 }));
             }
             Value::Array(out)
@@ -1589,6 +1616,31 @@ impl Server {
             self.flush_game_output();
         }
         Ok(())
+    }
+
+    /// A line the host of a listen server typed at the client's console. The original has one command table and
+    /// one dvar store for the client and the server it runs (`Cmd_ExecuteSingleCommand`, then `Dvar_Command`, then
+    /// `CL_ForwardCommandToServer`), so the host's `status`, `kick`, `map_restart` and `set` of a server variable
+    /// reach the server. Here the line runs on the server when it is a command or variable of the server's, and what
+    /// it printed (or its error) is the answer for the host's console. `None` when the server knows neither the
+    /// command nor the variable: the client forwards the line to the server as a client command, as it would to any
+    /// server. A `set` of a variable the server does not register is the client's own and prints nothing (#366).
+    pub fn host_line(&mut self, line: &str) -> Option<String> {
+        let argv = crate::cmd::tokenize(line);
+        let name = argv.first()?;
+        let lname = name.to_ascii_lowercase();
+        if matches!(lname.as_str(), "set" | "seta" | "sets" | "setu") {
+            if !argv.get(1).is_some_and(|n| self.game.cvars.exists(n)) {
+                return Some(String::new());
+            }
+        } else if !self.has_command(name) || CLIENT_ONLY.contains(&lname.as_str()) {
+            return None;
+        }
+        self.redirect = Some(String::new());
+        if let Err(e) = self.exec_line(line) {
+            self.say(&format!("{e}\n"));
+        }
+        Some(self.redirect.take().unwrap_or_default())
     }
 
     /// Whether this console would run `name`: a command of [`COMMANDS`], a client-only verb it ignores, or a
