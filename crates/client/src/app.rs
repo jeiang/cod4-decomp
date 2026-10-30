@@ -3442,8 +3442,18 @@ fn script_step(st: &mut State) -> bool {
             } else {
                 want.to_owned()
             };
+            // `gfxis=dlights 1+`: at least that many, for a count the scene's own lights add to.
             match have {
-                Some(h) => done(h == want, sc, format!("{name} is {h}")),
+                Some(h) => {
+                    let ok = match want.strip_suffix('+') {
+                        Some(min) => match (h.parse::<u64>(), min.parse::<u64>()) {
+                            (Ok(h), Ok(min)) => h >= min,
+                            _ => false,
+                        },
+                        None => h == want,
+                    };
+                    done(ok, sc, format!("{name} is {h}"));
+                }
                 None => done(false, sc, format!("gfxis: unknown or unavailable {name:?}")),
             }
         }
