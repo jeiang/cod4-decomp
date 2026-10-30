@@ -344,8 +344,8 @@ pub struct NetPlay {
     voice_on: bool,
     muted: HashSet<u16>,
     lib: Library,
-    /// The models the server precached have had their pipelines asked for (native).
-    models_warmed: bool,
+    /// The model configstrings (`CS_MODELS` slots) whose models the renderer has been handed to warm (native).
+    models_warmed: HashSet<u16>,
     weapons: WeaponTable,
     params: Params,
     /// The `MOVEMENT` configstring [`Self::params`] was made from.
@@ -556,7 +556,7 @@ impl NetPlay {
             tracer_material: None,
             shakes: Default::default(),
             lib,
-            models_warmed: false,
+            models_warmed: HashSet::new(),
             events: Events::default(),
             live_time: 0,
             kill_icons: HashMap::new(),
@@ -638,21 +638,28 @@ impl NetPlay {
         self.net.stats().map_or(0, |s| s.packets_in)
     }
 
-    /// The server has put the player in the world (alive at least once).
-    /// Once the player has spawned: the models the server precached (`precachemodel`: planes, vehicles, props the
-    /// scripts make) that the loaded zones have, for the renderer to get pipelines for before they first show.
+    /// The models the server precached (`precachemodel`: planes, vehicles, props the scripts make) whose names
+    /// arrived since the last call and that the loaded zones have, for the renderer to get passes and pipelines
+    /// for before they first show. The original registers them all in `CG_RegisterGraphics` once the gamestate
+    /// is in (KisakCOD `cgame_mp/cg_main_mp.cpp`); here the configstrings come as the server sends them, so each
+    /// is handed over as it comes.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn unwarmed_models(&mut self) -> Vec<std::sync::Arc<assets::zone::xmodel::XModel>> {
-        if !self.c.spawned || std::mem::replace(&mut self.models_warmed, true) {
-            return Vec::new();
-        }
         let Some(ui) = self.net.ui_ref() else {
             return Vec::new();
         };
-        (1..net::ui::cs::MODELS_COUNT)
-            .filter_map(|n| self.lib.content.model(ui.model(n)))
-            .cloned()
-            .collect()
+        let mut out = Vec::new();
+        for n in 1..net::ui::cs::MODELS_COUNT {
+            let name = ui.model(n);
+            if name.is_empty() || self.models_warmed.contains(&n) {
+                continue;
+            }
+            self.models_warmed.insert(n);
+            if let Some(m) = self.lib.content.model(name) {
+                out.push(m.clone());
+            }
+        }
+        out
     }
 
     pub fn spawned(&self) -> bool {
@@ -733,7 +740,7 @@ impl NetPlay {
         if let Some((lib, map, sound)) = world {
             self.weapons = WeaponTable::new(&lib.content.weapons())
                 .map_err(|e| format!("weapon table: {e:?}"))?;
-            self.models_warmed = false;
+            self.models_warmed.clear();
             let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
             self.effects = Effects::new(&lib.content, map.world.clone());
             self.effects

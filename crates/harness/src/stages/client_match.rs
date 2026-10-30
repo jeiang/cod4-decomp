@@ -45,6 +45,166 @@ pub(super) fn column(csv: &str, i: usize) -> Vec<f64> {
         .collect()
 }
 
+/// `frames.phases.csv` (`client/src/app.rs` `PHASES`): the columns by name, one value per frame, in the rows'
+/// order, which is `frames.raw.csv`'s. A column the client did not write is absent.
+pub(super) struct Phases {
+    names: Vec<String>,
+    rows: Vec<Vec<f64>>,
+}
+
+impl Phases {
+    pub(super) fn parse(csv: &str) -> Self {
+        let mut lines = csv.lines();
+        let names: Vec<String> = lines
+            .next()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let rows = lines
+            .map(|l| {
+                l.split(',')
+                    .map(|v| v.trim().parse().unwrap_or(0.0))
+                    .collect()
+            })
+            .collect();
+        Self { names, rows }
+    }
+
+    fn col(&self, name: &str) -> Option<usize> {
+        self.names.iter().position(|n| n == name)
+    }
+
+    /// The column's value in frame `i`, 0 where the client did not write the column.
+    fn at(&self, i: usize, name: &str) -> f64 {
+        self.col(name)
+            .and_then(|c| self.rows.get(i)?.get(c))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// The largest value of the column over the frames, with the frame it is in.
+    fn max(&self, name: &str) -> Option<(usize, f64)> {
+        let c = self.col(name)?;
+        self.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| Some((i, *r.get(c)?)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
+}
+
+/// The phases a frame's `cpu_ms` is made of, as `frames.phases.csv` splits it: the render by its laps rather than
+/// as a whole. What the columns do not cover (console lines, menu sound, the frame's tail) is `other`.
+const LEAVES: &[&str] = &[
+    "input_ms",
+    "net_ms",
+    "warm_ms",
+    "r_setup",
+    "r_dynamic",
+    "r_sun_shadow",
+    "r_spot_shadow",
+    "r_main_draws",
+    "r_lights",
+    "r_floatz",
+    "r_post_upload",
+    "r_encode",
+    "r_submit",
+    "ui_ms",
+    "present_ms",
+];
+
+/// A frame that prepared this many material passes at once drew a precache list, not one model that turned up: the
+/// passes of the models the server precached are prepared a material per frame (`Renderer::warm_late`), a draw's
+/// first sight of a model costs that model's materials only (a dozen passes).
+const MAX_PASSES_PER_FRAME: f64 = 64.0;
+
+/// Where the hitching frames' time went: the excess over each phase's median summed over the `spikes` frames, the
+/// worst frame's phases, and whether one phase held the stalls or every phase stretched alike. A stall that sits
+/// in one phase is a call the client blocks in; excess spread over the phases in proportion to their usual cost is
+/// the process not being scheduled (the machine, not the client).
+fn where_it_went(phases: &Phases, cpu_ms: &[f64], spikes: &[usize]) -> String {
+    let n = cpu_ms.len().min(phases.rows.len());
+    if n == 0 || spikes.is_empty() {
+        return String::new();
+    }
+    // `other` is what the columns leave of the frame; the render's laps stand for `render_ms`.
+    let value = |i: usize, leaf: &str| -> f64 {
+        if leaf == "other" {
+            let known: f64 = LEAVES.iter().map(|l| phases.at(i, l)).sum();
+            (cpu_ms[i] - known).max(0.0)
+        } else {
+            phases.at(i, leaf)
+        }
+    };
+    let leaves: Vec<&str> = LEAVES.iter().copied().chain(["other"]).collect();
+    let medians: Vec<f64> = leaves
+        .iter()
+        .map(|l| {
+            let mut v: Vec<f64> = (0..n).map(|i| value(i, l)).collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        })
+        .collect();
+    let usual: f64 = medians.iter().sum::<f64>().max(f64::EPSILON);
+    let excess: Vec<f64> = leaves
+        .iter()
+        .enumerate()
+        .map(|(k, l)| {
+            spikes
+                .iter()
+                .filter(|&&i| i < n)
+                .map(|&i| (value(i, l) - medians[k]).max(0.0))
+                .sum()
+        })
+        .collect();
+    let total: f64 = excess.iter().sum::<f64>().max(f64::EPSILON);
+    let mut order: Vec<usize> = (0..leaves.len()).collect();
+    order.sort_by(|a, b| excess[*b].total_cmp(&excess[*a]));
+    let top = order[0];
+    let (top_share, top_usual) = (excess[top] / total, medians[top] / usual);
+    let list = |idx: &[usize], f: &dyn Fn(usize) -> f64| -> String {
+        idx.iter()
+            .filter(|&&k| f(k) >= 1.0)
+            .map(|&k| format!("{} {:.0}", leaves[k].trim_end_matches("_ms"), f(k)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let worst = spikes
+        .iter()
+        .copied()
+        .filter(|&i| i < n)
+        .max_by(|a, b| cpu_ms[*a].total_cmp(&cpu_ms[*b]))
+        .unwrap_or(spikes[0].min(n - 1));
+    let mut worst_order: Vec<usize> = (0..leaves.len()).collect();
+    worst_order.sort_by(|a, b| value(worst, leaves[*b]).total_cmp(&value(worst, leaves[*a])));
+    let verdict = if top_share >= 0.6 && top_share >= 2.0 * top_usual {
+        format!(
+            "{} held the stalls ({:.0}% of the excess against {:.0}% of a usual frame): the client blocks there",
+            leaves[top].trim_end_matches("_ms"),
+            top_share * 100.0,
+            top_usual * 100.0
+        )
+    } else {
+        format!(
+            "every phase stretched alike (the largest, {}, holds {:.0}% of the excess and {:.0}% of a usual frame): the process was not being scheduled, which is the machine, not a call the client blocks in",
+            leaves[top].trim_end_matches("_ms"),
+            top_share * 100.0,
+            top_usual * 100.0
+        )
+    };
+    format!(
+        "; ms over the median across them: {}; the worst, frame {worst} ({:.0} ms): {}; {verdict}",
+        list(&order[..order.len().min(5)], &|k| excess[k]),
+        cpu_ms[worst],
+        list(&worst_order[..worst_order.len().min(5)], &|k| value(
+            worst, leaves[k]
+        )),
+    )
+}
+
 /// A frame costing this many times the median and this much more (ms) is a hitch the player feels: a frame of a
 /// 60 Hz game is 16 ms, so tens of milliseconds over the usual is a dropped frame, however fast or slow the machine.
 const SPIKE_FACTOR: f64 = 2.5;
@@ -75,26 +235,36 @@ fn misses(what: &str, list: &Value, allowed: &[&str]) -> Option<String> {
     (!names.is_empty()).then(|| format!("{} names missing: {}", what, names.join(", ")))
 }
 
-/// Why the frames hitched, if they did. `cpu_ms` is every frame's own cost. The report's `late_builds` lists what
-/// was built after the load, as "frame what": a pipeline listed was missing when a frame drew (its draws were
-/// skipped for the frames the compile took), so the load's warm-up missed it. None may be, whatever the runner's
-/// speed; the spike share is the relative check on what that misses. `clock_jumps` counts how often the clock the
-/// view follows jumped (a server running at the wrong pace does it every few seconds).
-fn hitch_failures(report: &Value, cpu_ms: &[f64]) -> Vec<String> {
-    hitches(report, cpu_ms, Some(SPIKE_SHARE))
+/// Why the frames hitched, if they did. `cpu_ms` is every frame's own cost (`frames.raw.csv`), `phases` where it
+/// went. The report's `late_builds` lists what was built after the load, as "frame what": a pipeline listed was
+/// missing when a frame drew (its draws were skipped for the frames the compile took), so the load's warm-up
+/// missed it. None may be, whatever the runner's speed; the spike share is the relative check on what that misses.
+/// `clock_jumps` counts how often the clock the view follows jumped (a server running at the wrong pace does it
+/// every few seconds).
+fn hitch_failures(report: &Value, cpu_ms: &[f64], phases: &Phases) -> Vec<String> {
+    hitches(report, cpu_ms, phases, Some(SPIKE_SHARE))
 }
 
 /// The share of frames that hitched by the rule of [`hitch_failures`].
 pub(super) fn spike_share(cpu_ms: &[f64]) -> Option<f64> {
     let p = Percentiles::from_samples(cpu_ms)?;
-    let limit = (p.p50 * SPIKE_FACTOR).max(p.p50 + SPIKE_EXTRA_MS);
-    let spikes = cpu_ms.iter().filter(|c| **c > limit).count();
-    Some(spikes as f64 / cpu_ms.len() as f64)
+    Some(spikes(cpu_ms, p.p50).len() as f64 / cpu_ms.len() as f64)
+}
+
+/// The frames costing far over the median: [`SPIKE_FACTOR`] times it and [`SPIKE_EXTRA_MS`] more.
+fn spikes(cpu_ms: &[f64], p50: f64) -> Vec<usize> {
+    let limit = (p50 * SPIKE_FACTOR).max(p50 + SPIKE_EXTRA_MS);
+    (0..cpu_ms.len()).filter(|&i| cpu_ms[i] > limit).collect()
 }
 
 /// [`hitch_failures`] with the frame-spike gate optional: a stage that shares its machine with a server and whatever
 /// else runs there is stalled in bursts, and leaves frame times to the stage that has the client alone.
-pub(super) fn hitches(report: &Value, cpu_ms: &[f64], max_spike_share: Option<f64>) -> Vec<String> {
+pub(super) fn hitches(
+    report: &Value,
+    cpu_ms: &[f64],
+    phases: &Phases,
+    max_spike_share: Option<f64>,
+) -> Vec<String> {
     let mut out = Vec::new();
     let late: Vec<&str> = report["late_builds"]
         .as_array()
@@ -112,6 +282,16 @@ pub(super) fn hitches(report: &Value, cpu_ms: &[f64], max_spike_share: Option<f6
             late.len()
         ));
     }
+    // The models the server precached are warmed a material per frame; a frame that prepared a whole list itself
+    // stalled on it (31 ms for 241 passes on the Linux test host).
+    if let Some((frame, passes)) = phases.max("late_passes")
+        && passes > MAX_PASSES_PER_FRAME
+    {
+        out.push(format!(
+            "frame {frame} prepared {passes:.0} material passes itself ({:.0} ms): the precached models were not warmed ahead of their first draw",
+            phases.at(frame, "late_pass_ms")
+        ));
+    }
     let jumps: u64 = report["net"]["clock_jumps"]
         .as_array()
         .into_iter()
@@ -125,13 +305,15 @@ pub(super) fn hitches(report: &Value, cpu_ms: &[f64], max_spike_share: Option<f6
     }
     if let (Some(max), Some(p)) = (max_spike_share, Percentiles::from_samples(cpu_ms)) {
         let limit = (p.p50 * SPIKE_FACTOR).max(p.p50 + SPIKE_EXTRA_MS);
-        let spikes = cpu_ms.iter().filter(|c| **c > limit).count();
-        if spikes as f64 > cpu_ms.len() as f64 * max {
+        let spikes = spikes(cpu_ms, p.p50);
+        if spikes.len() as f64 > cpu_ms.len() as f64 * max {
             out.push(format!(
-                "{spikes} of {} frames cost over {limit:.0} ms (median {:.1} ms, worst {:.0} ms): the frames hitch",
+                "{} of {} frames cost over {limit:.0} ms (median {:.1} ms, worst {:.0} ms): the frames hitch{}",
+                spikes.len(),
                 cpu_ms.len(),
                 p.p50,
-                p.max
+                p.max,
+                where_it_went(phases, cpu_ms, &spikes)
             ));
         }
     }
@@ -243,11 +425,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             jerky * 100.0
         ));
     }
-    // A frame that hitches: pipelines compiled inside a frame, or frames far over the usual cost.
+    // A frame that hitches: pipelines compiled inside a frame, a precache list prepared in one, or frames far over
+    // the usual cost; the phases say where a hitch went.
     let cpu = fs::read_to_string(dir.join("frames.raw.csv"))
         .map(|csv| column(&csv, 0))
         .unwrap_or_default();
-    failures.extend(hitch_failures(&json, &cpu));
+    let phases =
+        Phases::parse(&fs::read_to_string(dir.join("frames.phases.csv")).unwrap_or_default());
+    failures.extend(hitch_failures(&json, &cpu, &phases));
     // The camera eases over stair steps: a frame that began a step on the logical eye did not jump the drawn one.
     // The match's walking decides whether a step is climbed at all; with none the stage notes it as untested.
     let (stairs, snapped) = (
@@ -553,24 +738,66 @@ mod tests {
         );
     }
 
+    /// A phases file of `n` steady frames with the given columns, `(name, value)`, and the rest zero.
+    fn steady_phases(n: usize, cols: &[(&str, f64)]) -> Phases {
+        let header = LEAVES.join(",");
+        let row: Vec<String> = LEAVES
+            .iter()
+            .map(|l| {
+                cols.iter()
+                    .find(|(c, _)| c == l)
+                    .map_or("0".to_owned(), |(_, v)| v.to_string())
+            })
+            .collect();
+        let rows = vec![row.join(","); n];
+        Phases::parse(&format!("{header}\n{}\n", rows.join("\n")))
+    }
+
     #[test]
     fn a_pipeline_missing_while_playing_is_a_hitch_a_pass_is_not() {
         let steady = vec![16.0; 1000];
+        let none = Phases::parse("");
         let passes = json!({"late_builds": ["7 pass wc/x tech 9 World"]});
-        assert!(hitch_failures(&passes, &steady).is_empty());
+        assert!(hitch_failures(&passes, &steady, &none).is_empty());
         let pipe =
             json!({"late_builds": ["7 pass wc/x tech 9 World", "7 pipeline wc/x Target {}"]});
-        let why = hitch_failures(&pipe, &steady);
+        let why = hitch_failures(&pipe, &steady, &none);
         assert_eq!(why.len(), 1);
         assert!(why[0].contains("1 pipelines"), "{why:?}");
     }
 
     #[test]
+    fn a_precache_list_prepared_in_one_frame_is_a_hitch_a_model_is_not() {
+        let steady = vec![16.0; 1000];
+        let mut phases = steady_phases(1000, &[("r_submit", 5.0)]);
+        phases.names.push("late_passes".into());
+        phases.names.push("late_pass_ms".into());
+        for r in &mut phases.rows {
+            r.extend([0.0, 0.0]);
+        }
+        let (lp, lpm) = (phases.names.len() - 2, phases.names.len() - 1);
+        // One model's dozen passes at first sight.
+        (phases.rows[105][lp], phases.rows[105][lpm]) = (14.0, 2.0);
+        assert!(hitch_failures(&json!({}), &steady, &phases).is_empty());
+        // The server's whole list in one frame (241 passes, 31 ms on the test host).
+        (phases.rows[105][lp], phases.rows[105][lpm]) = (241.0, 31.3);
+        let why = hitch_failures(&json!({}), &steady, &phases);
+        assert_eq!(why.len(), 1, "{why:?}");
+        assert!(
+            why[0].contains("frame 105 prepared 241 material passes itself (31 ms)"),
+            "{why:?}"
+        );
+    }
+
+    #[test]
     fn a_clock_that_keeps_jumping_is_a_hitch_the_first_reading_is_not() {
         let steady = vec![16.0; 1000];
-        assert!(hitch_failures(&json!({"net": {"clock_jumps": [1, 0]}}), &steady).is_empty());
+        let none = Phases::parse("");
+        assert!(
+            hitch_failures(&json!({"net": {"clock_jumps": [1, 0]}}), &steady, &none).is_empty()
+        );
         assert_eq!(
-            hitch_failures(&json!({"net": {"clock_jumps": [36, 0]}}), &steady).len(),
+            hitch_failures(&json!({"net": {"clock_jumps": [36, 0]}}), &steady, &none).len(),
             1
         );
     }
@@ -578,18 +805,55 @@ mod tests {
     #[test]
     fn spikes_are_counted_against_the_median_not_a_fixed_speed() {
         let report = json!({});
+        let none = Phases::parse("");
         // A slow machine: everything at 90 ms is steady, not a hitch.
-        assert!(hitch_failures(&report, &vec![90.0; 1000]).is_empty());
+        assert!(hitch_failures(&report, &vec![90.0; 1000], &none).is_empty());
         let mut frames = vec![16.0; 1000];
         frames[10] = 300.0;
         assert!(
-            hitch_failures(&report, &frames).is_empty(),
+            hitch_failures(&report, &frames, &none).is_empty(),
             "one in a thousand is the scheduler"
         );
         // Tens of milliseconds over the usual, a few times a second: dropped frames.
         for f in frames.iter_mut().step_by(50) {
             *f = 60.0;
         }
-        assert_eq!(hitch_failures(&report, &frames).len(), 1);
+        assert_eq!(hitch_failures(&report, &frames, &none).len(), 1);
+    }
+
+    #[test]
+    fn a_hitch_names_the_phase_that_held_it_or_the_machine() {
+        // A usual frame: 1 ms of net, 5 ms of submit, 4 ms of draws, 6 ms of present.
+        let usual = [
+            ("net_ms", 1.0),
+            ("r_submit", 5.0),
+            ("r_main_draws", 4.0),
+            ("present_ms", 6.0),
+        ];
+        let mut frames = vec![16.0; 1000];
+        for f in frames.iter_mut().step_by(40) {
+            *f = 76.0;
+        }
+        // The 60 ms extra sits in the network frame every time: the client blocks there.
+        let mut phases = steady_phases(1000, &usual);
+        let net = phases.col("net_ms").unwrap();
+        for i in (0..1000).step_by(40) {
+            phases.rows[i][net] = 61.0;
+        }
+        let why = hitch_failures(&json!({}), &frames, &phases);
+        assert_eq!(why.len(), 1, "{why:?}");
+        assert!(why[0].contains("net held the stalls"), "{why:?}");
+        assert!(why[0].contains("(76 ms): net 61"), "{why:?}");
+        // Every phase four times its usual cost at once: the process was not scheduled.
+        let mut phases = steady_phases(1000, &usual);
+        for i in (0..1000).step_by(40) {
+            for v in &mut phases.rows[i] {
+                *v *= 4.75;
+            }
+        }
+        let why = hitch_failures(&json!({}), &frames, &phases);
+        assert_eq!(why.len(), 1, "{why:?}");
+        assert!(why[0].contains("every phase stretched alike"), "{why:?}");
+        assert!(why[0].contains("not being scheduled"), "{why:?}");
     }
 }

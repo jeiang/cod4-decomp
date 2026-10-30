@@ -369,7 +369,7 @@ struct State {
     menu_was_open: bool,
     samples: Vec<[f64; 3]>,
     /// Per frame, parallel to `samples`: where the milliseconds went (`frames.phases.csv`), see [`PHASES`].
-    phases: Vec<[f32; 18]>,
+    phases: Vec<[f32; 21]>,
     /// What the last render built on the frame path: pipelines, their ms, passes, their ms.
     late: [f32; 4],
     laps: [f32; 10],
@@ -457,9 +457,10 @@ struct State {
     load_report: Option<Value>,
     /// The next session answers the team and class menus by itself (a script's `start=` step).
     autojoin_next: bool,
-    /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
-    /// to explain a slow gap.
-    prev_cost: [f64; 4],
+    /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture, presenting,
+    /// the input and polls before the network frame, the late warm-up, and the UI painted between the renderer
+    /// and the present (`PHASES`), to explain a slow gap.
+    prev_cost: [f64; 7],
     /// Frames in a row the surface gave no texture although it was configured again; see [`recover_surface`].
     surface_failures: u32,
     /// How long a surface may time out or be occluded before a harness run gives up; `None` for a player's window,
@@ -549,6 +550,12 @@ const TOUR_MENUS: &[&str] = &[
 /// seconds if done at once): the frames before every pipeline exists skip the draws that lack one.
 #[cfg(target_arch = "wasm32")]
 const WARM_BUDGET: Duration = Duration::from_millis(6);
+
+/// What a native frame spends preparing the passes of models the server precached after the load
+/// ([`Renderer::warm_late`]): one material fits in it, so the list is spread over a second or two of frames rather
+/// than stalling the first one that sees it.
+#[cfg(not(target_arch = "wasm32"))]
+const WARM_LATE_BUDGET: Duration = Duration::from_millis(2);
 
 /// Frames a tour menu is shown before its screenshot (fades and expressions settle).
 const TOUR_FRAMES: u32 = 6;
@@ -1071,7 +1078,7 @@ impl Viewer {
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
-            prev_cost: [0.0; 4],
+            prev_cost: [0.0; 7],
             surface_failures: 0,
             surface_stalled_ms: 0.0,
             surface_retried: false,
@@ -1223,8 +1230,11 @@ impl ApplicationHandler<Ready> for Viewer {
 }
 
 /// The columns of `frames.phases.csv`: network and prediction, surface acquire, render, present, then what the
-/// render built on the frame path (pipelines and passes: count, ms each).
-const PHASES: &str = "net_ms,acquire_ms,render_ms,present_ms,late_pipelines,late_pipeline_ms,late_passes,late_pass_ms,r_setup,r_dynamic,r_sun_shadow,r_spot_shadow,r_main_draws,r_lights,r_floatz,r_post_upload,r_encode,r_submit";
+/// render built on the frame path (pipelines and passes: count, ms each), the render's own laps, and last the
+/// input and polls before the network frame, the late warm-up (`Renderer::warm_late`) and the UI painted between
+/// the render and the present. With the acquire left out, the columns but the laps add up to `cpu_ms` of
+/// `frames.raw.csv` but for the frame's tail (console lines, menu sound, actions).
+const PHASES: &str = "net_ms,acquire_ms,render_ms,present_ms,late_pipelines,late_pipeline_ms,late_passes,late_pass_ms,r_setup,r_dynamic,r_sun_shadow,r_spot_shadow,r_main_draws,r_lights,r_floatz,r_post_upload,r_encode,r_submit,input_ms,warm_ms,ui_ms";
 
 impl Viewer {
     /// The graphics device is lost and cannot be used again: a new one is made for the window, and everything that
@@ -1356,8 +1366,15 @@ impl Viewer {
                     "render_ms": st.prev_cost[1].round(),
                     "acquire_ms": st.prev_cost[2].round(),
                     "present_ms": st.prev_cost[3].round(),
+                    "input_ms": st.prev_cost[4].round(),
+                    "warm_ms": st.prev_cost[5].round(),
+                    "ui_ms": st.prev_cost[6].round(),
                 }));
             }
+        }
+        // The costs a frame may not reach (no network frame, nothing to warm) read as zero, not as the last frame's.
+        for i in [0, 4, 5, 6] {
+            st.prev_cost[i] = 0.0;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(done) = st.download.as_mut().and_then(|d| d.poll())
@@ -1612,17 +1629,19 @@ impl Viewer {
                 }));
             }
             // What the server precached beyond what the load warmed (planes, vehicles the scripts call in): its
-            // pipelines are built beside the frames now rather than at first sight.
+            // passes are prepared a material per frame and its pipelines built beside the frames, not at first sight.
             #[cfg(not(target_arch = "wasm32"))]
-            {
+            if let Some(r) = st.renderer.as_mut() {
                 let models = net.unwarmed_models();
-                if let (false, Some(r)) = (models.is_empty(), st.renderer.as_mut()) {
+                if !models.is_empty() {
                     r.warm_models(&models);
                     if let Some(sh) = st.shell.as_ref() {
                         r.warm_sprites(sh.ui.assets.material("gfx_tracer").cloned());
                     }
-                    r.warm_in_background(st.config.format);
                 }
+                let t_warm = Instant::now();
+                r.warm_late(st.config.format, WARM_LATE_BUDGET);
+                st.prev_cost[5] = t_warm.elapsed().as_secs_f64() * 1000.0;
             }
             new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {
@@ -1793,6 +1812,10 @@ impl Viewer {
             apply_resize(st, size)?;
         }
         let t_acquire = Instant::now();
+        // What the frame did before asking for its texture, beyond the network frame and the warm-up: the control
+        // channel, the input, the due commands, the load and download polls.
+        let pre_ms = t_acquire.duration_since(now).as_secs_f64() * 1000.0;
+        st.prev_cost[4] = (pre_ms - st.prev_cost[0] - st.prev_cost[5]).max(0.0);
         let frame = match st.surface().get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
@@ -1814,6 +1837,7 @@ impl Viewer {
             }
         };
         st.prev_cost[2] = t_acquire.elapsed().as_secs_f64() * 1000.0;
+        // `cpu_ms` is the frame's own work: everything but the wait for the surface texture.
         let cpu_start = Instant::now();
         let aspect = st
             .aspect
@@ -1887,6 +1911,8 @@ impl Viewer {
             st.distortion_now = stats.distortion_copy;
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
+        // The UI and captures between the world and the present: menus, HUD, screenshots, the video recorder.
+        let t_ui = Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
         let downloading = st
             .download
@@ -2066,6 +2092,7 @@ impl Viewer {
             st.control_shot_done = Some(shot);
         }
         let t_present = Instant::now();
+        st.prev_cost[6] = t_present.duration_since(t_ui).as_secs_f64() * 1000.0;
         st.gpu.queue.present(frame);
         st.presented = true;
         st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
@@ -2089,7 +2116,7 @@ impl Viewer {
             .unwrap_or_default();
         self.apply_actions(el, actions)?;
         let st = self.st.as_mut().ok_or("no window")?;
-        let cpu_ms = cpu_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_ms = pre_ms + cpu_start.elapsed().as_secs_f64() * 1000.0;
         if st.samples.len() % 30 == 0 {
             st.rss = rss();
         }
@@ -2122,6 +2149,9 @@ impl Viewer {
             lap(7),
             lap(8),
             lap(9),
+            c[4] as f32,
+            c[5] as f32,
+            c[6] as f32,
         ]);
         #[cfg(target_arch = "wasm32")]
         if st.overlay_at.elapsed() >= Duration::from_millis(500) {
