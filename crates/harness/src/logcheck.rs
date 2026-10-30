@@ -121,9 +121,33 @@ pub const ALLOWED: &[Allow] = &[
     },
     Allow {
         contains: &["net::client", "dropped by the server", "Player kicked"],
-        reason: "net-rcon and net-vote kick a client on purpose",
-        stages: &["net-rcon", "net-vote"],
+        reason: "net-rcon, net-vote and client-error kick a client on purpose",
+        stages: &["net-rcon", "net-vote", "client-error"],
         max: Some(3), // measured 2 on the Linux host, 2026-10-14,
+    },
+    Allow {
+        contains: &["cod4e::app", "map not found", "nosuchmap"],
+        reason: "client-error types map and devmap of a map the install lacks",
+        stages: &["client-error"],
+        max: Some(3), // measured 2 on the Linux host, 2026-10-29,
+    },
+    Allow {
+        contains: &["cannot join", "127.0.0.1:28999 did not answer"],
+        reason: "client-error joins an address nothing listens on",
+        stages: &["client-error"],
+        max: Some(2), // measured 1 on the Linux host, 2026-10-29,
+    },
+    Allow {
+        contains: &["net::client", "connection attempt timed out"],
+        reason: "client-error joins a server that answers getinfo but never the connect",
+        stages: &["client-error"],
+        max: Some(2), // measured 1 on the Linux host, 2026-10-29,
+    },
+    Allow {
+        contains: &["cod4e::app", "connection lost"],
+        reason: "client-error has a connect time out and a player kicked on purpose",
+        stages: &["client-error"],
+        max: Some(3), // measured 2 on the Linux host, 2026-10-29,
     },
     Allow {
         contains: &["server::server", "unknown client command", "frobnicate"],

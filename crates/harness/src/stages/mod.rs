@@ -6,6 +6,7 @@ pub mod client_brush;
 pub mod client_custom_class;
 pub mod client_dedicated;
 pub mod client_equipment;
+pub mod client_error;
 pub mod client_flythrough;
 pub mod client_frontend;
 pub mod client_fx;

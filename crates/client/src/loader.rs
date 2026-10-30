@@ -242,8 +242,8 @@ impl Work {
         #[cfg(not(target_arch = "wasm32"))]
         let (data, library) = std::thread::scope(|s| {
             let lib = s.spawn(|| Library::load(&req.install, &req.game, map));
-            let data = MapData::load(&req.install, &req.game, map)
-                .map_err(|e| format!("cannot load {map}: {e}"));
+            // The error is what the player reads in the error popup (the log names the map).
+            let data = MapData::load(&req.install, &req.game, map).map_err(|e| e.to_string());
             (
                 data,
                 lib.join().unwrap_or_else(|_| {
@@ -254,8 +254,7 @@ impl Work {
         });
         #[cfg(target_arch = "wasm32")]
         let (data, library) = (
-            MapData::load(&req.install, &req.game, map)
-                .map_err(|e| format!("cannot load {map}: {e}")),
+            MapData::load(&req.install, &req.game, map).map_err(|e| e.to_string()),
             Library::load(&req.install, &req.game, map),
         );
         self.data = Some(data?);
