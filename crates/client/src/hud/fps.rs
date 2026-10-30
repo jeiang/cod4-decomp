@@ -212,7 +212,9 @@ pub fn draw(ui: &Ui, p: &mut Painter, meter: &Meter, cfg: &Cfg) -> Option<String
     let font = ui.assets.fonts.get(FONT)?;
     let fimg = p.material_of_font(&ui.assets, font, false);
     let unit = ui.place.unit();
-    let scale = SCALE * unit;
+    // `CG_DrawDevString` scales the font by 0.75 of its own pixel height (not the menus' 48-pixel normalization
+    // that `draw_text` takes), and one virtual unit per pixel on top; the metrics then come out in pixels.
+    let scale = SCALE * unit * font.pixel_height.max(1) as f32 / 48.0;
     let far_right = ui.place.size.0 + cfg.offset[0] * unit;
     let column = ui2d::text_width(font, COLUMN_LABEL, 0, scale);
     let step = ui2d::text_height(font, scale);
