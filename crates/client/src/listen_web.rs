@@ -22,6 +22,7 @@ pub struct Config {
     pub port: u16,
     pub game: String,
     pub dvars: Vec<(String, String)>,
+    pub cheats: bool,
 }
 
 /// No listen server, so no objective counters: bombs planted, defused, airstrikes, helicopters, helicopter shots.
@@ -35,6 +36,22 @@ pub fn send(_line: &str) {}
 /// What the stock Start New Server path tells the player in the browser (the error popup's text): there is no
 /// listen server to start, so the menu points at Join Game instead of failing silently.
 pub const NO_HOSTING: &str = "Starting a server is not available in the browser. Use Join Game.";
+/// What a listen server would make of a line the host typed; none runs here.
+#[allow(dead_code)] // read by the native client, which drains a real server's replies
+pub struct HostReply {
+    pub line: String,
+    pub output: String,
+    pub forward: bool,
+}
+
+/// No listen server: the line is the client's alone.
+pub fn host_line(_line: &str) -> bool {
+    false
+}
+
+pub fn host_replies() -> Vec<HostReply> {
+    Vec::new()
+}
 
 pub fn free_standard_port() -> u16 {
     0

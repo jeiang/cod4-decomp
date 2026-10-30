@@ -6,7 +6,7 @@
 //! and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::{run_client, verdict};
+use super::client_session::{run_client, sprint_problem, verdict};
 use crate::stage::{StageCtx, StageReport, Status};
 use std::io;
 use std::time::Duration;
@@ -47,7 +47,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             for f in ["custom", "changed"] {
                 out.files.push(format!("{f}.png"));
             }
-            match verdict(&report) {
+            match verdict(&report).or_else(|| sprint_problem(&report["hud"]["sprint_spawn"])) {
                 Some(w) => {
                     out.status = Status::Failed;
                     out.reason = Some(w);

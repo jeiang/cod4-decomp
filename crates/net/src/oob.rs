@@ -7,8 +7,9 @@ use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::net::SocketAddr;
 
-/// Bumped when the wire format changes; a server refuses other versions.
-pub const PROTOCOL: u32 = 23;
+/// Bumped when the wire format changes; a server refuses other versions. Version 24 adds the `gamestate_end`
+/// reliable command: earlier servers and demos cannot complete the initial CODINFO table.
+pub const PROTOCOL: u32 = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Oob {

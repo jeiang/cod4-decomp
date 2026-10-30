@@ -9,6 +9,7 @@ pub mod archive;
 pub mod ban;
 pub mod bot;
 pub mod bullet;
+pub mod cheats;
 pub mod client;
 pub mod cmd;
 pub mod combat;

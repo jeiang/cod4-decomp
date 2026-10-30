@@ -113,8 +113,11 @@ impl DemoReader {
         if &head[..8] != MAGIC {
             return Err(bad("not a demo file"));
         }
-        if head[8..] != PROTOCOL.to_le_bytes() {
-            return Err(bad("recorded by a different protocol version"));
+        let recorded = u32::from_le_bytes(head[8..12].try_into().expect("four header bytes"));
+        if recorded != PROTOCOL {
+            return Err(bad(&format!(
+                "demo uses protocol {recorded}, this client uses {PROTOCOL}"
+            )));
         }
         Ok(Self { input, prev: None })
     }
@@ -209,6 +212,24 @@ mod tests {
         ));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn a_protocol_23_demo_without_the_gamestate_boundary_is_refused() {
+        let path = dir().join("old-protocol.demo");
+        let mut header = MAGIC.to_vec();
+        header.extend_from_slice(&23u32.to_le_bytes());
+        std::fs::write(&path, header).unwrap();
+        let error = match DemoReader::open(&path) {
+            Ok(_) => panic!("a protocol 23 demo cannot complete the gamestate"),
+            Err(e) => e,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            format!("demo uses protocol 23, this client uses {PROTOCOL}")
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

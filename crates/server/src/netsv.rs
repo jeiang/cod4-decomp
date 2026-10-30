@@ -894,6 +894,7 @@ impl NetSv {
             .encode(),
         ];
         out.extend(config_commands(all));
+        out.push(ServerCmd::GameStateEnd.encode());
         for (night, name) in game.vision.iter().enumerate() {
             if let Some(name) = name {
                 out.push(

@@ -1130,11 +1130,7 @@ fn vision_set(g: &mut Game, a: Args, night: bool) -> R {
     } else {
         1000
     };
-    g.vision[usize::from(night)] = Some(name.clone());
-    g.send(
-        crate::ui::Dest::All,
-        net::ui::ServerCmd::Vision { night, name, ms },
-    );
+    g.vision_set(&name, ms, night);
     Ok(Value::Undefined)
 }
 
