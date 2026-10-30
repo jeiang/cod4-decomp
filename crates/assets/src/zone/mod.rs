@@ -12,6 +12,7 @@
 
 mod asset_type;
 pub mod clipmap;
+pub mod db;
 mod error;
 pub mod fx;
 pub mod gfx;
@@ -28,6 +29,7 @@ pub mod xanim;
 pub mod xmodel;
 
 pub use asset_type::XAssetType;
+pub use db::{Db, Linkable};
 pub use error::{Result, ZoneError};
 pub use stream::{Addr, BLOCK_COUNT, Block, BlockUsage, Fields, Ptr, Stream};
 
@@ -93,6 +95,13 @@ pub trait DecodeFilter {
     /// dropped this way.
     fn keep_presentation(&self) -> bool {
         true
+    }
+
+    /// Whether, in a linked decode, the assets of this type join the consumer's [`Db`] and the zone's stubs of the
+    /// type are resolved from it. The default is the kept types: linking retains the definitions, so a consumer that
+    /// keeps a type only to look at it as it passes (a client noting sound alias names) opts out.
+    fn link(&self, ty: XAssetType) -> bool {
+        self.keep(ty)
     }
 }
 
@@ -280,8 +289,25 @@ impl<'a> Zone<'a> {
 
     /// Decode every asset body in order. Assets the filter keeps go to `sink`.
     /// Fails with [`ZoneError::Unsupported`] at the first type with no decoder.
+    /// The zone is decoded on its own: a stub (`,name`) stays as stored.
     pub fn decode(self, filter: &dyn DecodeFilter, sink: impl FnMut(Asset)) -> Result<ZoneStats> {
         let _span = tracing::debug_span!("zone_decode", assets = self.assets.len()).entered();
+        self.decode_assets(filter, sink)
+            .inspect_err(|e| tracing::error!(error = %e, "cannot decode fastfile"))
+    }
+
+    /// [`decode`](Self::decode) as one zone of a load order: the stubs of the types the filter links become the
+    /// definitions the zones decoded into `db` before gave, and this zone's definitions join `db` under `tag`, which
+    /// ranks them against the other zones' ([`Db`]).
+    pub fn decode_linked(
+        mut self,
+        filter: &'a dyn DecodeFilter,
+        db: &'a mut Db,
+        tag: u8,
+        sink: impl FnMut(Asset),
+    ) -> Result<ZoneStats> {
+        let _span = tracing::debug_span!("zone_decode", assets = self.assets.len(), tag).entered();
+        self.stream.set_linker(stream::Linker { db, filter, tag });
         self.decode_assets(filter, sink)
             .inspect_err(|e| tracing::error!(error = %e, "cannot decode fastfile"))
     }

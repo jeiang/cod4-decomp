@@ -274,6 +274,7 @@ mod tests {
     fn weapon_icons_resolve_after_registering_the_weapons() {
         let Some(i) = install() else { return };
         let mut content = server::content::Content::for_client();
+        content.load_zone(&i, "code_post_gfx_mp", 2).unwrap();
         content.load_zone(&i, "common_mp", 4).unwrap();
         let mut a = UiAssets::load(&i).unwrap();
         assert!(

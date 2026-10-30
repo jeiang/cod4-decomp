@@ -625,6 +625,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
 
     water(install, &mut report, &mut bad);
     destructible(install, &mut report, &mut bad);
+    references(&lib, &mut report, &mut bad);
 
     if bad.is_empty() {
         Ok(Value::Object(report))
@@ -812,6 +813,69 @@ fn element_types(lib: &Library, name: &str) -> Option<serde_json::Map<String, Va
         *n = (n.as_u64().unwrap_or(0) + 1).into();
     }
     Some(counts)
+}
+
+/// The materials and models the loaded effects draw with that are still a stub: the name behind a comma, a reference
+/// to another zone's asset that nothing linked (`DB_LinkXAssetEntry`), with no techset to draw by. The original draws
+/// every sprite of every stock effect, so none may be left; a model that is one is a separate gap (#389) and is
+/// reported.
+pub fn unresolved_references(content: &server::content::Content) -> (Vec<String>, Vec<String>) {
+    use assets::zone::fx::FxVisuals;
+    let stub = |n: Option<&str>| n.is_some_and(|n| n.starts_with(','));
+    let (mut materials, mut models) = (Vec::new(), Vec::new());
+    for e in content.effects() {
+        let effect = e.name.as_deref().unwrap_or("?");
+        let mut material = |m: &assets::zone::gfx::Material, via: &str| {
+            if stub(m.name.as_deref()) || m.technique_set.is_none() {
+                materials.push(format!(
+                    "{effect}: {via}{}",
+                    m.name.as_deref().unwrap_or("?")
+                ));
+            }
+        };
+        for el in e.elems.iter() {
+            match &el.visuals {
+                FxVisuals::Materials(ms) => ms.iter().flatten().for_each(|m| material(m, "")),
+                FxVisuals::Decals(ds) => ds
+                    .iter()
+                    .flat_map(|d| d.iter().flatten())
+                    .for_each(|m| material(m, "decal ")),
+                FxVisuals::Models(ms) => {
+                    for m in ms.iter().flatten() {
+                        let name = m.name.as_deref().unwrap_or("?");
+                        if stub(m.name.as_deref()) {
+                            models.push(format!("{effect}: {name}"));
+                        }
+                        for mat in m.materials.iter().flatten() {
+                            material(mat, &format!("{name}/"));
+                        }
+                    }
+                }
+                FxVisuals::None | FxVisuals::Sounds(_) | FxVisuals::Effects(_) => {}
+            }
+        }
+    }
+    for v in [&mut materials, &mut models] {
+        v.sort_unstable();
+        v.dedup();
+    }
+    (materials, models)
+}
+
+/// Every effect of the loaded zones has its sprite, decal and model materials defined in full.
+fn references(lib: &Library, report: &mut serde_json::Map<String, Value>, bad: &mut Vec<String>) {
+    let (materials, models) = unresolved_references(&lib.content);
+    report.insert("unresolved_materials".into(), materials.len().into());
+    report.insert("unresolved_models".into(), models.len().into());
+    report.insert("unresolved_material_names".into(), json!(materials));
+    report.insert("unresolved_model_names".into(), json!(models));
+    if !materials.is_empty() {
+        bad.push(format!(
+            "{} effect material(s) are a reference nothing defines, their sprites are never drawn: {}",
+            materials.len(),
+            materials.join(", ")
+        ));
+    }
 }
 
 /// A material that takes a mark of any kind.
