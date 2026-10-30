@@ -198,17 +198,6 @@ fn suicide(g: &mut Game, vm: &mut Vm, e: EntRef, _: Args) -> R {
 }
 
 impl Game {
-    /// `Cmd_Kill_f`: a player in a playing session dies of `MOD_SUICIDE`; anyone else is left alone.
-    pub fn kill_self(&mut self, vm: &mut Vm, n: u16) -> Result<(), String> {
-        if self
-            .client(n)
-            .is_some_and(|c| c.session == Session::Playing)
-        {
-            self.die_by_own_hand(vm, n);
-        }
-        Ok(())
-    }
-
     /// The body of `Cmd_Kill_f` and `PlayerCmd_Suicide` (KisakCOD `game_mp/g_cmds_mp.cpp`, `g_client_script_cmd_mp.cpp`):
     /// god and demigod are cleared, the health is 0 and `player_die` runs with `MOD_SUICIDE` and 100000 damage, with no
     /// damage step in between. So the stock `LastStandBleedOut` (`_globallogic.gsc`), which calls `suicide()` from the

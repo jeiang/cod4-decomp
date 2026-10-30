@@ -18,10 +18,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 const NAME: &str = "control-channel";
-const LIMIT: Duration = Duration::from_secs(360);
 
 /// One request and its reply: the line protocol the transports share.
-fn ask(sock: &mut BufReader<TcpStream>, id: u64, req: Value) -> Result<Value, String> {
+pub(super) fn ask(sock: &mut BufReader<TcpStream>, id: u64, req: Value) -> Result<Value, String> {
     let mut req = req;
     req["id"] = json!(id);
     let line = format!("{req}\n");
@@ -44,7 +43,7 @@ fn ask(sock: &mut BufReader<TcpStream>, id: u64, req: Value) -> Result<Value, St
 }
 
 /// Asks until the reply is `true`, letting the client run frames between offers.
-fn until(
+pub(super) fn until(
     sock: &mut BufReader<TcpStream>,
     id: &mut u64,
     req: Value,
@@ -58,6 +57,92 @@ fn until(
         json!({"cmd": "wait", "state": req, "timeout_ms": limit.as_millis() as u64}),
     )
     .map_err(|e| format!("{what}: {e}"))
+}
+
+/// Starts a real client with its listen server and the control channel on a free port, and connects to the channel:
+/// the child, the socket and the channel's address. `args` go after `--listen`.
+pub(super) fn launch(
+    client: &Path,
+    install: &Path,
+    dir: &Path,
+    args: &[&str],
+) -> io::Result<(Child, BufReader<TcpStream>, String)> {
+    let addr_file = dir.join("control.addr");
+    let log = File::create(dir.join("client.log"))?;
+    let mut child: Child = Command::new(client)
+        .arg("--install")
+        .arg(install)
+        .args(["--size", "1280x720", "--no-sound", "--listen"])
+        .args(args)
+        .args(["--duration", "600"])
+        .arg("--control")
+        .arg("0")
+        .arg("--control-file")
+        .arg(&addr_file)
+        .args(profile_args(&dir.join("config")))
+        .arg("--out")
+        .arg(dir)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let addr = loop {
+        if let Ok(s) = fs::read_to_string(&addr_file)
+            && let Some(a) = s.lines().next().and_then(|l| l.split(':').nth(1))
+        {
+            break format!("127.0.0.1:{a}");
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(
+                "the client did not open its control channel",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    match TcpStream::connect(&addr) {
+        Ok(s) => {
+            s.set_read_timeout(Some(Duration::from_secs(240)))?;
+            Ok((child, BufReader::new(s), addr))
+        }
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(io::Error::other(format!("the channel did not answer: {e}")))
+        }
+    }
+}
+
+/// Waits for the client to end (killing it after 30 s) and settles the report: a client that exited badly fails a
+/// run whose checks passed; a failed check is the reason.
+pub(super) fn settle(
+    mut child: Child,
+    outcome: Result<(), String>,
+    mut report: StageReport,
+) -> io::Result<StageReport> {
+    let end = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait()? {
+            Some(s) => break s,
+            None if Instant::now() > end => {
+                let _ = child.kill();
+                break child.wait()?;
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    };
+    if !status.success() && outcome.is_ok() {
+        report.status = Status::Failed;
+        report.reason = Some(format!("the client exited {status}"));
+        return Ok(report);
+    }
+    if let Err(e) = outcome {
+        report.status = Status::Failed;
+        report.reason = Some(e);
+    }
+    Ok(report)
 }
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -82,60 +167,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     let dir = ctx.dir.join("control");
     fs::create_dir_all(&dir)?;
-    let addr_file = dir.join("control.addr");
-    let log = File::create(dir.join("client.log"))?;
-    let mut child: Child = Command::new(&client)
-        .arg("--install")
-        .arg(install)
-        .args([
-            "--size",
-            "1280x720",
-            "--no-sound",
-            "--listen",
-            "--bots",
-            "0",
-        ])
-        .args(["--duration", "300"])
-        .arg("--control")
-        .arg("0")
-        .arg("--control-file")
-        .arg(&addr_file)
-        .args(profile_args(&dir.join("config")))
-        .arg("--out")
-        .arg(&dir)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .spawn()?;
-
-    let deadline = Instant::now() + Duration::from_secs(90);
-    let addr = loop {
-        if let Ok(s) = fs::read_to_string(&addr_file)
-            && let Some(a) = s.lines().next().and_then(|l| l.split(':').nth(1))
-        {
-            break format!("127.0.0.1:{a}");
-        }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(io::Error::other(
-                "the client did not open its control channel",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    };
-
-    let mut sock = match TcpStream::connect(&addr) {
-        Ok(s) => {
-            s.set_read_timeout(Some(Duration::from_secs(240)))?;
-            BufReader::new(s)
-        }
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(io::Error::other(format!("the channel did not answer: {e}")));
-        }
-    };
+    let (child, mut sock, addr) = launch(&client, install, &dir, &["--bots", "0"])?;
 
     let mut id = 0_u64;
     let mut report = StageReport::new(NAME, Status::Passed);
@@ -354,27 +386,5 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         Ok(())
     })();
 
-    let end = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        match child.try_wait()? {
-            Some(s) => break s,
-            None if Instant::now() > end => {
-                let _ = child.kill();
-                break child.wait()?;
-            }
-            None => std::thread::sleep(Duration::from_millis(100)),
-        }
-    };
-    if !status.success() && outcome.is_ok() {
-        report.status = Status::Failed;
-        report.reason = Some(format!("the client exited {status}"));
-        return Ok(report);
-    }
-    if let Err(e) = outcome {
-        report.status = Status::Failed;
-        report.reason = Some(e);
-    }
-    let _ = status;
-    let _ = LIMIT;
-    Ok(report)
+    settle(child, outcome, report)
 }

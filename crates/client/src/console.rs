@@ -448,6 +448,18 @@ pub fn server_line(cmd: &[String]) -> Option<String> {
     Some(format!("{name} {}", words.join(" ")).trim_end().to_owned())
 }
 
+/// The `set`/`seta` line a variable write is handed to the listen server as (one dvar store in the original, #366):
+/// the value quoted, with the server's tokenizer's limits ([`server_line`]).
+pub fn set_line(name: &str, value: &str, archive: bool) -> String {
+    let value: String = value
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| if c == '"' { '\'' } else { c })
+        .collect();
+    let verb = if archive { "seta" } else { "set" };
+    format!("{verb} {name} \"{value}\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
