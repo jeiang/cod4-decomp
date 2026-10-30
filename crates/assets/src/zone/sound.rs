@@ -125,7 +125,7 @@ const SAT_LOADED: u8 = 1;
 const SAT_STREAMED: u8 = 2;
 
 pub(super) fn load_alias_list(s: &mut Stream, p: Ptr) -> Result<Option<Arc<SoundAliasList>>> {
-    s.temp_asset(p, 4, SOUND_ALIAS_LIST_SIZE, |s, h| {
+    s.asset_at(None, p, 4, SOUND_ALIAS_LIST_SIZE, |s, h| {
         let mut f = Fields::new(h);
         let (name, head, count) = (f.ptr()?, f.ptr()?, f.i32());
         let count =
@@ -264,7 +264,7 @@ pub(super) fn load_curve(s: &mut Stream, p: Ptr) -> Result<Option<Arc<SndCurve>>
 }
 
 fn curve_at(s: &mut Stream, slot: Option<Addr>, p: Ptr) -> Result<Option<Arc<SndCurve>>> {
-    s.temp_asset_at(slot, p, 4, 72, |s, h| {
+    s.asset_at(slot, p, 4, 72, |s, h| {
         let mut f = Fields::new(h);
         let name = f.ptr()?;
         let knot_count = f.i32();
@@ -296,7 +296,7 @@ pub(super) fn load_loaded(s: &mut Stream, p: Ptr) -> Result<Option<Arc<LoadedSou
 }
 
 fn loaded_at(s: &mut Stream, slot: Option<Addr>, p: Ptr) -> Result<Option<Arc<LoadedSound>>> {
-    s.temp_asset_at(slot, p, 4, 44, |s, h| {
+    s.asset_at(slot, p, 4, 44, |s, h| {
         let mut f = Fields::new(h);
         let name = f.ptr()?;
         let format = f.i32();

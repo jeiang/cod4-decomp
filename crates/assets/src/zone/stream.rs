@@ -2,6 +2,8 @@
 //! The XFile stream reader: inflated byte source, the nine-block allocator
 //! with its push/pop stack, pointer kinds, and the offset-pointer registry.
 
+use super::DecodeFilter;
+use super::db::{Db, Linkable};
 use super::error::{Result, ZoneError};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -168,6 +170,14 @@ pub struct BlockUsage {
 
 const BUF_LEN: usize = 64 * 1024;
 
+/// The cross-zone table a linked decode files definitions in and resolves stubs from, for the types the consumer's
+/// filter links; the zone's tag ranks its definitions.
+pub(super) struct Linker<'a> {
+    pub db: &'a mut Db,
+    pub filter: &'a dyn DecodeFilter,
+    pub tag: u8,
+}
+
 pub struct Stream<'a> {
     src: Box<dyn Read + 'a>,
     buf: Vec<u8>,
@@ -181,6 +191,8 @@ pub struct Stream<'a> {
     stack: Vec<(Block, u32)>,
     registry: HashMap<(Addr, TypeId), Box<dyn Any + Send + Sync>>,
     keep_presentation: bool,
+    /// `None` decodes the zone on its own: stubs stay stubs.
+    linker: Option<Linker<'a>>,
 }
 
 impl<'a> Stream<'a> {
@@ -197,6 +209,7 @@ impl<'a> Stream<'a> {
             stack: Vec::new(),
             registry: HashMap::new(),
             keep_presentation: true,
+            linker: None,
         }
     }
 
@@ -206,6 +219,19 @@ impl<'a> Stream<'a> {
 
     pub(super) fn set_keep_presentation(&mut self, keep: bool) {
         self.keep_presentation = keep;
+    }
+
+    pub(super) fn set_linker(&mut self, linker: Linker<'a>) {
+        self.linker = Some(linker);
+    }
+
+    /// `DB_AddXAsset` for a decoded asset: linked across zones when the decode is linked and the consumer links its
+    /// type, else as decoded.
+    fn link<T: Linkable>(&mut self, v: Arc<T>) -> Arc<T> {
+        match &mut self.linker {
+            Some(l) if l.filter.link(T::TYPE) => l.db.link(l.tag, v),
+            _ => v,
+        }
     }
 
     /// Whether the current asset's presentation payload is retained.
@@ -500,6 +526,20 @@ impl<'a> Stream<'a> {
         self.temp_ptr_at(slot, p, align, size, true, f)
     }
 
+    /// [`temp_asset_at`](Self::temp_asset_at) for an asset zones reference by name across each other
+    /// (`Load_XAssetHeader` → `DB_AddXAsset`): a stub becomes the definition an earlier zone gave, and that is what
+    /// later offset pointers to the slot see as well.
+    pub fn asset_at<T: Linkable>(
+        &mut self,
+        slot: Option<Addr>,
+        p: Ptr,
+        align: u32,
+        size: u32,
+        f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
+    ) -> Result<Option<Arc<T>>> {
+        self.temp_ptr_link(slot, p, align, size, true, f, Self::link)
+    }
+
     pub fn temp_ptr_at<T: Any + Send + Sync>(
         &mut self,
         slot: Option<Addr>,
@@ -508,6 +548,20 @@ impl<'a> Stream<'a> {
         size: u32,
         push_virtual: bool,
         f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
+    ) -> Result<Option<Arc<T>>> {
+        self.temp_ptr_link(slot, p, align, size, push_virtual, f, |_, v| v)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn temp_ptr_link<T: Any + Send + Sync>(
+        &mut self,
+        slot: Option<Addr>,
+        p: Ptr,
+        align: u32,
+        size: u32,
+        push_virtual: bool,
+        f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
+        link: impl FnOnce(&mut Self, Arc<T>) -> Arc<T>,
     ) -> Result<Option<Arc<T>>> {
         match p {
             Ptr::Null => Ok(None),
@@ -527,6 +581,7 @@ impl<'a> Stream<'a> {
                 if push_virtual {
                     self.pop()?;
                 }
+                let v = link(self, v);
                 if let Some(s) = slot {
                     self.register(s, v.clone());
                 }

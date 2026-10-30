@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Install-gated fastfile tests; they skip when the original install is absent.
 
+use assets::zone::fx::FxVisuals;
 use assets::zone::gfx::{Material, TextureSource};
-use assets::zone::{Asset, Block, Consumer, KeepAll, XAssetType, Zone};
+use assets::zone::{Asset, Block, Consumer, Db, DecodeFilter, KeepAll, XAssetType, Zone};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
@@ -269,4 +270,68 @@ fn server_decode_keeps_no_image_pixels_or_render_bulk() {
             .unwrap_or_else(|e| panic!("{name}: {e}"));
     }
     eprintln!("checked {materials} materials, {models} models");
+}
+
+/// Keeps what a client draws effects with, and links it.
+struct Effects;
+
+impl DecodeFilter for Effects {
+    fn keep(&self, ty: XAssetType) -> bool {
+        matches!(
+            ty,
+            XAssetType::Material | XAssetType::XModel | XAssetType::Fx
+        )
+    }
+}
+
+/// A map's effects name sprite and model materials `common_mp` defines (`,gfx_smk_white_atlas`); decoded in load
+/// order into one table, each such reference is that definition, techset and all (`DB_LinkXAssetEntry`).
+#[test]
+fn a_maps_effect_materials_link_to_the_zones_before_it() {
+    let Some(dir) = zone_dir() else { return };
+    let mut db = Db::default();
+    let (mut stubs, mut linked, mut effects) = (Vec::new(), 0, 0);
+    for (zone, tag) in [("code_post_gfx_mp", 2), ("common_mp", 4), ("mp_crash", 8)] {
+        let mut seen = 0;
+        open(&dir.join(format!("{zone}.ff")))
+            .decode_linked(&Effects, &mut db, tag, |a| {
+                let Asset::Fx(e) = a else { return };
+                seen += 1;
+                for el in e.elems.iter() {
+                    let mats: Vec<&Material> = match &el.visuals {
+                        FxVisuals::Materials(ms) => ms.iter().flatten().map(|m| &**m).collect(),
+                        FxVisuals::Models(xs) => xs
+                            .iter()
+                            .flatten()
+                            .flat_map(|x| x.materials.iter().flatten().map(|m| &**m))
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    for m in mats {
+                        match m.name.as_deref() {
+                            Some(n) if n.starts_with(',') || m.technique_set.is_none() => {
+                                let effect = e.name.as_deref().unwrap_or("?");
+                                stubs.push(format!("{zone}: {effect}: {n}"));
+                            }
+                            _ => linked += 1,
+                        }
+                    }
+                }
+            })
+            .unwrap_or_else(|e| panic!("{zone}: {e}"));
+        if zone == "mp_crash" {
+            effects = seen;
+        }
+    }
+    stubs.sort();
+    stubs.dedup();
+    assert!(effects > 0, "mp_crash has effects of its own");
+    assert!(
+        stubs.is_empty(),
+        "effect materials left a reference ({linked} linked): {stubs:#?}"
+    );
+    assert!(
+        db.get::<Material>(",gfx_smk_white_atlas").is_some(),
+        "the smoke atlas is in the table"
+    );
 }
