@@ -3009,6 +3009,24 @@ fn script_step(st: &mut State) -> bool {
                 done(false, sc, format!("timed out; no line with {text:?}"));
             }
         }
+        // As `saw=`, but not a typed line's echo (`] …`): what the server or the engine answered
+        // (`sawreply=zz_word:5`).
+        "sawreply" => {
+            let (text, secs) = arg
+                .rsplit_once(':')
+                .map_or((arg, 10.0), |(t, s)| (t, s.parse().unwrap_or(10.0)));
+            let seen = st.shell.as_ref().is_some_and(|s| {
+                s.st.feed
+                    .console
+                    .iter()
+                    .any(|l| l.contains(text) && !l.starts_with("] "))
+            });
+            if seen {
+                done(true, sc, String::new());
+            } else if waited > secs {
+                done(false, sc, format!("timed out; no reply line with {text:?}"));
+            }
+        }
         // A line for the listen server's console, as typed there: `server=devtele human bombzone`.
         "server" => {
             listen::send(arg);
@@ -3471,6 +3489,28 @@ fn own_commands(f: &InputFrame) -> Vec<Action> {
         .filter(|cmd| crate::console::is_own_verb(&cmd[0]) || !crate::console::is_command(&cmd[0]))
         .map(|cmd| Action::Console(crate::input::config::join(&cmd)))
         .collect()
+}
+
+#[cfg(test)]
+mod own_command_tests {
+    use super::*;
+
+    /// A bound word nothing knows is the app's to forward or call unknown; the input layer's and the net play's
+    /// own commands are not.
+    #[test]
+    fn unknown_words_are_console_actions_and_known_ones_are_not() {
+        let mut input = Input::detached();
+        input.exec_line("zz_unknown_word a b; weapnext; record d1; set zz_cv 1; zz_cv 2");
+        let lines: Vec<String> = own_commands(&input.frame(0.01))
+            .into_iter()
+            .map(|a| match a {
+                Action::Console(l) => l,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(lines, ["zz_unknown_word a b", "record d1"]);
+        assert_eq!(input.cvar("zz_cv"), Some("2"));
+    }
 }
 
 /// The shell's commands (`setfromdvar`, `vid_restart`, `setFromLocString`, ...) from a bind: run through its

@@ -4,7 +4,8 @@
 //! read only (multiplayer has no pause); looking down then a bound `centerview` levels the view; `record` says
 //! where it writes and `stoprecord` leaves a demo file; Escape > Call Vote > Restart Map calls a vote the server
 //! announces; the B key opens the quick message menu and two keys say a team line the server relays;
-//! `setFromLocString` localizes into a cvar; `cmd` forwards its words to the server. Needs a display and the
+//! `setFromLocString` localizes into a cvar; `cmd` forwards its words to the server; a word nothing knows is
+//! `Unknown command` at the front end and, in a match, forwarded to the server, whose answer names it. Needs a display and the
 //! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
@@ -16,13 +17,15 @@ use std::time::Duration;
 const NAME: &str = "client-commands";
 const DEMO: &str = "stagedemo";
 
-const STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
+const STEPS: &str = "console=zz_unknown_at_front,saw=Unknown command \"zz_unknown_at_front\":5,\
+set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
 mouse=Marines,menu=changeclass:30,wait=1,mouse=Assault,ingame=120,wait=3,team=2:5,\
 holdkey=pause,releasekey=pause,saw=cl_paused is read only.:5,cvaris=cl_paused 0,\
 set=bind f9 centerview,holdkey=downarrow,wait=1,releasekey=downarrow,wait=0.5,pitchis=-90 -20,shot=lookdown,\
 holdkey=f9,releasekey=f9,wait=0.5,pitchis=-3 3,shot=centered,\
 console=record stagedemo,saw=recording to:5,wait=2,console=stoprecord,saw=Stopped demo.:5,console=stoprecord,saw=Not recording a demo.:5,\
 console=cmd say line_through_cmd,saw=line_through_cmd:6,\
+console=zz_unknown_in_match,sawreply=zz_unknown_in_match:6,\
 console=setFromLocString customclass3 @CLASS_CUSTOM3,wait=0.5,cvarloc=customclass3 CLASS_CUSTOM3,\
 togglemenu,wait=1,see=Call Vote,mouse=Call Vote,menu=callvote:5,wait=1,see=Restart Map+Next Map,shot=callvote,\
 mouse=Restart Map,saw=called a vote:6,nomenu=5,wait=1,\
