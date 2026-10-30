@@ -42,6 +42,8 @@ fn player(st: &NetPlay) -> Value {
         "origin": ps.origin,
         "velocity": ps.velocity,
         "angles": ps.viewangles,
+        // The current local aim before view kick/sway, not the last server snapshot's acknowledged angles.
+        "aim_angles": st.angles,
         "weapon": st.weapon(),
         "weapon_index": ps.weapon,
         "ads": ps.weapon_pos_frac,

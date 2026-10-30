@@ -556,7 +556,7 @@ impl Walker {
         let own = player["client"].as_u64().unwrap_or(u64::MAX);
         let team = player["team"].as_u64().unwrap_or(0);
         let origin = vec3(&player["origin"]);
-        let angles = vec3(&player["angles"]);
+        let angles = vec3(&player["aim_angles"]);
         let eye = [origin[0], origin[1], origin[2] + 60.0];
         let ents = c.state("entities")?;
         let mut nearest: Option<(f32, [f32; 3])> = None;
@@ -597,7 +597,8 @@ impl Walker {
             );
             self.stuck = 0;
         }
-        let (mut yaw_err, mut pitch_err, mut fire) = (0.0_f32, 0.0_f32, false);
+        let (mut yaw_err, mut pitch_err) = (0.0_f32, 0.0_f32);
+        let mut aim = None;
         if self.evade.0 > 0 {
             self.evade.0 -= 1;
             yaw_err = 30.0 * self.evade.1;
@@ -607,10 +608,17 @@ impl Walker {
             let want_pitch = -dz.atan2(dx.hypot(dy)).to_degrees();
             yaw_err = wrap(want_yaw - angles[1]);
             pitch_err = want_pitch - angles[0];
-            fire = d < 900.0 && yaw_err.abs() < 4.0 && pitch_err.abs() < 4.0;
+            aim = Some((d, want_yaw, want_pitch));
         }
+        // Stop walking while lining up a nearby target. Judge alignment after the turn, against the current local
+        // input aim rather than the delayed snapshot's angles; otherwise every correction chases the last correction.
+        self.hold(c, "+forward", aim.is_none_or(|(d, _, _)| d > 900.0))?;
         self.turn_by(c, yaw_err, pitch_err, angles)?;
-        self.hold(c, "+forward", true)?;
+        c.frames(2)?;
+        let after = vec3(&c.state("player")?["aim_angles"]);
+        let fire = aim.is_some_and(|(d, yaw, pitch)| {
+            d < 900.0 && wrap(yaw - after[1]).abs() < 4.0 && (pitch - after[0]).abs() < 4.0
+        });
         // Pulled on one tick and released on the next: a single-shot weapon fires once per pull.
         let pull = fire && !self.held.contains(&"+attack");
         self.shots += u32::from(pull);
@@ -636,7 +644,7 @@ impl Walker {
                     // The first real turn tells whether the look gate takes the mouse at all, and the client says
                     // why not when it does not (no focus, or a pointer the compositor would not lock).
                     c.frames(3)?;
-                    let after = vec3(&c.state("player")?["angles"]);
+                    let after = vec3(&c.state("player")?["aim_angles"]);
                     let client = c.state("client")?;
                     self.look = format!(
                         "focused {}, pointer locked {}, look gate {}",

@@ -235,6 +235,13 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
     })?;
 
     c.step("key fallback aim and fire", |c| w.check_key_fallback(c))?;
+    c.step("mouse input ready", |c| {
+        c.until(
+            json!({"client.focused": true, "client.pointer_locked": true, "client.look_gate": null}),
+            secs(10),
+            "the match window did not get focus and pointer lock",
+        )
+    })?;
 
     // A chat line typed as a person does, which the server must send back.
     c.step("chat", |c| {
@@ -395,6 +402,12 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         return Err(format!(
             "the stage's player never fired in {} ticks (turned with {})",
             w.ticks,
+            w.turning()
+        ));
+    }
+    if w.mouse_ticks == 0 {
+        return Err(format!(
+            "the match never exercised mouse look (turned with {})",
             w.turning()
         ));
     }
