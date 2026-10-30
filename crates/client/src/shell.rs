@@ -818,14 +818,14 @@ impl Shell {
         self.ui.click(&mut h, want)
     }
 
-    /// The items of an open menu with their names, texts and rectangles ([`Ui::item_report`]).
+    /// The items of an open menu with their names, texts, visibility and rectangles ([`Ui::item_report`]).
     pub fn item_report(
         &mut self,
         input: &mut Input,
         menu: &str,
-    ) -> Vec<(String, String, [f32; 4])> {
-        let h = Self::host(&mut self.st, input);
-        self.ui.item_report(&h, menu)
+    ) -> Vec<(String, String, bool, [f32; 4])> {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.item_report(&mut h, menu)
     }
 
     /// Carries out one thing the server asked of the UI.
