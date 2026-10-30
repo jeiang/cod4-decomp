@@ -108,7 +108,7 @@ impl Default for Meter {
 }
 
 /// The numbers one window of frame times yields (`CG_DrawFPS`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reading {
     /// Frames per second over the window, and the rates of the slowest and fastest frame.
     pub fps: i32,
