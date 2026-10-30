@@ -316,11 +316,13 @@ struct Warm {
     demand: HashSet<(u32, Target)>,
 }
 
-/// How a material queued for [`Renderer::warm_late`] is drawn, which decides the techniques it is warmed for.
+/// One entry of the queue of [`Renderer::warm_late`]: how the material is drawn decides the techniques it is
+/// warmed for, and an entry is at most the seven passes of one group for one vertex layout, so a frame's budget
+/// holds one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WarmKind {
-    /// World or model surfaces: every group of [`WarmGroup`] the settings and the map allow.
-    Surface,
+    /// World or model surfaces: one group of [`WarmGroup`] for one vertex layout.
+    Surface(WarmGroup, VertexKind),
     /// Effect sprites and tails, drawn as dynamic model-layout meshes.
     Sprite,
 }
@@ -783,9 +785,10 @@ impl Renderer {
 
     /// Prepares the passes of what [`Renderer::warm_models`] and [`Renderer::warm_sprites`] added since the last
     /// whole warm-up (the models the server precached: planes, vehicles the scripts call in) and asks the workers
-    /// for their pipelines, so a model the match brings in later does not stall its first frame. Materials are
-    /// taken from the queue until `budget` is spent (at least one per call: preparing a pass uploads its textures
-    /// and builds its bind-group layout, ~2 ms per material). Returns how many materials still wait.
+    /// for their pipelines, so a model the match brings in later does not stall its first frame. Entries (a
+    /// material's passes of one group for one vertex layout, [`WarmKind`]) are taken from the queue until `budget`
+    /// is spent, at least one per call: preparing a pass translates its shaders, uploads its textures and builds
+    /// its bind-group layout. Returns how many entries still wait.
     ///
     /// The original registers the server's models in one go under the load screen (`CG_RegisterGraphics`,
     /// `cgame_mp/cg_main_mp.cpp` in KisakCOD, from `CL_InitCGame` while the state is `CA_LOADING`); here the
@@ -798,10 +801,8 @@ impl Renderer {
         let mut jobs = Vec::new();
         while let Some((m, kind)) = self.warm_queue.pop_front() {
             match kind {
-                WarmKind::Surface => {
-                    for group in self.warm_groups() {
-                        self.surface_jobs(&m, group, scene, floatz, hsm, &mut jobs);
-                    }
+                WarmKind::Surface(group, kind) => {
+                    self.surface_jobs(&m, group, kind, scene, floatz, hsm, &mut jobs);
                 }
                 WarmKind::Sprite => self.sprite_jobs(&m, scene, hsm, &mut jobs),
             }
@@ -926,10 +927,16 @@ impl Renderer {
             .iter()
             .map(|m| Arc::as_ptr(m) as usize)
             .collect();
+        let groups = self.warm_groups();
         for model in models {
             for m in model.materials.iter().flatten() {
                 if seen.insert(Arc::as_ptr(m) as usize) {
-                    self.warm_queue.push_back((m.clone(), WarmKind::Surface));
+                    for &group in &groups {
+                        for kind in [VertexKind::World, VertexKind::Model] {
+                            self.warm_queue
+                                .push_back((m.clone(), WarmKind::Surface(group, kind)));
+                        }
+                    }
                     self.warm_extra.push(m.clone());
                 }
             }
@@ -968,11 +975,14 @@ impl Renderer {
         groups
     }
 
-    /// Prepares one surface material's passes of `group` and lists the (pass, target) pairs their pipelines are for.
+    /// Prepares one surface material's passes of `group` for `kind` surfaces and lists the (pass, target) pairs
+    /// their pipelines are for: at most seven passes, one queue entry of [`Renderer::warm_late`].
+    #[allow(clippy::too_many_arguments)]
     fn surface_jobs(
         &mut self,
         m: &Arc<Material>,
         group: WarmGroup,
+        kind: VertexKind,
         scene: Target,
         floatz: Target,
         hsm: bool,
@@ -980,52 +990,44 @@ impl Renderer {
     ) {
         match group {
             WarmGroup::Scene => {
-                for kind in [VertexKind::World, VertexKind::Model] {
-                    if let Some(p) = self.prepare_optional(m, &[TECH_BUILD_FLOATZ], kind, hsm) {
-                        jobs.push((p, floatz));
+                if let Some(p) = self.prepare_optional(m, &[TECH_BUILD_FLOATZ], kind, hsm) {
+                    jobs.push((p, floatz));
+                }
+                for techs in [
+                    &SUN_SHADOW_TECHS[..],
+                    &SUN_TECHS,
+                    &LIT,
+                    &SPOT_TECHS,
+                    &OMNI_TECHS,
+                ] {
+                    if let Some(p) = self.prepare_ahead(m, techs, kind, hsm) {
+                        jobs.push((p, scene));
                     }
-                    for techs in [
-                        &SUN_SHADOW_TECHS[..],
-                        &SUN_TECHS,
-                        &LIT,
-                        &SPOT_TECHS,
-                        &OMNI_TECHS,
-                    ] {
-                        if let Some(p) = self.prepare_ahead(m, techs, kind, hsm) {
-                            jobs.push((p, scene));
-                        }
-                    }
-                    if self.settings.shadows != ShadowMode::Off
-                        && let Some(p) = self.prepare_optional(m, &[self.shadow_tech()], kind, hsm)
-                    {
-                        jobs.push((p, self.shadow_target()));
-                    }
+                }
+                if self.settings.shadows != ShadowMode::Off
+                    && let Some(p) = self.prepare_optional(m, &[self.shadow_tech()], kind, hsm)
+                {
+                    jobs.push((p, self.shadow_target()));
                 }
             }
             WarmGroup::SpotShadow => {
-                for kind in [VertexKind::World, VertexKind::Model] {
-                    if let Some(p) = self.prepare_ahead(m, &SPOT_SHADOW_TECHS, kind, hsm) {
-                        jobs.push((p, scene));
-                    }
+                if let Some(p) = self.prepare_ahead(m, &SPOT_SHADOW_TECHS, kind, hsm) {
+                    jobs.push((p, scene));
                 }
             }
             WarmGroup::Cookie => {
-                if let Some(p) =
-                    self.prepare_optional(m, &COOKIE_CASTER_TECHS, VertexKind::Model, hsm)
+                if kind == VertexKind::Model
+                    && let Some(p) = self.prepare_optional(m, &COOKIE_CASTER_TECHS, kind, hsm)
                 {
                     jobs.push((p, Self::cookie_target()));
                 }
-                for kind in [VertexKind::World, VertexKind::Model] {
-                    if let Some(p) = self.prepare_optional(m, &COOKIE_RECEIVER_TECHS, kind, hsm) {
-                        jobs.push((p, scene));
-                    }
+                if let Some(p) = self.prepare_optional(m, &COOKIE_RECEIVER_TECHS, kind, hsm) {
+                    jobs.push((p, scene));
                 }
             }
             WarmGroup::Omni => {
-                for kind in [VertexKind::World, VertexKind::Model] {
-                    if let Some(p) = self.prepare_optional(m, &LIGHT_OMNI_TECHS, kind, hsm) {
-                        jobs.push((p, scene));
-                    }
+                if let Some(p) = self.prepare_optional(m, &LIGHT_OMNI_TECHS, kind, hsm) {
+                    jobs.push((p, scene));
                 }
             }
         }
@@ -1060,7 +1062,9 @@ impl Renderer {
             .chain(self.scene.world.sun.sprite_material.clone())
             .collect();
         for m in &materials {
-            self.surface_jobs(m, WarmGroup::Scene, scene, floatz, hsm, &mut jobs);
+            for kind in [VertexKind::World, VertexKind::Model] {
+                self.surface_jobs(m, WarmGroup::Scene, kind, scene, floatz, hsm, &mut jobs);
+            }
         }
         let clouds = self.warm_clouds.clone();
         for m in &clouds {
@@ -1077,7 +1081,9 @@ impl Renderer {
         // The later groups after everything a frame without them draws: a load that stops early still draws that.
         for group in self.warm_groups().into_iter().skip(1) {
             for m in &materials {
-                self.surface_jobs(m, group, scene, floatz, hsm, &mut jobs);
+                for kind in [VertexKind::World, VertexKind::Model] {
+                    self.surface_jobs(m, group, kind, scene, floatz, hsm, &mut jobs);
+                }
             }
         }
         self.warm_queue.clear();

@@ -552,8 +552,8 @@ const TOUR_MENUS: &[&str] = &[
 const WARM_BUDGET: Duration = Duration::from_millis(6);
 
 /// What a native frame spends preparing the passes of models the server precached after the load
-/// ([`Renderer::warm_late`]): one material fits in it, so the list is spread over a second or two of frames rather
-/// than stalling the first one that sees it.
+/// (`Renderer::warm_late`): a material's few passes fit in it, so the list is spread over a second or two of frames
+/// rather than stalling the first one that sees it.
 #[cfg(not(target_arch = "wasm32"))]
 const WARM_LATE_BUDGET: Duration = Duration::from_millis(2);
 
