@@ -457,6 +457,8 @@ struct State {
     load_report: Option<Value>,
     /// The next session answers the team and class menus by itself (a script's `start=` step).
     autojoin_next: bool,
+    /// Effect counts at an `fxmark` step: `cgis=fx:<kind> +n` then reads how often the kind played since.
+    fx_mark: HashMap<String, u64>,
     /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
     /// to explain a slow gap.
     prev_cost: [f64; 4],
@@ -847,6 +849,7 @@ impl Viewer {
                             port: 0,
                             game: self.cli.game.clone(),
                             dvars: Vec::new(),
+                            cheats: false,
                         },
                     )?;
                     let a = l.addr;
@@ -1071,6 +1074,7 @@ impl Viewer {
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
+            fx_mark: HashMap::new(),
             prev_cost: [0.0; 4],
             surface_failures: 0,
             surface_stalled_ms: 0.0,
@@ -1372,7 +1376,14 @@ impl Viewer {
                     if let Err(why) = follow_server_game(&self.cli, &mut self.map, st, &d.game) {
                         show_error(st, &why);
                     } else {
-                        start_session(&self.cli, &mut self.map, st, &d.map, &gametype, Some(addr));
+                        start_session(
+                            &self.cli,
+                            &mut self.map,
+                            st,
+                            &d.map,
+                            &gametype,
+                            Session::Join(addr),
+                        );
                     }
                 }
                 Err(why) => {
@@ -1574,6 +1585,11 @@ impl Viewer {
             {
                 // The original's range is 0 to 3600 s; a timeout of 0 would drop the client at once.
                 net.set_timeout(Duration::from_secs_f32(secs.clamp(1.0, 3600.0)));
+            }
+            // `CL_SystemInfoChanged`: the server's `sv_cheats` is the client's, and without cheats every cheat
+            // dvar goes back to its reset value.
+            if let Some(on) = net.take_cheat_state() {
+                st.input.cvars.set_cheat_state(on);
             }
             net.set_switches(crate::netplay::Switches::read(&st.input.cvars));
             let tracer = |name: &str, default: f32| {
@@ -1905,6 +1921,11 @@ impl Viewer {
             st.surfaces_drawn.push(stats.surfaces as f64);
             st.lights_drawn = stats.lights;
             st.distortion_now = stats.distortion_copy;
+            if let Some(sh) = st.shell.as_mut() {
+                sh.st.fps_scene = crate::hud::fps::Scene {
+                    prims: stats.draws + stats.shadow_draws + stats.light_draws,
+                };
+            }
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -2179,7 +2200,11 @@ impl Viewer {
                     }
                     el.exit();
                 }
-                Action::StartServer { map, gametype } => {
+                Action::StartServer {
+                    map,
+                    gametype,
+                    cheats,
+                } => {
                     // `SV_Map_f` looks for the map's zone before anything else (`DB_FileSize`, KisakCOD
                     // `server_mp/sv_ccmds_mp.cpp`): a map the install lacks starts no server and shows no loading
                     // screen. The original prints its `Can't find map` to the console; here it is the error popup's
@@ -2190,7 +2215,14 @@ impl Viewer {
                         tracing::warn!(%map, "map not found: the install has no zone for it");
                         show_error(st, &format!("Can't find map \"{map}\"."));
                     } else {
-                        start_session(&self.cli, &mut self.map, st, &map, &gametype, None);
+                        start_session(
+                            &self.cli,
+                            &mut self.map,
+                            st,
+                            &map,
+                            &gametype,
+                            Session::Host { cheats },
+                        );
                     }
                 }
                 Action::Join(addr) => {
@@ -2263,7 +2295,7 @@ impl Viewer {
                                 st,
                                 &e.map,
                                 &e.gametype,
-                                Some(a),
+                                Session::Join(a),
                             );
                         }
                         Err(err) => {
@@ -2585,13 +2617,16 @@ fn script_step(st: &mut State) -> bool {
                 done(false, sc, format!("timed out; open: {have}"));
             }
         }
-        "start" => {
+        // A listen server on the map, joined with the team and class answered by itself (`start=mp_crash`);
+        // `devmap=mp_crash` is the same with cheats on, as the console's `devmap`.
+        "start" | "devmap" => {
             let Some(sh) = st.shell.as_mut() else {
                 return true;
             };
             sh.st.actions.push(Action::StartServer {
                 map: arg.to_owned(),
                 gametype: "war".to_owned(),
+                cheats: key == "devmap",
             });
             st.autojoin_next = true;
             done(true, sc, String::new());
@@ -3106,6 +3141,16 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| u8::from(r.settings.shadows != render::ShadowMode::Off).to_string()),
+                // The sampler filtering the materials were made with: `r_texFilterAnisoMin` and `Max`, and
+                // `r_texFilterMipMode` as its enum index (`gfxis=aniso 2 4`, `gfxis=mipmode 2`).
+                "aniso" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| format!("{} {}", r.materials.aniso_min, r.materials.aniso_max)),
+                "mipmode" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| (r.materials.mip_mode as u8).to_string()),
                 // How many dynamic lights the last frame drew.
                 "dlights" => Some(st.lights_drawn.to_string()),
                 "aspect" => Some(format!("{:.2}", st.aspect.unwrap_or(0.0))),
@@ -3272,8 +3317,9 @@ fn script_step(st: &mut State) -> bool {
             done(st.net.is_some(), sc, "fx demo".into());
         }
         // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`,
-        // `cgis=fullbright 1`) or how often an effect kind played (`cgis=fx:shell_eject 0`,
-        // `cgis=fx:bullet_impact_noblood 1`): what was drawn or played, not the dvar's value.
+        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up) or
+        // how often an effect kind played (`cgis=fx:shell_eject 0`, `cgis=fx:bullet_impact_noblood 1`): what was
+        // drawn or played, not the dvar's value.
         "cgis" => {
             let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
             let sh = st.shell.as_ref();
@@ -3286,14 +3332,52 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| u8::from(r.settings.fullbright).to_string()),
-                _ => name
-                    .strip_prefix("fx:")
-                    .and_then(|kind| st.net.as_ref().map(|n| n.fx_played(kind).to_string())),
+                "shock" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.post.shell_shock.is_some()).to_string()),
+                "subtitle" => sh.map(|s| {
+                    u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
+                }),
+                _ => name.strip_prefix("fx:").and_then(|kind| {
+                    st.net.as_ref().map(|n| {
+                        let played = n.fx_played(kind);
+                        match want.strip_prefix('+') {
+                            Some(n_str) => {
+                                let target = n_str.parse::<u64>().unwrap_or(u64::MAX);
+                                let at = st.fx_mark.get(kind).copied().unwrap_or(0);
+                                let delta = played.saturating_sub(at);
+                                if delta == target {
+                                    "ok".to_owned()
+                                } else {
+                                    format!("+{delta}")
+                                }
+                            }
+                            None => played.to_string(),
+                        }
+                    })
+                }),
             };
             match have {
-                Some(h) => done(h == want, sc, format!("{name} is {h}")),
+                Some(h) => done(
+                    if want.starts_with('+') {
+                        h == "ok"
+                    } else {
+                        h == want
+                    },
+                    sc,
+                    format!("{name} is {h}"),
+                ),
                 None => done(false, sc, format!("cgis: unknown or unavailable {name:?}")),
             }
+        }
+        // `fxmark` remembers every effect count; `cgis=fx:<kind> +n` afterwards compares what played since it
+        // (exactly n, so a wrong effect kind fails as much as a missing one).
+        "fxmark" => {
+            if let Some(n) = st.net.as_ref() {
+                st.fx_mark = n.fx_counts();
+            }
+            done(st.net.is_some(), sc, "fx marked".into());
         }
         // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame (`hitflesh`): the flesh
         // impact effect, or the no-blood one with `cg_blood` off.
@@ -3302,6 +3386,20 @@ fn script_step(st: &mut State) -> bool {
                 n.inject_flesh_hit();
             }
             done(st.net.is_some(), sc, "flesh hit".into());
+        }
+        // A `shellshock` of the default kind for `shock=<ms>` ms, as a nearby explosion's; `subtitle=<key>` is a
+        // started sound's subtitle (`CL_SubtitlePrint`), both as the server or the sound engine would hand them on.
+        "shock" => {
+            if let Some(n) = st.net.as_mut() {
+                n.inject_shock(arg.parse().unwrap_or(5000));
+            }
+            done(st.net.is_some(), sc, "shellshock".into());
+        }
+        "subtitle" => {
+            if let Some(n) = st.net.as_mut() {
+                n.inject_subtitle(arg, 2000);
+            }
+            done(st.net.is_some(), sc, "subtitle".into());
         }
         "shot" => {
             if st.shot_request.is_none() {
@@ -4115,21 +4213,30 @@ fn apply_resize(st: &mut State, (w, h): (u32, u32)) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts (`join` of `None`) or joins a match from the menus: begins loading the map in the background. The window
-/// keeps drawing the loading screen; [`finish_load`] connects once the load is done.
-/// For a join, `map` is what the server said it is playing.
+/// Where a session's match is played: a listen server this client starts (with `sv_cheats` on for `devmap`), or
+/// a server to join.
+enum Session {
+    Host { cheats: bool },
+    Join(std::net::SocketAddr),
+}
+
+/// Starts or joins a match from the menus: begins loading the map in the background. The window keeps drawing the
+/// loading screen; [`finish_load`] connects once the load is done. For a join, `map` is what the server said it is
+/// playing.
 fn start_session(
     cli: &Cli,
     map_slot: &mut Option<MapData>,
     st: &mut State,
     map: &str,
     gametype: &str,
-    join: Option<std::net::SocketAddr>,
+    session: Session,
 ) {
     end_session(map_slot, st);
-    let server = match join {
-        Some(a) => loader::Server::Join(a),
-        None => loader::Server::Boot(listen_config(st, map, gametype, cli.bots)),
+    let server = match session {
+        Session::Join(a) => loader::Server::Join(a),
+        Session::Host { cheats } => {
+            loader::Server::Boot(listen_config(st, map, gametype, cli.bots, cheats))
+        }
     };
     begin_load(cli, st, map, gametype, server);
     if let Some(sh) = st.shell.as_mut() {
@@ -4241,8 +4348,14 @@ fn finish_load(
 }
 
 /// The menu-started server: the chosen map then the other stock maps in turn, the dvars the player set (time and score
-/// limits), on a standard port when one is free so the LAN list finds it.
-fn listen_config(st: &State, map: &str, gametype: &str, bots: Option<usize>) -> listen::Config {
+/// limits), on a standard port when one is free so the LAN list finds it; `cheats` starts it with `devmap`.
+fn listen_config(
+    st: &State,
+    map: &str,
+    gametype: &str,
+    bots: Option<usize>,
+    cheats: bool,
+) -> listen::Config {
     let maps: Vec<String> = st
         .shell
         .as_ref()
@@ -4257,6 +4370,7 @@ fn listen_config(st: &State, map: &str, gametype: &str, bots: Option<usize>) -> 
         port: listen::free_standard_port(),
         game: game_of(&st.input),
         dvars: st.input.cvars.with_prefix("scr_"),
+        cheats,
     }
 }
 

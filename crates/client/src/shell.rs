@@ -31,10 +31,12 @@ use web_time::Instant;
 /// What the app does on the menus' behalf after a UI call.
 #[derive(Debug, PartialEq)]
 pub enum Action {
-    /// Start a listen server on `map` with `gametype` and join it.
+    /// Start a listen server on `map` with `gametype` and join it; `cheats` is `devmap` (`SV_Map_f` sets
+    /// `sv_cheats` on for it, off for `map`).
     StartServer {
         map: String,
         gametype: String,
+        cheats: bool,
     },
     /// Connect to `host:port`.
     Join(String),
@@ -120,6 +122,8 @@ pub struct ShellState {
     /// The frame rate counter (`cg_drawFPS`): its frame times, what it asks for, and what it drew last frame.
     pub fps: hud::fps::Meter,
     pub fps_cfg: hud::fps::Cfg,
+    /// What the renderer drew last frame, for the counter's `-Scene-` lines (set by the app after each render).
+    pub fps_scene: hud::fps::Scene,
     pub fps_drawn: Option<String>,
     /// How many ownerdraws the HUD menus painted last frame (what `cg_draw2D` switches off).
     pub ownerdraws_painted: u64,
@@ -323,6 +327,7 @@ impl ShellState {
             draw_2d: true,
             fps: hud::fps::Meter::default(),
             fps_cfg: hud::fps::Cfg::read(&crate::input::Cvars::default()),
+            fps_scene: hud::fps::Scene::default(),
             fps_drawn: None,
             ownerdraws_painted: 0,
             hud_stats: hud::Stats::default(),
@@ -1195,7 +1200,13 @@ impl Shell {
             }
             // `CL_DrawScreen`: the frame rate counter, over everything but the console, while a match is on.
             self.st.fps_drawn = if self.st.in_game {
-                hud::fps::draw(&self.ui, &mut p, &self.st.fps, &self.st.fps_cfg)
+                hud::fps::draw(
+                    &self.ui,
+                    &mut p,
+                    &self.st.fps,
+                    &self.st.fps_cfg,
+                    self.st.fps_scene,
+                )
             } else {
                 None
             };
@@ -1848,6 +1859,7 @@ impl HostCx<'_> {
                         g if g.is_empty() => "war".to_owned(),
                         g => g,
                     },
+                    cheats: lname == "devmap",
                 }),
                 // `setFromLocString <dvar> <string>` (`Dvar_SetFromLocalizedStr_f`): an `@` reference is localized.
                 "setfromlocstring" => {
@@ -2143,7 +2155,11 @@ impl Host for HostCx<'_> {
                     .gametypes
                     .get(self.gametype_sel())
                     .map_or_else(|| "war".into(), |g| g.id.clone());
-                self.st.actions.push(Action::StartServer { map, gametype });
+                self.st.actions.push(Action::StartServer {
+                    map,
+                    gametype,
+                    cheats: false,
+                });
                 true
             }
             // The list is made again; a quick refresh asks the servers it has again without forgetting them. Opening the

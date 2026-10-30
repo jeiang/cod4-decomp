@@ -356,9 +356,13 @@ mod tests {
     fn the_dof_dvars_set_the_bias_and_the_tweaked_blur() {
         let s = Gfx::from_cvars(&cvars(&[])).settings(render::Settings::default());
         assert_eq!((s.dof_bias, s.dof_tweak), (0.5, None));
-        // Cheat dvars do nothing without `sv_cheats`.
-        let s = Gfx::from_cvars(&cvars(&[("r_dof_bias", "2"), ("r_dof_tweak", "1")]))
-            .settings(render::Settings::default());
+        // Cheat dvars do nothing while the server has `sv_cheats` off.
+        let s = Gfx::from_cvars(&cvars(&[
+            ("sv_cheats", "0"),
+            ("r_dof_bias", "2"),
+            ("r_dof_tweak", "1"),
+        ]))
+        .settings(render::Settings::default());
         assert_eq!((s.dof_bias, s.dof_tweak), (0.5, None));
         let g = Gfx::from_cvars(&cvars(&[
             ("sv_cheats", "1"),

@@ -22,6 +22,7 @@ pub struct Config {
     pub port: u16,
     pub game: String,
     pub dvars: Vec<(String, String)>,
+    pub cheats: bool,
 }
 
 /// No listen server, so no objective counters: bombs planted, defused, airstrikes, helicopters, helicopter shots.

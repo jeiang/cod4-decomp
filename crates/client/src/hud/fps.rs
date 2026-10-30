@@ -4,12 +4,13 @@
 //! developer font while a match is on (`CL_DrawScreen` draws it under the console, above the HUD and the menus, so
 //! `cg_draw2D` does not hide it).
 //!
-//! `cg_drawFPS` is the enum `Off`, `Simple`, `SimpleRanges`, `Verbose`. The original computes the same numbers for
-//! every mode (the average frame rate over the window, the slowest and fastest frame as rates, the mean deviation of
-//! the frame times, the average and extreme frame times in ms); which lines it prints per mode follows the enum's
-//! names: `Simple` is the rate alone, `SimpleRanges` adds the ranges, `Verbose` adds the frame-time line. The
-//! original's `Verbose` also lists memory and scene statistics this engine does not keep. The rate turns red below
-//! 55 and white above 65 frames per second (`Vec4Lerp(colorRed, colorWhite, (fps - 55) / 10)`).
+//! `cg_drawFPS` is the enum `Off`, `Simple`, `SimpleRanges`, `Verbose`. Every mode but `Off` prints the same two
+//! lines (`CG_DrawFPS` does not look at the mode until its scene statistics): the rate with the slowest and fastest
+//! frame as rates and the mean deviation of the frame times, `(min-max, var) fps`, then the shortest, longest and
+//! average frame time, `(min-max) avg cg ms/frame`. From `SimpleRanges` (`cg_drawFPS >= 2`) on, a `-Scene-`
+//! caption and the batches the last frame drew (` prim`) follow. The original's other lines (the server's frame
+//! time of a listen server, free memory, triangle counts, texture memory) count what this engine does not keep. The
+//! rate turns red below 55 and white above 65 frames per second (`Vec4Lerp(colorRed, colorWhite, (fps - 55) / 10)`).
 //!
 //! With `cg_drawFPSLabels` on, each value is right-aligned to the label column and its label follows; off, the value
 //! alone sits at the right edge. `cg_debugInfoCornerOffset` moves the column from the top-right corner.
@@ -29,8 +30,9 @@ const SCALE: f32 = 0.75;
 const COLUMN_LABEL: &str = " cg ms/frame";
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
-/// `colorWhiteFaded`, the labels' colour.
+/// `colorWhiteFaded`, the labels' colour, and `colorGreenFaded`, the captions'.
 const WHITE_FADED: [f32; 4] = [1.0, 1.0, 1.0, 0.75];
+const GREEN_FADED: [f32; 4] = [0.0, 1.0, 0.0, 0.75];
 
 /// `cg_drawFPS` as the enum the original registers it with (`cg_drawFpsNames`), by index or name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,37 +180,74 @@ fn rate_color(fps: i32) -> [f32; 4] {
     std::array::from_fn(|i| RED[i] + (WHITE[i] - RED[i]) * t)
 }
 
-/// The lines a mode prints: value, label, the value's colour.
-pub fn lines(mode: Mode, r: &Reading) -> Vec<(String, &'static str, [f32; 4])> {
-    let color = rate_color(r.fps);
-    match mode {
-        Mode::Off => Vec::new(),
-        Mode::Simple => vec![(r.fps.to_string(), " FPS", color)],
-        Mode::SimpleRanges | Mode::Verbose => {
-            let mut v = vec![(
-                format!("({}-{}, {}) {}", r.fps_min, r.fps_max, r.variance, r.fps),
-                " FPS",
-                color,
-            )];
-            if mode == Mode::Verbose {
-                v.push((
-                    format!("({}-{}) {:.2}", r.ms_min, r.ms_max, r.ms_avg),
-                    " cg ms/frame",
-                    WHITE,
-                ));
-            }
-            v
+/// What the last frame drew, for the `-Scene-` lines (`R_TrackStatistics`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scene {
+    /// Batches drawn (`c_batches`, ` prim`): the scene's, the shadow maps' and the dynamic lights'.
+    pub prims: usize,
+}
+
+/// One printed line: a value with its label (`CG_CornerDebugPrint`) or a caption (`CG_CornerDebugPrintCaption`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Line {
+    Value {
+        value: String,
+        label: &'static str,
+        color: [f32; 4],
+    },
+    Caption(&'static str),
+}
+
+impl Line {
+    fn value(value: String, label: &'static str, color: [f32; 4]) -> Line {
+        Line::Value {
+            value,
+            label,
+            color,
+        }
+    }
+
+    /// The line as the run report shows it (value and label, or the caption).
+    pub fn text(&self) -> String {
+        match self {
+            Line::Value { value, label, .. } => format!("{value}{label}"),
+            Line::Caption(c) => (*c).to_owned(),
         }
     }
 }
 
+/// The lines a mode prints, in order (`CG_DrawFPS`): nothing for `Off`; the rate and frame-time lines for every
+/// other mode; from `SimpleRanges` on (`cg_drawFPS >= 2`) the scene statistics too.
+pub fn lines(mode: Mode, r: &Reading, scene: Scene) -> Vec<Line> {
+    if mode == Mode::Off {
+        return Vec::new();
+    }
+    let mut v = vec![
+        Line::value(
+            format!("({}-{}, {}) {}", r.fps_min, r.fps_max, r.variance, r.fps),
+            " FPS",
+            rate_color(r.fps),
+        ),
+        Line::value(
+            format!("({}-{}) {:.2}", r.ms_min, r.ms_max, r.ms_avg),
+            " cg ms/frame",
+            WHITE,
+        ),
+    ];
+    if mode != Mode::Simple {
+        v.push(Line::Caption("-Scene-"));
+        v.push(Line::value(scene.prims.to_string(), " prim", WHITE));
+    }
+    v
+}
+
 /// Draws the counter; the text of the first line drawn, for the run report, or `None` when nothing was.
-pub fn draw(ui: &Ui, p: &mut Painter, meter: &Meter, cfg: &Cfg) -> Option<String> {
+pub fn draw(ui: &Ui, p: &mut Painter, meter: &Meter, cfg: &Cfg, scene: Scene) -> Option<String> {
     if cfg.mode == Mode::Off {
         return None;
     }
     let r = meter.reading()?;
-    let rows = lines(cfg.mode, &r);
+    let rows = lines(cfg.mode, &r, scene);
     let font = ui.assets.fonts.get(FONT)?;
     let fimg = p.material_of_font(&ui.assets, font, false);
     let unit = ui.place.unit();
@@ -222,44 +261,48 @@ pub fn draw(ui: &Ui, p: &mut Painter, meter: &Meter, cfg: &Cfg) -> Option<String
     // `CG_DrawDevString` with a bottom alignment: the baseline sits a line below `y`.
     let mut y = cfg.offset[1] * unit + step;
     let style = TextStyle::default();
-    let mut first = None;
-    for (value, label, color) in &rows {
-        let x = if cfg.labels {
-            far_right - column
-        } else {
-            far_right
-        };
-        let w = ui2d::text_width(font, value, 0, scale);
+    let x = if cfg.labels {
+        far_right - column
+    } else {
+        far_right
+    };
+    let text = |p: &mut Painter, s: &str, x: f32, y: f32, color: [f32; 4]| {
         p.g.draw_text(
             font,
             &fimg,
             None,
-            value,
-            (x - w).round(),
+            s,
+            x.round(),
             y.round(),
             scale,
-            *color,
+            color,
             style,
             0,
         );
-        if cfg.labels {
-            p.g.draw_text(
-                font,
-                &fimg,
-                None,
+    };
+    for row in &rows {
+        match row {
+            Line::Value {
+                value,
                 label,
-                x.round(),
-                y.round(),
-                scale,
-                WHITE_FADED,
-                style,
-                0,
-            );
+                color,
+            } => {
+                let w = ui2d::text_width(font, value, 0, scale);
+                text(p, value, x - w, y, *color);
+                if cfg.labels {
+                    text(p, label, x, y, WHITE_FADED);
+                }
+            }
+            // A caption is centred on the label column with labels on, right-aligned without.
+            Line::Caption(c) => {
+                let w = ui2d::text_width(font, c, 0, scale);
+                let at = if cfg.labels { x - w / 2.0 } else { x - w };
+                text(p, c, at, y, GREEN_FADED);
+            }
         }
-        first.get_or_insert_with(|| format!("{value}{label}"));
         y += step;
     }
-    first
+    rows.first().map(Line::text)
 }
 
 #[cfg(test)]
@@ -293,8 +336,10 @@ mod tests {
         assert_eq!(r.variance, 1);
     }
 
+    /// `CG_DrawFPS`: every mode but `Off` prints the rate line and the frame-time line; `cg_drawFPS >= 2` adds the
+    /// scene caption and its statistics.
     #[test]
-    fn each_mode_prints_its_lines_and_a_slow_rate_is_red() {
+    fn every_mode_prints_the_rate_and_frame_time_lines_and_2_up_add_the_scene() {
         let r = Reading {
             fps: 40,
             fps_min: 30,
@@ -304,20 +349,29 @@ mod tests {
             ms_max: 33,
             ms_avg: 25.0,
         };
-        assert!(lines(Mode::Off, &r).is_empty());
-        let simple = lines(Mode::Simple, &r);
-        assert_eq!(simple.len(), 1);
-        assert_eq!((simple[0].0.as_str(), simple[0].1), ("40", " FPS"));
-        assert_eq!(simple[0].2, RED);
-        let ranges = lines(Mode::SimpleRanges, &r);
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(ranges[0].0, "(30-50, 2) 40");
-        let verbose = lines(Mode::Verbose, &r);
-        assert_eq!(verbose.len(), 2);
+        let scene = Scene { prims: 321 };
+        assert!(lines(Mode::Off, &r, scene).is_empty());
+        let simple = lines(Mode::Simple, &r, scene);
         assert_eq!(
-            (verbose[1].0.as_str(), verbose[1].1),
-            ("(20-33) 25.00", " cg ms/frame")
+            simple,
+            [
+                Line::value("(30-50, 2) 40".into(), " FPS", RED),
+                Line::value("(20-33) 25.00".into(), " cg ms/frame", WHITE),
+            ]
         );
+        let texts = |v: &[Line]| v.iter().map(Line::text).collect::<Vec<_>>();
+        let ranges = lines(Mode::SimpleRanges, &r, scene);
+        assert_eq!(
+            texts(&ranges),
+            [
+                "(30-50, 2) 40 FPS",
+                "(20-33) 25.00 cg ms/frame",
+                "-Scene-",
+                "321 prim"
+            ]
+        );
+        assert_eq!(ranges[2], Line::Caption("-Scene-"));
+        assert_eq!(lines(Mode::Verbose, &r, scene), ranges);
         assert_eq!(rate_color(65), WHITE);
         assert_eq!(rate_color(60), [1.0, 0.5, 0.5, 1.0]);
     }

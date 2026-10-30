@@ -365,6 +365,8 @@ pub struct NetPlay {
     params: Params,
     /// The `MOVEMENT` configstring [`Self::params`] was made from.
     params_info: String,
+    /// `sv_cheats` as the systeminfo configstring last said it, once the app has acted on it.
+    cheats_seen: Option<bool>,
     boxes: PlayerBoxes,
     /// Per inline model of the map: whether it has surfaces to draw (a clip brush has none).
     brush_surfaces: Vec<bool>,
@@ -461,6 +463,8 @@ pub struct NetPlay {
     fx_demo: Option<(String, Option<i32>)>,
     /// A bullet hit on a player 64 units ahead, asked for by the `hitflesh` script step, played by the next frame.
     want_flesh_hit: bool,
+    /// Subtitles a `subtitle=` script step injected, taken with the sound engine's.
+    injected_subtitles: Vec<audio::engine::Subtitle>,
     /// The server announced a level the app has not acted on yet.
     new_level: Option<String>,
     /// Levels begun since the join: each map change or round restart ([`Self::new_level`]) counts one.
@@ -517,6 +521,7 @@ impl NetPlay {
                 ..Params::default()
             },
             params_info: String::new(),
+            cheats_seen: None,
             boxes: PlayerBoxes::new(clipmap),
             brush_surfaces: brush_surfaces(&map.world),
             pred: Predictor::default(),
@@ -584,6 +589,7 @@ impl NetPlay {
             server_addr: server.to_string(),
             fx_demo: None,
             want_flesh_hit: false,
+            injected_subtitles: Vec::new(),
             new_level: None,
             levels: 0,
             stat_sync: crate::profile::StatSync::default(),
@@ -605,10 +611,40 @@ impl NetPlay {
         self.want_flesh_hit = true;
     }
 
+    /// A `shellshock` server command for the player, `ms` of the default shock, as the server sends one for a
+    /// nearby explosion (for the `shock=` script step).
+    pub fn inject_shock(&mut self, ms: i32) {
+        self.net.commands.push(
+            net::ui::ServerCmd::ShellShock {
+                name: "default".to_owned(),
+                ms,
+            }
+            .encode(),
+        );
+    }
+
+    /// A sound's subtitle `key` of `ms`, as the sound engine reports one of a started sound (for the `subtitle=`
+    /// script step).
+    pub fn inject_subtitle(&mut self, key: &str, ms: u32) {
+        self.injected_subtitles.push(audio::engine::Subtitle {
+            key: key.into(),
+            ms,
+        });
+    }
+
     /// How often an effect kind was played this level (`fx.played` of the report; `shell_eject`, `bullet_impact`,
     /// `bullet_impact_noblood`, ...).
     pub fn fx_played(&self, kind: &str) -> u64 {
         self.effects.played.get(kind).copied().unwrap_or(0)
+    }
+
+    /// A copy of every effect count, for a script's `fxmark` step.
+    pub fn fx_counts(&self) -> HashMap<String, u64> {
+        self.effects
+            .played
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), *v))
+            .collect()
     }
 
     pub fn refused(&self) -> Option<&str> {
@@ -944,9 +980,11 @@ impl NetPlay {
         self.sound.set_volume(volume);
     }
 
-    /// The subtitles of the sounds the server had played since the last call.
+    /// The subtitles of the sounds the server had played since the last call, and any a script step injected.
     pub fn take_subtitles(&mut self) -> Vec<audio::engine::Subtitle> {
-        self.sound.take_subtitles()
+        let mut v = self.sound.take_subtitles();
+        v.append(&mut self.injected_subtitles);
+        v
     }
 
     /// `snd_slaveFadeTime` and `snd_enableReverb`, from the cvar store each frame.
@@ -997,6 +1035,22 @@ impl NetPlay {
             };
             self.params_info = info.to_owned();
         }
+    }
+
+    /// `sv_cheats` from the server's systeminfo when it is new or changed since the last call, as
+    /// `CL_SystemInfoChanged` reads it at the gamestate and `G_InitGame` at every level start: the app sets the
+    /// client's cheat state from it.
+    pub fn take_cheat_state(&mut self) -> Option<bool> {
+        let info = self.net.ui_ref()?.config(net::ui::cs::SYSTEMINFO);
+        if info.is_empty() {
+            return None;
+        }
+        let on = hud::info_value(info, "sv_cheats").is_some_and(|v| v.trim() != "0");
+        if self.cheats_seen == Some(on) {
+            return None;
+        }
+        self.cheats_seen = Some(on);
+        Some(on)
     }
 
     /// Runs one render frame of play. `None` until the server has given the player a body.

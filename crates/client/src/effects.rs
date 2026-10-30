@@ -383,11 +383,13 @@ impl Effects {
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
                 let mut def = self.impact_effect(t, *surface, flesh_column(*head));
                 // `CG_BulletHitEvent`: with blood off, a hit on a player plays the no-blood effect instead.
-                let kind = if def.is_some() && !self.blood_on && *surface == SURFACE_FLESH {
-                    def = self.fx.library().get(NO_BLOOD_FLESH_HIT).cloned();
-                    "bullet_impact_noblood"
-                } else {
-                    "bullet_impact"
+                let kind = match (*surface == SURFACE_FLESH, self.blood_on) {
+                    (true, false) if def.is_some() => {
+                        def = self.fx.library().get(NO_BLOOD_FLESH_HIT).cloned();
+                        "bullet_impact_noblood"
+                    }
+                    (true, _) => "bullet_impact_flesh",
+                    (false, _) => "bullet_impact",
                 };
                 self.play(kind, def, Vec3::from(*origin), Vec3::from(*normal));
             }

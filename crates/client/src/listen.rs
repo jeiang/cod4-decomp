@@ -41,6 +41,8 @@ pub struct Config {
     pub game: String,
     /// Server dvars the player set on the client (`scr_*`: time and score limits, ...), applied before the map starts.
     pub dvars: Vec<(String, String)>,
+    /// The map starts with `devmap` (`sv_cheats` on) instead of `map`.
+    pub cheats: bool,
 }
 
 /// The first standard port nothing is listening on, else 0 (any).
@@ -242,7 +244,11 @@ fn run(
             .clone()
             .unwrap_or_else(|| format!("gametype {gt} map {}", cfg.map));
         lines.push(format!("set sv_mapRotation \"{rotation}\""));
-        lines.push(format!("map {}", cfg.map));
+        lines.push(format!(
+            "{} {}",
+            if cfg.cheats { "devmap" } else { "map" },
+            cfg.map
+        ));
         for line in lines {
             s.exec_line(&line).map_err(|e| format!("{line}: {e}"))?;
         }
