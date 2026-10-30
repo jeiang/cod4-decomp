@@ -952,9 +952,11 @@ impl Ui {
                     }
                 }
             }
-            "statsetusingtable" | "statset" | "statclearbitmask" | "statclearperknew"
-            | "getautoupdate" | "wait" | "setbackground" | "openforgametype"
-            | "closeforgametype" => {
+            "getautoupdate" => {
+                host.ui_script(self, "getautoupdate", &[]);
+            }
+            "statsetusingtable" | "statset" | "statclearbitmask" | "statclearperknew" | "wait"
+            | "setbackground" | "openforgametype" | "closeforgametype" => {
                 host.exec(
                     &*self,
                     &cmd.iter().map(String::as_str).collect::<Vec<_>>().join(" "),

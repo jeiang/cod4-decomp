@@ -55,6 +55,8 @@ pub enum Action {
     },
     /// A console line the shell does not handle itself (binds, `+commands`, ...).
     Console(String),
+    /// The console's `closemenu <name>` (`UI_CloseMenu_f`): closes a named menu after its script finishes.
+    CloseMenu(String),
     /// `vid_restart`: take the graphics settings.
     VidRestart,
     /// `screenshot` or `screenshotJpeg`: write the next frame to the screenshots folder.
@@ -409,6 +411,9 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("sv_voice", "0"),
     ("scr_teambalance", "0"),
     ("g_allowvote", "1"),
+    // `SEH_Init_StringEd` registers the localization warnings (stock defaults 1; `background_main` turns them off).
+    ("loc_warnings", "1"),
+    ("loc_warningsAsErrors", "1"),
     ("sv_punkbuster", "0"),
     // The stock message windows show only while this is 1 (the server's scripts turn it off for hardcore).
     ("ui_hud_obituaries", "1"),
@@ -1771,7 +1776,6 @@ impl HostCx<'_> {
                 // `snd_volume` is read live every frame, and no other snd_ dvar needs a restart: these stay no-ops.
                 "snd_restart"
                 | "updatedvarsfromprofile"
-                | "loc_warnings"
                 | "r_applypicmip"
                 | "writeconfig"
                 | "setprofile" => {}
@@ -1825,6 +1829,7 @@ impl HostCx<'_> {
                     },
                     cheats: name == "devmap",
                 }),
+                "closemenu" => self.st.actions.push(Action::CloseMenu(cmd[1..].join(" "))),
                 // `setFromLocString <dvar> <string>` (`Dvar_SetFromLocalizedStr_f`): an `@` reference is localized.
                 "setfromlocstring" => {
                     if cmd.len() < 3 {
@@ -2200,6 +2205,13 @@ impl Host for HostCx<'_> {
                     .position(|&i| i == self.st.map_sel)
                     .unwrap_or(0);
                 ui.select_feeder_row(self, 4, row);
+                true
+            }
+            // `Script_GetAutoUpdate` is a menu action, not a console command. Stock opens the update URL only
+            // after the updater has found one (`CL_GetAutoUpdate`); this engine has no automatic updater.
+            "getautoupdate" => {
+                self.st
+                    .log("getAutoUpdate: not supported (no automatic updater)");
                 true
             }
             // No PunkBuster and no CD key check here: the menus' buttons say so instead of doing nothing.
@@ -2980,11 +2992,17 @@ mod tests {
         let mut st = ShellState::new(&assets, &install);
         let mut ui = Ui::new(assets, (1280, 720));
         let mut input = Input::detached();
+        // Match `Shell::new`: the UI's registered dvars must exist before a menu's bare-name `exec`.
+        register_defaults(&mut input);
         let mut h = HostCx {
             st: &mut st,
             input: &mut input,
         };
-        let defs: Vec<_> = ui.assets.menus.values().cloned().collect();
+        // By name, so every run walks the menus the same way; and a script's `wait` holds the rest of its buffer
+        // (and every buffer submitted after it) in the input layer, so each menu's buffers are run out before the
+        // next menu, as frames would run them: every script of every menu is reached in every run.
+        let mut defs: Vec<_> = ui.assets.menus.values().cloned().collect();
+        defs.sort_by(|a, b| a.window.name.cmp(&b.window.name));
         for def in defs {
             let m = ui
                 .menu_index(def.window.name.as_deref().unwrap_or(""))
@@ -2992,19 +3010,65 @@ mod tests {
             for src in scripts(&def) {
                 ui.run_script(&mut h, Some(m), None, src);
             }
+            // (A `wait` that ends a buffer counts down only once something follows it, as `Cbuf_Execute` does;
+            // the next menu's scripts are that something.)
+            let mut frames = 0;
+            while !h.input.waiting_on_nothing() && h.input.busy() {
+                if let Some(due) = h.input.take_due() {
+                    h.run_buffer(&ui, due);
+                }
+                frames += 1;
+                assert!(
+                    frames < 10_000,
+                    "a buffer of {:?} never ran out",
+                    def.window.name
+                );
+            }
         }
         assert!(ui.unknown.is_empty(), "unimplemented: {:?}", ui.unknown);
+        // Registration must prevent dvars from taking the unknown-command route; don't mask it in the filter.
+        for name in ["loc_warnings", "loc_warningsaserrors", "onlinegame"] {
+            assert!(h.input.cvar(name).is_some(), "{name} not registered");
+        }
+        assert!(
+            h.st.actions
+                .iter()
+                .any(|a| matches!(a, Action::CloseMenu(_))),
+            "the stock closemenu exec never reached its handler"
+        );
+        assert!(
+            h.st.feed
+                .console
+                .iter()
+                .any(|l| l.contains("no automatic updater")),
+            "the stock getAutoUpdate menu action never reached its handler"
+        );
         // Nor does any `exec` of theirs end as a word nobody runs: the app would forward it to the server as
         // unknown (`CL_ForwardCommandToServer`), and the input layer's pending list holds only its own commands.
-        // Two words are the console's (Xbox) commands, which the stock PC build does not register either, so it
-        // forwards them or says `Unknown command` just the same: `updategamerprofile` (`CL_UpdateGamerProfile`,
-        // `cl_main_xenon`) and `uploadstats` (`LiveStorage_UploadStatsCmd`).
-        const STOCK_UNKNOWN: [&str; 2] = ["updategamerprofile", "uploadstats"];
-        let mut forwarded: Vec<&str> =
+        // These stock PC leftovers are not registered by KisakCOD's PC MP client (the Xbox party commands are
+        // absent from its command registrations). They still use the forward/Unknown-command path, not no-ops.
+        // `updategamerprofile` is `CL_UpdateGamerProfile` (cl_main_xenon), `uploadstats` is LiveStorage's command;
+        // `g_friendly*dist` are earlier-game dvars. Names are compared case-insensitively, as command lookup is.
+        const STOCK_UNKNOWN: [&str; 8] = [
+            "acceptinvite",
+            "g_friendlyfiredist",
+            "g_friendlynamedist",
+            "splitscreencontrols",
+            "updategamerprofile",
+            "uploadstats",
+            "xstopparty",
+            "xstopprivateparty",
+        ];
+        let mut forwarded: Vec<String> =
             h.st.actions
                 .iter()
                 .filter_map(|a| match a {
-                    Action::Console(l) => Some(l.split_whitespace().next().unwrap_or("")),
+                    Action::Console(l) => Some(
+                        l.split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .to_ascii_lowercase(),
+                    ),
                     _ => None,
                 })
                 .filter(|w| !crate::console::is_app_verb(w) && !crate::console::is_command(w))
@@ -3013,7 +3077,7 @@ mod tests {
         forwarded.dedup();
         let unexpected: Vec<&str> = forwarded
             .iter()
-            .copied()
+            .map(String::as_str)
             .filter(|w| !STOCK_UNKNOWN.contains(w))
             .collect();
         assert!(
