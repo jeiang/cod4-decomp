@@ -960,6 +960,14 @@ fn play(
         Duration::from_secs(60),
     )?;
     page.click(server, "Start New Server")?;
+    // Start New Server opens the stock `createserver` menu; its Start button is what starts the listen server.
+    page.until_menu(
+        server,
+        "createserver",
+        "Start New Server did not open the createserver menu",
+        Duration::from_secs(10),
+    )?;
+    page.click(server, "Start")?;
     page.until_menu(
         server,
         "error_popmenu",
