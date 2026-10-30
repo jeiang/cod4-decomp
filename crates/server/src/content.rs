@@ -345,6 +345,7 @@ impl Content {
         self.modded = Layer::default();
         self.db.unload(MOD_TAG);
         self.decode_zone(&path, "mod", MOD_TAG)?;
+        self.base.merge(&self.modded);
         if self.map_name.is_some() {
             self.map.merge(&self.modded);
         }
@@ -713,6 +714,26 @@ mod tests {
             b"stock war"
         );
         assert_eq!(c.rawfile("mod/new.gsc").unwrap(), b"new");
+    }
+
+    /// A mod's rawfiles are readable as soon as `mod.ff` is loaded, before any map: the boot `exec` of a config the mod
+    /// carries and the `radiant/keys.txt` lookups happen then.
+    #[test]
+    fn mod_ff_rawfiles_are_readable_right_after_load_mod_before_a_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = dir.path().join("mods/t");
+        std::fs::create_dir_all(&m).unwrap();
+        std::fs::write(
+            m.join("mod.ff"),
+            assets::zone::testing::rawfile_zone(&[("mod/boot.cfg", "set x 1")]),
+        )
+        .unwrap();
+        let install = Install::open_game(dir.path(), "mods/t").unwrap();
+        let mut c = Content::default();
+        assert!(c.load_mod(&install).unwrap());
+        assert_eq!(c.map_name, None);
+        assert_eq!(c.rawfile("mod/boot.cfg").unwrap(), b"set x 1");
+        assert!(c.rawfiles().any(|(n, _)| n == "mod/boot.cfg"));
     }
 
     #[test]

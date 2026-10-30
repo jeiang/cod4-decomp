@@ -22,8 +22,9 @@ use super::phys::PhysPreset;
 use super::sound::{LoadedSound, SndCurve, SoundAliasList};
 use super::xmodel::XModel;
 
-/// Lowercase name to (zone tag, asset).
-type Table<T> = HashMap<String, (u8, Arc<T>)>;
+/// Lowercase name to the definitions of every zone that gave one, by rising tag (ties in load order): the last is
+/// the one in use, the rest its override chain (`XAssetEntry::nextOverride`), which unloading a zone promotes from.
+type Table<T> = HashMap<String, Vec<(u8, Arc<T>)>>;
 
 /// An asset type that zones reference by name across each other.
 pub trait Linkable: Any + Send + Sync + Sized {
@@ -53,7 +54,10 @@ macro_rules! linkable {
         impl Db {
             /// Drops the definitions of the zone tagged `tag` (`DB_UnloadXZone`).
             pub fn unload(&mut self, tag: u8) {
-                $(self.$field.retain(|_, (t, _)| *t != tag);)*
+                $(self.$field.retain(|_, chain| {
+                    chain.retain(|(t, _)| *t != tag);
+                    !chain.is_empty()
+                });)*
             }
         }
     };
@@ -77,22 +81,23 @@ pub fn is_stub(name: &str) -> bool {
 }
 
 impl Db {
-    /// The definition of `name` (a leading comma ignored), when a zone decoded so far has one.
+    /// The definition of `name` (a leading comma ignored) in use, when a zone decoded so far has one.
     pub fn get<T: Linkable>(&mut self, name: &str) -> Option<&Arc<T>> {
         T::table(self)
             .get(&name.trim_start_matches(',').to_ascii_lowercase())
+            .and_then(|chain| chain.last())
             .map(|(_, v)| v)
     }
 
-    /// `DB_LinkXAssetEntry` for one decoded asset of the zone tagged `tag`: a stub becomes the definition an earlier
-    /// zone gave (or stays the stub, when none did); a definition is filed, over an earlier zone's of a lower or equal
-    /// tag.
+    /// `DB_LinkXAssetEntry` for one decoded asset of the zone tagged `tag`: a stub becomes the definition in use (or
+    /// stays the stub, when none is); a definition joins the chain, in use when its tag is at least the current
+    /// one's (`DB_OverrideAsset`), else behind the ones that outrank it.
     pub(super) fn link<T: Linkable>(&mut self, tag: u8, v: Arc<T>) -> Arc<T> {
         let Some(name) = v.name() else { return v };
         let key = name.trim_start_matches(',').to_ascii_lowercase();
         if is_stub(name) {
-            return match T::table(self).get(&key) {
-                Some((_, found)) => found.clone(),
+            return match self.get::<T>(&key) {
+                Some(found) => found.clone(),
                 None => {
                     tracing::debug!(
                         ty = T::TYPE.name(),
@@ -103,10 +108,9 @@ impl Db {
                 }
             };
         }
-        let table = T::table(self);
-        if table.get(&key).is_none_or(|(t, _)| *t <= tag) {
-            table.insert(key, (tag, v.clone()));
-        }
+        let chain = T::table(self).entry(key).or_default();
+        let at = chain.partition_point(|(t, _)| *t <= tag);
+        chain.insert(at, (tag, v.clone()));
         v
     }
 }
@@ -150,7 +154,13 @@ mod tests {
             db.get::<Material>(",gfx_smk").unwrap(),
             &modded
         ));
+        // Unloading the mod puts the shadowed definition back in use (`DB_UnloadXZone`); unloading that too leaves
+        // the lower-ranked one, then nothing.
         db.unload(16);
+        assert!(Arc::ptr_eq(db.get::<Material>("gfx_smk").unwrap(), &common));
+        db.unload(4);
+        assert!(Arc::ptr_eq(db.get::<Material>("gfx_smk").unwrap(), &low));
+        db.unload(2);
         assert!(db.get::<Material>("gfx_smk").is_none());
     }
 
