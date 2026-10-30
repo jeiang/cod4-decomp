@@ -312,6 +312,31 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
                 ));
             }
             c.capture("scoreboard")?;
+            // The keys stay the game's while Tab is held: the down arrow looks down (`+lookdown`) and leaves the
+            // list alone; the wheel scrolls the list and goes no further, so `weapnext` on it changes no weapon
+            // (`Scoreboard_HandleInput`).
+            let top0 = c.lookup("hud.scores_top")?;
+            let pitch0 = c.lookup("player.angles.0")?.as_f64().unwrap_or(0.0);
+            let weapon0 = c.lookup("player.weapon")?;
+            c.key("downarrow", "down")?;
+            c.pause(Duration::from_millis(300))?;
+            c.key("downarrow", "up")?;
+            c.until(
+                json!({"player.angles.0": {"gt": pitch0 + 2.0}}),
+                secs(5),
+                "the down arrow did not look down while Tab was held",
+            )?;
+            if c.lookup("hud.scores_top")? != top0 {
+                return Err("the down arrow scrolled the scoreboard; it is the binds' key".to_owned());
+            }
+            c.ask(json!({"cmd": "wheel", "y": -1.0}))?;
+            c.pause(Duration::from_millis(300))?;
+            if c.lookup("hud.scores_top")? == top0 {
+                return Err("the wheel did not scroll the scoreboard".to_owned());
+            }
+            if c.lookup("player.weapon")? != weapon0 {
+                return Err("the wheel over the scoreboard reached the binds (the weapon changed)".to_owned());
+            }
             Ok(())
         };
         let r = held(c);
@@ -362,6 +387,15 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         w.ticks,
         w.shots
     ));
+    // The player must have got the sights on a bot and pulled the trigger: a walker that never aligns proves
+    // nothing about the crosshair names.
+    if w.shots == 0 {
+        return Err(format!(
+            "the stage's player never fired in {} ticks (turned with {})",
+            w.ticks,
+            w.turning()
+        ));
+    }
     Ok(())
 }
 

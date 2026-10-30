@@ -79,3 +79,9 @@ presses binds and keys, types, clicks a menu item by name or text where the stat
 `Walker` is a stage's own player in a match, turning toward the nearest living enemy with the mouse (or the arrow
 keys when the pointer could not be locked), walking with the forward key and firing with the attack button. The
 match stages move onto it one by one (#376): `client-hud` plays its whole match through the channel.
+
+Mouse look needs what a person's does: the window focused and the pointer locked (`client.focused`,
+`client.pointer_locked`, and `client.look_gate` names what drops the motion). On the headless sway display of the
+Linux host's slots (`scripts/virtual-display.sh`, `WLR_LIBINPUT_NO_DEVICES=1`) the seat has no pointer or keyboard
+device, so the lock is refused and `Walker` turns with the arrow keys instead, holding each for the time the error
+takes at `cl_yawspeed`; the stage's notes say which path ran and what the client reported.

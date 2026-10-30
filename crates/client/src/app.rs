@@ -5148,6 +5148,10 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "out": cli.out.as_ref().map(|p| p.display().to_string()),
                 "backends": cli.backend.clone(),
                 "present": cli.present.clone(),
+                // Whether mouse look can work: the window has the focus and the pointer is locked, or why not.
+                "focused": st.window.has_focus(),
+                "pointer_locked": st.grabbed,
+                "look_gate": st.input.look_gate(),
             }),
             "menu" => menu_state(st),
             "hud" => hud_state(st),
@@ -5246,6 +5250,7 @@ fn hud_state(st: &mut State) -> Value {
         },
         "missing_images": sh.missing(),
         "scoreboard_shown": g.scoreboard,
+        "scores_top": sh.st.scores_top,
         "dead": g.dead,
         "intermission": g.intermission,
         "team": g.team,

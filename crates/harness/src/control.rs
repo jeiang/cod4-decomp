@@ -392,6 +392,10 @@ pub struct Walker {
     turn: Turn,
     /// Degrees per mouse count: `sensitivity * m_yaw` and `sensitivity * m_pitch`.
     per_count: [f32; 2],
+    /// Degrees per second the arrow keys turn at: `cl_yawspeed` and `cl_pitchspeed`.
+    per_sec: [f32; 2],
+    /// What the client said of its window when the mouse was tried: focus, pointer lock, the look gate's reason.
+    pub look: String,
     held: Vec<&'static str>,
     last: Option<[f32; 3]>,
     stuck: u32,
@@ -424,9 +428,15 @@ impl Walker {
             sens * cvar(c, "m_yaw", 0.022)?,
             sens * cvar(c, "m_pitch", 0.022)?,
         ];
+        let per_sec = [
+            cvar(c, "cl_yawspeed", 140.0)?,
+            cvar(c, "cl_pitchspeed", 140.0)?,
+        ];
         Ok(Self {
             turn: Turn::Untried,
             per_count,
+            per_sec,
+            look: String::new(),
             held: Vec::new(),
             last: None,
             stuck: 0,
@@ -551,9 +561,15 @@ impl Walker {
             if yaw_err.abs() >= 2.0 || pitch_err.abs() >= 2.0 {
                 c.ask(json!({"cmd": "mouse", "dx": dx.clamp(-2000.0, 2000.0), "dy": dy.clamp(-2000.0, 2000.0)}))?;
                 if self.turn == Turn::Untried && yaw_err.abs() >= 10.0 {
-                    // The first real turn tells whether the look gate takes the mouse at all.
+                    // The first real turn tells whether the look gate takes the mouse at all, and the client says
+                    // why not when it does not (no focus, or a pointer the compositor would not lock).
                     c.frames(3)?;
                     let after = vec3(&c.state("player")?["angles"]);
+                    let client = c.state("client")?;
+                    self.look = format!(
+                        "focused {}, pointer locked {}, look gate {}",
+                        client["focused"], client["pointer_locked"], client["look_gate"]
+                    );
                     self.turn = if wrap(after[1] - angles[1]).abs() > 1.0 {
                         Turn::Mouse
                     } else {
@@ -569,22 +585,33 @@ impl Walker {
             }
         }
         self.key_ticks += 1;
-        // `cl_yawspeed` is 140 degrees a second: a key held a tick turns some 20 degrees.
-        self.hold(c, "+left", yaw_err > 6.0)?;
-        self.hold(c, "+right", yaw_err < -6.0)?;
-        self.hold(c, "+lookdown", pitch_err > 6.0)?;
-        self.hold(c, "+lookup", pitch_err < -6.0)?;
+        // A key turns at `cl_yawspeed` degrees a second: it is held for the time the error takes (a frame's worth
+        // of slack either way), so the view can settle within the firing tolerance.
+        for (err, per_sec, more, less) in [
+            (yaw_err, self.per_sec[0], "+left", "+right"),
+            (pitch_err, self.per_sec[1], "+lookdown", "+lookup"),
+        ] {
+            if err.abs() < 1.5 {
+                continue;
+            }
+            let bind = if err > 0.0 { more } else { less };
+            let ms = (err.abs() / per_sec.max(1.0) * 1000.0).clamp(16.0, 500.0) as u64;
+            self.hold(c, bind, true)?;
+            c.pause(Duration::from_millis(ms))?;
+            self.hold(c, bind, false)?;
+        }
         Ok(())
     }
 
     /// Whether the mouse or the arrow keys turned the view, for the stage's notes.
-    pub fn turning(&self) -> &'static str {
+    pub fn turning(&self) -> String {
         match self.turn {
-            Turn::Untried => "never turned",
-            Turn::Mouse => "the mouse",
-            Turn::Keys => {
-                "the arrow keys (the pointer could not be locked, so the mouse was dropped)"
-            }
+            Turn::Untried => "never turned".to_owned(),
+            Turn::Mouse => format!("the mouse ({})", self.look),
+            Turn::Keys => format!(
+                "the arrow keys: the mouse motion was dropped by the look gate ({})",
+                self.look
+            ),
         }
     }
 
