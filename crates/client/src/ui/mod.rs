@@ -577,6 +577,19 @@ pub(crate) enum ListZone {
 /// Width of a list's scroll bar and the height of its arrows, in virtual units.
 pub(crate) const SCROLL_W: f32 = 16.0;
 
+/// One item of an open menu as the control channel reports it: what an agent finds a click's target by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemReport {
+    /// The item's `name`, or empty.
+    pub name: String,
+    /// The text the item shows now, localized; empty for an item with none.
+    pub text: String,
+    /// Whether the item shows and takes the pointer now.
+    pub visible: bool,
+    /// `[x, y, w, h]` in window pixels: the rectangle a click is tested against.
+    pub rect: [f32; 4],
+}
+
 /// The menu system.
 pub struct Ui {
     pub assets: UiAssets,
@@ -1597,19 +1610,31 @@ impl Ui {
         self.item_pixels(m, i).contains(x, y)
     }
 
-    /// The items of one open menu, for the control channel's state document: each item's name and its rectangle in
-    /// window pixels (`[x, y, w, h]`), which is what a click is tested against.
-    pub fn item_report(&self, host: &dyn Host, menu: &str) -> Vec<(String, String, [f32; 4])> {
+    /// The items of one open menu, for the control channel's state document: each item's name, its text as shown
+    /// (localized, or the dvar's value), whether it shows now, and its rectangle in window pixels (`[x, y, w, h]`),
+    /// which is what a click is tested against: a type-0 text item answers the pointer over its text only, so its
+    /// rectangle is the text's.
+    pub fn item_report(&mut self, host: &mut dyn Host, menu: &str) -> Vec<ItemReport> {
         let Some(m) = self.menu_index(menu) else {
             return Vec::new();
         };
+        let def = self.menus[m].def.clone();
         (0..self.menus[m].items.len())
             .map(|i| {
-                let d = &self.menus[m].def.items[i];
+                let d = &def.items[i];
                 let name = d.window.name.as_deref().unwrap_or("").to_owned();
-                let text = self.item_text(host, m, i, d);
-                let p = self.item_pixels(m, i);
-                (name, text, [p.x, p.y, p.w, p.h])
+                let text = self.item_text(&*host, m, i, d);
+                let p = self
+                    .text_rect_px(&*host, m, i)
+                    .filter(|_| d.ty == ity::TEXT)
+                    .unwrap_or_else(|| self.item_pixels(m, i));
+                let visible = self.item_live(host, m, i);
+                ItemReport {
+                    name,
+                    text,
+                    visible,
+                    rect: [p.x, p.y, p.w, p.h],
+                }
             })
             .collect()
     }

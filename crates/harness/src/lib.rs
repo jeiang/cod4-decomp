@@ -4,6 +4,7 @@
 #![cfg_attr(test, allow(clippy::print_stderr, clippy::print_stdout))]
 pub mod bundle;
 pub mod child;
+pub mod control;
 pub mod diff;
 pub mod logcheck;
 pub mod manifest;

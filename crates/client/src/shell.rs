@@ -818,16 +818,6 @@ impl Shell {
         self.ui.click(&mut h, want)
     }
 
-    /// The items of an open menu with their names, texts and rectangles ([`Ui::item_report`]).
-    pub fn item_report(
-        &mut self,
-        input: &mut Input,
-        menu: &str,
-    ) -> Vec<(String, String, [f32; 4])> {
-        let h = Self::host(&mut self.st, input);
-        self.ui.item_report(&h, menu)
-    }
-
     /// Carries out one thing the server asked of the UI.
     pub fn apply(&mut self, input: &mut Input, ev: net::ui::UiEvent) {
         use net::ui::UiEvent;
@@ -1143,6 +1133,12 @@ impl Shell {
     pub fn mouse_move(&mut self, input: &mut Input, x: f32, y: f32) {
         let mut h = Self::host(&mut self.st, input);
         self.ui.mouse_move(&mut h, x, y);
+    }
+
+    /// The items of an open menu, as the control channel reports them.
+    pub fn menu_items(&mut self, input: &mut Input, menu: &str) -> Vec<crate::ui::ItemReport> {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.item_report(&mut h, menu)
     }
 
     /// Draws the UI over `target`; the world, if any, is already there (`clear` for the menu-only case).

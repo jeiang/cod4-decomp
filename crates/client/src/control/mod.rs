@@ -22,6 +22,7 @@ pub const PARTS: &[&str] = &[
     "scoreboard",
     "hud",
     "draw",
+    "render",
     "sound",
     "fx",
     "net",

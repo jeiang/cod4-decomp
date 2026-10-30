@@ -48,6 +48,14 @@ The `menu` section lists each open menu's items with their `name`, the `text` th
 so an agent can click a stock button by its label. The listen server's `clients` (`{"cmd":"server","op":"state",
 "what":"clients"}`) carry each client's `weapons` (owned, by name) and the cheat commands' state (`noclip`, `ufo`,
 `godmode`, `demigod`, `notarget`), which the `client-host-console` stage reads.
+Paths a stage leans on: `menu.open` (the stack), `menu.items[]` (`menu`, `name`, `text` as shown, `visible`, and
+`rect` `[x, y, w, h]` in window pixels, the rectangle a click is tested against: a static text item's is its text's),
+`console.open` and `console.text` (the console's lines as one text, for `contains`), `player.alive|dead|origin|angles|
+team|client`, `entities.list[]` (`kind`, `origin`, `team`, `dead`, `client`, `actor`), `hud.report` (what the HUD shows
+now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `hud.stats` (what it drew over the run:
+`messages`, `chat`, `window_lines`, `scoreboard_frames`, `killcam_frames`, `names_max`, `unresolved`, ...),
+`hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
+`net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`).
 
 ```sh
 printf '%s\n' '{"id":1,"cmd":"state","what":"menu"}' | nc -q1 127.0.0.1 18095
@@ -60,8 +68,14 @@ and `QueueTransport` (a page polls it, and replies by id), so a browser transpor
 A request whose handler cannot answer yet (a `wait`, a capture between frames, a step with frames left, a listen
 server's reply) stays at the head of the queue and is offered again on the next frame.
 
-## The stage
+## The stages
 
 `control-channel` in the harness runs the acceptance of #378: console opened with the player's key, `bots 3` typed in,
 four players waited for, the entity list and scoreboard read, a menu item clicked at the centre of the rectangle the
 state document gave for it, and a capture written with no visible window.
+
+`crates/harness/src/control.rs` is the harness's side: `Driven` starts a client with `--control 0`, asks, waits,
+presses binds and keys, types, clicks a menu item by name or text where the state document put it, and captures;
+`Walker` is a stage's own player in a match, turning toward the nearest living enemy with the mouse (or the arrow
+keys when the pointer could not be locked), walking with the forward key and firing with the attack button. The
+match stages move onto it one by one (#376): `client-hud` plays its whole match through the channel.

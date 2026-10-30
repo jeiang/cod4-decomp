@@ -5130,6 +5130,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "open": st.shell.as_ref().is_some_and(|sh| sh.st.console.active()),
                 "field": st.shell.as_ref().map(|sh| sh.st.console.field()),
                 "lines": st.shell.as_ref().map(|sh| sh.st.feed.console.clone()),
+                // The lines as one text, for a `contains` on a line's part (`console.text`).
+                "text": st.shell.as_ref().map(|sh| devctrl::text_lines(&sh.st.feed.console)),
                 "messages": st.input.messages(),
             }),
             "cvars" => {
@@ -5159,6 +5161,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "distortion_copy": st.distortion_now,
                 "late": st.late,
             }),
+            "render" => render_report(st),
             other => match st.net.as_mut() {
                 Some(net) => net.control_state(other),
                 None => Value::Null,
@@ -5169,7 +5172,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
     Value::Object(m)
 }
 
-/// The menus on the stack, and the item that has the focus with the rectangle a click is tested against.
+/// The menus on the stack, the item that has the focus, and every item of each open menu with the rectangle a click
+/// is tested against.
 fn menu_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
@@ -5181,29 +5185,41 @@ fn menu_state(st: &mut State) -> Value {
         .map(|(menu, item, rect)| json!({"menu": menu, "item": item, "rect": rect}));
     let mut items = Vec::new();
     for menu in &open {
-        for (name, text, rect) in sh.item_report(&mut st.input, menu) {
-            items.push(json!({"menu": menu, "name": name, "text": text, "rect": rect}));
+        for it in sh.menu_items(&mut st.input, menu) {
+            items.push(json!({
+                "menu": menu,
+                "name": it.name,
+                "text": it.text,
+                "visible": it.visible,
+                "rect": it.rect,
+            }));
         }
     }
     json!({"open": open, "focused": focused, "items": items})
 }
 
-/// What the HUD drew and counted, and the game facts the scoreboard reads.
+/// What the HUD drew and counted since the run began (`stats`, the counters `hud_draw` of `ui-script.json` has),
+/// what it shows now (`report`, `live`), and the game facts the scoreboard reads.
 fn hud_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_ref() else {
         return Value::Null;
     };
     let g = &sh.st.game;
+    let live = &sh.st.live;
     json!({
         "report": sh.st.game.hud.report(),
-        "stats": {
-            "messages": sh.st.hud_stats.messages,
-            "obituaries": sh.st.hud_stats.obituaries,
-            "scoreboard_frames": sh.st.hud_stats.scoreboard_frames,
-            "killcam_frames": sh.st.hud_stats.killcam_frames,
-            "names_max": sh.st.hud_stats.names_max,
-            "unresolved": sh.st.hud_stats.unresolved,
+        "stats": sh.st.hud_stats.report(),
+        "live": {
+            "killcam": live.killcam,
+            "dead": live.dead,
+            "intermission": live.intermission,
+            "following": live.following.is_some(),
+            // A message window has a line up.
+            "feed": (0..crate::hud::WINDOWS).any(|w| sh.st.feed.active(w, live.time)),
+            "players_listed": live.scores.len(),
+            "own_team": live.own_team,
         },
+        "missing_images": sh.missing(),
         "scoreboard_shown": g.scoreboard,
         "dead": g.dead,
         "intermission": g.intermission,
