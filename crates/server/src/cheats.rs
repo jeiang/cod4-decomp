@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The cheat and developer client commands of `ClientCommand` (KisakCOD `game_mp/g_cmds_mp.cpp`): `give`, `take`,
-//! `god`, `demigod`, `notarget`, `noclip`, `ufo`, `setviewpos`, `entitycount`, `printentities`, `visionsetnaked` and
-//! `visionsetnight`. Each one a player may type is gated by `CheatsOk`: `sv_cheats` (which `devmap` turns on) and a
-//! living player, else the localized refusal (`GAME_CHEATSNOTENABLED`, `GAME_MUSTBEALIVECOMMAND`) goes back as the
-//! `e` game message does. Issue #370.
+// Translated from KisakCOD `game_mp/g_cmds_mp.cpp` (GPL-3.0), copyright KisakCOD contributors.
+//! Cheat and developer client commands (`ClientCommand`, #370). `CheatsOk` gates `give`, `take`, `god`, `demigod`,
+//! `notarget`, `noclip`, `ufo` and `kill` by `sv_cheats` and a living player, with localized game messages on refusal.
+//! `setviewpos` requires cheats but not life; `entitycount` requires cheats and prints on the server. Stock
+//! `printentities` and the vision-set commands do not use `CheatsOk`.
 
 use net::ui::{PrintKind, ServerCmd};
 use sim::weapon::WeaponTable;
