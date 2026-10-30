@@ -57,6 +57,11 @@ now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `h
 `hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
 `net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`).
 
+`entities.list[].model_name` resolves each snapshot model index through the server's model configstrings.
+`net.props` lists the live client-side dynamic props by `model_name` and `origin` (these are not server entities).
+For same-camera rendering comparisons, the diagnostic console commands `drawscriptmodels 0` and `drawprops 0`
+hide those two classes independently; `1` restores them, as with `drawvehicles`.
+
 ```sh
 printf '%s\n' '{"id":1,"cmd":"state","what":"menu"}' | nc -q1 127.0.0.1 18095
 ```

@@ -2,7 +2,8 @@
 //! #357: the mp_crash garage is a match scene, not a serverless flythrough. The car is a script_model and the
 //! loose tyre is a client-side dynamic prop. Compare each class against the same live camera with it hidden.
 //! Reference: KisakCOD (GPL-3.0), game/g_scr_mover.cpp:201-207 (SP_script_model), cgame/cg_ents.cpp:847-883
-//! (CG_ScriptMover); DynEntity/DynEntity_client.cpp (client-side props). CoD4 MP 1.8, used as a guide for 1.7.
+//! (CG_ScriptMover); DynEntity/DynEntity_client.cpp:82-119 (DynEntCl_InitEntities), gfx_d3d/r_dpvs.cpp:1451-1457
+//! (R_AddDynEntToCell). CoD4 MP 1.8, used as a guide for 1.7.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
 use crate::control::Driven;
