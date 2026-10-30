@@ -2976,18 +2976,20 @@ mod tests {
             for src in scripts(&def) {
                 ui.run_script(&mut h, Some(m), None, src);
             }
-            for _ in 0..10_000 {
+            // (A `wait` that ends a buffer counts down only once something follows it, as `Cbuf_Execute` does;
+            // the next menu's scripts are that something.)
+            let mut frames = 0;
+            while !h.input.waiting_on_nothing() && h.input.busy() {
                 if let Some(due) = h.input.take_due() {
                     h.run_buffer(&ui, due);
-                } else if !h.input.busy() {
-                    break;
                 }
+                frames += 1;
+                assert!(
+                    frames < 10_000,
+                    "a buffer of {:?} never ran out",
+                    def.window.name
+                );
             }
-            assert!(
-                !h.input.busy(),
-                "a buffer of {:?} never ran out",
-                def.window.name
-            );
         }
         assert!(ui.unknown.is_empty(), "unimplemented: {:?}", ui.unknown);
         // Nor does any `exec` of theirs end as a word nobody runs: the app would forward it to the server as
