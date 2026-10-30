@@ -472,7 +472,7 @@ fn play(
     started: Instant,
 ) -> Result<(), String> {
     let since = |started: Instant| started.elapsed().as_secs_f64() * 1000.0;
-    let left = |started: Instant| LIMIT.saturating_duration_since(started.elapsed());
+    let left = |started: Instant| LIMIT.saturating_sub(started.elapsed());
     // The page answers once the module runs: the first request waits for the wasm to load and draw.
     page.until(
         server,
