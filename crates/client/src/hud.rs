@@ -14,6 +14,7 @@
 mod elems;
 mod feed;
 pub mod fill;
+pub mod fps;
 pub mod layout;
 pub mod names;
 mod prompt;

@@ -2,12 +2,18 @@
 //! `client-gfx`: the graphics settings of the options menus reach the window and the renderer. The real client sets
 //! the dvars the menu writes, applies them with `vid_restart` (vsync off, a 4:3 screen), starts a match (the most
 //! antialiasing the adapter has when asked for 16x, lowered normal and specular map quality, no soft smoke edges or water
-//! animation, no specular, depth of field, glow or shadows, four dynamic lights; with it on, aiming down the sights must
-//! blur the picture, and a hip-fired view must not), then turns the match's settings back with a second
-//! `vid_restart` in the running match. Every `gfxis=` check reads the renderer's and the surface's own state. A frame
-//! with a bright test light in front of the player must also be clearly brighter than the same frame without it (the
-//! dynamic light pass). At the end the graphics device is destroyed under the match, as a driver reset does it, and the
-//! client must make a new one and draw the world again. Needs a display and the install; skips without.
+//! animation, no specular, depth of field, glow or shadows, four dynamic lights, the texture filter options; with it
+//! on, aiming down the sights must blur the picture, and a hip-fired view must not), then turns the match's settings
+//! back with a second `vid_restart` in the running match. Every `gfxis=` check reads the renderer's and the surface's
+//! own state. A frame with a bright test light in front of the player must also be clearly brighter than the same
+//! frame without it (the dynamic light pass). At the end the graphics device is destroyed under the match, as a driver
+//! reset does it, and the client must make a new one and draw the world again.
+//!
+//! The cgame dvars of #369 are checked on the way: a sound or HUD option this build has one value of is refused with
+//! the stock domain line; the menu-started match runs without cheats, so a cheat dvar set at the main menu is reset
+//! at the join and a write in the match is refused as cheat protected; a `devmap` match then has them act (the view
+//! model, the 2D HUD, the shellshock blend and the unlit scene go off and come back), beside the frame rate counter,
+//! subtitles, blood and brass. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -21,19 +27,38 @@ const LIMIT: Duration = Duration::from_secs(300);
 const STEPS: &str = "set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 16,\
 set=set r_picmip_manual 1,set=set r_picmip 0,set=set r_picmip_bump 1,set=set r_picmip_spec 1,set=set r_zFeather 0,set=set r_drawWater 0,\
 set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_enable 0,set=set r_dlightLimit 4,\
+set=set r_texFilterAnisoMin 2,set=set r_texFilterMipMode 2,\
 vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
+set=set snd_khz 22,sawreply='22' is not a valid value for dvar 'snd_khz':5,\
+set=set snd_enableEq 0,sawreply='0' is not a valid value for dvar 'snd_enableEq':5,\
+set=set cg_drawLagometer 1,sawreply='1' is not a valid value for dvar 'cg_drawLagometer':5,\
+set=set cg_drawGun 0,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
 menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\
-gfxis=aa max,gfxis=picmip 0 1 1,gfxis=zfeather 0,gfxis=water 0,gfxis=specular 0,gfxis=dof 0,gfxis=blur 0,gfxis=glow 0,gfxis=shadows 0,shot=gfx-on,\
+gfxis=aa max,gfxis=picmip 0 1 1,gfxis=zfeather 0,gfxis=water 0,gfxis=specular 0,gfxis=dof 0,gfxis=blur 0,gfxis=glow 0,gfxis=shadows 0,\
+gfxis=aniso 2 4,gfxis=mipmode 2,shot=gfx-on,\
+cgis=gun 1,set=set cg_drawGun 0,sawreply=cg_drawGun is cheat protected.:5,wait=1,cgis=gun 1,\
+set=set sv_cheats 1,sawreply=sv_cheats is write protected.:5,\
+cgis=fps 0,set=set cg_drawFPS 1,wait=1,cgis=fps 1,shot=fps,set=set cg_drawFPS Off,wait=1,cgis=fps 0,\
+subtitle=MP_WAITING,wait=0.5,cgis=subtitle 1,wait=4,cgis=subtitle 0,\
+set=set cg_subtitles 0,subtitle=MP_WAITING,wait=0.5,cgis=subtitle 0,set=set cg_subtitles 1,\
+devmap=mp_crash,ingame=120,wait=2,\
+cgis=gun 1,set=set cg_drawGun 0,wait=1,cgis=gun 0,shot=no-gun,set=set cg_drawGun 1,wait=1,cgis=gun 1,\
+cgis=hud2d 1,set=set cg_draw2D 0,wait=1,cgis=hud2d 0,shot=no-2d,set=set cg_draw2D 1,wait=1,cgis=hud2d 1,\
+shock=8000,wait=1,cgis=shock 1,set=set cg_drawShellshock 0,wait=1,cgis=shock 0,set=set cg_drawShellshock 1,wait=1,cgis=shock 1,\
+fxmark,set=set cg_blood 0,hitflesh,wait=1,cgis=fx:bullet_impact_noblood +1,cgis=fx:bullet_impact_flesh +0,\
+set=set cg_blood 1,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,cgis=fx:bullet_impact_noblood +1,\
+set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0,set=set cg_brass 1,\
+cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
 set=set com_maxfps 20,wait=1,pacereset,wait=2,gfxis=pace 1,set=set com_maxfps 0,\
 set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
 set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
 set=set r_fullscreen 0,vidrestart,wait=2,gfxis=fullscreen 0,\
 fxdemo=distortion/distortion_tank_muzzleflash,wait=2,shotd=distort-on,\
 set=set r_distortion 0,vidrestart,wait=2,shot=distort-off,set=set r_distortion 1,vidrestart,wait=2,fxdemo=off,\
-dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1,shot=dlight-on,dlight=0,\
+dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1+,shot=dlight-on,dlight=0,\
 set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\
-set=set r_zFeather 1,set=set r_drawWater 1,\
+set=set r_zFeather 1,set=set r_drawWater 1,set=set r_texFilterAnisoMin 1,set=set r_texFilterMipMode Unchanged,\
 set=set r_aspectRatio auto,vidrestart,wait=2,gfxis=zfeather 1,gfxis=water 1,\
 gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,wait=2,gfxis=blur 1,releasekey=mouse2,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
 losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered";
@@ -198,6 +223,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 "distort-on.png",
                 "distort-off.png",
                 "recovered.png",
+                "fps.png",
+                "no-gun.png",
+                "no-2d.png",
+                "fullbright.png",
             ] {
                 out.files.push(f.into());
             }

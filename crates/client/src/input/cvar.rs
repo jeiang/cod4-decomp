@@ -54,10 +54,56 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // `cl_paused` is the engine's (`DVAR_ROM` in the multiplayer `CG_RegisterDvars`): multiplayer has no pause, and
     // the stock Pause key's `toggle cl_paused` is refused as read only.
     ("cl_paused", "0", false),
+    // `Dvar_Init` registers it on (`SYSTEMINFO | INIT`); the server's systeminfo sets it at every join and level
+    // start (`CL_SystemInfoChanged`, [`Cvars::set_cheat_state`]). A console write is refused as write protected.
+    ("sv_cheats", "1", false),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
 const READ_ONLY: &[&str] = &["cl_paused"];
+
+/// The cvars only the engine sets (`DVAR_INIT`): a console write is refused as write protected.
+const WRITE_PROTECTED: &[&str] = &["sv_cheats"];
+
+/// The `DVAR_CHEAT` dvars this build reads, with their reset values: a console write is refused while `sv_cheats`
+/// is off (`Dvar_SetVariant`, "is cheat protected"), and a server without cheats puts them back to these values
+/// (`Dvar_SetCheatState`). The registered-case names are what the refusal prints.
+const CHEAT: &[(&str, &str)] = &[
+    ("cg_drawGun", "1"),
+    ("cg_draw2D", "1"),
+    ("cg_drawShellshock", "1"),
+    ("r_fullbright", "0"),
+    ("r_dof_bias", "0.5"),
+    ("r_dof_tweak", "0"),
+    ("snd_slaveFadeTime", "500"),
+    ("snd_enableReverb", "1"),
+    ("ragdoll_max_life", "4500"),
+    ("ragdoll_jointlerp_time", "3000"),
+    ("ragdoll_explode_force", "18000"),
+    ("ragdoll_explode_upbias", "0.8"),
+    ("ragdoll_self_collision_scale", "1.2"),
+    ("ragdoll_rotvel_scale", "1"),
+];
+
+/// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other
+/// value is refused and says so, as stock refuses a value outside a dvar's domain (issue #369).
+const UNSUPPORTED: &[(&str, &str, &str)] = &[
+    (
+        "snd_khz",
+        "44",
+        "the mixer runs at the sound device's own rate; this build has no 11/22 kHz output",
+    ),
+    (
+        "snd_enableEq",
+        "1",
+        "the script equalizer cannot be switched off in this build",
+    ),
+    (
+        "cg_drawLagometer",
+        "0",
+        "the lagometer is not drawn in this build",
+    ),
+];
 
 struct Cvar {
     value: String,
@@ -108,6 +154,38 @@ impl Cvars {
     /// Whether a command (`set`, `toggle`, the name alone) may not write `name` (`DVAR_ROM`).
     pub fn read_only(name: &str) -> bool {
         READ_ONLY.iter().any(|n| n.eq_ignore_ascii_case(name))
+    }
+
+    /// Whether a command may not write `name` because only the engine sets it (`DVAR_INIT`).
+    pub fn write_protected(name: &str) -> bool {
+        WRITE_PROTECTED.iter().any(|n| n.eq_ignore_ascii_case(name))
+    }
+
+    /// The registered name of a `DVAR_CHEAT` dvar, for the refusal line; `None` for one that is not cheat protected.
+    pub fn cheat_name(name: &str) -> Option<&'static str> {
+        CHEAT
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(n, _)| n)
+    }
+
+    /// `sv_cheats` as the server's systeminfo says it; off, every cheat dvar goes back to its reset value
+    /// (`Dvar_SetCheatState`, run by `CL_SystemInfoChanged` and by `G_InitGame`).
+    pub fn set_cheat_state(&mut self, on: bool) {
+        self.set("sv_cheats", if on { "1" } else { "0" }, false);
+        if !on {
+            for (name, reset) in CHEAT {
+                self.set(name, reset, false);
+            }
+        }
+    }
+
+    /// For a dvar this build accepts only one value of: that value and why.
+    pub fn unsupported_domain(name: &str) -> Option<(&'static str, &'static str)> {
+        UNSUPPORTED
+            .iter()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, only, why)| (only, why))
     }
 
     /// Set a value, creating the cvar if needed. `archive` only ever turns the flag on (`seta`).

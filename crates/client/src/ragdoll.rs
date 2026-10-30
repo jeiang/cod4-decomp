@@ -1429,6 +1429,7 @@ mod tests {
     fn the_ragdoll_dvars_set_the_tunables_and_the_cheat_ones_need_sv_cheats() {
         let mut c = crate::input::Cvars::default();
         assert_eq!(Tunables::read(&c), Tunables::default(), "stock values");
+        c.set("sv_cheats", "0", false);
         c.set("ragdoll_max_simulating", "4", false);
         c.set("ragdoll_explode_force", "99999", false);
         c.set("ragdoll_max_life", "2000", false);
