@@ -408,6 +408,9 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("sv_voice", "0"),
     ("scr_teambalance", "0"),
     ("g_allowvote", "1"),
+    // `SEH_Init_StringEd` registers the localization warnings (stock defaults 1; `background_main` turns them off).
+    ("loc_warnings", "1"),
+    ("loc_warningsAsErrors", "1"),
     ("sv_punkbuster", "0"),
     // The stock message windows show only while this is 1 (the server's scripts turn it off for hardcore).
     ("ui_hud_obituaries", "1"),
@@ -1754,7 +1757,6 @@ impl HostCx<'_> {
                 // `snd_volume` is read live every frame, and no other snd_ dvar needs a restart: these stay no-ops.
                 "snd_restart"
                 | "updatedvarsfromprofile"
-                | "loc_warnings"
                 | "r_applypicmip"
                 | "writeconfig"
                 | "setprofile" => {}
@@ -2962,7 +2964,11 @@ mod tests {
             st: &mut st,
             input: &mut input,
         };
-        let defs: Vec<_> = ui.assets.menus.values().cloned().collect();
+        // By name, so every run walks the menus the same way; and a script's `wait` holds the rest of its buffer
+        // (and every buffer submitted after it) in the input layer, so each menu's buffers are run out before the
+        // next menu, as frames would run them: every script of every menu is reached in every run.
+        let mut defs: Vec<_> = ui.assets.menus.values().cloned().collect();
+        defs.sort_by(|a, b| a.window.name.cmp(&b.window.name));
         for def in defs {
             let m = ui
                 .menu_index(def.window.name.as_deref().unwrap_or(""))
@@ -2970,14 +2976,32 @@ mod tests {
             for src in scripts(&def) {
                 ui.run_script(&mut h, Some(m), None, src);
             }
+            for _ in 0..10_000 {
+                if let Some(due) = h.input.take_due() {
+                    h.run_buffer(&ui, due);
+                } else if !h.input.busy() {
+                    break;
+                }
+            }
+            assert!(
+                !h.input.busy(),
+                "a buffer of {:?} never ran out",
+                def.window.name
+            );
         }
         assert!(ui.unknown.is_empty(), "unimplemented: {:?}", ui.unknown);
         // Nor does any `exec` of theirs end as a word nobody runs: the app would forward it to the server as
         // unknown (`CL_ForwardCommandToServer`), and the input layer's pending list holds only its own commands.
-        // Two words are the console's (Xbox) commands, which the stock PC build does not register either, so it
-        // forwards them or says `Unknown command` just the same: `updategamerprofile` (`CL_UpdateGamerProfile`,
-        // `cl_main_xenon`) and `uploadstats` (`LiveStorage_UploadStatsCmd`).
-        const STOCK_UNKNOWN: [&str; 2] = ["updategamerprofile", "uploadstats"];
+        // These words the stock PC build does not register either, so it forwards them or says `Unknown command`
+        // just the same: the console's (Xbox) commands `updategamerprofile` (`CL_UpdateGamerProfile`,
+        // `cl_main_xenon`) and `uploadstats` (`LiveStorage_UploadStatsCmd`), and `background_main`'s
+        // `g_friendlyfiredist` and `g_friendlynamedist`, dvars of an earlier game that KisakCOD does not register.
+        const STOCK_UNKNOWN: [&str; 4] = [
+            "g_friendlyfiredist",
+            "g_friendlynamedist",
+            "updategamerprofile",
+            "uploadstats",
+        ];
         let mut forwarded: Vec<&str> =
             h.st.actions
                 .iter()
