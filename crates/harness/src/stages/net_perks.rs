@@ -659,9 +659,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         dropped.saturating_sub(grenades_before) as f64,
     );
 
+    // The clients leave; the server alone runs the frames that hear it (a disconnected client polling would be told
+    // it is not connected).
     m.v.c.disconnect();
     m.a.c.disconnect();
-    m.settle(5);
+    for _ in 0..5 {
+        m.server.run_for(FRAME);
+    }
     if !why.is_empty() {
         report.status = Status::Failed;
         report.reason = Some(why.join("; "));
