@@ -1378,16 +1378,17 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
 const TURRET_MAP: &str = "mp_convoy";
 
 /// A mounted gun's rounds through the client's event path (`CG_FireWeapon` on `EV_FIRE_WEAPON_MG42`): the gunner
-/// hears the turret weapon's first-person fire sound and a bystander its world one, each round once.
+/// hears the turret weapon's first-person fire sound and a bystander its world one, each round once. Returns the
+/// aliases heard (for the report) and the failed expectations.
 #[cfg(not(target_arch = "wasm32"))]
-fn turret_selftest(install: &Path) -> Vec<(String, bool)> {
+fn turret_selftest(install: &Path) -> (Vec<String>, Vec<(String, bool)>) {
     let bank = match load(install, "", TURRET_MAP) {
         Ok(b) => b,
-        Err(e) => return vec![(format!("turret sounds: {e}"), false)],
+        Err(e) => return (Vec::new(), vec![(format!("turret sounds: {e}"), false)]),
     };
     let turret = match turret_weapon(install) {
         Ok(t) => t,
-        Err(e) => return vec![(format!("turret weapon: {e}"), false)],
+        Err(e) => return (Vec::new(), vec![(format!("turret weapon: {e}"), false)]),
     };
     let mut cs = ClientSound::for_selftest(bank);
     cs.own_entity = 3;
@@ -1403,7 +1404,7 @@ fn turret_selftest(install: &Path) -> Vec<(String, bool)> {
         },
         last_shot: false,
     };
-    let mut out = Vec::new();
+    let (mut heard, mut out) = (Vec::new(), Vec::new());
     for (who, gunner, own) in [("the gunner", 3u16, true), ("a bystander", 4, false)] {
         let Some(expected) = weapon_sound(Some(&turret), ev::FIRE_WEAPON, own) else {
             out.push((
@@ -1424,7 +1425,9 @@ fn turret_selftest(install: &Path) -> Vec<(String, bool)> {
         let before = count(&mut cs);
         cs.world_events(&[shot(gunner)], &weapon, &|_| None);
         let after = count(&mut cs);
-        if after != before + 1 {
+        if after == before + 1 {
+            heard.push(expected);
+        } else {
             let played = cs.ready().map(|s| s.played.aliases.clone());
             out.push((
                 format!("a turret round should play {expected} once for {who}, played {played:?}"),
@@ -1432,7 +1435,7 @@ fn turret_selftest(install: &Path) -> Vec<(String, bool)> {
             ));
         }
     }
-    out
+    (heard, out)
 }
 
 /// The turret weapon of [`TURRET_MAP`] from its zones.
@@ -1880,7 +1883,9 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         Err(e) => check(false, format!("movement sounds: {e}")),
     }
     // A mounted gun's round through the same path: heard by the gunner and by a bystander.
-    for (what, ok) in turret_selftest(install) {
+    let (heard, failed) = turret_selftest(install);
+    m.insert("turret_fire_aliases".into(), heard.into());
+    for (what, ok) in failed {
         check(ok, what);
     }
     check(
