@@ -1119,7 +1119,7 @@ impl Input {
         {
             self.say(format!("'{value}' is not a valid value for dvar '{name}'"));
             self.say(format!("  Domain is {only} ({why})"));
-            tracing::warn!(cvar = name, value, "dvar value refused: {why}");
+            tracing::info!(cvar = name, value, "dvar value refused: {why}");
             return false;
         }
         self.cvars.set(name, value, archive);
