@@ -249,6 +249,7 @@ impl Gfx {
             size: self.mode.or(base.size),
             refresh: self.refresh.or(base.refresh),
             monitor: self.monitor.or(base.monitor),
+            position: base.position,
         }
     }
 

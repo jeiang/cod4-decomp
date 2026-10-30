@@ -72,6 +72,8 @@ pub struct Request {
     /// `r_monitor`: the 1-based number of the monitor fullscreen goes to; `None` (0 in the dvar) or a number past the
     /// last monitor picks automatically.
     pub monitor: Option<usize>,
+    /// `vid_xpos`/`vid_ypos`: where the windowed window opens.
+    pub position: Option<(i32, i32)>,
 }
 
 impl Default for Request {
@@ -81,6 +83,7 @@ impl Default for Request {
             size: Some((1280, 720)),
             refresh: None,
             monitor: None,
+            position: None,
         }
     }
 }
@@ -274,6 +277,9 @@ pub fn create_window(
     req: &Request,
 ) -> Result<(Window, Option<String>), String> {
     let mut attrs: WindowAttributes = Window::default_attributes().with_title("cod4e");
+    if let Some((x, y)) = req.position {
+        attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(x, y));
+    }
     let mon = monitor(el, req.monitor);
     let mut note = None;
     match req.kind {

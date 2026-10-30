@@ -904,6 +904,14 @@ impl Viewer {
                 .ok(),
         );
         input.cvars.set("fs_game", &self.cli.game, false);
+        self.cli.request.position = match (input.cvars.get("vid_xpos"), input.cvars.get("vid_ypos"))
+        {
+            (Some(x), Some(y)) => match (x.trim().parse(), y.trim().parse()) {
+                (Ok(x), Ok(y)) => Some((x, y)),
+                _ => None,
+            },
+            _ => None,
+        };
         let demo_dir = input
             .config_dir()
             .unwrap_or_else(|| self.cli.install.clone())
@@ -1741,9 +1749,25 @@ impl Viewer {
                     if let Some((glow, film)) = nf.look.vision {
                         (r.post.glow, r.post.film) = (glow, film);
                     }
+                    // `R_SetFilmInfo`: the three cheat dvars adjust the vision set's film block (desaturation is
+                    // applied twice, as stock does).
+                    let cheats = st.input.cvars.bool("sv_cheats");
+                    if cheats {
+                        let c = &st.input.cvars;
+                        let f = |n: &str, d: f32| {
+                            c.get(n)
+                                .and_then(|v| v.trim().parse::<f32>().ok())
+                                .filter(|v| v.is_finite())
+                                .unwrap_or(d)
+                        };
+                        let desat = (1.0 - r.post.film.desaturation) * f("r_desaturation", 1.0)
+                            + r.post.film.desaturation;
+                        r.post.film.desaturation *= desat;
+                        r.post.film.contrast *= f("r_contrast", 1.0);
+                        r.post.film.brightness += f("r_brightness", 0.0);
+                    }
                     // Cheat dvars, read live as the original does: `r_fullbright` (`R_InitDrawMethod` on change)
                     // and `cg_drawShellshock` (`DrawShellshockBlend`).
-                    let cheats = st.input.cvars.bool("sv_cheats");
                     r.settings.fullbright = cheats && st.input.cvars.bool("r_fullbright");
                     let shock_on = !cheats
                         || st

@@ -286,14 +286,70 @@ pub fn third_person(
     (view, origin)
 }
 
-/// `cg_heliKillCam*` and `cg_airstrikeKillCam*` defaults: how far the camera hangs from what it follows, the field of
-/// view and (for the helicopter) how far above it the camera looks from.
-pub const HELI_DIST: f32 = 1000.0;
-const HELI_FOV: f32 = 15.0;
-const HELI_Z: f32 = 50.0;
-const AIRSTRIKE_DIST: f32 = 200.0;
-const AIRSTRIKE_FOV: f32 = 80.0;
-const AIRSTRIKE_CLOSE_Z: f32 = 24.0;
+/// `cg_heliKillCam*` and `cg_airstrikeKillCam*` (`CG_RegisterDvars`, all `DVAR_CHEAT`): how far the camera hangs
+/// from what it follows, the field of view, how far above the helicopter it looks from, how close to the bomb's
+/// height it may get, and the depth of field (near blur start and end, far blur start and distance).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KillCamTune {
+    pub heli_dist: f32,
+    pub heli_fov: f32,
+    pub heli_z: f32,
+    pub heli_blur: [f32; 4],
+    pub airstrike_dist: f32,
+    pub airstrike_fov: f32,
+    pub airstrike_close_z: f32,
+    pub airstrike_blur: [f32; 4],
+}
+
+impl Default for KillCamTune {
+    fn default() -> Self {
+        KillCamTune {
+            heli_dist: 1000.0,
+            heli_fov: 15.0,
+            heli_z: 50.0,
+            heli_blur: [0.0, 100.0, 100.0, 300.0],
+            airstrike_dist: 200.0,
+            airstrike_fov: 80.0,
+            airstrike_close_z: 24.0,
+            airstrike_blur: [0.0, 100.0, 100.0, 300.0],
+        }
+    }
+}
+
+impl KillCamTune {
+    /// The dvars' values, held to the stock ranges; only while `sv_cheats` is on (they are cheat protected).
+    pub fn read(c: &crate::input::Cvars) -> Self {
+        let d = Self::default();
+        if !c.bool("sv_cheats") {
+            return d;
+        }
+        let f = |n: &str, stock: f32| {
+            c.get(n)
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+                .unwrap_or(stock)
+                .clamp(0.0, 10000.0)
+        };
+        let blur = |prefix: &str, stock: [f32; 4]| {
+            [
+                f(&format!("{prefix}NearBlurStart"), stock[0]),
+                f(&format!("{prefix}NearBlurEnd"), stock[1]),
+                f(&format!("{prefix}FarBlurStart"), stock[2]),
+                f(&format!("{prefix}FarBlurDist"), stock[3]),
+            ]
+        };
+        KillCamTune {
+            heli_dist: f("cg_heliKillCamDist", d.heli_dist),
+            heli_fov: f("cg_heliKillCamFov", d.heli_fov).clamp(1.0, 180.0),
+            heli_z: f("cg_heliKillCamZDist", d.heli_z),
+            heli_blur: blur("cg_heliKillCam", d.heli_blur),
+            airstrike_dist: f("cg_airstrikeKillCamDist", d.airstrike_dist),
+            airstrike_fov: f("cg_airstrikeKillCamFov", d.airstrike_fov).clamp(1.0, 180.0),
+            airstrike_close_z: f("cg_airstrikeKillCamCloseZDist", d.airstrike_close_z),
+            airstrike_blur: blur("cg_airstrikeKillCam", d.airstrike_blur),
+        }
+    }
+}
 
 /// A camera a kill cam puts on the thing that killed: where, how it is turned (pitch positive down, yaw, roll), the
 /// field of view it forces, and how far it is from the victim (the blur is set from it).
@@ -316,8 +372,8 @@ fn axis_angles(forward: Vec3, left: Vec3, up: Vec3) -> [f32; 3] {
 
 /// `CG_UpdateHelicopterKillCam`: from `cg_heliKillCamDist` behind the point above the helicopter at `heli`, looking
 /// at the victim at `target`, level with the horizon, through a narrow lens.
-pub fn helicopter_kill_cam(heli: Vec3, target: Vec3) -> Option<KillCam> {
-    let from = heli + Vec3::new(0.0, 0.0, HELI_Z);
+pub fn helicopter_kill_cam(t: &KillCamTune, heli: Vec3, target: Vec3) -> Option<KillCam> {
+    let from = heli + Vec3::new(0.0, 0.0, t.heli_z);
     let to = target - from;
     let distance = to.length();
     if distance <= 0.0 {
@@ -327,9 +383,9 @@ pub fn helicopter_kill_cam(heli: Vec3, target: Vec3) -> Option<KillCam> {
     let left = Vec3::Z.cross(forward).try_normalize()?;
     let up = forward.cross(left).normalize_or_zero();
     Some(KillCam {
-        origin: from - forward * HELI_DIST,
+        origin: from - forward * t.heli_dist,
         angles: axis_angles(forward, left, up),
-        fov: HELI_FOV,
+        fov: t.heli_fov,
         distance,
     })
 }
@@ -337,11 +393,16 @@ pub fn helicopter_kill_cam(heli: Vec3, target: Vec3) -> Option<KillCam> {
 /// `CG_UpdateAirstrikeKillCam`: from `cg_airstrikeKillCamDist` behind the aircraft (or bomb) at `plane` with
 /// `plane_angles`, turned to look at the victim at `target` once it is ahead of it, else straight along the line
 /// down to it.
-pub fn airstrike_kill_cam(plane: Vec3, plane_angles: [f32; 3], target: Vec3) -> KillCam {
+pub fn airstrike_kill_cam(
+    t: &KillCamTune,
+    plane: Vec3,
+    plane_angles: [f32; 3],
+    target: Vec3,
+) -> KillCam {
     let (forward, right, _) = angle_vectors(&plane_angles);
     let (forward, left) = (Vec3::from(forward), -Vec3::from(right));
     let mut bomb = plane;
-    bomb.z = bomb.z.max(target.z + AIRSTRIKE_CLOSE_Z);
+    bomb.z = bomb.z.max(target.z + t.airstrike_close_z);
     let mut delta = target - bomb;
     if delta.dot(forward) < 0.0 {
         delta.x = 0.0;
@@ -349,11 +410,11 @@ pub fn airstrike_kill_cam(plane: Vec3, plane_angles: [f32; 3], target: Vec3) -> 
     }
     let up = delta.cross(left).normalize_or_zero();
     let ahead = left.cross(up).normalize_or_zero();
-    let origin = bomb - ahead * AIRSTRIKE_DIST;
+    let origin = bomb - ahead * t.airstrike_dist;
     KillCam {
         origin,
         angles: axis_angles(ahead, left, up),
-        fov: AIRSTRIKE_FOV,
+        fov: t.airstrike_fov,
         distance: (target - origin).length(),
     }
 }
@@ -678,7 +739,7 @@ mod tests {
     fn the_helicopter_kill_cam_looks_down_the_line_to_the_victim() {
         let heli = Vec3::new(0.0, 0.0, 1000.0);
         let victim = Vec3::new(500.0, 0.0, 0.0);
-        let k = helicopter_kill_cam(heli, victim).unwrap();
+        let k = helicopter_kill_cam(&KillCamTune::default(), heli, victim).unwrap();
         // Behind the point above the helicopter, on the line to the victim.
         let from = heli + Vec3::new(0.0, 0.0, 50.0);
         let ahead = (victim - from).normalize();
@@ -686,18 +747,26 @@ mod tests {
         assert!((k.distance - (victim - from).length()).abs() < 1e-3);
         assert_eq!((k.fov, k.angles[1], k.angles[2]), (15.0, 0.0, 0.0));
         assert!(k.angles[0] > 0.0, "looking down: {:?}", k.angles);
-        assert!(helicopter_kill_cam(victim - Vec3::new(0.0, 0.0, 50.0), victim).is_none());
+        assert!(
+            helicopter_kill_cam(
+                &KillCamTune::default(),
+                victim - Vec3::new(0.0, 0.0, 50.0),
+                victim
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn the_airstrike_kill_cam_follows_the_plane_and_turns_to_the_victim_once_it_is_ahead() {
         let plane = Vec3::new(0.0, 0.0, 800.0);
-        let ahead = airstrike_kill_cam(plane, [0.0; 3], Vec3::new(1000.0, 0.0, 0.0));
+        let t = KillCamTune::default();
+        let ahead = airstrike_kill_cam(&t, plane, [0.0; 3], Vec3::new(1000.0, 0.0, 0.0));
         assert!(near(ahead.origin, plane - ahead_axis(&ahead) * 200.0));
         assert_eq!(ahead.fov, 80.0);
         assert!(ahead.angles[0] > 0.0 && ahead.angles[1].abs() < 1e-3);
         // A victim behind the plane is looked at from straight above.
-        let passed = airstrike_kill_cam(plane, [0.0; 3], Vec3::new(-1000.0, 0.0, 0.0));
+        let passed = airstrike_kill_cam(&t, plane, [0.0; 3], Vec3::new(-1000.0, 0.0, 0.0));
         assert!(passed.angles[0].abs() > 80.0, "{:?}", passed.angles);
     }
 

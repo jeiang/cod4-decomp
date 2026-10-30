@@ -350,6 +350,18 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_oldVoting", "1", ARCHIVE),
         ("fs_game", "", SYSTEMINFO | INIT),
         ("g_playerCollisionEjectSpeed", "25", ARCHIVE),
+        // Stock registrations a config or script may read (issue #369; `game_mp/g_main_mp.cpp`,
+        // `server_mp/sv_init_mp.cpp`): red crosshairs over enemies, the ban list, the friendly fire and name
+        // distances, the published IWD lists, the client command log switch, packet padding and the animation dump.
+        ("g_redCrosshairs", "1", LATCH | ARCHIVE),
+        ("g_banIPs", "", ARCHIVE),
+        ("g_friendlyFireDist", "15000", CHEAT),
+        ("g_friendlyNameDist", "15000", CHEAT),
+        ("sv_iwds", "", SYSTEMINFO | ROM),
+        ("sv_iwdNames", "", SYSTEMINFO | ROM),
+        ("sv_showCommands", "0", 0),
+        ("sv_padPackets", "0", 0),
+        ("g_dumpAnims", "-1", CHEAT),
         ("sv_keywords", "", SERVERINFO),
         ("protocol", "", ROM | SERVERINFO),
         ("sv_privateClients", "0", SERVERINFO),
