@@ -822,7 +822,15 @@ fn play(
     }
 
     // Killed by a bot (the server's `devkill`, as `net-killcam` does): the killcam plays, the kill line arrives,
-    // and the player is alive again afterwards.
+    // and the player is alive again afterwards. A bot may have killed the player meanwhile (the 2026-10-30 run
+    // `slot-1-cod4e-run-20261030-063326` ran `devkill` on a dead player and saw no killcam): the kill waits for a
+    // living player whose earlier killcam, if any, is over.
+    page.until(
+        server,
+        json!({"player.alive": true, "player.killcam": false}),
+        "the player was not alive to be killed",
+        Duration::from_secs(60),
+    )?;
     let bot = server
         .game
         .connected_clients()
