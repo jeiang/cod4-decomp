@@ -64,7 +64,7 @@ fn sample(w: u32, h: u32, rgb: &[u8], (nx, ny): (f32, f32)) -> [f64; 3] {
     let cy = ((1.0 - ny) * 0.5 * h as f32) as i64;
     let half = i64::from(BLOCK / 2);
     let mut sum = [0.0; 3];
-    let mut n = 0.0;
+    let mut n = 0.0_f64;
     for y in cy - half..=cy + half {
         for x in cx - half..=cx + half {
             if x < 0 || y < 0 || x >= i64::from(w) || y >= i64::from(h) {
