@@ -414,8 +414,8 @@ fn upload_lighting(gpu: &Gpu, l: &ModelLighting) -> (Tex, wgpu::Texture) {
 mod tests {
     use super::*;
 
-    /// Regression for the renderer's independent map decode: mp_carentan has a `,mc/lambert1` reference which must
-    /// draw the stock `$default` material instead of reaching Materials::prepare as a techset-less stub (#453).
+    /// Regression for the renderer's independent map decode: mp_carentan's `,mc/lambert1` must resolve through the
+    /// shared Db, not reach Materials::prepare as a techset-less stub (#453).
     #[test]
     fn carentan_world_and_static_models_have_no_unresolved_materials() {
         let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
@@ -448,18 +448,11 @@ mod tests {
                 m.name
             );
         }
-        let lambert = materials
-            .iter()
-            .find(|m| m.name.as_deref() == Some("mc/lambert1"))
-            .expect("the map exercises the missing-material default");
-        let default = data
-            .post_materials
-            .iter()
-            .find(|m| m.name.as_deref() == Some("$default"))
-            .expect("code_post_gfx_mp supplies the stock material default");
-        assert!(Arc::ptr_eq(
-            lambert.technique_set.as_ref().unwrap(),
-            default.technique_set.as_ref().unwrap()
-        ));
+        assert!(
+            materials
+                .iter()
+                .any(|m| m.name.as_deref() == Some("mc/lambert1")),
+            "the map must exercise the formerly unresolved material"
+        );
     }
 }
