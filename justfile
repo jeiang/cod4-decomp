@@ -124,7 +124,10 @@ original *args:
     set -euo pipefail
     ssh {{host}} bash -s -- $(printf '%q ' "$@") <<'EOF'
     r=~/Projects/cod4e
-    touch $r/.serial-pending
-    trap 'rm -f $r/.serial-pending' EXIT
+    # The serial-run marker protocol of scripts/host-run.sh: queue behind other serial owners, name the owner PID,
+    # and remove only our own marker.
+    exec 7>>$r/.serial-queue.lock; flock -x 7
+    { flock -x 6; printf '%s\n' "$$" > $r/.serial-pending; flock -u 6; } 6>>$r/.serial-marker.lock
+    trap '{ flock -x 6; o=; read -r o < $r/.serial-pending || true; if [ "$o" = "$$" ]; then rm -f $r/.serial-pending; fi; } 6>>$r/.serial-marker.lock' EXIT
     flock -x $r/.stage-lock $r/original-reference/orig.sh "$@"
     EOF

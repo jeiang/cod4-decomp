@@ -19,7 +19,7 @@ const NAME: &str = "client-ingame-menu";
 const STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
 see=OpFor+Marines+Auto-Assign+Controls+Options+Leave Game,nosee=Spectator,shot=team_pre,\
 mouse=OpFor,menu=changeclass:30,wait=1,see=Assault+Spec Ops+Heavy Gunner+Demolitions+Sniper,shot=class_pre,\
-mouse=Assault,ingame=120,wait=3,team=1:5,weapon=_gl:5,\
+mouse=Assault,ingame=120,wait=3,team=1:5,weapon=m16_gl:5,\
 togglemenu,wait=1,see=Choose Class+Change Team+Controls+Options+Call Vote+Mute Players+Leave Game,shot=escape_menu,key=escape,nomenu=5,\
 togglemenu,wait=1,mouse=Choose Class,menu=changeclass:5,wait=1,shot=class_in,key=escape,nomenu=5,\
 togglemenu,wait=1,mouse=Choose Class,menu=changeclass:5,mouse=Spec Ops,nomenu=5,wait=2,\

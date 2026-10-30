@@ -3,6 +3,7 @@
 pub mod asset_load;
 pub mod audio;
 pub mod client_brush;
+pub mod client_clear;
 pub mod client_commands;
 pub mod client_custom_class;
 pub mod client_dedicated;
@@ -14,6 +15,7 @@ pub mod client_fx;
 pub mod client_gfx;
 pub mod client_hardpoint;
 pub mod client_heli;
+pub mod client_host_console;
 pub mod client_hud;
 pub mod client_ingame_menu;
 pub mod client_input;

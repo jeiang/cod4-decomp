@@ -24,7 +24,7 @@ use crate::video::Recorder;
 use glam::Vec3;
 use render::{Gpu, MapData, Renderer, Scene, TextureCache, View};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -296,6 +296,38 @@ fn gpu_json(g: &Gpu) -> Value {
     })
 }
 
+/// Lets the world renderer go, keeping what it could not build for the run's report (a level change or a device loss
+/// would lose the record with it).
+fn drop_renderer(st: &mut State) {
+    if let Some(r) = st.renderer.take() {
+        st.material_failures.extend(
+            r.materials
+                .failures
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        st.image_failures.extend(r.textures.failed.iter().cloned());
+    }
+}
+
+/// What the renderers of the run could not build, for `client.json` and `ui-script.json`: `material_failures` is
+/// asserted empty by the harness (a material whose draws are skipped was invisible to every stage before, #375),
+/// `image_failures` are reported.
+fn render_report(st: &State) -> Value {
+    let mut materials = st.material_failures.clone();
+    let mut images = st.image_failures.clone();
+    if let Some(r) = st.renderer.as_ref() {
+        materials.extend(
+            r.materials
+                .failures
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+        images.extend(r.textures.failed.iter().cloned());
+    }
+    json!({"material_failures": materials, "image_failures": images})
+}
+
 /// The `--list-display-modes` result the harness reads from stdout.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::print_stdout)]
@@ -369,7 +401,7 @@ struct State {
     menu_was_open: bool,
     samples: Vec<[f64; 3]>,
     /// Per frame, parallel to `samples`: where the milliseconds went (`frames.phases.csv`), see [`PHASES`].
-    phases: Vec<[f32; 18]>,
+    phases: Vec<[f32; 21]>,
     /// What the last render built on the frame path: pipelines, their ms, passes, their ms.
     late: [f32; 4],
     laps: [f32; 10],
@@ -459,9 +491,10 @@ struct State {
     autojoin_next: bool,
     /// Effect counts at an `fxmark` step: `cgis=fx:<kind> +n` then reads how often the kind played since.
     fx_mark: HashMap<String, u64>,
-    /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
-    /// to explain a slow gap.
-    prev_cost: [f64; 4],
+    /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture, presenting,
+    /// the input and polls before the network frame, the late warm-up, and the UI painted between the renderer
+    /// and the present (`PHASES`), to explain a slow gap.
+    prev_cost: [f64; 7],
     /// Frames in a row the surface gave no texture although it was configured again; see [`recover_surface`].
     surface_failures: u32,
     /// How long a surface may time out or be occluded before a harness run gives up; `None` for a player's window,
@@ -481,6 +514,11 @@ struct State {
     fresh_surface: bool,
     /// What the graphics device went through: losses and recoveries, and errors it reported.
     gpu_log: GpuLog,
+    /// What the renderers of this run could not build, kept across level changes for the report: materials with no
+    /// usable pass or a failed pipeline, by name and reason, and images that did not load. The harness asserts the
+    /// first is empty (#375).
+    material_failures: BTreeMap<String, String>,
+    image_failures: BTreeSet<String>,
     /// A resize that arrived during a map load; see [`apply_resize`].
     pending_resize: Option<(u32, u32)>,
     /// When the page's debug overlay was last given its values.
@@ -552,13 +590,110 @@ const TOUR_MENUS: &[&str] = &[
 #[cfg(target_arch = "wasm32")]
 const WARM_BUDGET: Duration = Duration::from_millis(6);
 
+/// What a native frame spends preparing the passes of models the server precached after the load
+/// (`Renderer::warm_late`): a material's few passes fit in it, so the list is spread over a second or two of frames
+/// rather than stalling the first one that sees it.
+#[cfg(not(target_arch = "wasm32"))]
+const WARM_LATE_BUDGET: Duration = Duration::from_millis(2);
+
 /// Frames a tour menu is shown before its screenshot (fades and expressions settle).
 const TOUR_FRAMES: u32 = 6;
 
-/// `--ui-script`: steps that drive the menus like a player.
+/// A `throw` step in progress: the grenade counts of the HUD and the missiles seen when it pressed the key, and
+/// whether it has let go yet.
+struct Throw {
+    before: (Option<i32>, Option<i32>),
+    missiles: usize,
+    released: bool,
+}
+
+impl Throw {
+    /// Whether the grenade left the hand: the key was let go, a count dropped, a missile entity appeared and the
+    /// player is alive. A frag that cooked off in the hand drops the count and kills the player; a count that
+    /// changed with no missile is a pickup or a class change.
+    fn thrown(&self, now: (Option<i32>, Option<i32>), missiles: usize, dead: bool) -> bool {
+        self.released && now != self.before && missiles > self.missiles && !dead
+    }
+}
+
+/// Whether the player's team `have` satisfies a `team=<want>` step: a number is that team; `same` the one
+/// `team=save` kept; `other` the opposite side, which only a player on a side (1 or 2) can be on, so a spectator
+/// (3) or an unassigned player (0) satisfies neither `other` nor a side.
+fn team_matches(want: &str, have: &str, saved: Option<&str>) -> bool {
+    let side = |t: &str| t == "1" || t == "2";
+    match want {
+        "other" => saved.is_some_and(|t| side(t) && side(have) && t != have),
+        "same" => saved == Some(have),
+        _ => have == want,
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+
+    #[test]
+    fn the_other_team_is_the_other_side_not_the_spectators() {
+        assert!(team_matches("other", "1", Some("2")));
+        assert!(team_matches("other", "2", Some("1")));
+        assert!(
+            !team_matches("other", "3", Some("2")),
+            "dying is not a side switch"
+        );
+        assert!(!team_matches("other", "0", Some("2")));
+        assert!(!team_matches("other", "2", Some("2")));
+        assert!(
+            !team_matches("other", "1", Some("3")),
+            "a saved spectator has no other side"
+        );
+        assert!(!team_matches("other", "1", None));
+        assert!(team_matches("same", "2", Some("2")));
+        assert!(!team_matches("same", "2", None));
+        assert!(team_matches("2", "2", None));
+    }
+
+    #[test]
+    fn a_throw_needs_the_release_a_count_drop_a_missile_and_a_live_player() {
+        let t = Throw {
+            before: (Some(1), Some(1)),
+            missiles: 4,
+            released: true,
+        };
+        assert!(t.thrown((Some(0), Some(1)), 5, false));
+        assert!(
+            !t.thrown((Some(0), Some(1)), 5, true),
+            "cooked off in the hand"
+        );
+        assert!(
+            !t.thrown((Some(0), Some(1)), 4, false),
+            "no missile appeared"
+        );
+        assert!(
+            !t.thrown((Some(1), Some(1)), 5, false),
+            "someone else's grenade"
+        );
+        let held = Throw {
+            released: false,
+            ..t
+        };
+        assert!(
+            !held.thrown((Some(0), Some(1)), 5, false),
+            "still holding the key"
+        );
+    }
+}
+
+/// `--ui-script`: steps that drive the menus like a player. Each step that waits across frames keeps its own state
+/// here: one shared field let `team=save` stand in for the map `maprotate` started from (#375).
 struct UiScript {
-    /// The map a `maprotate` step started from.
+    /// What `respawn` and `loc` carry between frames (the death seen; the hint count the step began from).
     marker: Option<String>,
+    /// The team `team=save` remembered.
+    team_saved: Option<String>,
+    /// The map a `maprotate` step started from.
+    rotate_from: Option<String>,
+    /// The `throw` step under way.
+    throw: Option<Throw>,
     /// What `cvar=save` and `round=next` remembered, by name.
     saved: HashMap<String, String>,
     /// A `killcam` or `dead` step has seen the player die: a later `respawn` step counts that death, since the
@@ -570,6 +705,9 @@ struct UiScript {
     began: Instant,
     results: Vec<Value>,
 }
+
+/// How long a `throw` step holds the key before letting go: long enough for the pin, short of any fuse.
+const THROW_HOLD: f32 = 0.6;
 
 /// A device that has run this long since its predecessor was lost starts the count of losses again.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -1039,6 +1177,9 @@ impl Viewer {
             listen,
             script: self.cli.ui_script.as_ref().map(|s| UiScript {
                 marker: None,
+                team_saved: None,
+                rotate_from: None,
+                throw: None,
                 saved: HashMap::new(),
                 died: false,
                 steps: s
@@ -1075,7 +1216,7 @@ impl Viewer {
             load_report: None,
             autojoin_next: false,
             fx_mark: HashMap::new(),
-            prev_cost: [0.0; 4],
+            prev_cost: [0.0; 7],
             surface_failures: 0,
             surface_stalled_ms: 0.0,
             surface_retried: false,
@@ -1084,6 +1225,8 @@ impl Viewer {
                 .then_some(SURFACE_STALL),
             fresh_surface: false,
             gpu_log: std::mem::take(&mut self.gpu_log),
+            material_failures: BTreeMap::new(),
+            image_failures: BTreeSet::new(),
             pending_resize: None,
             #[cfg(target_arch = "wasm32")]
             overlay_at: now,
@@ -1227,8 +1370,11 @@ impl ApplicationHandler<Ready> for Viewer {
 }
 
 /// The columns of `frames.phases.csv`: network and prediction, surface acquire, render, present, then what the
-/// render built on the frame path (pipelines and passes: count, ms each).
-const PHASES: &str = "net_ms,acquire_ms,render_ms,present_ms,late_pipelines,late_pipeline_ms,late_passes,late_pass_ms,r_setup,r_dynamic,r_sun_shadow,r_spot_shadow,r_main_draws,r_lights,r_floatz,r_post_upload,r_encode,r_submit";
+/// render built on the frame path (pipelines and passes: count, ms each), the render's own laps, and last the
+/// input and polls before the network frame, the late warm-up (`Renderer::warm_late`) and the UI painted between
+/// the render and the present. With the acquire left out, the columns but the laps add up to `cpu_ms` of
+/// `frames.raw.csv` but for the frame's tail (console lines, menu sound, actions).
+const PHASES: &str = "net_ms,acquire_ms,render_ms,present_ms,late_pipelines,late_pipeline_ms,late_passes,late_pass_ms,r_setup,r_dynamic,r_sun_shadow,r_spot_shadow,r_main_draws,r_lights,r_floatz,r_post_upload,r_encode,r_submit,input_ms,warm_ms,ui_ms";
 
 impl Viewer {
     /// The graphics device is lost and cannot be used again: a new one is made for the window, and everything that
@@ -1266,7 +1412,7 @@ impl Viewer {
         };
         let format = st.config.format;
         // Everything on the old device goes before anything is built on the new one.
-        st.renderer = None;
+        drop_renderer(st);
         st.surface = Some(surface);
         st.gpu = gpu.clone();
         st.gamma = render::gamma::Gamma::new(&gpu, format);
@@ -1351,6 +1497,8 @@ impl Viewer {
             Some(sh) => sh.run_due(&mut st.input),
             None => st.input.run_due(),
         }
+        // What the listen server made of the host's console lines since the last frame (#366).
+        host_console_replies(st);
         if let Some(g) = st.load_gaps.as_mut() {
             g.frames += 1;
             g.max_ms = g.max_ms.max(interval);
@@ -1362,8 +1510,15 @@ impl Viewer {
                     "render_ms": st.prev_cost[1].round(),
                     "acquire_ms": st.prev_cost[2].round(),
                     "present_ms": st.prev_cost[3].round(),
+                    "input_ms": st.prev_cost[4].round(),
+                    "warm_ms": st.prev_cost[5].round(),
+                    "ui_ms": st.prev_cost[6].round(),
                 }));
             }
+        }
+        // The costs a frame may not reach (no network frame, nothing to warm) read as zero, not as the last frame's.
+        for i in [0, 4, 5, 6] {
+            st.prev_cost[i] = 0.0;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(done) = st.download.as_mut().and_then(|d| d.poll())
@@ -1382,7 +1537,7 @@ impl Viewer {
                             st,
                             &d.map,
                             &gametype,
-                            Session::Join(addr),
+                            loader::Server::Join(addr),
                         );
                     }
                 }
@@ -1630,17 +1785,19 @@ impl Viewer {
                 }));
             }
             // What the server precached beyond what the load warmed (planes, vehicles the scripts call in): its
-            // pipelines are built beside the frames now rather than at first sight.
+            // passes are prepared a material per frame and its pipelines built beside the frames, not at first sight.
             #[cfg(not(target_arch = "wasm32"))]
-            {
+            if let Some(r) = st.renderer.as_mut() {
                 let models = net.unwarmed_models();
-                if let (false, Some(r)) = (models.is_empty(), st.renderer.as_mut()) {
+                if !models.is_empty() {
                     r.warm_models(&models);
                     if let Some(sh) = st.shell.as_ref() {
                         r.warm_sprites(sh.ui.assets.material("gfx_tracer").cloned());
                     }
-                    r.warm_in_background(st.config.format);
                 }
+                let t_warm = Instant::now();
+                r.warm_late(st.config.format, WARM_LATE_BUDGET);
+                st.prev_cost[5] = t_warm.elapsed().as_secs_f64() * 1000.0;
             }
             new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {
@@ -1829,6 +1986,10 @@ impl Viewer {
             apply_resize(st, size)?;
         }
         let t_acquire = Instant::now();
+        // What the frame did before asking for its texture, beyond the network frame and the warm-up: the control
+        // channel, the input, the due commands, the load and download polls.
+        let pre_ms = t_acquire.duration_since(now).as_secs_f64() * 1000.0;
+        st.prev_cost[4] = (pre_ms - st.prev_cost[0] - st.prev_cost[5]).max(0.0);
         let frame = match st.surface().get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
@@ -1850,6 +2011,7 @@ impl Viewer {
             }
         };
         st.prev_cost[2] = t_acquire.elapsed().as_secs_f64() * 1000.0;
+        // `cpu_ms` is the frame's own work: everything but the wait for the surface texture.
         let cpu_start = Instant::now();
         let aspect = st
             .aspect
@@ -1928,6 +2090,8 @@ impl Viewer {
             }
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
+        // The UI and captures between the world and the present: menus, HUD, screenshots, the video recorder.
+        let t_ui = Instant::now();
         #[cfg(not(target_arch = "wasm32"))]
         let downloading = st
             .download
@@ -2107,6 +2271,7 @@ impl Viewer {
             st.control_shot_done = Some(shot);
         }
         let t_present = Instant::now();
+        st.prev_cost[6] = t_present.duration_since(t_ui).as_secs_f64() * 1000.0;
         st.gpu.queue.present(frame);
         st.presented = true;
         st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
@@ -2130,7 +2295,7 @@ impl Viewer {
             .unwrap_or_default();
         self.apply_actions(el, actions)?;
         let st = self.st.as_mut().ok_or("no window")?;
-        let cpu_ms = cpu_start.elapsed().as_secs_f64() * 1000.0;
+        let cpu_ms = pre_ms + cpu_start.elapsed().as_secs_f64() * 1000.0;
         if st.samples.len() % 30 == 0 {
             st.rss = rss();
         }
@@ -2163,6 +2328,9 @@ impl Viewer {
             lap(7),
             lap(8),
             lap(9),
+            c[4] as f32,
+            c[5] as f32,
+            c[6] as f32,
         ]);
         #[cfg(target_arch = "wasm32")]
         if st.overlay_at.elapsed() >= Duration::from_millis(500) {
@@ -2215,14 +2383,14 @@ impl Viewer {
                         tracing::warn!(%map, "map not found: the install has no zone for it");
                         show_error(st, &format!("Can't find map \"{map}\"."));
                     } else {
-                        start_session(
-                            &self.cli,
-                            &mut self.map,
+                        let boot = loader::Server::Boot(listen_config(
                             st,
                             &map,
                             &gametype,
-                            Session::Host { cheats },
-                        );
+                            self.cli.bots,
+                            cheats,
+                        ));
+                        start_session(&self.cli, &mut self.map, st, &map, &gametype, boot);
                     }
                 }
                 Action::Join(addr) => {
@@ -2295,7 +2463,7 @@ impl Viewer {
                                 st,
                                 &e.map,
                                 &e.gametype,
-                                Session::Join(a),
+                                loader::Server::Join(a),
                             );
                         }
                         Err(err) => {
@@ -2362,6 +2530,11 @@ impl Viewer {
                     restart_files(&self.cli, st);
                 }
                 Action::Console(line) => console_action(st, &line),
+                Action::CloseMenu(name) => {
+                    if let Some(sh) = st.shell.as_mut() {
+                        sh.close_by_name(&mut st.input, &name);
+                    }
+                }
                 // The front end uses a separate sound system with MP, SP and localized code zones.
                 // Match sound tables are loaded per map.
                 Action::SoundLoop(alias) if !self.cli.no_sound => {
@@ -2484,6 +2657,7 @@ impl Viewer {
             "showcase": st.showcase.as_ref().map(Showcase::report),
             "notes": st.notes,
             "gpu_health": st.gpu_log.report(&st.gpu),
+            "render": render_report(st),
         });
         std::fs::write(
             out.join("client.json"),
@@ -2511,6 +2685,7 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
     let gpu_health = st.gpu_log.report(&st.gpu);
     let report = json!({
         "gpu_health": gpu_health,
+        "render": render_report(st),
         "status": if ok { "ok" } else { "failed" },
         "quit": quit,
         "steps": sc.results,
@@ -2752,40 +2927,75 @@ fn script_step(st: &mut State) -> bool {
             }
             done(arg == "escape", sc, format!("key {arg}"));
         }
-        // Presses and releases a key as a player's hand does (`holdkey=mouse2` aims down the sights).
+        // Presses and releases a key as a player's hand does (`holdkey=mouse2` aims down the sights). A key the
+        // config binds to nothing does nothing, so it fails the step instead of reporting a press that went nowhere.
         "holdkey" | "releasekey" => {
-            st.input.key(arg, key == "holdkey");
-            done(true, sc, format!("{key} {arg}"));
+            let bound = st.input.bound(arg).map(str::to_owned);
+            match bound {
+                Some(cmd) => {
+                    st.input.key(arg, key == "holdkey");
+                    done(true, sc, format!("{key} {arg} ({cmd})"));
+                }
+                None => done(false, sc, format!("{key} {arg}: the key is not bound")),
+            }
         }
-        // Holds a key down until the grenade count of the HUD drops (`throw=g:10`: the key, at most that many
-        // seconds): the bind, the button and the server's throw as a player's key press goes through them.
+        // Throws a grenade as a player does (`throw=g:10`: the key, at most that many seconds): presses the key,
+        // lets go after [`THROW_HOLD`], then waits until the HUD's grenade count dropped, a missile entity appeared
+        // and the player is still alive. Holding until the count dropped let a frag cook off in the hand and count
+        // as a throw (#375).
         "throw" => {
             let (name, secs) = arg
                 .split_once(':')
                 .map_or((arg, 10.0), |(k, s)| (k, s.parse().unwrap_or(10.0)));
-            let now = st.shell.as_ref().map_or((None, None), |s| {
+            let (now, dead) = st.shell.as_ref().map_or(((None, None), true), |s| {
                 let h = &s.st.game.hud;
                 (
-                    h.frag.as_ref().map(|o| o.ammo),
-                    h.second.as_ref().map(|o| o.ammo),
+                    (
+                        h.frag.as_ref().map(|o| o.ammo),
+                        h.second.as_ref().map(|o| o.ammo),
+                    ),
+                    h.pm_dead || h.health <= 0,
                 )
             });
-            match sc.marker.clone() {
+            let missiles = st.net.as_ref().map_or(0, NetPlay::missiles_appeared);
+            match sc.throw.as_mut() {
                 None => {
-                    sc.marker = Some(format!("{now:?}"));
-                    st.input.key(name, true);
+                    if st.input.bound(name).is_none() {
+                        done(false, sc, format!("{name} is not bound"));
+                    } else {
+                        sc.throw = Some(Throw {
+                            before: now,
+                            missiles,
+                            released: false,
+                        });
+                        st.input.key(name, true);
+                    }
                 }
-                Some(before) if before != format!("{now:?}") => {
+                Some(t) if !t.released && waited >= THROW_HOLD => {
+                    t.released = true;
                     st.input.key(name, false);
-                    done(true, sc, format!("{before} -> {now:?}"));
-                    sc.marker = None;
                 }
-                Some(before) if waited > secs => {
-                    st.input.key(name, false);
-                    done(false, sc, format!("no throw; counts stayed {before}"));
-                    sc.marker = None;
+                Some(t) => {
+                    let thrown = t.thrown(now, missiles, dead);
+                    if thrown {
+                        let note = format!(
+                            "{:?} -> {now:?}, {} new missile(s)",
+                            t.before,
+                            missiles - t.missiles
+                        );
+                        sc.throw = None;
+                        done(true, sc, note);
+                    } else if waited > secs {
+                        st.input.key(name, false);
+                        let note = format!(
+                            "no throw: counts {:?} -> {now:?}, {} new missile(s), dead {dead}",
+                            t.before,
+                            missiles - t.missiles
+                        );
+                        sc.throw = None;
+                        done(false, sc, note);
+                    }
                 }
-                Some(_) => {}
             }
         }
         // Waits until no menu is open: the game has the keyboard and mouse back (`nomenu=5`).
@@ -2798,13 +3008,15 @@ fn script_step(st: &mut State) -> bool {
             }
         }
         // Waits until the server says the player is on team `n` (1 axis, 2 allies, 3 spectator): `team=2:20`.
-        // `team=save` remembers the team; `team=other:secs` waits for a different one, `team=same:secs` for the
-        // remembered one.
+        // `team=save` remembers the team; `team=other:secs` waits for the other side (a spectator or an unassigned
+        // player is on neither, so dying does not satisfy it, #375), `team=same:secs` for the remembered one.
+        // `weapon=<name>:secs` waits for the weapon in hand whose name starts with `<name>` (`m16_gl` is the rifle,
+        // `gl_m16` its launcher raised; a part anywhere in the name matched the rifle for the launcher, #375).
         "team" | "weapon" => {
             let (want, secs) = arg
                 .split_once(':')
                 .map_or((arg, 20.0), |(n, s)| (n, s.parse().unwrap_or(20.0)));
-            let saved = sc.marker.clone();
+            let saved = sc.team_saved.clone();
             let have = if key == "team" {
                 st.shell
                     .as_ref()
@@ -2812,15 +3024,15 @@ fn script_step(st: &mut State) -> bool {
             } else {
                 st.net.as_ref().map(NetPlay::weapon).unwrap_or_default()
             };
+            let matched = if key == "team" {
+                team_matches(want, &have, saved.as_deref())
+            } else {
+                have.starts_with(want)
+            };
             if key == "team" && want == "save" {
-                sc.marker = Some(have.clone());
+                sc.team_saved = Some(have.clone());
                 done(true, sc, format!("team {have}"));
-            } else if match (key, want) {
-                ("team", "other") => saved.is_some_and(|t| t != have && have != "0"),
-                ("team", "same") => saved.is_some_and(|t| t == have),
-                ("team", _) => have == want,
-                _ => have.contains(want),
-            } {
+            } else if matched {
                 done(true, sc, format!("{key} {have}"));
             } else if waited > secs {
                 done(false, sc, format!("timed out; {key} is {have:?}"));
@@ -3282,15 +3494,25 @@ fn script_step(st: &mut State) -> bool {
             }
         }
         // Waits until the server has rotated to a different map than the one the step began in (`maprotate=300`).
+        // The step starts only once a map is loaded: with none there is nothing to rotate away from.
         "maprotate" => {
-            let from = sc.marker.get_or_insert_with(|| st.map_name.clone()).clone();
             let secs: f32 = arg.parse().unwrap_or(300.0);
-            if st.net.is_some() && !st.map_name.is_empty() && st.map_name != from {
-                sc.marker = None;
-                done(true, sc, format!("{from} -> {}", st.map_name));
-            } else if waited > secs {
-                sc.marker = None;
-                done(false, sc, format!("timed out; still in {from}"));
+            if sc.rotate_from.is_none() && !st.map_name.is_empty() {
+                sc.rotate_from = Some(st.map_name.clone());
+            }
+            match sc.rotate_from.clone() {
+                Some(from)
+                    if st.net.is_some() && !st.map_name.is_empty() && st.map_name != from =>
+                {
+                    sc.rotate_from = None;
+                    done(true, sc, format!("{from} -> {}", st.map_name));
+                }
+                Some(from) if waited > secs => {
+                    sc.rotate_from = None;
+                    done(false, sc, format!("timed out; still in {from}"));
+                }
+                None if waited > secs => done(false, sc, "timed out; no map was loaded".into()),
+                _ => {}
             }
         }
         // `dlight=1` adds a bright light in front of the camera each frame, `dlight=0` removes it.
@@ -3709,7 +3931,6 @@ fn saved_bot_count_lines(bots_flag: Option<usize>, input: &Input) -> Vec<String>
 }
 
 fn console_action(st: &mut State, line: &str) {
-    let count_before = bot_count(&st.input);
     for cmd in crate::input::config::split_commands(line) {
         let _command = tracing::debug_span!("command", name = %cmd[0]).entered();
         let verb = cmd[0].to_ascii_lowercase();
@@ -3802,29 +4023,60 @@ fn console_action(st: &mut State, line: &str) {
             v if crate::console::is_command(v) => {
                 st.input.exec_line(&crate::input::config::join(&cmd));
             }
-            // `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which
-            // answers an unknown one); otherwise, or for a `+` word, it is unknown.
+            // `Cmd_ExecuteSingleCommand` past the client's commands: on a listen server the host's console runs the
+            // server's commands and variables too (`status`, `kick`, `map_restart`; one command table in the
+            // original), and what the server knows neither is forwarded as a client command
+            // (`CL_ForwardCommandToServer`) once it says so (`host_console_replies`). Without a server of this
+            // process the word is forwarded at once, or is unknown; a `+` word always is.
             v => {
                 if v.starts_with('-') {
                     continue;
                 }
-                match st
-                    .net
-                    .as_mut()
-                    .filter(|n| !v.starts_with('+') && n.in_match())
-                {
-                    Some(net) => net.send_command(&crate::input::config::join(&cmd)),
-                    None => {
-                        crate::console::note_unknown(v);
-                        say(st, &format!("Unknown command \"{}\"", cmd[0]));
+                if !v.starts_with('+') && st.listen.is_some() {
+                    let line = crate::input::config::join(&cmd);
+                    if listen::host_line(&line) {
+                        continue;
                     }
                 }
+                forward_to_server(st, &cmd);
             }
         }
     }
-    // The server of this process reads `bot_count` at its next map start.
-    if st.listen.is_some() && bot_count(&st.input) != count_before {
-        listen::send(&format!("set bot_count {}", bot_count(&st.input)));
+}
+
+/// `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which answers an
+/// unknown one); otherwise, or for a `+` word, it is unknown.
+fn forward_to_server(st: &mut State, cmd: &[String]) {
+    let Some(v) = cmd.first() else { return };
+    match st
+        .net
+        .as_mut()
+        .filter(|n| !v.starts_with('+') && n.in_match())
+    {
+        Some(net) => net.send_command(&crate::input::config::join(cmd)),
+        None => {
+            crate::console::note_unknown(v);
+            say(st, &format!("Unknown command \"{v}\""));
+        }
+    }
+}
+
+/// The listen server's answers to what the host typed: its output goes to the console, and a line it did not know
+/// is forwarded to it as a client command, as to any server (#366).
+fn host_console_replies(st: &mut State) {
+    if st.listen.is_none() {
+        return;
+    }
+    for reply in listen::host_replies() {
+        if reply.forward {
+            if let Some(cmd) = crate::input::config::split_commands(&reply.line).first() {
+                forward_to_server(st, cmd);
+            }
+        } else {
+            for line in reply.output.lines() {
+                say(st, line);
+            }
+        }
     }
 }
 
@@ -4213,13 +4465,6 @@ fn apply_resize(st: &mut State, (w, h): (u32, u32)) -> Result<(), String> {
     Ok(())
 }
 
-/// Where a session's match is played: a listen server this client starts (with `sv_cheats` on for `devmap`), or
-/// a server to join.
-enum Session {
-    Host { cheats: bool },
-    Join(std::net::SocketAddr),
-}
-
 /// Starts or joins a match from the menus: begins loading the map in the background. The window keeps drawing the
 /// loading screen; [`finish_load`] connects once the load is done. For a join, `map` is what the server said it is
 /// playing.
@@ -4229,15 +4474,9 @@ fn start_session(
     st: &mut State,
     map: &str,
     gametype: &str,
-    session: Session,
+    server: loader::Server,
 ) {
     end_session(map_slot, st);
-    let server = match session {
-        Session::Join(a) => loader::Server::Join(a),
-        Session::Host { cheats } => {
-            loader::Server::Boot(listen_config(st, map, gametype, cli.bots, cheats))
-        }
-    };
     begin_load(cli, st, map, gametype, server);
     if let Some(sh) = st.shell.as_mut() {
         sh.close_all(&mut st.input);
@@ -4348,7 +4587,7 @@ fn finish_load(
 }
 
 /// The menu-started server: the chosen map then the other stock maps in turn, the dvars the player set (time and score
-/// limits), on a standard port when one is free so the LAN list finds it; `cheats` starts it with `devmap`.
+/// limits), on a standard port when one is free so the LAN list finds it.
 fn listen_config(
     st: &State,
     map: &str,
@@ -4393,7 +4632,7 @@ fn enter_level(
             }
         }
         LevelChange::Load => {
-            st.renderer = None;
+            drop_renderer(st);
             *map_slot = None;
             let gametype = st
                 .input
@@ -4531,7 +4770,7 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
         l.finish();
     }
     st.listen = None;
-    st.renderer = None;
+    drop_renderer(st);
     *map_slot = None;
     st.map_name.clear();
     release_pointer(st);
@@ -5064,7 +5303,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
 
 /// The menus on the stack, and the item that has the focus with the rectangle a click is tested against.
 fn menu_state(st: &mut State) -> Value {
-    let Some(sh) = st.shell.as_ref() else {
+    let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
     };
     let open: Vec<String> = sh.ui.open_menus().iter().map(|m| (*m).to_owned()).collect();
@@ -5072,15 +5311,12 @@ fn menu_state(st: &mut State) -> Value {
         .ui
         .focused_report()
         .map(|(menu, item, rect)| json!({"menu": menu, "item": item, "rect": rect}));
-    let items: Vec<Value> = open
-        .iter()
-        .flat_map(|menu| {
-            sh.ui
-                .item_report(menu)
-                .into_iter()
-                .map(|(name, rect)| json!({"menu": menu.clone(), "name": name, "rect": rect}))
-        })
-        .collect();
+    let mut items = Vec::new();
+    for menu in &open {
+        for (name, text, rect) in sh.item_report(&mut st.input, menu) {
+            items.push(json!({"menu": menu, "name": name, "text": text, "rect": rect}));
+        }
+    }
     json!({"open": open, "focused": focused, "items": items})
 }
 

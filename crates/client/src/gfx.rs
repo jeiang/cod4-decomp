@@ -74,6 +74,8 @@ pub struct Gfx {
     pub z_feather: bool,
     /// `r_drawWater`.
     pub draw_water: bool,
+    /// `r_clear`, `r_clearColor`, `r_clearColor2` and `developer`: what the pixels nothing draws show.
+    pub clear: render::Clear,
 }
 
 /// `1920x1080` as a size.
@@ -143,6 +145,32 @@ fn dof_tweak(c: &Cvars) -> render::Dof {
         far_end: value("r_dof_farEnd", 0.0, 20000.0, 7000.0),
         near_blur: value("r_dof_nearBlur", 4.0, 10.0, 6.0),
         far_blur: value("r_dof_farBlur", 0.0, 10.0, 1.8),
+    }
+}
+
+/// The clear dvars (`R_GetClearColor`): `r_clear` by stock name or index (unset or unknown is the stock default,
+/// `dev-only blink`), the colour dvars as `r g b [a]` in 0..1 (a bad or missing channel is 0, as `Dvar_RegisterColor`'s
+/// default is black).
+fn clear(c: &Cvars) -> render::Clear {
+    let color = |n: &str| {
+        let mut rgb = [0.0_f32; 3];
+        let mut parts = c.get(n).unwrap_or("").split_whitespace();
+        for ch in &mut rgb {
+            *ch = parts
+                .next()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+                .map_or(0.0, |v| v.clamp(0.0, 1.0));
+        }
+        rgb
+    };
+    render::Clear {
+        mode: c
+            .get("r_clear")
+            .and_then(render::ClearMode::parse)
+            .unwrap_or(render::ClearMode::DevOnlyBlink),
+        developer: c.bool("developer"),
+        colors: [color("r_clearColor"), color("r_clearColor2")],
     }
 }
 
@@ -234,6 +262,7 @@ impl Gfx {
             distortion: on("r_distortion"),
             z_feather: on("r_zFeather"),
             draw_water: on("r_drawWater"),
+            clear: clear(c),
         }
     }
 
@@ -279,6 +308,7 @@ impl Gfx {
         base.lod_scale = self.lod_scale;
         base.lod_bias = self.lod_bias;
         base.fullbright = self.fullbright;
+        base.clear = self.clear;
         base
     }
 
@@ -350,6 +380,32 @@ mod tests {
         assert_eq!(s.shadows, render::ShadowMode::Off);
         assert!(!s.specular && !s.dof && !s.glow && !s.draw_sun && !s.distortion);
         assert_eq!(s.aa_samples, 4);
+    }
+
+    #[test]
+    fn the_clear_dvars_follow_r_getclearcolor() {
+        // Unset: the stock default, `dev-only blink` with `developer` off, clears nothing (black here).
+        let s = Gfx::from_cvars(&cvars(&[])).settings(render::Settings::default());
+        assert_eq!(s.clear.mode, render::ClearMode::DevOnlyBlink);
+        assert!(!s.clear.developer);
+        assert_eq!(s.clear.color(Some([0.6, 0.7, 0.7]), 0), [0.0; 3]);
+        // By index or by name, with the two colours.
+        let g = Gfx::from_cvars(&cvars(&[
+            ("r_clear", "2"),
+            ("r_clearColor", "1 0.5 0 1"),
+            ("r_clearColor2", "0 bad 2"),
+        ]));
+        assert_eq!(g.clear.mode, render::ClearMode::Blink);
+        assert_eq!(g.clear.colors, [[1.0, 0.5, 0.0], [0.0, 0.0, 1.0]]);
+        let g = Gfx::from_cvars(&cvars(&[("r_clear", "fog color"), ("developer", "1")]));
+        assert_eq!(g.clear.mode, render::ClearMode::FogColor);
+        assert!(g.clear.developer);
+        assert_eq!(
+            Gfx::from_cvars(&cvars(&[("r_clear", "nonsense")]))
+                .clear
+                .mode,
+            render::ClearMode::DevOnlyBlink
+        );
     }
 
     #[test]
