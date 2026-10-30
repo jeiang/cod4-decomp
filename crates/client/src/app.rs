@@ -119,6 +119,7 @@ pub fn run(
         map,
         load_ms,
         st: None,
+        probed: false,
         error: None,
         gpu_log: GpuLog::default(),
         proxy: None,
@@ -636,6 +637,7 @@ struct Viewer {
     map: Option<MapData>,
     load_ms: f64,
     st: Option<State>,
+    probed: bool,
     error: Option<String>,
     /// Device losses and errors from before the state exists (the start-up retries); moved into it.
     gpu_log: GpuLog,
@@ -1829,6 +1831,31 @@ impl Viewer {
             fov_x,
             time: t,
         };
+        // TEMP (#356)
+        if let (Some(r), Ok(p)) = (st.renderer.as_ref(), std::env::var("COD4E_PROBE"))
+            && self.cli.fly_at.is_some()
+            && t > 2.0
+            && !self.probed
+        {
+            self.probed = true;
+            for px in p.split(';') {
+                let mut it = px.split(',').filter_map(|v| v.trim().parse::<u32>().ok());
+                if let (Some(x), Some(y)) = (it.next(), it.next()) {
+                    tracing::warn!(
+                        "probe pixel {x},{y} view={view:?} size={:?}",
+                        (st.config.width, st.config.height)
+                    );
+                    for (i, h) in r
+                        .probe_pixel(&view, (st.config.width, st.config.height), x, y)
+                        .into_iter()
+                        .take(6)
+                        .enumerate()
+                    {
+                        tracing::warn!("probe hit {i}: {h}");
+                    }
+                }
+            }
+        }
         let surface_view = frame.texture.create_view(&Default::default());
         let size = (st.config.width, st.config.height);
         // `r_gamma` maps the whole picture, as the original's display ramp does: that ramp works only in full screen
