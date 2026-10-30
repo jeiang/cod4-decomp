@@ -12,8 +12,9 @@ use render::TextureCache;
 use render::ui2d::Ui2d;
 use std::sync::Arc;
 
-/// The ticks never fade out completely.
-const MIN_ALPHA: f32 = 0.5;
+/// The stock `cg_crosshairAlpha` and `cg_crosshairAlphaMin`: the ticks never fade out completely.
+pub const ALPHA: f32 = 1.0;
+pub const MIN_ALPHA: f32 = 0.5;
 /// Half the 480-high menu space: the spread's tangent times this over the vertical field of view's is the distance.
 const HALF_HEIGHT: f32 = 240.0;
 
@@ -56,6 +57,10 @@ pub struct Reticle {
     pub ads: f32,
     /// Tangent of half the vertical field of view.
     pub tan_half_fov_y: f32,
+    /// `cg_crosshairAlpha` and `cg_crosshairAlphaMin` (`CG_DrawCrosshair`: the alpha is scaled by the first and
+    /// raised to the second); cheat dvars, stock 1 and 0.5.
+    pub alpha_scale: f32,
+    pub alpha_min: f32,
 }
 
 /// One picture of the crosshair: where (virtual units, centre of the crosshair at the origin, y down), how it is
@@ -75,6 +80,7 @@ pub fn layout(r: &Reticle) -> (f32, Vec<Piece>) {
         r.spread_scale,
         r.ads,
         r.tan_half_fov_y,
+        (r.alpha_scale, r.alpha_min),
     )
 }
 
@@ -84,8 +90,9 @@ fn layout_of(
     spread_scale: f32,
     ads: f32,
     tan_half_fov_y: f32,
+    (alpha_scale, alpha_min): (f32, f32),
 ) -> (f32, Vec<Piece>) {
-    let alpha = (1.0 - spread_scale / 255.0).max(MIN_ALPHA) * (1.0 - ads);
+    let alpha = (alpha_scale * (1.0 - spread_scale / 255.0)).max(alpha_min) * (1.0 - ads);
     if alpha < 0.01 || tan_half_fov_y <= 0.0 {
         return (0.0, Vec::new());
     }
@@ -157,7 +164,14 @@ mod tests {
 
     /// 60 degrees vertical.
     fn lay(spread_deg: f32, scale: f32, ads: f32) -> (f32, Vec<Piece>) {
-        layout_of(&STYLE, spread_deg, scale, ads, 30f32.to_radians().tan())
+        layout_of(
+            &STYLE,
+            spread_deg,
+            scale,
+            ads,
+            30f32.to_radians().tan(),
+            (ALPHA, MIN_ALPHA),
+        )
     }
 
     fn top_gap(r: &(f32, Vec<Piece>)) -> f32 {

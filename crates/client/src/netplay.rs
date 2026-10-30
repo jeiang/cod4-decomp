@@ -110,6 +110,9 @@ pub struct Switches {
     pub brass: bool,
     /// `cg_drawGun`: the view model is drawn (`CG_AddViewWeapon`). A cheat dvar: off only with `sv_cheats` on.
     pub draw_gun: bool,
+    /// `cg_crosshairAlpha` and `cg_crosshairAlphaMin` (cheat; stock 1 and 0.5, each 0 to 1).
+    pub crosshair_alpha: f32,
+    pub crosshair_alpha_min: f32,
     /// The `ragdoll_*` dvars.
     pub ragdoll_tunables: crate::ragdoll::Tunables,
     /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
@@ -125,6 +128,8 @@ impl Default for Switches {
             blood: true,
             brass: true,
             draw_gun: true,
+            crosshair_alpha: crate::crosshair::ALPHA,
+            crosshair_alpha_min: crate::crosshair::MIN_ALPHA,
             ragdoll_tunables: crate::ragdoll::Tunables::default(),
             bullet: fx::BulletTune::default(),
         }
@@ -143,10 +148,26 @@ impl Switches {
             blood: on("cg_blood"),
             brass: on("cg_brass"),
             draw_gun: on("cg_drawGun") || !cheats,
+            crosshair_alpha: cheat_f32(c, cheats, "cg_crosshairAlpha", crate::crosshair::ALPHA),
+            crosshair_alpha_min: cheat_f32(
+                c,
+                cheats,
+                "cg_crosshairAlphaMin",
+                crate::crosshair::MIN_ALPHA,
+            ),
             ragdoll_tunables: crate::ragdoll::Tunables::read(c),
             bullet: bullet_tune(c),
         }
     }
+}
+
+/// A cheat float dvar in 0 to 1: its value with `sv_cheats` on, else `stock`.
+fn cheat_f32(c: &crate::input::Cvars, cheats: bool, name: &str, stock: f32) -> f32 {
+    c.get(name)
+        .filter(|_| cheats)
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(stock, |v| v.clamp(0.0, 1.0))
 }
 
 /// `phys_bulletUpBias` and `phys_bulletSpinScale`, held to the original's limits; one not set has its stock value.
@@ -1728,6 +1749,8 @@ impl NetPlay {
             spread_scale: ps.aim_spread_scale,
             ads: ps.weapon_pos_frac,
             tan_half_fov_y: 0.0,
+            alpha_scale: self.switches.crosshair_alpha,
+            alpha_min: self.switches.crosshair_alpha_min,
         })
     }
 
