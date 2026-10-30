@@ -1282,6 +1282,7 @@ impl ClientUiState {
             }
             ServerCmd::ConfigStrings(v) => {
                 let mut codinfo: Vec<u16> = Vec::new();
+                let mut values_in_batch: Vec<u16> = Vec::new();
                 for (i, s) in v {
                     if let Some(slot) = self.cs.get_mut(usize::from(i)) {
                         *slot = s;
@@ -1291,6 +1292,7 @@ impl ClientUiState {
                     } else if (cs::CODINFO_VALUE..cs::CODINFO_VALUE + cs::CODINFO_COUNT)
                         .contains(&i)
                     {
+                        values_in_batch.push(i - cs::CODINFO_VALUE);
                         i - cs::CODINFO_VALUE
                     } else {
                         continue;
@@ -1299,11 +1301,15 @@ impl ClientUiState {
                         codinfo.push(k);
                     }
                 }
-                // `CG_ParseCodInfo`: each `CODINFO` pair is a dvar the server set on this client.
+                // `CG_ParseCodInfo`: each `CODINFO` pair is a dvar the server set on this client. The table comes
+                // in chunks (a level's gamestate sends every name before any value), so a name whose value slot is
+                // still unset and not in this batch is half a pair: the dvar would read as empty for a frame (the
+                // scoreboard's `"scorebar_" + dvarString("scr_allies")` asked for `scorebar_`). It is applied once
+                // its value arrives; an empty value sent on purpose is in the batch and applies at once.
                 for k in codinfo {
                     let name = self.config(cs::CODINFO + k).to_owned();
-                    if !name.is_empty() {
-                        let value = self.config(cs::CODINFO_VALUE + k).to_owned();
+                    let value = self.config(cs::CODINFO_VALUE + k).to_owned();
+                    if !name.is_empty() && (!value.is_empty() || values_in_batch.contains(&k)) {
                         self.dvars.insert(name.to_ascii_lowercase(), value.clone());
                         self.push(UiEvent::SetDvar { name, value });
                     }
@@ -1534,6 +1540,44 @@ impl ClientUiState {
 mod tests {
     use super::*;
     use crate::Snapshot;
+
+    #[test]
+    fn a_codinfo_name_waits_for_its_value_and_an_empty_value_sent_applies() {
+        let set = |ui: &mut ClientUiState| -> Vec<(String, String)> {
+            ui.drain_events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    UiEvent::SetDvar { name, value } => Some((name, value)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut ui = ClientUiState::new();
+        // A level's gamestate in chunks: the names first, the values in a later batch.
+        ui.apply(ServerCmd::ConfigStrings(vec![(
+            cs::CODINFO,
+            "scr_allies".into(),
+        )]));
+        assert!(set(&mut ui).is_empty(), "half a pair sets nothing");
+        assert_eq!(ui.dvar("scr_allies"), None);
+        ui.apply(ServerCmd::ConfigStrings(vec![(
+            cs::CODINFO_VALUE,
+            "usmc".into(),
+        )]));
+        assert_eq!(set(&mut ui), [("scr_allies".to_owned(), "usmc".to_owned())]);
+        // The value emptied on purpose is in the batch and applies.
+        ui.apply(ServerCmd::ConfigStrings(vec![(
+            cs::CODINFO_VALUE,
+            String::new(),
+        )]));
+        assert_eq!(set(&mut ui), [("scr_allies".to_owned(), String::new())]);
+        // Both in one batch, in either order.
+        ui.apply(ServerCmd::ConfigStrings(vec![
+            (cs::CODINFO_VALUE + 1, "arab".into()),
+            (cs::CODINFO + 1, "scr_axis".into()),
+        ]));
+        assert_eq!(set(&mut ui), [("scr_axis".to_owned(), "arab".to_owned())]);
+    }
 
     #[test]
     fn a_menu_response_carries_the_level_it_was_answered_in() {
