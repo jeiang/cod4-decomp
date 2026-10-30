@@ -420,6 +420,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         "http://localhost:{PORT}/?dev-install=/install&autostart&debug&control&name={PLAYER}\
          &connect=127.0.0.1:{wt_port}&cert={hash}&args=--no-autojoin%20--duration%20100000"
     );
+    let browser_log = std::fs::File::create(dir.join("browser.log"))?;
     let mut command = Command::new(&chrome);
     command
         .env_remove("LD_LIBRARY_PATH")
@@ -435,7 +436,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(&page)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(browser_log);
     let mut cdp = super::browser_cdp::pipe(&mut command)?;
     let browser = Kill(
         command
@@ -450,6 +451,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         .and_then(|()| native_parity(&client, &install, &dir, &mut report));
     drop(browser);
     let _ = std::fs::remove_dir_all(&profile);
+    report.files.push("web-match/browser.log".into());
     report
         .metrics
         .insert("requests".into(), page.requests as f64);

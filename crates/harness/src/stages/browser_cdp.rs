@@ -10,7 +10,7 @@ use std::process::Command;
 mod imp {
     use super::*;
     use std::io::{Read, Write};
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, OwnedFd};
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
     use std::time::Duration;
@@ -30,11 +30,25 @@ mod imp {
         let (reader, child_write) = UnixStream::pair()?;
         let (child_read, writer) = UnixStream::pair()?;
         reader.set_read_timeout(Some(Duration::from_secs(30)))?;
+        // The child ends live on as plain descriptors until the browser has been spawned (the parent's copies close
+        // when the pipe is dropped; the child keeps its duplicates).
+        let child_read: OwnedFd = child_read.into();
+        let child_write: OwnedFd = child_write.into();
         let read_fd = child_read.as_raw_fd();
         let write_fd = child_write.as_raw_fd();
         // Chromium reads commands on fd 3 and writes replies on fd 4. `dup2` clears close-on-exec on the duplicates.
+        // The write end is moved out of the way first in case it already sits on fd 3.
         unsafe {
             command.pre_exec(move || {
+                let write_fd = if write_fd == 3 {
+                    let moved = libc_dup(write_fd);
+                    if moved == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    moved
+                } else {
+                    write_fd
+                };
                 for (from, to) in [(read_fd, 3), (write_fd, 4)] {
                     if libc_dup2(from, to) == -1 {
                         return Err(io::Error::last_os_error());
@@ -43,9 +57,6 @@ mod imp {
                 Ok(())
             });
         }
-        // The command owns the duplicates after spawning; these close the parent's original child ends.
-        let child_read = unsafe { OwnedFd::from_raw_fd(read_fd) };
-        let child_write = unsafe { OwnedFd::from_raw_fd(write_fd) };
         command.arg("--remote-debugging-pipe");
         Ok(BrowserPipe {
             reader,
@@ -60,6 +71,8 @@ mod imp {
     unsafe extern "C" {
         #[link_name = "dup2"]
         fn libc_dup2(oldfd: i32, newfd: i32) -> i32;
+        #[link_name = "dup"]
+        fn libc_dup(oldfd: i32) -> i32;
     }
 
     impl BrowserPipe {

@@ -72,6 +72,8 @@ requests answer with an error: the browser hosts no server.
 four players waited for, the entity list and scoreboard read, a menu item clicked at the centre of the rectangle the
 state document gave for it, and a capture written with no visible window.
 
-`web-match` runs the browser client through the same requests over the page transport: menus clicked, movement, fire,
-grenade, HUD, sound, scoreboard, killcam, map change, Leave Game and the no-hosting popup, each asserted on the state
-document (see the README's Browser section).
+`web-match` runs the browser client through the same requests over the page transport: menus clicked, movement, a
+mouse delta after a trusted click grants pointer lock, fire, grenade, HUD, sound, scoreboard, killcam, map change,
+Leave Game and the no-hosting popup, each asserted on the state document (see the README's Browser section). It then
+runs the native client on the same map, gametype and bot count and records the measured movement, shot and HUD
+ownerdraw differences.
