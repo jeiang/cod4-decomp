@@ -3678,6 +3678,10 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
     }
     let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
     let captured = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
+    // The scoreboard held up by `+scores` takes the scroll keys and nothing else (`CL_KeyEvent`: a key down that
+    // `Scoreboard_HandleInput` scrolls with goes no further); every other key stays the game's, so the bind's release
+    // reaches the bind table and lets the scoreboard go.
+    let scoreboard = st.shell.as_ref().is_some_and(|s| s.ui.scoreboard_only());
     if typing {
         if let Some(sh) = st.shell.as_mut() {
             for k in typed_ui_keys(ev) {
@@ -3687,6 +3691,27 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
     } else if captured {
         ui_event(st, ev);
     } else {
+        if scoreboard && let Some(sh) = st.shell.as_mut() {
+            let keys = match ev {
+                InputEvent::Wheel { y } => vec![if *y > 0.0 {
+                    UiKey::WheelUp
+                } else {
+                    UiKey::WheelDown
+                }],
+                InputEvent::Key {
+                    state: ElementState::Pressed,
+                    ..
+                } => typed_ui_keys(ev),
+                _ => Vec::new(),
+            };
+            let mut scrolled = false;
+            for k in keys {
+                scrolled |= sh.st.scroll_scores(&sh.ui, &k);
+            }
+            if scrolled {
+                return;
+            }
+        }
         st.input.event(ev);
     }
 }

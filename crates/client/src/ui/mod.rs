@@ -701,9 +701,18 @@ impl Ui {
         self.menu_kind == MenuKind::ScriptPopup && !self.stack.is_empty()
     }
 
-    /// True when any menu on the stack wants the mouse and keyboard (the game does not get them).
+    /// True when any menu on the stack wants the mouse and keyboard (the game does not get them). The scoreboard is
+    /// not one: the original holds it up on `cg.showScores` while `+scores` is down and paints the `scoreboard` menu
+    /// over the HUD without opening it (`CG_ScoresDown`, `CG_DrawScoreboard`), so the keys stay the game's and the
+    /// bind's release closes it.
     pub fn captures_input(&self) -> bool {
-        !self.stack.is_empty()
+        !self.stack.is_empty() && !self.scoreboard_only()
+    }
+
+    /// True while the scoreboard is what is open: painted over the HUD; the scroll keys are its and go no further,
+    /// every other key is the game's.
+    pub fn scoreboard_only(&self) -> bool {
+        !self.stack.is_empty() && self.menu_kind == MenuKind::Scoreboard
     }
 
     pub fn open_menus(&self) -> Vec<&str> {
@@ -3623,6 +3632,29 @@ mod tests {
         assert!(ui.is_open("popup_summary") && ui.script_popup_up());
         ui.close_all(&mut host);
         assert!(!ui.script_popup_up(), "nothing is up once they are closed");
+    }
+
+    /// The scoreboard held up by `+scores` leaves the keys to the game (the bind's release must reach the bind
+    /// table); a popup over it takes them.
+    #[test]
+    fn the_scoreboard_does_not_capture_input_but_a_popup_over_it_does() {
+        let Some(mut ui) = stock_ui() else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let mut host = Dummy::default();
+        assert!(!ui.captures_input());
+        ui.open_as(&mut host, "scoreboard", MenuKind::Scoreboard);
+        assert!(ui.scoreboard_only() && !ui.captures_input());
+        ui.open_script_menu(&mut host, "popup_unlock", true);
+        assert!(!ui.scoreboard_only() && ui.captures_input());
+        ui.close_all(&mut host);
+        ui.open_as(&mut host, "scoreboard", MenuKind::Scoreboard);
+        ui.open_as(&mut host, "popup_leavegame", MenuKind::Ingame);
+        assert!(
+            ui.captures_input(),
+            "a menu over the scoreboard takes the keys"
+        );
     }
 
     fn group_items(ui: &Ui, m: usize, group: &str) -> Vec<usize> {

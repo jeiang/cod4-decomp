@@ -290,7 +290,8 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         r
     })?;
 
-    // The scoreboard held up by the Tab bind, with every player on it.
+    // The scoreboard held up by the Tab bind, with every player on it, and up on every frame while the key is down
+    // (the original holds it on `cg.showScores`; a menu that took the keys would drop the bind and flicker).
     c.step("scoreboard", |c| {
         c.pause(secs(2))?;
         c.bind("+scores", "down")?;
@@ -300,7 +301,16 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
                 secs(10),
                 "the scoreboard did not come up on the bind",
             )?;
+            let shown0 = stat(c, "hud.stats.scoreboard_frames")?;
+            let frames0 = stat(c, "client.frames")?;
             c.pause(secs(2))?;
+            let shown = stat(c, "hud.stats.scoreboard_frames")?.saturating_sub(shown0);
+            let frames = stat(c, "client.frames")?.saturating_sub(frames0);
+            if frames < 10 || shown * 10 < frames * 9 {
+                return Err(format!(
+                    "the scoreboard was up on {shown} of the {frames} frames drawn while Tab was held"
+                ));
+            }
             c.capture("scoreboard")?;
             Ok(())
         };
