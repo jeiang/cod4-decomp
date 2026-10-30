@@ -157,7 +157,7 @@ mod tests {
         let front_end_only = &all[..5];
         let missing = menus_missing(front_end_only);
         assert_eq!(missing.len(), REQUIRED.len() - 5);
-        assert!(missing[0].starts_with("options_graphics"), "{missing:?}");
+        assert!(missing[0].starts_with("main_controls"), "{missing:?}");
         assert!(missing.last().unwrap().starts_with("endofgame"));
     }
 }
