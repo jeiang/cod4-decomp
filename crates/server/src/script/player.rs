@@ -3,7 +3,7 @@
 //! (`self.sessionstate`, `self.score`, ...; `g_client_fields.cpp` of the original).
 
 use gsc::{EntClass, EntRef, Value, Vm};
-use sim::pm::{PmType, button, pmf};
+use sim::pm::{button, pmf};
 
 use super::Impl::{self, Real};
 use super::{Args, MethFn, uicmd};
@@ -190,26 +190,42 @@ fn spawn(g: &mut Game, vm: &mut Vm, e: EntRef, a: Args) -> R {
     Ok(Value::Undefined)
 }
 
-/// `PlayerCmd_Suicide`: kills a living player the way a console `kill` does.
+/// `PlayerCmd_Suicide`: the player dies by their own hand at once, whatever state the body is in.
 fn suicide(g: &mut Game, vm: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client_of(g, e)?;
-    g.kill_self(vm, n)?;
+    g.die_by_own_hand(vm, n);
     Ok(Value::Undefined)
 }
 
 impl Game {
-    /// `Cmd_Kill_f`: a living player dies of `MOD_SUICIDE`; anyone else is left alone.
+    /// `Cmd_Kill_f`: a player in a playing session dies of `MOD_SUICIDE`; anyone else is left alone.
     pub fn kill_self(&mut self, vm: &mut Vm, n: u16) -> Result<(), String> {
-        let alive = self
+        if self
             .client(n)
-            .is_some_and(|c| c.session == Session::Playing && c.ps.pm_type == PmType::Normal);
-        if alive {
-            let mut d = Damage::new(100_000, combat::MOD_SUICIDE);
-            d.attacker = Some(n);
-            d.inflictor = Some(n);
-            self.finish_player_damage(vm, n, d)?;
+            .is_some_and(|c| c.session == Session::Playing)
+        {
+            self.die_by_own_hand(vm, n);
         }
         Ok(())
+    }
+
+    /// The body of `Cmd_Kill_f` and `PlayerCmd_Suicide` (KisakCOD `game_mp/g_cmds_mp.cpp`, `g_client_script_cmd_mp.cpp`):
+    /// god and demigod are cleared, the health is 0 and `player_die` runs with `MOD_SUICIDE` and 100000 damage, with no
+    /// damage step in between. So the stock `LastStandBleedOut` (`_globallogic.gsc`), which calls `suicide()` from the
+    /// Last Stand callback and ten seconds after it, kills a player whose Last Stand grace or god mode would have
+    /// swallowed the damage.
+    pub fn die_by_own_hand(&mut self, vm: &mut Vm, n: u16) {
+        if !self.alive_for_death(n) {
+            return;
+        }
+        if let Some(e) = self.ent_mut(n) {
+            e.flags &= !3;
+            e.health = 0;
+        }
+        let mut d = Damage::new(100_000, combat::MOD_SUICIDE);
+        d.attacker = Some(n);
+        d.inflictor = Some(n);
+        self.player_die(vm, n, &d, 100_000);
     }
 
     /// `Cmd_Where_f`: tells `n` where it stands.
