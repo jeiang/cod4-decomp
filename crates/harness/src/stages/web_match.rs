@@ -277,7 +277,7 @@ impl Page {
         let lit = shot["lit_fraction"].as_f64().unwrap_or(f64::NAN);
         report.metrics.insert(format!("lit_{step}"), lit);
         // A blank canvas is a capture taken before the frame reached it, or a page that draws nothing.
-        if !(lit > 0.01) {
+        if !lit.is_finite() || lit <= 0.01 {
             return Err(format!(
                 "the capture of {step} is blank (lit fraction {lit})"
             ));
@@ -706,7 +706,7 @@ fn play(
         p1["command_time"],
         p1["alive"]
     ));
-    if !(dist >= 64.0) {
+    if !dist.is_finite() || dist < 64.0 {
         return Err(format!(
             "W held for 45 s moved the player {dist:.0} units (from {origin0:?} to {}), want 64",
             p1["origin"]
