@@ -81,7 +81,16 @@ keys when the pointer could not be locked), walking with the forward key and fir
 match stages move onto it one by one (#376): `client-hud` plays its whole match through the channel.
 
 Mouse look needs what a person's does: the window focused and the pointer locked (`client.focused`,
-`client.pointer_locked`, and `client.look_gate` names what drops the motion). On the headless sway display of the
-Linux host's slots (`scripts/virtual-display.sh`, `WLR_LIBINPUT_NO_DEVICES=1`) the seat has no pointer or keyboard
-device, so the lock is refused and `Walker` turns with the arrow keys instead, holding each for the time the error
-takes at `cl_yawspeed`; the stage's notes say which path ran and what the client reported.
+`client.pointer_locked`, and `client.look_gate` names what drops the motion). A headless wlroots backend supplies
+an output but no keyboard/pointer, so `scripts/virtual-display.sh` keeps `headless-seat.py` alive on the private
+display. It creates virtual keyboard/pointer devices through the compositor's protocols and supplies an XKB keymap;
+startup fails if the seat does not advertise both capabilities. No physical device, `/dev/uinput`, or elevated
+privilege is used, and no key or motion is sent by that helper. The client's own channel still drives its input.
+The helper's connection closes when the display wrapper exits, destroying its devices.
+
+`client-hud` exercises both paths: it first tests the key-only fallback against a fixed bearing (snapshot aim must
+settle within four degrees and firing must consume magazine ammunition), restores the ordinary key speeds, and then
+uses the mouse-driven walker in the match. Key-only turning uses slower configurable `cl_yawspeed`/`cl_pitchspeed`
+and feedback pulses: each channel request crosses a rendered frame, so the original 140-degree/second keys would
+overshoot a small aiming error before the key-up even arrived. The stage's notes say which match path ran and what
+the client reported about focus and pointer lock.

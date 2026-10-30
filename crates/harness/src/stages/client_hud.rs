@@ -234,6 +234,8 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         Ok(())
     })?;
 
+    c.step("key fallback aim and fire", |c| w.check_key_fallback(c))?;
+
     // A chat line typed as a person does, which the server must send back.
     c.step("chat", |c| {
         c.chat("hello from the script", false)?;

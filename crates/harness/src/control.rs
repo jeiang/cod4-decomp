@@ -448,6 +448,78 @@ impl Walker {
         })
     }
 
+    /// Key events and wait replies each cross a rendered frame. Slow the ordinary configurable key-turn rates so
+    /// the minimum pulse (including those frames) is smaller than the four-degree aiming tolerance.
+    fn configure_keys(&mut self, c: &mut Driven) -> Result<(), String> {
+        self.stop(c)?;
+        self.per_sec = [self.per_sec[0].min(20.0), self.per_sec[1].min(20.0)];
+        c.console(&format!(
+            "set cl_yawspeed {}; set cl_pitchspeed {}",
+            self.per_sec[0], self.per_sec[1]
+        ))?;
+        self.turn = Turn::Keys;
+        Ok(())
+    }
+
+    /// Exercise the same key-only fallback even on a compositor where mouse lock works: turn to a fixed bearing,
+    /// prove the snapshot aim settled within four degrees, then fire through mouse1 and wait for ammo to drop.
+    /// Restore the key speeds before letting the match's normal mouse-driven walker run.
+    pub fn check_key_fallback(&mut self, c: &mut Driven) -> Result<(), String> {
+        let original = self.per_sec;
+        self.configure_keys(c)?;
+        let result = (|| {
+            let initial = vec3(&c.state("player")?["angles"]);
+            let target = [
+                (initial[0] + 20.0).clamp(-60.0, 60.0),
+                wrap(initial[1] + 35.0),
+            ];
+            let end = Instant::now() + Duration::from_secs(20);
+            loop {
+                let player = c.state("player")?;
+                if player["alive"] != true {
+                    return Err("the player died during the key-only aiming check".to_owned());
+                }
+                let angles = vec3(&player["angles"]);
+                let yaw = wrap(target[1] - angles[1]);
+                let pitch = target[0] - angles[0];
+                if yaw.abs() < 4.0 && pitch.abs() < 4.0 {
+                    break;
+                }
+                if Instant::now() >= end {
+                    return Err(format!(
+                        "the key-only fallback did not align: yaw error {yaw}, pitch error {pitch}"
+                    ));
+                }
+                self.turn_by(c, yaw, pitch, angles)?;
+                c.frames(3)?;
+            }
+            let ammo = c
+                .lookup("hud.report.weapon.clip")?
+                .as_i64()
+                .ok_or("no magazine ammunition")?;
+            if ammo <= 0 {
+                return Err("no ammunition for the key-only aiming check".to_owned());
+            }
+            self.hold(c, "+attack", true)?;
+            let fired = c.until(
+                json!({"hud.report.weapon.clip": {"lt": ammo}}),
+                Duration::from_secs(5),
+                "the aligned key-only player never fired",
+            );
+            self.hold(c, "+attack", false)?;
+            fired.map(|_| ())
+        })();
+        self.stop(c)?;
+        c.console(&format!(
+            "set cl_yawspeed {}; set cl_pitchspeed {}",
+            original[0], original[1]
+        ))?;
+        self.per_sec = original;
+        self.turn = Turn::Untried;
+        self.key_ticks = 0;
+        result
+    }
+
     fn hold(&mut self, c: &mut Driven, bind: &'static str, down: bool) -> Result<(), String> {
         let is = self.held.contains(&bind);
         if down && !is {
@@ -570,11 +642,11 @@ impl Walker {
                         "focused {}, pointer locked {}, look gate {}",
                         client["focused"], client["pointer_locked"], client["look_gate"]
                     );
-                    self.turn = if wrap(after[1] - angles[1]).abs() > 1.0 {
-                        Turn::Mouse
+                    if wrap(after[1] - angles[1]).abs() > 1.0 {
+                        self.turn = Turn::Mouse;
                     } else {
-                        Turn::Keys
-                    };
+                        self.configure_keys(c)?;
+                    }
                 }
                 if self.turn != Turn::Keys {
                     self.mouse_ticks += 1;
@@ -595,7 +667,8 @@ impl Walker {
                 continue;
             }
             let bind = if err > 0.0 { more } else { less };
-            let ms = (err.abs() / per_sec.max(1.0) * 1000.0).clamp(16.0, 500.0) as u64;
+            // Half the error leaves room for key-down/up transport frames; use snapshot feedback for the rest.
+            let ms = (err.abs() / per_sec.max(1.0) * 500.0).clamp(16.0, 500.0) as u64;
             self.hold(c, bind, true)?;
             c.pause(Duration::from_millis(ms))?;
             self.hold(c, bind, false)?;
