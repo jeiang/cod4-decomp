@@ -533,10 +533,18 @@ fn native_parity(
     let browser_ids = ids(&browser, "hud_drawn");
     let missing: Vec<i64> = native_ids.difference(&browser_ids).copied().collect();
     let extra: Vec<i64> = browser_ids.difference(&native_ids).copied().collect();
+    for (label, drawn) in [("native", &native_ids), ("browser", &browser_ids)] {
+        let lacking: Vec<_> = MUST_DRAW.iter().filter(|id| !drawn.contains(id)).collect();
+        if !lacking.is_empty() {
+            return Err(format!(
+                "{label} parity HUD lacks gameplay ownerdraws {lacking:?}"
+            ));
+        }
+    }
     for (name, value) in [
         ("native_moved", num(&native, "net.moved")),
         ("native_path", num(&native, "net.path")),
-        ("native_shots", num(&native, "net.shots")),
+        ("native_shots", num(&native, "server.person.shots")),
         ("native_hud_drawn", native_ids.len() as f64),
         ("parity_hud_missing", missing.len() as f64),
         ("parity_hud_extra", extra.len() as f64),
@@ -550,7 +558,7 @@ fn native_parity(
         "measured native/browser parity (mp_crash war, {BOTS} bots): native moved {:.1}, path {:.1}, shots {:.0}; browser moved {:.1}, fire events {:.0}; HUD native {native_ids:?}, browser {browser_ids:?}, missing {missing:?}, extra {extra:?}",
         num(&native, "net.moved"),
         num(&native, "net.path"),
-        num(&native, "net.shots"),
+        num(&native, "server.person.shots"),
         num(&browser, "moved"),
         num(&browser, "fire_events"),
     ));
@@ -794,8 +802,8 @@ fn play(
     report
         .metrics
         .insert("sound_active".into(), num(&sound, "active"));
-    if !(num(&sound, "started") >= 1.0) {
-        return Err(format!("no sound voice started: {sound}"));
+    if !(num(&sound, "started") >= 1.0 && num(&sound, "active") >= 1.0) {
+        return Err(format!("no sound voice is playing: {sound}"));
     }
 
     // The scoreboard, held up with the bind the player holds.
