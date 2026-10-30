@@ -243,7 +243,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "net-perks",
-        description: "two real UDP clients upload profiles with custom classes and spawn with them: the perk bits, Frag x3, Special Grenades x3 and Bandolier counts, Juggernaut, Stopping Power and Sonic Boom damage, Last Stand's pistol, crawl, no heal and ten second bleed-out, and Martyrdom's grenade",
+        description: "two real UDP clients upload profiles with custom classes and spawn with them: the perk bits, Frag x3, Special Grenades x3 and Bandolier counts, Juggernaut, Stopping Power and Sonic Boom damage, Last Stand's pistol, crawl, the health held at 1 by the overlay thread and ten second bleed-out, and Martyrdom's grenade",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,

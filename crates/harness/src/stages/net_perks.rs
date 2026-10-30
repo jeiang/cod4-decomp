@@ -42,6 +42,9 @@ const SWITCH: usize = 200;
 const BLEED_OUT_MS: i32 = 10_000;
 /// The frames of a Last Stand life the stage reads the health in, past the bleed-out.
 const LAST_STAND_FRAMES: usize = 1000;
+/// `lastStandKeepOverlay`: 0.05 s at health 2, 0.5 s at 1; a climb the regeneration makes is written back within one
+/// cycle.
+const OVERLAY_CYCLE_MS: i32 = 600;
 
 /// The perk slots of a class, as the stock `level.allowedPerks` lays them out: slot 0 is the kit (grenades, ammo),
 /// slot 1 the weapon perk, slot 2 the ability.
@@ -53,8 +56,9 @@ struct Class {
 /// No perk in a slot (`statsTable.csv` row 190).
 const NONE: &str = "specialty_null";
 
-/// The victim's classes: 1 for the kit and Last Stand, 2 for Bandolier, 3 for Special Grenades and Martyrdom.
-const VICTIM: [Class; 3] = [
+/// The victim's classes: 1 for the kit and Last Stand, 2 for Bandolier, 3 for Special Grenades and a Last Stand a
+/// grenade refuses, 4 for Martyrdom.
+const VICTIM: [Class; 4] = [
     Class {
         perks: [
             "specialty_fraggrenade",
@@ -73,8 +77,11 @@ const VICTIM: [Class; 3] = [
         perks: [
             "specialty_specialgrenade",
             "specialty_rof",
-            "specialty_grenadepulldeath",
+            "specialty_pistoldeath",
         ],
+    },
+    Class {
+        perks: [NONE, NONE, "specialty_grenadepulldeath"],
     },
 ];
 /// The attacker's classes: 1 plain, 2 Stopping Power, 3 Sonic Boom.
@@ -500,32 +507,43 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     // The victim picks its second class now: the bleed-out's respawn gives it.
     m.v.choose("custom2");
     // No heal through the bleed-out, which comes at ten seconds and credits the attacker. The stock
-    // `lastStandKeepOverlay` writes the health back to 1 twice a second, so the regeneration of `_healthoverlay.gsc`
-    // never keeps what it adds: the health is at 1 or 2 again within a second of any climb, and never full.
-    let (mut max_health, mut died_at, mut low_at) = (vb.health, None, hit_at);
+    // `lastStandKeepOverlay` writes the health to 2 for one 0.05 s step and back to 1 every 0.55 s. The regeneration
+    // of `_healthoverlay.gsc` (`playerHealthRegen`: once five seconds have passed with no drop below `oldhealth`,
+    // `setnormalhealth` adds a tenth per 0.05 s tick) runs on the same script, in the original as here, so what it
+    // adds inside one overlay cycle is written back to 1 by the next overlay step: a climb above 2 never outlives
+    // the cycle, and the health is 1 or 2 at every other sample.
+    let (mut max_health, mut died_at) = (vb.health, None);
+    let (mut climb_since, mut longest_climb_ms) = (None, 0);
     for _ in 0..LAST_STAND_FRAMES {
         m.frame();
         let b = body(&m.server, vn)?;
+        let now = m.server.game.level.time;
         if b.dead() || b.deaths > deaths_before {
-            died_at = Some(m.server.game.level.time - hit_at);
+            died_at = Some(now - hit_at);
             break;
         }
         max_health = max_health.max(b.health);
-        if b.health <= 2 {
-            low_at = m.server.game.level.time;
+        if b.health > 2 {
+            let since = *climb_since.get_or_insert(now);
+            longest_climb_ms = longest_climb_ms.max(now - since);
+        } else {
+            climb_since = None;
         }
     }
-    let held_down = died_at.is_some_and(|ms| hit_at + ms - low_at <= 1000);
     check(
-        max_health < 100 && held_down,
+        longest_climb_ms <= OVERLAY_CYCLE_MS && climb_since.is_none(),
         format!(
-            "Last Stand: the health climbed to {max_health} and was last at 1 {} ms before the end, want it held down",
-            died_at.map_or(0, |ms| hit_at + ms - low_at)
+            "Last Stand: the health climbed to {max_health} and stayed above 2 for {longest_climb_ms} ms (still up at the end: {}); the overlay writes it back within {OVERLAY_CYCLE_MS} ms",
+            climb_since.is_some()
         ),
     );
     report
         .metrics
         .insert("laststand.max_health".into(), f64::from(max_health));
+    report.metrics.insert(
+        "laststand.longest_climb_ms".into(),
+        f64::from(longest_climb_ms),
+    );
     match died_at {
         Some(ms) => {
             check(
@@ -620,7 +638,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ),
     );
 
-    // Martyrdom and Special Grenades x3: the victim's class 3, after a death without Last Stand.
+    // Special Grenades x3, and a lethal grenade on a Last Stand class: the engine saves the player (`lastStand` is set),
+    // the stock `mayDoLastStand` refuses a grenade and `Callback_PlayerLastStand` calls `suicide()` inside the grace,
+    // so the player is dead at once and no one crawls.
     m.v.choose("custom3");
     m.hit(vn, an, 1000, "MOD_RIFLE_BULLET", "ak47_mp")?;
     m.respawn(vn, vb.spawn_count, true)?;
@@ -628,7 +648,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     check(
         vb.perks == perk_bits(&VICTIM[2]),
         format!(
-            "victim class 3 perks {:#x}, want {:#x} (Special Grenades x3, Double Tap, Martyrdom)",
+            "victim class 3 perks {:#x}, want {:#x} (Special Grenades x3, Double Tap, Last Stand)",
             vb.perks,
             perk_bits(&VICTIM[2])
         ),
@@ -637,7 +657,30 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         vb.flash == 3,
         format!("Special Grenades x3 gave {} flashbangs, want 3", vb.flash),
     );
-    // A lethal grenade: no Last Stand (the class has none, and a grenade never gives one), and a live grenade dropped.
+    let deaths_before = vb.deaths;
+    m.v.choose("custom4");
+    m.hit(vn, an, 1000, "MOD_GRENADE_SPLASH", "frag_grenade_mp")?;
+    m.settle(2);
+    let vb = body(&m.server, vn)?;
+    check(
+        vb.last_stand && vb.dead() && vb.deaths == deaths_before + 1,
+        format!(
+            "a lethal grenade on a Last Stand class: lastStand {}, movement {:?}, deaths {} (was {deaths_before}); want the perk taken and the player dead at once",
+            vb.last_stand, vb.pm_type, vb.deaths
+        ),
+    );
+
+    // Martyrdom: the victim's class 4 leaves a live grenade behind when killed.
+    m.respawn(vn, vb.spawn_count, true)?;
+    let vb = body(&m.server, vn)?;
+    check(
+        vb.perks == perk_bits(&VICTIM[3]),
+        format!(
+            "victim class 4 perks {:#x}, want {:#x} (Martyrdom)",
+            vb.perks,
+            perk_bits(&VICTIM[3])
+        ),
+    );
     let grenades_before = grenades_of(&m.server, vn);
     m.hit(vn, an, 1000, "MOD_GRENADE_SPLASH", "frag_grenade_mp")?;
     m.settle(2);
