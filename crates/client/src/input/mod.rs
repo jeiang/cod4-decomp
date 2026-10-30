@@ -841,7 +841,7 @@ impl Input {
             .collect()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The command line the key is bound to, if any.
     pub fn bound(&self, key: &str) -> Option<&str> {
         self.binds
             .get(&key.to_ascii_lowercase())

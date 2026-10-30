@@ -8,7 +8,7 @@
 //! install; skips cleanly without.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
-use super::client_session::profile_args;
+use super::client_session::{profile_args, render_problem};
 use crate::perf::Percentiles;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
@@ -24,11 +24,60 @@ const LIMIT: Duration = Duration::from_secs(300);
 /// Share of the last frame's pixels that may look magenta.
 const MAX_MAGENTA: f64 = 0.002;
 
+/// A number at `path`, 0 when the report has none there: for the per-name tallies (`events.<kind>`,
+/// `sound.by_channel.<name>`, `fx.played.<name>`), where an entry that never happened is not written. A counter the
+/// client always writes is read through [`Counters`], so that its absence is a failure and not a zero.
 pub(super) fn num(v: &Value, path: &[&str]) -> f64 {
     path.iter()
         .try_fold(v, |v, k| v.get(k))
         .and_then(Value::as_f64)
         .unwrap_or(0.0)
+}
+
+/// The counters the client's report always writes, read for the checks. One that is not there is a failure of the
+/// report, not a zero: a check that read a missing counter as 0 passed when the client stopped writing it (#375).
+/// Such a read returns NaN, which no comparison passes or fails, so the one failure [`Counters::missing`] builds
+/// names the cause.
+pub(super) struct Counters<'a> {
+    of: &'a Value,
+    what: &'static str,
+    missing: Vec<String>,
+}
+
+impl<'a> Counters<'a> {
+    /// Reads under `of`, naming it `what` (`net`, `server`) in the failure.
+    pub(super) fn new(what: &'static str, of: &'a Value) -> Self {
+        Self {
+            of,
+            what,
+            missing: Vec::new(),
+        }
+    }
+
+    pub(super) fn get(&mut self, path: &[&str]) -> f64 {
+        match path
+            .iter()
+            .try_fold(self.of, |v, k| v.get(k))
+            .and_then(Value::as_f64)
+        {
+            Some(n) => n,
+            None => {
+                self.missing
+                    .push(format!("{}.{}", self.what, path.join(".")));
+                f64::NAN
+            }
+        }
+    }
+
+    /// The failure for the counters that were read and not found, if any.
+    pub(super) fn missing(&self) -> Option<String> {
+        (!self.missing.is_empty()).then(|| {
+            format!(
+                "the client report lacks the counter(s) {}",
+                self.missing.join(", ")
+            )
+        })
+    }
 }
 
 fn fail(mut r: StageReport, why: String) -> StageReport {
@@ -201,29 +250,26 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let (net, srv) = (&json["net"], &json["server"]);
     let mut failures = Vec::new();
     let secs = SECS as f64;
-    let snaps = num(net, &["snapshots"]);
-    let corrected = num(net, &["prediction_corrections"]);
-    let predicted = num(net, &["predictions"]);
-    let (shots, hits) = (
-        num(srv, &["person", "shots"]),
-        num(srv, &["person", "hits"]),
-    );
+    let mut c = Counters::new("net", net);
+    let mut sv = Counters::new("server", srv);
+    let snaps = c.get(&["snapshots"]);
+    let corrected = c.get(&["prediction_corrections"]);
+    let predicted = c.get(&["predictions"]);
+    let (shots, hits) = (sv.get(&["person", "shots"]), sv.get(&["person", "hits"]));
     if net["connected"] != true {
         failures.push("the client never connected".to_owned());
     }
     if net["spawned"] != true {
         failures.push("the server never gave the player a body".to_owned());
     }
-    if num(net, &["moved"]) < 100.0 && num(net, &["path"]) < 500.0 {
-        failures.push(format!(
-            "the player barely moved ({:.0} units walked)",
-            num(net, &["path"])
-        ));
+    let (moved, path) = (c.get(&["moved"]), c.get(&["path"]));
+    if moved < 100.0 && path < 500.0 {
+        failures.push(format!("the player barely moved ({path:.0} units walked)"));
     }
-    if num(net, &["players_seen_max"]) < (BOTS / 2) as f64 {
+    let players_seen = c.get(&["players_seen_max"]);
+    if players_seen < (BOTS / 2) as f64 {
         failures.push(format!(
-            "at most {} other players drawn of {BOTS} bots",
-            num(net, &["players_seen_max"])
+            "at most {players_seen} other players drawn of {BOTS} bots"
         ));
     }
     if snaps < secs * 20.0 {
@@ -251,8 +297,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     // The camera eases over stair steps: a frame that began a step on the logical eye did not jump the drawn one.
     // The match's walking decides whether a step is climbed at all; with none the stage notes it as untested.
     let (stairs, snapped) = (
-        num(net, &["view", "stair_frames"]),
-        num(net, &["view", "stair_snaps"]),
+        c.get(&["view", "stair_frames"]),
+        c.get(&["view", "stair_snaps"]),
     );
     if snapped > 0.0 {
         failures.push(format!(
@@ -260,17 +306,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             net["view"]["stair_last_snap"]
         ));
     }
-    if num(net, &["view", "steps"]) >= 1.0 && num(net, &["view", "step_max"]) <= 0.0 {
+    if c.get(&["view", "steps"]) >= 1.0 && c.get(&["view", "step_max"]) <= 0.0 {
         failures.push("the player climbed steps but the camera never smoothed one".into());
     }
     // Leaning out moved the eye sideways and a landing dipped it, when the bot did either.
-    if num(net, &["view", "lean_frames"]) >= 1.0 && num(net, &["view", "lean_max"]) < 1.0 {
+    if c.get(&["view", "lean_frames"]) >= 1.0 && c.get(&["view", "lean_max"]) < 1.0 {
         failures.push("the player leaned but the camera did not move sideways".into());
     }
-    if num(net, &["view", "landings"]) >= 1.0 && num(net, &["view", "dip_max"]) <= 0.0 {
+    if c.get(&["view", "landings"]) >= 1.0 && c.get(&["view", "dip_max"]) <= 0.0 {
         failures.push("the player landed from a jump but the view never dipped".into());
     }
-    if net["viewmodel_frames"].as_f64().unwrap_or(0.0) < secs {
+    if c.get(&["viewmodel_frames"]) < secs {
         failures.push("the first-person weapon was hardly drawn".into());
     }
     if net["weapons_without_models"]
@@ -284,8 +330,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     // Every scripted model the server published (props, cars, objectives) must be drawn.
     let (seen, drawn) = (
-        num(net, &["script_models_seen"]),
-        num(net, &["script_models_drawn"]),
+        c.get(&["script_models_seen"]),
+        c.get(&["script_models_drawn"]),
     );
     if seen < 1.0 {
         failures.push("the server published no script_model for the client to draw".into());
@@ -297,48 +343,45 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     // The scripts dress each player (`_teams` attaches a head to the body): the models they attached reach the client
     // and are drawn, not a head the client picked by faction.
-    if num(net, &["players_seen_max"]) >= 1.0
+    if players_seen >= 1.0
         && net["player_attachments"]
             .as_array()
             .is_none_or(|a| a.is_empty())
     {
         failures.push("players were drawn but none carried a model the scripts attached".into());
     }
-    if num(srv, &["script_errors"]) > 0.0 {
+    let script_errors = sv.get(&["script_errors"]);
+    if script_errors > 0.0 {
         failures.push(format!(
-            "{} script runtime errors on the server",
-            num(srv, &["script_errors"])
+            "{script_errors} script runtime errors on the server"
         ));
     }
     if shots < 1.0 {
         failures.push("the player never fired a shot the server ran".into());
     }
     // Recoil kicks the view and the kick is in the cmds the server aims the shots by.
-    if shots >= 1.0 && num(net, &["view_kick_max"]) <= 0.0 {
+    if shots >= 1.0 && c.get(&["view_kick_max"]) <= 0.0 {
         failures.push("shots were fired but the view never kicked".into());
     }
-    if shots >= 1.0 && num(net, &["view_kick_in_cmd_max"]) <= 0.0 {
+    if shots >= 1.0 && c.get(&["view_kick_in_cmd_max"]) <= 0.0 {
         failures.push("shots were fired but no cmd carried the kick".into());
     }
-    if shots >= 1.0 && num(net, &["view_kick_settled"]) < 1.0 {
+    if shots >= 1.0 && c.get(&["view_kick_settled"]) < 1.0 {
         failures.push("the view kicked but never came back to rest".into());
     }
     // The shots' kick moves the gun and the gun comes back. A weapon that cannot aim down sights has no recoil
     // spring, and a weapon whose file gives the gun no kick has nothing to move: both are untested, not failed.
-    if num(net, &["gun_speed_given"]) > 0.0 && net["gun_has_spring"].as_bool() == Some(true) {
-        if num(net, &["gun_recoil_max"]) <= 0.0 {
+    if c.get(&["gun_speed_given"]) > 0.0 && net["gun_has_spring"].as_bool() == Some(true) {
+        if c.get(&["gun_recoil_max"]) <= 0.0 {
             failures.push("shots kicked the gun but its recoil never moved".into());
-        } else if num(net, &["gun_recoil_settled"]) < 1.0 {
+        } else if c.get(&["gun_recoil_settled"]) < 1.0 {
             failures.push("the gun recoiled but never came back to rest".into());
         }
     }
     // A hit the player took (the match is bots shooting back) showed on the screen: the red flash and a wedge.
     // Whether a bot lands one within the run is up to the match, with no hit the stage notes it as untested.
-    let taken = num(net, &["damage_events"]);
-    if taken >= 1.0
-        && num(net, &["damage_flash_max"]) <= 0.0
-        && num(net, &["damage_wedges_max"]) < 1.0
-    {
+    let taken = c.get(&["damage_events"]);
+    if taken >= 1.0 && c.get(&["damage_flash_max"]) <= 0.0 && c.get(&["damage_wedges_max"]) < 1.0 {
         failures.push(format!(
             "the player state counted {taken} hits but the HUD showed neither a flash nor a damage wedge"
         ));
@@ -353,8 +396,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if snd["ready"] != true {
         failures.push(format!("the sound tables never loaded: {}", snd["error"]));
     } else {
-        if num(snd, &["started"]) < 50.0 {
-            failures.push(format!("only {} sounds started", num(snd, &["started"])));
+        let started = c.get(&["sound", "started"]);
+        if started < 50.0 {
+            failures.push(format!("only {started} sounds started"));
         }
         if heard(&["weapon", "weapon2d"]) < 1.0 {
             failures.push("no weapon fire was heard".into());
@@ -365,7 +409,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         if heard(&["ambient", "music"]) < 1.0 {
             failures.push("neither the map's ambience nor music played".into());
         }
-        if num(snd, &["lost_commands"]) > 0.0 {
+        if c.get(&["sound", "lost_commands"]) > 0.0 {
             failures.push("the mixer's command queue overflowed".into());
         }
         if snd["failed"].as_array().is_some_and(|f| !f.is_empty()) {
@@ -415,12 +459,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ));
     }
     failures.extend(misses("effect", &fx["missing"], ALLOWED_MISSING_EFFECTS));
-    if num(net, &["skin_faults"]) > 0.0 {
+    let skin_faults = c.get(&["skin_faults"]);
+    if skin_faults > 0.0 {
         failures.push(format!(
-            "{} skinned surfaces had vertices outside their model (stretched triangles)",
-            num(net, &["skin_faults"])
+            "{skin_faults} skinned surfaces had vertices outside their model (stretched triangles)"
         ));
     }
+    failures.extend(c.missing());
+    failures.extend(sv.missing());
+    failures.extend(render_problem(&json));
     // A missing texture or a model outside the light grid shows as magenta: the last frame must hold none.
     match decode(&dir.join("screenshot.png")) {
         Ok((_, _, rgb)) => {
@@ -530,6 +577,26 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_counter_the_report_lacks_is_a_failure_not_a_zero() {
+        let net = json!({"moved": 12.5, "view": {"steps": 3}, "snapshots": null});
+        let mut c = Counters::new("net", &net);
+        assert_eq!(c.get(&["moved"]), 12.5);
+        assert_eq!(c.get(&["view", "steps"]), 3.0);
+        assert_eq!(c.missing(), None);
+        // A missing counter compares as neither over nor under any threshold, and is named once at the end.
+        let gone = c.get(&["view", "step_max"]);
+        assert!(gone.is_nan() && gone.partial_cmp(&0.0).is_none());
+        assert!(c.get(&["snapshots"]).is_nan(), "null is not a number");
+        let why = c.missing().unwrap();
+        assert!(
+            why.contains("net.view.step_max") && why.contains("net.snapshots"),
+            "{why}"
+        );
+        // The lenient reader is for the tallies that are only written when something happened.
+        assert_eq!(num(&net, &["events", "weapon_fire"]), 0.0);
+    }
 
     #[test]
     fn a_name_the_tables_lack_fails_and_an_absent_list_fails() {

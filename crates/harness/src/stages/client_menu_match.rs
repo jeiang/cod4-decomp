@@ -51,6 +51,12 @@ fn menu_match_verdict(report: &Value) -> Option<String> {
     let Some((from, to)) = note.split_once(" -> ") else {
         return Some(format!("the map did not rotate (note {note:?})"));
     };
+    // Both ends are map names: a run once reported `2 -> mp_backlot`, the saved team standing in for the map (#375).
+    if !from.starts_with("mp_") || !to.starts_with("mp_") {
+        return Some(format!(
+            "the rotation note does not name two maps (note {note:?})"
+        ));
+    }
     if from == to || report["map"].as_str() != Some(to) {
         return Some(format!(
             "the map did not rotate (note {note:?}, ended in {})",
@@ -144,11 +150,17 @@ mod tests {
                     "map": "compass_map_x",
                     "drawn": {"112": 1, "117": 1, "159": 1, "150": 1}},
                 "map": map,
+                "render": {"material_failures": {}, "image_failures": []},
             })
         };
         assert_eq!(menu_match_verdict(&r("mp_a -> mp_b", "mp_b")), None);
         assert!(menu_match_verdict(&r("mp_a -> mp_a", "mp_a")).is_some());
         assert!(menu_match_verdict(&r("mp_a -> mp_b", "mp_c")).is_some());
+        assert!(
+            menu_match_verdict(&r("2 -> mp_b", "mp_b"))
+                .unwrap()
+                .contains("two maps")
+        );
     }
 
     #[test]

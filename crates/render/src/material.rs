@@ -678,7 +678,18 @@ impl Materials {
         kind: VertexKind,
         hsm: bool,
     ) -> Option<Arc<Prepared>> {
-        let set = self.techset(mat, hsm)?;
+        let Some(set) = self.techset(mat, hsm) else {
+            let name = mat.name.as_deref().unwrap_or("?");
+            logging::dedup!(
+                WARN,
+                name,
+                "material has no techset, its draws are skipped",
+                material = name
+            );
+            self.failures
+                .insert(name.to_owned(), "no techset".to_owned());
+            return None;
+        };
         let tech = techs.iter().copied().find(|&t| {
             set.techniques
                 .get(t)

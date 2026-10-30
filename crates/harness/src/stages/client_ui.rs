@@ -17,13 +17,23 @@ const NAME: &str = "client-ui";
 const LIMIT: Duration = Duration::from_secs(240);
 /// Menus that are mostly backdrop must light at least this share of the screenshot.
 const MIN_LIT: f64 = 0.02;
-/// Menus that must exist in the report: the front end and the script menus of a match.
+/// Every menu the tour opens (the client's `TOUR_MENUS`, in order): each must be in the report. Five of fourteen were
+/// required before, so a tour that stopped after the front end still passed (#375).
 const REQUIRED: &[&str] = &[
     "main",
+    "pc_join_unranked",
     "createserver",
+    "main_options",
+    "options_graphics",
+    "main_controls",
+    "options_look",
+    "options_move",
     "team_marinesopfor",
     "class",
+    "changeclass",
     "scoreboard",
+    "popup_leavegame",
+    "endofgame",
 ];
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -102,11 +112,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             out.files.push(format!("ui/{f}"));
         }
     }
-    for r in REQUIRED {
-        if !menus.iter().any(|m| m["menu"] == *r) {
-            bad.push(format!("{r} missing from the report"));
-        }
-    }
+    bad.extend(menus_missing(&menus));
     let missing = report["missing_images"].as_array().map_or(0, Vec::len);
     out.metrics.insert("menus".into(), menus.len() as f64);
     out.metrics.insert(
@@ -128,4 +134,30 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ));
     }
     Ok(out)
+}
+
+/// The tour menus the report has no entry for, as failures.
+fn menus_missing(menus: &[Value]) -> Vec<String> {
+    REQUIRED
+        .iter()
+        .filter(|r| !menus.iter().any(|m| m["menu"] == **r))
+        .map(|r| format!("{r} missing from the report"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_tour_that_stopped_early_names_every_menu_it_did_not_reach() {
+        let all: Vec<Value> = REQUIRED.iter().map(|m| json!({"menu": m})).collect();
+        assert!(menus_missing(&all).is_empty());
+        let front_end_only = &all[..5];
+        let missing = menus_missing(front_end_only);
+        assert_eq!(missing.len(), REQUIRED.len() - 5);
+        assert!(missing[0].starts_with("options_graphics"), "{missing:?}");
+        assert!(missing.last().unwrap().starts_with("endofgame"));
+    }
 }

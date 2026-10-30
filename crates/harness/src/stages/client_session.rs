@@ -115,6 +115,34 @@ pub(super) fn gpu_problem(health: &Value) -> Option<String> {
     (!errors.is_empty()).then(|| format!("graphics errors: {}", errors.join("; ")))
 }
 
+/// Material names the renderer may fail to prepare in a stock run, each with the reason it is benign. Empty: a
+/// material whose draws are skipped is a defect, so a new entry needs the name and why it is sound to leave it.
+const ALLOWED_MATERIAL_FAILURES: &[&str] = &[];
+
+/// Why a run's renderer does not vouch for it, or `None`: the client's `render` record must be there, and every
+/// material it could not prepare (no techset, no usable technique, a pipeline that failed to build) is a draw the
+/// player never saw. Those were counted and never asserted (#375). Images that did not load are the stage's to
+/// report; a UI image is checked by the menus' `missing_images`.
+pub(super) fn render_problem(report: &Value) -> Option<String> {
+    let Some(failures) = report["render"]["material_failures"].as_object() else {
+        return Some(
+            "the run reported no render record, so material failures were not checked".into(),
+        );
+    };
+    let bad: Vec<String> = failures
+        .iter()
+        .filter(|(name, _)| !ALLOWED_MATERIAL_FAILURES.contains(&name.as_str()))
+        .map(|(name, why)| format!("{name} ({})", why.as_str().unwrap_or("?")))
+        .collect();
+    (!bad.is_empty()).then(|| {
+        format!(
+            "{} material(s) the renderer could not prepare, their draws skipped: {}",
+            bad.len(),
+            bad.join(", ")
+        )
+    })
+}
+
 /// Why a run's steps do not vouch for it, or `None`: every step the script ran must have passed, and a report without
 /// steps proves nothing (a run that ended before its script reached a step).
 pub(super) fn steps_problem(report: &Value) -> Option<String> {
@@ -132,6 +160,9 @@ pub(super) fn steps_problem(report: &Value) -> Option<String> {
 /// Why a run failed, or `None` when every step passed and the player spawned.
 pub(super) fn verdict(report: &Value) -> Option<String> {
     if let Some(w) = gpu_problem(&report["gpu_health"]) {
+        return Some(w);
+    }
+    if let Some(w) = render_problem(report) {
         return Some(w);
     }
     if let Some(w) = steps_problem(report) {
@@ -349,5 +380,30 @@ mod tests {
         );
         let bad = json!({"device_losses": [], "errors": ["Buffer is invalid"]});
         assert!(gpu_problem(&bad).is_some());
+    }
+
+    #[test]
+    fn a_material_the_renderer_could_not_prepare_fails_and_no_record_fails() {
+        assert_eq!(
+            render_problem(&json!({"render": {"material_failures": {}, "image_failures": []}})),
+            None
+        );
+        let why = render_problem(&json!({"render": {"material_failures": {
+            "mc/foo": "techset \"x\" has techniques [1], wanted [0]"}}}))
+        .unwrap();
+        assert!(
+            why.contains("mc/foo") && why.contains("wanted [0]"),
+            "{why}"
+        );
+        assert!(
+            render_problem(&json!({"steps": []}))
+                .unwrap()
+                .contains("no render record")
+        );
+        assert!(
+            render_problem(&json!({"render": {"image_failures": []}}))
+                .unwrap()
+                .contains("no render record")
+        );
     }
 }

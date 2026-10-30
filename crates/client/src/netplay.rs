@@ -615,6 +615,12 @@ impl NetPlay {
             .unwrap_or(0)
     }
 
+    /// How many distinct missile entities have been drawn so far (a grenade thrown, a rocket fired): grows by one
+    /// per projectile that appeared, whoever launched it.
+    pub fn missiles_appeared(&self) -> usize {
+        self.c.missiles_seen.len()
+    }
+
     /// Explosions received so far.
     pub fn explosions(&self) -> u64 {
         self.c.events.get("explosion").copied().unwrap_or(0)
