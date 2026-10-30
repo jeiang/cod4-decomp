@@ -433,6 +433,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "--enable-unsafe-swiftshader",
             "--autoplay-policy=no-user-gesture-required",
             "--window-size=1280,720",
+            "--enable-logging=stderr",
+            "--log-level=0",
         ])
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(&page)
