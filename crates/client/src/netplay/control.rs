@@ -139,7 +139,7 @@ fn connection(st: &NetPlay) -> Value {
         "bytes_in": s.map(|s| s.bytes_in),
         "bytes_out": s.map(|s| s.bytes_out),
         "props": st.props.instances().map(|m| json!({
-            "model_name": m.model.name,
+            "model_name": m.model.name.as_deref(),
             "origin": m.origin,
         })).collect::<Vec<_>>(),
         "view": {
