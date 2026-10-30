@@ -2051,12 +2051,21 @@ impl Server {
                 self.game.cvars.set("bot_count", &n.to_string());
                 self.set_bots(n)?;
             }
-            // Test hook: `devkill <victim> <attacker>` has the attacker's rifle kill the victim.
+            // Test hook: `devkill <victim> <attacker> [damage] [mod] [weapon]` has the attacker's weapon hit the victim
+            // for that much (a 1000 damage ak47 rifle bullet by default), through `G_Damage` and the scripts' damage
+            // callback like a real hit, so the perks the stock scripts apply there act.
             "devkill" => {
                 let (Some(v), Some(a)) = (arg(1), arg(2)) else {
-                    return Err("usage: devkill <victim> <attacker>".into());
+                    return Err("usage: devkill <victim> <attacker> [damage] [mod] [weapon]".into());
                 };
                 let (v, a) = (cvar::parse_int(v) as u16, cvar::parse_int(a) as u16);
+                let damage = arg(3).map_or(1000, cvar::parse_int);
+                let mean = match arg(4) {
+                    Some(m) => crate::combat::mod_from_name(m)
+                        .ok_or_else(|| format!("devkill: unknown means of death {m:?}"))?,
+                    None => crate::combat::MOD_RIFLE_BULLET,
+                };
+                let weapon = arg(5).unwrap_or("ak47_mp").to_owned();
                 let Some(run) = self.run.as_mut() else {
                     return Err("Server is not running.".into());
                 };
@@ -2064,10 +2073,10 @@ impl Server {
                     game: &mut self.game,
                     dispatch: &run.dispatch,
                 };
-                let mut d = crate::combat::Damage::new(1000, crate::combat::MOD_RIFLE_BULLET);
+                let mut d = crate::combat::Damage::new(damage, mean);
                 d.attacker = Some(a);
                 d.inflictor = Some(a);
-                d.weapon = host.game.weapon_index("ak47_mp");
+                d.weapon = host.game.weapon_index(&weapon);
                 host.game.g_damage(&mut run.vm, v, d);
                 host.run_calls(&mut run.vm);
             }

@@ -1413,6 +1413,37 @@ fn a_player_the_last_stand_perk_saved_is_immune_for_half_a_second() {
     assert_eq!(g.client(b).unwrap().ps.pm_type, PmType::Dead);
 }
 
+/// `PlayerCmd_Suicide` and `Cmd_Kill_f` go straight to `player_die`: the stock `Callback_PlayerLastStand` calls
+/// `suicide()` for a death Last Stand does not cover (a grenade), inside the half-second grace, and the bleed-out
+/// calls it again ten seconds later. God mode does not stop it either.
+#[test]
+fn suicide_kills_a_player_inside_the_last_stand_grace_and_through_god_mode() {
+    let (mut g, mut vm) = arena(&[], 0, vec![frag()]);
+    let a = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let b = add_player(&mut g, &mut vm, [200.0, 0.0, 0.0], 0.0, Team::Axis);
+    g.client_mut(b).unwrap().ps.perks = 0x80;
+    g.level.time = 1000;
+    let mut d = Damage::new(150, server::combat::MOD_GRENADE_SPLASH);
+    d.attacker = Some(a);
+    g.finish_player_damage(&mut vm, b, d).unwrap();
+    assert!(g.client(b).unwrap().last_stand);
+    g.ent_mut(b).unwrap().health = 1;
+    g.ent_mut(b).unwrap().flags |= 1;
+    let deaths = g.stats.deaths;
+    g.die_by_own_hand(&mut vm, b);
+    assert_eq!(g.ent(b).unwrap().health, 0);
+    assert_eq!(g.client(b).unwrap().ps.pm_type, PmType::Dead);
+    assert_eq!(g.stats.deaths, deaths + 1);
+    assert_eq!(g.ent(b).unwrap().flags & 3, 0, "god mode is cleared");
+    // A dead player is left alone.
+    g.die_by_own_hand(&mut vm, b);
+    assert_eq!(g.stats.deaths, deaths + 1);
+    // Someone with no body (a spectator) is left alone too.
+    g.client_mut(a).unwrap().ps.pm_type = PmType::Spectator;
+    g.die_by_own_hand(&mut vm, a);
+    assert_eq!(g.stats.deaths, deaths + 1);
+}
+
 #[test]
 fn the_engine_sends_no_obituary_of_its_own_and_the_script_one_carries_its_arguments() {
     use net::ui::ServerCmd;
