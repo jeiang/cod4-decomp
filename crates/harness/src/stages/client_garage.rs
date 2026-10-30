@@ -117,8 +117,8 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     let bare_tyre = c.capture("no-tyre")?;
     // Ignore HUD and weapon regions. Each object's absence must change its own part of the garage image.
     for (label, bare, region) in [
-        ("car", bare_car, [0.0, 0.15, 0.3, 0.65]),
-        ("tyre", bare_tyre, [0.2, 0.55, 0.6, 0.95]),
+        ("car", bare_car, [0.0, 0.25, 0.2, 0.5]),
+        ("tyre", bare_tyre, [0.29, 0.70, 0.35, 0.80]),
     ] {
         let share = changed(&live, &bare, region)?;
         report
