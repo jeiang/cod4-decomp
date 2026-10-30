@@ -580,6 +580,7 @@ impl ClientSound {
                     shooter,
                     from: from @ (Shooter::Vehicle | Shooter::Turret { .. }),
                     last_shot,
+                    ..
                 } => {
                     let own = match *from {
                         Shooter::Turret { gunner, .. } => u32::from(gunner) == self.own_entity,
