@@ -572,19 +572,23 @@ fn play(
     }
     page.capture(server, report, dir, "04-moved")?;
 
-    // Turning: a mouse delta changes the yaw the server echoes.
+    // Turning: the stock `+right` button (`CL_KeyMove`'s `cl_yawspeed` turn, run from the console as the original
+    // allows) changes the yaw the server echoes. A mouse delta is not used here: mouse look applies only while the
+    // pointer is captured (as natively), and a headless page is never granted the pointer lock, which needs a
+    // gesture; the 2026-10-30 slot run showed the injected delta thrown away as "pointer free".
     let yaw0 = num(&p1, "angles.1");
     let turn = |y: f64| ((y - yaw0 + 540.0).rem_euclid(360.0) - 180.0).abs();
-    page.ask(server, json!({"cmd": "mouse", "dx": 400, "dy": 0}))?;
-    let yaw1 = page.poll(
+    page.ask(server, json!({"cmd": "exec", "line": "+right"}))?;
+    let turned = page.poll(
         server,
         "player",
         "angles.1",
         |y| turn(y) >= 2.0,
-        "a mouse delta of 400 did not turn the view",
-        Duration::from_secs(10),
-    )?;
-    report.metrics.insert("turned_deg".into(), turn(yaw1));
+        "+right did not turn the view",
+        Duration::from_secs(15),
+    );
+    page.ask(server, json!({"cmd": "exec", "line": "-right"}))?;
+    report.metrics.insert("turned_deg".into(), turn(turned?));
 
     // Firing: mouse1 lowers the clip and the own fire event is delivered.
     page.button(server, "mouse1", "down")?;
