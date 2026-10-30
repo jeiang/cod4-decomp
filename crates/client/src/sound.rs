@@ -581,7 +581,10 @@ impl ClientSound {
                     from: from @ (Shooter::Vehicle | Shooter::Turret { .. }),
                     last_shot,
                 } => {
-                    let own = matches!(*from, Shooter::Turret { gunner, .. } if u32::from(gunner) == self.own_entity);
+                    let own = match *from {
+                        Shooter::Turret { gunner, .. } => u32::from(gunner) == self.own_entity,
+                        Shooter::Player | Shooter::Vehicle => false,
+                    };
                     let event = if *last_shot {
                         ev::FIRE_WEAPON_LASTSHOT
                     } else {
@@ -1381,20 +1384,7 @@ fn turret_selftest(install: &Path) -> Vec<(String, bool)> {
         Ok(b) => b,
         Err(e) => return vec![(format!("turret sounds: {e}"), false)],
     };
-    let turret = (|| {
-        let install = server::content::Install::open(install).map_err(|e| e.to_string())?;
-        let mut content = server::content::Content::default();
-        content.load_boot(&install)?;
-        content.load_map(&install, TURRET_MAP)?;
-        content
-            .weapons()
-            .into_iter()
-            .find(|w| {
-                sim::weapon::WeaponClass::from_raw(w.weap_class) == sim::weapon::WeaponClass::Turret
-            })
-            .ok_or_else(|| format!("{TURRET_MAP} has no turret weapon"))
-    })();
-    let turret = match turret {
+    let turret = match turret_weapon(install) {
         Ok(t) => t,
         Err(e) => return vec![(format!("turret weapon: {e}"), false)],
     };
@@ -1416,7 +1406,7 @@ fn turret_selftest(install: &Path) -> Vec<(String, bool)> {
     for (who, gunner, own) in [("the gunner", 3u16, true), ("a bystander", 4, false)] {
         let Some(expected) = weapon_sound(Some(&turret), ev::FIRE_WEAPON, own) else {
             out.push((
-                format!("{} names no fire sound for {who}", turret.internal_name),
+                format!("{:?} names no fire sound for {who}", turret.internal_name),
                 false,
             ));
             continue;
@@ -1442,6 +1432,22 @@ fn turret_selftest(install: &Path) -> Vec<(String, bool)> {
         }
     }
     out
+}
+
+/// The turret weapon of [`TURRET_MAP`] from its zones.
+#[cfg(not(target_arch = "wasm32"))]
+fn turret_weapon(install: &Path) -> Result<Arc<WeaponDef>, String> {
+    let install = server::content::Install::open(install).map_err(|e| e.to_string())?;
+    let mut content = server::content::Content::default();
+    content.load_boot(&install)?;
+    content.load_map(&install, TURRET_MAP)?;
+    content
+        .weapons()
+        .into_iter()
+        .find(|w| {
+            sim::weapon::WeaponClass::from_raw(w.weap_class) == sim::weapon::WeaponClass::Turret
+        })
+        .ok_or_else(|| format!("{TURRET_MAP} has no turret weapon"))
 }
 
 /// Entity loops come from the snapshots' entity state: a looping entity is heard, follows nothing it is not, and
