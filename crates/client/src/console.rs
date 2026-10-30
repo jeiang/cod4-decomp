@@ -291,6 +291,7 @@ const OWN_COMMANDS: &[&str] = &[
     "chatmodepublic",
     "chatmodeteam",
     "cinematic",
+    "closemenu",
     "cmd",
     "connect",
     "devmap",
@@ -378,6 +379,7 @@ pub fn is_own_verb(name: &str) -> bool {
 pub fn is_shell_verb(name: &str) -> bool {
     const SHELL: &[&str] = &[
         "cinematic",
+        "closemenu",
         "connect",
         "demo",
         "devmap",

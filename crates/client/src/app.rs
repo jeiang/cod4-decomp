@@ -2340,6 +2340,11 @@ impl Viewer {
                     restart_files(&self.cli, st);
                 }
                 Action::Console(line) => console_action(st, &line),
+                Action::CloseMenu(name) => {
+                    if let Some(sh) = st.shell.as_mut() {
+                        sh.close_by_name(&mut st.input, &name);
+                    }
+                }
                 // The front end uses a separate sound system with MP, SP and localized code zones.
                 // Match sound tables are loaded per map.
                 Action::SoundLoop(alias) if !self.cli.no_sound => {
