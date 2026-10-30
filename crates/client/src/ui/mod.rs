@@ -1595,22 +1595,26 @@ impl Ui {
         self.item_pixels(m, i).contains(x, y)
     }
 
-    /// The items of one open menu, for the control channel's state document: each item's name and its rectangle in
-    /// window pixels (`[x, y, w, h]`), which is what a click is tested against.
-    pub fn item_report(&self, menu: &str) -> Vec<(String, [f32; 4])> {
+    /// The items of one open menu, for the control channel's state document: each item's name, the text it shows
+    /// (localized, as drawn; empty for an item without one), whether it is visible, and its rectangle in window pixels
+    /// (`[x, y, w, h]`), which is what a click is tested against.
+    pub fn item_report(
+        &mut self,
+        host: &mut dyn Host,
+        menu: &str,
+    ) -> Vec<(String, String, bool, [f32; 4])> {
         let Some(m) = self.menu_index(menu) else {
             return Vec::new();
         };
+        let def = self.menus[m].def.clone();
         (0..self.menus[m].items.len())
             .map(|i| {
-                let name = self.menus[m].def.items[i]
-                    .window
-                    .name
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_owned();
+                let d = &def.items[i];
+                let name = d.window.name.as_deref().unwrap_or("").to_owned();
+                let text = self.item_text(&*host, m, i, d);
                 let p = self.item_pixels(m, i);
-                (name, [p.x, p.y, p.w, p.h])
+                let visible = self.item_visible(host, m, i);
+                (name, text, visible, [p.x, p.y, p.w, p.h])
             })
             .collect()
     }

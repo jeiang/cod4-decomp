@@ -2160,10 +2160,20 @@ impl Viewer {
                     el.exit();
                 }
                 Action::StartServer { map, gametype } => {
+                    // The browser has no sockets or threads to host on (`listen_web.rs`): the stock Start New
+                    // Server path says so in the error popup instead of starting a load that cannot finish.
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = (&map, &gametype);
+                        tracing::warn!(%map, "a browser cannot host a game");
+                        show_error(st, crate::listen::NO_HOSTING);
+                        continue;
+                    }
                     // `SV_Map_f` looks for the map's zone before anything else (`DB_FileSize`, KisakCOD
                     // `server_mp/sv_ccmds_mp.cpp`): a map the install lacks starts no server and shows no loading
                     // screen. The original prints its `Can't find map` to the console; here it is the error popup's
                     // reason, so a menu player sees it too (#368). A match being played goes on, as there.
+                    #[cfg(not(target_arch = "wasm32"))]
                     if assets::paths::zone_file(&self.cli.install, &game_of(&st.input), &map)
                         .is_none()
                     {
@@ -4847,6 +4857,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "in_world": st.renderer.is_some(),
                 "out": cli.out.as_ref().map(|p| p.display().to_string()),
                 "backends": cli.backend.clone(),
+                "gpu": gpu_json(&st.gpu),
                 "present": cli.present.clone(),
             }),
             "menu" => menu_state(st),
@@ -4894,9 +4905,10 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
     Value::Object(m)
 }
 
-/// The menus on the stack, and the item that has the focus with the rectangle a click is tested against.
+/// The menus on the stack, the item that has the focus with the rectangle a click is tested against, and every item
+/// of the open menus with its name, the text it shows and whether it is visible.
 fn menu_state(st: &mut State) -> Value {
-    let Some(sh) = st.shell.as_ref() else {
+    let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
     };
     let open: Vec<String> = sh.ui.open_menus().iter().map(|m| (*m).to_owned()).collect();
@@ -4904,13 +4916,19 @@ fn menu_state(st: &mut State) -> Value {
         .ui
         .focused_report()
         .map(|(menu, item, rect)| json!({"menu": menu, "item": item, "rect": rect}));
+    let mut host = crate::shell::HostCx {
+        st: &mut sh.st,
+        input: &mut st.input,
+    };
     let items: Vec<Value> = open
         .iter()
         .flat_map(|menu| {
             sh.ui
-                .item_report(menu)
+                .item_report(&mut host, menu)
                 .into_iter()
-                .map(|(name, rect)| json!({"menu": menu.clone(), "name": name, "rect": rect}))
+                .map(|(name, text, visible, rect)| {
+                    json!({"menu": menu.clone(), "name": name, "text": text, "visible": visible, "rect": rect})
+                })
         })
         .collect();
     json!({"open": open, "focused": focused, "items": items})
@@ -4949,7 +4967,24 @@ fn hud_state(st: &mut State) -> Value {
     })
 }
 
+/// Takes the capture the channel asked for from the frame just drawn and answers its request. In the browser the page
+/// reads the canvas (the module has no file to write to, and WebGPU maps buffers asynchronously); the reply carries
+/// the PNG inline, and `dir` is the caller's to use.
+#[cfg(target_arch = "wasm32")]
+fn take_control_shot(_cli: &Cli, st: &mut State, tex: &wgpu::Texture) -> Result<Value, String> {
+    st.control_shot.take();
+    st.shot_serial += 1;
+    let mut reply = crate::web::capture_frame()?;
+    reply["name"] = Value::String(format!("control-{}.png", st.shot_serial));
+    if reply["width"].is_null() {
+        reply["width"] = json!(tex.width());
+        reply["height"] = json!(tex.height());
+    }
+    Ok(reply)
+}
+
 /// Takes the capture the channel asked for from the frame just drawn and answers its request.
+#[cfg(not(target_arch = "wasm32"))]
 fn take_control_shot(cli: &Cli, st: &mut State, tex: &wgpu::Texture) -> Result<Value, String> {
     let (dir, inline) = st.control_shot.take().unwrap_or_default();
     let dir = dir

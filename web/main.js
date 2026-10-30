@@ -175,6 +175,47 @@ function showOverlay() {
   $("overlay").textContent = rows.join("\n");
 }
 
+// ---- the dev control channel (docs/control-channel.md) -------------------------------------------------------
+//
+// With ?control the page is the channel's wire: it long-polls web/serve.py for the harness's requests
+// (GET /control/next), hands each line to the module between frames (cod4.control_next), and posts the module's
+// reply lines back (POST /control/reply). Without ?control nothing polls and the module opens no channel.
+const controlInbox = [];
+let controlPolling = false;
+
+async function pollControl() {
+  if (controlPolling) return;
+  controlPolling = true;
+  for (;;) {
+    try {
+      const r = await fetch("/control/next");
+      if (r.status === 200) controlInbox.push((await r.text()).trim());
+    } catch {
+      await new Promise((res) => setTimeout(res, 500));
+    }
+  }
+}
+
+// The frame the canvas shows, for the `capture` request: a PNG and the share of pixels that are not near black.
+function captureCanvas() {
+  const c = $("cod4e-canvas");
+  const off = document.createElement("canvas");
+  off.width = c.width;
+  off.height = c.height;
+  const ctx = off.getContext("2d");
+  ctx.drawImage(c, 0, 0);
+  const px = ctx.getImageData(0, 0, off.width, off.height).data;
+  let lit = 0;
+  for (let i = 0; i < px.length; i += 4) if (px[i] + px[i + 1] + px[i + 2] > 24) lit++;
+  const url = off.toDataURL("image/png");
+  return JSON.stringify({
+    png_base64: url.slice(url.indexOf(",") + 1),
+    width: off.width,
+    height: off.height,
+    lit_fraction: lit / (off.width * off.height),
+  });
+}
+
 async function play() {
   if (!install) return;
   try {
@@ -194,7 +235,11 @@ async function play() {
     net_state: () => wire.state(),
     net_error: () => wire.error(),
     net_close: () => wire.close(),
-    config: () => JSON.stringify({ args: clientArgs(), files: install }),
+    config: () => JSON.stringify({ args: clientArgs(), files: install, control: params.has("control") }),
+    // The dev control channel's wire (?control): requests in, reply lines out, and the canvas for `capture`.
+    control_next: () => controlInbox.shift(),
+    control_reply: (line) => { fetch("/control/reply", { method: "POST", body: line }).catch(() => {}); },
+    capture_canvas: captureCanvas,
     // The settings (a config_mp.cfg per profile) are kept in this browser, written the moment the client changes them.
     pref_get: (key) => {
       try { return localStorage.getItem(PREF + key) ?? undefined; } catch { return undefined; }
@@ -254,6 +299,7 @@ async function play() {
     $("overlay").hidden = false;
     setTimeout(() => { if (!overlayPinned) $("overlay").hidden = true; }, 8000);
   }
+  if (params.has("control")) pollControl();
   try {
     const mod = await import("./pkg/cod4e.js");
     await mod.default();

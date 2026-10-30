@@ -48,3 +48,4 @@ pub mod selftest;
 pub mod server;
 pub mod web_client;
 pub mod web_join;
+pub mod web_match;

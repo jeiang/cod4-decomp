@@ -11,6 +11,10 @@ wasm module. Two development aids, both off unless asked for:
                   served through the page's main thread, which is blocked inside the wasm client, so the page never
                   starts. In Safari pick the install folder once and use the saved copy (no ?dev-install).
   POST /report    the page posts its run statistics (numbers only, no file content) with ?report; printed here.
+  /control        the dev control channel's bridge (docs/control-channel.md): the harness POSTs one request line to
+                  /control and gets the reply as the response (504 after 30 s without one); the page, opened with
+                  ?control, long-polls GET /control/next for the next request and POSTs the reply to /control/reply.
+                  Without a page polling, every request times out: the bridge does nothing on its own.
 """
 from __future__ import annotations
 
@@ -20,7 +24,69 @@ import json
 import os
 import re
 import sys
+import threading
+import time
+from collections import deque
 from pathlib import Path
+
+# How long a request waits for the page's reply before 504, and how long the page's poll waits for a request.
+CONTROL_REPLY_TIMEOUT = 30.0
+CONTROL_POLL_TIMEOUT = 10.0
+
+
+class Control:
+    """The request queue between the harness (POST /control) and the page (GET /control/next, POST /control/reply).
+
+    A request is a JSON object with an `id`; the page's reply echoes it, which is how the two are paired."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.queue: deque[str] = deque()
+        self.replies: dict[object, str] = {}
+
+    def ask(self, line: str, timeout: float) -> str | None:
+        try:
+            key = json.loads(line).get("id")
+        except (ValueError, AttributeError):
+            return None
+        with self.cond:
+            self.queue.append(line)
+            self.cond.notify_all()
+            deadline = time.monotonic() + timeout
+            while key not in self.replies:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    # Nobody answered: the request is withdrawn so a page that starts later does not run it.
+                    try:
+                        self.queue.remove(line)
+                    except ValueError:
+                        pass
+                    return None
+                self.cond.wait(left)
+            return self.replies.pop(key)
+
+    def next(self, timeout: float) -> str | None:
+        with self.cond:
+            deadline = time.monotonic() + timeout
+            while not self.queue:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self.cond.wait(left)
+            return self.queue.popleft()
+
+    def reply(self, line: str) -> bool:
+        try:
+            key = json.loads(line).get("id")
+        except (ValueError, AttributeError):
+            return False
+        with self.cond:
+            self.replies[key] = line
+            self.cond.notify_all()
+        return True
+
+
+control = Control()
 
 # The files the client reads (the same rule as web/install.js): the install's language is line 1 of localization.txt.
 LANGUAGES = ["english", "french", "german", "italian", "spanish", "british", "russian", "polish", "korean",
@@ -68,21 +134,42 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     install: Path | None = None
 
     def log_message(self, fmt, *args):
-        if "/install/" not in self.path:
+        if "/install/" not in self.path and "/control" not in self.path:
             super().log_message(fmt, *args)
 
     def do_POST(self):
-        if self.path != "/report":
-            return self.send_error(404)
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        print("REPORT", body.decode("utf-8", "replace"), flush=True)
-        self.send_response(204)
-        self.end_headers()
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode("utf-8", "replace")
+        if self.path == "/report":
+            print("REPORT", body, flush=True)
+            return self.send_text(204, "")
+        if self.path == "/control":
+            reply = control.ask(body.strip(), CONTROL_REPLY_TIMEOUT)
+            if reply is None:
+                return self.send_text(504, "no reply from the page (is it open with ?control?)\n")
+            return self.send_text(200, reply + "\n", "application/json")
+        if self.path == "/control/reply":
+            return self.send_text(204 if control.reply(body.strip()) else 400, "")
+        self.send_error(404)
 
     def do_GET(self):
         if self.path.startswith("/install/") and self.install:
             return self.get_install()
+        if self.path == "/control/next":
+            line = control.next(CONTROL_POLL_TIMEOUT)
+            if line is None:
+                return self.send_text(204, "")
+            return self.send_text(200, line + "\n", "application/json")
         super().do_GET()
+
+    def send_text(self, status: int, text: str, content_type: str = "text/plain"):
+        body = text.encode()
+        self.send_response(status)
+        if body:
+            self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
 
     def get_install(self):
         rel = self.path[len("/install/"):].split("?")[0]

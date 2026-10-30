@@ -32,24 +32,28 @@ pub fn objectives() -> (u64, u64, u64, u64, u64) {
 /// No listen server console to queue `_line` for.
 pub fn send(_line: &str) {}
 
+/// What the stock Start New Server path tells the player in the browser (the error popup's text): there is no
+/// listen server to start, so the menu points at Join Game instead of failing silently.
+pub const NO_HOSTING: &str = "Starting a server is not available in the browser. Use Join Game.";
+
 pub fn free_standard_port() -> u16 {
     0
 }
 
 pub fn start(_install: &Path, _cfg: Config) -> Result<Listen, String> {
-    Err("a browser cannot host a game; join a server".into())
+    Err(NO_HOSTING.to_owned())
 }
 
 /// What [`begin`] returns: nothing ever boots here.
 pub struct Booting;
 
 pub fn begin(_install: &Path, _cfg: Config) -> Result<Booting, String> {
-    Err("a browser cannot host a game; join a server".into())
+    Err(NO_HOSTING.to_owned())
 }
 
 impl Booting {
     pub fn wait(self) -> Result<Listen, String> {
-        Err("a browser cannot host a game; join a server".into())
+        Err(NO_HOSTING.to_owned())
     }
 }
 
