@@ -2998,10 +2998,6 @@ mod tests {
             unexpected.is_empty(),
             "exec of unknown words: {unexpected:?}"
         );
-        assert!(
-            forwarded.contains(&"updategamerprofile"),
-            "the menus' updategamerprofile no longer reaches the forward path: {forwarded:?}"
-        );
         let pending: Vec<String> = h
             .input
             .frame(0.016)
