@@ -59,6 +59,26 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
 const READ_ONLY: &[&str] = &["cl_paused"];
 
+/// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other
+/// value is refused and says so, as stock refuses a value outside a dvar's domain (issue #369).
+const UNSUPPORTED: &[(&str, &str, &str)] = &[
+    (
+        "snd_khz",
+        "44",
+        "the mixer runs at the sound device's own rate; this build has no 11/22 kHz output",
+    ),
+    (
+        "snd_enableEq",
+        "1",
+        "the script equalizer cannot be switched off in this build",
+    ),
+    (
+        "cg_drawLagometer",
+        "0",
+        "the lagometer is not drawn in this build",
+    ),
+];
+
 struct Cvar {
     value: String,
     archive: bool,
@@ -108,6 +128,14 @@ impl Cvars {
     /// Whether a command (`set`, `toggle`, the name alone) may not write `name` (`DVAR_ROM`).
     pub fn read_only(name: &str) -> bool {
         READ_ONLY.iter().any(|n| n.eq_ignore_ascii_case(name))
+    }
+
+    /// For a dvar this build accepts only one value of: that value and why.
+    pub fn unsupported_domain(name: &str) -> Option<(&'static str, &'static str)> {
+        UNSUPPORTED
+            .iter()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, only, why)| (only, why))
     }
 
     /// Set a value, creating the cvar if needed. `archive` only ever turns the flag on (`seta`).

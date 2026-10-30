@@ -1089,10 +1089,19 @@ impl Input {
     }
 
     /// A `set`, `toggle` or bare-name write from a console, bind, menu or config (`Dvar_SetCommand`, an external
-    /// source): a read-only cvar is refused with the stock line. `true` when the value was set.
+    /// source): a read-only cvar is refused with the stock line, and so is a value this build cannot act on
+    /// (`Dvar_SetFromString` refuses a value outside the domain and prints it). `true` when the value was set.
     fn set_from_command(&mut self, name: &str, value: &str, archive: bool) -> bool {
         if cvar::Cvars::read_only(name) {
             self.say(format!("{} is read only.", name.to_ascii_lowercase()));
+            return false;
+        }
+        if let Some((only, why)) = cvar::Cvars::unsupported_domain(name)
+            && !value.trim().eq_ignore_ascii_case(only)
+        {
+            self.say(format!("'{value}' is not a valid value for dvar '{name}'"));
+            self.say(format!("  Domain is {only} ({why})"));
+            tracing::warn!(cvar = name, value, "dvar value refused: {why}");
             return false;
         }
         self.cvars.set(name, value, archive);

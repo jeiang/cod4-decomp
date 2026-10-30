@@ -90,6 +90,10 @@ const SUN_TECHS: [usize; 4] = [TECH_LIT_SUN, TECH_LIT, TECH_EMISSIVE, TECH_UNLIT
 const SPOT_TECHS: [usize; 4] = [TECH_LIT_SPOT, TECH_LIT, TECH_EMISSIVE, TECH_UNLIT];
 const OMNI_TECHS: [usize; 4] = [TECH_LIT_OMNI, TECH_LIT, TECH_EMISSIVE, TECH_UNLIT];
 const LIT: [usize; 3] = [TECH_LIT, TECH_EMISSIVE, TECH_UNLIT];
+/// `r_fullbright`: every scene surface draws with its unlit technique alone (`R_InitDrawMethod` forces the base,
+/// emissive and lit technique types to `TECHNIQUE_UNLIT`); a material without one is skipped, as the original's
+/// `R_SetMaterial` returns without a draw for a null technique.
+const FULLBRIGHT: [usize; 1] = [TECH_UNLIT];
 /// Surface flag: casts a shadow into the sun shadow map.
 const SURFACE_CASTS_SUN_SHADOW: u8 = 1;
 
@@ -227,6 +231,9 @@ pub struct Settings {
     pub lod_scale: [f32; 2],
     /// `r_lodBiasRigid` and `r_lodBiasSkinned`: units added to that distance.
     pub lod_bias: [f32; 2],
+    /// `r_fullbright`: the scene is drawn without lighting (the unlit techniques), with no glow and no dynamic
+    /// lights (`R_UsingGlow`, `R_AddDynamicLights` need `GFX_DRAW_SCENE_STANDARD`).
+    pub fullbright: bool,
 }
 
 impl Default for Settings {
@@ -257,6 +264,7 @@ impl Default for Settings {
             distortion: true,
             lod_scale: [1.0; 2],
             lod_bias: [0.0; 2],
+            fullbright: false,
         }
     }
 }
@@ -1131,7 +1139,8 @@ impl Renderer {
         } else if !self.settings.dof {
             p.dof = None;
         }
-        if !self.settings.glow {
+        // `R_UsingGlow`: not with `r_glow_allowed` off, nor in a fullbright scene.
+        if !self.settings.glow || self.settings.fullbright {
             p.glow.enabled = false;
         }
         p
@@ -1467,6 +1476,9 @@ impl Renderer {
 
     /// The techniques of a surface or model lit by primary light `light`, best first.
     fn scene_techs(&self, light: u8, sun_shadows: bool) -> &'static [usize] {
+        if self.settings.fullbright {
+            return &FULLBRIGHT;
+        }
         if u32::from(light) == self.scene.world.sun_primary_light_index {
             return if sun_shadows {
                 &SUN_SHADOW_TECHS
@@ -1485,6 +1497,19 @@ impl Renderer {
             Some(l) if self.settings.primary_lights && l.kind == LIGHT_KIND_OMNI => &OMNI_TECHS,
             _ => &LIT,
         }
+    }
+
+    /// Whether a pass leaves a material out rather than falling down its technique chain: the optional passes, and
+    /// the fullbright scene, whose one technique the original draws nothing without.
+    fn skips_without_tech(
+        &self,
+        kind: PassKind,
+        mat: &Material,
+        techs: &[usize],
+        hsm: bool,
+    ) -> bool {
+        (kind.optional_tech() || (kind == PassKind::Scene && self.settings.fullbright))
+            && !self.materials.has_technique(mat, techs[0], hsm)
     }
 
     /// Build the draws of one pass.
@@ -1533,7 +1558,7 @@ impl Renderer {
                 PassKind::CookieCaster => &COOKIE_CASTER_TECHS,
                 PassKind::CookieReceiver => &COOKIE_RECEIVER_TECHS,
             };
-            if kind.optional_tech() && !self.materials.has_technique(mat, techs[0], hsm) {
+            if self.skips_without_tech(kind, mat, techs, hsm) {
                 continue;
             }
             let Some(prep) = self.prepare(mat, techs, VertexKind::World, hsm) else {
@@ -1625,7 +1650,7 @@ impl Renderer {
                 let Some(Some(mat)) = model.materials.get(idx) else {
                     continue;
                 };
-                if kind.optional_tech() && !self.materials.has_technique(mat, techs[0], hsm) {
+                if self.skips_without_tech(kind, mat, techs, hsm) {
                     continue;
                 }
                 let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {
@@ -1852,6 +1877,9 @@ impl Renderer {
             } else {
                 VertexKind::Model
             };
+            if self.skips_without_tech(PassKind::Scene, mat, techs, hsm) {
+                continue;
+            }
             let Some(prep) = self.prepare(mat, techs, kind, hsm) else {
                 continue;
             };
@@ -1918,7 +1946,7 @@ impl Renderer {
                 PassKind::CookieCaster => &COOKIE_CASTER_TECHS,
                 PassKind::CookieReceiver => &COOKIE_RECEIVER_TECHS,
             };
-            if kind.optional_tech() && !self.materials.has_technique(mat, techs[0], hsm) {
+            if self.skips_without_tech(kind, mat, techs, hsm) {
                 continue;
             }
             let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {
@@ -2392,7 +2420,8 @@ impl Renderer {
         spot_lists: &mut Vec<(u32, Vec<Draw>)>,
         counts: &mut BuildCounts,
     ) -> Vec<LightPass> {
-        if lights.is_empty() || self.settings.dlight_limit == 0 {
+        // `R_AddDynamicLights`: no dynamic lights in a fullbright scene.
+        if lights.is_empty() || self.settings.dlight_limit == 0 || self.settings.fullbright {
             return Vec::new();
         }
         let chosen = dlight::select(lights, eye, frustum, self.settings.dlight_limit);

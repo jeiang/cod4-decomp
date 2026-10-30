@@ -1310,6 +1310,8 @@ impl Viewer {
                     .with_map_picmips(gfx.picmip_bump, gfx.picmip_spec),
             );
             r.materials.aniso_max = gfx.aniso_max;
+            r.materials.aniso_min = gfx.aniso_min;
+            r.materials.mip_mode = gfx.mip_mode;
             r.settings = gfx.settings(self.cli.settings);
             r.warm(format);
             st.renderer = Some(r);
@@ -1644,8 +1646,16 @@ impl Viewer {
                 for ev in net.take_ui_events() {
                     sh.apply(&mut st.input, ev);
                 }
+                // `CL_SubtitlePrint`: nothing with `cg_subtitles` off.
+                let subtitles_on = st
+                    .input
+                    .cvars
+                    .get("cg_subtitles")
+                    .is_none_or(|v| v.trim() != "0");
                 for s in net.take_subtitles() {
-                    sh.subtitle(&st.input, &s.key, s.ms);
+                    if subtitles_on {
+                        sh.subtitle(&st.input, &s.key, s.ms);
+                    }
                 }
                 let now = sh.now_ms();
                 net.fill_game_facts(&mut sh.st.game, now);
@@ -1715,7 +1725,17 @@ impl Viewer {
                     if let Some((glow, film)) = nf.look.vision {
                         (r.post.glow, r.post.film) = (glow, film);
                     }
-                    r.post.shell_shock = nf.look.shell_shock;
+                    // Cheat dvars, read live as the original does: `r_fullbright` (`R_InitDrawMethod` on change)
+                    // and `cg_drawShellshock` (`DrawShellshockBlend`).
+                    let cheats = st.input.cvars.bool("sv_cheats");
+                    r.settings.fullbright = cheats && st.input.cvars.bool("r_fullbright");
+                    let shock_on = !cheats
+                        || st
+                            .input
+                            .cvars
+                            .get("cg_drawShellshock")
+                            .is_none_or(|v| v.trim() != "0");
+                    r.post.shell_shock = nf.look.shell_shock.filter(|_| shock_on);
                     r.post.dof = Some(nf.dof);
                     // The server's fog replaces the one the map's art script was read for, once it has set any.
                     if nf.fog_from_server {
@@ -3251,6 +3271,38 @@ fn script_step(st: &mut State) -> bool {
             }
             done(st.net.is_some(), sc, "fx demo".into());
         }
+        // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`,
+        // `cgis=fullbright 1`) or how often an effect kind played (`cgis=fx:shell_eject 0`,
+        // `cgis=fx:bullet_impact_noblood 1`): what was drawn or played, not the dvar's value.
+        "cgis" => {
+            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+            let sh = st.shell.as_ref();
+            let have = match name {
+                "gun" => st.net.as_ref().map(|n| u8::from(n.gun_drawn()).to_string()),
+                "hud2d" => sh.map(|s| u8::from(s.st.ownerdraws_painted > 0).to_string()),
+                "fps" => sh.map(|s| u8::from(s.st.fps_drawn.is_some()).to_string()),
+                "fpstext" => sh.map(|s| s.st.fps_drawn.clone().unwrap_or_default()),
+                "fullbright" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.settings.fullbright).to_string()),
+                _ => name
+                    .strip_prefix("fx:")
+                    .and_then(|kind| st.net.as_ref().map(|n| n.fx_played(kind).to_string())),
+            };
+            match have {
+                Some(h) => done(h == want, sc, format!("{name} is {h}")),
+                None => done(false, sc, format!("cgis: unknown or unavailable {name:?}")),
+            }
+        }
+        // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame (`hitflesh`): the flesh
+        // impact effect, or the no-blood one with `cg_blood` off.
+        "hitflesh" => {
+            if let Some(n) = st.net.as_mut() {
+                n.inject_flesh_hit();
+            }
+            done(st.net.is_some(), sc, "flesh hit".into());
+        }
         "shot" => {
             if st.shot_request.is_none() {
                 st.shot_request = Some(arg.to_owned());
@@ -4101,6 +4153,8 @@ fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: load
         picmip_bump: gfx.picmip_bump,
         picmip_spec: gfx.picmip_spec,
         aniso_max: gfx.aniso_max,
+        aniso_min: gfx.aniso_min,
+        mip_mode: gfx.mip_mode,
         format: st.config.format,
     };
     gametype.clone_into(&mut st.load_gametype);

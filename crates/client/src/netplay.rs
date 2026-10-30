@@ -93,7 +93,8 @@ fn fixed_fov(ps: &PlayerState) -> Option<f32> {
 }
 
 /// The settings of the client that change what it makes of the match: the on/off ones (`cg_drawCrosshair`,
-/// `ragdoll_enable`, `fx_marks`; all on, as the stock defaults have them) and the physics tunables.
+/// `ragdoll_enable`, `fx_marks`, `cg_blood`, `cg_brass`, `cg_drawGun`; all on, as the stock defaults have them) and
+/// the physics tunables.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Switches {
     /// The weapon's crosshair is drawn.
@@ -102,6 +103,13 @@ pub struct Switches {
     pub ragdoll: bool,
     /// Bullet holes, blood and scorches are drawn.
     pub marks: bool,
+    /// `cg_blood`: a hit on a player plays the blood effects; off, the no-blood ones (`CG_BulletHitEvent`,
+    /// `CG_MeleeHitEvent`).
+    pub blood: bool,
+    /// `cg_brass`: weapons eject their shells (`CG_EjectWeaponBrass`).
+    pub brass: bool,
+    /// `cg_drawGun`: the view model is drawn (`CG_AddViewWeapon`). A cheat dvar: off only with `sv_cheats` on.
+    pub draw_gun: bool,
     /// The `ragdoll_*` dvars.
     pub ragdoll_tunables: crate::ragdoll::Tunables,
     /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
@@ -114,6 +122,9 @@ impl Default for Switches {
             crosshair: true,
             ragdoll: true,
             marks: true,
+            blood: true,
+            brass: true,
+            draw_gun: true,
             ragdoll_tunables: crate::ragdoll::Tunables::default(),
             bullet: fx::BulletTune::default(),
         }
@@ -124,10 +135,14 @@ impl Switches {
     /// The switches the dvars say; a dvar not set is on.
     pub fn read(c: &crate::input::Cvars) -> Self {
         let on = |n: &str| c.get(n).is_none_or(|v| v.trim() != "0");
+        let cheats = c.bool("sv_cheats");
         Self {
             crosshair: on("cg_drawCrosshair"),
             ragdoll: on("ragdoll_enable"),
             marks: on("fx_marks"),
+            blood: on("cg_blood"),
+            brass: on("cg_brass"),
+            draw_gun: on("cg_drawGun") || !cheats,
             ragdoll_tunables: crate::ragdoll::Tunables::read(c),
             bullet: bullet_tune(c),
         }
@@ -393,6 +408,8 @@ pub struct NetPlay {
     vm_spare: Option<((u16, u16), ViewModel)>,
     /// What aiming did to the view in the last frame.
     sight: Option<Sight>,
+    /// Whether the last frame put the view model in the scene (`cg_drawGun`, no scope).
+    gun_drawn: bool,
     c: Counters,
     auto: Option<Auto>,
     auto_join: Option<net::ui::AutoJoin>,
@@ -442,6 +459,8 @@ pub struct NetPlay {
     max_turn: [f32; 2],
     /// The effect `--fx-demo` plays, and when it last did.
     fx_demo: Option<(String, Option<i32>)>,
+    /// A bullet hit on a player 64 units ahead, asked for by the `hitflesh` script step, played by the next frame.
+    want_flesh_hit: bool,
     /// The server announced a level the app has not acted on yet.
     new_level: Option<String>,
     /// Levels begun since the join: each map change or round restart ([`Self::new_level`]) counts one.
@@ -524,6 +543,7 @@ impl NetPlay {
             vm: None,
             vm_spare: None,
             sight: None,
+            gun_drawn: false,
             c: Counters::default(),
             auto: autoplay.then(Auto::default),
             auto_join: autoplay.then(net::ui::AutoJoin::default),
@@ -563,6 +583,7 @@ impl NetPlay {
             scores_asked: None,
             server_addr: server.to_string(),
             fx_demo: None,
+            want_flesh_hit: false,
             new_level: None,
             levels: 0,
             stat_sync: crate::profile::StatSync::default(),
@@ -576,6 +597,18 @@ impl NetPlay {
     /// Plays effect `name` in front of the player every 1.5 s of server time; `None` stops.
     pub fn set_fx_demo(&mut self, name: Option<String>) {
         self.fx_demo = name.map(|n| (n, None));
+    }
+
+    /// Plays, on the next frame, what a bullet of the weapon in hand striking a player 64 units ahead shows: the
+    /// flesh row of the impact table, or the no-blood effect with `cg_blood` off (for the `hitflesh` script step).
+    pub fn inject_flesh_hit(&mut self) {
+        self.want_flesh_hit = true;
+    }
+
+    /// How often an effect kind was played this level (`fx.played` of the report; `shell_eject`, `bullet_impact`,
+    /// `bullet_impact_noblood`, ...).
+    pub fn fx_played(&self, kind: &str) -> u64 {
+        self.effects.played.get(kind).copied().unwrap_or(0)
     }
 
     pub fn refused(&self) -> Option<&str> {
@@ -600,6 +633,11 @@ impl NetPlay {
     /// The name of the weapon in hand, as the view model last drew it.
     pub fn weapon(&self) -> String {
         self.c.weapon.clone()
+    }
+
+    /// Whether the last frame drew the view model (`cg_drawGun` on and no scope up).
+    pub fn gun_drawn(&self) -> bool {
+        self.gun_drawn
     }
 
     /// The `MISSILE` entities of the newest snapshot: the grenades, rockets and packs in flight or at rest.
@@ -1512,6 +1550,8 @@ impl NetPlay {
         self.effects.set_tracer_cvars(self.tracer_cvars);
         self.effects.set_marks(self.switches.marks);
         self.effects
+            .set_blood_and_brass(self.switches.blood, self.switches.brass);
+        self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         crate::events::start_shakes(&mut self.shakes, st, eye.to_array(), events);
         for e in events {
@@ -1535,12 +1575,36 @@ impl NetPlay {
             );
             self.effects.event(e, &def);
         }
+        // Where the player looks (the demo and the scripted hit sit in front of the eyes, not the kicked view).
+        let (look_yaw, look_pitch) = (self.angles[1].to_radians(), -self.angles[0].to_radians());
         if let Some((name, last)) = &mut self.fx_demo
             && last.is_none_or(|l| st.wrapping_sub(l) >= 1500)
         {
             *last = Some(st);
-            let (yaw, pitch) = (self.angles[1].to_radians(), -self.angles[0].to_radians());
-            self.effects.demo(name, eye, yaw, pitch);
+            self.effects.demo(name, eye, look_yaw, look_pitch);
+        }
+        if std::mem::take(&mut self.want_flesh_hit) {
+            let (sy, cy) = look_yaw.sin_cos();
+            let (sp, cp) = look_pitch.sin_cos();
+            let forward = Vec3::new(cp * cy, cp * sy, sp);
+            let e = ClientEvent::BulletImpact {
+                origin: (eye + forward * 64.0).to_array(),
+                normal: (-forward).to_array(),
+                surface: crate::effects::SURFACE_FLESH,
+                weapon: self.vm.as_ref().map_or(0, |(k, _)| k.0),
+                shooter: own,
+                exit: false,
+                head: false,
+            };
+            let weapons = &self.weapons;
+            let content = &self.lib.content;
+            let def = |w: u16| {
+                weapons
+                    .get(w)
+                    .and_then(|i| content.weapon(&i.name))
+                    .cloned()
+            };
+            self.effects.event(&e, &def);
         }
         let flying: Vec<_> = self
             .net
@@ -2041,6 +2105,7 @@ impl NetPlay {
         }
         let Some((_, vm)) = self.vm.as_mut() else {
             self.sight = None;
+            self.gun_drawn = false;
             return Vec::new();
         };
         let mut shown = ps.clone();
@@ -2067,10 +2132,12 @@ impl NetPlay {
         self.c.gun_recoil_live = recoil != 0.0;
         self.c.gun_springs = vm.has_recoil_spring();
         let sight = vm.sight();
-        // Through the scope the original draws no gun.
+        // Through the scope the original draws no gun, nor with `cg_drawGun` off (`CG_AddViewWeapon`); the gun's
+        // state goes on either way.
         let scoped = sight.overlay.is_some();
         self.sight = Some(sight);
-        if scoped { Vec::new() } else { models }
+        self.gun_drawn = !scoped && self.switches.draw_gun;
+        if self.gun_drawn { models } else { Vec::new() }
     }
 
     /// The turret the own player is mounted on, as `snap` has it: the entity the server marked with the own client number

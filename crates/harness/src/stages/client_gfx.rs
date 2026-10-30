@@ -25,6 +25,12 @@ vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
 menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\
 gfxis=aa max,gfxis=picmip 0 1 1,gfxis=zfeather 0,gfxis=water 0,gfxis=specular 0,gfxis=dof 0,gfxis=blur 0,gfxis=glow 0,gfxis=shadows 0,shot=gfx-on,\
+set=set sv_cheats 1,cgis=fps 0,set=set cg_drawFPS 1,wait=1,cgis=fps 1,shot=fps,set=set cg_drawFPS Off,wait=1,cgis=fps 0,\
+cgis=gun 1,set=set cg_drawGun 0,wait=1,cgis=gun 0,shot=no-gun,set=set cg_drawGun 1,wait=1,cgis=gun 1,\
+cgis=hud2d 1,set=set cg_draw2D 0,wait=1,cgis=hud2d 0,shot=no-2d,set=set cg_draw2D 1,wait=1,cgis=hud2d 1,\
+set=set cg_blood 0,hitflesh,wait=1,cgis=fx:bullet_impact_noblood 1,set=set cg_blood 1,hitflesh,wait=1,cgis=fx:bullet_impact_noblood 1,\
+set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0,set=set cg_brass 1,\
+cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,set=set sv_cheats 0,\
 set=set com_maxfps 20,wait=1,pacereset,wait=2,gfxis=pace 1,set=set com_maxfps 0,\
 set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
 set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
@@ -198,6 +204,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 "distort-on.png",
                 "distort-off.png",
                 "recovered.png",
+                "fps.png",
+                "no-gun.png",
+                "no-2d.png",
+                "fullbright.png",
             ] {
                 out.files.push(f.into());
             }

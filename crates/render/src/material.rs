@@ -360,8 +360,94 @@ pub struct Materials {
     pub failures: BTreeMap<String, String>,
     /// The ocean simulations of the water textures prepared so far, by `Arc` address of their [`Water`].
     pub waters: HashMap<usize, WaterSim>,
-    /// `r_texFilterAnisoMax`: the most anisotropic filtering a sampler asks for; set before the samplers are made.
+    /// `r_texFilterAnisoMax`, `r_texFilterAnisoMin` and `r_texFilterMipMode`: how the samplers filter; set before
+    /// the samplers are made.
     pub aniso_max: u16,
+    pub aniso_min: u16,
+    pub mip_mode: MipMode,
+}
+
+/// `r_texFilterMipMode` (`mipFilterNames` of `r_dvars.cpp`): what becomes of a material sampler's mip filter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MipMode {
+    #[default]
+    Unchanged,
+    ForceTrilinear,
+    ForceBilinear,
+    ForceMipMapsOff,
+}
+
+impl MipMode {
+    pub const NAMES: [&'static str; 4] = [
+        "Unchanged",
+        "Force Trilinear",
+        "Force Bilinear",
+        "Force MipMaps Off",
+    ];
+
+    /// The enum by index or name (`2`, `Force Bilinear`); anything else is `None`.
+    pub fn parse(v: &str) -> Option<MipMode> {
+        let v = v.trim();
+        let index = v
+            .parse::<usize>()
+            .ok()
+            .or_else(|| Self::NAMES.iter().position(|n| n.eq_ignore_ascii_case(v)))?;
+        [
+            MipMode::Unchanged,
+            MipMode::ForceTrilinear,
+            MipMode::ForceBilinear,
+            MipMode::ForceMipMapsOff,
+        ]
+        .get(index)
+        .copied()
+    }
+}
+
+/// How a material sampler filters: what the techset's sampler state says, bent by the `r_texFilter*` dvars
+/// (`R_InitSamplerStates` of `r_state.cpp`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Filtering {
+    pub nearest: bool,
+    /// `None`: no mipmaps (the top level only).
+    pub mip: Option<wgpu::MipmapFilterMode>,
+    pub anisotropy: u16,
+}
+
+/// The filtering of sampler state `s` (bits 0..3 the filter: 1 nearest, 2 linear, 3 and 4 the anisotropic tiers
+/// of 2x and 4x; bits 3..5 the mip filter: 0 none, 1 nearest, 2 linear) with the dvars' anisotropy bounds and mip
+/// mode. The original clamps the minimum to the maximum, gives the plain linear samplers the minimum and the
+/// anisotropic tiers the larger of their own count and the minimum (`s_mipFilterTable` for the mip mode).
+/// Anisotropy needs linear filters and linear mips, which wgpu insists on; a sampler without them gets none.
+pub fn filtering(s: u32, aniso_min: u16, aniso_max: u16, mip_mode: MipMode) -> Filtering {
+    let nearest = s & 7 == 1;
+    let mip = match (s >> 3) & 3 {
+        0 => None,
+        1 => Some(wgpu::MipmapFilterMode::Nearest),
+        _ => Some(wgpu::MipmapFilterMode::Linear),
+    };
+    let mip = match (mip_mode, mip) {
+        (_, None) | (MipMode::Unchanged, _) => mip,
+        (MipMode::ForceTrilinear, _) => Some(wgpu::MipmapFilterMode::Linear),
+        (MipMode::ForceBilinear, _) => Some(wgpu::MipmapFilterMode::Nearest),
+        (MipMode::ForceMipMapsOff, _) => None,
+    };
+    let max = aniso_max.max(1);
+    let min = aniso_min.min(max).max(1);
+    let tier = match s & 7 {
+        3 => 2,
+        4 => 4,
+        _ => 1,
+    };
+    let anisotropy = if mip == Some(wgpu::MipmapFilterMode::Linear) && !nearest {
+        tier.min(max).max(min)
+    } else {
+        1
+    };
+    Filtering {
+        nearest,
+        mip,
+        anisotropy,
+    }
 }
 
 fn bank_entry(
@@ -418,6 +504,8 @@ impl Materials {
             failures: BTreeMap::new(),
             waters: HashMap::new(),
             aniso_max: 16,
+            aniso_min: 1,
+            mip_mode: MipMode::Unchanged,
         }
     }
 
@@ -520,36 +608,21 @@ impl Materials {
                         wgpu::AddressMode::Repeat
                     }
                 };
-                let nearest = s & 7 == 1;
-                let filter = if nearest {
+                let f = filtering(s, self.aniso_min, self.aniso_max, self.mip_mode);
+                let filter = if f.nearest {
                     wgpu::FilterMode::Nearest
                 } else {
                     wgpu::FilterMode::Linear
                 };
-                let mip = match (s >> 3) & 3 {
-                    0 => None,
-                    1 => Some(wgpu::MipmapFilterMode::Nearest),
-                    _ => Some(wgpu::MipmapFilterMode::Linear),
-                };
-                let aniso = match s & 7 {
-                    3 => 2,
-                    4 => 4,
-                    _ => 1,
-                }
-                .min(self.aniso_max.max(1));
                 Arc::new(gpu.device.create_sampler(&wgpu::SamplerDescriptor {
                     address_mode_u: addr(0x20),
                     address_mode_v: addr(0x40),
                     address_mode_w: addr(0x80),
                     mag_filter: filter,
                     min_filter: filter,
-                    mipmap_filter: mip.unwrap_or(wgpu::MipmapFilterMode::Nearest),
-                    lod_max_clamp: if mip.is_none() { 0.0 } else { 32.0 },
-                    anisotropy_clamp: if mip == Some(wgpu::MipmapFilterMode::Linear) && !nearest {
-                        aniso
-                    } else {
-                        1
-                    },
+                    mipmap_filter: f.mip.unwrap_or(wgpu::MipmapFilterMode::Nearest),
+                    lod_max_clamp: if f.mip.is_none() { 0.0 } else { 32.0 },
+                    anisotropy_clamp: f.anisotropy,
                     ..Default::default()
                 }))
             })
@@ -1170,4 +1243,68 @@ fn build_pipeline(
             cache: None,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::MipmapFilterMode::{Linear, Nearest};
+
+    /// A linear, mipped sampler state (filter 2, mip linear) and the 2x and 4x anisotropic tiers.
+    const LINEAR_MIPPED: u32 = 2 | 2 << 3;
+    const ANISO_2X: u32 = 3 | 2 << 3;
+    const ANISO_4X: u32 = 4 | 2 << 3;
+    const NEAREST_MIPPED: u32 = 1 | 1 << 3;
+
+    #[test]
+    fn the_mip_mode_parses_by_index_and_name() {
+        assert_eq!(MipMode::parse("Unchanged"), Some(MipMode::Unchanged));
+        assert_eq!(MipMode::parse("2"), Some(MipMode::ForceBilinear));
+        assert_eq!(
+            MipMode::parse("force trilinear"),
+            Some(MipMode::ForceTrilinear)
+        );
+        assert_eq!(MipMode::parse("5"), None);
+    }
+
+    #[test]
+    fn the_anisotropy_bounds_follow_the_original() {
+        let f = |s, min, max| filtering(s, min, max, MipMode::Unchanged).anisotropy;
+        // The plain linear sampler takes the minimum; the tiers the larger of their own and the minimum.
+        assert_eq!(
+            (
+                f(LINEAR_MIPPED, 1, 16),
+                f(ANISO_2X, 1, 16),
+                f(ANISO_4X, 1, 16)
+            ),
+            (1, 2, 4)
+        );
+        assert_eq!(
+            (
+                f(LINEAR_MIPPED, 4, 16),
+                f(ANISO_2X, 4, 16),
+                f(ANISO_4X, 4, 16)
+            ),
+            (4, 4, 4)
+        );
+        // The maximum caps everything, the minimum included.
+        assert_eq!(
+            (f(LINEAR_MIPPED, 8, 2), f(ANISO_2X, 8, 2), f(ANISO_4X, 8, 2)),
+            (2, 2, 2)
+        );
+        // No anisotropy without linear mips.
+        assert_eq!(f(NEAREST_MIPPED, 8, 16), 1);
+    }
+
+    #[test]
+    fn the_mip_mode_bends_the_mip_filter_and_drops_the_anisotropy_with_it() {
+        let mip = |s, mode| filtering(s, 1, 16, mode).mip;
+        assert_eq!(mip(NEAREST_MIPPED, MipMode::ForceTrilinear), Some(Linear));
+        assert_eq!(mip(LINEAR_MIPPED, MipMode::ForceBilinear), Some(Nearest));
+        assert_eq!(mip(LINEAR_MIPPED, MipMode::ForceMipMapsOff), None);
+        // A sampler without mipmaps keeps none whatever the mode.
+        assert_eq!(mip(2, MipMode::ForceTrilinear), None);
+        let bilinear = filtering(ANISO_4X, 1, 16, MipMode::ForceBilinear);
+        assert_eq!((bilinear.mip, bilinear.anisotropy), (Some(Nearest), 1));
+    }
 }
