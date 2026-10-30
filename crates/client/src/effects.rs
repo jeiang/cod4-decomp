@@ -322,25 +322,18 @@ impl Effects {
         }
     }
 
-    /// The effect a table or a weapon points at. Tables in one zone name effects of another by a placeholder (the
-    /// name with a comma in front and nothing in it); the effect itself is in the library under the plain name.
+    /// `d`, after a warning when it is a stub (the name behind a comma and nothing in it): a reference to another
+    /// zone's effect that linking left unresolved, which plays nothing.
     fn resolve(&self, d: &Arc<FxEffectDef>) -> Arc<FxEffectDef> {
-        let Some(plain) = d.name.as_deref().and_then(|n| n.strip_prefix(',')) else {
-            return d.clone();
-        };
-        self.fx
-            .library()
-            .get(plain)
-            .unwrap_or_else(|| {
-                logging::dedup!(
-                    WARN,
-                    plain,
-                    effect = plain,
-                    "effect placeholder has no definition"
-                );
-                d
-            })
-            .clone()
+        if let Some(plain) = d.name.as_deref().and_then(|n| n.strip_prefix(',')) {
+            logging::dedup!(
+                WARN,
+                plain,
+                effect = plain,
+                "effect reference has no definition in the loaded zones"
+            );
+        }
+        d.clone()
     }
 
     fn play(&mut self, kind: &'static str, def: Option<Arc<FxEffectDef>>, at: Vec3, dir: Vec3) {
@@ -910,7 +903,6 @@ impl Effects {
     pub fn set_blood_limit(&mut self, ms: Option<i32>) {
         self.blood_limit = ms;
     }
-
     /// A random number in [0, 1).
     fn roll(&mut self) -> f32 {
         self.dice ^= self.dice << 13;

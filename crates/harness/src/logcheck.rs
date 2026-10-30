@@ -75,16 +75,6 @@ pub const ALLOWED: &[Allow] = &[
         stages: &[],
         max: Some(12), // measured 7 (2026-10-14) and 11 with the class menu drawn (control-channel, 2026-10-29)
     },
-    Allow {
-        contains: &[
-            "render::material",
-            "material has no techset",
-            "material=\",",
-        ],
-        reason: "effect materials that name another zone's are not resolved, so they have no techset (#453); once per material per map",
-        stages: &[],
-        max: Some(200), // measured 14 (mp_crash) to 16 (mp_backlot) per client run, one map each (Linux host, 2026-10-30); client-flythrough starts about eight runs
-    },
     // Timing of the harness's own clients and bots.
     Allow {
         contains: &["server::netsv", "packet from an address with no client"],

@@ -51,7 +51,7 @@ pub struct ImageLoadDef {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GfxImage {
     pub map_type: u32,
     pub picmip: [u8; 2],
@@ -138,7 +138,7 @@ pub(super) fn image_ptr_at(
     slot: Option<Addr>,
     p: Ptr,
 ) -> Result<Option<Arc<GfxImage>>> {
-    s.temp_asset_at(slot, p, 4, IMAGE_SIZE, image)
+    s.asset_at(slot, p, 4, IMAGE_SIZE, image)
 }
 
 pub(super) fn material_ptr_at(
@@ -146,7 +146,7 @@ pub(super) fn material_ptr_at(
     slot: Option<Addr>,
     p: Ptr,
 ) -> Result<Option<Arc<Material>>> {
-    s.temp_asset_at(slot, p, 4, MATERIAL_SIZE, material)
+    s.asset_at(slot, p, 4, MATERIAL_SIZE, material)
 }
 
 pub(super) fn techset_ptr_at(
@@ -154,7 +154,7 @@ pub(super) fn techset_ptr_at(
     slot: Option<Addr>,
     p: Ptr,
 ) -> Result<Option<Arc<TechniqueSet>>> {
-    s.temp_asset_at(slot, p, 4, TECHSET_SIZE, techset)
+    s.asset_at(slot, p, 4, TECHSET_SIZE, techset)
 }
 
 #[derive(Debug)]
@@ -236,7 +236,7 @@ pub struct ConstantDef {
     pub literal: [f32; 4],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Material {
     pub name: Name,
     pub game_flags: u8,
@@ -277,7 +277,7 @@ pub(super) fn material(s: &mut Stream, h: &[u8]) -> Result<Material> {
     let (tech, tex, cons, bits) = (f.ptr()?, f.ptr()?, f.ptr()?, f.ptr()?);
 
     let name = s.string(name)?;
-    let mut technique_set = s.temp_asset(tech, 4, TECHSET_SIZE, techset)?;
+    let mut technique_set = techset_ptr(s, tech)?;
     let textures = s.array(tex, tex_n.into(), 4, 12, |s, f| {
         let name_hash = f.u32();
         let (name_start, name_end, sampler_state, semantic) = (f.u8(), f.u8(), f.u8(), f.u8());
@@ -517,7 +517,7 @@ fn shader_args(s: &mut Stream, n: u32) -> Result<Vec<ShaderArg>> {
     Ok(out)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TechniqueSet {
     pub name: Name,
     pub world_vert_format: u8,

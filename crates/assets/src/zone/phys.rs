@@ -6,7 +6,7 @@ use super::gfx::Name;
 use super::stream::{Addr, Fields, Ptr, Stream};
 use std::sync::Arc;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PhysPreset {
     pub name: Name,
     pub kind: i32,
@@ -48,7 +48,7 @@ fn preset(s: &mut Stream, h: &[u8]) -> Result<PhysPreset> {
 }
 
 pub(super) fn load(s: &mut Stream, p: Ptr) -> Result<Option<Arc<PhysPreset>>> {
-    s.temp_asset(p, 4, PRESET_SIZE, preset)
+    s.asset_at(None, p, 4, PRESET_SIZE, preset)
 }
 
 /// As [`load`], for a pointer stored in a persistent field at `slot`.
@@ -57,5 +57,5 @@ pub(super) fn load_at(
     slot: Option<Addr>,
     p: Ptr,
 ) -> Result<Option<Arc<PhysPreset>>> {
-    s.temp_asset_at(slot, p, 4, PRESET_SIZE, preset)
+    s.asset_at(slot, p, 4, PRESET_SIZE, preset)
 }

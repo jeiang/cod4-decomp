@@ -3480,8 +3480,18 @@ fn script_step(st: &mut State) -> bool {
             } else {
                 want.to_owned()
             };
+            // `gfxis=dlights 1+`: at least that many, for a count the scene's own lights add to.
             match have {
-                Some(h) => done(h == want, sc, format!("{name} is {h}")),
+                Some(h) => {
+                    let ok = match want.strip_suffix('+') {
+                        Some(min) => match (h.parse::<u64>(), min.parse::<u64>()) {
+                            (Ok(h), Ok(min)) => h >= min,
+                            _ => false,
+                        },
+                        None => h == want,
+                    };
+                    done(ok, sc, format!("{name} is {h}"));
+                }
                 None => done(false, sc, format!("gfxis: unknown or unavailable {name:?}")),
             }
         }
@@ -3858,6 +3868,10 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
     }
     let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
     let captured = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
+    // The scoreboard held up by `+scores` takes the scroll keys and nothing else (`CL_KeyEvent`: a key down that
+    // `Scoreboard_HandleInput` scrolls with goes no further); every other key stays the game's, so the bind's release
+    // reaches the bind table and lets the scoreboard go.
+    let scoreboard = st.shell.as_ref().is_some_and(|s| s.ui.scoreboard_only());
     if typing {
         if let Some(sh) = st.shell.as_mut() {
             for k in typed_ui_keys(ev) {
@@ -3867,6 +3881,27 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
     } else if captured {
         ui_event(st, ev);
     } else {
+        if scoreboard && let Some(sh) = st.shell.as_mut() {
+            let keys = match ev {
+                InputEvent::Wheel { y } => vec![if *y > 0.0 {
+                    UiKey::WheelUp
+                } else {
+                    UiKey::WheelDown
+                }],
+                InputEvent::Key {
+                    state: ElementState::Pressed,
+                    ..
+                } => typed_ui_keys(ev),
+                _ => Vec::new(),
+            };
+            let mut scrolled = false;
+            for k in keys {
+                scrolled |= sh.st.scroll_scores(&sh.ui, &k);
+            }
+            if scrolled {
+                return;
+            }
+        }
         st.input.event(ev);
     }
 }
@@ -5306,6 +5341,10 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "out": cli.out.as_ref().map(|p| p.display().to_string()),
                 "backends": cli.backend.clone(),
                 "present": cli.present.clone(),
+                // Whether mouse look can work: the window has the focus and the pointer is locked, or why not.
+                "focused": st.window.has_focus(),
+                "pointer_locked": st.grabbed,
+                "look_gate": st.input.look_gate(),
             }),
             "menu" => menu_state(st),
             "hud" => hud_state(st),
@@ -5313,6 +5352,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "open": st.shell.as_ref().is_some_and(|sh| sh.st.console.active()),
                 "field": st.shell.as_ref().map(|sh| sh.st.console.field()),
                 "lines": st.shell.as_ref().map(|sh| sh.st.feed.console.clone()),
+                // The lines as one text, for a `contains` on a line's part (`console.text`).
+                "text": st.shell.as_ref().map(|sh| devctrl::text_lines(&sh.st.feed.console)),
                 "messages": st.input.messages(),
             }),
             "cvars" => {
@@ -5342,6 +5383,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "distortion_copy": st.distortion_now,
                 "late": st.late,
             }),
+            "render" => render_report(st),
             other => match st.net.as_mut() {
                 Some(net) => net.control_state(other),
                 None => Value::Null,
@@ -5352,7 +5394,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
     Value::Object(m)
 }
 
-/// The menus on the stack, and the item that has the focus with the rectangle a click is tested against.
+/// The menus on the stack, the item that has the focus, and every item of each open menu with the rectangle a click
+/// is tested against.
 fn menu_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
@@ -5364,30 +5407,43 @@ fn menu_state(st: &mut State) -> Value {
         .map(|(menu, item, rect)| json!({"menu": menu, "item": item, "rect": rect}));
     let mut items = Vec::new();
     for menu in &open {
-        for (name, text, rect) in sh.item_report(&mut st.input, menu) {
-            items.push(json!({"menu": menu, "name": name, "text": text, "rect": rect}));
+        for it in sh.menu_items(&mut st.input, menu) {
+            items.push(json!({
+                "menu": menu,
+                "name": it.name,
+                "text": it.text,
+                "visible": it.visible,
+                "rect": it.rect,
+            }));
         }
     }
     json!({"open": open, "focused": focused, "items": items})
 }
 
-/// What the HUD drew and counted, and the game facts the scoreboard reads.
+/// What the HUD drew and counted since the run began (`stats`, the counters `hud_draw` of `ui-script.json` has),
+/// what it shows now (`report`, `live`), and the game facts the scoreboard reads.
 fn hud_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_ref() else {
         return Value::Null;
     };
     let g = &sh.st.game;
+    let live = &sh.st.live;
     json!({
         "report": sh.st.game.hud.report(),
-        "stats": {
-            "messages": sh.st.hud_stats.messages,
-            "obituaries": sh.st.hud_stats.obituaries,
-            "scoreboard_frames": sh.st.hud_stats.scoreboard_frames,
-            "killcam_frames": sh.st.hud_stats.killcam_frames,
-            "names_max": sh.st.hud_stats.names_max,
-            "unresolved": sh.st.hud_stats.unresolved,
+        "stats": sh.st.hud_stats.report(),
+        "live": {
+            "killcam": live.killcam,
+            "dead": live.dead,
+            "intermission": live.intermission,
+            "following": live.following.is_some(),
+            // A message window has a line up.
+            "feed": (0..crate::hud::WINDOWS).any(|w| sh.st.feed.active(w, live.time)),
+            "players_listed": live.scores.len(),
+            "own_team": live.own_team,
         },
+        "missing_images": sh.missing(),
         "scoreboard_shown": g.scoreboard,
+        "scores_top": sh.st.scores_top,
         "dead": g.dead,
         "intermission": g.intermission,
         "team": g.team,

@@ -81,6 +81,10 @@ mod tests {
         };
         let install = Install::open(std::path::Path::new(&root)).expect("install");
         let mut content = Content::for_client();
+        // As in Library::load: common_mp references the code zone's materials/default.
+        content
+            .load_zone(&install, "code_post_gfx_mp", 2)
+            .expect("code_post_gfx_mp");
         content
             .load_zone(&install, "common_mp", 4)
             .expect("common_mp");

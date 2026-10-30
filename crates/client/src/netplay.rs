@@ -730,7 +730,6 @@ impl NetPlay {
     pub fn heli_killcam_fov(&self) -> f32 {
         self.switches.killcam.heli_fov
     }
-
     /// A copy of every effect count, for a script's `fxmark` step.
     pub fn fx_counts(&self) -> HashMap<String, u64> {
         self.effects

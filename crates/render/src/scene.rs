@@ -9,7 +9,7 @@ use assets::zone::gfx::{Material, TechniqueSet};
 use assets::zone::gfxworld::GfxWorld;
 use assets::zone::world::{ComPrimaryLight, LightDef};
 use assets::zone::xmodel::XModel;
-use assets::zone::{Asset, DecodeFilter, XAssetType, Zone};
+use assets::zone::{Asset, Db, DecodeFilter, XAssetType, Zone};
 use glam::{Mat4, Vec3};
 use sim::cm::CollisionWorld;
 use sm3::SamplerDim;
@@ -103,6 +103,8 @@ impl MapData {
     /// directory `game` (`fs_game`, empty for none), else `zone/<language>`, else `usermaps/<map>`
     /// ([`assets::paths::zone_file`]).
     pub fn load(install: &Path, game: &str, map: &str) -> Result<MapData, LoadError> {
+        // Map/world materials take the same DB_LinkXAssetEntry/default-entry path as the client's effects.
+        let mut db = Db::default();
         let mut world = None;
         let mut com_world = None;
         let mut clipmap = None;
@@ -113,7 +115,7 @@ impl MapData {
         let mut vision_files: HashMap<String, String> = HashMap::new();
         let vision_name = format!("vision/{map}.vision");
         let art_name = format!("maps/createart/{map}_art.gsc");
-        for zone in ["code_post_gfx_mp", "common_mp", map] {
+        for (zone, tag) in [("code_post_gfx_mp", 2), ("common_mp", 4), (map, 8)] {
             let path = assets::paths::zone_file(install, game, zone).ok_or_else(|| {
                 LoadError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -123,7 +125,7 @@ impl MapData {
             let file = assets::fs::buffered(path).map_err(LoadError::Io)?;
             let z = Zone::open(file).map_err(LoadError::Zone)?;
             let keep = Keep(zone);
-            z.decode(&keep, |a| match a {
+            z.decode_linked(&keep, &mut db, tag, |a| match a {
                 Asset::GfxWorld(w) => world = Some(w),
                 Asset::ComWorld(c) => com_world = Some(c),
                 Asset::Clipmap(c) if zone == map => clipmap = Some(c),
@@ -163,8 +165,8 @@ impl MapData {
     }
 }
 
-/// Decode filter: technique sets from every zone, post-process materials from `code_post_gfx_mp`, the vision and art
-/// raw files from `common_mp`, everything the renderer draws from the map zone.
+/// Decode filter: materials for the cross-zone link table and technique sets from every zone, post-process
+/// materials from `code_post_gfx_mp`, the vision and art raw files from `common_mp`, and the map's render assets.
 struct Keep<'a>(&'a str);
 
 impl DecodeFilter for Keep<'_> {
@@ -176,13 +178,22 @@ impl DecodeFilter for Keep<'_> {
             ),
             "common_mp" => matches!(
                 ty,
-                XAssetType::TechniqueSet | XAssetType::RawFile | XAssetType::LightDef
+                XAssetType::TechniqueSet
+                    | XAssetType::Material
+                    | XAssetType::RawFile
+                    | XAssetType::LightDef
             ),
             _ => true,
         }
     }
     fn keep_presentation(&self) -> bool {
         true
+    }
+
+    fn link(&self, ty: XAssetType) -> bool {
+        // Techsets already have the renderer's name table; images resolve through the texture cache/IWI lookup.
+        // Only materials need the persistent decoded definition/default, including those nested in world models.
+        ty == XAssetType::Material
     }
 }
 
@@ -397,4 +408,51 @@ fn upload_lighting(gpu: &Gpu, l: &ModelLighting) -> (Tex, wgpu::Texture) {
         width: w,
     };
     (tex, texture)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the renderer's independent map decode: mp_carentan's `,mc/lambert1` must resolve through the
+    /// shared Db, not reach Materials::prepare as a techset-less stub (#453).
+    #[test]
+    fn carentan_world_and_static_models_have_no_unresolved_materials() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let data = MapData::load(&root, "", "mp_carentan").expect("mp_carentan loads");
+        let w = &data.world;
+        let mut materials: Vec<&Arc<Material>> = w
+            .dpvs
+            .surfaces
+            .iter()
+            .filter_map(|s| s.material.as_ref())
+            .chain(
+                w.dpvs
+                    .smodel_draw_insts
+                    .iter()
+                    .filter_map(|s| s.model.as_ref())
+                    .flat_map(|m| m.materials.iter().flatten()),
+            )
+            .chain(w.material_memory.iter().filter_map(|m| m.material.as_ref()))
+            .chain(w.sun.sprite_material.iter())
+            .chain(w.sun.flare_material.iter())
+            .collect();
+        materials.extend(data.post_materials.iter());
+        assert!(!materials.is_empty());
+        for m in &materials {
+            assert!(
+                m.name.as_deref().is_none_or(|n| !n.starts_with(',')) && m.technique_set.is_some(),
+                "unresolved world material: {:?}",
+                m.name
+            );
+        }
+        assert!(
+            materials
+                .iter()
+                .any(|m| m.name.as_deref() == Some("mc/lambert1")),
+            "the map must exercise the formerly unresolved material"
+        );
+    }
 }

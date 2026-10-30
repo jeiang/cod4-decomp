@@ -17,6 +17,12 @@ pub enum ZoneError {
     BadPointer(u32),
     /// An offset pointer whose target was never decoded (or has another type).
     BadOffset(Addr),
+    /// A name-only reference needs its type's stock default, but no loaded zone defines it.
+    MissingDefault {
+        ty: XAssetType,
+        default: &'static str,
+        name: String,
+    },
     BlockOverflow {
         block: Block,
         used: u64,
@@ -45,6 +51,11 @@ impl fmt::Display for ZoneError {
             Self::Unsupported(t) => write!(f, "no decoder for asset type {}", t.name()),
             Self::BadPointer(p) => write!(f, "invalid pointer {p:#010x}"),
             Self::BadOffset(a) => write!(f, "unresolved offset pointer {a:?}"),
+            Self::MissingDefault { ty, default, name } => write!(
+                f,
+                "could not load default asset {default:?} for asset type {}; tried to load {name:?}",
+                ty.name()
+            ),
             Self::BlockOverflow { block, used, size } => {
                 write!(f, "block {block:?} overflow: {used} > {size}")
             }
