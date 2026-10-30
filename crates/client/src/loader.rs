@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc;
-use std::time::Instant;
+use web_time::Instant;
 
 /// Where the session's server comes from.
 pub enum Server {
