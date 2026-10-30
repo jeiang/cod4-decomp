@@ -324,6 +324,9 @@ pub fn apply(window: &Window, req: &Request) -> Option<String> {
             window.set_fullscreen(None);
             let (w, h) = req.size.unwrap_or((1280, 720));
             let _ = window.request_inner_size(Size::Physical(PhysicalSize::new(w, h)));
+            if let Some((x, y)) = req.position {
+                window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+            }
             None
         }
         FullscreenKind::Borderless => {

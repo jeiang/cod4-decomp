@@ -189,6 +189,29 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         Ok(c.lookup("client.seconds")?.as_f64().unwrap_or(0.0))
     })?;
     c.pause(secs(3))?;
+    c.step("stock server dvar registrations", |c| {
+        // KisakCOD game_mp/g_main_mp.cpp:407,632-648,694-712 and server_mp/sv_init_mp.cpp:708-722,771.
+        // Empty registered strings must be "", never the null returned for an absent registration.
+        for (name, want) in [
+            ("g_redCrosshairs", "1"),
+            ("g_banIPs", ""),
+            ("g_friendlyfireDist", "256"),
+            ("g_friendlyNameDist", "15000"),
+            ("sv_iwds", ""),
+            ("sv_iwdNames", ""),
+            ("sv_showCommands", "0"),
+            ("sv_padPackets", "0"),
+            ("g_dumpAnims", "-1"),
+        ] {
+            let r = c.ask(json!({"cmd": "server", "op": "cvar", "name": name}))?;
+            if r["value"] != json!(want) {
+                return Err(format!(
+                    "{name}: expected registered default {want:?}, got {r}"
+                ));
+            }
+        }
+        Ok(())
+    })?;
 
     // A class change from the in-game menu while alive: the stock script answers with `iprintlnbold` of a bare
     // string key, which the HUD must show localized (a key left on screen is `unresolved`). Within the grace period
@@ -251,6 +274,29 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             secs(20),
             "the chat line never came back",
         )
+    })?;
+    c.step("team-only incoming chat", |c| {
+        let before = stat(c, "hud.stats.chat")?;
+        c.console("set cg_teamChatsOnly 1")?;
+        c.chat("global_hidden_369", false)?;
+        c.pause(secs(2))?;
+        if stat(c, "hud.stats.chat")? != before {
+            return Err("cg_teamChatsOnly did not suppress incoming global chat".into());
+        }
+        c.chat("team_visible_369", true)?;
+        c.until(
+            json!({"hud.stats.chat": {"gt": before}}),
+            secs(10),
+            "team chat was suppressed",
+        )?;
+        c.console("set cg_teamChatsOnly 0")?;
+        c.chat("global_visible_369", false)?;
+        c.until(
+            json!({"hud.stats.chat": {"gt": before + 1}}),
+            secs(10),
+            "global chat did not return",
+        )?;
+        Ok(())
     })?;
     // A vote called, bots counted and added through the console.
     c.step("callvote", |c| {

@@ -19,6 +19,8 @@ pub struct Gfx {
     pub refresh: Option<f64>,
     /// `r_monitor`: the 1-based monitor fullscreen goes to, 0 for automatic.
     pub monitor: Option<usize>,
+    /// `vid_xpos`/`vid_ypos`, physical coordinates of a windowed window.
+    pub position: Option<(i32, i32)>,
     /// `r_aspectRatio`: the shape of the screen, `None` for the window's own.
     pub aspect: Option<f32>,
     /// `r_vsync`.
@@ -174,6 +176,26 @@ fn clear(c: &Cvars) -> render::Clear {
     }
 }
 
+/// KisakCOD gfx_d3d/r_scene.cpp:1833-1861 (`R_SetFilmInfo`): overlay the live adjustments on the vision film.
+/// Preserve the double application of desaturation; applying the multiplier directly is not stock behavior.
+pub fn film(c: &Cvars, mut film: render::art::Film) -> render::art::Film {
+    if c.bool("sv_cheats") {
+        let f = |n: &str, d: f32, lo: f32, hi: f32| {
+            c.get(n)
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+                .unwrap_or(d)
+                .clamp(lo, hi)
+        };
+        let scale =
+            (1.0 - film.desaturation) * f("r_desaturation", 1.0, 0.0, 4.0) + film.desaturation;
+        film.desaturation *= scale;
+        film.contrast *= f("r_contrast", 1.0, 0.0, 4.0);
+        film.brightness += f("r_brightness", 0.0, -1.0, 1.0);
+    }
+    film
+}
+
 impl Gfx {
     pub fn from_cvars(c: &Cvars) -> Gfx {
         let text = |n: &str| c.get(n).unwrap_or("");
@@ -185,6 +207,11 @@ impl Gfx {
             mode: parse_mode(text("r_mode")),
             refresh: parse_hz(text("r_displayRefresh")),
             monitor: text("r_monitor").trim().parse().ok().filter(|&n| n > 0),
+            position: text("vid_xpos")
+                .trim()
+                .parse()
+                .ok()
+                .zip(text("vid_ypos").trim().parse().ok()),
             aspect: parse_aspect(text("r_aspectRatio")),
             vsync: c.bool("r_vsync"),
             aa_samples: text("r_aaSamples").trim().parse().unwrap_or(1).clamp(1, 16),
@@ -278,7 +305,7 @@ impl Gfx {
             size: self.mode.or(base.size),
             refresh: self.refresh.or(base.refresh),
             monitor: self.monitor.or(base.monitor),
-            position: base.position,
+            position: self.position.or(base.position),
         }
     }
 

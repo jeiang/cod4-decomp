@@ -726,9 +726,31 @@ impl NetPlay {
         self.effects.played.get(kind).copied().unwrap_or(0)
     }
 
-    /// The helicopter kill cam's field of view as the dvars set it (for the `cgis=heli_fov` script step).
-    pub fn heli_killcam_fov(&self) -> f32 {
-        self.switches.killcam.heli_fov
+    /// A deterministic view through the same camera/DOF builders the killcam uses. Console-driven harness checks
+    /// can exercise every camera dvar without waiting for a particular bot to kill with a particular vehicle.
+    pub fn killcam_sample(&self, helicopter: bool) -> String {
+        let t = &self.switches.killcam;
+        let (position, fov, dof) = if helicopter {
+            let k =
+                crate::camera::helicopter_kill_cam(t, Vec3::ZERO, Vec3::new(1000.0, 0.0, t.heli_z))
+                    .expect("horizontal helicopter sample");
+            (
+                format!("{:.0} {:.0}", k.origin.x, k.origin.z),
+                k.fov,
+                crate::dof::helicopter_kill_cam(k.distance, t.heli_dist, t.heli_blur),
+            )
+        } else {
+            let k = crate::camera::airstrike_kill_cam(t, Vec3::ZERO, [90.0, 0.0, 0.0], Vec3::ZERO);
+            (
+                format!("{:.0}", k.origin.z),
+                k.fov,
+                crate::dof::airstrike_kill_cam(k.distance, t.airstrike_blur),
+            )
+        };
+        format!(
+            "{position} {fov:.0} {:.0} {:.0} {:.0} {:.0} {:.0} {:.0}",
+            dof.near_start, dof.near_end, dof.far_start, dof.far_end, dof.near_blur, dof.far_blur
+        )
     }
     /// A copy of every effect count, for a script's `fxmark` step.
     pub fn fx_counts(&self) -> HashMap<String, u64> {

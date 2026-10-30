@@ -1044,14 +1044,6 @@ impl Viewer {
                 .ok(),
         );
         input.cvars.set("fs_game", &self.cli.game, false);
-        self.cli.request.position = match (input.cvars.get("vid_xpos"), input.cvars.get("vid_ypos"))
-        {
-            (Some(x), Some(y)) => match (x.trim().parse(), y.trim().parse()) {
-                (Ok(x), Ok(y)) => Some((x, y)),
-                _ => None,
-            },
-            _ => None,
-        };
         let demo_dir = input
             .config_dir()
             .unwrap_or_else(|| self.cli.install.clone())
@@ -1921,22 +1913,7 @@ impl Viewer {
                     if let Some((glow, _)) = nf.look.vision {
                         r.post.glow = glow;
                     }
-                    let mut film = base;
-                    if cheats {
-                        let c = &st.input.cvars;
-                        let f = |n: &str, d: f32| {
-                            c.get(n)
-                                .and_then(|v| v.trim().parse::<f32>().ok())
-                                .filter(|v| v.is_finite())
-                                .unwrap_or(d)
-                        };
-                        let desat = (1.0 - film.desaturation) * f("r_desaturation", 1.0)
-                            + film.desaturation;
-                        film.desaturation *= desat;
-                        film.contrast *= f("r_contrast", 1.0);
-                        film.brightness += f("r_brightness", 0.0);
-                    }
-                    r.post.film = film;
+                    r.post.film = crate::gfx::film(&st.input.cvars, base);
                     // Cheat dvars, read live as the original does: `r_fullbright` (`R_InitDrawMethod` on change)
                     // and `cg_drawShellshock` (`DrawShellshockBlend`).
                     r.settings.fullbright = cheats && st.input.cvars.bool("r_fullbright");
@@ -3332,6 +3309,14 @@ fn script_step(st: &mut State) -> bool {
                 done(false, sc, format!("timed out; no reply line with {text:?}"));
             }
         }
+        // Assert an output line is absent now, after the scenario waited for the command to finish.
+        "notsaw" => {
+            let seen = st
+                .shell
+                .as_ref()
+                .is_some_and(|s| s.st.feed.console.iter().any(|l| l.contains(arg)));
+            done(!seen, sc, format!("console contains {arg:?}: {seen}"));
+        }
         // A line for the listen server's console, as typed there: `server=devtele human bombzone`.
         "server" => {
             listen::send(arg);
@@ -3609,14 +3594,39 @@ fn script_step(st: &mut State) -> bool {
                 // What the remainder dvars came to: the centre print time in ms, the helicopter kill cam's field of
                 // view, the film brightness after `r_brightness`, and whether the console keeps lines.
                 "centertime" => sh.map(|s| s.st.feed.center_ms.to_string()),
-                "heli_fov" => st
-                    .net
-                    .as_ref()
-                    .map(|n| format!("{:.0}", n.heli_killcam_fov())),
+                "heli_camera" => st.net.as_ref().map(|n| n.killcam_sample(true)),
+                "air_camera" => st.net.as_ref().map(|n| n.killcam_sample(false)),
                 "brightness" => st
                     .renderer
                     .as_ref()
                     .map(|r| format!("{:.2}", r.post.film.brightness)),
+                "contrast" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| format!("{:.2}", r.post.film.contrast)),
+                "desaturation" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| format!("{:.2}", r.post.film.desaturation)),
+                "film_sample" => st.film_base.map(|mut base| {
+                    base.desaturation = 0.5;
+                    base.contrast = 1.0;
+                    base.brightness = 0.0;
+                    let film = crate::gfx::film(&st.input.cvars, base);
+                    format!(
+                        "{:.2} {:.2} {:.2}",
+                        film.brightness, film.contrast, film.desaturation
+                    )
+                }),
+                "crosshair_alpha" => sh
+                    .and_then(|s| s.st.live.reticle.as_ref())
+                    .map(|r| format!("{:.2}", crate::crosshair::layout(r).0)),
+                "chat_count" => sh.map(|s| s.st.hud_stats.chat.to_string()),
+                "window_position" => st
+                    .window
+                    .outer_position()
+                    .ok()
+                    .map(|p| format!("{} {}", p.x, p.y)),
                 "noprint" => sh.map(|s| u8::from(s.st.no_print).to_string()),
                 "subtitle" => sh.map(|s| {
                     u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
