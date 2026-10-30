@@ -26,9 +26,10 @@ const BAD_MAP: &str = "nosuchmap";
 /// An address nothing listens on: the standard ports are 28960 to 28963.
 const NOBODY: &str = "127.0.0.1:28999";
 
-/// The front end: a typed `map` and `devmap` of a missing map, and a join nobody answers. The popup is dismissed as a
-/// player does, with Escape, which empties the message, so each check is its own.
-const FRONTEND_STEPS: &str = "wait=2,console=map nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Can't find map \"nosuchmap\".,home=5,shot=badmap,\
+/// The front end: a bare `map` (nothing happens), a typed `map` and `devmap` of a missing map, and a join nobody
+/// answers. The popup is dismissed as a player does, with Escape, which empties the message, so each check is its own.
+const FRONTEND_STEPS: &str = "wait=2,console=map,wait=2,cvaris=com_errorMessage ,home=5,\
+console=map nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Can't find map \"nosuchmap\".,home=5,shot=badmap,\
 key=escape,wait=1,cvaris=com_errorMessage ,console=devmap nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Can't find map \"nosuchmap\".,home=5,\
 key=escape,wait=1,cvaris=com_errorMessage ,connect=127.0.0.1:28999,menu=error_popmenu:30,cvaris=com_errorMessage 127.0.0.1:28999 did not answer,home=5,shot=refused";
 

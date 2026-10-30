@@ -1770,6 +1770,8 @@ impl HostCx<'_> {
                 "reconnect" => self.st.actions.push(Action::Reconnect),
                 // The server's `g_gametype` defaults to `war` (`SV_Init` registers it so); a client that has not
                 // played yet has none set, and `set g_gametype` with nothing would fail the server's start.
+                // A bare `map` does nothing, as `SV_Map_f` checks the zone only `if (*map)`.
+                "map" | "devmap" if a(1).is_empty() => {}
                 "map" | "devmap" => self.st.actions.push(Action::StartServer {
                     map: a(1).to_owned(),
                     gametype: match self.dvar_get("g_gametype") {
