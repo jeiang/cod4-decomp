@@ -893,6 +893,10 @@ impl Shell {
                 tag,
                 text,
             } => {
+                // KisakCOD cg_servercmds_mp.cpp:547: suppress incoming global chat, not outgoing speech.
+                if !team && input.cvars.bool("cg_teamChatsOnly") {
+                    return;
+                }
                 let text = hud::chat_text(&self.ui.assets, &text);
                 self.st.hud_stats.note_text(&text);
                 let line = self.chat_line(team, client, tag, &text);
@@ -994,8 +998,6 @@ impl Shell {
         };
         match self.st.console.key(key, complete) {
             Some(Entered::Say { team, text }) => {
-                // `cg_teamChatsOnly`: an all-chat line goes to the team instead.
-                let team = team || input.cvars.bool("cg_teamChatsOnly");
                 let verb = if team { "say_team" } else { "say" };
                 self.st
                     .actions

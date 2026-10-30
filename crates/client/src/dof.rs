@@ -149,17 +149,27 @@ pub fn view_model(ps: &PlayerState, ads: Option<(f32, f32)>) -> (f32, f32) {
 
 /// `CG_UpdateHelicopterKillCamDof` (the `cg_heliKillCam*Blur*` defaults): `distance` is from the point the camera
 /// looks from to the victim, `pull` how far the camera hangs behind it.
-pub fn helicopter_kill_cam(distance: f32, pull: f32, blur: [f32; 4]) -> Dof {
+pub fn helicopter_kill_cam(distance: f32, pull: f32, blur: [f32; 6]) -> Dof {
     kill_cam(pull + distance, blur)
 }
 
 /// `CG_UpdateAirstrikeKillCamDof`: `distance` from the camera to the victim.
-pub fn airstrike_kill_cam(distance: f32, blur: [f32; 4]) -> Dof {
+pub fn airstrike_kill_cam(distance: f32, blur: [f32; 6]) -> Dof {
     kill_cam(distance, blur)
 }
 
-/// `blur`: the `cg_*KillCamNearBlurStart`, `NearBlurEnd`, `FarBlurStart` and `FarBlurDist` dvars.
-fn kill_cam(focus: f32, [near_start, near_end, far_start, far_dist]: [f32; 4]) -> Dof {
+/// `blur`: near start/end, far start/distance, and near/far blur radii in virtual pixels.
+fn kill_cam(
+    focus: f32,
+    [
+        near_start,
+        near_end,
+        far_start,
+        far_dist,
+        near_blur,
+        far_blur,
+    ]: [f32; 6],
+) -> Dof {
     Dof {
         view_model_start: 0.0,
         view_model_end: 0.0,
@@ -167,8 +177,8 @@ fn kill_cam(focus: f32, [near_start, near_end, far_start, far_dist]: [f32; 4]) -
         near_end: focus - near_end,
         far_start: focus + far_start,
         far_end: focus + far_start + far_dist,
-        near_blur: 4.0,
-        far_blur: 2.0,
+        near_blur,
+        far_blur,
     }
 }
 
@@ -298,10 +308,10 @@ mod tests {
 
     #[test]
     fn the_kill_cams_focus_on_the_victim() {
-        let d = airstrike_kill_cam(500.0, [0.0, 100.0, 100.0, 300.0]);
+        let d = airstrike_kill_cam(500.0, [0.0, 100.0, 100.0, 300.0, 4.0, 2.0]);
         assert!(d.active());
         assert_eq!((d.near_end, d.far_start, d.far_end), (400.0, 600.0, 900.0));
-        let h = helicopter_kill_cam(500.0, 1000.0, [0.0, 100.0, 100.0, 300.0]);
+        let h = helicopter_kill_cam(500.0, 1000.0, [0.0, 100.0, 100.0, 300.0, 4.0, 2.0]);
         assert_eq!(
             (h.near_end, h.far_start, h.far_end),
             (1400.0, 1600.0, 1900.0)

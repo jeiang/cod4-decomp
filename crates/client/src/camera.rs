@@ -294,11 +294,11 @@ pub struct KillCamTune {
     pub heli_dist: f32,
     pub heli_fov: f32,
     pub heli_z: f32,
-    pub heli_blur: [f32; 4],
+    pub heli_blur: [f32; 6],
     pub airstrike_dist: f32,
     pub airstrike_fov: f32,
     pub airstrike_close_z: f32,
-    pub airstrike_blur: [f32; 4],
+    pub airstrike_blur: [f32; 6],
 }
 
 impl Default for KillCamTune {
@@ -307,11 +307,11 @@ impl Default for KillCamTune {
             heli_dist: 1000.0,
             heli_fov: 15.0,
             heli_z: 50.0,
-            heli_blur: [0.0, 100.0, 100.0, 300.0],
+            heli_blur: [0.0, 100.0, 100.0, 300.0, 4.0, 2.0],
             airstrike_dist: 200.0,
             airstrike_fov: 80.0,
             airstrike_close_z: 24.0,
-            airstrike_blur: [0.0, 100.0, 100.0, 300.0],
+            airstrike_blur: [0.0, 100.0, 100.0, 300.0, 4.0, 2.0],
         }
     }
 }
@@ -328,25 +328,44 @@ impl KillCamTune {
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .filter(|v| v.is_finite())
                 .unwrap_or(stock)
-                .clamp(0.0, 10000.0)
+                .max(0.0)
         };
-        let blur = |prefix: &str, stock: [f32; 4]| {
-            [
-                f(&format!("{prefix}NearBlurStart"), stock[0]),
-                f(&format!("{prefix}NearBlurEnd"), stock[1]),
-                f(&format!("{prefix}FarBlurStart"), stock[2]),
-                f(&format!("{prefix}FarBlurDist"), stock[3]),
-            ]
+        let blur = |names: [&str; 6], stock: [f32; 6]| {
+            let mut values = std::array::from_fn(|i| f(names[i], stock[i]));
+            values[1] = values[1].min(10000.0);
+            values[4] = values[4].clamp(4.0, 10.0);
+            values[5] = values[5].min(10.0);
+            values
         };
         KillCamTune {
             heli_dist: f("cg_heliKillCamDist", d.heli_dist),
-            heli_fov: f("cg_heliKillCamFov", d.heli_fov).clamp(1.0, 180.0),
+            heli_fov: f("cg_heliKillCamFov", d.heli_fov).clamp(0.1, 160.0),
             heli_z: f("cg_heliKillCamZDist", d.heli_z),
-            heli_blur: blur("cg_heliKillCam", d.heli_blur),
+            heli_blur: blur(
+                [
+                    "cg_heliKillCamNearBlurStart",
+                    "cg_heliKillCamNearBlurEnd",
+                    "cg_heliKillCamFarBlurStart",
+                    "cg_heliKillCamFarBlurDist",
+                    "cg_heliKillCamNearBlur",
+                    "cg_heliKillCamFarBlur",
+                ],
+                d.heli_blur,
+            ),
             airstrike_dist: f("cg_airstrikeKillCamDist", d.airstrike_dist),
-            airstrike_fov: f("cg_airstrikeKillCamFov", d.airstrike_fov).clamp(1.0, 180.0),
+            airstrike_fov: f("cg_airstrikeKillCamFov", d.airstrike_fov).clamp(0.1, 160.0),
             airstrike_close_z: f("cg_airstrikeKillCamCloseZDist", d.airstrike_close_z),
-            airstrike_blur: blur("cg_airstrikeKillCam", d.airstrike_blur),
+            airstrike_blur: blur(
+                [
+                    "cg_airstrikeKillCamNearBlurStart",
+                    "cg_airstrikeKillCamNearBlurEnd",
+                    "cg_airstrikeKillCamFarBlurStart",
+                    "cg_airstrikeKillCamFarBlurDist",
+                    "cg_airstrikeKillCamNearBlur",
+                    "cg_airstrikeKillCamFarBlur",
+                ],
+                d.airstrike_blur,
+            ),
         }
     }
 }

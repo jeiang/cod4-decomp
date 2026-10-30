@@ -355,7 +355,7 @@ fn register_core_dvars(c: &mut Cvars) {
         // distances, the published IWD lists, the client command log switch, packet padding and the animation dump.
         ("g_redCrosshairs", "1", LATCH | ARCHIVE),
         ("g_banIPs", "", ARCHIVE),
-        ("g_friendlyFireDist", "15000", CHEAT),
+        ("g_friendlyfireDist", "256", CHEAT),
         ("g_friendlyNameDist", "15000", CHEAT),
         ("sv_iwds", "", SYSTEMINFO | ROM),
         ("sv_iwdNames", "", SYSTEMINFO | ROM),
@@ -430,12 +430,18 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_maxDroppedWeapons", 2, 32),
         ("g_inactivity", 0, i32::MAX),
         ("g_playerCollisionEjectSpeed", 0, 32_000),
+        ("g_redCrosshairs", 0, 1),
+        ("sv_showCommands", 0, 1),
+        ("sv_padPackets", 0, i32::MAX),
+        ("g_dumpAnims", -1, 1023),
     ] {
         c.set_limit(n, Limit::Int(lo, hi));
     }
     c.set_limit("g_voteAbstainWeight", Limit::Float(0.0, 1.0));
     c.set_limit("g_gravity", Limit::Float(1.0, f32::MAX));
     c.set_limit("sv_kickBanTime", Limit::Float(0.0, 3600.0));
+    c.set_limit("g_friendlyfireDist", Limit::Float(0.0, 15000.0));
+    c.set_limit("g_friendlyNameDist", Limit::Float(0.0, 15000.0));
     for (n, d) in crate::missile::MISSILE_CVARS {
         c.register(n, d, CHEAT);
     }
