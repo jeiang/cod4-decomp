@@ -246,6 +246,9 @@ fn hud_problem(hud: &Value) -> Option<String> {
     if hud["map"].as_str().is_none_or(str::is_empty) {
         return Some("the map's minimap (setMiniMap) never reached the client".into());
     }
+    if let Some(w) = sprint_problem(hud) {
+        return Some(w);
+    }
     // Overlay, magazine graphic, minimap image, player arrow.
     for id in ["112", "117", "159", "150"] {
         if hud["drawn"][id].as_u64().unwrap_or(0) == 0 {
@@ -253,6 +256,40 @@ fn hud_problem(hud: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// The longer-sprint perk bit of `ps.perks` (`sim::pm::state::PERK_SPRINT`).
+const PERK_SPRINT: u64 = 0x400;
+
+/// Why the HUD's sprint budget is not the stock one, or `None`: `BG_GetMaxSprintTime` is `player_sprintTime` (stock
+/// default 4 s) times the weapon's `sprintDurationScale`, times `perk_sprintMultiplier` (stock default 2) with the
+/// perk, capped at 0x3FFF ms. The report carries each input next to the budget, so a budget that varies between runs
+/// of the same class (#375 play-06: 4000, 7000, 8000, 14000) names what changed, and a dvar that drifted from stock
+/// fails here.
+fn sprint_problem(hud: &Value) -> Option<String> {
+    let f = &hud["sprint_facts"];
+    let (Some(max), Some(scale), Some(time), Some(mult), Some(perks)) = (
+        hud["sprint"][1].as_f64(),
+        f["scale"].as_f64(),
+        f["player_sprint_time"].as_f64(),
+        f["perk_sprint_multiplier"].as_f64(),
+        f["perks"].as_u64(),
+    ) else {
+        return Some("the HUD reported no sprint budget or its inputs".into());
+    };
+    if time != 4.0 || mult != 2.0 {
+        return Some(format!(
+            "player_sprintTime {time} / perk_sprintMultiplier {mult} are not the stock 4 / 2"
+        ));
+    }
+    let perk = if perks & PERK_SPRINT != 0 { mult } else { 1.0 };
+    let want = ((scale * time * 1000.0 * perk) as i64).min(0x3FFF) as f64;
+    ((max - want).abs() > 1.0).then(|| {
+        format!(
+            "sprint budget {max} ms, but {} x scale {scale} x {time} s x perk {perk} is {want} (perks {perks:#x})",
+            f["weapon"]
+        )
+    })
 }
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -316,7 +353,10 @@ mod tests {
 
     fn good() -> Value {
         json!({"live": true, "health": 100, "max_health": 100, "weapon": {"clip": 30},
-            "map": "compass_map_mp_crash", "drawn": {"112": 5, "117": 5, "159": 5, "150": 5}})
+            "map": "compass_map_mp_crash", "drawn": {"112": 5, "117": 5, "159": 5, "150": 5},
+            "sprint": [4000, 7000],
+            "sprint_facts": {"weapon": "p90_mp", "scale": 1.75, "player_sprint_time": 4.0,
+                "perk_sprint_multiplier": 2.0, "perks": 0}})
     }
 
     #[test]
@@ -368,6 +408,22 @@ mod tests {
         );
         assert_eq!(seen(5, json!(["pt_reload_stand_rifle"])), None);
         assert!(seen(5, json!([])).unwrap().contains("torso"));
+    }
+
+    #[test]
+    fn the_sprint_budget_is_the_stock_formula_of_its_recorded_inputs() {
+        assert_eq!(sprint_problem(&good()), None);
+        let mut h = good();
+        h["sprint"] = json!([14000, 14000]);
+        assert!(sprint_problem(&h).unwrap().contains("is 7000"), "doubled with no perk");
+        h["sprint_facts"]["perks"] = json!(0x400);
+        assert_eq!(sprint_problem(&h), None, "doubled by the longer-sprint perk");
+        let mut h = good();
+        h["sprint_facts"]["player_sprint_time"] = json!(7.0);
+        assert!(sprint_problem(&h).unwrap().contains("not the stock"));
+        let mut h = good();
+        h["sprint_facts"] = Value::Null;
+        assert!(sprint_problem(&h).unwrap().contains("no sprint budget"));
     }
 
     #[test]

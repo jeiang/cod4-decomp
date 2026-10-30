@@ -144,6 +144,13 @@ impl NetPlay {
         }
         let info = self.weapons.info(ps.weapon as u16);
         h.sprint_max = sim::pm::max_sprint_ms(&self.params, info.sprint_duration_scale, ps.perks);
+        if h.sprint_weapon != self.weapons.name(ps.weapon as u16) {
+            h.sprint_weapon = self.weapons.name(ps.weapon as u16).to_owned();
+        }
+        h.sprint_scale = info.sprint_duration_scale;
+        h.sprint_time = self.params.player_sprint_time;
+        h.sprint_perk_mult = self.params.perk_sprint_multiplier;
+        h.perks = ps.perks;
         h.sprint_left = sim::pm::sprint_left_ms(ps, &self.params, server_time, h.sprint_max);
         h.sprinting = ps.pm_flags & pmf::SPRINTING != 0;
         h.mantle_hint = ps.mantle_state.flags & 8 != 0;

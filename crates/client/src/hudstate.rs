@@ -362,9 +362,16 @@ pub struct HudFacts {
     pub stance: Stance,
     pub prone_blocked_end: i32,
     pub weapon_disabled: bool,
-    /// Sprint budget left and the full budget, ms.
+    /// Sprint budget left and the full budget, ms, with what the budget was computed from (`BG_GetMaxSprintTime`:
+    /// `player_sprintTime` seconds, the weapon's `sprintDurationScale`, times `perk_sprintMultiplier` with the
+    /// longer-sprint perk): the report carries them so a run can show why the budget is what it is (#375 play-06).
     pub sprint_left: i32,
     pub sprint_max: i32,
+    pub sprint_weapon: String,
+    pub sprint_scale: f32,
+    pub sprint_time: f32,
+    pub sprint_perk_mult: f32,
+    pub perks: u32,
     pub sprinting: bool,
     pub mantle_hint: bool,
     /// The player is picking a point on the map (an airstrike): the full-screen map shows.
@@ -511,6 +518,10 @@ impl HudFacts {
             "second": self.second.as_ref().map(|o| o.ammo),
             "stance": format!("{:?}", self.stance),
             "sprint": [self.sprint_left, self.sprint_max],
+            "sprint_facts": {
+                "weapon": self.sprint_weapon, "scale": self.sprint_scale, "player_sprint_time": self.sprint_time,
+                "perk_sprint_multiplier": self.sprint_perk_mult, "perks": self.perks,
+            },
             "map": self.map.as_ref().map(|m| &m.material),
             "friendlies": self.actors.values().filter(|a| a.friendly).count(),
             "enemies": self.actors.values().filter(|a| !a.friendly).count(),
