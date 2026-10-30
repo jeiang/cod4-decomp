@@ -11,9 +11,10 @@
 //! socket (`control_channel.rs`). The browser hosts no server, so the stage also opens Start New Server from the main
 //! menu before the join and asserts the popup that says so (`listen_web.rs`).
 //!
-//! Parity: the HUD ownerdraws the browser drew are compared with the set the native `client-match` run draws on the
-//! same server set-up ([`NATIVE_HUD_DRAWN`]); a difference is a note, and the three a match cannot do without (ammo,
-//! weapon name, compass map) are assertions.
+//! Parity: after the browser match the native client plays the same map, gametype and bot count; the stage compares
+//! its measured movement, shots and HUD ownerdraw set with the browser's. A difference is a note, and the three a
+//! match cannot do without (ammo, weapon name, compass map) are assertions.
+use super::client_flythrough::locate_client;
 use super::web_client::{Kill, find_chrome, find_web_dir};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::{Value, json};
@@ -42,18 +43,6 @@ const NO_HOSTING: &str = "Starting a server is not available in the browser. Use
 const EV_FIRE_WEAPON: u8 = 0x1A;
 const EV_FIRE_WEAPON_LASTSHOT: u8 = 0x1B;
 
-/// The HUD ownerdraw ids the stock `hud.menu` pieces reach for a player on foot in a team deathmatch, through
-/// `crates/client/src/ownerdraw.rs`, as the browser drew them on the Linux test host on 2026-10-30 (bundle
-/// `slot-1-cod4e-run-20261030-040243`): stance 20, breath/mantle/invalid hints 71/80/113 (empty pieces still
-/// counted), cursor hint 72, health 112, weapon name 81, clip graphic 117 and ammo stock 119 (the stock HUD's ammo
-/// counter; 5/6 are the older value pieces, which `hud.menu` does not use), the compass 146/150/151/152/158/159/170
-/// and the full-map pieces 181/182/183/185/188, the ammo hint blocks 103–106 and 166/168/169. The browser runs the
-/// same ownerdraw code on the same menus as the native client; a native per-id measurement (the `client-match`
-/// report carries none) is the follow-up that turns this list into a two-sided diff. A difference is a note.
-const NATIVE_HUD_DRAWN: &[i64] = &[
-    20, 71, 72, 80, 81, 103, 104, 105, 106, 112, 113, 117, 119, 146, 150, 151, 152, 158, 159, 166,
-    168, 169, 170, 181, 182, 183, 185, 188,
-];
 /// The ownerdraws a match cannot be played without: the ammo counter, the weapon's name and the compass map.
 const MUST_DRAW: &[i64] = &[119, 81, 159];
 
@@ -351,6 +340,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(chrome) = find_chrome() else {
         return skip("no Chromium found (set COD4E_CHROME)");
     };
+    let Some(client) = locate_client() else {
+        return skip("cod4e client binary not found next to the harness");
+    };
     let Some(install) = ctx.install.clone() else {
         return skip("no original install");
     };
@@ -428,22 +420,25 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         "http://localhost:{PORT}/?dev-install=/install&autostart&debug&control&name={PLAYER}\
          &connect=127.0.0.1:{wt_port}&cert={hash}&args=--no-autojoin%20--duration%20100000"
     );
+    let mut command = Command::new(&chrome);
+    command
+        .env_remove("LD_LIBRARY_PATH")
+        .args([
+            "--headless=new",
+            "--no-first-run",
+            "--ignore-gpu-blocklist",
+            "--use-angle=swiftshader",
+            "--enable-unsafe-swiftshader",
+            "--autoplay-policy=no-user-gesture-required",
+            "--window-size=1280,720",
+        ])
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(&page)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut cdp = super::browser_cdp::pipe(&mut command)?;
     let browser = Kill(
-        Command::new(&chrome)
-            .env_remove("LD_LIBRARY_PATH")
-            .args([
-                "--headless=new",
-                "--no-first-run",
-                "--ignore-gpu-blocklist",
-                "--use-angle=swiftshader",
-                "--enable-unsafe-swiftshader",
-                "--autoplay-policy=no-user-gesture-required",
-                "--window-size=1280,720",
-            ])
-            .arg(format!("--user-data-dir={}", profile.display()))
-            .arg(&page)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+        command
             .spawn()
             .map_err(|e| io::Error::other(format!("cannot start {}: {e}", chrome.display())))?,
     );
@@ -451,7 +446,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let started = Instant::now();
     let mut report = StageReport::new(NAME, Status::Passed);
     let mut page = Page { id: 0, requests: 0 };
-    let outcome = play(&mut server, &mut page, &mut report, &dir, started);
+    let outcome = play(&mut server, &mut page, &mut cdp, &mut report, &dir, started)
+        .and_then(|()| native_parity(&client, &install, &dir, &mut report));
     drop(browser);
     let _ = std::fs::remove_dir_all(&profile);
     report
@@ -467,10 +463,101 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     Ok(report)
 }
 
+/// Runs the native client on the same map, gametype and bot count, then records the measured state/HUD differences.
+/// The browser has left its dedicated server by now, so this reference uses the native client's own listen server.
+fn native_parity(
+    client: &Path,
+    install: &Path,
+    dir: &Path,
+    report: &mut StageReport,
+) -> Result<(), String> {
+    let out = dir.join("native");
+    std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
+    let log = std::fs::File::create(out.join("client.log")).map_err(|e| e.to_string())?;
+    let mut child = Command::new(client)
+        .arg("--install")
+        .arg(install)
+        .args(["--map", "mp_crash", "--listen", "--bots"])
+        .arg(BOTS.to_string())
+        .args([
+            "--autoplay",
+            "--duration",
+            "30",
+            "--size",
+            "1280x720",
+            "--out",
+        ])
+        .arg(&out)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().map_err(|e| e.to_string())?)
+        .stderr(log)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let end = Instant::now() + Duration::from_secs(180);
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if Instant::now() > end {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the native parity client did not finish within 180 s".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    if !status.success() {
+        return Err(format!("the native parity client exited with {status}"));
+    }
+    let native: Value =
+        serde_json::from_slice(&std::fs::read(out.join("client.json")).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    let browser: Value = serde_json::from_slice(
+        &std::fs::read(dir.join("browser-parity.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let ids = |v: &Value, path: &str| -> BTreeSet<i64> {
+        devctrl::lookup(v, path)
+            .and_then(|v| match v {
+                Value::Array(a) => Some(a.iter().filter_map(Value::as_i64).collect()),
+                Value::Object(o) => Some(o.keys().filter_map(|k| k.parse().ok()).collect()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    };
+    let native_ids = ids(&native, "hud.drawn");
+    let browser_ids = ids(&browser, "hud_drawn");
+    let missing: Vec<i64> = native_ids.difference(&browser_ids).copied().collect();
+    let extra: Vec<i64> = browser_ids.difference(&native_ids).copied().collect();
+    for (name, value) in [
+        ("native_moved", num(&native, "net.moved")),
+        ("native_path", num(&native, "net.path")),
+        ("native_shots", num(&native, "net.shots")),
+        ("native_hud_drawn", native_ids.len() as f64),
+        ("parity_hud_missing", missing.len() as f64),
+        ("parity_hud_extra", extra.len() as f64),
+    ] {
+        report.metrics.insert(name.into(), value);
+    }
+    report.notes.push(format!(
+        "measured native/browser parity (mp_crash war, {BOTS} bots): native moved {:.1}, path {:.1}, shots {:.0}; browser moved {:.1}, fire events {:.0}; HUD native {native_ids:?}, browser {browser_ids:?}, missing {missing:?}, extra {extra:?}",
+        num(&native, "net.moved"),
+        num(&native, "net.path"),
+        num(&native, "net.shots"),
+        num(&browser, "moved"),
+        num(&browser, "fire_events"),
+    ));
+    report.files.extend([
+        "web-match/native/client.json".into(),
+        "web-match/native/client.log".into(),
+    ]);
+    Ok(())
+}
+
 /// The match, step by step; the first failed assertion ends it.
 fn play(
     server: &mut Server,
     page: &mut Page,
+    cdp: &mut super::browser_cdp::BrowserPipe,
     report: &mut StageReport,
     dir: &Path,
     started: Instant,
@@ -582,22 +669,21 @@ fn play(
     }
     page.capture(server, report, dir, "04-moved")?;
 
-    // Turning: the stock `+right` button (`CL_KeyMove`'s `cl_yawspeed` turn, run from the console as the original
-    // allows) changes the yaw the server echoes. A mouse delta is not used here: mouse look applies only while the
-    // pointer is captured (as natively), and a headless page is never granted the pointer lock, which needs a
-    // gesture; the 2026-10-30 slot run showed the injected delta thrown away as "pointer free".
+    // Turning: a real click through Chromium's input pipeline grants the page pointer lock, as a player's click
+    // does; the delta itself goes through the same control-channel request as native (`CL_MouseMove`).
+    cdp.click()?;
+    page.ask(server, json!({"cmd": "step", "frames": 2}))?;
     let yaw0 = num(&p1, "angles.1");
     let turn = |y: f64| ((y - yaw0 + 540.0).rem_euclid(360.0) - 180.0).abs();
-    page.ask(server, json!({"cmd": "exec", "line": "+right"}))?;
+    page.ask(server, json!({"cmd": "mouse", "dx": 120, "dy": 0}))?;
     let turned = page.poll(
         server,
         "player",
         "angles.1",
         |y| turn(y) >= 2.0,
-        "+right did not turn the view",
+        "the control-channel mouse delta did not turn the view after pointer capture",
         Duration::from_secs(15),
     );
-    page.ask(server, json!({"cmd": "exec", "line": "-right"}))?;
     report.metrics.insert("turned_deg".into(), turn(turned?));
 
     // Firing: mouse1 lowers the clip and the own fire event is delivered.
@@ -651,18 +737,24 @@ fn play(
         .flatten()
         .filter_map(|(k, _)| k.parse().ok())
         .collect();
-    let native: BTreeSet<i64> = NATIVE_HUD_DRAWN.iter().copied().collect();
-    let missing: Vec<i64> = native.difference(&drawn).copied().collect();
-    let extra: Vec<i64> = drawn.difference(&native).copied().collect();
-    report.notes.push(format!(
-        "hud ownerdraws drawn {drawn:?}; against native client-match: missing {missing:?}, extra {extra:?}"
-    ));
+    report
+        .notes
+        .push(format!("browser HUD ownerdraws drawn {drawn:?}"));
     report
         .metrics
         .insert("hud_drawn".into(), drawn.len() as f64);
-    report
-        .metrics
-        .insert("hud_missing_vs_native".into(), missing.len() as f64);
+    let browser_parity = json!({
+        "hud_drawn": drawn.iter().copied().collect::<Vec<_>>(),
+        "moved": dist,
+        "fire_events": shots,
+        "sound_started": num(&page.state(server, "sound")?, "started"),
+    });
+    std::fs::write(
+        dir.join("browser-parity.json"),
+        serde_json::to_vec_pretty(&browser_parity).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    report.files.push("web-match/browser-parity.json".into());
     let lacking: Vec<i64> = MUST_DRAW
         .iter()
         .copied()

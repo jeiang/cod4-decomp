@@ -2428,6 +2428,7 @@ impl Viewer {
             "status": "ok",
             "net": net,
             "server": server,
+            "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
             "gpu": gpu_json(&st.gpu),
             "settings": {
                 "shadows": format!("{:?}", self.cli.settings.shadows).to_lowercase(),
