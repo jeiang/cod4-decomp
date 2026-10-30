@@ -266,7 +266,7 @@ const PERK_SPRINT: u64 = 0x400;
 /// perk, capped at 0x3FFF ms. The report carries each input next to the budget, so a budget that varies between runs
 /// of the same class (#375 play-06: 4000, 7000, 8000, 14000) names what changed, and a dvar that drifted from stock
 /// fails here.
-fn sprint_problem(hud: &Value) -> Option<String> {
+pub(super) fn sprint_problem(hud: &Value) -> Option<String> {
     let f = &hud["sprint_facts"];
     let (Some(max), Some(scale), Some(time), Some(mult), Some(perks)) = (
         hud["sprint"][1].as_f64(),
@@ -415,9 +415,16 @@ mod tests {
         assert_eq!(sprint_problem(&good()), None);
         let mut h = good();
         h["sprint"] = json!([14000, 14000]);
-        assert!(sprint_problem(&h).unwrap().contains("is 7000"), "doubled with no perk");
+        assert!(
+            sprint_problem(&h).unwrap().contains("is 7000"),
+            "doubled with no perk"
+        );
         h["sprint_facts"]["perks"] = json!(0x400);
-        assert_eq!(sprint_problem(&h), None, "doubled by the longer-sprint perk");
+        assert_eq!(
+            sprint_problem(&h),
+            None,
+            "doubled by the longer-sprint perk"
+        );
         let mut h = good();
         h["sprint_facts"]["player_sprint_time"] = json!(7.0);
         assert!(sprint_problem(&h).unwrap().contains("not the stock"));

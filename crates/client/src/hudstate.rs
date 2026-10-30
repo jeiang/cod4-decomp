@@ -372,6 +372,8 @@ pub struct HudFacts {
     pub sprint_time: f32,
     pub sprint_perk_mult: f32,
     pub perks: u32,
+    /// Sprint budget and its inputs at the most recent spawn, before weapon changes can overwrite the HUD facts.
+    pub sprint_spawn: Option<serde_json::Value>,
     pub sprinting: bool,
     pub mantle_hint: bool,
     /// The player is picking a point on the map (an airstrike): the full-screen map shows.
@@ -501,6 +503,15 @@ impl HudFacts {
         if self.prev_spawn != Some((client, spawn_count)) {
             self.overlay.reset(&OverlayParams::default());
             self.prev_spawn = Some((client, spawn_count));
+            self.sprint_spawn = Some(serde_json::json!({
+                "sprint": [self.sprint_left, self.sprint_max],
+                "sprint_facts": {
+                    "weapon": self.sprint_weapon, "scale": self.sprint_scale,
+                    "player_sprint_time": self.sprint_time,
+                    "perk_sprint_multiplier": self.sprint_perk_mult, "perks": self.perks,
+                },
+                "client": client, "spawn_count": spawn_count,
+            }));
         }
     }
 
@@ -522,6 +533,7 @@ impl HudFacts {
                 "weapon": self.sprint_weapon, "scale": self.sprint_scale, "player_sprint_time": self.sprint_time,
                 "perk_sprint_multiplier": self.sprint_perk_mult, "perks": self.perks,
             },
+            "sprint_spawn": self.sprint_spawn,
             "map": self.map.as_ref().map(|m| &m.material),
             "friendlies": self.actors.values().filter(|a| a.friendly).count(),
             "enemies": self.actors.values().filter(|a| !a.friendly).count(),
