@@ -6,10 +6,11 @@
 # <options>` (a bare `--` runs the default suite); with --exec it runs <command...> instead, with the release
 # binaries on PATH, writing into out/.
 # COD4E_SLOT=1..3 selects a harness slot: its own target dir, headless display (scripts/virtual-display.sh) and
-# loopback-only network namespace (scripts/netns.sh). Slot runs hold the host-wide stage lock shared, so up to three
-# run at once. Without a slot the run is serial: it holds the stage lock exclusively, so timing-gated stages see a
-# quiet host, and runs on its own headless display like a slot (the desktop session's state cannot stall its
-# windows). A pending serial run (~/Projects/cod4e/.serial-pending) keeps new slot runs from starting.
+# loopback-only network namespace (scripts/netns.sh). Every run holds the host-wide stage lock shared from its build
+# on, so up to three slot runs work at once. Without a slot the run is serial: after its build it holds the stage lock
+# exclusively, so timing-gated stages see a quiet host (no stage and no compile beside them), and runs on its own
+# headless display like a slot (the desktop session's state cannot stall its windows). A pending serial run
+# (~/Projects/cod4e/.serial-pending) keeps new runs from starting.
 set -euo pipefail
 root=$HOME/Projects/cod4e
 checks=1
@@ -29,15 +30,15 @@ if [ -n "${COD4E_SLOT:-}" ]; then
   # The slot is held from the build on: two runs in one slot would otherwise rebuild each other's binaries.
   exec 9>"$root/.slot-$COD4E_SLOT.lock"
   flock -x 9
-  # The stage lock is shared from the build on too, so a serial run's timing stages never share the host with a
-  # slot's compile. A pending serial run keeps new slot runs (and their builds) from starting.
-  while [ -e "$root/.serial-pending" ]; do sleep 10; done
-  exec 8>>"$root/.stage-lock"
-  flock -s 8
 elif [ $exec_mode = 1 ]; then
   echo "--exec needs a slot" >&2
   exit 2
 fi
+# Every build holds the stage lock shared, a serial run's included, so a serial run's timing stages never share the
+# host with a compile. A pending serial run keeps new runs (and their builds) from starting.
+while [ -e "$root/.serial-pending" ]; do sleep 10; done
+exec 8>>"$root/.stage-lock"
+flock -s 8
 
 nice -n 19 cargo build --workspace
 if [ $checks = 1 ]; then
@@ -70,6 +71,7 @@ if [ -n "${COD4E_SLOT:-}" ]; then
   # shellcheck disable=SC2086 # $chrome is an optional COD4E_CHROME=<path> assignment
   slot_wrap env COD4E_NO_PROMPT=1 $chrome "$h" run --out bundles "$@"
 else
+  flock -u 8
   touch "$root/.serial-pending"
   trap 'rm -f "$root/.serial-pending"' EXIT
   # shellcheck disable=SC2086
