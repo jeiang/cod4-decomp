@@ -566,6 +566,14 @@ fn play(
     report
         .metrics
         .insert("walk_ms".into(), t_move.elapsed().as_secs_f64() * 1000.0);
+    report.notes.push(format!(
+        "walk timing: server level {}, snapshot {}, client command {}, server command {}; alive {}",
+        server.level_time(),
+        p1["server_time"],
+        p1["client_command_time"],
+        p1["command_time"],
+        p1["alive"]
+    ));
     if !(dist >= 64.0) {
         return Err(format!(
             "W held for 30 s moved the player {dist:.0} units (from {origin0:?} to {}), want 64",

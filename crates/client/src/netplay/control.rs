@@ -51,6 +51,8 @@ fn player(st: &NetPlay) -> Value {
         "crouched": ps.pm_flags & sim::pm::pmf::DUCKED != 0,
         "spawn_count": ps.spawn_count,
         "server_time": snap.server_time,
+        "command_time": ps.command_time,
+        "client_command_time": st.cmd_time,
         "snapshot": snap.num,
         "killcam": snap.killcam(),
     })
