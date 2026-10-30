@@ -541,7 +541,10 @@ fn native_parity(
         ("parity_hud_missing", missing.len() as f64),
         ("parity_hud_extra", extra.len() as f64),
     ] {
-        report.metrics.insert(name.into(), value);
+        // A value the native report lacks is not a number; a metric must be one (the watchdog reads the JSON).
+        if value.is_finite() {
+            report.metrics.insert(name.into(), value);
+        }
     }
     report.notes.push(format!(
         "measured native/browser parity (mp_crash war, {BOTS} bots): native moved {:.1}, path {:.1}, shots {:.0}; browser moved {:.1}, fire events {:.0}; HUD native {native_ids:?}, browser {browser_ids:?}, missing {missing:?}, extra {extra:?}",
