@@ -6,6 +6,7 @@
 //! (R_AddDynEntToCell). CoD4 MP 1.8, used as a guide for 1.7.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
+use super::client_session::render_problem;
 use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::json;
@@ -104,6 +105,9 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     let live = c.capture("garage")?;
+    if let Some(problem) = render_problem(&json!({"render": c.state("render")?})) {
+        return Err(problem);
+    }
     c.ask(json!({"cmd": "exec", "line": "drawscriptmodels 0"}))?;
     c.ask(json!({"cmd": "step", "frames": 10}))?;
     let bare_car = c.capture("no-car")?;

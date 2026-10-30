@@ -60,7 +60,7 @@ against the same camera with script models and dynamic props separately hidden (
 `drawprops 0`, diagnostic commands analogous to `drawvehicles`). Both objects must change their own image regions.
 The serverless `--flythrough` is a tour of the static world, not a match: it does not spawn script models or
 client-side dynamic props, so their absence there is not evidence of a missing model in play. The control state
-names snapshot models (`entities.list[].model_name`) and live dynamic props (`net.props`) for diagnosis.
+names snapshot models (`entities.list[].model_name`) for diagnosis.
 
 ## Headless server
 
