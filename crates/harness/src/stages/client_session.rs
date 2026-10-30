@@ -115,30 +115,46 @@ pub(super) fn gpu_problem(health: &Value) -> Option<String> {
     (!errors.is_empty()).then(|| format!("graphics errors: {}", errors.join("; ")))
 }
 
-/// Material names the renderer may fail to prepare in a stock run, each with the reason it is benign. Empty: a
-/// material whose draws are skipped is a defect, so a new entry needs the name and why it is sound to leave it.
-const ALLOWED_MATERIAL_FAILURES: &[&str] = &[];
+/// Whether a material failure is a known, tracked gap rather than a new defect. The one class allowed: a material an
+/// effect names behind a comma (another zone defines it) that nothing resolves, so it has no techset (#453). A named
+/// entry for any other reason needs the name, the reason it is benign and an issue here.
+fn material_failure_allowed(name: &str, why: &str) -> bool {
+    name.starts_with(',') && why == "no techset"
+}
 
-/// Why a run's renderer does not vouch for it, or `None`: the client's `render` record must be there, and every
-/// material it could not prepare (no techset, no usable technique, a pipeline that failed to build) is a draw the
-/// player never saw. Those were counted and never asserted (#375). Images that did not load are the stage's to
-/// report; a UI image is checked by the menus' `missing_images`.
+/// Why a run's renderer does not vouch for it, or `None`: the client's `render` record must be there, every material
+/// it could not prepare (no techset, no usable technique, a pipeline that failed to build) is a draw the player never
+/// saw, and every image that did not load is a placeholder they saw instead. Both were counted and never asserted
+/// (#375); the default suite's maps load every image, so no image is allowed to fail.
 pub(super) fn render_problem(report: &Value) -> Option<String> {
-    let Some(failures) = report["render"]["material_failures"].as_object() else {
+    let render = &report["render"];
+    let (Some(failures), Some(images)) = (
+        render["material_failures"].as_object(),
+        render["image_failures"].as_array(),
+    ) else {
         return Some(
-            "the run reported no render record, so material failures were not checked".into(),
+            "the run reported no render record, so material and image failures were not checked"
+                .into(),
         );
     };
     let bad: Vec<String> = failures
         .iter()
-        .filter(|(name, _)| !ALLOWED_MATERIAL_FAILURES.contains(&name.as_str()))
-        .map(|(name, why)| format!("{name} ({})", why.as_str().unwrap_or("?")))
+        .map(|(name, why)| (name, why.as_str().unwrap_or("?")))
+        .filter(|(name, why)| !material_failure_allowed(name, why))
+        .map(|(name, why)| format!("{name} ({why})"))
         .collect();
-    (!bad.is_empty()).then(|| {
-        format!(
+    if !bad.is_empty() {
+        return Some(format!(
             "{} material(s) the renderer could not prepare, their draws skipped: {}",
             bad.len(),
             bad.join(", ")
+        ));
+    }
+    (!images.is_empty()).then(|| {
+        format!(
+            "{} image(s) did not load, drawn as placeholders: {}",
+            images.len(),
+            Value::Array(images.clone())
         )
     })
 }
@@ -383,16 +399,21 @@ mod tests {
     }
 
     #[test]
-    fn a_material_the_renderer_could_not_prepare_fails_and_no_record_fails() {
-        assert_eq!(
-            render_problem(&json!({"render": {"material_failures": {}, "image_failures": []}})),
-            None
-        );
-        let why = render_problem(&json!({"render": {"material_failures": {
-            "mc/foo": "techset \"x\" has techniques [1], wanted [0]"}}}))
+    fn a_material_or_image_the_renderer_could_not_load_fails_and_no_record_fails() {
+        let render = |materials: Value, images: Value| json!({"render": {"material_failures": materials, "image_failures": images}});
+        assert_eq!(render_problem(&render(json!({}), json!([]))), None);
+        let why = render_problem(&render(
+            json!({"mc/foo": "techset \"x\" has techniques [1], wanted [0]"}),
+            json!([]),
+        ))
         .unwrap();
         assert!(
             why.contains("mc/foo") && why.contains("wanted [0]"),
+            "{why}"
+        );
+        let why = render_problem(&render(json!({}), json!(["ammo_counter"]))).unwrap();
+        assert!(
+            why.contains("image") && why.contains("ammo_counter"),
             "{why}"
         );
         assert!(
@@ -404,6 +425,29 @@ mod tests {
             render_problem(&json!({"render": {"image_failures": []}}))
                 .unwrap()
                 .contains("no render record")
+        );
+        // The one tracked class (#453): a cross-zone reference with no techset. The same name with another reason,
+        // or a defined material with no techset, is a failure.
+        assert_eq!(
+            render_problem(&render(
+                json!({",gfx_smk_white_atlas": "no techset"}),
+                json!([])
+            )),
+            None
+        );
+        assert!(
+            render_problem(&render(
+                json!({"gfx_smk_white_atlas": "no techset"}),
+                json!([])
+            ))
+            .is_some()
+        );
+        assert!(
+            render_problem(&render(
+                json!({",gfx_smk_white_atlas": "shader x failed"}),
+                json!([])
+            ))
+            .is_some()
         );
     }
 }

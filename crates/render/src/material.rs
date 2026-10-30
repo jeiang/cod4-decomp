@@ -679,15 +679,19 @@ impl Materials {
         hsm: bool,
     ) -> Option<Arc<Prepared>> {
         let Some(set) = self.techset(mat, hsm) else {
+            // Once per material: an effect asks for its sprite material every frame. A name behind a comma is a
+            // reference to another zone's material that nothing resolved (#453).
             let name = mat.name.as_deref().unwrap_or("?");
-            logging::dedup!(
-                WARN,
-                name,
-                "material has no techset, its draws are skipped",
-                material = name
-            );
-            self.failures
-                .insert(name.to_owned(), "no techset".to_owned());
+            if self
+                .failures
+                .insert(name.to_owned(), "no techset".to_owned())
+                .is_none()
+            {
+                tracing::warn!(
+                    material = name,
+                    "material has no techset, its draws are skipped"
+                );
+            }
             return None;
         };
         let tech = techs.iter().copied().find(|&t| {
