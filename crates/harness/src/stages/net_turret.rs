@@ -2,8 +2,10 @@
 //! `net-turret`: two people (real UDP clients, no window) on mp_convoy, which places two stock `misc_turret`s. One
 //! stands behind a turret and holds +activate until it is mounted, aims past its arc, fires and lets go; the other
 //! watches. Asserts that the gunner's player state carries the turret flag, the drop hint and a view held inside the
-//! arc, that the server's shot count rises while the attack button is down, that the other client is shown the
-//! turret model and the gunner mounted on it with the gun swung off its rest pose by the gunner's aim, and that using again puts the gunner back on their feet.
+//! arc, that the server's shot count rises while the attack button is down, that each round reaches both clients as
+//! the turret's own fire event naming the turret and the gunner (what the client's fire sound, muzzle flash and camera
+//! shake come from), that the other client is shown the turret model and the gunner mounted on it with the gun swung
+//! off its rest pose by the gunner's aim, and that using again puts the gunner back on their feet.
 use super::net_objective::Human;
 use crate::stage::{StageCtx, StageReport, Status};
 use net::entity::etype;
@@ -165,6 +167,18 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut seen_by_b = (false, false);
     let mut swung = false;
     let (mut flagged, mut dropped, mut held) = (false, false, false);
+    // `EV_FIRE_WEAPON_MG42` on the turret entity with the gunner as its parameter (`turret.cpp`), as each client sees it.
+    let turret_fired = |p: &Human| {
+        p.c.latest().is_some_and(|s| {
+            s.entities.iter().any(|e| {
+                e.etype == etype::EVENT
+                    && e.event == server::tempev::ev::FIRE_WEAPON_MG42
+                    && e.client == turret
+                    && e.model == a
+            })
+        })
+    };
+    let mut fire_event_seen = [false, false];
     for _ in 0..200 {
         frame(&mut server, &mut people);
         if let Some(s) = people[0].c.latest() {
@@ -197,6 +211,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         if let Some(ui) = people[1].c.ui() {
             seen_by_b.0 |= models.iter().any(|&m| ui.model(m) == model);
         }
+        for (i, p) in people.iter().enumerate() {
+            fire_event_seen[i] |= turret_fired(p);
+        }
         if server.game.stats.shots >= shots + 5
             && flagged
             && dropped
@@ -204,6 +221,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             && seen_by_b.0
             && seen_by_b.1
             && swung
+            && fire_event_seen == [true, true]
         {
             break;
         }
@@ -247,6 +265,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         (
             fired >= 5,
             "the turret fired fewer than five shots with the attack button down",
+        ),
+        (
+            fire_event_seen[0],
+            "the gunner never received the turret's fire event naming the turret and the gunner",
+        ),
+        (
+            fire_event_seen[1],
+            "the other client never received the turret's fire event naming the turret and the gunner",
         ),
         (
             seen_by_b.0,
