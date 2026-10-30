@@ -285,16 +285,19 @@ mod tests {
         let good = ch.issue(from, 0);
         let old = Oob::Connect {
             challenge: good,
-            protocol: PROTOCOL + 1,
+            protocol: 23,
             qport: 1,
             pure: 0,
             name: "x".into(),
             password: String::new(),
         };
-        assert!(matches!(
-            serve(&ch, 0, from, old, Vec::new),
-            Gate::Reply(Oob::Error(_))
-        ));
+        let Gate::Reply(Oob::Error(why)) = serve(&ch, 0, from, old, Vec::new) else {
+            panic!("an old protocol must be refused without a slot");
+        };
+        assert_eq!(
+            why,
+            format!("Server uses protocol {PROTOCOL}, you have 23.")
+        );
     }
 
     #[test]

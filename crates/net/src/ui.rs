@@ -662,6 +662,9 @@ pub enum ServerCmd {
     },
     /// Configstring updates, `(index, string)`; an empty string clears the entry.
     ConfigStrings(Vec<(u16, String)>),
+    /// The initial configstring table following `Map` is complete. Like stock's complete gamestate boundary, this
+    /// makes absent value slots meaningful (empty), rather than half-received CODINFO pairs.
+    GameStateEnd,
     /// `setclientdvar`: set a dvar on the client.
     SetDvar {
         name: String,
@@ -892,6 +895,7 @@ impl ServerCmd {
                 s.push_str("map");
                 arg(&mut s, name);
             }
+            ServerCmd::GameStateEnd => s.push_str("gamestate_end"),
             ServerCmd::ConfigStrings(v) => {
                 s.push_str("cs");
                 for (i, t) in v {
@@ -985,6 +989,7 @@ impl ServerCmd {
         let a = |i: usize| w.get(i).map(String::as_str);
         Some(match (a(0)?, w.len()) {
             ("map", 2) => ServerCmd::Map { name: w[1].clone() },
+            ("gamestate_end", 1) => ServerCmd::GameStateEnd,
             ("cs", n) if n >= 3 && n % 2 == 1 => ServerCmd::ConfigStrings(
                 w[1..]
                     .chunks(2)
@@ -1229,6 +1234,7 @@ pub struct ClientUiState {
     cs: Vec<String>,
     events: Vec<UiEvent>,
     dvars: HashMap<String, String>,
+    receiving_gamestate: bool,
     hud: Vec<HudElem>,
     objectives: [Objective; MAX_OBJECTIVES],
     server_time: i32,
@@ -1244,6 +1250,7 @@ impl Default for ClientUiState {
             cs: vec![String::new(); usize::from(cs::MAX)],
             events: Vec::new(),
             dvars: HashMap::new(),
+            receiving_gamestate: false,
             hud: Vec::new(),
             objectives: [Objective::default(); MAX_OBJECTIVES],
             server_time: 0,
@@ -1273,12 +1280,19 @@ impl ClientUiState {
     pub fn apply(&mut self, cmd: ServerCmd) {
         match cmd {
             ServerCmd::Map { name } => {
+                self.receiving_gamestate = true;
                 self.scores = Scoreboard::default();
                 self.stats.clear();
                 self.cs.iter_mut().for_each(String::clear);
                 self.hud.clear();
                 self.objectives = Default::default();
                 self.push(UiEvent::Map { name });
+            }
+            ServerCmd::GameStateEnd => {
+                self.receiving_gamestate = false;
+                for k in 0..cs::CODINFO_COUNT {
+                    self.apply_codinfo(k);
+                }
             }
             ServerCmd::ConfigStrings(v) => {
                 let mut codinfo: Vec<u16> = Vec::new();
@@ -1299,13 +1313,12 @@ impl ClientUiState {
                         codinfo.push(k);
                     }
                 }
-                // `CG_ParseCodInfo`: each `CODINFO` pair is a dvar the server set on this client.
-                for k in codinfo {
-                    let name = self.config(cs::CODINFO + k).to_owned();
-                    if !name.is_empty() {
-                        let value = self.config(cs::CODINFO_VALUE + k).to_owned();
-                        self.dvars.insert(name.to_ascii_lowercase(), value.clone());
-                        self.push(UiEvent::SetDvar { name, value });
+                // Stock `CG_ParseCodInfo` runs after the complete gamestate and on later configstring updates.
+                // During initial delivery names precede values across chunks, so no pair is applied until the
+                // boundary. Afterwards an absent value slot means "", including a deliberately empty dvar.
+                if !self.receiving_gamestate {
+                    for k in codinfo {
+                        self.apply_codinfo(k);
                     }
                 }
             }
@@ -1366,6 +1379,15 @@ impl ClientUiState {
         }
     }
 
+    fn apply_codinfo(&mut self, k: u16) {
+        let name = self.config(cs::CODINFO + k).to_owned();
+        if !name.is_empty() {
+            let value = self.config(cs::CODINFO_VALUE + k).to_owned();
+            self.dvars.insert(name.to_ascii_lowercase(), value.clone());
+            self.push(UiEvent::SetDvar { name, value });
+        }
+    }
+
     /// The commands that bring a fresh `ClientUiState` to this one's state on level `map`: the level, every
     /// configstring, the stats and the client dvars. A demo begins with them so it can start mid-match.
     pub fn state_commands(&self, map: &str) -> Vec<ServerCmd> {
@@ -1382,6 +1404,7 @@ impl ClientUiState {
         if !strings.is_empty() {
             out.push(ServerCmd::ConfigStrings(strings));
         }
+        out.push(ServerCmd::GameStateEnd);
         let mut stats: Vec<_> = self.stats.iter().collect();
         stats.sort();
         out.extend(
@@ -1536,6 +1559,61 @@ mod tests {
     use crate::Snapshot;
 
     #[test]
+    fn codinfo_applies_at_gamestate_end_including_omitted_empty_values() {
+        let set = |ui: &mut ClientUiState| -> Vec<(String, String)> {
+            ui.drain_events()
+                .into_iter()
+                .filter_map(|e| match e {
+                    UiEvent::SetDvar { name, value } => Some((name, value)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut ui = ClientUiState::new();
+        ui.apply(ServerCmd::SetDvar {
+            name: "empty_at_start".into(),
+            value: "old".into(),
+        });
+        ui.apply(ServerCmd::Map {
+            name: "mp_crash".into(),
+        });
+        set(&mut ui);
+        // A level's gamestate in chunks: the names first, the values in a later batch.
+        ui.apply(ServerCmd::ConfigStrings(vec![
+            (cs::CODINFO, "scr_allies".into()),
+            (cs::CODINFO + 1, "empty_at_start".into()),
+        ]));
+        assert!(set(&mut ui).is_empty(), "half a pair sets nothing");
+        assert_eq!(ui.dvar("scr_allies"), None);
+        ui.apply(ServerCmd::ConfigStrings(vec![(
+            cs::CODINFO_VALUE,
+            "usmc".into(),
+        )]));
+        assert!(set(&mut ui).is_empty(), "wait for the complete gamestate");
+        ui.apply(ServerCmd::GameStateEnd);
+        assert_eq!(
+            set(&mut ui),
+            [
+                ("scr_allies".to_owned(), "usmc".to_owned()),
+                ("empty_at_start".to_owned(), String::new()),
+            ]
+        );
+        assert_eq!(ui.dvar("empty_at_start"), Some(""));
+        // The value emptied on purpose is in the batch and applies.
+        ui.apply(ServerCmd::ConfigStrings(vec![(
+            cs::CODINFO_VALUE,
+            String::new(),
+        )]));
+        assert_eq!(set(&mut ui), [("scr_allies".to_owned(), String::new())]);
+        // Both in one batch, in either order.
+        ui.apply(ServerCmd::ConfigStrings(vec![
+            (cs::CODINFO_VALUE + 2, "arab".into()),
+            (cs::CODINFO + 2, "scr_axis".into()),
+        ]));
+        assert_eq!(set(&mut ui), [("scr_axis".to_owned(), "arab".to_owned())]);
+    }
+
+    #[test]
     fn a_menu_response_carries_the_level_it_was_answered_in() {
         let mut ui = ClientUiState::new();
         assert_eq!(ui.server_id(), 0);
@@ -1571,6 +1649,7 @@ mod tests {
                 name: "mp_crash".into(),
             },
             ServerCmd::ConfigStrings(vec![(309, "Hello \"you\"".into()), (310, String::new())]),
+            ServerCmd::GameStateEnd,
             ServerCmd::SetDvar {
                 name: "ui_xpText".into(),
                 value: "1".into(),

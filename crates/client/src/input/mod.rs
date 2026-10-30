@@ -846,7 +846,7 @@ impl Input {
             .collect()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The command line the key is bound to, if any.
     pub fn bound(&self, key: &str) -> Option<&str> {
         self.binds
             .get(&key.to_ascii_lowercase())
@@ -881,6 +881,13 @@ impl Input {
     /// A `wait` is pending, so new commands queue behind it.
     pub fn busy(&self) -> bool {
         self.wait.is_some() || !self.backlog.is_empty()
+    }
+
+    /// A `wait` ended its buffer and nothing came after it: `take_due` has nothing to count down for until the
+    /// next submission (`Cbuf_Execute` counts the wait down only while text is pending).
+    #[cfg(test)]
+    pub(crate) fn waiting_on_nothing(&self) -> bool {
+        self.wait.is_some() && self.backlog.is_empty()
     }
 
     /// Adds commands to the buffer behind a `wait`.
@@ -1117,6 +1124,10 @@ impl Input {
         }
         self.cvars.set(name, value, archive);
         self.dirty = true;
+        // The original has one dvar store for the client and the listen server it runs: a write to a variable the
+        // server registers (`scr_war_scorelimit`, `g_gametype`, `sv_hostname`) is the server's too; it ignores the
+        // client's own (#366).
+        crate::listen::host_line(&crate::console::set_line(name, value, archive));
         true
     }
 

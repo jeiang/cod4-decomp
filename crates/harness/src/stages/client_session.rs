@@ -115,6 +115,50 @@ pub(super) fn gpu_problem(health: &Value) -> Option<String> {
     (!errors.is_empty()).then(|| format!("graphics errors: {}", errors.join("; ")))
 }
 
+/// Whether a material failure is a known, tracked gap rather than a new defect. The one class allowed: a material an
+/// effect names behind a comma (another zone defines it) that nothing resolves, so it has no techset (#453). A named
+/// entry for any other reason needs the name, the reason it is benign and an issue here.
+fn material_failure_allowed(name: &str, why: &str) -> bool {
+    name.starts_with(',') && why == "no techset"
+}
+
+/// Why a run's renderer does not vouch for it, or `None`: the client's `render` record must be there, every material
+/// it could not prepare (no techset, no usable technique, a pipeline that failed to build) is a draw the player never
+/// saw, and every image that did not load is a placeholder they saw instead. Both were counted and never asserted
+/// (#375); the default suite's maps load every image, so no image is allowed to fail.
+pub(super) fn render_problem(report: &Value) -> Option<String> {
+    let render = &report["render"];
+    let (Some(failures), Some(images)) = (
+        render["material_failures"].as_object(),
+        render["image_failures"].as_array(),
+    ) else {
+        return Some(
+            "the run reported no render record, so material and image failures were not checked"
+                .into(),
+        );
+    };
+    let bad: Vec<String> = failures
+        .iter()
+        .map(|(name, why)| (name, why.as_str().unwrap_or("?")))
+        .filter(|(name, why)| !material_failure_allowed(name, why))
+        .map(|(name, why)| format!("{name} ({why})"))
+        .collect();
+    if !bad.is_empty() {
+        return Some(format!(
+            "{} material(s) the renderer could not prepare, their draws skipped: {}",
+            bad.len(),
+            bad.join(", ")
+        ));
+    }
+    (!images.is_empty()).then(|| {
+        format!(
+            "{} image(s) did not load, drawn as placeholders: {}",
+            images.len(),
+            Value::Array(images.clone())
+        )
+    })
+}
+
 /// Why a run's steps do not vouch for it, or `None`: every step the script ran must have passed, and a report without
 /// steps proves nothing (a run that ended before its script reached a step).
 pub(super) fn steps_problem(report: &Value) -> Option<String> {
@@ -132,6 +176,9 @@ pub(super) fn steps_problem(report: &Value) -> Option<String> {
 /// Why a run failed, or `None` when every step passed and the player spawned.
 pub(super) fn verdict(report: &Value) -> Option<String> {
     if let Some(w) = gpu_problem(&report["gpu_health"]) {
+        return Some(w);
+    }
+    if let Some(w) = render_problem(report) {
         return Some(w);
     }
     if let Some(w) = steps_problem(report) {
@@ -199,6 +246,9 @@ fn hud_problem(hud: &Value) -> Option<String> {
     if hud["map"].as_str().is_none_or(str::is_empty) {
         return Some("the map's minimap (setMiniMap) never reached the client".into());
     }
+    if let Some(w) = sprint_problem(hud) {
+        return Some(w);
+    }
     // Overlay, magazine graphic, minimap image, player arrow.
     for id in ["112", "117", "159", "150"] {
         if hud["drawn"][id].as_u64().unwrap_or(0) == 0 {
@@ -206,6 +256,40 @@ fn hud_problem(hud: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// The longer-sprint perk bit of `ps.perks` (`sim::pm::state::PERK_SPRINT`).
+const PERK_SPRINT: u64 = 0x400;
+
+/// Why the HUD's sprint budget is not the stock one, or `None`: `BG_GetMaxSprintTime` is `player_sprintTime` (stock
+/// default 4 s) times the weapon's `sprintDurationScale`, times `perk_sprintMultiplier` (stock default 2) with the
+/// perk, capped at 0x3FFF ms. The report carries each input next to the budget, so a budget that varies between runs
+/// of the same class (#375 play-06: 4000, 7000, 8000, 14000) names what changed, and a dvar that drifted from stock
+/// fails here.
+pub(super) fn sprint_problem(hud: &Value) -> Option<String> {
+    let f = &hud["sprint_facts"];
+    let (Some(max), Some(scale), Some(time), Some(mult), Some(perks)) = (
+        hud["sprint"][1].as_f64(),
+        f["scale"].as_f64(),
+        f["player_sprint_time"].as_f64(),
+        f["perk_sprint_multiplier"].as_f64(),
+        f["perks"].as_u64(),
+    ) else {
+        return Some("the HUD reported no sprint budget or its inputs".into());
+    };
+    if time != 4.0 || mult != 2.0 {
+        return Some(format!(
+            "player_sprintTime {time} / perk_sprintMultiplier {mult} are not the stock 4 / 2"
+        ));
+    }
+    let perk = if perks & PERK_SPRINT != 0 { mult } else { 1.0 };
+    let want = ((scale * time * 1000.0 * perk) as i64).min(0x3FFF) as f64;
+    ((max - want).abs() > 1.0).then(|| {
+        format!(
+            "sprint budget {max} ms, but {} x scale {scale} x {time} s x perk {perk} is {want} (perks {perks:#x})",
+            f["weapon"]
+        )
+    })
 }
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -269,7 +353,10 @@ mod tests {
 
     fn good() -> Value {
         json!({"live": true, "health": 100, "max_health": 100, "weapon": {"clip": 30},
-            "map": "compass_map_mp_crash", "drawn": {"112": 5, "117": 5, "159": 5, "150": 5}})
+            "map": "compass_map_mp_crash", "drawn": {"112": 5, "117": 5, "159": 5, "150": 5},
+            "sprint": [4000, 7000],
+            "sprint_facts": {"weapon": "p90_mp", "scale": 1.75, "player_sprint_time": 4.0,
+                "perk_sprint_multiplier": 2.0, "perks": 0}})
     }
 
     #[test]
@@ -324,6 +411,29 @@ mod tests {
     }
 
     #[test]
+    fn the_sprint_budget_is_the_stock_formula_of_its_recorded_inputs() {
+        assert_eq!(sprint_problem(&good()), None);
+        let mut h = good();
+        h["sprint"] = json!([14000, 14000]);
+        assert!(
+            sprint_problem(&h).unwrap().contains("is 7000"),
+            "doubled with no perk"
+        );
+        h["sprint_facts"]["perks"] = json!(0x400);
+        assert_eq!(
+            sprint_problem(&h),
+            None,
+            "doubled by the longer-sprint perk"
+        );
+        let mut h = good();
+        h["sprint_facts"]["player_sprint_time"] = json!(7.0);
+        assert!(sprint_problem(&h).unwrap().contains("not the stock"));
+        let mut h = good();
+        h["sprint_facts"] = Value::Null;
+        assert!(sprint_problem(&h).unwrap().contains("no sprint budget"));
+    }
+
+    #[test]
     fn a_working_hud_passes_and_each_missing_piece_is_named() {
         assert_eq!(hud_problem(&good()), None);
         let mut h = good();
@@ -349,5 +459,58 @@ mod tests {
         );
         let bad = json!({"device_losses": [], "errors": ["Buffer is invalid"]});
         assert!(gpu_problem(&bad).is_some());
+    }
+
+    #[test]
+    fn a_material_or_image_the_renderer_could_not_load_fails_and_no_record_fails() {
+        let render = |materials: Value, images: Value| json!({"render": {"material_failures": materials, "image_failures": images}});
+        assert_eq!(render_problem(&render(json!({}), json!([]))), None);
+        let why = render_problem(&render(
+            json!({"mc/foo": "techset \"x\" has techniques [1], wanted [0]"}),
+            json!([]),
+        ))
+        .unwrap();
+        assert!(
+            why.contains("mc/foo") && why.contains("wanted [0]"),
+            "{why}"
+        );
+        let why = render_problem(&render(json!({}), json!(["ammo_counter"]))).unwrap();
+        assert!(
+            why.contains("image") && why.contains("ammo_counter"),
+            "{why}"
+        );
+        assert!(
+            render_problem(&json!({"steps": []}))
+                .unwrap()
+                .contains("no render record")
+        );
+        assert!(
+            render_problem(&json!({"render": {"image_failures": []}}))
+                .unwrap()
+                .contains("no render record")
+        );
+        // The one tracked class (#453): a cross-zone reference with no techset. The same name with another reason,
+        // or a defined material with no techset, is a failure.
+        assert_eq!(
+            render_problem(&render(
+                json!({",gfx_smk_white_atlas": "no techset"}),
+                json!([])
+            )),
+            None
+        );
+        assert!(
+            render_problem(&render(
+                json!({"gfx_smk_white_atlas": "no techset"}),
+                json!([])
+            ))
+            .is_some()
+        );
+        assert!(
+            render_problem(&render(
+                json!({",gfx_smk_white_atlas": "shader x failed"}),
+                json!([])
+            ))
+            .is_some()
+        );
     }
 }

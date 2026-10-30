@@ -952,9 +952,11 @@ impl Ui {
                     }
                 }
             }
-            "statsetusingtable" | "statset" | "statclearbitmask" | "statclearperknew"
-            | "getautoupdate" | "wait" | "setbackground" | "openforgametype"
-            | "closeforgametype" => {
+            "getautoupdate" => {
+                host.ui_script(self, "getautoupdate", &[]);
+            }
+            "statsetusingtable" | "statset" | "statclearbitmask" | "statclearperknew" | "wait"
+            | "setbackground" | "openforgametype" | "closeforgametype" => {
                 host.exec(
                     &*self,
                     &cmd.iter().map(String::as_str).collect::<Vec<_>>().join(" "),
@@ -1597,20 +1599,17 @@ impl Ui {
 
     /// The items of one open menu, for the control channel's state document: each item's name and its rectangle in
     /// window pixels (`[x, y, w, h]`), which is what a click is tested against.
-    pub fn item_report(&self, menu: &str) -> Vec<(String, [f32; 4])> {
+    pub fn item_report(&self, host: &dyn Host, menu: &str) -> Vec<(String, String, [f32; 4])> {
         let Some(m) = self.menu_index(menu) else {
             return Vec::new();
         };
         (0..self.menus[m].items.len())
             .map(|i| {
-                let name = self.menus[m].def.items[i]
-                    .window
-                    .name
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_owned();
+                let d = &self.menus[m].def.items[i];
+                let name = d.window.name.as_deref().unwrap_or("").to_owned();
+                let text = self.item_text(host, m, i, d);
                 let p = self.item_pixels(m, i);
-                (name, [p.x, p.y, p.w, p.h])
+                (name, text, [p.x, p.y, p.w, p.h])
             })
             .collect()
     }

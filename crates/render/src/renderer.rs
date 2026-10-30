@@ -26,7 +26,7 @@ use assets::zone::gfxworld::GfxWorld;
 use assets::zone::xmodel::XModel;
 use glam::{Mat4, Vec3, Vec4};
 use sm3::SamplerDim;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use web_time::{Duration, Instant};
@@ -234,6 +234,8 @@ pub struct Settings {
     /// `r_fullbright`: the scene is drawn without lighting (the unlit techniques), with no glow and no dynamic
     /// lights (`R_UsingGlow`, `R_AddDynamicLights` need `GFX_DRAW_SCENE_STANDARD`).
     pub fullbright: bool,
+    /// `r_clear`, `r_clearColor`, `r_clearColor2` and `developer`: what the pixels nothing draws show.
+    pub clear: Clear,
 }
 
 impl Default for Settings {
@@ -265,6 +267,84 @@ impl Default for Settings {
             lod_scale: [1.0; 2],
             lod_bias: [0.0; 2],
             fullbright: false,
+            clear: Clear::default(),
+        }
+    }
+}
+
+/// `r_clear`: how the colour buffer is cleared before the scene (`R_GetClearColor`, KisakCOD `gfx_d3d/r_utils.cpp`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClearMode {
+    /// `never`.
+    Never,
+    /// `dev-only blink` (the stock default): as `Blink` with `developer` on, else as `Never`.
+    DevOnlyBlink,
+    /// `blink`: `r_clearColor` and `r_clearColor2` in turn, 512 ms each.
+    Blink,
+    /// `steady`: `r_clearColor`.
+    Steady,
+    /// `fog color`: the map's fog colour while the map has fog, else as `Blink`.
+    FogColor,
+}
+
+impl ClearMode {
+    /// The stock enum's names and indices (`r_clearNames`); `None` for anything else.
+    pub fn parse(s: &str) -> Option<ClearMode> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "0" | "never" => ClearMode::Never,
+            "1" | "dev-only blink" => ClearMode::DevOnlyBlink,
+            "2" | "blink" => ClearMode::Blink,
+            "3" | "steady" => ClearMode::Steady,
+            "4" | "fog color" => ClearMode::FogColor,
+            _ => return None,
+        })
+    }
+}
+
+/// What the pixels nothing draws show. Stock clears only when `r_clear` says so: with the shipped default
+/// (`dev-only blink` and `developer` 0) the colour buffer is never cleared and such pixels keep what the target held
+/// before, which on the reference host is black, and never the fog colour. [`Clear::color`] is that colour: black
+/// where stock does not clear, since a stale frame is undefined and nothing to copy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clear {
+    pub mode: ClearMode,
+    /// `developer` is on: `DevOnlyBlink` clears.
+    pub developer: bool,
+    /// `r_clearColor` and `r_clearColor2`, RGB in 0..1.
+    pub colors: [[f32; 3]; 2],
+}
+
+impl Default for Clear {
+    fn default() -> Self {
+        Clear {
+            mode: ClearMode::DevOnlyBlink,
+            developer: false,
+            colors: [[0.0; 3]; 2],
+        }
+    }
+}
+
+impl Clear {
+    /// The colour the scene target is cleared to this frame, after `R_GetClearColor`: `fog` is the map's fog colour
+    /// while fog is drawn, `now_ms` the clock the blink follows (`Sys_Milliseconds() & 0x200`).
+    pub fn color(&self, fog: Option<[f32; 3]>, now_ms: u64) -> [f32; 3] {
+        let clears = match self.mode {
+            ClearMode::Never => false,
+            ClearMode::DevOnlyBlink => self.developer,
+            _ => true,
+        };
+        if !clears {
+            return [0.0; 3];
+        }
+        if self.mode == ClearMode::FogColor
+            && let Some(c) = fog
+        {
+            return c;
+        }
+        if self.mode == ClearMode::Steady || now_ms & 0x200 == 0 {
+            self.colors[0]
+        } else {
+            self.colors[1]
         }
     }
 }
@@ -322,6 +402,31 @@ struct Warm {
     timed: u32,
     /// Pipelines frames wanted and skipped, by (pass id, target); built first.
     demand: HashSet<(u32, Target)>,
+}
+
+/// One entry of the queue of [`Renderer::warm_late`]: how the material is drawn decides the techniques it is
+/// warmed for, and an entry is at most the seven passes of one group for one vertex layout, so a frame's budget
+/// holds one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WarmKind {
+    /// World or model surfaces: one group of [`WarmGroup`] for one vertex layout.
+    Surface(WarmGroup, VertexKind),
+    /// Effect sprites and tails, drawn as dynamic model-layout meshes.
+    Sprite,
+}
+
+/// The technique groups a surface material is warmed for, in the order [`Renderer::warm_jobs`] lists them: a load
+/// that stops early still draws everything the first groups cover.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WarmGroup {
+    /// The scene's lit, sun-shadowed, spot and omni techniques, the float-Z pass and the shadow map's caster.
+    Scene,
+    /// The shadowed spot techniques of a map that has spot lights that can cast one.
+    SpotShadow,
+    /// The shadow cookies of a frame without shadow maps.
+    Cookie,
+    /// The light pass of the effects' omni lights.
+    Omni,
 }
 
 impl Warm {
@@ -543,7 +648,6 @@ pub struct Renderer {
     z_feather_bound: bool,
     /// The last answer of [`Renderer::samples`], for the `(r_aaSamples, format)` it was asked with.
     samples_cache: std::cell::Cell<Option<((u32, wgpu::TextureFormat), u32)>>,
-    pub clear: [f64; 3],
     pub settings: Settings,
     /// Fog, glow and film of the map.
     pub art: MapArt,
@@ -589,6 +693,9 @@ pub struct Renderer {
     /// Materials of the effects' particle clouds, which have pipelines of their own vertex layout.
     warm_clouds: Vec<Arc<Material>>,
     warm_sprites: Vec<Arc<Material>>,
+    /// What [`Renderer::warm_models`] and [`Renderer::warm_sprites`] added since the last whole warm-up, for
+    /// [`Renderer::warm_late`] to prepare a few per frame; a whole warm-up ([`Renderer::warm_jobs`]) empties it.
+    warm_queue: VecDeque<(Arc<Material>, WarmKind)>,
     /// Sprites and decals to draw in the next [`Renderer::render`], in drawing order within a material.
     pub dynamic_meshes: Vec<DynMesh>,
     /// An index buffer that counts up from zero, for draws of unindexed dynamic triangles.
@@ -705,7 +812,6 @@ impl Renderer {
             tex_bgs: HashMap::new(),
             z_feather_bound: true,
             samples_cache: std::cell::Cell::new(None),
-            clear: [0.45, 0.43, 0.38],
             settings: Settings::default(),
             art: data.art.clone(),
             post: PostParams::from_art(&data.art),
@@ -733,6 +839,7 @@ impl Renderer {
             warm_extra: Vec::new(),
             warm_clouds: Vec::new(),
             warm_sprites: Vec::new(),
+            warm_queue: VecDeque::new(),
             dynamic_meshes: Vec::new(),
             count_mesh: Arc::new(counting_mesh(&gpu_for_dyn)),
             viewmodel_fov_x: None,
@@ -762,13 +869,37 @@ impl Renderer {
         self.materials.take_late_names();
     }
 
-    /// Asks the workers for the pipelines of what [`Renderer::warm_models`] and the like added since the load, so a
-    /// model the match brings in later (a plane the scripts call) does not appear a few frames after its first draw.
+    /// Prepares the passes of what [`Renderer::warm_models`] and [`Renderer::warm_sprites`] added since the last
+    /// whole warm-up (the models the server precached: planes, vehicles the scripts call in) and asks the workers
+    /// for their pipelines, so a model the match brings in later does not stall its first frame. Entries (a
+    /// material's passes of one group for one vertex layout, [`WarmKind`]) are taken from the queue until `budget`
+    /// is spent, at least one per call: preparing a pass translates its shaders, uploads its textures and builds
+    /// its bind-group layout. Returns how many entries still wait.
+    ///
+    /// The original registers the server's models in one go under the load screen (`CG_RegisterGraphics`,
+    /// `cgame_mp/cg_main_mp.cpp` in KisakCOD, from `CL_InitCGame` while the state is `CA_LOADING`); here the
+    /// list arrives while frames are presented, so the work is spread across them instead.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn warm_in_background(&mut self, format: wgpu::TextureFormat) {
-        for (p, target) in self.warm_jobs(format) {
-            self.materials.request(&p, target, false);
+    pub fn warm_late(&mut self, format: wgpu::TextureFormat, budget: Duration) -> usize {
+        let start = Instant::now();
+        let hsm = self.hsm();
+        let (scene, floatz) = self.warm_targets(format);
+        let mut jobs = Vec::new();
+        while let Some((m, kind)) = self.warm_queue.pop_front() {
+            match kind {
+                WarmKind::Surface(group, kind) => {
+                    self.surface_jobs(&m, group, kind, scene, floatz, hsm, &mut jobs);
+                }
+                WarmKind::Sprite => self.sprite_jobs(&m, scene, hsm, &mut jobs),
+            }
+            if start.elapsed() >= budget {
+                break;
+            }
         }
+        for (p, target) in &jobs {
+            self.materials.request(p, *target, false);
+        }
+        self.warm_queue.len()
     }
 
     /// Wait for the frames in flight and return their GPU times, as [`Renderer::take_gpu_times`].
@@ -801,7 +932,7 @@ impl Renderer {
                     &SPOT_TECHS,
                     &OMNI_TECHS,
                 ] {
-                    self.prepare(&m, techs, kind, hsm);
+                    self.prepare_ahead(&m, techs, kind, hsm);
                 }
                 self.prepare_optional(&m, &shadow_tech, kind, hsm);
             }
@@ -817,7 +948,7 @@ impl Renderer {
         if self.spot_shadows_possible() {
             for m in self.scene.materials() {
                 for kind in [VertexKind::World, VertexKind::Model] {
-                    self.prepare(&m, &SPOT_SHADOW_TECHS, kind, hsm);
+                    self.prepare_ahead(&m, &SPOT_SHADOW_TECHS, kind, hsm);
                 }
             }
         }
@@ -849,9 +980,20 @@ impl Renderer {
     }
 
     /// Materials of the effects' sprites and tails: drawn as dynamic meshes, their pipelines are built with
-    /// [`Renderer::warm`].
+    /// [`Renderer::warm`], or by [`Renderer::warm_late`] for those added after the load. A material already listed is
+    /// not listed again.
     pub fn warm_sprites(&mut self, materials: impl IntoIterator<Item = Arc<Material>>) {
-        self.warm_sprites.extend(materials);
+        let mut seen: HashSet<usize> = self
+            .warm_sprites
+            .iter()
+            .map(|m| Arc::as_ptr(m) as usize)
+            .collect();
+        for m in materials {
+            if seen.insert(Arc::as_ptr(&m) as usize) {
+                self.warm_queue.push_back((m.clone(), WarmKind::Sprite));
+                self.warm_sprites.push(m);
+            }
+        }
     }
 
     fn shadow_tech(&self) -> usize {
@@ -862,48 +1004,78 @@ impl Renderer {
         }
     }
 
-    /// Every (pass, target) pair a frame into `format` can draw with, in the order materials come.
     /// Models the map does not contain but the match will draw (players, weapons): their materials get their pipelines
-    /// with [`Renderer::warm`], so the first sight of them does not stall a frame.
+    /// with [`Renderer::warm`], or by [`Renderer::warm_late`] for those added after the load, so the first sight of
+    /// them does not stall a frame. A material already listed is not listed again.
     pub fn warm_models<'a>(&mut self, models: impl IntoIterator<Item = &'a Arc<XModel>>) {
         let mut seen: HashSet<usize> = self
             .warm_extra
             .iter()
             .map(|m| Arc::as_ptr(m) as usize)
             .collect();
+        let groups = self.warm_groups();
         for model in models {
             for m in model.materials.iter().flatten() {
                 if seen.insert(Arc::as_ptr(m) as usize) {
+                    for &group in &groups {
+                        for kind in [VertexKind::World, VertexKind::Model] {
+                            self.warm_queue
+                                .push_back((m.clone(), WarmKind::Surface(group, kind)));
+                        }
+                    }
                     self.warm_extra.push(m.clone());
                 }
             }
         }
     }
 
-    fn warm_jobs(&mut self, format: wgpu::TextureFormat) -> Vec<(Arc<Prepared>, Target)> {
-        let hsm = self.hsm();
-        let scene = Target {
-            color: Some(format),
-            depth: Some(DEPTH_FORMAT),
-            samples: self.samples(format),
-        };
-        let mut jobs = Vec::new();
-        let materials: Vec<Arc<Material>> = self
-            .scene
-            .materials()
-            .into_iter()
-            .chain(self.warm_extra.iter().cloned())
-            .chain(self.scene.world.sun.sprite_material.clone())
-            .collect();
-        // Depth of field and soft particles draw the scene's depth through these.
-        let floatz = Target {
-            color: Some(post::FLOATZ_FORMAT),
-            depth: Some(DEPTH_FORMAT),
-            samples: 1,
-        };
-        let shadow_tech = [self.shadow_tech()];
-        for m in &materials {
-            for kind in [VertexKind::World, VertexKind::Model] {
+    /// The scene target of frames into `format`, and the float-Z target depth of field and soft particles draw the
+    /// scene's depth through.
+    fn warm_targets(&self, format: wgpu::TextureFormat) -> (Target, Target) {
+        (
+            Target {
+                color: Some(format),
+                depth: Some(DEPTH_FORMAT),
+                samples: self.samples(format),
+            },
+            Target {
+                color: Some(post::FLOATZ_FORMAT),
+                depth: Some(DEPTH_FORMAT),
+                samples: 1,
+            },
+        )
+    }
+
+    /// The groups the settings and the map let a frame draw surfaces with, in [`Renderer::warm_jobs`]'s order.
+    fn warm_groups(&self) -> Vec<WarmGroup> {
+        let mut groups = vec![WarmGroup::Scene];
+        if self.spot_shadows_possible() {
+            groups.push(WarmGroup::SpotShadow);
+        }
+        if self.cookies_possible() {
+            groups.push(WarmGroup::Cookie);
+        }
+        if self.settings.dlight_limit > 0 {
+            groups.push(WarmGroup::Omni);
+        }
+        groups
+    }
+
+    /// Prepares one surface material's passes of `group` for `kind` surfaces and lists the (pass, target) pairs
+    /// their pipelines are for: at most seven passes, one queue entry of [`Renderer::warm_late`].
+    #[allow(clippy::too_many_arguments)]
+    fn surface_jobs(
+        &mut self,
+        m: &Arc<Material>,
+        group: WarmGroup,
+        kind: VertexKind,
+        scene: Target,
+        floatz: Target,
+        hsm: bool,
+        jobs: &mut Vec<(Arc<Prepared>, Target)>,
+    ) {
+        match group {
+            WarmGroup::Scene => {
                 if let Some(p) = self.prepare_optional(m, &[TECH_BUILD_FLOATZ], kind, hsm) {
                     jobs.push((p, floatz));
                 }
@@ -914,68 +1086,93 @@ impl Renderer {
                     &SPOT_TECHS,
                     &OMNI_TECHS,
                 ] {
-                    if let Some(p) = self.prepare(m, techs, kind, hsm) {
+                    if let Some(p) = self.prepare_ahead(m, techs, kind, hsm) {
                         jobs.push((p, scene));
                     }
                 }
                 if self.settings.shadows != ShadowMode::Off
-                    && let Some(p) = self.prepare_optional(m, &shadow_tech, kind, hsm)
+                    && let Some(p) = self.prepare_optional(m, &[self.shadow_tech()], kind, hsm)
                 {
                     jobs.push((p, self.shadow_target()));
                 }
+            }
+            WarmGroup::SpotShadow => {
+                if let Some(p) = self.prepare_ahead(m, &SPOT_SHADOW_TECHS, kind, hsm) {
+                    jobs.push((p, scene));
+                }
+            }
+            WarmGroup::Cookie => {
+                if kind == VertexKind::Model
+                    && let Some(p) = self.prepare_optional(m, &COOKIE_CASTER_TECHS, kind, hsm)
+                {
+                    jobs.push((p, Self::cookie_target()));
+                }
+                if let Some(p) = self.prepare_optional(m, &COOKIE_RECEIVER_TECHS, kind, hsm) {
+                    jobs.push((p, scene));
+                }
+            }
+            WarmGroup::Omni => {
+                if let Some(p) = self.prepare_optional(m, &LIGHT_OMNI_TECHS, kind, hsm) {
+                    jobs.push((p, scene));
+                }
+            }
+        }
+    }
+
+    /// Prepares one sprite material's passes and lists the pairs their pipelines are for.
+    fn sprite_jobs(
+        &mut self,
+        m: &Arc<Material>,
+        scene: Target,
+        hsm: bool,
+        jobs: &mut Vec<(Arc<Prepared>, Target)>,
+    ) {
+        for techs in [&SUN_SHADOW_TECHS[..], &SUN_TECHS, &LIT] {
+            if let Some(p) = self.prepare_ahead(m, techs, VertexKind::Model, hsm) {
+                jobs.push((p, scene));
+            }
+        }
+    }
+
+    /// Every (pass, target) pair a frame into `format` can draw with, in the order materials come: the whole
+    /// warm-up, which covers the queue of [`Renderer::warm_late`] and so empties it.
+    fn warm_jobs(&mut self, format: wgpu::TextureFormat) -> Vec<(Arc<Prepared>, Target)> {
+        let hsm = self.hsm();
+        let (scene, floatz) = self.warm_targets(format);
+        let mut jobs = Vec::new();
+        let materials: Vec<Arc<Material>> = self
+            .scene
+            .materials()
+            .into_iter()
+            .chain(self.warm_extra.iter().cloned())
+            .chain(self.scene.world.sun.sprite_material.clone())
+            .collect();
+        for m in &materials {
+            for kind in [VertexKind::World, VertexKind::Model] {
+                self.surface_jobs(m, WarmGroup::Scene, kind, scene, floatz, hsm, &mut jobs);
             }
         }
         let clouds = self.warm_clouds.clone();
         for m in &clouds {
             for techs in [&SUN_TECHS[..], &LIT] {
-                if let Some(p) = self.prepare(m, techs, VertexKind::Cloud, hsm) {
+                if let Some(p) = self.prepare_ahead(m, techs, VertexKind::Cloud, hsm) {
                     jobs.push((p, scene));
                 }
             }
         }
         let sprites = self.warm_sprites.clone();
         for m in &sprites {
-            for techs in [&SUN_SHADOW_TECHS[..], &SUN_TECHS, &LIT] {
-                if let Some(p) = self.prepare(m, techs, VertexKind::Model, hsm) {
-                    jobs.push((p, scene));
-                }
-            }
+            self.sprite_jobs(m, scene, hsm, &mut jobs);
         }
-        // The shadowed spot techniques of a map that has spot lights that can cast one.
-        if self.spot_shadows_possible() {
+        // The later groups after everything a frame without them draws: a load that stops early still draws that.
+        for group in self.warm_groups().into_iter().skip(1) {
             for m in &materials {
                 for kind in [VertexKind::World, VertexKind::Model] {
-                    if let Some(p) = self.prepare(m, &SPOT_SHADOW_TECHS, kind, hsm) {
-                        jobs.push((p, scene));
-                    }
+                    self.surface_jobs(m, group, kind, scene, floatz, hsm, &mut jobs);
                 }
             }
         }
-        // The shadow cookies of a frame without shadow maps.
-        if self.cookies_possible() {
-            for m in &materials {
-                if let Some(p) =
-                    self.prepare_optional(m, &COOKIE_CASTER_TECHS, VertexKind::Model, hsm)
-                {
-                    jobs.push((p, Self::cookie_target()));
-                }
-                for kind in [VertexKind::World, VertexKind::Model] {
-                    if let Some(p) = self.prepare_optional(m, &COOKIE_RECEIVER_TECHS, kind, hsm) {
-                        jobs.push((p, scene));
-                    }
-                }
-            }
-        }
-        // The effects' omni lights come last: a load that stops early still draws everything else.
-        if self.settings.dlight_limit > 0 {
-            for m in &materials {
-                for kind in [VertexKind::World, VertexKind::Model] {
-                    if let Some(p) = self.prepare_optional(m, &LIGHT_OMNI_TECHS, kind, hsm) {
-                        jobs.push((p, scene));
-                    }
-                }
-            }
-        }
+        self.warm_queue.clear();
         jobs
     }
 
@@ -1098,6 +1295,7 @@ impl Renderer {
         self.prepare(m, techs, kind, hsm)
     }
 
+    /// A pass prepared for a draw: a frame built it at first sight, which is a late one (`late_passes`).
     fn prepare(
         &mut self,
         m: &Arc<Material>,
@@ -1109,10 +1307,22 @@ impl Renderer {
             .prepare(&self.gpu, &mut self.textures, m, techs, kind, hsm)
     }
 
-    /// [`Renderer::prepare`] for a pass the material may lack (a shadow map, a shadow cookie, a dynamic light, the
-    /// floatz): silent `None` when the techset has none of `techs`. The original only asks such a material for the
-    /// technique where it has one (KisakCOD `r_material_load_obj.cpp` `MTL_GAMEFLAG_CASTS_SHADOW` from
-    /// `TECHNIQUE_BUILD_SHADOWMAP_DEPTH`, `r_light.cpp` `Material_GetTechnique(TECHNIQUE_LIGHT_OMNI)`,
+    /// A pass prepared ahead of its first draw (the warm-ups), which is not a late one.
+    fn prepare_ahead(
+        &mut self,
+        m: &Arc<Material>,
+        techs: &[usize],
+        kind: VertexKind,
+        hsm: bool,
+    ) -> Option<Arc<Prepared>> {
+        self.materials
+            .prepare_ahead(&self.gpu, &mut self.textures, m, techs, kind, hsm)
+    }
+
+    /// [`Renderer::prepare_ahead`] for a pass the material may lack (a shadow map, a shadow cookie, a dynamic
+    /// light, the floatz): silent `None` when the techset has none of `techs`. The original only asks such a
+    /// material for the technique where it has one (KisakCOD `r_material_load_obj.cpp` `MTL_GAMEFLAG_CASTS_SHADOW`
+    /// from `TECHNIQUE_BUILD_SHADOWMAP_DEPTH`, `r_light.cpp` `Material_GetTechnique(TECHNIQUE_LIGHT_OMNI)`,
     /// `r_shadowcookie.cpp` the cookie flags), so a techset that omits the slot is not a failure: the pass skips it.
     fn prepare_optional(
         &mut self,
@@ -1127,7 +1337,7 @@ impl Renderer {
         {
             return None;
         }
-        self.prepare(m, techs, kind, hsm)
+        self.prepare_ahead(m, techs, kind, hsm)
     }
 
     /// The post parameters as the settings allow them: depth of field and glow can be switched off.
@@ -2612,9 +2822,15 @@ impl Renderer {
         } else {
             None
         });
-        if let Some(f) = self.art.fog.as_ref().filter(|_| self.settings.fog) {
-            self.clear = f.color.map(f64::from);
-        }
+        // What the pixels nothing draws show (`R_GetClearColor`): never the fog colour unless `r_clear` asks for it.
+        let clear = self.settings.clear.color(
+            self.art
+                .fog
+                .as_ref()
+                .filter(|_| self.settings.fog)
+                .map(|f| f.color),
+            (view.time * 1000.0) as u64,
+        );
         let water_time = if self.settings.draw_water {
             view.time
         } else {
@@ -3124,9 +3340,9 @@ impl Renderer {
                     resolve_target: resolve,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.clear[0],
-                            g: self.clear[1],
-                            b: self.clear[2],
+                            r: f64::from(clear[0]),
+                            g: f64::from(clear[1]),
+                            b: f64::from(clear[2]),
                             a: 1.0,
                         }),
                         store: if resolve.is_some() && !distortion {
@@ -3720,6 +3936,31 @@ fn nearest(items: &mut Vec<u32>, centre: Vec3, at: impl Fn(u32) -> Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clear_colour_follows_r_getclearcolor() {
+        let fog = Some([0.6, 0.7, 0.7]);
+        let mut c = Clear {
+            mode: ClearMode::DevOnlyBlink,
+            developer: false,
+            colors: [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        };
+        // The shipped default clears nothing: black, never the fog colour.
+        assert_eq!(c.color(fog, 0), [0.0; 3]);
+        c.developer = true;
+        assert_eq!(c.color(fog, 0), [1.0, 0.0, 0.0]);
+        assert_eq!(c.color(fog, 0x200), [0.0, 0.0, 1.0]);
+        c.mode = ClearMode::Steady;
+        assert_eq!(c.color(fog, 0x200), [1.0, 0.0, 0.0]);
+        c.mode = ClearMode::FogColor;
+        assert_eq!(c.color(fog, 0), [0.6, 0.7, 0.7]);
+        assert_eq!(c.color(None, 0x200), [0.0, 0.0, 1.0]);
+        c.mode = ClearMode::Never;
+        assert_eq!(c.color(fog, 0), [0.0; 3]);
+        assert_eq!(ClearMode::parse(" Fog Color "), Some(ClearMode::FogColor));
+        assert_eq!(ClearMode::parse("3"), Some(ClearMode::Steady));
+        assert_eq!(ClearMode::parse("5"), None);
+    }
 
     #[test]
     fn a_lod_reaches_up_to_its_range_and_a_zero_range_reaches_everywhere() {
