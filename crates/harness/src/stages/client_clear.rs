@@ -42,7 +42,7 @@ struct Pose {
 
 /// The viewpoints of #356: `mp_crash` at 120 s (origin -83.8 1549.0 313.1, yaw -88.3, pitch -5.5) looks down into a
 /// hole left of a pillar; `mp_backlot` at 120 s (277.3 1728.0 149.2, yaw -14.3, pitch -3.2) has one across the lower
-/// left. The probes sit well inside each region; the drawn probe is on a sunlit wall.
+/// left. The probes sit well inside each region; the drawn probe is on a sunlit wall (crash) or the courtyard (backlot).
 const POSES: &[Pose] = &[
     Pose {
         map: "mp_crash",
@@ -54,7 +54,7 @@ const POSES: &[Pose] = &[
         map: "mp_backlot",
         fly_at: "120",
         void: &[(-0.62, -0.73), (-0.81, -0.89)],
-        drawn: (0.6, 0.3),
+        drawn: (-0.6, -0.1),
     },
 ];
 
