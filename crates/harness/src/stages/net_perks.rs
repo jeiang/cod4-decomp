@@ -221,7 +221,7 @@ struct Body {
     frag: i32,
     flash: i32,
     p90_stock: i32,
-    spawn_count: i32,
+    spawn_count: u16,
     deaths: i32,
     kills: i32,
 }
@@ -305,7 +305,7 @@ impl Match {
     }
 
     /// Runs until the player's spawn count passed `spawn` and it plays again: a respawn with its chosen class.
-    fn respawn(&mut self, n: u16, spawn: i32, victim: bool) -> io::Result<()> {
+    fn respawn(&mut self, n: u16, spawn: u16, victim: bool) -> io::Result<()> {
         loop {
             let b = body(&self.server, n)?;
             let p = if victim { &self.v } else { &self.a };
