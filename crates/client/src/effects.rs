@@ -7,7 +7,7 @@
 //! surface type a column; flesh has its own columns (body or head; the stock event carries only the head bit, so the fatal columns are not used).
 
 use crate::decal::{self, Placement};
-use crate::events::{ClientEvent, Events};
+use crate::events::{ClientEvent, Events, Shooter};
 use crate::tracer::{self, Tracers};
 use crate::viewmodel::ViewTags;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
@@ -484,7 +484,7 @@ impl Effects {
                 angles,
                 weapon: w,
                 shooter,
-                vehicle,
+                from,
                 last_shot,
             } => {
                 let Some(d) = weapon(*w) else {
@@ -496,7 +496,14 @@ impl Effects {
                     );
                     return;
                 };
-                let mine = *shooter == self.own && !vehicle;
+                // The first-person flash is the own gun's, or the turret's when the own player is on it
+                // (`CG_FireWeapon`: `playerUsingTurret` picks `viewFlashEffect`).
+                let mine = match *from {
+                    Shooter::Player => *shooter == self.own,
+                    Shooter::Vehicle => false,
+                    Shooter::Turret { gunner, .. } => gunner == self.own,
+                };
+                let at_muzzle = from.at_muzzle();
                 let (flash, eject) = if mine {
                     (&d.view_flash_effect, &d.view_shell_eject_effect)
                 } else {
@@ -518,7 +525,7 @@ impl Effects {
                 let eject = eject.filter(|_| d.bolt_action == 0);
                 // `CG_FireWeapon` -> `DrawBulletImpacts`: one shot in so many is a tracer, rolled here; where it ends is
                 // found at the next update, against the map and the players as they are then.
-                if !vehicle
+                if *from != Shooter::Vehicle
                     && sim::weapon::WeaponType::from_raw(d.weap_type)
                         == sim::weapon::WeaponType::Bullet
                 {
@@ -537,8 +544,8 @@ impl Effects {
                     self.tag_frame(*shooter, Tag::Flash),
                     self.tag_frame(*shooter, Tag::Brass),
                 ) {
-                    (None, None) if *vehicle => {
-                        // A vehicle's event names its muzzle, and it throws no shells.
+                    (None, None) if at_muzzle => {
+                        // The event names the gun's muzzle, and a turret or vehicle throws no shells.
                         let (f, r, u) = sim::pm::math::angle_vectors(angles);
                         let flash = Frame {
                             origin: Vec3::from(*eye),
@@ -568,10 +575,10 @@ impl Effects {
                     tags => tags,
                 };
                 if let (Some(def), Some(at)) = (flash, flash_at) {
-                    self.play_bolted("muzzle_flash", def, *shooter, Tag::Flash, at, !vehicle);
+                    self.play_bolted("muzzle_flash", def, *shooter, Tag::Flash, at, !at_muzzle);
                 }
                 if let (Some(def), Some(at)) = (eject, brass_at) {
-                    self.play_bolted("shell_eject", def, *shooter, Tag::Brass, at, !vehicle);
+                    self.play_bolted("shell_eject", def, *shooter, Tag::Brass, at, !at_muzzle);
                 }
             }
             ClientEvent::EjectBrass { weapon: w, shooter } => {

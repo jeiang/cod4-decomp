@@ -10,7 +10,7 @@
 //!   loops, the map's ambience and the music.
 
 use crate::effects::explodes_on_surface;
-use crate::events::ClientEvent;
+use crate::events::{ClientEvent, Shooter};
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::weapon::WeaponDef;
 use audio::bank::Bank;
@@ -120,7 +120,18 @@ impl ClientSound {
     /// Starts loading the sound tables of `map` (and of the mod `game`, `fs_game`; empty for none). `device = false`
     /// mixes without a sound card.
     pub fn start(install: &Path, game: &str, map: &str, device: bool) -> Self {
-        let state = Self::begin(install, game, map, device);
+        Self::with_state(Self::begin(install, game, map, device), device)
+    }
+
+    /// Ready on `bank`, mixing without a sound card, the listener at the origin: for the self-tests.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn for_selftest(bank: Bank) -> Self {
+        let mut sound = Sound::new(bank, false);
+        sound.set_listener([0.0; 3], 0.0);
+        Self::with_state(State::Ready(Box::new(sound)), false)
+    }
+
+    fn with_state(state: State, device: bool) -> Self {
         Self {
             state,
             device,
@@ -559,16 +570,25 @@ impl ClientSound {
                     };
                     self.play_world(&name, *origin);
                 }
-                // A player's shot is heard from the player's own events; a vehicle has none.
+                // A player's shot is heard from the player's own events; a vehicle's and a turret's only from this
+                // one (`CG_FireWeapon` on `EV_FIRE_WEAPON` of a helicopter, `EV_FIRE_WEAPON_MG42` of a turret): the
+                // weapon's `fireSound`, or `fireSoundPlayer` for the gunner on the turret (`isPlayer` when the own
+                // view is locked to it), from the muzzle on the shooting entity.
                 ClientEvent::WeaponFire {
                     eye,
                     weapon: w,
                     shooter,
-                    vehicle: true,
-                    ..
+                    from: from @ (Shooter::Vehicle | Shooter::Turret { .. }),
+                    last_shot,
                 } => {
+                    let own = matches!(*from, Shooter::Turret { gunner, .. } if u32::from(gunner) == self.own_entity);
+                    let event = if *last_shot {
+                        ev::FIRE_WEAPON_LASTSHOT
+                    } else {
+                        ev::FIRE_WEAPON
+                    };
                     let def = weapon(*w);
-                    if let Some(name) = weapon_sound(def.as_deref(), ev::FIRE_WEAPON, false) {
+                    if let Some(name) = weapon_sound(def.as_deref(), event, own) {
                         self.play(
                             &name,
                             Cue {
@@ -1260,23 +1280,7 @@ fn weapon_sound(w: Option<&WeaponDef>, event: u8, own: bool) -> Option<String> {
 /// for those met.
 #[cfg(not(target_arch = "wasm32"))]
 fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
-    let mut sound = Sound::new(bank, false);
-    sound.set_listener([0.0; 3], 0.0);
-    let mut cs = ClientSound {
-        state: State::Ready(Box::new(sound)),
-        device: false,
-        seen: HashMap::new(),
-        own_entity: NO_ENTITY,
-        dropped: 0,
-        pending: Vec::new(),
-        eye: [0.0; 3],
-        footsteps: true,
-        missile_loops: HashSet::new(),
-        names: Vec::new(),
-        entity_loops: HashMap::new(),
-        breath: crate::breath::Breath::default(),
-        breath_volumes: Vec::new(),
-    };
+    let mut cs = ClientSound::for_selftest(bank);
     let none = |_: u16| None;
     let mut seq = 0u8;
     let mut fire = |cs: &mut ClientSound, own: bool, quiet: bool, event: u8, parm: u8| {
@@ -1362,6 +1366,81 @@ fn movement_selftest(bank: Bank) -> Vec<(String, bool)> {
         out.push(("a concrete landing played dirt".into(), false));
     }
     out.extend(loop_selftest(&mut cs));
+    out
+}
+
+/// A stock map that places mounted guns; its zone carries the turret weapon.
+#[cfg(not(target_arch = "wasm32"))]
+const TURRET_MAP: &str = "mp_convoy";
+
+/// A mounted gun's rounds through the client's event path (`CG_FireWeapon` on `EV_FIRE_WEAPON_MG42`): the gunner
+/// hears the turret weapon's first-person fire sound and a bystander its world one, each round once.
+#[cfg(not(target_arch = "wasm32"))]
+fn turret_selftest(install: &Path) -> Vec<(String, bool)> {
+    let bank = match load(install, "", TURRET_MAP) {
+        Ok(b) => b,
+        Err(e) => return vec![(format!("turret sounds: {e}"), false)],
+    };
+    let turret = (|| {
+        let install = server::content::Install::open(install).map_err(|e| e.to_string())?;
+        let mut content = server::content::Content::default();
+        content.load_boot(&install)?;
+        content.load_map(&install, TURRET_MAP)?;
+        content
+            .weapons()
+            .into_iter()
+            .find(|w| {
+                sim::weapon::WeaponClass::from_raw(w.weap_class) == sim::weapon::WeaponClass::Turret
+            })
+            .ok_or_else(|| format!("{TURRET_MAP} has no turret weapon"))
+    })();
+    let turret = match turret {
+        Ok(t) => t,
+        Err(e) => return vec![(format!("turret weapon: {e}"), false)],
+    };
+    let mut cs = ClientSound::for_selftest(bank);
+    cs.own_entity = 3;
+    let weapon = |_: u16| Some(turret.clone());
+    let shot = |gunner: u16| ClientEvent::WeaponFire {
+        eye: [40.0, 0.0, 60.0],
+        angles: [0.0; 3],
+        weapon: 1,
+        shooter: 80,
+        from: Shooter::Turret {
+            gunner,
+            origin: [0.0; 3],
+        },
+        last_shot: false,
+    };
+    let mut out = Vec::new();
+    for (who, gunner, own) in [("the gunner", 3u16, true), ("a bystander", 4, false)] {
+        let Some(expected) = weapon_sound(Some(&turret), ev::FIRE_WEAPON, own) else {
+            out.push((
+                format!("{} names no fire sound for {who}", turret.internal_name),
+                false,
+            ));
+            continue;
+        };
+        let count = |cs: &mut ClientSound| {
+            cs.ready().map_or(0, |s| {
+                s.played
+                    .aliases
+                    .get(&expected.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0)
+            })
+        };
+        let before = count(&mut cs);
+        cs.world_events(&[shot(gunner)], &weapon, &|_| None);
+        let after = count(&mut cs);
+        if after != before + 1 {
+            let played = cs.ready().map(|s| s.played.aliases.clone());
+            out.push((
+                format!("a turret round should play {expected} once for {who}, played {played:?}"),
+                false,
+            ));
+        }
+    }
     out
 }
 
@@ -1793,6 +1872,10 @@ pub fn selftest(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         }
         Err(e) => check(false, format!("movement sounds: {e}")),
     }
+    // A mounted gun's round through the same path: heard by the gunner and by a bystander.
+    for (what, ok) in turret_selftest(install) {
+        check(ok, what);
+    }
     check(
         s.played.failed.is_empty(),
         format!("sound files failed: {:?}", s.played.failed),
@@ -1810,21 +1893,7 @@ mod tests {
 
     /// A sound system whose tables failed to load: enough to test what is dropped.
     fn failed() -> ClientSound {
-        ClientSound {
-            state: State::Failed("test".into()),
-            device: false,
-            seen: HashMap::new(),
-            own_entity: NO_ENTITY,
-            dropped: 0,
-            pending: Vec::new(),
-            eye: [0.0; 3],
-            footsteps: true,
-            missile_loops: HashSet::new(),
-            names: Vec::new(),
-            entity_loops: HashMap::new(),
-            breath: crate::breath::Breath::default(),
-            breath_volumes: Vec::new(),
-        }
+        ClientSound::with_state(State::Failed("test".into()), false)
     }
 
     #[test]

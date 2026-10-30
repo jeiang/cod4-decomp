@@ -376,13 +376,17 @@ impl Game {
         if let Some(c) = self.client_mut(n) {
             c.shots += 1;
         }
+        // `G_AddEvent(ent, EV_FIRE_WEAPON_MG42, shooter->s.number)` (KisakCOD `game/turret.cpp:239`): the event
+        // belongs to the turret, and names the gunner.
         let now = self.level.time;
-        self.tempev.add(now, crate::tempev::ev::WEAPON_FIRE, |s| {
-            s.origin = muzzle;
-            s.angles = angles;
-            s.weapon = weapon;
-            s.client = n;
-        });
+        self.tempev
+            .add(now, crate::tempev::ev::FIRE_WEAPON_MG42, |s| {
+                s.origin = muzzle;
+                s.angles = angles;
+                s.weapon = weapon;
+                s.client = t;
+                s.model = n;
+            });
         self.fire_bullets(vm, n, weapon, &aim, spread);
     }
 

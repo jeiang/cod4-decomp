@@ -46,6 +46,10 @@ pub mod ev {
     pub const MELEE_FLESH: u8 = 0x8f;
     /// A knife swing hit the world or an object (`G_TempEntity(.., 36)`); fields as in [`MELEE_FLESH`].
     pub const MELEE_WORLD: u8 = 0x90;
+    /// A mounted turret fired (`EV_FIRE_WEAPON_MG42`, raised on the turret entity): `origin` the muzzle, `angles` the
+    /// gunner's aim, `client` the turret entity, `model` the gunner (the stock event parm) and `weapon` the turret's
+    /// weapon. The muzzle flash, the fire sound (`fireSoundPlayer` for the gunner) and a camera shake nearby.
+    pub const FIRE_WEAPON_MG42: u8 = 0x91;
 }
 
 /// `event_parm` of a [`ev::WEAPON_FIRE`] that spent the last round of the clip (`EV_FIRE_WEAPON_LASTSHOT`).

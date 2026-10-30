@@ -78,14 +78,14 @@ pub enum ClientEvent {
     Physics { origin: [f32; 3], what: Physics },
     /// `earthquake`: the camera shakes for whoever is within `radius` of `origin`.
     Earthquake { origin: [f32; 3], quake: Earthquake },
-    /// A weapon fired: from the shooter's `eye`, looking along `angles` (degrees). A `vehicle` shooter is an entity
-    /// that is no player: `eye` is its muzzle, and its shot has no player event to make the sound.
+    /// A weapon fired: from `eye`, looking along `angles` (degrees). `shooter` is the entity that fired, `from` what
+    /// kind of thing it is.
     WeaponFire {
         eye: [f32; 3],
         angles: [f32; 3],
         weapon: u16,
         shooter: u16,
-        vehicle: bool,
+        from: Shooter,
         /// The round that emptied the clip: its shell has its own effect.
         last_shot: bool,
     },
@@ -119,6 +119,60 @@ impl ClientEvent {
             Self::WeaponFire { .. } => "weapon_fire",
             Self::EjectBrass { .. } => "eject_brass",
             Self::MeleeHit { .. } => "melee_hit",
+        }
+    }
+}
+
+/// What fired a [`ClientEvent::WeaponFire`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shooter {
+    /// A player: `eye` is their eye, and the sound comes with the player's own `FIRE_WEAPON` event.
+    Player,
+    /// A script vehicle (a helicopter): `eye` is its muzzle, and nothing but this event makes its sound.
+    Vehicle,
+    /// A mounted turret (`EV_FIRE_WEAPON_MG42`): `eye` is its muzzle, `gunner` the player on it, who hears the
+    /// first-person fire sound, and `origin` the turret, which shakes the view nearby.
+    Turret { gunner: u16, origin: [f32; 3] },
+}
+
+impl Shooter {
+    /// The event's `eye` is the muzzle of a gun that is not in a player's hands: the flash plays there, no shell is
+    /// thrown and no player event sounds the shot.
+    pub fn at_muzzle(self) -> bool {
+        !matches!(self, Self::Player)
+    }
+}
+
+/// `CG_StartShakeCamera` of a mounted gun's shot (`CG_EntityEvent`, `EV_FIRE_WEAPON_MG42`): scale, duration (ms)
+/// and radius.
+const TURRET_SHAKE: (f32, i32, f32) = (0.05, 100, 100.0);
+
+/// Starts the camera shakes `events` cause for a view at `eye` at server time `now`: an `earthquake`, and each round
+/// of a mounted gun for whoever is within 100 units of it.
+pub fn start_shakes(
+    shakes: &mut sim::shake::CameraShakes,
+    now: i32,
+    eye: [f32; 3],
+    events: &[ClientEvent],
+) {
+    for e in events {
+        match e {
+            ClientEvent::Earthquake { origin, quake } => shakes.start(
+                now,
+                eye,
+                quake.scale,
+                quake.duration_ms,
+                *origin,
+                quake.radius,
+            ),
+            ClientEvent::WeaponFire {
+                from: Shooter::Turret { origin, .. },
+                ..
+            } => {
+                let (scale, duration_ms, radius) = TURRET_SHAKE;
+                shakes.start(now, eye, scale, duration_ms, *origin, radius);
+            }
+            _ => {}
         }
     }
 }
@@ -167,26 +221,21 @@ impl Events {
     pub fn scan(&mut self, snap: &Snapshot) -> Vec<ClientEvent> {
         let mut out = Vec::new();
         let mut live = Vec::new();
-        let vehicles: Vec<u16> = snap
-            .entities
-            .iter()
-            .filter(|e| e.etype == etype::VEHICLE)
-            .map(|e| e.number)
-            .collect();
+        let entities = &snap.entities;
         for e in snap.entities.iter().filter(|e| e.etype == etype::EVENT) {
             live.push(e.number);
             if self.seen.get(&e.number) == Some(&e.event_seq) {
                 continue;
             }
             self.seen.insert(e.number, e.event_seq);
-            out.extend(self.decode(e, &vehicles));
+            out.extend(self.decode(e, entities));
         }
         // An entity that left the snapshot starts over, so a restarted server's sequence 1 is not skipped.
         self.seen.retain(|n, _| live.contains(n));
         out
     }
 
-    fn decode(&self, e: &EntityState, vehicles: &[u16]) -> Option<ClientEvent> {
+    fn decode(&self, e: &EntityState, entities: &[EntityState]) -> Option<ClientEvent> {
         let normal = direction(e.angles);
         Some(match e.event {
             ev::BULLET_IMPACT => ClientEvent::BulletImpact {
@@ -275,8 +324,31 @@ impl Events {
                 angles: e.angles,
                 weapon: e.weapon,
                 shooter: e.client,
-                vehicle: vehicles.contains(&e.client),
+                from: if entities
+                    .iter()
+                    .any(|v| v.number == e.client && v.etype == etype::VEHICLE)
+                {
+                    Shooter::Vehicle
+                } else {
+                    Shooter::Player
+                },
                 last_shot: e.event_parm == server::tempev::FIRE_LAST_SHOT,
+            },
+            // The shake is centred on the turret (`cent->pose.origin`); a turret the snapshot does not carry (the
+            // muzzle in view, the gun's base not) shakes from the muzzle.
+            ev::FIRE_WEAPON_MG42 => ClientEvent::WeaponFire {
+                eye: e.origin,
+                angles: e.angles,
+                weapon: e.weapon,
+                shooter: e.client,
+                from: Shooter::Turret {
+                    gunner: e.model,
+                    origin: entities
+                        .iter()
+                        .find(|t| t.number == e.client && t.etype == etype::SCRIPT_MODEL)
+                        .map_or(e.origin, |t| t.origin),
+                },
+                last_shot: false,
             },
             ev::EJECT_BRASS => ClientEvent::EjectBrass {
                 weapon: e.weapon,
@@ -416,7 +488,7 @@ mod tests {
                     angles: [5.0, 90.0, 0.0],
                     weapon: 7,
                     shooter: 3,
-                    vehicle: false,
+                    from: Shooter::Player,
                     last_shot: false,
                 }]
             ),
@@ -477,9 +549,86 @@ mod tests {
         v.etype = etype::VEHICLE;
         let out = ev.scan(&snap(&[e, v]));
         assert!(
-            matches!(out[..], [ClientEvent::WeaponFire { vehicle: true, .. }]),
+            matches!(
+                out[..],
+                [ClientEvent::WeaponFire {
+                    from: Shooter::Vehicle,
+                    ..
+                }]
+            ),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn a_turret_shot_names_the_turret_its_gunner_and_the_muzzle() {
+        let mut ev = Events::default();
+        let mut e = event(964, super::ev::FIRE_WEAPON_MG42, 1);
+        e.origin = [10.0, 20.0, 70.0];
+        e.weapon = 5;
+        e.client = 80;
+        e.model = 3;
+        let mut t = EntityState::new(80);
+        t.etype = etype::SCRIPT_MODEL;
+        t.origin = [0.0, 0.0, 30.0];
+        let out = ev.scan(&snap(&[e.clone(), t]));
+        assert_eq!(
+            out,
+            [ClientEvent::WeaponFire {
+                eye: [10.0, 20.0, 70.0],
+                angles: [0.0; 3],
+                weapon: 5,
+                shooter: 80,
+                from: Shooter::Turret {
+                    gunner: 3,
+                    origin: [0.0, 0.0, 30.0],
+                },
+                last_shot: false,
+            }]
+        );
+        // Without the turret in the snapshot the shake is centred on the muzzle.
+        e.event_seq = 2;
+        let out = ev.scan(&snap(&[e]));
+        assert!(
+            matches!(
+                out[..],
+                [ClientEvent::WeaponFire {
+                    from: Shooter::Turret {
+                        origin: [10.0, 20.0, 70.0],
+                        ..
+                    },
+                    ..
+                }]
+            ),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_turret_shot_shakes_the_view_within_its_radius() {
+        let shot = ClientEvent::WeaponFire {
+            eye: [40.0, 0.0, 70.0],
+            angles: [0.0; 3],
+            weapon: 5,
+            shooter: 80,
+            from: Shooter::Turret {
+                gunner: 3,
+                origin: [0.0; 3],
+            },
+            last_shot: false,
+        };
+        let mut near = sim::shake::CameraShakes::default();
+        start_shakes(
+            &mut near,
+            1000,
+            [50.0, 0.0, 0.0],
+            std::slice::from_ref(&shot),
+        );
+        assert!(near.strength(1050, [50.0, 0.0, 0.0]) > 0.0);
+        assert_eq!(near.strength(1200, [50.0, 0.0, 0.0]), 0.0, "100 ms long");
+        let mut far = sim::shake::CameraShakes::default();
+        start_shakes(&mut far, 1000, [150.0, 0.0, 0.0], &[shot]);
+        assert_eq!(far.strength(1050, [150.0, 0.0, 0.0]), 0.0, "100 units wide");
     }
 
     #[test]
