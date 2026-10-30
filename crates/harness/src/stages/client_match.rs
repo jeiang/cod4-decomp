@@ -631,10 +631,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if fires >= 1.0 && num(fx, &["played", "muzzle_flash"]) < 1.0 {
         failures.push("weapons fired but no muzzle flash played".into());
     }
-    if impacts >= 1.0 && num(fx, &["played", "bullet_impact"]) < 1.0 {
+    // A hit on the world, on a player (`bullet_impact_flesh`) or on one with blood off all play an impact effect.
+    let impact_fx = num(fx, &["played", "bullet_impact"])
+        + num(fx, &["played", "bullet_impact_flesh"])
+        + num(fx, &["played", "bullet_impact_noblood"]);
+    if impacts >= 1.0 && impact_fx < 1.0 {
         failures.push("bullet impacts happened but none played an effect".into());
     }
-    if num(fx, &["played", "bullet_impact"]) >= 1.0 && num(fx, &["quads_max"]) < 1.0 {
+    if impact_fx >= 1.0 && num(fx, &["quads_max"]) < 1.0 {
         failures.push("impact effects played but no sprite was ever drawn".into());
     }
     if fx["look_missing"].as_array().is_some_and(|f| !f.is_empty()) {

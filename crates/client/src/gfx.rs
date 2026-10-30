@@ -30,8 +30,14 @@ pub struct Gfx {
     pub picmip: usize,
     pub picmip_bump: usize,
     pub picmip_spec: usize,
-    /// `r_texFilterAnisoMax`.
+    /// `r_texFilterAnisoMax` and `r_texFilterAnisoMin` (the least anisotropy any mipped sampler gets, capped by the
+    /// most).
     pub aniso_max: u16,
+    pub aniso_min: u16,
+    /// `r_texFilterMipMode`: `Unchanged`, `Force Trilinear`, `Force Bilinear`, `Force MipMaps Off` (0 to 3).
+    pub mip_mode: render::MipMode,
+    /// `r_fullbright`: the scene without lighting. A cheat dvar: only with `sv_cheats` on.
+    pub fullbright: bool,
     /// `sm_enable`.
     pub shadows: bool,
     /// `r_specular`.
@@ -198,6 +204,12 @@ impl Gfx {
                 0
             },
             aniso_max: (c.f32("r_texFilterAnisoMax").max(1.0) as u16).min(16),
+            aniso_min: (c.f32("r_texFilterAnisoMin").max(1.0) as u16).min(16),
+            mip_mode: c
+                .get("r_texFilterMipMode")
+                .and_then(render::MipMode::parse)
+                .unwrap_or_default(),
+            fullbright: c.bool("sv_cheats") && c.bool("r_fullbright"),
             shadows: on("sm_enable"),
             specular: on("r_specular"),
             dof: on("r_dof_enable"),
@@ -295,6 +307,7 @@ impl Gfx {
         base.spot_fade_time = self.spot_fade_time;
         base.lod_scale = self.lod_scale;
         base.lod_bias = self.lod_bias;
+        base.fullbright = self.fullbright;
         base.clear = self.clear;
         base
     }
@@ -399,9 +412,13 @@ mod tests {
     fn the_dof_dvars_set_the_bias_and_the_tweaked_blur() {
         let s = Gfx::from_cvars(&cvars(&[])).settings(render::Settings::default());
         assert_eq!((s.dof_bias, s.dof_tweak), (0.5, None));
-        // Cheat dvars do nothing without `sv_cheats`.
-        let s = Gfx::from_cvars(&cvars(&[("r_dof_bias", "2"), ("r_dof_tweak", "1")]))
-            .settings(render::Settings::default());
+        // Cheat dvars do nothing while the server has `sv_cheats` off.
+        let s = Gfx::from_cvars(&cvars(&[
+            ("sv_cheats", "0"),
+            ("r_dof_bias", "2"),
+            ("r_dof_tweak", "1"),
+        ]))
+        .settings(render::Settings::default());
         assert_eq!((s.dof_bias, s.dof_tweak), (0.5, None));
         let g = Gfx::from_cvars(&cvars(&[
             ("sv_cheats", "1"),

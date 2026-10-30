@@ -403,7 +403,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-hud",
-        description: "the HUD the client draws over the stock menus in a team deathmatch against bots: scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam, a typed chat line and a console vote call coming back from the server",
+        description: "the HUD the client draws over the stock menus in a team deathmatch against bots, played through the control channel with the player's own keys, mouse, menus and console (#376): scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam, a localized class-change message, a typed chat line and a console vote call coming back from the server",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,

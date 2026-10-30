@@ -487,6 +487,8 @@ struct State {
     load_report: Option<Value>,
     /// The next session answers the team and class menus by itself (a script's `start=` step).
     autojoin_next: bool,
+    /// Effect counts at an `fxmark` step: `cgis=fx:<kind> +n` then reads how often the kind played since.
+    fx_mark: HashMap<String, u64>,
     /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture, presenting,
     /// the input and polls before the network frame, the late warm-up, and the UI painted between the renderer
     /// and the present (`PHASES`), to explain a slow gap.
@@ -1210,6 +1212,7 @@ impl Viewer {
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
+            fx_mark: HashMap::new(),
             prev_cost: [0.0; 7],
             surface_failures: 0,
             surface_stalled_ms: 0.0,
@@ -1454,6 +1457,8 @@ impl Viewer {
                     .with_map_picmips(gfx.picmip_bump, gfx.picmip_spec),
             );
             r.materials.aniso_max = gfx.aniso_max;
+            r.materials.aniso_min = gfx.aniso_min;
+            r.materials.mip_mode = gfx.mip_mode;
             r.settings = gfx.settings(self.cli.settings);
             r.warm(format);
             st.renderer = Some(r);
@@ -1729,6 +1734,11 @@ impl Viewer {
                 // The original's range is 0 to 3600 s; a timeout of 0 would drop the client at once.
                 net.set_timeout(Duration::from_secs_f32(secs.clamp(1.0, 3600.0)));
             }
+            // `CL_SystemInfoChanged`: the server's `sv_cheats` is the client's, and without cheats every cheat
+            // dvar goes back to its reset value.
+            if let Some(on) = net.take_cheat_state() {
+                st.input.cvars.set_cheat_state(on);
+            }
             net.set_switches(crate::netplay::Switches::read(&st.input.cvars));
             let tracer = |name: &str, default: f32| {
                 st.input
@@ -1802,8 +1812,16 @@ impl Viewer {
                 for ev in net.take_ui_events() {
                     sh.apply(&mut st.input, ev);
                 }
+                // `CL_SubtitlePrint`: nothing with `cg_subtitles` off.
+                let subtitles_on = st
+                    .input
+                    .cvars
+                    .get("cg_subtitles")
+                    .is_none_or(|v| v.trim() != "0");
                 for s in net.take_subtitles() {
-                    sh.subtitle(&st.input, &s.key, s.ms);
+                    if subtitles_on {
+                        sh.subtitle(&st.input, &s.key, s.ms);
+                    }
                 }
                 let now = sh.now_ms();
                 net.fill_game_facts(&mut sh.st.game, now);
@@ -1873,7 +1891,17 @@ impl Viewer {
                     if let Some((glow, film)) = nf.look.vision {
                         (r.post.glow, r.post.film) = (glow, film);
                     }
-                    r.post.shell_shock = nf.look.shell_shock;
+                    // Cheat dvars, read live as the original does: `r_fullbright` (`R_InitDrawMethod` on change)
+                    // and `cg_drawShellshock` (`DrawShellshockBlend`).
+                    let cheats = st.input.cvars.bool("sv_cheats");
+                    r.settings.fullbright = cheats && st.input.cvars.bool("r_fullbright");
+                    let shock_on = !cheats
+                        || st
+                            .input
+                            .cvars
+                            .get("cg_drawShellshock")
+                            .is_none_or(|v| v.trim() != "0");
+                    r.post.shell_shock = nf.look.shell_shock.filter(|_| shock_on);
                     r.post.dof = Some(nf.dof);
                     // The server's fog replaces the one the map's art script was read for, once it has set any.
                     if nf.fog_from_server {
@@ -2048,6 +2076,11 @@ impl Viewer {
             st.surfaces_drawn.push(stats.surfaces as f64);
             st.lights_drawn = stats.lights;
             st.distortion_now = stats.distortion_copy;
+            if let Some(sh) = st.shell.as_mut() {
+                sh.st.fps_scene = crate::hud::fps::Scene {
+                    prims: stats.draws + stats.shadow_draws + stats.light_draws,
+                };
+            }
             record_gpu(&mut st.gpu_ms, r.take_gpu_times());
         }
         // The UI and captures between the world and the present: menus, HUD, screenshots, the video recorder.
@@ -2772,14 +2805,16 @@ fn script_step(st: &mut State) -> bool {
                 done(false, sc, format!("timed out; open: {have}"));
             }
         }
-        "start" => {
+        // A listen server on the map, joined with the team and class answered by itself (`start=mp_crash`);
+        // `devmap=mp_crash` is the same with cheats on, as the console's `devmap`.
+        "start" | "devmap" => {
             let Some(sh) = st.shell.as_mut() else {
                 return true;
             };
             sh.st.actions.push(Action::StartServer {
                 map: arg.to_owned(),
                 gametype: "war".to_owned(),
-                cheats: false,
+                cheats: key == "devmap",
             });
             st.autojoin_next = true;
             done(true, sc, String::new());
@@ -3331,6 +3366,16 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| u8::from(r.settings.shadows != render::ShadowMode::Off).to_string()),
+                // The sampler filtering the materials were made with: `r_texFilterAnisoMin` and `Max`, and
+                // `r_texFilterMipMode` as its enum index (`gfxis=aniso 2 4`, `gfxis=mipmode 2`).
+                "aniso" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| format!("{} {}", r.materials.aniso_min, r.materials.aniso_max)),
+                "mipmode" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| (r.materials.mip_mode as u8).to_string()),
                 // How many dynamic lights the last frame drew.
                 "dlights" => Some(st.lights_drawn.to_string()),
                 "aspect" => Some(format!("{:.2}", st.aspect.unwrap_or(0.0))),
@@ -3410,8 +3455,18 @@ fn script_step(st: &mut State) -> bool {
             } else {
                 want.to_owned()
             };
+            // `gfxis=dlights 1+`: at least that many, for a count the scene's own lights add to.
             match have {
-                Some(h) => done(h == want, sc, format!("{name} is {h}")),
+                Some(h) => {
+                    let ok = match want.strip_suffix('+') {
+                        Some(min) => match (h.parse::<u64>(), min.parse::<u64>()) {
+                            (Ok(h), Ok(min)) => h >= min,
+                            _ => false,
+                        },
+                        None => h == want,
+                    };
+                    done(ok, sc, format!("{name} is {h}"));
+                }
                 None => done(false, sc, format!("gfxis: unknown or unavailable {name:?}")),
             }
         }
@@ -3505,6 +3560,91 @@ fn script_step(st: &mut State) -> bool {
                 n.set_fx_demo((arg != "off").then(|| arg.to_owned()));
             }
             done(st.net.is_some(), sc, "fx demo".into());
+        }
+        // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`,
+        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up) or
+        // how often an effect kind played (`cgis=fx:shell_eject 0`, `cgis=fx:bullet_impact_noblood 1`): what was
+        // drawn or played, not the dvar's value.
+        "cgis" => {
+            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+            let sh = st.shell.as_ref();
+            let have = match name {
+                "gun" => st.net.as_ref().map(|n| u8::from(n.gun_drawn()).to_string()),
+                "hud2d" => sh.map(|s| u8::from(s.st.ownerdraws_painted > 0).to_string()),
+                "fps" => sh.map(|s| u8::from(s.st.fps_drawn.is_some()).to_string()),
+                "fpstext" => sh.map(|s| s.st.fps_drawn.clone().unwrap_or_default()),
+                "fullbright" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.settings.fullbright).to_string()),
+                "shock" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| u8::from(r.post.shell_shock.is_some()).to_string()),
+                "subtitle" => sh.map(|s| {
+                    u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
+                }),
+                _ => name.strip_prefix("fx:").and_then(|kind| {
+                    st.net.as_ref().map(|n| {
+                        let played = n.fx_played(kind);
+                        match want.strip_prefix('+') {
+                            Some(n_str) => {
+                                let target = n_str.parse::<u64>().unwrap_or(u64::MAX);
+                                let at = st.fx_mark.get(kind).copied().unwrap_or(0);
+                                let delta = played.saturating_sub(at);
+                                if delta == target {
+                                    "ok".to_owned()
+                                } else {
+                                    format!("+{delta}")
+                                }
+                            }
+                            None => played.to_string(),
+                        }
+                    })
+                }),
+            };
+            match have {
+                Some(h) => done(
+                    if want.starts_with('+') {
+                        h == "ok"
+                    } else {
+                        h == want
+                    },
+                    sc,
+                    format!("{name} is {h}"),
+                ),
+                None => done(false, sc, format!("cgis: unknown or unavailable {name:?}")),
+            }
+        }
+        // `fxmark` remembers every effect count; `cgis=fx:<kind> +n` afterwards compares what played since it
+        // (exactly n, so a wrong effect kind fails as much as a missing one).
+        "fxmark" => {
+            if let Some(n) = st.net.as_ref() {
+                st.fx_mark = n.fx_counts();
+            }
+            done(st.net.is_some(), sc, "fx marked".into());
+        }
+        // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame (`hitflesh`): the flesh
+        // impact effect, or the no-blood one with `cg_blood` off.
+        "hitflesh" => {
+            if let Some(n) = st.net.as_mut() {
+                n.inject_flesh_hit();
+            }
+            done(st.net.is_some(), sc, "flesh hit".into());
+        }
+        // A `shellshock` of the default kind for `shock=<ms>` ms, as a nearby explosion's; `subtitle=<key>` is a
+        // started sound's subtitle (`CL_SubtitlePrint`), both as the server or the sound engine would hand them on.
+        "shock" => {
+            if let Some(n) = st.net.as_mut() {
+                n.inject_shock(arg.parse().unwrap_or(5000));
+            }
+            done(st.net.is_some(), sc, "shellshock".into());
+        }
+        "subtitle" => {
+            if let Some(n) = st.net.as_mut() {
+                n.inject_subtitle(arg, 2000);
+            }
+            done(st.net.is_some(), sc, "subtitle".into());
         }
         "shot" => {
             if st.shot_request.is_none() {
@@ -3691,6 +3831,10 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
     }
     let typing = st.shell.as_ref().is_some_and(|s| s.st.console.active());
     let captured = st.shell.as_ref().is_some_and(|s| s.ui.captures_input());
+    // The scoreboard held up by `+scores` takes the scroll keys and nothing else (`CL_KeyEvent`: a key down that
+    // `Scoreboard_HandleInput` scrolls with goes no further); every other key stays the game's, so the bind's release
+    // reaches the bind table and lets the scoreboard go.
+    let scoreboard = st.shell.as_ref().is_some_and(|s| s.ui.scoreboard_only());
     let released = matches!(
         ev,
         InputEvent::Key {
@@ -3715,14 +3859,26 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
         }
         ui_event(st, ev);
     } else {
-        // The scoreboard up on `+scores` scrolls on its keys (`Scoreboard_HandleInput`) and leaves the rest to the game.
-        if let Some(sh) = st.shell.as_mut()
-            && sh.st.scoreboard_shown(&sh.ui)
-            && typed_ui_keys(ev)
-                .iter()
-                .any(|k| sh.st.scroll_scores(&sh.ui, k))
-        {
-            return;
+        if scoreboard && let Some(sh) = st.shell.as_mut() {
+            let keys = match ev {
+                InputEvent::Wheel { y } => vec![if *y > 0.0 {
+                    UiKey::WheelUp
+                } else {
+                    UiKey::WheelDown
+                }],
+                InputEvent::Key {
+                    state: ElementState::Pressed,
+                    ..
+                } => typed_ui_keys(ev),
+                _ => Vec::new(),
+            };
+            let mut scrolled = false;
+            for k in keys {
+                scrolled |= sh.st.scroll_scores(&sh.ui, &k);
+            }
+            if scrolled {
+                return;
+            }
         }
         st.input.event(ev);
     }
@@ -4406,6 +4562,8 @@ fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: load
         picmip_bump: gfx.picmip_bump,
         picmip_spec: gfx.picmip_spec,
         aniso_max: gfx.aniso_max,
+        aniso_min: gfx.aniso_min,
+        mip_mode: gfx.mip_mode,
         format: st.config.format,
     };
     gametype.clone_into(&mut st.load_gametype);
@@ -5161,6 +5319,10 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "backends": cli.backend.clone(),
                 "gpu": gpu_json(&st.gpu),
                 "present": cli.present.clone(),
+                // Whether mouse look can work: the window has the focus and the pointer is locked, or why not.
+                "focused": st.window.has_focus(),
+                "pointer_locked": st.grabbed,
+                "look_gate": st.input.look_gate(),
             }),
             "menu" => menu_state(st),
             "hud" => hud_state(st),
@@ -5168,6 +5330,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "open": st.shell.as_ref().is_some_and(|sh| sh.st.console.active()),
                 "field": st.shell.as_ref().map(|sh| sh.st.console.field()),
                 "lines": st.shell.as_ref().map(|sh| sh.st.feed.console.clone()),
+                // The lines as one text, for a `contains` on a line's part (`console.text`).
+                "text": st.shell.as_ref().map(|sh| devctrl::text_lines(&sh.st.feed.console)),
                 "messages": st.input.messages(),
             }),
             "cvars" => {
@@ -5197,6 +5361,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "distortion_copy": st.distortion_now,
                 "late": st.late,
             }),
+            "render" => render_report(st),
             other => match st.net.as_mut() {
                 Some(net) => net.control_state(other),
                 None => Value::Null,
@@ -5207,8 +5372,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
     Value::Object(m)
 }
 
-/// The menus on the stack, the item that has the focus with the rectangle a click is tested against, and every item
-/// of the open menus with its name, the text it shows and whether it is visible.
+/// The menus on the stack, the item that has the focus, and every item of each open menu with the rectangle a click
+/// is tested against.
 fn menu_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
@@ -5218,41 +5383,45 @@ fn menu_state(st: &mut State) -> Value {
         .ui
         .focused_report()
         .map(|(menu, item, rect)| json!({"menu": menu, "item": item, "rect": rect}));
-    let mut host = crate::shell::HostCx {
-        st: &mut sh.st,
-        input: &mut st.input,
-    };
-    let items: Vec<Value> = open
-        .iter()
-        .flat_map(|menu| {
-            sh.ui
-                .item_report(&mut host, menu)
-                .into_iter()
-                .map(|(name, text, visible, rect)| {
-                    json!({"menu": menu.clone(), "name": name, "text": text, "visible": visible, "rect": rect})
-                })
-        })
-        .collect();
+    let mut items = Vec::new();
+    for menu in &open {
+        for it in sh.menu_items(&mut st.input, menu) {
+            items.push(json!({
+                "menu": menu,
+                "name": it.name,
+                "text": it.text,
+                "visible": it.visible,
+                "rect": it.rect,
+            }));
+        }
+    }
     json!({"open": open, "focused": focused, "items": items})
 }
 
-/// What the HUD drew and counted, and the game facts the scoreboard reads.
+/// What the HUD drew and counted since the run began (`stats`, the counters `hud_draw` of `ui-script.json` has),
+/// what it shows now (`report`, `live`), and the game facts the scoreboard reads.
 fn hud_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_ref() else {
         return Value::Null;
     };
     let g = &sh.st.game;
+    let live = &sh.st.live;
     json!({
         "report": sh.st.game.hud.report(),
-        "stats": {
-            "messages": sh.st.hud_stats.messages,
-            "obituaries": sh.st.hud_stats.obituaries,
-            "scoreboard_frames": sh.st.hud_stats.scoreboard_frames,
-            "killcam_frames": sh.st.hud_stats.killcam_frames,
-            "names_max": sh.st.hud_stats.names_max,
-            "unresolved": sh.st.hud_stats.unresolved,
+        "stats": sh.st.hud_stats.report(),
+        "live": {
+            "killcam": live.killcam,
+            "dead": live.dead,
+            "intermission": live.intermission,
+            "following": live.following.is_some(),
+            // A message window has a line up.
+            "feed": (0..crate::hud::WINDOWS).any(|w| sh.st.feed.active(w, live.time)),
+            "players_listed": live.scores.len(),
+            "own_team": live.own_team,
         },
+        "missing_images": sh.missing(),
         "scoreboard_shown": g.scoreboard,
+        "scores_top": sh.st.scores_top,
         "dead": g.dead,
         "intermission": g.intermission,
         "team": g.team,

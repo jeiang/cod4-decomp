@@ -48,6 +48,8 @@ pub struct Request {
     pub picmip_bump: usize,
     pub picmip_spec: usize,
     pub aniso_max: u16,
+    pub aniso_min: u16,
+    pub mip_mode: render::MipMode,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser warms from its frames
     pub format: wgpu::TextureFormat,
 }
@@ -276,6 +278,8 @@ impl Work {
                 .with_map_picmips(self.req.picmip_bump, self.req.picmip_spec),
         );
         renderer.materials.aniso_max = self.req.aniso_max;
+        renderer.materials.aniso_min = self.req.aniso_min;
+        renderer.materials.mip_mode = self.req.mip_mode;
         renderer.settings = self.req.settings;
         self.renderer = Some(renderer);
         progress.set(2, 0.25);

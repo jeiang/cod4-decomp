@@ -1066,4 +1066,29 @@ mod tests {
             "models with a material nothing defines: {left:#?}"
         );
     }
+
+    /// Every effect of every stock map draws with materials a loaded zone defines in full: the map's references to
+    /// `common_mp`'s sprite and model materials are linked to them (#453).
+    #[test]
+    fn no_stock_effect_is_left_with_a_material_it_cannot_draw() {
+        let Some(root) = std::env::var_os("COD4_PATH").map(std::path::PathBuf::from) else {
+            eprintln!("COD4_PATH not set; skipping");
+            return;
+        };
+        let custom = assets::paths::custom_maps(&root, "");
+        let mut left = Vec::new();
+        for map in assets::paths::maps(&root, "") {
+            if custom.contains(&map) {
+                continue;
+            }
+            let lib = Library::load(&root, "", &map).unwrap_or_else(|e| panic!("{map}: {e}"));
+            let (materials, models) = crate::fx_selftest::unresolved_references(&lib.content);
+            eprintln!("{map}: {} model references unresolved", models.len());
+            left.extend(materials.into_iter().map(|m| format!("{map}: {m}")));
+        }
+        assert!(
+            left.is_empty(),
+            "effects with a material nothing defines: {left:#?}"
+        );
+    }
 }

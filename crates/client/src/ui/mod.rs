@@ -577,6 +577,19 @@ pub(crate) enum ListZone {
 /// Width of a list's scroll bar and the height of its arrows, in virtual units.
 pub(crate) const SCROLL_W: f32 = 16.0;
 
+/// One item of an open menu as the control channel reports it: what an agent finds a click's target by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemReport {
+    /// The item's `name`, or empty.
+    pub name: String,
+    /// The text the item shows now, localized; empty for an item with none.
+    pub text: String,
+    /// Whether the item shows and takes the pointer now.
+    pub visible: bool,
+    /// `[x, y, w, h]` in window pixels: the rectangle a click is tested against.
+    pub rect: [f32; 4],
+}
+
 /// The menu system.
 pub struct Ui {
     pub assets: UiAssets,
@@ -688,19 +701,18 @@ impl Ui {
         self.menu_kind == MenuKind::ScriptPopup && !self.stack.is_empty()
     }
 
-    /// True when a menu on the stack wants the mouse and keyboard (the game does not get them). The scoreboard held
-    /// up by `+scores` is not one: the original shows it (`CG_ScoresDown`'s `showScores`) while the player's keys keep
-    /// moving them, and the key up runs `-scores` as every held bind's release does (`CL_KeyEvent`, KisakCOD
-    /// `client/cl_keys.cpp`).
+    /// True when any menu on the stack wants the mouse and keyboard (the game does not get them). The scoreboard is
+    /// not one: the original holds it up on `cg.showScores` while `+scores` is down and paints the `scoreboard` menu
+    /// over the HUD without opening it (`CG_ScoresDown`, `CG_DrawScoreboard`), so the keys stay the game's and the
+    /// bind's release closes it.
     pub fn captures_input(&self) -> bool {
-        !self.stack.is_empty() && !self.scoreboard_alone()
+        !self.stack.is_empty() && !self.scoreboard_only()
     }
 
-    /// The `+scores` scoreboard is the only menu up.
-    pub fn scoreboard_alone(&self) -> bool {
-        self.menu_kind == MenuKind::Scoreboard
-            && self.stack.len() == 1
-            && self.menus[self.stack[0]].name == "scoreboard"
+    /// True while the scoreboard is what is open: painted over the HUD; the scroll keys are its and go no further,
+    /// every other key is the game's.
+    pub fn scoreboard_only(&self) -> bool {
+        !self.stack.is_empty() && self.menu_kind == MenuKind::Scoreboard
     }
 
     pub fn open_menus(&self) -> Vec<&str> {
@@ -1607,14 +1619,11 @@ impl Ui {
         self.item_pixels(m, i).contains(x, y)
     }
 
-    /// The items of one open menu, for the control channel's state document: each item's name, the text it shows
-    /// (localized, as drawn; empty for an item without one), whether it is visible, and its rectangle in window pixels
-    /// (`[x, y, w, h]`), which is what a click is tested against.
-    pub fn item_report(
-        &mut self,
-        host: &mut dyn Host,
-        menu: &str,
-    ) -> Vec<(String, String, bool, [f32; 4])> {
+    /// The items of one open menu, for the control channel's state document: each item's name, its text as shown
+    /// (localized, or the dvar's value), whether it shows now, and its rectangle in window pixels (`[x, y, w, h]`),
+    /// which is what a click is tested against: a type-0 text item answers the pointer over its text only, so its
+    /// rectangle is the text's.
+    pub fn item_report(&mut self, host: &mut dyn Host, menu: &str) -> Vec<ItemReport> {
         let Some(m) = self.menu_index(menu) else {
             return Vec::new();
         };
@@ -1624,9 +1633,17 @@ impl Ui {
                 let d = &def.items[i];
                 let name = d.window.name.as_deref().unwrap_or("").to_owned();
                 let text = self.item_text(&*host, m, i, d);
-                let p = self.item_pixels(m, i);
-                let visible = self.item_visible(host, m, i);
-                (name, text, visible, [p.x, p.y, p.w, p.h])
+                let p = self
+                    .text_rect_px(&*host, m, i)
+                    .filter(|_| d.ty == ity::TEXT)
+                    .unwrap_or_else(|| self.item_pixels(m, i));
+                let visible = self.item_live(host, m, i);
+                ItemReport {
+                    name,
+                    text,
+                    visible,
+                    rect: [p.x, p.y, p.w, p.h],
+                }
             })
             .collect()
     }
@@ -3617,10 +3634,10 @@ mod tests {
         assert!(!ui.script_popup_up(), "nothing is up once they are closed");
     }
 
-    /// The `+scores` scoreboard is drawn over the game and takes nothing from it (`CG_ScoresDown`); a menu over it
-    /// does, and so does the scoreboard opened any other way.
+    /// The scoreboard held up by `+scores` leaves the keys to the game (the bind's release must reach the bind
+    /// table); a popup over it takes them.
     #[test]
-    fn the_held_scoreboard_does_not_capture_input() {
+    fn the_scoreboard_does_not_capture_input_but_a_popup_over_it_does() {
         let Some(mut ui) = stock_ui() else {
             eprintln!("COD4_PATH not set; skipping");
             return;
@@ -3628,14 +3645,16 @@ mod tests {
         let mut host = Dummy::default();
         assert!(!ui.captures_input());
         ui.open_as(&mut host, "scoreboard", MenuKind::Scoreboard);
-        assert!(ui.is_open("scoreboard") && ui.scoreboard_alone());
-        assert!(!ui.captures_input());
-        ui.open_as(&mut host, "popup_unlock", MenuKind::Ingame);
-        assert!(!ui.scoreboard_alone());
-        assert!(ui.captures_input());
+        assert!(ui.scoreboard_only() && !ui.captures_input());
+        ui.open_script_menu(&mut host, "popup_unlock", true);
+        assert!(!ui.scoreboard_only() && ui.captures_input());
         ui.close_all(&mut host);
-        ui.open_as(&mut host, "scoreboard", MenuKind::Other);
-        assert!(ui.captures_input(), "opened as an ordinary menu it is one");
+        ui.open_as(&mut host, "scoreboard", MenuKind::Scoreboard);
+        ui.open_as(&mut host, "popup_leavegame", MenuKind::Ingame);
+        assert!(
+            ui.captures_input(),
+            "a menu over the scoreboard takes the keys"
+        );
     }
 
     fn group_items(ui: &Ui, m: usize, group: &str) -> Vec<usize> {

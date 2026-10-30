@@ -202,7 +202,12 @@ impl Ui {
 }
 
 impl Painter<'_> {
-    fn material_of_font(&mut self, assets: &UiAssets, font: &Font, glow: bool) -> UiImage {
+    pub(crate) fn material_of_font(
+        &mut self,
+        assets: &UiAssets,
+        font: &Font,
+        glow: bool,
+    ) -> UiImage {
         let m = if glow {
             &font.glow_material
         } else {

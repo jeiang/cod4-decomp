@@ -39,11 +39,15 @@ const ROW_BY_IMPACT_TYPE: [Option<usize>; 9] = [
 ];
 /// `WeaponDef::impact_type` of the dud row.
 const IMPACT_TYPE_DUD: i32 = 8;
-const SURFACE_FLESH: u8 = 7;
-/// The effect of a knife blow that struck a player (`cgMedia.fxKnifeBlood`).
+pub(crate) const SURFACE_FLESH: u8 = 7;
 /// How far a bullet is followed for its tracer.
 const TRACER_RANGE: f32 = 8192.0;
+/// The effect of a knife blow that struck a player (`cgMedia.fxKnifeBlood`), and the one shown with `cg_blood` off
+/// (`cgMedia.fxKnifeNoBlood`).
 const KNIFE_BLOOD: &str = "impacts/flesh_hit_knife";
+const KNIFE_NO_BLOOD: &str = "impacts/flesh_hit_knife_noblood";
+/// What a bullet's hit on a player plays with `cg_blood` off (`cgMedia.fxNoBloodFleshHit`).
+const NO_BLOOD_FLESH_HIT: &str = "impacts/flesh_hit_noblood";
 /// The column of the impact table's flesh effects (`g_FleshTypeName`: body_nonfatal, body_fatal, head_nonfatal,
 /// head_fatal): the bullet event only says whether the head was hit.
 fn flesh_column(head: bool) -> usize {
@@ -174,6 +178,10 @@ pub struct Effects {
     tracer_cvars: tracer::Cvars,
     /// `fx_marks`.
     marks_on: bool,
+    /// `cg_blood`: off, a hit on a player plays the no-blood effects.
+    blood_on: bool,
+    /// `cg_brass`: off, no shell leaves a gun.
+    brass_on: bool,
     /// The state of the dice for the tracers.
     dice: u32,
     /// `gfx_tracer`, which the tracers are drawn with; none, none are drawn.
@@ -283,6 +291,8 @@ impl Effects {
             pending_tracers: Vec::new(),
             tracer_cvars: tracer::Cvars::default(),
             marks_on: true,
+            blood_on: true,
+            brass_on: true,
             dice: 0x9e37_79b9,
             tracer_material: None,
             played: BTreeMap::new(),
@@ -307,25 +317,18 @@ impl Effects {
         }
     }
 
-    /// The effect a table or a weapon points at. Tables in one zone name effects of another by a placeholder (the
-    /// name with a comma in front and nothing in it); the effect itself is in the library under the plain name.
+    /// `d`, after a warning when it is a stub (the name behind a comma and nothing in it): a reference to another
+    /// zone's effect that linking left unresolved, which plays nothing.
     fn resolve(&self, d: &Arc<FxEffectDef>) -> Arc<FxEffectDef> {
-        let Some(plain) = d.name.as_deref().and_then(|n| n.strip_prefix(',')) else {
-            return d.clone();
-        };
-        self.fx
-            .library()
-            .get(plain)
-            .unwrap_or_else(|| {
-                logging::dedup!(
-                    WARN,
-                    plain,
-                    effect = plain,
-                    "effect placeholder has no definition"
-                );
-                d
-            })
-            .clone()
+        if let Some(plain) = d.name.as_deref().and_then(|n| n.strip_prefix(',')) {
+            logging::dedup!(
+                WARN,
+                plain,
+                effect = plain,
+                "effect reference has no definition in the loaded zones"
+            );
+        }
+        d.clone()
     }
 
     fn play(&mut self, kind: &'static str, def: Option<Arc<FxEffectDef>>, at: Vec3, dir: Vec3) {
@@ -371,13 +374,17 @@ impl Effects {
                     return;
                 }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
-                let def = self.impact_effect(t, *surface, flesh_column(*head));
-                self.play(
-                    "bullet_impact",
-                    def,
-                    Vec3::from(*origin),
-                    Vec3::from(*normal),
-                );
+                let mut def = self.impact_effect(t, *surface, flesh_column(*head));
+                // `CG_BulletHitEvent`: with blood off, a hit on a player plays the no-blood effect instead.
+                let kind = match (*surface == SURFACE_FLESH, self.blood_on) {
+                    (true, false) if def.is_some() => {
+                        def = self.fx.library().get(NO_BLOOD_FLESH_HIT).cloned();
+                        "bullet_impact_noblood"
+                    }
+                    (true, _) => "bullet_impact_flesh",
+                    (false, _) => "bullet_impact",
+                };
+                self.play(kind, def, Vec3::from(*origin), Vec3::from(*normal));
             }
             ClientEvent::MissileBounce {
                 origin,
@@ -521,8 +528,9 @@ impl Effects {
                     .as_ref()
                     .filter(|_| *last_shot && both)
                     .or(eject.as_ref());
-                // A bolt-action throws its shell when the bolt is worked (`ClientEvent::EjectBrass`), not with the shot.
-                let eject = eject.filter(|_| d.bolt_action == 0);
+                // A bolt-action throws its shell when the bolt is worked (`ClientEvent::EjectBrass`), not with the shot;
+                // `cg_brass` off throws none at all (`CG_EjectWeaponBrass`).
+                let eject = eject.filter(|_| d.bolt_action == 0 && self.brass_on);
                 // `CG_FireWeapon` -> `DrawBulletImpacts`: one shot in so many is a tracer, rolled here; where it ends is
                 // found at the next update, against the map and the players as they are then.
                 if *from != Shooter::Vehicle
@@ -596,7 +604,9 @@ impl Effects {
                 } else {
                     &d.world_shell_eject_effect
                 };
-                if let (Some(def), Some(at)) = (def, self.tag_frame(*shooter, Tag::Brass)) {
+                if let (true, Some(def), Some(at)) =
+                    (self.brass_on, def, self.tag_frame(*shooter, Tag::Brass))
+                {
                     self.play_bolted("shell_eject", def, *shooter, Tag::Brass, at, true);
                 }
             }
@@ -606,14 +616,20 @@ impl Effects {
                 knife,
                 ..
             } => {
-                // `CG_MeleeBloodEvent`: the attacker sees the knife bloody; nobody else's view shows it.
+                // `CG_MeleeBloodEvent`: the attacker sees the knife bloody (or, with `cg_blood` off, the no-blood
+                // effect); nobody else's view shows it.
+                let (name, kind) = if self.blood_on {
+                    (KNIFE_BLOOD, "knife_blood")
+                } else {
+                    (KNIFE_NO_BLOOD, "knife_noblood")
+                };
                 if *flesh
                     && *knife
                     && *attacker == self.own
-                    && let Some(def) = self.fx.library().get(KNIFE_BLOOD).cloned()
+                    && let Some(def) = self.fx.library().get(name).cloned()
                     && let Some(at) = self.tag_frame(*attacker, Tag::Knife)
                 {
-                    self.play_bolted("knife_blood", &def, *attacker, Tag::Knife, at, true);
+                    self.play_bolted(kind, &def, *attacker, Tag::Knife, at, true);
                 }
             }
         }
@@ -860,6 +876,12 @@ impl Effects {
     /// `fx_marks`: off, bullet holes, blood and scorches are not drawn.
     pub fn set_marks(&mut self, on: bool) {
         self.marks_on = on;
+    }
+
+    /// `cg_blood` and `cg_brass`.
+    pub fn set_blood_and_brass(&mut self, blood: bool, brass: bool) {
+        self.blood_on = blood;
+        self.brass_on = brass;
     }
 
     /// A random number in [0, 1).

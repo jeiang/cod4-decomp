@@ -117,6 +117,17 @@ pub struct ShellState {
     pub scores_top: usize,
     /// The scoreboard held up by a script step instead of the key (the `--ui-script` `scores` step).
     pub scores_forced: bool,
+    /// `cg_draw2D`: off, the HUD, the crosshair, the chat and the scoreboard are not drawn (`CG_Draw2D`); the menus
+    /// and the console still are. A cheat dvar, so it only goes off with `sv_cheats` on.
+    pub draw_2d: bool,
+    /// The frame rate counter (`cg_drawFPS`): its frame times, what it asks for, and what it drew last frame.
+    pub fps: hud::fps::Meter,
+    pub fps_cfg: hud::fps::Cfg,
+    /// What the renderer drew last frame, for the counter's `-Scene-` lines (set by the app after each render).
+    pub fps_scene: hud::fps::Scene,
+    pub fps_drawn: Option<String>,
+    /// How many ownerdraws the HUD menus painted last frame (what `cg_draw2D` switches off).
+    pub ownerdraws_painted: u64,
     pub hud_stats: hud::Stats,
     /// The names and icons over other players, and the dvars that shape them.
     pub names: hud::names::Names,
@@ -314,6 +325,12 @@ impl ShellState {
             score_view: ScoreView::default(),
             scores_top: 1,
             scores_forced: false,
+            draw_2d: true,
+            fps: hud::fps::Meter::default(),
+            fps_cfg: hud::fps::Cfg::read(&crate::input::Cvars::default()),
+            fps_scene: hud::fps::Scene::default(),
+            fps_drawn: None,
+            ownerdraws_painted: 0,
             hud_stats: hud::Stats::default(),
             names: hud::names::Names::default(),
             names_cfg: hud::names::Cfg::read(&crate::input::Cvars::default()),
@@ -349,9 +366,11 @@ impl ShellState {
             || (self.live.intermission && !ui.is_open("endofgame"))
     }
 
-    /// The wheel, the arrows and the page keys move the scoreboard's list while it is up and has more rows than fit.
+    /// The wheel and the page keys move the scoreboard's list while it is up (`Scoreboard_HandleInput`: those keys
+    /// are the scoreboard's whenever it is displayed, at a bound or with no rows too, and go no further; the arrows
+    /// are not its and stay the binds'). `true` when the key was the scoreboard's.
     pub fn scroll_scores(&mut self, ui: &Ui, key: &UiKey) -> bool {
-        if !self.scoreboard_shown(ui) || self.live.scores.is_empty() {
+        if !self.scoreboard_shown(ui) {
             return false;
         }
         let live = &self.live;
@@ -360,8 +379,8 @@ impl ShellState {
         let total = hud::scoreboard_lines(&live.scores, live.own_team, m);
         let top = self.scores_top;
         let to = match key {
-            UiKey::WheelUp | UiKey::Up => top.saturating_sub(1),
-            UiKey::WheelDown | UiKey::Down => top + 1,
+            UiKey::WheelUp => top.saturating_sub(1),
+            UiKey::WheelDown => top + 1,
             UiKey::PageUp => top.saturating_sub(page),
             UiKey::PageDown => top + page,
             _ => return false,
@@ -462,6 +481,20 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("r_dlightLimit", "4"),
     ("r_drawSun", "1"),
     ("r_zfeather", "1"),
+    // The frame rate counter (`cg_drawFPS`: Off, Simple, SimpleRanges, Verbose; a stock 1.7 profile saves `Off`),
+    // its labels and its corner offset, and the texture filtering the graphics menu writes.
+    ("cg_drawFPS", "Off"),
+    ("cg_drawFPSLabels", "1"),
+    ("cg_debugInfoCornerOffset", "5 -5"),
+    ("r_texFilterMipMode", "Unchanged"),
+    // The options the Game and Sound menus write: blood effects, subtitles, brass, and the sound options this
+    // build accepts but cannot act on (`snd_khz`: the mixer runs at the device's rate; `snd_enableEq`: no
+    // equalizer pass).
+    ("cg_blood", "1"),
+    ("cg_brass", "1"),
+    ("cg_subtitles", "1"),
+    ("snd_khz", "44"),
+    ("snd_enableEq", "1"),
     ("r_distortion", "1"),
     ("r_depthPrepassModels", "0"),
     ("r_lodScaleRigid", "1"),
@@ -818,16 +851,6 @@ impl Shell {
         self.ui.click(&mut h, want)
     }
 
-    /// The items of an open menu with their names, texts, visibility and rectangles ([`Ui::item_report`]).
-    pub fn item_report(
-        &mut self,
-        input: &mut Input,
-        menu: &str,
-    ) -> Vec<(String, String, bool, [f32; 4])> {
-        let mut h = Self::host(&mut self.st, input);
-        self.ui.item_report(&mut h, menu)
-    }
-
     /// Carries out one thing the server asked of the UI.
     pub fn apply(&mut self, input: &mut Input, ev: net::ui::UiEvent) {
         use net::ui::UiEvent;
@@ -1145,6 +1168,12 @@ impl Shell {
         self.ui.mouse_move(&mut h, x, y);
     }
 
+    /// The items of an open menu, as the control channel reports them.
+    pub fn menu_items(&mut self, input: &mut Input, menu: &str) -> Vec<crate::ui::ItemReport> {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.item_report(&mut h, menu)
+    }
+
     /// Draws the UI over `target`; the world, if any, is already there (`clear` for the menu-only case).
     pub fn paint(
         &mut self,
@@ -1158,14 +1187,20 @@ impl Shell {
         self.sync_layout(input);
         self.resolve_keys(input);
         self.ui2d.team_colors = hud::team_colors(&input.cvars);
+        self.st.draw_2d = !input.cvars.bool("sv_cheats")
+            || input.cvars.get("cg_draw2D").is_none_or(|v| v.trim() != "0");
+        self.st.fps_cfg = hud::fps::Cfg::read(&input.cvars);
+        self.st.fps.tick();
+        let ownerdraws_before: u64 = self.st.game.hud.drawn.values().map(|&n| u64::from(n)).sum();
         {
             let mut p = Painter {
                 g: &mut self.ui2d,
                 cache: &mut self.cache,
                 images: &mut self.images,
             };
-            let in_game = self.st.in_game;
-            if in_game {
+            // `CG_Draw2D`: with `cg_draw2D` off none of the match's 2D is drawn; the open menus still are.
+            let hud_on = self.st.in_game && self.st.draw_2d;
+            if hud_on {
                 hud::draw_under(&self.ui, &mut p, &self.st);
                 hud::names::draw(
                     &self.ui,
@@ -1177,10 +1212,22 @@ impl Shell {
                 );
             }
             let mut h = Self::host(&mut self.st, input);
-            self.ui.paint(&mut h, &mut p, in_game);
-            if in_game {
+            self.ui.paint(&mut h, &mut p, hud_on);
+            if hud_on {
                 hud::draw_over(&self.ui, &mut p, &self.st);
             }
+            // `CL_DrawScreen`: the frame rate counter, over everything but the console, while a match is on.
+            self.st.fps_drawn = if self.st.in_game {
+                hud::fps::draw(
+                    &self.ui,
+                    &mut p,
+                    &self.st.fps,
+                    &self.st.fps_cfg,
+                    self.st.fps_scene,
+                )
+            } else {
+                None
+            };
             hud::draw_typing(
                 &self.ui,
                 &mut p,
@@ -1189,6 +1236,8 @@ impl Shell {
                 &self.st.feed.layout,
             );
         }
+        let ownerdraws_after: u64 = self.st.game.hud.drawn.values().map(|&n| u64::from(n)).sum();
+        self.st.ownerdraws_painted = ownerdraws_after - ownerdraws_before;
         self.ui2d.flush(target, clear);
     }
 
@@ -3476,14 +3525,23 @@ mod tests {
         st.scroll_scores(&ui, &UiKey::PageDown);
         assert!(st.scores_top > 4);
         for _ in 0..100 {
-            st.scroll_scores(&ui, &UiKey::Down);
+            assert!(
+                st.scroll_scores(&ui, &UiKey::WheelDown),
+                "the wheel is its at the bound too"
+            );
         }
         assert_eq!(st.scores_top, 32, "the last of 30 rows and the banners");
         st.scroll_scores(&ui, &UiKey::PageUp);
         assert!(st.scores_top < 32);
+        for key in [UiKey::Tab, UiKey::Up, UiKey::Down] {
+            let top = st.scores_top;
+            assert!(!st.scroll_scores(&ui, &key), "{key:?} is not its own");
+            assert_eq!(st.scores_top, top);
+        }
+        st.live.scores.clear();
         assert!(
-            !st.scroll_scores(&ui, &UiKey::Tab),
-            "other keys are not its own"
+            st.scroll_scores(&ui, &UiKey::PageDown),
+            "with no rows the key is still its"
         );
     }
 

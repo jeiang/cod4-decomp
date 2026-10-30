@@ -7,6 +7,7 @@ use super::{NetPlay, team_of};
 use crate::models::Team;
 use net::entity::etype;
 use serde_json::{Value, json};
+use server::netsv::eflags;
 
 /// A player's numbers as the snapshot has them.
 fn player(st: &NetPlay) -> Value {
@@ -41,6 +42,8 @@ fn player(st: &NetPlay) -> Value {
         "origin": ps.origin,
         "velocity": ps.velocity,
         "angles": ps.viewangles,
+        // The current local aim before view kick/sway, not the last server snapshot's acknowledged angles.
+        "aim_angles": st.angles,
         "weapon": st.weapon(),
         "weapon_index": ps.weapon,
         "ads": ps.weapon_pos_frac,
@@ -89,6 +92,7 @@ fn entities(st: &NetPlay) -> Value {
             "weapon": e.weapon,
             "model": e.model,
             "team": team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 }),
+            "dead": e.eflags & eflags::DEAD != 0,
             "loops": e.loop_sound != 0,
             "actor": !visible.contains(&e.number),
         }));
@@ -123,7 +127,8 @@ fn scoreboard(st: &NetPlay) -> Value {
     json!({"rows": rows, "axis": axis, "allies": allies, "limit": sb.limit})
 }
 
-/// The connection and what the network side counted.
+/// The connection, what the network side counted, and what the view did over the run (the dead view behind the body,
+/// the killcam, the frames depth of field blurred).
 fn connection(st: &NetPlay) -> Value {
     let s = st.net.stats();
     json!({
@@ -134,6 +139,12 @@ fn connection(st: &NetPlay) -> Value {
         "packets_in": s.map(|s| s.packets_in),
         "bytes_in": s.map(|s| s.bytes_in),
         "bytes_out": s.map(|s| s.bytes_out),
+        "view": {
+            "death_view_frames": st.c.death_view_frames,
+            "death_view_range_max": st.c.death_view_range_max,
+            "kill_cam_frames": st.c.kill_cam_frames,
+            "dof_frames": st.c.dof_frames,
+        },
     })
 }
 

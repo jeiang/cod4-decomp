@@ -21,7 +21,7 @@ const ACTOR_KEEP_MS: i32 = 5000;
 const COUNTER_ALT: i32 = 6;
 
 /// The `\key\value` pairs of an info string.
-fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
+pub(super) fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
     let mut it = info.split('\\').skip(1);
     while let (Some(k), Some(v)) = (it.next(), it.next()) {
         if k.eq_ignore_ascii_case(key) {

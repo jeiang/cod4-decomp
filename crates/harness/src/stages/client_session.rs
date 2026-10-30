@@ -27,7 +27,7 @@ const OBJECTIVE_STEPS: &str = "ingame=120,wait=8,shot=objectives";
 
 /// The arguments that give a client run the harness's own fully unlocked profile in `config_dir`, so it never reads or
 /// writes the tester's profile, config or the install's profiles (those are listed, never active).
-pub(super) fn profile_args(config_dir: &Path) -> [&std::ffi::OsStr; 3] {
+pub(crate) fn profile_args(config_dir: &Path) -> [&std::ffi::OsStr; 3] {
     [
         "--config-dir".as_ref(),
         config_dir.as_os_str(),
@@ -115,13 +115,6 @@ pub(super) fn gpu_problem(health: &Value) -> Option<String> {
     (!errors.is_empty()).then(|| format!("graphics errors: {}", errors.join("; ")))
 }
 
-/// Whether a material failure is a known, tracked gap rather than a new defect. The one class allowed: a material an
-/// effect names behind a comma (another zone defines it) that nothing resolves, so it has no techset (#453). A named
-/// entry for any other reason needs the name, the reason it is benign and an issue here.
-fn material_failure_allowed(name: &str, why: &str) -> bool {
-    name.starts_with(',') && why == "no techset"
-}
-
 /// Why a run's renderer does not vouch for it, or `None`: the client's `render` record must be there, every material
 /// it could not prepare (no techset, no usable technique, a pipeline that failed to build) is a draw the player never
 /// saw, and every image that did not load is a placeholder they saw instead. Both were counted and never asserted
@@ -140,7 +133,6 @@ pub(super) fn render_problem(report: &Value) -> Option<String> {
     let bad: Vec<String> = failures
         .iter()
         .map(|(name, why)| (name, why.as_str().unwrap_or("?")))
-        .filter(|(name, why)| !material_failure_allowed(name, why))
         .map(|(name, why)| format!("{name} ({why})"))
         .collect();
     if !bad.is_empty() {
@@ -489,14 +481,14 @@ mod tests {
                 .unwrap()
                 .contains("no render record")
         );
-        // The one tracked class (#453): a cross-zone reference with no techset. The same name with another reason,
-        // or a defined material with no techset, is a failure.
-        assert_eq!(
+        // Cross-zone references must resolve before drawing (#453); no material failure is allowed, including a
+        // comma-prefixed name with no techset.
+        assert!(
             render_problem(&render(
                 json!({",gfx_smk_white_atlas": "no techset"}),
                 json!([])
-            )),
-            None
+            ))
+            .is_some()
         );
         assert!(
             render_problem(&render(

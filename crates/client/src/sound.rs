@@ -1936,7 +1936,11 @@ mod tests {
             }
             c
         };
-        let set = [("snd_slaveFadeTime", "100"), ("snd_enableReverb", "0")];
+        let set = [
+            ("sv_cheats", "0"),
+            ("snd_slaveFadeTime", "100"),
+            ("snd_enableReverb", "0"),
+        ];
         assert_eq!(mix_of(&cvars(&[])), (500, true));
         assert_eq!(mix_of(&cvars(&set)), (500, true));
         let on: Vec<_> = set.iter().copied().chain([("sv_cheats", "1")]).collect();

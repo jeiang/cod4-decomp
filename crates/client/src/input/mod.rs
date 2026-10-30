@@ -430,7 +430,7 @@ impl Input {
     }
 
     /// Why this frame's mouse motion is thrown away, if it is.
-    fn look_gate(&self) -> Option<&'static str> {
+    pub fn look_gate(&self) -> Option<&'static str> {
         if !self.focused {
             Some("unfocused")
         } else if !self.captured {
@@ -1096,10 +1096,30 @@ impl Input {
     }
 
     /// A `set`, `toggle` or bare-name write from a console, bind, menu or config (`Dvar_SetCommand`, an external
-    /// source): a read-only cvar is refused with the stock line. `true` when the value was set.
+    /// source): a read-only or engine-only cvar is refused with the stock line, a cheat dvar is while `sv_cheats`
+    /// is off (`Dvar_SetVariant`), and so is a value this build cannot act on (`Dvar_SetFromString` refuses a value
+    /// outside the domain and prints it). `true` when the value was set.
     fn set_from_command(&mut self, name: &str, value: &str, archive: bool) -> bool {
         if cvar::Cvars::read_only(name) {
             self.say(format!("{} is read only.", name.to_ascii_lowercase()));
+            return false;
+        }
+        if cvar::Cvars::write_protected(name) {
+            self.say(format!("{} is write protected.", name.to_ascii_lowercase()));
+            return false;
+        }
+        if let Some(cheat) = cvar::Cvars::cheat_name(name)
+            && !self.cvars.bool("sv_cheats")
+        {
+            self.say(format!("{cheat} is cheat protected."));
+            return false;
+        }
+        if let Some((only, why)) = cvar::Cvars::unsupported_domain(name)
+            && !value.trim().eq_ignore_ascii_case(only)
+        {
+            self.say(format!("'{value}' is not a valid value for dvar '{name}'"));
+            self.say(format!("  Domain is {only} ({why})"));
+            tracing::info!(cvar = name, value, "dvar value refused: {why}");
             return false;
         }
         self.cvars.set(name, value, archive);
@@ -2343,6 +2363,43 @@ mod tests {
         assert_eq!(i.cvar("no_such_cvar_at_all"), None);
         i.exec_line("set n 1.0; toggle n 1 0");
         assert_eq!(i.cvar("n"), Some("0"));
+    }
+
+    /// `sv_cheats` starts on (`Dvar_Init`) and only the server's systeminfo sets it; with it off a cheat dvar's
+    /// write is refused with the stock line (`Dvar_SetVariant`), and the cheat dvars go back to their reset values
+    /// (`Dvar_SetCheatState`).
+    #[test]
+    fn cheat_dvars_are_refused_without_sv_cheats_and_reset_when_cheats_go_off() {
+        let mut i = Input::detached();
+        assert_eq!(i.cvar("sv_cheats"), Some("1"));
+        i.exec_line("set cg_drawgun 0; set r_fullbright 1; set sv_cheats 0");
+        assert_eq!(
+            (i.cvar("cg_drawGun"), i.cvar("r_fullbright")),
+            (Some("0"), Some("1"))
+        );
+        assert_eq!(i.cvar("sv_cheats"), Some("1"));
+        assert_eq!(i.take_messages(), ["sv_cheats is write protected."]);
+        i.cvars.set_cheat_state(false);
+        assert_eq!(
+            (i.cvar("cg_drawGun"), i.cvar("r_fullbright")),
+            (Some("1"), Some("0"))
+        );
+        i.exec_line("set cg_drawgun 0; toggle r_fullbright");
+        assert_eq!(
+            (i.cvar("cg_drawGun"), i.cvar("r_fullbright")),
+            (Some("1"), Some("0"))
+        );
+        assert_eq!(
+            i.take_messages(),
+            [
+                "cg_drawGun is cheat protected.",
+                "r_fullbright is cheat protected."
+            ]
+        );
+        i.cvars.set_cheat_state(true);
+        i.exec_line("set cg_drawGun 0");
+        assert_eq!(i.cvar("cg_drawGun"), Some("0"));
+        assert!(i.take_messages().is_empty());
     }
 
     #[test]
