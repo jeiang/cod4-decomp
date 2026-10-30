@@ -854,6 +854,7 @@ impl Viewer {
                             port: 0,
                             game: self.cli.game.clone(),
                             dvars: Vec::new(),
+                            cheats: false,
                         },
                     )?;
                     let a = l.addr;
@@ -1355,6 +1356,8 @@ impl Viewer {
             Some(sh) => sh.run_due(&mut st.input),
             None => st.input.run_due(),
         }
+        // What the listen server made of the host's console lines since the last frame (#366).
+        host_console_replies(st);
         if let Some(g) = st.load_gaps.as_mut() {
             g.frames += 1;
             g.max_ms = g.max_ms.max(interval);
@@ -1387,7 +1390,14 @@ impl Viewer {
                     if let Err(why) = follow_server_game(&self.cli, &mut self.map, st, &d.game) {
                         show_error(st, &why);
                     } else {
-                        start_session(&self.cli, &mut self.map, st, &d.map, &gametype, Some(addr));
+                        start_session(
+                            &self.cli,
+                            &mut self.map,
+                            st,
+                            &d.map,
+                            &gametype,
+                            loader::Server::Join(addr),
+                        );
                     }
                 }
                 Err(why) => {
@@ -2189,7 +2199,11 @@ impl Viewer {
                     }
                     el.exit();
                 }
-                Action::StartServer { map, gametype } => {
+                Action::StartServer {
+                    map,
+                    gametype,
+                    cheats,
+                } => {
                     // `SV_Map_f` looks for the map's zone before anything else (`DB_FileSize`, KisakCOD
                     // `server_mp/sv_ccmds_mp.cpp`): a map the install lacks starts no server and shows no loading
                     // screen. The original prints its `Can't find map` to the console; here it is the error popup's
@@ -2200,7 +2214,14 @@ impl Viewer {
                         tracing::warn!(%map, "map not found: the install has no zone for it");
                         show_error(st, &format!("Can't find map \"{map}\"."));
                     } else {
-                        start_session(&self.cli, &mut self.map, st, &map, &gametype, None);
+                        let boot = loader::Server::Boot(listen_config(
+                            st,
+                            &map,
+                            &gametype,
+                            self.cli.bots,
+                            cheats,
+                        ));
+                        start_session(&self.cli, &mut self.map, st, &map, &gametype, boot);
                     }
                 }
                 Action::Join(addr) => {
@@ -2273,7 +2294,7 @@ impl Viewer {
                                 st,
                                 &e.map,
                                 &e.gametype,
-                                Some(a),
+                                loader::Server::Join(a),
                             );
                         }
                         Err(err) => {
@@ -2602,6 +2623,7 @@ fn script_step(st: &mut State) -> bool {
             sh.st.actions.push(Action::StartServer {
                 map: arg.to_owned(),
                 gametype: "war".to_owned(),
+                cheats: false,
             });
             st.autojoin_next = true;
             done(true, sc, String::new());
@@ -3589,7 +3611,6 @@ fn saved_bot_count_lines(bots_flag: Option<usize>, input: &Input) -> Vec<String>
 }
 
 fn console_action(st: &mut State, line: &str) {
-    let count_before = bot_count(&st.input);
     for cmd in crate::input::config::split_commands(line) {
         let _command = tracing::debug_span!("command", name = %cmd[0]).entered();
         let verb = cmd[0].to_ascii_lowercase();
@@ -3682,29 +3703,60 @@ fn console_action(st: &mut State, line: &str) {
             v if crate::console::is_command(v) => {
                 st.input.exec_line(&crate::input::config::join(&cmd));
             }
-            // `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which
-            // answers an unknown one); otherwise, or for a `+` word, it is unknown.
+            // `Cmd_ExecuteSingleCommand` past the client's commands: on a listen server the host's console runs the
+            // server's commands and variables too (`status`, `kick`, `map_restart`; one command table in the
+            // original), and what the server knows neither is forwarded as a client command
+            // (`CL_ForwardCommandToServer`) once it says so (`host_console_replies`). Without a server of this
+            // process the word is forwarded at once, or is unknown; a `+` word always is.
             v => {
                 if v.starts_with('-') {
                     continue;
                 }
-                match st
-                    .net
-                    .as_mut()
-                    .filter(|n| !v.starts_with('+') && n.in_match())
-                {
-                    Some(net) => net.send_command(&crate::input::config::join(&cmd)),
-                    None => {
-                        crate::console::note_unknown(v);
-                        say(st, &format!("Unknown command \"{}\"", cmd[0]));
+                if !v.starts_with('+') && st.listen.is_some() {
+                    let line = crate::input::config::join(&cmd);
+                    if listen::host_line(&line) {
+                        continue;
                     }
                 }
+                forward_to_server(st, &cmd);
             }
         }
     }
-    // The server of this process reads `bot_count` at its next map start.
-    if st.listen.is_some() && bot_count(&st.input) != count_before {
-        listen::send(&format!("set bot_count {}", bot_count(&st.input)));
+}
+
+/// `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which answers an
+/// unknown one); otherwise, or for a `+` word, it is unknown.
+fn forward_to_server(st: &mut State, cmd: &[String]) {
+    let Some(v) = cmd.first() else { return };
+    match st
+        .net
+        .as_mut()
+        .filter(|n| !v.starts_with('+') && n.in_match())
+    {
+        Some(net) => net.send_command(&crate::input::config::join(cmd)),
+        None => {
+            crate::console::note_unknown(v);
+            say(st, &format!("Unknown command \"{v}\""));
+        }
+    }
+}
+
+/// The listen server's answers to what the host typed: its output goes to the console, and a line it did not know
+/// is forwarded to it as a client command, as to any server (#366).
+fn host_console_replies(st: &mut State) {
+    if st.listen.is_none() {
+        return;
+    }
+    for reply in listen::host_replies() {
+        if reply.forward {
+            if let Some(cmd) = crate::input::config::split_commands(&reply.line).first() {
+                forward_to_server(st, cmd);
+            }
+        } else {
+            for line in reply.output.lines() {
+                say(st, line);
+            }
+        }
     }
 }
 
@@ -4093,22 +4145,18 @@ fn apply_resize(st: &mut State, (w, h): (u32, u32)) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts (`join` of `None`) or joins a match from the menus: begins loading the map in the background. The window
-/// keeps drawing the loading screen; [`finish_load`] connects once the load is done.
-/// For a join, `map` is what the server said it is playing.
+/// Starts or joins a match from the menus: begins loading the map in the background. The window keeps drawing the
+/// loading screen; [`finish_load`] connects once the load is done. For a join, `map` is what the server said it is
+/// playing.
 fn start_session(
     cli: &Cli,
     map_slot: &mut Option<MapData>,
     st: &mut State,
     map: &str,
     gametype: &str,
-    join: Option<std::net::SocketAddr>,
+    server: loader::Server,
 ) {
     end_session(map_slot, st);
-    let server = match join {
-        Some(a) => loader::Server::Join(a),
-        None => loader::Server::Boot(listen_config(st, map, gametype, cli.bots)),
-    };
     begin_load(cli, st, map, gametype, server);
     if let Some(sh) = st.shell.as_mut() {
         sh.close_all(&mut st.input);
@@ -4218,7 +4266,13 @@ fn finish_load(
 
 /// The menu-started server: the chosen map then the other stock maps in turn, the dvars the player set (time and score
 /// limits), on a standard port when one is free so the LAN list finds it.
-fn listen_config(st: &State, map: &str, gametype: &str, bots: Option<usize>) -> listen::Config {
+fn listen_config(
+    st: &State,
+    map: &str,
+    gametype: &str,
+    bots: Option<usize>,
+    cheats: bool,
+) -> listen::Config {
     let maps: Vec<String> = st
         .shell
         .as_ref()
@@ -4233,6 +4287,7 @@ fn listen_config(st: &State, map: &str, gametype: &str, bots: Option<usize>) -> 
         port: listen::free_standard_port(),
         game: game_of(&st.input),
         dvars: st.input.cvars.with_prefix("scr_"),
+        cheats,
     }
 }
 
@@ -4926,7 +4981,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
 
 /// The menus on the stack, and the item that has the focus with the rectangle a click is tested against.
 fn menu_state(st: &mut State) -> Value {
-    let Some(sh) = st.shell.as_ref() else {
+    let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
     };
     let open: Vec<String> = sh.ui.open_menus().iter().map(|m| (*m).to_owned()).collect();
@@ -4934,15 +4989,12 @@ fn menu_state(st: &mut State) -> Value {
         .ui
         .focused_report()
         .map(|(menu, item, rect)| json!({"menu": menu, "item": item, "rect": rect}));
-    let items: Vec<Value> = open
-        .iter()
-        .flat_map(|menu| {
-            sh.ui
-                .item_report(menu)
-                .into_iter()
-                .map(|(name, rect)| json!({"menu": menu.clone(), "name": name, "rect": rect}))
-        })
-        .collect();
+    let mut items = Vec::new();
+    for menu in &open {
+        for (name, text, rect) in sh.item_report(&mut st.input, menu) {
+            items.push(json!({"menu": menu, "name": name, "text": text, "rect": rect}));
+        }
+    }
     json!({"open": open, "focused": focused, "items": items})
 }
 

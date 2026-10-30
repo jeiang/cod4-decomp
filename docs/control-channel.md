@@ -44,6 +44,11 @@ A state predicate is a map from dotted path to expected value; an expectation is
 `{"ge": 4}`, `{"contains": "word"}`, `{"exists": true}`, `{"len": 3}`. `wait` is what timing-sensitive checks use:
 `{"cmd":"wait","state":{"entities.count":{"ge":4}},"timeout_ms":120000}` costs a frame, not a sleep.
 
+The `menu` section lists each open menu's items with their `name`, the `text` they show (localized) and their `rect`,
+so an agent can click a stock button by its label. The listen server's `clients` (`{"cmd":"server","op":"state",
+"what":"clients"}`) carry each client's `weapons` (owned, by name) and the cheat commands' state (`noclip`, `ufo`,
+`godmode`, `demigod`, `notarget`), which the `client-host-console` stage reads.
+
 ```sh
 printf '%s\n' '{"id":1,"cmd":"state","what":"menu"}' | nc -q1 127.0.0.1 18095
 ```
