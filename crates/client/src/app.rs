@@ -457,6 +457,8 @@ struct State {
     load_report: Option<Value>,
     /// The next session answers the team and class menus by itself (a script's `start=` step).
     autojoin_next: bool,
+    /// The film block the last vision set gave, before the `r_brightness`/`r_contrast`/`r_desaturation` tweaks.
+    film_base: Option<render::art::Film>,
     /// Effect counts at an `fxmark` step: `cgis=fx:<kind> +n` then reads how often the kind played since.
     fx_mark: HashMap<String, u64>,
     /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture and presenting,
@@ -1083,6 +1085,7 @@ impl Viewer {
             load_report: None,
             autojoin_next: false,
             fx_mark: HashMap::new(),
+            film_base: None,
             prev_cost: [0.0; 4],
             surface_failures: 0,
             surface_stalled_ms: 0.0,
@@ -1327,6 +1330,7 @@ impl Viewer {
             r.settings = gfx.settings(self.cli.settings);
             r.warm(format);
             st.renderer = Some(r);
+            st.film_base = None;
         }
         st.window.request_redraw();
         Ok(())
@@ -1746,12 +1750,21 @@ impl Viewer {
                             glam::Vec3::new(3.0, 2.5, 1.5),
                         ));
                     }
-                    if let Some((glow, film)) = nf.look.vision {
-                        (r.post.glow, r.post.film) = (glow, film);
-                    }
-                    // `R_SetFilmInfo`: the three cheat dvars adjust the vision set's film block (desaturation is
-                    // applied twice, as stock does).
+                    // `R_SetFilmInfo`: the vision set's film block, then (with cheats on) the `r_desaturation`,
+                    // `r_contrast` and `r_brightness` tweaks on top of it (desaturation is applied twice, as stock
+                    // does). The base is the look's each frame, so the tweaks never accumulate.
                     let cheats = st.input.cvars.bool("sv_cheats");
+                    let base = nf
+                        .look
+                        .vision
+                        .map(|(_, f)| f)
+                        .or(st.film_base)
+                        .unwrap_or(r.post.film);
+                    st.film_base = Some(base);
+                    if let Some((glow, _)) = nf.look.vision {
+                        r.post.glow = glow;
+                    }
+                    let mut film = base;
                     if cheats {
                         let c = &st.input.cvars;
                         let f = |n: &str, d: f32| {
@@ -1760,12 +1773,13 @@ impl Viewer {
                                 .filter(|v| v.is_finite())
                                 .unwrap_or(d)
                         };
-                        let desat = (1.0 - r.post.film.desaturation) * f("r_desaturation", 1.0)
-                            + r.post.film.desaturation;
-                        r.post.film.desaturation *= desat;
-                        r.post.film.contrast *= f("r_contrast", 1.0);
-                        r.post.film.brightness += f("r_brightness", 0.0);
+                        let desat = (1.0 - film.desaturation) * f("r_desaturation", 1.0)
+                            + film.desaturation;
+                        film.desaturation *= desat;
+                        film.contrast *= f("r_contrast", 1.0);
+                        film.brightness += f("r_brightness", 0.0);
                     }
+                    r.post.film = film;
                     // Cheat dvars, read live as the original does: `r_fullbright` (`R_InitDrawMethod` on change)
                     // and `cg_drawShellshock` (`DrawShellshockBlend`).
                     r.settings.fullbright = cheats && st.input.cvars.bool("r_fullbright");
@@ -3360,6 +3374,18 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| u8::from(r.post.shell_shock.is_some()).to_string()),
+                // What the remainder dvars came to: the centre print time in ms, the helicopter kill cam's field of
+                // view, the film brightness after `r_brightness`, and whether the console keeps lines.
+                "centertime" => sh.map(|s| s.st.feed.center_ms.to_string()),
+                "heli_fov" => st
+                    .net
+                    .as_ref()
+                    .map(|n| format!("{:.0}", n.heli_killcam_fov())),
+                "brightness" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| format!("{:.2}", r.post.film.brightness)),
+                "noprint" => sh.map(|s| u8::from(s.st.no_print).to_string()),
                 "subtitle" => sh.map(|s| {
                     u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
                 }),
@@ -4364,6 +4390,7 @@ fn finish_load(
     #[cfg(not(target_arch = "wasm32"))]
     renderer.build_pipelines_in_background();
     st.renderer = Some(renderer);
+    st.film_base = None;
     *map_slot = Some(data);
     st.map_name = map.to_owned();
     // The menus' map title and minimap look the map up by this (the original sets it from the server's info).

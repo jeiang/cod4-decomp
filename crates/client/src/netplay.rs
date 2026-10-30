@@ -672,6 +672,11 @@ impl NetPlay {
         self.effects.played.get(kind).copied().unwrap_or(0)
     }
 
+    /// The helicopter kill cam's field of view as the dvars set it (for the `cgis=heli_fov` script step).
+    pub fn heli_killcam_fov(&self) -> f32 {
+        self.switches.killcam.heli_fov
+    }
+
     /// A copy of every effect count, for a script's `fxmark` step.
     pub fn fx_counts(&self) -> HashMap<String, u64> {
         self.effects

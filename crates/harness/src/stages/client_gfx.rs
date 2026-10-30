@@ -50,6 +50,11 @@ fxmark,set=set cg_blood 0,hitflesh,wait=1,cgis=fx:bullet_impact_noblood +1,cgis=
 set=set cg_blood 1,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,cgis=fx:bullet_impact_noblood +1,\
 set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0,set=set cg_brass 1,\
 cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
+cgis=centertime 3000,set=set cg_centertime 1.5,wait=1,cgis=centertime 1500,set=set cg_centertime 3,\
+cgis=heli_fov 15,set=set cg_heliKillCamFov 40,wait=1,cgis=heli_fov 40,set=set cg_heliKillCamFov 15,\
+set=set r_brightness 0.25,wait=1,cgis=brightness 0.25,set=set r_brightness 0,wait=1,cgis=brightness 0.00,\
+fxmark,set=set cg_bloodLimit 1,hitflesh,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,set=set cg_bloodLimit 0,\
+set=set cl_noprint 1,wait=1,cgis=noprint 1,set=set cl_noprint 0,wait=1,cgis=noprint 0,\
 set=set com_maxfps 20,wait=1,pacereset,wait=2,gfxis=pace 1,set=set com_maxfps 0,\
 set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
 set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
