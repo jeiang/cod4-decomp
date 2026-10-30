@@ -42,18 +42,20 @@ const NO_HOSTING: &str = "Starting a server is not available in the browser. Use
 const EV_FIRE_WEAPON: u8 = 0x1A;
 const EV_FIRE_WEAPON_LASTSHOT: u8 = 0x1B;
 
-/// The HUD ownerdraw ids the native client draws for a player on foot in a team deathmatch: the match dispatch of
-/// `crates/client/src/ownerdraw.rs` less the hints, vehicle, objective, killcam and map-image pieces this match does
-/// not reach. It is the implemented set, not a measured one: the native `client-match` report (`--autoplay`) carries
-/// no per-id draw count, so the per-run native measurement is a follow-up (the diff is reported in the notes).
-/// `ownerdraw.rs` names them: 5 ammo value, 6 ammo backdrop, 20 stance, 79/98 health bar, 81/82 weapon name, 114/115
-/// sprint meter, 116 weapon background, 117 clip graphic, 118 weapon icon, 119 ammo stock, 145/146 compass tape,
-/// 150 compass player, 151 compass back, 158 compass friendlies, 159 compass map, 165 d-pad back, 170 compass enemies.
+/// The HUD ownerdraw ids the stock `hud.menu` pieces reach for a player on foot in a team deathmatch, through
+/// `crates/client/src/ownerdraw.rs`, as the browser drew them on the Linux test host on 2026-10-30 (bundle
+/// `slot-1-cod4e-run-20261030-040243`): stance 20, breath/mantle/invalid hints 71/80/113 (empty pieces still
+/// counted), cursor hint 72, health 112, weapon name 81, clip graphic 117 and ammo stock 119 (the stock HUD's ammo
+/// counter; 5/6 are the older value pieces, which `hud.menu` does not use), the compass 146/150/151/152/158/159/170
+/// and the full-map pieces 181/182/183/185/188, the ammo hint blocks 103–106 and 166/168/169. The browser runs the
+/// same ownerdraw code on the same menus as the native client; a native per-id measurement (the `client-match`
+/// report carries none) is the follow-up that turns this list into a two-sided diff. A difference is a note.
 const NATIVE_HUD_DRAWN: &[i64] = &[
-    5, 6, 20, 79, 81, 82, 98, 114, 115, 116, 117, 118, 119, 145, 146, 150, 151, 158, 159, 165, 170,
+    20, 71, 72, 80, 81, 103, 104, 105, 106, 112, 113, 117, 119, 146, 150, 151, 152, 158, 159, 166,
+    168, 169, 170, 181, 182, 183, 185, 188,
 ];
-/// The ownerdraws a match cannot be played without: the ammo value, the weapon's name and the compass map.
-const MUST_DRAW: &[i64] = &[5, 81, 159];
+/// The ownerdraws a match cannot be played without: the ammo counter, the weapon's name and the compass map.
+const MUST_DRAW: &[i64] = &[119, 81, 159];
 
 /// One HTTP POST to `serve.py` on loopback, read to the end: `(status, body)`.
 fn http_post(path: &str, body: &str) -> Result<(u16, String), String> {
@@ -660,7 +662,7 @@ fn play(
         .collect();
     if !lacking.is_empty() {
         return Err(format!(
-            "the HUD never drew ownerdraws {lacking:?} (ammo 5, weapon name 81, compass map 159); drawn {drawn:?}"
+            "the HUD never drew ownerdraws {lacking:?} (ammo 119, weapon name 81, compass map 159); drawn {drawn:?}"
         ));
     }
     let sound = page.state(server, "sound")?;
