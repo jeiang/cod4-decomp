@@ -27,7 +27,7 @@ const OBJECTIVE_STEPS: &str = "ingame=120,wait=8,shot=objectives";
 
 /// The arguments that give a client run the harness's own fully unlocked profile in `config_dir`, so it never reads or
 /// writes the tester's profile, config or the install's profiles (those are listed, never active).
-pub(super) fn profile_args(config_dir: &Path) -> [&std::ffi::OsStr; 3] {
+pub(crate) fn profile_args(config_dir: &Path) -> [&std::ffi::OsStr; 3] {
     [
         "--config-dir".as_ref(),
         config_dir.as_os_str(),

@@ -48,6 +48,14 @@ The `menu` section lists each open menu's items with their `name`, the `text` th
 so an agent can click a stock button by its label. The listen server's `clients` (`{"cmd":"server","op":"state",
 "what":"clients"}`) carry each client's `weapons` (owned, by name) and the cheat commands' state (`noclip`, `ufo`,
 `godmode`, `demigod`, `notarget`), which the `client-host-console` stage reads.
+Paths a stage leans on: `menu.open` (the stack), `menu.items[]` (`menu`, `name`, `text` as shown, `visible`, and
+`rect` `[x, y, w, h]` in window pixels, the rectangle a click is tested against: a static text item's is its text's),
+`console.open` and `console.text` (the console's lines as one text, for `contains`), `player.alive|dead|origin|angles|
+team|client`, `entities.list[]` (`kind`, `origin`, `team`, `dead`, `client`, `actor`), `hud.report` (what the HUD shows
+now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `hud.stats` (what it drew over the run:
+`messages`, `chat`, `window_lines`, `scoreboard_frames`, `killcam_frames`, `names_max`, `unresolved`, ...),
+`hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
+`net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`).
 
 ```sh
 printf '%s\n' '{"id":1,"cmd":"state","what":"menu"}' | nc -q1 127.0.0.1 18095
@@ -60,8 +68,29 @@ and `QueueTransport` (a page polls it, and replies by id), so a browser transpor
 A request whose handler cannot answer yet (a `wait`, a capture between frames, a step with frames left, a listen
 server's reply) stays at the head of the queue and is offered again on the next frame.
 
-## The stage
+## The stages
 
 `control-channel` in the harness runs the acceptance of #378: console opened with the player's key, `bots 3` typed in,
 four players waited for, the entity list and scoreboard read, a menu item clicked at the centre of the rectangle the
 state document gave for it, and a capture written with no visible window.
+
+`crates/harness/src/control.rs` is the harness's side: `Driven` starts a client with `--control 0`, asks, waits,
+presses binds and keys, types, clicks a menu item by name or text where the state document put it, and captures;
+`Walker` is a stage's own player in a match, turning toward the nearest living enemy with the mouse (or the arrow
+keys when the pointer could not be locked), walking with the forward key and firing with the attack button. The
+match stages move onto it one by one (#376): `client-hud` plays its whole match through the channel.
+
+Mouse look needs what a person's does: the window focused and the pointer locked (`client.focused`,
+`client.pointer_locked`, and `client.look_gate` names what drops the motion). A headless wlroots backend supplies
+an output but no keyboard/pointer, so `scripts/virtual-display.sh` keeps `headless-seat.py` alive on the private
+display. It creates virtual keyboard/pointer devices through the compositor's protocols and supplies an XKB keymap;
+startup fails if the seat does not advertise both capabilities. No physical device, `/dev/uinput`, or elevated
+privilege is used, and no key or motion is sent by that helper. The client's own channel still drives its input.
+The helper's connection closes when the display wrapper exits, destroying its devices.
+
+`client-hud` exercises both paths: it first tests the key-only fallback against a fixed bearing (snapshot aim must
+settle within four degrees and firing must consume magazine ammunition), restores the ordinary key speeds, and then
+uses the mouse-driven walker in the match. Key-only turning uses slower configurable `cl_yawspeed`/`cl_pitchspeed`
+and feedback pulses: each channel request crosses a rendered frame, so the original 140-degree/second keys would
+overshoot a small aiming error before the key-up even arrived. The stage's notes say which match path ran and what
+the client reported about focus and pointer lock.

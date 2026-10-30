@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-objective`: the real client plays Search and Destroy against bots and plants the bomb. The
 //! stage puts the player in the bomb's pickup trigger, then in the zone, and holds +activate: the zone's hint
-//! must be drawn (owner-draw 72, shot saved) and the server must count the plant. Needs a display and
-//! the install; skips without.
+//! must be drawn (owner-draw 72, shot saved) and localized (the stock zone's hint is the bare string key
+//! `PLATFORM_HOLD_TO_PLANT_EXPLOSIVES`, which must not reach the screen as a key), and the server must count the
+//! plant. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, steps_problem};
@@ -12,10 +13,18 @@ use std::time::Duration;
 
 const NAME: &str = "client-objective";
 const LIMIT: Duration = Duration::from_secs(240);
-const ARGS: &[&str] = &["--listen", "--gametype", "sd", "--bots", "4"];
-// The attackers' bomb zone and the bomb itself; the player's team may be the defenders, in which case the
-// server refuses the move and the run reports it.
-const STEPS: &str = "ingame=120,server=set bot_idle 1,wait=1,server=devtele human sd_bomb_pickup,wait=3,\
+const ARGS: &[&str] = &[
+    "--listen",
+    "--gametype",
+    "sd",
+    "--bots",
+    "4",
+    "--no-autojoin",
+];
+// mp_crash's stock SD setup makes the Marines the attackers. Pick that team through its menu instead of letting
+// auto-assign sometimes put the player on defense, where no pickup trigger exists and a plant cannot be exercised.
+const STEPS: &str = "menu=team_marinesopfor:90,mouse=Marines,menu=changeclass:30,mouse=Assault,ingame=120,\
+server=set bot_idle 1,wait=1,server=devtele human sd_bomb_pickup,wait=3,\
 server=devtele human bombzone,wait=2,set=+activate,wait=2,shot=hint,wait=8,set=-activate,wait=1";
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
@@ -57,6 +66,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if drawn == 0 {
         problems.push("the cursor hint (owner-draw 72) never drew".into());
     }
+    if let Some(w) = unresolved_problem(&report) {
+        problems.push(w);
+    }
     if plants == 0 {
         problems.push("the bomb was never planted".into());
     }
@@ -66,4 +78,40 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             .with_reason(problems.join("; ")));
     }
     Ok(out)
+}
+
+/// Why the HUD showed text as a string key, or `None`: the hint (`hud.unresolved_text`) and the messages
+/// (`hud_draw.unresolved`) must have been localized.
+fn unresolved_problem(report: &serde_json::Value) -> Option<String> {
+    let keys: Vec<&str> = [
+        &report["hud"]["unresolved_text"],
+        &report["hud_draw"]["unresolved"],
+    ]
+    .into_iter()
+    .filter_map(|v| v.as_array())
+    .flatten()
+    .filter_map(serde_json::Value::as_str)
+    .collect();
+    (!keys.is_empty()).then(|| format!("unlocalized text on screen: {}", keys.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_hint_left_as_a_key_is_named() {
+        assert_eq!(
+            unresolved_problem(
+                &json!({"hud": {"unresolved_text": []}, "hud_draw": {"unresolved": []}})
+            ),
+            None
+        );
+        let why = unresolved_problem(
+            &json!({"hud": {"unresolved_text": ["PLATFORM_HOLD_TO_PLANT_EXPLOSIVES"]}, "hud_draw": {"unresolved": ["MP_X"]}}),
+        )
+        .unwrap();
+        assert!(why.contains("PLATFORM_HOLD_TO_PLANT_EXPLOSIVES") && why.contains("MP_X"));
+    }
 }

@@ -430,7 +430,7 @@ impl Input {
     }
 
     /// Why this frame's mouse motion is thrown away, if it is.
-    fn look_gate(&self) -> Option<&'static str> {
+    pub fn look_gate(&self) -> Option<&'static str> {
         if !self.focused {
             Some("unfocused")
         } else if !self.captured {

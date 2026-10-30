@@ -366,9 +366,11 @@ impl ShellState {
             || (self.live.intermission && !ui.is_open("endofgame"))
     }
 
-    /// The wheel, the arrows and the page keys move the scoreboard's list while it is up and has more rows than fit.
+    /// The wheel and the page keys move the scoreboard's list while it is up (`Scoreboard_HandleInput`: those keys
+    /// are the scoreboard's whenever it is displayed, at a bound or with no rows too, and go no further; the arrows
+    /// are not its and stay the binds'). `true` when the key was the scoreboard's.
     pub fn scroll_scores(&mut self, ui: &Ui, key: &UiKey) -> bool {
-        if !self.scoreboard_shown(ui) || self.live.scores.is_empty() {
+        if !self.scoreboard_shown(ui) {
             return false;
         }
         let live = &self.live;
@@ -377,8 +379,8 @@ impl ShellState {
         let total = hud::scoreboard_lines(&live.scores, live.own_team, m);
         let top = self.scores_top;
         let to = match key {
-            UiKey::WheelUp | UiKey::Up => top.saturating_sub(1),
-            UiKey::WheelDown | UiKey::Down => top + 1,
+            UiKey::WheelUp => top.saturating_sub(1),
+            UiKey::WheelDown => top + 1,
             UiKey::PageUp => top.saturating_sub(page),
             UiKey::PageDown => top + page,
             _ => return false,
@@ -849,16 +851,6 @@ impl Shell {
         self.ui.click(&mut h, want)
     }
 
-    /// The items of an open menu with their names, texts and rectangles ([`Ui::item_report`]).
-    pub fn item_report(
-        &mut self,
-        input: &mut Input,
-        menu: &str,
-    ) -> Vec<(String, String, [f32; 4])> {
-        let h = Self::host(&mut self.st, input);
-        self.ui.item_report(&h, menu)
-    }
-
     /// Carries out one thing the server asked of the UI.
     pub fn apply(&mut self, input: &mut Input, ev: net::ui::UiEvent) {
         use net::ui::UiEvent;
@@ -1174,6 +1166,12 @@ impl Shell {
     pub fn mouse_move(&mut self, input: &mut Input, x: f32, y: f32) {
         let mut h = Self::host(&mut self.st, input);
         self.ui.mouse_move(&mut h, x, y);
+    }
+
+    /// The items of an open menu, as the control channel reports them.
+    pub fn menu_items(&mut self, input: &mut Input, menu: &str) -> Vec<crate::ui::ItemReport> {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.item_report(&mut h, menu)
     }
 
     /// Draws the UI over `target`; the world, if any, is already there (`clear` for the menu-only case).
@@ -3527,14 +3525,23 @@ mod tests {
         st.scroll_scores(&ui, &UiKey::PageDown);
         assert!(st.scores_top > 4);
         for _ in 0..100 {
-            st.scroll_scores(&ui, &UiKey::Down);
+            assert!(
+                st.scroll_scores(&ui, &UiKey::WheelDown),
+                "the wheel is its at the bound too"
+            );
         }
         assert_eq!(st.scores_top, 32, "the last of 30 rows and the banners");
         st.scroll_scores(&ui, &UiKey::PageUp);
         assert!(st.scores_top < 32);
+        for key in [UiKey::Tab, UiKey::Up, UiKey::Down] {
+            let top = st.scores_top;
+            assert!(!st.scroll_scores(&ui, &key), "{key:?} is not its own");
+            assert_eq!(st.scores_top, top);
+        }
+        st.live.scores.clear();
         assert!(
-            !st.scroll_scores(&ui, &UiKey::Tab),
-            "other keys are not its own"
+            st.scroll_scores(&ui, &UiKey::PageDown),
+            "with no rows the key is still its"
         );
     }
 
