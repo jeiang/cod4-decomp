@@ -1513,17 +1513,8 @@ impl NetPlay {
         self.effects.set_marks(self.switches.marks);
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
+        crate::events::start_shakes(&mut self.shakes, st, eye.to_array(), events);
         for e in events {
-            if let ClientEvent::Earthquake { origin, quake } = e {
-                self.shakes.start(
-                    st,
-                    eye.to_array(),
-                    quake.scale,
-                    quake.duration_ms,
-                    *origin,
-                    quake.radius,
-                );
-            }
             if let ClientEvent::PlayerDeath { client, push, .. } = e {
                 self.pushes.insert(*client, *push);
             }

@@ -195,7 +195,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "net-turret",
-        description: "two real UDP clients on mp_convoy: one mounts a stock turret holding +activate, is held inside its arc, fires it and lets go; the other is shown the turret and the gunner on it",
+        description: "two real UDP clients on mp_convoy: one mounts a stock turret holding +activate, is held inside its arc, fires it and lets go; each round reaches both as the turret's own fire event naming the turret and the gunner; the other is shown the turret and the gunner on it",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
