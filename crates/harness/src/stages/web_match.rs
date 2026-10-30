@@ -892,12 +892,20 @@ fn play(
         left(started).min(Duration::from_secs(400)),
     )?;
     report.metrics.insert("next_map_ms".into(), since(started));
-    // The new level keeps the team: the class menu alone comes back, and the player is in the world again.
+    // The new level opens the stock team menu again (the 2026-10-30 run `slot-1-cod4e-run-20261030-063649` saw
+    // `team_marinesopfor`, as the stock `_menus` does on a map change), then the class menu.
+    page.until_menu(
+        server,
+        "team_marinesopfor",
+        "the team menu did not open in the next map",
+        Duration::from_secs(120),
+    )?;
+    page.click(server, "Marines")?;
     page.until_menu(
         server,
         "changeclass",
         "the class menu did not open in the next map",
-        Duration::from_secs(120),
+        Duration::from_secs(60),
     )?;
     page.click(server, "Assault")?;
     page.until(
