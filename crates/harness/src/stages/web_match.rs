@@ -372,7 +372,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         "set g_gametype war",
         "set scr_war_timelimit 0",
         "set scr_war_scorelimit 0",
-        "set sv_mapRotation \"gametype war map mp_crash gametype war map mp_backlot\"",
+        // The rotation starts at its first entry when the first match ends (`SV_MapRotate_f`), so that is the other map.
+        "set sv_mapRotation \"gametype war map mp_backlot gametype war map mp_crash\"",
         "map mp_crash",
         &format!("bots {BOTS}"),
     ] {
@@ -857,7 +858,10 @@ fn play(
     report.metrics.insert("respawn_ms".into(), since(started));
 
     // The end of the match: a score limit the bots have passed ends it (the stock script re-reads the limit), the
-    // end-of-game scoreboard shows, and the rotation's next map is loaded and played in the same page.
+    // end-of-game scoreboard shows, and the rotation's next map is loaded and played in the same page. The limit
+    // goes back to none once the match has ended, so the next map (whose scripts read the limit afresh) is played and
+    // not ended by the first kill: the 2026-10-30 run `slot-1-cod4e-run-20261030-053052` cycled the rotation every
+    // minute until the browser, loading map after map, overflowed its reliable commands and was dropped.
     server
         .exec_line("set scr_war_scorelimit 1")
         .map_err(|e| format!("scorelimit: {e}"))?;
@@ -867,6 +871,9 @@ fn play(
         "the match did not end on the score limit",
         Duration::from_secs(90),
     )?;
+    server
+        .exec_line("set scr_war_scorelimit 0")
+        .map_err(|e| format!("scorelimit: {e}"))?;
     page.capture(server, report, dir, "09-intermission")?;
     page.until(
         server,
