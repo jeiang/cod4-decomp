@@ -42,8 +42,10 @@ const NO_HOSTING: &str = "Starting a server is not available in the browser. Use
 const EV_FIRE_WEAPON: u8 = 0x1A;
 const EV_FIRE_WEAPON_LASTSHOT: u8 = 0x1B;
 
-/// The HUD ownerdraw ids the native `client-match` run draws in a team deathmatch on mp_crash (measured on the
-/// Linux test host, 2026-10-30, from its `client.json` `hud.drawn`): the browser is expected to draw the same ones.
+/// The HUD ownerdraw ids the native client draws for a player on foot in a team deathmatch: the match dispatch of
+/// `crates/client/src/ownerdraw.rs` less the hints, vehicle, objective, killcam and map-image pieces this match does
+/// not reach. It is the implemented set, not a measured one: the native `client-match` report (`--autoplay`) carries
+/// no per-id draw count, so the per-run native measurement is a follow-up (the diff is reported in the notes).
 /// `ownerdraw.rs` names them: 5 ammo value, 6 ammo backdrop, 20 stance, 79/98 health bar, 81/82 weapon name, 114/115
 /// sprint meter, 116 weapon background, 117 clip graphic, 118 weapon icon, 119 ammo stock, 145/146 compass tape,
 /// 150 compass player, 151 compass back, 158 compass friendlies, 159 compass map, 165 d-pad back, 170 compass enemies.
@@ -150,14 +152,6 @@ impl Page {
     fn state(&mut self, server: &mut Server, what: &str) -> Result<Value, String> {
         self.ask(server, json!({"cmd": "state", "what": what}))
             .map(|v| v[what].clone())
-    }
-
-    fn key(&mut self, server: &mut Server, name: &str, action: &str) -> Result<(), String> {
-        self.ask(
-            server,
-            json!({"cmd": "key", "name": name, "action": action}),
-        )
-        .map(|_| ())
     }
 
     fn bind(&mut self, server: &mut Server, bind: &str, action: &str) -> Result<(), String> {
@@ -289,7 +283,15 @@ impl Page {
         let path = dir.join(format!("{step}.png"));
         std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         report.files.push(format!("web-match/{step}.png"));
-        Ok(shot["lit_fraction"].as_f64().unwrap_or(f64::NAN))
+        let lit = shot["lit_fraction"].as_f64().unwrap_or(f64::NAN);
+        report.metrics.insert(format!("lit_{step}"), lit);
+        // A blank canvas is a capture taken before the frame reached it, or a page that draws nothing.
+        if !(lit > 0.01) {
+            return Err(format!(
+                "the capture of {step} is blank (lit fraction {lit})"
+            ));
+        }
+        Ok(lit)
     }
 }
 
@@ -543,21 +545,28 @@ fn play(
     }
     let clip0 = num(&page.state(server, "hud")?, "clip_ammo");
 
-    // Moving: W (the `+forward` bind) held for two seconds moves the origin at least 64 units.
+    // Moving: W (the `+forward` bind) held moves the origin at least 64 units. Held until it has, not for a wall
+    // time: a software-rendered page runs a few frames a second right after the spawn (its pipelines build in the
+    // frame), and a command's time is capped, so a second of the wall is less than a second of movement there.
     let origin0 = [num(&p0, "origin.0"), num(&p0, "origin.1")];
     page.bind(server, "+forward", "down")?;
     let t_move = Instant::now();
-    while t_move.elapsed() < Duration::from_secs(2) {
-        server.run_for(Duration::from_millis(50));
+    let end = Instant::now() + Duration::from_secs(30);
+    let mut dist = 0.0;
+    let mut p1 = p0.clone();
+    while dist < 64.0 && Instant::now() < end {
+        page.ask(server, json!({"cmd": "step", "frames": 3}))?;
+        p1 = page.state(server, "player")?;
+        dist = (num(&p1, "origin.0") - origin0[0]).hypot(num(&p1, "origin.1") - origin0[1]);
     }
     page.bind(server, "+forward", "up")?;
-    page.ask(server, json!({"cmd": "step", "frames": 3}))?;
-    let p1 = page.state(server, "player")?;
-    let dist = (num(&p1, "origin.0") - origin0[0]).hypot(num(&p1, "origin.1") - origin0[1]);
     report.metrics.insert("moved".into(), dist);
+    report
+        .metrics
+        .insert("walk_ms".into(), t_move.elapsed().as_secs_f64() * 1000.0);
     if !(dist >= 64.0) {
         return Err(format!(
-            "W held for 2 s moved the player {dist:.0} units (from {origin0:?} to {}), want 64",
+            "W held for 30 s moved the player {dist:.0} units (from {origin0:?} to {}), want 64",
             p1["origin"]
         ));
     }

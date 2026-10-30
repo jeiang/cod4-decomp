@@ -2060,13 +2060,22 @@ impl Viewer {
             el.exit();
         }
         // A capture the channel asked for is taken from the frame that was just drawn; its request answers on the
-        // next pass of the channel.
+        // next pass of the channel. In the browser the page reads the canvas, which the present blits to: the
+        // capture follows it.
+        #[cfg(not(target_arch = "wasm32"))]
         if st.control_shot.is_some() {
             let shot = take_control_shot(&self.cli, st, &frame.texture);
             st.control_shot_done = Some(shot);
         }
         let t_present = Instant::now();
+        #[cfg(target_arch = "wasm32")]
+        let (w, h) = (frame.texture.width(), frame.texture.height());
         st.gpu.queue.present(frame);
+        #[cfg(target_arch = "wasm32")]
+        if st.control_shot.is_some() {
+            let shot = take_control_shot(st, w, h);
+            st.control_shot_done = Some(shot);
+        }
         st.presented = true;
         st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
         if let Some(m) = st.menu_sound.as_mut() {
@@ -4971,14 +4980,14 @@ fn hud_state(st: &mut State) -> Value {
 /// reads the canvas (the module has no file to write to, and WebGPU maps buffers asynchronously); the reply carries
 /// the PNG inline, and `dir` is the caller's to use.
 #[cfg(target_arch = "wasm32")]
-fn take_control_shot(_cli: &Cli, st: &mut State, tex: &wgpu::Texture) -> Result<Value, String> {
+fn take_control_shot(st: &mut State, width: u32, height: u32) -> Result<Value, String> {
     st.control_shot.take();
     st.shot_serial += 1;
     let mut reply = crate::web::capture_frame()?;
     reply["name"] = Value::String(format!("control-{}.png", st.shot_serial));
     if reply["width"].is_null() {
-        reply["width"] = json!(tex.width());
-        reply["height"] = json!(tex.height());
+        reply["width"] = json!(width);
+        reply["height"] = json!(height);
     }
     Ok(reply)
 }
