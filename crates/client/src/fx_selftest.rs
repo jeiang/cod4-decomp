@@ -5,7 +5,7 @@
 //! the numbers as JSON.
 
 use crate::effects::Effects;
-use crate::events::ClientEvent;
+use crate::events::{ClientEvent, Shooter};
 use crate::look::Look;
 use crate::models::Library;
 use net::predict::PlayerBoxes;
@@ -203,7 +203,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
             angles: [0.0, 0.0, 0.0],
             weapon: 0,
             shooter: 7,
-            vehicle: false,
+            from: Shooter::Player,
             last_shot: false,
         },
         &weapon,
@@ -219,6 +219,58 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     }
     if flash_quads == 0 {
         bad.push("the muzzle flash drew no sprite".into());
+    }
+
+    // A mounted gun's round flashes at the muzzle the event names, with the first-person flash for the gunner and
+    // the world one for anyone else, throws no shell, and shakes the view within 100 units of the gun. The stock
+    // turret weapons live in the zones of the maps that place one; the dispatch is the same for any weapon, so the
+    // rifle's flashes stand in.
+    let turret_shot = |gunner: u16| ClientEvent::WeaponFire {
+        eye: [eye.x + 40.0, eye.y, eye.z],
+        angles: [0.0, 0.0, 0.0],
+        weapon: 0,
+        shooter: 80,
+        from: Shooter::Turret {
+            gunner,
+            origin: [eye.x, eye.y, at[2]],
+        },
+        last_shot: false,
+    };
+    let mut turret_fx = Vec::new();
+    for (who, gunner, effect) in [
+        ("gunner", 7u16, &gun.view_flash_effect),
+        ("watcher", 8, &gun.world_flash_effect),
+    ] {
+        // A weapon without the flash for that view plays nothing there (`WeaponFlash`).
+        let expected = u64::from(effect.is_some());
+        let mut fx = Effects::new(&lib.content, data.world.clone());
+        fx.set_view(7, None);
+        fx.event(&turret_shot(gunner), &weapon);
+        let flashed = fx.played.get("muzzle_flash").copied().unwrap_or(0);
+        let ejected = fx.played.get("shell_eject").copied().unwrap_or(0);
+        let (quads, _, _, _) = run_for(&mut fx, world, 0, 1, eye, 0.0);
+        turret_fx.push(json!({"who": who, "flashes": flashed, "shells": ejected, "quads": quads}));
+        if flashed != expected || ejected != 0 || (expected == 1 && quads == 0) {
+            bad.push(format!(
+                "a turret round seen by the {who} should play {expected} flash and no shell at the muzzle, played {flashed} and {ejected}, drew {quads} sprites"
+            ));
+        }
+    }
+    report.insert("turret_shot".into(), turret_fx.into());
+    let src = [eye.x, eye.y, at[2]];
+    let mut shakes = sim::shake::CameraShakes::default();
+    let near = [src[0] + 50.0, src[1], src[2]];
+    crate::events::start_shakes(&mut shakes, 1000, near, &[turret_shot(8)]);
+    let near_strength = shakes.strength(1050, near);
+    let mut shakes = sim::shake::CameraShakes::default();
+    let far = [src[0] + 150.0, src[1], src[2]];
+    crate::events::start_shakes(&mut shakes, 1000, far, &[turret_shot(8)]);
+    let far_strength = shakes.strength(1050, far);
+    report.insert("turret_shake_near".into(), near_strength.into());
+    if near_strength <= 0.0 || far_strength != 0.0 {
+        bad.push(format!(
+            "a turret round should shake the view within 100 units only: near {near_strength}, far {far_strength}"
+        ));
     }
 
     // Stock effects of each kind of element draw what they are made of.
@@ -289,7 +341,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 angles: aim,
                 weapon: 0,
                 shooter: 7,
-                vehicle: false,
+                from: Shooter::Player,
                 last_shot: false,
             },
             &weapon,
@@ -627,7 +679,7 @@ fn destructible(
                     angles,
                     weapon: 1,
                     shooter: 0,
-                    vehicle: false,
+                    from: Shooter::Player,
                     last_shot: false,
                 },
                 &|_| Some(gun.clone()),

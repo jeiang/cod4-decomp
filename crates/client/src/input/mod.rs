@@ -767,6 +767,11 @@ impl Input {
         self.dirty = false;
     }
 
+    /// The install's files, when there is an install.
+    pub fn vfs(&self) -> Option<&Vfs> {
+        self.vfs.as_ref()
+    }
+
     /// Cvar value as text.
     pub fn cvar(&self, name: &str) -> Option<&str> {
         self.cvars.get(name)
@@ -1080,8 +1085,33 @@ impl Input {
                 .position(|v| same(v, &current))
                 .map_or(*first, |i| values[i + 1]),
         };
-        self.cvars.set(name, next, false);
+        self.set_from_command(name, next, false);
+    }
+
+    /// A `set`, `toggle` or bare-name write from a console, bind, menu or config (`Dvar_SetCommand`, an external
+    /// source): a read-only cvar is refused with the stock line. `true` when the value was set.
+    fn set_from_command(&mut self, name: &str, value: &str, archive: bool) -> bool {
+        if cvar::Cvars::read_only(name) {
+            self.say(format!("{} is read only.", name.to_ascii_lowercase()));
+            return false;
+        }
+        self.cvars.set(name, value, archive);
         self.dirty = true;
+        true
+    }
+
+    /// `Dvar_Command`: a known cvar's name alone says its value, and with words after it sets it. `false` when
+    /// there is no such cvar (the word is a command for someone else, or unknown).
+    fn dvar_command(&mut self, name: &str, args: &[&str]) -> bool {
+        let Some(value) = self.cvars.get(name).map(str::to_owned) else {
+            return false;
+        };
+        if args.is_empty() {
+            self.say(format!("\"{name}\" is \"{value}\""));
+        } else {
+            self.set_from_command(name, &args.join(" "), false);
+        }
+        true
     }
 
     /// `dvarlist [match]`: a line per cvar (`A` marks an archived one) and the count.
@@ -1129,8 +1159,7 @@ impl Input {
                 self.dirty = true;
             }
             ("set" | "seta" | "sets" | "setu", [n, v, ..]) => {
-                self.cvars.set(n, v, name == "seta");
-                self.dirty = true;
+                self.set_from_command(n, v, name == "seta");
             }
             ("toggle", [n, values @ ..]) => self.toggle(n, values),
             ("toggle", []) => self.say("USAGE: toggle <variable> <optional value sequence>"),
@@ -1157,11 +1186,13 @@ impl Input {
             ("-actionslot", _) => {}
             _ if name.starts_with('+') && sink => self.console_hold(&name[1..], true),
             _ if name.starts_with('-') && sink => self.console_hold(&name[1..], false),
+            // A bare cvar name shows or sets it (`Dvar_Command`, which `Cmd_ExecuteSingleCommand` tries after the
+            // commands); the command the input layer does not run goes to the pending list, whose consumers (the
+            // app, the shell, the net play) carry it out or, for a word nothing knows, forward it to the server
+            // or say `Unknown command` (`CL_ForwardCommandToServer`).
             _ if sink => {
-                // The last stop of a bind or a menu's command that nothing here runs: the consumers of the pending
-                // list know only the commands `console::is_command` lists.
-                if !crate::console::is_command(&name) {
-                    crate::console::note_unknown(&name);
+                if !crate::console::is_command(&name) && self.dvar_command(&name, &args) {
+                    return;
                 }
                 self.pending.push(config::join(toks))
             }
@@ -2328,20 +2359,19 @@ mod tests {
         assert!(events.iter().any(|e| e.field("command") == Some("set")));
     }
 
+    /// A word the input layer does not run pends for the app, which forwards it or says it is unknown; a cvar's
+    /// name alone shows it and with a value sets it (`Dvar_Command`), without pending.
     #[test]
-    fn an_unknown_bound_or_menu_command_warns_by_name() {
+    fn an_unknown_bound_or_menu_command_pends_and_a_cvar_name_is_a_dvar_command() {
         let mut i = Input::detached();
-        let (_, events) = logging::capture(|| {
-            i.exec_line("no_such_bound_cmd_x with args");
-            i.exec_line("weapnext");
-        });
-        let w: Vec<_> = events
-            .iter()
-            .filter(|e| e.level == tracing::Level::WARN)
-            .collect();
-        assert_eq!(w.len(), 1, "{w:?}");
-        assert_eq!(w[0].field("command"), Some("no_such_bound_cmd_x"));
-        assert!(!format!("{w:?}").contains("with args"));
+        i.exec_line("no_such_bound_cmd_x with args");
+        i.exec_line("set zz_name 4; zz_name; zz_name 7 8");
+        assert_eq!(
+            frame(&mut i).pending_commands,
+            ["no_such_bound_cmd_x with args"]
+        );
+        assert_eq!(i.take_messages(), ["\"zz_name\" is \"4\""]);
+        assert_eq!(i.cvar("zz_name"), Some("7 8"));
     }
 
     #[test]
@@ -2384,14 +2414,15 @@ mod tests {
             return;
         };
         i.exec_text(&profile, None, false, 0);
-        // The stock profile binds Pause to `toggle cl_paused` and the vote keys to the server's commands.
+        // The stock profile binds Pause to `toggle cl_paused` and the vote keys to the server's commands. Multiplayer
+        // registers `cl_paused` read only (`CG_RegisterDvars`): the key says so and the value stays.
         if i.bound("pause") == Some("toggle cl_paused") {
-            i.exec_line("set cl_paused 0"); // the engine registers it; this store only knows what is set
-            i.key("pause", true);
-            assert_eq!(i.cvar("cl_paused"), Some("1"));
-            i.key("pause", false);
+            frame(&mut i);
+            i.take_messages();
             i.key("pause", true);
             assert_eq!(i.cvar("cl_paused"), Some("0"));
+            assert_eq!(i.take_messages(), ["cl_paused is read only."]);
+            assert!(frame(&mut i).pending_commands.is_empty());
         }
         if i.bound("f1") == Some("vote yes") {
             frame(&mut i); // what the typed `exec` handed on (`con_showchannel`, ...) is not under test

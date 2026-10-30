@@ -27,6 +27,7 @@ mod weapons;
 pub use args::{Args, format_float};
 
 pub use hud::free_client_elems as free_client_hud_elems;
+pub use player::PERK_NAMES;
 
 pub type FuncFn = fn(&mut Game, &mut Vm, Args) -> Result<Value, String>;
 pub type MethFn = fn(&mut Game, &mut Vm, EntRef, Args) -> Result<Value, String>;

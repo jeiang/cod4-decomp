@@ -714,7 +714,9 @@ fn make_dvar_server_info(g: &mut Game, _: &mut Vm, a: Args) -> R {
     } else if !g.cvars.exists(n) {
         g.cvars.set(n, "");
     }
-    g.cvars.add_flags(n, cvar::SERVERINFO);
+    // `GScr_MakeDvarServerInfo`: `Dvar_AddFlags(dvar, DVAR_CODINFO)`, so the clients get the pair in the CODINFO
+    // configstrings (`CG_ParseCodInfo` sets it on their side).
+    g.cvars.add_flags(n, cvar::CODINFO);
     Ok(Value::Undefined)
 }
 

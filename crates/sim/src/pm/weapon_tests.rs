@@ -363,6 +363,57 @@ fn the_reload_button_tops_up_a_partial_magazine() {
     assert_eq!(r.state(), ws::READY, "a full magazine does not reload");
 }
 
+/// `PM_Weapon_WeaponTimeAdjust`: with `specialty_fastreload` the reload clock runs at `1 / perk_weapReloadMultiplier`
+/// (0.5: twice as fast), so a 2000 ms reload is done after 1000 ms of commands.
+#[test]
+fn sleight_of_hand_halves_the_reload() {
+    let mut r = Rig::new(vec![ak()]);
+    let a = r.hold("ak47_mp");
+    r.ps.perks |= crate::weapon::perk::FAST_RELOAD;
+    r.inv.set_clip(&r.table, a, 10);
+    r.run(button::RELOAD, 1);
+    assert_eq!((r.state(), r.ps.weapon_time), (ws::RELOADING, 2000));
+    r.run(0, 99);
+    assert_eq!((r.state(), r.clip(a)), (ws::RELOADING, 10));
+    r.run(0, 1);
+    assert_eq!((r.state(), r.clip(a), r.stock(a)), (ws::READY, 30, 40));
+}
+
+/// With `specialty_rof` the firing clock runs at `1 / perk_weapRateMultiplier` (0.75): each 10 ms command takes 13
+/// off a 100 ms fire time (`SnapFloatToInt(10 / 0.75)`), so the next round leaves on the eighth command after a
+/// shot instead of the tenth.
+#[test]
+fn double_tap_shortens_the_fire_time() {
+    let mut r = Rig::new(vec![ak()]);
+    r.hold("ak47_mp");
+    r.ps.perks |= crate::weapon::perk::RATE_OF_FIRE;
+    r.run(ATTACK, 1);
+    assert_eq!(r.shots(), 1);
+    r.run(ATTACK, 7);
+    assert_eq!(r.shots(), 1, "7 commands take 91 off the 100 ms fire time");
+    r.run(ATTACK, 1);
+    assert_eq!(r.shots(), 2, "the eighth runs the clock out");
+    r.run(ATTACK, 8);
+    assert_eq!(r.shots(), 3);
+}
+
+/// `BG_GetMaxSprintTime`: `specialty_longersprint` multiplies the sprint budget by `perk_sprintMultiplier` (2).
+#[test]
+fn extreme_conditioning_doubles_the_sprint_budget() {
+    let p = Params::default();
+    let plain = super::sprint::max_sprint_ms(&p, 1.0, 0);
+    assert_eq!(plain, (p.player_sprint_time * 1000.0) as i32);
+    assert_eq!(
+        super::sprint::max_sprint_ms(&p, 1.0, PERK_SPRINT),
+        (p.player_sprint_time * 1000.0 * p.perk_sprint_multiplier) as i32
+    );
+    assert_eq!(
+        super::sprint::max_sprint_ms(&p, 100.0, PERK_SPRINT),
+        0x3FFF,
+        "capped"
+    );
+}
+
 #[test]
 fn no_partial_reload_refuses_to_top_up() {
     let mut w = ak();

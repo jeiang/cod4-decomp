@@ -3,6 +3,7 @@
 pub mod asset_load;
 pub mod audio;
 pub mod client_brush;
+pub mod client_commands;
 pub mod client_custom_class;
 pub mod client_dedicated;
 pub mod client_equipment;
@@ -36,6 +37,7 @@ pub mod net_mantle;
 pub mod net_master;
 pub mod net_match;
 pub mod net_objective;
+pub mod net_perks;
 pub mod net_rcon;
 pub mod net_triggers;
 pub mod net_turret;

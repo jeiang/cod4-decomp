@@ -867,6 +867,27 @@ impl NetPlay {
         self.hearing.tick(now, |p| sound.close_voice_pipe(p));
     }
 
+    /// Connected with a server's match under way and no demo playing (`CA_ACTIVE`): what `cmd` and an unknown
+    /// word are forwarded during (`CL_ForwardToServer_f`, `CL_ForwardCommandToServer`).
+    pub fn in_match(&self) -> bool {
+        self.net.connected() && !self.net.playing_demo() && self.net.latest().is_some()
+    }
+
+    /// The last snapshot shows the player in the game, not a spectator (`POF_PLAYER`): what `mp_QuickMessage` needs.
+    pub fn is_player(&self) -> bool {
+        self.net
+            .latest()
+            .is_some_and(|s| s.ps.other_flags & sim::pm::other::PLAYER != 0)
+    }
+
+    /// `IN_CenterView`: the view levels (the pitch the commands send is the server's `delta_angles` alone), once
+    /// connected.
+    pub fn center_view(&mut self) {
+        if self.net.latest().is_some() {
+            self.angles[0] = 0.0;
+        }
+    }
+
     /// Writes what this connection receives to `path` (`record`).
     pub fn start_record(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.net.start_record(path)
@@ -1500,17 +1521,8 @@ impl NetPlay {
         self.effects.set_marks(self.switches.marks);
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
+        crate::events::start_shakes(&mut self.shakes, st, eye.to_array(), events);
         for e in events {
-            if let ClientEvent::Earthquake { origin, quake } = e {
-                self.shakes.start(
-                    st,
-                    eye.to_array(),
-                    quake.scale,
-                    quake.duration_ms,
-                    *origin,
-                    quake.radius,
-                );
-            }
             if let ClientEvent::PlayerDeath { client, push, .. } = e {
                 self.pushes.insert(*client, *push);
             }

@@ -287,9 +287,11 @@ const OWN_COMMANDS: &[&str] = &[
     "actionslot",
     "bind",
     "bots",
+    "centerview",
     "chatmodepublic",
     "chatmodeteam",
     "cinematic",
+    "cmd",
     "connect",
     "devmap",
     "demo",
@@ -303,6 +305,7 @@ const OWN_COMMANDS: &[&str] = &[
     "loc_warnings",
     "logo",
     "map",
+    "mp_quickmessage",
     "name",
     "playdemo",
     "quit",
@@ -317,6 +320,7 @@ const OWN_COMMANDS: &[&str] = &[
     "set",
     "setdvartotime",
     "setfromdvar",
+    "setfromlocstring",
     "sets",
     "setu",
     "setprofile",
@@ -357,8 +361,51 @@ pub fn note_unknown(name: &str) {
 
 /// Whether `name` is a command the app answers itself in `console_action` (not the server's, not the input layer's).
 pub fn is_own_verb(name: &str) -> bool {
-    const OWN: &[&str] = &["rcon", "record", "stoprecord", "name", "bots"];
+    const OWN: &[&str] = &[
+        "rcon",
+        "record",
+        "stoprecord",
+        "name",
+        "bots",
+        "cmd",
+        "centerview",
+        "mp_quickmessage",
+    ];
     OWN.iter().any(|v| name.eq_ignore_ascii_case(v))
+}
+
+/// Whether `name` is a command the shell's command loop carries out (`HostCx::run_buffer`), which a bind or a
+/// config line hands over to it through the input layer's `pending_commands`.
+pub fn is_shell_verb(name: &str) -> bool {
+    const SHELL: &[&str] = &[
+        "cinematic",
+        "connect",
+        "demo",
+        "devmap",
+        "disconnect",
+        "loc_warnings",
+        "logo",
+        "map",
+        "playdemo",
+        "r_applypicmip",
+        "reconnect",
+        "selectstringtableentryindvar",
+        "setdvartotime",
+        "setfromdvar",
+        "setfromlocstring",
+        "setprofile",
+        "snd_restart",
+        "statclearbitmask",
+        "statclearperknew",
+        "statgetindvar",
+        "statset",
+        "statsetusingtable",
+        "unskippablecinematic",
+        "updatedvarsfromprofile",
+        "vid_restart",
+        "writeconfig",
+    ];
+    SHELL.iter().any(|v| name.eq_ignore_ascii_case(v))
 }
 
 /// Whether the shell hands `name` to the app as a console action (`console_action`) instead of the input layer:

@@ -1180,6 +1180,11 @@ impl Ui {
             .any(|o| self.menus[o].def.full_screen != 0 && self.menu_visible(host, o))
     }
 
+    /// The screen in pixels.
+    pub fn screen_size(&self) -> (f32, f32) {
+        self.place.size
+    }
+
     pub fn close_all(&mut self, host: &mut dyn Host) {
         for m in self.stack.clone().into_iter().rev() {
             self.close(host, m);
@@ -1431,7 +1436,8 @@ impl Ui {
     /// The item shows and takes the pointer: visible, and not switched off by its `enableDvar` rule.
     fn item_live(&mut self, host: &mut dyn Host, m: usize, i: usize) -> bool {
         let d = &self.menus[m].def.items[i];
-        (d.dvar_flags & 3 == 0 || self.enable_dvar_matches(host, d, 1))
+        // `Item_EnableShowViaDvar(item, CVAR_ENABLE)` answers for a `disableDvar` rule too.
+        (d.dvar_flags & 3 == 0 || self.enable_dvar_matches(host, d, 1 | 2))
             && self.item_visible(host, m, i)
     }
 

@@ -195,7 +195,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "net-turret",
-        description: "two real UDP clients on mp_convoy: one mounts a stock turret holding +activate, is held inside its arc, fires it and lets go; the other is shown the turret and the gunner on it",
+        description: "two real UDP clients on mp_convoy: one mounts a stock turret holding +activate, is held inside its arc, fires it and lets go; each round reaches both as the turret's own fire event naming the turret and the gunner; the other is shown the turret and the gunner on it",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
@@ -240,6 +240,14 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::net_killcam::run),
+    },
+    StageDef {
+        name: "net-perks",
+        description: "two real UDP clients upload profiles with custom classes and spawn with them: the perk bits, Frag x3, Special Grenades x3 and Bandolier counts, Juggernaut, Stopping Power and Sonic Boom damage, Last Stand's pistol, crawl, the health held at 1 by the overlay thread and ten second bleed-out, and Martyrdom's grenade",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_perks::run),
     },
     StageDef {
         name: "headless-bots-sd",
@@ -392,6 +400,14 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::client_hud::run),
+    },
+    StageDef {
+        name: "client-commands",
+        description: "the in-match commands a bind, menu or console line runs: the Pause key is refused as read only, centerview levels the view, record writes a demo, Call Vote > Restart Map and the quick message key reach the server, setFromLocString and cmd work from the console",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_commands::run),
     },
     StageDef {
         name: "client-ingame-menu",

@@ -83,6 +83,8 @@ pub mod ef {
 
 /// `playerState_t.otherFlags` bits a spectator's state carries.
 pub mod other {
+    /// In the game, not a spectator (`POF_PLAYER`): the quick message menu opens only for one.
+    pub const PLAYER: u8 = 1 << 2;
     /// Watching another player: the state shown is theirs and the spectator does not move.
     pub const FOLLOWING: u8 = 1 << 1;
     /// The spectator may step to another player (attack, ads).
