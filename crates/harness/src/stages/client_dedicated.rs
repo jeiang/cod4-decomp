@@ -7,9 +7,9 @@
 //! the player is gone: a clean disconnect frees the slot at once, a dropped connection would keep it until the
 //! timeout. Needs a display, the install, and `cod4e-server` next to the harness; skips cleanly without them.
 use super::client_flythrough::locate_client;
-use super::client_match::{Phases, column, hitches, num, spike_share};
+use super::client_match::{Counters, Phases, column, hitches, spike_share};
 use super::client_models::no_display;
-use super::client_session::profile_args;
+use super::client_session::{profile_args, render_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::fs::{self, File};
@@ -274,27 +274,30 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let net = &json["net"];
     let mut failures = Vec::new();
     let secs = SECS as f64;
-    let snaps = num(net, &["snapshots"]);
-    let (predicted, corrected) = (
-        num(net, &["predictions"]),
-        num(net, &["prediction_corrections"]),
+    // The counters the client always writes: one that is missing fails the stage instead of reading as 0 (#375).
+    let mut c = Counters::new("net", net);
+    let snaps = c.get(&["snapshots"]);
+    let (predicted, corrected) = (c.get(&["predictions"]), c.get(&["prediction_corrections"]));
+    let (moved, path, attacks, bytes_in) = (
+        c.get(&["moved"]),
+        c.get(&["path"]),
+        c.get(&["attack_cmds"]),
+        c.get(&["bytes_in"]),
     );
+    let players_seen = c.get(&["players_seen_max"]);
     if net["connected"] != true {
         failures.push("the client never connected".to_owned());
     }
     if net["spawned"] != true {
         failures.push("the server never gave the player a body".to_owned());
     }
-    if num(net, &["moved"]) < 100.0 && num(net, &["path"]) < 500.0 {
-        failures.push(format!(
-            "the player barely moved ({:.0} units walked)",
-            num(net, &["path"])
-        ));
+    if moved < 100.0 && path < 500.0 {
+        failures.push(format!("the player barely moved ({path:.0} units walked)"));
     }
-    if num(net, &["attack_cmds"]) < 1.0 {
+    if attacks < 1.0 {
         failures.push("the player never fired".into());
     }
-    if num(net, &["players_seen_max"]) < 1.0 {
+    if players_seen < 1.0 {
         failures.push(format!("none of the {BOTS} bots was ever seen"));
     }
     // The player is in the world for part of the run only (the load and the join come first).
@@ -306,6 +309,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "the server corrected {corrected} of {predicted} predictions"
         ));
     }
+    failures.extend(c.missing());
+    failures.extend(render_problem(&json));
     let cpu = fs::read_to_string(dir.join("frames.raw.csv"))
         .map(|csv| column(&csv, 0))
         .unwrap_or_default();
@@ -355,9 +360,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
     let m = &mut report.metrics;
     m.insert("client.snapshots".into(), snaps);
-    m.insert("client.bytes_in".into(), num(net, &["bytes_in"]));
-    m.insert("client.moved".into(), num(net, &["moved"]));
-    m.insert("client.attack_cmds".into(), num(net, &["attack_cmds"]));
+    m.insert("client.bytes_in".into(), bytes_in);
+    m.insert("client.moved".into(), moved);
+    m.insert("client.attack_cmds".into(), attacks);
     m.insert("client.predictions".into(), predicted);
     m.insert("client.prediction_corrections".into(), corrected);
     m.insert("server.port".into(), f64::from(port));

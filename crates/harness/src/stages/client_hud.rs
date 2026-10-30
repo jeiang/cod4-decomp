@@ -8,7 +8,7 @@
 //! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::{profile_args, steps_problem};
+use super::client_session::{profile_args, render_problem, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::fs::{self, File};
@@ -67,6 +67,9 @@ fn run_client(client: &Path, install: &Path, dir: &Path) -> Result<Value, String
 /// What is wrong with the HUD of a finished run, or `None`.
 pub(crate) fn verdict(report: &Value) -> Option<String> {
     if let Some(w) = steps_problem(report) {
+        return Some(w);
+    }
+    if let Some(w) = render_problem(report) {
         return Some(w);
     }
     let h = &report["hud_draw"];
@@ -223,7 +226,8 @@ mod tests {
                 "friends_in_sight_frames": 50, "crosshair_due_frames": 60,
                 "head_icon_materials": ["headiconyouinkillcam"], "chat": 1
             },
-            "net": {"view": {"death_view_frames": 40, "death_view_range_max": 120.0, "dof_frames": 900}}
+            "net": {"view": {"death_view_frames": 40, "death_view_range_max": 120.0, "dof_frames": 900}},
+            "render": {"material_failures": {}, "image_failures": []},
         })
     }
 

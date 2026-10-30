@@ -364,6 +364,8 @@ struct Counters {
     projectiles_max: usize,
     /// Missiles seen, one entry per entity and weapon: a weapon's count is how many projectiles of it appeared.
     missiles_seen: std::collections::BTreeSet<(u16, u16)>,
+    /// The missile entities the local player launched (`client` is the owner), by entity number.
+    own_missiles: std::collections::BTreeSet<u16>,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
     fx_quads_max: usize,
@@ -665,6 +667,12 @@ impl NetPlay {
                     .count()
             })
             .unwrap_or(0)
+    }
+
+    /// How many distinct missile entities the local player launched have been drawn so far (a grenade thrown, a
+    /// rocket fired): grows by one per own projectile that appeared, never for another player's.
+    pub fn missiles_appeared(&self) -> usize {
+        self.c.own_missiles.len()
     }
 
     /// Explosions received so far.
@@ -2317,6 +2325,13 @@ impl NetPlay {
         let mut looping = Vec::new();
         for e in flying {
             self.c.missiles_seen.insert((e.number, e.weapon));
+            if self
+                .net
+                .latest()
+                .is_some_and(|s| e.client == s.ps.client_num)
+            {
+                self.c.own_missiles.insert(e.number);
+            }
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
                 logging::dedup!(
                     WARN,
