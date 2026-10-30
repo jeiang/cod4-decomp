@@ -146,6 +146,18 @@ impl Vfs {
         &self.nodes
     }
 
+    /// The languages with localized files in the search path (`g_languages[].bPresent`), English counted when any
+    /// node is unlocalized.
+    pub fn languages_present(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = self.nodes.iter().filter_map(|n| n.language).collect();
+        if self.nodes.iter().any(|n| n.language.is_none()) {
+            v.push(0);
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
     pub fn language(&self) -> usize {
         self.language
     }

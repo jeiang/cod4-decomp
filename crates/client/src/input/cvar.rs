@@ -51,7 +51,13 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("ragdoll_rotvel_scale", "1", false),
     ("phys_bulletupbias", "0.5", false),
     ("phys_bulletspinscale", "3", true),
+    // `cl_paused` is the engine's (`DVAR_ROM` in the multiplayer `CG_RegisterDvars`): multiplayer has no pause, and
+    // the stock Pause key's `toggle cl_paused` is refused as read only.
+    ("cl_paused", "0", false),
 ];
+
+/// The cvars a console, bind or menu may not set (`DVAR_ROM`).
+const READ_ONLY: &[&str] = &["cl_paused"];
 
 struct Cvar {
     value: String,
@@ -97,6 +103,11 @@ impl Cvars {
 
     pub fn bool(&self, name: &str) -> bool {
         self.f32(name) != 0.0
+    }
+
+    /// Whether a command (`set`, `toggle`, the name alone) may not write `name` (`DVAR_ROM`).
+    pub fn read_only(name: &str) -> bool {
+        READ_ONLY.iter().any(|n| n.eq_ignore_ascii_case(name))
     }
 
     /// Set a value, creating the cvar if needed. `archive` only ever turns the flag on (`seta`).

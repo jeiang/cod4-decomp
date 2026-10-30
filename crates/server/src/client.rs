@@ -1107,7 +1107,8 @@ impl Game {
             }
             f
         } else {
-            0
+            // `ClientThink_real` marks a playing client; `SpectatorThink` clears it.
+            pm::other::PLAYER
         };
         if linked {
             c.ps.pm_type = match c.ps.pm_type {

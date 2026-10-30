@@ -1281,9 +1281,31 @@ impl ClientUiState {
                 self.push(UiEvent::Map { name });
             }
             ServerCmd::ConfigStrings(v) => {
+                let mut codinfo: Vec<u16> = Vec::new();
                 for (i, s) in v {
                     if let Some(slot) = self.cs.get_mut(usize::from(i)) {
                         *slot = s;
+                    }
+                    let k = if (cs::CODINFO..cs::CODINFO + cs::CODINFO_COUNT).contains(&i) {
+                        i - cs::CODINFO
+                    } else if (cs::CODINFO_VALUE..cs::CODINFO_VALUE + cs::CODINFO_COUNT)
+                        .contains(&i)
+                    {
+                        i - cs::CODINFO_VALUE
+                    } else {
+                        continue;
+                    };
+                    if !codinfo.contains(&k) {
+                        codinfo.push(k);
+                    }
+                }
+                // `CG_ParseCodInfo`: each `CODINFO` pair is a dvar the server set on this client.
+                for k in codinfo {
+                    let name = self.config(cs::CODINFO + k).to_owned();
+                    if !name.is_empty() {
+                        let value = self.config(cs::CODINFO_VALUE + k).to_owned();
+                        self.dvars.insert(name.to_ascii_lowercase(), value.clone());
+                        self.push(UiEvent::SetDvar { name, value });
                     }
                 }
             }
