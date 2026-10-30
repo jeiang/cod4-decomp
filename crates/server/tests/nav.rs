@@ -164,6 +164,9 @@ fn every_stock_map_generates_and_spawns_connect() {
     let mut times = Vec::new();
     for map in maps(&install) {
         let mut content = Content::default();
+        content
+            .load_boot(&install)
+            .expect("boot zones and defaults");
         content.load_map(&install, &map).expect("load map");
         let clip = content.clipmap().expect("clipmap").clone();
         let spawns = spawn_points(&clip.map_ents.as_ref().expect("map ents").entity_string);
@@ -304,6 +307,9 @@ fn generation_is_deterministic() {
         return;
     };
     let mut content = Content::default();
+    content
+        .load_boot(&install)
+        .expect("boot zones and defaults");
     content.load_map(&install, "mp_crash").expect("load map");
     let clip = content.clipmap().unwrap().clone();
     let seeds: Vec<Vec3> = spawn_points(&clip.map_ents.as_ref().unwrap().entity_string)

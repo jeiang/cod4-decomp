@@ -59,7 +59,7 @@ pub struct Range<T> {
     pub amplitude: T,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FxEffectDef {
     pub name: Name,
     pub flags: i32,
@@ -397,7 +397,7 @@ pub(super) fn load_at(
     slot: Option<Addr>,
     p: Ptr,
 ) -> Result<Option<Arc<FxEffectDef>>> {
-    s.temp_asset_at(slot, p, 4, EFFECT_SIZE, effect)
+    s.asset_at(slot, p, 4, EFFECT_SIZE, effect)
 }
 
 /// Impact effects of one surface type: 29 non-flesh and 4 flesh surfaces.
