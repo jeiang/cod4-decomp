@@ -365,11 +365,13 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         c.capture("feed").map(|_| ())
     })?;
     c.step("killcam", |c| {
+        // A replay can start with the victim behind a wall. Keep playing until a killcam actually offers the body
+        // to the "you" marker rather than ending the run at the first replay regardless of what it showed.
         w.drive_until(
             c,
-            json!({"hud.live.killcam": true}),
+            json!({"hud.live.killcam": true, "hud.stats.killcam_you_frames": {"gt": 0}}),
             secs(300),
-            "no bot killed the player, so there was no killcam",
+            "no killcam showed the viewer's body for the you marker",
         )?;
         c.capture("killcam_first")?;
         c.pause(secs(1))?;
