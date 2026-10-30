@@ -3578,78 +3578,77 @@ fn script_step(st: &mut State) -> bool {
         "cgis" => {
             let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
             let sh = st.shell.as_ref();
-            let have = match name {
-                "gun" => st.net.as_ref().map(|n| u8::from(n.gun_drawn()).to_string()),
-                "hud2d" => sh.map(|s| u8::from(s.st.ownerdraws_painted > 0).to_string()),
-                "fps" => sh.map(|s| u8::from(s.st.fps_drawn.is_some()).to_string()),
-                "fpstext" => sh.map(|s| s.st.fps_drawn.clone().unwrap_or_default()),
-                "fullbright" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| u8::from(r.settings.fullbright).to_string()),
-                "shock" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| u8::from(r.post.shell_shock.is_some()).to_string()),
-                // What the remainder dvars came to: the centre print time in ms, the helicopter kill cam's field of
-                // view, the film brightness after `r_brightness`, and whether the console keeps lines.
-                "centertime" => sh.map(|s| s.st.feed.center_ms.to_string()),
-                "heli_camera" => st.net.as_ref().map(|n| n.killcam_sample(true)),
-                "air_camera" => st.net.as_ref().map(|n| n.killcam_sample(false)),
-                "brightness" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| format!("{:.2}", r.post.film.brightness)),
-                "contrast" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| format!("{:.2}", r.post.film.contrast)),
-                "desaturation" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| format!("{:.2}", r.post.film.desaturation)),
-                "film_sample" => st.film_base.map(|mut base| {
-                    base.desaturation = 0.5;
-                    base.contrast = 1.0;
-                    base.brightness = 0.0;
-                    let film = crate::gfx::film(&st.input.cvars, base);
-                    format!(
-                        "{:.2} {:.2} {:.2}",
-                        film.brightness, film.contrast, film.desaturation
-                    )
-                }),
-                "crosshair_alpha" => sh
-                    .and_then(|s| s.st.live.reticle.as_ref())
-                    .map(|r| format!("{:.2}", crate::crosshair::layout(r).0)),
-                "chat_count" => sh.map(|s| s.st.hud_stats.chat.to_string()),
-                "window_position" => st
-                    .window
-                    .outer_position()
-                    .ok()
-                    .map(|p| format!("{} {}", p.x, p.y)),
-                "noprint" => sh.map(|s| u8::from(s.st.no_print).to_string()),
-                "subtitle" => sh.map(|s| {
-                    u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
-                }),
-                _ => name.strip_prefix("fx:").and_then(|kind| {
-                    st.net.as_ref().map(|n| {
-                        let played = n.fx_played(kind);
-                        match want.strip_prefix('+') {
-                            Some(n_str) => {
-                                let target = n_str.parse::<u64>().unwrap_or(u64::MAX);
-                                let at = st.fx_mark.get(kind).copied().unwrap_or(0);
-                                let delta = played.saturating_sub(at);
-                                if delta == target {
-                                    "ok".to_owned()
-                                } else {
-                                    format!("+{delta}")
+            let have =
+                match name {
+                    "gun" => st.net.as_ref().map(|n| u8::from(n.gun_drawn()).to_string()),
+                    "hud2d" => sh.map(|s| u8::from(s.st.ownerdraws_painted > 0).to_string()),
+                    "fps" => sh.map(|s| u8::from(s.st.fps_drawn.is_some()).to_string()),
+                    "fpstext" => sh.map(|s| s.st.fps_drawn.clone().unwrap_or_default()),
+                    "fullbright" => st
+                        .renderer
+                        .as_ref()
+                        .map(|r| u8::from(r.settings.fullbright).to_string()),
+                    "shock" => st
+                        .renderer
+                        .as_ref()
+                        .map(|r| u8::from(r.post.shell_shock.is_some()).to_string()),
+                    // Console-driven checks of the centre print duration, the killcam builders and film output.
+                    "centertime" => sh.map(|s| s.st.feed.center_ms.to_string()),
+                    "heli_camera" => st.net.as_ref().map(|n| n.killcam_sample(true)),
+                    "air_camera" => st.net.as_ref().map(|n| n.killcam_sample(false)),
+                    "brightness" => st.renderer.as_ref().zip(st.film_base).map(|(r, base)| {
+                        format!("{:.2}", r.post.film.brightness - base.brightness)
+                    }),
+                    "film_sample" => st.film_base.map(|mut base| {
+                        base.desaturation = 0.5;
+                        base.contrast = 1.0;
+                        base.brightness = 0.0;
+                        let film = crate::gfx::film(&st.input.cvars, base);
+                        format!(
+                            "{:.2} {:.2} {:.2}",
+                            film.brightness, film.contrast, film.desaturation
+                        )
+                    }),
+                    "crosshair_alpha" => sh
+                        .and_then(|s| s.st.live.reticle.as_ref())
+                        .map(|r| format!("{:.2}", crate::crosshair::layout(r).0)),
+                    "window_position" => {
+                        // Wayland deliberately offers no global position; there assert the request that reaches
+                        // display::apply. Platforms exposing outer_position must report the actual placement.
+                        let p = st
+                            .window
+                            .outer_position()
+                            .ok()
+                            .map(|p| (p.x, p.y))
+                            .or_else(|| {
+                                Gfx::from_cvars(&st.input.cvars)
+                                    .request(&display::Request::default())
+                                    .position
+                            });
+                        p.map(|(x, y)| format!("{x} {y}"))
+                    }
+                    "subtitle" => sh.map(|s| {
+                        u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
+                    }),
+                    _ => name.strip_prefix("fx:").and_then(|kind| {
+                        st.net.as_ref().map(|n| {
+                            let played = n.fx_played(kind);
+                            match want.strip_prefix('+') {
+                                Some(n_str) => {
+                                    let target = n_str.parse::<u64>().unwrap_or(u64::MAX);
+                                    let at = st.fx_mark.get(kind).copied().unwrap_or(0);
+                                    let delta = played.saturating_sub(at);
+                                    if delta == target {
+                                        "ok".to_owned()
+                                    } else {
+                                        format!("+{delta}")
+                                    }
                                 }
+                                None => played.to_string(),
                             }
-                            None => played.to_string(),
-                        }
-                    })
-                }),
-            };
+                        })
+                    }),
+                };
             match have {
                 Some(h) => done(
                     if want.starts_with('+') {

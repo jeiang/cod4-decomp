@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (GPL-3.0, KisakCOD contributors): gfx_d3d/r_scene.cpp (`R_SetFilmInfo`).
 //! The graphics settings of the options menus (`r_*`, `sm_enable`), read as the renderer and the window take them.
 //!
 //! The menus only write dvars; [`Gfx::from_cvars`] turns them into the video request, the present mode, the aspect
