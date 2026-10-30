@@ -54,7 +54,7 @@ const POSES: &[Pose] = &[
         map: "mp_backlot",
         fly_at: "120",
         void: &[(-0.62, -0.73), (-0.81, -0.89)],
-        drawn: (0.5, 0.0),
+        drawn: (0.6, 0.3),
     },
 ];
 

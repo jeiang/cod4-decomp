@@ -2826,12 +2826,9 @@ impl Renderer {
                 }
             }
         }
-        // TEMP (#356)
-        let no_smodels = std::env::var_os("COD4E_NO_SMODELS").is_some();
-        let no_surfs = std::env::var_os("COD4E_NO_SURFS").is_some();
         let items = Items {
-            surfaces: if no_surfs { &[] } else { &vis.surfaces },
-            smodels: if no_smodels { &[] } else { &vis.smodels },
+            surfaces: &vis.surfaces,
+            smodels: &vis.smodels,
         };
         let samples = self.samples(format);
         self.ensure_msaa(size, format, samples);
@@ -3699,126 +3696,6 @@ fn is_sky(m: &Material) -> bool {
         .as_ref()
         .and_then(|t| t.name.as_deref())
         .is_some_and(|n| n.trim_start_matches(',').contains("sky"))
-}
-
-impl Renderer {
-    /// TEMP (#356): every world surface under the pixel `(px, py)` of a `size` frame, nearest first.
-    pub fn probe_pixel(&self, view: &View, size: (u32, u32), px: u32, py: u32) -> Vec<String> {
-        let aspect = size.0 as f32 / size.1.max(1) as f32;
-        let (v, _) = view.matrices(aspect);
-        let w = 1.0 / (view.fov_x * 0.5).tan();
-        let h = w * aspect;
-        let nx = 2.0 * (px as f32 + 0.5) / size.0 as f32 - 1.0;
-        let ny = 1.0 - 2.0 * (py as f32 + 0.5) / size.1 as f32;
-        let cam = Vec3::new(nx / w, ny / h, 1.0);
-        let dir = v.transpose().transform_vector3(cam).normalize();
-        let world = &self.scene.world;
-        let pos = |i: usize| -> Vec3 {
-            let b = &world.vertices[i * 44..i * 44 + 12];
-            Vec3::new(
-                f32::from_le_bytes(b[0..4].try_into().unwrap()),
-                f32::from_le_bytes(b[4..8].try_into().unwrap()),
-                f32::from_le_bytes(b[8..12].try_into().unwrap()),
-            )
-        };
-        let mut hits = Vec::new();
-        for (si, s) in world.dpvs.surfaces.iter().enumerate() {
-            for t in 0..usize::from(s.tri_count) {
-                let i0 = s.base_index as usize + t * 3;
-                let Some(idx) = world.indices.get(i0..i0 + 3) else {
-                    break;
-                };
-                let p: Vec<Vec3> = idx
-                    .iter()
-                    .map(|&i| pos(s.first_vertex as usize + usize::from(i)))
-                    .collect();
-                let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
-                let pv = dir.cross(e2);
-                let det = e1.dot(pv);
-                if det.abs() < 1e-6 {
-                    continue;
-                }
-                let inv = 1.0 / det;
-                let tv = view.origin - p[0];
-                let u = tv.dot(pv) * inv;
-                if !(0.0..=1.0).contains(&u) {
-                    continue;
-                }
-                let qv = tv.cross(e1);
-                let vv = dir.dot(qv) * inv;
-                if vv < 0.0 || u + vv > 1.0 {
-                    continue;
-                }
-                let dist = e2.dot(qv) * inv;
-                if dist <= 0.0 {
-                    continue;
-                }
-                let vb =
-                    &world.vertices[(s.first_vertex as usize + usize::from(idx[0])) * 44..][..44];
-                let color = &vb[16..20];
-                let uv = [
-                    f32::from_le_bytes(vb[20..24].try_into().unwrap()),
-                    f32::from_le_bytes(vb[24..28].try_into().unwrap()),
-                    f32::from_le_bytes(vb[28..32].try_into().unwrap()),
-                    f32::from_le_bytes(vb[32..36].try_into().unwrap()),
-                ];
-                let mat = s.material.as_ref();
-                let n = e1.cross(e2).normalize();
-                hits.push((
-                    dist,
-                    format!(
-                        "si={si} dist={dist:.1} front={} tri={t}/{} mat={:?} techset={:?} sort={} sb={:?} gflags={:#x} sflags={:#x} lm={} probe={} light={} color={:?} uv={:?} textures={:?}",
-                        n.dot(dir) < 0.0,
-                        s.tri_count,
-                        mat.and_then(|m| m.name.as_deref()),
-                        mat.and_then(|m| m.technique_set.as_ref()).and_then(|t| t.name.as_deref()),
-                        mat.map_or(0, |m| m.sort_key),
-                        mat.and_then(|m| m.state_bits.first().copied()).map(|b| [format!("{:#x}", b[0]), format!("{:#x}", b[1])]),
-                        mat.map_or(0, |m| m.game_flags),
-                        s.flags,
-                        s.lightmap_index,
-                        s.reflection_probe_index,
-                        s.primary_light_index,
-                        color,
-                        uv,
-                        mat.map(|m| m.textures.iter().map(|t| (t.semantic, match &t.source { assets::zone::gfx::TextureSource::Image(Some(i)) => i.name.clone(), _ => None })).collect::<Vec<_>>()),
-                    ),
-                ));
-            }
-        }
-        // Static models: ray against the instance bounds (slab test).
-        for (mi, inst) in world.dpvs.smodel_insts.iter().enumerate() {
-            let (mins, maxs) = (Vec3::from(inst.mins), Vec3::from(inst.maxs));
-            let inv = dir.recip();
-            let t0 = (mins - view.origin) * inv;
-            let t1 = (maxs - view.origin) * inv;
-            let tmin = t0.min(t1).max_element().max(0.0);
-            let tmax = t0.max(t1).min_element();
-            if tmin > tmax {
-                continue;
-            }
-            let Some(d) = world.dpvs.smodel_draw_insts.get(mi) else {
-                continue;
-            };
-            let model = d.model.as_ref();
-            hits.push((
-                tmin,
-                format!(
-                    "smodel mi={mi} enter={tmin:.1} exit={tmax:.1} model={:?} origin={:?} scale={} cull={} flags={:#x} light={} lods={} mats={:?}",
-                    model.and_then(|m| m.name.as_deref()),
-                    d.origin,
-                    d.scale,
-                    d.cull_dist,
-                    d.flags,
-                    d.primary_light_index,
-                    model.map_or(0, |m| m.num_lods),
-                    model.map(|m| m.materials.iter().map(|m| m.as_ref().and_then(|m| m.name.clone())).collect::<Vec<_>>()),
-                ),
-            ));
-        }
-        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
-        hits.into_iter().map(|h| h.1).collect()
-    }
 }
 
 /// The techniques of a dynamic light's pass.
