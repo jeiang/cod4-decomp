@@ -2974,19 +2974,34 @@ mod tests {
         assert!(ui.unknown.is_empty(), "unimplemented: {:?}", ui.unknown);
         // Nor does any `exec` of theirs end as a word nobody runs: the app would forward it to the server as
         // unknown (`CL_ForwardCommandToServer`), and the input layer's pending list holds only its own commands.
-        let forwarded: Vec<&String> =
+        // Two words are the console's (Xbox) commands, which the stock PC build does not register either, so it
+        // forwards them or says `Unknown command` just the same: `updategamerprofile` (`CL_UpdateGamerProfile`,
+        // `cl_main_xenon`) and `uploadstats` (`LiveStorage_UploadStatsCmd`).
+        const STOCK_UNKNOWN: [&str; 2] = ["updategamerprofile", "uploadstats"];
+        let mut forwarded: Vec<&str> =
             h.st.actions
                 .iter()
                 .filter_map(|a| match a {
-                    Action::Console(l) => Some(l),
+                    Action::Console(l) => Some(l.split_whitespace().next().unwrap_or("")),
                     _ => None,
                 })
-                .filter(|l| {
-                    let w = l.split_whitespace().next().unwrap_or("");
-                    !crate::console::is_app_verb(w) && !crate::console::is_command(w)
-                })
+                .filter(|w| !crate::console::is_app_verb(w) && !crate::console::is_command(w))
                 .collect();
-        assert!(forwarded.is_empty(), "exec of unknown words: {forwarded:?}");
+        forwarded.sort_unstable();
+        forwarded.dedup();
+        let unexpected: Vec<&str> = forwarded
+            .iter()
+            .copied()
+            .filter(|w| !STOCK_UNKNOWN.contains(w))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "exec of unknown words: {unexpected:?}"
+        );
+        assert!(
+            forwarded.contains(&"updategamerprofile"),
+            "the menus' updategamerprofile no longer reaches the forward path: {forwarded:?}"
+        );
         let pending: Vec<String> = h
             .input
             .frame(0.016)
