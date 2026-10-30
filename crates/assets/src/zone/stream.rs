@@ -537,7 +537,20 @@ impl<'a> Stream<'a> {
         size: u32,
         f: impl FnOnce(&mut Self, &[u8]) -> Result<T>,
     ) -> Result<Option<Arc<T>>> {
-        self.temp_ptr_link(slot, p, align, size, true, f, Self::link)
+        // A kept/linked material can first appear inside a top-level asset the consumer drops (for example a
+        // weapon or effect in the renderer's boot-zone decode). Its definition still serves later zones, so keep
+        // its own presentation payload instead of registering the parent's presentation-less copy in the Db.
+        let previous = self.keep_presentation;
+        if self
+            .linker
+            .as_ref()
+            .is_some_and(|l| l.filter.link(T::TYPE) && l.filter.keep_presentation())
+        {
+            self.keep_presentation = true;
+        }
+        let result = self.temp_ptr_link(slot, p, align, size, true, f, Self::link);
+        self.keep_presentation = previous;
+        result
     }
 
     pub fn temp_ptr_at<T: Any + Send + Sync>(
