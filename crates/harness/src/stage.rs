@@ -394,6 +394,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_gfx::run),
     },
     StageDef {
+        name: "client-clear",
+        description: "pixels nothing draws are black, as stock leaves its uncleared colour buffer (`r_clear` dev-only blink), not the fog colour: the client is held at the #356 viewpoints on mp_crash and mp_backlot and the undrawn regions and a drawn wall are sampled",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_clear::run),
+    },
+    StageDef {
         name: "client-hud",
         description: "the HUD the client draws over the stock menus in a team deathmatch against bots: scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam, a typed chat line and a console vote call coming back from the server",
         needs_install: false,

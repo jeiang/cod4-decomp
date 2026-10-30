@@ -227,6 +227,8 @@ pub struct Settings {
     pub lod_scale: [f32; 2],
     /// `r_lodBiasRigid` and `r_lodBiasSkinned`: units added to that distance.
     pub lod_bias: [f32; 2],
+    /// `r_clear`, `r_clearColor`, `r_clearColor2` and `developer`: what the pixels nothing draws show.
+    pub clear: Clear,
 }
 
 impl Default for Settings {
@@ -257,6 +259,84 @@ impl Default for Settings {
             distortion: true,
             lod_scale: [1.0; 2],
             lod_bias: [0.0; 2],
+            clear: Clear::default(),
+        }
+    }
+}
+
+/// `r_clear`: how the colour buffer is cleared before the scene (`R_GetClearColor`, KisakCOD `gfx_d3d/r_utils.cpp`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClearMode {
+    /// `never`.
+    Never,
+    /// `dev-only blink` (the stock default): as `Blink` with `developer` on, else as `Never`.
+    DevOnlyBlink,
+    /// `blink`: `r_clearColor` and `r_clearColor2` in turn, 512 ms each.
+    Blink,
+    /// `steady`: `r_clearColor`.
+    Steady,
+    /// `fog color`: the map's fog colour while the map has fog, else as `Blink`.
+    FogColor,
+}
+
+impl ClearMode {
+    /// The stock enum's names and indices (`r_clearNames`); `None` for anything else.
+    pub fn parse(s: &str) -> Option<ClearMode> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "0" | "never" => ClearMode::Never,
+            "1" | "dev-only blink" => ClearMode::DevOnlyBlink,
+            "2" | "blink" => ClearMode::Blink,
+            "3" | "steady" => ClearMode::Steady,
+            "4" | "fog color" => ClearMode::FogColor,
+            _ => return None,
+        })
+    }
+}
+
+/// What the pixels nothing draws show. Stock clears only when `r_clear` says so: with the shipped default
+/// (`dev-only blink` and `developer` 0) the colour buffer is never cleared and such pixels keep what the target held
+/// before, which on the reference host is black, and never the fog colour. [`Clear::color`] is that colour: black
+/// where stock does not clear, since a stale frame is undefined and nothing to copy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clear {
+    pub mode: ClearMode,
+    /// `developer` is on: `DevOnlyBlink` clears.
+    pub developer: bool,
+    /// `r_clearColor` and `r_clearColor2`, RGB in 0..1.
+    pub colors: [[f32; 3]; 2],
+}
+
+impl Default for Clear {
+    fn default() -> Self {
+        Clear {
+            mode: ClearMode::DevOnlyBlink,
+            developer: false,
+            colors: [[0.0; 3]; 2],
+        }
+    }
+}
+
+impl Clear {
+    /// The colour the scene target is cleared to this frame, after `R_GetClearColor`: `fog` is the map's fog colour
+    /// while fog is drawn, `now_ms` the clock the blink follows (`Sys_Milliseconds() & 0x200`).
+    pub fn color(&self, fog: Option<[f32; 3]>, now_ms: u64) -> [f32; 3] {
+        let clears = match self.mode {
+            ClearMode::Never => false,
+            ClearMode::DevOnlyBlink => self.developer,
+            _ => true,
+        };
+        if !clears {
+            return [0.0; 3];
+        }
+        if self.mode == ClearMode::FogColor
+            && let Some(c) = fog
+        {
+            return c;
+        }
+        if self.mode == ClearMode::Steady || now_ms & 0x200 == 0 {
+            self.colors[0]
+        } else {
+            self.colors[1]
         }
     }
 }
@@ -535,7 +615,6 @@ pub struct Renderer {
     z_feather_bound: bool,
     /// The last answer of [`Renderer::samples`], for the `(r_aaSamples, format)` it was asked with.
     samples_cache: std::cell::Cell<Option<((u32, wgpu::TextureFormat), u32)>>,
-    pub clear: [f64; 3],
     pub settings: Settings,
     /// Fog, glow and film of the map.
     pub art: MapArt,
@@ -697,7 +776,6 @@ impl Renderer {
             tex_bgs: HashMap::new(),
             z_feather_bound: true,
             samples_cache: std::cell::Cell::new(None),
-            clear: [0.45, 0.43, 0.38],
             settings: Settings::default(),
             art: data.art.clone(),
             post: PostParams::from_art(&data.art),
@@ -2583,9 +2661,15 @@ impl Renderer {
         } else {
             None
         });
-        if let Some(f) = self.art.fog.as_ref().filter(|_| self.settings.fog) {
-            self.clear = f.color.map(f64::from);
-        }
+        // What the pixels nothing draws show (`R_GetClearColor`): never the fog colour unless `r_clear` asks for it.
+        let clear = self.settings.clear.color(
+            self.art
+                .fog
+                .as_ref()
+                .filter(|_| self.settings.fog)
+                .map(|f| f.color),
+            (view.time * 1000.0) as u64,
+        );
         let water_time = if self.settings.draw_water {
             view.time
         } else {
@@ -2742,9 +2826,12 @@ impl Renderer {
                 }
             }
         }
+        // TEMP (#356)
+        let no_smodels = std::env::var_os("COD4E_NO_SMODELS").is_some();
+        let no_surfs = std::env::var_os("COD4E_NO_SURFS").is_some();
         let items = Items {
-            surfaces: &vis.surfaces,
-            smodels: &vis.smodels,
+            surfaces: if no_surfs { &[] } else { &vis.surfaces },
+            smodels: if no_smodels { &[] } else { &vis.smodels },
         };
         let samples = self.samples(format);
         self.ensure_msaa(size, format, samples);
@@ -3095,9 +3182,9 @@ impl Renderer {
                     resolve_target: resolve,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: self.clear[0],
-                            g: self.clear[1],
-                            b: self.clear[2],
+                            r: f64::from(clear[0]),
+                            g: f64::from(clear[1]),
+                            b: f64::from(clear[2]),
                             a: 1.0,
                         }),
                         store: if resolve.is_some() && !distortion {
@@ -3699,6 +3786,36 @@ impl Renderer {
                 ));
             }
         }
+        // Static models: ray against the instance bounds (slab test).
+        for (mi, inst) in world.dpvs.smodel_insts.iter().enumerate() {
+            let (mins, maxs) = (Vec3::from(inst.mins), Vec3::from(inst.maxs));
+            let inv = dir.recip();
+            let t0 = (mins - view.origin) * inv;
+            let t1 = (maxs - view.origin) * inv;
+            let tmin = t0.min(t1).max_element().max(0.0);
+            let tmax = t0.max(t1).min_element();
+            if tmin > tmax {
+                continue;
+            }
+            let Some(d) = world.dpvs.smodel_draw_insts.get(mi) else {
+                continue;
+            };
+            let model = d.model.as_ref();
+            hits.push((
+                tmin,
+                format!(
+                    "smodel mi={mi} enter={tmin:.1} exit={tmax:.1} model={:?} origin={:?} scale={} cull={} flags={:#x} light={} lods={} mats={:?}",
+                    model.and_then(|m| m.name.as_deref()),
+                    d.origin,
+                    d.scale,
+                    d.cull_dist,
+                    d.flags,
+                    d.primary_light_index,
+                    model.map_or(0, |m| m.num_lods),
+                    model.map(|m| m.materials.iter().map(|m| m.as_ref().and_then(|m| m.name.clone())).collect::<Vec<_>>()),
+                ),
+            ));
+        }
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
         hits.into_iter().map(|h| h.1).collect()
     }
@@ -3781,6 +3898,31 @@ fn nearest(items: &mut Vec<u32>, centre: Vec3, at: impl Fn(u32) -> Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_clear_colour_follows_r_getclearcolor() {
+        let fog = Some([0.6, 0.7, 0.7]);
+        let mut c = Clear {
+            mode: ClearMode::DevOnlyBlink,
+            developer: false,
+            colors: [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        };
+        // The shipped default clears nothing: black, never the fog colour.
+        assert_eq!(c.color(fog, 0), [0.0; 3]);
+        c.developer = true;
+        assert_eq!(c.color(fog, 0), [1.0, 0.0, 0.0]);
+        assert_eq!(c.color(fog, 0x200), [0.0, 0.0, 1.0]);
+        c.mode = ClearMode::Steady;
+        assert_eq!(c.color(fog, 0x200), [1.0, 0.0, 0.0]);
+        c.mode = ClearMode::FogColor;
+        assert_eq!(c.color(fog, 0), [0.6, 0.7, 0.7]);
+        assert_eq!(c.color(None, 0x200), [0.0, 0.0, 1.0]);
+        c.mode = ClearMode::Never;
+        assert_eq!(c.color(fog, 0), [0.0; 3]);
+        assert_eq!(ClearMode::parse(" Fog Color "), Some(ClearMode::FogColor));
+        assert_eq!(ClearMode::parse("3"), Some(ClearMode::Steady));
+        assert_eq!(ClearMode::parse("5"), None);
+    }
 
     #[test]
     fn a_lod_reaches_up_to_its_range_and_a_zero_range_reaches_everywhere() {
