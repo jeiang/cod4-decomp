@@ -120,7 +120,7 @@ impl Game {
             let weapons = self.weapons.len() as u16;
             let c = &mut self.clients[usize::from(n)];
             if amount != 0 {
-                let w = c.ps.weapon;
+                let w = c.ps.weapon as u16;
                 if w != 0 {
                     let model = c.inv.model(w);
                     c.inv
@@ -198,7 +198,7 @@ impl Game {
             let weapons = self.weapons.len() as u16;
             let c = &mut self.clients[usize::from(n)];
             if amount != 0 {
-                let w = c.ps.weapon;
+                let w = c.ps.weapon as u16;
                 if w != 0 {
                     take_ammo(c, &self.weapons, w, amount);
                 }
