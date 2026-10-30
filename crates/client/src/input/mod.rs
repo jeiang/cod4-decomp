@@ -883,6 +883,12 @@ impl Input {
         self.wait.is_some() || !self.backlog.is_empty()
     }
 
+    /// A `wait` ended its buffer and nothing came after it: `take_due` has nothing to count down for until the
+    /// next submission (`Cbuf_Execute` counts the wait down only while text is pending).
+    pub(crate) fn waiting_on_nothing(&self) -> bool {
+        self.wait.is_some() && self.backlog.is_empty()
+    }
+
     /// Adds commands to the buffer behind a `wait`.
     pub(crate) fn enqueue(&mut self, cmds: impl IntoIterator<Item = Item>) {
         self.backlog.extend(cmds);
