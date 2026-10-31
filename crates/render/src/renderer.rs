@@ -543,6 +543,13 @@ impl PassKind {
         matches!(self, PassKind::DynLight { .. })
     }
 
+    fn is_camera(self) -> bool {
+        matches!(
+            self,
+            PassKind::Scene | PassKind::DynLight { .. } | PassKind::CookieReceiver
+        )
+    }
+
     /// Passes of techniques that a material may lack: the surface is left out of the pass, as the original's
     /// `R_SetMaterial` and `R_SetPrepassMaterial` (KisakCOD `r_draw_material.cpp`) return without a draw when
     /// `Material_GetTechnique` is null. The scene pass instead falls back down the chain to the unlit technique.
@@ -1714,7 +1721,7 @@ impl Renderer {
     /// `R_AddXModelSurfacesCamera` and `R_SkinStaticModelsCameraForLod` skip region 3, but the shadow passes do not:
     /// tree shadow-caster cards must still cut out and cast without appearing as black geometry in the scene.
     fn skips_material(&self, kind: PassKind, mat: &Material, techs: &[usize], hsm: bool) -> bool {
-        (kind == PassKind::Scene && mat.camera_region == 3)
+        (kind.is_camera() && mat.camera_region == 3)
             || ((kind.optional_tech() || (kind == PassKind::Scene && self.settings.fullbright))
                 && !self.materials.has_technique(mat, techs[0], hsm))
     }
