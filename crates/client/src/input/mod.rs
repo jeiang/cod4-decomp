@@ -1451,7 +1451,8 @@ impl Input {
     }
 
     /// Lets go of every key, button and stick: the state the input holds when the events that would end it will go
-    /// elsewhere (a menu takes the window's events while it is open).
+    /// elsewhere (the console or the chat line takes the window's events while it is open, and a window that lost
+    /// focus gets none).
     pub fn release_all(&mut self) {
         let keys: Vec<String> = self
             .down

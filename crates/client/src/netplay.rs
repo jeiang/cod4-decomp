@@ -383,6 +383,9 @@ struct Counters {
     own_missiles: std::collections::BTreeSet<u16>,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
+    /// The own player's events the prediction delivered (`EV_FIRE_WEAPON`, `EV_RELOAD`, ...), by event number: what
+    /// the control channel's `events.own` lists, so a shot can be asserted as the event and not the key press.
+    own_events: std::collections::BTreeMap<u8, u64>,
     fx_quads_max: usize,
     fx_tracers_max: usize,
     fx_decals_max: usize,
@@ -1335,6 +1338,9 @@ impl NetPlay {
         let ps = p.ps;
         self.meleeing = ps.weapon_state == sim::pm::weapon_state::MELEE_INIT;
         let events = p.events;
+        for (ev, _) in &events {
+            *self.c.own_events.entry(*ev).or_default() += 1;
+        }
         self.own_new.clone_from(&events);
         let err = self.pred.error_at(st);
         let feet = [

@@ -397,8 +397,6 @@ struct State {
     /// lock a moment after the request and drops it on its own (Escape, a lost activation).
     grab_at: Instant,
     lock_seen: bool,
-    /// A menu was open at the last frame.
-    menu_was_open: bool,
     samples: Vec<[f64; 3]>,
     /// Per frame, parallel to `samples`: where the milliseconds went (`frames.phases.csv`), see [`PHASES`].
     phases: Vec<[f32; 21]>,
@@ -1143,7 +1141,6 @@ impl Viewer {
             gate: Default::default(),
             grab_at: now,
             lock_seen: false,
-            menu_was_open: false,
             samples: Vec::new(),
             phases: Vec::new(),
             late: [0.0; 4],
@@ -1585,13 +1582,9 @@ impl Viewer {
         if menu_open {
             // A locked cursor never moves, so the menu could not be clicked.
             release_pointer(st);
-            // The menu takes the window's events: a button or key let go while it is open never reaches the input,
-            // and a right click held when it opened would keep the sights up for good.
-            if !st.menu_was_open {
-                st.input.release_all();
-            }
+            // The keys held when it opened stay held, as the original's do: their release reaches the bind table
+            // through the menu (`dispatch_input`).
         }
-        st.menu_was_open = menu_open;
         sync_os_cursor(st);
         // In a match the pointer is the game's whenever no menu wants it; a click is not required.
         let in_match = st.net.is_some()
@@ -2265,14 +2258,23 @@ impl Viewer {
             el.exit();
         }
         // A capture the channel asked for is taken from the frame that was just drawn; its request answers on the
-        // next pass of the channel.
+        // next pass of the channel. In the browser the page reads the canvas, which the present blits to: the
+        // capture follows it.
+        #[cfg(not(target_arch = "wasm32"))]
         if st.control_shot.is_some() {
             let shot = take_control_shot(&self.cli, st, &frame.texture);
             st.control_shot_done = Some(shot);
         }
         let t_present = Instant::now();
+        #[cfg(target_arch = "wasm32")]
+        let (w, h) = (frame.texture.width(), frame.texture.height());
         st.prev_cost[6] = t_present.duration_since(t_ui).as_secs_f64() * 1000.0;
         st.gpu.queue.present(frame);
+        #[cfg(target_arch = "wasm32")]
+        if st.control_shot.is_some() {
+            let shot = take_control_shot(st, w, h);
+            st.control_shot_done = Some(shot);
+        }
         st.presented = true;
         st.prev_cost[3] = t_present.elapsed().as_secs_f64() * 1000.0;
         if let Some(m) = st.menu_sound.as_mut() {
@@ -2373,10 +2375,20 @@ impl Viewer {
                     gametype,
                     cheats,
                 } => {
+                    // The browser has no sockets or threads to host on (`listen_web.rs`): the stock Start New
+                    // Server path says so in the error popup instead of starting a load that cannot finish.
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        let _ = (&map, &gametype, cheats);
+                        tracing::warn!(%map, "a browser cannot host a game");
+                        show_error(st, crate::listen::NO_HOSTING);
+                        continue;
+                    }
                     // `SV_Map_f` looks for the map's zone before anything else (`DB_FileSize`, KisakCOD
                     // `server_mp/sv_ccmds_mp.cpp`): a map the install lacks starts no server and shows no loading
                     // screen. The original prints its `Can't find map` to the console; here it is the error popup's
                     // reason, so a menu player sees it too (#368). A match being played goes on, as there.
+                    #[cfg(not(target_arch = "wasm32"))]
                     if assets::paths::zone_file(&self.cli.install, &game_of(&st.input), &map)
                         .is_none()
                     {
@@ -2634,6 +2646,7 @@ impl Viewer {
             "status": "ok",
             "net": net,
             "server": server,
+            "hud": st.shell.as_ref().map(|s| s.st.game.hud.report()),
             "gpu": gpu_json(&st.gpu),
             "settings": {
                 "shadows": format!("{:?}", self.cli.settings.shadows).to_lowercase(),
@@ -3822,6 +3835,16 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
     // `Scoreboard_HandleInput` scrolls with goes no further); every other key stays the game's, so the bind's release
     // reaches the bind table and lets the scoreboard go.
     let scoreboard = st.shell.as_ref().is_some_and(|s| s.ui.scoreboard_only());
+    let released = matches!(
+        ev,
+        InputEvent::Key {
+            state: ElementState::Released,
+            ..
+        } | InputEvent::Button {
+            state: ElementState::Released,
+            ..
+        }
+    );
     if typing {
         if let Some(sh) = st.shell.as_mut() {
             for k in typed_ui_keys(ev) {
@@ -3829,6 +3852,11 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
             }
         }
     } else if captured {
+        // A key let go runs its `-` bind whatever menu is up, so a button held when the menu opened is let go of
+        // with the key (`CL_KeyEvent`, KisakCOD `client/cl_keys.cpp`); the menu sees the release too.
+        if released {
+            st.input.event(ev);
+        }
         ui_event(st, ev);
     } else {
         if scoreboard && let Some(sh) = st.shell.as_mut() {
@@ -5289,6 +5317,7 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "in_world": st.renderer.is_some(),
                 "out": cli.out.as_ref().map(|p| p.display().to_string()),
                 "backends": cli.backend.clone(),
+                "gpu": gpu_json(&st.gpu),
                 "present": cli.present.clone(),
                 // Whether mouse look can work: the window has the focus and the pointer is locked, or why not.
                 "focused": st.window.has_focus(),
@@ -5409,7 +5438,24 @@ fn hud_state(st: &mut State) -> Value {
     })
 }
 
+/// Takes the capture the channel asked for from the frame just drawn and answers its request. In the browser the page
+/// reads the canvas (the module has no file to write to, and WebGPU maps buffers asynchronously); the reply carries
+/// the PNG inline, and `dir` is the caller's to use.
+#[cfg(target_arch = "wasm32")]
+fn take_control_shot(st: &mut State, width: u32, height: u32) -> Result<Value, String> {
+    st.control_shot.take();
+    st.shot_serial += 1;
+    let mut reply = crate::web::capture_frame()?;
+    reply["name"] = Value::String(format!("control-{}.png", st.shot_serial));
+    if reply["width"].is_null() {
+        reply["width"] = json!(width);
+        reply["height"] = json!(height);
+    }
+    Ok(reply)
+}
+
 /// Takes the capture the channel asked for from the frame just drawn and answers its request.
+#[cfg(not(target_arch = "wasm32"))]
 fn take_control_shot(cli: &Cli, st: &mut State, tex: &wgpu::Texture) -> Result<Value, String> {
     let (dir, inline) = st.control_shot.take().unwrap_or_default();
     let dir = dir

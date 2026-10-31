@@ -54,6 +54,8 @@ fn player(st: &NetPlay) -> Value {
         "crouched": ps.pm_flags & sim::pm::pmf::DUCKED != 0,
         "spawn_count": ps.spawn_count,
         "server_time": snap.server_time,
+        "command_time": ps.command_time,
+        "client_command_time": st.cmd_time,
         "snapshot": snap.num,
         "killcam": snap.killcam(),
     })
@@ -155,6 +157,12 @@ impl NetPlay {
             "scoreboard" => scoreboard(self),
             "net" => connection(self),
             "sound" => self.sound.report(),
+            // `world`: the entity events the snapshots carried, by kind; `own`: the own player's events the prediction
+            // delivered, by event number (`sim::pm::ev`), as the object `{"26": 3}` so a path can name one.
+            "events" => json!({
+                "world": self.c.events,
+                "own": self.c.own_events.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
+            }),
             "fx" => {
                 let full = self.report();
                 full.get("fx").cloned().unwrap_or(Value::Null)

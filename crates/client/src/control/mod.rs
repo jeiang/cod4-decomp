@@ -25,6 +25,7 @@ pub const PARTS: &[&str] = &[
     "render",
     "sound",
     "fx",
+    "events",
     "net",
     "console",
     "cvars",
@@ -37,10 +38,16 @@ use crate::Cli;
 use devctrl::Channel;
 
 /// Opens the channel the command line asked for. `None` when it did not: the channel is off unless a flag turns it
-/// on, and then it is bound to loopback or to this process's stdin.
+/// on, and then it is bound to loopback or to this process's stdin. In the browser the page's `?control` turns it
+/// on, and the page is the wire (`crate::web::PageTransport`).
 pub fn open(cli: &Cli) -> Option<Channel> {
     #[cfg(target_arch = "wasm32")]
-    let _ = cli;
+    {
+        let _ = cli;
+        if crate::web::control_wanted() {
+            return Some(Channel::new(Box::new(crate::web::PageTransport)));
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         if let Some(port) = cli.control {
