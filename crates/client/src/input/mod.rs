@@ -1199,8 +1199,8 @@ impl Input {
                 self.binds.clear();
                 self.dirty = true;
             }
-            ("set" | "seta" | "sets" | "setu", [n, v, ..]) => {
-                self.set_from_command(n, v, name == "seta");
+            ("set" | "seta" | "sets" | "setu", [n, values @ ..]) if !values.is_empty() => {
+                self.set_from_command(n, &values.join(" "), name == "seta");
             }
             ("toggle", [n, values @ ..]) => self.toggle(n, values),
             ("toggle", []) => self.say("USAGE: toggle <variable> <optional value sequence>"),
@@ -2430,6 +2430,13 @@ mod tests {
         i.exec_line("set cg_drawGun 0");
         assert_eq!(i.cvar("cg_drawGun"), Some("0"));
         assert!(i.take_messages().is_empty());
+    }
+
+    #[test]
+    fn set_keeps_the_whole_value_including_spaces() {
+        let mut i = Input::detached();
+        i.exec_line("set zz_vec 0 0 2");
+        assert_eq!(i.cvar("zz_vec"), Some("0 0 2"));
     }
 
     #[test]
