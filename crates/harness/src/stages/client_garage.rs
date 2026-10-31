@@ -69,6 +69,17 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     c.ask(json!({"cmd": "step", "frames": 30}))?;
     // TeleportPlayer adds one unit after subtracting view height; ask for 323.5 to put the render eye at 324.5.
     c.ask(json!({"cmd": "exec", "line": "setviewpos 200.8 2267.5 323.5 175.3 0"}))?;
+    // Render frames are not server ticks. Do not inspect entity selection until a snapshot actually contains the
+    // teleported player: the old spawn's PVS legitimately excludes the garage car.
+    c.until(
+        json!({
+            "player.origin.0": {"gt": 199.8, "lt": 201.8},
+            "player.origin.1": {"gt": 2266.5, "lt": 2268.5},
+            "player.origin.2": {"gt": 263.5, "lt": 265.5},
+        }),
+        secs(5),
+        "no snapshot arrived from the teleported position",
+    )?;
     c.ask(json!({"cmd": "step", "frames": 60}))?;
     let view = c.state("view")?;
     let origin = view["origin"].as_array().ok_or("missing render eye")?;
