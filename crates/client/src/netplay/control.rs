@@ -89,6 +89,7 @@ fn entities(st: &NetPlay) -> Value {
             "client": e.client,
             "weapon": e.weapon,
             "model": e.model,
+            "model_name": st.net.ui_ref().map(|ui| ui.model(e.model)),
             "team": team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 }),
             "dead": e.eflags & eflags::DEAD != 0,
             "loops": e.loop_sound != 0,
