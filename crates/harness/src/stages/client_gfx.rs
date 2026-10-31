@@ -24,7 +24,7 @@ use std::time::Duration;
 const NAME: &str = "client-gfx";
 const LIMIT: Duration = Duration::from_secs(300);
 
-const STEPS: &str = "set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 16,\
+const STEPS: &str = "cgis=window_position 40 60,set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 16,\
 set=set r_picmip_manual 1,set=set r_picmip 0,set=set r_picmip_bump 1,set=set r_picmip_spec 1,set=set r_zFeather 0,set=set r_drawWater 0,\
 set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_enable 0,set=set r_dlightLimit 4,\
 set=set r_texFilterAnisoMin 2,set=set r_texFilterMipMode 2,\
@@ -50,6 +50,28 @@ fxmark,set=set cg_blood 0,hitflesh,wait=1,cgis=fx:bullet_impact_noblood +1,cgis=
 set=set cg_blood 1,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,cgis=fx:bullet_impact_noblood +1,\
 set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0,set=set cg_brass 1,\
 cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
+cgis=centertime 3000,set=set cg_centertime 1.5,wait=1,cgis=centertime 1500,set=set cg_centertime 3,\
+set=set cg_crosshairAlpha 0,set=set cg_crosshairAlphaMin 0,wait=1,cgis=crosshair_alpha 0.00,\
+set=set cg_crosshairAlphaMin 0.75,wait=1,cgis=crosshair_alpha 0.75,holdkey=mouse2,wait=1,cgis=crosshair_alpha 0.75,releasekey=mouse2,set=set cg_crosshairAlpha 1,set=set cg_crosshairAlphaMin 0.5,\
+cgis=heli_camera -1000 50 15 0 1900 2100 2400 4 2,\
+set=set cg_heliKillCamDist 500,set=set cg_heliKillCamFov 40,set=set cg_heliKillCamZDist 80,\
+set=set cg_heliKillCamNearBlurStart 10,set=set cg_heliKillCamNearBlurEnd 200,\
+set=set cg_heliKillCamFarBlurStart 150,set=set cg_heliKillCamFarBlurDist 400,\
+set=set cg_heliKillCamNearBlur 6,set=set cg_heliKillCamFarBlur 3,wait=1,cgis=heli_camera -500 80 40 10 1300 1650 2050 6 3,\
+set=set cg_airstrikeKillCamDist 300,set=set cg_airstrikeKillCamFov 60,set=set cg_airstrikeKillCamCloseZDist 40,\
+set=set cg_airstrikeKillCamNearBlurStart 20,set=set cg_airstrikeKillCamNearBlurEnd 120,\
+set=set cg_airstrikeKillCamFarBlurStart 200,set=set cg_airstrikeKillCamFarBlurDist 500,\
+set=set cg_airstrikeKillCamNearBlur 7,set=set cg_airstrikeKillCamFarBlur 5,wait=1,cgis=air_camera 340 60 20 220 540 1040 7 5,\
+set=set r_brightness 0.25,wait=1,cgis=brightness 0.25,set=set r_brightness 0,wait=1,cgis=brightness 0.00,\
+set=set r_contrast 2,set=set r_desaturation 0,wait=1,cgis=film_sample 0.00 2.00 0.25,\
+set=set r_desaturation 2,wait=1,cgis=film_sample 0.00 2.00 0.75,\
+set=set r_contrast 1,set=set r_desaturation 1,wait=1,cgis=film_sample 0.00 1.00 0.50,\
+fxmark,set=set cg_bloodLimitMsec 2000,set=set cg_bloodLimit 1,hitflesh,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,\
+hitflesh,wait=1.2,cgis=fx:bullet_impact_flesh +1,hitflesh,cgis=fx:bullet_impact_flesh +2,\
+set=set cg_bloodLimitMsec 1,wait=0.1,hitflesh,wait=0.1,hitflesh,cgis=fx:bullet_impact_flesh +4,set=set cg_bloodLimit 0,set=set cg_bloodLimitMsec 330,\
+set=set cl_noprint 1,wait=1,console=echo hidden_print_369,wait=1,notsaw=hidden_print_369,\
+set=set cl_noprint 0,wait=1,console=echo visible_print_369,saw=visible_print_369:5,\
+set=set vid_xpos 40,set=set vid_ypos 60,vidrestart,wait=2,cgis=window_position 40 60,set=set vid_xpos 10000,set=set vid_ypos -10000,vidrestart,wait=2,cgis=window_position 4096 -4096,set=set vid_xpos 40,set=set vid_ypos 60,\
 set=set com_maxfps 20,wait=1,pacereset,wait=2,gfxis=pace 1,set=set com_maxfps 0,\
 set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
 set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
@@ -201,12 +223,19 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if let Some(r) = no_display(&client, NAME)? {
         return Ok(r);
     }
+    let config_dir = ctx.dir.join("config");
+    let profile = config_dir.join("players/profiles/harness");
+    std::fs::create_dir_all(&profile)?;
+    std::fs::write(
+        profile.join("config_mp.cfg"),
+        "seta vid_xpos 40\nseta vid_ypos 60\n",
+    )?;
     let mut out = StageReport::new(NAME, Status::Passed);
     match run_client(
         &client,
         install,
         &ctx.dir,
-        &ctx.dir.join("config"),
+        &config_dir,
         &["--bots", "3"],
         STEPS,
         LIMIT,

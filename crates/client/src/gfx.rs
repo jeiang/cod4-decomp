@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (GPL-3.0, KisakCOD contributors): gfx_d3d/r_scene.cpp (`R_SetFilmInfo`).
 //! The graphics settings of the options menus (`r_*`, `sm_enable`), read as the renderer and the window take them.
 //!
 //! The menus only write dvars; [`Gfx::from_cvars`] turns them into the video request, the present mode, the aspect
@@ -19,6 +20,8 @@ pub struct Gfx {
     pub refresh: Option<f64>,
     /// `r_monitor`: the 1-based monitor fullscreen goes to, 0 for automatic.
     pub monitor: Option<usize>,
+    /// `vid_xpos`/`vid_ypos`, physical coordinates of a windowed window.
+    pub position: Option<(i32, i32)>,
     /// `r_aspectRatio`: the shape of the screen, `None` for the window's own.
     pub aspect: Option<f32>,
     /// `r_vsync`.
@@ -174,17 +177,45 @@ fn clear(c: &Cvars) -> render::Clear {
     }
 }
 
+/// KisakCOD gfx_d3d/r_scene.cpp:1833-1861 (`R_SetFilmInfo`): overlay the live adjustments on the vision film.
+/// Preserve the double application of desaturation; applying the multiplier directly is not stock behavior.
+pub fn film(c: &Cvars, mut film: render::art::Film) -> render::art::Film {
+    if c.bool("sv_cheats") {
+        let f = |n: &str, d: f32, lo: f32, hi: f32| {
+            c.get(n)
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+                .unwrap_or(d)
+                .clamp(lo, hi)
+        };
+        let scale =
+            (1.0 - film.desaturation) * f("r_desaturation", 1.0, 0.0, 4.0) + film.desaturation;
+        film.desaturation *= scale;
+        film.contrast *= f("r_contrast", 1.0, 0.0, 4.0);
+        film.brightness += f("r_brightness", 0.0, -1.0, 1.0);
+    }
+    film
+}
+
 impl Gfx {
     pub fn from_cvars(c: &Cvars) -> Gfx {
         let text = |n: &str| c.get(n).unwrap_or("");
         // Unset means the engine's default: everything on.
         let on = |n: &str| c.get(n).is_none_or(|v| v.trim() != "0");
+        let window_coord = |n: &str| {
+            text(n)
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .map(|v| v.clamp(-4096, 4096))
+        };
         let picmip = |n: &str| (c.f32(n).max(0.0) as usize).min(3);
         Gfx {
             fullscreen: c.bool("r_fullscreen"),
             mode: parse_mode(text("r_mode")),
             refresh: parse_hz(text("r_displayRefresh")),
             monitor: text("r_monitor").trim().parse().ok().filter(|&n| n > 0),
+            position: window_coord("vid_xpos").zip(window_coord("vid_ypos")),
             aspect: parse_aspect(text("r_aspectRatio")),
             vsync: c.bool("r_vsync"),
             aa_samples: text("r_aaSamples").trim().parse().unwrap_or(1).clamp(1, 16),
@@ -278,6 +309,7 @@ impl Gfx {
             size: self.mode.or(base.size),
             refresh: self.refresh.or(base.refresh),
             monitor: self.monitor.or(base.monitor),
+            position: self.position.or(base.position),
         }
     }
 
@@ -350,6 +382,12 @@ mod tests {
             c.set(k, v, false);
         }
         c
+    }
+
+    #[test]
+    fn window_coordinates_follow_the_stock_domain() {
+        let g = Gfx::from_cvars(&cvars(&[("vid_xpos", "10000"), ("vid_ypos", "-10000")]));
+        assert_eq!(g.position, Some((4096, -4096)));
     }
 
     #[test]
