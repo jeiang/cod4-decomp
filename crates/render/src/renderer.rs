@@ -2943,7 +2943,8 @@ impl Renderer {
             v.inverse()
                 .transform_vector3(Vec3::new(0.0, 0.0, -self.settings.outdoor_away_bias));
         let biased = away + Vec3::new(0.0, 0.0, self.settings.outdoor_down_bias);
-        frame.outdoor_lookup.w_axis += frame.outdoor_lookup * biased.extend(0.0);
+        let offset = frame.outdoor_lookup * biased.extend(0.0);
+        frame.outdoor_lookup.w_axis += offset;
 
         let world = self.scene.world.clone();
         let mut frustum = Frustum::from_clip(&(p * v * Mat4::from_translation(-view.origin)));
