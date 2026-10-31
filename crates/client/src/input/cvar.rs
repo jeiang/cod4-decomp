@@ -195,14 +195,19 @@ impl Cvars {
 
     /// The value as a float; 0 when unset or not a number.
     pub fn f32(&self, name: &str) -> f32 {
+        self.f32_or(name, 0.0)
+    }
+
+    /// The value as a float, or `default` when unset or not a number.
+    pub fn f32_or(&self, name: &str, default: f32) -> f32 {
         let Some(v) = self.get(name) else {
-            return 0.0;
+            return default;
         };
         v.trim().parse().unwrap_or_else(|_| {
             if !v.trim().is_empty() {
                 logging::dedup!(WARN, name, cvar = name, "dvar is not a number, read as 0");
             }
-            0.0
+            default
         })
     }
 

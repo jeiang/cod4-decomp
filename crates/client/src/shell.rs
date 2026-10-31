@@ -1841,11 +1841,13 @@ impl HostCx<'_> {
                     }
                 }
                 // `snd_volume` is read live every frame, and no other snd_ dvar needs a restart: these stay no-ops.
-                "snd_restart"
-                | "updatedvarsfromprofile"
-                | "r_applypicmip"
-                | "writeconfig"
-                | "setprofile" => {}
+                "snd_restart" | "updatedvarsfromprofile" | "r_applypicmip" | "setprofile" => {}
+                // `Com_WriteConfig_f`: write the active config now, not only when something changed.
+                "writeconfig" => match self.input.write_config() {
+                    Ok(Some(path)) => self.input.say(format!("Wrote {}.", path.display())),
+                    Ok(None) => self.input.say("writeconfig: no profile to write"),
+                    Err(e) => self.input.say(format!("writeconfig: {e}")),
+                },
                 // `vstr` and `exec` run their commands in place, in this buffer.
                 "vstr" | "exec" => {
                     inserted += 1;

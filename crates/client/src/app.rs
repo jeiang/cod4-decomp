@@ -1916,7 +1916,7 @@ impl Viewer {
                         .unwrap_or(r.post.film);
                     st.film_base = Some(base);
                     if let Some((glow, _)) = nf.look.vision {
-                        r.post.glow = glow;
+                        r.post.glow = crate::gfx::glow(&st.input.cvars, glow);
                     }
                     r.post.film = crate::gfx::film(&st.input.cvars, base);
                     // Cheat dvars, read live as the original does: `r_fullbright` (`R_InitDrawMethod` on change)
@@ -3412,6 +3412,54 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| u8::from(r.settings.z_feather).to_string()),
+                // `r_znear` and `r_zfar` as the renderer holds them.
+                "nearfar" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| format!("{:.2} {:.0}", r.settings.near, r.settings.far)),
+                // `r_outdoor` and the lookup biases and feather.
+                "outdoor" => st.renderer.as_ref().map(|r| {
+                    format!(
+                        "{} {:.0} {:.0} {:.0}",
+                        u8::from(r.settings.outdoor),
+                        r.settings.outdoor_away_bias,
+                        r.settings.outdoor_down_bias,
+                        r.settings.outdoor_feather
+                    )
+                }),
+                // The cheat sun tweaks as parsed: light, colour and angles.
+                "sun_tweak" => st.renderer.as_ref().map(|r| {
+                    let t = r.settings.sun_tweak;
+                    let c = t.color.unwrap_or_default();
+                    let a = t.angles.unwrap_or_default();
+                    format!(
+                        "{:.2} {:.2} {:.2} {:.2} {:.1} {:.1} {:.1}",
+                        t.sun_light.unwrap_or(f32::NAN),
+                        c.x,
+                        c.y,
+                        c.z,
+                        a.x,
+                        a.y,
+                        a.z
+                    )
+                }),
+                // The glow tweak block as `R_SetGlowInfo` builds it.
+                "glow_tweak" => {
+                    let g = crate::gfx::glow(
+                        &st.input.cvars,
+                        render::art::Glow {
+                            bloom_cutoff: 0.5,
+                            ..Default::default()
+                        },
+                    );
+                    Some(format!(
+                        "{} {:.0} {:.1} {:.1}",
+                        u8::from(g.enabled),
+                        g.radius,
+                        g.bloom_intensity,
+                        g.bloom_cutoff
+                    ))
+                }
                 "water" => st
                     .renderer
                     .as_ref()

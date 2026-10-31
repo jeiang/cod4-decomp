@@ -122,6 +122,12 @@ impl View {
     /// View and projection matrices. Like the original's, the view is a pure rotation to the left-handed y-up camera
     /// space: positions are made camera-relative by the world matrices (see [`FrameConsts`]).
     pub fn matrices(&self, aspect: f32) -> (Mat4, Mat4) {
+        self.matrices_near(aspect, NEAR)
+    }
+
+    /// The same with `r_znear` (`R_GetDefaultNearClip` never goes below 0.01).
+    pub fn matrices_near(&self, aspect: f32, near: f32) -> (Mat4, Mat4) {
+        let near = near.max(0.01);
         let conv = Mat4::from_cols(
             Vec4::new(0.0, 0.0, 1.0, 0.0),
             Vec4::new(-1.0, 0.0, 0.0, 0.0),
@@ -236,6 +242,59 @@ pub struct Settings {
     pub fullbright: bool,
     /// `r_clear`, `r_clearColor`, `r_clearColor2` and `developer`: what the pixels nothing draws show.
     pub clear: Clear,
+    /// `r_znear`: the near clip plane (the original keeps it at least 0.01).
+    pub near: f32,
+    /// `r_zfar`: culling distance; zero uses the map's.
+    pub far: f32,
+    /// `r_outdoor`: off, the outdoor lookup and image are not sampled.
+    pub outdoor: bool,
+    /// `r_outdoorAwayBias`, `r_outdoorDownBias` and `r_outdoorFeather`.
+    pub outdoor_away_bias: f32,
+    pub outdoor_down_bias: f32,
+    pub outdoor_feather: f32,
+    /// The cheat `r_lightTweakSunLight`, `r_lightTweakSunColor` and `r_lightTweakSunDirection`, over the map's sun.
+    pub sun_tweak: SunTweak,
+}
+
+/// The `r_lightTweak*` sun overrides (`R_CopyParseParamsFromDvars`); `None` keeps the map's value.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SunTweak {
+    pub sun_light: Option<f32>,
+    /// Any scale: normalised to one in the brightest channel, as `R_GetNormalizedColorFromDvar` does.
+    pub color: Option<Vec3>,
+    /// Pitch, yaw, roll in degrees, as the map's sun angles.
+    pub angles: Option<Vec3>,
+}
+
+impl SunTweak {
+    /// The sun's direction and colour from the map's parse with the tweaks over it. `R_CopyParseParamsFromDvars`
+    /// keeps the map's ambient and diffuse share, so the sun light can only go down to that floor:
+    /// `R_InterpretSunLightParseParamsIntoLights` then makes `(1 - diffuse) * (light - ambient)`, which is the light
+    /// above the floor.
+    pub fn apply(
+        &self,
+        parse: &assets::zone::gfxworld::SunParse,
+        dir: Vec3,
+        color: Vec3,
+    ) -> (Vec3, Vec3) {
+        let dir = self.angles.map_or(dir, |a| {
+            let (pitch, yaw) = (a.x.to_radians(), a.y.to_radians());
+            Vec3::new(
+                pitch.cos() * yaw.cos(),
+                pitch.cos() * yaw.sin(),
+                -pitch.sin(),
+            )
+        });
+        if self.sun_light.is_none() && self.color.is_none() {
+            return (dir, color);
+        }
+        let ambient = parse.ambient_scale;
+        let floor = (parse.sun_light - ambient) * parse.diffuse_fraction + ambient;
+        let light = self.sun_light.unwrap_or(parse.sun_light);
+        let hue = self.color.unwrap_or(Vec3::from(parse.sun_color));
+        let hue = hue / hue.max_element().max(1e-6);
+        (dir, hue * (light - floor).max(0.0))
+    }
 }
 
 impl Default for Settings {
@@ -268,6 +327,13 @@ impl Default for Settings {
             lod_bias: [0.0; 2],
             fullbright: false,
             clear: Clear::default(),
+            near: NEAR,
+            far: 0.0,
+            outdoor: true,
+            outdoor_away_bias: 0.0,
+            outdoor_down_bias: 0.0,
+            outdoor_feather: crate::codeconst::OUTDOOR_FEATHER,
+            sun_tweak: SunTweak::default(),
         }
     }
 }
@@ -644,8 +710,9 @@ pub struct Renderer {
     /// The multisampled colour and depth of the scene pass, while `r_aaSamples` asks for more than one sample.
     msaa: Option<Msaa>,
     tex_bgs: HashMap<TexKey, Arc<wgpu::BindGroup>>,
-    /// `settings.z_feather` as the cached bind groups were made.
+    /// `settings.z_feather` and `settings.outdoor` as the cached bind groups were made.
     z_feather_bound: bool,
+    outdoor_bound: bool,
     /// The last answer of [`Renderer::samples`], for the `(r_aaSamples, format)` it was asked with.
     samples_cache: std::cell::Cell<Option<((u32, wgpu::TextureFormat), u32)>>,
     pub settings: Settings,
@@ -811,6 +878,7 @@ impl Renderer {
             msaa: None,
             tex_bgs: HashMap::new(),
             z_feather_bound: true,
+            outdoor_bound: true,
             samples_cache: std::cell::Cell::new(None),
             settings: Settings::default(),
             art: data.art.clone(),
@@ -1578,7 +1646,13 @@ impl Renderer {
                     .get(usize::from(probe))
                     .and_then(|r| r.image.clone()),
                 ctex::SKY => world.sky_image.clone(),
-                ctex::OUTDOOR => world.outdoor_image.clone(),
+                // `Material_GetRemappedFeatures_RunTime` remaps the outdoor feature off; a fully-white mask lets the
+                // particle's outdoor test pass everywhere instead of loading the map's mask.
+                ctex::OUTDOOR => self
+                    .settings
+                    .outdoor
+                    .then(|| world.outdoor_image.clone())
+                    .flatten(),
                 _ => None,
             };
             let entry = match (id, image) {
@@ -1639,10 +1713,12 @@ impl Renderer {
                         CODE_SAMPLER.into(),
                     ))
                 }
-                (ctex::WHITE, _) => Some((
-                    self.textures.solid(&self.gpu, SamplerDim::D2, [255; 4]),
-                    CODE_SAMPLER.into(),
-                )),
+                (ctex::WHITE | ctex::OUTDOOR, _) if id == ctex::WHITE || !self.settings.outdoor => {
+                    Some((
+                        self.textures.solid(&self.gpu, SamplerDim::D2, [255; 4]),
+                        CODE_SAMPLER.into(),
+                    ))
+                }
                 (ctex::BLACK, _) => Some((
                     self.textures
                         .solid(&self.gpu, SamplerDim::D2, [0, 0, 0, 255]),
@@ -2425,7 +2501,7 @@ impl Renderer {
         let planned = cookie::plan(
             &casters,
             view.origin,
-            self.scene.sun_dir,
+            frame.sun_direction(),
             self.settings.cookie_count,
         );
         if planned.is_empty() {
@@ -2796,9 +2872,11 @@ impl Renderer {
         // The scene's `FLOATZ` is the far-everywhere image while `r_zFeather` is off: bind groups hold which.
         if self.post_state.invalidate(size, format)
             || self.z_feather_bound != self.settings.z_feather
+            || self.outdoor_bound != self.settings.outdoor
         {
             self.tex_bgs.clear();
             self.z_feather_bound = self.settings.z_feather;
+            self.outdoor_bound = self.settings.outdoor;
         }
         self.frame_target = (size, format);
         self.ring.clear();
@@ -2810,11 +2888,21 @@ impl Renderer {
             .aspect
             .unwrap_or(size.0 as f32 / size.1 as f32);
         self.lod = LodParms::new((view.fov_x * 0.5).tan() / aspect, &self.settings);
-        let (v, p) = view.matrices(aspect);
+        let near = self.settings.near.max(0.01);
+        let (v, p) = view.matrices_near(aspect, near);
         let mut frame = FrameConsts::new(v, p, view.origin);
+        let (sun_dir, sun_color) = if self.settings.sun_tweak == SunTweak::default() {
+            (self.scene.sun_dir, self.scene.sun_color)
+        } else {
+            self.settings.sun_tweak.apply(
+                &self.scene.world.sun_parse,
+                self.scene.sun_dir,
+                self.scene.sun_color,
+            )
+        };
         frame.set_sun(
-            self.scene.sun_dir,
-            self.scene.sun_color,
+            sun_dir,
+            sun_color,
             if self.settings.specular { 1.0 } else { 0.0 },
         );
         frame.set_fog(if self.settings.fog {
@@ -2838,7 +2926,7 @@ impl Renderer {
         };
         self.materials.update_waters(&self.gpu, water_time);
         frame.vec[codeconst::GAMETIME as usize] = [view.time; 4];
-        frame.vec[codeconst::ZNEAR as usize] = [NEAR * 0.984_375, 0.0, 0.0, 0.0];
+        frame.vec[codeconst::ZNEAR as usize] = [near * 0.984_375, 0.0, 0.0, 0.0];
         frame.vec[codeconst::RENDER_TARGET_SIZE as usize] = [
             size.0 as f32,
             size.1 as f32,
@@ -2847,10 +2935,25 @@ impl Renderer {
         ];
         let lookup = self.scene.lighting.lookup_scale();
         frame.vec[codeconst::LIGHTING_LOOKUP_SCALE as usize] = lookup;
+        frame.vec[codeconst::OUTDOOR_FEATHER_PARMS as usize] = [self.settings.outdoor_feather; 4];
         frame.outdoor_lookup = Mat4::from_cols_array(&self.scene.world.outdoor_lookup_matrix);
+        // `R_GenerateWorldOutdoorLookupMatrix`: the away bias is a view-space z offset and the down bias is added
+        // after the inverse-view transform, then both go through the map's outdoor lookup.
+        let away =
+            v.inverse()
+                .transform_vector3(Vec3::new(0.0, 0.0, -self.settings.outdoor_away_bias));
+        let biased = away + Vec3::new(0.0, 0.0, self.settings.outdoor_down_bias);
+        frame.outdoor_lookup.w_axis += frame.outdoor_lookup * biased.extend(0.0);
 
         let world = self.scene.world.clone();
-        let frustum = Frustum::from_clip(&view.clip_from_world(aspect));
+        let mut frustum = Frustum::from_clip(&(p * v * Mat4::from_translation(-view.origin)));
+        if self.settings.far > 0.0 {
+            // `R_GetFarPlaneDist`: `r_zfar` is a cull distance, not the projection's far plane.
+            let forward = view.forward();
+            frustum
+                .planes
+                .push((-forward).extend(forward.dot(view.origin) + self.settings.far));
+        }
         let vis = cull::visible(&world, view.origin, &frustum);
         laps[0] = t0.elapsed().as_secs_f32() * 1000.0;
         let mut stats = FrameStats {
@@ -2898,11 +3001,11 @@ impl Renderer {
                 eye: view.origin,
                 forward: fwd,
                 tan_half: [t, t / aspect],
-                z_near: NEAR,
+                z_near: near,
             };
             SunShadow::new(
                 &cam,
-                self.scene.sun_dir,
+                sun_dir,
                 Vec3::from(world.mins),
                 Vec3::from(world.maxs),
             )
@@ -3936,6 +4039,62 @@ fn nearest(items: &mut Vec<u32>, centre: Vec3, at: impl Fn(u32) -> Vec3) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sun_tweak_keeps_the_maps_ambient_floor() {
+        let parse = assets::zone::gfxworld::SunParse {
+            name: "sun".into(),
+            ambient_scale: 0.1,
+            ambient_color: [0.0; 3],
+            diffuse_fraction: 0.5,
+            sun_light: 1.0,
+            sun_color: [1.0, 0.5, 0.0],
+            diffuse_color: [0.0; 3],
+            diffuse_color_has_been_set: false,
+            angles: [0.0; 3],
+        };
+        let d = Vec3::new(1.0, 0.0, 0.0);
+        let c = Vec3::new(1.0, 0.5, 0.0);
+        assert_eq!(SunTweak::default().apply(&parse, d, c), (d, c));
+        // 0.5 is below the floor `(1 - 0.1) * 0.5 + 0.1 = 0.55`, so the sun is black, not ambient-lit.
+        let t = SunTweak {
+            sun_light: Some(0.5),
+            ..SunTweak::default()
+        };
+        assert_eq!(t.apply(&parse, d, c).1, Vec3::ZERO);
+        // Above it the sun is the light above the floor; the colour is normalised and scaled.
+        let t = SunTweak {
+            sun_light: Some(1.5),
+            color: Some(Vec3::new(0.0, 0.0, 2.0)),
+            ..SunTweak::default()
+        };
+        assert_eq!(t.apply(&parse, d, c).1, Vec3::new(0.0, 0.0, 0.95));
+        // Angles: pitch and yaw in degrees, the map's forward convention.
+        let t = SunTweak {
+            angles: Some(Vec3::new(0.0, 90.0, 0.0)),
+            ..SunTweak::default()
+        };
+        let (dir, _) = t.apply(&parse, d, c);
+        assert!((dir - Vec3::Y).length() < 1e-6);
+    }
+
+    #[test]
+    fn r_znear_moves_the_projection_near_plane() {
+        let v = View {
+            origin: Vec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            fov_x: 1.0,
+            time: 0.0,
+        };
+        let (_, p4) = v.matrices_near(1.0, 4.0);
+        let (_, p05) = v.matrices_near(1.0, 0.05);
+        // The projection's translation is `-r * near`, so 0.05 moves it 80 times closer.
+        assert_eq!(p4.z_axis.w / p05.z_axis.w, 80.0);
+        let (_, p_clamped) = v.matrices_near(1.0, 0.0);
+        assert_eq!(p_clamped.z_axis.w, p4.z_axis.w / 400.0);
+    }
 
     #[test]
     fn the_clear_colour_follows_r_getclearcolor() {

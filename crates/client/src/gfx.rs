@@ -79,6 +79,16 @@ pub struct Gfx {
     pub draw_water: bool,
     /// `r_clear`, `r_clearColor`, `r_clearColor2` and `developer`: what the pixels nothing draws show.
     pub clear: render::Clear,
+    /// `r_znear` and `r_zfar` (cheat dvars): the near clip and the culling distance; zero keeps the map's.
+    pub near: f32,
+    pub far: f32,
+    /// `r_outdoor`, `r_outdoorAwayBias`, `r_outdoorDownBias` and `r_outdoorFeather`.
+    pub outdoor: bool,
+    pub outdoor_away_bias: f32,
+    pub outdoor_down_bias: f32,
+    pub outdoor_feather: f32,
+    /// The cheat `r_lightTweakSunLight`, `r_lightTweakSunColor` and `r_lightTweakSunDirection`.
+    pub sun_tweak: render::SunTweak,
 }
 
 /// `1920x1080` as a size.
@@ -180,6 +190,29 @@ fn clear(c: &Cvars) -> render::Clear {
 /// KisakCOD gfx_d3d/r_scene.cpp:1833-1861 (`R_SetFilmInfo`): overlay the live adjustments on the vision film.
 /// Preserve the double application of desaturation; applying the multiplier directly is not stock behavior.
 pub fn film(c: &Cvars, mut film: render::art::Film) -> render::art::Film {
+    // `r_filmUseTweaks` replaces the whole vision film before the live adjustments run.
+    if c.bool("sv_cheats") && c.bool("r_filmUseTweaks") {
+        let f = |n: &str, d: f32| c.f32_or(n, d);
+        let tint = |n: &str, d: [f32; 3]| {
+            let mut out = d;
+            let mut parts = c.get(n).unwrap_or("").split_whitespace();
+            for ch in &mut out {
+                *ch = parts
+                    .next()
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(*ch);
+            }
+            out
+        };
+        film.enabled = c.bool("r_filmTweakEnable");
+        film.contrast = f("r_filmTweakContrast", 1.0);
+        film.brightness = f("r_filmTweakBrightness", 0.0);
+        film.desaturation = f("r_filmTweakDesaturation", 0.0);
+        film.invert = c.bool("r_filmTweakInvert");
+        film.tint_light = tint("r_filmTweakLightTint", film.tint_light);
+        film.tint_dark = tint("r_filmTweakDarkTint", film.tint_dark);
+    }
     if c.bool("sv_cheats") {
         let f = |n: &str, d: f32, lo: f32, hi: f32| {
             c.get(n)
@@ -197,6 +230,22 @@ pub fn film(c: &Cvars, mut film: render::art::Film) -> render::art::Film {
     film
 }
 
+/// `R_SetGlowInfo` with `r_glowUseTweaks` on: the tweak dvars replace the vision set's glow block.
+pub fn glow(c: &Cvars, mut glow: render::art::Glow) -> render::art::Glow {
+    if c.bool("sv_cheats") && c.bool("r_glowUseTweaks") {
+        glow.enabled = c.bool("r_glowTweakEnable");
+        glow.radius = c.f32_or("r_glowTweakRadius", glow.radius);
+        glow.bloom_intensity = c
+            .f32_or("r_glowTweakBloomIntensity", glow.bloom_intensity)
+            .max(0.0);
+        glow.bloom_cutoff = c.f32_or("r_glowTweakBloomCutoff", glow.bloom_cutoff);
+        glow.bloom_desaturation = c.f32_or("r_glowTweakBloomDesaturation", glow.bloom_desaturation);
+        glow.sky_bleed_intensity =
+            c.f32_or("r_glowTweakSkyBleedIntensity", glow.sky_bleed_intensity);
+    }
+    glow
+}
+
 impl Gfx {
     pub fn from_cvars(c: &Cvars) -> Gfx {
         let text = |n: &str| c.get(n).unwrap_or("");
@@ -210,6 +259,24 @@ impl Gfx {
                 .map(|v| v.clamp(-4096, 4096))
         };
         let picmip = |n: &str| (c.f32(n).max(0.0) as usize).min(3);
+        let cheat = c.bool("sv_cheats");
+        let vec3 = |n: &str| {
+            let mut out = [0.0_f32; 3];
+            let mut parts = c.get(n)?.split_whitespace();
+            for ch in &mut out {
+                *ch = parts.next()?.parse().ok()?;
+            }
+            Some(glam::Vec3::from(out))
+        };
+        let tweak = |n: &str| cheat.then(|| c.get(n)).flatten();
+        let sun_tweak = render::SunTweak {
+            sun_light: tweak("r_lightTweakSunLight")
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .filter(|v| v.is_finite()),
+            color: tweak("r_lightTweakSunColor").and_then(|_| vec3("r_lightTweakSunColor")),
+            angles: tweak("r_lightTweakSunDirection")
+                .and_then(|_| vec3("r_lightTweakSunDirection")),
+        };
         Gfx {
             fullscreen: c.bool("r_fullscreen"),
             mode: parse_mode(text("r_mode")),
@@ -294,6 +361,21 @@ impl Gfx {
             z_feather: on("r_zFeather"),
             draw_water: on("r_drawWater"),
             clear: clear(c),
+            near: if cheat {
+                c.f32_or("r_znear", 4.0).clamp(0.001, 10000.0)
+            } else {
+                4.0
+            },
+            far: if cheat {
+                c.f32_or("r_zfar", 0.0).max(0.0)
+            } else {
+                0.0
+            },
+            outdoor: on("r_outdoor"),
+            outdoor_away_bias: c.f32_or("r_outdoorAwayBias", 32.0),
+            outdoor_down_bias: c.f32_or("r_outdoorDownBias", 0.0),
+            outdoor_feather: c.f32_or("r_outdoorFeather", render::codeconst::OUTDOOR_FEATHER),
+            sun_tweak,
         }
     }
 
@@ -341,6 +423,13 @@ impl Gfx {
         base.lod_bias = self.lod_bias;
         base.fullbright = self.fullbright;
         base.clear = self.clear;
+        base.near = self.near;
+        base.far = self.far;
+        base.outdoor = self.outdoor;
+        base.outdoor_away_bias = self.outdoor_away_bias;
+        base.outdoor_down_bias = self.outdoor_down_bias;
+        base.outdoor_feather = self.outdoor_feather;
+        base.sun_tweak = self.sun_tweak;
         base
     }
 
@@ -418,6 +507,101 @@ mod tests {
         assert_eq!(s.shadows, render::ShadowMode::Off);
         assert!(!s.specular && !s.dof && !s.glow && !s.draw_sun && !s.distortion);
         assert_eq!(s.aa_samples, 4);
+    }
+
+    #[test]
+    fn the_film_and_glow_tweak_dvars_replace_the_vision_blocks() {
+        let base = render::art::Film::default();
+        assert_eq!(
+            film(
+                &cvars(&[
+                    ("sv_cheats", "0"),
+                    ("r_filmUseTweaks", "1"),
+                    ("r_filmTweakContrast", "2"),
+                ]),
+                base
+            ),
+            base,
+            "cheat dvars do nothing with sv_cheats off"
+        );
+        let f = film(
+            &cvars(&[
+                ("sv_cheats", "1"),
+                ("r_filmUseTweaks", "1"),
+                ("r_filmTweakEnable", "1"),
+                ("r_filmTweakContrast", "1.5"),
+                ("r_filmTweakBrightness", "0.1"),
+                ("r_filmTweakDesaturation", "0.25"),
+                ("r_filmTweakInvert", "1"),
+                ("r_filmTweakLightTint", "0.5 1 2"),
+                ("r_filmTweakDarkTint", "0 0 0"),
+            ]),
+            base,
+        );
+        assert!(f.enabled && f.invert);
+        assert_eq!((f.contrast, f.brightness, f.desaturation), (1.5, 0.1, 0.25));
+        assert_eq!(f.tint_light, [0.5, 1.0, 2.0]);
+        assert_eq!(f.tint_dark, [0.0; 3]);
+
+        let glow = glow(
+            &cvars(&[
+                ("sv_cheats", "1"),
+                ("r_glowUseTweaks", "1"),
+                ("r_glowTweakEnable", "1"),
+                ("r_glowTweakRadius", "5"),
+                ("r_glowTweakBloomIntensity", "1.5"),
+                ("r_glowTweakBloomCutoff", "0.3"),
+                ("r_glowTweakBloomDesaturation", "0.2"),
+                ("r_glowTweakSkyBleedIntensity", "0.4"),
+            ]),
+            render::art::Glow::default(),
+        );
+        assert!(glow.enabled);
+        assert_eq!(
+            (
+                glow.radius,
+                glow.bloom_intensity,
+                glow.bloom_cutoff,
+                glow.bloom_desaturation,
+                glow.sky_bleed_intensity
+            ),
+            (5.0, 1.5, 0.3, 0.2, 0.4)
+        );
+    }
+
+    #[test]
+    fn the_depth_outdoor_and_sun_dvars_reach_the_settings() {
+        let s = Gfx::from_cvars(&cvars(&[])).settings(render::Settings::default());
+        assert_eq!((s.near, s.far), (4.0, 0.0));
+        assert!(s.outdoor);
+        assert_eq!(
+            (s.outdoor_away_bias, s.outdoor_down_bias, s.outdoor_feather),
+            (32.0, 0.0, 8.0)
+        );
+        assert_eq!(s.sun_tweak, render::SunTweak::default());
+        // `r_znear` and `r_zfar` are cheat dvars.
+        let s = Gfx::from_cvars(&cvars(&[
+            ("sv_cheats", "1"),
+            ("r_znear", "0.5"),
+            ("r_zfar", "2000"),
+            ("r_outdoor", "0"),
+            ("r_outdoorAwayBias", "4"),
+            ("r_outdoorDownBias", "2"),
+            ("r_outdoorFeather", "16"),
+            ("r_lightTweakSunLight", "0.25"),
+            ("r_lightTweakSunColor", "0 0 2"),
+            ("r_lightTweakSunDirection", "10 20 0"),
+        ]))
+        .settings(render::Settings::default());
+        assert_eq!((s.near, s.far), (0.5, 2000.0));
+        assert!(!s.outdoor);
+        assert_eq!(
+            (s.outdoor_away_bias, s.outdoor_down_bias, s.outdoor_feather),
+            (4.0, 2.0, 16.0)
+        );
+        assert_eq!(s.sun_tweak.sun_light, Some(0.25));
+        assert_eq!(s.sun_tweak.color, Some(glam::Vec3::new(0.0, 0.0, 2.0)));
+        assert_eq!(s.sun_tweak.angles, Some(glam::Vec3::new(10.0, 20.0, 0.0)));
     }
 
     #[test]

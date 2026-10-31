@@ -14,9 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gsc::{
-    Builtins, CallOutcome, EntClass, Obj, Options, Value, Vm, VmError, VmErrorKind, compile,
-};
+use gsc::{Builtins, CallOutcome, EntClass, Obj, Value, Vm, VmError, VmErrorKind, compile};
 
 use crate::ban::BanList;
 use crate::bot::{BotShared, Brain};
@@ -65,6 +63,23 @@ fn menu_response_args(server_id: i32, argv: &[String]) -> Option<[String; 2]> {
 /// What a person typed as the text of a chat line: no control characters, which steer the localizer.
 fn plain_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// `SV_GetChallenge`/`SV_Status`: the server's keywords, with the stock `demo ` marker under `fs_restrict`.
+fn server_keywords(c: &Cvars) -> String {
+    let keywords = c.string("sv_keywords");
+    if c.bool("fs_restrict") {
+        format!("demo {keywords}")
+    } else {
+        keywords.to_owned()
+    }
+}
+
+/// `Scr_CompileScripts`' `developer_script`: the `/# ... #/` blocks only compile when it is on.
+fn script_options(c: &Cvars) -> gsc::Options {
+    gsc::Options {
+        developer: c.bool("developer_script"),
+    }
 }
 
 /// The password a `connect` must give (`g_password`); the literal `none` means no password, as at the original.
@@ -1036,6 +1051,9 @@ impl Server {
         if !game_dir.is_empty() {
             put("game", game_dir.to_owned());
         }
+        // `SV_GetChallenge`/`SV_Status`: stock's server info carries `sv_keywords`, prefixed `demo ` under
+        // `fs_restrict` so a demo server is distinguishable.
+        put("sv_keywords", server_keywords(c));
         if c.bool("sv_allowAnonymous") {
             put("sv_allowAnonymous", "1".into());
         }
@@ -1074,6 +1092,10 @@ impl Server {
             };
         set("pswrd", u8::from(!join_password(c).is_empty()).to_string());
         set("mod", u8::from(!c.string("fs_game").is_empty()).to_string());
+        if c.bool("fs_restrict") {
+            let keywords = server_keywords(c);
+            set("sv_keywords", keywords);
+        }
         let players = self
             .game
             .connected_clients()
@@ -2577,7 +2599,12 @@ impl Server {
                 .map(|(n, t)| (n.as_str(), t.as_str()))
                 .collect();
             refs.push(("cod4e/testclient.gsc", TEST_CLIENT_GSC));
-            compile(&refs, &Builtins::stock_mp(), Options::default()).map_err(|errs| {
+            compile(
+                &refs,
+                &Builtins::stock_mp(),
+                script_options(&self.game.cvars),
+            )
+            .map_err(|errs| {
                 let mut s = String::from("script compile errors:\n");
                 for e in errs.iter().take(20) {
                     s.push_str(&format!("  {e}\n"));
@@ -2780,6 +2807,9 @@ impl Server {
                 game: &mut self.game,
                 dispatch: &run.dispatch,
             };
+            // `g_synchronousClients`: clients run at the server's rate, one usercmd a frame, rather than
+            // catching up with a backlog.
+            let synchronous = host.game.cvars.bool("g_synchronousClients");
             // `SV_BotFrame` then each client's `ClientThink`: usercmds reach the game before
             // the frame's script threads run.
             for n in 0..host.game.clients.len() as u16 {
@@ -2790,7 +2820,11 @@ impl Server {
                 let Some(mut b) = host.game.clients[usize::from(n)].bot_brain.take() else {
                     // A person: the usercmds that arrived since the last frame.
                     let t = Instant::now();
-                    for cmd in self.net.as_mut().map_or_else(Vec::new, |s| s.take_cmds(n)) {
+                    let mut cmds = self.net.as_mut().map_or_else(Vec::new, |s| s.take_cmds(n));
+                    if synchronous {
+                        cmds.truncate(1);
+                    }
+                    for cmd in cmds {
                         host.game.client_think(&mut run.vm, n, cmd);
                         host.run_calls(&mut run.vm);
                     }
@@ -3386,9 +3420,31 @@ mod tests {
     use super::may_speak;
     use super::{
         PERK_PARABOLIC, RotationPlan, VoiceRules, flood_drops, hears_voice, menu_response_args,
-        ping_field, plain_text, plan_rotation,
+        ping_field, plain_text, plan_rotation, register_core_dvars, script_options,
+        server_keywords,
     };
     use crate::client::{Client, Conn, Session, Team};
+    use crate::cvar::Cvars;
+
+    #[test]
+    fn keywords_reach_the_server_info_and_demo_servers_are_marked() {
+        let mut c = Cvars::new();
+        register_core_dvars(&mut c);
+        assert_eq!(server_keywords(&c), "");
+        c.set("sv_keywords", "hardcore harbor");
+        assert_eq!(server_keywords(&c), "hardcore harbor");
+        c.set("fs_restrict", "1");
+        assert_eq!(server_keywords(&c), "demo hardcore harbor");
+    }
+
+    #[test]
+    fn developer_script_gates_the_slash_comment_blocks() {
+        let mut c = Cvars::new();
+        register_core_dvars(&mut c);
+        assert!(!script_options(&c).developer);
+        c.set("developer_script", "1");
+        assert!(script_options(&c).developer);
+    }
 
     #[test]
     fn a_menu_response_from_an_earlier_level_is_dropped() {

@@ -43,6 +43,11 @@ cgis=fps 0,set=set cg_drawFPS 1,wait=1,cgis=fps 1,shot=fps,set=set cg_drawFPS Of
 subtitle=MP_WAITING,wait=0.5,cgis=subtitle 1,wait=4,cgis=subtitle 0,\
 set=set cg_subtitles 0,subtitle=MP_WAITING,wait=0.5,cgis=subtitle 0,set=set cg_subtitles 1,\
 devmap=mp_crash,ingame=120,wait=2,\
+set=set r_znear 0.5,set=set r_zfar 2000,set=set r_outdoor 0,set=set r_outdoorAwayBias 4,\
+set=set r_outdoorDownBias 2,set=set r_outdoorFeather 16,\
+set=set r_lightTweakSunLight 1.25,set=set r_lightTweakSunColor 0 0 2,set=set r_lightTweakSunDirection 10 20 0,\
+vidrestart,wait=2,gfxis=nearfar 0.50 2000,gfxis=outdoor 0 4 2 16,\
+gfxis=sun_tweak 1.25 0.00 0.00 2.00 10.0 20.0 0.0,\
 cgis=gun 1,set=set cg_drawGun 0,wait=1,cgis=gun 0,shot=no-gun,set=set cg_drawGun 1,wait=1,cgis=gun 1,\
 cgis=hud2d 1,set=set cg_draw2D 0,wait=1,cgis=hud2d 0,shot=no-2d,set=set cg_draw2D 1,wait=1,cgis=hud2d 1,\
 shock=8000,wait=1,cgis=shock 1,set=set cg_drawShellshock 0,wait=1,cgis=shock 0,set=set cg_drawShellshock 1,wait=1,cgis=shock 1,\
@@ -66,6 +71,13 @@ set=set r_brightness 0.25,wait=1,cgis=brightness 0.25,set=set r_brightness 0,wai
 set=set r_contrast 2,set=set r_desaturation 0,wait=1,cgis=film_sample 0.00 2.00 0.25,\
 set=set r_desaturation 2,wait=1,cgis=film_sample 0.00 2.00 0.75,\
 set=set r_contrast 1,set=set r_desaturation 1,wait=1,cgis=film_sample 0.00 1.00 0.50,\
+set=set r_filmUseTweaks 1,set=set r_filmTweakEnable 1,set=set r_filmTweakContrast 1.5,\
+set=set r_filmTweakBrightness 0.1,set=set r_filmTweakDesaturation 0.25,set=set r_filmTweakInvert 1,\
+set=set r_filmTweakLightTint 0.5 1 2,set=set r_filmTweakDarkTint 0 0 0,wait=1,\
+cgis=film_sample 0.10 1.50 0.25,set=set r_filmUseTweaks 0,set=set r_filmTweakEnable 0,\
+set=set r_glowUseTweaks 1,set=set r_glowTweakEnable 1,set=set r_glowTweakRadius 5,\
+set=set r_glowTweakBloomIntensity 1.5,set=set r_glowTweakBloomCutoff 0.3,wait=1,\
+gfxis=glow_tweak 1 5 1.5 0.3,set=set r_glowUseTweaks 0,set=set r_glowTweakEnable 0,\
 fxmark,set=set cg_bloodLimitMsec 2000,set=set cg_bloodLimit 1,hitflesh,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,\
 hitflesh,wait=1.2,cgis=fx:bullet_impact_flesh +1,hitflesh,cgis=fx:bullet_impact_flesh +2,\
 set=set cg_bloodLimitMsec 1,wait=0.1,hitflesh,wait=0.1,hitflesh,cgis=fx:bullet_impact_flesh +4,set=set cg_bloodLimit 0,set=set cg_bloodLimitMsec 330,\
