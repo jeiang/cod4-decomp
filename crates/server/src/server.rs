@@ -82,6 +82,15 @@ fn script_options(c: &Cvars) -> gsc::Options {
     }
 }
 
+/// `g_synchronousClients`: a person's usercmds are run at the server's rate, one a frame, rather than caught up
+/// with as a backlog.
+fn frame_cmds(mut cmds: Vec<sim::pm::UserCmd>, synchronous: bool) -> Vec<sim::pm::UserCmd> {
+    if synchronous {
+        cmds.truncate(1);
+    }
+    cmds
+}
+
 /// The password a `connect` must give (`g_password`); the literal `none` means no password, as at the original.
 fn join_password(c: &Cvars) -> &str {
     match c.string("g_password") {
@@ -2820,11 +2829,8 @@ impl Server {
                 let Some(mut b) = host.game.clients[usize::from(n)].bot_brain.take() else {
                     // A person: the usercmds that arrived since the last frame.
                     let t = Instant::now();
-                    let mut cmds = self.net.as_mut().map_or_else(Vec::new, |s| s.take_cmds(n));
-                    if synchronous {
-                        cmds.truncate(1);
-                    }
-                    for cmd in cmds {
+                    let cmds = self.net.as_mut().map_or_else(Vec::new, |s| s.take_cmds(n));
+                    for cmd in frame_cmds(cmds, synchronous) {
                         host.game.client_think(&mut run.vm, n, cmd);
                         host.run_calls(&mut run.vm);
                     }
@@ -3419,9 +3425,9 @@ fn hears_voice(rules: &VoiceRules, talker: &Client, listener: &Client) -> bool {
 mod tests {
     use super::may_speak;
     use super::{
-        PERK_PARABOLIC, RotationPlan, VoiceRules, flood_drops, hears_voice, menu_response_args,
-        ping_field, plain_text, plan_rotation, register_core_dvars, script_options,
-        server_keywords,
+        PERK_PARABOLIC, RotationPlan, VoiceRules, flood_drops, frame_cmds, hears_voice,
+        menu_response_args, ping_field, plain_text, plan_rotation, register_core_dvars,
+        script_options, server_keywords,
     };
     use crate::client::{Client, Conn, Session, Team};
     use crate::cvar::Cvars;
@@ -3444,6 +3450,13 @@ mod tests {
         assert!(!script_options(&c).developer);
         c.set("developer_script", "1");
         assert!(script_options(&c).developer);
+    }
+
+    #[test]
+    fn synchronous_clients_consume_one_usercmd_a_frame() {
+        let backlog = || vec![sim::pm::UserCmd::default(); 3];
+        assert_eq!(frame_cmds(backlog(), false).len(), 3);
+        assert_eq!(frame_cmds(backlog(), true).len(), 1);
     }
 
     #[test]
