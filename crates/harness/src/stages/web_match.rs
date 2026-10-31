@@ -672,7 +672,8 @@ fn play(
     // frame), and a command's time is capped, so a second of the wall is less than a second of movement there. A
     // spawn can face a wall (the 2026-10-30 run `slot-1-cod4e-run-20261030-040632` walked 25 units in 30 s into
     // one): when a second of walking gains nothing the view turns a quarter, as `net-match`'s walker does.
-    let origin0 = [num(&p0, "origin.0"), num(&p0, "origin.1")];
+    let spawn0 = num(&p0, "spawn_count");
+    let mut origin0 = [num(&p0, "origin.0"), num(&p0, "origin.1")];
     page.bind(server, "+forward", "down")?;
     let t_move = Instant::now();
     let end = Instant::now() + Duration::from_secs(45);
@@ -680,9 +681,24 @@ fn play(
     let mut p1 = p0.clone();
     let mut last_gain = (Instant::now(), 0.0);
     let mut turns = 0;
+    let mut respawns = 0;
     while dist < 64.0 && Instant::now() < end {
         page.ask(server, json!({"cmd": "step", "frames": 3}))?;
         p1 = page.state(server, "player")?;
+        let spawn1 = num(&p1, "spawn_count");
+        if spawn1 != spawn0 {
+            // A teleport to a new spawn is not walking. Measure afresh within this living spawn, as net-match does.
+            origin0 = [num(&p1, "origin.0"), num(&p1, "origin.1")];
+            dist = 0.0;
+            last_gain = (Instant::now(), 0.0);
+            respawns += 1;
+            continue;
+        }
+        if !p1["alive"].as_bool().unwrap_or(false) || p1["killcam"].as_bool().unwrap_or(false) {
+            return Err(format!(
+                "the player died or entered killcam during the movement attempt: {p1}"
+            ));
+        }
         dist = (num(&p1, "origin.0") - origin0[0]).hypot(num(&p1, "origin.1") - origin0[1]);
         if dist > last_gain.1 + 4.0 {
             last_gain = (Instant::now(), dist);
@@ -694,7 +710,12 @@ fn play(
     }
     page.bind(server, "+forward", "up")?;
     report.metrics.insert("moved".into(), dist);
-    report.metrics.insert("walk_turns".into(), f64::from(turns));
+    report
+        .metrics
+        .insert("walk_respawns".into(), f64::from(respawns));
+    report.notes.push(format!(
+        "movement spawn_count stayed {spawn0}; deaths/killcam failed the attempt"
+    ));
     report
         .metrics
         .insert("walk_ms".into(), t_move.elapsed().as_secs_f64() * 1000.0);
