@@ -2827,6 +2827,9 @@ impl NetPlay {
         ));
         report["brush_models_seen"] = self.c.brush_models_seen.into();
         report["brush_models_max"] = self.c.brush_models_max.into();
+        report["fx"]["effect_quads"] = json!(self.effects.effect_quads);
+        report["fx"]["ambient_quads"] = json!(self.effects.ambient().quads);
+        report["fx"]["ambient_without_quads"] = json!(self.effects.ambient().without_quads());
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
         report["fx"]["corpses_max"] = self.c.corpses_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();

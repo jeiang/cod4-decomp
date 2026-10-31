@@ -684,6 +684,18 @@ impl Fx {
         id
     }
 
+    /// Plays `def` at `frame` from `at`; with no looping life its looping elements go on until [`Fx::stop`]: a map's
+    /// placed effect (`FX_SpawnOrientedEffect` from `CG_ParseEffect`). Returns its handle.
+    pub fn play_persistent_at(&mut self, def: &Arc<FxEffectDef>, frame: Frame, at: i32) -> u64 {
+        let id = self.play_at(def, frame, at);
+        if def.msec_looping_life <= 0
+            && let Some(e) = self.effects.iter_mut().find(|e| e.id == id)
+        {
+            e.loop_end = i32::MAX;
+        }
+        id
+    }
+
     /// Moves a playing effect to `frame`; it spawns what its movement calls for (trail points along the way) at the
     /// next update. Does nothing if the effect is over.
     pub fn move_effect(&mut self, id: u64, frame: Frame) {
@@ -1213,8 +1225,19 @@ impl Fx {
 
     /// Everything to draw at the current time.
     pub fn draw(&mut self, cam: &Camera, out: &mut Draws) {
+        self.draw_counted(cam, out, &mut |_, _| {});
+    }
+
+    /// Everything to draw, with the number of sprite quads each effect contributes after culling.
+    pub fn draw_counted(
+        &mut self,
+        cam: &Camera,
+        out: &mut Draws,
+        observer: &mut dyn FnMut(&str, usize),
+    ) {
         let mut blockers = Vec::new();
         for e in &self.effects {
+            let before = out.quads.len();
             self.draw_trails(e, cam, out);
             let light = e.light.unwrap_or(NEUTRAL_LIGHT);
             for el in &e.elems {
@@ -1378,6 +1401,10 @@ impl Fx {
                     }
                     _ => {}
                 }
+            }
+            let drawn = out.quads.len() - before;
+            if drawn != 0 {
+                observer(e.def.name.as_deref().unwrap_or(""), drawn);
             }
         }
         self.blockers = blockers;
@@ -2309,6 +2336,24 @@ mod tests {
         fx.stop(id);
         fx.update(5000, &Empty);
         assert!(!fx.retrigger(id, 5100));
+    }
+
+    #[test]
+    fn a_placed_effect_without_a_looping_life_keeps_looping() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [1, 0];
+        e.life_span_msec.base = 100;
+        e.spawn_interval_msec = 100.0;
+        e.count.base = 1.0;
+        let def = effect("fx/placed", 1, 0, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        let id = fx.play_persistent_at(&def, Frame::facing(Vec3::ZERO, Vec3::Z), -2000);
+        for t in (0..60_000).step_by(1000) {
+            fx.update(t, &Empty);
+        }
+        assert_eq!(fx.live_effects(), 1);
+        assert!(fx.is_live(id));
+        assert!(fx.live_elems() > 0);
     }
 
     #[test]

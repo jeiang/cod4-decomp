@@ -6,6 +6,7 @@
 //! Which effect an impact plays is the original's: the weapon's impact type picks a row of the impact table, the
 //! surface type a column; flesh has its own columns (body or head; the stock event carries only the head bit, so the fatal columns are not used).
 
+use crate::ambient::Ambient;
 use crate::decal::{self, Placement};
 use crate::events::{ClientEvent, Events, Shooter};
 use crate::tracer::{self, Tracers};
@@ -149,6 +150,7 @@ struct Mark {
 
 pub struct Effects {
     fx: Fx,
+    ambient: Ambient,
     impact: Option<Arc<FxImpactTable>>,
     world: Arc<GfxWorld>,
     marks: HashMap<u64, Mark>,
@@ -188,6 +190,8 @@ pub struct Effects {
     tracer_material: Option<Arc<Material>>,
     /// What was played, by kind; for the report.
     pub played: BTreeMap<&'static str, u64>,
+    /// Total sprite quads each effect has passed the camera's cull to draw.
+    pub effect_quads: BTreeMap<String, u64>,
     /// Names of effects an event asked for that the content lacks.
     pub missing: HashSet<String>,
 }
@@ -274,6 +278,7 @@ impl Effects {
         }
         Self {
             fx: Fx::new(Arc::new(lib)),
+            ambient: Ambient::new(content),
             impact: content.impact_table().cloned(),
             world,
             marks: HashMap::new(),
@@ -296,8 +301,15 @@ impl Effects {
             dice: 0x9e37_79b9,
             tracer_material: None,
             played: BTreeMap::new(),
+            effect_quads: BTreeMap::new(),
             missing: HashSet::new(),
         }
+    }
+
+    /// No ambient effects, for the gameplay-effect selftests that must end with an empty pool.
+    pub fn without_ambient(mut self) -> Self {
+        self.ambient = Ambient::empty();
+        self
     }
 
     fn impact_effect(
@@ -963,6 +975,7 @@ impl Effects {
             map: &self.world,
         };
         self.fx.update(now_ms, &map);
+        self.ambient.update(now_ms, &map);
     }
 
     /// Sounds the effects started since the last call.
@@ -977,7 +990,11 @@ impl Effects {
     }
 
     pub fn live_elems(&self) -> usize {
-        self.fx.live_elems()
+        self.fx.live_elems() + self.ambient.live_elems()
+    }
+
+    pub fn ambient(&self) -> &Ambient {
+        &self.ambient
     }
 
     /// What to draw from a camera at `eye` looking along `yaw` and `pitch` (radians).
@@ -1001,7 +1018,15 @@ impl Effects {
         // What the effects that start next are culled against.
         self.fx.set_camera(cam);
         let mut d = Draws::default();
-        self.fx.draw(&cam, &mut d);
+        let quads = &mut self.effect_quads;
+        self.fx.draw_counted(&cam, &mut d, &mut |name, n| {
+            if let Some(count) = quads.get_mut(name) {
+                *count += n as u64;
+            } else {
+                quads.insert(name.to_owned(), n as u64);
+            }
+        });
+        self.ambient.draw(&cam, &mut d);
         let beams = self.tracers.beams(self.clock);
         let mut out = Drawn {
             tracers: beams.len(),

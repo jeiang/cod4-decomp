@@ -30,6 +30,15 @@ const SHOCK: &str = "concussion_grenade_mp";
 const SMOKE: &str = "smoke/smoke_grenade_11sec_mp";
 /// A stock explosion with a particle cloud among its elements.
 const CLOUDY: &str = "explosions/artilleryexp_dirt_brown";
+/// Maps and ambient effect families the map createfx must play (issue #359).
+const AMBIENT: &[(&str, &[&str])] = &[
+    ("mp_bog", &["fire"]),
+    ("mp_farm", &["rain"]),
+    ("mp_bloc", &["snow"]),
+    ("mp_crash_snow", &["snow"]),
+    ("mp_crash", &["fire"]),
+    ("mp_backlot", &["fire"]),
+];
 
 /// Plays `effects` from `from_ms` for `secs` seconds in 50 ms steps and returns (most sprites in one frame, most
 /// decals, sprites at the end, live elements at the end).
@@ -152,7 +161,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     let weapon = |_: u16| Some(gun.clone());
 
     // An explosion draws, and ends.
-    let mut fx = Effects::new(&lib.content, data.world.clone());
+    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
     fx.demo(EXPLOSION, eye, 0.0, 0.0);
     if !fx.missing.is_empty() {
         bad.push(format!("effect {EXPLOSION} is missing: {:?}", fx.missing));
@@ -171,7 +180,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     // A bullet into the floor leaves a decal on it, for whichever surface type has one.
     let mut decals_by_surface = Vec::new();
     for surface in 0..24u8 {
-        let mut fx = Effects::new(&lib.content, data.world.clone());
+        let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
         fx.event(
             &ClientEvent::BulletImpact {
                 origin: at,
@@ -196,7 +205,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     }
 
     // A shot flashes and ejects a shell.
-    let mut fx = Effects::new(&lib.content, data.world.clone());
+    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
     fx.event(
         &ClientEvent::WeaponFire {
             eye: [eye.x, eye.y, eye.z],
@@ -243,7 +252,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     ] {
         // A weapon without the flash for that view plays nothing there (`WeaponFlash`).
         let expected = u64::from(effect.is_some());
-        let mut fx = Effects::new(&lib.content, data.world.clone());
+        let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
         fx.set_view(7, None);
         fx.event(&turret_shot(gunner), &weapon);
         let flashed = fx.played.get("muzzle_flash").copied().unwrap_or(0);
@@ -307,7 +316,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     if tracer_material.is_none() {
         bad.push("the stock tracer material gfx_tracer is not in the install".into());
     }
-    let mut fx = Effects::new(&lib.content, data.world.clone());
+    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
     fx.set_tracer_material(tracer_material);
     fx.set_tracer_cvars(crate::tracer::Cvars {
         chance: 1.0,
@@ -376,7 +385,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     let Some(spot) = wide_floor(world, lo, hi) else {
         return Err(vec!["no wide floor found to throw debris on".into()]);
     };
-    let mut fx = Effects::new(&lib.content, data.world.clone());
+    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
     fx.demo(DEBRIS, spot, 0.0, std::f32::consts::FRAC_PI_2);
     if !fx.missing.is_empty() {
         bad.push(format!("effect {DEBRIS} is missing: {:?}", fx.missing));
@@ -434,7 +443,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     match lib.content.weapon(ROCKET).cloned() {
         Some(rocket) if rocket.proj_trail_effect.is_some() => {
             let rw = |_: u16| Some(rocket.clone());
-            let mut fx = Effects::new(&lib.content, data.world.clone());
+            let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
             let (mut strips, mut tris) = (0, 0);
             for step in 1..=60 {
                 let at = eye + glam::Vec3::X * (step as f32 * 40.0) + glam::Vec3::Z * 200.0;
@@ -478,7 +487,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 bad.push(format!("weapon {FRAG} has no projectile model"));
             }
             let fw = |_: u16| Some(frag.clone());
-            let mut fx = Effects::new(&lib.content, data.world.clone());
+            let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
             fx.event(
                 &ClientEvent::Explosion {
                     origin: at,
@@ -526,7 +535,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         .map(str::to_owned);
     match looped {
         Some(name) => {
-            let mut fx = Effects::new(&lib.content, data.world.clone());
+            let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
             let mut e = net::entity::EntityState::new(100);
             e.etype = net::entity::etype::LOOP_FX;
             e.origin = [eye.x, eye.y, eye.z + 200.0];
@@ -626,11 +635,74 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     water(install, &mut report, &mut bad);
     destructible(install, &mut report, &mut bad);
     references(&lib, &mut report, &mut bad);
+    ambient(install, &mut report, &mut bad);
 
     if bad.is_empty() {
         Ok(Value::Object(report))
     } else {
         Err(bad)
+    }
+}
+
+/// Look directly at every generated createfx placement on the affected maps. The named weather and fire
+/// effects must each contribute sprite quads, not merely have a decoded definition.
+fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mut Vec<String>) {
+    for &(map, families) in AMBIENT {
+        let lib = match Library::load(install, "", map) {
+            Ok(lib) => lib,
+            Err(e) => {
+                bad.push(format!("ambient map {map}: {e}"));
+                continue;
+            }
+        };
+        let data = match render::MapData::load(install, "", map) {
+            Ok(data) => data,
+            Err(e) => {
+                bad.push(format!("ambient map {map}: {e:?}"));
+                continue;
+            }
+        };
+        let Some(clipmap) = data.clipmap.clone() else {
+            bad.push(format!("ambient map {map} has no collision data"));
+            continue;
+        };
+        let boxes = PlayerBoxes::new(clipmap);
+        let world = boxes.world();
+        let mut fx = Effects::new(&lib.content, data.world.clone());
+        let poses: Vec<_> = fx
+            .ambient()
+            .poses()
+            .map(|(name, at, forward)| (name.to_owned(), at, forward))
+            .collect();
+        report.insert(format!("ambient_{map}_placements"), poses.len().into());
+        if poses.is_empty() {
+            bad.push(format!("{map} has no parsed ambient effect placements"));
+            continue;
+        }
+        let mut now = 0;
+        for (_, at, forward) in &poses {
+            let eye = *at - *forward * 400.0 + glam::Vec3::Z * 100.0;
+            let direction = (*at - eye).normalize();
+            now += 2000;
+            fx.update(now, world);
+            fx.draw(eye, direction.y.atan2(direction.x), direction.z.asin(), 0.0);
+        }
+        for family in families {
+            let quads: u64 = fx
+                .ambient()
+                .quads
+                .iter()
+                .filter(|(name, _)| name.contains(family))
+                .map(|(_, n)| *n)
+                .sum();
+            report.insert(format!("ambient_{map}_{family}_quads"), quads.into());
+            if quads == 0 {
+                bad.push(format!(
+                    "{map} ambient {family} effects never drew a sprite ({} placements)",
+                    poses.len()
+                ));
+            }
+        }
     }
 }
 
@@ -921,7 +993,7 @@ fn elements(
     if count("sprite_billboard") < 2 || count("runner") != 1 {
         bad.push(format!("{SMOKE} is not a runner and sprites: {types:?}"));
     }
-    let mut fx = Effects::new(&lib.content, data.world.clone());
+    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
     fx.demo(SMOKE, eye, 0.0, 0.0);
     let along = glam::Vec3::X * 400.0;
     let (mut quads, mut seen) = (0, 1.0f32);
@@ -950,7 +1022,7 @@ fn elements(
     if cloudy.get("cloud").and_then(Value::as_u64).unwrap_or(0) == 0 {
         bad.push(format!("effect {CLOUDY} has no cloud element: {cloudy:?}"));
     }
-    let mut fx = Effects::new(&lib.content, data.world.clone());
+    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
     fx.demo(CLOUDY, eye, 0.0, 0.0);
     let (mut clouds, mut quads, mut cloud_meshes) = (0, 0, 0);
     for step in 1..=400 {
@@ -1007,7 +1079,7 @@ fn elements(
             }
             candidates += 1;
             for &surface in surfaces {
-                let mut fx = Effects::new(&lib.content, data.world.clone());
+                let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
                 fx.event(
                     &ClientEvent::BulletImpact {
                         origin: c.to_array(),
