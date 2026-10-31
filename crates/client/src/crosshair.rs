@@ -92,7 +92,7 @@ fn layout_of(
     tan_half_fov_y: f32,
     (alpha_scale, alpha_min): (f32, f32),
 ) -> (f32, Vec<Piece>) {
-    let alpha = (alpha_scale * (1.0 - spread_scale / 255.0)).max(alpha_min) * (1.0 - ads);
+    let alpha = ((1.0 - ads) * alpha_scale * (1.0 - spread_scale / 255.0)).max(alpha_min);
     if alpha < 0.01 || tan_half_fov_y <= 0.0 {
         return (0.0, Vec::new());
     }
@@ -208,8 +208,15 @@ mod tests {
     }
 
     #[test]
+    fn the_minimum_alpha_applies_after_the_sights_scale() {
+        let alpha = layout_of(&STYLE, 1.0, 0.0, 0.5, 30f32.to_radians().tan(), (0.0, 0.75)).0;
+        assert!((alpha - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
     fn the_sights_take_the_crosshair_away() {
-        assert!(lay(1.0, 0.0, 1.0).1.is_empty());
+        let gone = layout_of(&STYLE, 1.0, 0.0, 1.0, 30f32.to_radians().tan(), (1.0, 0.0));
+        assert!(gone.1.is_empty());
         let half = lay(1.0, 0.0, 0.5).0;
         assert!((half - 0.5).abs() < 1e-6);
     }

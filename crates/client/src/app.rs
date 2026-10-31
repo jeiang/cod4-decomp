@@ -1078,6 +1078,11 @@ impl Viewer {
         };
         let (read, write) = profiles.config_paths();
         input.use_profile(read, write);
+        // The profile is read after the native window exists: apply its archived position now, not only on vid_restart.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((x, y)) = Gfx::from_cvars(&input.cvars).position {
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
         // A bare `--listen` started its server before the config was read: it learns `bot_count` now.
         if listen.is_some() {
             for line in saved_bot_count_lines(self.cli.bots, &input) {

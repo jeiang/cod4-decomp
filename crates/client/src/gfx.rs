@@ -202,17 +202,20 @@ impl Gfx {
         let text = |n: &str| c.get(n).unwrap_or("");
         // Unset means the engine's default: everything on.
         let on = |n: &str| c.get(n).is_none_or(|v| v.trim() != "0");
+        let window_coord = |n: &str| {
+            text(n)
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .map(|v| v.clamp(-4096, 4096))
+        };
         let picmip = |n: &str| (c.f32(n).max(0.0) as usize).min(3);
         Gfx {
             fullscreen: c.bool("r_fullscreen"),
             mode: parse_mode(text("r_mode")),
             refresh: parse_hz(text("r_displayRefresh")),
             monitor: text("r_monitor").trim().parse().ok().filter(|&n| n > 0),
-            position: text("vid_xpos")
-                .trim()
-                .parse()
-                .ok()
-                .zip(text("vid_ypos").trim().parse().ok()),
+            position: window_coord("vid_xpos").zip(window_coord("vid_ypos")),
             aspect: parse_aspect(text("r_aspectRatio")),
             vsync: c.bool("r_vsync"),
             aa_samples: text("r_aaSamples").trim().parse().unwrap_or(1).clamp(1, 16),
@@ -379,6 +382,12 @@ mod tests {
             c.set(k, v, false);
         }
         c
+    }
+
+    #[test]
+    fn window_coordinates_follow_the_stock_domain() {
+        let g = Gfx::from_cvars(&cvars(&[("vid_xpos", "10000"), ("vid_ypos", "-10000")]));
+        assert_eq!(g.position, Some((4096, -4096)));
     }
 
     #[test]
