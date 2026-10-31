@@ -153,7 +153,7 @@ impl View {
             Vec4::new(w, 0.0, 0.0, 0.0),
             Vec4::new(0.0, h, 0.0, 0.0),
             Vec4::new(0.0, 0.0, r, 1.0),
-            Vec4::new(0.0, 0.0, -r * NEAR, 0.0),
+            Vec4::new(0.0, 0.0, -r * near, 0.0),
         );
         (look * conv, proj)
     }
