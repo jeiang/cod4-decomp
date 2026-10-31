@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub struct AmbientEffect {
     pub name: String,
     frame: Frame,
+    start_ms: i32,
 }
 
 pub struct Ambient {
@@ -41,7 +42,9 @@ impl Ambient {
             .map_or_else(Vec::new, |map| parse(content, map, &lib));
         let mut fx = Fx::new(Arc::new(lib));
         for d in &defs {
-            fx.play_named(&d.name, d.frame);
+            if let Some(def) = fx.library().get(&d.name).cloned() {
+                fx.play_at(&def, d.frame, d.start_ms);
+            }
         }
         Self {
             fx,
@@ -58,16 +61,16 @@ impl Ambient {
         self.fx.update(now, world);
     }
 
-    /// `FX_SpawnOrientedEffect`: every map effect starts when the level starts; its delay is its
-    /// repeat period, including the first play.
+    /// Draws the effects that started with the level and counts their visible sprites.
     pub fn draw(&mut self, cam: &Camera, out: &mut Draws) {
-        let mut frame = BTreeMap::new();
+        let quads = &mut self.quads;
         self.fx.draw_counted(cam, out, &mut |name, n| {
-            *frame.entry(name.to_owned()).or_insert(0) += n;
+            if let Some(count) = quads.get_mut(name) {
+                *count += n as u64;
+            } else {
+                quads.insert(name.to_owned(), n as u64);
+            }
         });
-        for (name, n) in frame {
-            *self.quads.entry(name).or_default() += n as u64;
-        }
     }
 
     /// Every effect placement, for looking directly at a map's ambient effect.
@@ -145,6 +148,10 @@ fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
             tracing::warn!(map, path, "createfx effect has no effect key");
             continue;
         };
+        let Some(delay) = number_after(body, "\"delay\"") else {
+            tracing::warn!(map, path, "createfx effect has no delay");
+            continue;
+        };
         let Some(name) = names.get(key) else {
             tracing::warn!(map, path, key, "createfx effect key has no mapping");
             continue;
@@ -168,6 +175,7 @@ fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
                 origin: Vec3::from(origin),
                 axis: [Vec3::from(forward), -Vec3::from(right), Vec3::from(up)],
             },
+            start_ms: (delay * 1000.0) as i32,
         });
     }
     out

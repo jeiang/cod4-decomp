@@ -1018,14 +1018,15 @@ impl Effects {
         // What the effects that start next are culled against.
         self.fx.set_camera(cam);
         let mut d = Draws::default();
-        let mut frame_quads = BTreeMap::new();
+        let quads = &mut self.effect_quads;
         self.fx.draw_counted(&cam, &mut d, &mut |name, n| {
-            *frame_quads.entry(name.to_owned()).or_insert(0) += n;
+            if let Some(count) = quads.get_mut(name) {
+                *count += n as u64;
+            } else {
+                quads.insert(name.to_owned(), n as u64);
+            }
         });
         self.ambient.draw(&cam, &mut d);
-        for (name, n) in frame_quads {
-            *self.effect_quads.entry(name).or_default() += n as u64;
-        }
         let beams = self.tracers.beams(self.clock);
         let mut out = Drawn {
             tracers: beams.len(),
