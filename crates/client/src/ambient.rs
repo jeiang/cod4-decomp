@@ -43,7 +43,7 @@ impl Ambient {
         let mut fx = Fx::new(Arc::new(lib));
         for d in &defs {
             if let Some(def) = fx.library().get(&d.name).cloned() {
-                fx.play_at(&def, d.frame, d.start_ms);
+                fx.play_persistent_at(&def, d.frame, d.start_ms);
             }
         }
         Self {
