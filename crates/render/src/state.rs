@@ -107,8 +107,12 @@ impl StateBits {
     pub fn depth_bias(self) -> wgpu::DepthBiasState {
         match (self.0[1] >> 4) & 3 {
             0 => wgpu::DepthBiasState::default(),
+            // KisakCOD `R_ForceSetPolygonOffset`: the default shadow bias is
+            // `sm_polygonOffsetBias` 0.5 * 2^-16 = 2^-17. wgpu's `constant` is in
+            // minimum resolvable depth steps, 2^-23 for the shadow maps' D32Float,
+            // so preserving that offset takes 64 steps, not two.
             3 => wgpu::DepthBiasState {
-                constant: 2,
+                constant: 64,
                 slope_scale: 2.0,
                 clamp: 0.0,
             },
@@ -202,6 +206,14 @@ mod tests {
         let b = StateBits([5 | 6 << 4 | 1 << 8, 0]).blend().unwrap();
         assert_eq!(b.alpha.src_factor, wgpu::BlendFactor::SrcAlpha);
         assert_eq!(b.color.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+    }
+
+    #[test]
+    fn shadow_bias_keeps_the_stock_offset_in_d32_steps() {
+        // `sm_polygonOffsetBias` 0.5 * 2^-16 is 2^-17; one D32Float step is 2^-23.
+        let bias = StateBits([0, 0x30]).depth_bias();
+        assert_eq!(bias.constant, 64);
+        assert_eq!(bias.slope_scale, 2.0);
     }
 
     #[test]
