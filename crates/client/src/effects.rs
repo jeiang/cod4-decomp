@@ -990,7 +990,7 @@ impl Effects {
     }
 
     pub fn live_elems(&self) -> usize {
-        self.fx.live_elems() + self.ambient.fx.live_elems()
+        self.fx.live_elems() + self.ambient.live_elems()
     }
 
     pub fn ambient(&self) -> &Ambient {
@@ -1024,7 +1024,7 @@ impl Effects {
         });
         self.ambient.draw(&cam, &mut d);
         for (name, n) in frame_quads {
-            *self.effect_quads.entry(name).or_default() += n;
+            *self.effect_quads.entry(name).or_default() += n as u64;
         }
         let beams = self.tracers.beams(self.clock);
         let mut out = Drawn {

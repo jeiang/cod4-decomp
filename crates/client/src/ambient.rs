@@ -50,6 +50,10 @@ impl Ambient {
         }
     }
 
+    pub fn live_elems(&self) -> usize {
+        self.fx.live_elems()
+    }
+
     pub fn update(&mut self, now: i32, world: &dyn fx::World) {
         self.fx.update(now, world);
     }
@@ -62,7 +66,7 @@ impl Ambient {
             *frame.entry(name.to_owned()).or_insert(0) += n;
         });
         for (name, n) in frame {
-            *self.quads.entry(name).or_default() += n;
+            *self.quads.entry(name).or_default() += n as u64;
         }
     }
 
