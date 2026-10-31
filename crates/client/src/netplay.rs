@@ -2789,6 +2789,9 @@ impl NetPlay {
             "events": self.c.events,
             "fx": {
                 "played": self.effects.played,
+                "effect_quads": self.effects.effect_quads,
+                "ambient_quads": self.effects.ambient().quads,
+                "ambient_without_quads": self.effects.ambient().without_quads(),
                 "missing": self.effects.missing,
                 "quads_max": self.c.fx_quads_max,
                 "decals_max": self.c.fx_decals_max,

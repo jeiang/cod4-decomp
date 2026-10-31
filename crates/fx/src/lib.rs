@@ -1213,8 +1213,19 @@ impl Fx {
 
     /// Everything to draw at the current time.
     pub fn draw(&mut self, cam: &Camera, out: &mut Draws) {
+        self.draw_counted(cam, out, &mut |_, _| {});
+    }
+
+    /// Everything to draw, with the number of sprite quads each effect contributes after culling.
+    pub fn draw_counted(
+        &mut self,
+        cam: &Camera,
+        out: &mut Draws,
+        observer: &mut dyn FnMut(&str, usize),
+    ) {
         let mut blockers = Vec::new();
         for e in &self.effects {
+            let before = out.quads.len();
             self.draw_trails(e, cam, out);
             let light = e.light.unwrap_or(NEUTRAL_LIGHT);
             for el in &e.elems {
@@ -1378,6 +1389,10 @@ impl Fx {
                     }
                     _ => {}
                 }
+            }
+            let drawn = out.quads.len() - before;
+            if drawn != 0 {
+                observer(e.def.name.as_deref().unwrap_or(""), drawn);
             }
         }
         self.blockers = blockers;

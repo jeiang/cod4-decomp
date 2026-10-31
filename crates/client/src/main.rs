@@ -8,6 +8,7 @@
 #[cfg(test)]
 static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+mod ambient;
 mod app;
 mod automelee;
 mod breath;
