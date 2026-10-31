@@ -57,7 +57,8 @@ set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0
 cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
 cgis=centertime 3000,set=set cg_centertime 1.5,wait=1,cgis=centertime 1500,set=set cg_centertime 3,\
 set=set cg_crosshairAlpha 0,set=set cg_crosshairAlphaMin 0,wait=1,cgis=crosshair_alpha 0.00,\
-set=set cg_crosshairAlphaMin 0.75,wait=1,cgis=crosshair_alpha 0.75,holdkey=mouse2,wait=1,cgis=crosshair_alpha 0.75,releasekey=mouse2,set=set cg_crosshairAlpha 1,set=set cg_crosshairAlphaMin 0.5,\
+set=set cg_crosshairAlphaMin 0.75,wait=1,cgis=crosshair_alpha 0.75,holdkey=mouse2,releasekey=mouse2,wait=1,cgis=crosshair_alpha 0.75,\
+holdkey=mouse2,releasekey=mouse2,wait=1,set=set cg_crosshairAlpha 1,set=set cg_crosshairAlphaMin 0.5,\
 cgis=heli_camera -1000 50 15 0 1900 2100 2400 4 2,\
 set=set cg_heliKillCamDist 500,set=set cg_heliKillCamFov 40,set=set cg_heliKillCamZDist 80,\
 set=set cg_heliKillCamNearBlurStart 10,set=set cg_heliKillCamNearBlurEnd 200,\
@@ -94,7 +95,8 @@ dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1+,shot=dlight-on,
 set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\
 set=set r_zFeather 1,set=set r_drawWater 1,set=set r_texFilterAnisoMin 1,set=set r_texFilterMipMode Unchanged,\
 set=set r_aspectRatio auto,vidrestart,wait=2,gfxis=zfeather 1,gfxis=water 1,\
-gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,wait=2,gfxis=blur 1,releasekey=mouse2,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
+gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,releasekey=mouse2,wait=2,gfxis=blur 1,\
+holdkey=mouse2,releasekey=mouse2,wait=1,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
 losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered";
 
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
