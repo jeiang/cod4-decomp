@@ -94,9 +94,6 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
                     .is_some_and(|y| (y - 2112.5).abs() < 1.0)
         })
     });
-    if !car {
-        return Err("garage car script_model was not published at (58, 2112.5, 309.125)".into());
-    }
     let net = c.state("net")?;
     std::fs::write(
         c.dir.join("models.json"),
@@ -104,6 +101,9 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
             .map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
+    if !car {
+        return Err("garage car script_model was not published at (58, 2112.5, 309.125)".into());
+    }
     let live = c.capture("garage")?;
     if let Some(problem) = render_problem(&json!({"render": c.state("render")?})) {
         return Err(problem);
