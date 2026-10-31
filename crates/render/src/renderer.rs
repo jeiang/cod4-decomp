@@ -330,7 +330,7 @@ impl Default for Settings {
             near: NEAR,
             far: 0.0,
             outdoor: true,
-            outdoor_away_bias: 0.0,
+            outdoor_away_bias: 32.0,
             outdoor_down_bias: 0.0,
             outdoor_feather: crate::codeconst::OUTDOOR_FEATHER,
             sun_tweak: SunTweak::default(),
