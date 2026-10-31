@@ -42,7 +42,7 @@ set=set sv_cheats 1,sawreply=sv_cheats is write protected.:5,\
 cgis=fps 0,set=set cg_drawFPS 1,wait=1,cgis=fps 1,shot=fps,set=set cg_drawFPS Off,wait=1,cgis=fps 0,\
 subtitle=MP_WAITING,wait=0.5,cgis=subtitle 1,wait=4,cgis=subtitle 0,\
 set=set cg_subtitles 0,subtitle=MP_WAITING,wait=0.5,cgis=subtitle 0,set=set cg_subtitles 1,\
-devmap=mp_crash,ingame=120,wait=2,\
+devmap=mp_crash,ingame=120,console=god,wait=1,\
 set=set r_znear 0.5,set=set r_zfar 2000,set=set r_outdoor 0,set=set r_outdoorAwayBias 4,\
 set=set r_outdoorDownBias 2,set=set r_outdoorFeather 16,\
 set=set r_lightTweakSunLight 1.25,set=set r_lightTweakSunColor 0 0 2,set=set r_lightTweakSunDirection 10 20 0,\
