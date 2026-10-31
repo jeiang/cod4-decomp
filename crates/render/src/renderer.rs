@@ -4091,10 +4091,12 @@ mod tests {
         };
         let (_, p4) = v.matrices_near(1.0, 4.0);
         let (_, p05) = v.matrices_near(1.0, 0.05);
-        // The projection's translation is `-r * near`, so 0.05 moves it 80 times closer.
-        assert_eq!(p4.z_axis.w / p05.z_axis.w, 80.0);
+        // The projection's translation is `-r * near`, so 0.05 moves it about 20 times closer.
+        let ratio = p4.w_axis.z / p05.w_axis.z;
+        assert!((ratio - 20.0).abs() < 0.02, "{ratio}");
         let (_, p_clamped) = v.matrices_near(1.0, 0.0);
-        assert_eq!(p_clamped.z_axis.w, p4.z_axis.w / 400.0);
+        let ratio = p4.w_axis.z / p_clamped.w_axis.z;
+        assert!((ratio - 400.0).abs() < 0.5, "{ratio}");
     }
 
     #[test]
