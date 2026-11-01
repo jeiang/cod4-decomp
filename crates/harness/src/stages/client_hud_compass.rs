@@ -224,7 +224,7 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
         _ => return Err(format!("the person is on no team ({team})")),
     };
     exec(c, "set bot_idle 1")?;
-    exec(c, "set sv_cheats 1")?;
+    exec(c, "set developer 1")?;
     c.ask(json!({"cmd":"cvar", "name":"compassSoundPingFadeTime", "value":"2"}))?;
     let result = (|| {
         let bot = enemy_bot(c, enemy)?;

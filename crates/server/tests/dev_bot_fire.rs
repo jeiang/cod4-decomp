@@ -60,7 +60,7 @@ fn a_bot_fires_then_throws_after_the_compass_stage_sequence() {
         s.exec_line(&format!("devbotfire {n} mp5_mp 0")).is_err(),
         "hook must require opt-in"
     );
-    s.exec_line("set sv_cheats 1").unwrap();
+    s.exec_line("set developer 1").unwrap();
     let at = s.game.client(n).unwrap().ps.origin;
     s.exec_line(&format!("devtele {n} {} {} {}", at[0] + 96.0, at[1], at[2]))
         .unwrap();

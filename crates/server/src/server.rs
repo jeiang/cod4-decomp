@@ -1901,8 +1901,8 @@ impl Server {
             // switched to) or hold the frag key (after a `frag_grenade_mp` is given), for `ms`.
             "devbotfire" => {
                 self.say("WARNING: devbotfire development-only bot input override requested\n");
-                if !self.game.cvars.bool("sv_cheats") {
-                    return Err("devbotfire needs sv_cheats 1".into());
+                if !self.game.cvars.bool("developer") {
+                    return Err("devbotfire needs developer 1".into());
                 }
                 let (Some(who), Some(weapon), Some(ms)) = (arg(1), arg(2), arg(3)) else {
                     return Err("usage: devbotfire <client|axis|allies> <weapon|frag> <ms>".into());
