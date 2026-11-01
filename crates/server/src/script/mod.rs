@@ -145,6 +145,10 @@ impl ScriptHost<'_> {
                     }
                 }
             }
+            // `ClientDisconnect` frees the entity straight after the disconnect callback: a player
+            // left in the world until the end of the frame could still be damaged, and the damage
+            // callback's threads would outlive the `disconnect` notify they end on (#505).
+            self.game.finish_disconnects(vm);
             // A test client a script added begins once its connect callback has run and is waiting for it.
             let begins = std::mem::take(&mut self.game.pending_begin);
             if begins.is_empty() {
