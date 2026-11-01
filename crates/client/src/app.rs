@@ -4767,20 +4767,16 @@ fn sun_flare_materials(cvars: &crate::input::Cvars, net: &mut NetPlay, r: &mut R
 /// Scenario observations compare numeric tokens without depending on the decimal formatting of a dvar or frame
 /// value. Names remain exact, and missing, extra, non-finite or different tokens fail.
 fn scenario_value_matches(have: &str, want: &str) -> bool {
-    if have == want {
-        return true;
-    }
     let mut have = have.split_whitespace();
     for want in want.split_whitespace() {
         let Some(have) = have.next() else {
             return false;
         };
-        if have != want
-            && !matches!(
-                (have.parse::<f32>(), want.parse::<f32>()),
-                (Ok(h), Ok(w)) if h.is_finite() && w.is_finite() && (h - w).abs() <= 0.005
-            )
-        {
+        let ok = match (have.parse::<f32>(), want.parse::<f32>()) {
+            (Ok(h), Ok(w)) => h.is_finite() && w.is_finite() && (h - w).abs() <= 0.005,
+            _ => have == want,
+        };
+        if !ok {
             return false;
         }
     }
