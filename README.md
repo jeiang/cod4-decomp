@@ -89,7 +89,7 @@ KisakCOD (GPL-3.0, CoD4 MP 1.8), `game/g_missile.cpp:399`, `game_mp/g_main_mp.cp
 `cgame_mp/cg_main_mp.cpp:1593` and `cgame_mp/cg_snapshot_mp.cpp:419–422`; native 1.7 parity is not verified
 (REA unavailable). Our native wire protocol is now 26: entity deltas carry the custom explosion start and
 expiry times, retaining stock's `0x10000` smoke flag meaning rather than inventing another smoke event.
-The default-suite `client-smoke` stage throws the stock Sniper loadout's smoke through `+smoke`, then connects
+The default-suite `client-smoke` stage joins the stock class whose install loadout carries smoke, throws it through `+smoke`, then connects
 a second client after the burst; it asserts original-age visible smoke, one on-time burst and no late burst.
 Server unit coverage retains the cloud through its complete lifetime and frees it strictly after its deadline.
 

@@ -36,6 +36,45 @@ fn join(c: &mut Driven, address: &str, class: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Stock classes in menu order. Their special grenades come from the install's class table, so join each in turn
+/// until the spawned player carries smoke as the off-hand secondary that `+smoke` throws.
+const CLASSES: [&str; 5] = [
+    "Assault",
+    "Spec Ops",
+    "Heavy Gunner",
+    "Demolitions",
+    "Sniper",
+];
+
+fn join_with_smoke(c: &mut Driven, address: &str) -> Result<&'static str, String> {
+    let mut seen = Vec::new();
+    for (i, class) in CLASSES.into_iter().enumerate() {
+        if i > 0 {
+            c.console("disconnect")?;
+            // The next join waits for the new connection's team menu.
+            c.pause(Duration::from_secs(3))?;
+        }
+        join(c, address, class)?;
+        let carries = c.until(
+            json!({"player.offhand_secondary": 0, "player.smoke_ammo": {"gt": 0}}),
+            Duration::from_secs(5),
+            "no smoke off-hand",
+        );
+        if carries.is_ok() {
+            return Ok(class);
+        }
+        let player = c.state("player")?;
+        seen.push(format!(
+            "{class}: offhand_secondary={} smoke_ammo={}",
+            player["offhand_secondary"], player["smoke_ammo"]
+        ));
+    }
+    Err(format!(
+        "no stock class spawned with a smoke off-hand: {}",
+        seen.join("; ")
+    ))
+}
+
 fn integer(v: &Value, key: &str) -> Result<i64, String> {
     v[key]
         .as_i64()
@@ -107,7 +146,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         let args = ["--no-autojoin", "--duration", "300"];
         let mut early = Driven::start(&client, install, &ctx.dir.join("early"), &args)?;
         let address = format!("127.0.0.1:{port}");
-        early.step("join before smoke", |c| join(c, &address, "Sniper"))?;
+        let class = early.step("join before smoke", |c| join_with_smoke(c, &address))?;
         // A known walkable garage viewpoint (also used by client-garage), aimed down so the cloud stays nearby.
         early.console("setviewpos 200.8 2267.5 323.5 175.3 60")?;
         early.pause(Duration::from_secs(1))?;
@@ -121,7 +160,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     "player.weapon_time": {"le": 0}, "player.offhand_secondary": 0,
                     "player.smoke_ammo": {"gt": 0}}),
                 Duration::from_secs(30),
-                "Sniper did not become ready with enabled weapons and smoke ammunition",
+                "the smoke class did not become ready with enabled weapons and smoke ammunition",
             )?;
             c.report(
                 "ready-to-throw.json",
@@ -232,7 +271,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
         late.capture("late-smoke")?;
         let late_report = late.report("state.json", &["fx", "events", "sound", "player"])?;
-        let evidence = json!({"first": first, "restored": restored, "advanced": advanced,
+        let evidence = json!({"class": class, "first": first, "restored": restored, "advanced": advanced,
             "early": early_report, "late": late_report});
         if !late
             .finish(Duration::from_secs(15))
@@ -244,6 +283,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     })();
     match result {
         Ok(evidence) => {
+            out.reason = evidence["class"]
+                .as_str()
+                .map(|class| format!("thrown with the stock {class} class"));
             fs::write(
                 ctx.dir.join("smoke.json"),
                 serde_json::to_vec_pretty(&evidence)?,
