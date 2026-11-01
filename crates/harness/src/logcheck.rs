@@ -42,6 +42,16 @@ pub const ALLOWED: &[Allow] = &[
         stages: &["client-ui"],
         max: Some(6), // measured 4 on the Linux host, 2026-11-01
     },
+    Allow {
+        contains: &[
+            "cod4e::input",
+            "a menu's dvar write was refused",
+            "cvar=\"monkeytoy\"",
+        ],
+        reason: "client-frontend clicks Enable Console to check a menu cannot move monkeytoy off its one value (#372)",
+        stages: &["client-frontend"],
+        max: Some(2), // one click
+    },
     // Timing of the harness's own clients and bots.
     Allow {
         contains: &["server::netsv", "packet from an address with no client"],

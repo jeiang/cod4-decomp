@@ -162,6 +162,24 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // The one value each of these has here (see `UNSUPPORTED`); the Sound and Game Options pages show them.
     ("snd_outputConfiguration", "Windows default", true),
     ("monkeytoy", "0", true),
+    // The Voice Chat and Multiplayer Options pages' controls that `ui_multiplayer` shows (see `NOT_IMPLEMENTED`):
+    // `winvoice_mic_reclevel` as `Voice_Init` registers it (win32/win_voice.cpp, 65535); `cl_punkbuster` off, as no
+    // PunkBuster runs here (stock registers 1, cl_main_mp.cpp).
+    ("winvoice_mic_reclevel", "65535", true),
+    ("cl_punkbuster", "0", true),
+];
+
+/// Stock dvars the menus set that this build keeps but does not act on yet: a write says so (issue #372).
+const NOT_IMPLEMENTED: &[(&str, &str)] = &[
+    (
+        "winvoice_mic_reclevel",
+        "voice chat does not capture yet; the microphone's recording level is not set",
+    ),
+    (
+        "voicechat_level_indicator",
+        "voice chat does not capture yet; no level indicator is drawn",
+    ),
+    ("cl_punkbuster", "PunkBuster does not exist in this build"),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
@@ -372,6 +390,14 @@ impl Cvars {
                 }
             }
         }
+    }
+
+    /// For a stock dvar this build keeps but does not act on: why.
+    pub fn not_implemented(name: &str) -> Option<&'static str> {
+        NOT_IMPLEMENTED
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, why)| why)
     }
 
     /// For a dvar this build accepts only one value of: that value and why.

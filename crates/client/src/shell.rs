@@ -1461,7 +1461,7 @@ impl HostCx<'_> {
             Some(s) => s.as_str(),
             None => value,
         };
-        self.input.set_cvar(name, value);
+        self.input.set_cvar_from_menu(name, value);
     }
 
     /// The game mode the server settings show: the one `ui_netGametypeName` holds (a saved profile may have set it).
