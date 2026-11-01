@@ -296,6 +296,7 @@ fn crosshair_problem(seen: &[(u64, f64)], hidden: &[u64], label: &str) -> Option
 /// #413 / KisakCOD `cgame/cg_draw_reticles.cpp:601-627`: reload, weapon raise/drop and melee hide the crosshair;
 /// ready and firing keep it.
 fn crosshair_states(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
     c.bind("+attack", "down")?;
     let fire = sample_crosshair(c, Duration::from_millis(400));
     c.bind("+attack", "up")?;
