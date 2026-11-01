@@ -124,8 +124,9 @@ fn answer(s: &mut Server, req: &serde_json::Map<String, Value>) -> Result<Value,
         }
         "command_frame" => {
             let ms = req.get("collect_ms").and_then(Value::as_u64).unwrap_or(0);
-            if ms > 5000 {
-                return Err("command_frame collect_ms must be at most 5000".to_owned());
+            // 24 usercmds per tick (`MAX_CMDS_PER_FRAME`) at the 125 Hz send cap: about 190 ms fits one tick.
+            if ms > 190 {
+                return Err("command_frame collect_ms must be at most 190".to_owned());
             }
             Ok(s.control_command_frame(Duration::from_millis(ms)))
         }
