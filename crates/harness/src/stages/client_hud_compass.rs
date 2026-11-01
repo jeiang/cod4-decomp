@@ -121,27 +121,27 @@ fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
 }
 
 /// Puts the bot at `spot` (`devtele` arguments) and has it give and raise `weapon`, so the burst after it is the
-/// weapon's fire and not its raise. A bot that respawns meanwhile (a fresh inventory, somewhere else) is put back
-/// and given it again.
-fn raise(c: &mut Driven, bot: u64, spot: &str, label: &str, weapon: &str) -> Result<(), String> {
-    let end = Instant::now() + Duration::from_secs(15);
-    let mut placed = Value::Null;
+/// weapon's fire and not its raise. Only a bot seen dead or respawned (a fresh inventory, somewhere else) is put back
+/// and given it again; a living bot that does not raise it within the hook's own wait fails. Returns the spawn count
+/// the bot holds it in.
+fn raise(c: &mut Driven, bot: u64, spot: &str, label: &str, weapon: &str) -> Result<Value, String> {
+    let end = Instant::now() + Duration::from_secs(30);
+    let (mut placed, mut issued) = (Value::Null, Instant::now());
     loop {
         let p = server_client(c, bot)?;
         if p["alive"] == json!(true) && p["spawn_count"] != placed {
             exec(c, &format!("devtele {bot} {spot}"))?;
-            placed = p["spawn_count"].clone();
+            exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
+            (placed, issued) = (p["spawn_count"].clone(), Instant::now());
         }
-        exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
-        c.pause(Duration::from_secs(2))?;
+        c.pause(Duration::from_millis(500))?;
         let held = server_client(c, bot)?;
-        if held["weapon_name"] == weapon
-            && held["alive"] == json!(true)
-            && held["spawn_count"] == placed
-        {
-            return Ok(());
+        let same_life = held["alive"] == json!(true) && held["spawn_count"] == placed;
+        if same_life && held["weapon_name"] == weapon {
+            return Ok(placed);
         }
-        if Instant::now() > end {
+        // The hook asks for the weapon for 5 s (`DEV_RAISE_WAIT_MS` in `server/src/bot.rs`).
+        if (same_life && issued.elapsed() > Duration::from_secs(6)) || Instant::now() > end {
             return Err(format!(
                 "{label}: bot {bot} never raised {weapon}: {}",
                 body(&held)
@@ -163,10 +163,21 @@ fn case(
 ) -> Result<String, String> {
     let mut lost = Vec::new();
     for attempt in 1..=ATTEMPTS {
-        raise(c, bot, spot, label, weapon)?;
+        let placed = raise(c, bot, spot, label, weapon)?;
         c.pause(SETTLE)?;
         let before = counts(c)?;
         let was = server_client(c, bot)?;
+        // Killed while settling: the burst would be another life's, without the weapon.
+        if was["spawn_count"] != placed
+            || was["weapon_name"] != weapon
+            || was["alive"] != json!(true)
+        {
+            lost.push(format!(
+                "attempt {attempt} lost the weapon while settling: {}",
+                body(&was)
+            ));
+            continue;
+        }
         exec(c, &format!("devbotfire {bot} {weapon} {BURST_MS}"))?;
         c.pause(Duration::from_millis(u64::from(BURST_MS) + 1500))?;
         c.pause(Duration::from_secs(5))?;

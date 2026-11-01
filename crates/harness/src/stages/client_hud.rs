@@ -419,42 +419,46 @@ fn sample_crosshair(c: &mut Driven, until: Duration) -> Result<Vec<(u64, f64)>, 
     Ok(seen)
 }
 
-/// The crosshair opacity per predicted weapon state while `weapnext` switches the weapon. It comes from the wheel
-/// (`mwheelup` in `extra_binds.cfg`, not a key `bind` can press), sent again each second, at most three times, until
-/// the weapon starts to change (a drop or raise state, or a new weapon in hand): a single notch that left the weapon
-/// alone gave nothing to sample (#494). Also says how many notches went and which weapons were seen.
+/// The crosshair opacity per predicted weapon state while one `weapnext` switches the weapon. It comes from one
+/// wheel notch (`mwheelup` in `extra_binds.cfg`, not a key `bind` can press), as a person's one notch must do it.
+/// Also returns the trace of every sample whose facts changed: ms since the notch, the snapshot's `weapon_index`
+/// and `weapon_state`, the predicted `visual_weapon_state` and `crosshair_alpha`, and how many samples there were.
 fn sample_weapon_switch(
     c: &mut Driven,
     until: Duration,
 ) -> Result<(Vec<(u64, f64)>, String), String> {
-    let from = c.state("player")?["weapon_index"].clone();
-    let end = Instant::now() + until;
-    let (mut seen, mut weapons) = (Vec::new(), vec![from.clone()]);
-    let (mut wheels, mut next_wheel, mut switching) = (0, Instant::now(), false);
-    while Instant::now() < end {
-        if !switching && wheels < 3 && Instant::now() >= next_wheel {
-            c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
-            wheels += 1;
-            next_wheel = Instant::now() + Duration::from_secs(1);
-        }
+    let start = Instant::now();
+    c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
+    let (mut seen, mut trace, mut last, mut samples) = (Vec::new(), Vec::new(), None, 0);
+    while start.elapsed() < until {
         let p = c.state("player")?;
+        let ms = start.elapsed().as_millis();
         if p["alive"] != true {
             return Err("the player died while checking the crosshair".into());
+        }
+        samples += 1;
+        let facts = (
+            p["weapon_index"].clone(),
+            p["weapon_state"].clone(),
+            p["visual_weapon_state"].clone(),
+            p["crosshair_alpha"].clone(),
+        );
+        if last.as_ref() != Some(&facts) {
+            trace.push(format!(
+                "{ms} ms: weapon {} state {} visual {} alpha {}",
+                facts.0, facts.1, facts.2, facts.3
+            ));
+            last = Some(facts);
         }
         if let (Some(s), Some(a)) = (
             p["visual_weapon_state"].as_u64(),
             p["crosshair_alpha"].as_f64(),
         ) {
-            switching |= (1..=4).contains(&s);
             seen.push((s, a));
         }
-        if !weapons.contains(&p["weapon_index"]) {
-            weapons.push(p["weapon_index"].clone());
-        }
-        switching |= p["weapon_index"] != from;
         c.frames(1)?;
     }
-    Ok((seen, format!("{wheels} wheel notches, weapons {weapons:?}")))
+    Ok((seen, format!("{samples} samples: {}", trace.join(", "))))
 }
 
 /// What is wrong with crosshair samples: hidden states must be transparent, ready and firing visible.
@@ -474,8 +478,8 @@ fn crosshair_problem(seen: &[(u64, f64)], hidden: &[u64], label: &str) -> Option
 }
 
 /// #413 / KisakCOD `cgame/cg_draw_reticles.cpp:601-627`: reload, weapon raise/drop and melee hide the crosshair;
-/// ready and firing keep it.
-fn crosshair_states(c: &mut Driven) -> Result<(), String> {
+/// ready and firing keep it. Returns the weapon switch's trace for the notes.
+fn crosshair_states(c: &mut Driven) -> Result<String, String> {
     let secs = Duration::from_secs;
     c.bind("+attack", "down")?;
     let fire = sample_crosshair(c, Duration::from_millis(400));
@@ -489,22 +493,25 @@ fn crosshair_states(c: &mut Driven) -> Result<(), String> {
         secs(5),
         "the weapon did not settle after firing",
     )?;
+    let mut switch = String::new();
     for (bind, hidden, label) in [
         ("+reload", &[7][..], "reload"),
         ("weapnext", &[1, 2, 3, 4][..], "raise/drop"),
         ("+melee", &[12, 13, 14][..], "melee"),
     ] {
-        let (seen, how) = if bind == "weapnext" {
-            sample_weapon_switch(c, secs(5))?
+        let seen = if bind == "weapnext" {
+            let (seen, trace) = sample_weapon_switch(c, secs(4))?;
+            switch = trace;
+            seen
         } else {
             c.bind(bind, "tap")?;
-            (sample_crosshair(c, secs(4))?, String::new())
+            sample_crosshair(c, secs(4))?
         };
         if let Some(why) = crosshair_problem(&seen, hidden, label) {
-            return Err(if how.is_empty() {
-                why
+            return Err(if bind == "weapnext" {
+                format!("{why} ({switch})")
             } else {
-                format!("{why} ({how})")
+                why
             });
         }
         c.until(
@@ -513,7 +520,7 @@ fn crosshair_states(c: &mut Driven) -> Result<(), String> {
             &format!("the crosshair did not come back after {label}"),
         )?;
     }
-    Ok(())
+    Ok(format!("crosshair weapnext switch: {switch}"))
 }
 
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
@@ -624,7 +631,10 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         }
         Ok(())
     })?;
-    c.step("crosshair weapon states", crosshair_states)?;
+    c.step("crosshair weapon states", |c| {
+        notes.push(crosshair_states(c)?);
+        Ok(())
+    })?;
     c.step("compass firing pings", |c| {
         notes.push(super::client_hud_compass::check(c)?);
         c.until(
