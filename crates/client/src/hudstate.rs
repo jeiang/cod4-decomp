@@ -350,8 +350,19 @@ pub struct HudFacts {
     /// Active received speakers, ordered by client number, excluding the local player.
     pub talkers: Vec<(u16, String, bool)>,
     pub local_talking: bool,
+    /// `voice_current_voicelevel` from the app's microphone this frame ([`crate::voice::Talker::current_level`]).
+    pub voice_level: f32,
+    /// `Voice_GetVoiceLevel`'s six slots and its count, advanced at each draw of the record meter (265).
+    pub meter_slots: [f32; 6],
+    pub meter_count: usize,
+    /// The record meter drew since the app last looked: the app keeps the microphone open for it.
+    pub meter_shown: bool,
+    /// The level the record meter last drew (0..1) and how often it drew.
     pub record_level: f32,
+    pub record_meter_marks: u32,
+    /// Talker icons drawn by the cgame slots (193-196) and by the UI slots (267-270).
     pub talker_marks: u32,
+    pub ui_talker_marks: u32,
     pub local_talker_marks: u32,
     /// The shell's clock at the last fill.
     pub now: i32,
@@ -556,8 +567,11 @@ impl HudFacts {
             "helicopter_marks": self.helicopter_marks,
             "plane_marks": self.plane_marks,
             "talker_marks": self.talker_marks,
+            "ui_talker_marks": self.ui_talker_marks,
             "local_talker_marks": self.local_talker_marks,
             "local_talking": self.local_talking,
+            "record_level": self.record_level,
+            "record_meter_marks": self.record_meter_marks,
             "talkers": self.talkers,
             "vehicles_max": self.vehicles_max,
             "enemy_vehicles_max": self.enemy_vehicles_max,

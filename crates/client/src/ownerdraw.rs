@@ -52,7 +52,7 @@ impl Cfg {
         let b = |n: &str, d: bool| f(n, f32::from(u8::from(d))) != 0.0;
         Self {
             enable: b("hud_enable", true),
-            draw_talk: f("cg_drawTalk", 1.0) as i32,
+            draw_talk: draw_talk(c.get("cg_drawTalk")),
             draw_health: b("cg_drawHealth", false),
             breath_hint: b("cg_drawBreathHint", true),
             mantle_hint: b("cg_drawMantleHint", true),
@@ -70,6 +70,30 @@ impl Cfg {
             radar_ping_fade: f("compassRadarPingFadeTime", 4.0).clamp(0.01, 60.0),
             radar_line_thickness: f("compassRadarLineThickness", 0.4).clamp(0.01, 10.0),
             map_radar_line_thickness: f("cg_hudMapRadarLineThickness", 0.15).clamp(0.01, 10.0),
+        }
+    }
+}
+
+/// `cg_drawTalk`, a stock enum dvar (`cg_drawTalkNames`, KisakCOD `cgame_mp/cg_newDraw_mp.cpp:43,72`): a name
+/// (any case) or its index, default `ALL`.
+fn draw_talk(v: Option<&str>) -> i32 {
+    const NAMES: [&str; 4] = ["NONE", "ALL", "FRIENDLY", "ENEMY"];
+    let Some(v) = v.map(str::trim) else {
+        return 1;
+    };
+    if let Some(i) = NAMES.iter().position(|n| n.eq_ignore_ascii_case(v)) {
+        return i as i32;
+    }
+    match v.parse::<f32>() {
+        Ok(n) if (0.0..4.0).contains(&n) => n as i32,
+        _ => {
+            logging::dedup!(
+                WARN,
+                "draw-talk",
+                value = v,
+                "cg_drawTalk is not NONE, ALL, FRIENDLY or ENEMY; drawing ALL"
+            );
+            1
         }
     }
 }
@@ -242,21 +266,16 @@ pub fn draw(
     }
     let cfg = Cfg::read(&cx.input.cvars);
     if id == 265 {
+        // UI_DrawRecordLevel: the level of the app's microphone, which stays open while this draws.
         let unit = ui.place.unit();
-        let level = if cx.st.game.hud.live {
-            cx.st.game.hud.record_level
-        } else {
-            0.0
-        };
-        if !cx.st.game.hud.live {
-            logging::dedup!(
-                WARN,
-                "record-level",
-                "ownerdraw 265: microphone capture outside a match is not implemented (#371)"
-            );
-        }
+        let h = &mut cx.st.game.hud;
+        h.meter_shown = true;
+        let level =
+            crate::voice::meter_level(&mut h.meter_slots, &mut h.meter_count, h.voice_level);
+        h.record_level = level;
+        h.record_meter_marks += 1;
         let width = r.w * level - 4.0 * unit;
-        if width > 0.0 {
+        if level > 0.0 && width > 0.0 {
             p.fill(
                 Px {
                     x: r.x + 2.0 * unit,
@@ -392,7 +411,11 @@ fn talker(dc: &mut Dc, h: &mut HudFacts, slot: usize, filter: bool) {
         dc.color,
         name,
     );
-    h.talker_marks += 1;
+    if filter {
+        h.talker_marks += 1;
+    } else {
+        h.ui_talker_marks += 1;
+    }
 }
 
 // ---- health -----------------------------------------------------------------------------------------------
@@ -1550,6 +1573,18 @@ fn map_border(dc: &mut Dc, h: &mut HudFacts) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cg_draw_talk_takes_the_stock_names_and_indices() {
+        assert_eq!(draw_talk(None), 1);
+        assert_eq!(draw_talk(Some("enemy")), 3);
+        assert_eq!(draw_talk(Some("FRIENDLY")), 2);
+        assert_eq!(draw_talk(Some("None")), 0);
+        assert_eq!(draw_talk(Some("3")), 3);
+        let (n, events) = logging::capture(|| draw_talk(Some("loud")));
+        assert_eq!(n, 1);
+        assert!(events.iter().any(|e| e.level == tracing::Level::WARN));
+    }
 
     #[test]
     fn the_ammunition_display_pads_and_hides_what_the_weapon_lacks() {

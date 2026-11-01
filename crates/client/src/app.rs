@@ -481,6 +481,8 @@ struct State {
     demo_dir: PathBuf,
     /// The game mode id of the match being loaded (the loading screen names it); empty when unknown.
     load_gametype: String,
+    /// The microphone (`CL_VoiceFrame`): sends voice in a match and feeds the record meter in any menu.
+    talker: crate::voice::Talker,
     /// Frame intervals from the start of a map load until the player is in the world.
     load_gaps: Option<LoadGaps>,
     /// What the last load measured, for the report.
@@ -1238,6 +1240,7 @@ impl Viewer {
             pending_demo: None,
             demo_dir: demo_dir.clone(),
             load_gametype: String::new(),
+            talker: crate::voice::Talker::default(),
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
@@ -1664,6 +1667,7 @@ impl Viewer {
         // A bind item waits for a key: the pad's next button is the binding, as a key press is.
         st.input.capture_pad = st.shell.as_ref().is_some_and(|s| s.ui.bind_pending());
         let mut new_level = None;
+        let mut voiced = false;
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
             (st.pos, st.yaw, st.pitch, st.roll) = (p, y, pi, 0.0);
@@ -1793,10 +1797,11 @@ impl Viewer {
                 st.aspect
                     .unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
             );
+            let talking = net.voice_on() && f.held_other.iter().any(|c| c == "talk");
+            let frames = voice_capture(&mut st.talker, st.shell.as_mut(), &st.input, talking);
+            net.send_voice(frames, talking);
+            voiced = true;
             let frame_out = net.frame(dt, &f);
-            if let (Some(note), Some(sh)) = (net.take_voice_note(), st.shell.as_mut()) {
-                sh.print_console(&note);
-            }
             st.input.apply(&net.take_input_feedback());
             st.prev_cost[0] = t_net.elapsed().as_secs_f64() * 1000.0;
             if net.spawned()
@@ -1988,6 +1993,9 @@ impl Viewer {
                 st.roll = 0.0;
                 fly(st, &f, dt);
             }
+        }
+        if !voiced {
+            voice_capture(&mut st.talker, st.shell.as_mut(), &st.input, false);
         }
         if let Some(n) = st.input.take_pad_press()
             && let Some(sh) = st.shell.as_mut()
@@ -4079,6 +4087,31 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
         }
         st.input.event(ev);
     }
+}
+
+/// One frame of the microphone (`CL_VoiceFrame`, KisakCOD `client_mp/cl_main_mp.cpp:1995-2000`): open while
+/// `talking` or while the record meter drew last frame, its level handed to the meter, a failure printed once.
+fn voice_capture(
+    talker: &mut crate::voice::Talker,
+    shell: Option<&mut Shell>,
+    input: &Input,
+    talking: bool,
+) -> Vec<net::voice::Frame> {
+    let scaler = input
+        .cvar("winvoice_mic_scaler")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0);
+    let Some(sh) = shell else {
+        return talker.frames(talking, false, scaler, Instant::now());
+    };
+    let metering = std::mem::take(&mut sh.st.game.hud.meter_shown);
+    let frames = talker.frames(talking, metering, scaler, Instant::now());
+    sh.st.game.hud.voice_level = talker.current_level;
+    if let Some(note) = talker.note.take() {
+        sh.print_console(&note);
+    }
+    frames
 }
 
 /// `chatmodepublic` and `chatmodeteam` (bound to T and Y) open the chat field; `toggleconsole` is the console's.

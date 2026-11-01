@@ -447,8 +447,9 @@ const LOC_CURSOR_SPEED: f32 = 0.004;
 
 pub struct NetPlay {
     net: NetClient<Wire>,
-    /// Voice chat: the microphone, the other players' voices, `cl_voice`, and the players the person muted.
-    talker: crate::voice::Talker,
+    /// Voice chat: the other players' voices, `cl_voice`, the players the person muted, and whether the person is
+    /// talking (the microphone is the app's, [`crate::voice::Talker`]: the record meter uses it outside a match too).
+    talk_down: bool,
     hearing: crate::voice::Hearing,
     voice_on: bool,
     muted: HashSet<u16>,
@@ -616,7 +617,7 @@ impl NetPlay {
         net.set_pure(lib.pure_digest);
         Ok(Self {
             net,
-            talker: crate::voice::Talker::default(),
+            talk_down: false,
             hearing: crate::voice::Hearing::default(),
             voice_on: true,
             muted: HashSet::new(),
@@ -1053,6 +1054,20 @@ impl NetPlay {
         self.voice_on = on;
     }
 
+    /// `cl_voice`, as last set.
+    pub fn voice_on(&self) -> bool {
+        self.voice_on
+    }
+
+    /// The microphone's frames for this frame, sent while the person talks (`talking`: the talk key held with voice
+    /// on).
+    pub fn send_voice(&mut self, frames: Vec<net::voice::Frame>, talking: bool) {
+        self.talk_down = talking;
+        for f in frames {
+            self.net.send_voice(f);
+        }
+    }
+
     /// The players the person muted (the mute menu): their voices are not played, and the server is told so it does
     /// not even send them.
     pub fn set_muted(&mut self, muted: &HashSet<u16>) {
@@ -1068,18 +1083,9 @@ impl NetPlay {
         self.muted.clone_from(muted);
     }
 
-    /// Why the microphone could not be used, once.
-    pub fn take_voice_note(&mut self) -> Option<String> {
-        self.talker.note.take()
-    }
-
-    /// One frame of voice chat: the microphone's frames go to the server while the talk key is `down`, the voices the
-    /// server relayed are played.
-    fn voice_step(&mut self, down: bool) {
+    /// One frame of voice chat: the voices the server relayed are played.
+    fn voice_step(&mut self) {
         let now = Instant::now();
-        for f in self.talker.frames(down, self.voice_on, now) {
-            self.net.send_voice(f);
-        }
         let sound = &mut self.sound;
         for v in self.net.take_voice() {
             let gain = voice_gain(self.voice_on, &self.muted, v.speaker);
@@ -1240,7 +1246,7 @@ impl NetPlay {
         let mut laps = Laps::start();
         self.net.pump(Duration::ZERO);
         laps.lap("pump");
-        self.voice_step(input.held_other.iter().any(|c| c == "talk"));
+        self.voice_step();
         self.answer_menus();
         laps.lap("voice+menus");
         let now_ms = self.net.now_ms();

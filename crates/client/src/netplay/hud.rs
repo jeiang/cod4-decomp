@@ -105,9 +105,8 @@ impl NetPlay {
         h.live = true;
         h.now = now;
         h.own_client = own;
-        h.local_talking = self.talker.down
+        h.local_talking = self.talk_down
             && info_value(ui.config(cs::SERVERINFO), "sv_voice").is_some_and(|v| v != "0");
-        h.record_level = self.talker.level;
         h.talkers.clear();
         for client in self.hearing.talking(web_time::Instant::now()) {
             if client == own || !self.voice_on || self.muted.contains(&client) {
