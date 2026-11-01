@@ -446,8 +446,13 @@ pub struct Sun {
 
 impl Sun {
     pub fn new(gpu: &Gpu) -> Sun {
-        // The GL backend (WebGL2 in the browser) only has boolean occlusion queries.
-        let counted = gpu.adapter.get_info().backend != wgpu::Backend::Gl;
+        // The GL backend (WebGL2 in the browser) only has boolean occlusion queries. The browser WebGPU backend of
+        // wgpu 30.0.1 drops `occlusion_query_set` when it builds the JS `GPURenderPassDescriptor`
+        // (`src/backend/webgpu.rs:3225-3310` maps label, colour and depth-stencil attachments only), so the probe's
+        // `beginOcclusionQuery` fails validation (WebGPU spec, "beginOcclusionQuery": `occlusionQuerySet` must not be
+        // null) and invalidates the whole frame's command buffer. Both take the original's screen-rect fallback.
+        let backend = gpu.adapter.get_info().backend;
+        let counted = backend != wgpu::Backend::Gl && backend != wgpu::Backend::BrowserWebGpu;
         Sun {
             fade: Fade::default(),
             overlay: Overlay::default(),

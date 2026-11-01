@@ -22,6 +22,7 @@ pub fn level_change(current: &str, new: &str) -> LevelChange {
     change
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// `sv_mapRotation` for a server that starts on `current`: the maps after it in `maps` order, wrapping around to
 /// `current` last, each played with `gametype`. A single map rotates to itself.
 pub fn rotation(gametype: &str, maps: &[String], current: &str) -> String {

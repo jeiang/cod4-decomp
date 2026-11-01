@@ -402,6 +402,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_clear::run),
     },
     StageDef {
+        name: "client-foliage",
+        description: "mp_farm foliage at the #358 pose: shadow-only cards stay out of the camera draw and the canopy shows no black cutout silhouettes with sun shadows on or off; compares held-pose captures with shadows on and off",
+        needs_install: false,
+        timeout: Duration::from_secs(4 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_foliage::run),
+    },
+    StageDef {
         name: "client-hud",
         description: "the HUD the client draws over the stock menus in a team deathmatch against bots, played through the control channel with the player's own keys, mouse, menus and console (#376): scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam, a localized class-change message, a typed chat line and a console vote call coming back from the server",
         needs_install: false,
@@ -544,6 +552,14 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(20 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::web_join::run_download),
+    },
+    StageDef {
+        name: "web-match",
+        description: "the browser client (web/pkg) in a headless Chromium plays a match on a native server over WebTransport through the dev control channel's browser transport (#429): team and class clicked in the stock menus, walks, turns, fires, throws a grenade, HUD ownerdraws against the native client's, a sound voice, the scoreboard, a kill with its killcam and kill line, the match end and the next map of the rotation, Leave Game seen by the server, and the Start New Server popup that says the browser cannot host (skipped without a built web/pkg, a Chromium or an install)",
+        needs_install: false,
+        timeout: Duration::from_secs(25 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::web_match::run),
     },
     StageDef {
         name: "control-channel",
