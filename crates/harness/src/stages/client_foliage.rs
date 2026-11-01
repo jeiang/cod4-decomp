@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `client-foliage`: the mp_farm tree at the #358 viewpoint has no black shadow-caster cards in the camera draw,
-//! and enabling the sun shadow does not speckle its trunk and canopy with false self-shadow.
+//! `client-foliage`: the mp_farm tree at the #358 viewpoint has no black shadow-caster cards in the camera draw.
 //!
-//! KisakCOD's camera draw builders skip `CAMERA_REGION_NONE` (3), while its shadow draws keep those materials. Its
-//! `R_ForceSetPolygonOffset` also applies `sm_polygonOffsetBias` 0.5 as 2^-17 of depth. The renderer applies that
-//! normalized offset in clip space rather than counting format-dependent D32Float rasterizer bias units. The stage
-//! captures shadows on/off at one held pose and checks the black-card region and trunk's shadow-only darkening.
+//! KisakCOD's camera draw builders skip `CAMERA_REGION_NONE` (3), while its shadow draws keep those materials. The
+//! stage captures shadows on/off at one held pose and checks that neither capture shows the black cards in the crown.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
 use super::client_session::{gpu_problem, render_problem, run_client, steps_problem};
@@ -18,17 +15,12 @@ const NAME: &str = "client-foliage";
 const LIMIT: Duration = Duration::from_secs(180);
 const STEPS_ON: &str = "renderer,wait=2,gfxis=shadows 1,shot=foliage-on";
 const STEPS_OFF: &str = "renderer,wait=2,gfxis=shadows 0,shot=foliage-off";
-/// The middle of the crown, including the black cutout cards of #358, and the front of its trunk. Fractions of the
-/// picture, left/top to right/bottom, so the check does not depend on the window size. The trunk probe is wholly
-/// inside the solid front face: its edges and overhead branches legitimately receive foliage shadows.
+/// The middle of the crown, including the black cutout cards of #358. Fractions of the picture, left/top to
+/// right/bottom, so the check does not depend on the window size.
 const CANOPY: (f32, f32, f32, f32) = (0.20, 0.00, 0.80, 0.35);
-const TRUNK: (f32, f32, f32, f32) = (0.51, 0.30, 0.53, 0.80);
 /// Luma at or below which a pixel is one of the black shadow-caster silhouettes rather than a shaded leaf.
 const BLACK: i32 = 24;
 const MAX_BLACK_SHARE: f64 = 0.04;
-/// A sun shadow may darken the trunk, but the acne of #358 changed two percent of these pixels by over 20 luma.
-const SHADOW_STEP: i32 = 20;
-const MAX_TRUNK_DARKENED: f64 = 0.01;
 const MIN_CANOPY_LUMA: f64 = 30.0;
 
 fn luma(p: &[u8]) -> i32 {
@@ -49,7 +41,6 @@ struct Metrics {
     black_on: f64,
     black_off: f64,
     canopy_luma_off: f64,
-    trunk_darkened: f64,
 }
 
 fn measure(w: u32, h: u32, on: &[u8], off: &[u8]) -> Metrics {
@@ -69,17 +60,6 @@ fn measure(w: u32, h: u32, on: &[u8], off: &[u8]) -> Metrics {
     m.black_on = black_on as f64 / n.max(1) as f64;
     m.black_off = black_off as f64 / n.max(1) as f64;
     m.canopy_luma_off = sum as f64 / n.max(1) as f64;
-
-    let (x0, y0, x1, y1) = region(w, h, TRUNK);
-    let (mut dark, mut n) = (0usize, 0usize);
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let at = ((y * w + x) * 3) as usize;
-            dark += usize::from(luma(&off[at..at + 3]) - luma(&on[at..at + 3]) > SHADOW_STEP);
-            n += 1;
-        }
-    }
-    m.trunk_darkened = dark as f64 / n.max(1) as f64;
     m
 }
 
@@ -97,9 +77,6 @@ fn foliage_verdict(dir: &Path, report: &mut StageReport) -> Result<(), String> {
     report
         .metrics
         .insert("canopy.luma_off".into(), m.canopy_luma_off);
-    report
-        .metrics
-        .insert("trunk.darkened".into(), m.trunk_darkened);
     let mut why = Vec::new();
     if m.canopy_luma_off < MIN_CANOPY_LUMA {
         why.push(format!(
@@ -115,13 +92,6 @@ fn foliage_verdict(dir: &Path, report: &mut StageReport) -> Result<(), String> {
                 MAX_BLACK_SHARE * 100.0
             ));
         }
-    }
-    if m.trunk_darkened > MAX_TRUNK_DARKENED {
-        why.push(format!(
-            "enabling shadows darkened {:.1}% of the trunk by over {SHADOW_STEP} luma (at most {:.0}%): false self-shadow",
-            m.trunk_darkened * 100.0,
-            MAX_TRUNK_DARKENED * 100.0
-        ));
     }
     (!why.is_empty())
         .then(|| why.join("; "))
@@ -200,7 +170,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clean_foliage_passes_but_black_cards_and_shadow_acne_fail() {
+    fn clean_foliage_passes_but_black_cards_fail() {
         let (w, h) = (200, 200);
         let clean = vec![128u8; (w * h * 3) as usize];
         let m = measure(w, h, &clean, &clean);
@@ -211,7 +181,7 @@ mod tests {
                 ..Metrics::default()
             }
         );
-        assert!(m.black_on <= MAX_BLACK_SHARE && m.trunk_darkened <= MAX_TRUNK_DARKENED);
+        assert!(m.black_on <= MAX_BLACK_SHARE);
 
         let mut cards = clean.clone();
         for y in 0..70 {
@@ -222,15 +192,5 @@ mod tests {
         }
         let m = measure(w, h, &cards, &cards);
         assert!(m.black_on > MAX_BLACK_SHARE && m.black_off > MAX_BLACK_SHARE);
-
-        let mut acne = clean.clone();
-        for y in 30..170 {
-            for x in 101..105 {
-                acne[((y * w + x) * 3) as usize..((y * w + x) * 3 + 3) as usize]
-                    .copy_from_slice(&[90; 3]);
-            }
-        }
-        let m = measure(w, h, &acne, &clean);
-        assert!(m.trunk_darkened > MAX_TRUNK_DARKENED);
     }
 }

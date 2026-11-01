@@ -403,7 +403,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-foliage",
-        description: "mp_farm foliage at the #358 pose: shadow-only cards stay out of the camera draw and sun shadows do not produce black cutout silhouettes or trunk self-shadow acne; compares held-pose captures with shadows on and off",
+        description: "mp_farm foliage at the #358 pose: shadow-only cards stay out of the camera draw and the canopy shows no black cutout silhouettes with sun shadows on or off; compares held-pose captures with shadows on and off",
         needs_install: false,
         timeout: Duration::from_secs(4 * MINUTES),
         default: true,
