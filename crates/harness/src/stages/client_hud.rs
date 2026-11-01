@@ -48,82 +48,78 @@ const GRACE_SECS: f64 = 20.0;
 const NV_OFF: &str = "night_vision_off";
 const NV_STILL: &str = "night_vision_still";
 const NV_ON: &str = "night_vision";
-/// The screen cut into `NV_GRID` x `NV_GRID` cells. The overlay is stretched over all of it
-/// (`CG_DrawNightVisionOverlay`), so it changes nearly every cell; a bot walking through one may hide its change.
+/// The overlay's picture is a screen of fine horizontal scanlines (about 7 rows apart in a 720-row capture), so a
+/// region it covers gains row-to-row ripple in its row means, whatever the world behind it shows; a bot walking by
+/// or the view's own change move the row means far less. The screen is cut into `NV_GRID` x `NV_GRID` cells.
 const NV_GRID: u32 = 4;
-const NV_MIN_CELLS: usize = 13;
-/// A cell changed when its pixels moved by at least this much luma on average, and by more than twice (plus one)
-/// what they moved with the goggles off.
-const NV_MIN_CHANGE: f64 = 2.0;
-/// The lower corners, which hold the HUD's health and ammunition pieces, and where the overlay's vignette darkens the
-/// world: left, top, right, bottom as fractions of the picture.
-const HUD_CORNERS: [(f32, f32, f32, f32); 2] = [(0.0, 0.85, 0.25, 1.0), (0.75, 0.85, 1.0, 1.0)];
-/// A corner pixel at least this bright with the goggles off and steady (within `HUD_STEADY`) across both off
-/// captures is a candidate for the HUD; it stayed when it is within `HUD_KEPT` with them on, as the HUD drawn over
-/// the overlay does and the world under it does not.
-const HUD_BRIGHT: i32 = 110;
-const HUD_STEADY: i32 = 6;
-const HUD_KEPT: i32 = 8;
-const HUD_MIN_PIXELS: usize = 100;
-const HUD_MIN_KEPT: f64 = 0.3;
+/// The picture's vignette is near black in the corners, where the lines cannot show: all but those may miss.
+const NV_MIN_CELLS: usize = 12;
+/// Rows each side of a row whose mean the ripple is measured from.
+const NV_RADIUS: usize = 4;
+/// A cell shows the lines when its ripple with the goggles on is this much above the still view's, plus twice the
+/// ripple's own change between the two goggles-off captures.
+const NV_MIN_RISE: f64 = 1.5;
+/// The minimap of the compass in the driven client's 1280x720 window (left, top, right, bottom as fractions): HUD,
+/// drawn after the overlay (`CG_Draw2D` draws the overlay first), so the lines must not show on it.
+const NV_HUD: (f32, f32, f32, f32) = (0.01, 0.05, 0.12, 0.24);
+/// The most the minimap's ripple may rise with the goggles on.
+const NV_HUD_MAX_RISE: f64 = 1.0;
 
 fn luma(p: &[u8]) -> i32 {
     (i32::from(p[0]) * 77 + i32::from(p[1]) * 150 + i32::from(p[2]) * 29) >> 8
 }
 
+/// The mean distance of each row's mean luma over `x0..x1` from the mean of the `NV_RADIUS` rows on each side.
+fn ripple(img: &[u8], w: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> f64 {
+    let rows: Vec<f64> = (y0..y1)
+        .map(|y| {
+            let sum: i64 = (x0..x1)
+                .map(|x| {
+                    let at = ((y * w + x) * 3) as usize;
+                    i64::from(luma(&img[at..at + 3]))
+                })
+                .sum();
+            sum as f64 / f64::from((x1 - x0).max(1))
+        })
+        .collect();
+    let span = 2 * NV_RADIUS + 1;
+    let away: Vec<f64> = rows
+        .windows(span)
+        .map(|win| (win[NV_RADIUS] - win.iter().sum::<f64>() / span as f64).abs())
+        .collect();
+    away.iter().sum::<f64>() / away.len().max(1) as f64
+}
+
 /// What the goggles changed between the matched captures.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct NvView {
-    /// Cells of the grid whose change with the goggles on stood out from the still view's own.
+    /// Cells of the grid that gained the overlay's scanlines with the goggles on.
     cells_changed: usize,
-    /// Bright, steady pixels of the HUD corners with the goggles off.
-    hud_pixels: usize,
-    /// The share of those that stayed with the goggles on.
-    hud_kept: f64,
+    /// How much the minimap's ripple rose with the goggles on.
+    hud_rise: f64,
 }
 
 /// Compares the RGB pictures `off`, `still` (both goggles off) and `on`, each `w` x `h`.
 fn nv_measure(w: u32, h: u32, off: &[u8], still: &[u8], on: &[u8]) -> NvView {
-    let at = |x: u32, y: u32| ((y * w + x) * 3) as usize;
-    let px = |img: &[u8], x: u32, y: u32| luma(&img[at(x, y)..at(x, y) + 3]);
     let mut m = NvView::default();
     for cy in 0..NV_GRID {
         for cx in 0..NV_GRID {
-            let (x0, x1) = (cx * w / NV_GRID, (cx + 1) * w / NV_GRID);
-            let (y0, y1) = (cy * h / NV_GRID, (cy + 1) * h / NV_GRID);
-            let (mut noise, mut change, mut n) = (0u64, 0u64, 0u64);
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let (a, b, c) = (px(off, x, y), px(still, x, y), px(on, x, y));
-                    noise += u64::from((b - a).unsigned_abs());
-                    change += u64::from((c - b).unsigned_abs());
-                    n += 1;
-                }
-            }
-            let (noise, change) = (
-                noise as f64 / n.max(1) as f64,
-                change as f64 / n.max(1) as f64,
+            let r = (
+                cx * w / NV_GRID,
+                cy * h / NV_GRID,
+                (cx + 1) * w / NV_GRID,
+                (cy + 1) * h / NV_GRID,
             );
-            if change >= NV_MIN_CHANGE && change > 2.0 * noise + 1.0 {
+            let (a, b, c) = (ripple(off, w, r), ripple(still, w, r), ripple(on, w, r));
+            if c - b >= NV_MIN_RISE + 2.0 * (b - a).abs() {
                 m.cells_changed += 1;
             }
         }
     }
-    let mut kept = 0usize;
-    for (l, t, r, b) in HUD_CORNERS {
-        let (x0, x1) = ((l * w as f32) as u32, (r * w as f32) as u32);
-        let (y0, y1) = ((t * h as f32) as u32, (b * h as f32) as u32);
-        for y in y0..y1.min(h) {
-            for x in x0..x1.min(w) {
-                let (a, b, c) = (px(off, x, y), px(still, x, y), px(on, x, y));
-                if b >= HUD_BRIGHT && (b - a).abs() <= HUD_STEADY {
-                    m.hud_pixels += 1;
-                    kept += usize::from((c - b).abs() <= HUD_KEPT);
-                }
-            }
-        }
-    }
-    m.hud_kept = kept as f64 / m.hud_pixels.max(1) as f64;
+    let (l, t, r, b) = NV_HUD;
+    let at = |f: f32, n: u32| ((f * n as f32) as u32).min(n);
+    let hud = (at(l, w), at(t, h), at(r, w), at(b, h));
+    m.hud_rise = ripple(on, w, hud) - ripple(still, w, hud);
     m
 }
 
@@ -132,21 +128,15 @@ fn nv_problem(m: &NvView) -> Option<String> {
     let mut bad = Vec::new();
     if m.cells_changed < NV_MIN_CELLS {
         bad.push(format!(
-            "the goggles changed {} of {} parts of the screen (need {NV_MIN_CELLS}): the overlay does not cover it",
+            "the goggles' scanlines showed in {} of {} parts of the screen (need {NV_MIN_CELLS}): the overlay does not cover it",
             m.cells_changed,
             NV_GRID * NV_GRID
         ));
     }
-    if m.hud_pixels < HUD_MIN_PIXELS {
+    if m.hud_rise > NV_HUD_MAX_RISE {
         bad.push(format!(
-            "the HUD corners had {} bright pixels with the goggles off (need {HUD_MIN_PIXELS}): is the HUD drawn?",
-            m.hud_pixels
-        ));
-    } else if m.hud_kept < HUD_MIN_KEPT {
-        bad.push(format!(
-            "{:.0}% of the HUD corners' bright pixels stayed with the goggles on (need {:.0}%): the overlay is over the HUD",
-            m.hud_kept * 100.0,
-            HUD_MIN_KEPT * 100.0
+            "the minimap's row ripple rose {:.1} with the goggles on (at most {NV_HUD_MAX_RISE}): the overlay is over the HUD",
+            m.hud_rise
         ));
     }
     (!bad.is_empty()).then(|| bad.join("; "))
@@ -837,9 +827,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 Ok(m) => {
                     out.metrics
                         .insert("nv.cells_changed".into(), m.cells_changed as f64);
-                    out.metrics
-                        .insert("nv.hud_pixels".into(), m.hud_pixels as f64);
-                    out.metrics.insert("nv.hud_kept".into(), m.hud_kept);
+                    out.metrics.insert("nv.hud_rise".into(), m.hud_rise);
                     nv_problem(&m)
                 }
                 Err(e) => Some(format!(
@@ -986,18 +974,21 @@ mod tests {
         );
     }
 
-    /// A 64 x 64 picture: a mid-grey world with a white HUD block in the lower-left corner, and the same picture
-    /// with the goggles on, where `overlay` darkens every other pair of rows of the world it covers (and all of the
-    /// HUD block when `over_hud`).
+    const W: u32 = 320;
+    const H: u32 = 180;
+
+    /// A `W` x `H` picture: a smoothly shaded world with a flat white HUD block where the minimap is, and the same
+    /// picture with the goggles on, where `overlay` darkens three rows in every seven of the world it covers (and of
+    /// the HUD block when `over_hud`), as the goggles' scanlines do.
     fn pictures(overlay: impl Fn(u32, u32) -> bool, over_hud: bool) -> (Vec<u8>, Vec<u8>) {
         let (mut off, mut on) = (Vec::new(), Vec::new());
-        for y in 0..64u32 {
-            for x in 0..64u32 {
-                let hud = x < 12 && y > 56;
-                let v: u8 = if hud { 250 } else { 100 };
-                let dark = overlay(x, y) && if hud { over_hud } else { y % 4 < 2 };
-                off.extend([v; 3]);
-                on.extend([if dark { v / 2 } else { v }; 3]);
+        let hud = |x: u32, y: u32| (3..38).contains(&x) && (9..43).contains(&y);
+        for y in 0..H {
+            for x in 0..W {
+                let v = if hud(x, y) { 250 } else { 60 + x / 4 + y / 4 };
+                let line = y % 7 < 3 && overlay(x, y) && (!hud(x, y) || over_hud);
+                off.extend([v as u8; 3]);
+                on.extend([(if line { v * 7 / 10 } else { v }) as u8; 3]);
             }
         }
         (off, on)
@@ -1007,27 +998,22 @@ mod tests {
     fn the_goggles_frame_must_show_the_overlay_over_the_world_and_under_the_hud() {
         let measure = |overlay: &dyn Fn(u32, u32) -> bool, over_hud| {
             let (off, on) = pictures(overlay, over_hud);
-            nv_measure(64, 64, &off, &off, &on)
+            nv_measure(W, H, &off, &off, &on)
         };
         let good = measure(&|_, _| true, false);
         assert_eq!(good.cells_changed, 16);
-        assert!(good.hud_pixels == 84 && good.hud_kept == 1.0, "{good:?}");
-        // The thresholds want at least 100 HUD pixels, a full-size screen's worth.
-        let big = |m: NvView| NvView {
-            hud_pixels: 500,
-            ..m
-        };
-        assert!(nv_problem(&big(good)).is_none());
+        assert!(good.hud_rise.abs() < 0.01, "{good:?}");
+        assert!(nv_problem(&good).is_none());
         let none = measure(&|_, _| false, false);
-        assert!(nv_problem(&big(none)).unwrap().contains("does not cover"));
-        let quarter = measure(&|x, y| x < 32 && y < 32, false);
+        assert_eq!(none.cells_changed, 0);
+        assert!(nv_problem(&none).unwrap().contains("does not cover"));
+        let quarter = measure(&|x, y| x < W / 2 && y < H / 2, false);
         assert_eq!(quarter.cells_changed, 4);
         let over = measure(&|_, _| true, true);
-        assert_eq!(over.hud_kept, 0.0);
-        assert!(nv_problem(&big(over)).unwrap().contains("over the HUD"));
-        assert!(nv_problem(&good).unwrap().contains("is the HUD drawn"));
-        // A view that moves as much on its own as with the goggles shows no overlay.
+        assert!(over.hud_rise > 5.0, "{over:?}");
+        assert!(nv_problem(&over).unwrap().contains("over the HUD"));
+        // A view that changes as much on its own as with the goggles shows no overlay.
         let (off, on) = pictures(|_, _| true, false);
-        assert_eq!(nv_measure(64, 64, &on, &off, &on).cells_changed, 0);
+        assert_eq!(nv_measure(W, H, &on, &off, &on).cells_changed, 0);
     }
 }
