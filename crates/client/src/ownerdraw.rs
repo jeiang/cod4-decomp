@@ -241,6 +241,56 @@ pub fn draw(
         return false;
     }
     let cfg = Cfg::read(&cx.input.cvars);
+    if id == 265 {
+        let unit = ui.place.unit();
+        let level = if cx.st.game.hud.live {
+            cx.st.game.hud.record_level
+        } else {
+            0.0
+        };
+        if !cx.st.game.hud.live {
+            logging::dedup!(
+                WARN,
+                "record-level",
+                "ownerdraw 265: microphone capture outside a match is not implemented (#371)"
+            );
+        }
+        let width = r.w * level - 4.0 * unit;
+        if width > 0.0 {
+            p.fill(
+                Px {
+                    x: r.x + 2.0 * unit,
+                    y: r.y + 2.0 * unit,
+                    w: width,
+                    h: (r.h - 4.0 * unit).max(0.0),
+                },
+                WHITE,
+            );
+        }
+        for edge in [
+            Px { h: unit, ..r },
+            Px {
+                y: r.y + r.h - unit,
+                h: unit,
+                ..r
+            },
+            Px {
+                y: r.y + unit,
+                w: unit,
+                h: (r.h - 2.0 * unit).max(0.0),
+                ..r
+            },
+            Px {
+                x: r.x + r.w - unit,
+                y: r.y + unit,
+                w: unit,
+                h: (r.h - 2.0 * unit).max(0.0),
+            },
+        ] {
+            p.fill(edge, WHITE);
+        }
+        return true;
+    }
     if !cx.st.game.hud.live || !cfg.enable {
         return true;
     }
@@ -307,12 +357,6 @@ pub fn draw(
             if h.local_talking {
                 dc.pic("voice_on", dc.r, dc.color);
                 h.local_talker_marks += 1;
-            }
-        }
-        265 => {
-            let width = dc.r.w * h.record_level - 4.0 * dc.u();
-            if width > 0.0 {
-                dc.p.fill(Px { w: width, ..dc.r }, dc.color);
             }
         }
         170 => compass_enemies(&mut dc, h, false),
