@@ -231,6 +231,8 @@ struct ScriptBolt {
     teleport: Option<u32>,
     sample: Option<(i32, u64, Frame, Vec3)>,
     last_frame: Option<Frame>,
+    /// When the bolt began waiting for its entity to be drawn.
+    waiting_since: Option<i32>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -274,6 +276,11 @@ const LOOP_BUDGET: usize = 1000;
 
 /// Particle clouds drawn at once (`R_AddParticleCloudToScene`'s 256); the farthest ones are the ones left out.
 const MAX_CLOUDS: usize = 256;
+
+/// How long a `playfxontag` bolt may wait for its entity to be drawn. Entities are drawn `INTERP_DELAY_MS` (100)
+/// behind the snapshot the event came in, and a projectile shows only from its launch time; anything longer means the
+/// client never poses the entity, which stock (`CG_GetBoneIndex` on its DObj) would.
+const BOLT_POSE_WAIT_MS: i32 = 1000;
 
 /// Where and how a script effect entity plays.
 fn world_fx_frame(e: &EntityState) -> Frame {
@@ -552,6 +559,7 @@ impl Effects {
                     teleport: None,
                     sample: None,
                     last_frame: None,
+                    waiting_since: None,
                 });
             }
             ClientEvent::PlayerPain { origin, .. } => {
@@ -1029,6 +1037,23 @@ impl Effects {
                     );
                 }
                 return false;
+            }
+            if b.id.is_none() && b.frame.is_none() {
+                // Still waiting for its entity to be drawn: an entity the client never poses gets no effect, which
+                // is reported rather than left waiting.
+                let since = *b.waiting_since.get_or_insert(now_ms);
+                if now_ms.wrapping_sub(since) > BOLT_POSE_WAIT_MS {
+                    self.bolt_stats.missing_tags += 1;
+                    logging::dedup!(
+                        WARN,
+                        "bolt-unposed",
+                        entity = b.entity,
+                        etype = owner.map_or(0, |e| e.etype),
+                        tag = b.tag.as_str(),
+                        "effect attachment entity was never drawn"
+                    );
+                    return false;
+                }
             }
             if let Some(frame) = b.frame {
                 self.bolt_stats.resolved_frames += 1;

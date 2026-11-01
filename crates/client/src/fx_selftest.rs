@@ -701,6 +701,7 @@ fn bolted(
         .name
         .as_deref()
         .ok_or("bolted fixture effect has no name")?;
+    bolted_missile(&lib, render_world.clone(), world, eye, effect_name, report)?;
     let program = compile(
         &[("bolted.gsc", "main(ent) { playfxontag(1, ent, \"tag_origin\"); } move(ent) { ent moveto(ent.origin + (32, 0, 0), 0.1); } missing(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }")],
         &Builtins::stock_mp(),
@@ -829,6 +830,87 @@ fn bolted(
         return Err(format!(
             "bolted effect: events {received}, tag displacement {}, element displacement {}, follow error {}, stock missing-tag error {stock_error}",
             stats.max_tag_displacement, stats.max_element_displacement, stats.max_follow_error
+        ));
+    }
+    Ok(())
+}
+
+/// A `playfxontag` on a projectile rides the projectile model the match draws for it (`netplay::projectile_instance`,
+/// as `CG_Missile` draws the DObj `CG_GetBoneIndex` reads), and a bolt whose entity is never drawn is reported after
+/// [`crate::effects`]' wait rather than kept waiting. KisakCOD (GPL-3.0) cgame/cg_event.cpp:29–61: MP 1.8 reference;
+/// no iw3mp.exe 1.7 binary verification.
+fn bolted_missile(
+    lib: &Library,
+    render_world: std::sync::Arc<assets::zone::gfxworld::GfxWorld>,
+    world: &dyn Collide,
+    eye: glam::Vec3,
+    effect: &str,
+    report: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let mut weapons = lib.content.weapons();
+    weapons.sort_by(|a, b| a.internal_name.cmp(&b.internal_name));
+    // The stock planted charge if it is loaded, else any projectile whose model has a tag.
+    let (def, tag) = weapons
+        .iter()
+        .filter_map(|def| {
+            let model = def.projectile_model.as_ref()?.name.as_deref()?;
+            let tag = lib.content.model_bone_names(model)?.first()?.to_string();
+            Some((def, tag))
+        })
+        .min_by_key(|(def, _)| def.internal_name.as_deref() != Some("c4_mp"))
+        .ok_or("no loaded weapon with a tagged projectile model")?;
+    let mut missile = net::entity::EntityState::new(200);
+    missile.etype = net::entity::etype::MISSILE;
+    missile.origin = eye.to_array();
+    // Present in the snapshots but never drawn: its bolt must be reported, not left waiting.
+    let mut unposed = net::entity::EntityState::new(201);
+    unposed.etype = net::entity::etype::MISSILE;
+    unposed.origin = eye.to_array();
+    let mut fx = Effects::new(&lib.content, render_world);
+    for entity in [missile.number, unposed.number] {
+        fx.event(
+            &ClientEvent::PlayFxOnTag {
+                entity,
+                name: effect.to_owned(),
+                tag: tag.clone(),
+            },
+            &|_| None,
+        );
+    }
+    for step in 0..=24 {
+        let now = step * 50;
+        if now >= 500 {
+            missile.origin = (eye + glam::Vec3::X * 32.0).to_array();
+        }
+        fx.begin_script_tags();
+        // Drawn from `INTERP_DELAY_MS` after the event, as the match draws it.
+        if now >= net::view::INTERP_DELAY_MS {
+            let m = crate::netplay::projectile_instance(def, &missile)
+                .ok_or("projectile has no model")?;
+            fx.script_model_tags(missile.number, std::slice::from_ref(&m), &lib.content);
+        }
+        fx.update_script_bolts(&[missile.clone(), unposed.clone()], now);
+        fx.update(now, world);
+        fx.draw(eye, 0.0, 0.0, 0.0);
+    }
+    let stats = fx.bolted_stats();
+    report.insert(
+        "bolted_missile_weapon".into(),
+        def.internal_name.as_deref().unwrap_or_default().into(),
+    );
+    report.insert(
+        "bolted_missile_tag_displacement".into(),
+        stats.max_tag_displacement.into(),
+    );
+    report.insert(
+        "bolted_missile_follow_error".into(),
+        stats.max_follow_error.into(),
+    );
+    report.insert("bolted_unposed_reported".into(), stats.missing_tags.into());
+    if stats.max_tag_displacement < 3.0 || stats.max_follow_error > 1.0 || stats.missing_tags != 1 {
+        return Err(format!(
+            "bolted missile: tag displacement {}, follow error {}, never-drawn bolts reported {} (want 1)",
+            stats.max_tag_displacement, stats.max_follow_error, stats.missing_tags
         ));
     }
     Ok(())

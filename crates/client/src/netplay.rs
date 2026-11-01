@@ -2543,7 +2543,7 @@ impl NetPlay {
     }
 
     /// The weapons lying on the floor, in the world model of their weapon and variant.
-    fn items(&self, snap: &net::Snapshot) -> Vec<ModelInstance> {
+    fn items(&mut self, snap: &net::Snapshot) -> Vec<ModelInstance> {
         let mut out = Vec::new();
         for e in snap.entities.iter().filter(|e| e.etype == etype::ITEM) {
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
@@ -2568,6 +2568,8 @@ impl NetPlay {
             m.origin = e.origin;
             m.angles = e.angles;
             m.light_origin = e.origin;
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
             out.push(m);
         }
         out
@@ -2605,16 +2607,17 @@ impl NetPlay {
                 self.sound.missile_loop(e.number, alias, e.origin);
                 looping.push(e.number);
             }
-            // Not drawn until its launch time (a rocket leaves the tube before it shows).
-            let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
-            let Some(model) = def.projectile_model.clone().filter(|_| until_launch <= 0) else {
+            let Some(m) = projectile_instance(def, e) else {
                 continue;
             };
-            let mut m = ModelInstance::new(model, render::ModelKind::World);
-            m.origin = e.origin;
-            m.angles = e.angles;
-            m.light_origin = e.origin;
-            out.push(m);
+            // A script's `playfxontag` on the projectile rides its model, as on its DObj.
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            // Not drawn until its launch time (a rocket leaves the tube before it shows).
+            let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
+            if until_launch <= 0 {
+                out.push(m);
+            }
         }
         self.sound.missile_loops_end(&looping);
         self.c.projectiles_max = self.c.projectiles_max.max(out.len());
@@ -3023,6 +3026,18 @@ impl NetPlay {
     fn feet(&self) -> [f32; 3] {
         self.c.end
     }
+}
+
+/// A projectile entity's model (`CG_Missile`): the weapon's projectile model at the entity's origin and angles.
+pub(crate) fn projectile_instance(
+    def: &assets::zone::weapon::WeaponDef,
+    e: &EntityState,
+) -> Option<ModelInstance> {
+    let mut m = ModelInstance::new(def.projectile_model.clone()?, render::ModelKind::World);
+    m.origin = e.origin;
+    m.angles = e.angles;
+    m.light_origin = e.origin;
+    Some(m)
 }
 
 /// Notes a remote player's model that could not be built: logged once per distinct fault, kept for the report.
