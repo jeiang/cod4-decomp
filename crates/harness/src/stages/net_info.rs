@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! `net-info`: the `getinfo` answer a server browser lists a server by, against the original's `SVC_Info` (KisakCOD
-//! `server_mp/sv_main_mp.cpp:488-634`, CoD4 MP 1.8; 1.7 sends the same keys). Servers of each kind are booted one
-//! after another and asked over UDP, as the join menu asks: a pure dedicated server, a listen server (booted with the
-//! client's listen command line), an impure dedicated one, an impure one running a mod with an IWD of its own, a pure
-//! one with an extra IWD in `main`, and a pure one running a custom map with its IWD. Each answer must start with the
-//! challenge, carry only `SVC_Info`'s keys in its order, and give `hw` (2 dedicated, 6 listen), `pure` (only with
-//! `sv_pure`) and `mod` (unless pure with only `main`'s stock IWDs) as the original does.
+//! `net-info`: the `getinfo` answer a server browser lists a server by, against the original's `SVC_Info` (the CoD4
+//! MP 1.7 `iw3mp.exe`, `0x531c..0x532163`; KisakCOD's 1.8 `server_mp/sv_main_mp.cpp:488-634` sends the same keys but
+//! `hc` and `od`). Servers of each kind are booted one after another and asked over UDP, as the join menu asks: a pure
+//! dedicated server, a listen server (booted with the client's listen command line), an impure dedicated one, an
+//! impure one running a mod with an IWD of its own, a pure one with an extra IWD in `main`, a pure one running a custom
+//! map with its IWD, and a hardcore one. Each answer must start with the challenge, carry only `SVC_Info`'s keys in its
+//! order, and give `hw` (2 dedicated, 6 listen), `pure` (only with `sv_pure`), `mod` (unless pure with only `main`'s
+//! stock IWDs) and `hc` (`scr_hardcore` when set) as the original does.
 use crate::stage::{StageCtx, StageReport, Status};
 use net::oob::Oob;
 use net::{Transport, UdpTransport};
