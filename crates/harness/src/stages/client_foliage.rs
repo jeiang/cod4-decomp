@@ -3,9 +3,9 @@
 //! and enabling the sun shadow does not speckle its trunk and canopy with false self-shadow.
 //!
 //! KisakCOD's camera draw builders skip `CAMERA_REGION_NONE` (3), while its shadow draws keep those materials. Its
-//! `R_ForceSetPolygonOffset` also applies `sm_polygonOffsetBias` 0.5 as 2^-17 of depth; the renderer must preserve
-//! that offset in D32Float depth-bias units. The stage captures the same held flythrough pose with shadows on and
-//! off and checks both the black-card region and the trunk's shadow-only darkening. Needs a display and the install.
+//! `R_ForceSetPolygonOffset` also applies `sm_polygonOffsetBias` 0.5 as 2^-17 of depth. The renderer applies that
+//! normalized offset in clip space rather than counting format-dependent D32Float rasterizer bias units. The stage
+//! captures shadows on/off at one held pose and checks the black-card region and trunk's shadow-only darkening.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
 use super::client_session::{gpu_problem, render_problem, run_client, steps_problem};
