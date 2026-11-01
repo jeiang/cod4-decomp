@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Compass firing fades follow KisakCOD cgame_mp/cg_compassfriendlies_mp.cpp and cgame/cg_compass.cpp (GPL-3.0; copyright Activision and KisakCOD contributors).
 //! The HUD pieces the stock menus ask the client to draw (`ownerdraw` items): health, ammunition and weapon,
 //! grenades, stance, sprint, hints, the corner compass and the full-screen map.
 //!
@@ -38,6 +39,7 @@ struct Cfg {
     rotation: bool,
     show_enemies: bool,
     radar_ping_fade: f32,
+    sound_ping_fade: f32,
     radar_line_thickness: f32,
     map_radar_line_thickness: f32,
 }
@@ -63,6 +65,7 @@ impl Cfg {
             rotation: b("compassRotation", true),
             show_enemies: b("g_compassShowEnemies", false),
             radar_ping_fade: f("compassRadarPingFadeTime", 4.0).clamp(0.01, 60.0),
+            sound_ping_fade: f("compassSoundPingFadeTime", 2.0).clamp(0.01, 60.0),
             radar_line_thickness: f("compassRadarLineThickness", 0.4).clamp(0.01, 10.0),
             map_radar_line_thickness: f("cg_hudMapRadarLineThickness", 0.15).clamp(0.01, 10.0),
         }
@@ -1279,7 +1282,6 @@ fn mark_angle(rotation_up: bool, view_yaw: f32, north_yaw: f32, yaw: f32) -> f32
 }
 
 const FRIEND_RANGE_MS: i32 = 1500;
-const PING_MS: i32 = 2000;
 
 fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
     let a = if full { 1.0 } else { compass_alpha(dc, h) };
@@ -1299,11 +1301,11 @@ fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
             angle,
             alpha: a,
         });
-        if ac.fire_time != 0 && h.now - ac.fire_time <= PING_MS {
+        if let Some(fade) = ac.fire_alpha(h.now, dc.cfg.sound_ping_fade * 1000.0) {
             firing.push(Mark {
                 pos: ac.pos,
                 angle,
-                alpha: a * (1.0 - (h.now - ac.fire_time) as f32 / PING_MS as f32),
+                alpha: a * fade,
             });
         }
     }
@@ -1324,7 +1326,7 @@ fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
     };
     let fade_ms = dc.cfg.radar_ping_fade * 1000.0;
     let (mut seen, mut firing) = (Vec::new(), Vec::new());
-    for ac in h.actors.values().filter(|ac| !ac.friendly) {
+    for (&client, ac) in h.actors.iter().filter(|(_, ac)| !ac.friendly) {
         if dc.cfg.show_enemies {
             if ac.last_update >= h.now - FRIEND_RANGE_MS {
                 seen.push(Mark {
@@ -1340,17 +1342,21 @@ fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
                 alpha: a * (1.0 - (h.now - ac.radar_time).max(0) as f32 / fade_ms),
             });
         }
-        if ac.fire_time != 0 && h.now - ac.fire_time <= PING_MS {
+        if let Some(fade) = ac.fire_alpha(h.now, dc.cfg.sound_ping_fade * 1000.0) {
+            if client == h.last_fire_actor {
+                h.last_fire_mark_ms = h.now - ac.fire_time;
+            }
             firing.push(Mark {
                 pos: ac.fire_pos,
                 angle: 0.0,
-                alpha: a * (1.0 - (h.now - ac.fire_time) as f32 / PING_MS as f32),
+                alpha: a * fade,
             });
         }
     }
     if !dc.cfg.show_enemies {
         h.radar_marks += seen.len() as u32;
     }
+    h.enemy_firing_marks += firing.len() as u32;
     draw_marks(dc, h, &map, full, "compassping_enemy", &seen);
     draw_marks(dc, h, &map, full, "compassping_enemyfiring", &firing);
 }

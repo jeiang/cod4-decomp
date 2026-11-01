@@ -260,6 +260,82 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
     result
 }
 
+/// The crosshair opacity seen per predicted weapon state during one keyed action.
+fn sample_crosshair(c: &mut Driven, until: Duration) -> Result<Vec<(u64, f64)>, String> {
+    let end = Instant::now() + until;
+    let mut seen = Vec::new();
+    while Instant::now() < end {
+        let p = c.state("player")?;
+        if p["alive"] != true {
+            return Err("the player died while checking the crosshair".into());
+        }
+        if let (Some(s), Some(a)) = (
+            p["visual_weapon_state"].as_u64(),
+            p["crosshair_alpha"].as_f64(),
+        ) {
+            seen.push((s, a));
+        }
+        c.frames(1)?;
+    }
+    Ok(seen)
+}
+
+/// What is wrong with crosshair samples: hidden states must be transparent, ready and firing visible.
+fn crosshair_problem(seen: &[(u64, f64)], hidden: &[u64], label: &str) -> Option<String> {
+    if let Some((s, a)) = seen.iter().find(|(s, a)| hidden.contains(s) && *a > 0.0) {
+        return Some(format!("{label}: crosshair alpha {a} in weapon state {s}"));
+    }
+    if !seen.iter().any(|(s, _)| hidden.contains(s)) {
+        return Some(format!("{label}: no frame in weapon states {hidden:?}"));
+    }
+    if let Some((s, a)) = seen.iter().find(|(s, a)| matches!(s, 0 | 5) && *a <= 0.0) {
+        return Some(format!(
+            "{label}: crosshair hidden in weapon state {s} ({a})"
+        ));
+    }
+    None
+}
+
+/// #413 / KisakCOD `cgame/cg_draw_reticles.cpp:601-627`: reload, weapon raise/drop and melee hide the crosshair;
+/// ready and firing keep it.
+fn crosshair_states(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.bind("+attack", "down")?;
+    let fire = sample_crosshair(c, Duration::from_millis(400));
+    c.bind("+attack", "up")?;
+    let fire = fire?;
+    if !fire.iter().any(|(s, a)| *s == 5 && *a > 0.0) {
+        return Err(format!("firing showed no crosshair: {fire:?}"));
+    }
+    c.until(
+        json!({"player.visual_weapon_state": 0}),
+        secs(5),
+        "the weapon did not settle after firing",
+    )?;
+    for (bind, hidden, label) in [
+        ("+reload", &[7][..], "reload"),
+        ("weapnext", &[1, 2, 3, 4][..], "raise/drop"),
+        ("+melee", &[12, 13, 14][..], "melee"),
+    ] {
+        // `weapnext` is bound to the wheel (`mwheelup` in `extra_binds.cfg`), which is not a key `bind` can press.
+        if bind == "weapnext" {
+            c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
+        } else {
+            c.bind(bind, "tap")?;
+        }
+        let seen = sample_crosshair(c, secs(4))?;
+        if let Some(why) = crosshair_problem(&seen, hidden, label) {
+            return Err(why);
+        }
+        c.until(
+            json!({"player.visual_weapon_state": 0, "player.crosshair_alpha": {"gt": 0.0}}),
+            secs(10),
+            &format!("the crosshair did not come back after {label}"),
+        )?;
+    }
+    Ok(())
+}
+
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
 fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), String> {
     let secs = Duration::from_secs;
@@ -364,6 +440,16 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             ));
         }
         Ok(())
+    })?;
+    c.step("crosshair weapon states", crosshair_states)?;
+    c.step("compass firing pings", |c| {
+        notes.push(super::client_hud_compass::check(c)?);
+        c.until(
+            json!({"player.alive": true, "menu.open": {"len": 0}}),
+            secs(60),
+            "the player was not alive again after the compass checks",
+        )
+        .map(|_| ())
     })?;
 
     c.step("key fallback aim and fire", |c| w.check_key_fallback(c))?;

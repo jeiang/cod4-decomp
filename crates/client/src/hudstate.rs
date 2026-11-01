@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Compass firing timing translated from KisakCOD cgame_mp/cg_compassfriendlies_mp.cpp (GPL-3.0; copyright Activision and KisakCOD contributors).
 //! What the owner-draw HUD pieces read: facts of the player and the match, filled each frame from the network
 //! play, and the pure logic over them (fades, the low-health pulse, ammo thresholds).
 //!
@@ -294,6 +295,10 @@ pub struct Actor {
     pub last_update: i32,
     /// When it last fired (an enemy is shown at that spot for a while), 0 if never.
     pub fire_time: i32,
+    /// Full-opacity hold: the played fire sound's length, zero while unknown or for script pings.
+    pub fire_duration: i32,
+    /// The event sequence of a firing ping whose sound length is not known yet: the sound may play a frame later.
+    pub fire_seq: Option<u8>,
     pub fire_pos: [f32; 2],
     pub event_seq: u8,
     /// Where it was before the last update, for a move across the radar's sweep.
@@ -303,6 +308,48 @@ pub struct Actor {
     /// When the radar sweep last caught it (an enemy is shown at that spot for a while), 0 if never.
     pub radar_time: i32,
     pub radar_pos: [f32; 2],
+}
+
+// Timing translated from KisakCOD MP 1.8 cgame_mp/cg_compassfriendlies_mp.cpp:246,589-600
+// (GPL-3.0; Activision and KisakCOD contributors). CoD4 1.7 is not verified.
+impl Actor {
+    /// Hold for the played sound, then fade. A sound heard next frame can still supply its length.
+    pub fn ping(&mut self, now: i32, seq: Option<u8>, length_ms: Option<u32>) {
+        self.fire_time = now;
+        self.fire_pos = self.pos;
+        self.fire_duration = 0;
+        self.fire_seq = seq;
+        if let Some(seq) = seq {
+            self.learn_fire_length(seq, length_ms);
+        }
+    }
+
+    /// The length of the fire sound of the shot raised at event sequence `seq`, once it played.
+    pub fn learn_fire_length(&mut self, seq: u8, length_ms: Option<u32>) {
+        let Some(ms) = length_ms
+            .and_then(|ms| i32::try_from(ms).ok())
+            .filter(|&ms| ms > 0)
+        else {
+            return;
+        };
+        if self.fire_seq == Some(seq) {
+            self.fire_duration = ms;
+            self.fire_seq = None;
+        }
+    }
+
+    /// Stock holds full opacity until beginFadeTime, then fades over compassSoundPingFadeTime.
+    pub fn fire_alpha(&self, now: i32, fade_ms: f32) -> Option<f32> {
+        let age = now - self.fire_time;
+        let fade_age = age - self.fire_duration;
+        (self.fire_time != 0 && age >= 0 && fade_age as f32 <= fade_ms).then(|| {
+            if fade_age <= 0 {
+                1.0
+            } else {
+                1.0 - fade_age as f32 / fade_ms
+            }
+        })
+    }
 }
 
 /// How long after the entity last came in a snapshot the radar still catches an enemy.
@@ -415,6 +462,17 @@ pub struct HudFacts {
     pub radar_pings: u32,
     pub radar_lines: u32,
     pub vehicle_marks: u32,
+    /// Enemy firing marks the compass drew (one per mark per frame), the enemy shots that pinged it from their fire
+    /// events and the pings from `eflags::PING`, and the length of the latest shot ping (ms).
+    pub enemy_firing_marks: u32,
+    pub enemy_fire_pings: u32,
+    pub enemy_flag_pings: u32,
+    pub last_fire_ping_ms: i32,
+    /// Independent audio observation for the most recent enemy firing event (zero if unknown).
+    pub last_fire_played_ms: u32,
+    pub last_fire_actor: u16,
+    /// Age of the latest firing ping on the last frame its mark was drawn.
+    pub last_fire_mark_ms: i32,
     /// The most helicopters and planes the compass knew of at once, and how many of them were enemies.
     pub vehicles_max: u32,
     pub enemy_vehicles_max: u32,
@@ -545,6 +603,12 @@ impl HudFacts {
             "radar_marks": self.radar_marks,
             "radar_lines": self.radar_lines,
             "vehicle_marks": self.vehicle_marks,
+            "enemy_firing_marks": self.enemy_firing_marks,
+            "enemy_fire_pings": self.enemy_fire_pings,
+            "enemy_flag_pings": self.enemy_flag_pings,
+            "last_fire_ping_ms": self.last_fire_ping_ms,
+            "last_fire_played_ms": self.last_fire_played_ms,
+            "last_fire_mark_ms": self.last_fire_mark_ms,
             "vehicles_max": self.vehicles_max,
             "enemy_vehicles_max": self.enemy_vehicles_max,
             "objectives_listed": self.objectives_listed,
