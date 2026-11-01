@@ -57,10 +57,108 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // `Dvar_Init` registers it on (`SYSTEMINFO | INIT`); the server's systeminfo sets it at every join and level
     // start (`CL_SystemInfoChanged`, [`Cvars::set_cheat_state`]). A console write is refused as write protected.
     ("sv_cheats", "1", false),
+    // Stock registrations this build reads (issue #369): the crosshair alpha (cheat, archived), the centre print
+    // time, the blood limit, team-only chat, no console printing and the window position.
+    ("cg_crosshairAlpha", "1", true),
+    ("cg_crosshairAlphaMin", "0.5", true),
+    ("cg_centertime", "3", false),
+    ("cg_bloodLimit", "0", true),
+    ("cg_bloodLimitMsec", "330", true),
+    ("cg_teamChatsOnly", "0", true),
+    ("cl_noprint", "0", false),
+    ("vid_xpos", "3", true),
+    ("vid_ypos", "22", true),
+    ("r_brightness", "0", false),
+    ("r_contrast", "1", false),
+    ("r_desaturation", "1", false),
+    // KisakCOD (GPL-3.0), gfx_d3d/r_dvars.cpp, R_RegisterDvars: renderer defaults and flags.
+    // `DVAR_SAVED`, like `DVAR_ARCHIVE`, keeps ordinary `set` writes in the config.
+    ("r_filmUseTweaks", "0", false),
+    ("r_filmTweakEnable", "0", true),
+    ("r_filmTweakContrast", "1.4", true),
+    ("r_filmTweakBrightness", "0", true),
+    ("r_filmTweakDesaturation", "0.2", true),
+    ("r_filmTweakInvert", "0", true),
+    ("r_filmTweakDarkTint", "0.7 0.85 1", true),
+    ("r_filmTweakLightTint", "1.1 1.05 0.85", true),
+    ("r_glow_allowed", "1", true),
+    ("r_glow_allowed_script_forced", "0", true),
+    ("r_glow", "1", false),
+    ("r_glowUseTweaks", "0", false),
+    ("r_glowTweakEnable", "0", false),
+    ("r_glowTweakRadius0", "5", false),
+    ("r_glowTweakBloomIntensity0", "1", false),
+    ("r_glowTweakBloomCutoff", "0.5", false),
+    ("r_glowTweakBloomDesaturation", "0", false),
+    ("r_znear", "4", false),
+    ("r_znear_depthhack", "0.1", false),
+    ("r_zfar", "0", false),
+    ("r_outdoor", "1", true),
+    ("r_outdoorFeather", "8", true),
+    ("r_outdoorAwayBias", "32", true),
+    ("r_outdoorDownBias", "0", true),
+    ("r_sun_from_dvars", "0", false),
+    ("r_lightTweakSunLight", "1", false),
+    ("r_lightTweakSunColor", "0 1 0 1", false),
+    ("r_lightTweakSunDiffuseColor", "0 0 1 1", false),
+    ("r_lightTweakSunDirection", "0 0 0", true),
+    ("r_lightTweakAmbient", "0.1", false),
+    ("r_lightTweakAmbientColor", "1 0 0 1", false),
+    ("r_lightTweakDiffuseFraction", "0.5", false),
+    ("r_blur", "0", false),
+    // R_RegisterSunDvars, gfx_d3d/r_sky.cpp: the source set for `r_sun_from_dvars`, all `DVAR_NOFLAG`.
+    ("r_sunsprite_shader", "sun", false),
+    ("r_sunsprite_size", "16", false),
+    ("r_sunflare_shader", "sun_flare", false),
+    ("r_sunflare_min_size", "0", false),
+    ("r_sunflare_min_angle", "45", false),
+    ("r_sunflare_max_size", "2500", false),
+    ("r_sunflare_max_angle", "2", false),
+    ("r_sunflare_max_alpha", "1", false),
+    ("r_sunflare_fadein", "1", false),
+    ("r_sunflare_fadeout", "1", false),
+    ("r_sunblind_min_angle", "30", false),
+    ("r_sunblind_max_angle", "5", false),
+    ("r_sunblind_max_darken", "0.75", false),
+    ("r_sunblind_fadein", "0.5", false),
+    ("r_sunblind_fadeout", "3", false),
+    ("r_sunglare_min_angle", "30", false),
+    ("r_sunglare_max_angle", "5", false),
+    ("r_sunglare_max_lighten", "0.75", false),
+    ("r_sunglare_fadein", "0.5", false),
+    ("r_sunglare_fadeout", "3", false),
+    ("r_sun_fx_position", "0 0 0", false),
+    // The killcam cameras (`cgame_mp/cg_view_mp.cpp`), all cheat protected.
+    ("cg_heliKillCamDist", "1000", false),
+    ("cg_heliKillCamFov", "15", false),
+    ("cg_heliKillCamZDist", "50", false),
+    ("cg_heliKillCamNearBlur", "4", false),
+    ("cg_heliKillCamFarBlur", "2", false),
+    ("cg_heliKillCamFarBlurStart", "100", false),
+    ("cg_heliKillCamFarBlurDist", "300", false),
+    ("cg_heliKillCamNearBlurStart", "0", false),
+    ("cg_heliKillCamNearBlurEnd", "100", false),
+    ("cg_airstrikeKillCamDist", "200", false),
+    ("cg_airstrikeKillCamFov", "80", false),
+    ("cg_airstrikeKillCamCloseXYDist", "24", false),
+    ("cg_airstrikeKillCamCloseZDist", "24", false),
+    ("cg_airstrikeKillCamNearBlur", "4", false),
+    ("cg_airstrikeKillCamFarBlur", "2", false),
+    ("cg_airstrikeKillCamFarBlurStart", "100", false),
+    ("cg_airstrikeKillCamFarBlurDist", "300", false),
+    ("cg_airstrikeKillCamNearBlurStart", "0", false),
+    ("cg_airstrikeKillCamNearBlurEnd", "100", false),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
-const READ_ONLY: &[&str] = &["cl_paused"];
+const READ_ONLY: &[&str] = &[
+    "cl_paused",
+    // `DVAR_ROM | DVAR_AUTOEXEC` in R_RegisterDvars.
+    "r_lightTweakAmbient",
+    "r_lightTweakAmbientColor",
+    "r_lightTweakDiffuseFraction",
+    "r_lightTweakSunDiffuseColor",
+];
 
 /// The cvars only the engine sets (`DVAR_INIT`): a console write is refused as write protected.
 const WRITE_PROTECTED: &[&str] = &["sv_cheats"];
@@ -83,6 +181,47 @@ const CHEAT: &[(&str, &str)] = &[
     ("ragdoll_explode_upbias", "0.8"),
     ("ragdoll_self_collision_scale", "1.2"),
     ("ragdoll_rotvel_scale", "1"),
+    ("cg_crosshairAlpha", "1"),
+    ("cg_crosshairAlphaMin", "0.5"),
+    ("cg_centertime", "3"),
+    ("r_brightness", "0"),
+    ("r_contrast", "1"),
+    ("r_desaturation", "1"),
+    ("r_filmUseTweaks", "0"),
+    ("r_glow", "1"),
+    ("r_glowUseTweaks", "0"),
+    ("r_glowTweakEnable", "0"),
+    ("r_glowTweakRadius0", "5"),
+    ("r_glowTweakBloomIntensity0", "1"),
+    ("r_glowTweakBloomCutoff", "0.5"),
+    ("r_glowTweakBloomDesaturation", "0"),
+    ("r_znear", "4"),
+    ("r_znear_depthhack", "0.1"),
+    ("r_zfar", "0"),
+    ("r_sun_from_dvars", "0"),
+    ("r_lightTweakSunLight", "1"),
+    ("r_lightTweakSunColor", "0 1 0 1"),
+    ("r_lightTweakSunDirection", "0 0 0"),
+    ("r_blur", "0"),
+    ("cg_heliKillCamDist", "1000"),
+    ("cg_heliKillCamFov", "15"),
+    ("cg_heliKillCamZDist", "50"),
+    ("cg_heliKillCamNearBlur", "4"),
+    ("cg_heliKillCamFarBlur", "2"),
+    ("cg_heliKillCamFarBlurStart", "100"),
+    ("cg_heliKillCamFarBlurDist", "300"),
+    ("cg_heliKillCamNearBlurStart", "0"),
+    ("cg_heliKillCamNearBlurEnd", "100"),
+    ("cg_airstrikeKillCamDist", "200"),
+    ("cg_airstrikeKillCamFov", "80"),
+    ("cg_airstrikeKillCamCloseXYDist", "24"),
+    ("cg_airstrikeKillCamCloseZDist", "24"),
+    ("cg_airstrikeKillCamNearBlur", "4"),
+    ("cg_airstrikeKillCamFarBlur", "2"),
+    ("cg_airstrikeKillCamFarBlurStart", "100"),
+    ("cg_airstrikeKillCamFarBlurDist", "300"),
+    ("cg_airstrikeKillCamNearBlurStart", "0"),
+    ("cg_airstrikeKillCamNearBlurEnd", "100"),
 ];
 
 /// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other
@@ -108,6 +247,7 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
 struct Cvar {
     value: String,
     archive: bool,
+    reset: Option<String>,
 }
 
 pub struct Cvars {
@@ -120,7 +260,14 @@ impl Default for Cvars {
             .iter()
             .map(|&(n, v, archive)| {
                 let value = v.to_owned();
-                (n.to_owned(), Cvar { value, archive })
+                (
+                    n.to_ascii_lowercase(),
+                    Cvar {
+                        value,
+                        archive,
+                        reset: None,
+                    },
+                )
             })
             .collect();
         Self { map }
@@ -136,14 +283,19 @@ impl Cvars {
 
     /// The value as a float; 0 when unset or not a number.
     pub fn f32(&self, name: &str) -> f32 {
+        self.f32_or(name, 0.0)
+    }
+
+    /// The value as a float, or `default` when unset or not a number.
+    pub fn f32_or(&self, name: &str, default: f32) -> f32 {
         let Some(v) = self.get(name) else {
-            return 0.0;
+            return default;
         };
         v.trim().parse().unwrap_or_else(|_| {
             if !v.trim().is_empty() {
                 logging::dedup!(WARN, name, cvar = name, "dvar is not a number, read as 0");
             }
-            0.0
+            default
         })
     }
 
@@ -175,7 +327,11 @@ impl Cvars {
         self.set("sv_cheats", if on { "1" } else { "0" }, false);
         if !on {
             for (name, reset) in CHEAT {
-                self.set(name, reset, false);
+                if let Some(c) = self.map.get_mut(&name.to_ascii_lowercase()) {
+                    c.reset.as_deref().unwrap_or(reset).clone_into(&mut c.value);
+                } else {
+                    self.set(name, reset, false);
+                }
             }
         }
     }
@@ -196,6 +352,7 @@ impl Cvars {
             .or_insert_with(|| Cvar {
                 value: String::new(),
                 archive: false,
+                reset: None,
             });
         value.clone_into(&mut c.value);
         c.archive |= archive;
@@ -206,6 +363,21 @@ impl Cvars {
         {
             tracing::warn!(filter = value, "log_filter does not parse: {e}");
         }
+    }
+
+    /// Engine-only world registration: replace the current value and its cheat reset value without changing
+    /// archive flags. Map lighting uses this when stock re-registers its dvars from the world's sun settings.
+    pub fn set_reset(&mut self, name: &str, value: &str) {
+        let c = self
+            .map
+            .entry(name.to_ascii_lowercase())
+            .or_insert_with(|| Cvar {
+                value: String::new(),
+                archive: false,
+                reset: None,
+            });
+        value.clone_into(&mut c.value);
+        value.clone_into(c.reset.get_or_insert_with(String::new));
     }
 
     /// `(name, value, archived)` of every cvar whose name matches the glob `filter` (`*` and `?`, any case; all
@@ -257,4 +429,224 @@ fn glob(pattern: &str, name: &str) -> bool {
         }
     }
     at(pattern.as_bytes(), name.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::Input;
+
+    #[test]
+    fn renderer_defaults_and_flags_are_registered_before_any_assignment() {
+        let cvars = Cvars::default();
+        // Independent expectations from KisakCOD gfx_d3d/r_dvars.cpp, R_RegisterDvars.
+        // name, default, saved/archive, cheat, read only
+        for (name, default, archive, cheat, read_only) in [
+            ("r_brightness", "0", false, true, false),
+            ("r_contrast", "1", false, true, false),
+            ("r_desaturation", "1", false, true, false),
+            ("r_filmUseTweaks", "0", false, true, false),
+            ("r_filmTweakEnable", "0", true, false, false),
+            ("r_filmTweakContrast", "1.4", true, false, false),
+            ("r_filmTweakBrightness", "0", true, false, false),
+            ("r_filmTweakDesaturation", "0.2", true, false, false),
+            ("r_filmTweakInvert", "0", true, false, false),
+            ("r_filmTweakDarkTint", "0.7 0.85 1", true, false, false),
+            ("r_filmTweakLightTint", "1.1 1.05 0.85", true, false, false),
+            ("r_glow_allowed", "1", true, false, false),
+            ("r_glow_allowed_script_forced", "0", true, false, false),
+            ("r_glow", "1", false, true, false),
+            ("r_glowUseTweaks", "0", false, true, false),
+            ("r_glowTweakEnable", "0", false, true, false),
+            ("r_glowTweakRadius0", "5", false, true, false),
+            ("r_glowTweakBloomIntensity0", "1", false, true, false),
+            ("r_glowTweakBloomCutoff", "0.5", false, true, false),
+            ("r_glowTweakBloomDesaturation", "0", false, true, false),
+            ("r_znear", "4", false, true, false),
+            ("r_znear_depthhack", "0.1", false, true, false),
+            ("r_zfar", "0", false, true, false),
+            ("r_outdoor", "1", true, false, false),
+            ("r_outdoorFeather", "8", true, false, false),
+            ("r_outdoorAwayBias", "32", true, false, false),
+            ("r_outdoorDownBias", "0", true, false, false),
+            ("r_sun_from_dvars", "0", false, true, false),
+            ("r_lightTweakSunLight", "1", false, true, false),
+            ("r_lightTweakSunColor", "0 1 0 1", false, true, false),
+            ("r_lightTweakSunDiffuseColor", "0 0 1 1", false, false, true),
+            ("r_lightTweakSunDirection", "0 0 0", true, true, false),
+            ("r_lightTweakAmbient", "0.1", false, false, true),
+            ("r_lightTweakAmbientColor", "1 0 0 1", false, false, true),
+            ("r_lightTweakDiffuseFraction", "0.5", false, false, true),
+            ("r_blur", "0", false, true, false),
+        ] {
+            assert_eq!(cvars.get(name), Some(default), "{name}");
+            assert_eq!(Cvars::cheat_name(name).is_some(), cheat, "{name}");
+            assert_eq!(Cvars::read_only(name), read_only, "{name}");
+            let entries = cvars.entries(Some(name));
+            assert_eq!(entries.len(), 1, "{name}");
+            assert_eq!(entries[0].2, archive, "{name}");
+        }
+    }
+
+    #[test]
+    fn sun_flare_override_sources_have_fresh_stock_defaults_and_no_flags() {
+        let cvars = Cvars::default();
+        // KisakCOD gfx_d3d/r_sky.cpp, R_RegisterSunDvars.
+        for (name, default) in [
+            ("r_sunsprite_shader", "sun"),
+            ("r_sunsprite_size", "16"),
+            ("r_sunflare_shader", "sun_flare"),
+            ("r_sunflare_min_size", "0"),
+            ("r_sunflare_min_angle", "45"),
+            ("r_sunflare_max_size", "2500"),
+            ("r_sunflare_max_angle", "2"),
+            ("r_sunflare_max_alpha", "1"),
+            ("r_sunflare_fadein", "1"),
+            ("r_sunflare_fadeout", "1"),
+            ("r_sunblind_min_angle", "30"),
+            ("r_sunblind_max_angle", "5"),
+            ("r_sunblind_max_darken", "0.75"),
+            ("r_sunblind_fadein", "0.5"),
+            ("r_sunblind_fadeout", "3"),
+            ("r_sunglare_min_angle", "30"),
+            ("r_sunglare_max_angle", "5"),
+            ("r_sunglare_max_lighten", "0.75"),
+            ("r_sunglare_fadein", "0.5"),
+            ("r_sunglare_fadeout", "3"),
+            ("r_sun_fx_position", "0 0 0"),
+        ] {
+            assert_eq!(cvars.get(name), Some(default), "{name}");
+            assert_eq!(Cvars::cheat_name(name), None, "{name}");
+            assert!(!Cvars::read_only(name), "{name}");
+            assert!(!Cvars::write_protected(name), "{name}");
+            let entries = cvars.entries(Some(name));
+            assert_eq!(entries.len(), 1, "{name}");
+            assert!(!entries[0].2, "{name}");
+        }
+    }
+
+    #[test]
+    fn renderer_cheat_commands_are_refused_and_reset_to_registered_defaults() {
+        let mut input = Input::detached();
+        for (name, changed, default) in [
+            ("r_brightness", "0.5", "0"),
+            ("r_contrast", "2", "1"),
+            ("r_desaturation", "0.5", "1"),
+            ("r_filmUseTweaks", "1", "0"),
+            ("r_glow", "0", "1"),
+            ("r_glowUseTweaks", "1", "0"),
+            ("r_glowTweakEnable", "1", "0"),
+            ("r_glowTweakRadius0", "7", "5"),
+            ("r_glowTweakBloomIntensity0", "2", "1"),
+            ("r_glowTweakBloomCutoff", "0.25", "0.5"),
+            ("r_glowTweakBloomDesaturation", "0.5", "0"),
+            ("r_znear", "8", "4"),
+            ("r_znear_depthhack", "0.2", "0.1"),
+            ("r_zfar", "4096", "0"),
+            ("r_sun_from_dvars", "1", "0"),
+            ("r_lightTweakSunLight", "2", "1"),
+            ("r_lightTweakSunColor", "1 0 0 1", "0 1 0 1"),
+            ("r_lightTweakSunDirection", "10 20 30", "0 0 0"),
+            ("r_blur", "4", "0"),
+        ] {
+            input.cvars.set_cheat_state(true);
+            assert_eq!(input.cvar(name), Some(default), "{name}");
+            input.exec_line(&format!("set {name} \"{changed}\""));
+            assert_eq!(input.cvar(name), Some(changed), "{name}");
+            input.cvars.set_cheat_state(false);
+            assert_eq!(input.cvar(name), Some(default), "{name}");
+            input.take_messages();
+            input.exec_line(&format!("set {name} \"{changed}\""));
+            assert_eq!(input.cvar(name), Some(default), "{name}");
+            assert!(
+                input
+                    .take_messages()
+                    .iter()
+                    .any(|message| message.contains("is cheat protected")),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn renderer_saved_flags_archive_ordinary_set_commands() {
+        let mut input = Input::detached();
+        for (name, changed) in [
+            ("r_filmTweakEnable", "1"),
+            ("r_filmTweakContrast", "1.8"),
+            ("r_filmTweakBrightness", "0.25"),
+            ("r_filmTweakDesaturation", "0.5"),
+            ("r_filmTweakInvert", "1"),
+            ("r_filmTweakDarkTint", "1 1 1"),
+            ("r_filmTweakLightTint", "1 1 1"),
+            ("r_glow_allowed", "0"),
+            ("r_glow_allowed_script_forced", "1"),
+            ("r_outdoor", "0"),
+            ("r_outdoorFeather", "16"),
+            ("r_outdoorAwayBias", "64"),
+            ("r_outdoorDownBias", "8"),
+            ("r_lightTweakSunDirection", "10 20 30"),
+        ] {
+            input.exec_line(&format!("set {name} \"{changed}\""));
+            assert!(
+                input
+                    .cvars
+                    .archived()
+                    .contains(&(name.to_ascii_lowercase().as_str(), changed)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn renderer_read_only_lighting_refuses_console_writes() {
+        let mut input = Input::detached();
+        for (name, default) in [
+            ("r_lightTweakAmbient", "0.1"),
+            ("r_lightTweakAmbientColor", "1 0 0 1"),
+            ("r_lightTweakDiffuseFraction", "0.5"),
+            ("r_lightTweakSunDiffuseColor", "0 0 1 1"),
+        ] {
+            input.exec_line(&format!("set {name} 0"));
+            assert_eq!(input.cvar(name), Some(default), "{name}");
+            assert!(
+                input
+                    .take_messages()
+                    .iter()
+                    .any(|message| message.contains("is read only")),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn world_lighting_reset_survives_cheat_writes_without_changing_archive_flags() {
+        let mut cvars = Cvars::default();
+        cvars.set_reset("r_lightTweakSunLight", "1.75");
+        cvars.set_reset("r_lightTweakSunDirection", "10 20 30");
+        assert_eq!(cvars.get("r_lightTweakSunLight"), Some("1.75"));
+        cvars.set("r_lightTweakSunLight", "3", false);
+        cvars.set("r_lightTweakSunDirection", "40 50 60", false);
+        cvars.set("r_blur", "8", false);
+        cvars.set_cheat_state(false);
+        assert_eq!(cvars.get("r_lightTweakSunLight"), Some("1.75"));
+        assert_eq!(cvars.get("r_lightTweakSunDirection"), Some("10 20 30"));
+        assert_eq!(cvars.get("r_blur"), Some("0"));
+        assert!(
+            !cvars
+                .archived()
+                .iter()
+                .any(|(name, _)| *name == "r_lighttweaksunlight")
+        );
+        assert!(
+            cvars
+                .archived()
+                .contains(&("r_lighttweaksundirection", "10 20 30"))
+        );
+        // The next world replaces the previous world's reset, not only its current value.
+        cvars.set_reset("r_lightTweakSunLight", "0.5");
+        cvars.set("r_lightTweakSunLight", "2", false);
+        cvars.set_cheat_state(false);
+        assert_eq!(cvars.get("r_lightTweakSunLight"), Some("0.5"));
+    }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// The command buffer follows KisakCOD (qcommon/cmd.cpp: Cmd_Wait_f, Cmd_Vstr_f, Cmd_Exec_f, Cmd_ExecFromDisk; universal/dvar_cmds.cpp: Dvar_ToggleInternal, Dvar_List_f, Dvar_Dump_f; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// The command buffer follows KisakCOD (qcommon/cmd.cpp: Cmd_Wait_f, Cmd_Vstr_f, Cmd_Exec_f, Cmd_ExecFromDisk; qcommon/common.cpp: Com_WriteConfig_f, Com_WriteConfigToFile; universal/dvar_cmds.cpp: Dvar_ToggleInternal, Dvar_List_f, Dvar_Dump_f; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Player input: keys, mouse, wheel and gamepad resolved through the bind table into one [`InputFrame`] per frame.
 //!
 //! Decoupled from networking: the netplay layer turns an `InputFrame` into a usercmd. Commands keep their original
@@ -812,6 +812,34 @@ impl Input {
         Ok(())
     }
 
+    /// Export a named config below the user's `players` folder, without saving the active profile or clearing
+    /// its dirty flag. KisakCOD `qcommon/common.cpp:1628-1657` (`Com_WriteConfig_f`/`Com_WriteConfigToFile`).
+    pub fn write_config(&self, name: &str) -> std::io::Result<Option<PathBuf>> {
+        let name: String = name.chars().take(MAX_EXEC_NAME).collect();
+        let name = name.replace('\\', "/");
+        // The VFS's stays_inside convention: no absolute path, drive or parent traversal.
+        if name.is_empty()
+            || name.ends_with('/')
+            || name.starts_with('/')
+            || name.contains(':')
+            || name.split('/').any(|p| p == "..")
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "config filename must stay inside the players folder",
+            ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let Some(dir) = self.config_dir.as_deref() else {
+            return Ok(None);
+        };
+        #[cfg(target_arch = "wasm32")]
+        let dir = self.config_dir.as_deref().unwrap_or_else(|| Path::new(""));
+        let path = dir.join("players").join(config::exec_name(&name));
+        write_config(&path, &self.config_text())?;
+        Ok(Some(path))
+    }
+
     /// Whether settings or binds changed since the config was read or saved.
     #[cfg(target_arch = "wasm32")]
     pub fn unsaved(&self) -> bool {
@@ -1189,8 +1217,8 @@ impl Input {
                 self.binds.clear();
                 self.dirty = true;
             }
-            ("set" | "seta" | "sets" | "setu", [n, v, ..]) => {
-                self.set_from_command(n, v, name == "seta");
+            ("set" | "seta" | "sets" | "setu", [n, values @ ..]) if !values.is_empty() => {
+                self.set_from_command(n, &values.join(" "), name == "seta");
             }
             ("toggle", [n, values @ ..]) => self.toggle(n, values),
             ("toggle", []) => self.say("USAGE: toggle <variable> <optional value sequence>"),
@@ -2070,6 +2098,59 @@ mod tests {
     }
 
     #[test]
+    fn writeconfig_exports_named_files_without_saving_the_active_profile() {
+        let dir =
+            std::env::temp_dir().join(format!("cod4e-input-writeconfig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mine = dir.join("players/profiles/p/config_mp.cfg");
+        std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+        let original = "seta export_marker baseline\n";
+        std::fs::write(&mine, original).unwrap();
+        let mut i = Input::detached();
+        i.config_dir = Some(dir.clone());
+        i.use_profile(Some(mine.clone()), Some(mine.clone()));
+        assert!(!i.dirty);
+        let named = dir.join("players/export.cfg");
+        assert_eq!(i.write_config("export").unwrap(), Some(named.clone()));
+        assert!(!i.dirty, "an export does not dirty a clean profile");
+        i.exec_line("seta export_marker changed; bind f10 \"say exported\"");
+        let expected = i.config_text();
+        assert!(i.dirty);
+        assert_eq!(i.write_config("export.cfg").unwrap(), Some(named.clone()));
+        assert_eq!(std::fs::read_to_string(&named).unwrap(), expected);
+        assert!(!dir.join("players/export.cfg.cfg").exists());
+        assert_eq!(std::fs::read_to_string(&mine).unwrap(), original);
+        assert_eq!(i.config_path.as_ref(), Some(&mine));
+        assert!(i.dirty, "export must not consume the pending profile save");
+        let nested = dir.join("players/folder/other.txt");
+        assert_eq!(
+            i.write_config("folder\\other.txt").unwrap(),
+            Some(nested.clone())
+        );
+        assert_eq!(std::fs::read_to_string(nested).unwrap(), expected);
+        for name in [
+            "",
+            "../outside",
+            "folder/../outside",
+            "/absolute",
+            "\\absolute",
+            "C:\\drive",
+        ] {
+            assert_eq!(
+                i.write_config(name).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+        i.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&mine).unwrap(), expected);
+        std::fs::remove_file(&named).unwrap();
+        i.write_config("export").unwrap();
+        assert!(named.exists(), "writeconfig writes without a change");
+        assert!(!i.dirty);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_profile_config_runs_after_the_defaults_and_saves_to_its_own_file() {
         let dir = std::env::temp_dir().join(format!("cod4e-input-profile-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2400,6 +2481,13 @@ mod tests {
         i.exec_line("set cg_drawGun 0");
         assert_eq!(i.cvar("cg_drawGun"), Some("0"));
         assert!(i.take_messages().is_empty());
+    }
+
+    #[test]
+    fn set_keeps_the_whole_value_including_spaces() {
+        let mut i = Input::detached();
+        i.exec_line("set zz_vec 0 0 2");
+        assert_eq!(i.cvar("zz_vec"), Some("0 0 2"));
     }
 
     #[test]

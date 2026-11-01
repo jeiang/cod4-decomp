@@ -9,11 +9,12 @@
 //! frame without it (the dynamic light pass). At the end the graphics device is destroyed under the match, as a driver
 //! reset does it, and the client must make a new one and draw the world again.
 //!
-//! The cgame dvars of #369 are checked on the way: a sound or HUD option this build has one value of is refused with
-//! the stock domain line; the menu-started match runs without cheats, so a cheat dvar set at the main menu is reset
-//! at the join and a write in the match is refused as cheat protected; a `devmap` match then has them act (the view
-//! model, the 2D HUD, the shellshock blend and the unlit scene go off and come back), beside the frame rate counter,
-//! subtitles, blood and brass. Needs a display and the install; skips without.
+//! The cgame and renderer dvars of #369 are checked on the way: untouched registration defaults are observed before
+//! writes, and the menu-started match resets cheat dvars and refuses protected writes. A `devmap` match then checks
+//! live near/far/depthhack, outdoor, sun, film, glow and blur settings without restarting the renderer, including
+//! sun-flare source defaults, overrides and persistence after their gate closes. The view model, HUD, shellshock,
+//! unlit scene, frame counter, subtitles, blood and brass retain their player-path checks. Needs a display and the
+//! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -24,7 +25,20 @@ use std::time::Duration;
 const NAME: &str = "client-gfx";
 const LIMIT: Duration = Duration::from_secs(300);
 
-const STEPS: &str = "set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 16,\
+const STEPS: &str = "cvaris=r_znear 4,cvaris=r_znear_depthhack 0.1,cvaris=r_zfar 0,\
+cvaris=r_outdoor 1,cvaris=r_outdoorAwayBias 32,cvaris=r_outdoorDownBias 0,cvaris=r_outdoorFeather 8,\
+cvaris=r_filmUseTweaks 0,cvaris=r_filmTweakEnable 0,cvaris=r_filmTweakBrightness 0,cvaris=r_filmTweakContrast 1.4,\
+cvaris=r_filmTweakDesaturation 0.2,cvaris=r_filmTweakInvert 0,\
+cvaris=r_filmTweakLightTint 1.1 1.05 0.85,cvaris=r_filmTweakDarkTint 0.7 0.85 1,\
+cvaris=r_glowUseTweaks 0,cvaris=r_glowTweakEnable 0,cvaris=r_glowTweakRadius0 5,\
+cvaris=r_glowTweakBloomIntensity0 1,cvaris=r_glowTweakBloomCutoff 0.5,cvaris=r_blur 0,\
+cvaris=r_sun_from_dvars 0,cvaris=r_lightTweakSunLight 1,cvaris=r_lightTweakSunColor 0 1 0 1,\
+cvaris=r_lightTweakSunDirection 0 0 0,cvaris=r_lightTweakAmbient 0.1,cvaris=r_lightTweakAmbientColor 1 0 0 1,\
+cvaris=r_lightTweakDiffuseFraction 0.5,cvaris=r_lightTweakSunDiffuseColor 0 0 1 1,\
+cvaris=r_sunsprite_shader sun,cvaris=r_sunsprite_size 16,cvaris=r_sunflare_shader sun_flare,\
+cvaris=r_sunflare_min_size 0,cvaris=r_sunflare_max_size 2500,cvaris=r_sunflare_max_alpha 1,\
+cvaris=r_sunflare_fadein 1,cvaris=r_sunflare_fadeout 1,cvaris=r_sun_fx_position 0 0 0,\
+cgis=window_position 40 60,set=set r_vsync 0,set=set r_aspectRatio standard,set=set r_aaSamples 16,\
 set=set r_picmip_manual 1,set=set r_picmip 0,set=set r_picmip_bump 1,set=set r_picmip_spec 1,set=set r_zFeather 0,set=set r_drawWater 0,\
 set=set r_specular 0,set=set r_dof_enable 0,set=set r_glow_allowed 0,set=set sm_enable 0,set=set r_dlightLimit 4,\
 set=set r_texFilterAnisoMin 2,set=set r_texFilterMipMode 2,\
@@ -32,17 +46,49 @@ vidrestart,wait=1,gfxis=uncapped 1,gfxis=aspect 1.33,\
 set=set snd_khz 22,sawreply='22' is not a valid value for dvar 'snd_khz':5,\
 set=set snd_enableEq 0,sawreply='0' is not a valid value for dvar 'snd_enableEq':5,\
 set=set cg_drawLagometer 1,sawreply='1' is not a valid value for dvar 'cg_drawLagometer':5,\
-set=set cg_drawGun 0,\
+set=set cg_drawGun 0,set=set r_znear 0.5,cvaris=r_znear 0.5,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,\
 menu=team_marinesopfor:90,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=2,\
 gfxis=aa max,gfxis=picmip 0 1 1,gfxis=zfeather 0,gfxis=water 0,gfxis=specular 0,gfxis=dof 0,gfxis=blur 0,gfxis=glow 0,gfxis=shadows 0,\
 gfxis=aniso 2 4,gfxis=mipmode 2,shot=gfx-on,\
+gfxis=nearfar 4 0,gfxis=depthhack_near 0.1,gfxis=outdoor 1 32 0 8,gfxis=blur_radius 0,cvaris=r_znear 4,\
+set=set r_znear 0.5,sawreply=r_znear is cheat protected.:5,cvaris=r_znear 4,gfxis=nearfar 4 0,\
+set=set r_zfar 2000,sawreply=r_zfar is cheat protected.:5,cvaris=r_zfar 0,\
+set=set r_znear_depthhack 0.25,sawreply=r_znear_depthhack is cheat protected.:5,gfxis=depthhack_near 0.1,\
+set=set r_blur 3,sawreply=r_blur is cheat protected.:5,gfxis=blur_radius 0,\
+set=set r_filmUseTweaks 1,sawreply=r_filmUseTweaks is cheat protected.:5,cvaris=r_filmUseTweaks 0,\
+set=set r_glowUseTweaks 1,sawreply=r_glowUseTweaks is cheat protected.:5,cvaris=r_glowUseTweaks 0,\
+set=set r_sun_from_dvars 1,sawreply=r_sun_from_dvars is cheat protected.:5,cvaris=r_sun_from_dvars 0,\
+set=set r_lightTweakAmbient 0.9,sawreply=r_lighttweakambient is read only.:5,\
 cgis=gun 1,set=set cg_drawGun 0,sawreply=cg_drawGun is cheat protected.:5,wait=1,cgis=gun 1,\
 set=set sv_cheats 1,sawreply=sv_cheats is write protected.:5,\
 cgis=fps 0,set=set cg_drawFPS 1,wait=1,cgis=fps 1,shot=fps,set=set cg_drawFPS Off,wait=1,cgis=fps 0,\
 subtitle=MP_WAITING,wait=0.5,cgis=subtitle 1,wait=4,cgis=subtitle 0,\
 set=set cg_subtitles 0,subtitle=MP_WAITING,wait=0.5,cgis=subtitle 0,set=set cg_subtitles 1,\
-devmap=mp_crash,ingame=120,wait=2,\
+devmap=mp_crash,ingame=120,console=god,wait=1,\
+gfxis=nearfar 4 0,gfxis=depthhack_near 0.1,gfxis=outdoor 1 32 0 8,\
+set=set r_znear 0.5,set=set r_zfar 2000,set=set r_znear_depthhack 0.25,\
+set=set r_outdoor 0,set=set r_outdoorAwayBias 4,set=set r_outdoorDownBias 2,set=set r_outdoorFeather 16,\
+set=set r_sun_from_dvars 1,wait=1,gfxis=sun_flare 1 16 0 1250 1 1000 1000 sun sun_flare,\
+set=set r_lightTweakSunLight 4,set=set r_lightTweakSunColor 0 0 2,set=set r_lightTweakSunDirection 10 20 0,\
+wait=1,gfxis=nearfar 0.5 2000,gfxis=depthhack_near 0.25,gfxis=outdoor 0 4 2 16,\
+gfxis=sun_tweak 4 0 0 1 10 20 0,\
+set=set r_znear 1,set=set r_zfar 4000,set=set r_znear_depthhack 0.2,\
+set=set r_outdoor 1,set=set r_outdoorAwayBias 12,set=set r_outdoorDownBias 3,set=set r_outdoorFeather 6,\
+set=set r_lightTweakSunLight 3,set=set r_lightTweakSunColor 1 0 0,set=set r_lightTweakSunDirection 0 90 0,\
+wait=1,gfxis=nearfar 1 4000,gfxis=depthhack_near 0.2,gfxis=outdoor 1 12 3 6,gfxis=sun_tweak 3 1 0 0 0 90 0,\
+set=set r_lightTweakSunLight 1,set=set r_lightTweakSunColor 1 1 1,set=set r_lightTweakSunDirection 0 0 0,\
+set=set r_sunsprite_shader sun,set=set r_sunflare_shader sun_flare,set=set r_sunsprite_size 24,\
+set=set r_sunflare_min_size 8,set=set r_sunflare_max_size 1200,set=set r_sunflare_max_alpha 0.6,\
+set=set r_sunflare_fadein 0.25,set=set r_sunflare_fadeout 0.5,set=set r_sun_fx_position 0 90 0,\
+wait=1,gfxis=sun_flare 1 24 4 600 0.6 250 500 sun sun_flare,gfxis=sun_fx_position 0 1 0,\
+set=set r_sun_from_dvars 0,set=set r_sunsprite_size 40,set=set r_sunflare_max_size 1800,\
+wait=1,gfxis=sun_flare 1 24 4 600 0.6 250 500 sun sun_flare,gfxis=sun_fx_position 0 1 0,\
+set=set r_znear 4,set=set r_zfar 0,set=set r_znear_depthhack 0.1,\
+set=set r_outdoorAwayBias 32,set=set r_outdoorDownBias 0,set=set r_outdoorFeather 8,\
+wait=1,gfxis=nearfar 4 0,gfxis=depthhack_near 0.1,gfxis=outdoor 1 32 0 8,\
+gfxis=blur_radius 0,set=set r_blur 3,wait=1,gfxis=blur_radius 3,\
+set=set r_blur 4,wait=1,gfxis=blur_radius 4,set=set r_blur 0,wait=1,gfxis=blur_radius 0,\
 cgis=gun 1,set=set cg_drawGun 0,wait=1,cgis=gun 0,shot=no-gun,set=set cg_drawGun 1,wait=1,cgis=gun 1,\
 cgis=hud2d 1,set=set cg_draw2D 0,wait=1,cgis=hud2d 0,shot=no-2d,set=set cg_draw2D 1,wait=1,cgis=hud2d 1,\
 shock=8000,wait=1,cgis=shock 1,set=set cg_drawShellshock 0,wait=1,cgis=shock 0,set=set cg_drawShellshock 1,wait=1,cgis=shock 1,\
@@ -50,6 +96,40 @@ fxmark,set=set cg_blood 0,hitflesh,wait=1,cgis=fx:bullet_impact_noblood +1,cgis=
 set=set cg_blood 1,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,cgis=fx:bullet_impact_noblood +1,\
 set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0,set=set cg_brass 1,\
 cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
+cgis=centertime 3000,set=set cg_centertime 1.5,wait=1,cgis=centertime 1500,set=set cg_centertime 3,\
+set=set cg_crosshairAlpha 0,set=set cg_crosshairAlphaMin 0,wait=1,cgis=crosshair_alpha 0.00,\
+set=set cg_crosshairAlphaMin 0.75,wait=1,cgis=crosshair_alpha 0.75,holdkey=mouse2,releasekey=mouse2,wait=1,cgis=crosshair_alpha 0.75,\
+holdkey=mouse2,releasekey=mouse2,wait=1,set=set cg_crosshairAlpha 1,set=set cg_crosshairAlphaMin 0.5,\
+cgis=heli_camera -1000 50 15 0 1900 2100 2400 4 2,\
+set=set cg_heliKillCamDist 500,set=set cg_heliKillCamFov 40,set=set cg_heliKillCamZDist 80,\
+set=set cg_heliKillCamNearBlurStart 10,set=set cg_heliKillCamNearBlurEnd 200,\
+set=set cg_heliKillCamFarBlurStart 150,set=set cg_heliKillCamFarBlurDist 400,\
+set=set cg_heliKillCamNearBlur 6,set=set cg_heliKillCamFarBlur 3,wait=1,cgis=heli_camera -500 80 40 10 1300 1650 2050 6 3,\
+set=set cg_airstrikeKillCamDist 300,set=set cg_airstrikeKillCamFov 60,set=set cg_airstrikeKillCamCloseZDist 40,\
+set=set cg_airstrikeKillCamNearBlurStart 20,set=set cg_airstrikeKillCamNearBlurEnd 120,\
+set=set cg_airstrikeKillCamFarBlurStart 200,set=set cg_airstrikeKillCamFarBlurDist 500,\
+set=set cg_airstrikeKillCamNearBlur 7,set=set cg_airstrikeKillCamFarBlur 5,wait=1,cgis=air_camera 340 60 20 220 540 1040 7 5,\
+set=set r_brightness 0.25,wait=1,cgis=brightness 0.25,set=set r_brightness 0,wait=1,cgis=brightness 0.00,\
+set=set r_contrast 2,set=set r_desaturation 0,wait=1,cgis=film_sample 0.00 2.00 0.25,\
+set=set r_desaturation 2,wait=1,cgis=film_sample 0.00 2.00 0.75,\
+set=set r_contrast 1,set=set r_desaturation 1,wait=1,cgis=film_sample 0.00 1.00 0.50,\
+set=set r_filmUseTweaks 1,set=set r_filmTweakEnable 1,wait=1,\
+gfxis=film_tweak 0 1.4 0.2 0 1.1 1.05 0.85 0.7 0.85 1,\
+set=set r_filmTweakContrast 1.5,set=set r_filmTweakBrightness 0.1,set=set r_filmTweakDesaturation 0.25,set=set r_filmTweakInvert 1,\
+set=set r_filmTweakLightTint 0.5 1 2,set=set r_filmTweakDarkTint 0 0 0,wait=1,\
+gfxis=film_tweak 0.1 1.5 0.25 1 0.5 1 2 0 0 0,cgis=film_sample 0.10 1.50 0.25,\
+set=set r_filmUseTweaks 0,set=set r_filmTweakEnable 0,\
+set=set r_glowUseTweaks 1,set=set r_glowTweakEnable 1,wait=1,gfxis=glow_tweak 1 5 1 0.5,\
+set=set r_glowTweakRadius0 7,set=set r_glowTweakBloomIntensity0 1.5,set=set r_glowTweakBloomCutoff 0.3,wait=1,\
+gfxis=glow_tweak 1 7 1.5 0.3,\
+set=set r_glowTweakRadius0 3,set=set r_glowTweakBloomIntensity0 2,set=set r_glowTweakBloomCutoff 0.6,wait=1,\
+gfxis=glow_tweak 1 3 2 0.6,set=set r_glowUseTweaks 0,set=set r_glowTweakEnable 0,\
+fxmark,set=set cg_bloodLimitMsec 2000,set=set cg_bloodLimit 1,hitflesh,hitflesh,wait=1,cgis=fx:bullet_impact_flesh +1,\
+hitflesh,wait=1.2,cgis=fx:bullet_impact_flesh +1,hitflesh,cgis=fx:bullet_impact_flesh +2,\
+set=set cg_bloodLimitMsec 1,wait=0.1,hitflesh,wait=0.1,hitflesh,cgis=fx:bullet_impact_flesh +4,set=set cg_bloodLimit 0,set=set cg_bloodLimitMsec 330,\
+set=set cl_noprint 1,wait=1,console=echo hidden_print_369,wait=1,notsaw=hidden_print_369,\
+set=set cl_noprint 0,wait=1,console=echo visible_print_369,saw=visible_print_369:5,\
+set=set vid_xpos 40,set=set vid_ypos 60,vidrestart,wait=2,cgis=window_position 40 60,set=set vid_xpos 10000,set=set vid_ypos -10000,vidrestart,wait=2,cgis=window_position 4096 -4096,set=set vid_xpos 40,set=set vid_ypos 60,\
 set=set com_maxfps 20,wait=1,pacereset,wait=2,gfxis=pace 1,set=set com_maxfps 0,\
 set=set r_fullscreen 1,vidrestart,wait=2,gfxis=fullscreen 1,\
 set=set r_gamma 0.5,wait=1,shot=gamma-lo,set=set r_gamma 2,wait=1,shot=gamma-hi,set=set r_gamma 0.8,\
@@ -60,7 +140,8 @@ dlight=0,wait=1,shot=dlight-off,dlight=1,wait=1,gfxis=dlights 1+,shot=dlight-on,
 set=set r_aaSamples 1,set=set r_specular 1,set=set r_dof_enable 1,set=set r_glow_allowed 1,set=set sm_enable 1,\
 set=set r_zFeather 1,set=set r_drawWater 1,set=set r_texFilterAnisoMin 1,set=set r_texFilterMipMode Unchanged,\
 set=set r_aspectRatio auto,vidrestart,wait=2,gfxis=zfeather 1,gfxis=water 1,\
-gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,wait=2,gfxis=blur 1,releasekey=mouse2,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
+gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,releasekey=mouse2,wait=2,gfxis=blur 1,\
+holdkey=mouse2,releasekey=mouse2,wait=1,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
 losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered";
 
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
@@ -201,12 +282,19 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if let Some(r) = no_display(&client, NAME)? {
         return Ok(r);
     }
+    let config_dir = ctx.dir.join("config");
+    let profile = config_dir.join("players/profiles/harness");
+    std::fs::create_dir_all(&profile)?;
+    std::fs::write(
+        profile.join("config_mp.cfg"),
+        "seta vid_xpos 40\nseta vid_ypos 60\n",
+    )?;
     let mut out = StageReport::new(NAME, Status::Passed);
     match run_client(
         &client,
         install,
         &ctx.dir,
-        &ctx.dir.join("config"),
+        &config_dir,
         &["--bots", "3"],
         STEPS,
         LIMIT,

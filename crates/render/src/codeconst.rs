@@ -317,6 +317,11 @@ impl FrameConsts {
         self.vec[SUN_SPECULAR as usize] = [s.x, s.y, s.z, 1.0];
     }
 
+    pub fn sun_direction(&self) -> Vec3 {
+        let v = self.vec[SUN_POSITION as usize];
+        Vec3::new(v[0], v[1], v[2])
+    }
+
     pub fn set_fog(&mut self, fog: Option<&crate::art::Fog>) {
         match fog {
             Some(f) => {
