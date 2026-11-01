@@ -1894,6 +1894,16 @@ impl NetPlay {
         });
         let projectiles = self.projectiles(&flying, st);
         if let Some(snap) = self.net.latest() {
+            self.effects.smoke(
+                &snap.entities,
+                &|w| {
+                    self.weapons
+                        .get(w)
+                        .and_then(|i| self.lib.content.weapon(&i.name))
+                        .cloned()
+                },
+                st,
+            );
             self.effects.world_fx(&snap.entities, &self.events, eye, st);
         }
         self.effects.update(st, self.boxes.world());
@@ -2995,6 +3005,8 @@ impl NetPlay {
         report["fx"]["ambient_sounds"] = self.effects.ambient().sounds.len().into();
         report["fx"]["ambient_live_effects_max"] = self.c.ambient_live_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
+        report["fx"]["persistent_smoke"] = self.effects.smoke_report();
+        report["fx"]["persistent_smoke_quads"] = self.effects.smoke_quads().into();
         report["fx"]["corpses_max"] = self.c.corpses_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
         report["fx"]["camera_sway_max"] = self.c.sway_max.into();

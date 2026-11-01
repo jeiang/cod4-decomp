@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Snapshot reset handling follows KisakCOD (GPL-3.0, KisakCOD contributors and Activision),
+// `cgame_mp/cg_snapshot_mp.cpp:419-426` (CoD4 MP 1.8; native 1.7 unverified).
 //! What the server tells the client happened: the one-shot events of `server::tempev` turned into [`ClientEvent`]s,
 //! each delivered once however many snapshots repeat it.
 //!
@@ -34,6 +36,8 @@ pub enum ClientEvent {
         surface: u8,
         weapon: u16,
         owner: u16,
+        /// The persistent smoke cloud is reconstructed separately from its burst.
+        persistent_smoke: bool,
     },
     /// A missile that will not go off hit or settled on a surface (a grenade that never armed, a `dud` explosion).
     Dud {
@@ -181,8 +185,8 @@ pub fn start_shakes(
 pub struct Events {
     /// Effect names by index - 1.
     fx: Vec<String>,
-    /// Last sequence acted on, by event entity number.
-    seen: HashMap<u16, u8>,
+    /// Last sequence and smoke burst time acted on, by entity number.
+    seen: HashMap<u16, (u8, Option<i32>)>,
 }
 
 impl Events {
@@ -222,12 +226,29 @@ impl Events {
         let mut out = Vec::new();
         let mut live = Vec::new();
         let entities = &snap.entities;
-        for e in snap.entities.iter().filter(|e| e.etype == etype::EVENT) {
+        for e in snap
+            .entities
+            .iter()
+            .filter(|e| e.etype == etype::EVENT || persistent_smoke(e))
+        {
             live.push(e.number);
-            if self.seen.get(&e.number) == Some(&e.event_seq) {
+            let key = (
+                e.event_seq,
+                persistent_smoke(e).then_some(e.custom_explode_start_time),
+            );
+            if self.seen.get(&e.number) == Some(&key) {
                 continue;
             }
-            self.seen.insert(e.number, e.event_seq);
+            self.seen.insert(e.number, key);
+            // Reset entities more than 200 ms after the burst inherit its sequence without
+            // replaying the explosion (including audio). Exactly 200 ms is still fresh.
+            if persistent_smoke(e)
+                && (snap.server_time < e.custom_explode_start_time
+                    || snap.server_time > e.time2
+                    || snap.server_time.wrapping_sub(e.custom_explode_start_time) > 200)
+            {
+                continue;
+            }
             out.extend(self.decode(e, entities));
         }
         // An entity that left the snapshot starts over, so a restarted server's sequence 1 is not skipped.
@@ -253,6 +274,7 @@ impl Events {
                 surface: e.event_parm,
                 weapon: e.weapon,
                 owner: e.client,
+                persistent_smoke: persistent_smoke(e),
             },
             ev::DUD | ev::CHANGE_TO_DUD => ClientEvent::Dud {
                 settled: e.event == ev::CHANGE_TO_DUD,
@@ -376,6 +398,11 @@ impl Events {
     }
 }
 
+/// GENERAL smoke entities carry their explosion event for clients entering their snapshot later.
+pub(crate) fn persistent_smoke(e: &EntityState) -> bool {
+    e.etype == etype::GENERAL && e.eflags & net::entity::SMOKE_EXPLODE != 0
+}
+
 /// The unit vector a pitch/yaw/roll in degrees points along.
 fn direction(angles: [f32; 3]) -> [f32; 3] {
     sim::pm::math::angle_vectors(&angles).0
@@ -445,6 +472,72 @@ mod tests {
         assert_eq!(ev.scan(&snap(std::slice::from_ref(&e))).len(), 1);
         assert!(ev.scan(&snap(&[])).is_empty());
         assert_eq!(ev.scan(&snap(&[e])).len(), 1);
+    }
+
+    fn smoke(start: i32) -> EntityState {
+        let mut e = event(961, super::ev::EXPLOSION, 1);
+        e.etype = etype::GENERAL;
+        e.eflags = net::entity::SMOKE_EXPLODE;
+        e.custom_explode_start_time = start;
+        e.time2 = start + 61_000;
+        e
+    }
+
+    fn at(time: i32, entities: &[EntityState]) -> Snapshot {
+        let mut s = snap(entities);
+        s.server_time = time;
+        s
+    }
+
+    #[test]
+    fn general_smoke_bursts_once_only_when_first_seen_within_200_ms() {
+        for age in [0, 1, 199, 200, 201, 2_000, 60_000] {
+            let e = smoke(1_000);
+            let s = at(1_000 + age, std::slice::from_ref(&e));
+            let mut events = Events::default();
+            let burst = events.scan(&s);
+            assert_eq!(burst.len(), usize::from(age <= 200), "age {age}");
+            if age <= 200 {
+                assert!(matches!(
+                    burst[0],
+                    ClientEvent::Explosion {
+                        persistent_smoke: true,
+                        ..
+                    }
+                ));
+            }
+            assert!(events.scan(&s).is_empty(), "repeated age {age}");
+            events.scan(&at(4_000, &[]));
+            assert!(
+                events.scan(&at(4_001, &[e])).is_empty(),
+                "late reentry age {age}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reused_smoke_slot_with_sequence_one_has_a_new_burst_time() {
+        let mut events = Events::default();
+        assert_eq!(events.scan(&at(1_000, &[smoke(1_000)])).len(), 1);
+        assert_eq!(events.scan(&at(2_000, &[smoke(2_000)])).len(), 1);
+        assert!(events.scan(&at(2_001, &[smoke(2_000)])).is_empty());
+        // A restart recreates the scanner; an existing old cloud stays silent.
+        assert!(
+            Events::default()
+                .scan(&at(3_000, &[smoke(2_000)]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn smoke_outside_its_active_interval_has_no_burst() {
+        for time in [999, 62_001] {
+            assert!(
+                Events::default()
+                    .scan(&at(time, &[smoke(1_000)]))
+                    .is_empty()
+            );
+        }
     }
 
     #[test]

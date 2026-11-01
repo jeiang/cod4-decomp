@@ -1714,26 +1714,60 @@ mod bounce_tests {
             proj_explosion: ProjExplosion::Smoke,
             has_proj_explosion_effect: true,
             ..Default::default()
-        }]).unwrap();
-        let program = compile(&[("t.gsc", "main() {}")], &Builtins::stock_mp(), Options::default()).unwrap();
+        }])
+        .unwrap();
+        let program = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
         let mut vm = Vm::new(program).unwrap();
         g.level.time = 1_000;
         let weapon = g.weapons.index("smoke_grenade_mp");
-        let missile = g.launch_grenade(&mut vm, 0, weapon, [12.8, -25.9, 8.2], [0.0; 3], [0.0; 3], false, 1).unwrap();
+        let missile = g
+            .launch_grenade(
+                &mut vm,
+                0,
+                weapon,
+                [12.8, -25.9, 8.2],
+                [0.0; 3],
+                [0.0; 3],
+                false,
+                1,
+            )
+            .unwrap();
         g.with_missile(missile, |g, m| {
             m.ground = Some(ENTITYNUM_WORLD);
             g.explode_missile(&mut vm, missile, m);
         });
         assert!(g.ent(missile).is_none(), "the spent missile must be freed");
-        let cloud = world_entities(&g).into_iter().find(|s| s.etype == etype::GENERAL && s.eflags & SMOKE_EXPLODE != 0).expect("smoke must retain a GENERAL cloud, not just an EVENT");
+        let cloud = world_entities(&g)
+            .into_iter()
+            .find(|s| s.etype == etype::GENERAL && s.eflags & SMOKE_EXPLODE != 0)
+            .expect("smoke must retain a GENERAL cloud, not just an EVENT");
         assert_eq!(cloud.origin, [12.0, -25.0, 8.0]);
-        assert_eq!((cloud.custom_explode_start_time, cloud.time2), (1_000, 62_000));
-        assert_eq!((cloud.event, cloud.weapon), (crate::tempev::ev::EXPLOSION, weapon));
-        assert!(g.tempev.live(g.level.time).next().is_none(), "no duplicate temp burst");
+        assert_eq!(
+            (cloud.custom_explode_start_time, cloud.time2),
+            (1_000, 62_000)
+        );
+        assert_eq!(
+            (cloud.event, cloud.weapon),
+            (crate::tempev::ev::EXPLOSION, weapon)
+        );
+        assert!(
+            g.tempev.live(g.level.time).next().is_none(),
+            "no duplicate temp burst"
+        );
         for time in [1_201, 3_000, 61_999, 62_000] {
             g.level.time = time;
             g.run_entity(&mut vm, cloud.number);
-            assert!(world_entities(&g).iter().any(|s| s.number == cloud.number && s.time2 == 62_000), "cloud disappeared at {time}");
+            assert!(
+                world_entities(&g)
+                    .iter()
+                    .any(|s| s.number == cloud.number && s.time2 == 62_000),
+                "cloud disappeared at {time}"
+            );
         }
         g.level.time = 62_001;
         g.run_entity(&mut vm, cloud.number);

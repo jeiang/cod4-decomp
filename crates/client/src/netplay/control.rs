@@ -98,6 +98,9 @@ fn entities(st: &NetPlay) -> Value {
             "team": team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 }),
             "dead": e.eflags & eflags::DEAD != 0,
             "loops": e.loop_sound != 0,
+            "persistent_smoke": crate::events::persistent_smoke(e),
+            "custom_explode_start_time": e.custom_explode_start_time,
+            "time2": e.time2,
             "actor": !visible.contains(&e.number),
         }));
     }
