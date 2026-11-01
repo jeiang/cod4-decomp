@@ -5,8 +5,9 @@
 //! class from the in-game menu while alive (the stock `_menus.gsc` answers with a bare-key bold message, which must
 //! come out localized), types a chat line, calls a vote and adds bots through the console, puts the night vision
 //! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind, throws a grenade with
-//! its key, waits for a message window to have a line up and for a bot to kill it (the killcam), comes back from the
-//! dead, and plays on until it has had a bot in its sights and fired. What the HUD got to show over the run
+//! its key, waits for a message window to have a line up, has an enemy bot put beside it kill it (the killcam, through
+//! the bot's eyes with the body in sight), comes back from the dead, and plays on until it has had a bot in its
+//! sights and fired. What the HUD got to show over the run
 //! (`hud.stats` of the state document, the counters `hud_draw` of `ui-script.json` held) is the verdict: the
 //! scoreboard must have listed the players, the message windows must have drawn lines, the script hud elements must
 //! have arrived, the goggles must have drawn their overlay and d-pad icon (and the frame with them on must show the
@@ -647,6 +648,77 @@ fn crosshair_states(c: &mut Driven) -> Result<String, String> {
     Ok(format!("crosshair weapnext switch: {switch}"))
 }
 
+/// Where an enemy bot is put around the living player for the killcam's kill, tried in turn: east, west, north,
+/// south of them, near enough that the bot sees and turns to them.
+const KILLCAM_SIDES: [(f64, f64); 4] = [(120.0, 0.0), (-120.0, 0.0), (0.0, 120.0), (0.0, -120.0)];
+/// Time the bot is given to see the player and turn to them: its reaction is at most 600 ms and it turns at least
+/// 420 degrees a second (`server/src/bot.rs`).
+const KILLCAM_AIM: Duration = Duration::from_secs(2);
+
+/// Has an enemy bot kill the player in front of it, so the killcam that follows replays the kill through eyes that
+/// have the body in sight, and returns while that killcam is up with the viewer's body seen. Left to the match, a
+/// bot may not find the player before it ends (#494: no kill in 300 s). The bot is put beside the player with its
+/// own play on (`bot_idle 0`), so it turns to them, and then kills them with its rifle (`devkill`, as `net-killcam`
+/// and `web-match` do; a kill it makes first does as well). The stock `_killcam.gsc` plays the killcam. A side
+/// with a wall between the two leaves the body out of sight: the next side is tried after the respawn, and when no
+/// killcam showed the body, the step fails.
+fn killcam_kill(c: &mut Driven) -> Result<(), String> {
+    use super::client_hud_compass::{enemy_bot, exec, server_client};
+    let secs = Duration::from_secs;
+    let enemy = match c.lookup("player.team")?.as_u64() {
+        Some(1) => 2,
+        Some(2) => 1,
+        t => return Err(format!("the player is on no team ({t:?})")),
+    };
+    let me = c
+        .lookup("player.client")?
+        .as_u64()
+        .ok_or("the player has no client slot")?;
+    exec(c, "set bot_idle 0")?;
+    let mut tried = Vec::new();
+    for (dx, dy) in KILLCAM_SIDES {
+        c.until(
+            json!({"player.alive": true, "hud.live.killcam": false, "hud.live.dead": false}),
+            secs(60),
+            "the player was not alive to be killed",
+        )?;
+        let you0 = stat(c, "hud.stats.killcam_you_frames")?;
+        let person = server_client(c, me)?;
+        let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+        let bot = enemy_bot(c, enemy)?;
+        exec(
+            c,
+            &format!("devtele {bot} {} {} {}", at(0) + dx, at(1) + dy, at(2)),
+        )?;
+        c.pause(KILLCAM_AIM)?;
+        if server_client(c, me)?["alive"] == json!(true) {
+            exec(c, &format!("devkill {me} {bot}"))?;
+        }
+        c.until(
+            json!({"hud.live.killcam": true}),
+            secs(30),
+            "no killcam started after the bot's kill",
+        )?;
+        // Up while the replay plays: done once it has the body in sight, the next side once it is over without.
+        let end = Instant::now() + secs(30);
+        loop {
+            let hud = c.state("hud")?;
+            if hud["stats"]["killcam_you_frames"].as_u64().unwrap_or(0) > you0 {
+                return Ok(());
+            }
+            if hud["live"]["killcam"] != json!(true) || Instant::now() > end {
+                tried.push(format!("bot {bot} at ({dx}, {dy})"));
+                break;
+            }
+            c.frames(1)?;
+        }
+    }
+    Err(format!(
+        "no killcam showed the viewer's body for the you marker; killed by {}",
+        tried.join(", ")
+    ))
+}
+
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
 fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), String> {
     let secs = Duration::from_secs;
@@ -975,14 +1047,7 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         c.capture("feed").map(|_| ())
     })?;
     c.step("killcam", |c| {
-        // A replay can start with the victim behind a wall. Keep playing until a killcam actually offers the body
-        // to the "you" marker rather than ending the run at the first replay regardless of what it showed.
-        w.drive_until(
-            c,
-            json!({"hud.live.killcam": true, "hud.stats.killcam_you_frames": {"gt": 0}}),
-            secs(300),
-            "no killcam showed the viewer's body for the you marker",
-        )?;
+        killcam_kill(c)?;
         c.capture("killcam_first")?;
         c.pause(secs(1))?;
         c.capture("killcam_next")?;
