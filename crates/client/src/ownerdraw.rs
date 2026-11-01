@@ -1454,6 +1454,10 @@ fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
                 angle: 0.0,
                 alpha: a * fade,
             });
+        } else if client == h.last_fire_actor && h.last_fire_mark_ms > 0 && h.last_fire_gone_ms == 0
+        {
+            // The mark ended between this frame and the last that drew it: at a low frame rate that gap is long.
+            h.last_fire_gone_ms = h.now - ac.fire_time;
         }
     }
     if !dc.cfg.show_enemies {

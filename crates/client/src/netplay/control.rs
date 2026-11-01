@@ -56,6 +56,8 @@ fn player(st: &NetPlay) -> Value {
         // The same predicted frame that supplied the rendered reticle, not an older snapshot.
         "visual_weapon_state": st.hud_view.as_ref().map(|(ps, _)| ps.weapon_state),
         "crosshair_alpha": st.reticle.as_ref().map_or(0.0, crate::crosshair::alpha),
+        // Per weapon state, `[frames, frames with a visible crosshair]` drawn so far: a check diffs two reads.
+        "crosshair_state_frames": st.crosshair_state_frames,
         "alive": ps.health > 0 && ps.pm_type < sim::pm::PmType::Dead,
         "dead": ps.pm_type >= sim::pm::PmType::Dead && ps.pm_type != sim::pm::PmType::Spectator,
         "spectator": ps.pm_type == sim::pm::PmType::Spectator,
