@@ -314,7 +314,12 @@ fn crosshair_states(c: &mut Driven) -> Result<(), String> {
         ("weapnext", &[1, 2, 3, 4][..], "raise/drop"),
         ("+melee", &[12, 13, 14][..], "melee"),
     ] {
-        c.bind(bind, "tap")?;
+        // `weapnext` is bound to the wheel (`mwheelup` in `extra_binds.cfg`), which is not a key `bind` can press.
+        if bind == "weapnext" {
+            c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
+        } else {
+            c.bind(bind, "tap")?;
+        }
         let seen = sample_crosshair(c, secs(4))?;
         if let Some(why) = crosshair_problem(&seen, hidden, label) {
             return Err(why);
