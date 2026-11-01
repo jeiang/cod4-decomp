@@ -89,7 +89,8 @@ struct Dip {
 #[derive(Debug, Clone, Default)]
 pub struct Camera {
     dip: Option<Dip>,
-    /// Landings that started a dip, for the report.
+    /// Landings that started a dip, for the report: those of a player whose view can dip (a dead body that falls
+    /// still lands, but the view is the death camera's).
     pub landings: u64,
 }
 
@@ -165,10 +166,20 @@ impl Camera {
     }
 
     /// `CG_OffsetFirstPersonView` for one frame. Nothing changes for a dead player, in a turret or at the
-    /// intermission, and the landings still count then.
+    /// intermission, and a landing then neither dips the view nor counts.
     pub fn view(&mut self, f: &Frame<'_>) -> View {
-        self.landings(f.events, f.now, f.params);
+        if !Self::still(f.ps) {
+            self.landings(f.events, f.now, f.params);
+        }
         self.offsets(f)
+    }
+
+    fn still(ps: &PlayerState) -> bool {
+        ps.e_flags & ef::TURRET_ACTIVE != 0
+            || matches!(
+                ps.pm_type,
+                sim::pm::PmType::Dead | sim::pm::PmType::DeadLinked | sim::pm::PmType::Intermission
+            )
     }
 
     /// The same for the view of a player being watched: their state is the snapshot's, so no landing is read and
@@ -180,12 +191,7 @@ impl Camera {
 
     fn offsets(&mut self, f: &Frame<'_>) -> View {
         let ps = f.ps;
-        let still = ps.e_flags & ef::TURRET_ACTIVE != 0
-            || matches!(
-                ps.pm_type,
-                sim::pm::PmType::Dead | sim::pm::PmType::DeadLinked | sim::pm::PmType::Intermission
-            );
-        if still {
+        if Self::still(ps) {
             return View::default();
         }
         let angles = Self::angles(f);
@@ -518,6 +524,34 @@ mod tests {
         f.now = 1450;
         assert_eq!(cam.view(&f).dip, 0.0);
         assert_eq!(cam.landings, 1, "one landing, one dip");
+    }
+
+    #[test]
+    fn a_corpse_that_lands_neither_dips_the_view_nor_counts() {
+        let params = Params::default();
+        let dead = PlayerState {
+            velocity: [0.0; 3],
+            pm_type: sim::pm::PmType::Dead,
+            ..walking()
+        };
+        let mut cam = Camera::default();
+        let landing = [(ev::LANDING_FIRST + 5, 8)];
+        let mut f = frame(&dead, &params);
+        f.events = &landing;
+        f.now = 1000;
+        assert_eq!(cam.view(&f), View::default());
+        let alive = PlayerState {
+            velocity: [0.0; 3],
+            ..walking()
+        };
+        let mut f = frame(&alive, &params);
+        f.now = 1150;
+        assert_eq!(
+            cam.view(&f).dip,
+            0.0,
+            "the corpse's landing does not dip the next view"
+        );
+        assert_eq!(cam.landings, 0);
     }
 
     #[test]
