@@ -1279,7 +1279,6 @@ fn mark_angle(rotation_up: bool, view_yaw: f32, north_yaw: f32, yaw: f32) -> f32
 }
 
 const FRIEND_RANGE_MS: i32 = 1500;
-const PING_MS: i32 = 2000;
 
 fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
     let a = if full { 1.0 } else { compass_alpha(dc, h) };
@@ -1299,11 +1298,11 @@ fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
             angle,
             alpha: a,
         });
-        if ac.fire_time != 0 && h.now - ac.fire_time <= PING_MS {
+        if let Some(fade) = ac.fire_alpha(h.now) {
             firing.push(Mark {
                 pos: ac.pos,
                 angle,
-                alpha: a * (1.0 - (h.now - ac.fire_time) as f32 / PING_MS as f32),
+                alpha: a * fade,
             });
         }
     }
@@ -1340,17 +1339,18 @@ fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
                 alpha: a * (1.0 - (h.now - ac.radar_time).max(0) as f32 / fade_ms),
             });
         }
-        if ac.fire_time != 0 && h.now - ac.fire_time <= PING_MS {
+        if let Some(fade) = ac.fire_alpha(h.now) {
             firing.push(Mark {
                 pos: ac.fire_pos,
                 angle: 0.0,
-                alpha: a * (1.0 - (h.now - ac.fire_time) as f32 / PING_MS as f32),
+                alpha: a * fade,
             });
         }
     }
     if !dc.cfg.show_enemies {
         h.radar_marks += seen.len() as u32;
     }
+    h.enemy_firing_marks += firing.len() as u32;
     draw_marks(dc, h, &map, full, "compassping_enemy", &seen);
     draw_marks(dc, h, &map, full, "compassping_enemyfiring", &firing);
 }

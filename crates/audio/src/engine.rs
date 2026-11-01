@@ -412,10 +412,16 @@ impl Sound {
     }
 
     pub fn play(&mut self, alias: &str, cue: Cue) -> Option<VoiceId> {
+        self.play_with_length(alias, cue).map(|(id, _)| id)
+    }
+
+    /// Starts the selected variant and reports its decoded length, including streamed sounds.
+    /// Unlike `known_length_ms`, this describes the sound actually played, not the first alias variant.
+    pub fn play_with_length(&mut self, alias: &str, cue: Cue) -> Option<(VoiceId, Option<u32>)> {
         self.play_chain(alias, cue, 0)
     }
 
-    fn play_chain(&mut self, name: &str, cue: Cue, depth: u32) -> Option<VoiceId> {
+    fn play_chain(&mut self, name: &str, cue: Cue, depth: u32) -> Option<(VoiceId, Option<u32>)> {
         let Some(alias) = self.bank.pick(name) else {
             self.missing(name);
             return None;
@@ -441,7 +447,12 @@ impl Sound {
             .or_default() += 1;
     }
 
-    fn start(&mut self, alias: &Arc<Alias>, name: &str, cue: Cue) -> Option<VoiceId> {
+    fn start(
+        &mut self,
+        alias: &Arc<Alias>,
+        name: &str,
+        cue: Cue,
+    ) -> Option<(VoiceId, Option<u32>)> {
         let def = self.bank.channels.get(usize::from(alias.channel))?.clone();
         let emitter = if def.is_3d {
             let pos = cue.origin.unwrap_or(self.listener.pos);
@@ -480,7 +491,7 @@ impl Sound {
                 (alias.volume.0 * cue.volume).clamp(0.0, 1.0),
                 alias.pitch.0,
             );
-            return Some(id);
+            return Some((id, None));
         }
         // A looping or randomly started sound begins at a random point of its file.
         let start = if alias.random_looping {
@@ -566,7 +577,7 @@ impl Sound {
             .aliases
             .entry(name.to_ascii_lowercase())
             .or_default() += 1;
-        Some(id)
+        Some((id, (length_ms != 0).then_some(length_ms)))
     }
 
     /// Opens a 2D voice on the channel named `channel` (the first channel when there is none of that name) that
@@ -693,7 +704,9 @@ impl Sound {
                 self.handle.fade_out(old, fade_ms);
             }
             if let Some(a) = wanted {
-                self.ambient[slot] = self.start(&a, &a.name, cue).map(|id| (a.name.clone(), id));
+                self.ambient[slot] = self
+                    .start(&a, &a.name, cue)
+                    .map(|(id, _)| (a.name.clone(), id));
             }
         }
     }
@@ -935,6 +948,20 @@ mod tests {
     fn heard(s: &mut Sound) -> f32 {
         let out = s.render(48 * 50);
         out.iter().map(|x| x.abs()).sum::<f32>() / out.len() as f32
+    }
+
+    #[test]
+    fn playback_length_belongs_to_the_selected_variant() {
+        let a = Alias::test("shot", 0, dc(125));
+        let b = Alias::test("shot", 0, dc(875));
+        let mut s = engine(vec![("shot", vec![a, b])]);
+        let mut lengths = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let (_, length) = s.play_with_length("shot", Cue::default()).unwrap();
+            lengths.insert(length.unwrap());
+        }
+        assert_eq!(lengths, [125, 875].into_iter().collect());
+        assert!(s.play_with_length("missing", Cue::default()).is_none());
     }
 
     #[test]

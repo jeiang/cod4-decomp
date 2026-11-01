@@ -1917,7 +1917,10 @@ impl NetPlay {
 
     /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
-        if !self.switches.crosshair {
+        if !self.switches.crosshair
+            || !crate::crosshair::allowed(ps, self.switches.draw_gun)
+            || self.look.flashbanged(self.live_time)
+        {
             return None;
         }
         let index = sim::pm::viewmodel_weapon(ps);

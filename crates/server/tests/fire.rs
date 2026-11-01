@@ -271,6 +271,37 @@ fn firing_tells_clients_who_fired_what_from_where() {
     assert!((fired[0].angles[1] - 90.0).abs() < 0.5);
 }
 
+#[test]
+fn only_unsilenced_non_grenade_shots_mark_the_shooter_for_enemy_compasses() {
+    let silenced = WeaponInfo {
+        name: "m4_silencer_mp".into(),
+        silenced: true,
+        ..rifle()
+    };
+    let primary_frag = WeaponInfo {
+        name: "frag_primary_mp".into(),
+        inventory_type: InventoryType::Primary,
+        offhand_class: OffhandClass::None,
+        ..frag()
+    };
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle(), silenced, primary_frag]);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let before = g.client(shooter).unwrap().last_fire_time;
+    for (name, marks) in [
+        ("m4_silencer_mp", false),
+        ("frag_primary_mp", false),
+        ("ak47_mp", true),
+    ] {
+        g.level.time += 100;
+        fire_weapon(&mut g, &mut vm, shooter, name);
+        let last = g.client(shooter).unwrap().last_fire_time;
+        assert_eq!(last == g.level.time, marks, "{name}");
+        if !marks {
+            assert_eq!(last, before, "{name}");
+        }
+    }
+}
+
 /// The events of kind `kind` still live.
 fn live_events(g: &Game, kind: u8) -> Vec<net::entity::EntityState> {
     g.tempev

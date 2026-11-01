@@ -768,6 +768,11 @@ impl WeaponInfo {
         }
     }
 
+    /// `CG_FireWeapon`: an unsilenced non-grenade shot pings the compass (KisakCOD cgame/cg_weapons.cpp:2552).
+    pub fn pings_compass(&self) -> bool {
+        !self.silenced && self.weap_type != WeaponType::Grenade
+    }
+
     /// The bullet-per-shot count of one trigger pull: pellets for spread (shotgun) weapons.
     pub fn pellets(&self) -> i32 {
         if self.weap_class == WeaponClass::Spread {
@@ -860,5 +865,16 @@ mod tests {
         assert_eq!(w.fire_button(), crate::pm::button::ATTACK);
         w.has_detonator = true;
         assert_eq!(w.fire_button(), crate::pm::button::THROW);
+    }
+
+    #[test]
+    fn only_unsilenced_non_grenade_shots_ping_the_compass() {
+        let mut w = WeaponInfo::default();
+        assert!(w.pings_compass());
+        w.silenced = true;
+        assert!(!w.pings_compass());
+        w.silenced = false;
+        w.weap_type = WeaponType::Grenade;
+        assert!(!w.pings_compass());
     }
 }

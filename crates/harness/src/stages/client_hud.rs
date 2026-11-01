@@ -279,17 +279,16 @@ fn sample_crosshair(c: &mut Driven, until: Duration) -> Result<Vec<(u64, f64)>, 
 
 /// What is wrong with crosshair samples: hidden states must be transparent, ready and firing visible.
 fn crosshair_problem(seen: &[(u64, f64)], hidden: &[u64], label: &str) -> Option<String> {
-    if let Some((s, a)) = seen
-        .iter()
-        .find(|(s, a)| hidden.contains(s) && *a > 0.0)
-    {
+    if let Some((s, a)) = seen.iter().find(|(s, a)| hidden.contains(s) && *a > 0.0) {
         return Some(format!("{label}: crosshair alpha {a} in weapon state {s}"));
     }
     if !seen.iter().any(|(s, _)| hidden.contains(s)) {
         return Some(format!("{label}: no frame in weapon states {hidden:?}"));
     }
     if let Some((s, a)) = seen.iter().find(|(s, a)| matches!(s, 0 | 5) && *a <= 0.0) {
-        return Some(format!("{label}: crosshair hidden in weapon state {s} ({a})"));
+        return Some(format!(
+            "{label}: crosshair hidden in weapon state {s} ({a})"
+        ));
     }
     None
 }
@@ -434,6 +433,15 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         Ok(())
     })?;
     c.step("crosshair weapon states", crosshair_states)?;
+    c.step("compass firing pings", |c| {
+        notes.push(super::client_hud_compass::check(c)?);
+        c.until(
+            json!({"player.alive": true, "menu.open": {"len": 0}}),
+            secs(60),
+            "the player was not alive again after the compass checks",
+        )
+        .map(|_| ())
+    })?;
 
     c.step("key fallback aim and fire", |c| w.check_key_fallback(c))?;
     c.step("mouse input ready", |c| {

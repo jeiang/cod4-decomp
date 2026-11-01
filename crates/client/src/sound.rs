@@ -82,6 +82,9 @@ pub struct ClientSound {
     device: bool,
     /// Last event sequence seen per entity, so an event plays once.
     seen: HashMap<u16, u8>,
+    /// Length of the latest fire sound actually played for each player, with the event sequence that carried it
+    /// (unknown when playback failed).
+    fire_lengths: HashMap<u16, (u8, Option<u32>)>,
     /// The own player's entity number: its sounds (events, `lsnd`) belong to it, so a restricted channel keeps one.
     own_entity: u32,
     /// Sounds asked for before the tables were ready.
@@ -141,6 +144,7 @@ impl ClientSound {
             state,
             device,
             seen: HashMap::new(),
+            fire_lengths: HashMap::new(),
             own_entity: NO_ENTITY,
             dropped: 0,
             pending: Vec::new(),
@@ -270,10 +274,24 @@ impl ClientSound {
     }
 
     fn play(&mut self, alias: &str, cue: Cue) {
+        self.play_length(alias, cue);
+    }
+
+    /// Length of the fire sound played for the entity's event sequence `seq`, not an arbitrary variant of its alias;
+    /// `None` when that shot was not heard yet or its sound has no known length.
+    pub fn fire_length_ms(&self, entity: u16, seq: u8) -> Option<u32> {
+        self.fire_lengths
+            .get(&entity)
+            .filter(|(s, _)| *s == seq)
+            .and_then(|(_, length)| *length)
+    }
+
+    fn play_length(&mut self, alias: &str, cue: Cue) -> Option<u32> {
         match self.ready() {
             Some(s) => {
                 let _span = tracing::debug_span!("sound_alias", alias).entered();
-                if s.play(alias, cue).is_none() && !alias.is_empty() && !s.bank.has(alias) {
+                let played = s.play_with_length(alias, cue);
+                if played.is_none() && !alias.is_empty() && !s.bank.has(alias) {
                     logging::dedup!(
                         WARN,
                         "sound-alias",
@@ -281,8 +299,12 @@ impl ClientSound {
                         "sound alias not in the tables"
                     );
                 }
+                played.and_then(|(_, length)| length)
             }
-            None => self.dropped += 1,
+            None => {
+                self.dropped += 1;
+                None
+            }
         }
     }
 
@@ -687,6 +709,7 @@ impl ClientSound {
     /// look again, not a replay of what it did meanwhile.
     pub fn forget_absent(&mut self, present: &[u16]) {
         self.seen.retain(|n, _| present.contains(n));
+        self.fire_lengths.retain(|n, _| present.contains(n));
     }
 
     /// The player events of a remote entity, each once. `seq` is its event sequence number and `newest` its
@@ -697,7 +720,7 @@ impl ClientSound {
         let Some(last) = last else { return };
         let fresh = usize::from(seq.wrapping_sub(last)).min(newest.len());
         for &(event, parm) in &newest[newest.len() - fresh..] {
-            self.event(who, event, parm);
+            self.event(who, event, parm, seq);
         }
     }
 
@@ -706,11 +729,11 @@ impl ClientSound {
     pub fn own_events(&mut self, who: &Who, events: &[(u8, u8)]) {
         self.own_entity = u32::from(who.entity);
         for &(event, parm) in events {
-            self.event(who, event, parm);
+            self.event(who, event, parm, 0);
         }
     }
 
-    fn event(&mut self, who: &Who, event: u8, parm: u8) {
+    fn event(&mut self, who: &Who, event: u8, parm: u8, seq: u8) {
         let cue = if who.own {
             Cue {
                 entity: u32::from(who.entity),
@@ -723,6 +746,12 @@ impl ClientSound {
                 ..Cue::default()
             }
         };
+        if matches!(event, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT) {
+            let length = weapon_sound(who.weapon, event, who.own)
+                .and_then(|name| self.play_length(&name, cue));
+            self.fire_lengths.insert(who.entity, (seq, length));
+            return;
+        }
         if matches!(event, ev::ITEM_PICKUP | ev::AMMO_PICKUP) {
             let def = (who.weapon_of)(u16::from(parm));
             if let Some(name) = pickup_sound(def.as_deref(), event, who.own) {
@@ -770,6 +799,7 @@ impl ClientSound {
     /// next snapshot. The mixer's other state (the sound fade, the master volume) is left alone.
     pub fn stop_all(&mut self) {
         self.entity_loops.clear();
+        self.fire_lengths.clear();
         self.missile_loops.clear();
         self.client_ents = 0;
         if let Some(s) = self.ready() {

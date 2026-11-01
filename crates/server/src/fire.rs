@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// The compass-ping condition of `fire_weapon` follows KisakCOD cgame/cg_weapons.cpp (GPL-3.0; copyright the KisakCOD contributors and Activision).
 //! What the weapon state machine asks the game to do: fire bullets, swing the knife, throw
 //! grenades, and the script notifies that follow (`HandleClientEvent`, `FireWeapon`,
 //! `FireWeaponMelee`, `G_UseOffHand`).
@@ -76,9 +77,14 @@ impl Game {
     /// `FireWeapon`.
     fn fire_weapon(&mut self, vm: &mut Vm, n: u16, weapon: u16, last_round: bool) {
         vm.notify_entity(n, "weapon_fired", &[]);
-        let time = self.level.time;
-        if let Some(c) = self.client_mut(n) {
-            c.last_fire_time = time;
+        // Only a shot that pings the compass shows the shooter on enemies' compasses: an unsilenced non-grenade one
+        // (`CG_FireWeapon`, KisakCOD cgame/cg_weapons.cpp:2552). Otherwise `compass_state` would raise `eflags::PING`
+        // for a silenced shot or a grenade.
+        if self.weapons.get(weapon).is_some_and(|w| w.pings_compass()) {
+            let time = self.level.time;
+            if let Some(c) = self.client_mut(n) {
+                c.last_fire_time = time;
+            }
         }
         let Some(info) = self.weapons.get(weapon) else {
             return;

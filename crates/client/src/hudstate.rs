@@ -294,6 +294,10 @@ pub struct Actor {
     pub last_update: i32,
     /// When it last fired (an enemy is shown at that spot for a while), 0 if never.
     pub fire_time: i32,
+    /// The selected fire sound's length; unknown sounds and script pings use 2000 ms.
+    pub fire_duration: i32,
+    /// The event sequence of a firing ping whose sound length is not known yet: the sound may play a frame later.
+    pub fire_seq: Option<u8>,
     pub fire_pos: [f32; 2],
     pub event_seq: u8,
     /// Where it was before the last update, for a move across the radar's sweep.
@@ -303,6 +307,45 @@ pub struct Actor {
     /// When the radar sweep last caught it (an enemy is shown at that spot for a while), 0 if never.
     pub radar_time: i32,
     pub radar_pos: [f32; 2],
+}
+
+/// How long a ping lasts when its fire sound's length is unknown, and for `pingPlayer`.
+pub const UNKNOWN_FIRE_MS: i32 = 2000;
+
+impl Actor {
+    /// `CG_CompassAddWeaponPingInfo`: the compass shows the player where they stand now, for `length_ms` of the
+    /// fire sound played (`SND_GetKnownLength`), or [`UNKNOWN_FIRE_MS`] while that is unknown. `seq` is the event
+    /// sequence of the shot, whose sound may only be heard a frame later (`None` for `pingPlayer`).
+    pub fn ping(&mut self, now: i32, seq: Option<u8>, length_ms: Option<u32>) {
+        self.fire_time = now;
+        self.fire_pos = self.pos;
+        self.fire_duration = UNKNOWN_FIRE_MS;
+        self.fire_seq = seq;
+        if let Some(seq) = seq {
+            self.learn_fire_length(seq, length_ms);
+        }
+    }
+
+    /// The length of the fire sound of the shot raised at event sequence `seq`, once it played.
+    pub fn learn_fire_length(&mut self, seq: u8, length_ms: Option<u32>) {
+        let Some(ms) = length_ms
+            .and_then(|ms| i32::try_from(ms).ok())
+            .filter(|&ms| ms > 0)
+        else {
+            return;
+        };
+        if self.fire_seq == Some(seq) {
+            self.fire_duration = ms;
+            self.fire_seq = None;
+        }
+    }
+
+    /// How strongly the firing mark shows at `now`, fading over the ping's length; `None` when it does not.
+    pub fn fire_alpha(&self, now: i32) -> Option<f32> {
+        let age = now - self.fire_time;
+        (self.fire_time != 0 && self.fire_duration > 0 && (0..=self.fire_duration).contains(&age))
+            .then(|| 1.0 - age as f32 / self.fire_duration as f32)
+    }
 }
 
 /// How long after the entity last came in a snapshot the radar still catches an enemy.
@@ -415,6 +458,12 @@ pub struct HudFacts {
     pub radar_pings: u32,
     pub radar_lines: u32,
     pub vehicle_marks: u32,
+    /// Enemy firing marks the compass drew (one per mark per frame), the enemy shots that pinged it from their fire
+    /// events and the pings from `eflags::PING`, and the length of the latest shot ping (ms).
+    pub enemy_firing_marks: u32,
+    pub enemy_fire_pings: u32,
+    pub enemy_flag_pings: u32,
+    pub last_fire_ping_ms: i32,
     /// The most helicopters and planes the compass knew of at once, and how many of them were enemies.
     pub vehicles_max: u32,
     pub enemy_vehicles_max: u32,
@@ -545,6 +594,10 @@ impl HudFacts {
             "radar_marks": self.radar_marks,
             "radar_lines": self.radar_lines,
             "vehicle_marks": self.vehicle_marks,
+            "enemy_firing_marks": self.enemy_firing_marks,
+            "enemy_fire_pings": self.enemy_fire_pings,
+            "enemy_flag_pings": self.enemy_flag_pings,
+            "last_fire_ping_ms": self.last_fire_ping_ms,
             "vehicles_max": self.vehicles_max,
             "enemy_vehicles_max": self.enemy_vehicles_max,
             "objectives_listed": self.objectives_listed,
