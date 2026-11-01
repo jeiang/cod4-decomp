@@ -30,6 +30,18 @@ pub struct Allow {
 /// measured on the Linux host (the largest stage; each entry says its measurement and date) plus a margin of 25% or
 /// more. It catches a gross regression, not a one-off.
 pub const ALLOWED: &[Allow] = &[
+    // The stage's own conditions: the code is right to say so.
+    Allow {
+        contains: &[
+            "cod4e::ui::assets",
+            "localized string is missing",
+            "key=\"\"",
+        ],
+        reason: "client-ui draws the team and class menus with no map loaded: their map title looks up an empty \
+                 `mapname`, the bare `@` stock shows there too (#372)",
+        stages: &["client-ui"],
+        max: Some(6), // measured 4 on the Linux host, 2026-11-01
+    },
     // Timing of the harness's own clients and bots.
     Allow {
         contains: &["server::netsv", "packet from an address with no client"],
