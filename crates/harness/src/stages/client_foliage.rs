@@ -171,10 +171,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     format!("{mode}/ui-script.json").into(),
                     format!("{mode}/foliage-{mode}.png").into(),
                 ]);
-                let problems = session_verdict(&report);
-                if !problems.is_empty() {
+                if let Some(problem) = session_verdict(&report) {
                     out.status = Status::Failed;
-                    out.reason = Some(problems.join("; "));
+                    out.reason = Some(problem);
                     return Ok(out);
                 }
             }
