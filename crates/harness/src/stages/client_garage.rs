@@ -104,8 +104,8 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     spawn["origin"] = c.state("player")?["origin"].clone();
     // TeleportPlayer adds one unit after subtracting view height; ask for 323.5 to put the render eye at 324.5.
     c.ask(json!({"cmd": "exec", "line": "setviewpos 200.8 2267.5 323.5 175.3 0"}))?;
-    // Render frames are not server ticks. Do not inspect entity selection until a snapshot actually contains the
-    // teleported player: the old spawn's PVS legitimately excludes the garage car.
+    // Render frames are not server ticks: judge what the server sends from the garage only once a snapshot carries
+    // the teleported player; an earlier reading describes the spawn, not the issue pose.
     c.until(
         json!({
             "player.origin.0": {"gt": 199.8, "lt": 201.8},
