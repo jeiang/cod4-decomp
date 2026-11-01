@@ -86,10 +86,38 @@ fn a_bot_fires_on_demand_and_only_unsilenced_shots_mark_it() {
         );
     }
 
+    // The frag key held 400 ms, as the `client-hud` check does: the grenade leaves as a missile, the bot lives, and
+    // the throw marks nobody.
     let before = record(&s, n);
-    s.exec_line(&format!("devbotfire {n} frag 1000")).unwrap();
-    s.run_frames(frames(3));
+    s.exec_line(&format!("devbotfire {n} frag 400")).unwrap();
+    let mut trace = Vec::new();
+    let mut missile = false;
+    for _ in 0..frames(3) {
+        s.run_frames(1);
+        let c = s.game.client(n).expect("the bot is connected");
+        let flying = s.game.ents.iter().flatten().any(|e| e.missile.is_some());
+        missile |= flying;
+        trace.push(format!(
+            "t {} state {} weapon {} offhand {} fuse {} buttons {} health {} missile {flying}",
+            s.level_time(),
+            c.ps.weapon_state,
+            c.ps.weapon,
+            c.ps.offhand_index,
+            c.ps.grenade_time_left,
+            c.buttons,
+            c.ps.health
+        ));
+    }
     let after = record(&s, n);
+    let alive = s
+        .game
+        .client(n)
+        .is_some_and(|c| c.ps.pm_type < sim::pm::PmType::Dead);
+    assert!(
+        missile && alive,
+        "the frag throw went wrong:\n{}",
+        trace.join("\n")
+    );
     assert_eq!(
         after.1, before.1,
         "a thrown frag marked the bot for enemy compasses"
