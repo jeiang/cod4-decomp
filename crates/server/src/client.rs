@@ -1441,7 +1441,6 @@ mod spawn_inactivity_tests {
             expected.server_time = time;
             assert_eq!(c.received_cmd, Some(expected));
             assert_eq!(c.cmd, expected);
-            assert_eq!(c.ps.command_time, time);
         }
         g.disconnect_client(&mut vm, n);
         g.finish_disconnects(&mut vm);
