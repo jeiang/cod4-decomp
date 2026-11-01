@@ -57,6 +57,9 @@ pub enum Action {
     Console(String),
     /// The console's `closemenu <name>` (`UI_CloseMenu_f`): closes a named menu after its script finishes.
     CloseMenu(String),
+    /// The console's `openmenu <name>` (`UI_OpenMenu_f`, KisakCOD `ui_mp/ui_main_mp.cpp:4539-4545`): opens a named
+    /// menu after its script finishes.
+    OpenMenu(String),
     /// `vid_restart`: take the graphics settings.
     VidRestart,
     /// `screenshot` or `screenshotJpeg`: write the next frame to the screenshots folder.
@@ -1915,6 +1918,7 @@ impl HostCx<'_> {
                     cheats: name == "devmap",
                 }),
                 "closemenu" => self.st.actions.push(Action::CloseMenu(cmd[1..].join(" "))),
+                "openmenu" => self.st.actions.push(Action::OpenMenu(cmd[1..].join(" "))),
                 // `setFromLocString <dvar> <string>` (`Dvar_SetFromLocalizedStr_f`): an `@` reference is localized.
                 "setfromlocstring" => {
                     if cmd.len() < 3 {

@@ -422,7 +422,7 @@ fn play(
     c.step("record level ownerdraw", |c| {
         // UI_DrawRecordLevel in the stock voice options; the slot hosts have no microphone (#488), so only the
         // meter's drawing is checked, not a level.
-        c.console("togglemenu options_voice")?;
+        c.console("openmenu options_voice")?;
         let result = c.until(
             json!({"hud.report.record_meter_marks":{"ge":1}}),
             secs(10),
@@ -430,6 +430,8 @@ fn play(
         );
         if result.is_ok() {
             c.capture("record-level")?;
+        } else {
+            notes.push(format!("open menus: {}", c.lookup("menu.open")?));
         }
         c.console("closemenu options_voice")?;
         result.map(|_| ())
@@ -720,7 +722,7 @@ fn play(
     }
     c.step("helicopter compass ownerdraw", |c| {
         // Stock 1.7 places 155 in compass_old, not its current compass menu.
-        c.console("togglemenu compass_old")?;
+        c.console("openmenu compass_old")?;
         c.ask(json!({"cmd":"server","op":"exec","line":"devhardpoint bot helicopter_mp"}))?;
         c.until(
             json!({"hud.report.helicopter_marks":{"ge":1}}),

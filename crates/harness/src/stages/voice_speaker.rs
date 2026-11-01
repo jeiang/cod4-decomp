@@ -116,7 +116,4 @@ fn talk(mut c: NetClient<UdpTransport>, stop: &AtomicBool, own: &AtomicU32) {
         });
     }
     c.disconnect();
-    for _ in 0..5 {
-        c.pump(Duration::from_millis(10));
-    }
 }

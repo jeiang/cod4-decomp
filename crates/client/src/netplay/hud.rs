@@ -112,16 +112,11 @@ impl NetPlay {
             if client == own || !self.voice_on || self.muted.contains(&client) {
                 continue;
             }
+            // A speaker who just left lingers its 300 ms with no client info; stock skips it (`CG_DrawTalkerNum`
+            // draws only `infoValid` clients, KisakCOD `cgame_mp/cg_newDraw_mp.cpp:2319-2320`).
             if let Some(info) = ui.client(client) {
                 h.talkers
                     .push((client, info.name.clone(), team != 0 && team != info.team));
-            } else {
-                logging::dedup!(
-                    WARN,
-                    "talker-info",
-                    client,
-                    "talking client has invalid info"
-                );
             }
         }
         h.talkers.sort_unstable_by_key(|t| t.0);
