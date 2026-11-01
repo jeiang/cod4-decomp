@@ -2,11 +2,16 @@
 //! `client-session`: the real client gets a person into the world, both ways. Run 1 is the direct
 //! `--listen` path (no menus: the default team and class answers); run 2 starts from the main menu and clicks
 //! through the stock menus (Start New Server, the server's team menu, the class menu, Assault). Each run must
-//! complete every step and report that the local player spawned. Needs a display and the install; skips without.
+//! complete every step and report that the local player spawned. Run 4 is the original's launch line (#397): the
+//! client starts with `+set cg_fov 90 +exec <file> +name <nick> +connect <server>` beside its own `--` options and
+//! must join the `cod4e-server` started for it under that name, with the variable set over the profile's config and
+//! the file run, read back through the control channel. Needs a display and the install; skips without.
+use super::client_dedicated::{Dedicated, lists_player, locate_server};
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
+use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs::{self, File};
 use std::io;
 use std::path::Path;
@@ -329,6 +334,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             Err(e) => problems.push(format!("{label}: {e}")),
         }
     }
+    match command_line(ctx, &client, install) {
+        Ok(note) => {
+            out.files
+                .extend(["cmdline/client.log".into(), "cmdline/server.log".into()]);
+            out.notes.push(note);
+        }
+        Err(e) => problems.push(format!("command line: {e}")),
+    }
     out.notes
         .push("direct --listen and the stock-menu path each spawned the local player; the minimap marked domination's flags".into());
     if !problems.is_empty() {
@@ -336,6 +349,81 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         out.reason = Some(problems.join("; "));
     }
     Ok(out)
+}
+
+/// The name the command-line run joins under (the server keeps 15 characters).
+const CMDLINE_NICK: &str = "CmdLineTest";
+
+/// The original's launch line: `+set cg_fov 90 +exec <file> +name <nick> +connect 127.0.0.1:<port>`, with the
+/// harness's `--` options after it (`Driven` adds `--control`, `--config-dir`, `--harness-profile`, `--out`). The
+/// harness profile's config sets `cg_fov 65`, so a `+set` the configs overwrite fails; the file sets a marker only it
+/// sets; the join must reach the server, which must list the player under the `+name` given.
+fn command_line(ctx: &StageCtx, client: &Path, install: &Path) -> Result<String, String> {
+    let server = locate_server().ok_or("cod4e-server binary not found next to the harness")?;
+    let dir = ctx.dir.join("cmdline");
+    let work = dir.join("server");
+    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let profile = dir.join("config/players/profiles/harness/config_mp.cfg");
+    fs::create_dir_all(profile.parent().unwrap()).map_err(|e| e.to_string())?;
+    fs::write(&profile, "seta cg_fov 65\n").map_err(|e| e.to_string())?;
+    let cfg = dir.join("cmdline.cfg");
+    fs::write(&cfg, "set zz_cmdline_exec ran\n").map_err(|e| e.to_string())?;
+    let (mut dedicated, port) =
+        Dedicated::boot(&server, install, &work, 0, &dir.join("server.log"))?;
+    let target = format!("127.0.0.1:{port}");
+    let cfg = cfg.to_string_lossy();
+    let mut c = Driven::start(
+        client,
+        install,
+        &dir,
+        &[
+            "+set",
+            "cg_fov",
+            "90",
+            "+exec",
+            &cfg,
+            "+name",
+            CMDLINE_NICK,
+            "+connect",
+            &target,
+        ],
+    )?;
+    let checked = (|| -> Result<(), String> {
+        c.until(
+            json!({"net.connected": true}),
+            Duration::from_secs(120),
+            "+connect did not join the server",
+        )?;
+        let fov = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
+        if fov["value"] != json!("90") {
+            return Err(format!(
+                "+set cg_fov 90 did not outrank the profile's config: cg_fov is {}",
+                fov["value"]
+            ));
+        }
+        let ran = c.ask(json!({"cmd": "cvar", "name": "zz_cmdline_exec"}))?;
+        if ran["value"] != json!("ran") {
+            return Err(format!(
+                "+exec did not run the file: zz_cmdline_exec is {}",
+                ran["value"]
+            ));
+        }
+        Ok(())
+    })();
+    let status = dedicated.command("status", Duration::from_secs(10));
+    c.finish(Duration::from_secs(10));
+    checked?;
+    let status = status.ok_or("the server did not answer status")?;
+    if !lists_player(&status, CMDLINE_NICK) {
+        return Err(format!(
+            "the server does not list {CMDLINE_NICK} after +connect: {status:?}"
+        ));
+    }
+    dedicated.quit();
+    Ok(format!(
+        "+set cg_fov 90 +exec cmdline.cfg +name {CMDLINE_NICK} +connect {target}: joined under that name, cg_fov 90 \
+         over the profile's 65, the file ran"
+    ))
 }
 
 #[cfg(test)]

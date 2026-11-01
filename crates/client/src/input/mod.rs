@@ -324,11 +324,12 @@ impl DebugCounter {
 impl Input {
     /// Execute the install's `default_mp.cfg` (through `vfs`, as the original does at startup). The profile's own
     /// `config_mp.cfg` follows through [`Input::use_profile`]. `config_dir` is the user's folder (or the platform
-    /// default, see [`config::default_dir`]). Opens the raw mouse and gamepad backends; either failing is logged,
-    /// not fatal.
-    pub fn new(config_dir: Option<PathBuf>, vfs: Option<Vfs>) -> Self {
+    /// default, see [`config::default_dir`]). The command line's `set` lines in `startup` are applied first
+    /// ([`Input::startup_variables`]). Opens the raw mouse and gamepad backends; either failing is logged, not fatal.
+    pub fn new(config_dir: Option<PathBuf>, vfs: Option<Vfs>, startup: &[String]) -> Self {
         let mut i = Self::bare();
         i.vfs = vfs;
+        i.startup_variables(startup);
         i.load_defaults();
         i.mouse = RawMouse::new();
         i.clock = None;
@@ -377,6 +378,17 @@ impl Input {
         }
         self.exec_text(include_str!("extra_binds.cfg"), None, false, 0);
         self.dirty = false;
+    }
+
+    /// `Com_StartupVariable`: runs the command line's `set`, `seta`, `sets` and `setu` lines among `lines` and no
+    /// other. Run before the configs, so what reads the variable while they load sees it, and again after them, so it
+    /// outranks what they set.
+    pub fn startup_variables(&mut self, lines: &[String]) {
+        for line in lines {
+            if config::startup_set(line).is_some() {
+                self.exec_text(line, None, false, 0);
+            }
+        }
     }
 
     fn bare() -> Self {
@@ -2278,10 +2290,41 @@ mod tests {
         let mut i = Input::new(
             Some(std::env::temp_dir().join("cod4e-no-such-config.cfg")),
             None,
+            &[],
         );
         assert_eq!(i.look_gate(), Some("pointer free"));
         i.mouse.winit_motion((10.0, 10.0));
         assert_eq!(frame(&mut i).look_delta_yaw, 0.0);
+    }
+
+    /// `Com_StartupVariable`: the command line's `set` lines are in place before the configs run and win over what a
+    /// profile's config sets once they run again; its other lines are not run here (#397).
+    #[test]
+    fn command_line_sets_apply_before_and_after_the_configs() {
+        let dir = std::env::temp_dir().join(format!("cod4e-startup-vars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let profile = dir.join("config_mp.cfg");
+        std::fs::write(&profile, "seta cg_fov 65\nseta zz_profile_only 1\n").unwrap();
+        let lines = [
+            "set cg_fov 90".to_owned(),
+            "seta zz_from_line \"a b\"".to_owned(),
+            "bind f7 zz_bound".to_owned(),
+            "set".to_owned(),
+        ];
+        let mut i = Input::new(Some(dir.clone()), None, &lines);
+        assert_eq!(i.cvar("cg_fov"), Some("90"), "set before the configs");
+        assert_eq!(i.cvar("zz_from_line"), Some("a b"));
+        i.use_profile(Some(profile), None);
+        assert_eq!(i.cvar("cg_fov"), Some("65"), "the profile's config sets it");
+        i.startup_variables(&lines);
+        assert_eq!(i.cvar("cg_fov"), Some("90"), "the command line outranks it");
+        assert_eq!(i.cvar("zz_profile_only"), Some("1"));
+        assert!(
+            i.binds.values().all(|c| c != "zz_bound"),
+            "only the set lines run before the client is up"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
