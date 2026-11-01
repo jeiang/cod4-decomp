@@ -877,6 +877,7 @@ fn bolted_missile(
             &|_| None,
         );
     }
+    let mut captured = Vec::new();
     for step in 0..=24 {
         let now = step * 50;
         if now >= 500 {
@@ -889,7 +890,12 @@ fn bolted_missile(
                 .ok_or("projectile has no model")?;
             fx.script_model_tags(missile.number, std::slice::from_ref(&m), &lib.content);
         }
-        fx.update_script_bolts(&[missile.clone(), unposed.clone()], now);
+        // The never-drawn report is this check's expected outcome: it is asserted here and kept out of the stage log,
+        // where any such warning from a match still fails the run.
+        let ((), records) = logging::capture(|| {
+            fx.update_script_bolts(&[missile.clone(), unposed.clone()], now);
+        });
+        captured.extend(records);
         fx.update(now, world);
         fx.draw(eye, 0.0, 0.0, 0.0);
     }
@@ -906,10 +912,34 @@ fn bolted_missile(
         "bolted_missile_follow_error".into(),
         stats.max_follow_error.into(),
     );
-    report.insert("bolted_unposed_reported".into(), stats.missing_tags.into());
-    if stats.max_tag_displacement < 3.0 || stats.max_follow_error > 1.0 || stats.missing_tags != 1 {
+    let unexpected: Vec<_> = captured
+        .iter()
+        .filter(|r| r.level <= tracing::Level::WARN)
+        .filter(|r| {
+            !(r.message
+                .contains("effect attachment entity was never drawn")
+                && r.field("entity") == Some("201"))
+        })
+        .map(|r| format!("{} {}", r.level, r.message))
+        .collect();
+    let reported = captured
+        .iter()
+        .filter(|r| {
+            r.level == tracing::Level::WARN
+                && r.message
+                    .contains("effect attachment entity was never drawn")
+                && r.field("entity") == Some("201")
+        })
+        .count();
+    let reported = if stats.missing_tags == 1 { reported } else { 0 };
+    report.insert("bolted_unposed_reported".into(), reported.into());
+    if stats.max_tag_displacement < 3.0
+        || stats.max_follow_error > 1.0
+        || reported != 1
+        || !unexpected.is_empty()
+    {
         return Err(format!(
-            "bolted missile: tag displacement {}, follow error {}, never-drawn bolts reported {} (want 1)",
+            "bolted missile: tag displacement {}, follow error {}, never-drawn bolts {} with {reported} warning(s) (want 1), other warnings {unexpected:?}",
             stats.max_tag_displacement, stats.max_follow_error, stats.missing_tags
         ));
     }
