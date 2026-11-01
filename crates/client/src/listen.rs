@@ -122,6 +122,13 @@ fn answer(s: &mut Server, req: &serde_json::Map<String, Value>) -> Result<Value,
                 }
             }
         }
+        "command_frame" => {
+            let ms = req.get("collect_ms").and_then(Value::as_u64).unwrap_or(0);
+            if ms > 5000 {
+                return Err("command_frame collect_ms must be at most 5000".to_owned());
+            }
+            Ok(s.control_command_frame(Duration::from_millis(ms)))
+        }
         other => Err(format!("no such server request: {other}")),
     }
 }

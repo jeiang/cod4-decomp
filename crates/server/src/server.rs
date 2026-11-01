@@ -3115,6 +3115,17 @@ impl Server {
         })
     }
 
+    /// Dev-control scheduling fixture: collect actual UDP traffic without ticking, then observe exactly one
+    /// normal simulation tick. No commands are injected or rewritten here; `frame_cmds` still selects them.
+    pub fn control_command_frame(&mut self, collect: Duration) -> Value {
+        let end = Instant::now() + collect;
+        while Instant::now() < end {
+            self.net_service(end.saturating_duration_since(Instant::now()));
+        }
+        self.run_frames(1);
+        self.control_state(Some("clients"))
+    }
+
     pub fn run_frames(&mut self, n: u32) {
         for _ in 0..n {
             self.svs_time += self.frame_ms;

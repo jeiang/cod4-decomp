@@ -154,12 +154,15 @@ fn stat(c: &mut Driven, path: &str) -> Result<u64, String> {
     Ok(c.lookup(path)?.as_u64().unwrap_or(0))
 }
 
-/// Read the real person's last simulation frame, not an expected value supplied by the scenario.
+/// Observe an actual server tick atomically. Collecting UDP traffic before the tick creates a backlog even when
+/// the renderer is slower than `sv_fps`; polling the last tick instead loses the interesting frame to catch-up.
 fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<Value, String> {
     let start = Instant::now();
     let mut last = Value::Null;
     while start.elapsed() < Duration::from_secs(30) {
-        let state = c.ask(json!({"cmd": "server", "op": "state", "what": "clients"}))?;
+        let state = c.ask(json!({
+            "cmd": "server", "op": "command_frame", "collect_ms": if empty { 0 } else { 2000 }
+        }))?;
         let player = state["clients"]
             .as_array()
             .and_then(|a| a.iter().find(|p| p["slot"].as_u64() == Some(slot)))
@@ -203,7 +206,7 @@ fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<
     ))
 }
 
-/// Exercise both queued input and a frame without new input using the normal render/send cadence.
+/// Exercise queued and retained player input through the real UDP path, independent of rendering throughput.
 fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
     let fps = c.ask(json!({"cmd": "cvar", "name": "com_maxfps"}))?["value"].clone();
     let vsync = c.ask(json!({"cmd": "cvar", "name": "r_vsync"}))?["value"].clone();
@@ -215,8 +218,7 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
             .lookup("player.client")?
             .as_u64()
             .ok_or("no player slot")?;
-        // `r_vsync` reaches the surface only through `vid_restart`; while the display paces the frames, `com_maxfps`
-        // caps nothing and the client keeps sending a command every displayed frame.
+        // Uncap sending while collecting the backlog; this does not assume the GPU can exceed the server tick rate.
         c.ask(json!({"cmd": "cvar", "name": "r_vsync", "value": "0"}))?;
         c.console("vid_restart")?;
         c.ask(json!({"cmd": "cvar", "name": "com_maxfps", "value": "125"}))?;
@@ -462,12 +464,20 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
                 secs(10),
                 "the scoreboard did not come up on the bind",
             )?;
-            let shown0 = stat(c, "hud.stats.scoreboard_frames")?;
-            let frames0 = stat(c, "client.frames")?;
-            c.pause(secs(2))?;
-            let shown = stat(c, "hud.stats.scoreboard_frames")?.saturating_sub(shown0);
-            let frames = stat(c, "client.frames")?.saturating_sub(frames0);
-            if frames < 10 || shown * 10 < frames * 9 {
+            // Read both counters from the same state document, and measure frames rather than assuming the GPU
+            // can render ten in two seconds. The hold must still span at least thirty actual frames.
+            let before = c.ask(json!({"cmd": "state"}))?;
+            let shown0 = before["hud"]["stats"]["scoreboard_frames"].as_u64().unwrap_or(0);
+            let frames0 = before["client"]["frames"].as_u64().unwrap_or(0);
+            c.until(
+                json!({"client.frames": {"ge": frames0 + 30}}),
+                secs(30),
+                "fewer than thirty frames were drawn while Tab was held",
+            )?;
+            let after = c.ask(json!({"cmd": "state"}))?;
+            let shown = after["hud"]["stats"]["scoreboard_frames"].as_u64().unwrap_or(0).saturating_sub(shown0);
+            let frames = after["client"]["frames"].as_u64().unwrap_or(0).saturating_sub(frames0);
+            if frames < 30 || shown * 10 < frames * 9 {
                 return Err(format!(
                     "the scoreboard was up on {shown} of the {frames} frames drawn while Tab was held"
                 ));
