@@ -496,6 +496,7 @@ dependencies = [
  "fx",
  "gilrs",
  "glam",
+ "gsc",
  "install",
  "jpeg-encoder",
  "js-sys",
