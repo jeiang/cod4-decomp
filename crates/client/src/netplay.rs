@@ -523,6 +523,8 @@ pub struct NetPlay {
     new_level: Option<String>,
     /// Levels begun since the join: each map change or round restart ([`Self::new_level`]) counts one.
     levels: u32,
+    /// `clientSideEffects`, from the cvar store each frame; read when a level starts.
+    client_side_effects: bool,
     stat_sync: crate::profile::StatSync,
     /// The rotor rig of each helicopter model drawn (`None` when the model or its animation is missing), and the
     /// seconds the rotors have turned.
@@ -629,7 +631,7 @@ impl NetPlay {
             ragdoll_hits: Vec::new(),
             look: Look::new((map.art.glow, map.art.film)),
             max_turn: [0.0; 2],
-            effects: Effects::new(&lib.content, world).with_ambient(&lib.content),
+            effects: Effects::new(&lib.content, world).with_ambient(&lib.content, true),
             tracer_cvars: crate::tracer::Cvars::default(),
             switches: Switches::default(),
             tracer_material: None,
@@ -647,6 +649,7 @@ impl NetPlay {
             injected_subtitles: Vec::new(),
             new_level: None,
             levels: 0,
+            client_side_effects: true,
             stat_sync: crate::profile::StatSync::default(),
             rotors: HashMap::new(),
             rotor_clock: 0.0,
@@ -877,14 +880,16 @@ impl NetPlay {
                 .map_err(|e| format!("weapon table: {e:?}"))?;
             self.models_warmed.clear();
             let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
-            self.effects = Effects::new(&lib.content, map.world.clone()).with_ambient(&lib.content);
+            self.effects = Effects::new(&lib.content, map.world.clone())
+                .with_ambient(&lib.content, self.client_side_effects);
             self.params.mantle_anims = lib.content.mantle_anims();
             self.lib = lib;
             self.boxes = PlayerBoxes::new(clipmap);
             self.brush_surfaces = brush_surfaces(&map.world);
             self.sound = sound;
         } else {
-            self.effects.restart(&self.lib.content);
+            self.effects
+                .restart(&self.lib.content, self.client_side_effects);
         }
         self.effects
             .set_tracer_material(self.tracer_material.clone());
@@ -1055,6 +1060,23 @@ impl NetPlay {
         let mut v = self.sound.take_subtitles();
         v.append(&mut self.injected_subtitles);
         v
+    }
+
+    /// `clientSideEffects`, from the cvar store each frame. Like `CG_StartClientSideEffects` it takes effect when a
+    /// level starts; [`Self::start_client_side_effects`] applies it to the level joined.
+    pub fn set_client_side_effects(&mut self, on: bool) {
+        self.client_side_effects = on;
+    }
+
+    /// Applies `clientSideEffects` to the level just joined: [`Self::connect`] starts the map effects before the
+    /// cvars are known, so with the dvar off they start over without them.
+    pub fn start_client_side_effects(&mut self, on: bool) {
+        self.client_side_effects = on;
+        if !on {
+            self.effects.restart(&self.lib.content, false);
+            self.effects
+                .set_tracer_material(self.tracer_material.clone());
+        }
     }
 
     /// `snd_slaveFadeTime` and `snd_enableReverb`, from the cvar store each frame.

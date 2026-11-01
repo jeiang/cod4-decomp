@@ -307,15 +307,18 @@ impl Effects {
         }
     }
 
-    /// Starts the generated map effects in the same pool as gameplay and entity effects.
-    pub fn with_ambient(mut self, content: &Content) -> Self {
-        self.ambient = Ambient::new(content, &mut self.fx);
+    /// Starts the generated map effects in the same pool as gameplay and entity effects, unless `clientSideEffects`
+    /// (`ambient`) is off.
+    pub fn with_ambient(mut self, content: &Content, ambient: bool) -> Self {
+        if ambient {
+            self.ambient = Ambient::new(content, &mut self.fx);
+        }
         self
     }
 
     /// Restarts the client-side effects with the level clock, including a same-map round restart.
-    pub fn restart(&mut self, content: &Content) {
-        *self = Self::new(content, self.world.clone()).with_ambient(content);
+    pub fn restart(&mut self, content: &Content, ambient: bool) {
+        *self = Self::new(content, self.world.clone()).with_ambient(content, ambient);
     }
 
     fn impact_effect(

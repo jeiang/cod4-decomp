@@ -16,6 +16,17 @@ pub struct AmbientEffect {
     handle: u64,
 }
 
+/// `clientSideEffects` (`CG_RegisterDvars` registers it as a cheat bool, default on): whether a level starts its
+/// `_fx.gsc` effects. `CG_StartClientSideEffects` reads it when the level loads. A cheat dvar, so it only acts with
+/// `sv_cheats` on; otherwise the stock default stands.
+pub fn enabled_by(cvars: &crate::input::Cvars) -> bool {
+    !cvars.bool("sv_cheats")
+        || cvars
+            .get("clientSideEffects")
+            .and_then(|v| v.trim().parse::<i64>().ok())
+            .is_none_or(|v| v != 0)
+}
+
 pub struct Ambient {
     defs: Vec<AmbientEffect>,
     pub played: BTreeMap<String, u64>,
@@ -209,6 +220,27 @@ fn number_after(s: &str, key: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_side_effects_turn_off_only_with_cheats() {
+        let cvars = |pairs: &[(&str, &str)]| {
+            let mut c = crate::input::Cvars::default();
+            for (k, v) in pairs {
+                c.set(k, v, false);
+            }
+            c
+        };
+        assert!(enabled_by(&cvars(&[])));
+        assert!(enabled_by(&cvars(&[("clientSideEffects", "0")])));
+        assert!(!enabled_by(&cvars(&[
+            ("sv_cheats", "1"),
+            ("clientSideEffects", "0")
+        ])));
+        assert!(enabled_by(&cvars(&[
+            ("sv_cheats", "1"),
+            ("clientSideEffects", "1")
+        ])));
+    }
     #[test]
     fn generated_placements_parse_without_content() {
         let s = "ent.v[ \"origin\" ] = ( 1, -2.5, 30 );\nent.v[ \"angles\" ] = ( 270, 0, 0 );";

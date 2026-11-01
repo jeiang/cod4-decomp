@@ -669,7 +669,8 @@ fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mu
         };
         let boxes = PlayerBoxes::new(clipmap);
         let world = boxes.world();
-        let mut fx = Effects::new(&lib.content, data.world.clone()).with_ambient(&lib.content);
+        let mut fx =
+            Effects::new(&lib.content, data.world.clone()).with_ambient(&lib.content, true);
         fx.set_projection(90.0_f32.to_radians(), 16.0 / 9.0);
         let poses: Vec<_> = fx
             .ambient()
