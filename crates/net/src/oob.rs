@@ -7,9 +7,11 @@ use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::net::SocketAddr;
 
-/// Bumped when the wire format changes; a server refuses other versions. Version 24 adds the `gamestate_end`
-/// reliable command: earlier servers and demos cannot complete the initial CODINFO table.
-pub const PROTOCOL: u32 = 24;
+/// Bumped when the wire format changes; a server refuses other versions. Version 25 moves `playfxontag` from a
+/// detached `PLAY_FX` temp event to the target entity's event ring (`EV_PLAY_FX_ON_TAG`) and adds the
+/// `cs::EFFECT_TAGS` configstrings: a protocol 24 client would draw none of those effects, and this client would draw
+/// a 24 server's detached. Version 24 added the `gamestate_end` reliable command.
+pub const PROTOCOL: u32 = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Oob {

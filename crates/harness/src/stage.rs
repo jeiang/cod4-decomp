@@ -370,6 +370,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_models::run),
     },
     StageDef {
+        name: "client-garage",
+        description: "mp_crash garage in a live devmap match: the parked script-model car and loose dynamic tyre must change separate image regions at the issue #357 pose",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_garage::run),
+    },
+    StageDef {
         name: "client-viewmodel",
         description: "cod4e --viewmodel-tour on three maps: the first-person weapon and hands drawn from spawn points and paths must not be one colour (a wrong reflection probe painted them red) nor black; an off-hand throw must show the grenade, and the last round and an empty reload their own animations",
         needs_install: false,
@@ -395,7 +403,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-session",
-        description: "the real client gets a person into the world: direct --listen (default join answers) and the stock menus (Start New Server, team, class); the local player must spawn",
+        description: "the real client gets a person into the world: direct --listen (default join answers) and the stock menus (Start New Server, team, class); the local player must spawn; and the stock +set/+exec/+name/+connect launch line joins a cod4e-server",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
@@ -507,7 +515,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-fx",
-        description: "effects on the real content, headless: an explosion draws and ends, an impact leaves a decal, a shot flashes and ejects a shell, a burst of tracers draws a beam each, vision and shock files work",
+        description: "effects on real content, headless: explosions end, impacts leave decals, guns flash and eject shells, tracer bursts draw beams, script-model tag effects follow after 500 ms and reject missing tags, vision and shock files work",
         needs_install: false,
         timeout: Duration::from_secs(5 * MINUTES),
         default: true,

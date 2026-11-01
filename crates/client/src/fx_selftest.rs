@@ -411,6 +411,10 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 .collect(),
         );
     }
+    report.insert(
+        "model_elements_drawn_max".into(),
+        track.iter().map(Vec::len).max().unwrap_or(0).into(),
+    );
     let floor_z = spot.z - 60.0;
     let highest = track.iter().flatten().map(|p| p.z).fold(f32::MIN, f32::max);
     let alive = track.iter().rposition(|f| !f.is_empty());
@@ -646,12 +650,304 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     destructible(install, &mut report, &mut bad);
     references(&lib, &mut report, &mut bad);
     ambient(install, &mut report, &mut bad);
+    if let Err(e) = bolted(lib, data.world.clone(), world, eye, &mut report) {
+        bad.push(e);
+    }
 
     if bad.is_empty() {
         Ok(Value::Object(report))
     } else {
         Err(bad)
     }
+}
+
+/// Drives the stock script builtin, server snapshot event and posed model tag, not an injected client effect.
+/// KisakCOD (GPL-3.0), game_mp/g_scr_main_mp.cpp:4221–4254 `Scr_PlayFXOnTag`,
+/// cgame/cg_event.cpp:1286–1310 `CG_PlayFxOnTag`, EffectsCore/fx_update.cpp:2205–2232
+/// `FX_UpdateEffectBolt`: MP 1.8 reference; no iw3mp.exe 1.7 binary verification.
+fn bolted(
+    mut lib: Library,
+    render_world: std::sync::Arc<assets::zone::gfxworld::GfxWorld>,
+    world: &dyn Collide,
+    eye: glam::Vec3,
+    report: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    use assets::zone::fx::flags as flag;
+    use gsc::{Builtins, Options, Vm, compile};
+    use server::game::{Ent, EntKind, Game};
+    let model = lib
+        .content
+        .model_names("")
+        .into_iter()
+        .find(|name| {
+            lib.content.model_bone_names(name).is_some_and(|bones| {
+                bones
+                    .iter()
+                    .any(|bone| bone.eq_ignore_ascii_case("tag_origin"))
+            })
+        })
+        .ok_or("no loaded script model with tag_origin")?
+        .to_owned();
+    let pose = lib.rest_pose(&model, &[])?;
+    let mut candidates = lib.content.effects();
+    candidates.sort_by(|a, b| a.name.cmp(&b.name));
+    let effect = candidates
+        .into_iter()
+        .find(|effect| {
+            effect.elems.iter().any(|elem| {
+                elem.flags & flag::RUN_MASK == flag::RUN_RELATIVE_TO_EFFECT
+                    && elem.life_span_msec.base >= 1500
+                    && elem.spawn_delay_msec.base == 0
+            })
+        })
+        .ok_or("no loaded long-lived effect-relative element for bolted fixture")?;
+    let effect_name = effect
+        .name
+        .as_deref()
+        .ok_or("bolted fixture effect has no name")?;
+    bolted_missile(&lib, render_world.clone(), world, eye, effect_name, report)?;
+    let program = compile(
+        &[("bolted.gsc", "main(ent) { playfxontag(1, ent, \"tag_origin\"); } move(ent) { ent moveto(ent.origin + (32, 0, 0), 0.1); } missing(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }")],
+        &Builtins::stock_mp(),
+        Options::default(),
+    ).map_err(|e| format!("{e:?}"))?;
+    let main = program.find("bolted", "main").ok_or("missing main entry")?;
+    let moving = program.find("bolted", "move").ok_or("missing move entry")?;
+    let missing = program
+        .find("bolted", "missing")
+        .ok_or("missing missing-tag entry")?;
+    let dispatch = server::script::Dispatch::new(&program);
+    let mut vm = Vm::new(program).map_err(|e| format!("{e:?}"))?;
+    let mut game = Game::new(server::cvar::Cvars::new(), lib.content);
+    game.fx.index(effect_name);
+    game.note_model(&model);
+    let mut entity = Ent::new(EntKind::Plain, "script_model");
+    entity.model = model.clone().into();
+    entity.origin = eye.to_array();
+    let number = game.spawn(entity)?;
+    let ent = game.entity_value(&mut vm, number);
+    let mut events = crate::events::Events::default();
+    events.take_commands(&mut vec![format!("fx 1 {effect_name}")]);
+    // The client sees the script model before the effect is played on it, as a player in the match would: a
+    // script model first seen starts from its current event sequence (`CG_ResetEntity`) and replays nothing.
+    let mut seen = net::Snapshot::empty();
+    seen.entities = server::netsv::world_entities(&game);
+    if !events.scan(&seen).is_empty() {
+        return Err("a script model first seen replayed events".into());
+    }
+    vm.call(
+        &mut server::script::ScriptHost {
+            game: &mut game,
+            dispatch: &dispatch,
+        },
+        main,
+        None,
+        std::slice::from_ref(&ent),
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    let tags = game
+        .configstrings
+        .iter()
+        .filter_map(|(index, value)| {
+            u16::try_from(*index)
+                .ok()
+                .map(|index| (index, value.clone()))
+        })
+        .collect::<Vec<_>>();
+    events.set_effect_tags(&tags);
+    let mut fx = Effects::new(&game.content, render_world);
+    let mut received = 0;
+    for step in 0..=16 {
+        let now = step * 50;
+        game.level.time = now;
+        game.level.frametime = 50;
+        if now == 500 {
+            vm.call(
+                &mut server::script::ScriptHost {
+                    game: &mut game,
+                    dispatch: &dispatch,
+                },
+                moving,
+                None,
+                std::slice::from_ref(&ent),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        }
+        game.run_mover(&mut vm, number);
+        let mut snapshot = net::Snapshot::empty();
+        snapshot.num = step as u32 + 1;
+        snapshot.server_time = now;
+        snapshot.entities = server::netsv::world_entities(&game);
+        for event in events.scan(&snapshot) {
+            received += usize::from(matches!(event, ClientEvent::PlayFxOnTag { .. }));
+            fx.event(&event, &|_| None);
+        }
+        fx.begin_script_tags();
+        // The match draws entities `INTERP_DELAY_MS` (100) behind the snapshot its events come from, so the target
+        // is first posed two snapshots after the event; the bolt must wait for it, not count the tag missing.
+        if now >= net::view::INTERP_DELAY_MS {
+            let entity = game.ent(number).ok_or("script model vanished")?;
+            let instances = pose.instances(entity.origin, entity.angles, [0; 4]);
+            fx.script_model_tags(number, &instances, &game.content);
+        }
+        fx.update_script_bolts(&snapshot.entities, now);
+        fx.update(now, world);
+        fx.draw(eye, 0.0, 0.0, 0.0);
+    }
+    let stats = fx.bolted_stats();
+    report.insert("bolted_events".into(), received.into());
+    report.insert(
+        "bolted_tag_displacement".into(),
+        stats.max_tag_displacement.into(),
+    );
+    report.insert(
+        "bolted_element_displacement".into(),
+        stats.max_element_displacement.into(),
+    );
+    report.insert("bolted_follow_error".into(), stats.max_follow_error.into());
+    report.insert("bolted_model".into(), model.clone().into());
+    report.insert("bolted_effect".into(), effect_name.into());
+    let error = vm
+        .call(
+            &mut server::script::ScriptHost {
+                game: &mut game,
+                dispatch: &dispatch,
+            },
+            missing,
+            None,
+            &[ent],
+        )
+        .err()
+        .ok_or("unknown-tag playfxontag unexpectedly succeeded")?;
+    let expected = format!("tag 'unknown_tag' does not exist on entity with model '{model}'");
+    let stock_error = error.message.contains(&expected) && vm.level().get("survived").is_none();
+    report.insert(
+        "bolted_unknown_tag_error".into(),
+        u8::from(stock_error).into(),
+    );
+    if received != 1
+        || stats.max_tag_displacement < 3.0
+        || stats.max_element_displacement < 3.0
+        || stats.max_follow_error > 1.0
+        || !stock_error
+    {
+        return Err(format!(
+            "bolted effect: events {received}, tag displacement {}, element displacement {}, follow error {}, stock missing-tag error {stock_error}",
+            stats.max_tag_displacement, stats.max_element_displacement, stats.max_follow_error
+        ));
+    }
+    Ok(())
+}
+
+/// A `playfxontag` on a projectile rides the projectile model the match draws for it (`netplay::projectile_instance`,
+/// as `CG_Missile` draws the DObj `CG_GetBoneIndex` reads), and a bolt whose entity is never drawn is reported after
+/// [`crate::effects`]' wait rather than kept waiting. KisakCOD (GPL-3.0) cgame/cg_event.cpp:29–61: MP 1.8 reference;
+/// no iw3mp.exe 1.7 binary verification.
+fn bolted_missile(
+    lib: &Library,
+    render_world: std::sync::Arc<assets::zone::gfxworld::GfxWorld>,
+    world: &dyn Collide,
+    eye: glam::Vec3,
+    effect: &str,
+    report: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let mut weapons = lib.content.weapons();
+    weapons.sort_by(|a, b| a.internal_name.cmp(&b.internal_name));
+    // The stock planted charge if it is loaded, else any projectile whose model has a tag.
+    let (def, tag) = weapons
+        .iter()
+        .filter_map(|def| {
+            let model = def.projectile_model.as_ref()?.name.as_deref()?;
+            let tag = lib.content.model_bone_names(model)?.first()?.to_string();
+            Some((def, tag))
+        })
+        .min_by_key(|(def, _)| def.internal_name.as_deref() != Some("c4_mp"))
+        .ok_or("no loaded weapon with a tagged projectile model")?;
+    let mut missile = net::entity::EntityState::new(200);
+    missile.etype = net::entity::etype::MISSILE;
+    missile.origin = eye.to_array();
+    // Present in the snapshots but never drawn: its bolt must be reported, not left waiting.
+    let mut unposed = net::entity::EntityState::new(201);
+    unposed.etype = net::entity::etype::MISSILE;
+    unposed.origin = eye.to_array();
+    let mut fx = Effects::new(&lib.content, render_world);
+    for entity in [missile.number, unposed.number] {
+        fx.event(
+            &ClientEvent::PlayFxOnTag {
+                entity,
+                name: effect.to_owned(),
+                tag: tag.clone(),
+            },
+            &|_| None,
+        );
+    }
+    let mut captured = Vec::new();
+    for step in 0..=24 {
+        let now = step * 50;
+        if now >= 500 {
+            missile.origin = (eye + glam::Vec3::X * 32.0).to_array();
+        }
+        fx.begin_script_tags();
+        // Drawn from `INTERP_DELAY_MS` after the event, as the match draws it.
+        if now >= net::view::INTERP_DELAY_MS {
+            let m = crate::netplay::projectile_instance(def, &missile)
+                .ok_or("projectile has no model")?;
+            fx.script_model_tags(missile.number, std::slice::from_ref(&m), &lib.content);
+        }
+        // The never-drawn report is this check's expected outcome: it is asserted here and kept out of the stage log,
+        // where any such warning from a match still fails the run.
+        let ((), records) = logging::capture(|| {
+            fx.update_script_bolts(&[missile.clone(), unposed.clone()], now);
+        });
+        captured.extend(records);
+        fx.update(now, world);
+        fx.draw(eye, 0.0, 0.0, 0.0);
+    }
+    let stats = fx.bolted_stats();
+    report.insert(
+        "bolted_missile_weapon".into(),
+        def.internal_name.as_deref().unwrap_or_default().into(),
+    );
+    report.insert(
+        "bolted_missile_tag_displacement".into(),
+        stats.max_tag_displacement.into(),
+    );
+    report.insert(
+        "bolted_missile_follow_error".into(),
+        stats.max_follow_error.into(),
+    );
+    let unexpected: Vec<_> = captured
+        .iter()
+        .filter(|r| r.level <= tracing::Level::WARN)
+        .filter(|r| {
+            !(r.message
+                .contains("effect attachment entity was never drawn")
+                && r.field("entity") == Some("201"))
+        })
+        .map(|r| format!("{} {}", r.level, r.message))
+        .collect();
+    let reported = captured
+        .iter()
+        .filter(|r| {
+            r.level == tracing::Level::WARN
+                && r.message
+                    .contains("effect attachment entity was never drawn")
+                && r.field("entity") == Some("201")
+        })
+        .count();
+    let reported = if stats.missing_tags == 1 { reported } else { 0 };
+    report.insert("bolted_unposed_reported".into(), reported.into());
+    if stats.max_tag_displacement < 3.0
+        || stats.max_follow_error > 1.0
+        || reported != 1
+        || !unexpected.is_empty()
+    {
+        return Err(format!(
+            "bolted missile: tag displacement {}, follow error {}, never-drawn bolts {} with {reported} warning(s) (want 1), other warnings {unexpected:?}",
+            stats.max_tag_displacement, stats.max_follow_error, stats.missing_tags
+        ));
+    }
+    Ok(())
 }
 
 /// Look directly at every generated createfx placement on the affected maps. The named weather and fire
@@ -925,10 +1221,8 @@ fn element_types(lib: &Library, name: &str) -> Option<serde_json::Map<String, Va
     Some(counts)
 }
 
-/// The materials and models the loaded effects draw with that are still a stub: the name behind a comma, a reference
-/// to another zone's asset that nothing linked (`DB_LinkXAssetEntry`), with no techset to draw by. The original draws
-/// every sprite of every stock effect, so none may be left; a model that is one is a separate gap (#389) and is
-/// reported.
+/// Materials and models whose definitions did not resolve. An empty model visual list is authored
+/// simulation-only content, not a reference to an external zone.
 pub fn unresolved_references(content: &server::content::Content) -> (Vec<String>, Vec<String>) {
     use assets::zone::fx::FxVisuals;
     let stub = |n: Option<&str>| n.is_some_and(|n| n.starts_with(','));
@@ -951,7 +1245,11 @@ pub fn unresolved_references(content: &server::content::Content) -> (Vec<String>
                     .flat_map(|d| d.iter().flatten())
                     .for_each(|m| material(m, "decal ")),
                 FxVisuals::Models(ms) => {
-                    for m in ms.iter().flatten() {
+                    for (visual, m) in ms.iter().enumerate() {
+                        let Some(m) = m else {
+                            models.push(format!("{effect}: visual {visual}: null model"));
+                            continue;
+                        };
                         let name = m.name.as_deref().unwrap_or("?");
                         if stub(m.name.as_deref()) {
                             models.push(format!("{effect}: {name}"));
@@ -979,6 +1277,40 @@ fn references(lib: &Library, report: &mut serde_json::Map<String, Value>, bad: &
     report.insert("unresolved_models".into(), models.len().into());
     report.insert("unresolved_material_names".into(), json!(materials));
     report.insert("unresolved_model_names".into(), json!(models));
+    let mut simulation_only = Vec::new();
+    let mut model_names = Vec::new();
+    for effect in lib.content.effects() {
+        let name = effect.name.as_deref().unwrap_or("?");
+        for (index, el) in effect.elems.iter().enumerate() {
+            if let assets::zone::fx::FxVisuals::Models(models) = &el.visuals {
+                if models.is_empty() {
+                    simulation_only.push(format!("{name}: element {index}"));
+                }
+                for model in models.iter().flatten() {
+                    model_names.push(format!(
+                        "{name}: element {index}: {}",
+                        model.name.as_deref().unwrap_or("?")
+                    ));
+                }
+            }
+        }
+    }
+    simulation_only.sort_unstable();
+    model_names.sort_unstable();
+    model_names.dedup();
+    report.insert(
+        "simulation_only_model_elements".into(),
+        simulation_only.len().into(),
+    );
+    report.insert("simulation_only_model_names".into(), json!(simulation_only));
+    report.insert("resolved_model_names".into(), json!(model_names));
+    if !models.is_empty() {
+        bad.push(format!(
+            "{} effect model visual(s) did not resolve: {}",
+            models.len(),
+            models.join(", ")
+        ));
+    }
     if !materials.is_empty() {
         bad.push(format!(
             "{} effect material(s) are a reference nothing defines, their sprites are never drawn: {}",

@@ -57,6 +57,8 @@ pub enum Action {
     Console(String),
     /// The console's `closemenu <name>` (`UI_CloseMenu_f`): closes a named menu after its script finishes.
     CloseMenu(String),
+    /// The console's `openmenu <name>` (`UI_OpenMenu_f`): opens a loaded menu by name.
+    OpenMenu(String),
     /// `vid_restart`: take the graphics settings.
     VidRestart,
     /// `screenshot` or `screenshotJpeg`: write the next frame to the screenshots folder.
@@ -1013,10 +1015,16 @@ impl Shell {
         }
     }
 
-    /// A line typed at the console: echoed, then run as one buffer. A cvar's name alone says its value and with a
-    /// value sets it; a `wait` holds the rest of the line.
+    /// A line typed at the console: echoed, then run as one buffer ([`Shell::run_line`]).
     pub fn console_line(&mut self, input: &mut Input, line: &str) {
         self.log(&format!("] {line}"));
+        self.run_line(input, line);
+    }
+
+    /// A console line run as one buffer, as the console runs it but without the echo (`Cbuf_ExecuteBuffer`; the
+    /// command line's `+` lines). A cvar's name alone says its value and with a value sets it; a `wait` holds the
+    /// rest of the line.
+    pub fn run_line(&mut self, input: &mut Input, line: &str) {
         let cmds = crate::input::config::split_commands(line)
             .into_iter()
             .map(|toks| Item {
@@ -1029,7 +1037,13 @@ impl Shell {
 
     /// Runs the buffers whose `wait` has run out, once a frame.
     pub fn run_due(&mut self, input: &mut Input) {
+        // Warnings and errors print on the `error` channel; `con_hidechannel error` keeps them off the console
+        // (`Con_IsChannelVisible`, KisakCOD con_channels.cpp:93). They are drained either way.
+        let shown = input.channels.visible(logging::channels::ERROR);
         for (level, line) in logging::drain_console() {
+            if !shown {
+                continue;
+            }
             let (colour, word) = if level == tracing::Level::ERROR {
                 ("^1", "ERROR")
             } else {
@@ -1739,10 +1753,19 @@ impl HostCx<'_> {
             let _ = console;
             let a = |i: usize| cmd.get(i).map_or("", String::as_str);
             match name.as_str() {
+                // `Dvar_SetFromDvar_f` (KisakCOD dvar_cmds.cpp:306).
+                "setfromdvar" if cmd.len() != 3 => {
+                    self.st.log("USAGE: setfromdvar <dest_dvar> <source_dvar>");
+                }
                 "setfromdvar" => {
                     let v = self.dvar_get(a(2));
-                    self.store(a(1), &v);
+                    if v.is_empty() && self.input.cvars.get(a(2)).is_none() {
+                        self.st.log(&format!("dvar '{}' doesn't exist", a(2)));
+                    } else {
+                        self.store(a(1), &v);
+                    }
                 }
+                "setdvartotime" if cmd.len() < 2 => self.st.log("USAGE: set <variable>"),
                 "setdvartotime" => {
                     let t = self.st.started.elapsed().as_secs();
                     self.input.cvars.set(a(1), &t.to_string(), false);
@@ -1873,6 +1896,10 @@ impl HostCx<'_> {
                     }
                 }
                 "vid_restart" => self.st.actions.push(Action::VidRestart),
+                // `CL_PlayLogo_f` wants exactly four arguments (KisakCOD cl_main_mp.cpp:2417).
+                "logo" if cmd.len() != 5 => self.st.log(
+                    "USAGE: logo <image name> <fadein seconds> <full duration seconds> <fadeout seconds>",
+                ),
                 // The stock videos are Bink; there is no decoder, so the player is told rather than left to a
                 // "Unknown command".
                 "cinematic" | "unskippablecinematic" | "logo" => self
@@ -1893,7 +1920,18 @@ impl HostCx<'_> {
                 }
                 "quit" => self.st.actions.push(Action::Quit),
                 "disconnect" => self.st.actions.push(Action::Disconnect),
+                // `CL_Connect_f` (KisakCOD cl_main_pc_mp.cpp:300-382): a server is needed; while in a game only
+                // `connect <server> reconnect` leaves it for that server, any other is refused. `CL_PlayDemo_f`
+                // (cl_main_mp.cpp:2797).
+                "connect" if cmd.len() < 2 => self.st.log("usage: connect [server]"),
+                "connect"
+                    if self.st.in_game
+                        && !(cmd.len() == 3 && a(2).eq_ignore_ascii_case("reconnect")) =>
+                {
+                    self.st.log("Already connected to a server. Disconnect first")
+                }
                 "connect" => self.st.actions.push(Action::Join(a(1).to_owned())),
+                "playdemo" | "demo" if cmd.len() != 2 => self.st.log(&format!("{} <demoname>", cmd[0])),
                 "playdemo" | "demo" => self.st.actions.push(Action::PlayDemo(a(1).to_owned())),
                 "reconnect" => self.st.actions.push(Action::Reconnect),
                 // The server's `g_gametype` defaults to `war` (`SV_Init` registers it so); a client that has not
@@ -1909,6 +1947,18 @@ impl HostCx<'_> {
                     cheats: name == "devmap",
                 }),
                 "closemenu" => self.st.actions.push(Action::CloseMenu(cmd[1..].join(" "))),
+                "openmenu" => self.st.actions.push(Action::OpenMenu(cmd[1..].join(" "))),
+                // `CL_OpenScriptMenu_f` (KisakCOD cl_main_mp.cpp:3128): the response goes to the server as from the
+                // named menu, while responses are allowed.
+                "openscriptmenu" if cmd.len() != 3 => {
+                    self.st.log("USAGE: openscriptmenu <parent menu name> <script menu response>");
+                    self.st.log("EXAMPLE: openscriptmenu ingame changeweapon");
+                }
+                "openscriptmenu" if ui.allow_menu_response => self.menu_response(a(1), a(2)),
+                "openscriptmenu" => {}
+                "startsingleplayer" => self.st.actions.push(Action::StartSingleplayer),
+                // `Con_Clear_f`: the console's text goes.
+                "clear" => self.st.feed.console.clear(),
                 // `setFromLocString <dvar> <string>` (`Dvar_SetFromLocalizedStr_f`): an `@` reference is localized.
                 "setfromlocstring" => {
                     if cmd.len() < 3 {
@@ -1937,8 +1987,12 @@ impl HostCx<'_> {
                     .actions
                     .push(Action::Console(crate::input::config::join(&cmd))),
                 // The input layer's own (`bind`, `set`, `toggle`, the `+` commands, what it hands on).
-                n if crate::console::is_command(n) => {
+                n if crate::console::is_command(n) && !crate::console::is_shell_verb(n) => {
                     self.input.exec_line(&crate::input::config::join(&cmd))
+                }
+                // A shell command without an arm above would come back through the pending list every frame.
+                n if crate::console::is_shell_verb(n) => {
+                    tracing::error!(command = n, "shell command without a handler");
                 }
                 // `Cmd_ExecuteSingleCommand` past the commands: a cvar's name shows or sets it (`Dvar_Command`);
                 // anything else is the app's to forward to the server or call unknown

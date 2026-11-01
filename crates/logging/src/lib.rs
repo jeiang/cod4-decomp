@@ -11,6 +11,7 @@
 //! * [`dedup!`] rate-limits an event that repeats.
 //! * [`capture`] collects the events of a closure, for tests.
 
+pub mod channels;
 mod dedup;
 mod format;
 #[cfg(not(target_arch = "wasm32"))]

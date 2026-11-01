@@ -1721,6 +1721,10 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s
             }
         };
+        if e.event_sequence != 0 || e.events.iter().any(|&(event, _)| event != 0) {
+            state.set_recent_events(e.events);
+            state.event_seq = e.event_sequence;
+        }
         if matches!(
             state.etype,
             etype::PLAYER | etype::CORPSE | etype::SCRIPT_MODEL | etype::PLANE

@@ -82,21 +82,56 @@ impl Lines {
 }
 
 /// The running server. Dropping it kills the process, so no run leaves one behind.
-struct Dedicated {
+pub(crate) struct Dedicated {
     child: Child,
     stdin: ChildStdin,
     lines: Arc<Lines>,
 }
 
 impl Dedicated {
-    fn start(server: &Path, install: &Path, cwd: &Path, port: u16, log: &Path) -> io::Result<Self> {
+    /// Starts `server` on a free port with a war on mp_crash and `bots` bots, its console in `log`, and waits until
+    /// the map loaded with no script error: the server and its port, or why it did not come up.
+    pub(crate) fn boot(
+        server: &Path,
+        install: &Path,
+        cwd: &Path,
+        bots: usize,
+        log: &Path,
+    ) -> Result<(Self, u16), String> {
+        let port = free_port().map_err(|e| format!("no free port: {e}"))?;
+        let d = Self::start(server, install, cwd, port, bots, log)
+            .map_err(|e| format!("cannot start cod4e-server: {e}"))?;
+        let up = d.lines.wait_for(0, SERVER_UP, |l| {
+            l.starts_with("map mp_crash loaded") || l == EOF
+        });
+        match up
+            .as_deref()
+            .and_then(|l| l.iter().find(|l| l.starts_with("map ")))
+        {
+            Some(l) if l.contains(" 0 script errors") => Ok((d, port)),
+            Some(l) => Err(format!("the server's map did not load cleanly: {l}")),
+            None => Err(format!(
+                "cod4e-server never loaded the map (see {})",
+                log.display()
+            )),
+        }
+    }
+
+    fn start(
+        server: &Path,
+        install: &Path,
+        cwd: &Path,
+        port: u16,
+        bots: usize,
+        log: &Path,
+    ) -> io::Result<Self> {
         let mut child = Command::new(server)
             .arg("--install")
             .arg(install)
             .args(["+set", "net_port"])
             .arg(port.to_string())
             .args(["+set", "g_gametype", "war", "+set", "bot_count"])
-            .arg(BOTS.to_string())
+            .arg(bots.to_string())
             .args(["+map", "mp_crash"])
             .current_dir(cwd)
             .stdin(Stdio::piped())
@@ -125,7 +160,7 @@ impl Dedicated {
     }
 
     /// Runs a console command and returns what it printed. The `echo` after it marks the end of the output.
-    fn command(&mut self, line: &str, limit: Duration) -> Option<Vec<String>> {
+    pub(crate) fn command(&mut self, line: &str, limit: Duration) -> Option<Vec<String>> {
         let from = self.lines.len();
         let mark = format!("end-of-{}", from);
         writeln!(self.stdin, "{line}\necho {mark}").ok()?;
@@ -134,7 +169,7 @@ impl Dedicated {
     }
 
     /// Stops the server and returns its exit status.
-    fn quit(mut self) -> Option<std::process::ExitStatus> {
+    pub(crate) fn quit(mut self) -> Option<std::process::ExitStatus> {
         let _ = writeln!(self.stdin, "quit");
         let _ = self.stdin.flush();
         let end = Instant::now() + Duration::from_secs(15);
@@ -166,7 +201,7 @@ impl Drop for Dedicated {
 const EOF: &str = "\u{0}end of output";
 
 /// Whether a `status` listing has a player of this name (a bot's address column says `bot`).
-fn lists_player(status: &[String], name: &str) -> bool {
+pub(crate) fn lists_player(status: &[String], name: &str) -> bool {
     status
         .iter()
         .any(|l| l.split_whitespace().any(|w| w == name) && !l.contains(" bot "))
@@ -196,7 +231,6 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let dir = ctx.dir.join("dedicated");
     let work = dir.join("server");
     fs::create_dir_all(&work)?;
-    let port = free_port()?;
     let mut report = StageReport::new(NAME, Status::Passed);
     report.files.extend([
         "dedicated/server.log".into(),
@@ -204,28 +238,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         "dedicated/client.json".into(),
     ]);
 
-    let mut dedicated = Dedicated::start(&server, install, &work, port, &dir.join("server.log"))?;
-    let up = dedicated.lines.wait_for(0, SERVER_UP, |l| {
-        l.starts_with("map mp_crash loaded") || l == EOF
-    });
-    match up
-        .as_deref()
-        .and_then(|l| l.iter().find(|l| l.starts_with("map ")))
-    {
-        Some(l) if l.contains(" 0 script errors") => {}
-        Some(l) => {
-            return Ok(fail(
-                report,
-                format!("the server's map did not load cleanly: {l}"),
-            ));
-        }
-        None => {
-            return Ok(fail(
-                report,
-                "cod4e-server never loaded the map (see dedicated/server.log)".into(),
-            ));
-        }
-    }
+    let (mut dedicated, port) =
+        match Dedicated::boot(&server, install, &work, BOTS, &dir.join("server.log")) {
+            Ok(up) => up,
+            Err(why) => return Ok(fail(report, why)),
+        };
 
     let log = File::create(dir.join("client.log"))?;
     let mut child = Command::new(&client)

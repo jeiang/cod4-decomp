@@ -215,9 +215,38 @@ pub const COMMANDS: &[&str] = &[
     "gamecompletestatus",
     // Variables.
     "toggle",
+    "togglep",
     "reset",
     "setfromdvar",
     "cvarlist",
+    "dvarlist",
+    "dvardump",
+    // The command list and the console's print channels (the stock configs run `con_showchannel`).
+    "cmdlist",
+    "con_showchannel",
+    "con_hidechannel",
+    "con_channellist",
+    "con_visiblechannellist",
+];
+
+/// Stock dedicated-server commands this server does not carry out (#479): accepted with a warning that names them,
+/// so a config or an admin's line is not `Unknown command`.
+const MISSING: &[&str] = &[
+    "scriptdebugger",
+    "scriptvarusage",
+    "stringusage",
+    "scriptusage",
+    "scriptprofile",
+    "scriptbuiltin",
+    "setperk",
+    "dvar_bool",
+    "dvar_int",
+    "dvar_float",
+    "writeconfig",
+    "writedefaults",
+    "meminfo",
+    "tempmeminfo",
+    "dumpraw",
 ];
 
 /// Commands of the client console that mean nothing to a headless server; accepted silently
@@ -234,7 +263,9 @@ const CLIENT_ONLY: &[&str] = &[
 /// Whether the console has a handler for `name`: a command of [`COMMANDS`], or a client-only verb it ignores.
 pub fn accepts(name: &str) -> bool {
     let l = name.to_ascii_lowercase();
-    COMMANDS.contains(&l.as_str()) || CLIENT_ONLY.contains(&l.as_str())
+    COMMANDS.contains(&l.as_str())
+        || CLIENT_ONLY.contains(&l.as_str())
+        || MISSING.contains(&l.as_str())
 }
 
 struct Running {
@@ -262,6 +293,9 @@ pub struct Server {
     install: Install,
     run: Option<Running>,
     cbuf: CommandBuffer,
+    /// The console's print channels (`con_showchannel`, ...). The output itself is not filtered: the original's
+    /// dedicated server writes every line to stdout (`Com_PrintMessage`, KisakCOD common.cpp:174).
+    channels: logging::channels::Channels,
     /// Held command-line commands, run once init is complete.
     startup: Vec<String>,
     /// Zone `localized_code_post_gfx_mp` is loaded: `exec` prefers its rawfiles.
@@ -624,6 +658,7 @@ impl Server {
             install,
             run: None,
             cbuf: CommandBuffer::new(),
+            channels: logging::channels::Channels::default(),
             startup,
             cfg_from_zone: false,
             svs_time: 0,
@@ -1748,8 +1783,12 @@ impl Server {
         match lname.as_str() {
             "set" | "seta" | "sets" | "setu" => {
                 let (Some(n), true) = (arg(1), argv.len() >= 3) else {
-                    return Err(format!("usage: {lname} <variable> <value>"));
+                    // `Dvar_Set_f` and the others (KisakCOD dvar_cmds.cpp:244-301).
+                    return Err(format!("USAGE: {lname} <variable> <value>"));
                 };
+                if lname == "set" && !n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                    return Err(format!("invalid variable name: {n}"));
+                }
                 let v = argv[2..].join(" ");
                 self.console_set(n, &v)?;
                 let flag = match lname.as_str() {
@@ -2077,9 +2116,13 @@ impl Server {
             // Kicking: `clientkick` / `tempBanClient` / `banClient` take a client number (what a passed vote runs),
             // `onlykick` / `kick` (a brief ban, `sv_kickBanTime` seconds) / `tempBanUser` / `banUser` (for good) a name.
             "clientkick" | "tempbanclient" | "banclient" => {
+                // `SV_KickNum_f`, `SV_BanNum_f` (KisakCOD sv_ccmds_mp.cpp:784, 885).
                 let n = arg(1)
                     .map(cvar::parse_int)
-                    .ok_or_else(|| format!("usage: {lname} <client number>"))?;
+                    .ok_or_else(|| match lname.as_str() {
+                        "banclient" => "Usage: banClient <client number>".to_owned(),
+                        _ => format!("Usage: {name} <client number>"),
+                    })?;
                 let slot = u16::try_from(n)
                     .ok()
                     .filter(|s| {
@@ -2092,8 +2135,10 @@ impl Server {
                 self.kick(slot, Penalty::of(&lname))?;
             }
             "onlykick" | "kick" | "tempbanuser" | "banuser" => {
-                let who = arg(1).ok_or_else(|| {
-                    format!("usage: {lname} <player name>\n{lname} all = kick everyone")
+                // `SV_Kick_f`, `SV_Ban_f` (KisakCOD sv_ccmds_mp.cpp:675, 761).
+                let who = arg(1).ok_or_else(|| match lname.as_str() {
+                    "banuser" => "Usage: banUser <player name>".to_owned(),
+                    _ => format!("Usage: {name} <player name>\n{name} all = kick everyone"),
                 })?;
                 if self.run.is_none() {
                     return Err("Server is not running.".into());
@@ -2162,10 +2207,12 @@ impl Server {
             // This server announces itself to no master server, so there is nothing to send.
             "heartbeat" => self.heartbeats.send_now(),
             "gamecompletestatus" => {}
-            "toggle" => {
-                let n = arg(1).ok_or("usage: toggle <variable> [value1 value2 ...]")?;
+            "toggle" | "togglep" => {
+                let n = arg(1).ok_or_else(|| {
+                    format!("USAGE: {lname} <variable> <optional value sequence>")
+                })?;
                 if !self.game.cvars.exists(n) {
-                    return Err(format!("toggle: {n} is not a variable"));
+                    return Err(format!("toggle failed: dvar '{n}' not found."));
                 }
                 let cur = self.game.cvars.string(n).to_owned();
                 let next = if argv.len() > 2 {
@@ -2175,30 +2222,33 @@ impl Server {
                     (if cvar::parse_int(&cur) == 0 { "1" } else { "0" }).to_owned()
                 };
                 self.console_set(n, &next)?;
+                if lname == "togglep" {
+                    let v = self.game.cvars.string(n).to_owned();
+                    self.say(&format!("{n} toggled to {v}\n"));
+                }
             }
             "reset" => {
-                let n = arg(1).ok_or("usage: reset <variable>")?;
-                let default = self
-                    .game
-                    .cvars
-                    .get(n)
-                    .map(|c| c.default.clone())
-                    .ok_or_else(|| format!("reset: {n} is not a variable"))?;
-                self.console_set(n, &default)?;
+                let (Some(n), 2) = (arg(1), argv.len()) else {
+                    return Err("USAGE: reset <variable>".into());
+                };
+                // `Dvar_Reset_f`: a name that is no dvar does nothing.
+                if let Some(default) = self.game.cvars.get(n).map(|c| c.default.clone()) {
+                    self.console_set(n, &default)?;
+                }
             }
             "setfromdvar" => {
-                let (Some(dst), Some(src)) = (arg(1), arg(2)) else {
-                    return Err("usage: setfromdvar <variable> <source variable>".into());
+                let (Some(dst), Some(src), 3) = (arg(1), arg(2), argv.len()) else {
+                    return Err("USAGE: setfromdvar <dest_dvar> <source_dvar>".into());
                 };
                 let v = self
                     .game
                     .cvars
                     .get(src)
                     .map(|c| c.value.clone())
-                    .ok_or_else(|| format!("setfromdvar: {src} is not a variable"))?;
+                    .ok_or_else(|| format!("dvar '{src}' doesn't exist"))?;
                 self.console_set(dst, &v)?;
             }
-            "cvarlist" => {
+            "cvarlist" | "dvarlist" | "dvardump" => {
                 let filter = arg(1).map(str::to_ascii_lowercase);
                 let mut out = String::new();
                 let mut n = 0;
@@ -2229,6 +2279,27 @@ impl Server {
                     ));
                 }
                 self.say(&format!("{out}\n{n} cvar indexes\n"));
+            }
+            "cmdlist" => {
+                let lines = logging::channels::cmd_list(COMMANDS.iter().copied(), arg(1));
+                self.say(&format!("{}\n", lines.join("\n")));
+            }
+            "con_showchannel"
+            | "con_hidechannel"
+            | "con_channellist"
+            | "con_visiblechannellist" => {
+                let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+                let lines = self.channels.command(&lname, &args).unwrap_or_default();
+                self.say(&format!("{}\n", lines.join("\n")));
+            }
+            _ if MISSING.contains(&lname.as_str()) => {
+                logging::dedup!(
+                    WARN,
+                    lname.as_str(),
+                    command = lname.as_str(),
+                    issue = 479,
+                    "stock command not implemented"
+                );
             }
             "bots" => {
                 let n = arg(1)
@@ -3166,6 +3237,17 @@ impl Server {
                 .count() as u64,
             w => return Err(format!("unknown statistic {w:?}")),
         })
+    }
+
+    /// Dev-control scheduling fixture: collect actual UDP traffic without ticking, then observe exactly one
+    /// normal simulation tick. No commands are injected or rewritten here; `frame_cmds` still selects them.
+    pub fn control_command_frame(&mut self, collect: Duration) -> serde_json::Value {
+        let end = Instant::now() + collect;
+        while Instant::now() < end {
+            self.net_service(end.saturating_duration_since(Instant::now()));
+        }
+        self.run_frames(1);
+        self.control_state(Some("clients"))
     }
 
     pub fn run_frames(&mut self, n: u32) {

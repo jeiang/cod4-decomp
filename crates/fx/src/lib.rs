@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Translated in part from KisakCOD (EffectsCore/fx_draw.cpp: FX_EvaluateDistanceFade, FX_EvaluateVisualState_DoLighting, FX_DrawElem_Cloud, FX_AddVisBlocker; fx_system.cpp: FX_SpawnEffect, FX_CullElemForSpawn, FX_CullTrailElem, FX_GetClientVisibility; fx_update.cpp: FX_ProcessEmitting, FX_TraceHitSomething; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Bone-follow frame handling also follows EffectsCore/fx_system.cpp:1001-1015 (FX_PlayBoltedEffect)
+// and fx_update.cpp:2205-2232 (FX_UpdateEffectBolt), under the same GPL-3.0 copyright.
+// Zero-visual model drawing follows KisakCOD EffectsCore/fx_draw.cpp:1063 (FX_DrawElement),
+// GPL-3.0, copyright the KisakCOD contributors and Activision (MP 1.8 reference).
 //! Effect playback. An [`Fx`] runs [`FxEffectDef`]s: each effect spawns its elements (looping ones at an interval,
 //! one-shot ones at once, runners that start further effects), and every element lives for its lifespan moving by
 //! its velocity samples and gravity, bouncing off the world when it collides, and reads its colour, size and
@@ -695,6 +699,39 @@ impl Fx {
         }
     }
 
+    /// A stable live effect-relative element, for attachment-follow diagnostics.
+    pub fn attachment_sample(&self, id: u64) -> Option<(u64, Vec3)> {
+        let e = self.effects.iter().find(|e| e.id == id)?;
+        e.elems
+            .iter()
+            .find(|el| {
+                !el.done
+                    && e.def.elems[el.def].flags & flags::RUN_MASK == flags::RUN_RELATIVE_TO_EFFECT
+            })
+            .map(|el| (el.id, el.pos))
+    }
+
+    /// Updates a bone attachment, carrying existing effect-relative elements as well as future spawns.
+    /// World-relative particles (smoke, brass) keep their already-simulated world positions.
+    pub fn move_bolted(&mut self, id: u64, frame: Frame) {
+        if let Some(e) = self.effects.iter_mut().find(|e| e.id == id) {
+            let from = e.frame;
+            let rotate = |v: Vec3| {
+                frame.axis[0] * v.dot(from.axis[0])
+                    + frame.axis[1] * v.dot(from.axis[1])
+                    + frame.axis[2] * v.dot(from.axis[2])
+            };
+            for el in &mut e.elems {
+                if e.def.elems[el.def].flags & flags::RUN_MASK == flags::RUN_RELATIVE_TO_EFFECT {
+                    el.pos = frame.origin + rotate(el.pos - from.origin);
+                    el.base_vel = rotate(el.base_vel);
+                    el.orient = el.orient.map(rotate);
+                }
+            }
+            e.goal = Some(frame);
+        }
+    }
+
     /// Ends the looping of an effect started with [`Fx::play_attached`]; what it already spawned plays out.
     pub fn stop(&mut self, id: u64) {
         if let Some(e) = self.effects.iter_mut().find(|e| e.id == id) {
@@ -1051,6 +1088,9 @@ impl Fx {
                 }
                 el.done = true;
             }
+            // Zero visuals: nothing to draw and no model to give a PhysPreset (stock asserts `visualCount > 0` in
+            // `FX_GetElemVisuals` before `FX_SpawnModelPhysics`), so the element only runs its lifecycle.
+            (FxVisuals::Models(models), elem::MODEL) if models.is_empty() => {}
             (FxVisuals::Models(models), elem::MODEL) if d.flags & flags::USE_MODEL_PHYSICS != 0 => {
                 // The element is a rigid body with its model's PhysPreset, spinning as the element asks; one whose
                 // model has no preset cannot be simulated and is dropped, as in the original.
@@ -1263,6 +1303,11 @@ impl Fx {
                     continue;
                 }
                 let d = &e.def.elems[el.def];
+                // An authored model element can simulate and emit child effects without drawing a model.
+                // FX_DrawElement gates on visualCount; an empty list is not a failed zone lookup.
+                if matches!(&d.visuals, FxVisuals::Models(models) if models.is_empty()) {
+                    continue;
+                }
                 let t = ((self.now - el.begin) as f32 / el.life).clamp(0.0, 0.999_999);
                 let mut vis = visual_state(d, el, t);
                 if d.lighting_frac != 0 {
@@ -1352,7 +1397,10 @@ impl Fx {
                         let Some(Some(model)) = models.get(pick_index(el, models.len())) else {
                             logging::dedup!(
                                 WARN,
-                                "no-model",
+                                e.def.name.as_deref().unwrap_or("?"),
+                                effect = e.def.name.as_deref().unwrap_or("?"),
+                                element = el.def,
+                                visual = pick_index(el, models.len()),
                                 "model element skipped: its model did not resolve"
                             );
                             continue;
@@ -1864,6 +1912,74 @@ mod tests {
     use super::*;
     use assets::zone::fx::Range;
 
+    #[test]
+    fn bolted_existing_elements_follow_translation_and_rotation_then_expire() {
+        let mut relative = elem_def(elem::OMNI_LIGHT, FxVisuals::None);
+        relative.flags = flags::RUN_RELATIVE_TO_EFFECT;
+        relative.spawn_origin[0] = range(2.0, 0.0);
+        relative.life_span_msec = range(1000, 0);
+        let def = effect("bolt", 0, 1, 0, vec![relative]);
+        let mut fx = Fx::new(Arc::new(Library::default()));
+        let initial = Frame::facing(Vec3::ZERO, Vec3::X);
+        let id = fx.play_at(&def, initial, 0);
+        fx.update(0, &Empty);
+        let (elem, start) = fx.attachment_sample(id).unwrap();
+        let frame = Frame::facing(Vec3::new(20.0, 30.0, 40.0), Vec3::Y);
+        fx.move_bolted(id, frame);
+        fx.update(600, &Empty);
+        let (same, pos) = fx.attachment_sample(id).unwrap();
+        assert_eq!(same, elem);
+        let local = start - initial.origin;
+        let expected = frame.origin
+            + frame.axis[0] * local.dot(initial.axis[0])
+            + frame.axis[1] * local.dot(initial.axis[1])
+            + frame.axis[2] * local.dot(initial.axis[2]);
+        assert!(pos.distance(expected) < 0.001);
+        assert!(pos.distance(start) > 20.0);
+        fx.update(1001, &Empty);
+        assert!(!fx.is_live(id));
+    }
+
+    #[test]
+    fn a_stopped_unbolted_effect_keeps_its_live_elements_at_the_last_frame() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.flags = flags::RUN_RELATIVE_TO_EFFECT;
+        e.spawn = [100, i32::MAX];
+        e.life_span_msec = range(1000, 0);
+        let def = effect("fx/unbolted", 1, 0, i32::MAX, vec![e]);
+        let mut fx = Fx::new(Arc::new(Library::default()));
+        let id = fx.play_at(&def, Frame::facing(Vec3::ZERO, Vec3::X), 0);
+        fx.update(0, &Empty);
+        let last = Frame::facing(Vec3::new(30.0, 0.0, 0.0), Vec3::X);
+        fx.move_bolted(id, last);
+        fx.update(250, &Empty);
+        let live = fx.live_elems();
+        assert!(live > 0);
+        // `FX_StopEffect`: no more spawns, and what was spawned plays out where the bone last was.
+        fx.stop(id);
+        fx.update(400, &Empty);
+        assert!(fx.is_live(id));
+        assert_eq!(fx.live_elems(), live);
+        let (_, pos) = fx.attachment_sample(id).unwrap();
+        assert!(pos.distance(last.origin) < 1.0);
+        fx.update(1400, &Empty);
+        assert!(!fx.is_live(id));
+    }
+
+    #[test]
+    fn bolting_does_not_drag_world_relative_particles() {
+        let d = elem_def(elem::OMNI_LIGHT, FxVisuals::None);
+        let def = effect("world-particle", 0, 1, 0, vec![d]);
+        let mut fx = Fx::new(Arc::new(Library::default()));
+        let id = fx.play_at(&def, Frame::facing(Vec3::ZERO, Vec3::X), 0);
+        fx.update(0, &Empty);
+        let start = fx.effects[0].elems[0].pos;
+        fx.move_bolted(id, Frame::facing(Vec3::splat(30.0), Vec3::Y));
+        fx.update(50, &Empty);
+        assert_eq!(fx.effects[0].elems[0].pos, start);
+        assert!(fx.attachment_sample(id).is_none());
+    }
+
     fn range<T: Copy>(base: T, amplitude: T) -> Range<T> {
         Range { base, amplitude }
     }
@@ -2271,6 +2387,29 @@ mod tests {
         e.flags = flags;
         e.life_span_msec = range(6000, 0);
         effect("fx/debris", 0, 1, 0, vec![e])
+    }
+
+    #[test]
+    fn a_zero_visual_model_still_simulates_without_drawing() {
+        for physics in [0, flags::USE_MODEL_PHYSICS] {
+            let mut e = elem_def(elem::MODEL, FxVisuals::Models(Arc::from(Vec::new())));
+            e.flags = physics;
+            e.life_span_msec = range(1000, 0);
+            let def = effect("fx/invisible_model", 0, 1, 0, vec![e]);
+            let mut fx = Fx::new(lib(vec![def.clone()]));
+            let ((), events) = logging::capture(|| {
+                fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
+                assert_eq!(model_at(&mut fx, 50, &Floor), None);
+            });
+            assert_eq!(
+                fx.live_elems(),
+                1,
+                "no visual must not remove the simulation (flags {physics})"
+            );
+            assert!(events.is_empty(), "nothing is missing: {events:?}");
+            assert_eq!(model_at(&mut fx, 1100, &Floor), None);
+            assert_eq!(fx.live_elems(), 0);
+        }
     }
 
     #[test]

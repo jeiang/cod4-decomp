@@ -32,34 +32,6 @@ pub struct Allow {
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
     Allow {
-        contains: &["server::server", "unknown command", "con_showchannel"],
-        reason: "the stock configs run con_showchannel, which we do not implement (#365)",
-        stages: &[],
-        max: Some(5), // measured 4 on the Linux host, 2026-10-14,
-    },
-    Allow {
-        contains: &["fx: model element skipped: its model did not resolve"],
-        reason: "effects with a model element whose xmodel is not in the loaded zones (#389)",
-        stages: &[],
-        max: Some(20),
-    },
-    Allow {
-        contains: &[
-            "cod4e::netplay::attach",
-            "attachment tag did not resolve",
-            "model=\"head_mp_",
-        ],
-        reason: "head models do not find their attach tag (#388); seen: head_mp_arab_regular_{headwrap,ski_mask,suren,asad,sadiq}, head_mp_usmc_{shaved_head,tactical_mich,tactical_mich_stripes_nomex}; any head_mp_ model is the same bug",
-        stages: &[],
-        max: Some(60),
-    },
-    Allow {
-        contains: &["cod4e::models", "held model's tag bone missing"],
-        reason: "a held model whose tag bone is not in the rig (#389)",
-        stages: &[],
-        max: Some(3), // measured 2 on the Linux host, 2026-10-14,
-    },
-    Allow {
         contains: &[
             "cod4e::ui::assets",
             "localized string is missing",
@@ -132,6 +104,12 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(2), // measured 1 on the Linux host, 2026-10-29,
     },
     Allow {
+        contains: &["cannot join", "127.0.0.1:28998 did not answer"],
+        reason: "client-commands checks `connect <server> reconnect` against an address nothing listens on (#365)",
+        stages: &["client-commands"],
+        max: Some(2),
+    },
+    Allow {
         contains: &["net::client", "connection attempt timed out"],
         reason: "client-error joins a server that answers getinfo but never the connect",
         stages: &["client-error"],
@@ -154,6 +132,22 @@ pub const ALLOWED: &[Allow] = &[
         reason: "client-commands types an unknown word at the front end to check `Unknown command`",
         stages: &["client-commands"],
         max: Some(2), // measured 1 on the Linux host, 2026-10-30,
+    },
+    Allow {
+        contains: &["cod4e::console", "unknown command", "+zz_"],
+        reason: "client-commands types and binds a `+word` that is no button to check `Unknown command` (#365)",
+        stages: &["client-commands"],
+        max: Some(3), // two expected (+zz_typed, +zz_bound)
+    },
+    Allow {
+        contains: &[
+            "cod4e::console",
+            "stock command not implemented",
+            "issue=479",
+        ],
+        reason: "client-commands runs two stock commands we do not implement (imagelist, gfx_stats) to check the #479 warning and the error channel",
+        stages: &["client-commands"],
+        max: Some(3), // two expected
     },
     Allow {
         contains: &[
