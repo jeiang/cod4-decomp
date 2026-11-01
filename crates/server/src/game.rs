@@ -30,6 +30,8 @@ pub const MAX_GENTITIES: usize = 1024;
 pub const ENTITYNUM_WORLD: u16 = 1022;
 /// The first entity number [`Game::spawn`] hands out (64 client slots plus 8 corpse slots).
 pub const FIRST_SPAWNED: usize = 72;
+/// How long a freed entity's slot stays empty before `G_Spawn` hands it out again (`G_MaySpawnEntity`).
+pub const REUSE_DELAY_MS: i32 = 500;
 /// Script objects of hud elements use numbers from here up so they never collide with entities.
 pub const HUDELEM_BASE: u16 = 2048;
 pub const MAX_HUDELEMS: usize = 1024;
@@ -167,8 +169,6 @@ pub struct Ent {
     pub mv: Mover,
     /// Animations playing on the entity, if any.
     pub anim: Option<AnimTree>,
-    /// Level time when the slot was freed, in ms.
-    pub free_time: i32,
     /// Level time at which the engine frees the entity (`nextthink` of a mantle blocker).
     pub free_at: Option<i32>,
     /// `useCount`: differs for every entity that ever held the slot, so a queued trigger can tell its
@@ -243,7 +243,6 @@ impl Ent {
             brush_model: None,
             mv: Mover::default(),
             anim: None,
-            free_time: 0,
             free_at: None,
             use_count: 0,
             takedamage: false,
@@ -364,6 +363,8 @@ pub struct Level {
     pub map_requested: Option<String>,
     /// Entities spawned so far (`useCount` of the next one).
     pub spawn_serial: u32,
+    /// `level.firstFreeEnt` .. `lastFreeEnt`: freed spawned slots, oldest first, with the level time each was freed.
+    pub free_ents: std::collections::VecDeque<(u16, i32)>,
     /// `level.pendingTriggerList`: touches the next trigger pass delivers.
     pub pending_triggers: Vec<crate::trigger::PendingTrigger>,
 }
@@ -584,14 +585,26 @@ impl Game {
         self.tempev.add_earthquake(now, origin, &q);
     }
 
-    /// `G_Spawn`: the lowest free slot from [`FIRST_SPAWNED`], growing the table on demand.
+    /// `G_Spawn`: the oldest freed slot once it has been free for [`REUSE_DELAY_MS`] (or at once when the table is
+    /// full), else a new slot past the last one used. A number is never handed to a new entity in the frame its old one
+    /// went, so a client sees it leave before another entity takes it (`G_MaySpawnEntity`).
     pub fn spawn(&mut self, mut ent: Ent) -> Result<u16, String> {
         let first = FIRST_SPAWNED.max(self.max_clients);
         // The slots from `tempev::FIRST` up carry the one-shot events in snapshots: entities stop short of them.
         let limit = usize::from(crate::tempev::FIRST);
-        let slot = (first..self.ents.len())
-            .find(|&i| self.ents[i].is_none())
-            .unwrap_or_else(|| self.ents.len().max(first));
+        let grow = self.level.num_entities.max(first);
+        let reuse =
+            self.level.free_ents.front().is_some_and(|&(_, freed)| {
+                self.level.time - freed >= REUSE_DELAY_MS || grow >= limit
+            });
+        let slot = if reuse {
+            self.level
+                .free_ents
+                .pop_front()
+                .map_or(grow, |(n, _)| usize::from(n))
+        } else {
+            grow
+        };
         if slot >= limit {
             logging::dedup!(ERROR, "spawn", limit, "G_Spawn: no free entities");
             return Err("G_Spawn: no free entities".into());
@@ -606,7 +619,8 @@ impl Game {
         Ok(slot as u16)
     }
 
-    /// `G_FreeEntity`: the script object dies at the next `Scr_IncTime`.
+    /// `G_FreeEntity`: the script object dies at the next `Scr_IncTime`. A spawned entity's slot joins the end of
+    /// the free list with the time it was freed.
     pub fn free_entity(&mut self, vm: &mut Vm, num: u16) {
         self.stop_using_turret(num, true);
         self.unlink_all(num);
@@ -619,6 +633,9 @@ impl Game {
                 w.unlink(num);
             }
             vm.free_entity(num);
+            if usize::from(num) >= FIRST_SPAWNED {
+                self.level.free_ents.push_back((num, self.level.time));
+            }
         }
     }
 
@@ -1162,7 +1179,70 @@ mod tests {
         let a = g.spawn(Ent::new(EntKind::Plain, "a")).unwrap();
         let b = g.spawn(Ent::new(EntKind::Plain, "b")).unwrap();
         assert_eq!((a, b), (72, 73));
-        g.ents[72] = None;
-        assert_eq!(g.spawn(Ent::new(EntKind::Plain, "c")).unwrap(), 72);
+    }
+
+    /// `G_Spawn` / `G_FreeEntity`: a freed number waits 500 ms, then numbers come back oldest first. Taking a number
+    /// back in the frame it was freed gives a client one entity number for two entities in consecutive snapshots: an
+    /// airstrike plane spawned into the slot of a just-deleted model got its `playfxontag` judged on the old model.
+    #[test]
+    fn a_freed_number_waits_before_reuse_and_returns_oldest_first() {
+        let prog = gsc::compile(
+            &[("t.gsc", "main() {}")],
+            &gsc::Builtins::stock_mp(),
+            gsc::Options::default(),
+        )
+        .unwrap();
+        let mut vm = gsc::Vm::new(prog).unwrap();
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.max_clients = 32;
+        let ents: Vec<u16> = (0..3)
+            .map(|_| g.spawn(Ent::new(EntKind::Plain, "a")).unwrap())
+            .collect();
+        assert_eq!(ents, [72, 73, 74]);
+        g.level.time = 1000;
+        g.free_entity(&mut vm, 73);
+        g.level.time = 1050;
+        g.free_entity(&mut vm, 72);
+        let fresh = g.spawn(Ent::new(EntKind::Plain, "b")).unwrap();
+        assert_eq!(
+            fresh, 75,
+            "a number freed this frame is not handed out again"
+        );
+        g.level.time = 1000 + REUSE_DELAY_MS - 1;
+        assert_eq!(g.spawn(Ent::new(EntKind::Plain, "c")).unwrap(), 76);
+        g.level.time = 1000 + REUSE_DELAY_MS;
+        assert_eq!(
+            g.spawn(Ent::new(EntKind::Plain, "d")).unwrap(),
+            73,
+            "the oldest freed first"
+        );
+        assert_eq!(
+            g.spawn(Ent::new(EntKind::Plain, "e")).unwrap(),
+            77,
+            "72 is still waiting"
+        );
+        g.level.time = 1050 + REUSE_DELAY_MS;
+        assert_eq!(g.spawn(Ent::new(EntKind::Plain, "f")).unwrap(), 72);
+    }
+
+    #[test]
+    fn a_full_table_reuses_a_freed_number_at_once() {
+        let prog = gsc::compile(
+            &[("t.gsc", "main() {}")],
+            &gsc::Builtins::stock_mp(),
+            gsc::Options::default(),
+        )
+        .unwrap();
+        let mut vm = gsc::Vm::new(prog).unwrap();
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.max_clients = 32;
+        let limit = usize::from(crate::tempev::FIRST);
+        let mut last = 0;
+        while let Ok(n) = g.spawn(Ent::new(EntKind::Plain, "a")) {
+            last = n;
+        }
+        assert_eq!(usize::from(last), limit - 1);
+        g.free_entity(&mut vm, 100);
+        assert_eq!(g.spawn(Ent::new(EntKind::Plain, "b")).unwrap(), 100);
     }
 }
