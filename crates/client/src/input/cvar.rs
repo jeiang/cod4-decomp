@@ -151,11 +151,23 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // `CG_CompassRegisterDvars`: the multiplayer minimap's scale, `DVAR_ARCHIVE | DVAR_CHEAT | DVAR_SAVED` (3500 in
     // single player).
     ("compassMaxRange", "2500", true),
+    // `Com_Init`: the game version (`version`, this build's name, is added at start), and
+    // `UI_RegisterDvars` (ui_mp/ui_main_mp.cpp): this is the multiplayer UI, which the stock Options menu reads to
+    // offer Voice Chat and Multiplayer Options in place of the single-player Cheats; and where and how big the build
+    // number is drawn while no server is connected (`UI_DrawBuildNumber`; the 1.7 defaults).
+    ("shortversion", net::SHORT_VERSION, false),
+    ("ui_multiplayer", "1", false),
+    ("ui_buildLocation", "-100 52", false),
+    ("ui_buildSize", "0.3", false),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
 const READ_ONLY: &[&str] = &[
     "cl_paused",
+    // `DVAR_ROM` in Com_Init and UI_RegisterDvars.
+    "shortversion",
+    "version",
+    "ui_multiplayer",
     // `DVAR_ROM | DVAR_AUTOEXEC` in R_RegisterDvars.
     "r_lightTweakAmbient",
     "r_lightTweakAmbientColor",
@@ -279,7 +291,9 @@ impl Default for Cvars {
                 )
             })
             .collect();
-        Self { map }
+        let mut c = Self { map };
+        c.set("version", &net::version(), false);
+        c
     }
 }
 

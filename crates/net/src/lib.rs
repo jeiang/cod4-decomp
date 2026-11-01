@@ -37,3 +37,19 @@ pub use oob::Oob;
 pub use session::{ClientLink, ServerLink, packet_qport};
 pub use snapshot::Snapshot;
 pub use transport::{MemNet, Transport, UdpTransport};
+
+/// `shortversion` (`Com_Init`, `DVAR_ROM | DVAR_SERVERINFO`): the game version this engine plays, as the 1.7
+/// `iw3mp.exe` registers it. The server list shows it as the Version line of a server's info.
+pub const SHORT_VERSION: &str = "1.7";
+
+/// `version` (`Com_Init`, `DVAR_ROM`): the original's `"<game> <shortversion> build <build> <cpu>"`, here naming this
+/// build (`cod4e` and its crate version) and the platform it was built for in place of the original's build number
+/// and `win-x86`.
+pub fn version() -> String {
+    format!(
+        "CoD4 MP {SHORT_VERSION} build cod4e-{} {}-{}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}

@@ -630,6 +630,8 @@ pub struct Ui {
     border_low_scale: f32,
     /// The `soundLoop` aliases of the menus painted this frame.
     sound_loops: Vec<String>,
+    /// The build number the last frame drew over the menus (`UI_DrawBuildNumber`), `None` when it drew none.
+    pub build_drawn: Option<String>,
 }
 
 impl Ui {
@@ -679,6 +681,7 @@ impl Ui {
             overstrike: true,
             border_low_scale: 0.6,
             sound_loops: Vec::new(),
+            build_drawn: None,
         }
     }
 
