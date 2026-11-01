@@ -689,6 +689,7 @@ fn bolted(
         .ok_or("no loaded script model with tag_origin")?
         .to_owned();
     let pose = lib.rest_pose(&model, &[])?;
+    let plane_pose = lib.rest_pose(REUSE_PLANE_MODEL, &[])?;
     let mut candidates = lib.content.effects();
     candidates.sort_by(|a, b| a.name.cmp(&b.name));
     let effect = candidates
@@ -707,7 +708,7 @@ fn bolted(
         .ok_or("bolted fixture effect has no name")?;
     bolted_missile(&lib, render_world.clone(), world, eye, effect_name, report)?;
     let program = compile(
-        &[("bolted.gsc", "main(ent) { playfxontag(1, ent, \"tag_origin\"); } move(ent) { ent moveto(ent.origin + (32, 0, 0), 0.1); } missing(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }")],
+        &[("bolted.gsc", "main(ent) { playfxontag(1, ent, \"tag_origin\"); } move(ent) { ent moveto(ent.origin + (32, 0, 0), 0.1); } missing(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; } plane(ent) { playfxontag(1, ent, \"tag_engine_right\"); playfxontag(1, ent, \"tag_engine_left\"); playfxontag(1, ent, \"tag_right_wingtip\"); playfxontag(1, ent, \"tag_left_wingtip\"); }")],
         &Builtins::stock_mp(),
         Options::default(),
     ).map_err(|e| format!("{e:?}"))?;
@@ -716,6 +717,9 @@ fn bolted(
     let missing = program
         .find("bolted", "missing")
         .ok_or("missing missing-tag entry")?;
+    let plane_fx = program
+        .find("bolted", "plane")
+        .ok_or("missing plane entry")?;
     let dispatch = server::script::Dispatch::new(&program);
     let mut vm = Vm::new(program).map_err(|e| format!("{e:?}"))?;
     let mut game = Game::new(server::cvar::Cvars::new(), lib.content);
@@ -755,7 +759,7 @@ fn bolted(
         })
         .collect::<Vec<_>>();
     events.set_effect_tags(&tags);
-    let mut fx = Effects::new(&game.content, render_world);
+    let mut fx = Effects::new(&game.content, render_world.clone());
     let mut received = 0;
     for step in 0..=16 {
         let now = step * 50;
@@ -834,6 +838,143 @@ fn bolted(
         return Err(format!(
             "bolted effect: events {received}, tag displacement {}, element displacement {}, follow error {}, stock missing-tag error {stock_error}",
             stats.max_tag_displacement, stats.max_element_displacement, stats.max_follow_error
+        ));
+    }
+    bolted_reuse(
+        &mut game,
+        &mut vm,
+        &dispatch,
+        plane_fx,
+        (number, &*pose, &*plane_pose),
+        &mut events,
+        render_world,
+        world,
+        eye,
+        report,
+    )
+}
+
+/// The airstrike plane's model and the tags stock `playPlaneFx` (`_hardpoints.gsc`) plays effects on.
+const REUSE_PLANE_MODEL: &str = "vehicle_mig29_desert";
+
+/// An airstrike plane spawned in the frame another entity is freed, with stock `playPlaneFx`'s four `playfxontag`
+/// calls. `G_Spawn` hands a freed number out again only 500 ms later (`G_MaySpawnEntity`), so the client sees the old
+/// entity leave first; a number reused at once gave the plane's events to the old entity's number while the match still
+/// drew the old model 100 ms behind, and every plane tag was reported missing. The plane, first seen with those events
+/// already raised, replays none of them (`CG_ResetEntity` for `ET_PLANE`). KisakCOD (GPL-3.0)
+/// game_mp/g_utils_mp.cpp:1183–1214, 1287–1341 and cgame_mp/cg_snapshot_mp.cpp:474–476: MP 1.8 reference; the reuse
+/// rule was also compared with iw3mp.exe 1.7 `G_Spawn`/`G_FreeEntity` in review.
+#[allow(clippy::too_many_arguments)]
+fn bolted_reuse(
+    game: &mut server::game::Game,
+    vm: &mut gsc::Vm,
+    dispatch: &server::script::Dispatch,
+    plane_fx: gsc::bytecode::FuncId,
+    (freed, pose, plane_pose): (u16, &crate::models::RestPose, &crate::models::RestPose),
+    events: &mut crate::events::Events,
+    render_world: std::sync::Arc<assets::zone::gfxworld::GfxWorld>,
+    world: &dyn Collide,
+    eye: glam::Vec3,
+    report: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    use server::game::{Ent, EntKind};
+    let start = game.level.time + 50;
+    let free_at = start + 200;
+    let mut fx = Effects::new(&game.content, render_world);
+    // What each snapshot held, drawn `INTERP_DELAY_MS` (two snapshots) later as the match draws it.
+    let mut drawn: std::collections::VecDeque<Vec<(u16, bool, [f32; 3], [f32; 3])>> =
+        Default::default();
+    let mut plane = None;
+    let mut received = 0;
+    let mut captured = Vec::new();
+    for step in 0..=30 {
+        let now = start + step * 50;
+        game.level.time = now;
+        if now == free_at {
+            game.free_entity(vm, freed);
+            let mut e = Ent::new(EntKind::Plain, "script_model");
+            e.model = REUSE_PLANE_MODEL.into();
+            e.origin = eye.to_array();
+            e.x.plane_owner = Some(0);
+            game.note_model(REUSE_PLANE_MODEL);
+            let n = game.spawn(e)?;
+            let value = game.entity_value(vm, n);
+            vm.call(
+                &mut server::script::ScriptHost {
+                    game: &mut *game,
+                    dispatch,
+                },
+                plane_fx,
+                None,
+                std::slice::from_ref(&value),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            let tags = game
+                .configstrings
+                .iter()
+                .filter_map(|(index, value)| {
+                    u16::try_from(*index)
+                        .ok()
+                        .map(|index| (index, value.clone()))
+                })
+                .collect::<Vec<_>>();
+            events.set_effect_tags(&tags);
+            plane = Some(n);
+        }
+        let mut snapshot = net::Snapshot::empty();
+        snapshot.num = 100 + step as u32;
+        snapshot.server_time = now;
+        snapshot.entities = server::netsv::world_entities(game);
+        for event in events.scan(&snapshot) {
+            received += usize::from(matches!(event, ClientEvent::PlayFxOnTag { .. }));
+            fx.event(&event, &|_| None);
+        }
+        drawn.push_back(
+            [freed]
+                .into_iter()
+                .chain(plane)
+                .filter_map(|n| {
+                    let e = game.ent(n)?;
+                    Some((n, e.x.plane_owner.is_some(), e.origin, e.angles))
+                })
+                .collect(),
+        );
+        fx.begin_script_tags();
+        if drawn.len() > 2 {
+            for (n, is_plane, origin, angles) in drawn.pop_front().unwrap_or_default() {
+                let pose = if is_plane { plane_pose } else { pose };
+                let instances = pose.instances(origin, angles, [0; 4]);
+                fx.script_model_tags(n, &instances, &game.content);
+            }
+        }
+        let ((), records) = logging::capture(|| {
+            fx.update_script_bolts(&snapshot.entities, now);
+        });
+        captured.extend(records);
+        fx.update(now, world);
+        fx.draw(eye, 0.0, 0.0, 0.0);
+    }
+    let stats = fx.bolted_stats();
+    let warnings: Vec<_> = captured
+        .iter()
+        .filter(|r| r.level <= tracing::Level::WARN)
+        .map(|r| format!("{} {}", r.level, r.message))
+        .collect();
+    let new_number = plane.is_some_and(|n| n != freed);
+    report.insert(
+        "bolted_reuse_new_number".into(),
+        u8::from(new_number).into(),
+    );
+    report.insert("bolted_reuse_events".into(), received.into());
+    report.insert(
+        "bolted_reuse_missing_tags".into(),
+        stats.missing_tags.into(),
+    );
+    report.insert("bolted_reuse_warnings".into(), warnings.len().into());
+    if !new_number || stats.missing_tags != 0 || !warnings.is_empty() {
+        return Err(format!(
+            "plane spawned as entity {plane:?} in the frame entity {freed} was freed: missing tags {}, plane events replayed {received}, warnings {warnings:?}",
+            stats.missing_tags
         ));
     }
     Ok(())
