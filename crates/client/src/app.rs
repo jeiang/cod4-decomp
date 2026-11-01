@@ -4280,7 +4280,11 @@ fn console_action(st: &mut State, line: &str) {
                 Some(line) => say(st, &line),
                 None => forward_to_server(st, &cmd),
             },
-            // The cgame's commands the server carries out (`give`, `noclip`, `follow`, ...): the line as typed.
+            // The cgame's commands the server carries out (`give`, `noclip`, `follow`, ...): the line as typed. They
+            // have no handler of their own, so a dvar of the same name is shown or set instead (cmd.cpp:1214-1250).
+            v if crate::console::is_forward_verb(v) && st.input.cvar(v).is_some() => {
+                st.input.exec_line(&crate::input::config::join(&cmd));
+            }
             v if crate::console::is_forward_verb(v) => forward_to_server(st, &cmd),
             v if crate::console::is_server_verb(v) => {
                 if let Some(net) = st.net.as_mut() {

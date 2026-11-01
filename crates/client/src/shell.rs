@@ -1914,8 +1914,13 @@ impl HostCx<'_> {
                 }
                 "quit" => self.st.actions.push(Action::Quit),
                 "disconnect" => self.st.actions.push(Action::Disconnect),
-                // `CL_Connect_f` (KisakCOD cl_main_pc_mp.cpp:382) and `CL_PlayDemo_f` (cl_main_mp.cpp:2797).
-                "connect" if cmd.len() != 2 => self.st.log("usage: connect [server]"),
+                // `CL_Connect_f` (KisakCOD cl_main_pc_mp.cpp:300-382): a server is needed; while in a game only
+                // `connect <server> reconnect` leaves it for that server, any other is ignored. `CL_PlayDemo_f`
+                // (cl_main_mp.cpp:2797).
+                "connect" if cmd.len() < 2 => self.st.log("usage: connect [server]"),
+                "connect"
+                    if self.st.in_game
+                        && !(cmd.len() == 3 && a(2).eq_ignore_ascii_case("reconnect")) => {}
                 "connect" => self.st.actions.push(Action::Join(a(1).to_owned())),
                 "playdemo" | "demo" if cmd.len() != 2 => self.st.log(&format!("{} <demoname>", cmd[0])),
                 "playdemo" | "demo" => self.st.actions.push(Action::PlayDemo(a(1).to_owned())),

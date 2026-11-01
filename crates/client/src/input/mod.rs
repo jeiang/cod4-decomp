@@ -1352,6 +1352,9 @@ impl Input {
                     tracing::error!(command = name.as_str(), "input command without a handler");
                 }
                 Some(Owner::Missing) => crate::console::note_missing(&toks[0]),
+                // The cgame registers the server's commands without a handler (`CG_InitConsoleCommands`), so
+                // `Cmd_ExecuteSingleCommand` (KisakCOD cmd.cpp:1214-1250) tries a dvar of that name before forwarding.
+                Some(Owner::Forward) if self.dvar_command(&name, &args) => {}
                 // Someone else's: the pending list's consumers (the app, the shell, the net play) carry it out.
                 Some(_) => self.pending.push(config::join(toks)),
                 // A bare dvar name shows or sets it (`Dvar_Command`, which `Cmd_ExecuteSingleCommand` tries after
@@ -2755,5 +2758,12 @@ mod tests {
         // A start-up config's unknown word is said, not dropped.
         i.exec_text("zz_frob 1", None, false, 0);
         assert_eq!(i.take_messages(), ["Unknown command \"zz_frob\""]);
+        // A server command the cgame registers without a handler yields to a dvar of its name (cmd.cpp:1214-1250).
+        i.exec_line("set give sentinel");
+        frame(&mut i);
+        i.take_messages();
+        i.exec_line("give");
+        assert_eq!(i.take_messages(), ["\"give\" is \"sentinel\""]);
+        assert!(frame(&mut i).pending_commands.is_empty());
     }
 }

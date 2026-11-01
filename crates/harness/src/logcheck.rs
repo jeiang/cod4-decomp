@@ -104,6 +104,12 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(2), // measured 1 on the Linux host, 2026-10-29,
     },
     Allow {
+        contains: &["cannot join", "127.0.0.1:28998 did not answer"],
+        reason: "client-commands checks `connect <server> reconnect` against an address nothing listens on (#365)",
+        stages: &["client-commands"],
+        max: Some(2),
+    },
+    Allow {
         contains: &["net::client", "connection attempt timed out"],
         reason: "client-error joins a server that answers getinfo but never the connect",
         stages: &["client-error"],

@@ -13,8 +13,10 @@
 //! `error` channel keeps a not-implemented command's warning (#479) off the console and showing it brings it back;
 //! in the match `viewpos` prints the eye, the stance commands latch the stance typed and bound alike, a `+word`
 //! that is no button is `Unknown command` typed and bound alike, `openmenu`/`closemenu` open and close a menu, and
-//! `openscriptmenu team_marinesopfor axis` moves the player to the other team. Needs a display and the
-//! install; skips without.
+//! `openscriptmenu team_marinesopfor axis` moves the player to the other team. A dvar named like a server command
+//! (`give`) is shown typed and bound, not forwarded; `connect <server> reconnect` joins from the front end (an
+//! address nothing answers on opens the error popup) and a plain `connect` in a match is ignored. Needs a display
+//! and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -43,6 +45,8 @@ console=cmdlist togglecr*,sawreply=togglecrouch:5,saw=1 commands:5,\
 console=clear,notsaw=zz_unknown_at_front,\
 console=con_hidechannel error,saw=Hiding channel: error:5,console=imagelist,wait=1,notsaw=not implemented,\
 console=con_showchannel error,saw=Adding channel: error:5,set=gfx_stats,saw=not implemented:5,\
+console=connect 127.0.0.1:28998 reconnect,menu=error_popmenu:30,cvaris=com_errorMessage 127.0.0.1:28998 did not answer,\
+key=escape,wait=1,cvaris=com_errorMessage ,home=5,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
 mouse=Marines,menu=changeclass:30,wait=1,mouse=Assault,ingame=120,wait=3,team=2:5,\
 holdkey=pause,releasekey=pause,saw=cl_paused is read only.:5,cvaris=cl_paused 0,\
@@ -52,11 +56,14 @@ console=record stagedemo,saw=recording to:5,wait=2,console=stoprecord,saw=Stoppe
 console=cmd say line_through_cmd,saw=line_through_cmd:6,\
 console=zz_unknown_in_match,sawreply=zz_unknown_in_match:6,\
 console=viewpos,sawreply=) : :5,\
+console=set give sentinel,console=give,saw=\"give\" is \"sentinel\":5,\
+set=set give sentinel_bound,set=give,saw=\"give\" is \"sentinel_bound\":5,\
 console=toggleprone,stanceis=prone,console=toggleprone,stanceis=stand,\
 set=bind f7 togglecrouch,holdkey=f7,releasekey=f7,stanceis=crouch,holdkey=f7,releasekey=f7,stanceis=stand,\
 console=+zz_typed,saw=Unknown command \"+zz_typed\":5,\
 set=bind f6 +zz_bound,holdkey=f6,releasekey=f6,saw=Unknown command \"+zz_bound\":5,\
 console=openmenu quickmessage,menu=quickmessage:5,console=closemenu quickmessage,nomenu=5,\
+console=connect 127.0.0.1:28998,wait=3,nomenu=1,\
 console=openscriptmenu team_marinesopfor axis,team=1:15,menu=changeclass:10,wait=1,mouse=Assault,ingame=60,wait=3,\
 console=setFromLocString customclass3 @CLASS_CUSTOM3,wait=0.5,cvarloc=customclass3 CLASS_CUSTOM3,\
 togglemenu,wait=1,see=Call Vote,mouse=Call Vote,menu=callvote:5,wait=1,see=Restart Map+Next Map,shot=callvote,\
