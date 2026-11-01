@@ -403,7 +403,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-session",
-        description: "the real client gets a person into the world: direct --listen (default join answers) and the stock menus (Start New Server, team, class); the local player must spawn",
+        description: "the real client gets a person into the world: direct --listen (default join answers) and the stock menus (Start New Server, team, class); the local player must spawn; and the stock +set/+exec/+name/+connect launch line joins a cod4e-server",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,

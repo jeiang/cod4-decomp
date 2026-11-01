@@ -157,6 +157,14 @@ COD4_PATH=/path/to/install nix develop -c just client --listen --bots 9   # solo
 COD4_PATH=/path/to/install nix develop -c just client --connect host:28960 # a `cod4e-server` (set net_port; default 28960)
 ```
 
+The client also takes the original's launch line (`Com_ParseCommandLine`), as launchers and server browsers write it: every `+` word starts a console line and the words after it are that line's arguments, beside the client's own `--` options (a `--` word ends the line; a `-` word such as a negative value does not). The `set` and `seta` lines are applied before the configs run and again after them, so they outrank the profile's config (`Com_StartupVariable`); `sets` and `setu` are treated the same way, an extension of ours (stock applies only `set` and `seta` early, `sets`/`setu` only when the line runs), as the server does. `+set fs_game mods/<name>` picks the mod as `--game` does. Every line then runs as a console line once the main menu is up (`Com_AddStartupCommands`), so `+exec`, `+name`, `+connect`, `+map` and `+devmap` do what they do in the console. The joins go under the `name` variable: the profile's config sets it, `--name` sets it after the configs, and `+name` or `+set name` set it last (the `+` lines run after `--name`), so a `+` name wins; with none of them it is `player`. Stage `client-session` starts the client with `+set cg_fov 90 +exec <file> +name <nick> +connect <server>` against a `cod4e-server` and asserts the join, the name the server lists, the variable over the profile's `seta cg_fov 65` and the file's marker variable.
+
+The split differs from stock on purpose. Stock cuts the one Windows command-line string at every `+` and newline, even inside a word or a quoted argument, and keeps at most 32 lines; the client gets its arguments already split into words by the shell, so only a word that starts with `+` starts a line: a `+` inside a word or inside a quoted argument (`+name "a+b"`, `+set g_x 1+2`) stays part of the line, where stock would cut it, and a whole command line passed as one argument (`"+set a 1 +set b 2"`) is one line, not split. A quoted argument that itself starts with `+` still starts a line. There is no line limit.
+
+```sh
+cod4e +set cg_fov 90 +exec mine.cfg +name Player1 +connect host:28960
+```
+
 Player heads use stock DObj root melding: an empty attachment tag shares matching bone names
 with the body, rather than looking up a missing tag or placing the head at the feet. Tags are
 case-insensitive exact names (the `j_` prefix is part of a bone name), resolved from each

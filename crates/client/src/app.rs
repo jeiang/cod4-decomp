@@ -1050,6 +1050,7 @@ impl Viewer {
                     tracing::warn!(game = %self.cli.game, error = %e, "cannot open the file system for the config");
                 })
                 .ok(),
+            &self.cli.startup,
         );
         input.cvars.set("fs_game", &self.cli.game, false);
         let demo_dir = input
@@ -1086,6 +1087,13 @@ impl Viewer {
         };
         let (read, write) = profiles.config_paths();
         input.use_profile(read, write);
+        // `Com_StartupVariable` again: the command line's `set`s outrank the configs.
+        input.startup_variables(&self.cli.startup);
+        // `--name` is the `name` variable, a userinfo variable the joins send (`Dvar_InfoString` of the userinfo set).
+        // The command line's `+name`/`+set name` run after this and win over it.
+        if self.cli.name_given {
+            input.cvars.set("name", &self.cli.name, false);
+        }
         // The profile is read after the native window exists: apply its archived position now, not only on vid_restart.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some((x, y)) = Gfx::from_cvars(&input.cvars).position {
@@ -1099,6 +1107,9 @@ impl Viewer {
         }
         if let Some(n) = net.as_mut() {
             n.set_profile(&stats);
+            // A direct join began before the config was read: its userinfo takes the `name` the configs set now.
+            let (rate, snaps) = netplay_rates(&input);
+            n.set_userinfo(&player_name(&self.cli, &input), rate, snaps);
         }
         if let Some(sh) = shell.as_mut() {
             sh.set_profiles(&mut input, profiles, stats);
@@ -1117,6 +1128,7 @@ impl Viewer {
         {
             sh.open(&mut input, "main");
         }
+        run_startup_commands(&self.cli.startup, shell.as_mut(), &mut input);
         // A match started from the command line is a match in progress: the HUD menus draw.
         if net.is_some()
             && let Some(sh) = shell.as_mut()
@@ -4100,6 +4112,34 @@ fn screenshot_commands(shell: Option<&mut Shell>, f: &InputFrame) {
     }
 }
 
+/// `Com_AddStartupCommands`: once the client is up, every `+` line of the command line runs as a console line
+/// (`+exec x.cfg`, `+connect host:port`, `+map mp_crash`; the `set`s again). A run with no menus (`--flythrough`,
+/// `--show-models`) has no console to carry out what is the shell's (`connect`, `map`, ...): such a line is named, not
+/// run.
+fn run_startup_commands(lines: &[String], shell: Option<&mut Shell>, input: &mut Input) {
+    match shell {
+        Some(sh) => {
+            for line in lines {
+                sh.run_line(input, line);
+            }
+        }
+        None => {
+            for line in lines {
+                let shell_verbs: Vec<String> = crate::input::config::split_commands(line)
+                    .into_iter()
+                    .filter(|cmd| crate::console::is_shell_verb(&cmd[0]))
+                    .map(|cmd| cmd[0].clone())
+                    .collect();
+                if shell_verbs.is_empty() {
+                    input.exec_line(line);
+                } else {
+                    tracing::warn!(line = line.as_str(), commands = ?shell_verbs, "the command line's line needs the menus, which this run has none of; not run");
+                }
+            }
+        }
+    }
+}
+
 /// The app's own commands (`bots`, `rcon`, `name`, `record`, `cmd`, ...) and every word nobody runs, from a bind or
 /// a config line: `console_action` carries them out or forwards them (the input layer only hands them over).
 fn own_commands(f: &InputFrame) -> Vec<Action> {
@@ -4158,6 +4198,16 @@ fn netplay_rates(input: &Input) -> (i32, i32) {
             .unwrap_or(d)
     };
     (get("rate", 90_000), get("snaps", 30))
+}
+
+/// The name a join goes under: the `name` variable, else the client's default. The profile's config sets it, then
+/// `--name` after the configs, then `+set name` and `+name` when the command line's lines run, so a `+` name wins.
+fn player_name(cli: &Cli, input: &Input) -> String {
+    input
+        .cvar("name")
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or(&cli.name)
+        .to_owned()
 }
 
 /// The `bot_count` setting (archived): the bots a menu-started server plays with on every map.
@@ -4877,15 +4927,15 @@ fn finish_load(
         let limits = st.input.pitch_limits();
         // The `password` userinfo dvar: what a passworded server is given.
         let password = st.input.cvar("password").unwrap_or("").to_owned();
-        let mut net = NetPlay::connect(
-            library, &data, addr, &cli.name, &password, limits, false, sound,
-        )?;
+        let name = player_name(cli, &st.input);
+        let mut net =
+            NetPlay::connect(library, &data, addr, &name, &password, limits, false, sound)?;
         if let Some(path) = st.pending_demo.take() {
             net.play_demo(&path)?;
         }
         net.set_autojoin(std::mem::take(&mut st.autojoin_next));
         let (rate, snaps) = netplay_rates(&st.input);
-        net.set_userinfo(&cli.name, rate, snaps);
+        net.set_userinfo(&name, rate, snaps);
         if let Some(sh) = st.shell.as_ref() {
             net.set_profile(&sh.st.stats);
             net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
