@@ -1210,6 +1210,16 @@ impl NetPlay {
         self.sound.level_fade()
     }
 
+    /// Starts the eye bob probe over: [`eye_bob`](Self::eye_bob) is the most the eye bobbed after this.
+    pub fn bob_mark(&mut self) {
+        self.c.view_bob_max = 0.0;
+    }
+
+    /// The most the eye bobbed up or down since [`bob_mark`](Self::bob_mark) (or the start), units.
+    pub fn eye_bob(&self) -> f32 {
+        self.c.view_bob_max
+    }
+
     /// `cg_footsteps`, from the cvar store each frame.
     /// The `bg_shock_volume_<channel>` cvars: what a held breath dips the channels to.
     pub fn set_breath_volumes(&mut self, volumes: Vec<(String, f32)>) {
@@ -2485,6 +2495,7 @@ impl NetPlay {
         vm.kick_gun(speed);
         vm.set_felt(self.fx.hit, self.look.shock_end());
         vm.set_clip_empty(clip_empty);
+        vm.set_bob(self.params.bob);
         let models = vm.update(&shown, dt);
         for alias in vm.take_sounds() {
             self.sound.play_ui(&alias);

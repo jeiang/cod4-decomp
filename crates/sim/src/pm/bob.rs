@@ -26,17 +26,20 @@ pub struct Bob {
 
 impl Default for Bob {
     fn default() -> Self {
-        Self {
-            max: 8.0,
-            standing: [0.007, 0.007],
-            ducked: [0.0075, 0.0075],
-            prone: [0.02, 0.005],
-            sprinting: [0.02, 0.014],
-        }
+        Self::STOCK
     }
 }
 
 impl Bob {
+    /// The stock defaults (KisakCOD `bgame/bg_misc.cpp:621-657`).
+    pub const STOCK: Bob = Bob {
+        max: 8.0,
+        standing: [0.007, 0.007],
+        ducked: [0.0075, 0.0075],
+        prone: [0.02, 0.005],
+        sprinting: [0.02, 0.014],
+    };
+
     /// The amplitude of the player's stance: (horizontal, vertical) per unit of bob speed.
     pub fn amplitude(&self, ps: &PlayerState) -> [f32; 2] {
         if ps.view_height_target == VIEW_PRONE {

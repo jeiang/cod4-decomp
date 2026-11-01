@@ -16,8 +16,9 @@
 //! `openscriptmenu team_marinesopfor axis` moves the player to the other team. A dvar named like a server command
 //! (`give`) is shown typed and bound, not forwarded; `connect <server> reconnect` joins from the front end (an
 //! address nothing answers on opens the error popup) and a plain `connect` in a match is refused with the stock
-//! `Already connected to a server. Disconnect first`, opening nothing. Needs a display
-//! and the install; skips without.
+//! `Already connected to a server. Disconnect first`, opening nothing. The level's sound faded in from silence over
+//! `snd_levelFadeTime` (#407); walking bobs the eye, and after `set bg_bobMax 0` on the host walking does not
+//! (#408). Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -50,6 +51,10 @@ console=connect 127.0.0.1:28998 reconnect,menu=error_popmenu:30,cvaris=com_error
 key=escape,wait=1,cvaris=com_errorMessage ,home=5,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
 mouse=Marines,menu=changeclass:30,wait=1,mouse=Assault,ingame=120,wait=3,team=2:5,\
+cgis=levelfade in,\
+bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 1,\
+console=set bg_bobMax 0,wait=1,bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 0,\
+console=set bg_bobMax 8,\
 holdkey=pause,releasekey=pause,saw=cl_paused is read only.:5,cvaris=cl_paused 0,\
 set=bind f9 centerview,holdkey=downarrow,wait=1,releasekey=downarrow,wait=0.5,pitchis=-90 -20,shot=lookdown,\
 holdkey=f9,releasekey=f9,wait=0.5,pitchis=-3 3,shot=centered,\

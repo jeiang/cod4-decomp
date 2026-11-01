@@ -3856,6 +3856,12 @@ fn script_step(st: &mut State) -> bool {
                                 _ => format!("start {start:.2} after_300ms {after:?}"),
                             })
                     }
+                    // `1` when the eye bobbed more than a tenth of a unit since `bobmark` (`bg_bobMax`,
+                    // `bg_bobAmplitude*`), `0` when it did not.
+                    "eyebob" => st
+                        .net
+                        .as_ref()
+                        .map(|n| u8::from(n.eye_bob() > 0.1).to_string()),
                     "subtitle" => sh.map(|s| {
                         u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
                     }),
@@ -3898,6 +3904,13 @@ fn script_step(st: &mut State) -> bool {
                 st.fx_mark = n.fx_counts();
             }
             done(st.net.is_some(), sc, "fx marked".into());
+        }
+        // `bobmark` starts the eye bob probe over; `cgis=eyebob <0|1>` afterwards says whether the eye bobbed.
+        "bobmark" => {
+            if let Some(n) = st.net.as_mut() {
+                n.bob_mark();
+            }
+            done(st.net.is_some(), sc, "bob marked".into());
         }
         // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame (`hitflesh`): the flesh
         // impact effect, or the no-blood one with `cg_blood` off.

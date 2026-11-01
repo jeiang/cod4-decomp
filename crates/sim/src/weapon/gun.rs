@@ -792,6 +792,7 @@ mod tests {
         GunFrame {
             ps,
             p,
+            bob: &Bob::STOCK,
             xyspeed: 0.0,
             frametime: 0.016,
             time: 1000,
@@ -1112,8 +1113,8 @@ mod tests {
                 client.step(ps, &p);
                 if i % 3 == 0 {
                     let (a, b) = (
-                        server.view_angles(ps, &p, 0.0),
-                        client.view_angles(ps, &p, 0.0),
+                        server.view_angles(ps, &p, &Bob::STOCK, 0.0),
+                        client.view_angles(ps, &p, &Bob::STOCK, 0.0),
                     );
                     for k in 0..3 {
                         assert!((a[k] - b[k]).abs() < 1e-4, "{i}: {a:?} {b:?}");
