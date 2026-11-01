@@ -46,12 +46,19 @@ pub const MAX_ATTACH: usize = 19;
 /// the client does not slide the entity from where it was to where it is (`EF_TELEPORT_BIT`).
 pub const TELEPORT_BIT: u32 = 1 << 8;
 
+/// Stock unnamed `0x10000` flag: a GENERAL entity retains an active smoke explosion.
+pub const SMOKE_EXPLODE: u32 = 0x10000;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EntityState {
     /// Not part of the delta; the entity list codes it.
     pub number: u16,
     pub etype: u8,
     pub eflags: u32,
+    /// GENERAL smoke: original burst time (`lerp.u.customExplode.startTime`), milliseconds.
+    pub custom_explode_start_time: i32,
+    /// GENERAL smoke: end of the cloud's lifetime, milliseconds.
+    pub time2: i32,
     pub origin: [f32; 3],
     /// Degrees. A player's pitch is the view pitch, roll the lean.
     pub angles: [f32; 3],
@@ -162,6 +169,8 @@ fn table() -> Vec<Field<EntityState>> {
         num!(s, s.angles[1], Angle16),
         num!(s, s.angles[2], Angle16),
         int!(s, s.eflags, Bits(24)),
+        int!(s, s.custom_explode_start_time, Bits(32)),
+        int!(s, s.time2, Bits(32)),
         int!(s, s.model, Bits(10)),
         int!(s, s.weapon, Bits(9)),
         int!(s, s.client, Bits(10)),
@@ -312,6 +321,23 @@ mod tests {
         write_delta(&mut w, fields(), &EntityState::new(5), &to);
         let bytes = w.into_bytes();
         let mut got = EntityState::new(5);
+        read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
+        assert_eq!(got, to);
+    }
+
+    #[test]
+    fn smoke_times_survive_the_wire_beyond_the_old_24_bit_clock() {
+        let to = EntityState {
+            etype: etype::GENERAL,
+            eflags: SMOKE_EXPLODE,
+            custom_explode_start_time: 20_000_000,
+            time2: 20_061_000,
+            ..EntityState::new(70)
+        };
+        let mut w = BitWriter::new();
+        write_delta(&mut w, fields(), &EntityState::new(70), &to);
+        let bytes = w.into_bytes();
+        let mut got = EntityState::new(70);
         read_delta(&mut BitReader::new(&bytes), fields(), &mut got).unwrap();
         assert_eq!(got, to);
     }

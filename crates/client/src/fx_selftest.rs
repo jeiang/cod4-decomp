@@ -509,6 +509,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                     surface: 0,
                     weapon: 0,
                     owner: 1023,
+                    persistent_smoke: false,
                 },
                 &fw,
             );

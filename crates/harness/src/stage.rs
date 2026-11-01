@@ -426,6 +426,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_clear::run),
     },
     StageDef {
+        name: "client-smoke",
+        description: "a real off-hand smoke throw bursts once for its first observer; a late-joining client draws the same cloud at its original age without replaying the burst or sound",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_smoke::run),
+    },
+    StageDef {
         name: "client-foliage",
         description: "mp_farm foliage at the #358 pose: shadow-only cards stay out of the camera draw and the canopy shows no black cutout silhouettes with sun shadows on or off; compares held-pose captures with shadows on and off",
         needs_install: false,

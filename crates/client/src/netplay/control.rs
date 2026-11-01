@@ -46,6 +46,12 @@ fn player(st: &NetPlay) -> Value {
         "aim_angles": st.angles,
         "weapon": st.weapon(),
         "weapon_index": ps.weapon,
+        "weapons_enabled": ps.weapon_flags & sim::pm::wf::DISABLED == 0,
+        "weapon_state": ps.weapon_state,
+        "offhand_secondary": ps.offhand_secondary,
+        "smoke_ammo": sim::weapon::PlayerWeapons::from_words(&snap.inv)
+            .clip(&st.weapons, st.weapons.index("smoke_grenade_mp")),
+        "weapon_time": ps.weapon_time,
         "ads": ps.weapon_pos_frac,
         // The same predicted frame that supplied the rendered reticle, not an older snapshot.
         "visual_weapon_state": st.hud_view.as_ref().map(|(ps, _)| ps.weapon_state),
@@ -101,6 +107,9 @@ fn entities(st: &NetPlay) -> Value {
             "team": team_of(e.eflags).map(|t| if t == Team::Axis { 1 } else { 2 }),
             "dead": e.eflags & eflags::DEAD != 0,
             "loops": e.loop_sound != 0,
+            "persistent_smoke": crate::events::persistent_smoke(e),
+            "custom_explode_start_time": e.custom_explode_start_time,
+            "time2": e.time2,
             "actor": !visible.contains(&e.number),
         }));
     }

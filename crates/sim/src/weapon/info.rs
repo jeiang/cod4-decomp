@@ -224,6 +224,8 @@ pub struct WeaponInfo {
     pub penetrate_type: PenetrateType,
     pub impact_type: ImpactType,
     pub proj_explosion: ProjExplosion,
+    /// The authored projectile explosion effect exists (persistent smoke requires it).
+    pub has_proj_explosion_effect: bool,
 
     // Ammunition. Indices are assigned by the table: weapons with the same `ammo_name` share
     // `ammo_index`, those with the same `clip_name` share `clip_index`.
@@ -408,6 +410,7 @@ impl Default for WeaponInfo {
             penetrate_type: PenetrateType::default(),
             impact_type: ImpactType::default(),
             proj_explosion: ProjExplosion::default(),
+            has_proj_explosion_effect: false,
             start_ammo: 0,
             max_ammo: 0,
             clip_size: 0,
@@ -587,6 +590,7 @@ impl WeaponInfo {
             penetrate_type: PenetrateType::from_raw(def.penetrate_type),
             impact_type: ImpactType::from_raw(def.impact_type),
             proj_explosion: ProjExplosion::from_raw(def.proj_explosion),
+            has_proj_explosion_effect: def.proj_explosion_effect.is_some(),
             start_ammo: def.start_ammo,
             max_ammo: def.max_ammo,
             clip_size: def.clip_size,
