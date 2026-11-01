@@ -224,13 +224,16 @@ fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
         }
         c.pause(Duration::from_millis(250))?;
     }
-    let n = |c: &mut Driven, k: &str| -> Result<u64, String> {
-        Ok(c.lookup(&format!("hud.stats.{k}"))?.as_u64().unwrap_or(0))
+    // Both counters from the same state document: two reads would let frames land between them.
+    let counts = |c: &mut Driven| -> Result<(u64, u64), String> {
+        let s = c.ask(json!({"cmd": "state"}))?;
+        let n = |k: &str| s["hud"]["stats"][k].as_u64().unwrap_or(0);
+        Ok((
+            n("crosshair_enemy_due_frames"),
+            n("crosshair_enemy_due_white_frames"),
+        ))
     };
-    let (due, white) = (
-        n(c, "crosshair_enemy_due_frames")?,
-        n(c, "crosshair_enemy_due_white_frames")?,
-    );
+    let (due, white) = counts(c)?;
     w.drive_until(
         c,
         json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
@@ -238,14 +241,13 @@ fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
         "the crosshair was never held on an enemy past the fade-in with cg_crosshairEnemyColor 0",
     )?;
     c.capture("crosshair_enemy_white")?;
-    let (due, white) = (
-        n(c, "crosshair_enemy_due_frames")? - due,
-        n(c, "crosshair_enemy_due_white_frames")? - white,
-    );
+    let (due, white) = {
+        let (d, wh) = counts(c)?;
+        (d - due, wh - white)
+    };
     if white != due {
         return Err(format!(
-            "with cg_crosshairEnemyColor 0 the crosshair over an enemy was tinted on {} of {due} frames",
-            due - white
+            "with cg_crosshairEnemyColor 0 the crosshair over an enemy was white on {white} of {due} frames"
         ));
     }
     Ok(())
