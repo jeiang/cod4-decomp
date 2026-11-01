@@ -57,12 +57,12 @@ set=bind f7 togglecrouch,holdkey=f7,releasekey=f7,stanceis=crouch,holdkey=f7,rel
 console=+zz_typed,saw=Unknown command \"+zz_typed\":5,\
 set=bind f6 +zz_bound,holdkey=f6,releasekey=f6,saw=Unknown command \"+zz_bound\":5,\
 console=openmenu quickmessage,menu=quickmessage:5,console=closemenu quickmessage,nomenu=5,\
+console=openscriptmenu team_marinesopfor axis,team=1:15,menu=changeclass:10,wait=1,mouse=Assault,ingame=60,wait=3,\
 console=setFromLocString customclass3 @CLASS_CUSTOM3,wait=0.5,cvarloc=customclass3 CLASS_CUSTOM3,\
 togglemenu,wait=1,see=Call Vote,mouse=Call Vote,menu=callvote:5,wait=1,see=Restart Map+Next Map,shot=callvote,\
 mouse=Restart Map,saw=called a vote:6,nomenu=5,wait=1,\
 holdkey=b,releasekey=b,menu=quickmessage:5,wait=0.5,shot=quickmessage,uikey=1,menu=quickcommands:5,wait=0.5,shot=quickcommands,uikey=1,nomenu=5,\
-saw=(Team):8,\
-console=openscriptmenu team_marinesopfor axis,team=1:15";
+saw=(Team):8";
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
