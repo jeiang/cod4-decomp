@@ -253,7 +253,12 @@ impl NetPlay {
             *slot = crate::hudstate::SlotFacts {
                 kind,
                 usable,
-                active: kind == sim::pm::action_slot::WEAPON && target == ps.weapon as u16,
+                // `ActionSlotIsActive`: a night vision slot is lit while the player looks through the goggles.
+                active: match kind {
+                    sim::pm::action_slot::WEAPON => target == ps.weapon as u16,
+                    sim::pm::action_slot::NIGHT_VISION => ps.weapon_flags & wf::NIGHTVISION != 0,
+                    _ => false,
+                },
                 icon: def
                     .and_then(|d| d.dpad_icon.as_ref())
                     .and_then(|m| m.name.as_deref().map(str::to_owned)),

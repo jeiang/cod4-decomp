@@ -20,6 +20,8 @@ use ::assets::zone::menu::ItemDef;
 
 const LOW_AMMO_COLOR: [f32; 3] = [0.89, 0.18, 0.01];
 const WHITE: [f32; 4] = [1.0; 4];
+/// The d-pad icon of a night vision slot (`cgMedia.hudIconNVG`, KisakCOD `cgame_mp/cg_main_mp.cpp:1717`).
+const NIGHT_VISION_ICON: &str = "hud_icon_nvg";
 
 /// The dvars the pieces read, with the original's defaults.
 struct Cfg {
@@ -948,7 +950,8 @@ fn dpad_back(dc: &mut Dc, h: &mut HudFacts) {
     }
 }
 
-/// `CG_DrawPlayerActionSlot`: the weapon icon of slot `i` and its ammunition (red when empty); lit while the weapon is held.
+/// `CG_DrawPlayerActionSlot`: the weapon icon of slot `i` and its ammunition (red when empty), or the goggles' icon of
+/// a night vision slot; lit while the weapon is held or the goggles are on.
 fn action_slot(dc: &mut Dc, h: &mut HudFacts, i: usize) {
     let mut a = ammo_alpha(dc.cfg, h) * dc.color[3];
     let s = h.slots[i].clone();
@@ -961,7 +964,14 @@ fn action_slot(dc: &mut Dc, h: &mut HudFacts, i: usize) {
         color[1] *= 0.97;
         color[2] *= 0.55;
     }
-    if a <= 0.0 || !s.usable || s.kind == sim::pm::action_slot::NIGHT_VISION {
+    if a <= 0.0 || !s.usable {
+        return;
+    }
+    // A night vision slot draws `cgMedia.hudIconNVG` over the whole slot and no count (KisakCOD
+    // `cgame/cg_ammocounter.cpp:501-525`).
+    if s.kind == sim::pm::action_slot::NIGHT_VISION {
+        dc.pic(NIGHT_VISION_ICON, dc.r, color);
+        h.night_vision_icon_frames += 1;
         return;
     }
     let Some(icon) = s.icon else { return };

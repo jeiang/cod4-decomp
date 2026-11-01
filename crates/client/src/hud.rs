@@ -25,7 +25,7 @@ use crate::ui::assets::UiAssets;
 use net::ui::HudElem;
 use std::collections::HashMap;
 
-pub use elems::{draw_over, draw_under, spectator_commands};
+pub use elems::{Drawn, draw_over, draw_under, spectator_commands};
 pub use feed::{BOLD, Feed, NOTIFY, SUBTITLE, WINDOWS};
 pub use layout::Layout;
 pub use prompt::{LiveVote, draw_typing, draw_vote};
@@ -362,6 +362,10 @@ pub struct Stats {
     pub crosshair_due_frames: u32,
     /// Frames of a killcam in which the viewer's own body was in sight, so its "you" marker was due.
     pub killcam_you_frames: u32,
+    /// Frames the night vision goggles' overlay covered the screen.
+    pub night_vision_frames: u32,
+    /// Text and label keys of the live (not archived) elements drawn over a killcam replay: the stock skip prompt.
+    pub killcam_live_text: std::collections::BTreeSet<String>,
     /// Frames a vote was on screen, and the most yes and no answers its lines showed.
     pub vote_frames: u32,
     pub vote_yes_max: i32,
@@ -437,6 +441,18 @@ impl Stats {
         }
     }
 
+    /// What one HUD pass drew this frame ([`draw_under`], [`draw_over`]).
+    pub fn drawn(&mut self, d: &Drawn, live: &LiveUi) {
+        self.night_vision_frames += u32::from(d.night_vision);
+        for le in d.killcam_live.iter().filter_map(|&i| live.elems.get(i)) {
+            for t in [&le.text, &le.label] {
+                if !t.is_empty() && !self.killcam_live_text.contains(t) {
+                    self.killcam_live_text.insert(t.clone());
+                }
+            }
+        }
+    }
+
     /// What the view offered the names this frame: teammates whose name could be read, and a player under the
     /// crosshair a name was due for.
     pub fn names_offered(&mut self, names: &names::Names, live: &LiveUi) {
@@ -467,6 +483,8 @@ impl Stats {
             "head_icon_materials": self.head_icon_materials,
             "friends_in_sight_frames": self.friends_in_sight_frames,
             "killcam_you_frames": self.killcam_you_frames,
+            "night_vision_frames": self.night_vision_frames,
+            "killcam_live_text": self.killcam_live_text,
             "crosshair_due_frames": self.crosshair_due_frames,
             "vote_frames": self.vote_frames,
             "vote_yes_max": self.vote_yes_max,

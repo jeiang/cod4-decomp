@@ -454,9 +454,11 @@ impl Look {
         })
     }
 
-    /// The player looks through the night vision goggles (the night set is what they show).
+    /// `CG_LookingThroughNightVision` (KisakCOD `cgame/cg_visionsets.cpp:602`): the goggles are on (the player state's
+    /// night vision weapon flag), whether or not a script set a night look. Multiplayer has no wear or remove state,
+    /// so the flag alone decides.
     pub fn night_vision(&self) -> bool {
-        self.goggles && self.night_set.is_some()
+        self.goggles
     }
 
     /// The night vision goggles went on or off (the player state's weapon flag); the look blends to the night set

@@ -5763,6 +5763,7 @@ fn hud_state(st: &mut State) -> Value {
         "stats": sh.st.hud_stats.report(),
         "live": {
             "killcam": live.killcam,
+            "night_vision": live.night_vision,
             "dead": live.dead,
             "intermission": live.intermission,
             "following": live.following.is_some(),
