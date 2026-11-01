@@ -181,6 +181,7 @@ const CHEAT: &[(&str, &str)] = &[
     ("ragdoll_explode_upbias", "0.8"),
     ("ragdoll_self_collision_scale", "1.2"),
     ("ragdoll_rotvel_scale", "1"),
+    ("clientSideEffects", "1"),
     ("cg_crosshairAlpha", "1"),
     ("cg_crosshairAlphaMin", "0.5"),
     ("cg_centertime", "3"),
