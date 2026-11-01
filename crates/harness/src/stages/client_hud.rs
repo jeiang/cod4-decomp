@@ -154,14 +154,15 @@ fn stat(c: &mut Driven, path: &str) -> Result<u64, String> {
     Ok(c.lookup(path)?.as_u64().unwrap_or(0))
 }
 
-/// Observe an actual server tick atomically. Collecting UDP traffic before the tick creates a backlog even when
-/// the renderer is slower than `sv_fps`; polling the last tick instead loses the interesting frame to catch-up.
+/// Observe an actual server tick atomically. Collecting UDP traffic briefly before the tick creates a backlog even
+/// when the renderer is slower than `sv_fps`; 150 ms at the 125 Hz send cap stays under the server's 24-command take
+/// per frame and its 64-command queue, so the latest received command is the latest one sent.
 fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<Value, String> {
     let start = Instant::now();
     let mut last = Value::Null;
     while start.elapsed() < Duration::from_secs(30) {
         let state = c.ask(json!({
-            "cmd": "server", "op": "command_frame", "collect_ms": if empty { 0 } else { 2000 }
+            "cmd": "server", "op": "command_frame", "collect_ms": if empty { 0 } else { 150 }
         }))?;
         let player = state["clients"]
             .as_array()
