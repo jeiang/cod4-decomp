@@ -351,7 +351,9 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_speed", "190", 0),
         // Milliseconds past a mantle that its landing spot stays blocked to other players.
         ("g_mantleBlockTimeBuffer", "500", 0),
-        ("g_lagcomp", "1", 0),
+        // "Turn on antilag checks for weapon hits" (KisakCOD `game_mp/g_main_mp.cpp:614`): shots and knife swings are
+        // judged where the shooter saw the others (`lagcomp`).
+        ("g_antilag", "1", ARCHIVE | SERVERINFO),
         ("bot_idle", "0", 0),
         // Bots on every map; the listen server's player sets it, and a `bots` command sets it too.
         ("bot_count", "0", 0),
@@ -2877,6 +2879,8 @@ impl Server {
                     for cmd in frame_cmds(cmds, observed.retained, synchronous, self.svs_time) {
                         observed.selected = Some(cmd);
                         host.game.clients[usize::from(n)].received_cmd = Some(cmd);
+                        // `SV_ClientThink`: `G_SetLastServerTime`, then `ClientThink`.
+                        host.game.set_last_server_time(n, cmd.server_time);
                         host.game.client_think(&mut run.vm, n, cmd);
                         host.run_calls(&mut run.vm);
                     }
@@ -2890,6 +2894,7 @@ impl Server {
                 host.game.clients[usize::from(n)].bot_brain = Some(b);
                 bot += t.elapsed();
                 let t = Instant::now();
+                host.game.set_last_server_time(n, cmd.server_time);
                 host.game.client_think(&mut run.vm, n, cmd);
                 host.run_calls(&mut run.vm);
                 client += t.elapsed();

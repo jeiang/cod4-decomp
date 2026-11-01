@@ -202,6 +202,7 @@ fn a_player_behind_a_stock_turret_mounts_aims_fires_and_dismounts() {
             weapons: &g.weapons,
             params: &params,
             time: cmd.server_time,
+            draw_time: cmd.server_time,
         };
         let out = pred.predict(&snap, &env);
         let truth = g.client(n).unwrap().ps.clone();

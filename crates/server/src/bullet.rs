@@ -173,15 +173,9 @@ impl Game {
             if e.contents & contents::PLAYER == 0 {
                 continue;
             }
-            // A person's shot is judged against the bodies as they were when the shooter saw them.
-            let rewound = self
-                .lag_time
-                .and_then(|t| self.lag.at(n, t, self.level.time));
-            let body = rewound
-                .as_ref()
-                .map_or((&e.origin, &e.mins, &e.maxs, &c.pose), |r| {
-                    (&r.origin, &r.mins, &r.maxs, &r.pose)
-                });
+            // The entity's origin is where a rewind (`G_AntiLagRewindClientPos`) put it; the box and the pose are
+            // the live ones.
+            let body = (&e.origin, &e.mins, &e.maxs, &c.pose);
             let lo = [0, 1, 2].map(|i| body.0[i] + body.1[i] - 1.0);
             let hi = [0, 1, 2].map(|i| body.0[i] + body.2[i] + 1.0);
             if segment_box(start, end, lo, hi).is_none_or(|f| f >= best.fraction) {

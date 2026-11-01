@@ -250,6 +250,22 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_perks::run),
     },
     StageDef {
+        name: "net-antilag",
+        description: "a real UDP client stamps its usercmds with the time it draws the others at and shoots a strafing player: with g_antilag 1 (in the server info) the shots land where it saw the target, with g_antilag 0 they are judged against the live body and mostly miss",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_antilag::run),
+    },
+    StageDef {
+        name: "net-mover",
+        description: "a real UDP client rides a script_brushmodel platform up and down on mp_cargoship: its predicted feet stay on the platform as the client draws it",
+        needs_install: false,
+        timeout: Duration::from_secs(6 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_mover::run),
+    },
+    StageDef {
         name: "headless-bots-sd",
         description: "headless server, 20 bots play Search and Destroy",
         needs_install: false,
