@@ -163,10 +163,11 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("snd_outputConfiguration", "Windows default", true),
     ("monkeytoy", "0", true),
     // The Voice Chat and Multiplayer Options pages' controls that `ui_multiplayer` shows (see `NOT_IMPLEMENTED`):
-    // `winvoice_mic_reclevel` as `Voice_Init` registers it (win32/win_voice.cpp, 65535); `cl_punkbuster` off, as no
-    // PunkBuster runs here (stock registers 1, cl_main_mp.cpp).
+    // `winvoice_mic_reclevel` as `Voice_Init` registers it (win32/win_voice.cpp, 65535) and `cl_punkbuster` as
+    // `CL_InitOnceForAllClients` does (client_mp/cl_main_mp.cpp, 1): the stock profile's config writes that value back
+    // on every start, which is no change and so no warning.
     ("winvoice_mic_reclevel", "65535", true),
-    ("cl_punkbuster", "0", true),
+    ("cl_punkbuster", "1", true),
 ];
 
 /// Stock dvars the menus set that this build keeps but does not act on yet: a write says so (issue #372).
