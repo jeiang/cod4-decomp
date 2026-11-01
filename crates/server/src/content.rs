@@ -321,6 +321,14 @@ pub struct Content {
 }
 
 impl Content {
+    #[cfg(test)]
+    pub(crate) fn test_model_bone(&mut self, model: &str, bone: &str) {
+        self.base.skeletons.insert(
+            model.to_owned(),
+            (0, Arc::new(Skeleton::test_bone(bone))),
+        );
+    }
+
     /// Content for a client: as the server's, plus what drawing a model needs.
     pub fn for_client() -> Self {
         Self {

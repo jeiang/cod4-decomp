@@ -50,6 +50,8 @@ pub mod ev {
     /// gunner's aim, `client` the turret entity, `model` the gunner (the stock event parm) and `weapon` the turret's
     /// weapon. The muzzle flash, the fire sound (`fireSoundPlayer` for the gunner) and a camera shake nearby.
     pub const FIRE_WEAPON_MG42: u8 = 0x91;
+    /// `playfxontag`, on the target entity: `event_parm` indexes `cs::EFFECT_TAGS`.
+    pub const PLAY_FX_ON_TAG: u8 = 0x92;
 }
 
 /// `event_parm` of a [`ev::WEAPON_FIRE`] that spent the last round of the clip (`EV_FIRE_WEAPON_LASTSHOT`).

@@ -160,6 +160,15 @@ pub struct Skeleton {
 }
 
 impl Skeleton {
+    #[cfg(test)]
+    pub(crate) fn test_bone(name: &str) -> Self {
+        Self {
+            names: vec![Arc::from(name)],
+            rest: vec![IDENTITY],
+            turret: None,
+        }
+    }
+
     /// `strings` resolves the zone's script-string indices that name the bones.
     pub fn new(m: &Arc<XModel>, strings: &[Option<Arc<str>>]) -> Self {
         let n = usize::from(m.num_bones);
