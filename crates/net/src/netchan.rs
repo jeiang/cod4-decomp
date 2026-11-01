@@ -213,6 +213,13 @@ impl Netchan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// The drop test and the warning test both send a datagram too short for its header, and the warning is rate
+    /// limited by a `dedup!` key shared across the two: serialize them so the warning test can start a fresh counting
+    /// window without the drop test swallowing its first line (the failure appears only when the tests run in
+    /// parallel, where either can reach `process` first).
+    pub(super) static SHORT_DATAGRAMS: Mutex<()> = Mutex::new(());
 
     fn collect(c: &mut Netchan, m: &[u8]) -> Vec<Vec<u8>> {
         let mut v = Vec::new();
@@ -302,6 +309,7 @@ mod tests {
 
     #[test]
     fn malformed_datagrams_are_ignored() {
+        let _short = SHORT_DATAGRAMS.lock().unwrap_or_else(|e| e.into_inner());
         let mut b = Netchan::new();
         let mut out = Vec::new();
         assert!(!b.process(&[1, 2], &mut out));
@@ -334,6 +342,11 @@ mod log_tests {
 
     #[test]
     fn malformed_datagrams_are_warned() {
+        let _short = super::tests::SHORT_DATAGRAMS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // The drop test may have spent the "short" key before this one started; count afresh now that it cannot run.
+        logging::new_window();
         let mut c = Netchan::new();
         let mut out = Vec::new();
         let (ok, events) = logging::capture(|| c.process(&[1, 2], &mut out));
