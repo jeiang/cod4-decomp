@@ -1605,6 +1605,29 @@ mod world_fx_tests {
     }
 
     #[test]
+    fn a_missing_playfxontag_bone_terminates_the_script_thread_with_the_stock_error() {
+        let prog = compile(
+            &[("t.gsc", "main(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        ).unwrap();
+        let entry = prog.find("t", "main").unwrap();
+        let dispatch = crate::script::Dispatch::new(&prog);
+        let mut vm = Vm::new(prog).unwrap();
+        let (mut g, _) = setup();
+        g.content.test_model_bone("test_model", "tag_origin");
+        let mut e = Ent::new(EntKind::Plain, "script_model");
+        e.model = "test_model".into();
+        let n = g.spawn(e).unwrap();
+        let ent = g.entity_value(&mut vm, n);
+        let mut host = crate::script::ScriptHost { game: &mut g, dispatch: &dispatch };
+        let err = vm.call(&mut host, entry, None, &[ent]).unwrap_err();
+        assert!(err.message.contains("tag 'unknown_tag' does not exist on entity with model 'test_model'"), "{}", err.message);
+        assert!(vm.level().get("survived").is_none());
+        assert!(host.game.tempev.live(host.game.level.time).next().is_none());
+    }
+
+    #[test]
     fn playfxontag_raises_the_target_event_with_a_deduplicated_effect_tag_configstring() {
         let (mut g, mut vm) = setup();
         g.content.test_model_bone("test_model", "tag_origin");
