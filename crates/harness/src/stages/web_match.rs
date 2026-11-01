@@ -425,15 +425,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mut command = Command::new(&chrome);
     command
         .env_remove("LD_LIBRARY_PATH")
+        .args(super::browser_cdp::CHROMIUM_FLAGS)
         .args([
-            "--headless=new",
-            "--no-first-run",
-            "--enable-unsafe-webgpu",
-            "--ignore-gpu-blocklist",
-            "--use-angle=swiftshader",
-            "--enable-unsafe-swiftshader",
             "--autoplay-policy=no-user-gesture-required",
-            "--window-size=1280,720",
             "--enable-logging=stderr",
             "--log-level=0",
         ])
@@ -462,9 +456,18 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     report
         .metrics
         .insert("seconds".into(), started.elapsed().as_secs_f64());
+    // A lost WebGPU device leaves the page presenting a stale or black frame, so its log line names the failure
+    // ahead of whichever assertion tripped on that frame.
+    let gpu_failure = super::browser_cdp::gpu_failure(&dir.join("browser.log"));
     if let Err(e) = outcome {
         report.status = Status::Failed;
-        report.reason = Some(e);
+        report.reason = Some(match &gpu_failure {
+            Some(line) => format!("{e}; the browser's WebGPU device failed: {line}"),
+            None => e,
+        });
+    } else if let Some(line) = gpu_failure {
+        report.status = Status::Failed;
+        report.reason = Some(format!("the browser's WebGPU device failed: {line}"));
     }
     Ok(report)
 }

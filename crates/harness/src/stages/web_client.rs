@@ -65,6 +65,7 @@ fn run_backend(
     rx: &mpsc::Receiver<String>,
     backend: &str,
     profile: &Path,
+    log: &Path,
 ) -> Result<Value, String> {
     let url = format!(
         "http://localhost:{PORT}/?dev-install=/install&autostart&flythrough&report={FRAMES}&backend={backend}"
@@ -72,19 +73,12 @@ fn run_backend(
     let mut command = Command::new(chrome);
     command
         .env_remove("LD_LIBRARY_PATH")
-        .args([
-            "--headless=new",
-            "--no-first-run",
-            "--enable-unsafe-webgpu",
-            "--ignore-gpu-blocklist",
-            "--use-angle=swiftshader",
-            "--enable-unsafe-swiftshader",
-            "--window-size=1280,720",
-        ])
+        .args(super::browser_cdp::CHROMIUM_FLAGS)
+        .args(["--enable-logging=stderr", "--log-level=0"])
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(&url)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(std::fs::File::create(log).map_err(|e| e.to_string())?);
     let mut cdp = super::browser_cdp::pipe(&mut command).map_err(|e| e.to_string())?;
     let _browser = Kill(
         command
@@ -155,7 +149,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         // Outside the stage's directory: the browser leaves sockets in its profile that a bundle cannot hold.
         let profile =
             std::env::temp_dir().join(format!("cod4e-web-{}-{backend}", std::process::id()));
-        let result = run_backend(&chrome, &rx, backend, &profile);
+        let _ = std::fs::create_dir_all(&ctx.dir);
+        let log = ctx.dir.join(format!("browser-{backend}.log"));
+        let mut result = run_backend(&chrome, &rx, backend, &profile, &log);
+        if backend == "webgpu"
+            && result.as_ref().is_ok_and(|v| v["unavailable"] != true)
+            && let Some(line) = super::browser_cdp::gpu_failure(&log)
+        {
+            result = Err(format!("the WebGPU device failed: {line}"));
+        }
         if let Ok(v) = &result {
             r.notes
                 .push(format!("{backend} requestAdapter: {}", v["adapter"]));
