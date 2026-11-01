@@ -385,6 +385,10 @@ pub struct Stats {
     pub crosshair_cook_growth_max: f32,
     /// The viewer's-team and other-team colours the crosshair is tinted in.
     pub crosshair_team_tints: [[f32; 3]; 2],
+    /// Frames an enemy in range had been under the crosshair past `cg_enemyNameFadeIn`, and those of them the
+    /// reticle stayed white (`cg_crosshairEnemyColor 0`, or a weapon without `crosshairColorChange`).
+    pub crosshair_enemy_due_frames: u32,
+    pub crosshair_enemy_due_white_frames: u32,
     /// The elements of the busiest frame, as the screen got them.
     sample: Vec<Value>,
 }
@@ -534,6 +538,8 @@ impl Stats {
             "crosshair_cook_frames": self.crosshair_cook_frames,
             "crosshair_cook_growth_max": self.crosshair_cook_growth_max,
             "crosshair_team_tints": self.crosshair_team_tints.map(tint_text),
+            "crosshair_enemy_due_frames": self.crosshair_enemy_due_frames,
+            "crosshair_enemy_due_white_frames": self.crosshair_enemy_due_white_frames,
             "sample": self.sample,
         })
     }

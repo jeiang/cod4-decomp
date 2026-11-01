@@ -1199,12 +1199,16 @@ impl Shell {
                     my_team: mine,
                     enemy_team: theirs,
                 };
-                r.color = crate::crosshair::color(
-                    r.color_change,
-                    st.live.scan.weap_flags,
-                    st.names.crosshair_held(),
-                    &tint,
-                );
+                let held = st.names.crosshair_held();
+                r.color =
+                    crate::crosshair::color(r.color_change, st.live.scan.weap_flags, held, &tint);
+                // An enemy held past the fade-in, the frames an enemy tint is due if anything is to tint it.
+                if st.live.scan.weap_flags & sim::pm::wf::ENEMY_IN_CROSSHAIR != 0
+                    && held >= tint.enemy_fade_in
+                {
+                    st.hud_stats.crosshair_enemy_due_frames += 1;
+                    st.hud_stats.crosshair_enemy_due_white_frames += u32::from(r.color == [1.0; 3]);
+                }
             }
         } else {
             let st = &mut self.st;
