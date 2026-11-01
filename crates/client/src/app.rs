@@ -15,7 +15,7 @@ use crate::models::Library;
 use crate::netplay::NetPlay;
 use crate::profile::Profiles;
 use crate::serverlist;
-use crate::session::{LevelChange, level_change, rotation};
+use crate::session::{LevelChange, level_change};
 use crate::shell::{Action, Shell};
 use crate::showcase::Showcase;
 use crate::ui::UiKey;
@@ -4657,6 +4657,7 @@ fn finish_load(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The menu-started server: the chosen map then the other stock maps in turn, the dvars the player set (time and score
 /// limits), on a standard port when one is free so the LAN list finds it.
 fn listen_config(
@@ -4676,7 +4677,7 @@ fn listen_config(
         bots,
         bot_count: bot_count(&st.input),
         gametype: Some(gametype.to_owned()),
-        rotation: Some(rotation(gametype, &maps, map)),
+        rotation: Some(crate::session::rotation(gametype, &maps, map)),
         port: listen::free_standard_port(),
         game: game_of(&st.input),
         dvars: st.input.cvars.with_prefix("scr_"),

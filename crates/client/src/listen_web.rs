@@ -53,10 +53,6 @@ pub fn host_replies() -> Vec<HostReply> {
     Vec::new()
 }
 
-pub fn free_standard_port() -> u16 {
-    0
-}
-
 pub fn start(_install: &Path, _cfg: Config) -> Result<Listen, String> {
     Err(NO_HOSTING.to_owned())
 }
