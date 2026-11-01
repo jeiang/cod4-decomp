@@ -49,6 +49,9 @@ fn player(st: &NetPlay) -> Value {
         "weapons_enabled": ps.weapon_flags & sim::pm::wf::DISABLED == 0,
         "weapon_state": ps.weapon_state as u8,
         "offhand_secondary": ps.offhand_secondary,
+        "smoke_ammo": sim::weapon::PlayerWeapons::from_words(&snap.inv)
+            .clip(&st.weapons, st.weapons.index("smoke_grenade_mp")),
+        "weapon_time": ps.weapon_time,
         "ads": ps.weapon_pos_frac,
         "alive": ps.health > 0 && ps.pm_type < sim::pm::PmType::Dead,
         "dead": ps.pm_type >= sim::pm::PmType::Dead && ps.pm_type != sim::pm::PmType::Spectator,
