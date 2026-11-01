@@ -3,10 +3,10 @@
 //! movement, and the models of everyone else drawn from the interpolated snapshots.
 //!
 //! Every render frame the network is read; about every 8 ms (the original's `cl_maxpackets` ceiling) the input becomes
-//! one usercmd stamped with the client's estimate of the server clock. The player's body is the newest snapshot's
-//! player state with the unacknowledged commands replayed on top ([`net::predict`]); other players are drawn
-//! [`net::view::INTERP_DELAY_MS`] behind the server clock between the two snapshots around that moment, which is also
-//! the moment the server rewinds them to when it judges this client's shots.
+//! one usercmd. Other players are drawn [`net::view::INTERP_DELAY_MS`] behind the client's estimate of the server
+//! clock, between the two snapshots around that moment; the usercmds are stamped with that same moment
+//! ([`cmd_clock`]), which is where the server rewinds the others to when it judges this client's shots. The player's
+//! body is the newest snapshot's player state with the unacknowledged commands replayed on top ([`net::predict`]).
 
 mod attach;
 mod control;
@@ -1136,6 +1136,7 @@ impl NetPlay {
             laps.finish(&mut self.slow_net_frames);
             return None;
         };
+        let ct = cmd_clock(st);
         let _apply =
             tracing::debug_span!("snapshot_apply", server_time = st, client = own).entered();
         self.live_time = st;
@@ -1250,7 +1251,7 @@ impl NetPlay {
                 // The watched player's view bobs and leans as their own does (`CG_OffsetFirstPersonView`).
                 let cam = self.camera.follow(&crate::camera::Frame {
                     ps: &ps,
-                    now: st,
+                    now: ct,
                     weapon: def.as_deref().map(crate::camera::WeaponView::from),
                     aim,
                     step: 0.0,
@@ -1327,7 +1328,7 @@ impl NetPlay {
             world: self.boxes.world(),
             weapons: &self.weapons,
             params: &self.params,
-            time: st,
+            time: ct,
         };
         let p = self.pred.predict(&snap, &env);
         laps.lap("predict");
@@ -1336,7 +1337,7 @@ impl NetPlay {
         self.meleeing = ps.weapon_state == sim::pm::weapon_state::MELEE_INIT;
         let events = p.events;
         self.own_new.clone_from(&events);
-        let err = self.pred.error_at(st);
+        let err = self.pred.error_at(ct);
         let feet = [
             ps.origin[0] + err[0],
             ps.origin[1] + err[1],
@@ -1432,10 +1433,10 @@ impl NetPlay {
         let cam = self.camera.view(&crate::camera::Frame {
             ps: &ps,
             events: &events,
-            now: st,
+            now: ct,
             weapon: def.map(|d| crate::camera::WeaponView::from(&**d)),
             aim,
-            step: self.pred.step_offset(st),
+            step: self.pred.step_offset(ct),
             params: &self.params,
         });
         self.camera_metrics(&cam, eye, dt, dead, ps.leanf != 0.0 && !dead);
@@ -2043,7 +2044,7 @@ impl NetPlay {
         let Some(snap) = self.net.latest() else {
             return;
         };
-        self.cmd_time = (self.cmd_time + 1).max(st);
+        self.cmd_time = (self.cmd_time + 1).max(cmd_clock(st));
         // A weapon the player asked for is asked for until it is held; after that the scripts decide.
         if self.want_weapon == Some(snap.ps.weapon as u16) {
             self.want_weapon = None;
@@ -3314,4 +3315,12 @@ fn channel_volume_command(
         }
     }
     true
+}
+
+/// The time a usercmd is stamped with: the moment the others are drawn at. `CL_FinishMove` stamps
+/// `cmd->serverTime = cl.serverTime`, the time cgame interpolates the entities at (KisakCOD
+/// `client_mp/cl_input.cpp:779`), and the server's antilag judges the command's shots there
+/// (`game/g_weapon.cpp` `G_AntiLagRewindClientPos`).
+fn cmd_clock(st: i32) -> i32 {
+    st - net::view::INTERP_DELAY_MS
 }
