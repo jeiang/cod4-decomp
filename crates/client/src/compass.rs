@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD (GPL-3.0, KisakCOD contributors): `cgame/cg_compass.cpp`
+// (`CG_CompassDrawPlayerPointers_MP`, `GetObjectiveFade`).
 //! The compass and the full-screen map: the map's frame of reference and the transforms between world and screen.
 //!
 //! The map script's `setMiniMap` tells the clients which image shows the level and which two world points are the
@@ -127,6 +129,38 @@ pub fn clip_to_rect(mut xy: [f32; 2], w: f32, h: f32) -> ([f32; 2], bool) {
         }
     }
     (xy, clipped)
+}
+
+/// How opaque an objective `dist` world inches from the player is drawn (`CG_CompassDrawPlayerPointers_MP`): fully
+/// within `max_range` (`compassMaxRange`), `min_alpha` (`compassObjectiveMinAlpha`) from `obj_max_range`
+/// (`compassObjectiveMaxRange`) on, and a lerp between. No distance hides an objective: one off the minimap sits on
+/// its rim. With the multiplayer defaults (2500 past 2048, minimum alpha 1) every objective is opaque.
+pub fn objective_alpha(dist: f32, max_range: f32, obj_max_range: f32, min_alpha: f32) -> f32 {
+    if dist <= max_range {
+        return 1.0;
+    }
+    if dist >= obj_max_range {
+        return min_alpha;
+    }
+    let span = obj_max_range - max_range;
+    let t = if span == 0.0 {
+        0.0
+    } else {
+        (dist - max_range) / span
+    };
+    1.0 - (1.0 - min_alpha) * t
+}
+
+/// How much of a `w` by `h` icon with its top left at `x, y` shows inside `clip` (`[x, y, w, h]`): 1 wholly inside,
+/// down to 0 once it is a whole icon's width or height outside an edge (`GetObjectiveFade`).
+pub fn objective_fade(clip: [f32; 4], x: f32, y: f32, w: f32, h: f32) -> f32 {
+    let out = [
+        (clip[0] - x) / w,
+        (clip[1] - y) / h,
+        (x + w - (clip[0] + clip[2])) / w,
+        (y + h - (clip[1] + clip[3])) / h,
+    ];
+    1.0 - out.into_iter().fold(0.0_f32, f32::max).min(1.0)
 }
 
 /// The largest rect of the map's aspect that fits `rect` (`x, y, w, h`), centred, shrunk by `border` on every side
@@ -269,6 +303,30 @@ mod tests {
         close(m.corner_from([1000.0, 2000.0]), [0.0, 0.0]);
         // 40 inches east (-y) and 30 south (-x) of the corner.
         close(m.corner_from([970.0, 1960.0]), [-40.0, -30.0]);
+    }
+
+    #[test]
+    fn objectives_stay_opaque_at_any_range_with_the_multiplayer_defaults() {
+        // compassMaxRange 2500, compassObjectiveMaxRange 2048, compassObjectiveMinAlpha 1.
+        for d in [0.0, 2000.0, 2500.0, 3000.0, 1.0e5] {
+            assert_eq!(objective_alpha(d, 2500.0, 2048.0, 1.0), 1.0, "{d}");
+        }
+        // A lower minimum fades objectives between the two ranges and holds it beyond.
+        assert_eq!(objective_alpha(1000.0, 1000.0, 3000.0, 0.2), 1.0);
+        assert!((objective_alpha(2000.0, 1000.0, 3000.0, 0.2) - 0.6).abs() < 1e-6);
+        assert_eq!(objective_alpha(5000.0, 1000.0, 3000.0, 0.2), 0.2);
+    }
+
+    #[test]
+    fn an_objective_fades_as_its_icon_leaves_the_minimap() {
+        let clip = [0.0, 0.0, 100.0, 100.0];
+        assert_eq!(objective_fade(clip, 10.0, 10.0, 20.0, 20.0), 1.0);
+        // Half the icon past the right edge, then all of it.
+        assert!((objective_fade(clip, 90.0, 10.0, 20.0, 20.0) - 0.5).abs() < 1e-6);
+        assert_eq!(objective_fade(clip, 100.0, 10.0, 20.0, 20.0), 0.0);
+        assert_eq!(objective_fade(clip, -50.0, 10.0, 20.0, 20.0), 0.0);
+        // A quarter above the top.
+        assert!((objective_fade(clip, 10.0, -5.0, 20.0, 20.0) - 0.75).abs() < 1e-6);
     }
 
     #[test]

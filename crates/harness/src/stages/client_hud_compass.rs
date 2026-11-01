@@ -181,8 +181,15 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
     exec(c, "set bot_idle 1")?;
     exec(c, "set developer 1")?;
     c.ask(json!({"cmd":"cvar", "name":"compassSoundPingFadeTime", "value":"2"}))?;
+    let me = c
+        .lookup("player.client")?
+        .as_u64()
+        .ok_or("no client slot")?;
+    let person = server_client(c, me)?;
+    let mut bot_home = None;
     let result: Result<Vec<String>, String> = (|| {
         let bot = enemy_bot(c, enemy)?;
+        bot_home = Some((bot, server_client(c, bot)?["origin"].clone()));
         let origin = c.lookup("player.origin")?;
         let at = |i: usize| origin[i].as_f64().unwrap_or(0.0);
         exec(
@@ -195,9 +202,27 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
             case(c, bot, "silenced", SILENCED, false)?,
         ])
     })();
+    // Put the bot back where it stood before letting it think again: released 96 units from the person, an enemy
+    // with a raised SMG can kill them at the start of the next step.
+    if let Some((bot, home)) = bot_home
+        && let Some(o) = home.as_array().filter(|o| o.len() == 3)
+    {
+        exec(c, &format!("devtele {bot} {} {} {}", o[0], o[1], o[2]))?;
+    }
     exec(c, "set bot_idle 0")?;
     exec(c, "set developer 0")?;
-    Ok(format!("compass: {}", result?.join("; ")))
+    let after = server_client(c, me)?;
+    let mut notes = result?;
+    if after["deaths"] != person["deaths"] || after["alive"] != json!(true) {
+        return Err(format!(
+            "the person died during the compass check: before {person}, after {after}"
+        ));
+    }
+    notes.push(format!(
+        "person health {} -> {}",
+        person["health"], after["health"]
+    ));
+    Ok(format!("compass: {}", notes.join("; ")))
 }
 
 #[cfg(test)]

@@ -512,6 +512,40 @@ pub struct HudFacts {
     /// The most objectives the server listed and the most alpha the compass drew them with.
     pub objectives_listed: u32,
     pub objectives_alpha: f32,
+    /// The objectives the minimap drew in its latest frame, as measured from what it drew.
+    pub objective_draws: Vec<ObjectiveDraw>,
+}
+
+/// One objective the minimap drew, in virtual units where it has a size, for the run report.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ObjectiveDraw {
+    /// World inches from the player to the objective, flat.
+    pub dist: f32,
+    /// The world distance the drawn offset puts at the minimap's full height: the objective's distance times the
+    /// minimap's height over the icon's unclipped offset from the centre (`compassMaxRange`).
+    pub range: f32,
+    /// Where the icon's centre is between the centre (0) and the rim (1), the larger of its x and y fractions.
+    pub edge: f32,
+    /// The icon was off the minimap and pulled onto its rim.
+    pub clipped: bool,
+    /// The icon's width and height.
+    pub size: [f32; 2],
+    pub alpha: f32,
+    pub current: bool,
+    /// The current objective's lines across the minimap at the icon's row and column: how many were drawn and how
+    /// wide.
+    pub lines: u8,
+    pub line_width: f32,
+}
+
+impl ObjectiveDraw {
+    fn report(&self) -> serde_json::Value {
+        serde_json::json!({
+            "dist": self.dist, "range": self.range, "edge": self.edge, "clipped": self.clipped,
+            "size": self.size, "alpha": self.alpha, "current": self.current, "lines": self.lines,
+            "line_width": self.line_width,
+        })
+    }
 }
 
 impl HudFacts {
@@ -616,6 +650,7 @@ impl HudFacts {
             "enemy_vehicles_max": self.enemy_vehicles_max,
             "objectives_listed": self.objectives_listed,
             "objectives_alpha": self.objectives_alpha,
+            "objective_draws": self.objective_draws.iter().map(ObjectiveDraw::report).collect::<Vec<_>>(),
         })
     }
 }

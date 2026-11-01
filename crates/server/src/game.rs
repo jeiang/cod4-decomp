@@ -192,6 +192,8 @@ pub struct Ent {
     pub turret: Option<Box<crate::turret::Turret>>,
     /// The effect this entity plays for the clients (`spawnfx`, `playloopedfx`).
     pub world_fx: Option<WorldFx>,
+    /// A persistent GENERAL smoke explosion, retained until `free_at`.
+    pub smoke_explosion: Option<crate::missile::SmokeExplosion>,
     /// `playloopsound`: the sound alias (`Game::sounds` index) this entity loops, 0 for none. It travels in the
     /// entity's state, so late joiners hear it and it ends with the entity.
     pub loop_sound: u16,
@@ -253,6 +255,7 @@ impl Ent {
             item: None,
             turret: None,
             world_fx: None,
+            smoke_explosion: None,
             loop_sound: 0,
             events: [(0, 0); 4],
             event_sequence: 0,

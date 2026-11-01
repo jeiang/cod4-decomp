@@ -543,6 +543,9 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         }
         Ok(())
     })?;
+    c.step("minimap objectives", |c| {
+        super::client_hud_minimap::step(c, notes)
+    })?;
     c.step("synchronous client simulation", |c| {
         synchronous_commands(c, notes)
     })?;
