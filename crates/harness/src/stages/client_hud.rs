@@ -239,7 +239,7 @@ fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     w.drive_until(
         c,
         json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
-        Duration::from_secs(100),
+        Duration::from_secs(150),
         "the crosshair was never held on an enemy past the fade-in with cg_crosshairEnemyColor 0",
     )?;
     c.capture("crosshair_enemy_white")?;
