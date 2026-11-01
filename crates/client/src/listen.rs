@@ -4,7 +4,7 @@
 //! like to any other server.
 
 use serde_json::{Value, json};
-use server::server::{Server, TickSample};
+use server::server::{Server, TickSample, listen_cmdline};
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -261,20 +261,9 @@ fn run(
     tx: &mpsc::Sender<Result<SocketAddr, String>>,
 ) -> Value {
     let started = || -> Result<(Server, SocketAddr), String> {
-        // The server a player starts runs pure, as the stock one does: its clients' IWDs must be its own.
-        let mut args: Vec<String> = [
-            "+set",
-            "sv_pure",
-            "1",
-            "+set",
-            "net_port",
-            &cfg.port.to_string(),
-        ]
-        .map(String::from)
-        .to_vec();
-        if !cfg.game.is_empty() {
-            args.extend(["+set", "fs_game", &cfg.game].map(String::from));
-        }
+        // The server a player starts runs pure, as the stock one does: its clients' IWDs must be its own. It is not
+        // dedicated (`dedicated 0`), which its `getinfo` reports as hardware 6.
+        let args = listen_cmdline(cfg.port, &cfg.game);
         let mut s = Server::boot(install, &args, false)?;
         let addr = s.net_addr().ok_or("cannot bind a UDP socket")?;
         let gt = cfg.gametype.as_deref().unwrap_or("war");

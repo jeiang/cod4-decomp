@@ -39,6 +39,7 @@ pub mod client_viewmodel;
 pub mod control_channel;
 pub mod net_antilag;
 pub mod net_hardening;
+pub mod net_info;
 pub mod net_items;
 pub mod net_killcam;
 pub mod net_loopback;

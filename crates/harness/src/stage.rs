@@ -186,6 +186,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_master::run),
     },
     StageDef {
+        name: "net-info",
+        description: "the getinfo answer of a pure, an impure, a listen, a modded, an extra-IWD and a custom-map server asked over UDP: challenge first, only the original's keys in its order, and its hw, pure and mod values",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_info::run),
+    },
+    StageDef {
         name: "net-items",
         description: "two real UDP clients: one's rifle is dropped, both are shown the weapon in their snapshots, the other is hinted and takes it holding +activate and its inventory changes",
         needs_install: false,
