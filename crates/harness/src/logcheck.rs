@@ -32,28 +32,6 @@ pub struct Allow {
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
     Allow {
-        contains: &["fx: model element skipped: its model did not resolve"],
-        reason: "effects with a model element whose xmodel is not in the loaded zones (#389)",
-        stages: &[],
-        max: Some(20),
-    },
-    Allow {
-        contains: &[
-            "cod4e::netplay::attach",
-            "attachment tag did not resolve",
-            "model=\"head_mp_",
-        ],
-        reason: "head models do not find their attach tag (#388); seen: head_mp_arab_regular_{headwrap,ski_mask,suren,asad,sadiq}, head_mp_usmc_{shaved_head,tactical_mich,tactical_mich_stripes_nomex}; any head_mp_ model is the same bug",
-        stages: &[],
-        max: Some(60),
-    },
-    Allow {
-        contains: &["cod4e::models", "held model's tag bone missing"],
-        reason: "a held model whose tag bone is not in the rig (#389)",
-        stages: &[],
-        max: Some(3), // measured 2 on the Linux host, 2026-10-14,
-    },
-    Allow {
         contains: &[
             "cod4e::ui::assets",
             "localized string is missing",

@@ -121,7 +121,10 @@ const COMMANDS: &[(&str, Owner)] = {
         ("weapnext", Frame),
         ("weapprev", Frame),
         ("actionslot", Frame),
+        // This build's same-camera comparison switches (the net play reads them).
         ("drawvehicles", Frame),
+        ("drawprops", Frame),
+        ("drawscriptmodels", Frame),
         ("say", Server),
         ("say_team", Server),
         ("callvote", Server),

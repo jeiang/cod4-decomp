@@ -53,6 +53,9 @@ pub trait Control {
     /// it answers between its own frames.
     fn server(&mut self, seq: u64, req: &Map<String, Value>) -> Option<Result<Value, String>>;
 
+    /// Follows one entity through every snapshot the client accepts (`net::view::SnapshotWatch`), or stops following.
+    fn watch(&mut self, req: &Map<String, Value>) -> Result<Value, String>;
+
     /// Ends the run as `quit` does.
     fn quit(&mut self);
 }
@@ -216,6 +219,7 @@ fn answer<H: Control + ?Sized>(h: &mut H, req: &Request) -> Result<Value, String
             }
             h.view(origin, angles)
         }
+        "watch" => h.watch(&req.args),
 
         "quit" => {
             h.quit();
@@ -532,6 +536,9 @@ mod tests {
         }
         fn server(&mut self, _: u64, _: &Map<String, Value>) -> Option<Result<Value, String>> {
             Some(Err("no listen server".to_owned()))
+        }
+        fn watch(&mut self, _: &Map<String, Value>) -> Result<Value, String> {
+            Err("no game in progress".to_owned())
         }
         fn quit(&mut self) {
             self.quit = true;
