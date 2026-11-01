@@ -30,17 +30,6 @@ pub struct Allow {
 /// measured on the Linux host (the largest stage; each entry says its measurement and date) plus a margin of 25% or
 /// more. It catches a gross regression, not a one-off.
 pub const ALLOWED: &[Allow] = &[
-    // Known gaps: the code is right to say so; the cause is not fixed yet.
-    Allow {
-        contains: &[
-            "cod4e::ui::assets",
-            "localized string is missing",
-            "key=\"\"",
-        ],
-        reason: "menus show an empty `@` reference (#372)",
-        stages: &[],
-        max: Some(12), // measured 7 (2026-10-14) and 11 with the class menu drawn (control-channel, 2026-10-29)
-    },
     // Timing of the harness's own clients and bots.
     Allow {
         contains: &["server::netsv", "packet from an address with no client"],
@@ -167,16 +156,6 @@ pub const ALLOWED: &[Allow] = &[
         reason: "web-download exceeds the download budget on purpose",
         stages: &["web-download"],
         max: Some(9), // measured 7 on the Linux host, 2026-10-14
-    },
-    Allow {
-        contains: &[
-            "cod4e::ui",
-            "script names a menu that is not loaded",
-            "menu=\"options_",
-        ],
-        reason: "the options screens name menus (options_view, options_defaults, options_driverinfo, options_credits) the loaded UI zones lack (#372)",
-        stages: &["client-ui"],
-        max: Some(10), // measured 8 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &[

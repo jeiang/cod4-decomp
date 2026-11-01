@@ -808,20 +808,23 @@ impl Ui {
         };
         match name.to_ascii_lowercase().as_str() {
             "open" => self.open_by_name(host, &arg(0)),
+            // Closing a menu that is not loaded does nothing and says nothing, as `Menus_CloseByName` (KisakCOD
+            // ui/ui_shared.cpp) finds none: the stock options pages close every sibling page on open, some of which
+            // no MP zone has (#372).
             "close" => {
                 let a = arg(0);
                 if a == "self" {
                     if let Some(m) = menu {
                         self.close(host, m);
                     }
-                } else if let Some(m) = self.script_menu(&a) {
+                } else if let Some(m) = self.menu_index(&a) {
                     self.close(host, m);
                 }
             }
             "closemenu" => self.close_by_name(host, &arg(0)),
             "ingameopen" if host.in_game() => self.open_by_name(host, &arg(0)),
             "ingameclose" if host.in_game() => {
-                if let Some(m) = self.script_menu(&arg(0)) {
+                if let Some(m) = self.menu_index(&arg(0)) {
                     self.close(host, m);
                 }
             }
@@ -4046,6 +4049,7 @@ mod tests {
         let mut ui = bare_ui();
         let mut host = Dummy::default();
         let (_, events) = logging::capture(|| {
+            ui.run_script(&mut host, None, None, "showmenu no_such_menu_for_show_test");
             ui.run_script(&mut host, None, None, "close no_such_menu_for_close_test");
             ui.run_script(&mut host, None, None, "frobnicate_test_command 1");
         });
@@ -4055,6 +4059,12 @@ mod tests {
             .collect();
         assert!(
             warns
+                .iter()
+                .any(|e| e.field("menu") == Some("no_such_menu_for_show_test"))
+        );
+        // Closing a menu that is not loaded is silent, as `Menus_CloseByName`.
+        assert!(
+            !warns
                 .iter()
                 .any(|e| e.field("menu") == Some("no_such_menu_for_close_test"))
         );
