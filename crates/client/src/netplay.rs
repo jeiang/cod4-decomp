@@ -534,6 +534,8 @@ pub struct NetPlay {
     fog: crate::fog::FogState,
     /// The other players as the last frame's view saw them, for overhead names and head icons.
     scan: crate::hud::NameScan,
+    /// `cg.crosshairClientNum`: the last player the crosshair scan took, 0 until one (the cleared cgame state).
+    crosshair_client: u16,
     /// The state the HUD shows (predicted, or the followed player's) and the view yaw in degrees, from the last frame.
     hud_view: Option<(PlayerState, f32)>,
     /// The crosshair of the held weapon from the last frame; `None` when dead, watching another player or the weapon
@@ -672,6 +674,7 @@ impl NetPlay {
             ads_dof: crate::dof::AdsDof::default(),
             fog: crate::fog::FogState::default(),
             scan: crate::hud::NameScan::default(),
+            crosshair_client: 0,
             hud_view: None,
             reticle: None,
             sound,

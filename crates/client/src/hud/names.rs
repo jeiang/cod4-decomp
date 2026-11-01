@@ -293,12 +293,13 @@ impl Names {
                 put(&mut self.names, p, alpha, false);
             }
         }
-        // The crosshair's player: its timers run whether or not the name is drawn, as in the original.
+        // The crosshair's player: its timers run whether or not the name is drawn, as in the original. The enemy
+        // fade-out holds only when the scan took the enemy branch (`CG_ScanForCrosshairEntity`).
         if let Some(hit) = live.scan.crosshair {
-            let fade_out = if friendly(live.team(hit)) {
-                cfg.friendly_fade_out
-            } else {
+            let fade_out = if live.scan.weap_flags & sim::pm::wf::ENEMY_IN_CROSSHAIR != 0 {
                 cfg.enemy_fade_out
+            } else {
+                cfg.friendly_fade_out
             };
             if self.cross.client != hit || now - self.cross.last > fade_out {
                 self.cross = Cross {
