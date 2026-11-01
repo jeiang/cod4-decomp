@@ -148,6 +148,9 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("cg_airstrikeKillCamFarBlurDist", "300", false),
     ("cg_airstrikeKillCamNearBlurStart", "0", false),
     ("cg_airstrikeKillCamNearBlurEnd", "100", false),
+    // `CG_CompassRegisterDvars`: the multiplayer minimap's scale, `DVAR_ARCHIVE | DVAR_CHEAT | DVAR_SAVED` (3500 in
+    // single player).
+    ("compassMaxRange", "2500", true),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
@@ -223,6 +226,7 @@ const CHEAT: &[(&str, &str)] = &[
     ("cg_airstrikeKillCamFarBlurDist", "300"),
     ("cg_airstrikeKillCamNearBlurStart", "0"),
     ("cg_airstrikeKillCamNearBlurEnd", "100"),
+    ("compassMaxRange", "2500"),
 ];
 
 /// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other
@@ -502,6 +506,8 @@ mod tests {
             ("r_lightTweakAmbientColor", "1 0 0 1", false, false, true),
             ("r_lightTweakDiffuseFraction", "0.5", false, false, true),
             ("r_blur", "0", false, true, false),
+            // KisakCOD cgame/cg_compass.cpp, CG_CompassRegisterDvars (multiplayer).
+            ("compassMaxRange", "2500", true, true, false),
         ] {
             assert_eq!(cvars.get(name), Some(default), "{name}");
             assert_eq!(Cvars::cheat_name(name).is_some(), cheat, "{name}");
@@ -572,6 +578,7 @@ mod tests {
             ("r_lightTweakSunColor", "1 0 0 1", "0 1 0 1"),
             ("r_lightTweakSunDirection", "10 20 30", "0 0 0"),
             ("r_blur", "4", "0"),
+            ("compassMaxRange", "10000", "2500"),
         ] {
             input.cvars.set_cheat_state(true);
             assert_eq!(input.cvar(name), Some(default), "{name}");

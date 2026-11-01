@@ -59,7 +59,7 @@ pub(crate) fn check(draws: &Value, k: f64) -> Result<String, String> {
     if near["clipped"] != json!(false) {
         bad.push(format!("current: clipped {NEAR} away, inside the minimap"));
     }
-    if near["lines"].as_u64() != Some(2) || f(near, "line_width") != 2.0 {
+    if near["lines"].as_u64() != Some(2) || (f(near, "line_width") - 2.0).abs() > 1e-3 {
         bad.push(format!(
             "current: {} lines {} wide across the minimap, want 2 of width 2",
             near["lines"], near["line_width"]
@@ -141,7 +141,7 @@ mod tests {
             {"dist": NEAR, "range": range, "edge": 0.5, "clipped": false, "size": [size, size], "alpha": 1.0,
              "current": true, "lines": lines, "line_width": 2.0},
             {"dist": FAR, "range": range, "edge": if far_clipped { 1.0 } else { 0.9 }, "clipped": far_clipped,
-             "size": [size, size], "alpha": 1.0, "current": false, "lines": 0, "line_width": 2.0},
+             "size": [size, size], "alpha": 1.0, "current": false, "lines": 0, "line_width": 0.0},
         ])
     }
 
@@ -163,5 +163,20 @@ mod tests {
         assert!(e.contains("must sit on the rim"), "{e}");
         let e = check(&json!([]), 1.0).unwrap_err();
         assert!(e.contains("did not draw both"), "{e}");
+        let edit = |key: usize, field: &str, v: Value| {
+            let mut d = draws(2500.0, 20.0, 2, true);
+            d[key][field] = v;
+            check(&d, 1.0).unwrap_err()
+        };
+        let e = edit(0, "line_width", json!(1.0));
+        assert!(e.contains("lines 1.0 wide"), "{e}");
+        let e = edit(1, "alpha", json!(0.5));
+        assert!(e.contains("active: alpha 0.5"), "{e}");
+        let e = edit(0, "clipped", json!(true));
+        assert!(e.contains("current: clipped"), "{e}");
+        let e = edit(1, "lines", json!(2));
+        assert!(e.contains("active: 2 lines"), "{e}");
+        let e = edit(1, "dist", json!(2000.0));
+        assert!(e.contains("active: 2000 away"), "{e}");
     }
 }

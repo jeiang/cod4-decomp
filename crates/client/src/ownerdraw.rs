@@ -1313,7 +1313,8 @@ fn compass_objectives(
         };
         let (clipped_xy, clipped) = compass::clip_to_rect(xy, rect.w, rect.h);
         let at = [center[0] + xy[0], center[1] + xy[1]];
-        let mut lines = 0;
+        // What was drawn, in virtual units, for the HUD report: the lines' thickness and the icon's size.
+        let (mut lines, mut line_width) = (0, 0.0);
         let fade = compass::objective_fade(
             [rect.x, rect.y, rect.w, rect.h],
             at[0] - w * 0.5,
@@ -1331,6 +1332,7 @@ fn compass_objectives(
                 };
                 dc.p.pic(&line_img, r, c);
                 lines += 1;
+                line_width = r.h / u;
             }
             if (rect.x..=rect.x + rect.w).contains(&at[0]) {
                 let r = Px {
@@ -1340,6 +1342,7 @@ fn compass_objectives(
                 };
                 dc.p.pic(&line_img, r, c);
                 lines += 1;
+                line_width = r.w / u;
             }
         }
         let img = dc.p.named(&dc.ui.assets, &o.icon);
@@ -1360,11 +1363,11 @@ fn compass_objectives(
                 edge: (clipped_xy[0].abs() / (rect.w * 0.5))
                     .max(clipped_xy[1].abs() / (rect.h * 0.5)),
                 clipped,
-                size,
+                size: [r.w / u, r.h / u],
                 alpha,
                 current: o.current,
                 lines,
-                line_width: 2.0,
+                line_width,
             });
         }
     }

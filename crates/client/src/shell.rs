@@ -551,9 +551,8 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("cg_ScoresPing_MedColor", "0.8 0.8 0 1"),
     ("cg_ScoresPing_LowColor", "0 0.75 0 1"),
     ("cg_ScoresPing_BgColor", "0.25 0.25 0.25 0.5"),
-    // The minimap's scale and its objective icons, the multiplayer defaults (`CG_CompassRegisterDvars`;
-    // `compassMaxRange` is also cheat protected in stock, and 3500 in single player).
-    ("compassMaxRange", "2500"),
+    // The minimap's objective icons, the multiplayer defaults (`CG_CompassRegisterDvars`; `compassMaxRange`, cheat
+    // protected, is registered with the cvars).
     ("compassObjectiveWidth", "20"),
     ("compassObjectiveHeight", "20"),
     ("compassObjectiveIconWidth", "16"),

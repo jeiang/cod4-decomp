@@ -170,6 +170,8 @@ An enemy's firing mark comes only from fire events of players in the snapshot: u
 
 Development-only `devbotfire <client|axis|allies> <weapon|frag> <ms>` grants/selects the weapon and holds the bot's attack or frag input for that interval. It requires explicit `developer 1` (default 0) and prints a console warning on every invocation. Harness and integration tests opt in explicitly. This uses the existing server development-mode dvar rather than trying to change write-protected `sv_cheats` after map start. A headless server throws the frag (`crates/server/tests/dev_bot_fire.rs`), but the bot in the `client-hud` listen-server match has not yet been seen to (#486).
 
+Test hook `devobjective <index> <state> [x y z [icon]]` does what the scripts' `objective_add` does (state `empty`, `active`, `current`, ...; the icon is set only with an origin), so `client-hud` can put a current and an active objective at chosen distances and check the minimap's scale, icon size, cross-hair lines and rim clipping.
+
 ```sh
 COD4_PATH=/path/to/install nix develop -c just client --listen --bots 9   # solo: a team deathmatch against bots
 COD4_PATH=/path/to/install nix develop -c just client --connect host:28960 # a `cod4e-server` (set net_port; default 28960)
