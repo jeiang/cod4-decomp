@@ -318,6 +318,59 @@ pub fn pad_name(b: gilrs::Button) -> Option<&'static str> {
     })
 }
 
+/// Whether `bind` and `unbind` take `name` as a key (`Key_StringToKeynum`, KisakCOD cl_keys.cpp:1252): one
+/// character, a `0x` code, a key of the table, a keypad key with NumLock off, a mouse button, the wheel or a
+/// gamepad button. Any case.
+pub fn is_key_name(name: &str) -> bool {
+    use gilrs::Button::*;
+    let n = name.to_ascii_lowercase();
+    let keypad_nav = [
+        "kp_home",
+        "kp_uparrow",
+        "kp_pgup",
+        "kp_leftarrow",
+        "kp_rightarrow",
+        "kp_end",
+        "kp_downarrow",
+        "kp_pgdn",
+        "kp_ins",
+        "kp_del",
+    ];
+    let pad = [
+        South,
+        East,
+        West,
+        North,
+        LeftTrigger,
+        RightTrigger,
+        LeftTrigger2,
+        RightTrigger2,
+        Select,
+        Start,
+        LeftThumb,
+        RightThumb,
+        DPadUp,
+        DPadDown,
+        DPadLeft,
+        DPadRight,
+    ];
+    let numbered = |prefix: &str| {
+        n.strip_prefix(prefix)
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    };
+    n.chars().count() == 1
+        || (n.len() == 4 && n.starts_with("0x"))
+        || key_code(&n).is_some()
+        || keypad_nav.contains(&n.as_str())
+        || pad.into_iter().any(|b| pad_name(b) == Some(n.as_str()))
+        // Stock names no key of ours has: `AUX1`..`AUX16`, `KP_STAR`, `COMMAND` and the numbered extended
+        // characters (`181`, ...), kept so a stock config's bind of one is not refused.
+        || matches!(n.as_str(), "mwheelup" | "mwheeldown" | "kp_star" | "command")
+        || numbered("mouse")
+        || numbered("aux")
+        || numbered("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
