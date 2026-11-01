@@ -257,9 +257,14 @@ impl Events {
             .filter(|e| !matches!(e.etype, etype::EVENT | etype::FX | etype::LOOP_FX))
         {
             live.push(e.number);
-            // An entity not seen before follows `CG_ResetEntity` (cg_snapshot_mp.cpp:415-479): a general entity or a missile
-            // starts from sequence 0, so the events it was spawned with play; any other type starts from its current
-            // sequence, so a late joiner or a re-entering entity does not replay its history.
+            // An entity not seen before follows `CG_ResetEntity` (cg_snapshot_mp.cpp:415-479): a general entity or a
+            // missile starts from sequence 0, so the events it was spawned with play; any other type starts from its
+            // current sequence, so a late joiner or a re-entering entity does not replay its history.
+            // Stock's one exception (cg_snapshot_mp.cpp:419-422) keeps the current sequence for an entity with eFlags
+            // 0x10000 seen more than 200 ms after its `launchTime`. Only the persistent smoke-grenade explode entity
+            // (an `ET_GENERAL`, g_missile.cpp:399, time in `customExplode.startTime`) carries it. We send no such
+            // entity (#480), and our missile `eflags` hold a launch time rather than flags, so the exception cannot
+            // apply here.
             let last = self.seen.get(&e.number).copied().unwrap_or(match e.etype {
                 etype::GENERAL | etype::MISSILE => 0,
                 _ => e.event_seq,
