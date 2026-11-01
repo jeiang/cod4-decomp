@@ -100,13 +100,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let result = (|| -> Result<Value, String> {
         let (mut server, port) =
             Dedicated::boot(&server, install, &work, 0, &ctx.dir.join("server.log"))?;
+        // The map command owns sv_cheats (an init-protected dvar); wait for its synchronous reload and echo.
         server
-            .command("set sv_cheats 1", Duration::from_secs(10))
-            .ok_or("server did not answer sv_cheats")?;
+            .command("devmap mp_crash", Duration::from_secs(120))
+            .ok_or("server did not finish devmap mp_crash")?;
         let args = ["--no-autojoin", "--duration", "300"];
         let mut early = Driven::start(&client, install, &ctx.dir.join("early"), &args)?;
-        // Load the second process before throwing: zone/shader startup must not eat the cloud's 61 s lifetime.
-        let mut late = Driven::start(&client, install, &ctx.dir.join("late"), &args)?;
         let address = format!("127.0.0.1:{port}");
         early.step("join before smoke", |c| join(c, &address, "Sniper"))?;
         // A known walkable garage viewpoint (also used by client-garage), aimed down so the cloud stays nearby.
@@ -141,6 +140,22 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             return Err(format!("smoke must retain its 61000 ms deadline: {first}"));
         }
         early.pause(Duration::from_secs(2))?;
+        if early.lookup("fx.played.persistent_smoke")? != 1 || burst(&mut early)? != (1, 1) {
+            return Err(
+                "on-time observer restarted smoke or replayed its burst across snapshots".into(),
+            );
+        }
+        early.capture("on-time-smoke")?;
+        let early_report = early.report("state.json", &["fx", "events", "sound", "player"])?;
+        // Only one window at a time: an occluded client can stop processing its control requests.
+        // The dedicated server must retain the timed cloud even after its thrower disconnects.
+        if !early
+            .finish(Duration::from_secs(15))
+            .is_some_and(|s| s.success())
+        {
+            return Err("on-time smoke observer did not exit cleanly".into());
+        }
+        let mut late = Driven::start(&client, install, &ctx.dir.join("late"), &args)?;
         late.step("join after the smoke burst", |c| {
             join(c, &address, "Assault")
         })?;
@@ -168,12 +183,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         if late_burst != (0, 0) {
             return Err(format!("late smoke replayed a burst: {late_burst:?}"));
         }
-        // Repeated snapshots must neither recreate the cloud nor replay either observer's burst.
+        // Repeated snapshots must neither recreate the late cloud nor replay its burst.
         late.pause(Duration::from_secs(2))?;
         let advanced = cloud(&mut late)?;
-        if early.lookup("fx.played.persistent_smoke")? != 1
-            || late.lookup("fx.played.persistent_smoke")? != 1
-        {
+        if late.lookup("fx.played.persistent_smoke")? != 1 {
             return Err(
                 "repeated snapshots must start exactly one smoke effect per observer".into(),
             );
@@ -181,24 +194,18 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         if advanced["start_time"] != restored["start_time"]
             || integer(&advanced, "age_ms")? < age + 1_000
             || burst(&mut late)? != (0, 0)
-            || burst(&mut early)? != (1, 1)
         {
             return Err(format!(
                 "smoke restarted or replayed across snapshots: {restored} -> {advanced}"
             ));
         }
-        early.capture("on-time-smoke")?;
         late.capture("late-smoke")?;
-        let early_report = early.report("state.json", &["fx", "events", "sound", "player"])?;
         let late_report = late.report("state.json", &["fx", "events", "sound", "player"])?;
         let evidence = json!({"first": first, "restored": restored, "advanced": advanced,
             "early": early_report, "late": late_report});
-        if !early
+        if !late
             .finish(Duration::from_secs(15))
             .is_some_and(|s| s.success())
-            || !late
-                .finish(Duration::from_secs(15))
-                .is_some_and(|s| s.success())
         {
             return Err("smoke observer did not exit cleanly".into());
         }
