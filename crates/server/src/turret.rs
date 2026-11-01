@@ -387,7 +387,7 @@ impl Game {
                 s.client = t;
                 s.model = n;
             });
-        self.fire_bullets(vm, n, weapon, &aim, spread);
+        self.fire_bullets(vm, n, weapon, &aim, spread, self.level.time);
     }
 
     /// `Player_SetTurretDropHint` (as the cursor hint a gunner sees): the weapon's drop hint, with no entity.

@@ -132,6 +132,9 @@ pub struct Showcase {
     clock: f32,
     fire_ms: i32,
     reload_ms: i32,
+    heads_checked: usize,
+    heads_resolved: usize,
+    held_before_tick: usize,
 }
 
 /// Height of the first solid surface under `p` (searching `up` above and `down` below), by bisection on a sight trace.
@@ -226,6 +229,40 @@ impl Showcase {
         if axis.is_none() {
             tracing::warn!("no axis player models in the loaded zones; the allied ones stand in");
         }
+        // Exercise every head in this map's loaded zones, not just the two display actors.
+        let heads: Vec<String> = lib
+            .content
+            .model_names("head_mp_")
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut heads_resolved = 0;
+        for head in &heads {
+            let root = lib
+                .content
+                .model_bone_names(head)
+                .and_then(|names| names.first())
+                .ok_or_else(|| format!("{head} has no root"))?;
+            let body = [&allies, axis.as_ref().unwrap_or(&allies)]
+                .into_iter()
+                .find(|s| {
+                    lib.content.model_bone_names(&s.body).is_some_and(|names| {
+                        names.iter().any(|name| name.eq_ignore_ascii_case(root))
+                    })
+                })
+                .ok_or_else(|| format!("no compatible body for {head}"))?;
+            let set = PlayerModelSet {
+                body: body.body.clone(),
+                attach: vec![(head.clone(), String::new())],
+                hand: Vec::new(),
+            };
+            let player = lib.player(&set)?;
+            if player.head_attachment_resolved() {
+                heads_resolved += 1;
+            } else {
+                return Err(format!("head {head} does not meld onto {}", body.body));
+            }
+        }
         let poses = poses();
         let (fx, fy) = (yaw.cos(), yaw.sin());
         let ground_z = eye.z - 60.0;
@@ -263,6 +300,10 @@ impl Showcase {
             viewangles: [-pitch.to_degrees(), yaw.to_degrees(), 0.0],
             ..PlayerState::default()
         };
+        let held_before_tick = actors
+            .iter()
+            .filter(|a| a.player.held_at_tags(a.origin))
+            .count();
         Ok(Showcase {
             actors,
             vm,
@@ -271,6 +312,9 @@ impl Showcase {
             clock: 0.0,
             fire_ms: def.fire_time.max(50),
             reload_ms: def.reload_time.max(500),
+            heads_checked: heads.len(),
+            heads_resolved,
+            held_before_tick,
         })
     }
 
@@ -287,7 +331,8 @@ impl Showcase {
             .filter(|a| a.pose.script.is_some())
             .map(|a| (a.pose.label.to_owned(), json!(a.clips)))
             .collect();
-        json!({ "clips": clips })
+        json!({ "clips": clips, "heads_checked": self.heads_checked,
+            "heads_resolved": self.heads_resolved, "held_before_tick": self.held_before_tick })
     }
 
     /// `label: animation` of every actor and the view model's animation slot, for the run log.

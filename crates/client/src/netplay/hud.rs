@@ -151,7 +151,9 @@ impl NetPlay {
         h.sprint_time = self.params.player_sprint_time;
         h.sprint_perk_mult = self.params.perk_sprint_multiplier;
         h.perks = ps.perks;
-        h.sprint_left = sim::pm::sprint_left_ms(ps, &self.params, server_time, h.sprint_max);
+        // The sprint timers are stamped on the usercmd clock.
+        let cmd_time = super::cmd_clock(server_time);
+        h.sprint_left = sim::pm::sprint_left_ms(ps, &self.params, cmd_time, h.sprint_max);
         h.sprinting = ps.pm_flags & pmf::SPRINTING != 0;
         h.mantle_hint = ps.mantle_state.flags & 8 != 0;
         if ps.cursor_hint != 0 {

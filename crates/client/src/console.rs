@@ -297,6 +297,8 @@ const OWN_COMMANDS: &[&str] = &[
     "devmap",
     "demo",
     "disconnect",
+    "drawprops",
+    "drawscriptmodels",
     "drawvehicles",
     "dvardump",
     "dvarlist",

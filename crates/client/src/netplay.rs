@@ -3,10 +3,10 @@
 //! movement, and the models of everyone else drawn from the interpolated snapshots.
 //!
 //! Every render frame the network is read; about every 8 ms (the original's `cl_maxpackets` ceiling) the input becomes
-//! one usercmd stamped with the client's estimate of the server clock. The player's body is the newest snapshot's
-//! player state with the unacknowledged commands replayed on top ([`net::predict`]); other players are drawn
-//! [`net::view::INTERP_DELAY_MS`] behind the server clock between the two snapshots around that moment, which is also
-//! the moment the server rewinds them to when it judges this client's shots.
+//! one usercmd. Other players are drawn [`net::view::INTERP_DELAY_MS`] behind the client's estimate of the server
+//! clock, between the two snapshots around that moment; the usercmds are stamped with that same moment
+//! ([`cmd_clock`]), which is where the server rewinds the others to when it judges this client's shots. The player's
+//! body is the newest snapshot's player state with the unacknowledged commands replayed on top ([`net::predict`]).
 
 mod attach;
 mod control;
@@ -327,6 +327,8 @@ fn eye_speed_summary(speeds: &[f32]) -> Value {
 #[derive(Default)]
 struct Counters {
     cmds: u64,
+    /// How far each sent usercmd's time was from the moment the others were last drawn at, ms.
+    cmd_drawn: Vec<i32>,
     shots: u64,
     /// The most the view kicked up, and the most the pitch of a sent cmd differed from the player's own aim, degrees.
     max_kick_up: f32,
@@ -473,6 +475,8 @@ pub struct NetPlay {
     damage_hud: DamageHud,
     pitch_limits: (f32, f32),
     cmd_time: i32,
+    /// The server time the other players were last drawn at.
+    drawn_at: Option<i32>,
     last_cmd: Instant,
     want_weapon: Option<u16>,
     /// The last primary weapon held (`weaponLatestPrimaryIdx`): where cycling from an item or offhand returns to.
@@ -569,6 +573,10 @@ pub struct NetPlay {
     rotor_clock: f32,
     /// `drawvehicles 0` leaves the vehicles out of the picture (the harness compares a view with and without them).
     draw_vehicles: bool,
+    /// `drawscriptmodels 0` leaves scripted props out for a same-camera visual comparison.
+    draw_script_models: bool,
+    /// `drawprops 0` leaves client-side dynamic props out for a same-camera visual comparison.
+    draw_props: bool,
     /// The server's `delta_angles` of the last snapshot: when it turns the player's view (a spawn, a teleport), the
     /// commands' angles turn with it.
     last_delta: Option<[f32; 3]>,
@@ -625,6 +633,7 @@ impl NetPlay {
             damage_hud: DamageHud::default(),
             pitch_limits,
             cmd_time: 0,
+            drawn_at: None,
             last_cmd: Instant::now(),
             want_weapon: None,
             latest_primary: 0,
@@ -691,6 +700,8 @@ impl NetPlay {
             rotors: HashMap::new(),
             rotor_clock: 0.0,
             draw_vehicles: true,
+            draw_script_models: true,
+            draw_props: true,
             last_delta: None,
         })
     }
@@ -962,6 +973,7 @@ impl NetPlay {
         }
         self.pred = Predictor::default();
         self.cmd_time = 0;
+        self.drawn_at = None;
         self.want_weapon = None;
         self.latest_primary = 0;
         self.last_spawn = None;
@@ -1232,6 +1244,7 @@ impl NetPlay {
             laps.finish(&mut self.slow_net_frames);
             return None;
         };
+        let ct = cmd_clock(st);
         let _apply =
             tracing::debug_span!("snapshot_apply", server_time = st, client = own).entered();
         self.live_time = st;
@@ -1346,7 +1359,7 @@ impl NetPlay {
                 // The watched player's view bobs and leans as their own does (`CG_OffsetFirstPersonView`).
                 let cam = self.camera.follow(&crate::camera::Frame {
                     ps: &ps,
-                    now: st,
+                    now: ct,
                     weapon: def.as_deref().map(crate::camera::WeaponView::from),
                     aim,
                     step: 0.0,
@@ -1393,7 +1406,9 @@ impl NetPlay {
                 (yaw, pitch, seen[2].to_radians()),
             );
             laps.lap("follow: kill_cam+players+models+fx");
-            models.extend(self.props.instances());
+            if self.draw_props {
+                models.extend(self.props.instances());
+            }
             models.extend(drawn.models);
             laps.finish(&mut self.slow_net_frames);
             return Some(NetFrame {
@@ -1423,7 +1438,8 @@ impl NetPlay {
             world: self.boxes.world(),
             weapons: &self.weapons,
             params: &self.params,
-            time: st,
+            time: ct,
+            draw_time: st,
         };
         let p = self.pred.predict(&snap, &env);
         laps.lap("predict");
@@ -1435,7 +1451,7 @@ impl NetPlay {
             *self.c.own_events.entry(*ev).or_default() += 1;
         }
         self.own_new.clone_from(&events);
-        let err = self.pred.error_at(st);
+        let err = self.pred.error_at(ct);
         let feet = [
             ps.origin[0] + err[0],
             ps.origin[1] + err[1],
@@ -1531,10 +1547,10 @@ impl NetPlay {
         let cam = self.camera.view(&crate::camera::Frame {
             ps: &ps,
             events: &events,
-            now: st,
+            now: ct,
             weapon: def.map(|d| crate::camera::WeaponView::from(&**d)),
             aim,
-            step: self.pred.step_offset(st),
+            step: self.pred.step_offset(ct),
             params: &self.params,
         });
         self.camera_metrics(&cam, eye, dt, dead, ps.leanf != 0.0 && !dead);
@@ -1611,7 +1627,9 @@ impl NetPlay {
         laps.lap("dof");
         let drawn = self.fx_frame(dt, st, own, &events, render, (yaw, pitch, roll));
         laps.lap("fx");
-        models.extend(self.props.instances());
+        if self.draw_props {
+            models.extend(self.props.instances());
+        }
         models.extend(drawn.models);
         laps.finish(&mut self.slow_net_frames);
         Some(NetFrame {
@@ -2112,6 +2130,14 @@ impl NetPlay {
             self.draw_vehicles = arg.trim() != "0";
             return;
         }
+        if let Some(arg) = cmd.strip_prefix("drawscriptmodels ") {
+            self.draw_script_models = arg.trim() != "0";
+            return;
+        }
+        if let Some(arg) = cmd.strip_prefix("drawprops ") {
+            self.draw_props = arg.trim() != "0";
+            return;
+        }
         let forward = match cmd {
             "weapnext" => true,
             "weapprev" => false,
@@ -2175,7 +2201,7 @@ impl NetPlay {
         let Some(snap) = self.net.latest() else {
             return;
         };
-        self.cmd_time = (self.cmd_time + 1).max(st);
+        self.cmd_time = (self.cmd_time + 1).max(cmd_clock(st));
         // A weapon the player asked for is asked for until it is held; after that the scripts decide.
         if self.want_weapon == Some(snap.ps.weapon as u16) {
             self.want_weapon = None;
@@ -2227,6 +2253,11 @@ impl NetPlay {
             (cmd.angles[0].wrapping_sub(pack(self.angles[0], delta[0])) as i16).unsigned_abs();
         self.c.max_kick_in_cmd = self.c.max_kick_in_cmd.max(f32::from(sent) * ANGLE_UNIT);
         self.c.cmds += 1;
+        // How far the command's time is from the moment the others were last drawn at: stock stamps that very moment
+        // (`cl.serverTime`), and the server's antilag judges the shot there.
+        if let Some(drawn) = self.drawn_at {
+            self.c.cmd_drawn.push(cmd.server_time - drawn);
+        }
         self.pred.push(cmd);
         self.net.send_cmd(cmd);
     }
@@ -2433,6 +2464,9 @@ impl NetPlay {
     /// The scripted models of the level (`script_model`: props, cars, objectives), posed at the origin and angles the
     /// server gave them, between the snapshots around the interpolation moment like the players they move with.
     fn script_models(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
+        if !self.draw_script_models {
+            return Vec::new();
+        }
         let ents = self
             .net
             .snaps
@@ -2684,10 +2718,12 @@ impl NetPlay {
     fn remote_players(&mut self, dt: f32, st: i32, own: u16, show_own: bool) -> Vec<ModelInstance> {
         self.effects.begin_script_tags();
         let own_bolt = self.effects.has_script_bolt(own);
-        let ents = self.net.snaps.interpolate(
-            st - net::view::INTERP_DELAY_MS,
-            (!show_own && !own_bolt).then_some(own),
-        );
+        let at = st - net::view::INTERP_DELAY_MS;
+        self.drawn_at = Some(at);
+        let ents = self
+            .net
+            .snaps
+            .interpolate(at, (!show_own && !own_bolt).then_some(own));
         if !show_own && !own_bolt {
             // Not seen through its own eyes: the body is made anew (and falls anew) the next time it is.
             self.remotes.remove(&own);
@@ -2952,6 +2988,18 @@ impl NetPlay {
             "clock_jumps": self.net.snaps.jumps,
             "sound": self.sound.report(),
         });
+        let mut d = std::mem::take(&mut self.c.cmd_drawn);
+        d.sort_unstable();
+        let at = |q: f64| {
+            d.get(((d.len() as f64 - 1.0) * q).round() as usize)
+                .copied()
+        };
+        report["cmd_minus_drawn_ms"] = if d.is_empty() {
+            Value::Null
+        } else {
+            json!({ "min": at(0.0), "median": at(0.5), "p95": at(0.95), "max": at(1.0) })
+        };
+        self.c.cmd_drawn = d;
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
         let bolts = self.effects.bolted_stats();
         report["fx"]["bolted"] = json!({
@@ -3489,4 +3537,12 @@ fn channel_volume_command(
         }
     }
     true
+}
+
+/// The time a usercmd is stamped with: the moment the others are drawn at. `CL_FinishMove` stamps
+/// `cmd->serverTime = cl.serverTime`, the time cgame interpolates the entities at (KisakCOD
+/// `client_mp/cl_input.cpp:779`), and the server's antilag judges the command's shots there
+/// (`game/g_weapon.cpp` `G_AntiLagRewindClientPos`).
+fn cmd_clock(st: i32) -> i32 {
+    st - net::view::INTERP_DELAY_MS
 }

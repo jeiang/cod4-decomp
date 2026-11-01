@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD xanim/dobj.cpp (DObjCreateDuplicateParts), GPL-3.0,
+// copyright the KisakCOD contributors and Activision.
 //! Player models: loading the body and attachments the scripts gave a player (or the stock ones of a team), and
 //! posing a player each frame.
 //!
@@ -336,6 +338,12 @@ impl Library {
             prev_at: [0.0; 3],
             yaw: 0.0,
         };
+        // DObj has a valid bind pose even before its first animation tick. In particular a
+        // fixed-step scripted actor can be drawn before enough time accrued for its first step.
+        player
+            .anims
+            .rig()
+            .pose(&[], &Controllers::NONE, &mut player.pose);
         player.set_hand(self.hand(&set.hand)?);
         Ok(player)
     }
@@ -451,6 +459,38 @@ pub struct Player {
 }
 
 impl Player {
+    /// The stock head's first bone must duplicate a body bone rather than sit at the feet.
+    pub fn head_attachment_resolved(&self) -> bool {
+        let Some(body) = self.models.first() else {
+            return false;
+        };
+        let root = usize::from(body.num_bones);
+        self.models
+            .get(1)
+            .is_some_and(|m| m.name.as_deref().is_some_and(|n| n.starts_with("head_mp_")))
+            && self.anims.rig().duplicate_of(root).is_some()
+    }
+
+    /// Every held model is drawn from its posed hand tag, not the entity-root fallback.
+    pub fn held_at_tags(&self, origin: [f32; 3]) -> bool {
+        let models = self.instances(origin);
+        let rig = self.anims.rig();
+        !self.hand.is_empty()
+            && self.hand.iter().enumerate().all(|(i, h)| {
+                let Some(hand) = rig
+                    .bone_index(&h.tag)
+                    .and_then(|b| self.pose.bones().get(b))
+                else {
+                    return false;
+                };
+                models
+                    .get(self.models.len() + i)
+                    .and_then(|m| m.bones.first())
+                    .zip(h.bones(hand).first())
+                    .is_some_and(|(drawn, want)| drawn == want)
+            })
+    }
+
     /// Tells the player where its entity is for the next [`Player::update`]: the frame before is where the entity was
     /// when the last one was placed, which a ragdoll made from it needs to keep the entity's travel.
     pub fn place(&mut self, origin: [f32; 3]) {
@@ -624,15 +664,21 @@ impl Player {
         // What is held follows its tag bone: its own rest bones carried by that bone's matrix.
         let rig = self.anims.rig();
         for h in &self.hand {
-            let Some(tag) = rig.bone_index(&h.tag).and_then(|i| bones.get(i)) else {
-                logging::dedup!(
-                    WARN,
-                    &h.tag,
-                    tag = h.tag.as_str(),
-                    "held model's tag bone missing"
-                );
-                continue;
-            };
+            let tag = rig
+                .bone_index(&h.tag)
+                .and_then(|i| bones.get(i))
+                .unwrap_or_else(|| {
+                    // DObjCreateDuplicateParts leaves modelParents at NO_BONEINDEX when
+                    // an explicit tag is absent: warn, but retain the model at entity root.
+                    logging::dedup!(
+                        WARN,
+                        &h.tag,
+                        model = h.model.name.as_deref().unwrap_or("?"),
+                        tag = h.tag.as_str(),
+                        "held model's tag bone missing"
+                    );
+                    &sim::skel::BoneMat::IDENTITY
+                });
             let mut m = ModelInstance::new(h.model.clone(), ModelKind::World);
             m.casts_cookie = true;
             m.origin = origin;
@@ -648,6 +694,70 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_stock_map_head_melds_by_its_exact_zone_bone_name() {
+        let Some(root) = std::env::var_os("COD4_PATH") else {
+            return;
+        };
+        let root = std::path::Path::new(&root);
+        let mut checked = 0;
+        for entry in std::fs::read_dir(root.join("zone/english"))
+            .expect("zones")
+            .flatten()
+        {
+            let path = entry.path();
+            let Some(map) = path.file_stem().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !map.starts_with("mp_")
+                || map.ends_with("_load")
+                || path.extension().is_none_or(|e| e != "ff")
+            {
+                continue;
+            }
+            let mut lib = Library::load(root, "", map).expect("map models");
+            let heads: Vec<String> = lib
+                .content
+                .model_names("head_mp_")
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            for head in heads {
+                let root_name = lib
+                    .content
+                    .model_bone_names(&head)
+                    .and_then(|names| names.first())
+                    .expect("head root")
+                    .clone();
+                let body = lib
+                    .content
+                    .model_names("body_mp_")
+                    .into_iter()
+                    .find(|body| {
+                        lib.content.model_bone_names(body).is_some_and(|names| {
+                            names
+                                .iter()
+                                .any(|name| name.eq_ignore_ascii_case(&root_name))
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{map}: no compatible body for {head} root {root_name}")
+                    })
+                    .to_owned();
+                let rest = lib
+                    .rest_pose(&body, &[(head.clone(), String::new())])
+                    .expect("head rig");
+                let first = usize::from(rest.models[0].num_bones);
+                assert!(
+                    rest.rig.duplicate_of(first).is_some(),
+                    "{map}: {body} + {head}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the map sweep must exercise stock heads");
+    }
 
     #[test]
     fn a_scripted_body_missing_from_the_zones_is_noted_and_not_drawn() {
@@ -689,6 +799,20 @@ mod tests {
             .expect("allied models")
             .armed(Some((held.clone(), "tag_weapon_right".to_owned())), None);
         let mut p = lib.player(&set).expect("player");
+        let (initial, events) = logging::capture(|| p.instances([0.0; 3]));
+        assert_eq!(
+            initial.len(),
+            3,
+            "a weapon draws before the first animation tick"
+        );
+        assert!(
+            p.held_at_tags([0.0; 3]),
+            "the bind pose places the gun at the hand tag"
+        );
+        assert!(
+            events.is_empty(),
+            "the bind pose already contains the hand tag"
+        );
         p.update(0.0, &PlayerPoseInput::default());
         let models = p.instances([0.0; 3]);
         assert_eq!(models.len(), 3);
@@ -698,6 +822,19 @@ mod tests {
         assert!(
             (20.0..70.0).contains(&at[2]) && at[0].hypot(at[1]) < 40.0,
             "the gun is at {at:?}"
+        );
+        p.hand[0].tag = "tag_absent_regression_389".to_owned();
+        let (missing, events) = logging::capture(|| p.instances([0.0; 3]));
+        assert_eq!(
+            missing.len(),
+            3,
+            "DObj keeps an explicitly unparented model"
+        );
+        assert_eq!(missing[2].bones[0].trans, p.hand[0].rest.bones[0][0].trans);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.field("tag") == Some("tag_absent_regression_389"))
         );
     }
 

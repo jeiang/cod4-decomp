@@ -250,6 +250,22 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_perks::run),
     },
     StageDef {
+        name: "net-antilag",
+        description: "a real UDP client stamps its usercmds with the time it draws the others at and shoots a strafing player: with g_antilag 1 (in the server info) the shots land where it saw the target, with g_antilag 0 they are judged against the live body and mostly miss",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_antilag::run),
+    },
+    StageDef {
+        name: "net-mover",
+        description: "a real UDP client rides a script_brushmodel platform up and down on mp_cargoship: its predicted feet stay on the platform as the client draws it",
+        needs_install: false,
+        timeout: Duration::from_secs(6 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_mover::run),
+    },
+    StageDef {
         name: "headless-bots-sd",
         description: "headless server, 20 bots play Search and Destroy",
         needs_install: false,
@@ -354,6 +370,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_models::run),
     },
     StageDef {
+        name: "client-garage",
+        description: "mp_crash garage in a live devmap match: the parked script-model car and loose dynamic tyre must change separate image regions at the issue #357 pose",
+        needs_install: false,
+        timeout: Duration::from_secs(8 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_garage::run),
+    },
+    StageDef {
         name: "client-viewmodel",
         description: "cod4e --viewmodel-tour on three maps: the first-person weapon and hands drawn from spawn points and paths must not be one colour (a wrong reflection probe painted them red) nor black; an off-hand throw must show the grenade, and the last round and an empty reload their own animations",
         needs_install: false,
@@ -379,7 +403,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-session",
-        description: "the real client gets a person into the world: direct --listen (default join answers) and the stock menus (Start New Server, team, class); the local player must spawn",
+        description: "the real client gets a person into the world: direct --listen (default join answers) and the stock menus (Start New Server, team, class); the local player must spawn; and the stock +set/+exec/+name/+connect launch line joins a cod4e-server",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,

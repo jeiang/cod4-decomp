@@ -1013,10 +1013,16 @@ impl Shell {
         }
     }
 
-    /// A line typed at the console: echoed, then run as one buffer. A cvar's name alone says its value and with a
-    /// value sets it; a `wait` holds the rest of the line.
+    /// A line typed at the console: echoed, then run as one buffer ([`Shell::run_line`]).
     pub fn console_line(&mut self, input: &mut Input, line: &str) {
         self.log(&format!("] {line}"));
+        self.run_line(input, line);
+    }
+
+    /// A console line run as one buffer, as the console runs it but without the echo (`Cbuf_ExecuteBuffer`; the
+    /// command line's `+` lines). A cvar's name alone says its value and with a value sets it; a `wait` holds the
+    /// rest of the line.
+    pub fn run_line(&mut self, input: &mut Input, line: &str) {
         let cmds = crate::input::config::split_commands(line)
             .into_iter()
             .map(|toks| Item {

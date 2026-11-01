@@ -813,8 +813,13 @@ mod tests {
         );
     }
 
+    /// Both tests below send an unknown event type, whose warning is rate limited by one shared `dedup!` key: run in
+    /// parallel, the ignore test can spend the key and the warn test then sees one warning instead of two.
+    static UNKNOWN_EVENTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn non_event_entities_and_unknown_kinds_are_ignored() {
+        let _unknown = UNKNOWN_EVENTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut ev = Events::default();
         let mut p = EntityState::new(5);
         p.etype = etype::PLAYER;
@@ -826,6 +831,8 @@ mod tests {
 
     #[test]
     fn an_unknown_event_type_and_a_malformed_fx_announcement_warn() {
+        let _unknown = UNKNOWN_EVENTS.lock().unwrap_or_else(|e| e.into_inner());
+        logging::new_window();
         let (_, events) = logging::capture(|| {
             let mut ev = Events::default();
             ev.scan(&snap(&[event(965, 0x7e, 1)]));

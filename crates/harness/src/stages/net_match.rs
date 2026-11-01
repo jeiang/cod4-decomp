@@ -202,6 +202,7 @@ fn client(
                 weapons: &rules.weapons,
                 params: &rules.params,
                 time: cmd.server_time,
+                draw_time: cmd.server_time,
             };
             let before = pred.corrections;
             let p = pred.predict(s, &env);

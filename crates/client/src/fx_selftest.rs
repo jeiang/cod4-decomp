@@ -411,6 +411,10 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 .collect(),
         );
     }
+    report.insert(
+        "model_elements_drawn_max".into(),
+        track.iter().map(Vec::len).max().unwrap_or(0).into(),
+    );
     let floor_z = spot.z - 60.0;
     let highest = track.iter().flatten().map(|p| p.z).fold(f32::MIN, f32::max);
     let alive = track.iter().rposition(|f| !f.is_empty());
@@ -1217,10 +1221,8 @@ fn element_types(lib: &Library, name: &str) -> Option<serde_json::Map<String, Va
     Some(counts)
 }
 
-/// The materials and models the loaded effects draw with that are still a stub: the name behind a comma, a reference
-/// to another zone's asset that nothing linked (`DB_LinkXAssetEntry`), with no techset to draw by. The original draws
-/// every sprite of every stock effect, so none may be left; a model that is one is a separate gap (#389) and is
-/// reported.
+/// Materials and models whose definitions did not resolve. An empty model visual list is authored
+/// simulation-only content, not a reference to an external zone.
 pub fn unresolved_references(content: &server::content::Content) -> (Vec<String>, Vec<String>) {
     use assets::zone::fx::FxVisuals;
     let stub = |n: Option<&str>| n.is_some_and(|n| n.starts_with(','));
@@ -1243,7 +1245,11 @@ pub fn unresolved_references(content: &server::content::Content) -> (Vec<String>
                     .flat_map(|d| d.iter().flatten())
                     .for_each(|m| material(m, "decal ")),
                 FxVisuals::Models(ms) => {
-                    for m in ms.iter().flatten() {
+                    for (visual, m) in ms.iter().enumerate() {
+                        let Some(m) = m else {
+                            models.push(format!("{effect}: visual {visual}: null model"));
+                            continue;
+                        };
                         let name = m.name.as_deref().unwrap_or("?");
                         if stub(m.name.as_deref()) {
                             models.push(format!("{effect}: {name}"));
@@ -1271,6 +1277,40 @@ fn references(lib: &Library, report: &mut serde_json::Map<String, Value>, bad: &
     report.insert("unresolved_models".into(), models.len().into());
     report.insert("unresolved_material_names".into(), json!(materials));
     report.insert("unresolved_model_names".into(), json!(models));
+    let mut simulation_only = Vec::new();
+    let mut model_names = Vec::new();
+    for effect in lib.content.effects() {
+        let name = effect.name.as_deref().unwrap_or("?");
+        for (index, el) in effect.elems.iter().enumerate() {
+            if let assets::zone::fx::FxVisuals::Models(models) = &el.visuals {
+                if models.is_empty() {
+                    simulation_only.push(format!("{name}: element {index}"));
+                }
+                for model in models.iter().flatten() {
+                    model_names.push(format!(
+                        "{name}: element {index}: {}",
+                        model.name.as_deref().unwrap_or("?")
+                    ));
+                }
+            }
+        }
+    }
+    simulation_only.sort_unstable();
+    model_names.sort_unstable();
+    model_names.dedup();
+    report.insert(
+        "simulation_only_model_elements".into(),
+        simulation_only.len().into(),
+    );
+    report.insert("simulation_only_model_names".into(), json!(simulation_only));
+    report.insert("resolved_model_names".into(), json!(model_names));
+    if !models.is_empty() {
+        bad.push(format!(
+            "{} effect model visual(s) did not resolve: {}",
+            models.len(),
+            models.join(", ")
+        ));
+    }
     if !materials.is_empty() {
         bad.push(format!(
             "{} effect material(s) are a reference nothing defines, their sprites are never drawn: {}",

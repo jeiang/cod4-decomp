@@ -68,6 +68,15 @@ pub fn split_commands(line: &str) -> Vec<Vec<String>> {
     cmds
 }
 
+/// A command line's `+set`, `+seta`, `+sets` or `+setu` line with a name and a value, as its tokens: the lines
+/// applied before the configs run and again after them. Stock's `Com_StartupVariable` takes only `set` and `seta`;
+/// `sets` and `setu` are our extension, as on the server.
+pub fn startup_set(line: &str) -> Option<Vec<String>> {
+    let toks = split_commands(line).into_iter().next()?;
+    let verb = toks.first()?.to_ascii_lowercase();
+    (matches!(verb.as_str(), "set" | "seta" | "sets" | "setu") && toks.len() >= 3).then_some(toks)
+}
+
 /// `"text"` with `"`, `\` and newlines escaped, so [`split_commands`] reads it back unchanged.
 pub fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
