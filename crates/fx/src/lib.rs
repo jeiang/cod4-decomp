@@ -730,21 +730,6 @@ impl Fx {
         }
     }
 
-    /// Removes an attachment whose owning entity no longer exists, including its live elements.
-    pub fn remove(&mut self, id: u64) {
-        if let Some(i) = self.effects.iter().position(|e| e.id == id) {
-            let e = self.effects.swap_remove(i);
-            for el in e.elems {
-                if el.trail.is_some() {
-                    self.live_trail_elems = self.live_trail_elems.saturating_sub(1);
-                } else {
-                    self.live_elems = self.live_elems.saturating_sub(1);
-                }
-            }
-            self.live_ids.remove(&id);
-        }
-    }
-
     /// Ends the looping of an effect started with [`Fx::play_attached`]; what it already spawned plays out.
     pub fn stop(&mut self, id: u64) {
         if let Some(e) = self.effects.iter_mut().find(|e| e.id == id) {
@@ -1943,17 +1928,29 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_bolt_drops_live_elements_without_waiting_for_expiry() {
-        let d = elem_def(elem::OMNI_LIGHT, FxVisuals::None);
-        let def = effect("removed-bolt", 0, 1, 0, vec![d]);
+    fn a_stopped_unbolted_effect_keeps_its_live_elements_at_the_last_frame() {
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.flags = flags::RUN_RELATIVE_TO_EFFECT;
+        e.spawn = [100, i32::MAX];
+        e.life_span_msec = range(1000, 0);
+        let def = effect("fx/unbolted", 1, 0, i32::MAX, vec![e]);
         let mut fx = Fx::new(Arc::new(Library::default()));
         let id = fx.play_at(&def, Frame::facing(Vec3::ZERO, Vec3::X), 0);
+        fx.update(0, &Empty);
+        let last = Frame::facing(Vec3::new(30.0, 0.0, 0.0), Vec3::X);
+        fx.move_bolted(id, last);
+        fx.update(250, &Empty);
+        let live = fx.live_elems();
+        assert!(live > 0);
+        // `FX_StopEffect`: no more spawns, and what was spawned plays out where the bone last was.
+        fx.stop(id);
+        fx.update(400, &Empty);
         assert!(fx.is_live(id));
-        fx.remove(id);
+        assert_eq!(fx.live_elems(), live);
+        let (_, pos) = fx.attachment_sample(id).unwrap();
+        assert!(pos.distance(last.origin) < 1.0);
+        fx.update(1400, &Empty);
         assert!(!fx.is_live(id));
-        assert_eq!(fx.live_elems(), 0);
-        fx.update(10, &Empty);
-        assert_eq!(fx.live_effects(), 0);
     }
 
     #[test]

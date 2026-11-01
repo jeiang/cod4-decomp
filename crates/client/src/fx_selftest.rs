@@ -721,6 +721,15 @@ fn bolted(
     entity.origin = eye.to_array();
     let number = game.spawn(entity)?;
     let ent = game.entity_value(&mut vm, number);
+    let mut events = crate::events::Events::default();
+    events.take_commands(&mut vec![format!("fx 1 {effect_name}")]);
+    // The client sees the script model before the effect is played on it, as a player in the match would: a
+    // script model first seen starts from its current event sequence (`CG_ResetEntity`) and replays nothing.
+    let mut seen = net::Snapshot::empty();
+    seen.entities = server::netsv::world_entities(&game);
+    if !events.scan(&seen).is_empty() {
+        return Err("a script model first seen replayed events".into());
+    }
     vm.call(
         &mut server::script::ScriptHost {
             game: &mut game,
@@ -740,9 +749,7 @@ fn bolted(
                 .map(|index| (index, value.clone()))
         })
         .collect::<Vec<_>>();
-    let mut events = crate::events::Events::default();
     events.set_effect_tags(&tags);
-    events.take_commands(&mut vec![format!("fx 1 {effect_name}")]);
     let mut fx = Effects::new(&game.content, render_world);
     let mut received = 0;
     for step in 0..=16 {

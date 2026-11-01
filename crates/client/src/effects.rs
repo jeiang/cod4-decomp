@@ -227,7 +227,8 @@ struct ScriptBolt {
     tag: String,
     frame: Option<Frame>,
     attempted: bool,
-    owner: Option<(u16, u32)>,
+    /// The owner's teleport bit when last seen; a flip stops the effect (`FX_GetBoltTemporalBits`).
+    teleport: Option<u32>,
     sample: Option<(i32, u64, Frame, Vec3)>,
     last_frame: Option<Frame>,
 }
@@ -236,7 +237,7 @@ struct ScriptBolt {
 pub struct ScriptBoltStats {
     pub active: usize,
     pub resolved_frames: u64,
-    pub removed: u64,
+    pub stopped: u64,
     pub expired: u64,
     pub missing_tags: u64,
     pub max_tag_displacement: f32,
@@ -548,7 +549,7 @@ impl Effects {
                     tag: tag.clone(),
                     frame: None,
                     attempted: false,
-                    owner: None,
+                    teleport: None,
                     sample: None,
                     last_frame: None,
                 });
@@ -986,20 +987,22 @@ impl Effects {
         }
     }
 
-    /// Applies the current animated world tags, forgetting vanished entities and naturally finished effects.
+    /// Applies the current animated world tags. As `FX_UpdateEffectBolt` (fx_update.cpp) does, an effect whose entity
+    /// vanished, teleported or no longer resolves the tag (a new model) is stopped and unbolted (`FX_StopEffect`):
+    /// it spawns nothing more and what it spawned plays out at the last frame.
     pub fn update_script_bolts(&mut self, entities: &[EntityState], now_ms: i32) {
         let mut bolts = std::mem::take(&mut self.script_bolts);
         bolts.retain_mut(|b| {
             let owner = entities.iter().find(|e| e.number == b.entity);
-            let identity = owner.map(|e| (e.model, e.eflags & net::entity::TELEPORT_BIT));
-            if owner.is_none() || b.owner.is_some_and(|old| Some(old) != identity) {
+            let teleport = owner.map(|e| e.eflags & net::entity::TELEPORT_BIT);
+            if owner.is_none() || b.teleport.is_some_and(|old| Some(old) != teleport) {
                 if let Some(id) = b.id {
-                    self.fx.remove(id);
+                    self.fx.stop(id);
                 }
-                self.bolt_stats.removed += 1;
+                self.bolt_stats.stopped += 1;
                 return false;
             }
-            b.owner = identity;
+            b.teleport = teleport;
             if let Some(id) = b.id
                 && !self.fx.is_live(id)
             {
@@ -1008,15 +1011,18 @@ impl Effects {
             }
             if b.attempted && b.frame.is_none() {
                 self.bolt_stats.missing_tags += 1;
-                logging::dedup!(
-                    WARN,
-                    "bolt-tag",
-                    entity = b.entity,
-                    tag = b.tag.as_str(),
-                    "effect attachment tag not found"
-                );
                 if let Some(id) = b.id {
-                    self.fx.remove(id);
+                    // A tag that resolved before and no longer does: the model changed under the effect.
+                    self.fx.stop(id);
+                    self.bolt_stats.stopped += 1;
+                } else {
+                    logging::dedup!(
+                        WARN,
+                        "bolt-tag",
+                        entity = b.entity,
+                        tag = b.tag.as_str(),
+                        "effect attachment tag not found"
+                    );
                 }
                 return false;
             }

@@ -2954,7 +2954,7 @@ impl NetPlay {
         report["fx"]["bolted"] = json!({
             "active": bolts.active,
             "resolved_frames": bolts.resolved_frames,
-            "removed": bolts.removed,
+            "stopped": bolts.stopped,
             "expired": bolts.expired,
             "missing_tags": bolts.missing_tags,
             "tag_displacement": bolts.max_tag_displacement,

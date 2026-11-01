@@ -251,12 +251,20 @@ impl Events {
             self.seen.insert(e.number, e.event_seq);
             out.extend(self.decode(e, entities));
         }
-        for e in snap.entities.iter().filter(|e| e.etype != etype::EVENT) {
+        for e in snap
+            .entities
+            .iter()
+            .filter(|e| !matches!(e.etype, etype::EVENT | etype::FX | etype::LOOP_FX))
+        {
             live.push(e.number);
-            let count = self
-                .seen
-                .get(&e.number)
-                .map_or(4, |last| e.event_seq.wrapping_sub(*last).min(4));
+            // An entity not seen before follows `CG_ResetEntity` (cg_snapshot_mp.cpp:415-479): a general entity or a missile
+            // starts from sequence 0, so the events it was spawned with play; any other type starts from its current
+            // sequence, so a late joiner or a re-entering entity does not replay its history.
+            let last = self.seen.get(&e.number).copied().unwrap_or(match e.etype {
+                etype::GENERAL | etype::MISSILE => 0,
+                _ => e.event_seq,
+            });
+            let count = e.event_seq.wrapping_sub(last).min(4);
             self.seen.insert(e.number, e.event_seq);
             let recent = e.recent_events();
             for &(event, parm) in &recent[4 - usize::from(count)..] {
@@ -447,10 +455,14 @@ mod tests {
         ]);
         let mut target = EntityState::new(20);
         target.etype = etype::SCRIPT_MODEL;
-        target.event_seq = 2;
+        target.event_seq = 1;
+        target.set_recent_events([(0, 0), (0, 0), (0, 0), (ev::PLAY_FX_ON_TAG, 2)]);
+        // A script model first seen (a late join, re-entering the view) starts from its current sequence.
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        target.event_seq = 3;
         target.set_recent_events([
             (0, 0),
-            (0, 0),
+            (ev::PLAY_FX_ON_TAG, 2),
             (ev::PLAY_FX_ON_TAG, 1),
             (ev::PLAY_FX_ON_TAG, 2),
         ]);
@@ -471,16 +483,23 @@ mod tests {
             ]
         );
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
-        target.event_seq = 3;
+        target.event_seq = 4;
         target.set_recent_events([
-            (0, 0),
+            (ev::PLAY_FX_ON_TAG, 2),
             (ev::PLAY_FX_ON_TAG, 1),
             (ev::PLAY_FX_ON_TAG, 2),
             (ev::PLAY_FX_ON_TAG, 1),
         ]);
         assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
+        // Leaving and re-entering the snapshot replays nothing.
         events.scan(&snap(&[]));
-        assert_eq!(events.scan(&snap(&[target])).len(), 3);
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        // A general entity first seen plays the events it carries from sequence 0, as `CG_ResetEntity` resets it.
+        let mut general = target.clone();
+        general.number = 21;
+        general.etype = etype::GENERAL;
+        general.event_seq = 2;
+        assert_eq!(events.scan(&snap(&[target, general])).len(), 2);
     }
 
     #[test]
@@ -498,7 +517,7 @@ mod tests {
         target.event_seq = 255;
         target.event = ev::PLAY_FX_ON_TAG;
         target.event_parm = 1;
-        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
         target.event_seq = 0;
         assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
