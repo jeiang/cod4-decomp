@@ -8,7 +8,7 @@
 //! off and checks both the black-card region and the trunk's shadow-only darkening. Needs a display and the install.
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
-use super::client_session::{run_client, verdict as session_verdict};
+use super::client_session::{gpu_problem, render_problem, run_client, steps_problem};
 use crate::stage::{StageCtx, StageReport, Status};
 use std::io;
 use std::path::Path;
@@ -171,7 +171,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     format!("{mode}/ui-script.json"),
                     format!("{mode}/foliage-{mode}.png"),
                 ]);
-                if let Some(problem) = session_verdict(&report) {
+                if let Some(problem) = gpu_problem(&report["gpu_health"])
+                    .or_else(|| render_problem(&report))
+                    .or_else(|| steps_problem(&report))
+                {
                     out.status = Status::Failed;
                     out.reason = Some(problem);
                     return Ok(out);
