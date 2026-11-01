@@ -159,6 +159,9 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("ui_multiplayer", "1", false),
     ("ui_buildLocation", "-100 52", false),
     ("ui_buildSize", "0.3", false),
+    // The one value each of these has here (see `UNSUPPORTED`); the Sound and Game Options pages show them.
+    ("snd_outputConfiguration", "Windows default", true),
+    ("monkeytoy", "0", true),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
@@ -248,6 +251,18 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "snd_khz",
         "44",
         "the mixer runs at the sound device's own rate; this build has no 11/22 kHz output",
+    ),
+    // `SND_InitDriver` (sound/snd_driver.cpp): an enum, index 0 the default; the Sound options page shows it (#372).
+    (
+        "snd_outputConfiguration",
+        "Windows default",
+        "the mixer plays through the sound device's own channel layout",
+    ),
+    // `Con_Init` (client/cl_console.cpp): the Game Options page's Enable Console (#372).
+    (
+        "monkeytoy",
+        "0",
+        "the console is always open to the player in this build",
     ),
     (
         "snd_enableEq",
