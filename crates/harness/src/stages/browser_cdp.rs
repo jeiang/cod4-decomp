@@ -2,7 +2,9 @@
 //! A trusted click in the headless page, through Chromium's DevTools pipe. It grants the transient activation a real
 //! player's click grants; mouse deltas themselves still go through the dev control channel.
 
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(unix)]
+use serde_json::json;
 use std::io;
 use std::process::Command;
 
