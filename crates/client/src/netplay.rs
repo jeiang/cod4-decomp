@@ -2785,7 +2785,6 @@ impl NetPlay {
             "usercmds": self.c.cmds,
             "predictions": self.c.predictions,
             "prediction_corrections": self.pred.corrections,
-            "cmd_minus_drawn_ms": self.c.cmd_drawn.map(|(lo, hi)| json!({ "min": lo, "max": hi })),
             "players_seen_max": self.c.max_players_seen,
             "moved": moved,
             "path": self.c.path,
@@ -2824,6 +2823,11 @@ impl NetPlay {
             "clock_jumps": self.net.snaps.jumps,
             "sound": self.sound.report(),
         });
+        report["cmd_minus_drawn_ms"] = json!(
+            self.c
+                .cmd_drawn
+                .map(|(lo, hi)| json!({ "min": lo, "max": hi }))
+        );
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
         report["script_model_parts_max"] = self.c.script_model_parts_max.into();
         report["player_attachments"] = json!(self.c.player_attachments);
