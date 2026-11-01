@@ -259,6 +259,45 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
     result
 }
 
+/// The record meter's white outline (`UI_DrawRecordLevel`, KisakCOD `ui_mp/ui_main_mp.cpp:1524-1533`) must be on
+/// screen at the rectangle the meter last drew: most of its top and bottom edges near-white.
+fn meter_outline(shot: &Path, rect: &Value) -> Result<(), String> {
+    let r: Vec<f64> = rect
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default();
+    let [x, y, w, h] = r[..] else {
+        return Err(format!("the record meter reported no rectangle: {rect}"));
+    };
+    if w < 4.0 || h < 4.0 {
+        return Err(format!(
+            "the record meter's rectangle is degenerate: {rect}"
+        ));
+    }
+    let (width, height, rgb) = super::client_models::decode(shot)?;
+    let white = |px: u32, py: u32| {
+        let i = ((py * width + px) * 3) as usize;
+        rgb[i..i + 3].iter().all(|&c| c >= 200)
+    };
+    // The share of white pixels on the best row near an edge (an edge is one 640-unit, a pixel or two).
+    let edge = |ey: f64| -> f64 {
+        let (x0, x1) = (x.max(0.0) as u32, ((x + w) as u32).min(width));
+        let rows = (ey - 1.0).max(0.0) as u32..((ey + 2.0) as u32).min(height);
+        rows.map(|py| {
+            let lit = (x0..x1).filter(|&px| white(px, py)).count();
+            lit as f64 / f64::from(x1.saturating_sub(x0).max(1))
+        })
+        .fold(0.0, f64::max)
+    };
+    let (top, bottom) = (edge(y), edge(y + h - 1.0));
+    if top < 0.8 || bottom < 0.8 {
+        return Err(format!(
+            "the record meter's outline is not on screen at {rect}: top edge {top:.2} white, bottom {bottom:.2}"
+        ));
+    }
+    Ok(())
+}
+
 /// A second person joins the listen server and talks ([`voice_speaker::Speaker`]); the server relays the voice and the
 /// cgame talker slots (193-196) must name them, then `cg_drawTalk` given by its stock names must hide and show them by
 /// side (`CG_DrawTalkerNum`, KisakCOD `cgame_mp/cg_newDraw_mp.cpp:2287`).
@@ -422,19 +461,33 @@ fn play(
     c.step("record level ownerdraw", |c| {
         // UI_DrawRecordLevel in the stock voice options; the slot hosts have no microphone (#488), so only the
         // meter's drawing is checked, not a level.
+        let before = c.lookup("menu.open")?;
         c.console("openmenu options_voice")?;
         let result = c.until(
             json!({"hud.report.record_meter_marks":{"ge":1}}),
             secs(10),
             "the voice options never drew the record level (265)",
         );
-        if result.is_ok() {
-            c.capture("record-level")?;
-        } else {
+        let result = result.and_then(|_| {
+            let shot = c.capture("record-level")?;
+            let rect = c.lookup("hud.report.record_meter_rect")?;
+            notes.push(format!("record meter rect {rect}"));
+            meter_outline(&shot, &rect)
+        });
+        if result.is_err() {
             notes.push(format!("open menus: {}", c.lookup("menu.open")?));
         }
         c.console("closemenu options_voice")?;
-        result.map(|_| ())
+        result?;
+        // The match's menus must be as they were, or the steps after play with a menu up.
+        c.pause(Duration::from_millis(500))?;
+        let after = c.lookup("menu.open")?;
+        if after != before {
+            return Err(format!(
+                "closing the voice options left {after} open, not {before}"
+            ));
+        }
+        Ok(())
     })?;
     c.step("stock server dvar registrations", |c| {
         // KisakCOD game_mp/g_main_mp.cpp:407,632-648,694-712 and server_mp/sv_init_mp.cpp:708-722,771.

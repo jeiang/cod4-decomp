@@ -274,6 +274,7 @@ pub fn draw(
             crate::voice::meter_level(&mut h.meter_slots, &mut h.meter_count, h.voice_level);
         h.record_level = level;
         h.record_meter_marks += 1;
+        h.record_meter_rect = [r.x, r.y, r.w, r.h];
         let width = r.w * level - 4.0 * unit;
         if level > 0.0 && width > 0.0 {
             p.fill(

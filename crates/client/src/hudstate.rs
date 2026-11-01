@@ -360,6 +360,8 @@ pub struct HudFacts {
     /// The level the record meter last drew (0..1) and how often it drew.
     pub record_level: f32,
     pub record_meter_marks: u32,
+    /// Where the record meter last drew, in pixels (x, y, w, h).
+    pub record_meter_rect: [f32; 4],
     /// Talker icons drawn by the cgame slots (193-196) and by the UI slots (267-270).
     pub talker_marks: u32,
     pub ui_talker_marks: u32,
@@ -572,6 +574,7 @@ impl HudFacts {
             "local_talking": self.local_talking,
             "record_level": self.record_level,
             "record_meter_marks": self.record_meter_marks,
+            "record_meter_rect": self.record_meter_rect,
             "talkers": self.talkers,
             "vehicles_max": self.vehicles_max,
             "enemy_vehicles_max": self.enemy_vehicles_max,
