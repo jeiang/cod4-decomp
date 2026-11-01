@@ -28,12 +28,14 @@ use crate::props::{Launches, Props};
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::{Sight, ViewModel, ViewTags};
 use crate::wire::Wire;
+use assets::zone::clipmap::Clipmap;
 use glam::Vec3;
 use net::client::NetClient;
 use net::entity::{EntityState, etype};
 use net::predict::{Env, PlayerBoxes, Predictor};
 use render::ModelInstance;
 use serde_json::{Value, json};
+use server::nav::{NavMesh, NodeId, PathScratch, Steer};
 use server::netsv::eflags;
 use server::playeranim::{LegsWire, PlayerPoseInput, TorsoWire};
 use sim::cm::{Collide, ENTITYNUM_NONE};
@@ -44,6 +46,7 @@ use sim::weapon::gun::ViewFx;
 use sim::weapon::{PlayerWeapons, WeaponTable};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use web_time::Instant;
 
@@ -551,6 +554,7 @@ impl NetPlay {
         sound: ClientSound,
     ) -> Result<Self, String> {
         let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
+        let auto = autoplay.then(|| Auto::new(&clipmap));
         let world = map.world.clone();
         let t = Wire::open(server)?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -603,7 +607,7 @@ impl NetPlay {
             sight: None,
             gun_drawn: false,
             c: Counters::default(),
-            auto: autoplay.then(Auto::default),
+            auto,
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
@@ -881,6 +885,9 @@ impl NetPlay {
                 .set_tracer_material(self.tracer_material.clone());
             self.params.mantle_anims = lib.content.mantle_anims();
             self.lib = lib;
+            if let Some(a) = self.auto.as_mut() {
+                a.nav = AutoNav::new(&clipmap).map(Box::new);
+            }
             self.boxes = PlayerBoxes::new(clipmap);
             self.brush_surfaces = brush_surfaces(&map.world);
             self.sound = sound;
@@ -2937,7 +2944,8 @@ fn pose_input(
 
 // ---- autoplay -------------------------------------------------------------------------------------------------
 
-/// A bot's brain for the harness: walks, turns away from walls, turns toward the nearest enemy it can see and fires.
+/// A bot's brain for the harness: walks the map toward the nearest enemy, turns toward the nearest enemy it can see
+/// and fires.
 #[derive(Default)]
 struct Auto {
     t: f32,
@@ -2948,8 +2956,91 @@ struct Auto {
     reload_at: f32,
     target_seen_at: f32,
     /// Once a second: `[t, x, y, z, players and enemies in the snapshot, nearest enemy's distance (-1 none), seen,
-    /// alive, own team flags]`.
+    /// in play (alive and not in a killcam), own team flags]`.
     track: Vec<[f32; 10]>,
+    nav: Option<Box<AutoNav>>,
+}
+
+impl Auto {
+    fn new(clipmap: &Arc<Clipmap>) -> Self {
+        Self {
+            nav: AutoNav::new(clipmap).map(Box::new),
+            ..Self::default()
+        }
+    }
+}
+
+/// The autoplay's way to an enemy out of sight: the server bots' navigation mesh (`server::nav`), generated from the
+/// client's own copy of the map's collision. Walking straight at an enemy behind a wall pinned the player to the
+/// wall for the whole match on some routes of mp_crash (#464).
+struct AutoNav {
+    mesh: NavMesh,
+    scratch: PathScratch,
+    path: Vec<NodeId>,
+    steer: Steer,
+    repath_at: f32,
+    /// The mesh is not used until then: no route, or the walk along it stopped making progress.
+    off_until: f32,
+}
+
+impl AutoNav {
+    /// How often the path is searched again, as the enemy moves (s).
+    const REPATH: f32 = 1.5;
+
+    fn new(clipmap: &Arc<Clipmap>) -> Option<Self> {
+        let ents = clipmap.map_ents.as_ref()?;
+        let seeds: Vec<[f32; 3]> = server::nav::spawn_points(&ents.entity_string)
+            .iter()
+            .map(|s| s.origin)
+            .collect();
+        let mesh = NavMesh::generate(&sim::world::World::new(clipmap.clone()), &seeds);
+        let st = mesh.stats();
+        tracing::info!(
+            nodes = st.nodes,
+            ms = st.generation_ms,
+            "autoplay navigation generated"
+        );
+        Some(Self {
+            scratch: PathScratch::new(&mesh),
+            mesh,
+            path: Vec::new(),
+            steer: Steer::new(),
+            repath_at: 0.0,
+            off_until: 0.0,
+        })
+    }
+
+    /// The next point to walk to on the way from `feet` to `goal` (both on the floor), or `None` when the mesh has no
+    /// way or the walk along it is stuck.
+    fn toward(
+        &mut self,
+        world: &impl Collide,
+        t: f32,
+        feet: [f32; 3],
+        goal: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        if t < self.off_until {
+            return None;
+        }
+        if self.path.is_empty() || t >= self.repath_at {
+            self.repath_at = t + Self::REPATH;
+            let (from, to) = (self.mesh.nearest_node(feet)?, self.mesh.nearest_node(goal)?);
+            if !self.mesh.path(from, to, &mut self.scratch, &mut self.path) {
+                self.off_until = t + Self::REPATH;
+                return None;
+            }
+            self.mesh.smooth(world, &mut self.path);
+            self.steer.reset();
+        }
+        let out = self.steer.update(&self.mesh, &self.path, feet);
+        if out.stuck {
+            // Turning away from the wall takes over for a moment, then a fresh path.
+            self.path.clear();
+            self.off_until = t + Self::REPATH;
+            return None;
+        }
+        (!out.arrived).then_some(out.waypoint)
+    }
 }
 
 impl NetPlay {
@@ -3060,11 +3151,12 @@ impl NetPlay {
             }
         }
         let visible = best.is_some();
+        // In the world with a body: not dead, and not watching a killcam (whose snapshots are the past's).
+        let playing = self
+            .net
+            .latest()
+            .is_some_and(|s| s.follow.is_none() && alive(&s.ps));
         if a.track.last().is_none_or(|l| a.t - l[0] >= 1.0) {
-            let alive = self
-                .net
-                .latest()
-                .is_some_and(|s| !matches!(s.ps.pm_type, PmType::Dead | PmType::DeadLinked));
             a.track.push([
                 a.t,
                 feet[0],
@@ -3074,18 +3166,29 @@ impl NetPlay {
                 enemies as f32,
                 nearest.map_or(-1.0, |(d, _)| d),
                 f32::from(u8::from(visible)),
-                f32::from(u8::from(alive)),
+                f32::from(u8::from(playing)),
                 my_team as f32,
             ]);
         }
-        // Out of sight, the bot walks toward the nearest enemy anyway (a test driver, not a person: it reads the
-        // snapshot) and turns away from walls when stuck.
-        let aim = best.or(nearest);
-        if a.t < a.turn_until && !visible {
+        // Out of sight, the bot heads for the nearest enemy anyway (a test driver, not a person: it reads the
+        // snapshot), along the navigation mesh where it has a way, and turns away from walls when stuck.
+        let waypoint = match (a.nav.as_deref_mut(), nearest) {
+            (Some(nav), Some((_, at))) if playing && !visible => {
+                let goal = at - Vec3::Z * 50.0;
+                nav.toward(self.boxes.world(), a.t, feet, goal.to_array())
+            }
+            _ => None,
+        };
+        // The way's next point is looked at level, from the eye.
+        let along = nearest
+            .zip(waypoint)
+            .map(|((d, _), w)| (d, Vec3::new(w[0], w[1], eye.z)));
+        let aim = best.or(along).or(nearest);
+        if a.t < a.turn_until && !visible && waypoint.is_none() {
             f.look_delta_yaw = a.turn_dir * 200.0 * dt;
             f.move_forward = 0.7;
         } else if let Some((dist, at)) = aim.filter(|(d, _)| *d > 120.0) {
-            if visible {
+            if visible && playing {
                 self.c.target_frames += 1;
                 self.c.in_range_frames += u64::from(dist < FIRE);
                 a.target_seen_at = a.t;
