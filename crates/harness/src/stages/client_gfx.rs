@@ -67,9 +67,6 @@ cgis=fps 0,set=set cg_drawFPS 1,wait=1,cgis=fps 1,shot=fps,set=set cg_drawFPS Of
 subtitle=MP_WAITING,wait=0.5,cgis=subtitle 1,wait=4,cgis=subtitle 0,\
 set=set cg_subtitles 0,subtitle=MP_WAITING,wait=0.5,cgis=subtitle 0,set=set cg_subtitles 1,\
 devmap=mp_crash,ingame=120,console=god,wait=1,\
-bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 1,\
-console=set bg_bobMax 0,wait=1,bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 0,\
-console=set bg_bobMax 8,wait=1,\
 gfxis=nearfar 4 0,gfxis=depthhack_near 0.1,gfxis=outdoor 1 32 0 8,\
 set=set r_znear 0.5,set=set r_zfar 2000,set=set r_znear_depthhack 0.25,\
 set=set r_outdoor 0,set=set r_outdoorAwayBias 4,set=set r_outdoorDownBias 2,set=set r_outdoorFeather 16,\
@@ -146,6 +143,9 @@ set=set r_zFeather 1,set=set r_drawWater 1,set=set r_texFilterAnisoMin 1,set=set
 set=set r_aspectRatio auto,vidrestart,wait=2,gfxis=zfeather 1,gfxis=water 1,\
 gfxis=aa 1,gfxis=specular 1,gfxis=dof 1,gfxis=blur 0,holdkey=mouse2,releasekey=mouse2,wait=2,gfxis=blur 1,\
 holdkey=mouse2,releasekey=mouse2,wait=1,gfxis=glow 1,gfxis=shadows 1,gfxis=aspect 0.00,shot=gfx-off,\
+bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 1,\
+console=set bg_bobMax 0,wait=1,bobmark,holdkey=w,wait=1.5,releasekey=w,holdkey=s,wait=1.5,releasekey=s,cgis=eyebob 0,\
+console=set bg_bobMax 8,wait=1,\
 losedevice,renderer=90,ingame=120,wait=2,gfxis=aa 1,shot=recovered";
 
 /// Share of pixels a light must brighten, and by how much (of 255, in luma).
