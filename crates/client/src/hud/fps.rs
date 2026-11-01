@@ -19,7 +19,7 @@ use crate::input::Cvars;
 use crate::ui::Ui;
 use crate::ui::paint::Painter;
 use render::ui2d::{self, TextStyle};
-use std::time::Instant;
+use web_time::Instant;
 
 /// Frames the original averages over.
 const WINDOW: usize = 32;
