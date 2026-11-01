@@ -84,26 +84,7 @@ fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
         tracing::warn!(map, "map effect mapping is not UTF-8");
         return Vec::new();
     };
-    let mut names = BTreeMap::new();
-    let mut rest = map_text;
-    while let Some(p) = rest.find("level._effect[") {
-        rest = &rest[p + "level._effect[".len()..];
-        let Some(p) = rest.find("loadfx") else { break };
-        let line = &rest[..p];
-        let Some(key) = quoted(line) else {
-            tracing::warn!(map, "malformed map effect mapping key");
-            rest = &rest[p..];
-            continue;
-        };
-        rest = &rest[p + "loadfx".len()..];
-        let Some(p) = rest.find('(') else { break };
-        let Some(file) = quoted(&rest[p + 1..]) else {
-            tracing::warn!(map, "malformed map effect definition");
-            break;
-        };
-        names.insert(key.to_owned(), file.to_owned());
-        rest = &rest[p + 1..];
-    }
+    let names = mappings(map_text, map);
     let path = format!("maps/createfx/{map}_fx.gsc");
     let Some(text) = content.rawfile(&path) else {
         tracing::warn!(map, path, "map createfx file is missing");
@@ -155,7 +136,8 @@ fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
         };
         let (forward, right, up) = sim::pm::math::angle_vectors(&angles);
         out.push(AmbientEffect {
-            name: name.clone(),
+            // Lower case, as the library resolves names: the counters are keyed by it.
+            name: name.to_lowercase(),
             frame: Frame {
                 origin: Vec3::from(origin),
                 axis: [Vec3::from(forward), -Vec3::from(right), Vec3::from(up)],
@@ -165,6 +147,31 @@ fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
         });
     }
     out
+}
+
+/// The effect key to definition mappings a map's effect script assigns, one per line that begins
+/// `level._effect[`; script that merely reads `level._effect[...]` is not a mapping.
+fn mappings(map_text: &str, map: &str) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::new();
+    for line in map_text.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("level._effect[") else {
+            continue;
+        };
+        let Some(p) = rest.find("loadfx") else {
+            continue;
+        };
+        // A key that is not a literal (`level._effect[ fxName ]`) is a script helper, not a map mapping.
+        let Some(key) = quoted(&rest[..p]) else {
+            continue;
+        };
+        let rest = &rest[p + "loadfx".len()..];
+        let Some(file) = rest.find('(').and_then(|p| quoted(&rest[p + 1..])) else {
+            tracing::warn!(map, "malformed map effect definition");
+            continue;
+        };
+        names.insert(key.to_owned(), file.to_owned());
+    }
+    names
 }
 
 fn quoted(s: &str) -> Option<&str> {
@@ -213,6 +220,18 @@ mod tests {
         assert_eq!(
             number_after("ent.v[ \"delay\" ] = 0.2;", "\"delay\""),
             Some(0.2)
+        );
+    }
+
+    #[test]
+    fn only_lines_that_assign_a_mapping_are_mappings() {
+        let s = "main()\n{\n\tlevel._effect[ \"rain\" ] = loadfx( \"weather/rain_a\" );\n\
+                 \tif ( !isdefined( level._effect[ fxName ] ) )\n\t\tlevel._effect[ fxName ] = loadfx( fxFile );\n}\n";
+        let names = mappings(s, "test");
+        assert_eq!(names.len(), 1);
+        assert_eq!(
+            names.get("rain").map(String::as_str),
+            Some("weather/rain_a")
         );
     }
 }

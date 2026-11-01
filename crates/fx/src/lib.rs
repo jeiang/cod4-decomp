@@ -361,6 +361,8 @@ struct Effect {
     /// The average light where the effect started, for the elements that take their colour from it; sampled by the
     /// first update.
     light: Option<[u8; 3]>,
+    /// Lower-case name of the effect that was played, which runner children inherit: what their draws count against.
+    root: Arc<str>,
 }
 
 pub struct Fx {
@@ -610,6 +612,7 @@ impl Fx {
             last_move: at,
             spawned: Vec::new(),
             light: None,
+            root: def.name.as_deref().unwrap_or("").to_lowercase().into(),
         };
         self.next_id += 1;
         self.begin(&mut e, at);
@@ -849,17 +852,23 @@ impl Fx {
         self.now = now_ms;
         let mut effects = std::mem::take(&mut self.effects);
         let mut spawned: Vec<(Arc<FxEffectDef>, Frame, i32)> = Vec::new();
+        // The root of the effect that spawned each entry of `spawned`.
+        let mut roots: Vec<Arc<str>> = Vec::new();
         for e in &mut effects {
             self.update_effect(e, now_ms, world, &mut spawned);
+            roots.resize(spawned.len(), e.root.clone());
         }
         // Effects started by this update run too, from the moment they were started.
         let mut rounds = 0;
         while !spawned.is_empty() && rounds < 4 {
             rounds += 1;
             let batch = std::mem::take(&mut spawned);
-            for (def, frame, at) in batch {
+            let batch_roots = std::mem::take(&mut roots);
+            for ((def, frame, at), root) in batch.into_iter().zip(batch_roots) {
                 if let Some(mut ne) = self.start(effects.len(), &def, frame, at) {
+                    ne.root = root;
                     self.update_effect(&mut ne, now_ms, world, &mut spawned);
+                    roots.resize(spawned.len(), ne.root.clone());
                     effects.push(ne);
                 }
             }
@@ -1233,16 +1242,20 @@ impl Fx {
         self.draw_counted(cam, out, &mut |_, _| {});
     }
 
-    /// Everything to draw, with the number of sprite quads each effect contributes after culling.
+    /// Everything to draw, with the number of draws (sprite quads, clouds, models and trail strips) each played effect
+    /// contributes after culling, by the lower-case name of the effect that was played: a runner's children count
+    /// against it.
     pub fn draw_counted(
         &mut self,
         cam: &Camera,
         out: &mut Draws,
         observer: &mut dyn FnMut(&str, usize),
     ) {
+        let count =
+            |out: &Draws| out.quads.len() + out.clouds.len() + out.models.len() + out.trails.len();
         let mut blockers = Vec::new();
         for e in &self.effects {
-            let before = out.quads.len();
+            let before = count(out);
             self.draw_trails(e, cam, out);
             let light = e.light.unwrap_or(NEUTRAL_LIGHT);
             for el in &e.elems {
@@ -1407,9 +1420,9 @@ impl Fx {
                     _ => {}
                 }
             }
-            let drawn = out.quads.len() - before;
+            let drawn = count(out) - before;
             if drawn != 0 {
-                observer(e.def.name.as_deref().unwrap_or(""), drawn);
+                observer(&e.root, drawn);
             }
         }
         self.blockers = blockers;
@@ -2529,6 +2542,31 @@ mod tests {
             axis: [Vec3::X, Vec3::Y, Vec3::Z],
             frustum: None,
         }
+    }
+
+    #[test]
+    fn a_runners_child_draws_count_against_the_lower_case_effect_that_was_played() {
+        let child = sprite_effect([255; 4], |_| {});
+        let runner = elem_def(
+            elem::RUNNER,
+            FxVisuals::Effects(Arc::from(vec![Some(Arc::<str>::from("fx/sprite"))])),
+        );
+        let parent = effect("FX/Parent", 0, 1, 0, vec![runner]);
+        let mut fx = Fx::new(lib(vec![child, parent.clone()]));
+        fx.play(&parent, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(10, &Empty);
+        fx.update(20, &Empty);
+        let mut d = Draws::default();
+        let mut counted = Vec::new();
+        fx.draw_counted(
+            &cam_at(Vec3::new(-400.0, 0.0, 0.0)),
+            &mut d,
+            &mut |name, n| {
+                counted.push((name.to_owned(), n));
+            },
+        );
+        assert!(!d.quads.is_empty());
+        assert_eq!(counted, vec![("fx/parent".to_owned(), d.quads.len())]);
     }
 
     #[test]
