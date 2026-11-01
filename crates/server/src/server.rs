@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The voice audience and session checks (`hears_voice`) are translated from KisakCOD (server_mp/sv_voice_mp.cpp G_BroadcastVoice, game_mp/g_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Synchronous command selection follows KisakCOD game_mp/g_active_mp.cpp:801-833 (GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The headless server: boot, map load, console commands and the frame loop.
 //!
 //! Boot follows the original's dedicated start: command-line `set`s first, `default_mp.cfg`
@@ -14,9 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use gsc::{
-    Builtins, CallOutcome, EntClass, Obj, Options, Value, Vm, VmError, VmErrorKind, compile,
-};
+use gsc::{Builtins, CallOutcome, EntClass, Obj, Value, Vm, VmError, VmErrorKind, compile};
 
 use crate::ban::BanList;
 use crate::bot::{BotShared, Brain};
@@ -65,6 +64,42 @@ fn menu_response_args(server_id: i32, argv: &[String]) -> Option<[String; 2]> {
 /// What a person typed as the text of a chat line: no control characters, which steer the localizer.
 fn plain_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// `SV_GetChallenge`/`SV_Status`: the server's keywords, with the stock `demo ` marker under `fs_restrict`.
+fn server_keywords(c: &Cvars) -> String {
+    let keywords = c.string("sv_keywords");
+    if c.bool("fs_restrict") {
+        format!("demo {keywords}")
+    } else {
+        keywords.to_owned()
+    }
+}
+
+/// `Scr_CompileScripts`' `developer_script`: the `/# ... #/` blocks only compile when it is on.
+fn script_options(c: &Cvars) -> gsc::Options {
+    gsc::Options {
+        developer: c.bool("developer_script"),
+    }
+}
+
+/// `ClientThink` retains the latest received command; `G_RunClient` reuses it every synchronous frame
+/// at level time, even when nothing arrived. Normal play still runs the entire received backlog.
+fn frame_cmds(
+    mut cmds: Vec<sim::pm::UserCmd>,
+    retained: sim::pm::UserCmd,
+    synchronous: bool,
+    time: i32,
+) -> impl Iterator<Item = sim::pm::UserCmd> {
+    let frame = synchronous.then(|| {
+        let mut cmd = cmds.last().copied().unwrap_or(retained);
+        cmd.server_time = time;
+        cmd
+    });
+    if synchronous {
+        cmds.clear();
+    }
+    frame.into_iter().chain(cmds)
 }
 
 /// The password a `connect` must give (`g_password`); the literal `none` means no password, as at the original.
@@ -352,6 +387,18 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_oldVoting", "1", ARCHIVE),
         ("fs_game", "", SYSTEMINFO | INIT),
         ("g_playerCollisionEjectSpeed", "25", ARCHIVE),
+        // Stock registrations a config or script may read (issue #369; `game_mp/g_main_mp.cpp`,
+        // `server_mp/sv_init_mp.cpp`): red crosshairs over enemies, the ban list, the friendly fire and name
+        // distances, the published IWD lists, the client command log switch, packet padding and the animation dump.
+        ("g_redCrosshairs", "1", LATCH | ARCHIVE),
+        ("g_banIPs", "", ARCHIVE),
+        ("g_friendlyfireDist", "256", CHEAT),
+        ("g_friendlyNameDist", "15000", CHEAT),
+        ("sv_iwds", "", SYSTEMINFO | ROM),
+        ("sv_iwdNames", "", SYSTEMINFO | ROM),
+        ("sv_showCommands", "0", 0),
+        ("sv_padPackets", "0", 0),
+        ("g_dumpAnims", "-1", CHEAT),
         ("sv_keywords", "", SERVERINFO),
         ("protocol", "", ROM | SERVERINFO),
         ("sv_privateClients", "0", SERVERINFO),
@@ -420,12 +467,18 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_maxDroppedWeapons", 2, 32),
         ("g_inactivity", 0, i32::MAX),
         ("g_playerCollisionEjectSpeed", 0, 32_000),
+        ("g_redCrosshairs", 0, 1),
+        ("sv_showCommands", 0, 1),
+        ("sv_padPackets", 0, i32::MAX),
+        ("g_dumpAnims", -1, 1023),
     ] {
         c.set_limit(n, Limit::Int(lo, hi));
     }
     c.set_limit("g_voteAbstainWeight", Limit::Float(0.0, 1.0));
     c.set_limit("g_gravity", Limit::Float(1.0, f32::MAX));
     c.set_limit("sv_kickBanTime", Limit::Float(0.0, 3600.0));
+    c.set_limit("g_friendlyfireDist", Limit::Float(0.0, 15000.0));
+    c.set_limit("g_friendlyNameDist", Limit::Float(0.0, 15000.0));
     for (n, d) in crate::missile::MISSILE_CVARS {
         c.register(n, d, CHEAT);
     }
@@ -1020,6 +1073,9 @@ impl Server {
         if !game_dir.is_empty() {
             put("game", game_dir.to_owned());
         }
+        // `SV_GetChallenge`/`SV_Status`: stock's server info carries `sv_keywords`, prefixed `demo ` under
+        // `fs_restrict` so a demo server is distinguishable.
+        put("sv_keywords", server_keywords(c));
         if c.bool("sv_allowAnonymous") {
             put("sv_allowAnonymous", "1".into());
         }
@@ -1058,6 +1114,10 @@ impl Server {
             };
         set("pswrd", u8::from(!join_password(c).is_empty()).to_string());
         set("mod", u8::from(!c.string("fs_game").is_empty()).to_string());
+        if c.bool("fs_restrict") {
+            let keywords = server_keywords(c);
+            set("sv_keywords", keywords);
+        }
         let players = self
             .game
             .connected_clients()
@@ -1482,6 +1542,17 @@ impl Server {
                     .filter(|&w| c.inv.has(w))
                     .map(|w| self.game.weapons.name(w))
                     .collect();
+                let command = |cmd: sim::pm::UserCmd| {
+                    json!({
+                        "server_time": cmd.server_time,
+                        "forwardmove": cmd.forwardmove,
+                        "rightmove": cmd.rightmove,
+                        "buttons": cmd.buttons,
+                        "angles": cmd.angles,
+                        "weapon": cmd.weapon,
+                    })
+                };
+                let f = &c.command_frame;
                 out.push(json!({
                     "slot": n,
                     "session": c.session.name(),
@@ -1498,6 +1569,16 @@ impl Server {
                     "weapons": weapons,
                     "alive": c.ps.pm_type < sim::pm::PmType::Dead,
                     "spawn_count": c.spawn_count,
+                    "command_frame": {
+                        "synchronous": f.synchronous,
+                        "received": f.received,
+                        "latest_received": f.latest_received.map(command),
+                        "retained": command(f.retained),
+                        "selected": f.selected.map(command),
+                        "frame_time": f.frame_time,
+                        "previous_time": f.previous_time,
+                        "simulated_time": f.simulated_time,
+                    },
                     // The cheat commands' state (`noclip`, `ufo`, `god`, `demigod`, `notarget`; #370).
                     "noclip": c.noclip,
                     "ufo": c.ufo,
@@ -2561,7 +2642,12 @@ impl Server {
                 .map(|(n, t)| (n.as_str(), t.as_str()))
                 .collect();
             refs.push(("cod4e/testclient.gsc", TEST_CLIENT_GSC));
-            compile(&refs, &Builtins::stock_mp(), Options::default()).map_err(|errs| {
+            compile(
+                &refs,
+                &Builtins::stock_mp(),
+                script_options(&self.game.cvars),
+            )
+            .map_err(|errs| {
                 let mut s = String::from("script compile errors:\n");
                 for e in errs.iter().take(20) {
                     s.push_str(&format!("  {e}\n"));
@@ -2764,6 +2850,8 @@ impl Server {
                 game: &mut self.game,
                 dispatch: &run.dispatch,
             };
+            // `ClientThink` receives inputs; `G_RunClient` runs the latest at level time when synchronous.
+            let synchronous = host.game.cvars.bool("g_synchronousClients");
             // `SV_BotFrame` then each client's `ClientThink`: usercmds reach the game before
             // the frame's script threads run.
             for n in 0..host.game.clients.len() as u16 {
@@ -2774,12 +2862,31 @@ impl Server {
                 let Some(mut b) = host.game.clients[usize::from(n)].bot_brain.take() else {
                     // A person: the usercmds that arrived since the last frame.
                     let t = Instant::now();
-                    for cmd in self.net.as_mut().map_or_else(Vec::new, |s| s.take_cmds(n)) {
+                    let cmds = self.net.as_mut().map_or_else(Vec::new, |s| s.take_cmds(n));
+                    let c = &mut host.game.clients[usize::from(n)];
+                    let mut observed = crate::client::CommandFrame {
+                        synchronous,
+                        received: cmds.len(),
+                        latest_received: cmds.last().copied(),
+                        retained: c.received_cmd.unwrap_or(c.cmd),
+                        frame_time: self.svs_time,
+                        previous_time: c.ps.command_time,
+                        ..Default::default()
+                    };
+                    if !cmds.is_empty() {
+                        c.last_cmd_time = self.svs_time;
+                    }
+                    for cmd in frame_cmds(cmds, observed.retained, synchronous, self.svs_time) {
+                        observed.selected = Some(cmd);
+                        host.game.clients[usize::from(n)].received_cmd = Some(cmd);
                         // `SV_ClientThink`: `G_SetLastServerTime`, then `ClientThink`.
                         host.game.set_last_server_time(n, cmd.server_time);
                         host.game.client_think(&mut run.vm, n, cmd);
                         host.run_calls(&mut run.vm);
                     }
+                    let c = &mut host.game.clients[usize::from(n)];
+                    observed.simulated_time = c.ps.command_time;
+                    c.command_frame = observed;
                     client += t.elapsed();
                     continue;
                 };
@@ -3372,10 +3479,68 @@ fn hears_voice(rules: &VoiceRules, talker: &Client, listener: &Client) -> bool {
 mod tests {
     use super::may_speak;
     use super::{
-        PERK_PARABOLIC, RotationPlan, VoiceRules, flood_drops, hears_voice, menu_response_args,
-        ping_field, plain_text, plan_rotation,
+        PERK_PARABOLIC, RotationPlan, VoiceRules, flood_drops, frame_cmds, hears_voice,
+        menu_response_args, ping_field, plain_text, plan_rotation, register_core_dvars,
+        script_options, server_keywords,
     };
     use crate::client::{Client, Conn, Session, Team};
+    use crate::cvar::Cvars;
+
+    #[test]
+    fn keywords_reach_the_server_info_and_demo_servers_are_marked() {
+        let mut c = Cvars::new();
+        register_core_dvars(&mut c);
+        assert_eq!(server_keywords(&c), "");
+        c.set("sv_keywords", "hardcore harbor");
+        assert_eq!(server_keywords(&c), "hardcore harbor");
+        c.set("fs_restrict", "1");
+        assert_eq!(server_keywords(&c), "demo hardcore harbor");
+    }
+
+    #[test]
+    fn developer_script_gates_the_slash_comment_blocks() {
+        let mut c = Cvars::new();
+        register_core_dvars(&mut c);
+        assert!(!script_options(&c).developer);
+        c.set("developer_script", "1");
+        assert!(script_options(&c).developer);
+    }
+
+    #[test]
+    fn synchronous_clients_run_latest_input_at_frame_time_and_retain_it() {
+        use sim::pm::UserCmd;
+        let backlog: Vec<_> = [100, 108, 116]
+            .into_iter()
+            .enumerate()
+            .map(|(i, server_time)| UserCmd {
+                server_time,
+                forwardmove: (i as i8 + 1) * 20,
+                buttons: 1 << i,
+                ..Default::default()
+            })
+            .collect();
+        let selected: Vec<_> = frame_cmds(backlog.clone(), UserCmd::default(), true, 150).collect();
+        assert_eq!(selected.len(), 1);
+        let mut want = backlog[2];
+        want.server_time = 150;
+        assert_eq!(selected[0], want);
+        let next: Vec<_> = frame_cmds(Vec::new(), selected[0], true, 200).collect();
+        want.server_time = 200;
+        assert_eq!(
+            next,
+            [want],
+            "an empty frame still thinks with retained input"
+        );
+        assert_eq!(
+            frame_cmds(backlog.clone(), want, false, 250).collect::<Vec<_>>(),
+            backlog,
+            "switching off runs all arrivals at their original times"
+        );
+        assert_eq!(frame_cmds(Vec::new(), want, false, 300).count(), 0);
+        let again: Vec<_> = frame_cmds(Vec::new(), want, true, 350).collect();
+        want.server_time = 350;
+        assert_eq!(again, [want], "switching on retains the session command");
+    }
 
     #[test]
     fn a_menu_response_from_an_earlier_level_is_dropped() {

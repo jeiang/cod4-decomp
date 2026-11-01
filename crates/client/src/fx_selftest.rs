@@ -30,6 +30,25 @@ const SHOCK: &str = "concussion_grenade_mp";
 const SMOKE: &str = "smoke/smoke_grenade_11sec_mp";
 /// A stock explosion with a particle cloud among its elements.
 const CLOUDY: &str = "explosions/artilleryexp_dirt_brown";
+/// Maps, the ambient effect families their createfx must draw, and the exact effects that must draw
+/// (issue #359).
+const AMBIENT: &[(&str, &[&str], &[&str])] = &[
+    ("mp_bog", &["fire"], &[]),
+    ("mp_farm", &["rain"], &[]),
+    ("mp_bloc", &["snow"], &["weather/snow_light_mp_bloc"]),
+    ("mp_crash_snow", &["snow"], &["weather/snow_light_mp_crash"]),
+    ("mp_crash", &["fire"], &[]),
+    ("mp_backlot", &["fire"], &[]),
+];
+
+/// The [`AMBIENT`] maps whose stock createfx file places sounds; mp_crash's places none.
+const AMBIENT_SOUNDS: &[&str] = &[
+    "mp_bog",
+    "mp_farm",
+    "mp_bloc",
+    "mp_crash_snow",
+    "mp_backlot",
+];
 
 /// Plays `effects` from `from_ms` for `secs` seconds in 50 ms steps and returns (most sprites in one frame, most
 /// decals, sprites at the end, live elements at the end).
@@ -626,11 +645,102 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     water(install, &mut report, &mut bad);
     destructible(install, &mut report, &mut bad);
     references(&lib, &mut report, &mut bad);
+    ambient(install, &mut report, &mut bad);
 
     if bad.is_empty() {
         Ok(Value::Object(report))
     } else {
         Err(bad)
+    }
+}
+
+/// Look directly at every generated createfx placement on the affected maps. The named weather and fire
+/// effects must each contribute sprite quads, not merely have a decoded definition.
+fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mut Vec<String>) {
+    for &(map, families, exact) in AMBIENT {
+        let lib = match Library::load(install, "", map) {
+            Ok(lib) => lib,
+            Err(e) => {
+                bad.push(format!("ambient map {map}: {e}"));
+                continue;
+            }
+        };
+        let data = match render::MapData::load(install, "", map) {
+            Ok(data) => data,
+            Err(e) => {
+                bad.push(format!("ambient map {map}: {e:?}"));
+                continue;
+            }
+        };
+        let Some(clipmap) = data.clipmap.clone() else {
+            bad.push(format!("ambient map {map} has no collision data"));
+            continue;
+        };
+        let boxes = PlayerBoxes::new(clipmap);
+        let world = boxes.world();
+        let mut fx =
+            Effects::new(&lib.content, data.world.clone()).with_ambient(&lib.content, true);
+        fx.set_projection(90.0_f32.to_radians(), 16.0 / 9.0);
+        let poses: Vec<_> = fx
+            .ambient()
+            .poses()
+            .map(|(name, at, forward)| (name.to_owned(), at, forward))
+            .collect();
+        report.insert(format!("ambient_{map}_placements"), poses.len().into());
+        let sounds = fx.ambient().sounds.len();
+        report.insert(format!("ambient_{map}_sounds"), sounds.into());
+        if sounds == 0 && AMBIENT_SOUNDS.contains(&map) {
+            bad.push(format!("{map} has no parsed createfx sounds"));
+        }
+        if poses.is_empty() {
+            bad.push(format!("{map} has no parsed ambient effect placements"));
+            continue;
+        }
+        let mut now = 0;
+        let mut live_max = 0;
+        for (_, at, forward) in &poses {
+            let eye = *at - *forward * 400.0 + glam::Vec3::Z * 100.0;
+            let direction = (*at - eye).normalize();
+            let (yaw, pitch) = (direction.y.atan2(direction.x), direction.z.asin());
+            // Set the camera before simulating: spawn-range culling uses the last drawn view.
+            fx.draw(eye, yaw, pitch, 0.0);
+            for _ in 0..40 {
+                now += 50;
+                fx.update(now, world);
+                live_max = live_max.max(fx.ambient_live_effects());
+                fx.draw(eye, yaw, pitch, 0.0);
+            }
+        }
+        report.insert(format!("ambient_{map}_live_effects_max"), live_max.into());
+        if live_max == 0 {
+            bad.push(format!("{map} has no live ambient effects"));
+        }
+        report.insert(format!("ambient_{map}_played"), json!(fx.ambient().played));
+        report.insert(format!("ambient_{map}_quads"), json!(fx.ambient().quads));
+        for family in families {
+            let quads: u64 = fx
+                .ambient()
+                .quads
+                .iter()
+                .filter(|(name, _)| name.contains(family))
+                .map(|(_, n)| *n)
+                .sum();
+            report.insert(format!("ambient_{map}_{family}_quads"), quads.into());
+            if quads == 0 {
+                bad.push(format!(
+                    "{map} ambient {family} effects never drew ({} placements): {:?}",
+                    poses.len(),
+                    fx.ambient().quads
+                ));
+            }
+        }
+        for name in exact {
+            let drawn = fx.ambient().quads.get(*name).copied().unwrap_or(0);
+            report.insert(format!("ambient_{map}_{name}_draws"), drawn.into());
+            if drawn == 0 {
+                bad.push(format!("{map} ambient effect {name} never drew"));
+            }
+        }
     }
 }
 

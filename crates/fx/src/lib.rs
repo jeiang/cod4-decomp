@@ -361,6 +361,8 @@ struct Effect {
     /// The average light where the effect started, for the elements that take their colour from it; sampled by the
     /// first update.
     light: Option<[u8; 3]>,
+    /// Lower-case name of the effect that was played, which runner children inherit: what their draws count against.
+    root: Arc<str>,
 }
 
 pub struct Fx {
@@ -610,6 +612,7 @@ impl Fx {
             last_move: at,
             spawned: Vec::new(),
             light: None,
+            root: def.name.as_deref().unwrap_or("").to_lowercase().into(),
         };
         self.next_id += 1;
         self.begin(&mut e, at);
@@ -849,17 +852,23 @@ impl Fx {
         self.now = now_ms;
         let mut effects = std::mem::take(&mut self.effects);
         let mut spawned: Vec<(Arc<FxEffectDef>, Frame, i32)> = Vec::new();
+        // The root of the effect that spawned each entry of `spawned`.
+        let mut roots: Vec<Arc<str>> = Vec::new();
         for e in &mut effects {
             self.update_effect(e, now_ms, world, &mut spawned);
+            roots.resize(spawned.len(), e.root.clone());
         }
         // Effects started by this update run too, from the moment they were started.
         let mut rounds = 0;
         while !spawned.is_empty() && rounds < 4 {
             rounds += 1;
             let batch = std::mem::take(&mut spawned);
-            for (def, frame, at) in batch {
+            let batch_roots = std::mem::take(&mut roots);
+            for ((def, frame, at), root) in batch.into_iter().zip(batch_roots) {
                 if let Some(mut ne) = self.start(effects.len(), &def, frame, at) {
+                    ne.root = root;
                     self.update_effect(&mut ne, now_ms, world, &mut spawned);
+                    roots.resize(spawned.len(), ne.root.clone());
                     effects.push(ne);
                 }
             }
@@ -927,6 +936,23 @@ impl Fx {
             // effect's looping life.
             let limited = d.spawn[1] != i32::MAX;
             let until = if limited { i32::MAX } else { e.loop_end };
+            // A long catch-up (an effect started well before it is first updated) skips the spawns that could no
+            // longer have anything alive by the end of it, as `FX_SpawnLoopingElems` does: the effect is fully
+            // developed without filling the pool with elements that die on their first update. Stock spawns a
+            // limited run all at once (`FX_SpawnAllFutureLooping`), so only the unlimited ones are skipped.
+            let pending = i64::from(e.next_loop[k]);
+            let window = i64::from(now.min(until)) - pending;
+            if !limited && window > 128 {
+                let lib = self.lib.clone();
+                let max = stabilize_time(&lib, d, false, window, 0) + 1;
+                if window > max {
+                    let skipped = (window - max) / i64::from(interval) + 1;
+                    let next = pending + skipped * i64::from(interval);
+                    e.spawned[k] =
+                        e.spawned[k].saturating_add(skipped.min(i64::from(u32::MAX)) as u32);
+                    e.next_loop[k] = next.min(i64::from(i32::MAX)) as i32;
+                }
+            }
             while e.next_loop[k] <= now && e.next_loop[k] <= until {
                 let t = e.next_loop[k];
                 self.spawn(e, k, t);
@@ -1213,8 +1239,23 @@ impl Fx {
 
     /// Everything to draw at the current time.
     pub fn draw(&mut self, cam: &Camera, out: &mut Draws) {
+        self.draw_counted(cam, out, &mut |_, _| {});
+    }
+
+    /// Everything to draw, with the number of draws (sprite quads, clouds, models and trail strips) each played effect
+    /// contributes after culling, by the lower-case name of the effect that was played: a runner's children count
+    /// against it.
+    pub fn draw_counted(
+        &mut self,
+        cam: &Camera,
+        out: &mut Draws,
+        observer: &mut dyn FnMut(&str, usize),
+    ) {
+        let count =
+            |out: &Draws| out.quads.len() + out.clouds.len() + out.models.len() + out.trails.len();
         let mut blockers = Vec::new();
         for e in &self.effects {
+            let before = count(out);
             self.draw_trails(e, cam, out);
             let light = e.light.unwrap_or(NEUTRAL_LIGHT);
             for el in &e.elems {
@@ -1379,6 +1420,10 @@ impl Fx {
                     _ => {}
                 }
             }
+            let drawn = count(out) - before;
+            if drawn != 0 {
+                observer(&e.root, drawn);
+            }
         }
         self.blockers = blockers;
     }
@@ -1417,6 +1462,72 @@ fn spawn_origin(d: &FxElemDef, r: &[f32; key::COUNT], f: &Frame) -> (Vec3, Vec3)
 
 fn is_trail(d: &FxElemDef) -> bool {
     d.elem_type == elem::TRAIL && d.trail.is_some() && matches!(d.visuals, FxVisuals::Materials(_))
+}
+
+/// How long after it spawns `d` (and what it spawns in turn) still has anything alive, capped at `cap`
+/// (`FX_LimitStabilizeTimeForElemDef_Recurse`): a catch-up longer than this cannot leave anything of an earlier spawn.
+/// `system` counts the looping element's whole run of spawns, as when it belongs to an effect spawned in turn.
+fn stabilize_time(lib: &Library, d: &FxElemDef, system: bool, cap: i64, depth: u32) -> i64 {
+    let own = stabilize_time_self(d, system);
+    if own >= cap || depth > 8 {
+        return cap;
+    }
+    let mut most = own;
+    let effect = |name: &str| {
+        lib.get(name)
+            .map_or(0, |def| stabilize_time_effect(lib, def, cap, depth + 1))
+    };
+    if d.elem_type == elem::RUNNER
+        && let FxVisuals::Effects(names) = &d.visuals
+    {
+        for name in names.iter().flatten() {
+            most = most.max(effect(name));
+            if most >= cap {
+                return cap;
+            }
+        }
+    }
+    for name in [&d.effect_on_death, &d.effect_on_impact, &d.effect_emitted]
+        .into_iter()
+        .filter_map(|n| n.as_deref())
+    {
+        most = most.max(own + effect(name));
+        if most >= cap {
+            return cap;
+        }
+    }
+    most
+}
+
+/// [`stabilize_time`] of every element of `def` (`FX_LimitStabilizeTimeForEffectDef_Recurse`).
+fn stabilize_time_effect(lib: &Library, def: &FxEffectDef, cap: i64, depth: u32) -> i64 {
+    let mut most = 0;
+    for d in def.elems.iter() {
+        most = most.max(stabilize_time(lib, d, true, cap, depth));
+        if most >= cap {
+            return cap;
+        }
+    }
+    most
+}
+
+/// The longest an element of `d` lives after it is spawned, plus the rest of its looping run when `system`
+/// (`FX_LimitStabilizeTimeForElemDef_SelfOnly`); a trail never stabilizes.
+fn stabilize_time_self(d: &FxElemDef, system: bool) -> i64 {
+    if d.elem_type == elem::TRAIL {
+        return i64::from(i32::MAX);
+    }
+    let mut t = i64::from(d.spawn_delay_msec.base)
+        + i64::from(d.spawn_delay_msec.amplitude)
+        + i64::from(d.life_span_msec.base)
+        + i64::from(d.life_span_msec.amplitude);
+    if system && d.spawn[1] > 0 {
+        if d.spawn[1] == i32::MAX {
+            return i64::from(i32::MAX);
+        }
+        t += i64::from(d.spawn[0]) * i64::from(d.spawn[1] - 1);
+    }
+    t
 }
 
 fn lerp_frame(a: &Frame, b: &Frame, t: f32) -> Frame {
@@ -1860,10 +1971,34 @@ mod tests {
         let def = effect("fx/loop", 1, 0, 450, vec![e]);
         let mut fx = Fx::new(lib(vec![def.clone()]));
         fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
-        fx.update(2000, &Empty);
+        // Frame by frame, so no update is a long catch-up.
+        for now in (50..=2000).step_by(50) {
+            fx.update(now, &Empty);
+        }
         // t = 0, 100, 200, 300 and 400.
         assert_eq!(fx.stats.elems_spawned, 5);
         assert_eq!(fx.live_effects(), 0);
+    }
+
+    #[test]
+    fn a_long_catch_up_skips_looping_spawns_that_could_not_still_be_alive() {
+        // A map's ambient effect is started 15 s before the level begins (`FX_SpawnLoopingElems`).
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [10, i32::MAX];
+        let def = effect("fx/ambient", 1, 0, i32::MAX, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play_at(&def, Frame::facing(Vec3::ZERO, Vec3::Z), -15_000);
+        fx.update(0, &Empty);
+        // Fully developed: the spawns of the last 100 ms (its lifespan) are alive; the 1500 before them never are.
+        let live = fx.live_elems();
+        assert!((9..=11).contains(&live), "{live} live");
+        assert!(
+            fx.stats.elems_spawned <= 12,
+            "{} spawned",
+            fx.stats.elems_spawned
+        );
+        fx.update(50, &Empty);
+        assert!((9..=11).contains(&fx.live_elems()));
     }
 
     #[test]
@@ -2407,6 +2542,31 @@ mod tests {
             axis: [Vec3::X, Vec3::Y, Vec3::Z],
             frustum: None,
         }
+    }
+
+    #[test]
+    fn a_runners_child_draws_count_against_the_lower_case_effect_that_was_played() {
+        let child = sprite_effect([255; 4], |_| {});
+        let runner = elem_def(
+            elem::RUNNER,
+            FxVisuals::Effects(Arc::from(vec![Some(Arc::<str>::from("fx/sprite"))])),
+        );
+        let parent = effect("FX/Parent", 0, 1, 0, vec![runner]);
+        let mut fx = Fx::new(lib(vec![child, parent.clone()]));
+        fx.play(&parent, Frame::facing(Vec3::ZERO, Vec3::Z));
+        fx.update(10, &Empty);
+        fx.update(20, &Empty);
+        let mut d = Draws::default();
+        let mut counted = Vec::new();
+        fx.draw_counted(
+            &cam_at(Vec3::new(-400.0, 0.0, 0.0)),
+            &mut d,
+            &mut |name, n| {
+                counted.push((name.to_owned(), n));
+            },
+        );
+        assert!(!d.quads.is_empty());
+        assert_eq!(counted, vec![("fx/parent".to_owned(), d.quads.len())]);
     }
 
     #[test]

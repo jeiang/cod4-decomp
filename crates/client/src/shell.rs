@@ -128,6 +128,8 @@ pub struct ShellState {
     pub fps_drawn: Option<String>,
     /// How many ownerdraws the HUD menus painted last frame (what `cg_draw2D` switches off).
     pub ownerdraws_painted: u64,
+    /// `cl_noprint`: the console keeps no lines.
+    pub no_print: bool,
     pub hud_stats: hud::Stats,
     /// The names and icons over other players, and the dvars that shape them.
     pub names: hud::names::Names,
@@ -202,6 +204,10 @@ const STAT_COUNT: usize = 4000;
 impl ShellState {
     /// A line for the console's output; it keeps the latest 256.
     fn log(&mut self, text: &str) {
+        // `cl_noprint`: nothing goes to the console.
+        if self.no_print {
+            return;
+        }
         let log = &mut self.feed.console;
         log.extend(text.lines().map(str::to_owned));
         let extra = log.len().saturating_sub(256);
@@ -331,6 +337,7 @@ impl ShellState {
             fps_scene: hud::fps::Scene::default(),
             fps_drawn: None,
             ownerdraws_painted: 0,
+            no_print: false,
             hud_stats: hud::Stats::default(),
             names: hud::names::Names::default(),
             names_cfg: hud::names::Cfg::read(&crate::input::Cvars::default()),
@@ -449,6 +456,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("cg_scoreboardPingGraph", "0"),
     // Cheat protected: only acts with `sv_cheats` on.
     ("snd_enableReverb", "1"),
+    // Whether a level starts its `_fx.gsc` map effects (`CG_StartClientSideEffects`). Cheat protected.
+    ("clientSideEffects", "1"),
     // How the colour buffer is cleared (`R_GetClearColor`): the stock default never clears, so pixels nothing draws
     // are black here, not the fog colour (#356). `r_clear` takes the stock names or indices 0 to 4; the colours are
     // `r g b a` in 0..1.
@@ -886,6 +895,10 @@ impl Shell {
                 tag,
                 text,
             } => {
+                // KisakCOD cg_servercmds_mp.cpp:547: suppress incoming global chat, not outgoing speech.
+                if !team && input.cvars.bool("cg_teamChatsOnly") {
+                    return;
+                }
                 let text = hud::chat_text(&self.ui.assets, &text);
                 self.st.hud_stats.note_text(&text);
                 let line = self.chat_line(team, client, tag, &text);
@@ -1032,6 +1045,13 @@ impl Shell {
     /// Reads the HUD placement and timing dvars, which take effect at once: the feed keeps what it last read.
     fn sync_layout(&mut self, input: &Input) {
         self.st.feed.layout = hud::Layout::read(&input.cvars);
+        // `cg_centertime` is cheat protected: only while `sv_cheats` is on.
+        self.st.feed.center_ms = if input.cvars.bool("sv_cheats") {
+            (input.cvars.f32("cg_centertime") * 1000.0).round() as i32
+        } else {
+            3000
+        };
+        self.st.no_print = input.cvars.bool("cl_noprint");
     }
 
     /// An `iprintln` line or announcement: into the message window it belongs to, or only the console log.
@@ -1823,11 +1843,21 @@ impl HostCx<'_> {
                     }
                 }
                 // `snd_volume` is read live every frame, and no other snd_ dvar needs a restart: these stay no-ops.
-                "snd_restart"
-                | "updatedvarsfromprofile"
-                | "r_applypicmip"
-                | "writeconfig"
-                | "setprofile" => {}
+                "snd_restart" | "updatedvarsfromprofile" | "r_applypicmip" | "setprofile" => {}
+                // `Com_WriteConfig_f`: exactly one filename, independently of the active profile.
+                "writeconfig" => {
+                    if cmd.len() != 2 {
+                        self.input.say("Usage: writeconfig <filename>");
+                    } else {
+                        match self.input.write_config(a(1)) {
+                            Ok(Some(path)) => {
+                                self.input.say(format!("Writing {}.", path.display()))
+                            }
+                            Ok(None) => self.input.say("writeconfig: no config folder to write"),
+                            Err(e) => self.input.say(format!("writeconfig: {e}")),
+                        }
+                    }
+                }
                 // `vstr` and `exec` run their commands in place, in this buffer.
                 "vstr" | "exec" => {
                     inserted += 1;
@@ -3561,6 +3591,32 @@ mod tests {
         let mut input = Input::detached();
         register_defaults(&mut input);
         Some((st, Ui::new(assets, (1280, 720)), input))
+    }
+
+    #[test]
+    fn writeconfig_requires_exactly_one_filename_without_writing_the_profile() {
+        let Some((mut st, ui, mut input)) = shell_env() else {
+            return;
+        };
+        let dir =
+            std::env::temp_dir().join(format!("cod4e-shell-writeconfig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let active = dir.join("config_mp.cfg");
+        input.use_profile(None, Some(active.clone()));
+        input.take_messages();
+        let mut h = HostCx {
+            st: &mut st,
+            input: &mut input,
+        };
+        for command in ["writeconfig", "writeconfig named extra"] {
+            h.command(&ui, command);
+            assert_eq!(h.input.take_messages(), ["Usage: writeconfig <filename>"]);
+            assert!(!active.exists(), "invalid arity must not write the profile");
+        }
+        assert!(
+            !dir.exists(),
+            "invalid arity must not create any config folder"
+        );
     }
 
     /// The unlock popup the server opens at the end of a match stays up through the intermission, with the

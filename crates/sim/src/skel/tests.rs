@@ -168,6 +168,62 @@ fn yaw_of(q: &[f32; 4]) -> f32 {
 }
 
 // --- sampling --------------------------------------------------------------------------
+#[test]
+fn full_rotation_endpoint_never_reads_a_following_key() {
+    // The last animated quaternion is also the end of random_data_short, as in
+    // pb_runjump_takeoff. Zero lerp must not read a nonexistent following key.
+    for num_frames in [0, 10, 255, 256, 300] {
+        for size in [0u16, 1, 63, 64, 65] {
+            if size > num_frames && num_frames != 0 {
+                continue;
+            }
+            let mut a = anim(num_frames, false);
+            a.names = vec![0];
+            a.bone_counts = [0, 0, 1, 0, 0, 0, 0, 0, 0, 1];
+            a.data_short = vec![size as i16];
+            let keys: Vec<u16> = (0..=size)
+                .map(|i| {
+                    if size == 0 {
+                        0
+                    } else {
+                        (u32::from(i) * u32::from(num_frames) / u32::from(size)) as u16
+                    }
+                })
+                .collect();
+            if num_frames < 256 {
+                a.data_byte = keys.iter().map(|k| *k as u8).collect();
+            } else if size >= 64 {
+                a.data_short.extend([0, size as i16]);
+                a.indices = Indices::Short(keys);
+            } else {
+                a.data_short.extend(keys.iter().map(|k| *k as i16));
+            }
+            for _ in 0..=size {
+                a.random_data_short.extend([0, 0, 0, 32767]);
+            }
+            for time in [0.0, 0.5, 0.999999, 1.0, 2.0] {
+                let mut pose = [Accum::ZERO];
+                assert!(
+                    anim::accumulate(&a, &[0], time, 1.0, &mut pose),
+                    "frames={num_frames} size={size} time={time}"
+                );
+                assert_eq!(pose[0].finish().0.unwrap(), [0.0, 0.0, 0.0, 1.0]);
+                assert!(
+                    pose[0]
+                        .quat
+                        .iter()
+                        .chain(&pose[0].trans)
+                        .all(|v| v.is_finite())
+                );
+            }
+            a.random_data_short.pop();
+            assert!(
+                !anim::accumulate(&a, &[0], 1.0, 1.0, &mut [Accum::ZERO]),
+                "a truncated last key must fail the bounds assertion"
+            );
+        }
+    }
+}
 
 #[test]
 fn yaw_track_interpolates_between_keys() {

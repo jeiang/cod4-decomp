@@ -84,6 +84,55 @@ extern "C" {
     fn net_close();
 }
 
+#[wasm_bindgen]
+extern "C" {
+    /// The next control channel request line the page received (`GET /control/next`), or `undefined`.
+    #[wasm_bindgen(js_namespace = cod4)]
+    fn control_next() -> Option<String>;
+    /// One reply line for the page to post back (`POST /control/reply`).
+    #[wasm_bindgen(js_namespace = cod4)]
+    fn control_reply(line: &str);
+    /// The frame the canvas is showing, as the JSON `{"png_base64", "width", "height", "lit_fraction"}` the
+    /// `capture` request answers with; throws when the canvas cannot be read.
+    #[wasm_bindgen(js_namespace = cod4, catch)]
+    fn capture_canvas() -> Result<String, JsValue>;
+}
+
+/// Whether the page asked for the dev control channel (`?control`): read from the page's config at start.
+static CONTROL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the page asked for the dev control channel.
+pub fn control_wanted() -> bool {
+    CONTROL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The browser's [`devctrl::Transport`]: the page long-polls `web/serve.py` for the harness's requests and hands
+/// them to the module one line at a time; a reply goes straight back to the page, which posts it. There is one
+/// connection, the page's, so every line is connection 0.
+pub struct PageTransport;
+
+impl devctrl::Transport for PageTransport {
+    fn poll(&mut self) -> Vec<(u64, String)> {
+        let mut lines = Vec::new();
+        while let Some(line) = control_next() {
+            lines.push((0, line));
+        }
+        lines
+    }
+
+    fn reply(&mut self, _conn: u64, line: &str) {
+        control_reply(line.trim_end_matches('\n'));
+    }
+}
+
+/// The frame on the canvas, read by the page: what a `capture` request answers with in the browser, where the module
+/// has no file to write and WebGPU maps buffers asynchronously.
+pub fn capture_frame() -> Result<Value, String> {
+    let json =
+        capture_canvas().map_err(|e| format!("the page could not read the canvas: {e:?}"))?;
+    serde_json::from_str(&json).map_err(|e| format!("bad capture from the page: {e}"))
+}
+
 /// The session the client plays on: [`net::Transport`] over the page's WebTransport. There is one peer, the server,
 /// so the address datagrams are sent to is ignored and everything received comes from `server`. Receiving never waits:
 /// the browser delivers datagrams between frames.
@@ -287,6 +336,11 @@ fn boot() -> Result<(), String> {
                 .collect()
         })
         .unwrap_or_default();
+    // `?control`: the page polls the dev control channel's requests; off unless the page says so.
+    CONTROL.store(
+        cfg["control"].as_bool().unwrap_or(false),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let mut cli = crate::parse(&args).map_err(|e| format!("bad arguments: {e}"))?;
     cli.install = PathBuf::from(WEB_ROOT);
     if cli.connect.is_none() {
