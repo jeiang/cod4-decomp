@@ -48,13 +48,15 @@ const GRACE_SECS: f64 = 20.0;
 const NV_OFF: &str = "night_vision_off";
 const NV_STILL: &str = "night_vision_still";
 const NV_ON: &str = "night_vision";
+/// A screen region as fractions: left, top, right, bottom.
+type Frac = (f32, f32, f32, f32);
 /// The overlay's picture is a screen of fine horizontal scanlines (about 7 rows apart in a 720-row capture), so a
 /// region it covers gains row-to-row ripple in its row means. The lines darken what is behind them by a share, so
 /// the ripple they add grows with the scene's brightness: the gain is measured against the region's mean luma. A
 /// half of the screen averages over enough of the scene that a dark corner, a bot walking by or the view's own drift
 /// do not hide it (per-cell counts did, #494), and the four halves together still tell a full-screen overlay from
 /// one over a quarter of it.
-const NV_HALVES: [(&str, (f32, f32, f32, f32)); 4] = [
+const NV_HALVES: [(&str, Frac); 4] = [
     ("left", (0.0, 0.0, 0.5, 1.0)),
     ("right", (0.5, 0.0, 1.0, 1.0)),
     ("top", (0.0, 0.0, 1.0, 0.5)),
@@ -67,7 +69,7 @@ const NV_RADIUS: usize = 4;
 const NV_MIN_GAIN: f64 = 0.015;
 /// The minimap of the compass in the driven client's 1280x720 window (left, top, right, bottom as fractions): HUD,
 /// drawn after the overlay (`CG_Draw2D` draws the overlay first), so the lines must not show on it.
-const NV_HUD: (f32, f32, f32, f32) = (0.01, 0.05, 0.12, 0.24);
+const NV_HUD: Frac = (0.01, 0.05, 0.12, 0.24);
 /// The most the minimap's ripple may rise with the goggles on.
 const NV_HUD_MAX_RISE: f64 = 1.0;
 
@@ -113,7 +115,7 @@ struct NvView {
 /// Compares the RGB pictures `off`, `still` (both goggles off) and `on`, each `w` x `h`.
 fn nv_measure(w: u32, h: u32, off: &[u8], still: &[u8], on: &[u8]) -> NvView {
     let at = |f: f32, n: u32| ((f * n as f32) as u32).min(n);
-    let rect = |(l, t, r, b): (f32, f32, f32, f32)| (at(l, w), at(t, h), at(r, w), at(b, h));
+    let rect = |(l, t, r, b): Frac| (at(l, w), at(t, h), at(r, w), at(b, h));
     let mut m = NvView {
         min_gain: f64::INFINITY,
         ..NvView::default()
