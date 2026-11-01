@@ -48,20 +48,28 @@ const GRACE_SECS: f64 = 20.0;
 const NV_OFF: &str = "night_vision_off";
 const NV_STILL: &str = "night_vision_still";
 const NV_ON: &str = "night_vision";
+/// A screen region as fractions: left, top, right, bottom.
+type Frac = (f32, f32, f32, f32);
 /// The overlay's picture is a screen of fine horizontal scanlines (about 7 rows apart in a 720-row capture), so a
-/// region it covers gains row-to-row ripple in its row means, whatever the world behind it shows; a bot walking by
-/// or the view's own change move the row means far less. The screen is cut into `NV_GRID` x `NV_GRID` cells.
-const NV_GRID: u32 = 4;
-/// The picture's vignette is near black in the corners, where the lines cannot show: all but those may miss.
-const NV_MIN_CELLS: usize = 12;
+/// region it covers gains row-to-row ripple in its row means. The lines darken what is behind them by a share, so
+/// the ripple they add grows with the scene's brightness: the gain is measured against the region's mean luma. A
+/// half of the screen averages over enough of the scene that a dark corner, a bot walking by or the view's own drift
+/// do not hide it (per-cell counts did, #494), and the four halves together still tell a full-screen overlay from
+/// one over a quarter of it.
+const NV_HALVES: [(&str, Frac); 4] = [
+    ("left", (0.0, 0.0, 0.5, 1.0)),
+    ("right", (0.5, 0.0, 1.0, 1.0)),
+    ("top", (0.0, 0.0, 1.0, 0.5)),
+    ("bottom", (0.0, 0.5, 1.0, 1.0)),
+];
 /// Rows each side of a row whose mean the ripple is measured from.
 const NV_RADIUS: usize = 4;
-/// A cell shows the lines when its ripple with the goggles on is this much above the still view's, plus twice the
-/// ripple's own change between the two goggles-off captures.
-const NV_MIN_RISE: f64 = 1.5;
+/// The least gain, as a share of the half's mean luma, after twice the ripple's own change between the two
+/// goggles-off captures is taken off. Runs with the overlay measured 0.035 to 0.055 in every half.
+const NV_MIN_GAIN: f64 = 0.015;
 /// The minimap of the compass in the driven client's 1280x720 window (left, top, right, bottom as fractions): HUD,
 /// drawn after the overlay (`CG_Draw2D` draws the overlay first), so the lines must not show on it.
-const NV_HUD: (f32, f32, f32, f32) = (0.01, 0.05, 0.12, 0.24);
+const NV_HUD: Frac = (0.01, 0.05, 0.12, 0.24);
 /// The most the minimap's ripple may rise with the goggles on.
 const NV_HUD_MAX_RISE: f64 = 1.0;
 
@@ -69,8 +77,9 @@ fn luma(p: &[u8]) -> i32 {
     (i32::from(p[0]) * 77 + i32::from(p[1]) * 150 + i32::from(p[2]) * 29) >> 8
 }
 
-/// The mean distance of each row's mean luma over `x0..x1` from the mean of the `NV_RADIUS` rows on each side.
-fn ripple(img: &[u8], w: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> f64 {
+/// The ripple of a region (the mean distance of each row's mean luma over `x0..x1` from the mean of the
+/// `NV_RADIUS` rows on each side) and its mean luma.
+fn ripple(img: &[u8], w: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> (f64, f64) {
     let rows: Vec<f64> = (y0..y1)
         .map(|y| {
             let sum: i64 = (x0..x1)
@@ -87,50 +96,51 @@ fn ripple(img: &[u8], w: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> f64 {
         .windows(span)
         .map(|win| (win[NV_RADIUS] - win.iter().sum::<f64>() / span as f64).abs())
         .collect();
-    away.iter().sum::<f64>() / away.len().max(1) as f64
+    (
+        away.iter().sum::<f64>() / away.len().max(1) as f64,
+        rows.iter().sum::<f64>() / rows.len().max(1) as f64,
+    )
 }
 
 /// What the goggles changed between the matched captures.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct NvView {
-    /// Cells of the grid that gained the overlay's scanlines with the goggles on.
-    cells_changed: usize,
+    /// The smallest scanline gain of the four halves, and which half it was.
+    min_gain: f64,
+    weakest: &'static str,
     /// How much the minimap's ripple rose with the goggles on.
     hud_rise: f64,
 }
 
 /// Compares the RGB pictures `off`, `still` (both goggles off) and `on`, each `w` x `h`.
 fn nv_measure(w: u32, h: u32, off: &[u8], still: &[u8], on: &[u8]) -> NvView {
-    let mut m = NvView::default();
-    for cy in 0..NV_GRID {
-        for cx in 0..NV_GRID {
-            let r = (
-                cx * w / NV_GRID,
-                cy * h / NV_GRID,
-                (cx + 1) * w / NV_GRID,
-                (cy + 1) * h / NV_GRID,
-            );
-            let (a, b, c) = (ripple(off, w, r), ripple(still, w, r), ripple(on, w, r));
-            if c - b >= NV_MIN_RISE + 2.0 * (b - a).abs() {
-                m.cells_changed += 1;
-            }
+    let at = |f: f32, n: u32| ((f * n as f32) as u32).min(n);
+    let rect = |(l, t, r, b): Frac| (at(l, w), at(t, h), at(r, w), at(b, h));
+    let mut m = NvView {
+        min_gain: f64::INFINITY,
+        ..NvView::default()
+    };
+    for (name, half) in NV_HALVES {
+        let r = rect(half);
+        let ((a, _), (b, mean), (c, _)) =
+            (ripple(off, w, r), ripple(still, w, r), ripple(on, w, r));
+        let gain = (c - b - 2.0 * (b - a).abs()) / mean.max(1.0);
+        if gain < m.min_gain {
+            (m.min_gain, m.weakest) = (gain, name);
         }
     }
-    let (l, t, r, b) = NV_HUD;
-    let at = |f: f32, n: u32| ((f * n as f32) as u32).min(n);
-    let hud = (at(l, w), at(t, h), at(r, w), at(b, h));
-    m.hud_rise = ripple(on, w, hud) - ripple(still, w, hud);
+    let hud = rect(NV_HUD);
+    m.hud_rise = ripple(on, w, hud).0 - ripple(still, w, hud).0;
     m
 }
 
 /// What is wrong with the goggles' frame, or `None`.
 fn nv_problem(m: &NvView) -> Option<String> {
     let mut bad = Vec::new();
-    if m.cells_changed < NV_MIN_CELLS {
+    if m.min_gain < NV_MIN_GAIN {
         bad.push(format!(
-            "the goggles' scanlines showed in {} of {} parts of the screen (need {NV_MIN_CELLS}): the overlay does not cover it",
-            m.cells_changed,
-            NV_GRID * NV_GRID
+            "the goggles' scanlines gained {:.3} of the mean luma in the {} half of the screen (need {NV_MIN_GAIN}): the overlay does not cover it",
+            m.min_gain, m.weakest
         ));
     }
     if m.hud_rise > NV_HUD_MAX_RISE {
@@ -925,8 +935,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             }
             verdict(&report).or_else(|| match night_vision_view(&dir) {
                 Ok(m) => {
-                    out.metrics
-                        .insert("nv.cells_changed".into(), m.cells_changed as f64);
+                    out.metrics.insert("nv.min_gain".into(), m.min_gain);
                     out.metrics.insert("nv.hud_rise".into(), m.hud_rise);
                     nv_problem(&m)
                 }
@@ -1077,15 +1086,23 @@ mod tests {
     const W: u32 = 320;
     const H: u32 = 180;
 
-    /// A `W` x `H` picture: a smoothly shaded world with a flat white HUD block where the minimap is, and the same
-    /// picture with the goggles on, where `overlay` darkens three rows in every seven of the world it covers (and of
-    /// the HUD block when `over_hud`), as the goggles' scanlines do.
-    fn pictures(overlay: impl Fn(u32, u32) -> bool, over_hud: bool) -> (Vec<u8>, Vec<u8>) {
+    /// A `W` x `H` picture: a smoothly shaded world (its luma divided by `dim`) with a flat white HUD block where the
+    /// minimap is, and the same picture with the goggles on, where `overlay` darkens three rows in every seven of the
+    /// world it covers (and of the HUD block when `over_hud`), as the goggles' scanlines do.
+    fn pictures(
+        overlay: impl Fn(u32, u32) -> bool,
+        over_hud: bool,
+        dim: u32,
+    ) -> (Vec<u8>, Vec<u8>) {
         let (mut off, mut on) = (Vec::new(), Vec::new());
         let hud = |x: u32, y: u32| (3..38).contains(&x) && (9..43).contains(&y);
         for y in 0..H {
             for x in 0..W {
-                let v = if hud(x, y) { 250 } else { 60 + x / 4 + y / 4 };
+                let v = if hud(x, y) {
+                    250
+                } else {
+                    (60 + x / 4 + y / 4) / dim
+                };
                 let line = y % 7 < 3 && overlay(x, y) && (!hud(x, y) || over_hud);
                 off.extend([v as u8; 3]);
                 on.extend([(if line { v * 7 / 10 } else { v }) as u8; 3]);
@@ -1096,24 +1113,34 @@ mod tests {
 
     #[test]
     fn the_goggles_frame_must_show_the_overlay_over_the_world_and_under_the_hud() {
-        let measure = |overlay: &dyn Fn(u32, u32) -> bool, over_hud| {
-            let (off, on) = pictures(overlay, over_hud);
+        let measure = |overlay: &dyn Fn(u32, u32) -> bool, over_hud, dim| {
+            let (off, on) = pictures(overlay, over_hud, dim);
             nv_measure(W, H, &off, &off, &on)
         };
-        let good = measure(&|_, _| true, false);
-        assert_eq!(good.cells_changed, 16);
+        let good = measure(&|_, _| true, false, 1);
+        assert!(good.min_gain > 0.03, "{good:?}");
         assert!(good.hud_rise.abs() < 0.01, "{good:?}");
         assert!(nv_problem(&good).is_none());
-        let none = measure(&|_, _| false, false);
-        assert_eq!(none.cells_changed, 0);
+        // A dark scene shows the lines as plainly for its brightness (#494).
+        let dark = measure(&|_, _| true, false, 3);
+        assert!(nv_problem(&dark).is_none(), "{dark:?}");
+        let none = measure(&|_, _| false, false, 1);
+        assert!(none.min_gain.abs() < 0.001, "{none:?}");
         assert!(nv_problem(&none).unwrap().contains("does not cover"));
-        let quarter = measure(&|x, y| x < W / 2 && y < H / 2, false);
-        assert_eq!(quarter.cells_changed, 4);
-        let over = measure(&|_, _| true, true);
+        let quarter = measure(&|x, y| x < W / 2 && y < H / 2, false, 1);
+        assert!(
+            nv_problem(&quarter).unwrap().contains("does not cover"),
+            "{quarter:?}"
+        );
+        let over = measure(&|_, _| true, true, 1);
         assert!(over.hud_rise > 5.0, "{over:?}");
         assert!(nv_problem(&over).unwrap().contains("over the HUD"));
         // A view that changes as much on its own as with the goggles shows no overlay.
-        let (off, on) = pictures(|_, _| true, false);
-        assert_eq!(nv_measure(W, H, &on, &off, &on).cells_changed, 0);
+        let (off, on) = pictures(|_, _| true, false, 1);
+        assert!(
+            nv_problem(&nv_measure(W, H, &on, &off, &on))
+                .unwrap()
+                .contains("does not cover")
+        );
     }
 }
