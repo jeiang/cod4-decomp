@@ -1914,6 +1914,8 @@ impl NetPlay {
             .map(|e| (e.number, e.loop_sound, e.origin))
             .collect();
         self.sound.entity_loops(&loops);
+        // `CG_AddClientSideSounds`: the level's createfx sounds, each from its origin.
+        self.sound.client_ent_sounds(&self.effects.ambient().sounds);
         // Only the sound commands; the rest belong to other systems.
         let (mine, rest): (Vec<String>, Vec<String>) = std::mem::take(&mut self.net.commands)
             .into_iter()
@@ -2860,6 +2862,7 @@ impl NetPlay {
         report["fx"]["ambient_played"] = json!(self.effects.ambient().played);
         report["fx"]["ambient_quads"] = json!(self.effects.ambient().quads);
         report["fx"]["ambient_without_quads"] = json!(self.effects.ambient().without_quads());
+        report["fx"]["ambient_sounds"] = self.effects.ambient().sounds.len().into();
         report["fx"]["ambient_live_effects_max"] = self.c.ambient_live_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
         report["fx"]["corpses_max"] = self.c.corpses_max.into();

@@ -83,6 +83,7 @@ const CHEAT: &[(&str, &str)] = &[
     ("ragdoll_explode_upbias", "0.8"),
     ("ragdoll_self_collision_scale", "1.2"),
     ("ragdoll_rotvel_scale", "1"),
+    ("clientSideEffects", "1"),
 ];
 
 /// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other

@@ -678,6 +678,11 @@ fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mu
             .map(|(name, at, forward)| (name.to_owned(), at, forward))
             .collect();
         report.insert(format!("ambient_{map}_placements"), poses.len().into());
+        let sounds = fx.ambient().sounds.len();
+        report.insert(format!("ambient_{map}_sounds"), sounds.into());
+        if sounds == 0 {
+            bad.push(format!("{map} has no parsed createfx sounds"));
+        }
         if poses.is_empty() {
             bad.push(format!("{map} has no parsed ambient effect placements"));
             continue;

@@ -17,18 +17,22 @@ pub struct AmbientEffect {
 }
 
 /// `clientSideEffects` (`CG_RegisterDvars` registers it as a cheat bool, default on): whether a level starts its
-/// `_fx.gsc` effects. `CG_StartClientSideEffects` reads it when the level loads. A cheat dvar, so it only acts with
-/// `sv_cheats` on; otherwise the stock default stands.
+/// `_fx.gsc` effects. `CG_StartClientSideEffects` reads it when the level loads. A cheat dvar: a write is refused
+/// while `sv_cheats` is off and cheats going off put it back to 1, so the store's value is what acts.
 pub fn enabled_by(cvars: &crate::input::Cvars) -> bool {
-    !cvars.bool("sv_cheats")
-        || cvars
-            .get("clientSideEffects")
-            .and_then(|v| v.trim().parse::<i64>().ok())
-            .is_none_or(|v| v != 0)
+    cvars
+        .get("clientSideEffects")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .is_none_or(|v| v != 0.0)
 }
+
+/// `MAX_CLIENT_ENT_SOUNDS`: the most createfx sounds a level keeps.
+pub const MAX_SOUNDS: usize = 128;
 
 pub struct Ambient {
     defs: Vec<AmbientEffect>,
+    /// The createfx sounds (`CG_AddClientEntSound`): each alias plays at its origin.
+    pub sounds: Vec<([f32; 3], String)>,
     pub played: BTreeMap<String, u64>,
     pub quads: BTreeMap<String, u64>,
 }
@@ -37,16 +41,17 @@ impl Ambient {
     pub fn empty() -> Self {
         Self {
             defs: Vec::new(),
+            sounds: Vec::new(),
             played: BTreeMap::new(),
             quads: BTreeMap::new(),
         }
     }
 
     pub fn new(content: &Content, fx: &mut Fx) -> Self {
-        let mut defs = content
+        let (mut defs, sounds) = content
             .map_name
             .as_deref()
-            .map_or_else(Vec::new, |map| parse(content, map, fx.library()));
+            .map_or_else(Default::default, |map| parse(content, map, fx.library()));
         let mut played = BTreeMap::new();
         let mut quads = BTreeMap::new();
         for d in &mut defs {
@@ -60,6 +65,7 @@ impl Ambient {
         }
         Self {
             defs,
+            sounds,
             played,
             quads,
         }
@@ -87,33 +93,82 @@ impl Ambient {
     }
 }
 
-fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
+const EFFECT: &str = "ent = maps\\mp\\_utility::createOneshotEffect";
+const LOOP_SOUND: &str = "ent = maps\\mp\\_createfx::createLoopSound();";
+
+/// The createfx file's entity blocks in file order: whether each is a loop sound, and its body.
+fn blocks(text: &str) -> Vec<(bool, &str)> {
+    let next = |s: &str| {
+        [(false, s.find(EFFECT)), (true, s.find(LOOP_SOUND))]
+            .into_iter()
+            .filter_map(|(sound, p)| Some((p?, sound)))
+            .min()
+    };
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some((p, sound)) = next(rest) {
+        rest = &rest[p + if sound {
+            LOOP_SOUND.len()
+        } else {
+            EFFECT.len()
+        }..];
+        let end = next(rest).map_or(rest.len(), |(e, _)| e);
+        out.push((sound, &rest[..end]));
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// The createfx sounds in file order (`CG_ParseSound`, and a oneshot effect's optional `soundalias`, which
+/// `CG_ParseEffect` adds whether or not the effect itself resolves), at most [`MAX_SOUNDS`].
+fn sounds(text: &str, map: &str) -> Vec<([f32; 3], String)> {
+    let mut out = Vec::new();
+    for (loop_sound, body) in blocks(text) {
+        let alias = string_after(body, "\"soundalias\"");
+        let origin = vector_after(body, "\"origin\"");
+        let (Some(alias), Some(origin)) = (alias, origin) else {
+            if loop_sound {
+                tracing::warn!(map, "createfx loop sound has no origin or alias");
+            }
+            continue;
+        };
+        if out.len() == MAX_SOUNDS {
+            tracing::warn!(
+                map,
+                "Too many client ent sounds.  Increase MAX_CLIENT_ENT_SOUNDS."
+            );
+            continue;
+        }
+        out.push((origin, alias.to_owned()));
+    }
+    out
+}
+
+fn parse(
+    content: &Content,
+    map: &str,
+    lib: &Library,
+) -> (Vec<AmbientEffect>, Vec<([f32; 3], String)>) {
     let Some(map_text) = content.rawfile(&format!("maps/mp/{map}_fx.gsc")) else {
         tracing::warn!(map, "map effect mapping is missing");
-        return Vec::new();
+        return Default::default();
     };
     let Ok(map_text) = std::str::from_utf8(map_text) else {
         tracing::warn!(map, "map effect mapping is not UTF-8");
-        return Vec::new();
+        return Default::default();
     };
     let names = mappings(map_text, map);
     let path = format!("maps/createfx/{map}_fx.gsc");
     let Some(text) = content.rawfile(&path) else {
         tracing::warn!(map, path, "map createfx file is missing");
-        return Vec::new();
+        return Default::default();
     };
     let Ok(text) = std::str::from_utf8(text) else {
         tracing::warn!(map, path, "map createfx file is not UTF-8");
-        return Vec::new();
+        return Default::default();
     };
-    let marker = "ent = maps\\mp\\_utility::createOneshotEffect";
-    let mut rest = text;
     let mut out = Vec::new();
-    while let Some(p) = rest.find(marker) {
-        rest = &rest[p + marker.len()..];
-        let end = rest.find(marker).unwrap_or(rest.len());
-        let body = &rest[..end];
-        rest = &rest[end..];
+    for (_, body) in blocks(text).into_iter().filter(|(sound, _)| !sound) {
         let Some(origin) = vector_after(body, "\"origin\"") else {
             tracing::warn!(map, path, "createfx effect has no origin");
             continue;
@@ -158,7 +213,7 @@ fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
             handle: 0,
         });
     }
-    out
+    (out, sounds(text, map))
 }
 
 /// The effect key to definition mappings a map's effect script assigns, one per line that begins
@@ -223,23 +278,15 @@ mod tests {
 
     #[test]
     fn client_side_effects_turn_off_only_with_cheats() {
-        let cvars = |pairs: &[(&str, &str)]| {
-            let mut c = crate::input::Cvars::default();
-            for (k, v) in pairs {
-                c.set(k, v, false);
-            }
-            c
-        };
-        assert!(enabled_by(&cvars(&[])));
-        assert!(enabled_by(&cvars(&[("clientSideEffects", "0")])));
-        assert!(!enabled_by(&cvars(&[
-            ("sv_cheats", "1"),
-            ("clientSideEffects", "0")
-        ])));
-        assert!(enabled_by(&cvars(&[
-            ("sv_cheats", "1"),
-            ("clientSideEffects", "1")
-        ])));
+        let mut c = crate::input::Cvars::default();
+        assert!(enabled_by(&c));
+        c.set("clientSideEffects", "0", false);
+        assert!(!enabled_by(&c));
+        c.set_cheat_state(false);
+        assert!(enabled_by(&c));
+        c.set_cheat_state(true);
+        c.set("clientSideEffects", "1", false);
+        assert!(enabled_by(&c));
     }
     #[test]
     fn generated_placements_parse_without_content() {
@@ -266,5 +313,45 @@ mod tests {
             names.get("rain").map(String::as_str),
             Some("weather/rain_a")
         );
+    }
+
+    #[test]
+    fn loop_sounds_and_effect_sounds_are_kept_in_file_order() {
+        let effect = |o: i32, alias: Option<&str>| {
+            format!(
+                "\tent = maps\\mp\\_utility::createOneshotEffect( \"a\" );\n\tent.v[ \"origin\" ] = ( {o}, 0, 0 );\n\
+                 \tent.v[ \"angles\" ] = ( 0, 0, 0 );\n\tent.v[ \"fxid\" ] = \"a\";\n\tent.v[ \"delay\" ] = -15;\n{}",
+                alias.map_or(String::new(), |a| format!(
+                    "\tent.v[ \"soundalias\" ] = \"{a}\";\n"
+                ))
+            )
+        };
+        let sound = |o: i32, alias: &str| {
+            format!(
+                "\tent = maps\\mp\\_createfx::createLoopSound();\n\tent.v[ \"origin\" ] = ( {o}, 0, 0 );\n\
+                 \tent.v[ \"angles\" ] = ( 0, 0, 0 );\n\tent.v[ \"soundalias\" ] = \"{alias}\";\n"
+            )
+        };
+        let text = [
+            effect(1, None),
+            sound(2, "hum"),
+            effect(3, Some("crackle")),
+            sound(4, "wind"),
+        ]
+        .concat();
+        // The loop sound after an effect is not that effect's sound.
+        assert_eq!(blocks(&text).iter().filter(|(s, _)| !s).count(), 2);
+        assert_eq!(
+            sounds(&text, "test"),
+            vec![
+                ([2.0, 0.0, 0.0], "hum".to_owned()),
+                ([3.0, 0.0, 0.0], "crackle".to_owned()),
+                ([4.0, 0.0, 0.0], "wind".to_owned()),
+            ]
+        );
+        let many: String = (0..MAX_SOUNDS as i32 + 3)
+            .map(|i| sound(i, "hum"))
+            .collect();
+        assert_eq!(sounds(&many, "test").len(), MAX_SOUNDS);
     }
 }

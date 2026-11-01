@@ -74,6 +74,9 @@ const BREATH_ENTITY: u32 = 0x00ff_fffe;
 /// The entity a menu's `soundLoop` plays for, so a looping alias starts once however often it is asked for.
 const MENU_ENTITY: u32 = 0x00ff_fffd;
 
+/// The first entity number the createfx sounds play as (`CG_AddClientSideSounds`: `MAX_GENTITIES + i`).
+const CLIENT_ENT_SOUNDS: u32 = 1024;
+
 pub struct ClientSound {
     state: State,
     device: bool,
@@ -91,6 +94,8 @@ pub struct ClientSound {
     footsteps: bool,
     /// The missiles whose flight loop is playing.
     missile_loops: HashSet<u16>,
+    /// How many of the createfx sounds ([`Self::client_ent_sounds`]) are playing.
+    client_ents: usize,
     /// The names of the alias indices entities loop (`sndname` commands), 1-based.
     names: Vec<String>,
     /// The entities looping a sound now, and the alias index each plays.
@@ -142,6 +147,7 @@ impl ClientSound {
             eye: [0.0; 3],
             footsteps: true,
             missile_loops: HashSet::new(),
+            client_ents: 0,
             names: Vec::new(),
             entity_loops: HashMap::new(),
             breath: crate::breath::Breath::default(),
@@ -765,10 +771,42 @@ impl ClientSound {
     pub fn stop_all(&mut self) {
         self.entity_loops.clear();
         self.missile_loops.clear();
+        self.client_ents = 0;
         if let Some(s) = self.ready() {
             s.stop_all();
             s.fade_all(1.0, 0);
         }
+    }
+
+    /// `CG_AddClientSideSounds`: each createfx sound plays at its origin as client entity `1024 + i`. Stock asks every
+    /// frame and a looping alias already on that entity carries on, so each one starts once here, until
+    /// [`Self::stop_all`].
+    pub fn client_ent_sounds(&mut self, sounds: &[([f32; 3], String)]) {
+        // The level's createfx sounds went away (`clientSideEffects` turned off): the ones playing stop.
+        if self.client_ents > sounds.len() {
+            let gone = sounds.len()..self.client_ents;
+            self.client_ents = sounds.len();
+            if let Some(s) = self.ready() {
+                for i in gone {
+                    s.stop_entity(CLIENT_ENT_SOUNDS + i as u32);
+                }
+            }
+            return;
+        }
+        if self.client_ents == sounds.len() || self.ready().is_none() {
+            return;
+        }
+        for (i, (origin, alias)) in sounds.iter().enumerate().skip(self.client_ents) {
+            self.play(
+                alias,
+                Cue {
+                    origin: Some(*origin),
+                    entity: CLIENT_ENT_SOUNDS + i as u32,
+                    ..Cue::default()
+                },
+            );
+        }
+        self.client_ents = sounds.len();
     }
 
     /// `CG_AddEntityLoopSound`: the entities that loop a sound this frame, as (entity, alias index, origin). Each
