@@ -663,7 +663,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
 /// `FX_UpdateEffectBolt`: MP 1.8 reference; no iw3mp.exe 1.7 binary verification.
 fn bolted(
     mut lib: Library,
-    render_world: std::sync::Arc<assets::zone::gfx::GfxWorld>,
+    render_world: std::sync::Arc<assets::zone::gfxworld::GfxWorld>,
     world: &dyn Collide,
     eye: glam::Vec3,
     report: &mut serde_json::Map<String, Value>,
@@ -697,6 +697,10 @@ fn bolted(
             })
         })
         .ok_or("no loaded long-lived effect-relative element for bolted fixture")?;
+    let effect_name = effect
+        .name
+        .as_deref()
+        .ok_or("bolted fixture effect has no name")?;
     let program = compile(
         &[("bolted.gsc", "main(ent) { playfxontag(1, ent, \"tag_origin\"); } move(ent) { ent moveto(ent.origin + (32, 0, 0), 0.1); } missing(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }")],
         &Builtins::stock_mp(),
@@ -710,7 +714,7 @@ fn bolted(
     let dispatch = server::script::Dispatch::new(&program);
     let mut vm = Vm::new(program).map_err(|e| format!("{e:?}"))?;
     let mut game = Game::new(server::cvar::Cvars::new(), lib.content);
-    game.fx.index(&effect.name);
+    game.fx.index(effect_name);
     game.note_model(&model);
     let mut entity = Ent::new(EntKind::Plain, "script_model");
     entity.model = model.clone().into();
@@ -738,7 +742,7 @@ fn bolted(
         .collect::<Vec<_>>();
     let mut events = crate::events::Events::default();
     events.set_effect_tags(&tags);
-    events.take_commands(&mut vec![format!("fx 1 {}", effect.name)]);
+    events.take_commands(&mut vec![format!("fx 1 {effect_name}")]);
     let mut fx = Effects::new(&game.content, render_world);
     let mut received = 0;
     for step in 0..=16 {
@@ -786,7 +790,7 @@ fn bolted(
     );
     report.insert("bolted_follow_error".into(), stats.max_follow_error.into());
     report.insert("bolted_model".into(), model.clone().into());
-    report.insert("bolted_effect".into(), effect.name.to_string().into());
+    report.insert("bolted_effect".into(), effect_name.into());
     let error = vm
         .call(
             &mut server::script::ScriptHost {
