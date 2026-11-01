@@ -58,6 +58,8 @@ now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `h
 `net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`).
 
 `entities.list[].model_name` resolves each snapshot model index through the server's model configstrings.
+`entities.snapshot` and `entities.server_time` name the snapshot the list came from, so a check that compares
+snapshots reads the list and its snapshot in one request.
 For same-camera rendering comparisons, the diagnostic console commands `drawscriptmodels 0` and `drawprops 0`
 hide those two classes independently; `1` restores them, as with `drawvehicles`.
 

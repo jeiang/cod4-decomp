@@ -75,12 +75,10 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
                 .zip(e["origin"][1].as_f64())
                 .is_some_and(|(x, y)| (x - 58.0).hypot(y - 2112.5) < r)
     };
-    // The newest snapshot's player and the garage's script_models. The player is read on both sides of the entity
-    // list, so a sample whose snapshot changed in between is marked and not judged.
+    // The newest snapshot's garage script_models. The list and the number of the snapshot it came from are read in
+    // one request, so a sample never mixes two snapshots.
     let sample = |c: &mut Driven| -> Result<serde_json::Value, String> {
-        let before = c.state("player")?;
         let entities = c.state("entities")?;
-        let after = c.state("player")?;
         let list = entities["list"].as_array().cloned().unwrap_or_default();
         let garage: Vec<_> = list
             .iter()
@@ -90,13 +88,11 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
                         .as_str()
                         .is_some_and(|m| m.starts_with("vehicle_"))
             })
-            .map(|e| json!({"n": e["number"], "m": e["model_name"], "o": e["origin"]}))
+            .map(|e| json!({"n": e["number"], "k": e["kind"], "m": e["model_name"], "o": e["origin"]}))
             .collect();
         Ok(json!({
-            "snapshot": before["snapshot"],
-            "consistent": before["snapshot"] == after["snapshot"],
-            "server_time": before["server_time"],
-            "origin": before["origin"],
+            "snapshot": entities["snapshot"],
+            "server_time": entities["server_time"],
             "count": entities["count"],
             "numbers": list.iter().map(|e| e["number"].clone()).collect::<Vec<_>>(),
             "car": list.iter().any(|e| near(e, 1.0)),
@@ -104,7 +100,8 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
             "garage": garage,
         }))
     };
-    let spawn = sample(c)?;
+    let mut spawn = sample(c)?;
+    spawn["origin"] = c.state("player")?["origin"].clone();
     // TeleportPlayer adds one unit after subtracting view height; ask for 323.5 to put the render eye at 324.5.
     c.ask(json!({"cmd": "exec", "line": "setviewpos 200.8 2267.5 323.5 175.3 0"}))?;
     // Render frames are not server ticks. Do not inspect entity selection until a snapshot actually contains the
@@ -118,18 +115,14 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         secs(5),
         "no snapshot arrived from the teleported position",
     )?;
-    // Every snapshot sent from the teleported eye must carry the car: judge 20 of them, not only the newest.
-    let mut timeline = Vec::new();
-    for _ in 0..600 {
-        if timeline.len() >= 20 {
-            break;
-        }
-        c.ask(json!({"cmd": "step", "frames": 1}))?;
+    // Every snapshot sent from the teleported eye must carry the car: judge 40 of them, not only the newest.
+    let mut timeline: Vec<serde_json::Value> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while timeline.len() < 40 && std::time::Instant::now() < deadline {
         let s = sample(c)?;
-        if s["consistent"] == true
-            && timeline
-                .last()
-                .is_none_or(|l: &serde_json::Value| l["snapshot"] != s["snapshot"])
+        if timeline
+            .last()
+            .is_none_or(|l| l["snapshot"] != s["snapshot"])
         {
             timeline.push(s);
         }
@@ -152,7 +145,7 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
             s["snapshot"]
         ));
     }
-    if timeline.len() < 20 {
+    if timeline.len() < 40 {
         return Err(format!(
             "only {} post-teleport snapshots arrived",
             timeline.len()

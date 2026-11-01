@@ -96,8 +96,9 @@ fn entities(st: &NetPlay) -> Value {
             "actor": !visible.contains(&e.number),
         }));
     }
-    // The count first: a `wait` on `entities.count` is what an agent asks for, not the list itself.
-    json!({"count": out.len(), "list": out})
+    // The count first: a `wait` on `entities.count` is what an agent asks for, not the list itself. The snapshot's
+    // number and server time name the snapshot the list came from, so one request ties the two together.
+    json!({"count": out.len(), "snapshot": snap.num, "server_time": snap.server_time, "list": out})
 }
 
 /// The scoreboard the server last sent, with each row's numbers.
