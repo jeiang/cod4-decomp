@@ -187,7 +187,8 @@ pub const COMMANDS: &[&str] = &[
     "bots",
     "expect",
     "until",
-    // Test hooks: `devtele`, `devrun`, `devgrenade`, `devhardpoint`, `devradar`, `devheli`, `devkill`, `devshoot`.
+    // Test hooks: `devtele`, `devrun`, `devgrenade`, `devhardpoint`, `devradar`, `devheli`, `devkill`, `devshoot`,
+    // `devobjective`.
     "devtele",
     "devrun",
     "devgrenade",
@@ -196,6 +197,7 @@ pub const COMMANDS: &[&str] = &[
     "devheli",
     "devkill",
     "devshoot",
+    "devobjective",
     // Players and administration.
     "clientkick",
     "tempbanclient",
@@ -2256,6 +2258,19 @@ impl Server {
                 // The variable is the one count: the map starts that follow read it.
                 self.game.cvars.set("bot_count", &n.to_string());
                 self.set_bots(n)?;
+            }
+            // Test hook: `devobjective <index> <state> [x y z [icon]]` sets an objective as the scripts'
+            // `objective_add` does, shown to every team.
+            "devobjective" => {
+                let (Some(i), Some(state)) = (arg(1), arg(2)) else {
+                    return Err("usage: devobjective <index> <state> [x y z [icon]]".into());
+                };
+                let i = usize::try_from(cvar::parse_int(i)).map_err(|e| e.to_string())?;
+                let origin = match (arg(3), arg(4), arg(5)) {
+                    (Some(x), Some(y), Some(z)) => Some([x, y, z].map(cvar::parse_float)),
+                    _ => None,
+                };
+                crate::script::uicmd::add_objective(&mut self.game, i, state, origin, arg(6))?;
             }
             // Test hook: `devkill <victim> <attacker> [damage] [mod] [weapon]` has the attacker's weapon hit the victim
             // for that much (a 1000 damage ak47 rifle bullet by default), through `G_Damage` and the scripts' damage

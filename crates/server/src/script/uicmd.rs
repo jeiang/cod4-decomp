@@ -420,18 +420,48 @@ pub fn objective_add(g: &mut Game, _: &mut Vm, a: Args) -> R {
         return Err("objective_add needs at least the first two parameters out of its parameter list of: index state [string] [position]\n".into());
     }
     let i = objective_index(a)?;
-    let state = objective_state_of(a.string(1)?)?;
+    let state = a.string(1)?.to_owned();
+    let origin = if a.len() >= 3 {
+        Some(a.vector(2)?)
+    } else {
+        None
+    };
+    let icon = if a.len() >= 4 {
+        Some(a.string(3)?.to_owned())
+    } else {
+        None
+    };
+    add_objective(g, i, &state, origin, icon.as_deref())?;
+    Ok(Value::Undefined)
+}
+
+/// What `objective_add` does: objective `i` takes `state` (`"current"`, `"active"`, ...), the position and icon when
+/// given, and is shown to every team.
+pub fn add_objective(
+    g: &mut Game,
+    i: usize,
+    state: &str,
+    origin: Option<[f32; 3]>,
+    icon: Option<&str>,
+) -> Result<(), String> {
+    if i >= ui::MAX_OBJECTIVES {
+        return Err(format!(
+            "index {i} is an illegal objective index. Valid indexes are 0 to {}\n",
+            ui::MAX_OBJECTIVES - 1
+        ));
+    }
+    let state = objective_state_of(state)?;
     let o = &mut g.ui.objectives[i];
     o.o.entity = ui::NO_ENTITY;
     o.o.state = state;
-    if a.len() >= 3 {
-        o.o.origin = whole(a.vector(2)?);
-        if a.len() >= 4 {
-            set_icon(g, i, a.string(3)?)?;
+    if let Some(origin) = origin {
+        o.o.origin = whole(origin);
+        if let Some(icon) = icon {
+            set_icon(g, i, icon)?;
         }
     }
     g.ui.objectives[i].team = Team::Free;
-    Ok(Value::Undefined)
+    Ok(())
 }
 
 pub fn objective_delete(g: &mut Game, _: &mut Vm, a: Args) -> R {
