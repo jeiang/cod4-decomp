@@ -159,6 +159,12 @@ fn stat(c: &mut Driven, path: &str) -> Result<u64, String> {
 /// Read the real person's last simulation frame, not an expected value supplied by the scenario.
 fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<Value, String> {
     let start = Instant::now();
+    let frames = |c: &mut Driven| -> Result<u64, String> {
+        Ok(c.ask(json!({"cmd": "ping"}))?["frames"]
+            .as_u64()
+            .unwrap_or(0))
+    };
+    let first = frames(c)?;
     let mut last = Value::Null;
     while start.elapsed() < Duration::from_secs(30) {
         let state = c.ask(json!({"cmd": "server", "op": "state", "what": "clients"}))?;
@@ -199,8 +205,9 @@ fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<
         }
         c.pause(Duration::from_millis(50))?;
     }
+    let drawn = frames(c)?.saturating_sub(first);
     Err(format!(
-        "no matching sync {} frame (right={right}): {last}",
+        "no matching sync {} frame (right={right}; the client drew {drawn} frames in the wait): {last}",
         if empty { "empty" } else { "backlog" }
     ))
 }
@@ -455,6 +462,7 @@ fn play(
         c.ask(json!({"cmd":"server","op":"cvar","name":"sv_voice","value":"0"}))?;
         Ok(())
     })?;
+    let cvars_before = c.ask(json!({"cmd": "cvars"}))?;
     c.step("received voice talker ownerdraws", |c| {
         received_voice(c, install, notes)
     })?;
@@ -489,6 +497,16 @@ fn play(
         }
         Ok(())
     })?;
+    // What the voice steps (the speaker, the voice options' scripts) left changed in the client's settings.
+    let cvars_after = c.ask(json!({"cmd": "cvars"}))?;
+    if let (Some(a), Some(b)) = (cvars_before.as_object(), cvars_after.as_object()) {
+        let changed: Vec<String> = b
+            .iter()
+            .filter(|(k, v)| !matches!(k.as_str(), "ok" | "id") && a.get(*k) != Some(*v))
+            .map(|(k, v)| format!("{k}={v} (was {})", a.get(k).unwrap_or(&Value::Null)))
+            .collect();
+        notes.push(format!("cvars the voice steps changed: {changed:?}"));
+    }
     c.step("stock server dvar registrations", |c| {
         // KisakCOD game_mp/g_main_mp.cpp:407,632-648,694-712 and server_mp/sv_init_mp.cpp:708-722,771.
         // Empty registered strings must be "", never the null returned for an absent registration.
