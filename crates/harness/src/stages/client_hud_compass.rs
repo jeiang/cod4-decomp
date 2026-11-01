@@ -17,6 +17,8 @@ const SILENCED: &str = "mp5_silencer_mp";
 const BURST_MS: u32 = 500;
 /// Long enough for the sound hold and fade to end.
 const SETTLE: Duration = Duration::from_secs(5);
+/// Attempts at one case: the match can still kill the idle bot (#494 saw it respawn mid-case).
+const ATTEMPTS: u32 = 3;
 
 /// The HUD's cumulative compass counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,23 +120,26 @@ fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
     }
 }
 
-/// One case: the bot shoots `weapon`; the compass must ping or not.
-fn case(
-    c: &mut Driven,
-    bot: u64,
-    label: &str,
-    weapon: &str,
-    pings: bool,
-) -> Result<String, String> {
-    // Give and raise the weapon first, so the burst below is its fire and not the raise. A bot that lost it (a
-    // respawn gives a fresh inventory) is given it again.
+/// Puts the bot at `spot` (`devtele` arguments) and has it give and raise `weapon`, so the burst after it is the
+/// weapon's fire and not its raise. A bot that respawns meanwhile (a fresh inventory, somewhere else) is put back
+/// and given it again.
+fn raise(c: &mut Driven, bot: u64, spot: &str, label: &str, weapon: &str) -> Result<(), String> {
     let end = Instant::now() + Duration::from_secs(15);
+    let mut placed = Value::Null;
     loop {
+        let p = server_client(c, bot)?;
+        if p["alive"] == json!(true) && p["spawn_count"] != placed {
+            exec(c, &format!("devtele {bot} {spot}"))?;
+            placed = p["spawn_count"].clone();
+        }
         exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
         c.pause(Duration::from_secs(2))?;
         let held = server_client(c, bot)?;
-        if held["weapon_name"] == weapon && held["alive"] == json!(true) {
-            break;
+        if held["weapon_name"] == weapon
+            && held["alive"] == json!(true)
+            && held["spawn_count"] == placed
+        {
+            return Ok(());
         }
         if Instant::now() > end {
             return Err(format!(
@@ -143,25 +148,75 @@ fn case(
             ));
         }
     }
-    c.pause(SETTLE)?;
-    let before = counts(c)?;
-    let was = server_client(c, bot)?;
-    exec(c, &format!("devbotfire {bot} {weapon} {BURST_MS}"))?;
-    c.pause(Duration::from_millis(u64::from(BURST_MS) + 1500))?;
-    c.pause(Duration::from_secs(5))?;
-    let after = counts(c)?;
-    let now = server_client(c, bot)?;
+}
+
+/// One case: the bot, at `spot`, shoots `weapon`; the compass must ping or not. An attempt in which the bot
+/// respawned (something in the match killed it; the person's pings and its weapon are then another life's) proves
+/// nothing and is made again, up to [`ATTEMPTS`] times.
+fn case(
+    c: &mut Driven,
+    bot: u64,
+    spot: &str,
+    label: &str,
+    weapon: &str,
+    pings: bool,
+) -> Result<String, String> {
+    let mut lost = Vec::new();
+    for attempt in 1..=ATTEMPTS {
+        raise(c, bot, spot, label, weapon)?;
+        c.pause(SETTLE)?;
+        let before = counts(c)?;
+        let was = server_client(c, bot)?;
+        exec(c, &format!("devbotfire {bot} {weapon} {BURST_MS}"))?;
+        c.pause(Duration::from_millis(u64::from(BURST_MS) + 1500))?;
+        c.pause(Duration::from_secs(5))?;
+        let after = counts(c)?;
+        let now = server_client(c, bot)?;
+        if now["spawn_count"] != was["spawn_count"] || now["alive"] != json!(true) {
+            lost.push(format!(
+                "attempt {attempt} before: {}; after: {}",
+                body(&was),
+                body(&now)
+            ));
+            continue;
+        }
+        return finish(c, bot, label, pings, (before, after), (&was, &now))
+            .map(|s| retried(s, &lost));
+    }
+    Err(format!(
+        "{label}: bot {bot} died during every attempt: {}",
+        lost.join("; ")
+    ))
+}
+
+/// A passing case's note, naming the attempts the bot died in.
+fn retried(note: String, lost: &[String]) -> String {
+    if lost.is_empty() {
+        note
+    } else {
+        format!(
+            "{note} (bot died in {} earlier attempts: {})",
+            lost.len(),
+            lost.join("; ")
+        )
+    }
+}
+
+/// The verdict on one attempt in which the bot lived throughout.
+fn finish(
+    c: &mut Driven,
+    bot: u64,
+    label: &str,
+    pings: bool,
+    (before, after): (Counts, Counts),
+    (was, now): (&Value, &Value),
+) -> Result<String, String> {
     let shots = now["shots"]
         .as_u64()
         .unwrap_or(0)
         .saturating_sub(was["shots"].as_u64().unwrap_or(0));
-    verdict(label, pings, before, after, shots).map_err(|e| {
-        format!(
-            "{e}; bot {bot} before: {}; after: {}",
-            body(&was),
-            body(&now)
-        )
-    })?;
+    verdict(label, pings, before, after, shots)
+        .map_err(|e| format!("{e}; bot {bot} before: {}; after: {}", body(was), body(now)))?;
     if pings {
         let played = c
             .lookup("hud.report.last_fire_played_ms")?
@@ -221,14 +276,12 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
         bot_home = Some((bot, server_client(c, bot)?["origin"].clone()));
         let origin = c.lookup("player.origin")?;
         let at = |i: usize| origin[i].as_f64().unwrap_or(0.0);
-        exec(
-            c,
-            &format!("devtele {bot} {} {} {}", at(0) + 96.0, at(1), at(2)),
-        )?;
+        // 96 units along x from the person; `case` puts it back there after a respawn.
+        let spot = format!("{} {} {}", at(0) + 96.0, at(1), at(2));
         // `case` compares the independently played sound with the hold and final drawn mark lifetime.
         Ok(vec![
-            case(c, bot, "unsilenced", UNSILENCED, true)?,
-            case(c, bot, "silenced", SILENCED, false)?,
+            case(c, bot, &spot, "unsilenced", UNSILENCED, true)?,
+            case(c, bot, &spot, "silenced", SILENCED, false)?,
         ])
     })();
     // Put the bot back where it stood before letting it think again: released 96 units from the person, an enemy
