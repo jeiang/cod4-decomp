@@ -14,7 +14,7 @@
 //! prompt over it, a teammate must have had a name over the head and the player under the crosshair a name of their
 //! own, and nothing may be on screen as a bare string key. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
-use super::client_models::no_display;
+use super::client_models::{decode, no_display};
 use super::client_session::{render_problem, steps_problem};
 use crate::control::{Driven, Walker};
 use crate::stage::{StageCtx, StageReport, Status};
@@ -42,6 +42,126 @@ const BOLD: usize = 1;
 /// Seconds after the spawn before a class change says anything: the stock grace period (`scr_war_graceperiod`, 15 s)
 /// runs from the match's start, which is before the spawn.
 const GRACE_SECS: f64 = 20.0;
+
+/// The night vision step's matched captures, the player held still: goggles off, off again a second later (what the
+/// view changes by on its own) and on.
+const NV_OFF: &str = "night_vision_off";
+const NV_STILL: &str = "night_vision_still";
+const NV_ON: &str = "night_vision";
+/// The screen cut into `NV_GRID` x `NV_GRID` cells. The overlay is stretched over all of it
+/// (`CG_DrawNightVisionOverlay`), so it changes nearly every cell; a bot walking through one may hide its change.
+const NV_GRID: u32 = 4;
+const NV_MIN_CELLS: usize = 13;
+/// A cell changed when its pixels moved by at least this much luma on average, and by more than twice (plus one)
+/// what they moved with the goggles off.
+const NV_MIN_CHANGE: f64 = 2.0;
+/// The lower corners, which hold the HUD's health and ammunition pieces, and where the overlay's vignette darkens the
+/// world: left, top, right, bottom as fractions of the picture.
+const HUD_CORNERS: [(f32, f32, f32, f32); 2] = [(0.0, 0.85, 0.25, 1.0), (0.75, 0.85, 1.0, 1.0)];
+/// A corner pixel at least this bright with the goggles off and steady (within `HUD_STEADY`) across both off
+/// captures is a candidate for the HUD; it stayed when it is within `HUD_KEPT` with them on, as the HUD drawn over
+/// the overlay does and the world under it does not.
+const HUD_BRIGHT: i32 = 110;
+const HUD_STEADY: i32 = 6;
+const HUD_KEPT: i32 = 8;
+const HUD_MIN_PIXELS: usize = 100;
+const HUD_MIN_KEPT: f64 = 0.3;
+
+fn luma(p: &[u8]) -> i32 {
+    (i32::from(p[0]) * 77 + i32::from(p[1]) * 150 + i32::from(p[2]) * 29) >> 8
+}
+
+/// What the goggles changed between the matched captures.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct NvView {
+    /// Cells of the grid whose change with the goggles on stood out from the still view's own.
+    cells_changed: usize,
+    /// Bright, steady pixels of the HUD corners with the goggles off.
+    hud_pixels: usize,
+    /// The share of those that stayed with the goggles on.
+    hud_kept: f64,
+}
+
+/// Compares the RGB pictures `off`, `still` (both goggles off) and `on`, each `w` x `h`.
+fn nv_measure(w: u32, h: u32, off: &[u8], still: &[u8], on: &[u8]) -> NvView {
+    let at = |x: u32, y: u32| ((y * w + x) * 3) as usize;
+    let px = |img: &[u8], x: u32, y: u32| luma(&img[at(x, y)..at(x, y) + 3]);
+    let mut m = NvView::default();
+    for cy in 0..NV_GRID {
+        for cx in 0..NV_GRID {
+            let (x0, x1) = (cx * w / NV_GRID, (cx + 1) * w / NV_GRID);
+            let (y0, y1) = (cy * h / NV_GRID, (cy + 1) * h / NV_GRID);
+            let (mut noise, mut change, mut n) = (0u64, 0u64, 0u64);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let (a, b, c) = (px(off, x, y), px(still, x, y), px(on, x, y));
+                    noise += u64::from((b - a).unsigned_abs());
+                    change += u64::from((c - b).unsigned_abs());
+                    n += 1;
+                }
+            }
+            let (noise, change) = (
+                noise as f64 / n.max(1) as f64,
+                change as f64 / n.max(1) as f64,
+            );
+            if change >= NV_MIN_CHANGE && change > 2.0 * noise + 1.0 {
+                m.cells_changed += 1;
+            }
+        }
+    }
+    let mut kept = 0usize;
+    for (l, t, r, b) in HUD_CORNERS {
+        let (x0, x1) = ((l * w as f32) as u32, (r * w as f32) as u32);
+        let (y0, y1) = ((t * h as f32) as u32, (b * h as f32) as u32);
+        for y in y0..y1.min(h) {
+            for x in x0..x1.min(w) {
+                let (a, b, c) = (px(off, x, y), px(still, x, y), px(on, x, y));
+                if b >= HUD_BRIGHT && (b - a).abs() <= HUD_STEADY {
+                    m.hud_pixels += 1;
+                    kept += usize::from((c - b).abs() <= HUD_KEPT);
+                }
+            }
+        }
+    }
+    m.hud_kept = kept as f64 / m.hud_pixels.max(1) as f64;
+    m
+}
+
+/// What is wrong with the goggles' frame, or `None`.
+fn nv_problem(m: &NvView) -> Option<String> {
+    let mut bad = Vec::new();
+    if m.cells_changed < NV_MIN_CELLS {
+        bad.push(format!(
+            "the goggles changed {} of {} parts of the screen (need {NV_MIN_CELLS}): the overlay does not cover it",
+            m.cells_changed,
+            NV_GRID * NV_GRID
+        ));
+    }
+    if m.hud_pixels < HUD_MIN_PIXELS {
+        bad.push(format!(
+            "the HUD corners had {} bright pixels with the goggles off (need {HUD_MIN_PIXELS}): is the HUD drawn?",
+            m.hud_pixels
+        ));
+    } else if m.hud_kept < HUD_MIN_KEPT {
+        bad.push(format!(
+            "{:.0}% of the HUD corners' bright pixels stayed with the goggles on (need {:.0}%): the overlay is over the HUD",
+            m.hud_kept * 100.0,
+            HUD_MIN_KEPT * 100.0
+        ));
+    }
+    (!bad.is_empty()).then(|| bad.join("; "))
+}
+
+/// Decodes the step's three captures from `dir` and measures them.
+fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
+    let load = |n: &str| decode(&dir.join(format!("{n}.png")));
+    let ((w, h, off), (w2, h2, still), (w3, h3, on)) =
+        (load(NV_OFF)?, load(NV_STILL)?, load(NV_ON)?);
+    if (w, h) != (w2, h2) || (w, h) != (w3, h3) {
+        return Err("the captures differ in size".into());
+    }
+    Ok(nv_measure(w, h, &off, &still, &on))
+}
 
 /// What is wrong with the HUD of a finished run, or `None`.
 pub(crate) fn verdict(report: &Value) -> Option<String> {
@@ -464,13 +584,24 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
 
     // Night vision on the stock action slot 1 bind (every stock class gets `setactionslot(1, "nightvision")`): the
     // goggles' overlay covers the screen under the HUD and the d-pad slot shows their icon
-    // (`CG_DrawNightVisionOverlay`, `CG_DrawPlayerActionSlot`); the same bind takes them off.
+    // (`CG_DrawNightVisionOverlay`, `CG_DrawPlayerActionSlot`); the same bind takes them off. The player stands still
+    // for the matched captures: two with the goggles off (what the view changes by on its own) and one with them on.
     c.step("night vision", |c| {
+        w.stop(c)?;
+        c.until(
+            json!({"player.alive": true, "hud.live.killcam": false}),
+            secs(30),
+            "the player was not alive to put the goggles on",
+        )?;
         let frames = stat(c, "hud.stats.night_vision_frames")?;
         let icons = c
             .lookup("hud.report.night_vision_icon_frames")?
             .as_u64()
             .unwrap_or(0);
+        c.pause(secs(1))?;
+        c.capture(NV_OFF)?;
+        c.pause(secs(1))?;
+        c.capture(NV_STILL)?;
         c.bind("+actionslot 1", "tap")?;
         c.until(
             json!({
@@ -482,7 +613,10 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             "the goggles' overlay and d-pad icon were not drawn after the night vision bind",
         )?;
         c.pause(secs(1))?;
-        c.capture("night_vision")?;
+        c.capture(NV_ON)?;
+        if c.lookup("player.alive")? != Value::Bool(true) {
+            return Err("the player died while the goggles' frames were captured".into());
+        }
         c.bind("+actionslot 1", "tap")?;
         c.until(
             json!({"hud.live.night_vision": false}),
@@ -673,6 +807,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     for f in [
         "scoreboard.png",
         "feed.png",
+        "night_vision_off.png",
+        "night_vision_still.png",
         "night_vision.png",
         "killcam_first.png",
         "killcam_next.png",
@@ -697,7 +833,19 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     out.metrics.insert(format!("hud.{k}"), v);
                 }
             }
-            verdict(&report)
+            verdict(&report).or_else(|| match night_vision_view(&dir) {
+                Ok(m) => {
+                    out.metrics
+                        .insert("nv.cells_changed".into(), m.cells_changed as f64);
+                    out.metrics
+                        .insert("nv.hud_pixels".into(), m.hud_pixels as f64);
+                    out.metrics.insert("nv.hud_kept".into(), m.hud_kept);
+                    nv_problem(&m)
+                }
+                Err(e) => Some(format!(
+                    "the night vision captures could not be compared: {e}"
+                )),
+            })
         }
     };
     if let Some(why) = why {
@@ -836,5 +984,50 @@ mod tests {
                 && why.contains("picture"),
             "{why}"
         );
+    }
+
+    /// A 64 x 64 picture: a mid-grey world with a white HUD block in the lower-left corner, and the same picture
+    /// with the goggles on, where `overlay` darkens every other pair of rows of the world it covers (and all of the
+    /// HUD block when `over_hud`).
+    fn pictures(overlay: impl Fn(u32, u32) -> bool, over_hud: bool) -> (Vec<u8>, Vec<u8>) {
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let hud = x < 12 && y > 56;
+                let v: u8 = if hud { 250 } else { 100 };
+                let dark = overlay(x, y) && if hud { over_hud } else { y % 4 < 2 };
+                off.extend([v; 3]);
+                on.extend([if dark { v / 2 } else { v }; 3]);
+            }
+        }
+        (off, on)
+    }
+
+    #[test]
+    fn the_goggles_frame_must_show_the_overlay_over_the_world_and_under_the_hud() {
+        let measure = |overlay: &dyn Fn(u32, u32) -> bool, over_hud| {
+            let (off, on) = pictures(overlay, over_hud);
+            nv_measure(64, 64, &off, &off, &on)
+        };
+        let good = measure(&|_, _| true, false);
+        assert_eq!(good.cells_changed, 16);
+        assert!(good.hud_pixels == 84 && good.hud_kept == 1.0, "{good:?}");
+        // The thresholds want at least 100 HUD pixels, a full-size screen's worth.
+        let big = |m: NvView| NvView {
+            hud_pixels: 500,
+            ..m
+        };
+        assert!(nv_problem(&big(good)).is_none());
+        let none = measure(&|_, _| false, false);
+        assert!(nv_problem(&big(none)).unwrap().contains("does not cover"));
+        let quarter = measure(&|x, y| x < 32 && y < 32, false);
+        assert_eq!(quarter.cells_changed, 4);
+        let over = measure(&|_, _| true, true);
+        assert_eq!(over.hud_kept, 0.0);
+        assert!(nv_problem(&big(over)).unwrap().contains("over the HUD"));
+        assert!(nv_problem(&good).unwrap().contains("is the HUD drawn"));
+        // A view that moves as much on its own as with the goggles shows no overlay.
+        let (off, on) = pictures(|_, _| true, false);
+        assert_eq!(nv_measure(64, 64, &on, &off, &on).cells_changed, 0);
     }
 }
