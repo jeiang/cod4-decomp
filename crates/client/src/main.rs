@@ -394,7 +394,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         .filter_map(|l| input::config::startup_set(l))
         .filter(|t| t[1].eq_ignore_ascii_case("fs_game"))
         .map(|t| t[2..].join(" "))
-        .last()
+        .next_back()
     {
         if !assets::paths::valid_game(&game) {
             return Err("+set fs_game takes mods/<name>".into());
