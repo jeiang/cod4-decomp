@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! #357: the mp_crash garage is a match scene, not a serverless flythrough. The car is a script_model and the
-//! loose tyre is a client-side dynamic prop. Compare each class against the same live camera with it hidden.
+//! loose tyre is a client-side dynamic prop. The client counts the car in every snapshot it accepts after the
+//! teleport to the issue pose (the control `watch`), and each one must carry it. Compare each class against the
+//! same live camera with it hidden.
 //! Reference: KisakCOD (GPL-3.0), game/g_scr_mover.cpp:201-207 (SP_script_model), cgame/cg_ents.cpp:847-883
 //! (CG_ScriptMover); DynEntity/DynEntity_client.cpp:82-119 (DynEntCl_InitEntities), gfx_d3d/r_dpvs.cpp:1451-1457
 //! (R_AddDynEntToCell). CoD4 MP 1.8, used as a guide for 1.7.
@@ -40,6 +42,12 @@ fn changed(a: &Path, b: &Path, region: [f64; 4]) -> Result<f64, String> {
         }
     }
     Ok(n as f64 / ((x1 - x0) * (y1 - y0)) as f64)
+}
+
+/// Writes `v` to `path` as pretty-printed JSON.
+fn write_json(path: &Path, v: &serde_json::Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?;
+    std::fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
 fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
@@ -105,50 +113,99 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     // TeleportPlayer adds one unit after subtracting view height; ask for 323.5 to put the render eye at 324.5.
     c.ask(json!({"cmd": "exec", "line": "setviewpos 200.8 2267.5 323.5 175.3 0"}))?;
     // Render frames are not server ticks: judge what the server sends from the garage only once a snapshot carries
-    // the teleported player; an earlier reading describes the spawn, not the issue pose.
-    c.until(
+    // the teleported player; an earlier reading describes the spawn, not the issue pose. The wait names the snapshot
+    // it saw, the newest one when the position matched.
+    let arrived = c.until(
         json!({
             "player.origin.0": {"gt": 199.8, "lt": 201.8},
             "player.origin.1": {"gt": 2266.5, "lt": 2268.5},
             "player.origin.2": {"gt": 263.5, "lt": 265.5},
+            "player.snapshot": {"gt": 0},
         }),
         secs(5),
         "no snapshot arrived from the teleported position",
     )?;
-    // Every snapshot sent from the teleported eye must carry the car: judge 40 of them, not only the newest.
-    let mut timeline: Vec<serde_json::Value> = Vec::new();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while timeline.len() < 40 && std::time::Instant::now() < deadline {
-        let s = sample(c)?;
-        if timeline
-            .last()
-            .is_none_or(|l| l["snapshot"] != s["snapshot"])
-        {
-            timeline.push(s);
-        }
-    }
-    std::fs::write(
-        c.dir.join("teleport-timeline.json"),
-        serde_json::to_vec_pretty(&json!({"spawn": spawn, "after_teleport": timeline}))
-            .map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    if let Some(s) = timeline.iter().find(|s| s["car"] != true) {
+    let teleported = arrived["observed"]["player.snapshot"]
+        .as_u64()
+        .ok_or_else(|| format!("the teleport wait did not say which snapshot it saw: {arrived}"))?;
+    // Every snapshot sent from the teleported eye must carry the car, not only the ones a reading happens to catch.
+    // Find the car in the newest snapshot, then let the client count it in each snapshot it accepts from the one the
+    // wait saw onward: a snapshot that drops it between two readings is counted too.
+    let seen = c.state("entities")?;
+    let timeline = c.dir.join("teleport-timeline.json");
+    let list = seen["list"].as_array().cloned().unwrap_or_default();
+    let Some(car) = list.iter().find(|e| e["actor"] != true && near(e, 1.0)) else {
+        write_json(
+            &timeline,
+            &json!({"spawn": spawn, "teleported": teleported, "seen": seen}),
+        )?;
         return Err(format!(
-            "garage car script_model missing from post-teleport snapshot {} (control/teleport-timeline.json)",
-            s["snapshot"]
+            "garage car script_model missing from snapshot {} after the teleport (control/teleport-timeline.json)",
+            seen["snapshot"]
+        ));
+    };
+    if car["model_name"] != CAR {
+        write_json(
+            &timeline,
+            &json!({"spawn": spawn, "teleported": teleported, "seen": seen}),
+        )?;
+        return Err(format!(
+            "garage car at (58, 2112.5) is {} in snapshot {}, not {CAR} (control/teleport-timeline.json)",
+            car["model_name"], seen["snapshot"]
         ));
     }
-    if let Some(s) = timeline.iter().find(|s| s["car_model"] != true) {
+    c.ask(json!({
+        "cmd": "watch",
+        "number": car["number"],
+        "model": car["model"],
+        "from": teleported,
+    }))?;
+    // A wait that runs out still leaves counts to judge; the checks below name what fell short.
+    c.wait(&json!({"watch.received": {"ge": 40}}), secs(20))?;
+    let watch = c.state("watch")?;
+    c.ask(json!({"cmd": "watch", "clear": true}))?;
+    write_json(
+        &timeline,
+        &json!({
+            "spawn": spawn,
+            "teleported": teleported,
+            "seen": {"snapshot": seen["snapshot"], "server_time": seen["server_time"], "car": car},
+            "watch": watch,
+        }),
+    )?;
+    let n = |k: &str| watch[k].as_u64().unwrap_or(0);
+    let (first, last) = (&watch["first"], &watch["last"]);
+    if first.as_u64() != Some(teleported) {
         return Err(format!(
-            "garage car at (58, 2112.5) is not {CAR} in snapshot {} (control/teleport-timeline.json)",
-            s["snapshot"]
+            "the car's count began at snapshot {first}, not at {teleported}, the one the teleport wait saw (control/teleport-timeline.json)"
         ));
     }
-    if timeline.len() < 40 {
+    if n("breaks") != 0 {
         return Err(format!(
-            "only {} post-teleport snapshots arrived",
-            timeline.len()
+            "snapshots {first}..{last} after the teleport were not consecutive: {} missed, first gap {} (control/teleport-timeline.json)",
+            n("missed"),
+            watch["gaps"][0]
+        ));
+    }
+    if n("present") != n("received") {
+        return Err(format!(
+            "garage car script_model missing from {} of {} post-teleport snapshots, first {} (control/teleport-timeline.json)",
+            n("received").saturating_sub(n("present")),
+            n("received"),
+            watch["absent"][0]
+        ));
+    }
+    if n("matched") != n("present") {
+        return Err(format!(
+            "garage car is not {CAR} in {} post-teleport snapshots, first [snapshot, model] {} (control/teleport-timeline.json)",
+            n("present").saturating_sub(n("matched")),
+            watch["wrong_model"][0]
+        ));
+    }
+    if n("received") < 40 {
+        return Err(format!(
+            "only {} post-teleport snapshots arrived in 20 s (control/teleport-timeline.json)",
+            n("received")
         ));
     }
     c.ask(json!({"cmd": "step", "frames": 60}))?;
@@ -177,12 +234,10 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         })
     });
     let net = c.state("net")?;
-    std::fs::write(
-        c.dir.join("models.json"),
-        serde_json::to_vec_pretty(&json!({"entities": entities, "net": net, "view": view}))
-            .map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    write_json(
+        &c.dir.join("models.json"),
+        &json!({"entities": entities, "net": net, "view": view}),
+    )?;
     if !car {
         return Err("garage car script_model was not published at (58, 2112.5, 309.125)".into());
     }
