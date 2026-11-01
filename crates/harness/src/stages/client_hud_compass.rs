@@ -122,15 +122,16 @@ fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
     }
 }
 
-/// Lets `d` pass while sampling the client's entities for a missile.
+/// Lets `d` pass while sampling the server's entities for a thrown grenade (classname `grenade`). The server's view,
+/// not the client's: a bot put beyond a wall throws out of the person's PVS.
 fn watch_for_missile(c: &mut Driven, d: Duration) -> Result<bool, String> {
     let end = Instant::now() + d;
     let mut seen = false;
     while Instant::now() < end {
-        let ents = c.state("entities")?;
-        seen |= ents["list"]
+        let ents = c.ask(json!({"cmd": "server", "op": "state", "what": "entities"}))?;
+        seen |= ents
             .as_array()
-            .is_some_and(|l| l.iter().any(|e| e["kind"] == json!("missile")));
+            .is_some_and(|l| l.iter().any(|e| e["classname"] == json!("grenade")));
         c.pause(Duration::from_millis(100))?;
     }
     Ok(seen)
