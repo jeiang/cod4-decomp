@@ -159,7 +159,7 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
 /// console, then drives onto an enemy in range until the reticle has been due a tint for a second's worth of
 /// frames, every one of which must have been white.
 fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
-    let end = Instant::now() + secs(15);
+    let end = Instant::now() + Duration::from_secs(15);
     loop {
         let set = c.ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "0"}))?;
         if set["value"] == "0" {
@@ -183,7 +183,7 @@ fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     w.drive_until(
         c,
         json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
-        secs(100),
+        Duration::from_secs(100),
         "the crosshair was never held on an enemy past the fade-in with cg_crosshairEnemyColor 0",
     )?;
     c.capture("crosshair_enemy_white")?;
@@ -976,7 +976,7 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats", "value": v, "force": true}))
         };
         force(c, "1")?;
-        let r = enemy_colour_off(c, &mut w);
+        let r = enemy_colour_off(c, w);
         let restored = c
             .ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "1"}))
             .and_then(|_| force(c, &cheats));
