@@ -7,7 +7,14 @@
 //! `setFromLocString` localizes into a cvar; `cmd` forwards its words to the server; a word nothing knows is
 //! `Unknown command` at the front end and, in a match, forwarded to the server, whose answer names it.
 //! `writeconfig` exports archived settings and binds to the named file, not the active profile; missing or extra
-//! arguments only print usage. Needs a display and the install; skips without.
+//! arguments only print usage. The console commands of #365: bad arguments print the stock usage lines (`bind`,
+//! `unbind`, `set`, `seta` through a bind, `reset`, `setfromdvar`, `con_showchannel`, `openscriptmenu`); `bind k`,
+//! `bindlist`, `reset`, `togglep`, `cmdlist <filter>` and `clear` show or do what the original's do; hiding the
+//! `error` channel keeps a not-implemented command's warning (#479) off the console and showing it brings it back;
+//! in the match `viewpos` prints the eye, the stance commands latch the stance typed and bound alike, a `+word`
+//! that is no button is `Unknown command` typed and bound alike, `openmenu`/`closemenu` open and close a menu, and
+//! `openscriptmenu team_marinesopfor spectator` moves the player to the spectators. Needs a display and the
+//! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{run_client, verdict};
@@ -19,6 +26,23 @@ const NAME: &str = "client-commands";
 const DEMO: &str = "stagedemo";
 
 const STEPS: &str = "console=zz_unknown_at_front,saw=Unknown command \"zz_unknown_at_front\":5,\
+console=bind,saw=bind <key> [command] : attach a command to a key:5,\
+console=bind f11 \"say bound_a\",console=bind f11,saw=\"f11\" = \"say bound_a\":5,\
+console=bind zz_nokey x,saw=\"zz_nokey\" isn't a valid key:5,\
+console=unbind,saw=unbind <key> : remove commands from a key:5,\
+console=set,saw=USAGE: set <variable> <value>:5,set=seta zz_x,saw=USAGE: seta <variable> <value>:5,\
+console=set zz.bad 1,saw=invalid variable name: zz.bad:5,\
+console=reset,saw=USAGE: reset <variable>:5,\
+console=setfromdvar zz_a,saw=USAGE: setfromdvar <dest_dvar> <source_dvar>:5,\
+console=con_showchannel,saw=<channel> may include wildcards */?:5,\
+console=openscriptmenu,saw=EXAMPLE: openscriptmenu ingame changeweapon:5,\
+console=set zz_reset first,console=set zz_reset second,console=reset zz_reset,cvaris=zz_reset first,\
+console=set zz_tp 0,console=togglep zz_tp,saw=zz_tp toggled to 1:5,cvaris=zz_tp 1,\
+console=bindlist,sawreply=f11 \"say bound_a\":5,\
+console=cmdlist togglecr*,sawreply=togglecrouch:5,saw=1 commands:5,\
+console=clear,notsaw=zz_unknown_at_front,\
+console=con_hidechannel error,saw=Hiding channel: error:5,console=imagelist,wait=1,notsaw=not implemented,\
+console=con_showchannel error,saw=Adding channel: error:5,set=gfx_stats,saw=not implemented:5,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
 mouse=Marines,menu=changeclass:30,wait=1,mouse=Assault,ingame=120,wait=3,team=2:5,\
 holdkey=pause,releasekey=pause,saw=cl_paused is read only.:5,cvaris=cl_paused 0,\
@@ -27,11 +51,18 @@ holdkey=f9,releasekey=f9,wait=0.5,pitchis=-3 3,shot=centered,\
 console=record stagedemo,saw=recording to:5,wait=2,console=stoprecord,saw=Stopped demo.:5,console=stoprecord,saw=Not recording a demo.:5,\
 console=cmd say line_through_cmd,saw=line_through_cmd:6,\
 console=zz_unknown_in_match,sawreply=zz_unknown_in_match:6,\
+console=viewpos,sawreply=) : :5,\
+console=toggleprone,stanceis=prone,console=toggleprone,stanceis=stand,\
+set=bind f7 togglecrouch,holdkey=f7,releasekey=f7,stanceis=crouch,holdkey=f7,releasekey=f7,stanceis=stand,\
+console=+zz_typed,saw=Unknown command \"+zz_typed\":5,\
+set=bind f6 +zz_bound,holdkey=f6,releasekey=f6,saw=Unknown command \"+zz_bound\":5,\
+console=openmenu quickmessage,menu=quickmessage:5,console=closemenu quickmessage,nomenu=5,\
 console=setFromLocString customclass3 @CLASS_CUSTOM3,wait=0.5,cvarloc=customclass3 CLASS_CUSTOM3,\
 togglemenu,wait=1,see=Call Vote,mouse=Call Vote,menu=callvote:5,wait=1,see=Restart Map+Next Map,shot=callvote,\
 mouse=Restart Map,saw=called a vote:6,nomenu=5,wait=1,\
 holdkey=b,releasekey=b,menu=quickmessage:5,wait=0.5,shot=quickmessage,uikey=1,menu=quickcommands:5,wait=0.5,shot=quickcommands,uikey=1,nomenu=5,\
-saw=(Team):8";
+saw=(Team):8,\
+console=openscriptmenu team_marinesopfor spectator,team=3:10";
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {

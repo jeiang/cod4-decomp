@@ -57,6 +57,8 @@ pub enum Action {
     Console(String),
     /// The console's `closemenu <name>` (`UI_CloseMenu_f`): closes a named menu after its script finishes.
     CloseMenu(String),
+    /// The console's `openmenu <name>` (`UI_OpenMenu_f`): opens a loaded menu by name.
+    OpenMenu(String),
     /// `vid_restart`: take the graphics settings.
     VidRestart,
     /// `screenshot` or `screenshotJpeg`: write the next frame to the screenshots folder.
@@ -1029,7 +1031,13 @@ impl Shell {
 
     /// Runs the buffers whose `wait` has run out, once a frame.
     pub fn run_due(&mut self, input: &mut Input) {
+        // Warnings and errors print on the `error` channel; `con_hidechannel error` keeps them off the console
+        // (`Con_IsChannelVisible`, KisakCOD con_channels.cpp:93). They are drained either way.
+        let shown = input.channels.visible(logging::channels::ERROR);
         for (level, line) in logging::drain_console() {
+            if !shown {
+                continue;
+            }
             let (colour, word) = if level == tracing::Level::ERROR {
                 ("^1", "ERROR")
             } else {
@@ -1739,10 +1747,19 @@ impl HostCx<'_> {
             let _ = console;
             let a = |i: usize| cmd.get(i).map_or("", String::as_str);
             match name.as_str() {
+                // `Dvar_SetFromDvar_f` (KisakCOD dvar_cmds.cpp:306).
+                "setfromdvar" if cmd.len() != 3 => {
+                    self.st.log("USAGE: setfromdvar <dest_dvar> <source_dvar>");
+                }
                 "setfromdvar" => {
                     let v = self.dvar_get(a(2));
-                    self.store(a(1), &v);
+                    if v.is_empty() && self.input.cvars.get(a(2)).is_none() {
+                        self.st.log(&format!("dvar '{}' doesn't exist", a(2)));
+                    } else {
+                        self.store(a(1), &v);
+                    }
                 }
+                "setdvartotime" if cmd.len() < 2 => self.st.log("USAGE: set <variable>"),
                 "setdvartotime" => {
                     let t = self.st.started.elapsed().as_secs();
                     self.input.cvars.set(a(1), &t.to_string(), false);

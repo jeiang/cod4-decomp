@@ -1369,6 +1369,15 @@ impl Input {
         }
     }
 
+    /// The latched stance the commands set (`stand`, `crouch` or `prone`): the harness's `stanceis=` reads it.
+    pub fn stance_name(&self) -> &'static str {
+        match self.stance {
+            buttons::PRONE => "prone",
+            buttons::CROUCH => "crouch",
+            _ => "stand",
+        }
+    }
+
     /// `CL_SetStance`: the stance the cgame (or a command) puts the client in. Ignored while `+prone` / `+movedown`
     /// is held, which send their own temporary stance.
     fn set_stance(&mut self, stance: u32) {
@@ -2681,6 +2690,13 @@ mod tests {
             return;
         };
         i.exec_text(&profile, None, false, 0);
+        // Every word of the stock profile is a command, a key or a dvar this build knows.
+        let said = i.take_messages();
+        assert!(
+            said.iter()
+                .all(|m| !m.contains("Unknown command") && !m.contains("isn't a valid key")),
+            "{said:?}"
+        );
         // The stock profile binds Pause to `toggle cl_paused` and the vote keys to the server's commands. Multiplayer
         // registers `cl_paused` read only (`CG_RegisterDvars`): the key says so and the value stays.
         if i.bound("pause") == Some("toggle cl_paused") {
@@ -2696,5 +2712,40 @@ mod tests {
             i.key("f1", true);
             assert_eq!(frame(&mut i).pending_commands, ["vote yes"]);
         }
+    }
+
+    /// One table routes typed, bound and config lines alike: the input layer's own commands run here and never reach
+    /// the pending list, everyone else's go there for the app, the shell or the net play, and a missing one warns.
+    #[test]
+    fn every_command_runs_where_its_owner_is() {
+        use crate::console::{Owner, owner};
+        for name in crate::console::names() {
+            if name.starts_with(['+', '-']) || name.eq_ignore_ascii_case("wait") {
+                continue;
+            }
+            let mut i = Input::bare();
+            i.exec_line(&name);
+            let pending = frame(&mut i).pending_commands;
+            match owner(&name) {
+                Some(Owner::Input | Owner::Missing) => {
+                    assert!(pending.is_empty(), "{name}: {pending:?}")
+                }
+                Some(Owner::Frame) => {}
+                _ => assert_eq!(pending, [name.clone()], "{name}"),
+            }
+        }
+        let mut i = Input::bare();
+        i.exec_line("bind zz_nokey x");
+        i.exec_line("seta zz_x");
+        assert_eq!(
+            i.take_messages(),
+            [
+                "\"zz_nokey\" isn't a valid key",
+                "USAGE: seta <variable> <value>"
+            ]
+        );
+        // A start-up config's unknown word is said, not dropped.
+        i.exec_text("zz_frob 1", None, false, 0);
+        assert_eq!(i.take_messages(), ["Unknown command \"zz_frob\""]);
     }
 }

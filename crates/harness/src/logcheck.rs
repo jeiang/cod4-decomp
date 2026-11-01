@@ -32,12 +32,6 @@ pub struct Allow {
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
     Allow {
-        contains: &["server::server", "unknown command", "con_showchannel"],
-        reason: "the stock configs run con_showchannel, which we do not implement (#365)",
-        stages: &[],
-        max: Some(5), // measured 4 on the Linux host, 2026-10-14,
-    },
-    Allow {
         contains: &["fx: model element skipped: its model did not resolve"],
         reason: "effects with a model element whose xmodel is not in the loaded zones (#389)",
         stages: &[],
@@ -154,6 +148,22 @@ pub const ALLOWED: &[Allow] = &[
         reason: "client-commands types an unknown word at the front end to check `Unknown command`",
         stages: &["client-commands"],
         max: Some(2), // measured 1 on the Linux host, 2026-10-30,
+    },
+    Allow {
+        contains: &["cod4e::console", "unknown command", "+zz_"],
+        reason: "client-commands types and binds a `+word` that is no button to check `Unknown command` (#365)",
+        stages: &["client-commands"],
+        max: Some(3), // two expected (+zz_typed, +zz_bound)
+    },
+    Allow {
+        contains: &[
+            "cod4e::console",
+            "stock command not implemented",
+            "issue=479",
+        ],
+        reason: "client-commands runs two stock commands we do not implement (imagelist, gfx_stats) to check the #479 warning and the error channel",
+        stages: &["client-commands"],
+        max: Some(3), // two expected
     },
     Allow {
         contains: &[
