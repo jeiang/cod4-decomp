@@ -40,6 +40,7 @@ pub mod net_loopback;
 pub mod net_mantle;
 pub mod net_master;
 pub mod net_match;
+pub mod net_mover;
 pub mod net_objective;
 pub mod net_perks;
 pub mod net_rcon;

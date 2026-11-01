@@ -258,6 +258,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_antilag::run),
     },
     StageDef {
+        name: "net-mover",
+        description: "a real UDP client rides a script_brushmodel platform up and down on mp_cargoship: its predicted feet stay on the platform as the client draws it",
+        needs_install: false,
+        timeout: Duration::from_secs(6 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::net_mover::run),
+    },
+    StageDef {
         name: "headless-bots-sd",
         description: "headless server, 20 bots play Search and Destroy",
         needs_install: false,

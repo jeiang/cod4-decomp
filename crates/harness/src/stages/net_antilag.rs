@@ -51,15 +51,20 @@ const OFF_MAX: f64 = 0.35;
 const WALLS: i32 = contents::SOLID | contents::PLAYERCLIP | contents::GLASS;
 
 /// A client that joins `team` as the stock Spec Ops class (an MP5) and stamps its usercmds as the game client does.
-struct Player {
-    c: NetClient<UdpTransport>,
+pub(super) struct Player {
+    pub(super) c: NetClient<UdpTransport>,
     team: &'static str,
-    own: Option<u16>,
+    pub(super) own: Option<u16>,
     cmd_time: i32,
 }
 
 impl Player {
-    fn new(addr: SocketAddr, name: &str, qport: u16, team: &'static str) -> io::Result<Self> {
+    pub(super) fn new(
+        addr: SocketAddr,
+        name: &str,
+        qport: u16,
+        team: &'static str,
+    ) -> io::Result<Self> {
         let t = UdpTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;
         Ok(Self {
             c: NetClient::new(t, addr, name, "", qport),
@@ -71,7 +76,7 @@ impl Player {
 
     /// Takes the packets and answers the join menus; the time the next usercmd is stamped with: the client's moment
     /// of the others, `INTERP_DELAY_MS` behind its clock estimate (`CL_FinishMove` stamps `cl.serverTime`).
-    fn pump(&mut self) -> Option<i32> {
+    pub(super) fn pump(&mut self) -> Option<i32> {
         self.c.pump(Duration::from_millis(1));
         let mut answers = Vec::new();
         if let Some(ui) = self.c.ui() {
@@ -115,7 +120,7 @@ impl Player {
     }
 }
 
-fn playing(server: &Server, p: &Player) -> bool {
+pub(super) fn playing(server: &Server, p: &Player) -> bool {
     p.own.and_then(|n| server.game.client(n)).is_some_and(|c| {
         c.session == Session::Playing
             && matches!(c.team, Team::Axis | Team::Allies)
@@ -124,7 +129,7 @@ fn playing(server: &Server, p: &Player) -> bool {
 }
 
 /// Where a player stands on the floor below `p` (searched from 40 above to 100 below).
-fn ground(world: &World, p: [f32; 3]) -> Option<[f32; 3]> {
+pub(super) fn ground(world: &World, p: [f32; 3]) -> Option<[f32; 3]> {
     let (top, bottom) = (p[2] + 40.0, p[2] - 100.0);
     let t = world.trace(
         [p[0], p[1], top],
