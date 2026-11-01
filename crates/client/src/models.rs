@@ -789,6 +789,19 @@ mod tests {
             (20.0..70.0).contains(&at[2]) && at[0].hypot(at[1]) < 40.0,
             "the gun is at {at:?}"
         );
+        p.hand[0].tag = "tag_absent_regression_389".to_owned();
+        let (missing, events) = logging::capture(|| p.instances([0.0; 3]));
+        assert_eq!(
+            missing.len(),
+            3,
+            "DObj keeps an explicitly unparented model"
+        );
+        assert_eq!(missing[2].bones[0].trans, p.hand[0].rest.bones[0][0].trans);
+        assert!(
+            events
+                .iter()
+                .any(|e| e.field("tag") == Some("tag_absent_regression_389"))
+        );
     }
 
     /// A stock body, its head and a many-bone weapon (all three together pass the original's 128 bones) make a rig, and
