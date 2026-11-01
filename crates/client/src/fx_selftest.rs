@@ -30,14 +30,15 @@ const SHOCK: &str = "concussion_grenade_mp";
 const SMOKE: &str = "smoke/smoke_grenade_11sec_mp";
 /// A stock explosion with a particle cloud among its elements.
 const CLOUDY: &str = "explosions/artilleryexp_dirt_brown";
-/// Maps and ambient effect families the map createfx must play (issue #359).
-const AMBIENT: &[(&str, &[&str])] = &[
-    ("mp_bog", &["fire"]),
-    ("mp_farm", &["rain"]),
-    ("mp_bloc", &["snow"]),
-    ("mp_crash_snow", &["snow"]),
-    ("mp_crash", &["fire"]),
-    ("mp_backlot", &["fire"]),
+/// Maps, the ambient effect families their createfx must draw, and the exact effects that must draw
+/// (issue #359).
+const AMBIENT: &[(&str, &[&str], &[&str])] = &[
+    ("mp_bog", &["fire"], &[]),
+    ("mp_farm", &["rain"], &[]),
+    ("mp_bloc", &["snow"], &["weather/snow_light_mp_bloc"]),
+    ("mp_crash_snow", &["snow"], &["weather/snow_light_mp_crash"]),
+    ("mp_crash", &["fire"], &[]),
+    ("mp_backlot", &["fire"], &[]),
 ];
 
 /// Plays `effects` from `from_ms` for `secs` seconds in 50 ms steps and returns (most sprites in one frame, most
@@ -647,7 +648,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
 /// Look directly at every generated createfx placement on the affected maps. The named weather and fire
 /// effects must each contribute sprite quads, not merely have a decoded definition.
 fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mut Vec<String>) {
-    for &(map, families) in AMBIENT {
+    for &(map, families, exact) in AMBIENT {
         let lib = match Library::load(install, "", map) {
             Ok(lib) => lib,
             Err(e) => {
@@ -712,10 +713,17 @@ fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mu
             report.insert(format!("ambient_{map}_{family}_quads"), quads.into());
             if quads == 0 {
                 bad.push(format!(
-                    "{map} ambient {family} effects never drew a sprite ({} placements): {:?}",
+                    "{map} ambient {family} effects never drew ({} placements): {:?}",
                     poses.len(),
                     fx.ambient().quads
                 ));
+            }
+        }
+        for name in exact {
+            let drawn = fx.ambient().quads.get(*name).copied().unwrap_or(0);
+            report.insert(format!("ambient_{map}_{name}_draws"), drawn.into());
+            if drawn == 0 {
+                bad.push(format!("{map} ambient effect {name} never drew"));
             }
         }
     }

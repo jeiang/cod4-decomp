@@ -190,7 +190,8 @@ pub struct Effects {
     tracer_material: Option<Arc<Material>>,
     /// What was played, by kind; for the report.
     pub played: BTreeMap<&'static str, u64>,
-    /// Total sprite quads each effect has passed the camera's cull to draw.
+    /// Total draws (sprite quads, clouds, models, trail strips) that passed the camera's cull, by the lower-case name
+    /// of the effect that was played; a runner's children count against it.
     pub effect_quads: BTreeMap<String, u64>,
     /// Names of effects an event asked for that the content lacks.
     pub missing: HashSet<String>,

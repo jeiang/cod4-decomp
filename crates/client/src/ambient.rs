@@ -65,7 +65,8 @@ impl Ambient {
             .map(|d| (d.name.as_str(), d.frame.origin, d.frame.axis[0]))
     }
 
-    /// Names of ambient effects that have never contributed a sprite quad.
+    /// Names of ambient effects that have never drawn anything (sprite quad, cloud, model or trail), counting what
+    /// their runner children draw.
     pub fn without_quads(&self) -> BTreeSet<&str> {
         self.defs
             .iter()
