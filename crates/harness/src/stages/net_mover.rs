@@ -10,8 +10,8 @@
 //! the newest snapshot ([`PlayerBoxes`]), the movers drawn at the clock estimate ([`mover_offset`]).
 //!
 //! - The player stood on the platform (`groundEntityNum`) while it moved, for at least 30 frames.
-//! - The predicted feet stay within 2 units of the drawn platform top in 95% of those frames: carrying the player
-//!   only to its commands' time (100 ms behind the drawn platform) leaves the feet about 5 to 10 units off.
+//! - The predicted feet stay off the drawn platform top by at most 2.5 units (median) and 4 units (95th percentile)
+//!   over those frames: carrying the player only to its commands' time leaves them trailing the platform.
 use super::net_antilag::{Player, ground, playing};
 use crate::stage::{StageCtx, StageReport, Status};
 use net::predict::{Env, PlayerBoxes, Predictor, mover_offset};
@@ -33,7 +33,12 @@ const RISE_SECS: f32 = 0.64;
 /// Up and down this many times.
 const TRIPS: usize = 4;
 const MIN_FRAMES: usize = 30;
-const TOLERANCE: f32 = 2.0;
+/// The feet against the drawn top, units. Correct carry measures about 1 (median) and 2.6 (p95) on the slot host:
+/// the drawn top is the snapshot's plus a velocity guess, the predicted feet a pmove on the snapshot's mover. With the
+/// carry clamped to nothing (the player carried only to its commands' time) the feet trail the platform by its
+/// speed times how far the clock is past the snapshot, 0 to 35 ms at 300 units/s.
+const MEDIAN_MAX: f32 = 2.5;
+const P95_MAX: f32 = 4.0;
 
 /// The largest solid inline model a `script_brushmodel` of the map uses (`*N`), its bounds about its origin.
 fn platform_model(server: &Server) -> Option<(String, [f32; 3], [f32; 3])> {
@@ -246,7 +251,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         why.push(format!(
             "the player stood on the moving platform in only {riding} frames"
         ));
-    } else if p95 > TOLERANCE {
+    } else if median > MEDIAN_MAX || p95 > P95_MAX {
         why.push(format!(
             "the predicted feet were {p95:.1} units off the drawn platform in 5% of the frames (median {median:.1}, max {max:.1})"
         ));
