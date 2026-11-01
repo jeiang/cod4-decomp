@@ -18,7 +18,7 @@
 //! node. Queries allocate nothing once the caller's [`PathScratch`] has seen the mesh.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use web_time::Instant;
 
 use sim::Vec3;
 use sim::cm::{Collide, ENTITYNUM_NONE, Trace};
