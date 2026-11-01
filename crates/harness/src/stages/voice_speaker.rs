@@ -92,8 +92,9 @@ fn talk(mut c: NetClient<UdpTransport>, stop: &AtomicBool, own: &AtomicU32) {
             }
         }
         let Some(s) = c.latest() else { continue };
-        let n = s.ps.client_num;
-        let alive = s.entity(n).is_some_and(|e| e.etype == etype::PLAYER);
+        // A spectator's `ps` can show the player it follows; `own()` is the receiving client's slot.
+        let n = s.own();
+        let alive = s.follow.is_none() && s.entity(n).is_some_and(|e| e.etype == etype::PLAYER);
         if alive {
             own.store(u32::from(n), Ordering::Relaxed);
         }
