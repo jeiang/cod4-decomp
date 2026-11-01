@@ -392,7 +392,7 @@ impl NetPlay {
                 h.enemy_fire_pings += u32::from(pinged.shot);
                 if pinged.shot {
                     h.last_fire_actor = e.client;
-                    h.last_fire_mark_ms = 0;
+                    (h.last_fire_mark_ms, h.last_fire_gone_ms) = (0, 0);
                 }
                 if pinged.shot || pinged.learned {
                     // Read the audio observation independently of Actor's hold calculation.
