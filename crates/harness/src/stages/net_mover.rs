@@ -175,7 +175,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         let moving = server
             .game
             .ent(plat)
-            .is_some_and(|e| !e.mv.pos.finished(server.game.level.time));
+            .is_some_and(|e| e.mv.remaining_ms(server.game.level.time) > 0);
         if !moving {
             idle += 1;
             // Settled a moment at each end, then the next move.
