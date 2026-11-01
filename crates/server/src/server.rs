@@ -1568,13 +1568,6 @@ impl Server {
                     "health": c.ps.health,
                     "origin": c.ps.origin,
                     "weapon": c.ps.weapon,
-                    "weapon_state": c.ps.weapon_state,
-                    "weapon_flags": c.ps.weapon_flags,
-                    "offhand_index": c.ps.offhand_index,
-                    "grenade_time_left": c.ps.grenade_time_left,
-                    "pm_flags": c.ps.pm_flags,
-                    "dev_buttons": c.dev_buttons,
-                    "buttons": c.buttons,
                     "weapons": weapons,
                     // Shots through `FireWeapon`; compass pings are derived client-side from snapshot events.
                     "shots": c.shots,
