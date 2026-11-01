@@ -13,6 +13,7 @@ pub struct AmbientEffect {
     pub name: String,
     frame: Frame,
     start_ms: i32,
+    handle: u64,
 }
 
 pub struct Ambient {
@@ -31,17 +32,19 @@ impl Ambient {
     }
 
     pub fn new(content: &Content, fx: &mut Fx) -> Self {
-        let defs = content
+        let mut defs = content
             .map_name
             .as_deref()
             .map_or_else(Vec::new, |map| parse(content, map, fx.library()));
         let mut played = BTreeMap::new();
         let mut quads = BTreeMap::new();
-        for d in &defs {
+        for d in &mut defs {
             if let Some(def) = fx.library().get(&d.name).cloned() {
-                fx.play_at(&def, d.frame, d.start_ms);
-                *played.entry(d.name.clone()).or_default() += 1;
-                quads.entry(d.name.clone()).or_default();
+                d.handle = fx.play_at(&def, d.frame, d.start_ms);
+                if d.handle != 0 {
+                    *played.entry(d.name.clone()).or_default() += 1;
+                    quads.entry(d.name.clone()).or_default();
+                }
             }
         }
         Self {
@@ -49,6 +52,10 @@ impl Ambient {
             played,
             quads,
         }
+    }
+
+    pub fn live_effects(&self, fx: &Fx) -> usize {
+        self.defs.iter().filter(|d| fx.is_live(d.handle)).count()
     }
 
     /// Every effect placement, for looking directly at a map's ambient effect.
@@ -154,6 +161,7 @@ fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
                 axis: [Vec3::from(forward), -Vec3::from(right), Vec3::from(up)],
             },
             start_ms: (delay * 1000.0) as i32,
+            handle: 0,
         });
     }
     out

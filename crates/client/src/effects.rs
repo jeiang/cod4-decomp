@@ -1001,6 +1001,10 @@ impl Effects {
         &self.ambient
     }
 
+    pub fn ambient_live_effects(&self) -> usize {
+        self.ambient.live_effects(&self.fx)
+    }
+
     /// What to draw from a camera at `eye` looking along `yaw` and `pitch` (radians).
     pub fn draw(&mut self, eye: Vec3, yaw: f32, pitch: f32, roll: f32) -> Drawn {
         let (sy, cy) = yaw.sin_cos();

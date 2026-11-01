@@ -681,12 +681,18 @@ fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mu
             continue;
         }
         let mut now = 0;
+        let mut live_max = 0;
         for (_, at, forward) in &poses {
             let eye = *at - *forward * 400.0 + glam::Vec3::Z * 100.0;
             let direction = (*at - eye).normalize();
             now += 2000;
             fx.update(now, world);
+            live_max = live_max.max(fx.ambient_live_effects());
             fx.draw(eye, direction.y.atan2(direction.x), direction.z.asin(), 0.0);
+        }
+        report.insert(format!("ambient_{map}_live_effects_max"), live_max.into());
+        if live_max == 0 {
+            bad.push(format!("{map} has no live ambient effects"));
         }
         report.insert(format!("ambient_{map}_played"), json!(fx.ambient().played));
         report.insert(format!("ambient_{map}_quads"), json!(fx.ambient().quads));

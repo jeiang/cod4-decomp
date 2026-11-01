@@ -392,6 +392,7 @@ struct Counters {
     fx_live_max: usize,
     /// The most script looping effects playing at once, and the strongest camera shake and sway felt.
     looped_fx_max: usize,
+    ambient_live_max: usize,
     shake_max: f32,
     sway_max: f32,
     /// How fast the eye moved between drawn frames (units per second) while the player walked; the spread of these
@@ -1790,6 +1791,10 @@ impl NetPlay {
             .sway_max
             .max(drawn.sway.iter().fold(0.0, |m, a| m.max(a.abs())));
         self.c.looped_fx_max = self.c.looped_fx_max.max(self.effects.looped_fx());
+        self.c.ambient_live_max = self
+            .c
+            .ambient_live_max
+            .max(self.effects.ambient_live_effects());
         self.c.fx_quads_max = self.c.fx_quads_max.max(drawn.quads);
         self.c.fx_tracers_max = self.c.fx_tracers_max.max(drawn.tracers);
         self.c.fx_decals_max = self.c.fx_decals_max.max(drawn.decals);
@@ -2833,6 +2838,7 @@ impl NetPlay {
         report["fx"]["ambient_played"] = json!(self.effects.ambient().played);
         report["fx"]["ambient_quads"] = json!(self.effects.ambient().quads);
         report["fx"]["ambient_without_quads"] = json!(self.effects.ambient().without_quads());
+        report["fx"]["ambient_live_effects_max"] = self.c.ambient_live_max.into();
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();
         report["fx"]["corpses_max"] = self.c.corpses_max.into();
         report["fx"]["camera_shake_max"] = self.c.shake_max.into();
