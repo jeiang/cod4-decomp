@@ -47,7 +47,7 @@ fn player(st: &NetPlay) -> Value {
         "weapon": st.weapon(),
         "weapon_index": ps.weapon,
         "weapons_enabled": ps.weapon_flags & sim::pm::wf::DISABLED == 0,
-        "weapon_state": ps.weapon_state as u8,
+        "weapon_state": ps.weapon_state,
         "offhand_secondary": ps.offhand_secondary,
         "smoke_ammo": sim::weapon::PlayerWeapons::from_words(&snap.inv)
             .clip(&st.weapons, st.weapons.index("smoke_grenade_mp")),
