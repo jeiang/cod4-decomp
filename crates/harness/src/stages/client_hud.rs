@@ -469,10 +469,48 @@ fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<
     ))
 }
 
-/// Exercise queued and retained player input through the real UDP path, independent of rendering throughput.
+/// Frames the client drew per second over `window`, by its own frame counter.
+fn frame_rate(c: &mut Driven, window: Duration) -> Result<f64, String> {
+    let count = |c: &mut Driven| {
+        c.lookup("client.frames")?
+            .as_u64()
+            .ok_or_else(|| "no client.frames".to_owned())
+    };
+    let (f0, t0) = (count(c)?, Instant::now());
+    c.pause(window)?;
+    Ok(count(c)?.saturating_sub(f0) as f64 / t0.elapsed().as_secs_f64())
+}
+
+/// The first rate over `window` of at least `want` frames a second, measured again until `limit` has passed (`Ok`), or
+/// the best rate seen (`Err`). A busy host (another slot's release build) slows every frame for a while, whatever the
+/// present mode: a slot run at a few frames a second drew as few with `Immediate` as with `Fifo` (#499).
+fn reach_frame_rate(
+    c: &mut Driven,
+    want: f64,
+    window: Duration,
+    limit: Duration,
+) -> Result<Result<f64, f64>, String> {
+    let start = Instant::now();
+    let mut best = 0.0f64;
+    loop {
+        let rate = frame_rate(c, window)?;
+        if rate >= want {
+            return Ok(Ok(rate));
+        }
+        best = best.max(rate);
+        if start.elapsed() >= limit {
+            return Ok(Err(best));
+        }
+    }
+}
+
+/// Exercise queued and retained player input through the real UDP path, independent of rendering throughput. The
+/// step's `vid_restart` back to the player's `r_vsync` must give the frame rate back too, as stock `vid_restart` does
+/// (#499): at least half the rate measured before the step, within 15 s.
 fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
     let fps = c.ask(json!({"cmd": "cvar", "name": "com_maxfps"}))?["value"].clone();
     let vsync = c.ask(json!({"cmd": "cvar", "name": "r_vsync"}))?["value"].clone();
+    let before = frame_rate(c, Duration::from_secs(1))?;
     let sync =
         c.ask(json!({"cmd": "server", "op": "cvar", "name": "g_synchronousClients"}))?["value"]
             .clone();
@@ -519,7 +557,26 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
     c.ask(json!({"cmd": "cvar", "name": "r_vsync", "value": vsync}))?;
     c.console("vid_restart")?;
     c.ask(json!({"cmd": "server", "op": "cvar", "name": "g_synchronousClients", "value": sync}))?;
-    result
+    result?;
+    let vsync = vsync.as_str().unwrap_or("?");
+    match reach_frame_rate(
+        c,
+        before / 2.0,
+        Duration::from_secs(1),
+        Duration::from_secs(15),
+    )? {
+        Ok(after) => {
+            notes.push(format!(
+                "frame rate around the synchronous step: {before:.0} a second before, {after:.0} after vid_restart \
+                 put r_vsync {vsync} back"
+            ));
+            Ok(())
+        }
+        Err(best) => Err(format!(
+            "after vid_restart put r_vsync {vsync} back the client drew at most {best:.1} frames a second in 15 s, \
+             against {before:.1} before the step"
+        )),
+    }
 }
 
 /// The crosshair opacity seen per predicted weapon state during one keyed action.
@@ -561,11 +618,23 @@ fn state_frames(c: &mut Driven) -> Result<Vec<[u64; 2]>, String> {
 /// polling gap on a busy host to miss (#494). So besides the polled samples it diffs the client's per-frame counts
 /// of the drop and raise states (1-4), which see every drawn frame. Also returns the trace of every polled sample
 /// whose facts changed (ms since the notch, the snapshot's `weapon_index` and `weapon_state`, the predicted
-/// `visual_weapon_state` and `crosshair_alpha`) and the counted frames per state.
+/// `visual_weapon_state` and `crosshair_alpha`) and the counted frames per state. At a few frames a second the whole
+/// switch falls inside one frame's prediction and is never drawn, so the notch waits (up to 30 s) for the client to
+/// draw twenty a second, about ten frames of the switch: a busy host slows every frame for a while (#499).
 fn sample_weapon_switch(
     c: &mut Driven,
     until: Duration,
 ) -> Result<(Vec<(u64, f64)>, String), String> {
+    let rate = match reach_frame_rate(c, 20.0, Duration::from_millis(500), Duration::from_secs(30))?
+    {
+        Ok(rate) => rate,
+        Err(best) => {
+            return Err(format!(
+                "the client drew at most {best:.1} frames a second for 30 s, too few to draw a half-second weapon \
+                 switch"
+            ));
+        }
+    };
     let counted = state_frames(c)?;
     let start = Instant::now();
     c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
@@ -621,7 +690,7 @@ fn sample_weapon_switch(
     Ok((
         seen,
         format!(
-            "{samples} samples: {}; {total} frames drawn in {} ms: {}",
+            "{samples} samples at {rate:.0} frames a second before the notch: {}; {total} frames drawn in {} ms: {}",
             trace.join(", "),
             start.elapsed().as_millis(),
             frames.join(", ")
