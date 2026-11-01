@@ -20,6 +20,7 @@ pub mod client_hardpoint;
 pub mod client_heli;
 pub mod client_host_console;
 pub mod client_hud;
+mod client_hud_compass;
 mod client_hud_minimap;
 pub mod client_ingame_menu;
 pub mod client_input;

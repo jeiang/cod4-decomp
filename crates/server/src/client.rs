@@ -220,14 +220,14 @@ pub struct Client {
     pub compass_ping_until: i32,
     /// Level time until which the player counts as talking: a voice frame of theirs was relayed ([`crate::netsv::TALKING_MS`]).
     pub talking_until: i32,
-    /// Level time of the player's latest shot: enemies' compasses show where it came from for a moment.
-    pub last_fire_time: i32,
     /// `client->lastServerTime`: the `serverTime` of the latest usercmd (`G_SetLastServerTime`), the time the
     /// player's shots are judged at with `g_antilag` on.
     pub last_server_time: i32,
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
+    /// Test hook `devbotfire`: buttons the bot holds, standing still, and the level time it lets go.
+    pub dev_buttons: Option<(i32, i32)>,
     /// The body animation clock locational hits are tested against.
     pub pose: PlayerPoseState,
 }
@@ -302,10 +302,10 @@ impl Client {
             local: false,
             compass_ping_until: 0,
             talking_until: 0,
-            last_fire_time: i32::MIN / 2,
             last_server_time: 0,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
+            dev_buttons: None,
             pose: PlayerPoseState::default(),
         }
     }

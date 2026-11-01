@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Weapon compass ping eligibility follows KisakCOD cgame/cg_weapons.cpp (GPL-3.0; copyright the KisakCOD contributors and Activision).
 //! Fills [`GameFacts`] each frame from what the network play knows: the player state, the weapon inventory and the
 //! weapon definitions, the server's configstrings and scoreboard, and the other players in the snapshots.
 
@@ -29,6 +30,53 @@ pub(super) fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
         }
     }
     None
+}
+
+/// The compass pings of one player at shell time `now`: `pingPlayer` (`eflags::PING`), and an `EV_FIRE_WEAPON` or
+/// `EV_FIRE_WEAPON_LASTSHOT` of a weapon that `pings` (unsilenced, not a grenade: `CG_FireWeapon`, KisakCOD
+/// cgame/cg_weapons.cpp:2552-2558). Only snapshot fire events ping; non-PVS compass positions carry no events.
+fn note_pings(
+    a: &mut Actor,
+    flags: u32,
+    event_seq: u8,
+    recent: &[(u8, u8)],
+    pings: bool,
+    now: i32,
+    length: impl Fn(u8) -> Option<u32>,
+) -> Pinged {
+    let mut out = Pinged::default();
+    // A shot seen before its sound played learns the sound's length when it does.
+    if let Some(seq) = a.fire_seq {
+        a.learn_fire_length(seq, length(seq));
+        out.learned = a.fire_seq.is_none();
+    }
+    // `pingPlayer`: the compass flashes the player, as for a shot, at most every three seconds.
+    if flags & eflags::PING != 0 && (a.fire_time == 0 || now - a.fire_time >= 3000) {
+        a.ping(now, None, None);
+        out.flag = true;
+    }
+    if event_seq == a.event_seq {
+        return out;
+    }
+    // Every event raised since the last look, not only the newest.
+    let fresh = usize::from(event_seq.wrapping_sub(a.event_seq)).min(recent.len());
+    a.event_seq = event_seq;
+    let fired = recent[recent.len() - fresh..]
+        .iter()
+        .any(|&(k, _)| matches!(k, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT));
+    if fired && pings {
+        a.ping(now, Some(event_seq), length(event_seq));
+        out.shot = true;
+    }
+    out
+}
+
+/// What [`note_pings`] did: pinged for `pingPlayer`, pinged for a shot, learned a shot's sound length.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Pinged {
+    flag: bool,
+    shot: bool,
+    learned: bool,
 }
 
 /// Whether a vehicle owned by `owner` with team flags `eflags` is the viewer's enemy: another team's, or with no
@@ -205,7 +253,12 @@ impl NetPlay {
             *slot = crate::hudstate::SlotFacts {
                 kind,
                 usable,
-                active: kind == sim::pm::action_slot::WEAPON && target == ps.weapon as u16,
+                // `ActionSlotIsActive`: a night vision slot is lit while the player looks through the goggles.
+                active: match kind {
+                    sim::pm::action_slot::WEAPON => target == ps.weapon as u16,
+                    sim::pm::action_slot::NIGHT_VISION => ps.weapon_flags & wf::NIGHTVISION != 0,
+                    _ => false,
+                },
                 icon: def
                     .and_then(|d| d.dpad_icon.as_ref())
                     .and_then(|m| m.name.as_deref().map(str::to_owned)),
@@ -323,21 +376,33 @@ impl NetPlay {
             a.perks = e.perks;
             a.yaw = e.angles[1];
             a.last_update = now;
-            // `pingPlayer`: the compass flashes the player, as for a shot, at most every three seconds.
-            if e.eflags & eflags::PING != 0 && (a.fire_time == 0 || now - a.fire_time >= 3000) {
-                a.fire_time = now;
-                a.fire_pos = a.pos;
-            }
-            if e.event_seq != a.event_seq {
-                // Every event raised since the last look, not only the newest.
-                let fresh = usize::from(e.event_seq.wrapping_sub(a.event_seq)).min(4);
-                a.event_seq = e.event_seq;
-                let fired = e.recent_events()[4 - fresh..]
-                    .iter()
-                    .any(|&(k, _)| matches!(k, ev::FIRE_WEAPON | ev::FIRE_WEAPON_LASTSHOT));
-                if fired {
-                    a.fire_time = now;
-                    a.fire_pos = a.pos;
+            let pinged = note_pings(
+                a,
+                e.eflags,
+                e.event_seq,
+                &e.recent_events(),
+                self.weapons
+                    .get(e.weapon)
+                    .is_some_and(WeaponInfo::pings_compass),
+                now,
+                |seq| self.sound.fire_length_ms(e.number, seq),
+            );
+            if !a.friendly {
+                h.enemy_flag_pings += u32::from(pinged.flag);
+                h.enemy_fire_pings += u32::from(pinged.shot);
+                if pinged.shot {
+                    h.last_fire_actor = e.client;
+                    h.last_fire_mark_ms = 0;
+                }
+                if pinged.shot || pinged.learned {
+                    // Read the audio observation independently of Actor's hold calculation.
+                    h.last_fire_played_ms = self
+                        .sound
+                        .fire_length_ms(e.number, e.event_seq)
+                        .unwrap_or(0);
+                }
+                if pinged.shot || pinged.learned {
+                    h.last_fire_ping_ms = a.fire_duration;
                 }
             }
         }
@@ -501,5 +566,51 @@ mod tests {
         // Free for all: only the viewer's own.
         assert!(vehicle_is_enemy(0, 0, 5, 0));
         assert!(!vehicle_is_enemy(0, 5, 5, 0));
+    }
+
+    const SHOT: [(u8, u8); 4] = [(0, 0), (0, 0), (0, 0), (ev::FIRE_WEAPON, 0)];
+
+    #[test]
+    fn only_an_unsilenced_non_grenade_shot_pings_for_its_sound_length() {
+        let mut a = Actor::default();
+        // A silenced shot or a grenade: no ping.
+        note_pings(&mut a, 0, 1, &SHOT, false, 1000, |_| Some(400));
+        assert_eq!(a.fire_time, 0);
+        // An unsilenced shot: as long as its fire sound.
+        note_pings(&mut a, 0, 2, &SHOT, true, 2000, |s| (s == 2).then_some(400));
+        assert_eq!((a.fire_time, a.fire_duration), (2000, 400));
+        assert_eq!(a.fire_alpha(2400, 2000.0), Some(1.0));
+        assert_eq!(a.fire_alpha(3400, 2000.0), Some(0.5));
+        assert!(a.fire_alpha(4400, 2000.0).is_some() && a.fire_alpha(4401, 2000.0).is_none());
+        // The same events looked at again do not ping again.
+        note_pings(&mut a, 0, 2, &SHOT, true, 2500, |_| Some(400));
+        assert_eq!(a.fire_time, 2000);
+    }
+
+    #[test]
+    fn a_shot_heard_later_learns_its_sound_length_and_unknown_means_zero_hold() {
+        let mut a = Actor::default();
+        note_pings(&mut a, 0, 3, &SHOT, true, 1000, |_| None);
+        assert_eq!(a.fire_duration, 0);
+        note_pings(&mut a, 0, 3, &SHOT, true, 1016, |s| (s == 3).then_some(650));
+        assert_eq!((a.fire_time, a.fire_duration), (1000, 650));
+        // Never heard: fade immediately, without a hold.
+        let mut b = Actor::default();
+        note_pings(&mut b, 0, 1, &SHOT, true, 1000, |_| None);
+        note_pings(&mut b, 0, 1, &SHOT, true, 1016, |_| None);
+        assert_eq!(b.fire_duration, 0);
+        assert_eq!(b.fire_alpha(2000, 2000.0), Some(0.5));
+        assert!(b.fire_alpha(3001, 2000.0).is_none());
+    }
+
+    #[test]
+    fn ping_player_still_pings_at_most_every_three_seconds() {
+        let mut a = Actor::default();
+        note_pings(&mut a, eflags::PING, 0, &SHOT, false, 1000, |_| None);
+        assert_eq!((a.fire_time, a.fire_duration), (1000, 0));
+        note_pings(&mut a, eflags::PING, 0, &SHOT, false, 3999, |_| None);
+        assert_eq!(a.fire_time, 1000);
+        note_pings(&mut a, eflags::PING, 0, &SHOT, false, 4000, |_| None);
+        assert_eq!(a.fire_time, 4000);
     }
 }

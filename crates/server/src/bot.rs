@@ -177,6 +177,16 @@ impl Brain {
             self.finish(&mut cmd, delta);
             return cmd;
         }
+        // Test hook `devbotfire`: the bot stands and holds the given buttons until the time is up.
+        if let Some((buttons, until)) = c.dev_buttons
+            && time < until
+        {
+            cmd.buttons |= buttons;
+            self.yaw = c.ps.viewangles[1];
+            self.pitch = c.ps.viewangles[0];
+            self.finish(&mut cmd, delta);
+            return cmd;
+        }
         // `bot_idle`: bots stand where they are (a stage that needs a quiet round), holding +activate where a use
         // trigger's hint shows (a bot put in a bomb zone by `devtele` plants or defuses).
         if g.cvars.bool("bot_idle") {

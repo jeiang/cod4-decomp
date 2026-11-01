@@ -1176,6 +1176,15 @@ impl Input {
         }
         self.cvars.set(name, value, archive);
         self.dirty = true;
+        // `CG_LookingThroughNightVision` reads it to drop the goggles' overlay and vision set (KisakCOD
+        // `cgame/cg_visionsets.cpp:610`); this build does not, so a player who sets it is told.
+        if name.eq_ignore_ascii_case("nightVisionDisableEffects") && self.cvars.bool(name) {
+            tracing::warn!(
+                cvar = name,
+                value,
+                "nightVisionDisableEffects is not implemented (#399): the night vision goggles keep their effects"
+            );
+        }
         // The original has one dvar store for the client and the listen server it runs: a write to a variable the
         // server registers (`scr_war_scorelimit`, `g_gametype`, `sv_hostname`) is the server's too; it ignores the
         // client's own (#366).

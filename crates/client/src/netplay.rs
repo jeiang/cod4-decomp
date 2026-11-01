@@ -1625,6 +1625,10 @@ impl NetPlay {
         self.feedback.merge(fb);
         laps.lap("hear+feedback");
         let (events, commands) = self.take_events(&snap);
+        // The player's own goggles, from the predicted state (`CG_LookingThroughNightVision` reads
+        // `predictedPlayerState.weapFlags`).
+        self.look
+            .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
         let look = self.look.frame(st);
         self.shock_effects(&look);
         laps.lap("events+look");
@@ -1952,7 +1956,10 @@ impl NetPlay {
 
     /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
-        if !self.switches.crosshair {
+        if !self.switches.crosshair
+            || !crate::crosshair::allowed(ps, self.switches.draw_gun)
+            || self.look.flashbanged(self.live_time)
+        {
             return None;
         }
         let index = sim::pm::viewmodel_weapon(ps);
