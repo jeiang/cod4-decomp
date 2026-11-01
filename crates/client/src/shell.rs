@@ -1873,6 +1873,10 @@ impl HostCx<'_> {
                     }
                 }
                 "vid_restart" => self.st.actions.push(Action::VidRestart),
+                // `CL_PlayLogo_f` wants exactly four arguments (KisakCOD cl_main_mp.cpp:2417).
+                "logo" if cmd.len() != 5 => self.st.log(
+                    "USAGE: logo <image name> <fadein seconds> <full duration seconds> <fadeout seconds>",
+                ),
                 // The stock videos are Bink; there is no decoder, so the player is told rather than left to a
                 // "Unknown command".
                 "cinematic" | "unskippablecinematic" | "logo" => self
@@ -1893,7 +1897,10 @@ impl HostCx<'_> {
                 }
                 "quit" => self.st.actions.push(Action::Quit),
                 "disconnect" => self.st.actions.push(Action::Disconnect),
+                // `CL_Connect_f` (KisakCOD cl_main_pc_mp.cpp:382) and `CL_PlayDemo_f` (cl_main_mp.cpp:2797).
+                "connect" if cmd.len() != 2 => self.st.log("usage: connect [server]"),
                 "connect" => self.st.actions.push(Action::Join(a(1).to_owned())),
+                "playdemo" | "demo" if cmd.len() != 2 => self.st.log(&format!("{} <demoname>", cmd[0])),
                 "playdemo" | "demo" => self.st.actions.push(Action::PlayDemo(a(1).to_owned())),
                 "reconnect" => self.st.actions.push(Action::Reconnect),
                 // The server's `g_gametype` defaults to `war` (`SV_Init` registers it so); a client that has not
@@ -1909,6 +1916,18 @@ impl HostCx<'_> {
                     cheats: name == "devmap",
                 }),
                 "closemenu" => self.st.actions.push(Action::CloseMenu(cmd[1..].join(" "))),
+                "openmenu" => self.st.actions.push(Action::OpenMenu(cmd[1..].join(" "))),
+                // `CL_OpenScriptMenu_f` (KisakCOD cl_main_mp.cpp:3128): the response goes to the server as from the
+                // named menu, while responses are allowed.
+                "openscriptmenu" if cmd.len() != 3 => {
+                    self.st.log("USAGE: openscriptmenu <parent menu name> <script menu response>");
+                    self.st.log("EXAMPLE: openscriptmenu ingame changeweapon");
+                }
+                "openscriptmenu" if ui.allow_menu_response => self.menu_response(a(1), a(2)),
+                "openscriptmenu" => {}
+                "startsingleplayer" => self.st.actions.push(Action::StartSingleplayer),
+                // `Con_Clear_f`: the console's text goes.
+                "clear" => self.st.feed.console.clear(),
                 // `setFromLocString <dvar> <string>` (`Dvar_SetFromLocalizedStr_f`): an `@` reference is localized.
                 "setfromlocstring" => {
                     if cmd.len() < 3 {
@@ -1937,8 +1956,12 @@ impl HostCx<'_> {
                     .actions
                     .push(Action::Console(crate::input::config::join(&cmd))),
                 // The input layer's own (`bind`, `set`, `toggle`, the `+` commands, what it hands on).
-                n if crate::console::is_command(n) => {
+                n if crate::console::is_command(n) && !crate::console::is_shell_verb(n) => {
                     self.input.exec_line(&crate::input::config::join(&cmd))
+                }
+                // A shell command without an arm above would come back through the pending list every frame.
+                n if crate::console::is_shell_verb(n) => {
+                    tracing::error!(command = n, "shell command without a handler");
                 }
                 // `Cmd_ExecuteSingleCommand` past the commands: a cvar's name shows or sets it (`Dvar_Command`);
                 // anything else is the app's to forward to the server or call unknown
