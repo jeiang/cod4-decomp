@@ -1424,10 +1424,17 @@ mod spawn_inactivity_tests {
 
     /// #505: stock `ClientDisconnect` frees the entity right after the disconnect callback, so in the
     /// same frame the leaving player is gone from the world and a script's reference to them is no
-    /// longer defined (the stock `_missions::playerDamaged` thread relies on it).
+    /// longer defined (the stock `_missions::playerDamaged` thread relies on it). The callback itself
+    /// still has the player throughout: its builtins run nested script calls, which must not free it.
     #[test]
     fn a_leaving_player_is_freed_right_after_the_disconnect_callback() {
-        let src = "CodeCallback_PlayerDisconnect() { level.left = self; }\n\
+        let src = "CodeCallback_PlayerDisconnect()\n\
+                   {\n\
+                   \tif (isdefined(self))\n\
+                   \t\tlevel.seen = self getentitynumber();\n\
+                   \tlevel.left = self;\n\
+                   }\n\
+                   seen() { return level.seen; }\n\
                    still_there() { return isdefined(level.left); }\n";
         let p = gsc::compile(
             &[("t.gsc", src)],
@@ -1437,6 +1444,7 @@ mod spawn_inactivity_tests {
         .unwrap();
         let callback = p.find("t", "CodeCallback_PlayerDisconnect").unwrap();
         let still_there = p.find("t", "still_there").unwrap();
+        let seen = p.find("t", "seen").unwrap();
         let dispatch = crate::script::Dispatch::new(&p);
         let mut vm = Vm::new(p).unwrap();
         let mut g = Game::new(Cvars::new(), Content::default());
@@ -1451,6 +1459,20 @@ mod spawn_inactivity_tests {
             dispatch: &dispatch,
         };
         host.run_calls(&mut vm);
+        assert!(
+            host.game.nested_errors.is_empty(),
+            "the disconnect callback failed: {:?}",
+            host.game
+                .nested_errors
+                .iter()
+                .map(|e| &e.message)
+                .collect::<Vec<_>>()
+        );
+        let seen = vm.call(&mut host, seen, None, &[]).unwrap();
+        assert!(
+            matches!(seen, gsc::CallOutcome::Finished(Value::Int(s)) if s == i32::from(n)),
+            "the disconnect callback lost its player: {seen:?}"
+        );
         let left = vm.call(&mut host, still_there, None, &[]).unwrap();
         assert!(
             matches!(left, gsc::CallOutcome::Finished(Value::Int(0))),

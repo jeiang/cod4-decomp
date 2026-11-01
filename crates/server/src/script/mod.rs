@@ -135,6 +135,7 @@ impl ScriptHost<'_> {
     /// wait before this returns, and may queue more. Errors are kept for the server's report.
     pub fn run_calls(&mut self, vm: &mut Vm) {
         let _span = tracing::debug_span!("script_calls").entered();
+        self.game.run_calls_depth += 1;
         loop {
             while !self.game.calls.is_empty() {
                 for c in std::mem::take(&mut self.game.calls) {
@@ -145,10 +146,6 @@ impl ScriptHost<'_> {
                     }
                 }
             }
-            // `ClientDisconnect` frees the entity straight after the disconnect callback: a player
-            // left in the world until the end of the frame could still be damaged, and the damage
-            // callback's threads would outlive the `disconnect` notify they end on (#505).
-            self.game.finish_disconnects(vm);
             // A test client a script added begins once its connect callback has run and is waiting for it.
             let begins = std::mem::take(&mut self.game.pending_begin);
             if begins.is_empty() {
@@ -157,6 +154,15 @@ impl ScriptHost<'_> {
             for n in begins {
                 self.game.client_begin(vm, n);
             }
+        }
+        self.game.run_calls_depth -= 1;
+        // `ClientDisconnect` frees the entity straight after the disconnect callback: a player
+        // left in the world until the end of the frame could still be damaged, and the damage
+        // callback's threads would outlive the `disconnect` notify they end on (#505). Only the
+        // outermost call frees: every builtin runs a nested one, which may be inside the
+        // disconnect callback itself.
+        if self.game.run_calls_depth == 0 {
+            self.game.finish_disconnects(vm);
         }
     }
 
