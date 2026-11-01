@@ -77,6 +77,9 @@ pub struct Options {
     pub vertex_fixes: BTreeMap<(u32, u32), VertexFix>,
     /// Pixel shaders only. `None` = no alpha test.
     pub alpha_test: Option<AlphaTest>,
+    /// Vertex shaders only: constant normalized-depth offset, applied to clip z as `offset * w`.
+    /// This keeps D3D9's floating-point depth bias independent of the target depth format's ULP.
+    pub depth_offset: f32,
     /// Sampler registers sampled as depth textures with a comparison sampler (`textureSampleCompare`, reference =
     /// coordinate z, 2D only; the result is splatted to all four components).
     pub comparison_samplers: BTreeSet<u32>,
@@ -789,6 +792,12 @@ pub(crate) fn emit(s: &Shader, opts: &Options) -> Result<Translation, Error> {
         let _ = writeln!(w, "    var r{t} = vec4<f32>(0.0);");
     }
     w.push_str(&c.out);
+    if vs && opts.depth_offset != 0.0 {
+        for output in outs.iter().filter(|s| s.usage == 0) {
+            let r = output.register;
+            let _ = writeln!(w, "    o{r}.z += {} * o{r}.w;", fmt_f(opts.depth_offset));
+        }
+    }
     let ret: Vec<String> = if vs {
         outs.iter().map(|s| format!("o{}", s.register)).collect()
     } else {

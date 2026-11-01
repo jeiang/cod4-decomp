@@ -543,6 +543,13 @@ impl PassKind {
         matches!(self, PassKind::DynLight { .. })
     }
 
+    fn is_camera(self) -> bool {
+        matches!(
+            self,
+            PassKind::Scene | PassKind::DynLight { .. } | PassKind::CookieReceiver
+        )
+    }
+
     /// Passes of techniques that a material may lack: the surface is left out of the pass, as the original's
     /// `R_SetMaterial` and `R_SetPrepassMaterial` (KisakCOD `r_draw_material.cpp`) return without a draw when
     /// `Material_GetTechnique` is null. The scene pass instead falls back down the chain to the unlit technique.
@@ -1709,17 +1716,14 @@ impl Renderer {
         }
     }
 
-    /// Whether a pass leaves a material out rather than falling down its technique chain: the optional passes, and
-    /// the fullbright scene, whose one technique the original draws nothing without.
-    fn skips_without_tech(
-        &self,
-        kind: PassKind,
-        mat: &Material,
-        techs: &[usize],
-        hsm: bool,
-    ) -> bool {
-        (kind.optional_tech() || (kind == PassKind::Scene && self.settings.fullbright))
-            && !self.materials.has_technique(mat, techs[0], hsm)
+    /// Whether a pass leaves a material out: the optional passes and fullbright scene need their first technique,
+    /// and camera draws leave out `CAMERA_REGION_NONE`. KisakCOD's `R_AddBModelSurfacesCamera`,
+    /// `R_AddXModelSurfacesCamera` and `R_SkinStaticModelsCameraForLod` skip region 3, but the shadow passes do not:
+    /// tree shadow-caster cards must still cut out and cast without appearing as black geometry in the scene.
+    fn skips_material(&self, kind: PassKind, mat: &Material, techs: &[usize], hsm: bool) -> bool {
+        (kind.is_camera() && mat.camera_region == 3)
+            || ((kind.optional_tech() || (kind == PassKind::Scene && self.settings.fullbright))
+                && !self.materials.has_technique(mat, techs[0], hsm))
     }
 
     /// Build the draws of one pass.
@@ -1768,7 +1772,7 @@ impl Renderer {
                 PassKind::CookieCaster => &COOKIE_CASTER_TECHS,
                 PassKind::CookieReceiver => &COOKIE_RECEIVER_TECHS,
             };
-            if self.skips_without_tech(kind, mat, techs, hsm) {
+            if self.skips_material(kind, mat, techs, hsm) {
                 continue;
             }
             let Some(prep) = self.prepare(mat, techs, VertexKind::World, hsm) else {
@@ -1860,7 +1864,7 @@ impl Renderer {
                 let Some(Some(mat)) = model.materials.get(idx) else {
                     continue;
                 };
-                if self.skips_without_tech(kind, mat, techs, hsm) {
+                if self.skips_material(kind, mat, techs, hsm) {
                     continue;
                 }
                 let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {
@@ -2087,7 +2091,7 @@ impl Renderer {
             } else {
                 VertexKind::Model
             };
-            if self.skips_without_tech(PassKind::Scene, mat, techs, hsm) {
+            if self.skips_material(PassKind::Scene, mat, techs, hsm) {
                 continue;
             }
             let Some(prep) = self.prepare(mat, techs, kind, hsm) else {
@@ -2156,7 +2160,7 @@ impl Renderer {
                 PassKind::CookieCaster => &COOKIE_CASTER_TECHS,
                 PassKind::CookieReceiver => &COOKIE_RECEIVER_TECHS,
             };
-            if self.skips_without_tech(kind, mat, techs, hsm) {
+            if self.skips_material(kind, mat, techs, hsm) {
                 continue;
             }
             let Some(prep) = self.prepare(mat, techs, VertexKind::Model, hsm) else {

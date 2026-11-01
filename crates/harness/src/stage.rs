@@ -402,6 +402,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::client_clear::run),
     },
     StageDef {
+        name: "client-foliage",
+        description: "mp_farm foliage at the #358 pose: shadow-only cards stay out of the camera draw and the canopy shows no black cutout silhouettes with sun shadows on or off; compares held-pose captures with shadows on and off",
+        needs_install: false,
+        timeout: Duration::from_secs(4 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::client_foliage::run),
+    },
+    StageDef {
         name: "client-hud",
         description: "the HUD the client draws over the stock menus in a team deathmatch against bots, played through the control channel with the player's own keys, mouse, menus and console (#376): scoreboard rows, print and kill lines in the message windows, script hud elements, the killcam, a localized class-change message, a typed chat line and a console vote call coming back from the server",
         needs_install: false,
