@@ -27,8 +27,9 @@ pub(super) fn attachments_of(
         let name = ui.model(model);
         let tag = tag_name(content, &models, tag).map_or_else(
             || {
-                // An unused attachment slot has no model, so no tag either.
-                if !name.is_empty() {
+                // Zero is the intentional DObj root-meld path, not a failed lookup.
+                // Stock heads use it to share j_spine4/j_neck/j_head with the body.
+                if tag != 0 && !name.is_empty() {
                     logging::dedup!(
                         WARN,
                         "attach-tag",
@@ -145,6 +146,25 @@ mod tests {
 
     /// A gun that starts 2 units behind its tag and is 32 long.
     const GUN: (f32, f32) = (-2.0, 32.0);
+
+    #[test]
+    fn stock_head_root_meld_is_not_a_missing_attachment_tag() {
+        let mut ui = ClientUiState::default();
+        ui.apply(net::ui::ServerCmd::ConfigStrings(vec![(
+            net::ui::cs::MODELS + 1,
+            "head_mp_usmc_shaved_head".to_owned(),
+        )]));
+        let content = Content::for_client();
+        let mut e = EntityState::new(1);
+        e.set_attach(0, 1, 0);
+        let (attached, events) = logging::capture(|| attachments_of(&ui, &content, &e, ""));
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].1, "");
+        assert!(
+            events.is_empty(),
+            "zero requests melding, not tag resolution"
+        );
+    }
 
     #[test]
     fn a_gun_is_hidden_only_when_its_barrel_is_in_a_wall_and_its_stock_is_out_of_the_viewers_sight()

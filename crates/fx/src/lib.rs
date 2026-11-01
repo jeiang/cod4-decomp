@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Translated in part from KisakCOD (EffectsCore/fx_draw.cpp: FX_EvaluateDistanceFade, FX_EvaluateVisualState_DoLighting, FX_DrawElem_Cloud, FX_AddVisBlocker; fx_system.cpp: FX_SpawnEffect, FX_CullElemForSpawn, FX_CullTrailElem, FX_GetClientVisibility; fx_update.cpp: FX_ProcessEmitting, FX_TraceHitSomething; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Zero-visual model drawing follows KisakCOD EffectsCore/fx_draw.cpp:1063 (FX_DrawElement),
+// GPL-3.0, copyright the KisakCOD contributors and Activision (MP 1.8 reference).
 //! Effect playback. An [`Fx`] runs [`FxEffectDef`]s: each effect spawns its elements (looping ones at an interval,
 //! one-shot ones at once, runners that start further effects), and every element lives for its lifespan moving by
 //! its velocity samples and gravity, bouncing off the world when it collides, and reads its colour, size and
@@ -1263,6 +1265,11 @@ impl Fx {
                     continue;
                 }
                 let d = &e.def.elems[el.def];
+                // An authored model element can simulate and emit child effects without drawing a model.
+                // FX_DrawElement gates on visualCount; an empty list is not a failed zone lookup.
+                if matches!(&d.visuals, FxVisuals::Models(models) if models.is_empty()) {
+                    continue;
+                }
                 let t = ((self.now - el.begin) as f32 / el.life).clamp(0.0, 0.999_999);
                 let mut vis = visual_state(d, el, t);
                 if d.lighting_frac != 0 {
@@ -1352,7 +1359,10 @@ impl Fx {
                         let Some(Some(model)) = models.get(pick_index(el, models.len())) else {
                             logging::dedup!(
                                 WARN,
-                                "no-model",
+                                e.def.name.as_deref().unwrap_or("?"),
+                                effect = e.def.name.as_deref().unwrap_or("?"),
+                                element = el.def,
+                                visual = pick_index(el, models.len()),
                                 "model element skipped: its model did not resolve"
                             );
                             continue;
@@ -2271,6 +2281,23 @@ mod tests {
         e.flags = flags;
         e.life_span_msec = range(6000, 0);
         effect("fx/debris", 0, 1, 0, vec![e])
+    }
+
+    #[test]
+    fn a_zero_visual_model_still_simulates_without_drawing() {
+        let mut e = elem_def(elem::MODEL, FxVisuals::Models(Arc::from(Vec::new())));
+        e.life_span_msec = range(1000, 0);
+        let def = effect("fx/invisible_model", 0, 1, 0, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
+        assert_eq!(model_at(&mut fx, 50, &Floor), None);
+        assert_eq!(
+            fx.live_elems(),
+            1,
+            "no visual must not remove the simulation"
+        );
+        assert_eq!(model_at(&mut fx, 1100, &Floor), None);
+        assert_eq!(fx.live_elems(), 0);
     }
 
     #[test]

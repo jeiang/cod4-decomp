@@ -186,6 +186,23 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             return Ok(report_fail(report, &format!("no client report: {e}")));
         }
     };
+    let checked = client["showcase"]["heads_checked"].as_u64().unwrap_or(0);
+    let resolved = client["showcase"]["heads_resolved"].as_u64().unwrap_or(0);
+    let held = client["showcase"]["held_before_tick"].as_u64().unwrap_or(0);
+    if checked == 0 || resolved != checked || held != PLAYERS as u64 {
+        return Ok(report_fail(
+            report,
+            &format!(
+                "attachment regression: {resolved}/{checked} heads resolved, {held}/{PLAYERS} weapons drawn before the first animation tick"
+            ),
+        ));
+    }
+    report
+        .metrics
+        .insert("attachments.heads_resolved".into(), resolved as f64);
+    report
+        .metrics
+        .insert("attachments.held_before_tick".into(), held as f64);
     if let Some(why) = scripted_clips_problem(&client) {
         return Ok(report_fail(report, &why));
     }
