@@ -312,6 +312,11 @@ impl Effects {
         self
     }
 
+    /// Restarts the client-side effects with the level clock, including a same-map round restart.
+    pub fn restart(&mut self, content: &Content) {
+        *self = Self::new(content, self.world.clone()).with_ambient(content);
+    }
+
     fn impact_effect(
         &self,
         impact_type: i32,

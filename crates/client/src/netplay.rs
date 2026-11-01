@@ -877,14 +877,16 @@ impl NetPlay {
             self.models_warmed.clear();
             let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
             self.effects = Effects::new(&lib.content, map.world.clone()).with_ambient(&lib.content);
-            self.effects
-                .set_tracer_material(self.tracer_material.clone());
             self.params.mantle_anims = lib.content.mantle_anims();
             self.lib = lib;
             self.boxes = PlayerBoxes::new(clipmap);
             self.brush_surfaces = brush_surfaces(&map.world);
             self.sound = sound;
+        } else {
+            self.effects.restart(&self.lib.content);
         }
+        self.effects
+            .set_tracer_material(self.tracer_material.clone());
         {
             let sound = &mut self.sound;
             self.hearing.close_all(|p| sound.close_voice_pipe(p));

@@ -669,6 +669,7 @@ fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mu
         let boxes = PlayerBoxes::new(clipmap);
         let world = boxes.world();
         let mut fx = Effects::new(&lib.content, data.world.clone()).with_ambient(&lib.content);
+        fx.set_projection(90.0_f32.to_radians(), 16.0 / 9.0);
         let poses: Vec<_> = fx
             .ambient()
             .poses()
@@ -687,6 +688,8 @@ fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mu
             fx.update(now, world);
             fx.draw(eye, direction.y.atan2(direction.x), direction.z.asin(), 0.0);
         }
+        report.insert(format!("ambient_{map}_played"), json!(fx.ambient().played));
+        report.insert(format!("ambient_{map}_quads"), json!(fx.ambient().quads));
         for family in families {
             let quads: u64 = fx
                 .ambient()
