@@ -121,7 +121,7 @@ fn shown_text(ui: &Ui, le: &LiveElem, now: i32) -> String {
 }
 
 /// The full-screen picture of the night vision goggles (`cgMedia.nightVisionOverlay`, `cg_main_mp.cpp` of KisakCOD).
-pub const NIGHT_VISION_OVERLAY: &str = "nightvision_overlay_goggles";
+const NIGHT_VISION_OVERLAY: &str = "nightvision_overlay_goggles";
 
 /// What a HUD pass drew that the run report counts ([`super::Stats::drawn`]).
 #[derive(Default)]

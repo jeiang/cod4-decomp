@@ -20,7 +20,7 @@ use ::assets::zone::menu::ItemDef;
 const LOW_AMMO_COLOR: [f32; 3] = [0.89, 0.18, 0.01];
 const WHITE: [f32; 4] = [1.0; 4];
 /// The d-pad icon of a night vision slot (`cgMedia.hudIconNVG`, KisakCOD `cgame_mp/cg_main_mp.cpp:1717`).
-pub const NIGHT_VISION_ICON: &str = "hud_icon_nvg";
+const NIGHT_VISION_ICON: &str = "hud_icon_nvg";
 
 /// The dvars the pieces read, with the original's defaults.
 struct Cfg {

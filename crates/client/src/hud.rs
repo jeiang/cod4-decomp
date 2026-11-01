@@ -25,7 +25,7 @@ use crate::ui::assets::UiAssets;
 use net::ui::HudElem;
 use std::collections::HashMap;
 
-pub use elems::{Drawn, NIGHT_VISION_OVERLAY, draw_over, draw_under, spectator_commands};
+pub use elems::{Drawn, draw_over, draw_under, spectator_commands};
 pub use feed::{BOLD, Feed, NOTIFY, SUBTITLE, WINDOWS};
 pub use layout::Layout;
 pub use prompt::{LiveVote, draw_typing, draw_vote};
