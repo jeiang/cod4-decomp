@@ -292,6 +292,19 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         Ok(c.lookup("client.seconds")?.as_f64().unwrap_or(0.0))
     })?;
     c.pause(secs(3))?;
+    c.step("voice talking ownerdraw", |c| {
+        c.ask(json!({"cmd":"server","op":"cvar","name":"sv_voice","value":"1"}))?;
+        c.bind("+talk", "down")?;
+        let result = c.until(
+            json!({"hud.report.local_talker_marks":{"ge":1}}),
+            secs(10),
+            "the speaking player's ownerdraw 266 never drew",
+        );
+        c.bind("+talk", "up")?;
+        result?;
+        c.ask(json!({"cmd":"server","op":"cvar","name":"sv_voice","value":"0"}))?;
+        Ok(())
+    })?;
     c.step("stock server dvar registrations", |c| {
         // KisakCOD game_mp/g_main_mp.cpp:407,632-648,694-712 and server_mp/sv_init_mp.cpp:708-722,771.
         // Empty registered strings must be "", never the null returned for an absent registration.
@@ -576,6 +589,18 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             w.turning()
         ));
     }
+    c.step("helicopter compass ownerdraw", |c| {
+        // Stock 1.7 places 155 in compass_old, not its current compass menu.
+        c.console("togglemenu compass_old")?;
+        c.ask(json!({"cmd":"server","op":"exec","line":"devhardpoint bot helicopter_mp"}))?;
+        c.until(
+            json!({"hud.report.helicopter_marks":{"ge":1}}),
+            secs(120),
+            "an active helicopter never drew its minimap icon (155)",
+        )?;
+        c.capture("helicopter-compass")?;
+        Ok(())
+    })?;
     Ok(())
 }
 

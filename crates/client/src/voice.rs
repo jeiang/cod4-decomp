@@ -25,6 +25,8 @@ pub struct Talker {
     pub note: Option<String>,
     /// Frames sent so far.
     pub sent: u64,
+    pub down: bool,
+    pub level: f32,
 }
 
 impl Talker {
@@ -32,6 +34,8 @@ impl Talker {
     /// frames to send; otherwise it is thrown away so nothing stale is sent when the key goes down.
     pub fn frames(&mut self, down: bool, enabled: bool, now: Instant) -> Vec<Frame> {
         let talking = down && enabled;
+        self.down = talking;
+        self.level = 0.0;
         if talking {
             self.last_down = Some(now);
             if self.mic.is_none() && self.failed_at.is_none_or(|t| now - t > RETRY) {
@@ -61,6 +65,7 @@ impl Talker {
         let mut out = Vec::new();
         let mut pcm = [0f32; FRAME_SAMPLES];
         while mic.waiting() >= FRAME_SAMPLES && mic.read(&mut pcm) {
+            self.level = pcm.iter().fold(self.level, |a, s| a.max(s.abs()));
             if talking {
                 let mut ints = [0i16; FRAME_SAMPLES];
                 for (i, s) in ints.iter_mut().zip(&pcm) {
@@ -104,6 +109,13 @@ pub struct Hearing {
 }
 
 impl Hearing {
+    /// A talker icon lingers for the same short gap as an utterance, not the mixer's idle timeout.
+    pub fn talking(&self, now: Instant) -> impl Iterator<Item = u16> + '_ {
+        self.speakers.iter().filter_map(move |(&client, s)| {
+            (now - s.last <= UTTERANCE_GAP).then_some(u16::from(client))
+        })
+    }
+
     /// Plays a frame from `v.speaker` through `open`, which makes a pipe when the speaker has none.
     /// `gain` scales the audio (0 mutes).
     pub fn feed(

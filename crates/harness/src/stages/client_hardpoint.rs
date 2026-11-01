@@ -15,7 +15,7 @@ const NAME: &str = "client-hardpoint";
 const LIMIT: Duration = Duration::from_secs(240);
 const ARGS: &[&str] = &["--listen", "--bots", "3"];
 const STEPS: &str = "ingame=120,wait=2,server=devhardpoint human airstrike_mp,wait=2,shot=dpad,\
-set=+actionslot 4,wait=3,shot=pick,set=+attack,wait=0.3,set=-attack,wait=6";
+set=+actionslot 4,wait=3,shot=pick,set=+attack,wait=0.3,set=-attack,wait=1,set=togglemenu compass_old,wait=5";
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
@@ -66,6 +66,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     if strikes == 0 {
         problems.push("the airstrike was never called in".into());
+    }
+    let marks = report["hud"]["plane_marks"].as_u64().unwrap_or(0);
+    out.metrics.insert("plane_marks".into(), marks as f64);
+    if marks == 0 {
+        problems.push("an active airstrike never drew a minimap plane icon (156)".into());
     }
     if !problems.is_empty() {
         return Ok(fail(out, problems.join("; ")));

@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// HUD vehicle and talker behavior follows KisakCOD (GPL-3.0), Infinity Ward:
+// cgame_mp/cg_compassfriendlies_mp.cpp:978 and cg_newDraw_mp.cpp:2287;
+// ui_mp/ui_main_mp.cpp:1495,1909. MP 1.8 reference; native 1.7 voice uses our codec.
 //! The HUD pieces the stock menus ask the client to draw (`ownerdraw` items): health, ammunition and weapon,
 //! grenades, stance, sprint, hints, the corner compass and the full-screen map.
 //!
@@ -23,6 +26,7 @@ const WHITE: [f32; 4] = [1.0; 4];
 /// The dvars the pieces read, with the original's defaults.
 struct Cfg {
     enable: bool,
+    draw_talk: i32,
     draw_health: bool,
     breath_hint: bool,
     mantle_hint: bool,
@@ -48,6 +52,7 @@ impl Cfg {
         let b = |n: &str, d: bool| f(n, f32::from(u8::from(d))) != 0.0;
         Self {
             enable: b("hud_enable", true),
+            draw_talk: f("cg_drawTalk", 1.0) as i32,
             draw_health: b("cg_drawHealth", false),
             breath_hint: b("cg_drawBreathHint", true),
             mantle_hint: b("cg_drawMantleHint", true),
@@ -219,6 +224,8 @@ pub fn draw(
             | 150
             | 151
             | 152
+            | 155
+            | 156
             | 158
             | 159
             | 170
@@ -228,6 +235,8 @@ pub fn draw(
             | 185
             | 187
             | 188
+            | 193..=196
+            | 265..=270
     ) {
         return false;
     }
@@ -292,6 +301,20 @@ pub fn draw(
         155 => compass_vehicles(&mut dc, h, false),
         156 => compass_vehicles(&mut dc, h, true),
         158 => compass_friendlies(&mut dc, h, false),
+        193..=196 => talker(&mut dc, h, (id - 193) as usize, true),
+        267..=270 => talker(&mut dc, h, (id - 267) as usize, false),
+        266 => {
+            if h.local_talking {
+                dc.pic("voice_on", dc.r, dc.color);
+                h.local_talker_marks += 1;
+            }
+        }
+        265 => {
+            let width = dc.r.w * h.record_level - 4.0 * dc.u();
+            if width > 0.0 {
+                dc.p.fill(Px { w: width, ..dc.r }, dc.color);
+            }
+        }
         170 => compass_enemies(&mut dc, h, false),
         183 => compass_player(&mut dc, h, true),
         181 => map_image(&mut dc, h),
@@ -307,6 +330,25 @@ pub fn draw(
         _ => {}
     }
     true
+}
+
+/// The numbered slots are assigned before the friendly/enemy filter, as in UI_GetTalkerClientNum.
+fn talker(dc: &mut Dc, h: &mut HudFacts, slot: usize, filter: bool) {
+    let Some((_, name, enemy)) = h.talkers.get(slot) else {
+        return;
+    };
+    let mode = dc.cfg.draw_talk;
+    if filter && (mode == 0 || (mode == 2 && *enemy) || (mode == 3 && !*enemy)) {
+        return;
+    }
+    dc.pic("voice_on", dc.r, dc.color);
+    dc.text(
+        dc.r.x + dc.r.w + 2.0 * dc.u(),
+        dc.r.y + (dc.r.h + dc.text_h()) * 0.5,
+        dc.color,
+        name,
+    );
+    h.talker_marks += 1;
 }
 
 // ---- health -----------------------------------------------------------------------------------------------
@@ -1388,6 +1430,11 @@ fn compass_vehicles(dc: &mut Dc, h: &mut HudFacts, planes: bool) {
             })
             .collect();
         h.vehicle_marks += marks.len() as u32;
+        if planes {
+            h.plane_marks += marks.len() as u32;
+        } else {
+            h.helicopter_marks += marks.len() as u32;
+        }
         draw_marks_sized(dc, h, &map, false, icon, &marks, size);
     }
 }

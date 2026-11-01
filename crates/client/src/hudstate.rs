@@ -347,6 +347,12 @@ pub struct SlotFacts {
 pub struct HudFacts {
     /// A live match is being played; the pieces draw nothing otherwise.
     pub live: bool,
+    /// Active received speakers, ordered by client number, excluding the local player.
+    pub talkers: Vec<(u16, String, bool)>,
+    pub local_talking: bool,
+    pub record_level: f32,
+    pub talker_marks: u32,
+    pub local_talker_marks: u32,
     /// The shell's clock at the last fill.
     pub now: i32,
     pub pm_dead: bool,
@@ -415,6 +421,8 @@ pub struct HudFacts {
     pub radar_pings: u32,
     pub radar_lines: u32,
     pub vehicle_marks: u32,
+    pub helicopter_marks: u32,
+    pub plane_marks: u32,
     /// The most helicopters and planes the compass knew of at once, and how many of them were enemies.
     pub vehicles_max: u32,
     pub enemy_vehicles_max: u32,
@@ -545,6 +553,12 @@ impl HudFacts {
             "radar_marks": self.radar_marks,
             "radar_lines": self.radar_lines,
             "vehicle_marks": self.vehicle_marks,
+            "helicopter_marks": self.helicopter_marks,
+            "plane_marks": self.plane_marks,
+            "talker_marks": self.talker_marks,
+            "local_talker_marks": self.local_talker_marks,
+            "local_talking": self.local_talking,
+            "talkers": self.talkers,
             "vehicles_max": self.vehicles_max,
             "enemy_vehicles_max": self.enemy_vehicles_max,
             "objectives_listed": self.objectives_listed,
