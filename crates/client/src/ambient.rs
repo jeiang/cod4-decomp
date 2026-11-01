@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The map's client-side createfx effects. The mapping file gives each effect key its definition;
-//! the generated createfx file gives the definition key's placement and repeat interval.
+//! the generated createfx file gives the definition key's placement and start time.
 //! `CG_LoadClientEffectMapping`, `CG_ParseClientEffects` and `CG_ParseEffect` in KisakCOD
 //! `cgame_mp/cg_client_side_effects_mp.cpp` (CoD4 MP 1.8, Activision/IW).
-use fx::{Camera, Draws, Frame, Fx, Library};
+use fx::{Frame, Fx, Library};
 use glam::Vec3;
 use server::content::Content;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 /// One effect from a map's generated createfx file.
 pub struct AmbientEffect {
@@ -17,60 +16,39 @@ pub struct AmbientEffect {
 }
 
 pub struct Ambient {
-    fx: Fx,
     defs: Vec<AmbientEffect>,
+    pub played: BTreeMap<String, u64>,
     pub quads: BTreeMap<String, u64>,
 }
 
 impl Ambient {
     pub fn empty() -> Self {
         Self {
-            fx: Fx::new(Arc::new(Library::default())),
             defs: Vec::new(),
+            played: BTreeMap::new(),
             quads: BTreeMap::new(),
         }
     }
 
-    pub fn new(content: &Content) -> Self {
-        let mut lib = Library::default();
-        for e in content.effects() {
-            lib.add(e);
-        }
+    pub fn new(content: &Content, fx: &mut Fx) -> Self {
         let defs = content
             .map_name
             .as_deref()
-            .map_or_else(Vec::new, |map| parse(content, map, &lib));
-        let mut fx = Fx::new(Arc::new(lib));
+            .map_or_else(Vec::new, |map| parse(content, map, fx.library()));
+        let mut played = BTreeMap::new();
+        let mut quads = BTreeMap::new();
         for d in &defs {
             if let Some(def) = fx.library().get(&d.name).cloned() {
-                fx.play_persistent_at(&def, d.frame, d.start_ms);
+                fx.play_at(&def, d.frame, d.start_ms);
+                *played.entry(d.name.clone()).or_default() += 1;
+                quads.entry(d.name.clone()).or_default();
             }
         }
         Self {
-            fx,
             defs,
-            quads: BTreeMap::new(),
+            played,
+            quads,
         }
-    }
-
-    pub fn live_elems(&self) -> usize {
-        self.fx.live_elems()
-    }
-
-    pub fn update(&mut self, now: i32, world: &dyn fx::World) {
-        self.fx.update(now, world);
-    }
-
-    /// Draws the effects that started with the level and counts their visible sprites.
-    pub fn draw(&mut self, cam: &Camera, out: &mut Draws) {
-        let quads = &mut self.quads;
-        self.fx.draw_counted(cam, out, &mut |name, n| {
-            if let Some(count) = quads.get_mut(name) {
-                *count += n as u64;
-            } else {
-                quads.insert(name.to_owned(), n as u64);
-            }
-        });
     }
 
     /// Every effect placement, for looking directly at a map's ambient effect.
@@ -84,7 +62,7 @@ impl Ambient {
     pub fn without_quads(&self) -> BTreeSet<&str> {
         self.defs
             .iter()
-            .filter(|d| !self.quads.contains_key(&d.name))
+            .filter(|d| self.quads.get(&d.name).copied().unwrap_or(0) == 0)
             .map(|d| d.name.as_str())
             .collect()
     }
@@ -106,7 +84,7 @@ fn parse(content: &Content, map: &str, lib: &Library) -> Vec<AmbientEffect> {
         let Some(p) = rest.find("loadfx") else { break };
         let line = &rest[..p];
         let Some(key) = quoted(line) else {
-            tracing::warn!(map, line, "malformed map effect mapping key");
+            tracing::warn!(map, "malformed map effect mapping key");
             rest = &rest[p..];
             continue;
         };

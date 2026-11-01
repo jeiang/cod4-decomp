@@ -278,7 +278,7 @@ impl Effects {
         }
         Self {
             fx: Fx::new(Arc::new(lib)),
-            ambient: Ambient::new(content),
+            ambient: Ambient::empty(),
             impact: content.impact_table().cloned(),
             world,
             marks: HashMap::new(),
@@ -306,9 +306,9 @@ impl Effects {
         }
     }
 
-    /// No ambient effects, for the gameplay-effect selftests that must end with an empty pool.
-    pub fn without_ambient(mut self) -> Self {
-        self.ambient = Ambient::empty();
+    /// Starts the generated map effects in the same pool as gameplay and entity effects.
+    pub fn with_ambient(mut self, content: &Content) -> Self {
+        self.ambient = Ambient::new(content, &mut self.fx);
         self
     }
 
@@ -975,7 +975,6 @@ impl Effects {
             map: &self.world,
         };
         self.fx.update(now_ms, &map);
-        self.ambient.update(now_ms, &map);
     }
 
     /// Sounds the effects started since the last call.
@@ -990,7 +989,7 @@ impl Effects {
     }
 
     pub fn live_elems(&self) -> usize {
-        self.fx.live_elems() + self.ambient.live_elems()
+        self.fx.live_elems()
     }
 
     pub fn ambient(&self) -> &Ambient {
@@ -1019,14 +1018,17 @@ impl Effects {
         self.fx.set_camera(cam);
         let mut d = Draws::default();
         let quads = &mut self.effect_quads;
+        let ambient_quads = &mut self.ambient.quads;
         self.fx.draw_counted(&cam, &mut d, &mut |name, n| {
             if let Some(count) = quads.get_mut(name) {
                 *count += n as u64;
             } else {
                 quads.insert(name.to_owned(), n as u64);
             }
+            if let Some(count) = ambient_quads.get_mut(name) {
+                *count += n as u64;
+            }
         });
-        self.ambient.draw(&cam, &mut d);
         let beams = self.tracers.beams(self.clock);
         let mut out = Drawn {
             tracers: beams.len(),

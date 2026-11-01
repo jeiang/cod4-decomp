@@ -628,7 +628,7 @@ impl NetPlay {
             ragdoll_hits: Vec::new(),
             look: Look::new((map.art.glow, map.art.film)),
             max_turn: [0.0; 2],
-            effects: Effects::new(&lib.content, world),
+            effects: Effects::new(&lib.content, world).with_ambient(&lib.content),
             tracer_cvars: crate::tracer::Cvars::default(),
             switches: Switches::default(),
             tracer_material: None,
@@ -876,7 +876,7 @@ impl NetPlay {
                 .map_err(|e| format!("weapon table: {e:?}"))?;
             self.models_warmed.clear();
             let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
-            self.effects = Effects::new(&lib.content, map.world.clone());
+            self.effects = Effects::new(&lib.content, map.world.clone()).with_ambient(&lib.content);
             self.effects
                 .set_tracer_material(self.tracer_material.clone());
             self.params.mantle_anims = lib.content.mantle_anims();
@@ -2828,6 +2828,7 @@ impl NetPlay {
         report["brush_models_seen"] = self.c.brush_models_seen.into();
         report["brush_models_max"] = self.c.brush_models_max.into();
         report["fx"]["effect_quads"] = json!(self.effects.effect_quads);
+        report["fx"]["ambient_played"] = json!(self.effects.ambient().played);
         report["fx"]["ambient_quads"] = json!(self.effects.ambient().quads);
         report["fx"]["ambient_without_quads"] = json!(self.effects.ambient().without_quads());
         report["fx"]["looped_fx_max"] = self.c.looped_fx_max.into();

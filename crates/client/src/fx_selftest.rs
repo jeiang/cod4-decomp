@@ -161,7 +161,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     let weapon = |_: u16| Some(gun.clone());
 
     // An explosion draws, and ends.
-    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+    let mut fx = Effects::new(&lib.content, data.world.clone());
     fx.demo(EXPLOSION, eye, 0.0, 0.0);
     if !fx.missing.is_empty() {
         bad.push(format!("effect {EXPLOSION} is missing: {:?}", fx.missing));
@@ -180,7 +180,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     // A bullet into the floor leaves a decal on it, for whichever surface type has one.
     let mut decals_by_surface = Vec::new();
     for surface in 0..24u8 {
-        let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+        let mut fx = Effects::new(&lib.content, data.world.clone());
         fx.event(
             &ClientEvent::BulletImpact {
                 origin: at,
@@ -205,7 +205,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     }
 
     // A shot flashes and ejects a shell.
-    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+    let mut fx = Effects::new(&lib.content, data.world.clone());
     fx.event(
         &ClientEvent::WeaponFire {
             eye: [eye.x, eye.y, eye.z],
@@ -252,7 +252,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     ] {
         // A weapon without the flash for that view plays nothing there (`WeaponFlash`).
         let expected = u64::from(effect.is_some());
-        let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+        let mut fx = Effects::new(&lib.content, data.world.clone());
         fx.set_view(7, None);
         fx.event(&turret_shot(gunner), &weapon);
         let flashed = fx.played.get("muzzle_flash").copied().unwrap_or(0);
@@ -316,7 +316,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     if tracer_material.is_none() {
         bad.push("the stock tracer material gfx_tracer is not in the install".into());
     }
-    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+    let mut fx = Effects::new(&lib.content, data.world.clone());
     fx.set_tracer_material(tracer_material);
     fx.set_tracer_cvars(crate::tracer::Cvars {
         chance: 1.0,
@@ -385,7 +385,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     let Some(spot) = wide_floor(world, lo, hi) else {
         return Err(vec!["no wide floor found to throw debris on".into()]);
     };
-    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+    let mut fx = Effects::new(&lib.content, data.world.clone());
     fx.demo(DEBRIS, spot, 0.0, std::f32::consts::FRAC_PI_2);
     if !fx.missing.is_empty() {
         bad.push(format!("effect {DEBRIS} is missing: {:?}", fx.missing));
@@ -443,7 +443,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     match lib.content.weapon(ROCKET).cloned() {
         Some(rocket) if rocket.proj_trail_effect.is_some() => {
             let rw = |_: u16| Some(rocket.clone());
-            let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+            let mut fx = Effects::new(&lib.content, data.world.clone());
             let (mut strips, mut tris) = (0, 0);
             for step in 1..=60 {
                 let at = eye + glam::Vec3::X * (step as f32 * 40.0) + glam::Vec3::Z * 200.0;
@@ -487,7 +487,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
                 bad.push(format!("weapon {FRAG} has no projectile model"));
             }
             let fw = |_: u16| Some(frag.clone());
-            let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+            let mut fx = Effects::new(&lib.content, data.world.clone());
             fx.event(
                 &ClientEvent::Explosion {
                     origin: at,
@@ -535,7 +535,7 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
         .map(str::to_owned);
     match looped {
         Some(name) => {
-            let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+            let mut fx = Effects::new(&lib.content, data.world.clone());
             let mut e = net::entity::EntityState::new(100);
             e.etype = net::entity::etype::LOOP_FX;
             e.origin = [eye.x, eye.y, eye.z + 200.0];
@@ -668,7 +668,7 @@ fn ambient(install: &Path, report: &mut serde_json::Map<String, Value>, bad: &mu
         };
         let boxes = PlayerBoxes::new(clipmap);
         let world = boxes.world();
-        let mut fx = Effects::new(&lib.content, data.world.clone());
+        let mut fx = Effects::new(&lib.content, data.world.clone()).with_ambient(&lib.content);
         let poses: Vec<_> = fx
             .ambient()
             .poses()
@@ -993,7 +993,7 @@ fn elements(
     if count("sprite_billboard") < 2 || count("runner") != 1 {
         bad.push(format!("{SMOKE} is not a runner and sprites: {types:?}"));
     }
-    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+    let mut fx = Effects::new(&lib.content, data.world.clone());
     fx.demo(SMOKE, eye, 0.0, 0.0);
     let along = glam::Vec3::X * 400.0;
     let (mut quads, mut seen) = (0, 1.0f32);
@@ -1022,7 +1022,7 @@ fn elements(
     if cloudy.get("cloud").and_then(Value::as_u64).unwrap_or(0) == 0 {
         bad.push(format!("effect {CLOUDY} has no cloud element: {cloudy:?}"));
     }
-    let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+    let mut fx = Effects::new(&lib.content, data.world.clone());
     fx.demo(CLOUDY, eye, 0.0, 0.0);
     let (mut clouds, mut quads, mut cloud_meshes) = (0, 0, 0);
     for step in 1..=400 {
@@ -1079,7 +1079,7 @@ fn elements(
             }
             candidates += 1;
             for &surface in surfaces {
-                let mut fx = Effects::new(&lib.content, data.world.clone()).without_ambient();
+                let mut fx = Effects::new(&lib.content, data.world.clone());
                 fx.event(
                     &ClientEvent::BulletImpact {
                         origin: c.to_array(),
