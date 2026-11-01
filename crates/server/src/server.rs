@@ -483,6 +483,9 @@ fn register_core_dvars(c: &mut Cvars) {
         ("g_dumpAnims", "-1", CHEAT),
         ("sv_keywords", "", SERVERINFO),
         ("protocol", "", ROM | SERVERINFO),
+        // `Com_Init`: the game version (`shortversion`, published in the server info) and this build's name.
+        ("shortversion", net::SHORT_VERSION, ROM | SERVERINFO),
+        ("version", "", ROM),
         ("sv_privateClients", "0", SERVERINFO),
         ("sv_pure", "0", SERVERINFO | SYSTEMINFO),
         ("sv_voice", "0", ARCHIVE | SERVERINFO | SYSTEMINFO),
@@ -533,6 +536,7 @@ fn register_core_dvars(c: &mut Cvars) {
         c.register(n, d, f);
     }
     c.force("protocol", &net::oob::PROTOCOL.to_string());
+    c.force("version", &net::version());
     // `Dvar_Register*` domains.
     for (n, lo, hi) in [
         ("sv_fps", 10, 1000),

@@ -867,6 +867,18 @@ impl Shell {
         self.ui.has_item(&mut h, want)
     }
 
+    /// See [`Ui::item_state`].
+    pub fn item_state(&mut self, input: &mut Input, want: &str) -> Option<bool> {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.item_state(&mut h, want)
+    }
+
+    /// See [`Ui::unset_values`].
+    pub fn unset_values(&mut self, input: &mut Input, menu: &str) -> Vec<String> {
+        let mut h = Self::host(&mut self.st, input);
+        self.ui.unset_values(&mut h, menu)
+    }
+
     /// Clicks the item of the top menu named or labelled `want`.
     pub fn click(&mut self, input: &mut Input, want: &str) -> bool {
         let mut h = Self::host(&mut self.st, input);
@@ -1452,7 +1464,7 @@ impl HostCx<'_> {
             Some(s) => s.as_str(),
             None => value,
         };
-        self.input.set_cvar(name, value);
+        self.input.set_cvar_from_menu(name, value);
     }
 
     /// The game mode the server settings show: the one `ui_netGametypeName` holds (a saved profile may have set it).
