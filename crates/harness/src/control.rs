@@ -406,6 +406,8 @@ pub struct Walker {
     pub key_ticks: u32,
     pub shots: u32,
     pub ticks: u32,
+    /// Turn toward the nearest living teammate instead, and hold fire.
+    pub friends: bool,
 }
 
 /// Degrees in `[-180, 180)`.
@@ -445,6 +447,7 @@ impl Walker {
             key_ticks: 0,
             shots: 0,
             ticks: 0,
+            friends: false,
         })
     }
 
@@ -540,9 +543,9 @@ impl Walker {
         Ok(())
     }
 
-    /// One tick of the walker, a few times a second: turns toward the nearest living enemy (or away from the wall
-    /// the player is stuck on), walks, and fires when the sights are on an enemy in range. Does nothing while the
-    /// player is dead, in the killcam, or has a menu or the console up.
+    /// One tick of the walker, a few times a second: turns toward the nearest living enemy (or teammate, with
+    /// `friends`; or away from the wall the player is stuck on), walks, and fires when the sights are on an enemy in
+    /// range. Does nothing while the player is dead, in the killcam, or has a menu or the console up.
     pub fn tick(&mut self, c: &mut Driven) -> Result<(), String> {
         self.ticks += 1;
         let player = c.state("player")?;
@@ -565,7 +568,9 @@ impl Walker {
                 || e["actor"].as_bool() == Some(true)
                 || e["dead"].as_bool() == Some(true)
                 || e["client"].as_u64() == Some(own)
-                || e["team"].as_u64().is_none_or(|t| t == team)
+                || e["team"]
+                    .as_u64()
+                    .is_none_or(|t| (t == team) != self.friends)
             {
                 continue;
             }
@@ -616,9 +621,10 @@ impl Walker {
         self.turn_by(c, yaw_err, pitch_err, angles)?;
         c.frames(2)?;
         let after = vec3(&c.state("player")?["aim_angles"]);
-        let fire = aim.is_some_and(|(d, yaw, pitch)| {
-            d < 900.0 && wrap(yaw - after[1]).abs() < 4.0 && (pitch - after[0]).abs() < 4.0
-        });
+        let fire = !self.friends
+            && aim.is_some_and(|(d, yaw, pitch)| {
+                d < 900.0 && wrap(yaw - after[1]).abs() < 4.0 && (pitch - after[0]).abs() < 4.0
+            });
         // Pulled on one tick and released on the next: a single-shot weapon fires once per pull.
         let pull = fire && !self.held.contains(&"+attack");
         self.shots += u32::from(pull);

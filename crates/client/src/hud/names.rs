@@ -213,6 +213,11 @@ fn sees_head(p: &NearPlayer, eye: [f32; 3], cfg: &Cfg) -> bool {
 }
 
 impl Names {
+    /// How long the crosshair has been on its player (`crosshairClientLastTime - crosshairClientStartTime`), ms.
+    pub fn crosshair_held(&self) -> i32 {
+        self.cross.last - self.cross.start
+    }
+
     /// Settles this frame's names and icons. `colors` are the viewer's-team and other-team name colours.
     pub fn update(&mut self, live: &LiveUi, cfg: &Cfg, colors: [[f32; 4]; 2]) {
         self.names.clear();
@@ -524,6 +529,7 @@ mod tests {
                 near,
                 crosshair,
                 flashed: false,
+                weap_flags: 0,
             },
             ..LiveUi::default()
         }

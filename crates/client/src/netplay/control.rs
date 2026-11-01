@@ -56,6 +56,12 @@ fn player(st: &NetPlay) -> Value {
         // The same predicted frame that supplied the rendered reticle, not an older snapshot.
         "visual_weapon_state": st.hud_view.as_ref().map(|(ps, _)| ps.weapon_state),
         "crosshair_alpha": st.reticle.as_ref().map_or(0.0, crate::crosshair::alpha),
+        // The crosshair's centre size this frame (a cooked grenade grows it), and the crosshair bits the client put
+        // on its predicted `weapFlags` (8 a teammate, 0x10 an enemy in range).
+        "crosshair_center": st.reticle.as_ref().and_then(crate::crosshair::center_size),
+        "crosshair_flags": st.hud_view.as_ref().map_or(0, |(ps, _)| ps.weapon_flags
+            & (sim::pm::wf::FRIEND_IN_CROSSHAIR | sim::pm::wf::ENEMY_IN_CROSSHAIR)),
+        "grenade_time_left": st.hud_view.as_ref().map(|(ps, _)| ps.grenade_time_left),
         "alive": ps.health > 0 && ps.pm_type < sim::pm::PmType::Dead,
         "dead": ps.pm_type >= sim::pm::PmType::Dead && ps.pm_type != sim::pm::PmType::Spectator,
         "spectator": ps.pm_type == sim::pm::PmType::Spectator,

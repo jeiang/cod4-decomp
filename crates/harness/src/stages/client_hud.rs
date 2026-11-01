@@ -4,10 +4,12 @@
 //! stage picks a team and a class with the pointer, walks and aims with the keys and the mouse ([`Walker`]), changes
 //! class from the in-game menu while alive (the stock `_menus.gsc` answers with a bare-key bold message, which must
 //! come out localized), types a chat line, calls a vote and adds bots through the console, puts the night vision
-//! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind, throws a grenade with
-//! its key, waits for a message window to have a line up and for a bot to kill it (the killcam), comes back from the
-//! dead, and plays on until it has had a bot in its sights and fired. What the HUD got to show over the run
-//! (`hud.stats` of the state document, the counters `hud_draw` of `ui-script.json` held) is the verdict: the
+//! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind, cooks a grenade with its
+//! key (the crosshair's centre dot must grow with the fuse) and throws it, waits for a message window to have a line
+//! up and for a bot to kill it (the killcam), comes back from the dead, plays on until it has had a bot in its sights
+//! and fired, then holds its sights on an enemy and on a teammate until the crosshair takes each one's team colour.
+//! What the HUD got to show over the run (`hud.stats` of the state document, the counters `hud_draw` of
+//! `ui-script.json` held) is the verdict: the
 //! scoreboard must have listed the players, the message windows must have drawn lines, the script hud elements must
 //! have arrived, the goggles must have drawn their overlay and d-pad icon (and the frame with them on must show the
 //! overlay over the world with the HUD still above it), the killcam must have played behind the body with its skip
@@ -212,6 +214,27 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
         bad.push("the crosshair was never on a player in range, so none was ever named");
     } else if n("crosshair_name_frames") == 0 {
         bad.push("the crosshair was on a player but never named them");
+    }
+    // The crosshair's tint (#414): white, or the colour of the team of the player it is on, never another.
+    fn strs(v: &Value) -> Vec<&str> {
+        v.as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+    let team = strs(&h["crosshair_team_tints"]);
+    let only = |k: &str, i: usize| {
+        strs(&h[k])
+            .iter()
+            .all(|t| *t == "1.000 1.000 1.000" || team.get(i) == Some(t))
+    };
+    if !only("crosshair_friend_tints", 0) {
+        bad.push("the crosshair over a teammate was drawn in a colour other than white or the player's team's");
+    }
+    if !only("crosshair_enemy_tints", 1) {
+        bad.push("the crosshair over an enemy was drawn in a colour other than white or the enemy team's");
+    }
+    if n("crosshair_stray_tint_frames") > 0 {
+        bad.push("the crosshair was tinted with no player under it");
     }
     // The killcam shows the viewer's own body, which carries the "you" marker over its head.
     let marked = h["head_icon_materials"]
@@ -708,7 +731,8 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         Ok(())
     })?;
 
-    // A grenade thrown with its key: the count on the HUD drops once the throw is out.
+    // A grenade cooked and thrown with its key: while it cooks the crosshair's centre dot grows with the fuse
+    // (`CG_DrawReticleCenter`, #419), and the count on the HUD drops once the throw is out.
     c.step("throw", |c| {
         let frag = c.lookup("hud.report.frag")?;
         let (key, before) = match (frag.as_u64(), c.lookup("hud.report.second")?.as_u64()) {
@@ -716,14 +740,38 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             (None, Some(n)) => ("hud.report.second", n),
             (None, None) => return Err("the HUD shows no grenade to throw".to_owned()),
         };
+        let cooked = c
+            .lookup("hud.stats.crosshair_cook_frames")?
+            .as_u64()
+            .unwrap_or(0);
         c.bind("+frag", "down")?;
-        let r = c.until(
+        // A second and a half of cooking spans a fuse second, so the dot has been both small and large.
+        let cooking = c
+            .until(
+                json!({"player.grenade_time_left": {"gt": 0}, "hud.stats.crosshair_cook_frames": {"gt": cooked + 90}}),
+                secs(10),
+                "holding the grenade key cooked no grenade under a drawn crosshair",
+            )
+            .and_then(|_| c.capture("crosshair_cook").map(|_| ()));
+        if let Err(e) = cooking {
+            c.bind("+frag", "up")?;
+            return Err(e);
+        }
+        let grown = c
+            .lookup("hud.stats.crosshair_cook_growth_max")?
+            .as_f64()
+            .unwrap_or(0.0);
+        c.bind("+frag", "up")?;
+        if grown < 5.0 {
+            return Err(format!(
+                "the crosshair's centre grew by at most {grown} while the grenade cooked"
+            ));
+        }
+        c.until(
             json!({key: {"lt": before}}),
             secs(30),
             "the grenade count never dropped",
-        );
-        c.bind("+frag", "up")?;
-        r
+        )
     })?;
 
     // The scoreboard held up by the Tab bind, with every player on it, and up on every frame while the key is down
@@ -846,6 +894,31 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             w.tick(c)?;
         }
         w.stop(c)
+    })?;
+    // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414): the walker's sights
+    // on an enemy in range for the enemy fade-in, then on a teammate, holding fire.
+    c.step("crosshair over an enemy", |c| {
+        let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
+        w.drive_until(
+            c,
+            json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
+            secs(100),
+            "the crosshair never took the enemy team's colour over an enemy",
+        )?;
+        c.capture("crosshair_enemy").map(|_| ())
+    })?;
+    c.step("crosshair over a teammate", |c| {
+        let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
+        w.friends = true;
+        let r = w.drive_until(
+            c,
+            json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
+            secs(100),
+            "the crosshair never took the player's team colour over a teammate",
+        );
+        w.friends = false;
+        r?;
+        c.capture("crosshair_friend").map(|_| ())
     })?;
     notes.push(format!(
         "the stage's player turned with {}; {} ticks, {} shots",
@@ -1021,6 +1094,19 @@ mod tests {
         let why = verdict(&r).unwrap();
         assert!(
             why.contains("no teammate was ever in sight") && why.contains("never on a player"),
+            "{why}"
+        );
+        // The crosshair tinted in the wrong team's colour, or with nobody under it.
+        let mut r = good();
+        r["hud_draw"]["crosshair_team_tints"] = json!(["0.400 0.600 0.850", "0.750 0.250 0.250"]);
+        r["hud_draw"]["crosshair_friend_tints"] = json!(["1.000 1.000 1.000", "0.400 0.600 0.850"]);
+        r["hud_draw"]["crosshair_enemy_tints"] = json!(["0.750 0.250 0.250"]);
+        assert_eq!(verdict(&r), None);
+        r["hud_draw"]["crosshair_enemy_tints"] = json!(["0.400 0.600 0.850"]);
+        r["hud_draw"]["crosshair_stray_tint_frames"] = json!(3);
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("over an enemy") && why.contains("no player under it"),
             "{why}"
         );
         let mut r = good();

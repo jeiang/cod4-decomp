@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Crosshair visibility follows KisakCOD cgame/cg_draw_reticles.cpp (GPL-3.0; copyright the KisakCOD contributors
-// and Activision).
+// Crosshair visibility, colour and the cooked grenade's centre follow KisakCOD cgame/cg_draw_reticles.cpp
+// (`AllowedToDrawCrosshair`, `CG_CalcCrosshairColor`, `CG_DrawReticleCenter`; GPL-3.0; copyright the KisakCOD
+// contributors and Activision).
 //! The hip-fire crosshair: the weapon's centre dot and four ticks that move out with the weapon's spread.
 //!
 //! The weapon file names the two materials, their sizes (in the 640x480 menu space), the smallest distance of a tick
 //! from the centre and where on its own length a tick sits. The spread is the one the server shoots with
 //! ([`sim::weapon::fire::aim_spread_degrees`]), turned into screen distance by the vertical field of view, so what
 //! the ticks enclose is where the bullets go. It fades with the spread (a moving or just-fired weapon is less
-//! certain) and away as the sights come up, where the sights themselves are the aim.
+//! certain) and away as the sights come up, where the sights themselves are the aim. Over a player it takes their
+//! team's colour, and a cooked grenade's centre dot grows with the fuse.
 
 use assets::zone::weapon::WeaponDef;
 use render::TextureCache;
@@ -81,6 +83,62 @@ pub struct Reticle {
     /// raised to the second); cheat dvars, stock 1 and 0.5.
     pub alpha_scale: f32,
     pub alpha_min: f32,
+    /// The predicted fuse of a cooked grenade, ms (`grenadeTimeLeft`); 0 when none is cooking.
+    pub grenade_time_left: i32,
+    /// The weapon in hand has `crosshairColorChange`: the reticle may take a target's team colour.
+    pub color_change: bool,
+    /// The tint the reticle is drawn in, white until the HUD sets it from the crosshair's target ([`color`]).
+    pub color: [f32; 3],
+}
+
+/// What tints the crosshair over a player (`CG_CalcCrosshairColor`): `cg_crosshairEnemyColor`, the name fade-ins
+/// the target must have been held for, and the `g_TeamColor_MyTeam` and `g_TeamColor_EnemyTeam` colours.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tint {
+    pub enemy_color: bool,
+    pub friendly_fade_in: i32,
+    pub enemy_fade_in: i32,
+    pub my_team: [f32; 3],
+    pub enemy_team: [f32; 3],
+}
+
+/// The reticle's colour: the enemy team's once an enemy in range has been under it for `enemy_fade_in` ms, the
+/// viewer's team's once a teammate has for `friendly_fade_in`, otherwise white. `weap_flags` are the predicted
+/// state's crosshair bits, `held` the target's `crosshairClientLastTime - crosshairClientStartTime`.
+pub fn color(color_change: bool, weap_flags: u32, held: i32, t: &Tint) -> [f32; 3] {
+    use sim::pm::wf;
+    if !color_change {
+        [1.0; 3]
+    } else if weap_flags & wf::FRIEND_IN_CROSSHAIR != 0 {
+        if held < t.friendly_fade_in {
+            [1.0; 3]
+        } else {
+            t.my_team
+        }
+    } else if weap_flags & wf::ENEMY_IN_CROSSHAIR != 0 && t.enemy_color && held >= t.enemy_fade_in {
+        t.enemy_team
+    } else {
+        [1.0; 3]
+    }
+}
+
+/// What the cooked fuse adds to the centre's size (`CG_DrawReticleCenter`): a cook-off-hold grenade's dot is a unit
+/// larger per 100 ms left in the fuse's current second, so it shrinks and jumps back once a second while held.
+pub fn cook_growth(w: &WeaponDef, grenade_time_left: i32) -> f32 {
+    /// `WEAPTYPE_GRENADE`.
+    const GRENADE: i32 = 1;
+    growth(
+        w.weap_type == GRENADE && w.cook_off_hold != 0,
+        grenade_time_left,
+    )
+}
+
+fn growth(cooks: bool, grenade_time_left: i32) -> f32 {
+    if cooks && grenade_time_left != 0 {
+        (grenade_time_left % 1000) as f32 / 100.0
+    } else {
+        0.0
+    }
 }
 
 /// One picture of the crosshair: where (virtual units, centre of the crosshair at the origin, y down), how it is
@@ -92,10 +150,21 @@ pub struct Piece {
     pub tick: bool,
 }
 
+/// The centre picture's size in virtual units this frame, the cooked fuse's growth included; `None` without one.
+pub fn center_size(r: &Reticle) -> Option<f32> {
+    Style::of(&r.weapon)
+        .center
+        .map(|c| c + cook_growth(&r.weapon, r.grenade_time_left))
+}
+
 /// The pieces and their opacity; nothing when the crosshair is not drawn.
 pub fn layout(r: &Reticle) -> (f32, Vec<Piece>) {
+    let style = Style {
+        center: center_size(r),
+        ..Style::of(&r.weapon)
+    };
     layout_of(
-        &Style::of(&r.weapon),
+        &style,
         r.spread_deg,
         r.spread_scale,
         r.ads,
@@ -174,7 +243,7 @@ pub fn draw(g: &mut Ui2d, cache: &mut TextureCache, r: &Reticle, size: (u32, u32
             &img,
             rect,
             [0.0, 0.0, 1.0, 1.0],
-            [1.0, 1.0, 1.0, alpha],
+            [r.color[0], r.color[1], r.color[2], alpha],
             p.degrees.to_radians(),
             [rect[0] + w * 0.5, rect[1] + h * 0.5],
         );
@@ -273,5 +342,51 @@ mod tests {
         assert!(gone.1.is_empty());
         let half = lay(1.0, 0.0, 0.5).0;
         assert!((half - 0.5).abs() < 1e-6);
+    }
+
+    const TINT: Tint = Tint {
+        enemy_color: true,
+        friendly_fade_in: 0,
+        enemy_fade_in: 250,
+        my_team: [0.4, 0.6, 0.85],
+        enemy_team: [0.75, 0.25, 0.25],
+    };
+
+    #[test]
+    fn an_enemy_tints_the_crosshair_after_the_enemy_fade_in() {
+        use sim::pm::wf::ENEMY_IN_CROSSHAIR as E;
+        assert_eq!(color(true, E, 249, &TINT), [1.0; 3]);
+        assert_eq!(color(true, E, 250, &TINT), TINT.enemy_team);
+        assert_eq!(color(true, 0, 1000, &TINT), [1.0; 3]);
+        // `cg_crosshairEnemyColor 0`, or a weapon without `crosshairColorChange`, stays white.
+        let off = Tint {
+            enemy_color: false,
+            ..TINT
+        };
+        assert_eq!(color(true, E, 1000, &off), [1.0; 3]);
+        assert_eq!(color(false, E, 1000, &TINT), [1.0; 3]);
+    }
+
+    #[test]
+    fn a_teammate_tints_the_crosshair_after_the_friendly_fade_in_whatever_the_enemy_switch() {
+        use sim::pm::wf::FRIEND_IN_CROSSHAIR as F;
+        assert_eq!(color(true, F, 0, &TINT), TINT.my_team);
+        let slow = Tint {
+            friendly_fade_in: 100,
+            enemy_color: false,
+            ..TINT
+        };
+        assert_eq!(color(true, F, 99, &slow), [1.0; 3]);
+        assert_eq!(color(true, F, 100, &slow), TINT.my_team);
+        assert_eq!(color(false, F, 100, &slow), [1.0; 3]);
+    }
+
+    #[test]
+    fn a_cooked_grenade_grows_the_centre_with_the_fuse_second() {
+        assert_eq!(growth(true, 0), 0.0);
+        assert_eq!(growth(true, 3500), 5.0);
+        assert_eq!(growth(true, 2990), 9.9);
+        assert_eq!(growth(true, 2000), 0.0);
+        assert_eq!(growth(false, 3500), 0.0);
     }
 }

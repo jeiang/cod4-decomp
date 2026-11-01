@@ -124,11 +124,16 @@ impl NetPlay {
                     .find(|e| e.client == hit && e.etype == net::entity::etype::PLAYER)
             {
                 // A spectator sees every name; a player on a side sees friends always and enemies in the weapon's
-                // enemy range.
+                // enemy range. A player also marks the predicted state's crosshair bits, which tint the reticle.
                 let friend = mine != 0 && team_of(hit) == mine;
                 let in_range = (Vec3::from(e.origin) - eye).length_squared() <= range * range;
                 if mine == 3 || friend || in_range {
                     scan.crosshair = Some(hit);
+                }
+                if mine != 3 && friend {
+                    scan.weap_flags = sim::pm::wf::FRIEND_IN_CROSSHAIR;
+                } else if mine != 3 && in_range {
+                    scan.weap_flags = sim::pm::wf::ENEMY_IN_CROSSHAIR;
                 }
             }
         }

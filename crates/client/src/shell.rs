@@ -1184,9 +1184,28 @@ impl Shell {
             });
             st.hud_stats.frame(&st.live, rows);
             st.names_cfg = hud::names::Cfg::read(&input.cvars);
-            st.names
-                .update(&st.live, &st.names_cfg, hud::team_colors(&input.cvars));
+            let colors = hud::team_colors(&input.cvars);
+            st.names.update(&st.live, &st.names_cfg, colors);
             st.hud_stats.names_offered(&st.names, &st.live);
+            // `CG_CalcCrosshairColor`: the target the names track tints the reticle.
+            let [mine, theirs] = colors.map(|c| [c[0], c[1], c[2]]);
+            st.hud_stats.crosshair_team_tints = [mine, theirs];
+            if let Some(r) = st.live.reticle.as_mut() {
+                let tint = crate::crosshair::Tint {
+                    // A cheat dvar: the store puts it back on without `sv_cheats`.
+                    enemy_color: input.cvars.bool("cg_crosshairEnemyColor"),
+                    friendly_fade_in: st.names_cfg.friendly_fade_in,
+                    enemy_fade_in: st.names_cfg.enemy_fade_in,
+                    my_team: mine,
+                    enemy_team: theirs,
+                };
+                r.color = crate::crosshair::color(
+                    r.color_change,
+                    st.live.scan.weap_flags,
+                    st.names.crosshair_held(),
+                    &tint,
+                );
+            }
         } else {
             let st = &mut self.st;
             st.names.update(&st.live, &st.names_cfg, [[1.0; 4]; 2]);

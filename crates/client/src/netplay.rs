@@ -1640,6 +1640,12 @@ impl NetPlay {
         };
         laps.lap("remote_players");
         self.scan_names(st, own, eye, view, dead);
+        // `CG_ScanForCrosshairEntity` clears and sets the crosshair bits on the predicted state every frame.
+        if let Some((v, _)) = self.hud_view.as_mut() {
+            v.weapon_flags = (v.weapon_flags
+                & !(sim::pm::wf::FRIEND_IN_CROSSHAIR | sim::pm::wf::ENEMY_IN_CROSSHAIR))
+                | self.scan.weap_flags;
+        }
         models.extend(self.script_models(dt, st, own));
         let brush_models = self.brush_models(&snap, st);
         models.extend(self.items(&snap));
@@ -1975,6 +1981,12 @@ impl NetPlay {
         let index = sim::pm::viewmodel_weapon(ps);
         let weapon = self.lib.content.weapon(self.weapons.name(index))?.clone();
         let spread_deg = aim_spread_degrees(self.weapons.info(index), ps, &self.params.weapon);
+        // `CG_CalcCrosshairColor` asks the weapon in hand, not the offhand one the viewmodel may be showing.
+        let color_change = self
+            .lib
+            .content
+            .weapon(self.weapons.name(ps.weapon as u16))
+            .is_some_and(|d| d.crosshair_color_change != 0);
         Some(Reticle {
             weapon,
             spread_deg,
@@ -1983,6 +1995,9 @@ impl NetPlay {
             tan_half_fov_y: 0.0,
             alpha_scale: self.switches.crosshair_alpha,
             alpha_min: self.switches.crosshair_alpha_min,
+            grenade_time_left: ps.grenade_time_left,
+            color_change,
+            color: [1.0; 3],
         })
     }
 
