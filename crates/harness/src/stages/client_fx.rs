@@ -5,8 +5,9 @@
 //! one beam each in the stock tracer material, every effect material that names another zone's is the one that zone
 //! defines (#453), a real GSC playfxontag event keeps existing elements bolted to a model moved after 500 ms and
 //! rejects unknown tags (#421), an effect bolted to a projectile follows the projectile model the match draws and a
-//! bolt on an entity never drawn is reported, and vision and shock files change the picture. Needs the install;
-//! skips without it.
+//! bolt on an entity never drawn is reported, an airstrike plane spawned in the frame another entity is freed takes a
+//! new number and loses no tags (#492), and vision and shock files change the picture. Needs the install; skips without
+//! it.
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::Value;
 use std::io;
@@ -72,6 +73,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             ("bolted_missile_tag_displacement", 3.0, f64::INFINITY),
             ("bolted_missile_follow_error", 0.0, 1.0),
             ("bolted_unposed_reported", 1.0, 1.0),
+            ("bolted_reuse_new_number", 1.0, 1.0),
+            ("bolted_reuse_missing_tags", 0.0, 0.0),
+            ("bolted_reuse_warnings", 0.0, 0.0),
         ] {
             let key = format!("fx.{metric}");
             if !r
