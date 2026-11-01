@@ -1,18 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The compass firing ping (#406), checked inside the default `client-hud` stage. With the bots told to stand still
-//! (`bot_idle 1`), one enemy bot is put next to the person and made to act through its own usercmds (`devbotfire`):
-//! an unsilenced `mp5_mp` burst, a silenced `mp5_silencer_mp` burst, and the frag key. The client's own HUD counters
-//! say what the compass did with each: the unsilenced shot pings (`enemy_fire_pings` and drawn `enemy_firing_marks`
-//! rise, `last_fire_ping_ms` is the fire sound's played length or the 2000 ms fallback), the silenced shot and the
-//! frag ping nothing, neither through the fire event nor through a server-forged `PING` flag (`enemy_flag_pings`).
-//! The server's client record confirms the bot did fire (`shots`) and that only the unsilenced shot marked it for
-//! enemy compasses (`last_fire_time`).
-//!
-//! The frag case cannot fail for want of a throw. A stock offhand throw raises `EV_USE_OFFHAND`, never a fire event
-//! (KisakCOD MP 1.8 `bgame/bg_weapons.cpp:3061-3081` `PM_Weapon_OffHand`), so the `WEAPTYPE_GRENADE` rule of
-//! `CG_FireWeapon` only matters for a grenade fired as the weapon in hand, which the client's unit tests cover
-//! (`netplay/hud.rs`). The bot's throw is not reliable in this listen-server match (#406 PR notes), so whether a
-//! grenade entity appeared is reported, not required.
+//! Snapshot firing-event compass parity (#406). Bots stand still and use real weapon usercmds.
+//! An unsilenced shot must hold its rendered mark for the independently observed audio playback length,
+//! then fade for compassSoundPingFadeTime; silenced shots and a proven offhand throw must not ping.
+//! Reference: KisakCOD MP 1.8 (GPL-3.0), cgame/cg_weapons.cpp:2552-2558,
+//! cgame_mp/cg_compassfriendlies_mp.cpp:246,589-600, bgame/bg_weapons.cpp:3061-3081. 1.7 unverified.
 use crate::control::Driven;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -24,7 +15,7 @@ const SILENCED: &str = "mp5_silencer_mp";
 const BURST_MS: u32 = 500;
 /// How long the frag key is held before it is let go and the grenade flies.
 const FRAG_MS: u32 = 1000;
-/// Long enough for a ping to fade and for the server's shot window (and the forged `PING` flag it sends) to close.
+/// Long enough for the sound hold and fade to end.
 const SETTLE: Duration = Duration::from_secs(5);
 
 /// The HUD's cumulative compass counters.
@@ -40,9 +31,7 @@ struct Counts {
 struct Fired {
     /// Shots the server counted through `FireWeapon`.
     shots: u64,
-    /// Whether the bot's `last_fire_time` moved (the shot shows on enemy compasses).
-    marked: bool,
-    /// Whether a grenade entity appeared on the server (reported only; see the module notes).
+    /// Proof the offhand action actually happened.
     missile: bool,
 }
 
@@ -55,16 +44,19 @@ fn verdict(
     fired: Fired,
     grenade: bool,
 ) -> Result<(), String> {
+    if grenade && !fired.missile {
+        return Err(format!("{case}: no grenade throw observed ({fired:?})"));
+    }
     if !grenade && fired.shots == 0 {
         return Err(format!("{case}: the bot never fired ({fired:?})"));
     }
     if pings {
-        if after.fire_pings <= before.fire_pings || after.marks <= before.marks || !fired.marked {
+        if after.fire_pings <= before.fire_pings || after.marks <= before.marks {
             return Err(format!(
                 "{case}: want a compass ping, counters {before:?} -> {after:?}, server {fired:?}"
             ));
         }
-    } else if after != before || fired.marked {
+    } else if after != before {
         return Err(format!(
             "{case}: want no compass ping, counters {before:?} -> {after:?}, server {fired:?}"
         ));
@@ -159,7 +151,7 @@ fn case(
     let ms = if grenade { FRAG_MS } else { BURST_MS };
     exec(c, &format!("devbotfire {bot} {weapon} {ms}"))?;
     let missile = watch_for_missile(c, Duration::from_millis(u64::from(ms) + 1500))?;
-    c.pause(Duration::from_secs(1))?;
+    c.pause(Duration::from_secs(5))?;
     let after = counts(c)?;
     let now = server_client(c, bot)?;
     let fired = Fired {
@@ -167,7 +159,6 @@ fn case(
             .as_u64()
             .unwrap_or(0)
             .saturating_sub(was["shots"].as_u64().unwrap_or(0)),
-        marked: now["last_fire_time"] != was["last_fire_time"],
         missile,
     };
     verdict(label, pings, before, after, fired, grenade).map_err(|e| {
@@ -184,6 +175,21 @@ fn case(
             now["command_frame"]["retained"]
         )
     })?;
+    if pings {
+        let played = c
+            .lookup("hud.report.last_fire_played_ms")?
+            .as_i64()
+            .ok_or("missing independent audio length")?;
+        let hold = c
+            .lookup("hud.report.last_fire_ping_ms")?
+            .as_i64()
+            .ok_or("missing firing hold")?;
+        let mark = c
+            .lookup("hud.report.last_fire_mark_ms")?
+            .as_i64()
+            .ok_or("missing rendered mark lifetime")?;
+        duration_verdict(played, hold, mark, 2000)?;
+    }
     let length = c.lookup("hud.report.last_fire_ping_ms")?;
     Ok(format!(
         "{label}: {} fire pings, {} flag pings, {} marks drawn, last ping {length} ms{}",
@@ -198,6 +204,17 @@ fn case(
     ))
 }
 
+/// At 60 Hz allow several frames of snapshot/draw scheduling, but never the 351 ms fixed-hold error.
+fn duration_verdict(played: i64, hold: i64, mark: i64, fade: i64) -> Result<(), String> {
+    if hold != played || (mark - (played + fade)).abs() > 200 {
+        return Err(format!(
+            "fire timing: played {played} ms, held {hold} ms, mark {mark} ms; want {} ms",
+            played + fade
+        ));
+    }
+    Ok(())
+}
+
 /// Unsilenced shots ping the compass for the fire sound's length; silenced shots and frags do not ping at all.
 pub(super) fn check(c: &mut Driven) -> Result<String, String> {
     let team = c.lookup("player.team")?.as_u64().unwrap_or(0);
@@ -207,6 +224,8 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
         _ => return Err(format!("the person is on no team ({team})")),
     };
     exec(c, "set bot_idle 1")?;
+    exec(c, "set sv_cheats 1")?;
+    c.ask(json!({"cmd":"cvar", "name":"compassSoundPingFadeTime", "value":"2"}))?;
     let result = (|| {
         let bot = enemy_bot(c, enemy)?;
         let origin = c.lookup("player.origin")?;
@@ -217,15 +236,7 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
         )?;
         let mut notes = Vec::new();
         notes.push(case(c, bot, "unsilenced", UNSILENCED, true)?);
-        let ping = c
-            .lookup("hud.report.last_fire_ping_ms")?
-            .as_i64()
-            .unwrap_or(0);
-        if ping <= 0 {
-            return Err(format!(
-                "unsilenced: the ping lasts {ping} ms, want the fire sound's length or 2000"
-            ));
-        }
+        // `case` compares the independently played sound with the hold and final drawn mark lifetime.
         notes.push(case(c, bot, "silenced", SILENCED, false)?);
         notes.push(case(c, bot, "grenade", "frag", false)?);
         Ok(notes)
@@ -240,7 +251,6 @@ mod tests {
 
     const SHOT: Fired = Fired {
         shots: 2,
-        marked: true,
         missile: false,
     };
 
@@ -261,16 +271,11 @@ mod tests {
 
     #[test]
     fn a_silenced_shot_or_frag_must_not_ping_at_all() {
-        let quiet = Fired {
-            marked: false,
-            ..SHOT
-        };
+        let quiet = SHOT;
         assert!(verdict("s", false, c(1, 1, 9), c(1, 1, 9), quiet, false).is_ok());
         assert!(verdict("s", false, c(1, 1, 9), c(1, 2, 9), quiet, false).is_err());
-        assert!(verdict("s", false, c(1, 1, 9), c(1, 1, 9), SHOT, false).is_err());
         let frag = Fired {
             shots: 0,
-            marked: false,
             missile: true,
         };
         assert!(verdict("g", false, c(0, 0, 0), c(0, 0, 0), frag, true).is_ok());
@@ -278,8 +283,17 @@ mod tests {
     }
 
     #[test]
-    fn a_shot_that_was_not_fired_fails_but_a_frag_need_not_fly() {
+    fn an_action_that_never_happened_fails() {
         assert!(verdict("s", false, c(0, 0, 0), c(0, 0, 0), Fired::default(), false).is_err());
-        assert!(verdict("g", false, c(0, 0, 0), c(0, 0, 0), Fired::default(), true).is_ok());
+        assert!(verdict("g", false, c(0, 0, 0), c(0, 0, 0), Fired::default(), true).is_err());
+    }
+
+    #[test]
+    fn lifetime_rejects_a_fixed_two_seconds_and_handles_unknown_audio() {
+        assert!(duration_verdict(1649, 1649, 3640, 2000).is_ok());
+        assert!(duration_verdict(1649, 2000, 4000, 2000).is_err());
+        assert!(duration_verdict(1649, 1649, 2000, 2000).is_err());
+        assert!(duration_verdict(0, 0, 1990, 2000).is_ok());
+        assert!(duration_verdict(0, 2000, 4000, 2000).is_err());
     }
 }

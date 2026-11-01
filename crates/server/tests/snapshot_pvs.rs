@@ -128,13 +128,30 @@ fn an_enemy_behind_a_wall_reaches_the_compass_only_as_far_as_the_radar_shows_it(
     g.client_mut(a).unwrap().ps.radar_enabled = true;
     assert_eq!(actors(&g), [b], "a UAV shows it");
     g.client_mut(a).unwrap().ps.radar_enabled = false;
-    g.level.time = 10_000;
-    g.client_mut(b).unwrap().last_fire_time = 9_000;
+    g.client_mut(b)
+        .unwrap()
+        .ps
+        .add_event(sim::pm::ev::FIRE_WEAPON, 1);
+    g.client_mut(b).unwrap().compass_ping_until = 30_000;
+    assert!(
+        actors(&g).is_empty(),
+        "neither shooting nor pingPlayer reveals a hidden enemy"
+    );
+    g.cvars.set("g_compassShowEnemies", "1");
     let (_, shown) = visible_to(&g, a);
-    assert_eq!(numbers(&shown), [b], "a shot shows it for a moment");
-    assert_ne!(shown[0].eflags & server::netsv::eflags::PING, 0);
-    g.level.time = 20_000;
-    assert!(actors(&g).is_empty());
+    assert_eq!(numbers(&shown), [b], "g_compassShowEnemies reveals it");
+    assert!(
+        shown[0]
+            .recent_events()
+            .iter()
+            .all(|&(event, _)| event == 0)
+    );
+    assert_eq!(shown[0].eflags & server::netsv::eflags::PING, 0);
+    g.client_mut(a).unwrap().team = Team::Spectator;
+    assert!(
+        actors(&g).is_empty(),
+        "spectators receive no non-PVS compass players"
+    );
 }
 
 #[test]

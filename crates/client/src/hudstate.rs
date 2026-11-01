@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Compass firing timing translated from KisakCOD cgame_mp/cg_compassfriendlies_mp.cpp (GPL-3.0; copyright Activision and KisakCOD contributors).
 //! What the owner-draw HUD pieces read: facts of the player and the match, filled each frame from the network
 //! play, and the pure logic over them (fades, the low-health pulse, ammo thresholds).
 //!
@@ -294,7 +295,7 @@ pub struct Actor {
     pub last_update: i32,
     /// When it last fired (an enemy is shown at that spot for a while), 0 if never.
     pub fire_time: i32,
-    /// The selected fire sound's length; unknown sounds and script pings use 2000 ms.
+    /// Full-opacity hold: the played fire sound's length, zero while unknown or for script pings.
     pub fire_duration: i32,
     /// The event sequence of a firing ping whose sound length is not known yet: the sound may play a frame later.
     pub fire_seq: Option<u8>,
@@ -309,17 +310,14 @@ pub struct Actor {
     pub radar_pos: [f32; 2],
 }
 
-/// How long a ping lasts when its fire sound's length is unknown, and for `pingPlayer`.
-pub const UNKNOWN_FIRE_MS: i32 = 2000;
-
+// Timing translated from KisakCOD MP 1.8 cgame_mp/cg_compassfriendlies_mp.cpp:246,589-600
+// (GPL-3.0; Activision and KisakCOD contributors). CoD4 1.7 is not verified.
 impl Actor {
-    /// `CG_CompassAddWeaponPingInfo`: the compass shows the player where they stand now, for `length_ms` of the
-    /// fire sound played (`SND_GetKnownLength`), or [`UNKNOWN_FIRE_MS`] while that is unknown. `seq` is the event
-    /// sequence of the shot, whose sound may only be heard a frame later (`None` for `pingPlayer`).
+    /// Hold for the played sound, then fade. A sound heard next frame can still supply its length.
     pub fn ping(&mut self, now: i32, seq: Option<u8>, length_ms: Option<u32>) {
         self.fire_time = now;
         self.fire_pos = self.pos;
-        self.fire_duration = UNKNOWN_FIRE_MS;
+        self.fire_duration = 0;
         self.fire_seq = seq;
         if let Some(seq) = seq {
             self.learn_fire_length(seq, length_ms);
@@ -340,11 +338,17 @@ impl Actor {
         }
     }
 
-    /// How strongly the firing mark shows at `now`, fading over the ping's length; `None` when it does not.
-    pub fn fire_alpha(&self, now: i32) -> Option<f32> {
+    /// Stock holds full opacity until beginFadeTime, then fades over compassSoundPingFadeTime.
+    pub fn fire_alpha(&self, now: i32, fade_ms: f32) -> Option<f32> {
         let age = now - self.fire_time;
-        (self.fire_time != 0 && self.fire_duration > 0 && (0..=self.fire_duration).contains(&age))
-            .then(|| 1.0 - age as f32 / self.fire_duration as f32)
+        let fade_age = age - self.fire_duration;
+        (self.fire_time != 0 && age >= 0 && fade_age as f32 <= fade_ms).then(|| {
+            if fade_age <= 0 {
+                1.0
+            } else {
+                1.0 - fade_age as f32 / fade_ms
+            }
+        })
     }
 }
 
@@ -464,6 +468,11 @@ pub struct HudFacts {
     pub enemy_fire_pings: u32,
     pub enemy_flag_pings: u32,
     pub last_fire_ping_ms: i32,
+    /// Independent audio observation for the most recent enemy firing event (zero if unknown).
+    pub last_fire_played_ms: u32,
+    pub last_fire_actor: u16,
+    /// Age of the latest firing ping on the last frame its mark was drawn.
+    pub last_fire_mark_ms: i32,
     /// The most helicopters and planes the compass knew of at once, and how many of them were enemies.
     pub vehicles_max: u32,
     pub enemy_vehicles_max: u32,
@@ -598,6 +607,8 @@ impl HudFacts {
             "enemy_fire_pings": self.enemy_fire_pings,
             "enemy_flag_pings": self.enemy_flag_pings,
             "last_fire_ping_ms": self.last_fire_ping_ms,
+            "last_fire_played_ms": self.last_fire_played_ms,
+            "last_fire_mark_ms": self.last_fire_mark_ms,
             "vehicles_max": self.vehicles_max,
             "enemy_vehicles_max": self.enemy_vehicles_max,
             "objectives_listed": self.objectives_listed,

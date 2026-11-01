@@ -34,7 +34,7 @@ pub(super) fn info_value<'a>(info: &'a str, key: &str) -> Option<&'a str> {
 
 /// The compass pings of one player at shell time `now`: `pingPlayer` (`eflags::PING`), and an `EV_FIRE_WEAPON` or
 /// `EV_FIRE_WEAPON_LASTSHOT` of a weapon that `pings` (unsilenced, not a grenade: `CG_FireWeapon`, KisakCOD
-/// cgame/cg_weapons.cpp:2552-2558), lasting as long as the fire sound played for it (`length` by event sequence).
+/// cgame/cg_weapons.cpp:2552-2558). Only snapshot fire events ping; non-PVS compass positions carry no events.
 fn note_pings(
     a: &mut Actor,
     flags: u32,
@@ -385,6 +385,17 @@ impl NetPlay {
             if !a.friendly {
                 h.enemy_flag_pings += u32::from(pinged.flag);
                 h.enemy_fire_pings += u32::from(pinged.shot);
+                if pinged.shot {
+                    h.last_fire_actor = e.client;
+                    h.last_fire_mark_ms = 0;
+                }
+                if pinged.shot || pinged.learned {
+                    // Read the audio observation independently of Actor's hold calculation.
+                    h.last_fire_played_ms = self
+                        .sound
+                        .fire_length_ms(e.number, e.event_seq)
+                        .unwrap_or(0);
+                }
                 if pinged.shot || pinged.learned {
                     h.last_fire_ping_ms = a.fire_duration;
                 }
@@ -563,34 +574,35 @@ mod tests {
         // An unsilenced shot: as long as its fire sound.
         note_pings(&mut a, 0, 2, &SHOT, true, 2000, |s| (s == 2).then_some(400));
         assert_eq!((a.fire_time, a.fire_duration), (2000, 400));
-        assert!(a.fire_alpha(2400).is_some() && a.fire_alpha(2401).is_none());
+        assert_eq!(a.fire_alpha(2400, 2000.0), Some(1.0));
+        assert_eq!(a.fire_alpha(3400, 2000.0), Some(0.5));
+        assert!(a.fire_alpha(4400, 2000.0).is_some() && a.fire_alpha(4401, 2000.0).is_none());
         // The same events looked at again do not ping again.
         note_pings(&mut a, 0, 2, &SHOT, true, 2500, |_| Some(400));
         assert_eq!(a.fire_time, 2000);
     }
 
     #[test]
-    fn a_shot_heard_later_learns_its_sound_length_and_an_unknown_one_keeps_the_fallback() {
+    fn a_shot_heard_later_learns_its_sound_length_and_unknown_means_zero_hold() {
         let mut a = Actor::default();
         note_pings(&mut a, 0, 3, &SHOT, true, 1000, |_| None);
-        assert_eq!(a.fire_duration, hudstate::UNKNOWN_FIRE_MS);
+        assert_eq!(a.fire_duration, 0);
         note_pings(&mut a, 0, 3, &SHOT, true, 1016, |s| (s == 3).then_some(650));
         assert_eq!((a.fire_time, a.fire_duration), (1000, 650));
-        // Never heard: the stock constant.
+        // Never heard: fade immediately, without a hold.
         let mut b = Actor::default();
         note_pings(&mut b, 0, 1, &SHOT, true, 1000, |_| None);
         note_pings(&mut b, 0, 1, &SHOT, true, 1016, |_| None);
-        assert_eq!(b.fire_duration, hudstate::UNKNOWN_FIRE_MS);
+        assert_eq!(b.fire_duration, 0);
+        assert_eq!(b.fire_alpha(2000, 2000.0), Some(0.5));
+        assert!(b.fire_alpha(3001, 2000.0).is_none());
     }
 
     #[test]
     fn ping_player_still_pings_at_most_every_three_seconds() {
         let mut a = Actor::default();
         note_pings(&mut a, eflags::PING, 0, &SHOT, false, 1000, |_| None);
-        assert_eq!(
-            (a.fire_time, a.fire_duration),
-            (1000, hudstate::UNKNOWN_FIRE_MS)
-        );
+        assert_eq!((a.fire_time, a.fire_duration), (1000, 0));
         note_pings(&mut a, eflags::PING, 0, &SHOT, false, 3999, |_| None);
         assert_eq!(a.fire_time, 1000);
         note_pings(&mut a, eflags::PING, 0, &SHOT, false, 4000, |_| None);

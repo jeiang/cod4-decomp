@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The `devbotfire` test hook the `client-hud` compass check drives: a standing bot is given a weapon, raises it and
-//! fires it through its own usercmds, and only an unsilenced shot marks it for enemy compasses (`last_fire_time`,
-//! KisakCOD MP 1.8 `cgame/cg_weapons.cpp:2552-2559`). Skips without `COD4_PATH`.
+//! The gated `devbotfire` hook, mirroring the listen-server compass stage's idle, teleport, weapon sequence and waits.
+//! A frag must actually become a missile. Skips without COD4_PATH.
 
 use server::server::Server;
 use std::path::PathBuf;
@@ -32,14 +31,14 @@ fn live_bot(s: &mut Server) -> u16 {
     panic!("no bot spawned on a team within a minute");
 }
 
-/// `(shots, last_fire_time, weapon in hand)` of client `n`.
-fn record(s: &Server, n: u16) -> (u32, i32, u32) {
+/// `(shots, weapon in hand)` of client `n`.
+fn record(s: &Server, n: u16) -> (u32, u32) {
     let c = s.game.client(n).expect("the bot is connected");
-    (c.shots, c.last_fire_time, c.ps.weapon)
+    (c.shots, c.ps.weapon)
 }
 
 #[test]
-fn a_bot_fires_on_demand_and_only_unsilenced_shots_mark_it() {
+fn a_bot_fires_then_throws_after_the_compass_stage_sequence() {
     let Some(root) = std::env::var_os("COD4_PATH") else {
         eprintln!("COD4_PATH not set; skipping");
         return;
@@ -57,42 +56,44 @@ fn a_bot_fires_on_demand_and_only_unsilenced_shots_mark_it() {
     }
     let n = live_bot(&mut s);
     s.exec_line("set bot_idle 1").unwrap();
+    assert!(
+        s.exec_line(&format!("devbotfire {n} mp5_mp 0")).is_err(),
+        "hook must require opt-in"
+    );
+    s.exec_line("set sv_cheats 1").unwrap();
+    let at = s.game.client(n).unwrap().ps.origin;
+    s.exec_line(&format!("devtele {n} {} {} {}", at[0] + 96.0, at[1], at[2]))
+        .unwrap();
     s.run_frames(frames(2));
 
-    for (weapon, marks) in [("mp5_mp", true), ("mp5_silencer_mp", false)] {
+    for weapon in ["mp5_mp", "mp5_silencer_mp"] {
         let index = u32::from(s.game.weapons.index(weapon));
         assert_ne!(index, 0, "{weapon} is not in the weapon table");
         s.exec_line(&format!("devbotfire {n} {weapon} 0")).unwrap();
-        s.run_frames(frames(4));
+        s.run_frames(frames(2));
+        s.run_frames(frames(5));
         let before = record(&s, n);
         assert_eq!(
-            before.2, index,
+            before.1, index,
             "{weapon}: the bot did not raise it ({before:?})"
         );
         s.exec_line(&format!("devbotfire {n} {weapon} 500"))
             .unwrap();
-        s.run_frames(frames(1));
+        s.run_frames(frames(7));
         let after = record(&s, n);
         assert!(
             after.0 > before.0,
             "{weapon}: the bot never fired ({before:?} -> {after:?})"
         );
-        assert_eq!(
-            after.1 != before.1,
-            marks,
-            "{weapon}: last_fire_time {} -> {}",
-            before.1,
-            after.1
-        );
     }
 
-    // The frag key held 400 ms, as the `client-hud` check does: the grenade leaves as a missile, the bot lives, and
-    // the throw marks nobody.
+    // Just like the client stage: allow the old mark to finish, then hold frag for a second.
+    s.run_frames(frames(5));
     let before = record(&s, n);
-    s.exec_line(&format!("devbotfire {n} frag 400")).unwrap();
+    s.exec_line(&format!("devbotfire {n} frag 1000")).unwrap();
     let mut trace = Vec::new();
     let mut missile = false;
-    for _ in 0..frames(3) {
+    for _ in 0..frames(4) {
         s.run_frames(1);
         let c = s.game.client(n).expect("the bot is connected");
         let flying = s.game.ents.iter().flatten().any(|e| e.missile.is_some());
@@ -118,8 +119,5 @@ fn a_bot_fires_on_demand_and_only_unsilenced_shots_mark_it() {
         "the frag throw went wrong:\n{}",
         trace.join("\n")
     );
-    assert_eq!(
-        after.1, before.1,
-        "a thrown frag marked the bot for enemy compasses"
-    );
+    assert_eq!(after.0, before.0, "an offhand throw is not FireWeapon");
 }
