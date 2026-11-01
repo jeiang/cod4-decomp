@@ -1227,7 +1227,8 @@ impl Shell {
             // `CG_Draw2D`: with `cg_draw2D` off none of the match's 2D is drawn; the open menus still are.
             let hud_on = self.st.in_game && self.st.draw_2d;
             if hud_on {
-                hud::draw_under(&self.ui, &mut p, &self.st);
+                let drawn = hud::draw_under(&self.ui, &mut p, &self.st);
+                self.st.hud_stats.drawn(&drawn, &self.st.live);
                 hud::names::draw(
                     &self.ui,
                     &mut p,
@@ -1240,7 +1241,8 @@ impl Shell {
             let mut h = Self::host(&mut self.st, input);
             self.ui.paint(&mut h, &mut p, hud_on);
             if hud_on {
-                hud::draw_over(&self.ui, &mut p, &self.st);
+                let drawn = hud::draw_over(&self.ui, &mut p, &self.st);
+                self.st.hud_stats.drawn(&drawn, &self.st.live);
             }
             // `CL_DrawScreen`: the frame rate counter, over everything but the console, while a match is on.
             self.st.fps_drawn = if self.st.in_game {

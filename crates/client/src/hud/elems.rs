@@ -120,10 +120,40 @@ fn shown_text(ui: &Ui, le: &LiveElem, now: i32) -> String {
     }
 }
 
+/// The full-screen picture of the night vision goggles (`cgMedia.nightVisionOverlay`, `cg_main_mp.cpp` of KisakCOD).
+pub const NIGHT_VISION_OVERLAY: &str = "nightvision_overlay_goggles";
+
+/// What a HUD pass drew that the run report counts ([`super::Stats::drawn`]).
+#[derive(Default)]
+pub struct Drawn {
+    /// The night vision goggles' overlay covered the screen.
+    pub night_vision: bool,
+    /// Indexes into [`LiveUi::elems`] of the live (not archived) elements drawn over a killcam replay.
+    pub killcam_live: Vec<usize>,
+}
+
 /// Elements under the menus, then the chat above them all (the order of `CG_Draw2D`).
-pub fn draw_under(ui: &Ui, p: &mut Painter, st: &ShellState) {
+pub fn draw_under(ui: &Ui, p: &mut Painter, st: &ShellState) -> Drawn {
+    let mut drawn = Drawn::default();
     if !st.live.active {
-        return;
+        return drawn;
+    }
+    // `CG_DrawNightVisionOverlay` (KisakCOD `cgame/cg_draw_reticles.cpp:89-113`, called first for a player in
+    // `cgame_mp/cg_draw_mp.cpp:171`): stretched white over the world, under the crosshair, the scope and the HUD.
+    if st.live.night_vision {
+        let (w, h) = ui.place.size;
+        let img = p.named(&ui.assets, NIGHT_VISION_OVERLAY);
+        p.pic(
+            &img,
+            Px {
+                x: 0.0,
+                y: 0.0,
+                w,
+                h,
+            },
+            [1.0; 4],
+        );
+        drawn.night_vision = true;
     }
     if let Some(o) = &st.live.scope {
         draw_scope(ui, p, o);
@@ -134,7 +164,8 @@ pub fn draw_under(ui: &Ui, p: &mut Painter, st: &ShellState) {
     }
     st.feed.draw_chat(ui, p, &st.live, st.game.scoreboard);
     super::draw_vote(ui, p, &st.live, &st.feed.layout);
-    draw_elems(ui, p, &st.live, false);
+    draw_elems(ui, p, &st.live, false, &mut drawn);
+    drawn
 }
 
 /// The scope overlay centred on the screen (`CG_DrawAdsOverlay`), black beyond its edges.
@@ -201,12 +232,13 @@ fn draw_damage(ui: &Ui, p: &mut Painter, live: &LiveUi, layout: &super::Layout) 
 }
 
 /// Foreground elements, the spectated player's name and the scoreboard rows, over the menus.
-pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
+pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) -> Drawn {
+    let mut drawn = Drawn::default();
     let live = &st.live;
     if !live.active {
-        return;
+        return drawn;
     }
-    draw_elems(ui, p, live, true);
+    draw_elems(ui, p, live, true, &mut drawn);
     if live.interrupted {
         draw_interrupted(ui, p, live);
     }
@@ -241,6 +273,7 @@ pub fn draw_over(ui: &Ui, p: &mut Painter, st: &ShellState) {
     if st.scoreboard_shown(ui) {
         super::draw_scoreboard(ui, p, st);
     }
+    drawn
 }
 
 /// `CG_DrawDisconnect`: the warning and, half of every second, the net icon.
@@ -338,16 +371,20 @@ fn draw_spectator_prompts(ui: &Ui, p: &mut Painter, live: &LiveUi) {
     }
 }
 
-fn draw_elems(ui: &Ui, p: &mut Painter, live: &LiveUi, foreground: bool) {
+/// Whether element `e` stays off screen this frame. `CG_Draw2dHudElems` draws both of the player state's sets, the
+/// current and the archival, with no killcam rule (KisakCOD `cgame/cg_hudelem.cpp:1760-1761`): in a killcam the
+/// server fills the current set with the watcher's own live elements (`SpectatorClientEndFrame`,
+/// `game_mp/g_active_mp.cpp:970-972`), which is where the stock `_killcam.gsc` puts its skip prompt.
+fn hidden(e: &HudElem, live: &LiveUi, menu_open: bool) -> bool {
+    (live.dead && e.flags & hf::HIDE_WHEN_DEAD != 0)
+        || (menu_open && e.flags & hf::HIDE_WHEN_IN_MENU != 0)
+}
+
+fn draw_elems(ui: &Ui, p: &mut Painter, live: &LiveUi, foreground: bool, drawn: &mut Drawn) {
     let menu_open = !ui.open_menus().is_empty();
-    for le in &live.elems {
+    for (i, le) in live.elems.iter().enumerate() {
         let e = &le.e;
-        let fg = e.flags & hf::FOREGROUND != 0;
-        if fg != foreground
-            || (live.dead && e.flags & hf::HIDE_WHEN_DEAD != 0)
-            || (menu_open && e.flags & hf::HIDE_WHEN_IN_MENU != 0)
-            || (live.killcam && !e.archived())
-        {
+        if (e.flags & hf::FOREGROUND != 0) != foreground || hidden(e, live, menu_open) {
             continue;
         }
         let now = live.hud_time;
@@ -359,6 +396,9 @@ fn draw_elems(ui: &Ui, p: &mut Painter, live: &LiveUi, foreground: bool) {
             draw_waypoint(ui, p, live, le, color);
         } else {
             draw_elem(ui, p, le, now, color, &live.keys);
+        }
+        if live.killcam && !e.archived() {
+            drawn.killcam_live.push(i);
         }
     }
 }
@@ -783,6 +823,33 @@ mod tests {
         let end = at(&e, 2000).0;
         assert!((mid - (start + end) * 0.5).abs() < 1.0);
         assert!(start < mid && mid < end);
+    }
+
+    #[test]
+    fn a_killcam_draws_the_watchers_live_elements_and_the_archived_ones() {
+        let live = LiveUi {
+            killcam: true,
+            ..LiveUi::default()
+        };
+        let mut prompt = HudElem::new(1);
+        prompt.flags = 0;
+        assert!(!prompt.archived());
+        assert!(
+            !hidden(&prompt, &live, false),
+            "the skip prompt is a live element"
+        );
+        let mut kept = HudElem::new(2);
+        kept.flags = hf::ARCHIVED;
+        assert!(!hidden(&kept, &live, false));
+        // The other rules still hold in a replay.
+        prompt.flags = hf::HIDE_WHEN_IN_MENU;
+        assert!(hidden(&prompt, &live, true));
+        let dead = LiveUi {
+            dead: true,
+            ..LiveUi::default()
+        };
+        prompt.flags = hf::HIDE_WHEN_DEAD;
+        assert!(hidden(&prompt, &dead, false));
     }
 
     #[test]

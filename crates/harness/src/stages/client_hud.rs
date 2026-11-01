@@ -3,14 +3,16 @@
 //! channel (#378) the way a person plays (#376). The real client starts its own listen server with nine bots and the
 //! stage picks a team and a class with the pointer, walks and aims with the keys and the mouse ([`Walker`]), changes
 //! class from the in-game menu while alive (the stock `_menus.gsc` answers with a bare-key bold message, which must
-//! come out localized), types a chat line, calls a vote and adds bots through the console, holds the scoreboard up
-//! with the Tab bind, throws a grenade with its key, waits for a message window to have a line up and for a bot to
-//! kill it (the killcam), comes back from the dead, and plays on until it has had a bot in its sights and fired.
-//! What the HUD got to show over the run (`hud.stats` of the state document, the counters `hud_draw` of
-//! `ui-script.json` held) is the verdict: the scoreboard must have listed the players, the message windows must have
-//! drawn lines, the script hud elements must have arrived, the killcam must have played behind the body, a teammate
-//! must have had a name over the head and the player under the crosshair a name of their own, and nothing may be on
-//! screen as a bare string key. Needs a display and the install; skips without.
+//! come out localized), types a chat line, calls a vote and adds bots through the console, puts the night vision
+//! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind, throws a grenade with
+//! its key, waits for a message window to have a line up and for a bot to kill it (the killcam), comes back from the
+//! dead, and plays on until it has had a bot in its sights and fired. What the HUD got to show over the run
+//! (`hud.stats` of the state document, the counters `hud_draw` of `ui-script.json` held) is the verdict: the
+//! scoreboard must have listed the players, the message windows must have drawn lines, the script hud elements must
+//! have arrived, the goggles must have drawn their overlay and d-pad icon (and the frame with them on must show the
+//! overlay over the world with the HUD still above it), the killcam must have played behind the body with its skip
+//! prompt over it, a teammate must have had a name over the head and the player under the crosshair a name of their
+//! own, and nothing may be on screen as a bare string key. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{render_problem, steps_problem};
@@ -109,6 +111,33 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
         bad.push("the killcam never had the viewer's body in sight, so the \"you\" marker was never checked");
     } else if n("killcam_you_frames") > 0 && !marked {
         bad.push("the killcam drew no head icon over the viewer's body");
+    }
+    // A killcam shows the watcher's own live elements beside the killer's archived ones (#426): the stock
+    // `_killcam.gsc` skip prompt (a `PLATFORM_PRESS_TO_...` key) must have been drawn over the replay.
+    let prompt = h["killcam_live_text"].as_array().is_some_and(|t| {
+        t.iter()
+            .filter_map(Value::as_str)
+            .any(|t| t.contains("PRESS_TO"))
+    });
+    if n("killcam_frames") > 0 && !prompt {
+        bad.push("the killcam's skip prompt was never drawn over the replay");
+    }
+    // The goggles on (#427): their overlay over the screen and their icon in the d-pad slot.
+    if n("night_vision_frames") == 0 {
+        bad.push("the night vision goggles' overlay was never drawn");
+    }
+    if report["hud"]["night_vision_icon_frames"]
+        .as_u64()
+        .unwrap_or(0)
+        == 0
+    {
+        bad.push("the d-pad never drew the night vision icon");
+    }
+    let overlay_missing = report["missing_images"]
+        .as_array()
+        .is_some_and(|m| m.iter().any(|v| v == "nightvision_overlay_goggles"));
+    if overlay_missing {
+        bad.push("the night vision overlay's picture could not be loaded");
     }
     // A message or hint that is still a string key (MP_CHANGE_CLASS_NEXT_SPAWN) was not localized.
     let keys: Vec<&str> = [&h["unresolved"], &report["hud"]["unresolved_text"]]
@@ -433,6 +462,36 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         r
     })?;
 
+    // Night vision on the stock action slot 1 bind (every stock class gets `setactionslot(1, "nightvision")`): the
+    // goggles' overlay covers the screen under the HUD and the d-pad slot shows their icon
+    // (`CG_DrawNightVisionOverlay`, `CG_DrawPlayerActionSlot`); the same bind takes them off.
+    c.step("night vision", |c| {
+        let frames = stat(c, "hud.stats.night_vision_frames")?;
+        let icons = c
+            .lookup("hud.report.night_vision_icon_frames")?
+            .as_u64()
+            .unwrap_or(0);
+        c.bind("+actionslot 1", "tap")?;
+        c.until(
+            json!({
+                "hud.live.night_vision": true,
+                "hud.stats.night_vision_frames": {"gt": frames},
+                "hud.report.night_vision_icon_frames": {"gt": icons},
+            }),
+            secs(10),
+            "the goggles' overlay and d-pad icon were not drawn after the night vision bind",
+        )?;
+        c.pause(secs(1))?;
+        c.capture("night_vision")?;
+        c.bind("+actionslot 1", "tap")?;
+        c.until(
+            json!({"hud.live.night_vision": false}),
+            secs(10),
+            "the goggles did not come off on the second press",
+        )?;
+        Ok(())
+    })?;
+
     // A grenade thrown with its key: the count on the HUD drops once the throw is out.
     c.step("throw", |c| {
         let frag = c.lookup("hud.report.frag")?;
@@ -614,6 +673,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     for f in [
         "scoreboard.png",
         "feed.png",
+        "night_vision.png",
         "killcam_first.png",
         "killcam_next.png",
         "killcam.png",
@@ -668,8 +728,11 @@ mod tests {
                 "messages": [2, 0, 0, 0], "obituaries": 3, "window_lines": [40, 0, 0, 0],
                 "killcam_frames": 120, "killcam_you_frames": 30, "names_max": 3, "crosshair_name_frames": 40,
                 "friends_in_sight_frames": 50, "crosshair_due_frames": 60,
-                "head_icon_materials": ["headiconyouinkillcam"], "chat": 1
+                "head_icon_materials": ["headiconyouinkillcam"], "chat": 1,
+                "killcam_live_text": ["&PLATFORM_PRESS_TO_SKIP"], "night_vision_frames": 60
             },
+            "hud": {"night_vision_icon_frames": 60},
+            "missing_images": [],
             "net": {"view": {"death_view_frames": 40, "death_view_range_max": 120.0, "dof_frames": 900}},
             "render": {"material_failures": {}, "image_failures": []},
         })
@@ -759,5 +822,19 @@ mod tests {
         let mut r = good();
         r["steps"] = json!([{"step": "killcam", "ok": false, "note": "no bot killed the player"}]);
         assert!(verdict(&r).unwrap().contains("killcam"));
+        let mut r = good();
+        r["hud_draw"]["killcam_live_text"] = json!([]);
+        assert!(verdict(&r).unwrap().contains("skip prompt"));
+        let mut r = good();
+        r["hud_draw"]["night_vision_frames"] = json!(0);
+        r["hud"]["night_vision_icon_frames"] = json!(0);
+        r["missing_images"] = json!(["nightvision_overlay_goggles"]);
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("goggles' overlay")
+                && why.contains("night vision icon")
+                && why.contains("picture"),
+            "{why}"
+        );
     }
 }
