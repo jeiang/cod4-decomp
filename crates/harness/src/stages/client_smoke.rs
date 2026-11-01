@@ -111,17 +111,48 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         // A known walkable garage viewpoint (also used by client-garage), aimed down so the cloud stays nearby.
         early.console("setviewpos 200.8 2267.5 323.5 175.3 60")?;
         early.pause(Duration::from_secs(1))?;
-        early.step("throw smoke with the off-hand bind", |c| {
+        early.report(
+            "before-throw.json",
+            &["player", "hud", "fx", "events", "sound"],
+        )?;
+        let thrown = early.step("throw smoke with the off-hand bind", |c| {
+            c.until(
+                json!({"player.weapons_enabled": true, "player.weapon_state": 0,
+                    "player.weapon_time": {"le": 0}, "player.offhand_secondary": 0,
+                    "player.smoke_ammo": {"gt": 0}}),
+                Duration::from_secs(30),
+                "Sniper did not become ready with enabled weapons and smoke ammunition",
+            )?;
+            c.report(
+                "ready-to-throw.json",
+                &["player", "hud", "fx", "events", "sound"],
+            )?;
             c.bind("+smoke", "down")?;
-            c.pause(Duration::from_millis(200))?;
+            // Wait until the off-hand has actually been primed, not a fixed key pulse during weapon raising.
+            let primed = c.until(
+                json!({"player.weapon_state": {"ge": 17}}),
+                Duration::from_secs(5),
+                "the smoke bind never primed an off-hand grenade",
+            );
             c.bind("+smoke", "up")?;
+            primed?;
             c.until(
                 json!({"fx.persistent_smoke": {"len": 1}}),
                 Duration::from_secs(20),
                 "the player's smoke throw never produced a persistent cloud",
             )?;
             Ok(())
-        })?;
+        });
+        if let Err(reason) = thrown {
+            let _ = early.report(
+                "throw-failure.json",
+                &[
+                    "player", "hud", "fx", "events", "sound", "entities", "console",
+                ],
+            );
+            let _ = early.capture("throw-failure");
+            return Err(reason);
+        }
         let first = cloud(&mut early)?;
         if !(0..=200).contains(&integer(&first, "age_ms")?) || first["live"] != true {
             return Err(format!(
