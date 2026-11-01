@@ -158,6 +158,9 @@ pub struct Env<'a, W: Collide> {
     pub params: &'a Params,
     /// The client's time (what its commands are stamped with), for easing the view over steps.
     pub time: i32,
+    /// The time the client draws the movers at (`mover_offset` from the snapshot): what the player standing on one is
+    /// carried to.
+    pub draw_time: i32,
 }
 
 pub struct Predicted {
@@ -298,7 +301,9 @@ impl Predictor {
             }
             old = *cmd;
             replayed += 1;
-            carry = ground_carry(snap, &ps, cmd.server_time);
+            // The mover is drawn at `draw_time`; the player on it is carried to the same moment, so the feet stay on
+            // the drawn platform whatever clock the commands are stamped on (`CG_AdjustPositionForMover`).
+            carry = ground_carry(snap, &ps, cmd.server_time + env.draw_time - env.time);
             if self.last.is_some_and(|(t, _)| t == cmd.server_time) {
                 at_last = Some(add(ps.origin, carry));
             }
@@ -518,6 +523,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=60)
             .map(|i| cmd(i * 16, 127, (i * 300) % 65536))
@@ -547,6 +553,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=40).map(|i| cmd(i * 16, 127, 0)).collect();
         let truth = serve(&cmds, &env);
@@ -584,6 +591,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=20).map(|i| cmd(i * 16, 127, 0)).collect();
         let truth = serve(&cmds, &env);
@@ -609,6 +617,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=20).map(|i| cmd(i * 16, 127, 0)).collect();
         let truth = serve(&cmds, &env);
@@ -633,6 +642,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=20).map(|i| cmd(i * 16, 127, 0)).collect();
         let truth = serve(&cmds, &env);
@@ -656,6 +666,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=30).map(|i| cmd(i * 16, 127, 0)).collect();
         let mut fast = start();
@@ -686,6 +697,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=60)
             .map(|i| UserCmd {
@@ -815,6 +827,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let cmds: Vec<UserCmd> = (1..=10).map(|i| cmd(i * 16, 127, 0)).collect();
         let truth = serve(&cmds, &env);
@@ -843,6 +856,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: t,
+            draw_time: t,
         };
         let truth = serve(&cmds, &env(0));
         let mut pr = Predictor::default();
@@ -910,6 +924,7 @@ mod tests {
             weapons: &w,
             params: &p,
             time: 0,
+            draw_time: 0,
         };
         let lift = |velocity: [f32; 3]| EntityState {
             number: 5,
@@ -938,5 +953,46 @@ mod tests {
         let mut m = lift([0.0, 0.0, 100.0]);
         m.pm_flags = 40;
         assert!((mover_offset(&m, 100)[2] - 4.0).abs() < 1e-4);
+    }
+
+    /// Commands are stamped [`crate::view::INTERP_DELAY_MS`] behind the clock estimate, which sits past the newest
+    /// snapshot, while the mover is drawn ahead of the snapshot at the estimate: the feet go where the platform is
+    /// drawn, not to the command's (earlier) time, where the carry would clamp to nothing.
+    #[test]
+    fn the_carry_matches_the_drawn_mover_with_commands_behind_the_snapshot() {
+        let mut world = TestWorld::floor();
+        world.blocks[0].entity = 5;
+        let (w, p) = (table(), Params::default());
+        let st = 1020;
+        let ct = st - crate::view::INTERP_DELAY_MS;
+        let env = Env {
+            world: &world,
+            weapons: &w,
+            params: &p,
+            time: ct,
+            draw_time: st,
+        };
+        let lift = EntityState {
+            number: 5,
+            etype: crate::entity::etype::BRUSH,
+            velocity: [0.0, 0.0, 200.0],
+            pm_flags: 1000,
+            ..EntityState::default()
+        };
+        let mut ps = start();
+        ps.ground_entity_num = 5;
+        ps.command_time = ct - 40;
+        let mut snap = snapshot(&ps);
+        snap.server_time = 1000;
+        snap.entities.push(lift.clone());
+        let mut pr = Predictor::default();
+        pr.push(UserCmd {
+            server_time: ct,
+            ..UserCmd::default()
+        });
+        let feet = pr.predict(&snap, &env).ps.origin[2];
+        let drawn = mover_offset(&lift, st - snap.server_time)[2];
+        assert!(drawn > 3.9, "the platform is drawn {drawn} ahead");
+        assert!((feet - drawn).abs() < 1e-3, "feet {feet}, platform {drawn}");
     }
 }

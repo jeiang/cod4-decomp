@@ -222,6 +222,9 @@ pub struct Client {
     pub talking_until: i32,
     /// Level time of the player's latest shot: enemies' compasses show where it came from for a moment.
     pub last_fire_time: i32,
+    /// `client->lastServerTime`: the `serverTime` of the latest usercmd (`G_SetLastServerTime`), the time the
+    /// player's shots are judged at with `g_antilag` on.
+    pub last_server_time: i32,
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
@@ -300,6 +303,7 @@ impl Client {
             compass_ping_until: 0,
             talking_until: 0,
             last_fire_time: i32::MIN / 2,
+            last_server_time: 0,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
             pose: PlayerPoseState::default(),
@@ -758,10 +762,6 @@ impl Game {
         let Some(world) = self.world.as_ref() else {
             return;
         };
-        // A person's shots are judged where the shooter saw the others.
-        if !c.bot && self.cvars.bool("g_lagcomp") {
-            self.lag_time = Some(cmd.server_time - net::view::INTERP_DELAY_MS);
-        }
         let out = pm::run_usercmd(
             &mut c.ps,
             &mut c.inv,
@@ -790,7 +790,6 @@ impl Game {
         }
         self.client_events(vm, n, old_events);
         self.weapon_events(vm, n, &out);
-        self.lag_time = None;
         for t in touched {
             let (other, me) = (self.entity_value(vm, t), self.entity_value(vm, n));
             vm.notify_entity(n, "touch", &[other]);
@@ -1036,31 +1035,6 @@ impl Game {
     /// The script value for entity `n`.
     pub fn entity_value(&self, vm: &mut Vm, n: u16) -> Value {
         Value::Object(vm.entity(n, EntClass::Entity))
-    }
-
-    /// Files every player's body for this frame in the lag-compensation history.
-    pub fn lag_record(&mut self) {
-        let time = self.level.time;
-        for n in 0..self.clients.len() {
-            let c = &self.clients[n];
-            let Some(e) = self.ents.get(n).and_then(Option::as_ref) else {
-                continue;
-            };
-            if !c.connected() {
-                self.lag.clear(n as u16);
-                continue;
-            }
-            self.lag.record(
-                n as u16,
-                crate::lagcomp::Sample {
-                    time,
-                    origin: e.origin,
-                    mins: e.mins,
-                    maxs: e.maxs,
-                    pose: c.pose.clone(),
-                },
-            );
-        }
     }
 
     /// `ps.radarEnabled`: the client's team has radar (`setteamradar`) or the client has (`hasradar`).
