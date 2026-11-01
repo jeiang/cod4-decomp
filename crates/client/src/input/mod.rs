@@ -815,8 +815,11 @@ impl Input {
                 format!("  Domain is {only} ({why})"),
             ]
         } else {
+            let changed = self.cvars.get(name) != Some(value);
             self.set_cvar(name, value);
-            Self::warn_not_implemented(name, value);
+            if changed {
+                Self::warn_not_implemented(name, value);
+            }
             return true;
         };
         tracing::warn!(cvar = name, value, "a menu's dvar write was refused");
@@ -826,7 +829,7 @@ impl Input {
         false
     }
 
-    /// A write to a stock dvar this build keeps but does not act on says so, naming it (#372).
+    /// A write that changes a stock dvar this build keeps but does not act on says so, naming it (#372).
     fn warn_not_implemented(name: &str, value: &str) {
         if let Some(why) = cvar::Cvars::not_implemented(name) {
             logging::dedup!(
@@ -1215,9 +1218,12 @@ impl Input {
             tracing::info!(cvar = name, value, "dvar value refused: {why}");
             return false;
         }
+        let changed = self.cvars.get(name) != Some(value);
         self.cvars.set(name, value, archive);
         self.dirty = true;
-        Self::warn_not_implemented(name, value);
+        if changed {
+            Self::warn_not_implemented(name, value);
+        }
         // `CG_LookingThroughNightVision` reads it to drop the goggles' overlay and vision set (KisakCOD
         // `cgame/cg_visionsets.cpp:610`); this build does not, so a player who sets it is told.
         if name.eq_ignore_ascii_case("nightVisionDisableEffects") && self.cvars.bool(name) {

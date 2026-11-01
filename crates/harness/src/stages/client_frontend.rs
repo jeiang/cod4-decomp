@@ -28,7 +28,7 @@ mouse=Options,menu=main_options:5,wait=1,mouse=Texture Settings...,menu=options_
 mouse=Options,menu=main_options:5,wait=1,mouse=Sound...,menu=options_sound:5,wait=1,values=options_sound,key=escape,wait=1,\
 mouse=Options,menu=main_options:5,wait=1,mouse=Voice Chat...,menu=options_voice:5,wait=1,values=options_voice,key=escape,wait=1,\
 mouse=Options,menu=main_options:5,wait=1,mouse=Game Options...,menu=options_game:5,wait=1,values=options_game,\
-mouse=#80,wait=1,cvaris=monkeytoy 0,key=escape,wait=1,\
+mouse=$monkeytoy,wait=1,cvaris=monkeytoy 0,key=escape,wait=1,\
 mouse=Options,menu=main_options:5,wait=1,mouse=Multiplayer Options...,menu=options_multi:5,wait=1,values=options_multi,shot=options_multi,\
 key=escape,wait=1,\
 mouse=Join Game,menu=pc_join_unranked:5,wait=1,shot=join,\

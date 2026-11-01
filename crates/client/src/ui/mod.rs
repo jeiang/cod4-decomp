@@ -2497,7 +2497,8 @@ impl Ui {
         let &m = self.stack.last()?;
         let def = self.menus[m].def.clone();
         for (i, d) in def.items.iter().enumerate() {
-            // `#245` names an item by its owner-draw id, for those that have no name or text of their own.
+            // `#245` names an item by its owner-draw id, `$monkeytoy` by the dvar it edits: for those that have no
+            // name or text of their own.
             let named = d
                 .window
                 .name
@@ -2506,7 +2507,12 @@ impl Ui {
                 || want
                     .strip_prefix('#')
                     .and_then(|id| id.parse::<i32>().ok())
-                    .is_some_and(|id| id == d.window.owner_draw);
+                    .is_some_and(|id| id == d.window.owner_draw)
+                || want.strip_prefix('$').is_some_and(|v| {
+                    d.dvar
+                        .as_deref()
+                        .is_some_and(|dv| dv.eq_ignore_ascii_case(v))
+                });
             let texted = !named && {
                 let t = self.item_text(&*host, m, i, d);
                 !t.is_empty() && t.eq_ignore_ascii_case(want)

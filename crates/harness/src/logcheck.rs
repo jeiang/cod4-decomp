@@ -37,10 +37,11 @@ pub const ALLOWED: &[Allow] = &[
             "localized string is missing",
             "key=\"\"",
         ],
-        reason: "client-ui draws the team and class menus with no map loaded: their map title looks up an empty \
-                 `mapname`, the bare `@` stock shows there too (#372)",
-        stages: &["client-ui"],
-        max: Some(6), // measured 4 on the Linux host, 2026-11-01
+        reason: "the team and class menus title the map from mp/mapsTable.csv by `mapname`: with no map (client-ui) or \
+                 a synthetic test map the table does not list (client-objective, client-hardpoint) the title is the bare \
+                 `@` stock shows too (#372)",
+        stages: &["client-ui", "client-objective", "client-hardpoint"],
+        max: Some(10), // measured 4 (client-ui) and 7 (client-objective, client-hardpoint) on the Linux host, 2026-11-01
     },
     Allow {
         contains: &[
