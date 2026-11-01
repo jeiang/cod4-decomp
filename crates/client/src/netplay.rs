@@ -539,6 +539,10 @@ pub struct NetPlay {
     /// The crosshair of the held weapon from the last frame; `None` when dead, watching another player or the weapon
     /// has no reticle. The HUD draws it; the field of view is the app's to fill in.
     reticle: Option<Reticle>,
+    /// Every drawn frame's predicted weapon state, counted per state as `[frames, frames with a visible crosshair]`
+    /// since the net play began, so the control channel can tell a short state (a pistol's quick drop and raise) from
+    /// one never shown without polling every frame (#494).
+    crosshair_state_frames: [[u32; 2]; 32],
     sound: ClientSound,
     events: Events,
     /// The client's estimate of the server clock at the last frame, for the HUD.
@@ -674,6 +678,7 @@ impl NetPlay {
             scan: crate::hud::NameScan::default(),
             hud_view: None,
             reticle: None,
+            crosshair_state_frames: [[0; 2]; 32],
             sound,
             props: Props::new(
                 lib.content
@@ -1583,6 +1588,15 @@ impl NetPlay {
         self.last_eye = Some(eye);
         self.hud_view = Some((ps.clone(), yaw_deg));
         self.reticle = if dead { None } else { self.reticle_of(&ps) };
+        let frames = &mut self.crosshair_state_frames[usize::from(ps.weapon_state).min(31)];
+        frames[0] += 1;
+        if self
+            .reticle
+            .as_ref()
+            .is_some_and(|r| crate::crosshair::alpha(r) > 0.0)
+        {
+            frames[1] += 1;
+        }
         // The hands hang off the render eye, with the camera's angles on the aim.
         let mut seen = [
             aim[0] + cam.angles[0],

@@ -419,14 +419,31 @@ fn sample_crosshair(c: &mut Driven, until: Duration) -> Result<Vec<(u64, f64)>, 
     Ok(seen)
 }
 
+/// Per weapon state, the drawn frames and those with a visible crosshair (`player.crosshair_state_frames`).
+fn state_frames(c: &mut Driven) -> Result<Vec<[u64; 2]>, String> {
+    let p = c.state("player")?;
+    let rows = p["crosshair_state_frames"]
+        .as_array()
+        .ok_or("no player.crosshair_state_frames")?;
+    Ok(rows
+        .iter()
+        .map(|r| [0, 1].map(|i| r[i].as_u64().unwrap_or(0)))
+        .collect())
+}
+
 /// The crosshair opacity per predicted weapon state while one `weapnext` switches the weapon. It comes from one
 /// wheel notch (`mwheelup` in `extra_binds.cfg`, not a key `bind` can press), as a person's one notch must do it.
-/// Also returns the trace of every sample whose facts changed: ms since the notch, the snapshot's `weapon_index`
-/// and `weapon_state`, the predicted `visual_weapon_state` and `crosshair_alpha`, and how many samples there were.
+/// A switch to a pistol drops and raises quickly, as stock does (KisakCOD MP 1.8 `bgame/bg_weapons.cpp:2491-2587`,
+/// `PM_BeginWeaponChange`: `quickDropTime` for `WEAPCLASS_PISTOL`): about half a second in all, short enough for a
+/// polling gap on a busy host to miss (#494). So besides the polled samples it diffs the client's per-frame counts
+/// of the drop and raise states (1-4), which see every drawn frame. Also returns the trace of every polled sample
+/// whose facts changed (ms since the notch, the snapshot's `weapon_index` and `weapon_state`, the predicted
+/// `visual_weapon_state` and `crosshair_alpha`) and the counted frames per state.
 fn sample_weapon_switch(
     c: &mut Driven,
     until: Duration,
 ) -> Result<(Vec<(u64, f64)>, String), String> {
+    let counted = state_frames(c)?;
     let start = Instant::now();
     c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
     let (mut seen, mut trace, mut last, mut samples) = (Vec::new(), Vec::new(), None, 0);
@@ -458,7 +475,31 @@ fn sample_weapon_switch(
         }
         c.frames(1)?;
     }
-    Ok((seen, format!("{samples} samples: {}", trace.join(", "))))
+    let mut frames = Vec::new();
+    for (s, (now, was)) in state_frames(c)?.iter().zip(&counted).enumerate() {
+        let (all, shown) = (now[0].saturating_sub(was[0]), now[1].saturating_sub(was[1]));
+        if all == 0 {
+            continue;
+        }
+        frames.push(format!("state {s}: {all} frames, {shown} with a crosshair"));
+        // A counted drop or raise frame stands for its state with the crosshair shown (1) or hidden (0).
+        if (1..=4).contains(&s) {
+            if shown > 0 {
+                seen.push((s as u64, 1.0));
+            }
+            if shown < all {
+                seen.push((s as u64, 0.0));
+            }
+        }
+    }
+    Ok((
+        seen,
+        format!(
+            "{samples} samples: {}; frames drawn: {}",
+            trace.join(", "),
+            frames.join(", ")
+        ),
+    ))
 }
 
 /// What is wrong with crosshair samples: hidden states must be transparent, ready and firing visible.
