@@ -408,6 +408,8 @@ pub struct Walker {
     pub ticks: u32,
     /// Turn toward the nearest living teammate instead, and hold fire.
     pub friends: bool,
+    /// Keep the sights on the target without firing (an enemy held under the crosshair rather than killed).
+    pub hold_fire: bool,
 }
 
 /// Degrees in `[-180, 180)`.
@@ -448,6 +450,7 @@ impl Walker {
             shots: 0,
             ticks: 0,
             friends: false,
+            hold_fire: false,
         })
     }
 
@@ -628,6 +631,7 @@ impl Walker {
         c.frames(2)?;
         let after = vec3(&c.state("player")?["aim_angles"]);
         let fire = !self.friends
+            && !self.hold_fire
             && aim.is_some_and(|(d, yaw, pitch)| {
                 d < 900.0 && wrap(yaw - after[1]).abs() < 4.0 && (pitch - after[0]).abs() < 4.0
             });

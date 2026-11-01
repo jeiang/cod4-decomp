@@ -179,6 +179,8 @@ fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
         }
         c.ask(json!({"cmd": "exec", "line": "god"})).map(|_| ())
     })?;
+    // Held fire keeps an enemy alive under the sights through the fade-in; `god` keeps the player alive.
+    w.hold_fire = true;
     c.step("crosshair over an enemy", |c| {
         let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
         w.drive_until(
@@ -1112,6 +1114,7 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
     };
     force(c, "1")?;
     let r = crosshair_colours(c, w);
+    w.hold_fire = false;
     let restored = c
         .ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "1"}))
         .and_then(|_| c.ask(json!({"cmd": "exec", "line": "god"})))
