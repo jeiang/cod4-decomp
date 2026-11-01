@@ -152,16 +152,20 @@ with the body, rather than looking up a missing tag or placing the head at the f
 case-insensitive exact names (the `j_` prefix is part of a bone name), resolved from each
 model's own 1.7 zone script-string table. An explicit missing held-weapon tag warns and retains
 the model at entity root, as KisakCOD's DObj construction does; normal players already have
-a bind pose before their first animation tick. `client-models` asserts loaded heads resolve
-and all nine held weapons draw before that tick; an install-backed unit test sweeps the heads
-of every stock map. The attachment wire remains this engine's compact bone-index protocol,
-not stock's script-string attachment protocol; zero deliberately requests melding.
+a bind pose before their first animation tick. A script attachment whose non-empty tag none of
+the earlier models has is warned about by the server (`explicit attachment tag did not
+resolve`, naming the parent model and the tag, as `DObjCreateDuplicateParts` warns), because
+the attachment wire carries both an empty tag and such a miss as 0. `client-models` asserts
+loaded heads meld and all nine held weapons sit at their hand tags before that tick; an
+install-backed unit test sweeps the heads of every stock map. The attachment wire remains this
+engine's compact bone-index protocol, not stock's script-string attachment protocol.
 
-FX model elements with zero authored visuals are simulation-only (including physics), not
-unresolved XModels. They remain alive without submitting a model draw; elements with actual
-visuals still resolve their models across the loaded zones. `client-fx` requires positive
-drawn-model and simulation-only-element counters, zero genuinely unresolved model visuals,
-and records effect/model names in `fx.json`.
+FX model elements with zero authored visuals are not unresolved XModels: they draw nothing (as
+`FX_DrawElement` skips a zero `visualCount`) and run their element lifecycle; model physics for
+them is not spawned, which stock's `FX_SpawnModelPhysics` also cannot do without a visual.
+Elements with actual visuals still resolve their models across the loaded zones. `client-fx`
+requires positive drawn-model and zero-visual-element counters, zero genuinely unresolved model
+visuals, and records effect/model names in `fx.json`.
 
 
 The client talks to the server over UDP (`net`: sequenced, fragmented netchan, delta-coded snapshots about 36 per second, up to 3 usercmds per packet with redundancy). `--listen` runs the same server inside the client process. The player's own movement is predicted with the very `sim::pm::run_usercmd` the server runs (other players are collision boxes from the snapshot; server corrections fade over 100 ms, a teleport shown as one; the server's `g_speed` and non-stock movement and weapon dvars such as `jump_height`, `friction` and `player_meleeRange` reach the client in a configstring; own footsteps, jumps, landings and shots are played from the predicted events, once each however often the replay raises them); other players are drawn 100 ms behind the server clock between two snapshots, and the server rewinds them to that moment when it judges a shot (`g_lagcomp`, at most 250 ms back). Keys, mouse, gamepad and the config file are the input layer's (`bind w +forward`). In a match the mouse is locked whenever no menu is open (no click needed after a menu closes); Esc with no menu to open releases it (it never quits) and a click takes it again. `COD4E_INPUT_DEBUG=1` prints one `input:` line per second to stderr: events per second from GCMouse and winit, which source feeds the look, the GCMouse devices and whether our handler is on each, window focus, pointer lock, and how many frames of motion the focus/lock gate threw away.

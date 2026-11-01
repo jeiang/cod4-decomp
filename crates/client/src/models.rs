@@ -471,6 +471,26 @@ impl Player {
             && self.anims.rig().duplicate_of(root).is_some()
     }
 
+    /// Every held model is drawn from its posed hand tag, not the entity-root fallback.
+    pub fn held_at_tags(&self, origin: [f32; 3]) -> bool {
+        let models = self.instances(origin);
+        let rig = self.anims.rig();
+        !self.hand.is_empty()
+            && self.hand.iter().enumerate().all(|(i, h)| {
+                let Some(hand) = rig
+                    .bone_index(&h.tag)
+                    .and_then(|b| self.pose.bones().get(b))
+                else {
+                    return false;
+                };
+                models
+                    .get(self.models.len() + i)
+                    .and_then(|m| m.bones.first())
+                    .zip(h.bones(hand).first())
+                    .is_some_and(|(drawn, want)| drawn == want)
+            })
+    }
+
     /// Tells the player where its entity is for the next [`Player::update`]: the frame before is where the entity was
     /// when the last one was placed, which a ragdoll made from it needs to keep the entity's travel.
     pub fn place(&mut self, origin: [f32; 3]) {
@@ -784,6 +804,10 @@ mod tests {
             initial.len(),
             3,
             "a weapon draws before the first animation tick"
+        );
+        assert!(
+            p.held_at_tags([0.0; 3]),
+            "the bind pose places the gun at the hand tag"
         );
         assert!(
             events.is_empty(),

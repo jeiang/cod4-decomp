@@ -1053,6 +1053,9 @@ impl Fx {
                 }
                 el.done = true;
             }
+            // Zero visuals: nothing to draw and no model to give a PhysPreset (stock asserts `visualCount > 0` in
+            // `FX_GetElemVisuals` before `FX_SpawnModelPhysics`), so the element only runs its lifecycle.
+            (FxVisuals::Models(models), elem::MODEL) if models.is_empty() => {}
             (FxVisuals::Models(models), elem::MODEL) if d.flags & flags::USE_MODEL_PHYSICS != 0 => {
                 // The element is a rigid body with its model's PhysPreset, spinning as the element asks; one whose
                 // model has no preset cannot be simulated and is dropped, as in the original.
@@ -2285,19 +2288,25 @@ mod tests {
 
     #[test]
     fn a_zero_visual_model_still_simulates_without_drawing() {
-        let mut e = elem_def(elem::MODEL, FxVisuals::Models(Arc::from(Vec::new())));
-        e.life_span_msec = range(1000, 0);
-        let def = effect("fx/invisible_model", 0, 1, 0, vec![e]);
-        let mut fx = Fx::new(lib(vec![def.clone()]));
-        fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
-        assert_eq!(model_at(&mut fx, 50, &Floor), None);
-        assert_eq!(
-            fx.live_elems(),
-            1,
-            "no visual must not remove the simulation"
-        );
-        assert_eq!(model_at(&mut fx, 1100, &Floor), None);
-        assert_eq!(fx.live_elems(), 0);
+        for physics in [0, flags::USE_MODEL_PHYSICS] {
+            let mut e = elem_def(elem::MODEL, FxVisuals::Models(Arc::from(Vec::new())));
+            e.flags = physics;
+            e.life_span_msec = range(1000, 0);
+            let def = effect("fx/invisible_model", 0, 1, 0, vec![e]);
+            let mut fx = Fx::new(lib(vec![def.clone()]));
+            let ((), events) = logging::capture(|| {
+                fx.play(&def, Frame::facing(Vec3::new(0.0, 0.0, 100.0), Vec3::Z));
+                assert_eq!(model_at(&mut fx, 50, &Floor), None);
+            });
+            assert_eq!(
+                fx.live_elems(),
+                1,
+                "no visual must not remove the simulation (flags {physics})"
+            );
+            assert!(events.is_empty(), "nothing is missing: {events:?}");
+            assert_eq!(model_at(&mut fx, 1100, &Floor), None);
+            assert_eq!(fx.live_elems(), 0);
+        }
     }
 
     #[test]

@@ -27,8 +27,8 @@ pub(super) fn attachments_of(
         let name = ui.model(model);
         let tag = tag_name(content, &models, tag).map_or_else(
             || {
-                // Zero is the intentional DObj root-meld path, not a failed lookup.
-                // Stock heads use it to share j_spine4/j_neck/j_head with the body.
+                // Zero is an empty tag (DObj root meld, as stock heads share j_spine4/j_neck/j_head with the body)
+                // or an explicit tag no earlier model has; the server warns about the latter where it knows the name.
                 if tag != 0 && !name.is_empty() {
                     logging::dedup!(
                         WARN,

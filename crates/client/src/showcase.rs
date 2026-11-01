@@ -302,7 +302,7 @@ impl Showcase {
         };
         let held_before_tick = actors
             .iter()
-            .filter(|a| a.player.instances(a.origin).len() == 3)
+            .filter(|a| a.player.held_at_tags(a.origin))
             .count();
         Ok(Showcase {
             actors,
