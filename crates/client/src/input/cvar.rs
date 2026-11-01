@@ -151,11 +151,45 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     // `CG_CompassRegisterDvars`: the multiplayer minimap's scale, `DVAR_ARCHIVE | DVAR_CHEAT | DVAR_SAVED` (3500 in
     // single player).
     ("compassMaxRange", "2500", true),
+    // `Com_Init`: the game version (`version`, this build's name, is added at start), and
+    // `UI_RegisterDvars` (ui_mp/ui_main_mp.cpp): this is the multiplayer UI, which the stock Options menu reads to
+    // offer Voice Chat and Multiplayer Options in place of the single-player Cheats; and where and how big the build
+    // number is drawn while no server is connected (`UI_DrawBuildNumber`; the 1.7 defaults).
+    ("shortversion", net::SHORT_VERSION, false),
+    ("ui_multiplayer", "1", false),
+    ("ui_buildLocation", "-100 52", false),
+    ("ui_buildSize", "0.3", false),
+    // The one value each of these has here (see `UNSUPPORTED`); the Sound and Game Options pages show them.
+    ("snd_outputConfiguration", "Windows default", true),
+    ("monkeytoy", "0", true),
+    // The Voice Chat and Multiplayer Options pages' controls that `ui_multiplayer` shows (see `NOT_IMPLEMENTED`):
+    // `winvoice_mic_reclevel` as `Voice_Init` registers it (win32/win_voice.cpp, 65535) and `cl_punkbuster` as
+    // `CL_InitOnceForAllClients` does (client_mp/cl_main_mp.cpp, 1): the stock profile's config writes that value back
+    // on every start, which is no change and so no warning.
+    ("winvoice_mic_reclevel", "65535", true),
+    ("cl_punkbuster", "1", true),
+];
+
+/// Stock dvars the menus set that this build keeps but does not act on yet: a write says so (issue #372).
+const NOT_IMPLEMENTED: &[(&str, &str)] = &[
+    (
+        "winvoice_mic_reclevel",
+        "voice chat does not capture yet; the microphone's recording level is not set",
+    ),
+    (
+        "voicechat_level_indicator",
+        "voice chat does not capture yet; no level indicator is drawn",
+    ),
+    ("cl_punkbuster", "PunkBuster does not exist in this build"),
 ];
 
 /// The cvars a console, bind or menu may not set (`DVAR_ROM`).
 const READ_ONLY: &[&str] = &[
     "cl_paused",
+    // `DVAR_ROM` in Com_Init and UI_RegisterDvars.
+    "shortversion",
+    "version",
+    "ui_multiplayer",
     // `DVAR_ROM | DVAR_AUTOEXEC` in R_RegisterDvars.
     "r_lightTweakAmbient",
     "r_lightTweakAmbientColor",
@@ -237,6 +271,18 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "44",
         "the mixer runs at the sound device's own rate; this build has no 11/22 kHz output",
     ),
+    // `SND_InitDriver` (sound/snd_driver.cpp): an enum, index 0 the default; the Sound options page shows it (#372).
+    (
+        "snd_outputConfiguration",
+        "Windows default",
+        "the mixer plays through the sound device's own channel layout",
+    ),
+    // `Con_Init` (client/cl_console.cpp): the Game Options page's Enable Console (#372).
+    (
+        "monkeytoy",
+        "0",
+        "the console is always open to the player in this build",
+    ),
     (
         "snd_enableEq",
         "1",
@@ -279,7 +325,9 @@ impl Default for Cvars {
                 )
             })
             .collect();
-        Self { map }
+        let mut c = Self { map };
+        c.set("version", &net::version(), false);
+        c
     }
 }
 
@@ -343,6 +391,14 @@ impl Cvars {
                 }
             }
         }
+    }
+
+    /// For a stock dvar this build keeps but does not act on: why.
+    pub fn not_implemented(name: &str) -> Option<&'static str> {
+        NOT_IMPLEMENTED
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, why)| why)
     }
 
     /// For a dvar this build accepts only one value of: that value and why.

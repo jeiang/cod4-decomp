@@ -98,8 +98,8 @@ set=set cg_brass 0,holdkey=mouse1,wait=1,releasekey=mouse1,cgis=fx:shell_eject 0
 cgis=fullbright 0,set=set r_fullbright 1,wait=1,cgis=fullbright 1,shot=fullbright,set=set r_fullbright 0,wait=1,cgis=fullbright 0,\
 cgis=centertime 3000,set=set cg_centertime 1.5,wait=1,cgis=centertime 1500,set=set cg_centertime 3,\
 set=set cg_crosshairAlpha 0,set=set cg_crosshairAlphaMin 0,wait=1,cgis=crosshair_alpha 0.00,\
-set=set cg_crosshairAlphaMin 0.75,wait=1,cgis=crosshair_alpha 0.75,holdkey=mouse2,releasekey=mouse2,wait=1,cgis=crosshair_alpha 0.75,\
-holdkey=mouse2,releasekey=mouse2,wait=1,set=set cg_crosshairAlpha 1,set=set cg_crosshairAlphaMin 0.5,\
+set=set cg_crosshairAlphaMin 0.75,wait=1,cgis=crosshair_alpha 0.75,holdkey=mouse2,releasekey=mouse2,wait=1,cgis=crosshair_alpha hidden,\
+holdkey=mouse2,releasekey=mouse2,wait=1,cgis=crosshair_alpha 0.75,set=set cg_crosshairAlpha 1,set=set cg_crosshairAlphaMin 0.5,\
 cgis=heli_camera -1000 50 15 0 1900 2100 2400 4 2,\
 set=set cg_heliKillCamDist 500,set=set cg_heliKillCamFov 40,set=set cg_heliKillCamZDist 80,\
 set=set cg_heliKillCamNearBlurStart 10,set=set cg_heliKillCamNearBlurEnd 200,\
