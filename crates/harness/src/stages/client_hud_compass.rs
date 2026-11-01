@@ -191,8 +191,10 @@ fn case(
         duration_verdict(played, hold, mark, 2000)?;
     }
     let length = c.lookup("hud.report.last_fire_ping_ms")?;
+    let played = c.lookup("hud.report.last_fire_played_ms")?;
+    let mark = c.lookup("hud.report.last_fire_mark_ms")?;
     Ok(format!(
-        "{label}: {} fire pings, {} flag pings, {} marks drawn, last ping {length} ms{}",
+        "{label}: {} fire pings, {} flag pings, {} marks drawn, hold {length} ms, audio {played} ms, mark lifetime {mark} ms{}",
         after.fire_pings - before.fire_pings,
         after.flag_pings - before.flag_pings,
         after.marks - before.marks,
@@ -226,7 +228,7 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
     exec(c, "set bot_idle 1")?;
     exec(c, "set developer 1")?;
     c.ask(json!({"cmd":"cvar", "name":"compassSoundPingFadeTime", "value":"2"}))?;
-    let result = (|| {
+    let result: Result<Vec<String>, String> = (|| {
         let bot = enemy_bot(c, enemy)?;
         let origin = c.lookup("player.origin")?;
         let at = |i: usize| origin[i].as_f64().unwrap_or(0.0);
@@ -242,6 +244,7 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
         Ok(notes)
     })();
     exec(c, "set bot_idle 0")?;
+    exec(c, "set developer 0")?;
     Ok(format!("compass: {}", result?.join("; ")))
 }
 
