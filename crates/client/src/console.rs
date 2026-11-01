@@ -10,35 +10,327 @@ pub const CHAT_MAX: usize = 149;
 /// Lines the console remembers to recall with the arrow keys.
 const HISTORY: usize = 64;
 
-/// Commands the client runs for the console (Tab completes them).
-const COMMANDS: &[&str] = &[
-    "bind",
-    "callvote",
-    "connect",
-    "devmap",
-    "disconnect",
-    "dvardump",
-    "dvarlist",
-    "exec",
-    "map",
-    "playdemo",
-    "quit",
-    "rcon",
-    "record",
-    "say",
-    "say_team",
-    "screenshot",
-    "screenshotjpeg",
-    "set",
-    "seta",
-    "stoprecord",
-    "toggle",
-    "unbind",
-    "unbindall",
-    "vid_restart",
-    "vote",
-    "vstr",
+/// Who carries out a client command. Typed, bound, menu and config lines all reach the owner the same way: the
+/// shell's command loop and the input layer route by this table, so a word known to one is known to both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner {
+    /// The input layer itself (`Input::exec_tokens`, `Input::run`): binds, dvars, stances, console channels.
+    Input,
+    /// The shell's command loop (`HostCx::run_buffer`), which a bind hands it to through `pending_commands`.
+    Shell,
+    /// The app's `console_action`.
+    App,
+    /// Read from the input frame's `pending_commands` by the app or the net play (`weapnext`, `togglemenu`, ...).
+    Frame,
+    /// The server's, sent through [`server_line`] (`say`, `callvote`, ...).
+    Server,
+    /// A cgame command with no handler (`CG_InitConsoleCommands`, KisakCOD cg_consolecmds_mp.cpp:84-110): in a
+    /// match it goes to the server as typed, otherwise it is unknown, as the cgame is not loaded.
+    Forward,
+    /// Stock, but not carried out by this build: a warning names it and #479.
+    Missing,
+}
+
+/// Every command the client knows besides the `+`/`-` buttons ([`BUTTONS`]), by its registered name: the stock
+/// multiplayer client's `Cmd_AddCommand` names (KisakCOD 1.8; the 1.7 table is not verified) and this build's own
+/// (`bots`, `name`, `playdemo`, `toggleconsole`, `drawvehicles`, the stats verbs the menus run, ...).
+const COMMANDS: &[(&str, Owner)] = {
+    use Owner::*;
+    &[
+        // cl_keys.cpp:1462-1465, dvar_cmds.cpp:525-537, cmd.cpp:441-446, con_channels.cpp:281-284.
+        ("bind", Input),
+        ("bindlist", Input),
+        ("unbind", Input),
+        ("unbindall", Input),
+        ("set", Input),
+        ("seta", Input),
+        ("sets", Input),
+        ("setu", Input),
+        ("toggle", Input),
+        ("togglep", Input),
+        ("reset", Input),
+        ("dvarlist", Input),
+        ("dvardump", Input),
+        ("cmdlist", Input),
+        ("exec", Input),
+        ("vstr", Input),
+        ("wait", Input),
+        ("con_channellist", Input),
+        ("con_showchannel", Input),
+        ("con_hidechannel", Input),
+        ("con_visiblechannellist", Input),
+        // cl_input.cpp:973-1047: the stance and ADS commands.
+        ("gocrouch", Input),
+        ("goprone", Input),
+        ("togglecrouch", Input),
+        ("toggleprone", Input),
+        ("lowerstance", Input),
+        ("raisestance", Input),
+        ("toggleads", Input),
+        ("leaveads", Input),
+        // cl_main_mp.cpp, cl_console.cpp:364, ui_main_mp.cpp, dvar_cmds.cpp, win_storage.cpp, r_cmds.cpp.
+        ("cinematic", Shell),
+        ("unskippablecinematic", Shell),
+        ("logo", Shell),
+        ("clear", Shell),
+        ("closemenu", Shell),
+        ("openmenu", Shell),
+        ("openScriptMenu", Shell),
+        ("connect", Shell),
+        ("reconnect", Shell),
+        ("disconnect", Shell),
+        ("demo", Shell),
+        ("playdemo", Shell),
+        ("map", Shell),
+        ("devmap", Shell),
+        ("vid_restart", Shell),
+        ("r_applyPicmip", Shell),
+        ("snd_restart", Shell),
+        ("writeconfig", Shell),
+        ("setfromdvar", Shell),
+        ("setdvartotime", Shell),
+        ("setfromlocString", Shell),
+        ("selectStringTableEntryInDvar", Shell),
+        ("statSet", Shell),
+        ("statGetInDvar", Shell),
+        ("statsetusingtable", Shell),
+        ("statclearbitmask", Shell),
+        ("statclearperknew", Shell),
+        ("setprofile", Shell),
+        ("updatedvarsfromprofile", Shell),
+        ("startSingleplayer", Shell),
+        // cl_main_mp.cpp (rcon, record, stoprecord, cmd), cl_input.cpp (centerview), cg_consolecmds_mp.cpp
+        // (mp_QuickMessage, viewpos); `bots` and `name` are this build's.
+        ("rcon", App),
+        ("record", App),
+        ("stoprecord", App),
+        ("cmd", App),
+        ("centerview", App),
+        ("mp_QuickMessage", App),
+        ("viewpos", App),
+        ("bots", App),
+        ("name", App),
+        ("quit", Frame),
+        ("toggleMenu", Frame),
+        ("chatmodepublic", Frame),
+        ("chatmodeteam", Frame),
+        ("toggleconsole", Frame),
+        ("togglefullscreen", Frame),
+        ("screenshot", Frame),
+        ("screenshotJpeg", Frame),
+        ("weapnext", Frame),
+        ("weapprev", Frame),
+        ("actionslot", Frame),
+        // This build's same-camera comparison switches (the net play reads them).
+        ("drawvehicles", Frame),
+        ("drawprops", Frame),
+        ("drawscriptmodels", Frame),
+        ("say", Server),
+        ("say_team", Server),
+        ("callvote", Server),
+        ("vote", Server),
+        ("kill", Server),
+        ("follownext", Server),
+        ("followprev", Server),
+        ("where", Server),
+        ("mr", Forward),
+        ("give", Forward),
+        ("take", Forward),
+        ("god", Forward),
+        ("demigod", Forward),
+        ("notarget", Forward),
+        ("noclip", Forward),
+        ("ufo", Forward),
+        ("levelshot", Forward),
+        ("setviewpos", Forward),
+        ("jumptonode", Forward),
+        ("stats", Forward),
+        ("team", Forward),
+        ("follow", Forward),
+        ("printentities", Forward),
+        ("muteplayer", Forward),
+        ("unmuteplayer", Forward),
+        ("VisionSetNaked", Forward),
+        ("VisionSetNight", Forward),
+    ]
+};
+
+/// The stock multiplayer client commands this build accepts but does not carry out (#479): each says so in a
+/// warning instead of `Unknown command`. `error`, `crash`, `freeze` and `assert` are not here: the original
+/// registers them only with `com_developer` (common.cpp:1328-1334).
+const MISSING: &[&str] = &[
+    "clientinfo",
+    "configstrings",
+    "cubemapShot",
+    "devgui",
+    "devgui_cmd",
+    "devgui_dvar",
+    "devgui_open",
+    "dumpraw",
+    "gfx_model",
+    "gfx_stats",
+    "gfx_world",
+    "imagelist",
+    "loadzone",
+    "meminfo",
+    "tempmeminfo",
+    "updatehunkusage",
+    "parseBadPacket",
+    "phys_go",
+    "phys_stop",
+    "ragdoll_baselerp_bone",
+    "ragdoll_bone",
+    "ragdoll_clear",
+    "ragdoll_joint",
+    "ragdoll_limit",
+    "ragdoll_pin_bone",
+    "ragdoll_selfpair",
+    "reloadmaterialtextures",
+    "r_loadsun",
+    "r_savesun",
+    "r_smc_flush",
+    "r_smc_stats",
+    "cg_shellshock",
+    "cg_shellshock_load",
+    "cg_shellshock_save",
+    "fxTest",
+    "fxSetTestPosition",
+    "restartsmokegrenades",
+    "updateFilmTweaks",
+    "updateGlowTweaks",
+    "timedemo",
+    "steam_testkick",
+    "dir",
+    "fdir",
+    "path",
+    "fullpath",
+    "touchFile",
+    "fs_openedList",
+    "fs_referencedList",
+    "net_dumpnetfieldchanges",
+    "net_dumpprofile",
+    "net_listen",
+    "net_restart",
+    "getqport",
+    "setqport",
+    "showip",
+    "localservers",
+    "globalservers",
+    "ping",
+    "serverstatus",
+    "dvar_bool",
+    "dvar_int",
+    "dvar_float",
+    "setenv",
+    "in_restart",
+    "writedefaults",
+    "snd_list",
+    "snd_playLocal",
+    "snd_refreshSpeakerMaps",
+    "snd_setEq",
+    "snd_setEqFreq",
+    "snd_setEqGain",
+    "snd_setEqQ",
+    "snd_setEqType",
+    "snd_deactivateEq",
+    "snd_setEnvironmentEffects",
+    "snd_deactivateEnvironmentEffects",
+    "snd_refreshVolumeModGroups",
+    "localizeSoundAliasFiles",
+    "statGet",
+    "readStats",
+    "uploadStats",
+    "resetStats",
+    "listmenus",
+    "VoiceChat",
+    "VoiceTeamChat",
 ];
+
+/// The `+`/`-` button commands (KisakCOD cl_input.cpp:973-1047, and the cgame's `+scores` and `+actionslot`,
+/// cg_consolecmds_mp.cpp). A `+` word not among them is unknown, typed or bound, as the original never forwards
+/// one (`CL_ForwardCommandToServer`).
+pub const BUTTONS: &[&str] = &[
+    "actionslot",
+    "activate",
+    "attack",
+    "back",
+    "breath_sprint",
+    "forward",
+    "frag",
+    "gostand",
+    "holdbreath",
+    "leanleft",
+    "leanright",
+    "left",
+    "lookdown",
+    "lookup",
+    "melee",
+    "melee_breath",
+    "mlook",
+    "movedown",
+    "moveleft",
+    "moveright",
+    "moveup",
+    "prone",
+    "reload",
+    "right",
+    "scores",
+    "smoke",
+    "speed",
+    "speed_throw",
+    "sprint",
+    "stance",
+    "strafe",
+    "talk",
+    "throw",
+    "toggleads_throw",
+    "usereload",
+];
+
+/// Who carries out `name` (any case); `None` for a word that is no client command (a dvar, or unknown).
+pub fn owner(name: &str) -> Option<Owner> {
+    if let Some(b) = name.strip_prefix(['+', '-']) {
+        return BUTTONS
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(b))
+            .then_some(Owner::Input);
+    }
+    COMMANDS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|&(_, o)| o)
+        .or_else(|| {
+            MISSING
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(name))
+                .then_some(Owner::Missing)
+        })
+}
+
+/// Every command name the client registers, as registered (`cmdlist`, Tab): the commands, the missing ones and
+/// the `+`/`-` buttons.
+pub fn names() -> impl Iterator<Item = String> {
+    COMMANDS
+        .iter()
+        .map(|(n, _)| (*n).to_owned())
+        .chain(MISSING.iter().map(|n| (*n).to_owned()))
+        .chain(
+            BUTTONS
+                .iter()
+                .flat_map(|b| [format!("+{b}"), format!("-{b}")]),
+        )
+}
+
+/// A stock command this build does not carry out (#479): one warning per command name, which the console shows.
+pub fn note_missing(name: &str) {
+    logging::dedup!(
+        WARN,
+        name,
+        command = name,
+        issue = 479,
+        "stock command not implemented"
+    );
+}
 
 /// What a console word names: what Tab completes it from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,10 +510,8 @@ impl Console {
         let (head, mut names) = match line.split_once(char::is_whitespace) {
             None => {
                 let want = line.to_ascii_lowercase();
-                let names = COMMANDS
-                    .iter()
-                    .filter(|c| c.starts_with(&want))
-                    .map(|c| (*c).to_owned())
+                let names = names()
+                    .filter(|c| c.to_ascii_lowercase().starts_with(&want))
                     .chain(complete(Want {
                         kind: Arg::Cvar,
                         prefix: &want,
@@ -269,91 +559,9 @@ impl Console {
     }
 }
 
-/// The client commands the server carries out; every other command is the client's own.
-const SERVER_VERBS: &[&str] = &[
-    "say",
-    "say_team",
-    "callvote",
-    "vote",
-    "kill",
-    "follownext",
-    "followprev",
-    "where",
-];
-
-/// Every command the client's menus, binds and console carry out (besides the `+`/`-` ones and the server's), for
-/// telling a typed word that is none of them.
-const OWN_COMMANDS: &[&str] = &[
-    "actionslot",
-    "bind",
-    "bots",
-    "centerview",
-    "chatmodepublic",
-    "chatmodeteam",
-    "cinematic",
-    "closemenu",
-    "cmd",
-    "connect",
-    "devmap",
-    "demo",
-    "disconnect",
-    "drawprops",
-    "drawscriptmodels",
-    "drawvehicles",
-    "dvardump",
-    "dvarlist",
-    "exec",
-    "gocrouch",
-    "goprone",
-    "logo",
-    "map",
-    "mp_quickmessage",
-    "name",
-    "openmenu",
-    "playdemo",
-    "quit",
-    "r_applypicmip",
-    "rcon",
-    "reconnect",
-    "record",
-    "screenshot",
-    "screenshotjpeg",
-    "seta",
-    "selectstringtableentryindvar",
-    "set",
-    "setdvartotime",
-    "setfromdvar",
-    "setfromlocstring",
-    "sets",
-    "setu",
-    "setprofile",
-    "snd_restart",
-    "statclearbitmask",
-    "statclearperknew",
-    "statgetindvar",
-    "statset",
-    "statsetusingtable",
-    "stoprecord",
-    "toggle",
-    "toggleconsole",
-    "togglefullscreen",
-    "togglemenu",
-    "unbind",
-    "unskippablecinematic",
-    "unbindall",
-    "updatedvarsfromprofile",
-    "vid_restart",
-    "vstr",
-    "wait",
-    "weapnext",
-    "weapprev",
-    "writeconfig",
-];
-
-/// Whether a console word is a command at all (a cvar is another matter).
+/// Whether a console word is a client command at all (a dvar is another matter).
 pub fn is_command(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    n.starts_with(['+', '-']) || is_server_verb(&n) || OWN_COMMANDS.contains(&n.as_str())
+    owner(name).is_some()
 }
 
 /// An unknown word typed at the console: a warning keyed by the command name (never its arguments, which may be a
@@ -362,65 +570,35 @@ pub fn note_unknown(name: &str) {
     logging::dedup!(WARN, name, command = name, "unknown command");
 }
 
-/// Whether `name` is a command the app answers itself in `console_action` (not the server's, not the input layer's).
+/// Whether the app's `console_action` carries `name` out from a bind or config line (its own commands, and the
+/// cgame's forwarded ones), not the input layer, the shell or the net play.
 pub fn is_own_verb(name: &str) -> bool {
-    const OWN: &[&str] = &[
-        "rcon",
-        "record",
-        "stoprecord",
-        "name",
-        "bots",
-        "cmd",
-        "centerview",
-        "mp_quickmessage",
-    ];
-    OWN.iter().any(|v| name.eq_ignore_ascii_case(v))
+    matches!(owner(name), Some(Owner::App | Owner::Forward))
 }
 
 /// Whether `name` is a command the shell's command loop carries out (`HostCx::run_buffer`), which a bind or a
 /// config line hands over to it through the input layer's `pending_commands`.
 pub fn is_shell_verb(name: &str) -> bool {
-    const SHELL: &[&str] = &[
-        "cinematic",
-        "closemenu",
-        "connect",
-        "demo",
-        "devmap",
-        "disconnect",
-        "logo",
-        "map",
-        "openmenu",
-        "playdemo",
-        "r_applypicmip",
-        "reconnect",
-        "selectstringtableentryindvar",
-        "setdvartotime",
-        "setfromdvar",
-        "setfromlocstring",
-        "setprofile",
-        "snd_restart",
-        "statclearbitmask",
-        "statclearperknew",
-        "statgetindvar",
-        "statset",
-        "statsetusingtable",
-        "unskippablecinematic",
-        "updatedvarsfromprofile",
-        "vid_restart",
-        "writeconfig",
-    ];
-    SHELL.iter().any(|v| name.eq_ignore_ascii_case(v))
+    owner(name) == Some(Owner::Shell)
 }
 
 /// Whether the shell hands `name` to the app as a console action (`console_action`) instead of the input layer:
-/// the server's verbs and the commands the app answers itself.
+/// the server's verbs, the forwarded ones and the commands the app answers itself.
 pub fn is_app_verb(name: &str) -> bool {
-    is_server_verb(name) || is_own_verb(name) || name.eq_ignore_ascii_case("togglemenu")
+    matches!(
+        owner(name),
+        Some(Owner::App | Owner::Server | Owner::Forward)
+    ) || name.eq_ignore_ascii_case("togglemenu")
 }
 
 /// Whether `name` (a command's first word) goes to the server.
 pub fn is_server_verb(name: &str) -> bool {
-    SERVER_VERBS.iter().any(|v| name.eq_ignore_ascii_case(v))
+    owner(name) == Some(Owner::Server)
+}
+
+/// Whether `name` is a cgame command without a handler, forwarded to the server as typed while in a match.
+pub fn is_forward_verb(name: &str) -> bool {
+    owner(name) == Some(Owner::Forward)
 }
 
 /// The line a server command is sent as: `say "text"`, `callvote clientkick 3`. The server's tokenizer has no
@@ -635,5 +813,40 @@ mod tests {
                 .iter()
                 .all(|c| is_command(c))
         );
+    }
+
+    /// One name, one owner: a command listed twice (or both carried out and missing) would route by whichever
+    /// came first.
+    #[test]
+    fn every_command_has_one_owner() {
+        let mut seen = std::collections::HashSet::new();
+        for n in names() {
+            assert!(seen.insert(n.to_ascii_lowercase()), "{n} listed twice");
+        }
+        assert!(BUTTONS.iter().all(|b| *b == b.to_ascii_lowercase()));
+        assert_eq!(owner("MeminFo"), Some(Owner::Missing));
+        assert_eq!(owner("openscriptmenu"), Some(Owner::Shell));
+        assert_eq!(owner("TOGGLEPRONE"), Some(Owner::Input));
+        assert_eq!(owner("give"), Some(Owner::Forward));
+        assert!(is_own_verb("viewpos") && is_own_verb("give") && !is_own_verb("say"));
+    }
+
+    /// Only the stock buttons are `+`/`-` commands: `+frobnicate` is unknown, typed or bound, as the original never
+    /// forwards a `+` word (`CL_ForwardCommandToServer`).
+    #[test]
+    fn only_stock_buttons_are_plus_commands() {
+        assert!(is_command("+attack") && is_command("-SCORES") && is_command("+melee_breath"));
+        assert!(!is_command("+frobnicate") && !is_command("-frobnicate"));
+        assert!(!is_command("+nightvision") && !is_command("+binoculars"));
+    }
+
+    #[test]
+    fn a_missing_command_warns_naming_its_issue() {
+        // A name no other test runs: the warning is rate limited per name across the test threads.
+        let (_, events) = logging::capture(|| note_missing("zz_missing_probe"));
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert!(e.level == tracing::Level::WARN && e.field("command") == Some("zz_missing_probe"));
+        assert_eq!(e.field("issue"), Some("479"));
     }
 }

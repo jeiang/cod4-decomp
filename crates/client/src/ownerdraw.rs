@@ -2,6 +2,7 @@
 // HUD vehicle and talker behavior follows KisakCOD (GPL-3.0), Infinity Ward:
 // cgame_mp/cg_compassfriendlies_mp.cpp:978 and cg_newDraw_mp.cpp:2287;
 // ui_mp/ui_main_mp.cpp:1495,1909. MP 1.8 reference; native 1.7 voice uses our codec.
+// Compass firing fades follow KisakCOD cgame_mp/cg_compassfriendlies_mp.cpp and cgame/cg_compass.cpp (GPL-3.0; copyright Activision and KisakCOD contributors).
 //! The HUD pieces the stock menus ask the client to draw (`ownerdraw` items): health, ammunition and weapon,
 //! grenades, stance, sprint, hints, the corner compass and the full-screen map.
 //!
@@ -22,6 +23,8 @@ use ::assets::zone::menu::ItemDef;
 
 const LOW_AMMO_COLOR: [f32; 3] = [0.89, 0.18, 0.01];
 const WHITE: [f32; 4] = [1.0; 4];
+/// The d-pad icon of a night vision slot (`cgMedia.hudIconNVG`, KisakCOD `cgame_mp/cg_main_mp.cpp:1717`).
+const NIGHT_VISION_ICON: &str = "hud_icon_nvg";
 
 /// The dvars the pieces read, with the original's defaults.
 struct Cfg {
@@ -42,6 +45,7 @@ struct Cfg {
     rotation: bool,
     show_enemies: bool,
     radar_ping_fade: f32,
+    sound_ping_fade: f32,
     radar_line_thickness: f32,
     map_radar_line_thickness: f32,
 }
@@ -68,6 +72,7 @@ impl Cfg {
             rotation: b("compassRotation", true),
             show_enemies: b("g_compassShowEnemies", false),
             radar_ping_fade: f("compassRadarPingFadeTime", 4.0).clamp(0.01, 60.0),
+            sound_ping_fade: f("compassSoundPingFadeTime", 2.0).clamp(0.01, 60.0),
             radar_line_thickness: f("compassRadarLineThickness", 0.4).clamp(0.01, 10.0),
             map_radar_line_thickness: f("cg_hudMapRadarLineThickness", 0.15).clamp(0.01, 10.0),
         }
@@ -1055,7 +1060,8 @@ fn dpad_back(dc: &mut Dc, h: &mut HudFacts) {
     }
 }
 
-/// `CG_DrawPlayerActionSlot`: the weapon icon of slot `i` and its ammunition (red when empty); lit while the weapon is held.
+/// `CG_DrawPlayerActionSlot`: the weapon icon of slot `i` and its ammunition (red when empty), or the goggles' icon of
+/// a night vision slot; lit while the weapon is held or the goggles are on.
 fn action_slot(dc: &mut Dc, h: &mut HudFacts, i: usize) {
     let mut a = ammo_alpha(dc.cfg, h) * dc.color[3];
     let s = h.slots[i].clone();
@@ -1068,7 +1074,14 @@ fn action_slot(dc: &mut Dc, h: &mut HudFacts, i: usize) {
         color[1] *= 0.97;
         color[2] *= 0.55;
     }
-    if a <= 0.0 || !s.usable || s.kind == sim::pm::action_slot::NIGHT_VISION {
+    if a <= 0.0 || !s.usable {
+        return;
+    }
+    // A night vision slot draws `cgMedia.hudIconNVG` over the whole slot and no count (KisakCOD
+    // `cgame/cg_ammocounter.cpp:501-525`).
+    if s.kind == sim::pm::action_slot::NIGHT_VISION {
+        dc.pic(NIGHT_VISION_ICON, dc.r, color);
+        h.night_vision_icon_frames += 1;
         return;
     }
     let Some(icon) = s.icon else { return };
@@ -1389,7 +1402,6 @@ fn mark_angle(rotation_up: bool, view_yaw: f32, north_yaw: f32, yaw: f32) -> f32
 }
 
 const FRIEND_RANGE_MS: i32 = 1500;
-const PING_MS: i32 = 2000;
 
 fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
     let a = if full { 1.0 } else { compass_alpha(dc, h) };
@@ -1409,11 +1421,11 @@ fn compass_friendlies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
             angle,
             alpha: a,
         });
-        if ac.fire_time != 0 && h.now - ac.fire_time <= PING_MS {
+        if let Some(fade) = ac.fire_alpha(h.now, dc.cfg.sound_ping_fade * 1000.0) {
             firing.push(Mark {
                 pos: ac.pos,
                 angle,
-                alpha: a * (1.0 - (h.now - ac.fire_time) as f32 / PING_MS as f32),
+                alpha: a * fade,
             });
         }
     }
@@ -1434,7 +1446,7 @@ fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
     };
     let fade_ms = dc.cfg.radar_ping_fade * 1000.0;
     let (mut seen, mut firing) = (Vec::new(), Vec::new());
-    for ac in h.actors.values().filter(|ac| !ac.friendly) {
+    for (&client, ac) in h.actors.iter().filter(|(_, ac)| !ac.friendly) {
         if dc.cfg.show_enemies {
             if ac.last_update >= h.now - FRIEND_RANGE_MS {
                 seen.push(Mark {
@@ -1450,17 +1462,21 @@ fn compass_enemies(dc: &mut Dc, h: &mut HudFacts, full: bool) {
                 alpha: a * (1.0 - (h.now - ac.radar_time).max(0) as f32 / fade_ms),
             });
         }
-        if ac.fire_time != 0 && h.now - ac.fire_time <= PING_MS {
+        if let Some(fade) = ac.fire_alpha(h.now, dc.cfg.sound_ping_fade * 1000.0) {
+            if client == h.last_fire_actor {
+                h.last_fire_mark_ms = h.now - ac.fire_time;
+            }
             firing.push(Mark {
                 pos: ac.fire_pos,
                 angle: 0.0,
-                alpha: a * (1.0 - (h.now - ac.fire_time) as f32 / PING_MS as f32),
+                alpha: a * fade,
             });
         }
     }
     if !dc.cfg.show_enemies {
         h.radar_marks += seen.len() as u32;
     }
+    h.enemy_firing_marks += firing.len() as u32;
     draw_marks(dc, h, &map, full, "compassping_enemy", &seen);
     draw_marks(dc, h, &map, full, "compassping_enemyfiring", &firing);
 }

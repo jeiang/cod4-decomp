@@ -3,16 +3,18 @@
 //! channel (#378) the way a person plays (#376). The real client starts its own listen server with nine bots and the
 //! stage picks a team and a class with the pointer, walks and aims with the keys and the mouse ([`Walker`]), changes
 //! class from the in-game menu while alive (the stock `_menus.gsc` answers with a bare-key bold message, which must
-//! come out localized), types a chat line, calls a vote and adds bots through the console, holds the scoreboard up
-//! with the Tab bind, throws a grenade with its key, waits for a message window to have a line up and for a bot to
-//! kill it (the killcam), comes back from the dead, and plays on until it has had a bot in its sights and fired.
-//! What the HUD got to show over the run (`hud.stats` of the state document, the counters `hud_draw` of
-//! `ui-script.json` held) is the verdict: the scoreboard must have listed the players, the message windows must have
-//! drawn lines, the script hud elements must have arrived, the killcam must have played behind the body, a teammate
-//! must have had a name over the head and the player under the crosshair a name of their own, and nothing may be on
-//! screen as a bare string key. Needs a display and the install; skips without.
+//! come out localized), types a chat line, calls a vote and adds bots through the console, puts the night vision
+//! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind, throws a grenade with
+//! its key, waits for a message window to have a line up and for a bot to kill it (the killcam), comes back from the
+//! dead, and plays on until it has had a bot in its sights and fired. What the HUD got to show over the run
+//! (`hud.stats` of the state document, the counters `hud_draw` of `ui-script.json` held) is the verdict: the
+//! scoreboard must have listed the players, the message windows must have drawn lines, the script hud elements must
+//! have arrived, the goggles must have drawn their overlay and d-pad icon (and the frame with them on must show the
+//! overlay over the world with the HUD still above it), the killcam must have played behind the body with its skip
+//! prompt over it, a teammate must have had a name over the head and the player under the crosshair a name of their
+//! own, and nothing may be on screen as a bare string key. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
-use super::client_models::no_display;
+use super::client_models::{decode, no_display};
 use super::client_session::{render_problem, steps_problem};
 use super::voice_speaker;
 use crate::control::{Driven, Walker};
@@ -42,6 +44,116 @@ const BOLD: usize = 1;
 /// Seconds after the spawn before a class change says anything: the stock grace period (`scr_war_graceperiod`, 15 s)
 /// runs from the match's start, which is before the spawn.
 const GRACE_SECS: f64 = 20.0;
+
+/// The night vision step's matched captures, the player held still: goggles off, off again a second later (what the
+/// view changes by on its own) and on.
+const NV_OFF: &str = "night_vision_off";
+const NV_STILL: &str = "night_vision_still";
+const NV_ON: &str = "night_vision";
+/// The overlay's picture is a screen of fine horizontal scanlines (about 7 rows apart in a 720-row capture), so a
+/// region it covers gains row-to-row ripple in its row means, whatever the world behind it shows; a bot walking by
+/// or the view's own change move the row means far less. The screen is cut into `NV_GRID` x `NV_GRID` cells.
+const NV_GRID: u32 = 4;
+/// The picture's vignette is near black in the corners, where the lines cannot show: all but those may miss.
+const NV_MIN_CELLS: usize = 12;
+/// Rows each side of a row whose mean the ripple is measured from.
+const NV_RADIUS: usize = 4;
+/// A cell shows the lines when its ripple with the goggles on is this much above the still view's, plus twice the
+/// ripple's own change between the two goggles-off captures.
+const NV_MIN_RISE: f64 = 1.5;
+/// The minimap of the compass in the driven client's 1280x720 window (left, top, right, bottom as fractions): HUD,
+/// drawn after the overlay (`CG_Draw2D` draws the overlay first), so the lines must not show on it.
+const NV_HUD: (f32, f32, f32, f32) = (0.01, 0.05, 0.12, 0.24);
+/// The most the minimap's ripple may rise with the goggles on.
+const NV_HUD_MAX_RISE: f64 = 1.0;
+
+fn luma(p: &[u8]) -> i32 {
+    (i32::from(p[0]) * 77 + i32::from(p[1]) * 150 + i32::from(p[2]) * 29) >> 8
+}
+
+/// The mean distance of each row's mean luma over `x0..x1` from the mean of the `NV_RADIUS` rows on each side.
+fn ripple(img: &[u8], w: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> f64 {
+    let rows: Vec<f64> = (y0..y1)
+        .map(|y| {
+            let sum: i64 = (x0..x1)
+                .map(|x| {
+                    let at = ((y * w + x) * 3) as usize;
+                    i64::from(luma(&img[at..at + 3]))
+                })
+                .sum();
+            sum as f64 / f64::from((x1 - x0).max(1))
+        })
+        .collect();
+    let span = 2 * NV_RADIUS + 1;
+    let away: Vec<f64> = rows
+        .windows(span)
+        .map(|win| (win[NV_RADIUS] - win.iter().sum::<f64>() / span as f64).abs())
+        .collect();
+    away.iter().sum::<f64>() / away.len().max(1) as f64
+}
+
+/// What the goggles changed between the matched captures.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct NvView {
+    /// Cells of the grid that gained the overlay's scanlines with the goggles on.
+    cells_changed: usize,
+    /// How much the minimap's ripple rose with the goggles on.
+    hud_rise: f64,
+}
+
+/// Compares the RGB pictures `off`, `still` (both goggles off) and `on`, each `w` x `h`.
+fn nv_measure(w: u32, h: u32, off: &[u8], still: &[u8], on: &[u8]) -> NvView {
+    let mut m = NvView::default();
+    for cy in 0..NV_GRID {
+        for cx in 0..NV_GRID {
+            let r = (
+                cx * w / NV_GRID,
+                cy * h / NV_GRID,
+                (cx + 1) * w / NV_GRID,
+                (cy + 1) * h / NV_GRID,
+            );
+            let (a, b, c) = (ripple(off, w, r), ripple(still, w, r), ripple(on, w, r));
+            if c - b >= NV_MIN_RISE + 2.0 * (b - a).abs() {
+                m.cells_changed += 1;
+            }
+        }
+    }
+    let (l, t, r, b) = NV_HUD;
+    let at = |f: f32, n: u32| ((f * n as f32) as u32).min(n);
+    let hud = (at(l, w), at(t, h), at(r, w), at(b, h));
+    m.hud_rise = ripple(on, w, hud) - ripple(still, w, hud);
+    m
+}
+
+/// What is wrong with the goggles' frame, or `None`.
+fn nv_problem(m: &NvView) -> Option<String> {
+    let mut bad = Vec::new();
+    if m.cells_changed < NV_MIN_CELLS {
+        bad.push(format!(
+            "the goggles' scanlines showed in {} of {} parts of the screen (need {NV_MIN_CELLS}): the overlay does not cover it",
+            m.cells_changed,
+            NV_GRID * NV_GRID
+        ));
+    }
+    if m.hud_rise > NV_HUD_MAX_RISE {
+        bad.push(format!(
+            "the minimap's row ripple rose {:.1} with the goggles on (at most {NV_HUD_MAX_RISE}): the overlay is over the HUD",
+            m.hud_rise
+        ));
+    }
+    (!bad.is_empty()).then(|| bad.join("; "))
+}
+
+/// Decodes the step's three captures from `dir` and measures them.
+fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
+    let load = |n: &str| decode(&dir.join(format!("{n}.png")));
+    let ((w, h, off), (w2, h2, still), (w3, h3, on)) =
+        (load(NV_OFF)?, load(NV_STILL)?, load(NV_ON)?);
+    if (w, h) != (w2, h2) || (w, h) != (w3, h3) {
+        return Err("the captures differ in size".into());
+    }
+    Ok(nv_measure(w, h, &off, &still, &on))
+}
 
 /// What is wrong with the HUD of a finished run, or `None`.
 pub(crate) fn verdict(report: &Value) -> Option<String> {
@@ -112,6 +224,33 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
     } else if n("killcam_you_frames") > 0 && !marked {
         bad.push("the killcam drew no head icon over the viewer's body");
     }
+    // A killcam shows the watcher's own live elements beside the killer's archived ones (#426): the stock
+    // `_killcam.gsc` skip prompt (a `PLATFORM_PRESS_TO_...` key) must have been drawn over the replay.
+    let prompt = h["killcam_live_text"].as_array().is_some_and(|t| {
+        t.iter()
+            .filter_map(Value::as_str)
+            .any(|t| t.contains("PRESS_TO"))
+    });
+    if n("killcam_frames") > 0 && !prompt {
+        bad.push("the killcam's skip prompt was never drawn over the replay");
+    }
+    // The goggles on (#427): their overlay over the screen and their icon in the d-pad slot.
+    if n("night_vision_frames") == 0 {
+        bad.push("the night vision goggles' overlay was never drawn");
+    }
+    if report["hud"]["night_vision_icon_frames"]
+        .as_u64()
+        .unwrap_or(0)
+        == 0
+    {
+        bad.push("the d-pad never drew the night vision icon");
+    }
+    let overlay_missing = report["missing_images"]
+        .as_array()
+        .is_some_and(|m| m.iter().any(|v| v == "nightvision_overlay_goggles"));
+    if overlay_missing {
+        bad.push("the night vision overlay's picture could not be loaded");
+    }
     // A message or hint that is still a string key (MP_CHANGE_CLASS_NEXT_SPAWN) was not localized.
     let keys: Vec<&str> = [&h["unresolved"], &report["hud"]["unresolved_text"]]
         .into_iter()
@@ -156,7 +295,9 @@ fn stat(c: &mut Driven, path: &str) -> Result<u64, String> {
     Ok(c.lookup(path)?.as_u64().unwrap_or(0))
 }
 
-/// Read the real person's last simulation frame, not an expected value supplied by the scenario.
+/// Observe an actual server tick atomically. Collecting UDP traffic briefly before the tick creates a backlog even
+/// when the renderer is slower than `sv_fps`; 150 ms at the 125 Hz send cap stays under the server's 24-command take
+/// per frame and its 64-command queue, so the latest received command is the latest one sent.
 fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<Value, String> {
     let start = Instant::now();
     let frames = |c: &mut Driven| -> Result<u64, String> {
@@ -167,7 +308,9 @@ fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<
     let first = frames(c)?;
     let mut last = Value::Null;
     while start.elapsed() < Duration::from_secs(30) {
-        let state = c.ask(json!({"cmd": "server", "op": "state", "what": "clients"}))?;
+        let state = c.ask(json!({
+            "cmd": "server", "op": "command_frame", "collect_ms": if empty { 0 } else { 150 }
+        }))?;
         let player = state["clients"]
             .as_array()
             .and_then(|a| a.iter().find(|p| p["slot"].as_u64() == Some(slot)))
@@ -212,7 +355,7 @@ fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<
     ))
 }
 
-/// Exercise both queued input and a frame without new input using the normal render/send cadence.
+/// Exercise queued and retained player input through the real UDP path, independent of rendering throughput.
 fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), String> {
     let fps = c.ask(json!({"cmd": "cvar", "name": "com_maxfps"}))?["value"].clone();
     let vsync = c.ask(json!({"cmd": "cvar", "name": "r_vsync"}))?["value"].clone();
@@ -224,8 +367,7 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
             .lookup("player.client")?
             .as_u64()
             .ok_or("no player slot")?;
-        // `r_vsync` reaches the surface only through `vid_restart`; while the display paces the frames, `com_maxfps`
-        // caps nothing and the client keeps sending a command every displayed frame.
+        // Uncap sending while collecting the backlog; this does not assume the GPU can exceed the server tick rate.
         c.ask(json!({"cmd": "cvar", "name": "r_vsync", "value": "0"}))?;
         c.console("vid_restart")?;
         c.ask(json!({"cmd": "cvar", "name": "com_maxfps", "value": "125"}))?;
@@ -301,6 +443,82 @@ fn meter_outline(shot: &Path, rect: &Value) -> Result<(), String> {
         return Err(format!(
             "the record meter's outline is not on screen at {rect}: top edge {top:.2} white, bottom {bottom:.2}"
         ));
+    }
+    Ok(())
+}
+
+/// The crosshair opacity seen per predicted weapon state during one keyed action.
+fn sample_crosshair(c: &mut Driven, until: Duration) -> Result<Vec<(u64, f64)>, String> {
+    let end = Instant::now() + until;
+    let mut seen = Vec::new();
+    while Instant::now() < end {
+        let p = c.state("player")?;
+        if p["alive"] != true {
+            return Err("the player died while checking the crosshair".into());
+        }
+        if let (Some(s), Some(a)) = (
+            p["visual_weapon_state"].as_u64(),
+            p["crosshair_alpha"].as_f64(),
+        ) {
+            seen.push((s, a));
+        }
+        c.frames(1)?;
+    }
+    Ok(seen)
+}
+
+/// What is wrong with crosshair samples: hidden states must be transparent, ready and firing visible.
+fn crosshair_problem(seen: &[(u64, f64)], hidden: &[u64], label: &str) -> Option<String> {
+    if let Some((s, a)) = seen.iter().find(|(s, a)| hidden.contains(s) && *a > 0.0) {
+        return Some(format!("{label}: crosshair alpha {a} in weapon state {s}"));
+    }
+    if !seen.iter().any(|(s, _)| hidden.contains(s)) {
+        return Some(format!("{label}: no frame in weapon states {hidden:?}"));
+    }
+    if let Some((s, a)) = seen.iter().find(|(s, a)| matches!(s, 0 | 5) && *a <= 0.0) {
+        return Some(format!(
+            "{label}: crosshair hidden in weapon state {s} ({a})"
+        ));
+    }
+    None
+}
+
+/// #413 / KisakCOD `cgame/cg_draw_reticles.cpp:601-627`: reload, weapon raise/drop and melee hide the crosshair;
+/// ready and firing keep it.
+fn crosshair_states(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.bind("+attack", "down")?;
+    let fire = sample_crosshair(c, Duration::from_millis(400));
+    c.bind("+attack", "up")?;
+    let fire = fire?;
+    if !fire.iter().any(|(s, a)| *s == 5 && *a > 0.0) {
+        return Err(format!("firing showed no crosshair: {fire:?}"));
+    }
+    c.until(
+        json!({"player.visual_weapon_state": 0}),
+        secs(5),
+        "the weapon did not settle after firing",
+    )?;
+    for (bind, hidden, label) in [
+        ("+reload", &[7][..], "reload"),
+        ("weapnext", &[1, 2, 3, 4][..], "raise/drop"),
+        ("+melee", &[12, 13, 14][..], "melee"),
+    ] {
+        // `weapnext` is bound to the wheel (`mwheelup` in `extra_binds.cfg`), which is not a key `bind` can press.
+        if bind == "weapnext" {
+            c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
+        } else {
+            c.bind(bind, "tap")?;
+        }
+        let seen = sample_crosshair(c, secs(4))?;
+        if let Some(why) = crosshair_problem(&seen, hidden, label) {
+            return Err(why);
+        }
+        c.until(
+            json!({"player.visual_weapon_state": 0, "player.crosshair_alpha": {"gt": 0.0}}),
+            secs(10),
+            &format!("the crosshair did not come back after {label}"),
+        )?;
     }
     Ok(())
 }
@@ -408,7 +626,6 @@ fn received_voice(c: &mut Driven, install: &Path, notes: &mut Vec<String>) -> Re
     }
     result
 }
-
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
 fn play(
     c: &mut Driven,
@@ -577,6 +794,16 @@ fn play(
         }
         Ok(())
     })?;
+    c.step("crosshair weapon states", crosshair_states)?;
+    c.step("compass firing pings", |c| {
+        notes.push(super::client_hud_compass::check(c)?);
+        c.until(
+            json!({"player.alive": true, "menu.open": {"len": 0}}),
+            secs(60),
+            "the player was not alive again after the compass checks",
+        )
+        .map(|_| ())
+    })?;
 
     c.step("key fallback aim and fire", |c| w.check_key_fallback(c))?;
     c.step("mouse input ready", |c| {
@@ -648,6 +875,50 @@ fn play(
         r
     })?;
 
+    // Night vision on the stock action slot 1 bind (every stock class gets `setactionslot(1, "nightvision")`): the
+    // goggles' overlay covers the screen under the HUD and the d-pad slot shows their icon
+    // (`CG_DrawNightVisionOverlay`, `CG_DrawPlayerActionSlot`); the same bind takes them off. The player stands still
+    // for the matched captures: two with the goggles off (what the view changes by on its own) and one with them on.
+    c.step("night vision", |c| {
+        w.stop(c)?;
+        c.until(
+            json!({"player.alive": true, "hud.live.killcam": false}),
+            secs(30),
+            "the player was not alive to put the goggles on",
+        )?;
+        let frames = stat(c, "hud.stats.night_vision_frames")?;
+        let icons = c
+            .lookup("hud.report.night_vision_icon_frames")?
+            .as_u64()
+            .unwrap_or(0);
+        c.pause(secs(1))?;
+        c.capture(NV_OFF)?;
+        c.pause(secs(1))?;
+        c.capture(NV_STILL)?;
+        c.bind("+actionslot 1", "tap")?;
+        c.until(
+            json!({
+                "hud.live.night_vision": true,
+                "hud.stats.night_vision_frames": {"gt": frames},
+                "hud.report.night_vision_icon_frames": {"gt": icons},
+            }),
+            secs(10),
+            "the goggles' overlay and d-pad icon were not drawn after the night vision bind",
+        )?;
+        c.pause(secs(1))?;
+        c.capture(NV_ON)?;
+        if c.lookup("player.alive")? != Value::Bool(true) {
+            return Err("the player died while the goggles' frames were captured".into());
+        }
+        c.bind("+actionslot 1", "tap")?;
+        c.until(
+            json!({"hud.live.night_vision": false}),
+            secs(10),
+            "the goggles did not come off on the second press",
+        )?;
+        Ok(())
+    })?;
+
     // A grenade thrown with its key: the count on the HUD drops once the throw is out.
     c.step("throw", |c| {
         let frag = c.lookup("hud.report.frag")?;
@@ -677,12 +948,20 @@ fn play(
                 secs(10),
                 "the scoreboard did not come up on the bind",
             )?;
-            let shown0 = stat(c, "hud.stats.scoreboard_frames")?;
-            let frames0 = stat(c, "client.frames")?;
-            c.pause(secs(2))?;
-            let shown = stat(c, "hud.stats.scoreboard_frames")?.saturating_sub(shown0);
-            let frames = stat(c, "client.frames")?.saturating_sub(frames0);
-            if frames < 10 || shown * 10 < frames * 9 {
+            // Read both counters from the same state document, and measure frames rather than assuming the GPU
+            // can render ten in two seconds. The hold must still span at least thirty actual frames.
+            let before = c.ask(json!({"cmd": "state"}))?;
+            let shown0 = before["hud"]["stats"]["scoreboard_frames"].as_u64().unwrap_or(0);
+            let frames0 = before["client"]["frames"].as_u64().unwrap_or(0);
+            c.until(
+                json!({"client.frames": {"ge": frames0 + 30}}),
+                secs(30),
+                "fewer than thirty frames were drawn while Tab was held",
+            )?;
+            let after = c.ask(json!({"cmd": "state"}))?;
+            let shown = after["hud"]["stats"]["scoreboard_frames"].as_u64().unwrap_or(0).saturating_sub(shown0);
+            let frames = after["client"]["frames"].as_u64().unwrap_or(0).saturating_sub(frames0);
+            if frames < 30 || shown * 10 < frames * 9 {
                 return Err(format!(
                     "the scoreboard was up on {shown} of the {frames} frames drawn while Tab was held"
                 ));
@@ -842,6 +1121,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     for f in [
         "scoreboard.png",
         "feed.png",
+        "night_vision_off.png",
+        "night_vision_still.png",
+        "night_vision.png",
         "killcam_first.png",
         "killcam_next.png",
         "killcam.png",
@@ -867,7 +1149,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     out.metrics.insert(format!("hud.{k}"), v);
                 }
             }
-            verdict(&report)
+            verdict(&report).or_else(|| match night_vision_view(&dir) {
+                Ok(m) => {
+                    out.metrics
+                        .insert("nv.cells_changed".into(), m.cells_changed as f64);
+                    out.metrics.insert("nv.hud_rise".into(), m.hud_rise);
+                    nv_problem(&m)
+                }
+                Err(e) => Some(format!(
+                    "the night vision captures could not be compared: {e}"
+                )),
+            })
         }
     };
     if let Some(why) = why {
@@ -898,8 +1190,11 @@ mod tests {
                 "messages": [2, 0, 0, 0], "obituaries": 3, "window_lines": [40, 0, 0, 0],
                 "killcam_frames": 120, "killcam_you_frames": 30, "names_max": 3, "crosshair_name_frames": 40,
                 "friends_in_sight_frames": 50, "crosshair_due_frames": 60,
-                "head_icon_materials": ["headiconyouinkillcam"], "chat": 1
+                "head_icon_materials": ["headiconyouinkillcam"], "chat": 1,
+                "killcam_live_text": ["&PLATFORM_PRESS_TO_SKIP"], "night_vision_frames": 60
             },
+            "hud": {"night_vision_icon_frames": 60},
+            "missing_images": [],
             "net": {"view": {"death_view_frames": 40, "death_view_range_max": 120.0, "dof_frames": 900}},
             "render": {"material_failures": {}, "image_failures": []},
         })
@@ -989,5 +1284,62 @@ mod tests {
         let mut r = good();
         r["steps"] = json!([{"step": "killcam", "ok": false, "note": "no bot killed the player"}]);
         assert!(verdict(&r).unwrap().contains("killcam"));
+        let mut r = good();
+        r["hud_draw"]["killcam_live_text"] = json!([]);
+        assert!(verdict(&r).unwrap().contains("skip prompt"));
+        let mut r = good();
+        r["hud_draw"]["night_vision_frames"] = json!(0);
+        r["hud"]["night_vision_icon_frames"] = json!(0);
+        r["missing_images"] = json!(["nightvision_overlay_goggles"]);
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("goggles' overlay")
+                && why.contains("night vision icon")
+                && why.contains("picture"),
+            "{why}"
+        );
+    }
+
+    const W: u32 = 320;
+    const H: u32 = 180;
+
+    /// A `W` x `H` picture: a smoothly shaded world with a flat white HUD block where the minimap is, and the same
+    /// picture with the goggles on, where `overlay` darkens three rows in every seven of the world it covers (and of
+    /// the HUD block when `over_hud`), as the goggles' scanlines do.
+    fn pictures(overlay: impl Fn(u32, u32) -> bool, over_hud: bool) -> (Vec<u8>, Vec<u8>) {
+        let (mut off, mut on) = (Vec::new(), Vec::new());
+        let hud = |x: u32, y: u32| (3..38).contains(&x) && (9..43).contains(&y);
+        for y in 0..H {
+            for x in 0..W {
+                let v = if hud(x, y) { 250 } else { 60 + x / 4 + y / 4 };
+                let line = y % 7 < 3 && overlay(x, y) && (!hud(x, y) || over_hud);
+                off.extend([v as u8; 3]);
+                on.extend([(if line { v * 7 / 10 } else { v }) as u8; 3]);
+            }
+        }
+        (off, on)
+    }
+
+    #[test]
+    fn the_goggles_frame_must_show_the_overlay_over_the_world_and_under_the_hud() {
+        let measure = |overlay: &dyn Fn(u32, u32) -> bool, over_hud| {
+            let (off, on) = pictures(overlay, over_hud);
+            nv_measure(W, H, &off, &off, &on)
+        };
+        let good = measure(&|_, _| true, false);
+        assert_eq!(good.cells_changed, 16);
+        assert!(good.hud_rise.abs() < 0.01, "{good:?}");
+        assert!(nv_problem(&good).is_none());
+        let none = measure(&|_, _| false, false);
+        assert_eq!(none.cells_changed, 0);
+        assert!(nv_problem(&none).unwrap().contains("does not cover"));
+        let quarter = measure(&|x, y| x < W / 2 && y < H / 2, false);
+        assert_eq!(quarter.cells_changed, 4);
+        let over = measure(&|_, _| true, true);
+        assert!(over.hud_rise > 5.0, "{over:?}");
+        assert!(nv_problem(&over).unwrap().contains("over the HUD"));
+        // A view that changes as much on its own as with the goggles shows no overlay.
+        let (off, on) = pictures(|_, _| true, false);
+        assert_eq!(nv_measure(W, H, &on, &off, &on).cells_changed, 0);
     }
 }

@@ -68,7 +68,6 @@ pub mod buttons {
     pub const BREATH: u32 = button::BREATH as u32;
     pub const FRAG: u32 = button::FRAG as u32;
     pub const SMOKE: u32 = button::SMOKE as u32;
-    pub const NIGHTVISION: u32 = button::NIGHTVISION as u32;
     pub const THROW: u32 = button::THROW as u32;
     pub const TEMP_STANCE: u32 = button::TEMP_STANCE as u32;
 }
@@ -158,6 +157,8 @@ fn button_bits(cmd: &str) -> u32 {
         "usereload" => USE_RELOAD,
         "melee" => MELEE,
         "frag" => FRAG,
+        // `IN_MeleeBreath_Down`: melee and hold breath (KisakCOD client_mp/cl_input.cpp:1004).
+        "melee_breath" => MELEE | BREATH,
         "smoke" => SMOKE,
         "gostand" | "moveup" => JUMP,
         "sprint" => SPRINT,
@@ -166,7 +167,6 @@ fn button_bits(cmd: &str) -> u32 {
         "leanleft" => LEAN_LEFT,
         "leanright" => LEAN_RIGHT,
         "throw" => THROW,
-        "nightvision" => NIGHTVISION,
         _ => 0,
     }
 }
@@ -249,6 +249,9 @@ pub struct Input {
     wait: Option<u32>,
     /// What commands said, for the console (see [`Input::take_messages`]).
     messages: Vec<String>,
+    /// The console's print channels (`con_showchannel`, ...): the shell drops the warnings and errors it shows
+    /// while `error` is hidden.
+    pub channels: logging::channels::Channels,
 }
 
 const MAX_EXEC_DEPTH: u32 = 8;
@@ -423,6 +426,7 @@ impl Input {
             backlog: VecDeque::new(),
             wait: None,
             messages: Vec::new(),
+            channels: logging::channels::Channels::default(),
         }
     }
 
@@ -907,7 +911,7 @@ impl Input {
             if let Some(held) = held {
                 for c in &cmds {
                     let n = c.toks[0].to_ascii_lowercase();
-                    if n.starts_with('+') && n != "+actionslot" {
+                    if n.starts_with('+') && n != "+actionslot" && crate::console::is_command(&n) {
                         held.push(format!("\0{}", &n[1..]));
                     }
                 }
@@ -977,7 +981,10 @@ impl Input {
                     // A press, not a held button: the game selects the slot's weapon once.
                     self.pending.push(config::join(&toks).replacen('+', "", 1));
                 }
-                (_, Some(started)) if toks[0].starts_with('+') => {
+                // A bound `+word` holds a stock button; any other is an unknown command (below), as typed.
+                (_, Some(started))
+                    if toks[0].starts_with('+') && crate::console::is_command(&toks[0]) =>
+                {
                     let h = self.hold(&toks[0][1..]);
                     started.push(h);
                 }
@@ -1105,11 +1112,11 @@ impl Input {
 
     /// `toggle <cvar> [values...]` (`Dvar_ToggleInternal`): with no values a number flips between 0 and 1; with
     /// values it takes the one after the current (numbers compare as numbers), or the first. The cvar's domain
-    /// (a float's range, an enum's names) is not modelled: this store keeps text.
-    fn toggle(&mut self, name: &str, values: &[&str]) {
+    /// (a float's range, an enum's names) is not modelled: this store keeps text. `true` when the value changed.
+    fn toggle(&mut self, name: &str, values: &[&str]) -> bool {
         let Some(current) = self.cvars.get(name).map(str::to_owned) else {
             self.say(format!("toggle failed: dvar '{name}' not found."));
-            return;
+            return false;
         };
         let same = |a: &str, b: &str| {
             a.eq_ignore_ascii_case(b)
@@ -1124,7 +1131,7 @@ impl Input {
                     self.say(format!(
                         "'toggle' with no arguments makes no sense for dvar '{name}'"
                     ));
-                    return;
+                    return false;
                 }
             },
             [first, ..] => values[..values.len() - 1]
@@ -1132,7 +1139,12 @@ impl Input {
                 .position(|v| same(v, &current))
                 .map_or(*first, |i| values[i + 1]),
         };
-        self.set_from_command(name, next, false);
+        self.set_from_command(name, next, false)
+    }
+
+    /// Whether `name` may name a dvar (`Dvar_IsValidName`, KisakCOD dvar.cpp:291): letters, digits and `_`.
+    fn is_dvar_name(name: &str) -> bool {
+        name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     }
 
     /// A `set`, `toggle` or bare-name write from a console, bind, menu or config (`Dvar_SetCommand`, an external
@@ -1164,6 +1176,15 @@ impl Input {
         }
         self.cvars.set(name, value, archive);
         self.dirty = true;
+        // `CG_LookingThroughNightVision` reads it to drop the goggles' overlay and vision set (KisakCOD
+        // `cgame/cg_visionsets.cpp:610`); this build does not, so a player who sets it is told.
+        if name.eq_ignore_ascii_case("nightVisionDisableEffects") && self.cvars.bool(name) {
+            tracing::warn!(
+                cvar = name,
+                value,
+                "nightVisionDisableEffects is not implemented (#399): the night vision goggles keep their effects"
+            );
+        }
         // The original has one dvar store for the client and the listen server it runs: a write to a variable the
         // server registers (`scr_war_scorelimit`, `g_gametype`, `sv_hostname`) is the server's too; it ignores the
         // client's own (#366).
@@ -1211,63 +1232,173 @@ impl Input {
         );
     }
 
-    /// `sink`: unknown commands go to `pending` (interactive); off while loading files.
+    /// One command the input layer was given (a bind, a typed line, a config line). `sink`: interactive, so a
+    /// `+`/`-` button holds or lets go and a command of someone else's goes to `pending`; off while the startup
+    /// configs load, where buttons are not pressed. The bad-argument lines are the stock ones (KisakCOD
+    /// cl_keys.cpp:1236-1387, dvar_cmds.cpp:200-360, con_channels.cpp:297-357, cmd.cpp:1268-1288).
     fn exec_tokens(&mut self, toks: &[String], sink: bool) {
+        use crate::console::{Owner, owner};
         let args: Vec<&str> = toks[1..].iter().map(String::as_str).collect();
         let name = toks[0].to_ascii_lowercase();
         match (name.as_str(), args.as_slice()) {
-            ("bind", [key, cmd]) => {
-                self.binds
-                    .insert(key.to_ascii_lowercase(), (*cmd).to_owned());
+            ("bind", []) => self.say("bind <key> [command] : attach a command to a key"),
+            ("bind" | "unbind", [key, ..]) if !keys::is_key_name(key) => {
+                self.say(format!("\"{key}\" isn't a valid key"));
+            }
+            ("bind", [key]) => {
+                let line = match self.bound(key) {
+                    Some(b) if !b.is_empty() => format!("\"{key}\" = \"{b}\""),
+                    _ => format!("\"{key}\" is not bound"),
+                };
+                self.say(line);
+            }
+            ("bind", [key, cmd @ ..]) => {
+                // `Key_Bind_f`: the words after the key, a word with a space quoted when there are several.
+                let several = cmd.len() > 1;
+                let joined = cmd
+                    .iter()
+                    .map(|w| {
+                        if several && w.contains(' ') {
+                            format!("\"{w}\"")
+                        } else {
+                            (*w).to_owned()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.binds.insert(key.to_ascii_lowercase(), joined);
                 self.dirty = true;
             }
             ("unbind", [key]) => {
                 self.binds.remove(&key.to_ascii_lowercase());
                 self.dirty = true;
             }
-            ("unbindall", []) => {
+            ("unbind", _) => self.say("unbind <key> : remove commands from a key"),
+            ("unbindall", _) => {
                 self.binds.clear();
                 self.dirty = true;
+            }
+            ("bindlist", _) => {
+                let lines: Vec<String> = self
+                    .binds
+                    .iter()
+                    .filter(|(_, b)| !b.is_empty())
+                    .map(|(k, b)| format!("{k} \"{b}\""))
+                    .collect();
+                for l in lines {
+                    self.say(l);
+                }
+            }
+            ("set", [n, _, ..]) if !Self::is_dvar_name(n) => {
+                self.say(format!("invalid variable name: {n}"));
             }
             ("set" | "seta" | "sets" | "setu", [n, values @ ..]) if !values.is_empty() => {
                 self.set_from_command(n, &values.join(" "), name == "seta");
             }
-            ("toggle", [n, values @ ..]) => self.toggle(n, values),
-            ("toggle", []) => self.say("USAGE: toggle <variable> <optional value sequence>"),
-            ("dvarlist", []) => self.dvar_list(None),
-            ("dvarlist", [m]) => self.dvar_list(Some(m)),
-            ("dvardump", []) => self.dvar_dump(None),
-            ("dvardump", [m]) => self.dvar_dump(Some(m)),
-            ("bind" | "unbind" | "unbindall" | "set" | "seta" | "sets" | "setu", _) => {
-                // Verb only: a `set` line may carry a password.
-                tracing::warn!(command = name.as_str(), args = args.len(), "bad arguments");
+            ("set" | "seta" | "sets" | "setu", _) => {
+                self.say(format!("USAGE: {name} <variable> <value>"));
             }
+            ("toggle", [n, values @ ..]) => {
+                self.toggle(n, values);
+            }
+            ("togglep", [n, values @ ..]) => {
+                if self.toggle(n, values) {
+                    let v = self.cvars.get(n).unwrap_or("").to_owned();
+                    self.say(format!("{n} toggled to {v}"));
+                }
+            }
+            ("toggle" | "togglep", []) => {
+                self.say(format!(
+                    "USAGE: {name} <variable> <optional value sequence>"
+                ));
+            }
+            ("reset", [n]) => {
+                if let Some(v) = self.cvars.reset_value(n).map(str::to_owned) {
+                    self.set_from_command(n, &v, false);
+                }
+            }
+            ("reset", _) => self.say("USAGE: reset <variable>"),
+            ("dvarlist", []) => self.dvar_list(None),
+            ("dvarlist", [m, ..]) => self.dvar_list(Some(m)),
+            ("dvardump", []) => self.dvar_dump(None),
+            ("dvardump", [m, ..]) => self.dvar_dump(Some(m)),
+            ("cmdlist", _) => {
+                let names: Vec<String> = crate::console::names().collect();
+                let lines = logging::channels::cmd_list(
+                    names.iter().map(String::as_str),
+                    args.first().copied(),
+                );
+                for l in lines {
+                    self.say(l);
+                }
+            }
+            (
+                "con_showchannel"
+                | "con_hidechannel"
+                | "con_channellist"
+                | "con_visiblechannellist",
+                _,
+            ) => {
+                for l in self.channels.command(&toks[0], &args).unwrap_or_default() {
+                    self.say(l);
+                }
+            }
+            // A `wait` in a config read at start-up: nothing is waiting to run after it.
+            ("wait", _) => {}
             // The stance commands set (goprone, gocrouch) or step (the rest) the latched stance, as the original's.
-            ("goprone", []) if sink => self.set_stance(buttons::PRONE),
-            ("gocrouch", []) if sink => self.set_stance(buttons::CROUCH),
-            ("togglecrouch", []) if sink => self.toggle_stance(buttons::CROUCH),
-            ("toggleprone", []) if sink => self.toggle_stance(buttons::PRONE),
-            ("lowerstance", []) if sink => self.lower_stance(),
-            ("raisestance", []) if sink => self.raise_stance(),
-            ("toggleads", []) if sink => self.using_ads = !self.using_ads,
-            ("leaveads", []) if sink => self.using_ads = false,
+            ("goprone", _) => self.set_stance(buttons::PRONE),
+            ("gocrouch", _) => self.set_stance(buttons::CROUCH),
+            ("togglecrouch", _) => self.toggle_stance(buttons::CROUCH),
+            ("toggleprone", _) => self.toggle_stance(buttons::PRONE),
+            ("lowerstance", _) => self.lower_stance(),
+            ("raisestance", _) => self.raise_stance(),
+            ("toggleads", _) => self.using_ads = !self.using_ads,
+            ("leaveads", _) => self.using_ads = false,
             ("+actionslot", _) if sink => {
                 self.pending.push(config::join(toks).replacen('+', "", 1))
             }
             ("-actionslot", _) => {}
-            _ if name.starts_with('+') && sink => self.console_hold(&name[1..], true),
-            _ if name.starts_with('-') && sink => self.console_hold(&name[1..], false),
-            // A bare cvar name shows or sets it (`Dvar_Command`, which `Cmd_ExecuteSingleCommand` tries after the
-            // commands); the command the input layer does not run goes to the pending list, whose consumers (the
-            // app, the shell, the net play) carry it out or, for a word nothing knows, forward it to the server
-            // or say `Unknown command` (`CL_ForwardCommandToServer`).
-            _ if sink => {
-                if !crate::console::is_command(&name) && self.dvar_command(&name, &args) {
-                    return;
+            _ => match owner(&name) {
+                Some(Owner::Input) if name.starts_with('+') => {
+                    if sink {
+                        self.console_hold(&name[1..], true);
+                    }
                 }
-                self.pending.push(config::join(toks))
-            }
-            _ => {}
+                Some(Owner::Input) if name.starts_with('-') => {
+                    if sink {
+                        self.console_hold(&name[1..], false);
+                    }
+                }
+                Some(Owner::Input) => {
+                    tracing::error!(command = name.as_str(), "input command without a handler");
+                }
+                Some(Owner::Missing) => crate::console::note_missing(&toks[0]),
+                // The cgame registers the server's commands without a handler (`CG_InitConsoleCommands`), so
+                // `Cmd_ExecuteSingleCommand` (KisakCOD cmd.cpp:1214-1250) tries a dvar of that name before forwarding.
+                Some(Owner::Forward) if self.dvar_command(&name, &args) => {}
+                // Someone else's: the pending list's consumers (the app, the shell, the net play) carry it out.
+                Some(_) => self.pending.push(config::join(toks)),
+                // A bare dvar name shows or sets it (`Dvar_Command`, which `Cmd_ExecuteSingleCommand` tries after
+                // the commands).
+                None if self.dvar_command(&name, &args) => {}
+                // Interactive, a word nothing knows goes to the app, which forwards it to the server or says
+                // `Unknown command` (`CL_ForwardCommandToServer`); a `-` word is dropped there, as the original's.
+                None if sink => self.pending.push(config::join(toks)),
+                None if name.starts_with('-') => {}
+                None => {
+                    crate::console::note_unknown(&toks[0]);
+                    self.say(format!("Unknown command \"{}\"", toks[0]));
+                }
+            },
+        }
+    }
+
+    /// The latched stance the commands set (`stand`, `crouch` or `prone`): the harness's `stanceis=` reads it.
+    pub fn stance_name(&self) -> &'static str {
+        match self.stance {
+            buttons::PRONE => "prone",
+            buttons::CROUCH => "crouch",
+            _ => "stand",
         }
     }
 
@@ -2548,15 +2679,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_exec_and_bad_arguments_warn_without_the_arguments() {
+    fn failed_exec_warns_and_bad_arguments_print_the_stock_usage() {
         let mut i = Input::detached();
+        i.take_messages();
         let (_, events) = logging::capture(|| {
             i.exec_line("exec no_such_config_anywhere");
             i.exec_line("set onlyname");
         });
         assert!(events.iter().any(|e| e.level == tracing::Level::WARN
             && e.field("name") == Some("no_such_config_anywhere")));
-        assert!(events.iter().any(|e| e.field("command") == Some("set")));
+        // `Dvar_Set_f` prints its usage (KisakCOD dvar_cmds.cpp:244); the line may hold a password, so nothing logs it.
+        assert!(
+            i.take_messages()
+                .iter()
+                .any(|m| m == "USAGE: set <variable> <value>")
+        );
+        assert!(!events.iter().any(|e| e.message.contains("onlyname")
+            || e.fields.iter().any(|(_, v)| v.contains("onlyname"))));
     }
 
     /// A word the input layer does not run pends for the app, which forwards it or says it is unknown; a cvar's
@@ -2614,6 +2753,13 @@ mod tests {
             return;
         };
         i.exec_text(&profile, None, false, 0);
+        // Every word of the stock profile is a command, a key or a dvar this build knows.
+        let said = i.take_messages();
+        assert!(
+            said.iter()
+                .all(|m| !m.contains("Unknown command") && !m.contains("isn't a valid key")),
+            "{said:?}"
+        );
         // The stock profile binds Pause to `toggle cl_paused` and the vote keys to the server's commands. Multiplayer
         // registers `cl_paused` read only (`CG_RegisterDvars`): the key says so and the value stays.
         if i.bound("pause") == Some("toggle cl_paused") {
@@ -2629,5 +2775,47 @@ mod tests {
             i.key("f1", true);
             assert_eq!(frame(&mut i).pending_commands, ["vote yes"]);
         }
+    }
+
+    /// One table routes typed, bound and config lines alike: the input layer's own commands run here and never reach
+    /// the pending list, everyone else's go there for the app, the shell or the net play, and a missing one warns.
+    #[test]
+    fn every_command_runs_where_its_owner_is() {
+        use crate::console::{Owner, owner};
+        for name in crate::console::names() {
+            if name.starts_with(['+', '-']) || name.eq_ignore_ascii_case("wait") {
+                continue;
+            }
+            let mut i = Input::bare();
+            i.exec_line(&name);
+            let pending = frame(&mut i).pending_commands;
+            match owner(&name) {
+                Some(Owner::Input | Owner::Missing) => {
+                    assert!(pending.is_empty(), "{name}: {pending:?}")
+                }
+                Some(Owner::Frame) => {}
+                _ => assert_eq!(pending, [name.clone()], "{name}"),
+            }
+        }
+        let mut i = Input::bare();
+        i.exec_line("bind zz_nokey x");
+        i.exec_line("seta zz_x");
+        assert_eq!(
+            i.take_messages(),
+            [
+                "\"zz_nokey\" isn't a valid key",
+                "USAGE: seta <variable> <value>"
+            ]
+        );
+        // A start-up config's unknown word is said, not dropped.
+        i.exec_text("zz_frob 1", None, false, 0);
+        assert_eq!(i.take_messages(), ["Unknown command \"zz_frob\""]);
+        // A server command the cgame registers without a handler yields to a dvar of its name (cmd.cpp:1214-1250).
+        i.exec_line("set give sentinel");
+        frame(&mut i);
+        i.take_messages();
+        i.exec_line("give");
+        assert_eq!(i.take_messages(), ["\"give\" is \"sentinel\""]);
+        assert!(frame(&mut i).pending_commands.is_empty());
     }
 }

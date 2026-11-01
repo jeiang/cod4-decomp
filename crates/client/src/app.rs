@@ -3276,6 +3276,11 @@ fn script_step(st: &mut State) -> bool {
                 format!("{name} is {have:?}"),
             );
         }
+        // The stance the stance commands latched: `stanceis=prone`.
+        "stanceis" => {
+            let have = st.input.stance_name();
+            done(have == arg, sc, format!("stance is {have}"));
+        }
         // The rows a list shows: `rows=2 1` is exactly one, `rows=2 +1` at least one; a list may take up to the
         // seconds after the colon (`rows=2 +1:15`, default 5) to get there, as a refresh takes its time.
         "rows" => {
@@ -4347,6 +4352,23 @@ fn console_action(st: &mut State, line: &str) {
                     net.center_view();
                 }
             }
+            // The cgame's `viewpos`: in a match it prints the drawn eye; without one the cgame's commands are not
+            // registered, so the word is forwarded or unknown as any other.
+            "viewpos" => match st
+                .net
+                .as_ref()
+                .filter(|n| n.in_match())
+                .and_then(NetPlay::viewpos)
+            {
+                Some(line) => say(st, &line),
+                None => forward_to_server(st, &cmd),
+            },
+            // The cgame's commands the server carries out (`give`, `noclip`, `follow`, ...): the line as typed. They
+            // have no handler of their own, so a dvar of the same name is shown or set instead (cmd.cpp:1214-1250).
+            v if crate::console::is_forward_verb(v) && st.input.cvar(v).is_some() => {
+                st.input.exec_line(&crate::input::config::join(&cmd));
+            }
+            v if crate::console::is_forward_verb(v) => forward_to_server(st, &cmd),
             v if crate::console::is_server_verb(v) => {
                 if let Some(net) = st.net.as_mut() {
                     if let Some(wire) = crate::console::server_line(&cmd) {
@@ -4355,6 +4377,10 @@ fn console_action(st: &mut State, line: &str) {
                 } else if let Some(sh) = st.shell.as_mut() {
                     sh.print_console(&format!("{}: not connected to a server", cmd[0]));
                 }
+            }
+            // An app command without an arm above would come back through the pending list every frame.
+            v if crate::console::is_own_verb(v) => {
+                tracing::error!(command = v, "app command without a handler");
             }
             v if crate::console::is_command(v) => {
                 st.input.exec_line(&crate::input::config::join(&cmd));
@@ -5770,6 +5796,7 @@ fn hud_state(st: &mut State) -> Value {
         "stats": sh.st.hud_stats.report(),
         "live": {
             "killcam": live.killcam,
+            "night_vision": live.night_vision,
             "dead": live.dead,
             "intermission": live.intermission,
             "following": live.following.is_some(),

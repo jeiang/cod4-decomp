@@ -253,6 +253,9 @@ struct Cvar {
     value: String,
     archive: bool,
     reset: Option<String>,
+    /// The value it was registered with: the default, or the first value of one a command created
+    /// (`Dvar_RegisterVariant` with an external source keeps it as the reset value).
+    registered: String,
 }
 
 pub struct Cvars {
@@ -268,6 +271,7 @@ impl Default for Cvars {
                 (
                     n.to_ascii_lowercase(),
                     Cvar {
+                        registered: value.clone(),
                         value,
                         archive,
                         reset: None,
@@ -358,6 +362,7 @@ impl Cvars {
                 value: String::new(),
                 archive: false,
                 reset: None,
+                registered: value.to_owned(),
             });
         value.clone_into(&mut c.value);
         c.archive |= archive;
@@ -380,9 +385,27 @@ impl Cvars {
                 value: String::new(),
                 archive: false,
                 reset: None,
+                registered: value.to_owned(),
             });
         value.clone_into(&mut c.value);
         value.clone_into(c.reset.get_or_insert_with(String::new));
+    }
+
+    /// What `reset <name>` restores (`Dvar_Reset`): the engine's reset value, a cheat dvar's, else the value it was
+    /// registered with. `None` for no such dvar.
+    pub fn reset_value(&self, name: &str) -> Option<&str> {
+        let c = self.map.get(&name.to_ascii_lowercase())?;
+        Some(
+            c.reset
+                .as_deref()
+                .or_else(|| {
+                    CHEAT
+                        .iter()
+                        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                        .map(|&(_, r)| r)
+                })
+                .unwrap_or(&c.registered),
+        )
     }
 
     /// `(name, value, archived)` of every cvar whose name matches the glob `filter` (`*` and `?`, any case; all
