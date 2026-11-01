@@ -269,6 +269,13 @@ const CHEAT: &[(&str, &str)] = &[
     ("compassMaxRange", "2500"),
 ];
 
+/// Float dvars registered with a range narrower than any number: name, min, max.
+const FLOAT_DOMAINS: &[(&str, f32, f32)] = &[
+    // `iw3mp.exe` 1.7's `cg_fov` registration (near 0x43adc1): min 65, max 80, `DVAR_ARCHIVE` only. KisakCOD
+    // (GPL-3.0, CoD4 MP 1.8), cgame_mp/cg_main_mp.cpp:366, allows up to 120.
+    ("cg_fov", 65.0, 80.0),
+];
+
 /// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other
 /// value is refused and says so, as stock refuses a value outside a dvar's domain (issue #369).
 const UNSUPPORTED: &[(&str, &str, &str)] = &[
@@ -413,6 +420,15 @@ impl Cvars {
             .iter()
             .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
             .map(|&(_, only, why)| (only, why))
+    }
+
+    /// The range of a float dvar whose registration bounds it (`Dvar_RegisterFloat`'s min and max): a write outside
+    /// it is refused (`Dvar_SetVariant` after `Dvar_ValueInDomain`).
+    pub fn float_domain(name: &str) -> Option<(f32, f32)> {
+        FLOAT_DOMAINS
+            .iter()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, min, max)| (min, max))
     }
 
     /// Set a value, creating the cvar if needed. `archive` only ever turns the flag on (`seta`).

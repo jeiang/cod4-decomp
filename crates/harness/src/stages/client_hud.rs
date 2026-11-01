@@ -1056,6 +1056,20 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
                 "the horizontal field of view is {got}, not the {want:.2} cg_fov 65 gives at aspect {aspect}"
             ));
         }
+        // 1.7 registers `cg_fov` from 65 to 80: a value outside is refused and the dvar keeps its value.
+        c.console("set cg_fov 90")?;
+        c.pause(Duration::from_millis(300))?;
+        let refused = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
+        c.console("set cg_fov 80")?;
+        c.pause(Duration::from_millis(300))?;
+        let widest = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
+        c.console("set cg_fov 65")?;
+        if refused["value"] != json!("65") || widest["value"] != json!("80") {
+            return Err(format!(
+                "cg_fov is {} after `set cg_fov 90` (the 1.7 range is 65 to 80) and {} after `set cg_fov 80`",
+                refused["value"], widest["value"]
+            ));
+        }
         Ok(())
     })?;
 

@@ -4813,9 +4813,11 @@ fn vid_restart(cli: &Cli, st: &mut State) {
 ///
 /// Never while a map loads: reconfiguring a surface fails (a panic) when another thread submits to the queue at the
 /// same moment, and the loader does. The size is kept in `pending_resize` until the load is done.
-/// `cg_fov` in degrees at 4:3, within the original's 1 to 160.
+/// `cg_fov` in degrees at 4:3, within `iw3mp.exe` 1.7's registered 65 to 80 (a value written past the console's
+/// range check, such as `--fov`, is held to it).
 fn cg_fov(input: &Input) -> f32 {
-    input.cvars.f32("cg_fov").clamp(1.0, 160.0)
+    let (min, max) = crate::input::Cvars::float_domain("cg_fov").unwrap_or((65.0, 80.0));
+    input.cvars.f32("cg_fov").clamp(min, max)
 }
 
 /// The world's field of view in degrees at 4:3 (`CG_GetViewFov`).

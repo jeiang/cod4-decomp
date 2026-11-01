@@ -435,11 +435,15 @@ impl ClientLink {
         for c in cmds {
             out.raw.push(c.clone());
             match ServerCmd::parse(&c) {
+                // The renderer's (`visionsetnaked`/`visionsetnight`, `shellshock`): the cgame's look takes them from
+                // the command stream, so they stay in it.
+                Some(ServerCmd::Vision { .. } | ServerCmd::ShellShock { .. }) | None => {
+                    out.reliable.push(c)
+                }
                 Some(cmd) => {
                     out.new_map |= matches!(cmd, ServerCmd::Map { .. });
                     self.ui.apply(cmd);
                 }
-                None => out.reliable.push(c),
             }
         }
         let mut readable = true;

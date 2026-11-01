@@ -1218,6 +1218,16 @@ impl Input {
             tracing::info!(cvar = name, value, "dvar value refused: {why}");
             return false;
         }
+        if let Some((min, max)) = cvar::Cvars::float_domain(name) {
+            // `Dvar_StringToValue` reads the number as `atof` does (0 for none); `Dvar_ValueInDomain` then refuses one
+            // outside the range, printed with `%g` (`Dvar_PrintDomain`), and the dvar keeps its value.
+            let v = value.trim().parse::<f32>().unwrap_or(0.0);
+            if !(min..=max).contains(&v) {
+                self.say(format!("'{v}' is not a valid value for dvar '{name}'"));
+                self.say(format!("  Domain is any number from {min} to {max}"));
+                return false;
+            }
+        }
         let changed = self.cvars.get(name) != Some(value);
         self.cvars.set(name, value, archive);
         self.dirty = true;
@@ -2477,24 +2487,38 @@ mod tests {
         let profile = dir.join("config_mp.cfg");
         std::fs::write(&profile, "seta cg_fov 65\nseta zz_profile_only 1\n").unwrap();
         let lines = [
-            "set cg_fov 90".to_owned(),
+            "set cg_fov 75".to_owned(),
             "seta zz_from_line \"a b\"".to_owned(),
             "bind f7 zz_bound".to_owned(),
             "set".to_owned(),
         ];
         let mut i = Input::new(Some(dir.clone()), None, &lines);
-        assert_eq!(i.cvar("cg_fov"), Some("90"), "set before the configs");
+        assert_eq!(i.cvar("cg_fov"), Some("75"), "set before the configs");
         assert_eq!(i.cvar("zz_from_line"), Some("a b"));
         i.use_profile(Some(profile), None);
         assert_eq!(i.cvar("cg_fov"), Some("65"), "the profile's config sets it");
         i.startup_variables(&lines);
-        assert_eq!(i.cvar("cg_fov"), Some("90"), "the command line outranks it");
+        assert_eq!(i.cvar("cg_fov"), Some("75"), "the command line outranks it");
         assert_eq!(i.cvar("zz_profile_only"), Some("1"));
         assert!(
             i.binds.values().all(|c| c != "zz_bound"),
             "only the set lines run before the client is up"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cg_fov_refuses_a_value_outside_its_range() {
+        let mut i = Input::detached();
+        i.exec_line("set cg_fov 75");
+        assert_eq!(i.cvar("cg_fov"), Some("75"));
+        i.exec_line("set cg_fov 90");
+        i.exec_line("set cg_fov 1");
+        assert_eq!(
+            i.cvar("cg_fov"),
+            Some("75"),
+            "1.7 registers 65 to 80 and keeps the value"
+        );
     }
 
     #[test]
