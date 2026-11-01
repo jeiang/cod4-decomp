@@ -48,8 +48,9 @@ pub fn serve(
     match oob {
         Oob::GetChallenge => Gate::Reply(Oob::Challenge(challenger.issue(from, now_secs))),
         Oob::GetInfo(c) => {
+            // `SVC_Info` sets `challenge` first (KisakCOD `server_mp/sv_main_mp.cpp:535`).
             let mut kv = info();
-            kv.push(("challenge".into(), c.to_string()));
+            kv.insert(0, ("challenge".into(), c.to_string()));
             Gate::Reply(Oob::InfoResponse(kv))
         }
         Oob::Connect {

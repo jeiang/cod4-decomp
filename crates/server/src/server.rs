@@ -66,7 +66,7 @@ fn plain_text(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
 
-/// `SV_GetChallenge`/`SV_Status`: the server's keywords, with the stock `demo ` marker under `fs_restrict`.
+/// `SVC_Status`/`SVC_GameCompleteStatus`: the server's keywords, with the stock `demo ` marker under `fs_restrict`.
 fn server_keywords(c: &Cvars) -> String {
     let keywords = c.string("sv_keywords");
     if c.bool("fs_restrict") {
@@ -74,6 +74,49 @@ fn server_keywords(c: &Cvars) -> String {
     } else {
         keywords.to_owned()
     }
+}
+
+/// `FS_iwIwd(name, "main")` (KisakCOD `qcommon/files.cpp:57`): one of the stock IWDs of `main`, `main/iw_00` to
+/// `main/iw_24` (`name` lowercase, `/`, extension kept).
+fn stock_iwd(name: &str) -> bool {
+    name.strip_prefix("main/iw_")
+        .and_then(|n| n.strip_suffix(".iwd"))
+        .is_some_and(|n| n.len() == 2 && n.bytes().all(|b| b.is_ascii_digit()) && n <= "24")
+}
+
+/// Whether `sv_referencedIwdNames` would name an IWD that is not a stock one of `main`, which makes `getinfo` and
+/// `getstatus` say `mod 1` (KisakCOD `server_mp/sv_main_mp.cpp:609-626`). The original lists the IWDs outside `main`
+/// and those of `main` a file was read from (`FS_ReferencedIwdNames`); this counts every non-localized IWD on the
+/// search path, so an extra IWD in `main` nothing was read from counts too.
+fn foreign_iwds(install: &Install) -> bool {
+    install
+        .vfs
+        .pure_iwds(&install.root)
+        .iter()
+        .any(|(name, _)| !stock_iwd(name))
+}
+
+/// The command line a listen server (the one a player starts from the client) boots with: `dedicated 0`, as the
+/// client program registers it, and `sv_pure 1`, which is ours: the original registers `sv_pure` 0 and its menus never
+/// set it, so its listen server is impure and says `mod 1` (README, `sv_pure`). `game` is the client's `fs_game`.
+pub fn listen_cmdline(port: u16, game: &str) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "+set",
+        "dedicated",
+        "0",
+        "+set",
+        "sv_pure",
+        "1",
+        "+set",
+        "net_port",
+        &port.to_string(),
+    ]
+    .map(String::from)
+    .to_vec();
+    if !game.is_empty() {
+        args.extend(["+set", "fs_game", game].map(String::from));
+    }
+    args
 }
 
 /// `Scr_CompileScripts`' `developer_script`: the `/# ... #/` blocks only compile when it is on.
@@ -343,6 +386,8 @@ pub struct Server {
     /// Whether this server may tell masters about itself (set by [`Self::announce_to_masters`]).
     masters_allowed: bool,
     heartbeats: crate::heartbeat::Heartbeats,
+    /// The search path holds an IWD that is not one of `main`'s stock `iw_00`..`iw_24` (see [`foreign_iwds`]).
+    foreign_iwds: bool,
 }
 
 /// Set by a signal handler (SIGINT, SIGTERM) so the server leaves its loop and says goodbye to its masters.
@@ -618,7 +663,8 @@ fn io_err(e: impl std::fmt::Display) -> String {
 
 impl Server {
     /// Boots a dedicated server on the install at `root`. `cmdline` is the program's
-    /// arguments after the executable name (`+set a b +exec server.cfg +map mp_crash`).
+    /// arguments after the executable name (`+set a b +exec server.cfg +map mp_crash`); a listen server's starts
+    /// with [`listen_cmdline`].
     pub fn boot(root: &Path, cmdline: &[String], echo: bool) -> Result<Self, String> {
         Self::boot_in(root, cmdline, echo, PathBuf::from("."))
     }
@@ -653,6 +699,7 @@ impl Server {
         let fs_game = cvars.string("fs_game").to_owned();
         let install = Install::open_game(root, &fs_game)
             .map_err(|e| format!("{}: {}", root.display(), io_err(e)))?;
+        let foreign_iwds = foreign_iwds(&install);
         let game = Game::new(cvars, Content::default());
         let mut s = Server {
             game,
@@ -687,6 +734,7 @@ impl Server {
             log_dir,
             masters_allowed: false,
             heartbeats: Default::default(),
+            foreign_iwds,
         };
         s.say("CoD4 MP headless server (cod4e)\n");
         s.say(&format!(
@@ -1072,7 +1120,11 @@ impl Server {
             .count()
     }
 
-    /// `SVC_Info`: the answer to `getinfo`. A key whose value is the default is left out, as at the original.
+    /// `SVC_Info`: the answer to `getinfo`, in the original's key order (`challenge`, which the original puts first,
+    /// is added by `net::connect::serve`). The reference is the CoD4 MP 1.7 `iw3mp.exe` (`SVC_Info` at
+    /// `0x531c..0x532163`); KisakCOD's 1.8 (`server_mp/sv_main_mp.cpp:488-634`) sends the same keys but `hc` and `od`.
+    /// A key whose value is empty is left out, as `Info_SetValueForKey` does, and so is one the original only sends
+    /// when it is set.
     pub fn server_info(&self) -> Vec<(String, String)> {
         let c = &self.game.cvars;
         let max = usize::try_from(c.int("sv_maxclients")).unwrap_or(0);
@@ -1082,16 +1134,15 @@ impl Server {
         let private_used = self.used_slots(0..private);
         let clients = private_used + self.used_slots(private..max);
         let max_clients = max - (private - private_used);
-        let mut kv = vec![
-            ("protocol".to_owned(), net::oob::PROTOCOL.to_string()),
-            ("hostname".into(), c.string("sv_hostname").to_owned()),
-            ("mapname".into(), self.map_name().unwrap_or("").to_owned()),
-        ];
-        let mut put = |k: &str, v: String| kv.push((k.to_owned(), v));
-        // A dedicated server that is not (or no longer) public says so, which takes it off a master's list.
-        if self.masters_allowed && c.int("sv_public") == 0 {
-            put("public", "0".into());
-        }
+        let mut kv = Vec::new();
+        let mut put = |k: &str, v: String| {
+            if !v.is_empty() {
+                kv.push((k.to_owned(), v));
+            }
+        };
+        put("protocol", net::oob::PROTOCOL.to_string());
+        put("hostname", c.string("sv_hostname").to_owned());
+        put("mapname", self.map_name().unwrap_or("").to_owned());
         if clients > 0 {
             put("clients", clients.to_string());
         }
@@ -1099,6 +1150,10 @@ impl Server {
             put("sv_maxclients", max_clients.to_string());
         }
         put("gametype", c.string("g_gametype").to_owned());
+        // The original also says `pure` when `fs_numServerIwds` is non-zero, but that count is the client side's: the
+        // IWD list of the pure server the same process's client is connected to (`FS_PureServerSetLoadedIwds`, from
+        // the systeminfo `sv_iwds`, which an `sv_pure 0` server leaves empty). A dedicated server never has one and a
+        // listen server's own client is told its `sv_pure`, so it comes to `sv_pure`.
         if c.bool("sv_pure") {
             put("pure", "1".into());
         }
@@ -1107,13 +1162,7 @@ impl Server {
                 put(key, c.int(cvar).to_string());
             }
         }
-        let game_dir = c.string("fs_game");
-        if !game_dir.is_empty() {
-            put("game", game_dir.to_owned());
-        }
-        // `SV_GetChallenge`/`SV_Status`: stock's server info carries `sv_keywords`, prefixed `demo ` under
-        // `fs_restrict` so a demo server is distinguishable.
-        put("sv_keywords", server_keywords(c));
+        put("game", c.string("fs_game").to_owned());
         if c.bool("sv_allowAnonymous") {
             put("sv_allowAnonymous", "1".into());
         }
@@ -1123,17 +1172,35 @@ impl Server {
         if !join_password(c).is_empty() {
             put("pswrd", "1".into());
         }
-        for (key, cvar) in [("ff", "scr_team_fftype"), ("kc", "scr_game_allowkillcam")] {
+        // `hc` and `od` (1.7 only, `0x531f15-0x531fa7`): `scr_hardcore` and `scr_oldschool`, which the scripts set.
+        for (key, cvar) in [
+            ("ff", "scr_team_fftype"),
+            ("kc", "scr_game_allowkillcam"),
+            ("hc", "scr_hardcore"),
+            ("od", "scr_oldschool"),
+        ] {
             if c.int(cvar) != 0 {
                 put(key, c.int(cvar).to_string());
             }
         }
-        // A dedicated server (the only kind here) is hardware type 2.
-        put("hw", "2".into());
-        put("mod", u8::from(!game_dir.is_empty()).to_string());
+        // `com_dedicated`: a dedicated server is hardware 2 (the original's Windows dedicated icon), a listen server
+        // 6 (Windows listen).
+        put("hw", if c.int("dedicated") != 0 { "2" } else { "6" }.into());
+        put("mod", u8::from(self.modded()).to_string());
         put("voice", u8::from(c.bool("sv_voice")).to_string());
         put("pb", u8::from(c.bool("sv_punkbuster")).to_string());
+        // Not the original's: our master's way to learn that a dedicated server is no (longer) public (README).
+        if self.masters_allowed && c.int("sv_public") == 0 {
+            put("public", "0".into());
+        }
         kv
+    }
+
+    /// `mod` in `getinfo` and `getstatus` (KisakCOD `server_mp/sv_main_mp.cpp:601-627` and `:391-415`): set unless
+    /// the server is pure, runs no `fs_game` and its IWDs are all stock ones of `main`.
+    fn modded(&self) -> bool {
+        let c = &self.game.cvars;
+        !c.bool("sv_pure") || !c.string("fs_game").is_empty() || self.foreign_iwds
     }
 
     /// `SVC_Status`: the answer to `getstatus`: the server info variables, the password and mod flags, and the
@@ -1151,7 +1218,7 @@ impl Server {
                 None => info.push((k.to_owned(), v)),
             };
         set("pswrd", u8::from(!join_password(c).is_empty()).to_string());
-        set("mod", u8::from(!c.string("fs_game").is_empty()).to_string());
+        set("mod", u8::from(self.modded()).to_string());
         if c.bool("fs_restrict") {
             let keywords = server_keywords(c);
             set("sv_keywords", keywords);
@@ -2691,6 +2758,8 @@ impl Server {
                 .load_map(&self.install, map)
                 .map_err(|e| format!("ERROR: {e}"))?;
         }
+        // `SV_SpawnServer` publishes `sv_referencedIwdNames` for the level: a custom map's IWDs are on it.
+        self.foreign_iwds = foreign_iwds(&self.install);
         self.game.cvars.force("mapname", map);
         self.game.cvars.force("sv_mapname", map);
         let fps = self.game.cvars.int("sv_fps").clamp(10, 1000);
@@ -3633,7 +3702,7 @@ mod tests {
     use super::{
         PERK_PARABOLIC, RotationPlan, VoiceRules, flood_drops, frame_cmds, hears_voice,
         menu_response_args, ping_field, plain_text, plan_rotation, register_core_dvars,
-        script_options, server_keywords,
+        script_options, server_keywords, stock_iwd,
     };
     use crate::client::{Client, Conn, Session, Team};
     use crate::cvar::Cvars;
@@ -3647,6 +3716,23 @@ mod tests {
         assert_eq!(server_keywords(&c), "hardcore harbor");
         c.set("fs_restrict", "1");
         assert_eq!(server_keywords(&c), "demo hardcore harbor");
+    }
+
+    #[test]
+    fn only_mains_iw_00_to_iw_24_are_stock_iwds() {
+        for stock in ["main/iw_00.iwd", "main/iw_13.iwd", "main/iw_24.iwd"] {
+            assert!(stock_iwd(stock), "{stock}");
+        }
+        for other in [
+            "main/iw_25.iwd",
+            "main/iw_1.iwd",
+            "main/iw_custom.iwd",
+            "main/xbase_00.iwd",
+            "mods/m/iw_00.iwd",
+            "main/iw_00.zip",
+        ] {
+            assert!(!stock_iwd(other), "{other}");
+        }
     }
 
     #[test]
