@@ -419,6 +419,44 @@ fn sample_crosshair(c: &mut Driven, until: Duration) -> Result<Vec<(u64, f64)>, 
     Ok(seen)
 }
 
+/// The crosshair opacity per predicted weapon state while `weapnext` switches the weapon. It comes from the wheel
+/// (`mwheelup` in `extra_binds.cfg`, not a key `bind` can press), sent again each second, at most three times, until
+/// the weapon starts to change (a drop or raise state, or a new weapon in hand): a single notch that left the weapon
+/// alone gave nothing to sample (#494). Also says how many notches went and which weapons were seen.
+fn sample_weapon_switch(
+    c: &mut Driven,
+    until: Duration,
+) -> Result<(Vec<(u64, f64)>, String), String> {
+    let from = c.state("player")?["weapon_index"].clone();
+    let end = Instant::now() + until;
+    let (mut seen, mut weapons) = (Vec::new(), vec![from.clone()]);
+    let (mut wheels, mut next_wheel, mut switching) = (0, Instant::now(), false);
+    while Instant::now() < end {
+        if !switching && wheels < 3 && Instant::now() >= next_wheel {
+            c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
+            wheels += 1;
+            next_wheel = Instant::now() + Duration::from_secs(1);
+        }
+        let p = c.state("player")?;
+        if p["alive"] != true {
+            return Err("the player died while checking the crosshair".into());
+        }
+        if let (Some(s), Some(a)) = (
+            p["visual_weapon_state"].as_u64(),
+            p["crosshair_alpha"].as_f64(),
+        ) {
+            switching |= (1..=4).contains(&s);
+            seen.push((s, a));
+        }
+        if !weapons.contains(&p["weapon_index"]) {
+            weapons.push(p["weapon_index"].clone());
+        }
+        switching |= p["weapon_index"] != from;
+        c.frames(1)?;
+    }
+    Ok((seen, format!("{wheels} wheel notches, weapons {weapons:?}")))
+}
+
 /// What is wrong with crosshair samples: hidden states must be transparent, ready and firing visible.
 fn crosshair_problem(seen: &[(u64, f64)], hidden: &[u64], label: &str) -> Option<String> {
     if let Some((s, a)) = seen.iter().find(|(s, a)| hidden.contains(s) && *a > 0.0) {
@@ -456,15 +494,18 @@ fn crosshair_states(c: &mut Driven) -> Result<(), String> {
         ("weapnext", &[1, 2, 3, 4][..], "raise/drop"),
         ("+melee", &[12, 13, 14][..], "melee"),
     ] {
-        // `weapnext` is bound to the wheel (`mwheelup` in `extra_binds.cfg`), which is not a key `bind` can press.
-        if bind == "weapnext" {
-            c.ask(json!({"cmd": "wheel", "y": 1.0}))?;
+        let (seen, how) = if bind == "weapnext" {
+            sample_weapon_switch(c, secs(5))?
         } else {
             c.bind(bind, "tap")?;
-        }
-        let seen = sample_crosshair(c, secs(4))?;
+            (sample_crosshair(c, secs(4))?, String::new())
+        };
         if let Some(why) = crosshair_problem(&seen, hidden, label) {
-            return Err(why);
+            return Err(if how.is_empty() {
+                why
+            } else {
+                format!("{why} ({how})")
+            });
         }
         c.until(
             json!({"player.visual_weapon_state": 0, "player.crosshair_alpha": {"gt": 0.0}}),
