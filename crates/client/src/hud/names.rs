@@ -213,6 +213,11 @@ fn sees_head(p: &NearPlayer, eye: [f32; 3], cfg: &Cfg) -> bool {
 }
 
 impl Names {
+    /// How long the crosshair has been on its player (`crosshairClientLastTime - crosshairClientStartTime`), ms.
+    pub fn crosshair_held(&self) -> i32 {
+        self.cross.last - self.cross.start
+    }
+
     /// Settles this frame's names and icons. `colors` are the viewer's-team and other-team name colours.
     pub fn update(&mut self, live: &LiveUi, cfg: &Cfg, colors: [[f32; 4]; 2]) {
         self.names.clear();
@@ -288,12 +293,13 @@ impl Names {
                 put(&mut self.names, p, alpha, false);
             }
         }
-        // The crosshair's player: its timers run whether or not the name is drawn, as in the original.
+        // The crosshair's player: its timers run whether or not the name is drawn, as in the original. The enemy
+        // fade-out holds only when the scan took the enemy branch (`CG_ScanForCrosshairEntity`).
         if let Some(hit) = live.scan.crosshair {
-            let fade_out = if friendly(live.team(hit)) {
-                cfg.friendly_fade_out
-            } else {
+            let fade_out = if live.scan.weap_flags & sim::pm::wf::ENEMY_IN_CROSSHAIR != 0 {
                 cfg.enemy_fade_out
+            } else {
+                cfg.friendly_fade_out
             };
             if self.cross.client != hit || now - self.cross.last > fade_out {
                 self.cross = Cross {
@@ -524,6 +530,7 @@ mod tests {
                 near,
                 crosshair,
                 flashed: false,
+                weap_flags: 0,
             },
             ..LiveUi::default()
         }

@@ -4,10 +4,12 @@
 //! stage picks a team and a class with the pointer, walks and aims with the keys and the mouse ([`Walker`]), changes
 //! class from the in-game menu while alive (the stock `_menus.gsc` answers with a bare-key bold message, which must
 //! come out localized), types a chat line, calls a vote and adds bots through the console, puts the night vision
-//! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind, throws a grenade with
-//! its key, waits for a message window to have a line up and for a bot to kill it (the killcam), comes back from the
-//! dead, and plays on until it has had a bot in its sights and fired. What the HUD got to show over the run
-//! (`hud.stats` of the state document, the counters `hud_draw` of `ui-script.json` held) is the verdict: the
+//! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind, cooks a grenade with its
+//! key (the crosshair's centre dot must grow with the fuse) and throws it, waits for a message window to have a line
+//! up and for a bot to kill it (the killcam), comes back from the dead, plays on until it has had a bot in its sights
+//! and fired, then holds its sights on an enemy and on a teammate until the crosshair takes each one's team colour.
+//! What the HUD got to show over the run (`hud.stats` of the state document, the counters `hud_draw` of
+//! `ui-script.json` held) is the verdict: the
 //! scoreboard must have listed the players, the message windows must have drawn lines, the script hud elements must
 //! have arrived, the goggles must have drawn their overlay and d-pad icon (and the frame with them on must show the
 //! overlay over the world with the HUD still above it), the killcam must have played behind the body with its skip
@@ -163,6 +165,96 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
     Ok(nv_measure(w, h, &off, &still, &on))
 }
 
+/// The crosshair colour steps, once the server has `sv_cheats` on: waits for the client to take it, puts the
+/// player in `god` mode, then holds the sights on an enemy, on an enemy with `cg_crosshairEnemyColor 0`, and on a
+/// teammate.
+fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
+    c.step("crosshair cheats", |c| {
+        let end = Instant::now() + Duration::from_secs(15);
+        while c.ask(json!({"cmd": "cvar", "name": "sv_cheats"}))?["value"] != "1" {
+            if Instant::now() > end {
+                return Err("the client never took sv_cheats 1 from the server".to_owned());
+            }
+            c.pause(Duration::from_millis(250))?;
+        }
+        c.ask(json!({"cmd": "exec", "line": "god"})).map(|_| ())
+    })?;
+    // Held fire keeps an enemy alive under the sights through the fade-in; `god` keeps the player alive.
+    w.hold_fire = true;
+    c.step("crosshair over an enemy", |c| {
+        let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
+        w.drive_until(
+            c,
+            json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
+            Duration::from_secs(100),
+            "the crosshair never took the enemy team's colour over an enemy",
+        )?;
+        c.capture("crosshair_enemy").map(|_| ())
+    })?;
+    // `cg_crosshairEnemyColor 0` keeps the reticle white over an enemy held past the fade-in.
+    c.step("crosshair enemy colour off", |c| enemy_colour_off(c, w))?;
+    c.step("crosshair over a teammate", |c| {
+        let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
+        w.friends = true;
+        let r = w.drive_until(
+            c,
+            json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
+            Duration::from_secs(100),
+            "the crosshair never took the player's team colour over a teammate",
+        );
+        w.friends = false;
+        r?;
+        c.capture("crosshair_friend").map(|_| ())
+    })
+}
+
+/// With `sv_cheats` on at the server: waits for the client to take it, sets `cg_crosshairEnemyColor 0` through the
+/// console, then drives onto an enemy in range until the reticle has been due a tint for a second's worth of
+/// frames, every one of which must have been white.
+fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let set = c.ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "0"}))?;
+        if set["value"] == "0" {
+            break;
+        }
+        if Instant::now() > end {
+            return Err(format!(
+                "cg_crosshairEnemyColor stayed {} after the server turned sv_cheats on",
+                set["value"]
+            ));
+        }
+        c.pause(Duration::from_millis(250))?;
+    }
+    // Both counters from the same state document: two reads would let frames land between them.
+    let counts = |c: &mut Driven| -> Result<(u64, u64), String> {
+        let s = c.ask(json!({"cmd": "state"}))?;
+        let n = |k: &str| s["hud"]["stats"][k].as_u64().unwrap_or(0);
+        Ok((
+            n("crosshair_enemy_due_frames"),
+            n("crosshair_enemy_due_white_frames"),
+        ))
+    };
+    let (due, white) = counts(c)?;
+    w.drive_until(
+        c,
+        json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
+        Duration::from_secs(150),
+        "the crosshair was never held on an enemy past the fade-in with cg_crosshairEnemyColor 0",
+    )?;
+    c.capture("crosshair_enemy_white")?;
+    let (due, white) = {
+        let (d, wh) = counts(c)?;
+        (d - due, wh - white)
+    };
+    if white != due {
+        return Err(format!(
+            "with cg_crosshairEnemyColor 0 the crosshair over an enemy was white on {white} of {due} frames"
+        ));
+    }
+    Ok(())
+}
+
 /// What is wrong with the HUD of a finished run, or `None`.
 pub(crate) fn verdict(report: &Value) -> Option<String> {
     if let Some(w) = steps_problem(report) {
@@ -222,6 +314,27 @@ pub(crate) fn verdict(report: &Value) -> Option<String> {
         bad.push("the crosshair was never on a player in range, so none was ever named");
     } else if n("crosshair_name_frames") == 0 {
         bad.push("the crosshair was on a player but never named them");
+    }
+    // The crosshair's tint (#414): white, or the colour of the team of the player it is on, never another.
+    fn strs(v: &Value) -> Vec<&str> {
+        v.as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    }
+    let team = strs(&h["crosshair_team_tints"]);
+    let only = |k: &str, i: usize| {
+        strs(&h[k])
+            .iter()
+            .all(|t| *t == "1.000 1.000 1.000" || team.get(i) == Some(t))
+    };
+    if !only("crosshair_friend_tints", 0) {
+        bad.push("the crosshair over a teammate was drawn in a colour other than white or the player's team's");
+    }
+    if !only("crosshair_enemy_tints", 1) {
+        bad.push("the crosshair over an enemy was drawn in a colour other than white or the enemy team's");
+    }
+    if n("crosshair_stray_tint_frames") > 0 {
+        bad.push("the crosshair was tinted with no player under it");
     }
     // The killcam shows the viewer's own body, which carries the "you" marker over its head.
     let marked = h["head_icon_materials"]
@@ -883,7 +996,8 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         Ok(())
     })?;
 
-    // A grenade thrown with its key: the count on the HUD drops once the throw is out.
+    // A grenade cooked and thrown with its key: while it cooks the crosshair's centre dot grows with the fuse
+    // (`CG_DrawReticleCenter`, #419), and the count on the HUD drops once the throw is out.
     c.step("throw", |c| {
         let frag = c.lookup("hud.report.frag")?;
         let (key, before) = match (frag.as_u64(), c.lookup("hud.report.second")?.as_u64()) {
@@ -891,14 +1005,47 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             (None, Some(n)) => ("hud.report.second", n),
             (None, None) => return Err("the HUD shows no grenade to throw".to_owned()),
         };
+        let cooked = c
+            .lookup("hud.stats.crosshair_cook_frames")?
+            .as_u64()
+            .unwrap_or(0);
         c.bind("+frag", "down")?;
-        let r = c.until(
+        // The dot is half again its size at the first cooked frame (3.5 s left); half a second of cooking shows it.
+        let cooking = c
+            .until(
+                json!({"player.grenade_time_left": {"gt": 0}, "hud.stats.crosshair_cook_frames": {"gt": cooked + 30}}),
+                secs(10),
+                "holding the grenade key cooked no grenade under a drawn crosshair",
+            )
+            .and_then(|_| c.capture("crosshair_cook").map(|_| ()));
+        if let Err(e) = cooking {
+            c.bind("+frag", "up")?;
+            return Err(e);
+        }
+        let grown = c
+            .lookup("hud.stats.crosshair_cook_growth_max")?
+            .as_f64()
+            .unwrap_or(0.0);
+        c.bind("+frag", "up")?;
+        if grown < 5.0 {
+            return Err(format!(
+                "the crosshair's centre grew by at most {grown} while the grenade cooked"
+            ));
+        }
+        c.until(
             json!({key: {"lt": before}}),
             secs(30),
             "the grenade count never dropped",
-        );
-        c.bind("+frag", "up")?;
-        r
+        )?;
+        // The cooked grenade goes off a few seconds after the throw, and one that bounces back off a wall can kill
+        // the thrower: let it go off and the player be back on their feet before the scoreboard's look checks.
+        c.pause(secs(4))?;
+        c.until(
+            json!({"hud.report.live": true, "hud.live.killcam": false, "hud.live.dead": false, "hud.report.health": {"gt": 0}}),
+            secs(120),
+            "the player did not come back after the cooked grenade",
+        )
+        .map(|_| ())
     })?;
 
     // The scoreboard held up by the Tab bind, with every player on it, and up on every frame while the key is down
@@ -1022,6 +1169,27 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         }
         w.stop(c)
     })?;
+    // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414). The colour steps run
+    // with `sv_cheats` on at the listen server (forced, as `devmap` sets it; the client takes it from the
+    // systeminfo) and the player in `god` mode, so the walker's sights stay on players rather than on killcams.
+    let cheats = c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats"}))?["value"]
+        .as_str()
+        .unwrap_or("0")
+        .to_owned();
+    let force = |c: &mut Driven, v: &str| {
+        c.ask(
+            json!({"cmd": "server", "op": "cvar", "name": "sv_cheats", "value": v, "force": true}),
+        )
+    };
+    force(c, "1")?;
+    let r = crosshair_colours(c, w);
+    w.hold_fire = false;
+    let restored = c
+        .ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "1"}))
+        .and_then(|_| c.ask(json!({"cmd": "exec", "line": "god"})))
+        .and_then(|_| force(c, &cheats));
+    r?;
+    restored?;
     notes.push(format!(
         "the stage's player turned with {}; {} ticks, {} shots",
         w.turning(),
@@ -1195,6 +1363,19 @@ mod tests {
         let why = verdict(&r).unwrap();
         assert!(
             why.contains("no teammate was ever in sight") && why.contains("never on a player"),
+            "{why}"
+        );
+        // The crosshair tinted in the wrong team's colour, or with nobody under it.
+        let mut r = good();
+        r["hud_draw"]["crosshair_team_tints"] = json!(["0.400 0.600 0.850", "0.750 0.250 0.250"]);
+        r["hud_draw"]["crosshair_friend_tints"] = json!(["1.000 1.000 1.000", "0.400 0.600 0.850"]);
+        r["hud_draw"]["crosshair_enemy_tints"] = json!(["0.750 0.250 0.250"]);
+        assert_eq!(verdict(&r), None);
+        r["hud_draw"]["crosshair_enemy_tints"] = json!(["0.400 0.600 0.850"]);
+        r["hud_draw"]["crosshair_stray_tint_frames"] = json!(3);
+        let why = verdict(&r).unwrap();
+        assert!(
+            why.contains("over an enemy") && why.contains("no player under it"),
             "{why}"
         );
         let mut r = good();

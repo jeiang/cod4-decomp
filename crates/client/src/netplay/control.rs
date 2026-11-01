@@ -56,6 +56,12 @@ fn player(st: &NetPlay) -> Value {
         // The same predicted frame that supplied the rendered reticle, not an older snapshot.
         "visual_weapon_state": st.hud_view.as_ref().map(|(ps, _)| ps.weapon_state),
         "crosshair_alpha": st.reticle.as_ref().map_or(0.0, crate::crosshair::alpha),
+        // The crosshair's centre size this frame (a cooked grenade grows it), and the crosshair bits the client put
+        // on its predicted `weapFlags` (8 a teammate, 0x10 an enemy in range).
+        "crosshair_center": st.reticle.as_ref().and_then(crate::crosshair::center_size),
+        "crosshair_flags": st.hud_view.as_ref().map_or(0, |(ps, _)| ps.weapon_flags
+            & (sim::pm::wf::FRIEND_IN_CROSSHAIR | sim::pm::wf::ENEMY_IN_CROSSHAIR)),
+        "grenade_time_left": st.hud_view.as_ref().map(|(ps, _)| ps.grenade_time_left),
         // Per weapon state, `[frames, frames with a visible crosshair]` drawn so far: a check diffs two reads.
         "crosshair_state_frames": st.crosshair_state_frames,
         "alive": ps.health > 0 && ps.pm_type < sim::pm::PmType::Dead,
@@ -112,6 +118,14 @@ fn entities(st: &NetPlay) -> Value {
             "persistent_smoke": crate::events::persistent_smoke(e),
             "custom_explode_start_time": e.custom_explode_start_time,
             "time2": e.time2,
+            // A player's stance from the snapshot's `eFlags`, for aiming at the body rather than over it.
+            "stance": if e.eflags & sim::pm::ef::PRONE != 0 {
+                "prone"
+            } else if e.eflags & sim::pm::ef::CROUCH != 0 {
+                "crouch"
+            } else {
+                "stand"
+            },
             "actor": !visible.contains(&e.number),
         }));
     }
