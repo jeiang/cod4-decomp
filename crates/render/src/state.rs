@@ -104,11 +104,22 @@ impl StateBits {
         }
     }
 
+    /// KisakCOD `R_ForceSetPolygonOffset` sends this normalized constant to D3D9, not a count of depth ULPs.
+    /// Apply it in clip space; D32Float rasterizer bias units vary with the primitive's depth exponent.
+    pub fn depth_offset(self) -> f32 {
+        if (self.0[1] >> 4) & 3 == 3 {
+            0.5 / 65536.0
+        } else {
+            0.0
+        }
+    }
+
     pub fn depth_bias(self) -> wgpu::DepthBiasState {
         match (self.0[1] >> 4) & 3 {
             0 => wgpu::DepthBiasState::default(),
+            // The stock constant is applied by the vertex translation; only the stock slope scale belongs here.
             3 => wgpu::DepthBiasState {
-                constant: 2,
+                constant: 0,
                 slope_scale: 2.0,
                 clamp: 0.0,
             },
@@ -202,6 +213,15 @@ mod tests {
         let b = StateBits([5 | 6 << 4 | 1 << 8, 0]).blend().unwrap();
         assert_eq!(b.alpha.src_factor, wgpu::BlendFactor::SrcAlpha);
         assert_eq!(b.color.dst_factor, wgpu::BlendFactor::OneMinusSrcAlpha);
+    }
+
+    #[test]
+    fn shadow_bias_keeps_the_stock_normalized_offset() {
+        let state = StateBits([0, 0x30]);
+        assert_eq!(state.depth_offset(), 0.5 / 65536.0);
+        let bias = state.depth_bias();
+        assert_eq!(bias.constant, 0);
+        assert_eq!(bias.slope_scale, 2.0);
     }
 
     #[test]
