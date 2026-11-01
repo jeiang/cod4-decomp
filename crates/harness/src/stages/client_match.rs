@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Stage 4, `client-match`: the real `cod4e` client plays a team deathmatch against bots on the server it starts
-//! in-process (`--listen --autoplay`). The scripted player connects over UDP, gets a body, walks, sees the bots,
-//! turns toward enemies it can see and shoots them, for 90 seconds. The stage reads the client's report and asserts
-//! what makes a match playable: connected and spawned, the player moved by prediction, the others were drawn,
+//! in-process (`--listen --autoplay`). The scripted player connects over UDP, gets a body, walks toward the nearest
+//! enemy along the bots' navigation mesh, turns toward enemies it can see and shoots them, for 90 seconds. The stage
+//! reads the client's report and asserts what makes a match playable: connected and spawned, the player moved by
+//! prediction, the others were drawn,
 //! snapshots kept coming, prediction was rarely corrected, shots were fired and their events (impacts, flashes, pain) became effects, and the server ran without
 //! script errors. Bandwidth, frame times and the server's tick cost are reported as metrics. Needs a display and the
 //! install; skips cleanly without.
@@ -558,7 +559,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ));
     }
     if shots < 1.0 {
-        failures.push("the player never fired a shot the server ran".into());
+        // Whether the player ever had an enemy in sight tells a match that never met anyone from firing that broke.
+        failures.push(format!(
+            "the player never fired a shot the server ran ({} frames alive with an enemy in sight, {} attack cmds)",
+            num(net, &["target_frames"]),
+            num(net, &["attack_cmds"])
+        ));
     }
     // Recoil kicks the view and the kick is in the cmds the server aims the shots by.
     if shots >= 1.0 && c.get(&["view_kick_max"]) <= 0.0 {
