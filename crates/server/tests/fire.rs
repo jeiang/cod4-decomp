@@ -422,52 +422,129 @@ fn a_wide_spread_misses_some_shots_but_not_all() {
     assert_eq!(rounds_that_hit(10.0, 0.5, true, 100), (100, 100));
 }
 
-#[test]
-fn a_shot_is_judged_against_the_bodies_as_the_shooter_saw_them() {
-    use server::lagcomp::Sample;
-    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
-    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
-    let victim = add_player(&mut g, &mut vm, [40.0, 300.0, 0.0], 180.0, Team::Axis);
-    g.client_mut(shooter).unwrap().ps.view_height_current = 66.0;
-    // The victim stood in the line of fire 100 ms ago and has since stepped out of it.
-    for (time, y) in [(900, 0.0), (1000, 0.0), (1100, 300.0)] {
-        g.lag.record(
-            victim,
-            Sample {
-                time,
-                origin: [40.0, y, 0.0],
-                mins: PLAYER_MINS,
-                maxs: PLAYER_MAXS,
-                pose: Default::default(),
-            },
-        );
+/// `g_antilag 1` at stock's 20 frames a second.
+fn antilag_on(g: &mut Game) {
+    g.cvars.register("g_antilag", "1", 0);
+    g.cvars.register("sv_fps", "20", 0);
+}
+
+/// Files `n` at `origin(t)` in the history every 50 ms frame from 600 to 1000, leaving it there at 1000.
+fn walk(g: &mut Game, n: u16, origin: impl Fn(i32) -> [f32; 3]) {
+    for t in (600..=1000).step_by(50) {
+        g.level.time = t;
+        g.client_mut(n).unwrap().ps.origin = origin(t);
+        g.ent_mut(n).unwrap().origin = origin(t);
+        g.relink(n);
+        g.lag_record();
     }
+}
+
+#[test]
+fn a_rewind_moves_only_the_origin_to_the_commands_server_time() {
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    antilag_on(&mut g);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [300.0, 0.0, 0.0], 180.0, Team::Axis);
+    // 10 units a 50 ms frame: y = 0 at 600, 80 at 1000.
+    walk(&mut g, victim, |t| [300.0, (t - 600) as f32 / 5.0, 0.0]);
+    // The live box is a prone one; the box and the pose stay live through the rewind.
+    let prone = [15.0, 15.0, 30.0];
+    g.ent_mut(victim).unwrap().maxs = prone;
+    let at = |g: &Game| (g.ent(victim).unwrap().origin, g.ent(victim).unwrap().maxs);
+    // Rewound to the command's own time, not 100 ms before it.
+    let r = g.antilag_rewind(900);
+    assert_eq!(at(&g), ([300.0, 60.0, 0.0], prone));
+    assert_eq!(g.ent(shooter).unwrap().origin, [0.0; 3]);
+    g.antilag_restore(r);
+    assert_eq!(at(&g), ([300.0, 80.0, 0.0], prone));
+    // Between frames the origin is interpolated.
+    let r = g.antilag_rewind(925);
+    assert_eq!(at(&g).0, [300.0, 65.0, 0.0]);
+    g.antilag_restore(r);
+    // No more than a frame old, or more than 400 ms: judged live.
+    for t in [1000, 950, 599] {
+        let r = g.antilag_rewind(t);
+        assert_eq!(at(&g).0, [300.0, 80.0, 0.0], "game time {t}");
+        g.antilag_restore(r);
+    }
+    // Exactly 400 ms back is still rewound.
+    let r = g.antilag_rewind(600);
+    assert_eq!(at(&g).0, [300.0, 0.0, 0.0]);
+    g.antilag_restore(r);
+    // With `g_antilag 0` nothing moves.
+    g.cvars.set("g_antilag", "0");
+    let r = g.antilag_rewind(900);
+    assert_eq!(at(&g).0, [300.0, 80.0, 0.0]);
+    g.antilag_restore(r);
+}
+
+#[test]
+fn a_player_whose_history_cannot_reach_the_time_stays_live() {
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    antilag_on(&mut g);
+    add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [300.0, 0.0, 0.0], 180.0, Team::Axis);
+    walk(&mut g, victim, |t| [300.0, (t - 600) as f32 / 5.0, 0.0]);
+    // Dead for a frame: the history restarts after it.
+    g.client_mut(victim).unwrap().ps.pm_type = PmType::Dead;
+    g.level.time = 1050;
+    g.lag_record();
+    g.client_mut(victim).unwrap().ps.pm_type = PmType::Normal;
     g.level.time = 1100;
-    // Judged live, the shot misses.
-    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
-    assert!(damage_calls(&g, victim).is_empty());
-    // Judged where the shooter saw the victim, it hits.
-    g.lag_time = Some(1000);
-    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
-    g.lag_time = None;
-    assert_eq!(damage_calls(&g, victim).len(), 1);
-    // A shooter cannot reach further back than the cap: 1700 - 500 is long after he stood there.
-    g.calls.clear();
-    g.level.time = 1700;
-    g.lag_time = Some(900);
-    g.lag.record(
-        victim,
-        Sample {
-            time: 1500,
-            origin: [40.0, 300.0, 0.0],
-            mins: PLAYER_MINS,
-            maxs: PLAYER_MAXS,
-            pose: Default::default(),
-        },
-    );
-    fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
-    g.lag_time = None;
-    assert!(damage_calls(&g, victim).is_empty());
+    g.lag_record();
+    let r = g.antilag_rewind(900);
+    assert_eq!(g.ent(victim).unwrap().origin, [300.0, 80.0, 0.0]);
+    g.antilag_restore(r);
+}
+
+#[test]
+fn a_shot_is_judged_where_its_command_saw_the_target() {
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    antilag_on(&mut g);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [300.0, 0.0, 0.0], 180.0, Team::Axis);
+    let c = g.client_mut(shooter).unwrap();
+    c.ps.view_height_current = 40.0;
+    c.ps.aim_spread_scale = 0.0;
+    // Crossing the line of fire (y = 0) at 900, 20 units a frame: -40 at 800, 40 at 1000.
+    walk(&mut g, victim, |t| [300.0, (t - 900) as f32 * 0.4, 0.0]);
+    let shot_at = |g: &mut Game, vm: &mut Vm, time: i32| {
+        g.calls.clear();
+        g.client_mut(shooter).unwrap().last_server_time = time;
+        fire_weapon(g, vm, shooter, "ak47_mp");
+        // The rewind is undone after the shot.
+        assert_eq!(g.ent(victim).unwrap().origin, [300.0, 40.0, 0.0]);
+        !damage_calls(g, victim).is_empty()
+    };
+    assert!(shot_at(&mut g, &mut vm, 900), "the command's own time hits");
+    assert!(!shot_at(&mut g, &mut vm, 800), "100 ms before it misses");
+    g.cvars.set("g_antilag", "0");
+    assert!(!shot_at(&mut g, &mut vm, 900), "judged live, it misses");
+}
+
+#[test]
+fn a_rewound_body_keeps_its_live_stance() {
+    let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    antilag_on(&mut g);
+    let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
+    let victim = add_player(&mut g, &mut vm, [300.0, 0.0, 0.0], 180.0, Team::Axis);
+    g.client_mut(shooter).unwrap().ps.aim_spread_scale = 0.0;
+    // Standing in the line of fire until 900, then out of it and prone.
+    walk(&mut g, victim, |t| {
+        [300.0, if t <= 900 { 0.0 } else { 300.0 }, 0.0]
+    });
+    g.ent_mut(victim).unwrap().maxs = [15.0, 15.0, 30.0];
+    let shot_at = |g: &mut Game, vm: &mut Vm, height: f32| {
+        g.calls.clear();
+        let c = g.client_mut(shooter).unwrap();
+        c.last_server_time = 900;
+        c.ps.view_height_current = height;
+        fire_weapon(g, vm, shooter, "ak47_mp");
+        !damage_calls(g, victim).is_empty()
+    };
+    // At the standing origin, but the box is the live prone one: chest height passes over it.
+    assert!(!shot_at(&mut g, &mut vm, 50.0));
+    assert!(shot_at(&mut g, &mut vm, 10.0));
 }
 
 #[test]
@@ -1478,17 +1555,19 @@ fn the_engine_sends_no_obituary_of_its_own_and_the_script_one_carries_its_argume
 #[test]
 fn a_shot_judged_in_the_past_tells_the_script_how_far_back() {
     let (mut g, mut vm) = arena(&[], 0, vec![rifle()]);
+    antilag_on(&mut g);
     let shooter = add_player(&mut g, &mut vm, [0.0; 3], 0.0, Team::Allies);
     let victim = add_player(&mut g, &mut vm, [40.0, 0.0, 0.0], 180.0, Team::Axis);
     g.client_mut(shooter).unwrap().ps.view_height_current = 66.0;
     g.level.time = 1000;
-    g.lag_time = Some(900);
+    g.set_last_server_time(shooter, 900);
     fire_weapon(&mut g, &mut vm, shooter, "ak47_mp");
     let call = g
         .calls
         .iter()
         .find(|c| c.this == Some(victim))
         .expect("a hit");
+    // `psTimeOffset` is `level.time - gameTime`.
     assert!(
         matches!(call.args[9], Value::Int(100)),
         "{:?}",

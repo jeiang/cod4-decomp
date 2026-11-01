@@ -9,7 +9,8 @@
 use crate::perf::{Percentiles, process_rss};
 use crate::stage::{StageCtx, StageReport, Status};
 use assets::vfs::{NodeKind, Vfs};
-use assets::zone::{KeepAll, Zone, ZoneError};
+use assets::zone::{Asset, KeepAll, Zone, ZoneError};
+use sim::skel::anim::{self, Accum};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -65,6 +66,9 @@ struct ZoneRow {
     decode_ms: f64,
     inflated: u64,
     assets: usize,
+    anims: usize,
+    anim_samples: usize,
+    takeoff_anims: usize,
     outcome: ZoneOutcome,
 }
 
@@ -80,6 +84,9 @@ fn load_zone(path: &Path) -> ZoneRow {
         decode_ms: 0.0,
         inflated: 0,
         assets: 0,
+        anims: 0,
+        anim_samples: 0,
+        takeoff_anims: 0,
         outcome: ZoneOutcome::Decoded,
     };
     let open =
@@ -95,7 +102,36 @@ fn load_zone(path: &Path) -> ZoneRow {
     row.open_ms = ms(t);
     row.assets = zone.asset_types().len();
     let t = Instant::now();
-    match zone.decode(&KeepAll, |_| {}) {
+    let mut animation_error = None;
+    match zone.decode(&KeepAll, |asset| {
+        if let Asset::XAnimParts(a) = asset {
+            row.anims += 1;
+            row.takeoff_anims += usize::from(a.name.as_deref() == Some("pb_runjump_takeoff"));
+            let binding: [u8; 255] = std::array::from_fn(|i| i as u8);
+            // Every integer frame and midpoint, including the held non-looping endpoint.
+            for half_frame in 0..=u32::from(a.num_frames).max(1) * 2 {
+                let time = half_frame as f32 / (f32::from(a.num_frames).max(1.0) * 2.0);
+                let mut pose = [Accum::ZERO; 255];
+                let in_range = anim::accumulate(&a, &binding, time, 1.0, &mut pose);
+                row.anim_samples += 1;
+                let finite = pose.iter().all(|bone| {
+                    let (q, t) = bone.finish();
+                    bone.quat.iter().chain(&bone.trans).all(|v| v.is_finite())
+                        && q.iter()
+                            .flatten()
+                            .chain(t.iter().flatten())
+                            .all(|v| v.is_finite())
+                });
+                if !in_range || !finite || a.names.len() > binding.len() {
+                    animation_error = Some(format!(
+                        "animation {} at {time}: in_range={in_range}, finite={finite}",
+                        a.name.as_deref().unwrap_or("?")
+                    ));
+                    break;
+                }
+            }
+        }
+    }) {
         Ok(stats) => row.inflated = stats.consumed,
         Err(ZoneError::Unsupported(ty)) => {
             row.outcome = ZoneOutcome::Partial(ty.name());
@@ -105,6 +141,9 @@ fn load_zone(path: &Path) -> ZoneRow {
             }
         }
         Err(e) => row.outcome = ZoneOutcome::Failed(format!("decode: {e}")),
+    }
+    if let Some(error) = animation_error {
+        row.outcome = ZoneOutcome::Failed(error);
     }
     row.decode_ms = ms(t);
     row
@@ -175,6 +214,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let (mut open_ms, mut decode_ms) = (Vec::new(), Vec::new());
     let (mut decoded, mut partial, mut failed) = (0usize, 0usize, 0usize);
     let (mut inflated, mut assets_listed) = (0u64, 0usize);
+    let (mut anims, mut anim_samples) = (0, 0);
+    let mut takeoff_anims = 0;
     let mut stopped_at = BTreeSet::new();
     let mut failures = Vec::new();
     for path in &zones {
@@ -217,6 +258,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         decode_ms.push(row.decode_ms);
         inflated += row.inflated;
         assets_listed += row.assets;
+        anims += row.anims;
+        anim_samples += row.anim_samples;
+        takeoff_anims += row.takeoff_anims;
     }
     csv.flush()?;
 
@@ -258,6 +302,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ("zones.partial", partial),
         ("zones.failed", failed),
         ("zones.assets_listed", assets_listed),
+        ("xanim.decoded", anims),
+        ("xanim.samples", anim_samples),
+        ("xanim.takeoff_anims", takeoff_anims),
     ] {
         report.metrics.insert(k.into(), v as f64);
     }
@@ -283,6 +330,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             format!(" ({})", stopped_at.into_iter().collect::<Vec<_>>().join(", "))
         }
     ));
+    if anims == 0 || anim_samples == 0 || takeoff_anims == 0 {
+        failures.push("animation sweep did not cover pb_runjump_takeoff".into());
+    }
     if !failures.is_empty() {
         report.status = Status::Failed;
         report.reason = Some(failures.join("; "));

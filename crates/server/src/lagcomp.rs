@@ -1,38 +1,39 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Lag compensation: a short history of every player's body, so a shot is judged against the
-//! world the shooter saw. A client draws other players a fixed interval behind the server
-//! clock ([`net::view::INTERP_DELAY_MS`]) and stamps every command with its clock; when the
-//! command fires, the server puts the other players back where they were at that moment of
-//! the stamp minus the interval, traces, and leaves them where they are. Rewinding is capped
-//! so a laggy client cannot shoot far into the past.
+//! Lag compensation (antilag): a short history of every live player's origin, so a shot is judged where the
+//! shooter saw the others. Follows KisakCOD (GPL-3.0; Infinity Ward, Activision, the KisakCOD contributors)
+//! `server_mp/sv_snapshot_mp.cpp` `SV_GetClientPositionAtTime` and `game/g_weapon.cpp` `G_AntiLagRewindClientPos` /
+//! `G_AntiLag_RestoreClientPos`.
+//!
+//! A client draws the others at the time it stamps its commands with (`cl.serverTime`, `CL_FinishMove`); when a
+//! command fires, the server moves every other live player's origin back to that time, keeps their current stance
+//! box and animation pose, judges the shot, and puts the origins back. Only the origin is archived: the stock
+//! snapshot archive keeps `ps.origin` per frame and nothing of the box or the pose.
 
-use crate::playeranim::PlayerPoseState;
 use sim::Vec3;
 use std::collections::VecDeque;
 
-/// Samples per player: about a second at 30 frames per second.
+/// Samples per player: about a second at 30 frames per second, more than the 400 ms window needs.
 const SAMPLES: usize = 32;
-/// The furthest back in time a shot may reach, in milliseconds; a shot from further back is judged against the live
-/// bodies. The original rewinds to the command's own clock when that is at most 400 ms old and not at all beyond; here
-/// the request is already moved back by the draw delay (the time the shooter saw, not the time of the command), so
-/// the same 400 ms of lag lands exactly on this limit.
-pub const MAX_REWIND_MS: i32 = 400 + net::view::INTERP_DELAY_MS;
-/// A jump bigger than this between two samples is a teleport: no sliding between them.
-const TELEPORT: f32 = 256.0;
+/// `G_AntiLagRewindClientPos`: a command more than this old (ms) is judged against the live bodies.
+pub const MAX_REWIND_MS: i32 = 400;
 
-/// One player's body at one server frame.
-#[derive(Debug, Clone)]
+/// One player's origin at one server frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Sample {
     pub time: i32,
     pub origin: Vec3,
-    pub mins: Vec3,
-    pub maxs: Vec3,
-    pub pose: PlayerPoseState,
 }
 
 #[derive(Debug, Default)]
 pub struct LagRing {
     players: Vec<VecDeque<Sample>>,
+}
+
+/// Whether `G_AntiLagRewindClientPos` rewinds at all for a command stamped `game_time` judged at `now`: the command
+/// is more than one server frame (`1000 / sv_fps`) and at most [`MAX_REWIND_MS`] old.
+pub fn in_window(game_time: i32, now: i32, sv_fps: i32) -> bool {
+    let age = now - game_time;
+    age <= MAX_REWIND_MS && age > 1000 / sv_fps.max(1)
 }
 
 impl LagRing {
@@ -42,6 +43,7 @@ impl LagRing {
         }
     }
 
+    /// Files a live player's origin for this frame.
     pub fn record(&mut self, client: u16, s: Sample) {
         let Some(q) = self.players.get_mut(usize::from(client)) else {
             return;
@@ -55,42 +57,123 @@ impl LagRing {
         q.push_back(s);
     }
 
-    /// Forgets a player (left, or was respawned elsewhere).
+    /// Forgets a player: gone, dead or not playing this frame. `SV_GetClientPositionAtTime` refuses a time it can
+    /// reach only through such a frame, and a cleared history cannot reach past it.
     pub fn clear(&mut self, client: u16) {
         if let Some(q) = self.players.get_mut(usize::from(client)) {
             q.clear();
         }
     }
 
-    /// Where `client` was at `time`: between the two samples around it, the pose of the earlier.
-    /// `now` limits how far back: a request older than [`MAX_REWIND_MS`] is not compensated.
-    /// `None` when there is no history that reaches back that far or the request is outside the window, so the caller
-    /// uses the live body.
-    pub fn at(&self, client: u16, time: i32, now: i32) -> Option<Sample> {
+    /// `SV_GetClientPositionAtTime`: where `client` was at `time`, interpolated between the two frames around it.
+    /// `None` when the history does not reach back that far (the player is then left where it is).
+    pub fn at(&self, client: u16, time: i32) -> Option<Vec3> {
         let q = self.players.get(usize::from(client))?;
-        // Beyond the window the shooter's lag is not compensated at all, as in the original.
-        if time < now - MAX_REWIND_MS {
+        let first = q.front()?;
+        if time < first.time {
             return None;
         }
-        let (first, last) = (q.front()?, q.back()?);
-        if time >= last.time {
-            return None;
+        let Some(i) = q.iter().position(|s| s.time >= time) else {
+            // Newer than the newest frame: the newest origin.
+            return q.back().map(|s| s.origin);
+        };
+        let b = &q[i];
+        if b.time == time || i == 0 {
+            return Some(b.origin);
         }
-        if time <= first.time {
-            return Some(first.clone());
-        }
-        let i = q.iter().position(|s| s.time > time)?;
-        let (a, b) = (&q[i - 1], &q[i]);
-        let f = (time - a.time) as f32 / (b.time - a.time).max(1) as f32;
-        let d: f32 = (0..3).map(|k| (b.origin[k] - a.origin[k]).powi(2)).sum();
-        let mut s = a.clone();
-        if d <= TELEPORT * TELEPORT {
-            for k in 0..3 {
-                s.origin[k] = a.origin[k] + (b.origin[k] - a.origin[k]) * f;
+        let a = &q[i - 1];
+        let f = (time - a.time) as f32 / (b.time - a.time) as f32;
+        Some(std::array::from_fn(|k| {
+            a.origin[k] + (b.origin[k] - a.origin[k]) * f
+        }))
+    }
+}
+
+/// `AntilagClientStore`: the live origins of the players a rewind moved, to put back.
+#[derive(Debug, Default)]
+#[must_use = "the rewound players stay rewound until restored"]
+pub struct Rewound {
+    moved: Vec<(u16, Vec3)>,
+}
+
+impl crate::game::Game {
+    /// The archive `SV_GetClientPositionAtTime` reads: every live player's `ps.origin` this frame. A player who is
+    /// not playing, is dead or is gone has no frame, so no time before now can be reached through it.
+    pub fn lag_record(&mut self) {
+        let time = self.level.time;
+        for n in 0..self.clients.len() {
+            let c = &self.clients[n];
+            let alive = c.connected()
+                && c.session == crate::client::Session::Playing
+                && c.ps.pm_type < sim::pm::PmType::Dead
+                && self
+                    .ents
+                    .get(n)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|e| e.health > 0);
+            if !alive {
+                self.lag.clear(n as u16);
+                continue;
             }
+            let origin = c.ps.origin;
+            self.lag.record(n as u16, Sample { time, origin });
         }
-        s.time = time;
-        Some(s)
+    }
+
+    /// `G_SetLastServerTime`: keeps `client->lastServerTime` at the newest command's `serverTime`, no more than a
+    /// second old.
+    pub fn set_last_server_time(&mut self, n: u16, server_time: i32) {
+        let now = self.level.time;
+        let Some(c) = self.client_mut(n) else { return };
+        let t = server_time.max(now - 1000);
+        if t >= c.last_server_time || now <= t {
+            c.last_server_time = t;
+        }
+    }
+
+    /// `HandleClientEvent`: the time a player's shot or knife swing is judged at, `client->lastServerTime` with
+    /// `g_antilag` on, `level.time` with it off.
+    pub fn shot_game_time(&self, n: u16) -> i32 {
+        match self.client(n) {
+            Some(c) if self.cvars.bool("g_antilag") => c.last_server_time,
+            _ => self.level.time,
+        }
+    }
+
+    /// `G_AntiLagRewindClientPos`: with `g_antilag` on and `game_time` more than a server frame and at most
+    /// [`MAX_REWIND_MS`] old, moves every playing client whose origin at `game_time` the history holds back there.
+    /// Only the origin moves; the stance box and the animation pose stay as they are now.
+    pub fn antilag_rewind(&mut self, game_time: i32) -> Rewound {
+        let mut r = Rewound::default();
+        if !self.cvars.bool("g_antilag")
+            || !in_window(game_time, self.level.time, self.cvars.int("sv_fps"))
+        {
+            return r;
+        }
+        for n in 0..self.clients.len() as u16 {
+            let c = &self.clients[usize::from(n)];
+            if !c.connected() || c.session != crate::client::Session::Playing {
+                continue;
+            }
+            let Some(past) = self.lag.at(n, game_time) else {
+                continue;
+            };
+            let Some(e) = self.ent_mut(n) else { continue };
+            r.moved.push((n, e.origin));
+            e.origin = past;
+            self.relink(n);
+        }
+        r
+    }
+
+    /// `G_AntiLag_RestoreClientPos`: puts the players a rewind moved back where they are.
+    pub fn antilag_restore(&mut self, r: Rewound) {
+        for (n, origin) in r.moved {
+            if let Some(e) = self.ent_mut(n) {
+                e.origin = origin;
+            }
+            self.relink(n);
+        }
     }
 }
 
@@ -98,70 +181,58 @@ impl LagRing {
 mod tests {
     use super::*;
 
-    fn sample(time: i32, x: f32) -> Sample {
-        Sample {
-            time,
-            origin: [x, 0.0, 0.0],
-            mins: [-15.0; 3],
-            maxs: [15.0; 3],
-            pose: PlayerPoseState::default(),
-        }
-    }
-
     fn ring() -> LagRing {
+        // 20 server frames a second, the stock `sv_fps`; the body walks 10 units a frame.
         let mut r = LagRing::new(2);
         for i in 0..10 {
-            r.record(1, sample(i * 33, i as f32 * 10.0));
+            r.record(
+                1,
+                Sample {
+                    time: i * 50,
+                    origin: [i as f32 * 10.0, 0.0, 0.0],
+                },
+            );
         }
         r
     }
 
     #[test]
-    fn a_time_between_samples_interpolates() {
+    fn a_time_between_frames_interpolates_the_origin() {
         let r = ring();
-        let s = r.at(1, 33 * 4 + 16, 300).unwrap();
-        assert!((s.origin[0] - 44.8).abs() < 0.5, "{}", s.origin[0]);
+        assert_eq!(r.at(1, 200).unwrap()[0], 40.0);
+        assert_eq!(r.at(1, 225).unwrap()[0], 45.0);
+        assert_eq!(r.at(1, 0).unwrap()[0], 0.0);
     }
 
     #[test]
-    fn now_or_the_future_is_the_live_body_and_the_past_is_capped() {
+    fn a_time_the_history_cannot_reach_leaves_the_body_live() {
         let r = ring();
-        assert!(r.at(1, 33 * 9, 300).is_none());
-        assert!(r.at(1, 10_000, 300).is_none());
-        // Asking for a time before `now - MAX_REWIND_MS` is not compensated; at the limit it is.
-        let now = 33 * 9 + 5;
-        assert!(r.at(1, now - MAX_REWIND_MS - 1, now).is_none());
-        assert!(r.at(1, now - MAX_REWIND_MS, now).is_some());
-    }
-
-    #[test]
-    fn a_shooter_with_400_ms_of_lag_is_rewound_to_what_they_saw() {
-        let mut r = LagRing::new(1);
-        for i in 0..20 {
-            r.record(0, sample(i * 33, i as f32 * 10.0));
-        }
-        let now = 19 * 33 + 5;
-        // 400 ms of lag and the draw delay: where the player was 500 ms before `now`, not a nearer moment.
-        let want = (now - 400 - net::view::INTERP_DELAY_MS) as f32 / 33.0 * 10.0;
-        let s = r
-            .at(0, now - 400 - net::view::INTERP_DELAY_MS, now)
-            .unwrap();
-        assert!(
-            (s.origin[0] - want).abs() < 11.0,
-            "{} vs {want}",
-            s.origin[0]
+        assert!(r.at(1, -1).is_none());
+        assert!(r.at(0, 100).is_none());
+        assert!(r.at(7, 100).is_none());
+        let mut r = ring();
+        // Died (or stopped playing): the frames before are out of reach.
+        r.clear(1);
+        r.record(
+            1,
+            Sample {
+                time: 500,
+                origin: [0.0; 3],
+            },
         );
+        assert!(r.at(1, 450).is_none());
+        assert_eq!(r.at(1, 500), Some([0.0; 3]));
     }
 
     #[test]
-    fn a_teleport_does_not_slide_and_unknown_players_have_no_history() {
-        let mut r = LagRing::new(1);
-        r.record(0, sample(0, 0.0));
-        r.record(0, sample(33, 5000.0));
-        r.record(0, sample(66, 5001.0));
-        assert_eq!(r.at(0, 16, 100).unwrap().origin[0], 0.0);
-        assert!(r.at(0, 40, 100).unwrap().origin[0] > 4000.0);
-        assert!(LagRing::new(1).at(0, 10, 100).is_none());
-        assert!(r.at(7, 10, 100).is_none());
+    fn the_window_is_more_than_one_frame_and_at_most_400_ms() {
+        // `level.time - gameTime <= 400 && level.time - gameTime > 1000 / sv_fps`.
+        assert!(!in_window(1000, 1000, 20));
+        assert!(!in_window(950, 1000, 20));
+        assert!(in_window(949, 1000, 20));
+        assert!(in_window(600, 1000, 20));
+        assert!(!in_window(599, 1000, 20));
+        assert!(in_window(966, 1000, 30));
+        assert!(!in_window(967, 1000, 30));
     }
 }

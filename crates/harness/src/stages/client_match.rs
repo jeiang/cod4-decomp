@@ -462,6 +462,22 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "the server corrected {corrected} of {predicted} predictions"
         ));
     }
+    // Stock stamps a usercmd with the moment cgame draws the others at (`CL_FinishMove`, `cl.serverTime`), and the
+    // server's antilag judges its shots there: a command stamped off that moment is judged where the player did not
+    // see the target. A frame's worth of slack (the cmd and the draw read the clock apart).
+    // Gated on the median and the 95th percentile: the clock estimate stepping back holds the (monotonic) stamps ahead
+    // for a moment. Stamping the clock estimate itself, as before, puts them about 100 ms ahead.
+    let drawn = &net["cmd_minus_drawn_ms"];
+    let (median, p95, hi) = (
+        num(drawn, &["median"]),
+        num(drawn, &["p95"]),
+        num(drawn, &["max"]),
+    );
+    if !drawn.is_object() || median.abs() > 35.0 || p95.abs() > 50.0 {
+        failures.push(format!(
+            "the usercmds were stamped a median {median:.0} ms (95th percentile {p95:.0}) from the time the others were drawn at (antilag judges shots at the stamp)"
+        ));
+    }
     // A steady walk moves the eye at a steady speed; a view that jerks (the clock following snapshot jitter, a stair
     // snap) has frames that cover twice the usual ground. The jittery clock put about 5% of frames there.
     let jerky = num(net, &["eye_speed", "over_twice_median"]);
@@ -709,6 +725,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         num(net, &["bytes_out"]) / secs,
     );
     m.insert("client.prediction_corrections".into(), corrected);
+    m.insert("client.cmd_minus_drawn_ms.median".into(), median);
+    m.insert("client.cmd_minus_drawn_ms.p95".into(), p95);
+    m.insert("client.cmd_minus_drawn_ms.max".into(), hi);
     m.insert(
         "client.players_seen_max".into(),
         num(net, &["players_seen_max"]),
