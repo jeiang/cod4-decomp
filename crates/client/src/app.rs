@@ -1725,6 +1725,7 @@ impl Viewer {
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
             net.set_sound_mix(crate::sound::mix_of(&st.input.cvars));
+            net.set_level_fade_time(crate::sound::level_fade_of(&st.input.cvars));
             net.set_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
             net.set_voice(st.input.cvar("cl_voice").is_none_or(|v| v.trim() != "0"));
             net.set_demo_paused(
@@ -3843,6 +3844,17 @@ fn script_step(st: &mut State) -> bool {
                                     .position
                             });
                         p.map(|(x, y)| format!("{x} {y}"))
+                    }
+                    // `in` when the level's sound faded in (`SND_MapInit`): the quietest channel under half volume
+                    // in the first mixed chunk and back at full after 300 ms; otherwise the two volumes.
+                    "levelfade" => {
+                        st.net
+                            .as_ref()
+                            .and_then(|n| n.level_fade())
+                            .map(|(start, after)| match after {
+                                Some(after) if start < 0.5 && after >= 0.99 => "in".to_owned(),
+                                _ => format!("start {start:.2} after_300ms {after:?}"),
+                            })
                     }
                     "subtitle" => sh.map(|s| {
                         u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()

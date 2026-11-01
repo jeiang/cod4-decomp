@@ -575,6 +575,8 @@ pub struct NetPlay {
     levels: u32,
     /// `clientSideEffects`, from the cvar store each frame; read when a level starts.
     client_side_effects: bool,
+    /// `snd_levelFadeTime`, from the cvar store each frame; read when a level starts.
+    level_fade_ms: u32,
     stat_sync: crate::profile::StatSync,
     /// The rotor rig of each helicopter model drawn (`None` when the model or its animation is missing), and the
     /// seconds the rotors have turned.
@@ -605,8 +607,10 @@ impl NetPlay {
         password: &str,
         pitch_limits: (f32, f32),
         autoplay: bool,
-        sound: ClientSound,
+        mut sound: ClientSound,
     ) -> Result<Self, String> {
+        // `SND_MapInit` of the level joined; the cvar store has not been read yet, so the stock fade time.
+        sound.map_init(crate::sound::LEVEL_FADE_MS);
         let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
         let auto = autoplay.then(|| Auto::new(&clipmap));
         let world = map.world.clone();
@@ -708,6 +712,7 @@ impl NetPlay {
             new_level: None,
             levels: 0,
             client_side_effects: true,
+            level_fade_ms: crate::sound::LEVEL_FADE_MS,
             stat_sync: crate::profile::StatSync::default(),
             rotors: HashMap::new(),
             rotor_clock: 0.0,
@@ -986,6 +991,7 @@ impl NetPlay {
             let sound = &mut self.sound;
             self.hearing.close_all(|p| sound.close_voice_pipe(p));
         }
+        self.sound.map_init(self.level_fade_ms);
         self.pred = Predictor::default();
         self.cmd_time = 0;
         self.drawn_at = None;
@@ -1191,6 +1197,17 @@ impl NetPlay {
     /// `snd_slaveFadeTime` and `snd_enableReverb`, from the cvar store each frame.
     pub fn set_sound_mix(&mut self, mix: (u32, bool)) {
         self.sound.set_mix(mix);
+    }
+
+    /// `snd_levelFadeTime`, from the cvar store each frame: the sound fade-in of the next level.
+    pub fn set_level_fade_time(&mut self, ms: u32) {
+        self.level_fade_ms = ms;
+    }
+
+    /// The level's sound fade-in so far: the quietest channel's volume in the first mixed chunk, and after 300 ms
+    /// (`None` until then). `None` before the tables are ready.
+    pub fn level_fade(&self) -> Option<(f32, Option<f32>)> {
+        self.sound.level_fade()
     }
 
     /// `cg_footsteps`, from the cvar store each frame.
