@@ -165,6 +165,47 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
     Ok(nv_measure(w, h, &off, &still, &on))
 }
 
+/// The crosshair colour steps, once the server has `sv_cheats` on: waits for the client to take it, puts the
+/// player in `god` mode, then holds the sights on an enemy, on an enemy with `cg_crosshairEnemyColor 0`, and on a
+/// teammate.
+fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
+    c.step("crosshair cheats", |c| {
+        let end = Instant::now() + Duration::from_secs(15);
+        while c.ask(json!({"cmd": "cvar", "name": "sv_cheats"}))?["value"] != "1" {
+            if Instant::now() > end {
+                return Err("the client never took sv_cheats 1 from the server".to_owned());
+            }
+            c.pause(Duration::from_millis(250))?;
+        }
+        c.ask(json!({"cmd": "exec", "line": "god"})).map(|_| ())
+    })?;
+    c.step("crosshair over an enemy", |c| {
+        let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
+        w.drive_until(
+            c,
+            json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
+            Duration::from_secs(100),
+            "the crosshair never took the enemy team's colour over an enemy",
+        )?;
+        c.capture("crosshair_enemy").map(|_| ())
+    })?;
+    // `cg_crosshairEnemyColor 0` keeps the reticle white over an enemy held past the fade-in.
+    c.step("crosshair enemy colour off", |c| enemy_colour_off(c, w))?;
+    c.step("crosshair over a teammate", |c| {
+        let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
+        w.friends = true;
+        let r = w.drive_until(
+            c,
+            json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
+            Duration::from_secs(100),
+            "the crosshair never took the player's team colour over a teammate",
+        );
+        w.friends = false;
+        r?;
+        c.capture("crosshair_friend").map(|_| ())
+    })
+}
+
 /// With `sv_cheats` on at the server: waits for the client to take it, sets `cg_crosshairEnemyColor 0` through the
 /// console, then drives onto an enemy in range until the reticle has been due a tint for a second's worth of
 /// frames, every one of which must have been white.
@@ -1055,48 +1096,26 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         }
         w.stop(c)
     })?;
-    // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414): the walker's sights
-    // on an enemy in range for the enemy fade-in, then on a teammate, holding fire.
-    c.step("crosshair over an enemy", |c| {
-        let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
-        w.drive_until(
-            c,
-            json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
-            secs(100),
-            "the crosshair never took the enemy team's colour over an enemy",
-        )?;
-        c.capture("crosshair_enemy").map(|_| ())
-    })?;
-    c.step("crosshair over a teammate", |c| {
-        let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
-        w.friends = true;
-        let r = w.drive_until(
-            c,
-            json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
-            secs(100),
-            "the crosshair never took the player's team colour over a teammate",
-        );
-        w.friends = false;
-        r?;
-        c.capture("crosshair_friend").map(|_| ())
-    })?;
-    // `cg_crosshairEnemyColor 0` (a cheat dvar: the server turns `sv_cheats` on as `devmap` does, and the client
-    // takes it from the systeminfo) keeps the reticle white over an enemy held past the fade-in.
-    c.step("crosshair enemy colour off", |c| {
-        let cheats = c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats"}))?["value"]
-            .as_str()
-            .unwrap_or("0")
-            .to_owned();
-        let force = |c: &mut Driven, v: &str| {
-            c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats", "value": v, "force": true}))
-        };
-        force(c, "1")?;
-        let r = enemy_colour_off(c, w);
-        let restored = c
-            .ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "1"}))
-            .and_then(|_| force(c, &cheats));
-        r.and(restored.map(|_| ()))
-    })?;
+    // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414). The colour steps run
+    // with `sv_cheats` on at the listen server (forced, as `devmap` sets it; the client takes it from the
+    // systeminfo) and the player in `god` mode, so the walker's sights stay on players rather than on killcams.
+    let cheats = c.ask(json!({"cmd": "server", "op": "cvar", "name": "sv_cheats"}))?["value"]
+        .as_str()
+        .unwrap_or("0")
+        .to_owned();
+    let force = |c: &mut Driven, v: &str| {
+        c.ask(
+            json!({"cmd": "server", "op": "cvar", "name": "sv_cheats", "value": v, "force": true}),
+        )
+    };
+    force(c, "1")?;
+    let r = crosshair_colours(c, w);
+    let restored = c
+        .ask(json!({"cmd": "cvar", "name": "cg_crosshairEnemyColor", "value": "1"}))
+        .and_then(|_| c.ask(json!({"cmd": "exec", "line": "god"})))
+        .and_then(|_| force(c, &cheats));
+    r?;
+    restored?;
     notes.push(format!(
         "the stage's player turned with {}; {} ticks, {} shots",
         w.turning(),
