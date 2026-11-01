@@ -881,9 +881,10 @@ fn bolted_reuse(
     let start = game.level.time + 50;
     let free_at = start + 200;
     let mut fx = Effects::new(&game.content, render_world);
-    // What each snapshot held, drawn `INTERP_DELAY_MS` (two snapshots) later as the match draws it.
-    let mut drawn: std::collections::VecDeque<Vec<(u16, bool, [f32; 3], [f32; 3])>> =
-        Default::default();
+    // What each snapshot held (number, is a plane, origin, angles), drawn `INTERP_DELAY_MS` (two snapshots) later as
+    // the match draws it.
+    type Drawn = Vec<(u16, bool, [f32; 3], [f32; 3])>;
+    let mut drawn = std::collections::VecDeque::<Drawn>::new();
     let mut plane = None;
     let mut received = 0;
     let mut captured = Vec::new();
