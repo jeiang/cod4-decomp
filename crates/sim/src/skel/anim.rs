@@ -35,6 +35,7 @@
 //! rotation into the hemisphere of what has accumulated so far (`XAnimCalcNonLoopEnd`).
 
 use assets::zone::xanim::{Indices, XAnimParts};
+use std::cell::Cell;
 
 /// "Not a bone of this rig" in an anim-to-model table.
 pub const NO_BONE: u8 = u8::MAX;
@@ -126,11 +127,13 @@ struct Walk<'a> {
     rb: usize,
     rs: usize,
     ix: usize,
+    in_range: Cell<bool>,
 }
 
 impl Walk<'_> {
     /// Reads past the end of an animation's data (corrupt asset) give 0.
     fn overrun(&self, table: &str, i: usize) {
+        self.in_range.set(false);
         let name = self.a.name.as_deref().unwrap_or("?");
         logging::dedup!(
             WARN,
@@ -166,10 +169,28 @@ impl Walk<'_> {
 
     fn fine(&self, at: usize, i: usize) -> u32 {
         match &self.a.indices {
-            Indices::Short(v) => v.get(at + i).copied().map_or(0, u32::from),
-            Indices::Byte(v) => v.get(at + i).copied().map_or(0, u32::from),
-            Indices::None => 0,
+            Indices::Short(v) => v.get(at + i).copied().map(u32::from),
+            Indices::Byte(v) => v.get(at + i).copied().map(u32::from),
+            Indices::None => None,
         }
+        .unwrap_or_else(|| {
+            self.overrun("indices", at + i);
+            0
+        })
+    }
+
+    fn byte(&self, i: usize) -> u8 {
+        self.a.data_byte.get(i).copied().unwrap_or_else(|| {
+            self.overrun("data_byte", i);
+            0
+        })
+    }
+
+    fn rb(&self, i: usize) -> u8 {
+        self.a.random_data_byte.get(i).copied().unwrap_or_else(|| {
+            self.overrun("random_data_byte", i);
+            0
+        })
     }
 
     /// Consumes one track header (`tableSize` word and index table) and picks the key pair.
@@ -178,7 +199,7 @@ impl Walk<'_> {
         self.ds += 1;
         let key_at = |w: &Self, i: usize| -> u32 {
             if !w.wide {
-                w.a.data_byte.get(w.db + i).copied().map_or(0, u32::from)
+                u32::from(w.byte(w.db + i))
             } else if size >= 64 {
                 w.fine(w.ix, i)
             } else {
@@ -240,7 +261,14 @@ fn add_rot(acc: &mut Accum, w: f32, q: [f32; 4], end: bool) {
 /// it; so does an index past `out`). Looping animations wrap `time` into `[0, 1)`; others clamp
 /// it to `[0, 1]`. A one-pose animation (`num_frames == 0`) always takes its last keys. Allocation-free; a truncated
 /// or malformed animation reads zeros rather than panicking.
-pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: &mut [Accum]) {
+/// Returns whether every accessed data/index entry was in range.
+pub fn accumulate(
+    a: &XAnimParts,
+    to_model: &[u8],
+    time: f32,
+    weight: f32,
+    out: &mut [Accum],
+) -> bool {
     let time = if a.looping {
         let t = time - time.floor();
         if t >= 1.0 { 0.0 } else { t }
@@ -263,6 +291,7 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
         rb: 0,
         rs: 0,
         ix: 0,
+        in_range: Cell::new(true),
     };
     let slot = |part: usize, out: &mut [Accum]| -> Option<usize> {
         let b = *to_model.get(part)?;
@@ -283,7 +312,7 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
         if let Some(b) = slot(part, out) {
             let f = 2 * t.key;
             let (z0, w0) = (w.rs(w.rs + f), w.rs(w.rs + f + 1));
-            let (z1, w1) = if end {
+            let (z1, w1) = if end || size == 0 {
                 (z0, w0)
             } else {
                 (w.rs(w.rs + f + 2), w.rs(w.rs + f + 3))
@@ -303,7 +332,12 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
             let mut q = [0.0; 4];
             for (i, c) in q.iter_mut().enumerate() {
                 let p = f32::from(w.rs(w.rs + f + i));
-                let n = f32::from(w.rs(w.rs + f + 4 + i));
+                // XAnimCalcNonLoopEnd reads only the final quaternion, not a following key.
+                let n = if end || size == 0 {
+                    p
+                } else {
+                    f32::from(w.rs(w.rs + f + 4 + i))
+                };
                 *c = (p + (n - p) * t.frac) * INV_I16;
             }
             add_rot(&mut out[b], weight, q, end);
@@ -337,18 +371,13 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
 
     for group in [5usize, 6] {
         for _ in 0..counts[group] {
-            let named = usize::from(w.a.data_byte.get(w.db).copied().unwrap_or(0));
+            let named = usize::from(w.byte(w.db));
             w.db += 1;
             let (size, t) = w.track();
             if let Some(b) = slot(named, out) {
                 let sample = |w: &Walk, k: usize, i: usize| -> f32 {
                     if group == 5 {
-                        f32::from(
-                            w.a.random_data_byte
-                                .get(w.rb + 3 * k + i)
-                                .copied()
-                                .unwrap_or(0),
-                        )
+                        f32::from(w.rb(w.rb + 3 * k + i))
                     } else {
                         f32::from(w.rs(w.rs + 3 * k + i) as u16)
                     }
@@ -356,7 +385,7 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
                 let mut tr = [0.0f32; 3];
                 for (i, c) in tr.iter_mut().enumerate() {
                     let from = sample(&w, t.key, i);
-                    let v = if end {
+                    let v = if end || size == 0 {
                         from
                     } else {
                         from + (sample(&w, t.key + 1, i) - from) * t.frac
@@ -378,7 +407,7 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
     }
 
     for _ in 0..counts[7] {
-        let named = usize::from(w.a.data_byte.get(w.db).copied().unwrap_or(0));
+        let named = usize::from(w.byte(w.db));
         w.db += 1;
         if let Some(b) = slot(named, out) {
             for i in 0..3 {
@@ -390,10 +419,11 @@ pub fn accumulate(a: &XAnimParts, to_model: &[u8], time: f32, weight: f32, out: 
     }
 
     for _ in 0..counts[8] {
-        let named = usize::from(w.a.data_byte.get(w.db).copied().unwrap_or(0));
+        let named = usize::from(w.byte(w.db));
         w.db += 1;
         if let Some(b) = slot(named, out) {
             out[b].trans_weight += weight;
         }
     }
+    w.in_range.get()
 }

@@ -32,12 +32,6 @@ pub struct Allow {
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
     Allow {
-        contains: &["sim::skel::anim", "animation data read out of range"],
-        reason: "random_data_short reads past the table for some takeoff and ads animations (#387)",
-        stages: &[],
-        max: Some(40),
-    },
-    Allow {
         contains: &["server::server", "unknown command", "con_showchannel"],
         reason: "the stock configs run con_showchannel, which we do not implement (#365)",
         stages: &[],

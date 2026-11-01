@@ -231,3 +231,5 @@ The harness Chromium runs headless with SwiftShader behind both APIs (`--enable-
 | `audio` | ordered-zone sound alias tables (including name-only sample references), realtime-safe mixer (`Mixer::fill`, AudioWorklet-ready), WAV/MP3 decoding, cpal output (AudioWorklet in the browser) |
 | `client` | `cod4e`, the player-facing client (native, and wasm for `web/`) |
 | `harness` | `cod4e-harness`, scenario runner and run bundles |
+
+The default `asset-load` stage also samples every decoded MP animation at each frame and midpoint, including the held non-looping endpoint (`pb_runjump_takeoff` must be present). It fails on any out-of-range data/index access or non-finite pose; animation read warnings are not allow-listed. Endpoint sampling reads only the last quaternion, following KisakCOD's `XAnimCalcNonLoopEnd` (`src/xanim/xanim_calc.cpp:921-956`, GPL-3.0; CoD4 MP 1.8). The 1.7 fastfile uses the same 88-byte `XAnimParts` layout and byte/short frame-index boundary (256 frames); this fix changes neither the loader nor delta/notify data. Native 1.7 binary analysis was unavailable, so this is a source-reference fix checked against the installed 1.7 content.
