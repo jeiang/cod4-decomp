@@ -157,10 +157,17 @@ pub struct Switches {
     pub blood: bool,
     /// `cg_brass`: weapons eject their shells (`CG_EjectWeaponBrass`).
     pub brass: bool,
+    /// `cg_bloodLimit` and `cg_bloodLimitMsec`: blood plays at most once in this many ms.
+    pub blood_limit_ms: Option<i32>,
     /// `cg_drawGun`: the view model is drawn (`CG_AddViewWeapon`). A cheat dvar: off only with `sv_cheats` on.
     pub draw_gun: bool,
+    /// `cg_crosshairAlpha` and `cg_crosshairAlphaMin` (cheat; stock 1 and 0.5, each 0 to 1).
+    pub crosshair_alpha: f32,
+    pub crosshair_alpha_min: f32,
     /// The `ragdoll_*` dvars.
     pub ragdoll_tunables: crate::ragdoll::Tunables,
+    /// The `cg_heliKillCam*` and `cg_airstrikeKillCam*` dvars (cheat).
+    pub killcam: crate::camera::KillCamTune,
     /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
     pub bullet: fx::BulletTune,
 }
@@ -173,8 +180,12 @@ impl Default for Switches {
             marks: true,
             blood: true,
             brass: true,
+            blood_limit_ms: None,
             draw_gun: true,
+            crosshair_alpha: crate::crosshair::ALPHA,
+            crosshair_alpha_min: crate::crosshair::MIN_ALPHA,
             ragdoll_tunables: crate::ragdoll::Tunables::default(),
+            killcam: crate::camera::KillCamTune::default(),
             bullet: fx::BulletTune::default(),
         }
     }
@@ -191,11 +202,34 @@ impl Switches {
             marks: on("fx_marks"),
             blood: on("cg_blood"),
             brass: on("cg_brass"),
+            blood_limit_ms: on("cg_bloodLimit").then(|| {
+                c.get("cg_bloodLimitMsec")
+                    .and_then(|v| v.trim().parse::<i32>().ok())
+                    .unwrap_or(330)
+                    .clamp(1, 2000)
+            }),
             draw_gun: on("cg_drawGun") || !cheats,
+            crosshair_alpha: cheat_f32(c, cheats, "cg_crosshairAlpha", crate::crosshair::ALPHA),
+            crosshair_alpha_min: cheat_f32(
+                c,
+                cheats,
+                "cg_crosshairAlphaMin",
+                crate::crosshair::MIN_ALPHA,
+            ),
             ragdoll_tunables: crate::ragdoll::Tunables::read(c),
+            killcam: crate::camera::KillCamTune::read(c),
             bullet: bullet_tune(c),
         }
     }
+}
+
+/// A cheat float dvar in 0 to 1: its value with `sv_cheats` on, else `stock`.
+fn cheat_f32(c: &crate::input::Cvars, cheats: bool, name: &str, stock: f32) -> f32 {
+    c.get(name)
+        .filter(|_| cheats)
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(stock, |v| v.clamp(0.0, 1.0))
 }
 
 /// `phys_bulletUpBias` and `phys_bulletSpinScale`, held to the original's limits; one not set has its stock value.
@@ -383,6 +417,9 @@ struct Counters {
     own_missiles: std::collections::BTreeSet<u16>,
     /// Events received, by kind.
     events: std::collections::BTreeMap<&'static str, u64>,
+    /// The own player's events the prediction delivered (`EV_FIRE_WEAPON`, `EV_RELOAD`, ...), by event number: what
+    /// the control channel's `events.own` lists, so a shot can be asserted as the event and not the key press.
+    own_events: std::collections::BTreeMap<u8, u64>,
     fx_quads_max: usize,
     fx_tracers_max: usize,
     fx_decals_max: usize,
@@ -698,6 +735,32 @@ impl NetPlay {
         self.effects.played.get(kind).copied().unwrap_or(0)
     }
 
+    /// A deterministic view through the same camera/DOF builders the killcam uses. Console-driven harness checks
+    /// can exercise every camera dvar without waiting for a particular bot to kill with a particular vehicle.
+    pub fn killcam_sample(&self, helicopter: bool) -> String {
+        let t = &self.switches.killcam;
+        let (position, fov, dof) = if helicopter {
+            let k =
+                crate::camera::helicopter_kill_cam(t, Vec3::ZERO, Vec3::new(1000.0, 0.0, t.heli_z))
+                    .expect("horizontal helicopter sample");
+            (
+                format!("{:.0} {:.0}", k.origin.x, k.origin.z),
+                k.fov,
+                crate::dof::helicopter_kill_cam(k.distance, t.heli_dist, t.heli_blur),
+            )
+        } else {
+            let k = crate::camera::airstrike_kill_cam(t, Vec3::ZERO, [90.0, 0.0, 0.0], Vec3::ZERO);
+            (
+                format!("{:.0}", k.origin.z),
+                k.fov,
+                crate::dof::airstrike_kill_cam(k.distance, t.airstrike_blur),
+            )
+        };
+        format!(
+            "{position} {fov:.0} {:.0} {:.0} {:.0} {:.0} {:.0} {:.0}",
+            dof.near_start, dof.near_end, dof.far_start, dof.far_end, dof.near_blur, dof.far_blur
+        )
+    }
     /// A copy of every effect count, for a script's `fxmark` step.
     pub fn fx_counts(&self) -> HashMap<String, u64> {
         self.effects
@@ -1027,6 +1090,14 @@ impl NetPlay {
         }
     }
 
+    /// Resolves a material from this match's linked presentation assets, not the UI registry.
+    pub fn material(
+        &mut self,
+        name: &str,
+    ) -> Result<std::sync::Arc<assets::zone::gfx::Material>, String> {
+        self.lib.content.material(name)
+    }
+
     /// Writes what this connection receives to `path` (`record`).
     pub fn start_record(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.net.start_record(path)
@@ -1343,6 +1414,9 @@ impl NetPlay {
         let ps = p.ps;
         self.meleeing = ps.weapon_state == sim::pm::weapon_state::MELEE_INIT;
         let events = p.events;
+        for (ev, _) in &events {
+            *self.c.own_events.entry(*ev).or_default() += 1;
+        }
         self.own_new.clone_from(&events);
         let err = self.pred.error_at(st);
         let feet = [
@@ -1592,14 +1666,22 @@ impl NetPlay {
         let find = |n: u16| ents.iter().find(|e| e.number == n);
         let (killer, victim) = (find(number)?, find(follow.own)?);
         let target = Vec3::from(victim.origin);
+        let t = &self.switches.killcam;
         if killer.etype == etype::VEHICLE {
-            let k = crate::camera::helicopter_kill_cam(Vec3::from(killer.origin), target)?;
-            let dof = crate::dof::helicopter_kill_cam(k.distance, crate::camera::HELI_DIST);
+            let k = crate::camera::helicopter_kill_cam(t, Vec3::from(killer.origin), target)?;
+            let dof = crate::dof::helicopter_kill_cam(k.distance, t.heli_dist, t.heli_blur);
             Some((k, dof))
         } else {
-            let k =
-                crate::camera::airstrike_kill_cam(Vec3::from(killer.origin), killer.angles, target);
-            Some((k, crate::dof::airstrike_kill_cam(k.distance)))
+            let k = crate::camera::airstrike_kill_cam(
+                t,
+                Vec3::from(killer.origin),
+                killer.angles,
+                target,
+            );
+            Some((
+                k,
+                crate::dof::airstrike_kill_cam(k.distance, t.airstrike_blur),
+            ))
         }
     }
 
@@ -1696,6 +1778,7 @@ impl NetPlay {
         self.effects.set_marks(self.switches.marks);
         self.effects
             .set_blood_and_brass(self.switches.blood, self.switches.brass);
+        self.effects.set_blood_limit(self.switches.blood_limit_ms);
         self.effects
             .set_view(own, self.vm.as_ref().and_then(|(_, v)| v.tags()));
         crate::events::start_shakes(&mut self.shakes, st, eye.to_array(), events);
@@ -1819,6 +1902,8 @@ impl NetPlay {
             spread_scale: ps.aim_spread_scale,
             ads: ps.weapon_pos_frac,
             tan_half_fov_y: 0.0,
+            alpha_scale: self.switches.crosshair_alpha,
+            alpha_min: self.switches.crosshair_alpha_min,
         })
     }
 

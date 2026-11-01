@@ -39,8 +39,6 @@ pub const FLOATZ_CLEAR: f64 = 2_000_000.0;
 pub const FLOATZ_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 /// The original's `r_dof_bias` default.
 pub const DOF_BIAS: f32 = 0.5;
-/// The original's `r_znear_depthhack` default, the near clip of the view model.
-const VIEW_MODEL_NEAR: f32 = 0.1;
 /// Quads one frame can draw: the longest chain is a dozen passes of depth of field, 33 of glow and 33 of blur.
 const MAX_QUADS: usize = 128;
 
@@ -82,9 +80,8 @@ impl Dof {
 
     /// `CONST_SRC_CODE_DOF_EQUATION_VIEWMODEL_AND_FAR_BLUR`: the view model's near equation with no far part, and the
     /// far blur radius relative to the near one (after the bias power) in `w`.
-    pub fn view_model_equation(&self, bias: f32) -> [f32; 4] {
-        let [scale, offset] =
-            near_equation(self.view_model_start, self.view_model_end, VIEW_MODEL_NEAR);
+    pub fn view_model_equation(&self, bias: f32, z_near: f32) -> [f32; 4] {
+        let [scale, offset] = near_equation(self.view_model_start, self.view_model_end, z_near);
         [
             scale,
             0.0,
@@ -940,7 +937,7 @@ pub(crate) fn build(
             let (scale, bias) = d.lerp_constants(h, p.dof_bias);
             b.base.vec[codeconst::DOF_EQUATION_SCENE as usize] = d.scene_equation(z_near);
             b.base.vec[codeconst::DOF_EQUATION_VIEWMODEL_AND_FAR_BLUR as usize] =
-                d.view_model_equation(p.dof_bias);
+                d.view_model_equation(p.dof_bias, b.r.settings.depthhack_near.max(0.01));
             b.base.vec[codeconst::DOF_ROW_DELTA as usize] = [0.0, 1.0 / h as f32, 0.0, 0.0];
             b.base.vec[codeconst::DOF_LERP_SCALE as usize] = scale;
             b.base.vec[codeconst::DOF_LERP_BIAS as usize] = bias;
@@ -1063,7 +1060,7 @@ pub(crate) fn build(
     if sun != Default::default() {
         // RB_DrawSunPostEffects: the flare, then the blind and glare, over the finished picture.
         b.frame = (target.clone(), size);
-        if let (Some(f), Some(mat)) = (sun.flare, b.r.scene.world.sun.flare_material.clone()) {
+        if let (Some(f), Some(mat)) = (sun.flare, b.r.sun_flare.flare_material.clone()) {
             let [x, y] = f.center;
             let [hw, hh] = f.half;
             let a = f.alpha;
@@ -1305,6 +1302,26 @@ mod tests {
         assert_eq!(near(500.0), 0.0);
     }
 
+    #[test]
+    fn live_near_planes_change_the_scene_and_view_model_dof_equations() {
+        let mut d = dof();
+        d.near_start = 0.0;
+        d.near_end = 0.0;
+        let mut settings = crate::renderer::Settings::default();
+        let scene_default = d.scene_equation(settings.near);
+        let vm_default = d.view_model_equation(DOF_BIAS, settings.depthhack_near);
+        settings.near = 8.0;
+        settings.depthhack_near = 0.4;
+        let scene_changed = d.scene_equation(settings.near);
+        let vm_changed = d.view_model_equation(DOF_BIAS, settings.depthhack_near);
+        assert_eq!(scene_default[0], -0.5);
+        assert_eq!(scene_changed[0], -0.25);
+        assert_eq!(vm_default[0], -20.0);
+        assert_eq!(vm_changed[0], -5.0);
+        assert_eq!(scene_changed[2], 1.0);
+        assert_eq!(vm_changed[2], 1.0);
+    }
+
     /// A far range that ends inside the near clip, or an empty near range, turns that side off.
     #[test]
     fn dof_degenerate_ranges_blur_nothing() {
@@ -1355,7 +1372,7 @@ mod tests {
         let mut d = dof();
         d.view_model_start = 0.2;
         d.view_model_end = 12.0;
-        let e = d.view_model_equation(DOF_BIAS);
+        let e = d.view_model_equation(DOF_BIAS, 0.1);
         assert_eq!(e[1], 0.0);
         assert!((e[3] - 0.5f32.sqrt()).abs() < 1e-6);
         assert!((e[0] * 0.2 + e[2] - 1.0).abs() < 1e-5 && (e[0] * 12.0 + e[2]).abs() < 1e-5);
@@ -1365,8 +1382,8 @@ mod tests {
     #[test]
     fn dof_bias_is_the_power_of_the_blur_fraction() {
         let d = dof();
-        assert!((d.view_model_equation(1.0)[3] - 0.5).abs() < 1e-6);
-        assert!((d.view_model_equation(2.0)[3] - 0.25).abs() < 1e-6);
+        assert!((d.view_model_equation(1.0, 0.1)[3] - 0.5).abs() < 1e-6);
+        assert!((d.view_model_equation(2.0, 0.1)[3] - 0.25).abs() < 1e-6);
         let (sharp, _) = d.lerp_constants(720, 1.0);
         let (soft, _) = d.lerp_constants(720, 0.5);
         assert_ne!(sharp, soft);

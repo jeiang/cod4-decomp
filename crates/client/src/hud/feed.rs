@@ -86,7 +86,6 @@ struct Center {
 }
 
 /// Everything the feed keeps between frames.
-#[derive(Default)]
 pub struct Feed {
     windows: [Vec<Msg>; WINDOWS],
     chat: Vec<ChatLine>,
@@ -95,12 +94,27 @@ pub struct Feed {
     pub console: Vec<String>,
     /// The placement and timing dvars as of the last frame, set by the shell.
     pub layout: Layout,
+    /// `cg_centertime`, milliseconds (stock 3000); read by the shell each frame.
+    pub center_ms: i32,
+}
+
+impl Default for Feed {
+    fn default() -> Self {
+        Self {
+            windows: Default::default(),
+            chat: Vec::new(),
+            center: None,
+            console: Vec::new(),
+            layout: Layout::default(),
+            center_ms: CENTER_MS,
+        }
+    }
 }
 
 /// The most chat lines kept (the top of `cg_chatHeight`).
 const CHAT_MAX: usize = 8;
-/// How long the centre string stays (`cg_centertime`).
-const CENTER_MS: i32 = 5000;
+/// How long the centre string stays by default (`cg_centertime`, stock 3.0 s).
+const CENTER_MS: i32 = 3000;
 
 /// The opacity of a message at `now`: fading out over the last `fade_out_ms`, and fading in over the last
 /// `fade_in_ms` of the scroll when it scrolls into place (`Con_GetMessageAlpha`).
@@ -239,7 +253,7 @@ impl Feed {
         let busy = self
             .center
             .as_ref()
-            .is_some_and(|c| now - c.start < CENTER_MS && priority < c.priority);
+            .is_some_and(|c| now - c.start < self.center_ms && priority < c.priority);
         if !busy {
             self.center = Some(Center {
                 text,
@@ -407,7 +421,7 @@ impl Feed {
         now: i32,
     ) {
         let Some(c) = &self.center else { return };
-        let Some(a) = fade_alpha(now, c.start, CENTER_MS, 100) else {
+        let Some(a) = fade_alpha(now, c.start, self.center_ms, 100) else {
             self.center = None;
             return;
         };

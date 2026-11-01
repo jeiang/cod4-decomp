@@ -33,7 +33,8 @@ pub use gpu::{Gpu, GpuError, GpuInfo};
 pub use material::MipMode;
 pub use post::{DOF_BIAS, Dof, PostParams, ShellShock};
 pub use renderer::{
-    BrushInstance, Clear, ClearMode, FrameStats, Progress, Renderer, Settings, ShadowMode, View,
+    BrushInstance, Clear, ClearMode, FrameStats, Progress, Renderer, Settings, ShadowMode,
+    SunTweak, View,
 };
 pub use scene::{MapData, Scene};
 pub use skin::{ModelInstance, ModelKind};

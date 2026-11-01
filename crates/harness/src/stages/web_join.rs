@@ -375,14 +375,7 @@ fn visit(
         Command::new(chrome)
             // The dev shell's library path is for the build; a Chromium from the Nix store takes its own.
             .env_remove("LD_LIBRARY_PATH")
-            .args([
-                "--headless=new",
-                "--no-first-run",
-                "--ignore-gpu-blocklist",
-                "--use-angle=swiftshader",
-                "--enable-unsafe-swiftshader",
-                "--window-size=1280,720",
-            ])
+            .args(super::browser_cdp::CHROMIUM_FLAGS)
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg(page)
             .stdout(Stdio::null())
