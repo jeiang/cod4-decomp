@@ -839,10 +839,11 @@ mod tests {
 
     #[test]
     fn a_missing_command_warns_naming_its_issue() {
-        let (_, events) = logging::capture(|| note_missing("imagelist"));
+        // A name no other test runs: the warning is rate limited per name across the test threads.
+        let (_, events) = logging::capture(|| note_missing("zz_missing_probe"));
         assert_eq!(events.len(), 1);
         let e = &events[0];
-        assert!(e.level == tracing::Level::WARN && e.field("command") == Some("imagelist"));
+        assert!(e.level == tracing::Level::WARN && e.field("command") == Some("zz_missing_probe"));
         assert_eq!(e.field("issue"), Some("479"));
     }
 }
