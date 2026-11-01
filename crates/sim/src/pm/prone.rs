@@ -207,7 +207,9 @@ pub(super) fn check_turned(pm: &mut Pmove<'_>, world: &dyn Collide, new_yaw: f32
 }
 
 /// `PM_VerifyPronePosition`: a prone player must still fit after a slide move; otherwise the
-/// caller's fallback state is restored.
+/// caller's fallback state is restored. `isOnGround` is a fixed 1 here, not the player's state
+/// (`iw3mp.exe` 1.7 at 0x414dd0 pushes 1, 1, 1 for `isAlreadyProne`, `isOnGround` and
+/// `groundIsWalkable`), so a slide that ends airborne still has to fit the pose.
 pub(super) fn verify_position(
     pm: &mut Pmove<'_>,
     world: &dyn Collide,
@@ -217,8 +219,20 @@ pub(super) fn verify_position(
     if pm.ps.pm_flags & super::pmf::PRONE == 0 {
         return true;
     }
-    let yaw = pm.ps.prone_direction;
-    let ok = check_player_prone(pm, world, yaw, true, true, 50.0, true);
+    let ps = &pm.ps;
+    let c = ProneCheck {
+        size: 15.0,
+        height: 30.0,
+        yaw: ps.prone_direction,
+        already_prone: true,
+        on_ground: true,
+        ground_walkable: true,
+        feet_dist: 50.0,
+    };
+    let mut p = [ps.torso_pitch, ps.waist_pitch];
+    let ok = check_prone(world, ps.client_num, &ps.origin, &c, Some(&mut p));
+    pm.ps.torso_pitch = p[0];
+    pm.ps.waist_pitch = p[1];
     if !ok {
         pm.ps.origin = *fallback_origin;
         pm.ps.velocity = *fallback_velocity;
