@@ -14,10 +14,12 @@
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{render_problem, steps_problem};
+use super::voice_speaker;
 use crate::control::{Driven, Walker};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::{Value, json};
 use std::io;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 const NAME: &str = "client-hud";
@@ -257,8 +259,117 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
     result
 }
 
+/// A second person joins the listen server and talks ([`voice_speaker::Speaker`]); the server relays the voice and the
+/// cgame talker slots (193-196) must name them, then `cg_drawTalk` given by its stock names must hide and show them by
+/// side (`CG_DrawTalkerNum`, KisakCOD `cgame_mp/cg_newDraw_mp.cpp:2287`).
+fn received_voice(c: &mut Driven, install: &Path, notes: &mut Vec<String>) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    let server = |c: &mut Driven, name: &str, value: &str| {
+        c.ask(json!({"cmd":"server","op":"cvar","name":name,"value":value}))
+            .map(|_| ())
+    };
+    // Everyone hears everyone, dead or alive, so the speaker's team and a death do not decide the check.
+    for (name, value) in [
+        ("sv_voice", "1"),
+        ("voice_global", "1"),
+        ("voice_deadChat", "1"),
+    ] {
+        server(c, name, value)?;
+    }
+    let addr = c.ask(json!({"cmd":"server","op":"state","what":"net"}))?["addr"]
+        .as_str()
+        .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+        .ok_or("the listen server did not say its address")?;
+    let speaker = voice_speaker::Speaker::start(
+        std::net::SocketAddr::from(([127, 0, 0, 1], addr.port())),
+        install,
+    )?;
+    let result = (|| {
+        let start = Instant::now();
+        let client = loop {
+            if let Some(n) = speaker.client() {
+                break n;
+            }
+            if start.elapsed() > secs(60) {
+                return Err("the speaker never got a body on the listen server".to_owned());
+            }
+            c.pause(Duration::from_millis(500))?;
+        };
+        c.ask(json!({"cmd":"cvar","name":"cg_drawTalk","value":"ALL"}))?;
+        c.until(
+            json!({"hud.report.talker_marks":{"ge":1}}),
+            secs(20),
+            "a talking player's ownerdraw (193) never drew",
+        )?;
+        let talkers = c.lookup("hud.report.talkers")?;
+        let me = talkers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t[0].as_u64() == Some(u64::from(client)))
+            .cloned()
+            .ok_or_else(|| {
+                format!("the talkers {talkers} do not list the speaker, client {client}")
+            })?;
+        if me[1].as_str() != Some(voice_speaker::NAME) {
+            return Err(format!(
+                "the talker is named {} instead of {}",
+                me[1],
+                voice_speaker::NAME
+            ));
+        }
+        let enemy = me[2].as_bool().unwrap_or(false);
+        notes.push(format!("speaker client {client}, enemy {enemy}"));
+        let (hide, show) = if enemy {
+            ("FRIENDLY", "ENEMY")
+        } else {
+            ("ENEMY", "FRIENDLY")
+        };
+        let marks = |c: &mut Driven| -> Result<u64, String> {
+            Ok(c.lookup("hud.report.talker_marks")?.as_u64().unwrap_or(0))
+        };
+        c.ask(json!({"cmd":"cvar","name":"cg_drawTalk","value":hide}))?;
+        c.pause(Duration::from_millis(500))?;
+        let before = marks(c)?;
+        c.pause(secs(2))?;
+        let after = marks(c)?;
+        let still = c.lookup("hud.report.talkers")?;
+        if still.as_array().is_none_or(Vec::is_empty) {
+            return Err("the speaker stopped being heard while cg_drawTalk hid it".to_owned());
+        }
+        if after != before {
+            return Err(format!(
+                "cg_drawTalk {hide} still drew the {} talker ({before} -> {after} icons)",
+                if enemy { "enemy" } else { "friendly" }
+            ));
+        }
+        c.ask(json!({"cmd":"cvar","name":"cg_drawTalk","value":show}))?;
+        c.until(
+            json!({"hud.report.talker_marks":{"gt":after}}),
+            secs(10),
+            &format!("cg_drawTalk {show} did not draw the talker"),
+        )?;
+        Ok(())
+    })();
+    drop(speaker);
+    c.ask(json!({"cmd":"cvar","name":"cg_drawTalk","value":"ALL"}))?;
+    for (name, value) in [
+        ("sv_voice", "0"),
+        ("voice_global", "0"),
+        ("voice_deadChat", "0"),
+    ] {
+        server(c, name, value)?;
+    }
+    result
+}
+
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
-fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), String> {
+fn play(
+    c: &mut Driven,
+    w: &mut Walker,
+    install: &Path,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
     let secs = Duration::from_secs;
     // The server's team menu, answered with the pointer; then the class menu.
     c.step("team menu", |c| {
@@ -304,6 +415,24 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         result?;
         c.ask(json!({"cmd":"server","op":"cvar","name":"sv_voice","value":"0"}))?;
         Ok(())
+    })?;
+    c.step("received voice talker ownerdraws", |c| {
+        received_voice(c, install, notes)
+    })?;
+    c.step("record level ownerdraw", |c| {
+        // UI_DrawRecordLevel in the stock voice options; the slot hosts have no microphone (#488), so only the
+        // meter's drawing is checked, not a level.
+        c.console("togglemenu options_voice")?;
+        let result = c.until(
+            json!({"hud.report.record_meter_marks":{"ge":1}}),
+            secs(10),
+            "the voice options never drew the record level (265)",
+        );
+        if result.is_ok() {
+            c.capture("record-level")?;
+        }
+        c.console("closemenu options_voice")?;
+        result.map(|_| ())
     })?;
     c.step("stock server dvar registrations", |c| {
         // KisakCOD game_mp/g_main_mp.cpp:407,632-648,694-712 and server_mp/sv_init_mp.cpp:708-722,771.
@@ -626,7 +755,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     };
     out.notes.push(format!("channel {}", c.addr));
-    let played = Walker::new(&mut c).and_then(|mut w| play(&mut c, &mut w, &mut out.notes));
+    let played =
+        Walker::new(&mut c).and_then(|mut w| play(&mut c, &mut w, install, &mut out.notes));
     // The counters are read before the run ends, played out or not: a failed step still says what the HUD drew.
     let report = c
         .report("control-run.json", &["hud", "net", "render"])
@@ -642,6 +772,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         "killcam_first.png",
         "killcam_next.png",
         "killcam.png",
+        "record-level.png",
+        "helicopter-compass.png",
     ] {
         if dir.join(f).is_file() {
             out.files.push(format!("hud/{f}"));
