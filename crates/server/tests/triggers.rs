@@ -185,6 +185,7 @@ fn a_touch_of_a_freed_trigger_is_dropped() {
     let t = trigger(&mut g, "trigger_multiple", 0, None, 0, 0);
     g.touch_triggers(&mut vm, p);
     g.free_entity(&mut vm, t);
+    g.level.time += server::game::REUSE_DELAY_MS;
     let again = trigger(&mut g, "trigger_multiple", 0, Some(1.0), 0, 0);
     assert_eq!(again, t, "the slot is reused");
     let mut list = std::mem::take(&mut g.level.pending_triggers);

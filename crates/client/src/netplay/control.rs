@@ -62,6 +62,8 @@ fn player(st: &NetPlay) -> Value {
         "crosshair_flags": st.hud_view.as_ref().map_or(0, |(ps, _)| ps.weapon_flags
             & (sim::pm::wf::FRIEND_IN_CROSSHAIR | sim::pm::wf::ENEMY_IN_CROSSHAIR)),
         "grenade_time_left": st.hud_view.as_ref().map(|(ps, _)| ps.grenade_time_left),
+        // Per weapon state, `[frames, frames with a visible crosshair]` drawn so far: a check diffs two reads.
+        "crosshair_state_frames": st.crosshair_state_frames,
         "alive": ps.health > 0 && ps.pm_type < sim::pm::PmType::Dead,
         "dead": ps.pm_type >= sim::pm::PmType::Dead && ps.pm_type != sim::pm::PmType::Spectator,
         "spectator": ps.pm_type == sim::pm::PmType::Spectator,

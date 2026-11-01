@@ -29,6 +29,34 @@ const NOTICE_RADIUS: f32 = 350.0;
 const FOV_HALF: f32 = 95.0;
 /// Longest distance a bot shoots at.
 const MAX_FIRE_DIST: f32 = 2200.0;
+/// How long the `devbotfire` hook waits for its weapon to come up before it lets go.
+const DEV_RAISE_WAIT_MS: i32 = 5000;
+
+/// Test hook `devbotfire`: the bot stands, asks for `weapon` and, once it is raised, holds `buttons` for `ms`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DevFire {
+    pub buttons: i32,
+    /// The weapon to hold the buttons with; 0 (the frag key) starts at once.
+    pub weapon: u16,
+    pub ms: i32,
+    /// The bot's time it lets go: `ms` after the weapon is ready, or [`DEV_RAISE_WAIT_MS`] after the request if
+    /// it never is. `None` until the bot has seen the request.
+    pub until: Option<i32>,
+    /// Whether the time runs from the weapon being ready (`until` then counts `ms`).
+    pub started: bool,
+}
+
+impl DevFire {
+    pub fn new(buttons: i32, weapon: u16, ms: i32) -> Self {
+        Self {
+            buttons,
+            weapon,
+            ms: ms.max(0),
+            until: None,
+            started: false,
+        }
+    }
+}
 
 /// Working memory shared by all bots on the server (path searches run one at a time).
 #[derive(Default)]
@@ -78,6 +106,8 @@ pub struct Brain {
     /// carried bomb's pickup may be removed instead of parked).
     bomb: BombState,
     bomb_level: bool,
+    /// Test hook `devbotfire`; set by the server command.
+    pub dev_fire: Option<DevFire>,
 }
 
 fn xorshift(s: &mut u32) -> u32 {
@@ -148,6 +178,7 @@ impl Brain {
             bomb: BombState::None,
             bomb_level: false,
             gave_up: None,
+            dev_fire: None,
         }
     }
 
@@ -177,15 +208,32 @@ impl Brain {
             self.finish(&mut cmd, delta);
             return cmd;
         }
-        // Test hook `devbotfire`: the bot stands and holds the given buttons until the time is up.
-        if let Some((buttons, until)) = c.dev_buttons
-            && time < until
-        {
-            cmd.buttons |= buttons;
-            self.yaw = c.ps.viewangles[1];
-            self.pitch = c.ps.viewangles[0];
-            self.finish(&mut cmd, delta);
-            return cmd;
+        // Test hook `devbotfire`: the bot stands and asks for the hook's weapon; only once that is raised does the
+        // hook's time start, so a switch's drop and raise (a respawn lost the weapon, the class weapon was up) never
+        // eat the burst.
+        if let Some(mut f) = self.dev_fire {
+            if !f.started
+                && (f.weapon == 0
+                    || c.ps.weapon == u32::from(f.weapon)
+                        && c.ps.weapon_state == sim::pm::weapon_state::READY)
+            {
+                f.started = true;
+                f.until = Some(time + f.ms);
+            }
+            let until = *f.until.get_or_insert(time + DEV_RAISE_WAIT_MS);
+            if time < until {
+                if f.started {
+                    cmd.buttons |= f.buttons;
+                }
+                // The weapon a person's client would keep asking for (`usercmd_s::weapon`).
+                cmd.weapon = u8::try_from(f.weapon).unwrap_or(0);
+                self.dev_fire = Some(f);
+                self.yaw = c.ps.viewangles[1];
+                self.pitch = c.ps.viewangles[0];
+                self.finish(&mut cmd, delta);
+                return cmd;
+            }
+            self.dev_fire = None;
         }
         // `bot_idle`: bots stand where they are (a stage that needs a quiet round), holding +activate where a use
         // trigger's hint shows (a bot put in a bomb zone by `devtele` plants or defuses).
