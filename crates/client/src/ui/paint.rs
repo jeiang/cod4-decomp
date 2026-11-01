@@ -702,9 +702,15 @@ impl Ui {
             }
             ity::OWNERDRAW => {
                 let r = self.menus[m].items[i].rect;
-                let px = self
-                    .place
-                    .rect(r.x, r.y, r.w, r.h, r.horz_align, r.vert_align);
+                // UI_OwnerDraw hands each piece the item's rect moved by its text offset, and UI_DrawRecordLevel
+                // fills it at alignment 0/0, whatever the item's (KisakCOD `ui_mp/ui_main_mp.cpp:1495-1534,1747-1752`).
+                let px = if d.window.owner_draw == 265 {
+                    self.place
+                        .rect(r.x + d.text_align_x, r.y + d.text_align_y, r.w, r.h, 0, 0)
+                } else {
+                    self.place
+                        .rect(r.x, r.y, r.w, r.h, r.horz_align, r.vert_align)
+                };
                 let color = self.text_color(m, i, d, &*host);
                 let text = self.item_text(&*host, m, i, d);
                 host.owner_draw(&*self, p, d, px, color, &text);
