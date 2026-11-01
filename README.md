@@ -48,6 +48,11 @@ the mouse-driven match begins.
 scheduling fixture collects a backlog before observing one actual server tick, then checks retained input on
 ticks without new traffic. It does not require rendering faster than `sv_fps`. Its held-Tab check measures at
 least thirty rendered frames using atomic counter snapshots, rather than requiring ten frames in two seconds.
+The synchronous step turns vsync off with `vid_restart` and back on with a second one; the client must then draw at
+least half the frames a second it drew before the step, within 15 s (#499). A slot that drew about five frames a
+second after that `vid_restart` drew as few with vsync off: the cause was the host's load (other slots' builds and
+matches), not the present mode, so the weapon-switch crosshair check waits up to 30 s for twenty frames a second
+before its wheel notch, and says so when the host never gets there.
 These checks follow KisakCOD (GPL-3.0, CoD4 MP 1.8), `g_active_mp.cpp:801–833` (`ClientThink`/`G_RunClient`) and
 `cg_consolecmds_mp.cpp:11–22,135–184` (`+scores`/`-scores` and `showScores`). The target remains 1.7; these
 stage-only corrections change no 1.7 gameplay or scoreboard input behavior, and native 1.7 analysis was unavailable.
