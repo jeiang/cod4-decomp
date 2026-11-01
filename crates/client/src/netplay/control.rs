@@ -118,6 +118,14 @@ fn entities(st: &NetPlay) -> Value {
             "persistent_smoke": crate::events::persistent_smoke(e),
             "custom_explode_start_time": e.custom_explode_start_time,
             "time2": e.time2,
+            // A player's stance from the snapshot's `eFlags`, for aiming at the body rather than over it.
+            "stance": if e.eflags & sim::pm::ef::PRONE != 0 {
+                "prone"
+            } else if e.eflags & sim::pm::ef::CROUCH != 0 {
+                "crouch"
+            } else {
+                "stand"
+            },
             "actor": !visible.contains(&e.number),
         }));
     }

@@ -574,8 +574,14 @@ impl Walker {
             {
                 continue;
             }
+            // The chest: a crouched or prone player's is lower, and aiming over it never puts the sights on them.
+            let chest = match e["stance"].as_str() {
+                Some("prone") => 10.0,
+                Some("crouch") => 30.0,
+                _ => 50.0,
+            };
             let at = vec3(&e["origin"]);
-            let at = [at[0], at[1], at[2] + 50.0];
+            let at = [at[0], at[1], at[2] + chest];
             let d = dist(eye, at);
             if nearest.is_none_or(|(n, _)| d < n) {
                 nearest = Some((d, at));
