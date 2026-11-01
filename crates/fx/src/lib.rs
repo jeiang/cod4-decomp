@@ -927,6 +927,23 @@ impl Fx {
             // effect's looping life.
             let limited = d.spawn[1] != i32::MAX;
             let until = if limited { i32::MAX } else { e.loop_end };
+            // A long catch-up (an effect started well before it is first updated) skips the spawns that could no
+            // longer have anything alive by the end of it, as `FX_SpawnLoopingElems` does: the effect is fully
+            // developed without filling the pool with elements that die on their first update. Stock spawns a
+            // limited run all at once (`FX_SpawnAllFutureLooping`), so only the unlimited ones are skipped.
+            let pending = i64::from(e.next_loop[k]);
+            let window = i64::from(now.min(until)) - pending;
+            if !limited && window > 128 {
+                let lib = self.lib.clone();
+                let max = stabilize_time(&lib, d, false, window, 0) + 1;
+                if window > max {
+                    let skipped = (window - max) / i64::from(interval) + 1;
+                    let next = pending + skipped * i64::from(interval);
+                    e.spawned[k] =
+                        e.spawned[k].saturating_add(skipped.min(i64::from(u32::MAX)) as u32);
+                    e.next_loop[k] = next.min(i64::from(i32::MAX)) as i32;
+                }
+            }
             while e.next_loop[k] <= now && e.next_loop[k] <= until {
                 let t = e.next_loop[k];
                 self.spawn(e, k, t);
@@ -1434,6 +1451,72 @@ fn is_trail(d: &FxElemDef) -> bool {
     d.elem_type == elem::TRAIL && d.trail.is_some() && matches!(d.visuals, FxVisuals::Materials(_))
 }
 
+/// How long after it spawns `d` (and what it spawns in turn) still has anything alive, capped at `cap`
+/// (`FX_LimitStabilizeTimeForElemDef_Recurse`): a catch-up longer than this cannot leave anything of an earlier spawn.
+/// `system` counts the looping element's whole run of spawns, as when it belongs to an effect spawned in turn.
+fn stabilize_time(lib: &Library, d: &FxElemDef, system: bool, cap: i64, depth: u32) -> i64 {
+    let own = stabilize_time_self(d, system);
+    if own >= cap || depth > 8 {
+        return cap;
+    }
+    let mut most = own;
+    let effect = |name: &str| {
+        lib.get(name)
+            .map_or(0, |def| stabilize_time_effect(lib, def, cap, depth + 1))
+    };
+    if d.elem_type == elem::RUNNER
+        && let FxVisuals::Effects(names) = &d.visuals
+    {
+        for name in names.iter().flatten() {
+            most = most.max(effect(name));
+            if most >= cap {
+                return cap;
+            }
+        }
+    }
+    for name in [&d.effect_on_death, &d.effect_on_impact, &d.effect_emitted]
+        .into_iter()
+        .filter_map(|n| n.as_deref())
+    {
+        most = most.max(own + effect(name));
+        if most >= cap {
+            return cap;
+        }
+    }
+    most
+}
+
+/// [`stabilize_time`] of every element of `def` (`FX_LimitStabilizeTimeForEffectDef_Recurse`).
+fn stabilize_time_effect(lib: &Library, def: &FxEffectDef, cap: i64, depth: u32) -> i64 {
+    let mut most = 0;
+    for d in def.elems.iter() {
+        most = most.max(stabilize_time(lib, d, true, cap, depth));
+        if most >= cap {
+            return cap;
+        }
+    }
+    most
+}
+
+/// The longest an element of `d` lives after it is spawned, plus the rest of its looping run when `system`
+/// (`FX_LimitStabilizeTimeForElemDef_SelfOnly`); a trail never stabilizes.
+fn stabilize_time_self(d: &FxElemDef, system: bool) -> i64 {
+    if d.elem_type == elem::TRAIL {
+        return i64::from(i32::MAX);
+    }
+    let mut t = i64::from(d.spawn_delay_msec.base)
+        + i64::from(d.spawn_delay_msec.amplitude)
+        + i64::from(d.life_span_msec.base)
+        + i64::from(d.life_span_msec.amplitude);
+    if system && d.spawn[1] > 0 {
+        if d.spawn[1] == i32::MAX {
+            return i64::from(i32::MAX);
+        }
+        t += i64::from(d.spawn[0]) * i64::from(d.spawn[1] - 1);
+    }
+    t
+}
+
 fn lerp_frame(a: &Frame, b: &Frame, t: f32) -> Frame {
     Frame {
         origin: a.origin.lerp(b.origin, t),
@@ -1875,10 +1958,34 @@ mod tests {
         let def = effect("fx/loop", 1, 0, 450, vec![e]);
         let mut fx = Fx::new(lib(vec![def.clone()]));
         fx.play(&def, Frame::facing(Vec3::ZERO, Vec3::Z));
-        fx.update(2000, &Empty);
+        // Frame by frame, so no update is a long catch-up.
+        for now in (50..=2000).step_by(50) {
+            fx.update(now, &Empty);
+        }
         // t = 0, 100, 200, 300 and 400.
         assert_eq!(fx.stats.elems_spawned, 5);
         assert_eq!(fx.live_effects(), 0);
+    }
+
+    #[test]
+    fn a_long_catch_up_skips_looping_spawns_that_could_not_still_be_alive() {
+        // A map's ambient effect is started 15 s before the level begins (`FX_SpawnLoopingElems`).
+        let mut e = elem_def(elem::SPRITE_BILLBOARD, FxVisuals::None);
+        e.spawn = [10, i32::MAX];
+        let def = effect("fx/ambient", 1, 0, i32::MAX, vec![e]);
+        let mut fx = Fx::new(lib(vec![def.clone()]));
+        fx.play_at(&def, Frame::facing(Vec3::ZERO, Vec3::Z), -15_000);
+        fx.update(0, &Empty);
+        // Fully developed: the spawns of the last 100 ms (its lifespan) are alive; the 1500 before them never are.
+        let live = fx.live_elems();
+        assert!((9..=11).contains(&live), "{live} live");
+        assert!(
+            fx.stats.elems_spawned <= 12,
+            "{} spawned",
+            fx.stats.elems_spawned
+        );
+        fx.update(50, &Empty);
+        assert!((9..=11).contains(&fx.live_elems()));
     }
 
     #[test]
