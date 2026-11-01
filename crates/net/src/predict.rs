@@ -303,7 +303,7 @@ impl Predictor {
             replayed += 1;
             // The mover is drawn at `draw_time`; the player on it is carried to the same moment, so the feet stay on
             // the drawn platform whatever clock the commands are stamped on (`CG_AdjustPositionForMover`).
-            carry = ground_carry(snap, &ps, cmd.server_time + env.draw_time - env.time);
+            carry = ground_carry(snap, &ps, cmd.server_time);
             if self.last.is_some_and(|(t, _)| t == cmd.server_time) {
                 at_last = Some(add(ps.origin, carry));
             }
