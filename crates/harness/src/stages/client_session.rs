@@ -22,7 +22,9 @@ const NAME: &str = "client-session";
 const LIMIT: Duration = Duration::from_secs(240);
 
 const DIRECT: &[&str] = &["--listen", "--bots", "3"];
-const DIRECT_STEPS: &str = "ingame=120,wait=3,shot=direct";
+/// The direct start loads `mp_crash` before any menu: the in-game menu's map title must name it, not show the bare `@`
+/// an unset `mapname` leaves (#372).
+const DIRECT_STEPS: &str = "ingame=120,wait=3,shot=direct,togglemenu,wait=1,see=Crash,nosee=@,shot=direct_menu,key=escape,nomenu=5";
 const MENU_STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
 click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=3,shot=menus";
 
