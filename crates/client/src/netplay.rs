@@ -1816,7 +1816,9 @@ impl NetPlay {
                 &def,
                 self.switches.ragdoll_tunables.max_simulating,
             );
-            self.effects.event(e, &def);
+            if !matches!(e, ClientEvent::PlayFxOnTag { .. }) {
+                self.effects.event(e, &def);
+            }
         }
         // Where the player looks (the demo and the scripted hit sit in front of the eyes, not the kicked view).
         let (look_yaw, look_pitch) = (self.angles[1].to_radians(), -self.angles[0].to_radians());
@@ -1877,6 +1879,7 @@ impl NetPlay {
         let projectiles = self.projectiles(&flying, st);
         if let Some(snap) = self.net.latest() {
             self.effects.world_fx(&snap.entities, &self.events, eye, st);
+            self.effects.update_script_bolts(&snap.entities, st);
         }
         self.effects.update(st, self.boxes.world());
         for s in self.effects.take_sounds() {
@@ -1954,9 +1957,22 @@ impl NetPlay {
                 );
             }
         }
+        if let Some(ui) = self.net.ui_ref() {
+            let tags = (1..net::ui::cs::EFFECT_TAGS_COUNT)
+                .filter_map(|slot| {
+                    let index = net::ui::cs::EFFECT_TAGS + slot;
+                    let value = ui.config(index);
+                    (!value.is_empty()).then(|| (index, value.to_owned()))
+                })
+                .collect::<Vec<_>>();
+            self.events.set_effect_tags(&tags);
+        }
         let events = self.events.scan(snap);
         for e in &events {
             *self.c.events.entry(e.kind()).or_default() += 1;
+            if matches!(e, ClientEvent::PlayFxOnTag { .. }) {
+                self.effects.event(e, &|_| None);
+            }
         }
         let (weapons, lib) = (&self.weapons, &self.lib);
         self.sound.world_events(
@@ -2470,6 +2486,8 @@ impl NetPlay {
                             out.push(m);
                         }
                     }
+                    self.effects
+                        .script_model_tags(e.number, &out[before..], &self.lib.content);
                     drawn += 1;
                     self.c.script_model_parts_max =
                         self.c.script_model_parts_max.max(out.len() - before);
@@ -2649,6 +2667,8 @@ impl NetPlay {
             if let Some(r) = rotors {
                 m.bones = r.pose(self.rotor_clock).to_vec();
             }
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
             out.push(m);
         }
         self.c.vehicles_seen = seen;
@@ -2659,11 +2679,13 @@ impl NetPlay {
 
     /// Models of every other player, between the snapshots around the interpolation moment.
     fn remote_players(&mut self, dt: f32, st: i32, own: u16, show_own: bool) -> Vec<ModelInstance> {
-        let ents = self
-            .net
-            .snaps
-            .interpolate(st - net::view::INTERP_DELAY_MS, (!show_own).then_some(own));
-        if !show_own {
+        self.effects.begin_script_tags();
+        let own_bolt = self.effects.has_script_bolt(own);
+        let ents = self.net.snaps.interpolate(
+            st - net::view::INTERP_DELAY_MS,
+            (!show_own && !own_bolt).then_some(own),
+        );
+        if !show_own && !own_bolt {
             // Not seen through its own eyes: the body is made anew (and falls anew) the next time it is.
             self.remotes.remove(&own);
         }
@@ -2846,8 +2868,13 @@ impl NetPlay {
             if let Some(c) = r.player.torso_animation() {
                 self.c.torso_clips.insert(c);
             }
-            drawn += 1;
-            out.extend(r.player.instances(e.origin));
+            let instances = r.player.instances(e.origin);
+            self.effects
+                .script_model_tags(e.number, &instances, &self.lib.content);
+            if e.client != own || show_own {
+                drawn += 1;
+                out.extend(instances);
+            }
         }
         out.extend(self.corpse_models(dt, &ents, now));
         self.effects.set_remote_tags(guns);
@@ -2923,6 +2950,17 @@ impl NetPlay {
             "sound": self.sound.report(),
         });
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
+        let bolts = self.effects.bolted_stats();
+        report["fx"]["bolted"] = json!({
+            "active": bolts.active,
+            "resolved_frames": bolts.resolved_frames,
+            "removed": bolts.removed,
+            "expired": bolts.expired,
+            "missing_tags": bolts.missing_tags,
+            "tag_displacement": bolts.max_tag_displacement,
+            "element_displacement": bolts.max_element_displacement,
+            "follow_error": bolts.max_follow_error,
+        });
         report["script_model_parts_max"] = self.c.script_model_parts_max.into();
         report["player_attachments"] = json!(self.c.player_attachments);
         report["gun_speed_given"] = json!(self.c.gun_speed_given);

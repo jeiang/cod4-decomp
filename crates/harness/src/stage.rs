@@ -491,7 +491,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "client-fx",
-        description: "effects on the real content, headless: an explosion draws and ends, an impact leaves a decal, a shot flashes and ejects a shell, a burst of tracers draws a beam each, vision and shock files work",
+        description: "effects on real content, headless: explosions end, impacts leave decals, guns flash and eject shells, tracer bursts draw beams, script-model tag effects follow after 500 ms and reject missing tags, vision and shock files work",
         needs_install: false,
         timeout: Duration::from_secs(5 * MINUTES),
         default: true,

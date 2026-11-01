@@ -646,12 +646,177 @@ pub fn run(install: &Path, map: &str) -> Result<Value, Vec<String>> {
     destructible(install, &mut report, &mut bad);
     references(&lib, &mut report, &mut bad);
     ambient(install, &mut report, &mut bad);
+    if let Err(e) = bolted(lib, data.world.clone(), world, eye, &mut report) {
+        bad.push(e);
+    }
 
     if bad.is_empty() {
         Ok(Value::Object(report))
     } else {
         Err(bad)
     }
+}
+
+/// Drives the stock script builtin, server snapshot event and posed model tag, not an injected client effect.
+/// KisakCOD (GPL-3.0), game_mp/g_scr_main_mp.cpp:4221–4254 `Scr_PlayFXOnTag`,
+/// cgame/cg_event.cpp:1286–1310 `CG_PlayFxOnTag`, EffectsCore/fx_update.cpp:2205–2232
+/// `FX_UpdateEffectBolt`: MP 1.8 reference; no iw3mp.exe 1.7 binary verification.
+fn bolted(
+    mut lib: Library,
+    render_world: std::sync::Arc<assets::zone::gfx::GfxWorld>,
+    world: &dyn Collide,
+    eye: glam::Vec3,
+    report: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    use assets::zone::fx::flags as flag;
+    use gsc::{Builtins, Options, Vm, compile};
+    use server::game::{Ent, EntKind, Game};
+    let model = lib
+        .content
+        .model_names("")
+        .into_iter()
+        .find(|name| {
+            lib.content.model_bone_names(name).is_some_and(|bones| {
+                bones
+                    .iter()
+                    .any(|bone| bone.eq_ignore_ascii_case("tag_origin"))
+            })
+        })
+        .ok_or("no loaded script model with tag_origin")?
+        .to_owned();
+    let pose = lib.rest_pose(&model, &[])?;
+    let mut candidates = lib.content.effects();
+    candidates.sort_by(|a, b| a.name.cmp(&b.name));
+    let effect = candidates
+        .into_iter()
+        .find(|effect| {
+            effect.elems.iter().any(|elem| {
+                elem.flags & flag::RUN_MASK == flag::RUN_RELATIVE_TO_EFFECT
+                    && elem.life_span_msec.base >= 1500
+                    && elem.spawn_delay_msec.base == 0
+            })
+        })
+        .ok_or("no loaded long-lived effect-relative element for bolted fixture")?;
+    let program = compile(
+        &[("bolted.gsc", "main(ent) { playfxontag(1, ent, \"tag_origin\"); } move(ent) { ent moveto(ent.origin + (32, 0, 0), 0.1); } missing(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }")],
+        &Builtins::stock_mp(),
+        Options::default(),
+    ).map_err(|e| format!("{e:?}"))?;
+    let main = program.find("bolted", "main").ok_or("missing main entry")?;
+    let moving = program.find("bolted", "move").ok_or("missing move entry")?;
+    let missing = program
+        .find("bolted", "missing")
+        .ok_or("missing missing-tag entry")?;
+    let dispatch = server::script::Dispatch::new(&program);
+    let mut vm = Vm::new(program).map_err(|e| format!("{e:?}"))?;
+    let mut game = Game::new(server::cvar::Cvars::new(), lib.content);
+    game.fx.index(&effect.name);
+    game.note_model(&model);
+    let mut entity = Ent::new(EntKind::Plain, "script_model");
+    entity.model = model.clone().into();
+    entity.origin = eye.to_array();
+    let number = game.spawn(entity)?;
+    let ent = game.entity_value(&mut vm, number);
+    vm.call(
+        &mut server::script::ScriptHost {
+            game: &mut game,
+            dispatch: &dispatch,
+        },
+        main,
+        None,
+        &[ent.clone()],
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    let tags = game
+        .configstrings
+        .iter()
+        .filter_map(|(index, value)| {
+            u16::try_from(*index)
+                .ok()
+                .map(|index| (index, value.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut events = crate::events::Events::default();
+    events.set_effect_tags(&tags);
+    events.take_commands(&mut vec![format!("fx 1 {}", effect.name)]);
+    let mut fx = Effects::new(&game.content, render_world);
+    let mut received = 0;
+    for step in 0..=16 {
+        let now = step * 50;
+        game.level.time = now;
+        game.level.frametime = 50;
+        if now == 500 {
+            vm.call(
+                &mut server::script::ScriptHost {
+                    game: &mut game,
+                    dispatch: &dispatch,
+                },
+                moving,
+                None,
+                &[ent.clone()],
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        }
+        game.run_mover(&mut vm, number);
+        let mut snapshot = net::Snapshot::empty();
+        snapshot.num = step as u32 + 1;
+        snapshot.server_time = now;
+        snapshot.entities = server::netsv::world_entities(&game);
+        for event in events.scan(&snapshot) {
+            received += usize::from(matches!(event, ClientEvent::PlayFxOnTag { .. }));
+            fx.event(&event, &|_| None);
+        }
+        fx.begin_script_tags();
+        let entity = game.ent(number).ok_or("script model vanished")?;
+        let instances = pose.instances(entity.origin, entity.angles, [0; 4]);
+        fx.script_model_tags(number, &instances, &game.content);
+        fx.update_script_bolts(&snapshot.entities, now);
+        fx.update(now, world);
+        fx.draw(eye, 0.0, 0.0, 0.0);
+    }
+    let stats = fx.bolted_stats();
+    report.insert("bolted_events".into(), received.into());
+    report.insert(
+        "bolted_tag_displacement".into(),
+        stats.max_tag_displacement.into(),
+    );
+    report.insert(
+        "bolted_element_displacement".into(),
+        stats.max_element_displacement.into(),
+    );
+    report.insert("bolted_follow_error".into(), stats.max_follow_error.into());
+    report.insert("bolted_model".into(), model.clone().into());
+    report.insert("bolted_effect".into(), effect.name.to_string().into());
+    let error = vm
+        .call(
+            &mut server::script::ScriptHost {
+                game: &mut game,
+                dispatch: &dispatch,
+            },
+            missing,
+            None,
+            &[ent],
+        )
+        .err()
+        .ok_or("unknown-tag playfxontag unexpectedly succeeded")?;
+    let expected = format!("tag 'unknown_tag' does not exist on entity with model '{model}'");
+    let stock_error = error.message.contains(&expected) && vm.level().get("survived").is_none();
+    report.insert(
+        "bolted_unknown_tag_error".into(),
+        u8::from(stock_error).into(),
+    );
+    if received != 1
+        || stats.max_tag_displacement < 3.0
+        || stats.max_element_displacement < 3.0
+        || stats.max_follow_error > 1.0
+        || !stock_error
+    {
+        return Err(format!(
+            "bolted effect: events {received}, tag displacement {}, element displacement {}, follow error {}, stock missing-tag error {stock_error}",
+            stats.max_tag_displacement, stats.max_element_displacement, stats.max_follow_error
+        ));
+    }
+    Ok(())
 }
 
 /// Look directly at every generated createfx placement on the affected maps. The named weather and fire

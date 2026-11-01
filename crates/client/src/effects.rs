@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD cgame/cg_event.cpp (CG_PlayFxOnTag) and
+// EffectsCore/fx_system.cpp / fx_update.cpp (FX_PlayBoltedEffect / FX_UpdateEffectBolt),
+// GPL-3.0, copyright the KisakCOD contributors and Activision.
 //! The client's effects: [`ClientEvent`]s become effect playbacks (impact sprites and decals, explosions, blood), the
 //! playback runs on the server clock against the static map, and every frame yields the sprites, decals, models and
 //! sounds to draw.
@@ -174,6 +177,8 @@ pub struct Effects {
     remote_tags: HashMap<u16, ViewTags>,
     /// The effects that follow a gun's tag until they end (a muzzle flash, a shell leaving the ejection port).
     bolted: Vec<Bolted>,
+    script_bolts: Vec<ScriptBolt>,
+    bolt_stats: ScriptBoltStats,
     tracers: Tracers,
     /// Tracers rolled by shots, not yet launched: the shooter, their eye and the way they look.
     pending_tracers: Vec<(u16, Vec3, Vec3)>,
@@ -213,6 +218,30 @@ struct Bolted {
     id: u64,
     shooter: u16,
     tag: Tag,
+}
+
+struct ScriptBolt {
+    id: Option<u64>,
+    entity: u16,
+    name: String,
+    tag: String,
+    frame: Option<Frame>,
+    attempted: bool,
+    owner: Option<(u16, u32)>,
+    sample: Option<(i32, u64, Frame, Vec3)>,
+    last_frame: Option<Frame>,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct ScriptBoltStats {
+    pub active: usize,
+    pub resolved_frames: u64,
+    pub removed: u64,
+    pub expired: u64,
+    pub missing_tags: u64,
+    pub max_tag_displacement: f32,
+    pub max_element_displacement: f32,
+    pub max_follow_error: f32,
 }
 
 /// A frame at `origin` facing `forward` with `up` above it.
@@ -296,6 +325,8 @@ impl Effects {
             projection: None,
             remote_tags: HashMap::new(),
             bolted: Vec::new(),
+            script_bolts: Vec::new(),
+            bolt_stats: ScriptBoltStats::default(),
             tracers: Tracers::default(),
             pending_tracers: Vec::new(),
             tracer_cvars: tracer::Cvars::default(),
@@ -509,6 +540,19 @@ impl Effects {
                     self.missing.insert(name.clone());
                 }
             },
+            ClientEvent::PlayFxOnTag { entity, name, tag } => {
+                self.script_bolts.push(ScriptBolt {
+                    id: None,
+                    entity: *entity,
+                    name: name.clone(),
+                    tag: tag.clone(),
+                    frame: None,
+                    attempted: false,
+                    owner: None,
+                    sample: None,
+                    last_frame: None,
+                });
+            }
             ClientEvent::PlayerPain { origin, .. } => {
                 let def = self.impact_effect(1, SURFACE_FLESH, flesh_column(false));
                 self.play(
@@ -729,9 +773,7 @@ impl Effects {
             self.fx.play(&d, at);
             return;
         }
-        let id = self.fx.play_attached(&d, at);
-        // Attached effects loop until stopped: this one plays once, and is carried along while it does.
-        self.fx.stop(id);
+        let id = self.fx.play_at(&d, at, self.clock);
         self.bolted.push(Bolted { id, shooter, tag });
     }
 
@@ -898,6 +940,139 @@ impl Effects {
         self.projection = (fov_x > 0.0 && aspect > 0.0).then_some((fov_x, aspect));
     }
 
+    pub fn bolted_stats(&self) -> ScriptBoltStats {
+        ScriptBoltStats {
+            active: self.script_bolts.len(),
+            ..self.bolt_stats
+        }
+    }
+
+    pub fn has_script_bolt(&self, entity: u16) -> bool {
+        self.script_bolts.iter().any(|b| b.entity == entity)
+    }
+
+    /// Begins a rendered pose frame; only tags actually resolved this frame may move an attachment.
+    pub fn begin_script_tags(&mut self) {
+        for b in &mut self.script_bolts {
+            b.frame = None;
+            b.attempted = true;
+        }
+    }
+
+    /// Resolves requested tags against the exact posed model instances submitted to the renderer.
+    pub fn script_model_tags(&mut self, entity: u16, models: &[ModelInstance], content: &Content) {
+        for bolt in self.script_bolts.iter_mut().filter(|b| b.entity == entity) {
+            bolt.attempted = true;
+            let frame = models.iter().find_map(|m| {
+                let names = content.model_bone_names(m.model.name.as_deref()?)?;
+                let i = names
+                    .iter()
+                    .position(|n| n.eq_ignore_ascii_case(&bolt.tag))?;
+                let (quat, trans) = m
+                    .bones
+                    .get(i)
+                    .map(|b| (b.quat, b.trans))
+                    .or_else(|| m.model.base_mat.get(i).map(|b| (b.quat, b.trans)))?;
+                let axes = sim::skel::quat::axes(&quat);
+                let (f, r, u) = sim::pm::math::angle_vectors(&m.angles);
+                let axis = [Vec3::from(f), -Vec3::from(r), Vec3::from(u)];
+                let world = |v: [f32; 3]| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
+                Some(Frame {
+                    origin: Vec3::from(m.origin) + world(trans),
+                    axis: axes.map(world),
+                })
+            });
+            bolt.frame = frame;
+        }
+    }
+
+    /// Applies the current animated world tags, forgetting vanished entities and naturally finished effects.
+    pub fn update_script_bolts(&mut self, entities: &[EntityState], now_ms: i32) {
+        let mut bolts = std::mem::take(&mut self.script_bolts);
+        bolts.retain_mut(|b| {
+            let owner = entities.iter().find(|e| e.number == b.entity);
+            let identity = owner.map(|e| (e.model, e.eflags & net::entity::TELEPORT_BIT));
+            if owner.is_none() || b.owner.is_some_and(|old| Some(old) != identity) {
+                if let Some(id) = b.id {
+                    self.fx.remove(id);
+                }
+                self.bolt_stats.removed += 1;
+                return false;
+            }
+            b.owner = identity;
+            if let Some(id) = b.id
+                && !self.fx.is_live(id)
+            {
+                self.bolt_stats.expired += 1;
+                return false;
+            }
+            if b.attempted && b.frame.is_none() {
+                self.bolt_stats.missing_tags += 1;
+                logging::dedup!(
+                    WARN,
+                    "bolt-tag",
+                    entity = b.entity,
+                    tag = b.tag.as_str(),
+                    "effect attachment tag not found"
+                );
+                if let Some(id) = b.id {
+                    self.fx.remove(id);
+                }
+                return false;
+            }
+            if let Some(frame) = b.frame {
+                self.bolt_stats.resolved_frames += 1;
+                let before = b.id.and_then(|id| self.fx.attachment_sample(id));
+                if let Some(id) = b.id {
+                    self.fx.move_bolted(id, frame);
+                } else if let Some(def) = self.fx.library().get(&b.name).cloned() {
+                    let def = self.resolve(&def);
+                    b.id = Some(self.fx.play_at(&def, frame, now_ms));
+                    *self.played.entry("play_fx_on_tag").or_default() += 1;
+                } else {
+                    self.missing.insert(b.name.clone());
+                    logging::dedup!(
+                        WARN,
+                        "bolt-effect",
+                        effect = b.name.as_str(),
+                        "effect not in the library"
+                    );
+                    return false;
+                }
+                if let Some((elem, pos)) = b.id.and_then(|id| self.fx.attachment_sample(id)) {
+                    if let (Some((old_elem, old_pos)), Some(old_frame)) = (before, b.last_frame)
+                        && old_elem == elem
+                    {
+                        let local = old_pos - old_frame.origin;
+                        let expected = frame.origin
+                            + frame.axis[0] * local.dot(old_frame.axis[0])
+                            + frame.axis[1] * local.dot(old_frame.axis[1])
+                            + frame.axis[2] * local.dot(old_frame.axis[2]);
+                        self.bolt_stats.max_follow_error =
+                            self.bolt_stats.max_follow_error.max(pos.distance(expected));
+                    }
+                    if let Some((start, original_elem, original_frame, original_pos)) = b.sample {
+                        if elem == original_elem && now_ms - start >= 500 {
+                            self.bolt_stats.max_tag_displacement = self
+                                .bolt_stats
+                                .max_tag_displacement
+                                .max(frame.origin.distance(original_frame.origin));
+                            self.bolt_stats.max_element_displacement = self
+                                .bolt_stats
+                                .max_element_displacement
+                                .max(pos.distance(original_pos));
+                        }
+                    } else {
+                        b.sample = Some((now_ms, elem, frame, pos));
+                    }
+                }
+                b.last_frame = Some(frame);
+            }
+            true
+        });
+        self.script_bolts = bolts;
+    }
+
     /// Tells the effects where the guns of the other players are this frame, by client number: what their muzzle
     /// flashes and shells follow.
     pub fn set_remote_tags(&mut self, tags: HashMap<u16, ViewTags>) {
@@ -992,7 +1167,7 @@ impl Effects {
                 return false;
             }
             if let Some(at) = self.tag_frame(b.shooter, b.tag) {
-                self.fx.move_effect(b.id, at);
+                self.fx.move_bolted(b.id, at);
             }
             true
         });

@@ -1127,7 +1127,9 @@ fn play_fx_on_tag(g: &mut Game, _: &mut Vm, a: Args) -> R {
         return Err("cannot use \" characters in tag names\n".into());
     }
     if g.local_tag(n, &tag).is_none() {
-        return Err(format!("tag '{tag}' does not exist on entity with model '{model}'"));
+        return Err(format!(
+            "tag '{tag}' does not exist on entity with model '{model}'"
+        ));
     }
     let text = format!("{index:02}{tag}");
     let cs = (1..net::ui::cs::EFFECT_TAGS_COUNT)
@@ -1161,7 +1163,6 @@ fn vision_set(g: &mut Game, a: Args, night: bool) -> R {
     g.vision_set(&name, ms, night);
     Ok(Value::Undefined)
 }
-
 
 /// The outer and inner radius of a physics event (`origin, outer, inner, ...`).
 fn physics_radii(a: &Args) -> Result<(f32, f32), String> {
@@ -1607,10 +1608,14 @@ mod world_fx_tests {
     #[test]
     fn a_missing_playfxontag_bone_terminates_the_script_thread_with_the_stock_error() {
         let prog = compile(
-            &[("t.gsc", "main(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }")],
+            &[(
+                "t.gsc",
+                "main(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }",
+            )],
             &Builtins::stock_mp(),
             Options::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let entry = prog.find("t", "main").unwrap();
         let dispatch = crate::script::Dispatch::new(&prog);
         let mut vm = Vm::new(prog).unwrap();
@@ -1620,9 +1625,17 @@ mod world_fx_tests {
         e.model = "test_model".into();
         let n = g.spawn(e).unwrap();
         let ent = g.entity_value(&mut vm, n);
-        let mut host = crate::script::ScriptHost { game: &mut g, dispatch: &dispatch };
+        let mut host = crate::script::ScriptHost {
+            game: &mut g,
+            dispatch: &dispatch,
+        };
         let err = vm.call(&mut host, entry, None, &[ent]).unwrap_err();
-        assert!(err.message.contains("tag 'unknown_tag' does not exist on entity with model 'test_model'"), "{}", err.message);
+        assert!(
+            err.message
+                .contains("tag 'unknown_tag' does not exist on entity with model 'test_model'"),
+            "{}",
+            err.message
+        );
         assert!(vm.level().get("survived").is_none());
         assert!(host.game.tempev.live(host.game.level.time).next().is_none());
     }
@@ -1646,14 +1659,23 @@ mod world_fx_tests {
             assert_eq!(target.state.event_parm, 1);
             assert_eq!(target.state.event_seq, sequence);
             assert_eq!(target.state.etype, etype::SCRIPT_MODEL);
-            assert_eq!(g.configstrings[&u32::from(net::ui::cs::EFFECT_TAGS + 1)], "01tag_origin");
-            assert!(!g.configstrings.contains_key(&u32::from(net::ui::cs::EFFECT_TAGS + 2)));
+            assert_eq!(
+                g.configstrings[&u32::from(net::ui::cs::EFFECT_TAGS + 1)],
+                "01tag_origin"
+            );
+            assert!(
+                !g.configstrings
+                    .contains_key(&u32::from(net::ui::cs::EFFECT_TAGS + 2))
+            );
             assert!(g.tempev.live(g.level.time).next().is_none());
         }
         g.ent_mut(n).unwrap().hidden = true;
         assert!(world_entities(&g).iter().all(|s| s.number != n));
         let sent = crate::netsv::world_snapshot(&g);
-        assert_eq!(sent.iter().find(|s| s.state.number == n).unwrap().shown_to, Some(0));
+        assert_eq!(
+            sent.iter().find(|s| s.state.number == n).unwrap().shown_to,
+            Some(0)
+        );
     }
 
     #[test]
@@ -1682,14 +1704,22 @@ mod world_fx_tests {
         }
         args[0] = Value::Int(1);
         args[2] = Value::str("tag_\"bad");
-        assert!(play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args)).unwrap_err().contains("cannot use"));
+        assert!(
+            play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args))
+                .unwrap_err()
+                .contains("cannot use")
+        );
         assert_eq!(
             play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args[..2])).unwrap_err(),
             "Incorrect number of parameters"
         );
         assert_eq!(g.ent(n).unwrap().event_sequence, 0);
         assert!(g.tempev.live(g.level.time).next().is_none());
-        assert!(!g.configstrings.keys().any(|&i| i >= u32::from(net::ui::cs::EFFECT_TAGS)));
+        assert!(
+            !g.configstrings
+                .keys()
+                .any(|&i| i >= u32::from(net::ui::cs::EFFECT_TAGS))
+        );
     }
 
     #[test]

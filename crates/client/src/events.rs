@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Translated in part from KisakCOD cgame/cg_event.cpp (CG_PlayFxOnTag),
+// GPL-3.0, copyright the KisakCOD contributors and Activision.
 //! What the server tells the client happened: the one-shot events of `server::tempev` turned into [`ClientEvent`]s,
 //! each delivered once however many snapshots repeat it.
 //!
@@ -59,8 +61,12 @@ pub enum ClientEvent {
         /// Where the effect's up points (the roll `playfx` gave it).
         up: [f32; 3],
         name: String,
-        /// The entity the effect was played on (`playfxontag`), 1023 for none.
+    },
+    /// A script effect following a world-model bone for its authored lifetime.
+    PlayFxOnTag {
         entity: u16,
+        name: String,
+        tag: String,
     },
     PlayerDeath {
         origin: [f32; 3],
@@ -112,6 +118,7 @@ impl ClientEvent {
             Self::MissileBounce { .. } => "missile_bounce",
             Self::Dud { .. } => "dud",
             Self::PlayFx { .. } => "play_fx",
+            Self::PlayFxOnTag { .. } => "play_fx_on_tag",
             Self::PlayerDeath { .. } => "player_death",
             Self::PlayerPain { .. } => "player_pain",
             Self::Physics { .. } => "physics",
@@ -181,11 +188,25 @@ pub fn start_shakes(
 pub struct Events {
     /// Effect names by index - 1.
     fx: Vec<String>,
+    effect_tags: HashMap<u16, String>,
     /// Last sequence acted on, by event entity number.
     seen: HashMap<u16, u8>,
 }
 
 impl Events {
+    /// Replaces the EFFECT_TAGS configstring table (absolute configstring indices).
+    pub fn set_effect_tags(&mut self, strings: &[(u16, String)]) {
+        self.effect_tags.clear();
+        for (index, value) in strings {
+            if let Some(index) = index.checked_sub(net::ui::cs::EFFECT_TAGS)
+                && index > 0
+                && index < net::ui::cs::EFFECT_TAGS_COUNT
+            {
+                self.effect_tags.insert(index, value.clone());
+            }
+        }
+    }
+
     /// Takes the `fx` commands out of `cmds`, returning the rest in order.
     pub fn take_commands(&mut self, cmds: &mut Vec<String>) -> Vec<String> {
         let mut rest = Vec::new();
@@ -230,6 +251,23 @@ impl Events {
             self.seen.insert(e.number, e.event_seq);
             out.extend(self.decode(e, entities));
         }
+        for e in snap.entities.iter().filter(|e| e.etype != etype::EVENT) {
+            live.push(e.number);
+            let count = self
+                .seen
+                .get(&e.number)
+                .map_or(4, |last| e.event_seq.wrapping_sub(*last).min(4));
+            self.seen.insert(e.number, e.event_seq);
+            let recent = e.recent_events();
+            for &(event, parm) in &recent[4 - usize::from(count)..] {
+                if event == ev::PLAY_FX_ON_TAG {
+                    let mut event_state = e.clone();
+                    event_state.event = event;
+                    event_state.event_parm = parm;
+                    out.extend(self.decode(&event_state, entities));
+                }
+            }
+        }
         // An entity that left the snapshot starts over, so a restarted server's sequence 1 is not skipped.
         self.seen.retain(|n, _| live.contains(n));
         out
@@ -238,6 +276,21 @@ impl Events {
     fn decode(&self, e: &EntityState, entities: &[EntityState]) -> Option<ClientEvent> {
         let normal = direction(e.angles);
         Some(match e.event {
+            ev::PLAY_FX_ON_TAG => {
+                let encoded = self.effect_tags.get(&u16::from(e.event_parm))?;
+                let digits = encoded.as_bytes().get(..2)?;
+                if !digits.iter().all(u8::is_ascii_digit) {
+                    logging::dedup!(WARN, "effect-tag", "malformed EFFECT_TAGS entry");
+                    return None;
+                }
+                let index = usize::from(digits[0] - b'0') * 10 + usize::from(digits[1] - b'0');
+                let tag = encoded.get(2..).filter(|s| !s.is_empty())?;
+                ClientEvent::PlayFxOnTag {
+                    entity: e.number,
+                    name: self.fx_name(index)?.to_owned(),
+                    tag: tag.to_owned(),
+                }
+            }
             ev::BULLET_IMPACT => ClientEvent::BulletImpact {
                 origin: e.origin,
                 normal,
@@ -285,7 +338,6 @@ impl Events {
                         ""
                     })
                     .to_owned(),
-                entity: e.client,
             },
             ev::PLAYER_DEATH => ClientEvent::PlayerDeath {
                 origin: e.origin,
@@ -384,6 +436,78 @@ fn direction(angles: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_tag_events_decode_configstrings_and_deduplicate_ring_history() {
+        let mut events = Events::default();
+        events.take_commands(&mut vec!["fx 1 bolt_a".into(), "fx 2 bolt_b".into()]);
+        events.set_effect_tags(&[
+            (net::ui::cs::EFFECT_TAGS + 1, "01tag_flash".into()),
+            (net::ui::cs::EFFECT_TAGS + 2, "02tag_brass".into()),
+        ]);
+        let mut target = EntityState::new(20);
+        target.etype = etype::SCRIPT_MODEL;
+        target.event_seq = 2;
+        target.set_recent_events([
+            (0, 0),
+            (0, 0),
+            (ev::PLAY_FX_ON_TAG, 1),
+            (ev::PLAY_FX_ON_TAG, 2),
+        ]);
+        let first = events.scan(&snap(std::slice::from_ref(&target)));
+        assert_eq!(
+            first,
+            vec![
+                ClientEvent::PlayFxOnTag {
+                    entity: 20,
+                    name: "bolt_a".into(),
+                    tag: "tag_flash".into()
+                },
+                ClientEvent::PlayFxOnTag {
+                    entity: 20,
+                    name: "bolt_b".into(),
+                    tag: "tag_brass".into()
+                },
+            ]
+        );
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        target.event_seq = 3;
+        target.set_recent_events([
+            (0, 0),
+            (ev::PLAY_FX_ON_TAG, 1),
+            (ev::PLAY_FX_ON_TAG, 2),
+            (ev::PLAY_FX_ON_TAG, 1),
+        ]);
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
+        events.scan(&snap(&[]));
+        assert_eq!(events.scan(&snap(&[target])).len(), 3);
+    }
+
+    #[test]
+    fn target_tag_event_sequence_wraps_and_invalid_tag_entries_are_not_played() {
+        let mut events = Events::default();
+        events.take_commands(&mut vec!["fx 1 bolt".into()]);
+        events.set_effect_tags(&[
+            (net::ui::cs::EFFECT_TAGS + 1, "01tag_origin".into()),
+            (net::ui::cs::EFFECT_TAGS + 2, "00tag_origin".into()),
+            (net::ui::cs::EFFECT_TAGS + 3, "01".into()),
+            (net::ui::cs::EFFECT_TAGS + 4, "x1tag_origin".into()),
+        ]);
+        let mut target = EntityState::new(12);
+        target.etype = etype::SCRIPT_MODEL;
+        target.event_seq = 255;
+        target.event = ev::PLAY_FX_ON_TAG;
+        target.event_parm = 1;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
+        target.event_seq = 0;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
+        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        for parm in [0, 2, 3, 4, 255] {
+            target.event_seq = target.event_seq.wrapping_add(1);
+            target.event_parm = parm;
+            assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
+        }
+    }
 
     fn snap(events: &[EntityState]) -> Snapshot {
         let mut s = Snapshot::empty();
