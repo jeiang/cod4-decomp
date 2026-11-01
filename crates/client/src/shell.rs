@@ -456,6 +456,8 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("cg_scoreboardPingGraph", "0"),
     // Cheat protected: only acts with `sv_cheats` on.
     ("snd_enableReverb", "1"),
+    // Whether a level starts its `_fx.gsc` map effects (`CG_StartClientSideEffects`). Cheat protected.
+    ("clientSideEffects", "1"),
     // How the colour buffer is cleared (`R_GetClearColor`): the stock default never clears, so pixels nothing draws
     // are black here, not the fog colour (#356). `r_clear` takes the stock names or indices 0 to 4; the colours are
     // `r g b a` in 0..1.

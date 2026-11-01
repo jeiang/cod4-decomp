@@ -1708,6 +1708,7 @@ impl Viewer {
             let t_net = Instant::now();
             net.set_volume(crate::sound::volume_of(&st.input.cvars));
             net.set_sound_mix(crate::sound::mix_of(&st.input.cvars));
+            net.set_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
             net.set_voice(st.input.cvar("cl_voice").is_none_or(|v| v.trim() != "0"));
             net.set_demo_paused(
                 st.input
@@ -4889,6 +4890,7 @@ fn finish_load(
             net.set_profile(&sh.st.stats);
             net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
         }
+        net.start_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
         st.net = Some(net);
         st.listen = listen;
         if let Some(sh) = st.shell.as_mut() {

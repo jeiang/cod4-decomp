@@ -6,6 +6,7 @@
 //! Which effect an impact plays is the original's: the weapon's impact type picks a row of the impact table, the
 //! surface type a column; flesh has its own columns (body or head; the stock event carries only the head bit, so the fatal columns are not used).
 
+use crate::ambient::Ambient;
 use crate::decal::{self, Placement};
 use crate::events::{ClientEvent, Events, Shooter};
 use crate::tracer::{self, Tracers};
@@ -149,6 +150,7 @@ struct Mark {
 
 pub struct Effects {
     fx: Fx,
+    ambient: Ambient,
     impact: Option<Arc<FxImpactTable>>,
     world: Arc<GfxWorld>,
     marks: HashMap<u64, Mark>,
@@ -191,6 +193,9 @@ pub struct Effects {
     tracer_material: Option<Arc<Material>>,
     /// What was played, by kind; for the report.
     pub played: BTreeMap<&'static str, u64>,
+    /// Total draws (sprite quads, clouds, models, trail strips) that passed the camera's cull, by the lower-case name
+    /// of the effect that was played; a runner's children count against it.
+    pub effect_quads: BTreeMap<String, u64>,
     /// Names of effects an event asked for that the content lacks.
     pub missing: HashSet<String>,
 }
@@ -277,6 +282,7 @@ impl Effects {
         }
         Self {
             fx: Fx::new(Arc::new(lib)),
+            ambient: Ambient::empty(),
             impact: content.impact_table().cloned(),
             world,
             marks: HashMap::new(),
@@ -301,8 +307,23 @@ impl Effects {
             dice: 0x9e37_79b9,
             tracer_material: None,
             played: BTreeMap::new(),
+            effect_quads: BTreeMap::new(),
             missing: HashSet::new(),
         }
+    }
+
+    /// Starts the generated map effects in the same pool as gameplay and entity effects, unless `clientSideEffects`
+    /// (`ambient`) is off.
+    pub fn with_ambient(mut self, content: &Content, ambient: bool) -> Self {
+        if ambient {
+            self.ambient = Ambient::new(content, &mut self.fx);
+        }
+        self
+    }
+
+    /// Restarts the client-side effects with the level clock, including a same-map round restart.
+    pub fn restart(&mut self, content: &Content, ambient: bool) {
+        *self = Self::new(content, self.world.clone()).with_ambient(content, ambient);
     }
 
     fn impact_effect(
@@ -999,6 +1020,14 @@ impl Effects {
         self.fx.live_elems()
     }
 
+    pub fn ambient(&self) -> &Ambient {
+        &self.ambient
+    }
+
+    pub fn ambient_live_effects(&self) -> usize {
+        self.ambient.live_effects(&self.fx)
+    }
+
     /// What to draw from a camera at `eye` looking along `yaw` and `pitch` (radians).
     pub fn draw(&mut self, eye: Vec3, yaw: f32, pitch: f32, roll: f32) -> Drawn {
         let (sy, cy) = yaw.sin_cos();
@@ -1020,7 +1049,18 @@ impl Effects {
         // What the effects that start next are culled against.
         self.fx.set_camera(cam);
         let mut d = Draws::default();
-        self.fx.draw(&cam, &mut d);
+        let quads = &mut self.effect_quads;
+        let ambient_quads = &mut self.ambient.quads;
+        self.fx.draw_counted(&cam, &mut d, &mut |name, n| {
+            if let Some(count) = quads.get_mut(name) {
+                *count += n as u64;
+            } else {
+                quads.insert(name.to_owned(), n as u64);
+            }
+            if let Some(count) = ambient_quads.get_mut(name) {
+                *count += n as u64;
+            }
+        });
         let beams = self.tracers.beams(self.clock);
         let mut out = Drawn {
             tracers: beams.len(),
