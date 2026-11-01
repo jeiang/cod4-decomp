@@ -16,8 +16,8 @@ use std::time::Duration;
 
 const NAME: &str = "client-foliage";
 const LIMIT: Duration = Duration::from_secs(180);
-const STEPS: &str = "set=set sm_enable 1,vidrestart,wait=2,gfxis=shadows 1,shot=foliage-on,\
-set=set sm_enable 0,vidrestart,wait=2,gfxis=shadows 0,shot=foliage-off";
+const STEPS_ON: &str = "renderer,wait=2,gfxis=shadows 1,shot=foliage-on";
+const STEPS_OFF: &str = "renderer,wait=2,gfxis=shadows 0,shot=foliage-off";
 /// The middle of the crown, including the black cutout cards of #358, and the front of its trunk. Fractions of the
 /// picture, left/top to right/bottom, so the check does not depend on the window size.
 const CANOPY: (f32, f32, f32, f32) = (0.20, 0.00, 0.80, 0.35);
@@ -83,8 +83,8 @@ fn measure(w: u32, h: u32, on: &[u8], off: &[u8]) -> Metrics {
 }
 
 fn foliage_verdict(dir: &Path, report: &mut StageReport) -> Result<(), String> {
-    let (w, h, on) = decode(&dir.join("foliage-on.png"))?;
-    let (w2, h2, off) = decode(&dir.join("foliage-off.png"))?;
+    let (w, h, on) = decode(&dir.join("on/foliage-on.png"))?;
+    let (w2, h2, off) = decode(&dir.join("off/foliage-off.png"))?;
     if (w, h) != (w2, h2) {
         return Err("foliage shadow-on and shadow-off screenshots differ in size".into());
     }
@@ -139,45 +139,55 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         return Ok(r);
     }
     let mut out = StageReport::new(NAME, Status::Passed);
-    let args = [
-        "--map",
-        "mp_farm",
-        "--flythrough",
-        "--fly-at",
-        "60",
-        "--duration",
-        "30",
-        "--size",
-        "1920x1080",
-    ];
-    match run_client(
-        &client,
-        install,
-        &ctx.dir,
-        &ctx.dir.join("config"),
-        &args,
-        STEPS,
-        LIMIT,
-    ) {
-        Ok(report) => {
-            out.files.extend([
-                "ui-script.json".into(),
-                "foliage-on.png".into(),
-                "foliage-off.png".into(),
-            ]);
-            let problems: Vec<String> = session_verdict(&report)
-                .into_iter()
-                .chain(foliage_verdict(&ctx.dir, &mut out).err())
-                .collect();
-            if !problems.is_empty() {
+    // Flythrough has no gameplay shell to apply vid_restart. Start each held pose with the public shadow-mode
+    // option instead, and assert the renderer's actual setting before capturing it.
+    for (mode, steps) in [("on", STEPS_ON), ("off", STEPS_OFF)] {
+        let mut args = vec![
+            "--map",
+            "mp_farm",
+            "--flythrough",
+            "--fly-at",
+            "60",
+            "--duration",
+            "30",
+            "--size",
+            "1920x1080",
+        ];
+        if mode == "off" {
+            args.extend(["--shadows", "off"]);
+        }
+        let dir = ctx.dir.join(mode);
+        match run_client(
+            &client,
+            install,
+            &dir,
+            &dir.join("config"),
+            &args,
+            steps,
+            LIMIT,
+        ) {
+            Ok(report) => {
+                out.files.extend([
+                    format!("{mode}/ui-script.json").into(),
+                    format!("{mode}/foliage-{mode}.png").into(),
+                ]);
+                let problems = session_verdict(&report);
+                if !problems.is_empty() {
+                    out.status = Status::Failed;
+                    out.reason = Some(problems.join("; "));
+                    return Ok(out);
+                }
+            }
+            Err(e) => {
                 out.status = Status::Failed;
-                out.reason = Some(problems.join("; "));
+                out.reason = Some(e);
+                return Ok(out);
             }
         }
-        Err(e) => {
-            out.status = Status::Failed;
-            out.reason = Some(e);
-        }
+    }
+    if let Err(e) = foliage_verdict(&ctx.dir, &mut out) {
+        out.status = Status::Failed;
+        out.reason = Some(e);
     }
     Ok(out)
 }

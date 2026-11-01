@@ -2091,7 +2091,7 @@ impl Renderer {
             } else {
                 VertexKind::Model
             };
-            if self.skips_without_tech(PassKind::Scene, mat, techs, hsm) {
+            if self.skips_material(PassKind::Scene, mat, techs, hsm) {
                 continue;
             }
             let Some(prep) = self.prepare(mat, techs, kind, hsm) else {
