@@ -859,14 +859,22 @@ impl Viewer {
             note,
         } = ready;
         let caps = surface.get_capabilities(&gpu.adapter);
-        // The shaders write display-referred values: an 8-bit linear (non-sRGB) target, not an HDR one.
-        let format = [
+        // The shaders write display-referred values: an 8-bit linear (non-sRGB) target, not an HDR one. In a
+        // browser the canvas takes the format `navigator.gpu.getPreferredCanvasFormat()` names, which wgpu lists
+        // first (wgpu-30 `backend/webgpu.rs` `surface_get_capabilities`): Chromium warns on any other and its
+        // SwiftShader WebGPU cannot make a swapchain image of it ("Could not find SharedImageBackingFactory",
+        // `gpu/command_buffer/service/shared_image/shared_image_factory.cc`), losing the device.
+        let linear = [
             wgpu::TextureFormat::Bgra8Unorm,
             wgpu::TextureFormat::Rgba8Unorm,
-        ]
-        .into_iter()
-        .find(|f| caps.formats.contains(f))
-        .unwrap_or(caps.formats[0]);
+        ];
+        let preferred = cfg!(target_arch = "wasm32")
+            .then(|| caps.formats.first().copied())
+            .flatten()
+            .filter(|f| linear.contains(f));
+        let format = preferred
+            .or_else(|| linear.into_iter().find(|f| caps.formats.contains(f)))
+            .unwrap_or(caps.formats[0]);
         let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
         let copy_src = caps.usages.contains(wgpu::TextureUsages::COPY_SRC);
         if copy_src {
