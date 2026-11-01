@@ -293,6 +293,8 @@ fn eye_speed_summary(speeds: &[f32]) -> Value {
 #[derive(Default)]
 struct Counters {
     cmds: u64,
+    /// The least and the most a sent usercmd's time differed from the moment the others were drawn at, ms.
+    cmd_drawn: Option<(i32, i32)>,
     shots: u64,
     /// The most the view kicked up, and the most the pitch of a sent cmd differed from the player's own aim, degrees.
     max_kick_up: f32,
@@ -435,6 +437,8 @@ pub struct NetPlay {
     damage_hud: DamageHud,
     pitch_limits: (f32, f32),
     cmd_time: i32,
+    /// The server time the other players were last drawn at.
+    drawn_at: Option<i32>,
     last_cmd: Instant,
     want_weapon: Option<u16>,
     /// The last primary weapon held (`weaponLatestPrimaryIdx`): where cycling from an item or offhand returns to.
@@ -585,6 +589,7 @@ impl NetPlay {
             damage_hud: DamageHud::default(),
             pitch_limits,
             cmd_time: 0,
+            drawn_at: None,
             last_cmd: Instant::now(),
             want_weapon: None,
             latest_primary: 0,
@@ -891,6 +896,7 @@ impl NetPlay {
         }
         self.pred = Predictor::default();
         self.cmd_time = 0;
+        self.drawn_at = None;
         self.want_weapon = None;
         self.latest_primary = 0;
         self.last_spawn = None;
@@ -1329,6 +1335,7 @@ impl NetPlay {
             weapons: &self.weapons,
             params: &self.params,
             time: ct,
+            draw_time: st,
         };
         let p = self.pred.predict(&snap, &env);
         laps.lap("predict");
@@ -2096,6 +2103,16 @@ impl NetPlay {
             (cmd.angles[0].wrapping_sub(pack(self.angles[0], delta[0])) as i16).unsigned_abs();
         self.c.max_kick_in_cmd = self.c.max_kick_in_cmd.max(f32::from(sent) * ANGLE_UNIT);
         self.c.cmds += 1;
+        // How far the command's time is from the moment the others were last drawn at: stock stamps that very moment
+        // (`cl.serverTime`), and the server's antilag judges the shot there.
+        if let Some(drawn) = self.drawn_at {
+            let d = cmd.server_time - drawn;
+            self.c.cmd_drawn = Some(
+                self.c
+                    .cmd_drawn
+                    .map_or((d, d), |(lo, hi)| (lo.min(d), hi.max(d))),
+            );
+        }
         self.pred.push(cmd);
         self.net.send_cmd(cmd);
     }
@@ -2544,10 +2561,9 @@ impl NetPlay {
 
     /// Models of every other player, between the snapshots around the interpolation moment.
     fn remote_players(&mut self, dt: f32, st: i32, own: u16, show_own: bool) -> Vec<ModelInstance> {
-        let ents = self
-            .net
-            .snaps
-            .interpolate(st - net::view::INTERP_DELAY_MS, (!show_own).then_some(own));
+        let at = st - net::view::INTERP_DELAY_MS;
+        self.drawn_at = Some(at);
+        let ents = self.net.snaps.interpolate(at, (!show_own).then_some(own));
         if !show_own {
             // Not seen through its own eyes: the body is made anew (and falls anew) the next time it is.
             self.remotes.remove(&own);
@@ -2769,6 +2785,7 @@ impl NetPlay {
             "usercmds": self.c.cmds,
             "predictions": self.c.predictions,
             "prediction_corrections": self.pred.corrections,
+            "cmd_minus_drawn_ms": self.c.cmd_drawn.map(|(lo, hi)| json!({ "min": lo, "max": hi })),
             "players_seen_max": self.c.max_players_seen,
             "moved": moved,
             "path": self.c.path,

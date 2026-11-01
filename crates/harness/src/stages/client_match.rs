@@ -462,6 +462,16 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             "the server corrected {corrected} of {predicted} predictions"
         ));
     }
+    // Stock stamps a usercmd with the moment cgame draws the others at (`CL_FinishMove`, `cl.serverTime`), and the
+    // server's antilag judges its shots there: a command stamped off that moment is judged where the player did not
+    // see the target. A frame's worth of slack (the cmd and the draw read the clock apart).
+    let drawn = &net["cmd_minus_drawn_ms"];
+    let (lo, hi) = (num(drawn, &["min"]), num(drawn, &["max"]));
+    if !drawn.is_object() || lo < -35.0 || hi > 35.0 {
+        failures.push(format!(
+            "the usercmds were stamped {lo:.0}..{hi:.0} ms from the time the others were drawn at (antilag judges shots at the stamp)"
+        ));
+    }
     // A steady walk moves the eye at a steady speed; a view that jerks (the clock following snapshot jitter, a stair
     // snap) has frames that cover twice the usual ground. The jittery clock put about 5% of frames there.
     let jerky = num(net, &["eye_speed", "over_twice_median"]);
@@ -709,6 +719,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         num(net, &["bytes_out"]) / secs,
     );
     m.insert("client.prediction_corrections".into(), corrected);
+    m.insert("client.cmd_minus_drawn_ms.min".into(), lo);
+    m.insert("client.cmd_minus_drawn_ms.max".into(), hi);
     m.insert(
         "client.players_seen_max".into(),
         num(net, &["players_seen_max"]),
