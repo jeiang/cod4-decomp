@@ -516,6 +516,8 @@ pub struct NetPlay {
     /// Events for the menu runtime (a person's menus drain them; autoplay answers them itself).
     ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
+    /// The drawn eye and its angles (pitch, yaw, roll) last frame: what `viewpos` prints.
+    last_view: Option<(Vec3, [f32; 3])>,
     /// The melee aim assist: the tangents of the half angles of the view, the lunge the next command carries (yaw,
     /// distance), whether the swing is winding up, and the view's pull onto its target.
     tan_half_fov: [f32; 2],
@@ -660,6 +662,7 @@ impl NetPlay {
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
+            last_view: None,
             tan_half_fov: [0.84, 0.63],
             melee_charge: (0.0, 0),
             meleeing: false,
@@ -993,6 +996,7 @@ impl NetPlay {
         self.own_new.clear();
         self.shakes.clear();
         self.last_eye = None;
+        self.last_view = None;
         self.camera.reset();
         self.ads_dof = crate::dof::AdsDof::default();
         self.fog.reset();
@@ -1088,6 +1092,16 @@ impl NetPlay {
             }
         }
         self.hearing.tick(now, |p| sound.close_voice_pipe(p));
+    }
+
+    /// `CG_Viewpos_f` (KisakCOD cg_consolecmds_mp.cpp:120): the drawn eye as `(x y z) : yaw pitch`, whole numbers.
+    pub fn viewpos(&self) -> Option<String> {
+        self.last_view.map(|(o, a)| {
+            format!(
+                "({:.0} {:.0} {:.0}) : {:.0} {:.0}",
+                o.x, o.y, o.z, a[1], a[0]
+            )
+        })
     }
 
     /// Connected with a server's match under way and no demo playing (`CA_ACTIVE`): what `cmd` and an unknown
@@ -1598,6 +1612,7 @@ impl NetPlay {
         laps.lap("kick+camera+view_model");
         // The listener hears from the drawn eye (`SND_SetListener(.., refdef.vieworg, ..)`).
         self.hear(dt, render, &ps, &events, &snap);
+        self.last_view = Some((render, seen));
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
@@ -1610,6 +1625,10 @@ impl NetPlay {
         self.feedback.merge(fb);
         laps.lap("hear+feedback");
         let (events, commands) = self.take_events(&snap);
+        // The player's own goggles, from the predicted state (`CG_LookingThroughNightVision` reads
+        // `predictedPlayerState.weapFlags`).
+        self.look
+            .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
         let look = self.look.frame(st);
         self.shock_effects(&look);
         laps.lap("events+look");
@@ -1947,7 +1966,10 @@ impl NetPlay {
 
     /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
-        if !self.switches.crosshair {
+        if !self.switches.crosshair
+            || !crate::crosshair::allowed(ps, self.switches.draw_gun)
+            || self.look.flashbanged(self.live_time)
+        {
             return None;
         }
         let index = sim::pm::viewmodel_weapon(ps);
