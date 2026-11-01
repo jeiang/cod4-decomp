@@ -175,13 +175,7 @@ impl Gpu {
         // A lost device fails every later call, and the browser throws (wgpu panics) on a mapped-at-creation
         // buffer for one (WebGPU spec, `createBuffer` step "mappedAtCreation": a RangeError when the mapping cannot
         // be allocated). The loss recorded by the device-lost callback is read without polling.
-        if let Some(why) = self
-            .health
-            .lost
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
+        if let Some(why) = self.lost() {
             return Err(format!(
                 "cannot create the buffer '{name}': the device was lost ({why})"
             ));
