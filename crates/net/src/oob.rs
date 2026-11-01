@@ -7,9 +7,11 @@ use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 use std::net::SocketAddr;
 
-/// Bumped when the wire format changes; a server refuses other versions. Version 25 adds the
-/// custom explosion start time and expiry time for persistent GENERAL smoke entities.
-pub const PROTOCOL: u32 = 25;
+/// Bumped when the wire format changes; a server refuses other versions. Version 26 adds the custom explosion
+/// start time and expiry time for persistent GENERAL smoke entities. Version 25 moved `playfxontag` to the
+/// target entity's event ring (`EV_PLAY_FX_ON_TAG`) and added `cs::EFFECT_TAGS`. Version 24 added the
+/// `gamestate_end` reliable command.
+pub const PROTOCOL: u32 = 26;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Oob {

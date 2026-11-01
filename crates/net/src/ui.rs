@@ -87,8 +87,11 @@ pub mod cs {
     /// One `n\<name>\t\<team>\...` string per client slot (see [`client_info`]).
     pub const CLIENTINFO: u16 = 2315;
     pub const CLIENTINFO_COUNT: u16 = 64;
+    /// `playfxontag`: two decimal effect-id digits followed by the lowercase bone name. Slot 0 is unused.
+    pub const EFFECT_TAGS: u16 = CLIENTINFO + CLIENTINFO_COUNT;
+    pub const EFFECT_TAGS_COUNT: u16 = 256;
     /// One past the last index.
-    pub const MAX: u16 = CLIENTINFO + CLIENTINFO_COUNT;
+    pub const MAX: u16 = EFFECT_TAGS + EFFECT_TAGS_COUNT;
 }
 
 /// Hud elements one client sees: this many archived (kept in killcam replays) and this many not.

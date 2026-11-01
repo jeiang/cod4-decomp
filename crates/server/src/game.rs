@@ -197,6 +197,9 @@ pub struct Ent {
     /// `playloopsound`: the sound alias (`Game::sounds` index) this entity loops, 0 for none. It travels in the
     /// entity's state, so late joiners hear it and it ends with the entity.
     pub loop_sound: u16,
+    /// Non-player entity event ring (`G_AddEvent`), oldest to newest.
+    pub events: [(u8, u8); 4],
+    pub event_sequence: u8,
 }
 
 /// What a script effect entity tells the clients to play (`ET_FX`, `ET_LOOP_FX`).
@@ -254,6 +257,8 @@ impl Ent {
             world_fx: None,
             smoke_explosion: None,
             loop_sound: 0,
+            events: [(0, 0); 4],
+            event_sequence: 0,
         }
     }
 }

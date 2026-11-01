@@ -5,12 +5,12 @@
 //! class from the in-game menu while alive (the stock `_menus.gsc` answers with a bare-key bold message, which must
 //! come out localized), types a chat line, calls a vote and adds bots through the console, holds the scoreboard up
 //! with the Tab bind, throws a grenade with its key, waits for a message window to have a line up and for a bot to
-//! kill it (the killcam), and comes back from the dead. What the HUD got to show over the run (`hud.stats` of the
-//! state document, the counters `hud_draw` of `ui-script.json` held) is the verdict: the scoreboard must have listed
-//! the players, the message windows must have drawn lines, the script hud elements must have arrived, the killcam
-//! must have played behind the body, a teammate must have had a name over the head and the player under the crosshair
-//! a name of their own, and nothing may be on screen as a bare string key. Needs a display and the install; skips
-//! without.
+//! kill it (the killcam), comes back from the dead, and plays on until it has had a bot in its sights and fired.
+//! What the HUD got to show over the run (`hud.stats` of the state document, the counters `hud_draw` of
+//! `ui-script.json` held) is the verdict: the scoreboard must have listed the players, the message windows must have
+//! drawn lines, the script hud elements must have arrived, the killcam must have played behind the body, a teammate
+//! must have had a name over the head and the player under the crosshair a name of their own, and nothing may be on
+//! screen as a bare string key. Needs a display and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{render_problem, steps_problem};
@@ -544,21 +544,32 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         }
         Ok(())
     })?;
+    // The player must have got the sights on a bot and pulled the trigger: a walker that never aligns proves
+    // nothing about the crosshair names. The steps above end on the match's events (a line in the feed, a bot's
+    // kill), which can come before the walker met anyone (#464): keep playing until it has had a bot in its sights,
+    // so the check fails only when aiming and firing do not work.
+    c.step("fire", |c| {
+        let end = Instant::now() + secs(120);
+        while w.shots == 0 {
+            if Instant::now() > end {
+                w.stop(c)?;
+                return Err(format!(
+                    "the stage's player never fired in {} ticks (turned with {})",
+                    w.ticks,
+                    w.turning()
+                ));
+            }
+            c.pause(Duration::from_millis(150))?;
+            w.tick(c)?;
+        }
+        w.stop(c)
+    })?;
     notes.push(format!(
         "the stage's player turned with {}; {} ticks, {} shots",
         w.turning(),
         w.ticks,
         w.shots
     ));
-    // The player must have got the sights on a bot and pulled the trigger: a walker that never aligns proves
-    // nothing about the crosshair names.
-    if w.shots == 0 {
-        return Err(format!(
-            "the stage's player never fired in {} ticks (turned with {})",
-            w.ticks,
-            w.turning()
-        ));
-    }
     if w.mouse_ticks == 0 {
         return Err(format!(
             "the match never exercised mouse look (turned with {})",

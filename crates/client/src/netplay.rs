@@ -28,12 +28,14 @@ use crate::props::{Launches, Props};
 use crate::sound::{ClientSound, Who};
 use crate::viewmodel::{Sight, ViewModel, ViewTags};
 use crate::wire::Wire;
+use assets::zone::clipmap::Clipmap;
 use glam::Vec3;
 use net::client::NetClient;
 use net::entity::{EntityState, etype};
 use net::predict::{Env, PlayerBoxes, Predictor};
 use render::ModelInstance;
 use serde_json::{Value, json};
+use server::nav::{NavMesh, NodeId, PathScratch, Steer};
 use server::netsv::eflags;
 use server::playeranim::{LegsWire, PlayerPoseInput, TorsoWire};
 use sim::cm::{Collide, ENTITYNUM_NONE};
@@ -44,6 +46,7 @@ use sim::weapon::gun::ViewFx;
 use sim::weapon::{PlayerWeapons, WeaponTable};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use web_time::Instant;
 
@@ -599,6 +602,7 @@ impl NetPlay {
         sound: ClientSound,
     ) -> Result<Self, String> {
         let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
+        let auto = autoplay.then(|| Auto::new(&clipmap));
         let world = map.world.clone();
         let t = Wire::open(server)?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -652,7 +656,7 @@ impl NetPlay {
             sight: None,
             gun_drawn: false,
             c: Counters::default(),
-            auto: autoplay.then(Auto::default),
+            auto,
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
@@ -958,6 +962,9 @@ impl NetPlay {
                 .with_ambient(&lib.content, self.client_side_effects);
             self.params.mantle_anims = lib.content.mantle_anims();
             self.lib = lib;
+            if let Some(a) = self.auto.as_mut() {
+                a.nav = AutoNav::new(&clipmap).map(Box::new);
+            }
             self.boxes = PlayerBoxes::new(clipmap);
             self.brush_surfaces = brush_surfaces(&map.world);
             self.sound = sound;
@@ -1834,7 +1841,9 @@ impl NetPlay {
                 &def,
                 self.switches.ragdoll_tunables.max_simulating,
             );
-            self.effects.event(e, &def);
+            if !matches!(e, ClientEvent::PlayFxOnTag { .. }) {
+                self.effects.event(e, &def);
+            }
         }
         // Where the player looks (the demo and the scripted hit sit in front of the eyes, not the kicked view).
         let (look_yaw, look_pitch) = (self.angles[1].to_radians(), -self.angles[0].to_radians());
@@ -1905,6 +1914,7 @@ impl NetPlay {
                 st,
             );
             self.effects.world_fx(&snap.entities, &self.events, eye, st);
+            self.effects.update_script_bolts(&snap.entities, st);
         }
         self.effects.update(st, self.boxes.world());
         for s in self.effects.take_sounds() {
@@ -1982,9 +1992,22 @@ impl NetPlay {
                 );
             }
         }
+        if let Some(ui) = self.net.ui_ref() {
+            let tags = (1..net::ui::cs::EFFECT_TAGS_COUNT)
+                .filter_map(|slot| {
+                    let index = net::ui::cs::EFFECT_TAGS + slot;
+                    let value = ui.config(index);
+                    (!value.is_empty()).then(|| (index, value.to_owned()))
+                })
+                .collect::<Vec<_>>();
+            self.events.set_effect_tags(&tags);
+        }
         let events = self.events.scan(snap);
         for e in &events {
             *self.c.events.entry(e.kind()).or_default() += 1;
+            if matches!(e, ClientEvent::PlayFxOnTag { .. }) {
+                self.effects.event(e, &|_| None);
+            }
         }
         let (weapons, lib) = (&self.weapons, &self.lib);
         self.sound.world_events(
@@ -2514,6 +2537,8 @@ impl NetPlay {
                             out.push(m);
                         }
                     }
+                    self.effects
+                        .script_model_tags(e.number, &out[before..], &self.lib.content);
                     drawn += 1;
                     self.c.script_model_parts_max =
                         self.c.script_model_parts_max.max(out.len() - before);
@@ -2569,7 +2594,7 @@ impl NetPlay {
     }
 
     /// The weapons lying on the floor, in the world model of their weapon and variant.
-    fn items(&self, snap: &net::Snapshot) -> Vec<ModelInstance> {
+    fn items(&mut self, snap: &net::Snapshot) -> Vec<ModelInstance> {
         let mut out = Vec::new();
         for e in snap.entities.iter().filter(|e| e.etype == etype::ITEM) {
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
@@ -2594,6 +2619,8 @@ impl NetPlay {
             m.origin = e.origin;
             m.angles = e.angles;
             m.light_origin = e.origin;
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
             out.push(m);
         }
         out
@@ -2631,16 +2658,17 @@ impl NetPlay {
                 self.sound.missile_loop(e.number, alias, e.origin);
                 looping.push(e.number);
             }
-            // Not drawn until its launch time (a rocket leaves the tube before it shows).
-            let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
-            let Some(model) = def.projectile_model.clone().filter(|_| until_launch <= 0) else {
+            let Some(m) = projectile_instance(def, e) else {
                 continue;
             };
-            let mut m = ModelInstance::new(model, render::ModelKind::World);
-            m.origin = e.origin;
-            m.angles = e.angles;
-            m.light_origin = e.origin;
-            out.push(m);
+            // A script's `playfxontag` on the projectile rides its model, as on its DObj.
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            // Not drawn until its launch time (a rocket leaves the tube before it shows).
+            let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
+            if until_launch <= 0 {
+                out.push(m);
+            }
         }
         self.sound.missile_loops_end(&looping);
         self.c.projectiles_max = self.c.projectiles_max.max(out.len());
@@ -2693,6 +2721,8 @@ impl NetPlay {
             if let Some(r) = rotors {
                 m.bones = r.pose(self.rotor_clock).to_vec();
             }
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
             out.push(m);
         }
         self.c.vehicles_seen = seen;
@@ -2703,10 +2733,15 @@ impl NetPlay {
 
     /// Models of every other player, between the snapshots around the interpolation moment.
     fn remote_players(&mut self, dt: f32, st: i32, own: u16, show_own: bool) -> Vec<ModelInstance> {
+        self.effects.begin_script_tags();
+        let own_bolt = self.effects.has_script_bolt(own);
         let at = st - net::view::INTERP_DELAY_MS;
         self.drawn_at = Some(at);
-        let ents = self.net.snaps.interpolate(at, (!show_own).then_some(own));
-        if !show_own {
+        let ents = self
+            .net
+            .snaps
+            .interpolate(at, (!show_own && !own_bolt).then_some(own));
+        if !show_own && !own_bolt {
             // Not seen through its own eyes: the body is made anew (and falls anew) the next time it is.
             self.remotes.remove(&own);
         }
@@ -2889,8 +2924,13 @@ impl NetPlay {
             if let Some(c) = r.player.torso_animation() {
                 self.c.torso_clips.insert(c);
             }
-            drawn += 1;
-            out.extend(r.player.instances(e.origin));
+            let instances = r.player.instances(e.origin);
+            self.effects
+                .script_model_tags(e.number, &instances, &self.lib.content);
+            if e.client != own || show_own {
+                drawn += 1;
+                out.extend(instances);
+            }
         }
         out.extend(self.corpse_models(dt, &ents, now));
         self.effects.set_remote_tags(guns);
@@ -2978,6 +3018,17 @@ impl NetPlay {
         };
         self.c.cmd_drawn = d;
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
+        let bolts = self.effects.bolted_stats();
+        report["fx"]["bolted"] = json!({
+            "active": bolts.active,
+            "resolved_frames": bolts.resolved_frames,
+            "stopped": bolts.stopped,
+            "expired": bolts.expired,
+            "missing_tags": bolts.missing_tags,
+            "tag_displacement": bolts.max_tag_displacement,
+            "element_displacement": bolts.max_element_displacement,
+            "follow_error": bolts.max_follow_error,
+        });
         report["script_model_parts_max"] = self.c.script_model_parts_max.into();
         report["player_attachments"] = json!(self.c.player_attachments);
         report["gun_speed_given"] = json!(self.c.gun_speed_given);
@@ -3029,6 +3080,7 @@ impl NetPlay {
             "dof_frames": self.c.dof_frames,
         });
         report["damage_events"] = json!(self.c.damage_events);
+        report["autoplay_track"] = json!(self.auto.as_ref().map(|a| &a.track));
         report["damage_flash_max"] = json!(self.c.max_damage_flash);
         report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
@@ -3042,6 +3094,18 @@ impl NetPlay {
     fn feet(&self) -> [f32; 3] {
         self.c.end
     }
+}
+
+/// A projectile entity's model (`CG_Missile`): the weapon's projectile model at the entity's origin and angles.
+pub(crate) fn projectile_instance(
+    def: &assets::zone::weapon::WeaponDef,
+    e: &EntityState,
+) -> Option<ModelInstance> {
+    let mut m = ModelInstance::new(def.projectile_model.clone()?, render::ModelKind::World);
+    m.origin = e.origin;
+    m.angles = e.angles;
+    m.light_origin = e.origin;
+    Some(m)
 }
 
 /// Notes a remote player's model that could not be built: logged once per distinct fault, kept for the report.
@@ -3115,7 +3179,8 @@ fn pose_input(
 
 // ---- autoplay -------------------------------------------------------------------------------------------------
 
-/// A bot's brain for the harness: walks, turns away from walls, turns toward the nearest enemy it can see and fires.
+/// A bot's brain for the harness: walks the map toward the nearest enemy, turns toward the nearest enemy it can see
+/// and fires.
 #[derive(Default)]
 struct Auto {
     t: f32,
@@ -3125,6 +3190,92 @@ struct Auto {
     last_feet: Option<[f32; 3]>,
     reload_at: f32,
     target_seen_at: f32,
+    /// Once a second: `[t, x, y, z, players and enemies in the snapshot, nearest enemy's distance (-1 none), seen,
+    /// in play (alive and not in a killcam), own team flags]`.
+    track: Vec<[f32; 10]>,
+    nav: Option<Box<AutoNav>>,
+}
+
+impl Auto {
+    fn new(clipmap: &Arc<Clipmap>) -> Self {
+        Self {
+            nav: AutoNav::new(clipmap).map(Box::new),
+            ..Self::default()
+        }
+    }
+}
+
+/// The autoplay's way to an enemy out of sight: the server bots' navigation mesh (`server::nav`), generated from the
+/// client's own copy of the map's collision. Walking straight at an enemy behind a wall pinned the player to the
+/// wall for the whole match on some routes of mp_crash (#464).
+struct AutoNav {
+    mesh: NavMesh,
+    scratch: PathScratch,
+    path: Vec<NodeId>,
+    steer: Steer,
+    repath_at: f32,
+    /// The mesh is not used until then: no route, or the walk along it stopped making progress.
+    off_until: f32,
+}
+
+impl AutoNav {
+    /// How often the path is searched again, as the enemy moves (s).
+    const REPATH: f32 = 1.5;
+
+    fn new(clipmap: &Arc<Clipmap>) -> Option<Self> {
+        let ents = clipmap.map_ents.as_ref()?;
+        let seeds: Vec<[f32; 3]> = server::nav::spawn_points(&ents.entity_string)
+            .iter()
+            .map(|s| s.origin)
+            .collect();
+        let mesh = NavMesh::generate(&sim::world::World::new(clipmap.clone()), &seeds);
+        let st = mesh.stats();
+        tracing::info!(
+            nodes = st.nodes,
+            ms = st.generation_ms,
+            "autoplay navigation generated"
+        );
+        Some(Self {
+            scratch: PathScratch::new(&mesh),
+            mesh,
+            path: Vec::new(),
+            steer: Steer::new(),
+            repath_at: 0.0,
+            off_until: 0.0,
+        })
+    }
+
+    /// The next point to walk to on the way from `feet` to `goal` (both on the floor), or `None` when the mesh has no
+    /// way or the walk along it is stuck.
+    fn toward(
+        &mut self,
+        world: &impl Collide,
+        t: f32,
+        feet: [f32; 3],
+        goal: [f32; 3],
+    ) -> Option<[f32; 3]> {
+        if t < self.off_until {
+            return None;
+        }
+        if self.path.is_empty() || t >= self.repath_at {
+            self.repath_at = t + Self::REPATH;
+            let (from, to) = (self.mesh.nearest_node(feet)?, self.mesh.nearest_node(goal)?);
+            if !self.mesh.path(from, to, &mut self.scratch, &mut self.path) {
+                self.off_until = t + Self::REPATH;
+                return None;
+            }
+            self.mesh.smooth(world, &mut self.path);
+            self.steer.reset();
+        }
+        let out = self.steer.update(&self.mesh, &self.path, feet);
+        if out.stuck {
+            // Turning away from the wall takes over for a moment, then a fresh path.
+            self.path.clear();
+            self.off_until = t + Self::REPATH;
+            return None;
+        }
+        (!out.arrived).then_some(out.waypoint)
+    }
 }
 
 impl NetPlay {
@@ -3204,13 +3355,16 @@ impl NetPlay {
         let mut nearest: Option<(f32, Vec3)> = None;
         const SEE: f32 = 1500.0;
         const FIRE: f32 = 900.0;
+        let (mut enemies, mut players) = (0, 0);
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
+            players += 1;
             let flags = e.eflags;
             if flags & eflags::DEAD != 0
                 || flags & (eflags::TEAM_AXIS | eflags::TEAM_ALLIES) == my_team
             {
                 continue;
             }
+            enemies += 1;
             let at = Vec3::from(e.origin) + Vec3::Z * 50.0;
             let d = at.distance(eye);
             if nearest.is_none_or(|(n, _)| d < n) {
@@ -3232,14 +3386,44 @@ impl NetPlay {
             }
         }
         let visible = best.is_some();
-        // Out of sight, the bot walks toward the nearest enemy anyway (a test driver, not a person: it reads the
-        // snapshot) and turns away from walls when stuck.
-        let aim = best.or(nearest);
-        if a.t < a.turn_until && !visible {
+        // In the world with a body: not dead, and not watching a killcam (whose snapshots are the past's).
+        let playing = self
+            .net
+            .latest()
+            .is_some_and(|s| s.follow.is_none() && alive(&s.ps));
+        if a.track.last().is_none_or(|l| a.t - l[0] >= 1.0) {
+            a.track.push([
+                a.t,
+                feet[0],
+                feet[1],
+                feet[2],
+                players as f32,
+                enemies as f32,
+                nearest.map_or(-1.0, |(d, _)| d),
+                f32::from(u8::from(visible)),
+                f32::from(u8::from(playing)),
+                my_team as f32,
+            ]);
+        }
+        // Out of sight, the bot heads for the nearest enemy anyway (a test driver, not a person: it reads the
+        // snapshot), along the navigation mesh where it has a way, and turns away from walls when stuck.
+        let waypoint = match (a.nav.as_deref_mut(), nearest) {
+            (Some(nav), Some((_, at))) if playing && !visible => {
+                let goal = at - Vec3::Z * 50.0;
+                nav.toward(self.boxes.world(), a.t, feet, goal.to_array())
+            }
+            _ => None,
+        };
+        // The way's next point is looked at level, from the eye.
+        let along = nearest
+            .zip(waypoint)
+            .map(|((d, _), w)| (d, Vec3::new(w[0], w[1], eye.z)));
+        let aim = best.or(along).or(nearest);
+        if a.t < a.turn_until && !visible && waypoint.is_none() {
             f.look_delta_yaw = a.turn_dir * 200.0 * dt;
             f.move_forward = 0.7;
         } else if let Some((dist, at)) = aim.filter(|(d, _)| *d > 120.0) {
-            if visible {
+            if visible && playing {
                 self.c.target_frames += 1;
                 self.c.in_range_frames += u64::from(dist < FIRE);
                 a.target_seen_at = a.t;
