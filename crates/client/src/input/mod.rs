@@ -2624,15 +2624,23 @@ mod tests {
     }
 
     #[test]
-    fn failed_exec_and_bad_arguments_warn_without_the_arguments() {
+    fn failed_exec_warns_and_bad_arguments_print_the_stock_usage() {
         let mut i = Input::detached();
+        i.take_messages();
         let (_, events) = logging::capture(|| {
             i.exec_line("exec no_such_config_anywhere");
             i.exec_line("set onlyname");
         });
         assert!(events.iter().any(|e| e.level == tracing::Level::WARN
             && e.field("name") == Some("no_such_config_anywhere")));
-        assert!(events.iter().any(|e| e.field("command") == Some("set")));
+        // `Dvar_Set_f` prints its usage (KisakCOD dvar_cmds.cpp:244); the line may hold a password, so nothing logs it.
+        assert!(
+            i.take_messages()
+                .iter()
+                .any(|m| m == "USAGE: set <variable> <value>")
+        );
+        assert!(!events.iter().any(|e| e.message.contains("onlyname")
+            || e.fields.iter().any(|(_, v)| v.contains("onlyname"))));
     }
 
     /// A word the input layer does not run pends for the app, which forwards it or says it is unknown; a cvar's
