@@ -491,6 +491,8 @@ struct State {
     autojoin_next: bool,
     /// The film block the last vision set gave, before the `r_brightness`/`r_contrast`/`r_desaturation` tweaks.
     film_base: Option<render::art::Film>,
+    /// The glow block the last vision set gave, before the `r_glowTweak*` overrides.
+    glow_base: Option<render::art::Glow>,
     /// Effect counts at an `fxmark` step: `cgis=fx:<kind> +n` then reads how often the kind played since.
     fx_mark: HashMap<String, u64>,
     /// Milliseconds the last frame spent in the network frame, the renderer, getting the surface texture, presenting,
@@ -1224,6 +1226,7 @@ impl Viewer {
             autojoin_next: false,
             fx_mark: HashMap::new(),
             film_base: None,
+            glow_base: None,
             prev_cost: [0.0; 7],
             surface_failures: 0,
             surface_stalled_ms: 0.0,
@@ -1474,6 +1477,7 @@ impl Viewer {
             r.warm(format);
             st.renderer = Some(r);
             st.film_base = None;
+            st.glow_base = None;
         }
         st.window.request_redraw();
         Ok(())
@@ -1915,9 +1919,14 @@ impl Viewer {
                         .or(st.film_base)
                         .unwrap_or(r.post.film);
                     st.film_base = Some(base);
-                    if let Some((glow, _)) = nf.look.vision {
-                        r.post.glow = crate::gfx::glow(&st.input.cvars, glow);
-                    }
+                    let glow_base = nf
+                        .look
+                        .vision
+                        .map(|(g, _)| g)
+                        .or(st.glow_base)
+                        .unwrap_or(r.post.glow);
+                    st.glow_base = Some(glow_base);
+                    r.post.glow = crate::gfx::glow(&st.input.cvars, glow_base);
                     r.post.film = crate::gfx::film(&st.input.cvars, base);
                     // Cheat dvars, read live as the original does: `r_fullbright` (`R_InitDrawMethod` on change)
                     // and `cg_drawShellshock` (`DrawShellshockBlend`).
@@ -4857,6 +4866,7 @@ fn finish_load(
     renderer.build_pipelines_in_background();
     st.renderer = Some(renderer);
     st.film_base = None;
+    st.glow_base = None;
     *map_slot = Some(data);
     st.map_name = map.to_owned();
     // The menus' map title and minimap look the map up by this (the original sets it from the server's info).
