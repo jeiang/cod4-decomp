@@ -3209,11 +3209,16 @@ fn script_step(st: &mut State) -> bool {
             }
             done(true, sc, format!("key {arg}"));
         }
-        // A cvar's value (`cvaris=ui_netGametypeName dom`).
+        // A cvar's registered value (`cvaris=ui_netGametypeName dom`), including untouched defaults, engine map
+        // seeds and protected writes; numbers compare within rounding, words exactly.
         "cvaris" => {
             let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
             let have = st.input.cvar(name).unwrap_or("").to_owned();
-            done(have == want, sc, format!("{name} is {have:?}"));
+            done(
+                scenario_value_matches(&have, want),
+                sc,
+                format!("{name} is {have:?}"),
+            );
         }
         // The rows a list shows: `rows=2 1` is exactly one, `rows=2 +1` at least one; a list may take up to the
         // seconds after the colon (`rows=2 +1:15`, default 5) to get there, as a refresh takes its time.
@@ -3361,18 +3366,6 @@ fn script_step(st: &mut State) -> bool {
                 sh.st.actions.push(Action::VidRestart);
             }
             done(true, sc, String::new());
-        }
-        // The actual registered value, including untouched defaults, engine map seeds and protected writes.
-        "cvaris" => {
-            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
-            match st.input.cvars.get(name) {
-                Some(have) => done(
-                    scenario_value_matches(have, want),
-                    sc,
-                    format!("{name} is {have}"),
-                ),
-                None => done(false, sc, format!("cvaris: unregistered {name:?}")),
-            }
         }
         // What the graphics settings came to (`gfxis=aa 4`, `gfxis=specular 0`, `gfxis=aspect 1.78`,
         // `gfxis=fullscreen 0`, `gfxis=uncapped 1`): the renderer's and the surface's own state.

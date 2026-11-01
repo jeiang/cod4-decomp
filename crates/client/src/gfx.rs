@@ -386,7 +386,6 @@ impl Gfx {
                 .map(|v| v.clamp(-4096, 4096))
         };
         let picmip = |n: &str| (c.f32(n).max(0.0) as usize).min(3);
-        let cheat = c.bool("sv_cheats");
         Gfx {
             fullscreen: c.bool("r_fullscreen"),
             mode: parse_mode(text("r_mode")),
