@@ -215,7 +215,10 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
             .lookup("player.client")?
             .as_u64()
             .ok_or("no player slot")?;
+        // `r_vsync` reaches the surface only through `vid_restart`; while the display paces the frames, `com_maxfps`
+        // caps nothing and the client keeps sending a command every displayed frame.
         c.ask(json!({"cmd": "cvar", "name": "r_vsync", "value": "0"}))?;
+        c.console("vid_restart")?;
         c.ask(json!({"cmd": "cvar", "name": "com_maxfps", "value": "125"}))?;
         c.ask(
             json!({"cmd": "server", "op": "cvar", "name": "g_synchronousClients", "value": "1"}),
@@ -249,6 +252,7 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
     c.bind("+gostand", "up")?;
     c.ask(json!({"cmd": "cvar", "name": "com_maxfps", "value": fps}))?;
     c.ask(json!({"cmd": "cvar", "name": "r_vsync", "value": vsync}))?;
+    c.console("vid_restart")?;
     c.ask(json!({"cmd": "server", "op": "cvar", "name": "g_synchronousClients", "value": sync}))?;
     result
 }
