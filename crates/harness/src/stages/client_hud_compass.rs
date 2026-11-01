@@ -152,18 +152,24 @@ fn raise(c: &mut Driven, bot: u64, spot: &str, label: &str, weapon: &str) -> Res
 
 /// One case: the bot, at `spot`, shoots `weapon`; the compass must ping or not. An attempt in which the bot
 /// respawned (something in the match killed it; the person's pings and its weapon are then another life's) proves
-/// nothing and is made again, up to [`ATTEMPTS`] times.
+/// nothing and is made again, up to [`ATTEMPTS`] times. So is one in which the person (client `me`) died: the bot's
+/// burst or another player can kill them, and a respawned person's compass holds another life's pings. The bot
+/// stands 96 units along x from where the person is at each attempt's start.
 fn case(
     c: &mut Driven,
+    me: u64,
     bot: u64,
-    spot: &str,
     label: &str,
     weapon: &str,
     pings: bool,
 ) -> Result<String, String> {
     let mut lost = Vec::new();
     for attempt in 1..=ATTEMPTS {
-        let placed = raise(c, bot, spot, label, weapon)?;
+        let person = alive_person(c, me)?;
+        let o = &person["origin"];
+        let at = |i: usize| o[i].as_f64().unwrap_or(0.0);
+        let spot = format!("{} {} {}", at(0) + 96.0, at(1), at(2));
+        let placed = raise(c, bot, &spot, label, weapon)?;
         c.pause(SETTLE)?;
         let before = counts(c)?;
         let was = server_client(c, bot)?;
@@ -183,6 +189,7 @@ fn case(
         c.pause(Duration::from_secs(5))?;
         let after = counts(c)?;
         let now = server_client(c, bot)?;
+        let person_now = server_client(c, me)?;
         if now["spawn_count"] != was["spawn_count"] || now["alive"] != json!(true) {
             lost.push(format!(
                 "attempt {attempt} before: {}; after: {}",
@@ -191,13 +198,36 @@ fn case(
             ));
             continue;
         }
+        if person_now["spawn_count"] != person["spawn_count"] || person_now["alive"] != json!(true)
+        {
+            lost.push(format!(
+                "attempt {attempt}: the person died (deaths {} -> {}, health {})",
+                person["deaths"], person_now["deaths"], person_now["health"]
+            ));
+            continue;
+        }
         return finish(c, bot, label, pings, (before, after), (&was, &now))
             .map(|s| retried(s, &lost));
     }
     Err(format!(
-        "{label}: bot {bot} died during every attempt: {}",
+        "{label}: the bot or the person died during every attempt: {}",
         lost.join("; ")
     ))
+}
+
+/// The person's server state once they are alive (a killed person respawns within a few seconds).
+fn alive_person(c: &mut Driven, me: u64) -> Result<Value, String> {
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let p = server_client(c, me)?;
+        if p["alive"] == json!(true) {
+            return Ok(p);
+        }
+        if Instant::now() > end {
+            return Err(format!("the person did not respawn: {}", body(&p)));
+        }
+        c.pause(Duration::from_millis(500))?;
+    }
 }
 
 /// A passing case's note, naming the attempts the bot died in.
@@ -241,25 +271,38 @@ fn finish(
             .lookup("hud.report.last_fire_mark_ms")?
             .as_i64()
             .ok_or("missing rendered mark lifetime")?;
-        duration_verdict(played, hold, mark, 2000)?;
+        let gone = c
+            .lookup("hud.report.last_fire_gone_ms")?
+            .as_i64()
+            .ok_or("missing first frame without the mark")?;
+        duration_verdict(played, hold, (mark, gone), 2000)?;
     }
     let length = c.lookup("hud.report.last_fire_ping_ms")?;
     let played = c.lookup("hud.report.last_fire_played_ms")?;
     let mark = c.lookup("hud.report.last_fire_mark_ms")?;
+    let gone = c.lookup("hud.report.last_fire_gone_ms")?;
     Ok(format!(
-        "{label}: {} fire pings, {} flag pings, {} marks drawn, hold {length} ms, audio {played} ms, mark lifetime {mark} ms",
+        "{label}: {} fire pings, {} flag pings, {} marks drawn, hold {length} ms, audio {played} ms, mark lifetime {mark}-{gone} ms",
         after.fire_pings - before.fire_pings,
         after.flag_pings - before.flag_pings,
         after.marks - before.marks,
     ))
 }
 
-/// At 60 Hz allow several frames of snapshot/draw scheduling, but never the 351 ms fixed-hold error.
-fn duration_verdict(played: i64, hold: i64, mark: i64, fade: i64) -> Result<(), String> {
-    if hold != played || (mark - (played + fade)).abs() > 200 {
+/// The mark's lifetime lies between its age on the last frame that drew it (`mark`) and on the first that did not
+/// (`gone`, 0 when unseen). At a few frames a second those are hundreds of milliseconds apart (#499), so the wanted
+/// lifetime must fall in that span, give or take a few 60 Hz frames of snapshot and draw scheduling; never the
+/// 351 ms fixed-hold error.
+fn duration_verdict(
+    played: i64,
+    hold: i64,
+    (mark, gone): (i64, i64),
+    fade: i64,
+) -> Result<(), String> {
+    let want = played + fade;
+    if hold != played || mark > want + 200 || mark.max(gone) < want - 200 {
         return Err(format!(
-            "fire timing: played {played} ms, held {hold} ms, mark {mark} ms; want {} ms",
-            played + fade
+            "fire timing: played {played} ms, held {hold} ms, mark {mark} ms, gone {gone} ms; want {want} ms"
         ));
     }
     Ok(())
@@ -280,20 +323,19 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
         .lookup("player.client")?
         .as_u64()
         .ok_or("no client slot")?;
-    let person = server_client(c, me)?;
+    let mut person = server_client(c, me)?;
     let mut bot_home = None;
     let result: Result<Vec<String>, String> = (|| {
         let bot = enemy_bot(c, enemy)?;
         bot_home = Some((bot, server_client(c, bot)?["origin"].clone()));
-        let origin = c.lookup("player.origin")?;
-        let at = |i: usize| origin[i].as_f64().unwrap_or(0.0);
-        // 96 units along x from the person; `case` puts it back there after a respawn.
-        let spot = format!("{} {} {}", at(0) + 96.0, at(1), at(2));
         // `case` compares the independently played sound with the hold and final drawn mark lifetime.
-        Ok(vec![
-            case(c, bot, &spot, "unsilenced", UNSILENCED, true)?,
-            case(c, bot, &spot, "silenced", SILENCED, false)?,
-        ])
+        let notes = vec![
+            case(c, me, bot, "unsilenced", UNSILENCED, true)?,
+            case(c, me, bot, "silenced", SILENCED, false)?,
+        ];
+        // A death `case` repeated an attempt for is in its note; the release below must not add one.
+        person = server_client(c, me)?;
+        Ok(notes)
     })();
     // Put the bot back where it stood before letting it think again: released 96 units from the person, an enemy
     // with a raised SMG can kill them at the start of the next step.
@@ -308,7 +350,7 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
     let mut notes = result?;
     if after["deaths"] != person["deaths"] || after["alive"] != json!(true) {
         return Err(format!(
-            "the person died during the compass check: before {person}, after {after}"
+            "the person died releasing the bot: before {person}, after {after}"
         ));
     }
     notes.push(format!(
@@ -350,10 +392,19 @@ mod tests {
 
     #[test]
     fn lifetime_rejects_a_fixed_two_seconds_and_handles_unknown_audio() {
-        assert!(duration_verdict(1649, 1649, 3640, 2000).is_ok());
-        assert!(duration_verdict(1649, 2000, 4000, 2000).is_err());
-        assert!(duration_verdict(1649, 1649, 2000, 2000).is_err());
-        assert!(duration_verdict(0, 0, 1990, 2000).is_ok());
-        assert!(duration_verdict(0, 2000, 4000, 2000).is_err());
+        assert!(duration_verdict(1649, 1649, (3640, 3656), 2000).is_ok());
+        assert!(duration_verdict(1649, 2000, (4000, 4016), 2000).is_err());
+        assert!(duration_verdict(1649, 1649, (2000, 2016), 2000).is_err());
+        assert!(duration_verdict(0, 0, (1990, 0), 2000).is_ok());
+        assert!(duration_verdict(0, 2000, (4000, 4016), 2000).is_err());
+    }
+
+    #[test]
+    fn lifetime_spans_a_slow_frame_but_not_a_short_mark() {
+        // #494: the last drawn frame 224 ms short of the fade's end, the next frame 300 ms later past it.
+        assert!(duration_verdict(1649, 1649, (3425, 3725), 2000).is_ok());
+        assert!(duration_verdict(1649, 1649, (3425, 0), 2000).is_err());
+        assert!(duration_verdict(1649, 1649, (3000, 3100), 2000).is_err());
+        assert!(duration_verdict(1649, 1649, (3900, 4200), 2000).is_err());
     }
 }
