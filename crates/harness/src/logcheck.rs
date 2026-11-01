@@ -122,6 +122,12 @@ pub const ALLOWED: &[Allow] = &[
         max: Some(3), // measured 2 on the Linux host, 2026-10-29,
     },
     Allow {
+        contains: &["cod4e::voice", "microphone cannot be opened"],
+        reason: "client-hud holds +talk on the headless host, which has no capture device (#371)",
+        stages: &["client-hud"],
+        max: Some(2), // measured 1 on the Linux host, 2026-11-01,
+    },
+    Allow {
         contains: &["server::server", "unknown client command", "frobnicate"],
         reason: "net-vote sends an unknown client command to check the answer",
         stages: &["net-vote"],
