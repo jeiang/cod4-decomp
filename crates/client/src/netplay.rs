@@ -1010,6 +1010,8 @@ impl NetPlay {
         self.last_eye = None;
         self.last_view = None;
         self.camera.reset();
+        // The new level's cgame starts without the old one's shell shock (its clock restarts near zero).
+        self.look.end_shock();
         self.ads_dof = crate::dof::AdsDof::default();
         self.fog.reset();
         self.scan = crate::hud::NameScan::default();
@@ -1639,6 +1641,8 @@ impl NetPlay {
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
+            // The spawn cleared the player state's shell shock: the cgame's ends with it.
+            self.look.end_shock();
             self.note_latest_primary(ps.weapon as u16);
         }
         let mut fb = scan_own(&mut self.own_events, &ps, &events);

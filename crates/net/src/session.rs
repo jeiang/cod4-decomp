@@ -691,6 +691,45 @@ mod tests {
     }
 
     #[test]
+    fn vision_and_shellshock_commands_reach_the_client_commands() {
+        let net = MemNet::new();
+        let (mut st, mut ct) = (net.endpoint(addr(1)), net.endpoint(addr(2)));
+        let mut srv = ServerLink::new(addr(2), 4);
+        let mut cli = ClientLink::new(addr(1), 4);
+        let ended = ServerCmd::ShellShock {
+            name: String::new(),
+            ms: 0,
+        }
+        .encode();
+        let lines = [
+            "shellshock concussion_grenade_mp 4000".to_owned(),
+            ended.clone(),
+            "vision naked default_night 3000".to_owned(),
+        ];
+        for l in &lines {
+            srv.command(l.clone()).unwrap();
+        }
+        let mut buf = [0u8; 2000];
+        let mut commands = Vec::new();
+        for t in 1..=4 {
+            srv.send(&mut st, Some(world(t)));
+            while let Ok(Some((n, _))) = ct.recv_from(&mut buf, None) {
+                if let Some(m) = cli.receive(&buf[..n]) {
+                    commands.extend(m.reliable);
+                }
+            }
+        }
+        assert_eq!(
+            commands, lines,
+            "the look takes them from the command stream"
+        );
+        assert!(matches!(
+            ServerCmd::parse(&ended),
+            Some(ServerCmd::ShellShock { ref name, ms: 0 }) if name.is_empty()
+        ));
+    }
+
+    #[test]
     fn voice_frames_cross_in_both_directions_with_the_snapshot_and_without_one() {
         let net = MemNet::new();
         let mut st = net.endpoint(addr(1));

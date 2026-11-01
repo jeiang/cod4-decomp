@@ -1214,6 +1214,44 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         r
     })?;
 
+    // A shell shock ends at the next spawn, as stock's does (`ClientSpawn` wipes the player state's shock and the
+    // cgame's `CG_StartShellShock(.., 0, 0)` ends it), not when its own time runs out. The player throws a concussion
+    // grenade at its feet through the server (`devgrenade`, the stock scripts shock it), dies (`devkill`) and
+    // respawns; the look must have no shock at the first live frame.
+    c.step("shock ends at spawn", |c| {
+        w.stop(c)?;
+        let me = c.lookup("player.client")?.as_u64().ok_or("player.client is not a number")?;
+        let before = c.lookup("look.shocks")?.as_u64().unwrap_or(0);
+        c.ask(json!({"cmd": "server", "op": "exec", "line": "devgrenade human concussion_grenade_mp 0 100"}))?;
+        c.until(
+            json!({"look.shocks": {"gt": before}}),
+            secs(10),
+            "a concussion grenade at the player's feet did not shell shock the client",
+        )?;
+        let shock = c.lookup("look.shock")?;
+        let end = shock["start_ms"].as_f64().unwrap_or(0.0) + shock["duration_ms"].as_f64().unwrap_or(0.0);
+        c.ask(json!({"cmd": "server", "op": "exec", "line": format!("devkill {me} {me}")}))?;
+        c.until(json!({"player.dead": true}), secs(10), "devkill did not kill the player")?;
+        c.until(
+            json!({"player.alive": true, "hud.live.dead": false}),
+            secs(60),
+            "the player did not respawn after devkill",
+        )?;
+        let look = c.lookup("look")?;
+        let now = look["time"].as_f64().unwrap_or(0.0);
+        if !look["shock"].is_null() {
+            return Err(format!(
+                "the shell shock ({shock}) is still running after the spawn at {now} ms; stock ends it at spawn"
+            ));
+        }
+        if now >= end {
+            return Err(format!(
+                "the respawn at {now} ms came after the shock's own end at {end} ms, so it proves nothing"
+            ));
+        }
+        Ok(())
+    })?;
+
     // A grenade cooked and thrown with its key: while it cooks the crosshair's centre dot grows with the fuse
     // (`CG_DrawReticleCenter`, #419), and the count on the HUD drops once the throw is out.
     c.step("throw", |c| {

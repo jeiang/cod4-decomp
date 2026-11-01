@@ -590,7 +590,19 @@ impl Look {
                 "first": look_json(&s.first),
                 "target": look_json(&s.target),
             })),
+            "shocks": self.shocks,
+            "shock": self.shock.as_ref().map(|s| serde_json::json!({
+                "start_ms": s.start_ms,
+                "duration_ms": s.duration_ms,
+            })),
         })
+    }
+
+    /// The shock ends where stock ends it: a spawn clears the player state's shell shock (`ClientSpawn` wipes the
+    /// client, KisakCOD `game_mp/g_client_mp.cpp:376`), and `CG_StartShellShock(.., 0, 0)` then `EndShellShock`
+    /// (`cgame_mp/cg_view_mp.cpp:1365-1377`); a new level rebuilds the cgame. As `shellshock "" 0`.
+    pub fn end_shock(&mut self) {
+        self.silence();
     }
 
     /// `CG_Flashbanged`: a shock whose screen is not a blur is still running at `now_ms`.
