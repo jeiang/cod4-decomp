@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 /// The unsilenced and silenced weapons of one family, so only the silencer differs.
 const UNSILENCED: &str = "mp5_mp";
 const SILENCED: &str = "mp5_silencer_mp";
-/// How long the bot holds the trigger: one or two rounds, enough to ping without emptying the person's health.
-const BURST_MS: u32 = 150;
+/// How long the bot holds the trigger: a few rounds, as the server test of the hook (`dev_bot_fire.rs`) does.
+const BURST_MS: u32 = 500;
 /// How long the frag key is held before it is let go and the grenade flies.
 const FRAG_MS: u32 = 400;
 /// Long enough for a ping to fade and for the server's shot window (and the forged `PING` flag it sends) to close.
@@ -167,7 +167,20 @@ fn case(
         marked: now["last_fire_time"] != was["last_fire_time"],
         missile,
     };
-    verdict(label, pings, before, after, fired, grenade)?;
+    verdict(label, pings, before, after, fired, grenade).map_err(|e| {
+        format!(
+            "{e}; bot {bot} before: weapon {} alive {} retained {}; after: weapon {} weapons {} alive {} \
+             origin {} retained {}",
+            was["weapon"],
+            was["alive"],
+            was["command_frame"]["retained"],
+            now["weapon"],
+            now["weapons"],
+            now["alive"],
+            now["origin"],
+            now["command_frame"]["retained"]
+        )
+    })?;
     let length = c.lookup("hud.report.last_fire_ping_ms")?;
     Ok(format!(
         "{label}: {} fire pings, {} flag pings, {} marks drawn, last ping {length} ms",
