@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Rocket destabilisation, attractors and repulsors, water splash and explosion depth, and glass penetration translated in part from KisakCOD (game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Missile simulation and persistent smoke translated in part from KisakCOD (game/g_missile.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Grenades and rockets (`ET_MISSILE`): `G_FireGrenade`, `G_FireRocket`, `G_RunMissile`,
 //! `MissileImpact`, `BounceMissile` and `G_ExplodeMissile`, plus the dropped weapons that fall
 //! to the floor.
@@ -118,6 +118,15 @@ pub struct Missile {
     pub stage: JavelinStage,
     pub target: Option<u16>,
     pub target_offset: Vec3,
+}
+
+/// The small payload retained by a GENERAL smoke entity after its missile is freed.
+#[derive(Debug, Clone, Copy)]
+pub struct SmokeExplosion {
+    pub start_time: i32,
+    pub weapon: u16,
+    pub owner: u16,
+    pub surface: u8,
 }
 
 /// `MISSILESTAGE_*`: a javelin is tossed out (`SoftLaunch`), lights its motor and climbs (`Ascent`), then dives
@@ -1249,6 +1258,25 @@ impl Game {
         let now = self.level.time;
         let (weapon, owner) = (m.weapon, m.parent.unwrap_or(1023));
         let angles = crate::tempev::dir_to_angles(normal);
+        // KisakCOD g_missile.cpp:399: only smoke with an authored effect leaves a cloud.
+        // CoD4 MP 1.8 reference; the 1.7 native implementation has not been verified.
+        if m.info.proj_explosion == ProjExplosion::Smoke && m.info.has_proj_explosion_effect {
+            let mut e = Ent::new(EntKind::Plain, "smoke");
+            e.origin = origin.map(f32::trunc);
+            e.angles = angles;
+            // G_RunFrameForEntity (g_main_mp.cpp:1506) frees strictly after time2.
+            e.free_at = Some(now + 61_001);
+            e.smoke_explosion = Some(SmokeExplosion {
+                start_time: now,
+                weapon,
+                owner,
+                surface,
+            });
+            if let Err(err) = self.spawn(e) {
+                tracing::warn!(%err, "could not retain smoke explosion");
+            }
+            return;
+        }
         let mut kinds = vec![crate::tempev::ev::EXPLOSION];
         if m.info.proj_explosion == ProjExplosion::Dud {
             kinds.push(crate::tempev::ev::DUD);
@@ -1669,5 +1697,81 @@ mod bounce_tests {
         ));
         // The same hard bounce in water.
         assert!(!bounce_is_loud(true, fall, [0.0, 0.0, 150.0]));
+    }
+
+    #[test]
+    fn smoke_cloud_survives_the_burst_and_is_freed_only_after_its_lifetime() {
+        use super::*;
+        use crate::{content::Content, cvar::Cvars, netsv::world_entities};
+        use gsc::{Builtins, Options, compile};
+        use net::entity::{SMOKE_EXPLODE, etype};
+        use sim::weapon::WeaponTable;
+
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.weapons = WeaponTable::from_infos(vec![WeaponInfo {
+            name: "smoke_grenade_mp".into(),
+            offhand_class: OffhandClass::Smoke,
+            proj_explosion: ProjExplosion::Smoke,
+            has_proj_explosion_effect: true,
+            ..Default::default()
+        }])
+        .unwrap();
+        let program = compile(
+            &[("t.gsc", "main() {}")],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(program).unwrap();
+        g.level.time = 1_000;
+        let weapon = g.weapons.index("smoke_grenade_mp");
+        let missile = g
+            .launch_grenade(
+                &mut vm,
+                0,
+                weapon,
+                [12.8, -25.9, 8.2],
+                [0.0; 3],
+                [0.0; 3],
+                false,
+                1,
+            )
+            .unwrap();
+        g.with_missile(missile, |g, m| {
+            m.ground = Some(ENTITYNUM_WORLD);
+            g.explode_missile(&mut vm, missile, m);
+        });
+        assert!(g.ent(missile).is_none(), "the spent missile must be freed");
+        let cloud = world_entities(&g)
+            .into_iter()
+            .find(|s| s.etype == etype::GENERAL && s.eflags & SMOKE_EXPLODE != 0)
+            .expect("smoke must retain a GENERAL cloud, not just an EVENT");
+        assert_eq!(cloud.origin, [12.0, -25.0, 8.0]);
+        assert_eq!(
+            (cloud.custom_explode_start_time, cloud.time2),
+            (1_000, 62_000)
+        );
+        assert_eq!(
+            (cloud.event, cloud.weapon),
+            (crate::tempev::ev::EXPLOSION, weapon)
+        );
+        assert!(
+            g.tempev.live(g.level.time).next().is_none(),
+            "no duplicate temp burst"
+        );
+        for time in [1_201, 3_000, 61_999, 62_000] {
+            g.level.time = time;
+            g.run_entity(&mut vm, cloud.number);
+            assert!(
+                world_entities(&g)
+                    .iter()
+                    .any(|s| s.number == cloud.number && s.time2 == 62_000),
+                "cloud disappeared at {time}"
+            );
+        }
+        g.level.time = 62_001;
+        g.run_entity(&mut vm, cloud.number);
+        assert!(g.ent(cloud.number).is_none());
+        assert!(!world_entities(&g).iter().any(|s| s.number == cloud.number));
     }
 }

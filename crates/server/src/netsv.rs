@@ -1675,6 +1675,25 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.eflags = owner_team_flags(game, v.owner);
                 s
             }
+            EntKind::Plain if e.smoke_explosion.is_some() => {
+                // G_ExplodeMissile broadcasts the persistent smoke cloud, including to late joiners.
+                let smoke = e.smoke_explosion.expect("smoke explosion");
+                EntityState {
+                    number: n,
+                    etype: etype::GENERAL,
+                    eflags: net::entity::SMOKE_EXPLODE,
+                    origin: e.origin,
+                    angles: e.angles,
+                    weapon: smoke.weapon,
+                    client: smoke.owner,
+                    event: crate::tempev::ev::EXPLOSION,
+                    event_parm: smoke.surface,
+                    event_seq: 1,
+                    custom_explode_start_time: smoke.start_time,
+                    time2: smoke.start_time + 61_000,
+                    ..Default::default()
+                }
+            }
             EntKind::Plain if e.world_fx.is_some() => {
                 let mut s = EntityState::new(n);
                 s.origin = e.origin;

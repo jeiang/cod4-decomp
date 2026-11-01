@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Persistent smoke follows KisakCOD (GPL-3.0, KisakCOD contributors and Activision),
+// `cgame_mp/cg_main_mp.cpp:1578-1616` and `cgame_mp/cg_ents_mp.cpp:1462-1482`
+// (CoD4 MP 1.8; native 1.7 unverified).
 // Translated in part from KisakCOD cgame/cg_event.cpp (CG_PlayFxOnTag) and
 // EffectsCore/fx_system.cpp / fx_update.cpp (FX_PlayBoltedEffect / FX_UpdateEffectBolt),
 // GPL-3.0, copyright the KisakCOD contributors and Activision.
@@ -167,6 +170,8 @@ pub struct Effects {
     /// The script effect entities, by entity number.
     world_fx: HashMap<u16, WorldFx>,
     world_fx_stamp: u32,
+    smoke: HashMap<u16, SmokeCloud>,
+    smoke_quads: usize,
     /// The client number of this player and the gun in their hands, for the first-person flash.
     own: u16,
     view: Option<ViewTags>,
@@ -269,6 +274,60 @@ struct WorldFx {
     stamp: u32,
 }
 
+/// Kept until the server expiry, even across snapshot culling, so reentry does not
+/// layer a second cloud over the first. Restarting Effects clears this cache.
+struct SmokeCloud {
+    start: i32,
+    end: i32,
+    handle: u64,
+    def: Arc<FxEffectDef>,
+}
+
+fn smoke_clouds(
+    fx: &mut Fx,
+    clouds: &mut HashMap<u16, SmokeCloud>,
+    ents: &[EntityState],
+    effect: &dyn Fn(u16) -> Option<(Arc<FxEffectDef>, bool)>,
+    now: i32,
+) -> u64 {
+    clouds.retain(|_, cloud| now <= cloud.end);
+    let mut started = 0;
+    for e in ents.iter().filter(|e| crate::events::persistent_smoke(e)) {
+        let start = e.custom_explode_start_time;
+        if now < start || now > e.time2 {
+            continue;
+        }
+        if clouds
+            .get(&e.number)
+            .is_some_and(|cloud| cloud.start == start)
+        {
+            continue;
+        }
+        let Some((def, force_up)) = effect(e.weapon) else {
+            continue;
+        };
+        let normal = if force_up {
+            Vec3::Z
+        } else {
+            Vec3::from(sim::pm::math::angle_vectors(&e.angles).0)
+        };
+        let handle = fx.play_at(&def, Frame::facing(Vec3::from(e.origin), normal), start);
+        if handle != 0 {
+            clouds.insert(
+                e.number,
+                SmokeCloud {
+                    start,
+                    end: e.time2,
+                    handle,
+                    def,
+                },
+            );
+            started += 1;
+        }
+    }
+    started
+}
+
 /// Looping script effects do not start while this many elements are alive: the rest is for the effects of play. About
 /// half of the pool of elements (`fx::MAX_ELEMS`, the original's 2048): the other half is for impacts, explosions and
 /// muzzle flashes.
@@ -326,6 +385,8 @@ impl Effects {
             missiles: HashMap::new(),
             world_fx: HashMap::new(),
             world_fx_stamp: 0,
+            smoke: HashMap::new(),
+            smoke_quads: 0,
             clock: 0,
             sweep: None,
             own: u16::MAX,
@@ -482,6 +543,7 @@ impl Effects {
                 normal,
                 surface,
                 weapon: w,
+                persistent_smoke,
                 ..
             } => {
                 let d = weapon(*w);
@@ -499,8 +561,12 @@ impl Effects {
                     let def = self.impact_effect(d.impact_type, *surface, 0);
                     self.play("explosion_impact", def, Vec3::from(*origin), n);
                 }
-                let def = d.as_ref().and_then(|d| d.proj_explosion_effect.clone());
-                self.play("explosion", def, Vec3::from(*origin), n);
+                // A persistent smoke's weapon FX is started from its original burst time
+                // by the snapshot path, not again at the first rendered frame.
+                if !*persistent_smoke {
+                    let def = d.as_ref().and_then(|d| d.proj_explosion_effect.clone());
+                    self.play("explosion", def, Vec3::from(*origin), n);
+                }
             }
             ClientEvent::Dud {
                 origin,
@@ -813,6 +879,53 @@ impl Effects {
             }
             flying
         });
+    }
+
+    /// Reconstructs active GENERAL smoke from the authoritative burst time. This also
+    /// runs after an effects restart, without delivering an explosion event or sound.
+    pub fn smoke(
+        &mut self,
+        ents: &[EntityState],
+        weapon: &dyn Fn(u16) -> Option<Arc<WeaponDef>>,
+        now: i32,
+    ) {
+        let started = smoke_clouds(
+            &mut self.fx,
+            &mut self.smoke,
+            ents,
+            &|w| {
+                let weapon = weapon(w)?;
+                Some((
+                    weapon.proj_explosion_effect.clone()?,
+                    weapon.proj_explosion_effect_force_normal_up != 0,
+                ))
+            },
+            now,
+        );
+        if started != 0 {
+            *self.played.entry("persistent_smoke").or_default() += started;
+        }
+    }
+
+    pub fn smoke_report(&self) -> serde_json::Value {
+        serde_json::json!(
+            self.smoke
+                .iter()
+                .map(|(number, cloud)| {
+                    serde_json::json!({
+                        "number": number,
+                        "start_time": cloud.start,
+                        "end_time": cloud.end,
+                        "age_ms": self.clock.wrapping_sub(cloud.start),
+                        "live": self.fx.is_live(cloud.handle),
+                    })
+                })
+                .collect::<Vec<_>>()
+        )
+    }
+
+    pub fn smoke_quads(&self) -> usize {
+        self.smoke_quads
     }
 
     /// Keeps the script effect entities of the newest snapshot playing (`CG_Fx`, `CG_LoopFx`): a looped effect starts
@@ -1261,6 +1374,9 @@ impl Effects {
         let mut d = Draws::default();
         let quads = &mut self.effect_quads;
         let ambient_quads = &mut self.ambient.quads;
+        self.smoke_quads = 0;
+        let smoke_quads = &mut self.smoke_quads;
+        let smoke = &self.smoke;
         self.fx.draw_counted(&cam, &mut d, &mut |name, n| {
             if let Some(count) = quads.get_mut(name) {
                 *count += n as u64;
@@ -1269,6 +1385,12 @@ impl Effects {
             }
             if let Some(count) = ambient_quads.get_mut(name) {
                 *count += n as u64;
+            }
+            if smoke
+                .values()
+                .any(|cloud| cloud.def.name.as_deref() == Some(name))
+            {
+                *smoke_quads += n;
             }
         });
         let beams = self.tracers.beams(self.clock);
@@ -1426,5 +1548,147 @@ mod flesh_tests {
             [super::flesh_column(false), super::flesh_column(true)],
             [0, 2]
         );
+    }
+}
+
+#[cfg(test)]
+mod smoke_tests {
+    use super::*;
+    use assets::zone::fx::{FxElemDef, FxVisuals, Range};
+
+    fn probe() -> Arc<FxEffectDef> {
+        let zero = Range {
+            base: 0.0,
+            amplitude: 0.0,
+        };
+        let elem = FxElemDef {
+            flags: 0,
+            spawn: [1, 0],
+            spawn_range: zero,
+            fade_in_range: zero,
+            fade_out_range: zero,
+            spawn_frustum_cull_radius: 0.0,
+            spawn_delay_msec: Range {
+                base: 0,
+                amplitude: 0,
+            },
+            life_span_msec: Range {
+                base: 1_000,
+                amplitude: 0,
+            },
+            spawn_origin: [zero; 3],
+            spawn_offset_radius: zero,
+            spawn_offset_height: zero,
+            spawn_angles: [zero; 3],
+            angular_velocity: [zero; 3],
+            initial_rotation: zero,
+            gravity: zero,
+            reflection_factor: zero,
+            atlas: [0; 6],
+            atlas_entry_count: 0,
+            elem_type: assets::zone::fx::elem::OMNI_LIGHT,
+            vel_samples: Arc::from(Vec::new()),
+            vis_samples: Arc::from(Vec::new()),
+            visuals: FxVisuals::None,
+            coll_mins: [0.0; 3],
+            coll_maxs: [0.0; 3],
+            effect_on_impact: None,
+            effect_on_death: None,
+            effect_emitted: None,
+            emit_dist: zero,
+            emit_dist_variance: zero,
+            trail: None,
+            sort_order: 0,
+            lighting_frac: 0,
+            use_item_clip: false,
+        };
+        Arc::new(FxEffectDef {
+            name: Some("smoke-age-probe".into()),
+            flags: 0,
+            total_size: 0,
+            msec_looping_life: 0,
+            looping_count: 0,
+            one_shot_count: 1,
+            emission_count: 0,
+            elems: Arc::from(vec![elem]),
+        })
+    }
+
+    fn smoke(start: i32) -> EntityState {
+        let mut e = EntityState::new(42);
+        e.etype = etype::GENERAL;
+        e.eflags = net::entity::SMOKE_EXPLODE;
+        e.custom_explode_start_time = start;
+        e.time2 = start + 61_000;
+        e
+    }
+
+    #[test]
+    fn a_late_or_restarted_smoke_uses_original_effect_age_not_join_age() {
+        let def = probe();
+        let effect = |_: u16| Some((def.clone(), false));
+        let e = smoke(1_000);
+        for now in [1_000, 1_200, 1_500, 2_001, 10_000] {
+            // Each iteration also represents rebuilding the FX pool on restart.
+            let mut fx = Fx::new(Arc::new(Library::default()));
+            let mut clouds = HashMap::new();
+            assert_eq!(
+                smoke_clouds(&mut fx, &mut clouds, std::slice::from_ref(&e), &effect, now),
+                1
+            );
+            fx.update(now, &fx::Empty);
+            assert_eq!(clouds[&42].start, 1_000);
+            // A probe with a 1000 ms life must already be over on a late join.
+            // Starting at `now` instead would incorrectly leave one element alive.
+            assert_eq!(
+                fx.live_elems(),
+                usize::from(now < 2_000),
+                "first seen {now}"
+            );
+            assert!(fx.take_sounds().is_empty());
+        }
+    }
+
+    #[test]
+    fn snapshot_reentry_keeps_the_existing_cloud_and_reuse_starts_a_new_one() {
+        let def = probe();
+        let effect = |_: u16| Some((def.clone(), false));
+        let mut fx = Fx::new(Arc::new(Library::default()));
+        let mut clouds = HashMap::new();
+        let e = smoke(1_000);
+        assert_eq!(
+            smoke_clouds(
+                &mut fx,
+                &mut clouds,
+                std::slice::from_ref(&e),
+                &effect,
+                1_000
+            ),
+            1
+        );
+        let handle = clouds[&42].handle;
+        assert_eq!(smoke_clouds(&mut fx, &mut clouds, &[], &effect, 1_100), 0);
+        assert_eq!(smoke_clouds(&mut fx, &mut clouds, &[e], &effect, 1_300), 0);
+        assert_eq!(clouds[&42].handle, handle);
+        assert_eq!(
+            smoke_clouds(&mut fx, &mut clouds, &[smoke(2_000)], &effect, 2_000),
+            1
+        );
+        assert_ne!(clouds[&42].handle, handle);
+        assert_eq!(clouds[&42].start, 2_000);
+    }
+
+    #[test]
+    fn smoke_reconstruction_obeys_both_ends_of_the_server_interval() {
+        let def = probe();
+        let effect = |_: u16| Some((def.clone(), false));
+        for (now, expected) in [(999, 0), (1_000, 1), (62_000, 1), (62_001, 0)] {
+            let mut fx = Fx::new(Arc::new(Library::default()));
+            let mut clouds = HashMap::new();
+            assert_eq!(
+                smoke_clouds(&mut fx, &mut clouds, &[smoke(1_000)], &effect, now),
+                expected
+            );
+        }
     }
 }
