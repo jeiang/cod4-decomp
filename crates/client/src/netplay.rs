@@ -293,8 +293,8 @@ fn eye_speed_summary(speeds: &[f32]) -> Value {
 #[derive(Default)]
 struct Counters {
     cmds: u64,
-    /// The least and the most a sent usercmd's time differed from the moment the others were drawn at, ms.
-    cmd_drawn: Option<(i32, i32)>,
+    /// How far each sent usercmd's time was from the moment the others were last drawn at, ms.
+    cmd_drawn: Vec<i32>,
     shots: u64,
     /// The most the view kicked up, and the most the pitch of a sent cmd differed from the player's own aim, degrees.
     max_kick_up: f32,
@@ -2106,12 +2106,7 @@ impl NetPlay {
         // How far the command's time is from the moment the others were last drawn at: stock stamps that very moment
         // (`cl.serverTime`), and the server's antilag judges the shot there.
         if let Some(drawn) = self.drawn_at {
-            let d = cmd.server_time - drawn;
-            self.c.cmd_drawn = Some(
-                self.c
-                    .cmd_drawn
-                    .map_or((d, d), |(lo, hi)| (lo.min(d), hi.max(d))),
-            );
+            self.c.cmd_drawn.push(cmd.server_time - drawn);
         }
         self.pred.push(cmd);
         self.net.send_cmd(cmd);
@@ -2823,11 +2818,18 @@ impl NetPlay {
             "clock_jumps": self.net.snaps.jumps,
             "sound": self.sound.report(),
         });
-        report["cmd_minus_drawn_ms"] = json!(
-            self.c
-                .cmd_drawn
-                .map(|(lo, hi)| json!({ "min": lo, "max": hi }))
-        );
+        let mut d = std::mem::take(&mut self.c.cmd_drawn);
+        d.sort_unstable();
+        let at = |q: f64| {
+            d.get(((d.len() as f64 - 1.0) * q).round() as usize)
+                .copied()
+        };
+        report["cmd_minus_drawn_ms"] = if d.is_empty() {
+            Value::Null
+        } else {
+            json!({ "min": at(0.0), "median": at(0.5), "p95": at(0.95), "max": at(1.0) })
+        };
+        self.c.cmd_drawn = d;
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
         report["script_model_parts_max"] = self.c.script_model_parts_max.into();
         report["player_attachments"] = json!(self.c.player_attachments);
