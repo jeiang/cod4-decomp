@@ -728,7 +728,7 @@ fn bolted(
         },
         main,
         None,
-        &[ent.clone()],
+        std::slice::from_ref(&ent),
     )
     .map_err(|e| format!("{e:?}"))?;
     let tags = game
@@ -757,7 +757,7 @@ fn bolted(
                 },
                 moving,
                 None,
-                &[ent.clone()],
+                std::slice::from_ref(&ent),
             )
             .map_err(|e| format!("{e:?}"))?;
         }
