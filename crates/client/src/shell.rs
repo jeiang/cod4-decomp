@@ -551,6 +551,14 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("cg_ScoresPing_MedColor", "0.8 0.8 0 1"),
     ("cg_ScoresPing_LowColor", "0 0.75 0 1"),
     ("cg_ScoresPing_BgColor", "0.25 0.25 0.25 0.5"),
+    // The minimap's objective icons, the multiplayer defaults (`CG_CompassRegisterDvars`; `compassMaxRange`, cheat
+    // protected, is registered with the cvars).
+    ("compassObjectiveWidth", "20"),
+    ("compassObjectiveHeight", "20"),
+    ("compassObjectiveIconWidth", "16"),
+    ("compassObjectiveIconHeight", "16"),
+    ("compassObjectiveMaxRange", "2048"),
+    ("compassObjectiveMinAlpha", "1"),
     // The four game message windows: seconds on screen, lines, scroll, fade in and fade out.
     ("con_gameMsgWindow0MsgTime", "5"),
     ("con_gameMsgWindow0LineCount", "4"),
