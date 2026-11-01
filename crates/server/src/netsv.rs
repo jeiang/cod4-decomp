@@ -1259,15 +1259,18 @@ pub fn visible_to(game: &Game, viewer: u16) -> (Vec<EntityState>, Vec<EntityStat
     tell(game, &world_snapshot(game), viewer, eye, &[], true)
 }
 
-/// Non-PVS compass positions carry no fire events or scripted ping flags. Firing pings come only from players'
-/// events in the snapshot, not a synthetic server shot reveal.
+/// Non-PVS compass positions carry no fire events, so firing pings come only from players' events in the snapshot,
+/// never from a synthetic server shot reveal. The script `pingPlayer` bit (`eflags::PING`) of a player that passed
+/// [`compass_shows`] is kept: stock copies `EF_PING` (0x400000) of the compass player into `ps.eFlags` 0x800000
+/// (KisakCOD MP 1.8 game_mp/g_active_mp.cpp:1244-1251) and the compass pings that actor for it
+/// (cgame_mp/cg_compassfriendlies_mp.cpp:437-438). GPL-3.0, Activision and KisakCOD contributors; 1.7 unverified.
 fn compass_state(p: &EntityState) -> EntityState {
     let mut a = EntityState::new(p.number);
     a.etype = p.etype;
     a.client = p.client;
     a.origin = p.origin;
     a.angles = [0.0, p.angles[1], 0.0];
-    a.eflags = p.eflags & !eflags::PING;
+    a.eflags = p.eflags;
     a.perks = p.perks;
     a.head_icon = p.head_icon;
     a.head_icon_team = p.head_icon_team;

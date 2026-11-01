@@ -144,9 +144,24 @@ fn an_enemy_behind_a_wall_reaches_the_compass_only_as_far_as_the_radar_shows_it(
         shown[0]
             .recent_events()
             .iter()
-            .all(|&(event, _)| event == 0)
+            .all(|&(event, _)| event == 0),
+        "no fire events reach the compass from outside the snapshot"
     );
-    assert_eq!(shown[0].eflags & server::netsv::eflags::PING, 0);
+    let ping = server::netsv::eflags::PING;
+    assert_ne!(
+        shown[0].eflags & ping,
+        0,
+        "a revealed player's pingPlayer bit survives"
+    );
+    g.client_mut(b).unwrap().compass_ping_until = 0;
+    assert_eq!(visible_to(&g, a).1[0].eflags & ping, 0, "no ping, no bit");
+    g.cvars.set("g_compassShowEnemies", "0");
+    g.client_mut(b).unwrap().compass_ping_until = 30_000;
+    let team = g.client(a).unwrap().team;
+    g.client_mut(b).unwrap().team = team;
+    let (_, shown) = visible_to(&g, a);
+    assert_eq!(numbers(&shown), [b], "a teammate is always shown");
+    assert_ne!(shown[0].eflags & ping, 0, "with its pingPlayer bit");
     g.client_mut(a).unwrap().team = Team::Spectator;
     assert!(
         actors(&g).is_empty(),
