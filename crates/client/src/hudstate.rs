@@ -598,7 +598,18 @@ impl HudFacts {
 
     /// The facts as the run report shows them.
     pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({
+        // Two `json!` maps: one would pass the macro's recursion limit.
+        let voice = serde_json::json!({
+            "talker_marks": self.talker_marks,
+            "ui_talker_marks": self.ui_talker_marks,
+            "local_talker_marks": self.local_talker_marks,
+            "local_talking": self.local_talking,
+            "record_level": self.record_level,
+            "record_meter_marks": self.record_meter_marks,
+            "record_meter_rect": self.record_meter_rect,
+            "talkers": self.talkers,
+        });
+        let mut report = serde_json::json!({
             "live": self.live,
             "health": self.health,
             "max_health": self.max_health,
@@ -629,14 +640,6 @@ impl HudFacts {
             "vehicle_marks": self.vehicle_marks,
             "helicopter_marks": self.helicopter_marks,
             "plane_marks": self.plane_marks,
-            "talker_marks": self.talker_marks,
-            "ui_talker_marks": self.ui_talker_marks,
-            "local_talker_marks": self.local_talker_marks,
-            "local_talking": self.local_talking,
-            "record_level": self.record_level,
-            "record_meter_marks": self.record_meter_marks,
-            "record_meter_rect": self.record_meter_rect,
-            "talkers": self.talkers,
             "enemy_firing_marks": self.enemy_firing_marks,
             "enemy_fire_pings": self.enemy_fire_pings,
             "enemy_flag_pings": self.enemy_flag_pings,
@@ -647,7 +650,11 @@ impl HudFacts {
             "enemy_vehicles_max": self.enemy_vehicles_max,
             "objectives_listed": self.objectives_listed,
             "objectives_alpha": self.objectives_alpha,
-        })
+        });
+        if let (Some(r), serde_json::Value::Object(v)) = (report.as_object_mut(), voice) {
+            r.extend(v);
+        }
+        report
     }
 }
 
