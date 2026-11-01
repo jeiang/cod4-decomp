@@ -106,7 +106,10 @@ impl Game {
             };
         });
         match weap_type {
-            WeaponType::Bullet => self.fire_bullets(vm, n, weapon, &aim, spread),
+            WeaponType::Bullet => {
+                let game_time = self.shot_game_time(n);
+                self.fire_bullets(vm, n, weapon, &aim, spread, game_time);
+            }
             WeaponType::Grenade => self.throw_grenade(vm, n, weapon, &aim, fuse_left),
             WeaponType::Projectile if class == WeaponClass::Grenade => {
                 self.fire_grenade_launcher(vm, n, weapon, &aim)
@@ -131,7 +134,9 @@ impl Game {
         c.gun.state.kick(r.gun_kick);
     }
 
-    /// `Bullet_Fire` and the damage it deals.
+    /// `Bullet_Fire` and the damage it deals. `game_time` is the time the shot is judged at: the other players are
+    /// rewound to it for the traces and the damage (`G_AntiLagRewindClientPos`), it seeds the spread, and
+    /// `level.time - game_time` is how far back the killcam starts (`psTimeOffset`).
     pub(crate) fn fire_bullets(
         &mut self,
         vm: &mut Vm,
@@ -139,38 +144,42 @@ impl Game {
         weapon: u16,
         aim: &AimBasis,
         spread: f32,
+        game_time: i32,
     ) {
         self.ensure_player_anims();
         let penetration = self.penetration_table();
         let params = self.pm_params.weapon;
+        let Some(perks) = self.client(n).map(|c| c.ps.perks) else {
+            return;
+        };
+        let friendly_fire = self.cvars.int("scr_friendlyfire") != 0;
+        let rewound = self.antilag_rewind(game_time);
         let mut hits: Vec<BulletHit> = Vec::new();
-        {
-            let (Some(info), Some(c)) = (self.weapons.get(weapon), self.client(n)) else {
-                return;
-            };
+        if let Some(info) = self.weapons.get(weapon) {
             let p = BulletParams {
                 attacker: n,
                 info,
-                perks: c.ps.perks,
+                perks,
                 params: &params,
                 penetration: &penetration,
-                friendly_fire: self.cvars.int("scr_friendlyfire") != 0,
+                friendly_fire,
             };
-            self.bullet_hits(&p, aim, spread, self.level.time, &mut hits);
+            self.bullet_hits(&p, aim, spread, game_time, &mut hits);
         }
-        self.apply_bullet_hits(vm, n, weapon, hits);
+        self.apply_bullet_hits(vm, n, weapon, hits, self.level.time - game_time);
+        self.antilag_restore(rewound);
     }
 
-    /// The impacts and damage of the bullets `shooter` (a player or a vehicle) fired.
+    /// The impacts and damage of the bullets `shooter` (a player or a vehicle) fired. The bodies were judged as they
+    /// were `time_offset` ms ago (`psTimeOffset`): the killcam starts that much back.
     pub(crate) fn apply_bullet_hits(
         &mut self,
         vm: &mut Vm,
         shooter: u16,
         weapon: u16,
         hits: Vec<BulletHit>,
+        time_offset: i32,
     ) {
-        // The shot was judged against the bodies as they were `psTimeOffset` ago; the killcam starts that much back.
-        let time_offset = self.lag_time.map_or(0, |t| self.level.time - t);
         for h in hits {
             if h.exit {
                 self.bullet_impact_event(shooter, weapon, &h);
@@ -286,9 +295,17 @@ impl Game {
         }
     }
 
-    /// `FireWeaponMelee` and `Weapon_Melee_internal`: the knife swing hits the nearest thing
-    /// within reach, trying the centre line and then the corners of the swing box.
+    /// `FireWeaponMelee` and `Weapon_Melee`: the swing is judged with the other players rewound to the swing's game
+    /// time ([`Game::shot_game_time`]) and put back afterwards; its damage carries no killcam offset.
     fn fire_melee(&mut self, vm: &mut Vm, n: u16, weapon: u16) {
+        let rewound = self.antilag_rewind(self.shot_game_time(n));
+        self.melee_internal(vm, n, weapon);
+        self.antilag_restore(rewound);
+    }
+
+    /// `Weapon_Melee_internal`: the knife swing hits the nearest thing within reach, trying the centre line and then
+    /// the corners of the swing box.
+    fn melee_internal(&mut self, vm: &mut Vm, n: u16, weapon: u16) {
         self.ensure_player_anims();
         let Some(info) = self.weapons.get(weapon) else {
             return;

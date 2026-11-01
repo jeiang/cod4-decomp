@@ -8,6 +8,7 @@
 #[cfg(test)]
 static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+mod ambient;
 mod app;
 mod automelee;
 mod breath;
@@ -77,7 +78,7 @@ use std::process::ExitCode;
 const USAGE: &str = "\
 cod4e: CoD4 multiplayer client (world viewer)
 
-usage: cod4e [options]
+usage: cod4e [options] [+command args ...]
   --install <dir>        original install (else COD4_PATH, the folder picked last time, Steam and registry locations, ./COD4, a folder prompt that is remembered)
   --map <name>           map zone to load (default mp_crash)
   --game <mods/name>     run a mod (fs_game): its mod.ff, IWDs and menus, and the server's too with --listen
@@ -122,6 +123,10 @@ usage: cod4e [options]
   --fx-demo <name>       play the named effect (fx/...) in front of the player every 1.5 s, for looking at effects
   --autoplay             a scripted player instead of the keyboard, for --duration seconds (harness stage 4)
   --list-display-modes [--json]   print the GPU, monitors, video modes and present modes, then exit
+  +<command> [args]      a console line, as the original's command line takes it: `+set`/`+seta`/`+sets`/`+setu` set
+                         the variable before the configs run and again after them (so it outranks them), the others
+                         (`+exec x.cfg`, `+connect host:port`, `+map mp_crash`, `+name x`) run once the client is up;
+                         the line runs to the next `+` word or `--` option
 
 Interactive: WASD move, Space/Ctrl up/down, Shift fast, arrows look, click to capture the mouse, Esc releases it (quit with the `quit` command or by closing the window).
 Keys are the config file's binds, e.g. bind w +forward.";
@@ -168,7 +173,10 @@ pub struct Cli {
     pub listen: bool,
     pub bots: Option<usize>,
     pub gametype: Option<String>,
+    /// The name a join goes under when the `name` variable is empty.
     pub name: String,
+    /// `--name` was given: it sets the `name` variable at start-up, over the configs.
+    pub name_given: bool,
     /// A scripted player instead of the keyboard (harness): walks, aims at and shoots enemies for `--duration`.
     pub autoplay: bool,
     pub fx_demo: Option<String>,
@@ -187,6 +195,10 @@ pub struct Cli {
     pub control_file: Option<PathBuf>,
     /// `--control-stdio`: the channel reads stdin and writes stdout instead of listening.
     pub control_stdio: bool,
+    /// The `+` words of the command line, one console line each (`Com_ParseCommandLine`): the `set` lines are applied
+    /// before and after the configs (`Com_StartupVariable`), and every line runs once the client is up
+    /// (`Com_AddStartupCommands`).
+    pub startup: Vec<String>,
 }
 
 impl Cli {
@@ -242,6 +254,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         bots: None,
         gametype: None,
         name: "player".into(),
+        name_given: false,
         autoplay: false,
         fx_demo: None,
         no_sound: false,
@@ -251,10 +264,29 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         control: None,
         control_file: None,
         control_stdio: false,
+        startup: Vec::new(),
     };
     let mut it = args.iter();
     let mut size_given = false;
+    // The `+` line the words that are not options join (`Com_ParseCommandLine` cuts the line at every `+`; a `-` word
+    // is no option there, so `+set cg_x -1` keeps its value).
+    let mut line: Option<String> = None;
     while let Some(a) = it.next() {
+        if let Some(rest) = a.strip_prefix('+') {
+            // The word after `+` is taken as written: a launcher may pass a whole line as one argument.
+            c.startup.extend(line.replace(rest.to_owned()));
+            continue;
+        }
+        let option = a.starts_with("--") || a == "-h";
+        if !option && let Some(l) = line.as_mut() {
+            if !l.is_empty() {
+                l.push(' ');
+            }
+            l.push_str(&quote_word(a));
+            continue;
+        }
+        // An option of ours ends the `+` line before it.
+        c.startup.extend(line.take());
         let mut val = |name: &str| it.next().cloned().ok_or(format!("{name} needs a value"));
         match a.as_str() {
             "--install" => {
@@ -331,7 +363,10 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             "--connect" => c.connect = Some(val(a)?),
             "--listen" => c.listen = true,
             "--bots" => c.bots = Some(val(a)?.parse().map_err(|_| "bad bot count")?),
-            "--name" => c.name = val(a)?,
+            "--name" => {
+                c.name = val(a)?;
+                c.name_given = true;
+            }
             "--autoplay" => c.autoplay = true,
             "--fx-demo" => c.fx_demo = Some(val(a)?),
             "--no-sound" => c.no_sound = true,
@@ -349,6 +384,23 @@ fn parse(args: &[String]) -> Result<Cli, String> {
             other => return Err(format!("unknown option {other}")),
         }
     }
+    c.startup.extend(line);
+    // `Com_AddStartupCommands` skips an empty line (a lone `+`).
+    c.startup.retain(|l| !l.trim().is_empty());
+    // `FS_InitFilesystem` reads `fs_game` after the first `Com_StartupVariable`: `+set fs_game mods/x` is `--game`.
+    if let Some(game) = c
+        .startup
+        .iter()
+        .filter_map(|l| input::config::startup_set(l))
+        .filter(|t| t[1].eq_ignore_ascii_case("fs_game"))
+        .map(|t| t[2..].join(" "))
+        .next_back()
+    {
+        if !assets::paths::valid_game(&game) {
+            return Err("+set fs_game takes mods/<name>".into());
+        }
+        c.game = game;
+    }
     if c.request.kind == FullscreenKind::Borderless && !size_given {
         c.request.size = None;
     }
@@ -362,6 +414,16 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         c.out = Some(".".into());
     }
     Ok(c)
+}
+
+/// A word of a `+` line as the console reads it back: quoted when it holds a space or a command separator, as the
+/// original's command line keeps the user's quotes.
+fn quote_word(w: &str) -> String {
+    if w.is_empty() || w.contains(|c: char| c.is_whitespace() || c == ';' || c == '"') {
+        input::config::quote(w)
+    } else {
+        w.to_owned()
+    }
 }
 
 /// The browser starts here when the page instantiates the module: the page has put the install and the arguments in
@@ -556,5 +618,48 @@ mod tests {
         );
         assert!(parse(&args("--size 12")).is_err());
         assert!(parse(&args("--bogus")).is_err());
+    }
+
+    /// The original's command line (`Com_ParseCommandLine`): every `+` word starts a console line, which the words
+    /// after it join until the next `+` word or one of our `--` options (#397).
+    #[test]
+    fn plus_words_are_console_lines_beside_the_options() {
+        let c = parse(&args(
+            "--flythrough +set cg_fov 90 +exec stage.cfg --no-sound +connect 127.0.0.1:28960 +set cg_x -1",
+        ))
+        .unwrap();
+        assert_eq!(
+            c.startup,
+            [
+                "set cg_fov 90",
+                "exec stage.cfg",
+                "connect 127.0.0.1:28960",
+                "set cg_x -1"
+            ]
+        );
+        assert!(c.flythrough && c.no_sound);
+        assert_eq!(c.game, "", "a set of another variable is no mod");
+        // A word the shell kept together is one word again, and a launcher's whole line in one argument is a line.
+        let words: Vec<String> = ["+set", "sv_hostname", "My Server", "+set name x;y", "+"]
+            .map(str::to_owned)
+            .into();
+        let lines = parse(&words).unwrap().startup;
+        assert_eq!(
+            lines,
+            ["set sv_hostname \"My Server\"", "set name x;y"],
+            "a lone + is an empty line, which runs nothing"
+        );
+        assert_eq!(
+            input::config::split_commands(&lines[0]),
+            [["set", "sv_hostname", "My Server"]]
+        );
+        // `+set fs_game` is the mod the client starts with, as `--game` is.
+        let m = parse(&args("+set fs_game mods/promod +connect 1.2.3.4:28960")).unwrap();
+        assert_eq!(m.game, "mods/promod");
+        assert_eq!(m.connect, None, "+connect runs as a console line");
+        assert!(m.menu_mode(), "a + line is no automation flag");
+        assert!(parse(&args("+set fs_game ../x")).is_err());
+        // A word before any `+` is no option.
+        assert!(parse(&args("cg_fov")).is_err());
     }
 }

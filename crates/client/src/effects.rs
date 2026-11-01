@@ -6,6 +6,7 @@
 //! Which effect an impact plays is the original's: the weapon's impact type picks a row of the impact table, the
 //! surface type a column; flesh has its own columns (body or head; the stock event carries only the head bit, so the fatal columns are not used).
 
+use crate::ambient::Ambient;
 use crate::decal::{self, Placement};
 use crate::events::{ClientEvent, Events, Shooter};
 use crate::tracer::{self, Tracers};
@@ -149,6 +150,7 @@ struct Mark {
 
 pub struct Effects {
     fx: Fx,
+    ambient: Ambient,
     impact: Option<Arc<FxImpactTable>>,
     world: Arc<GfxWorld>,
     marks: HashMap<u64, Mark>,
@@ -180,6 +182,9 @@ pub struct Effects {
     marks_on: bool,
     /// `cg_blood`: off, a hit on a player plays the no-blood effects.
     blood_on: bool,
+    /// `cg_bloodLimit` and `cg_bloodLimitMsec`: at most one blood effect in this window.
+    blood_limit: Option<i32>,
+    last_blood_ms: i32,
     /// `cg_brass`: off, no shell leaves a gun.
     brass_on: bool,
     /// The state of the dice for the tracers.
@@ -188,6 +193,9 @@ pub struct Effects {
     tracer_material: Option<Arc<Material>>,
     /// What was played, by kind; for the report.
     pub played: BTreeMap<&'static str, u64>,
+    /// Total draws (sprite quads, clouds, models, trail strips) that passed the camera's cull, by the lower-case name
+    /// of the effect that was played; a runner's children count against it.
+    pub effect_quads: BTreeMap<String, u64>,
     /// Names of effects an event asked for that the content lacks.
     pub missing: HashSet<String>,
 }
@@ -274,6 +282,7 @@ impl Effects {
         }
         Self {
             fx: Fx::new(Arc::new(lib)),
+            ambient: Ambient::empty(),
             impact: content.impact_table().cloned(),
             world,
             marks: HashMap::new(),
@@ -292,12 +301,29 @@ impl Effects {
             tracer_cvars: tracer::Cvars::default(),
             marks_on: true,
             blood_on: true,
+            blood_limit: None,
+            last_blood_ms: -1,
             brass_on: true,
             dice: 0x9e37_79b9,
             tracer_material: None,
             played: BTreeMap::new(),
+            effect_quads: BTreeMap::new(),
             missing: HashSet::new(),
         }
+    }
+
+    /// Starts the generated map effects in the same pool as gameplay and entity effects, unless `clientSideEffects`
+    /// (`ambient`) is off.
+    pub fn with_ambient(mut self, content: &Content, ambient: bool) -> Self {
+        if ambient {
+            self.ambient = Ambient::new(content, &mut self.fx);
+        }
+        self
+    }
+
+    /// Restarts the client-side effects with the level clock, including a same-map round restart.
+    pub fn restart(&mut self, content: &Content, ambient: bool) {
+        *self = Self::new(content, self.world.clone()).with_ambient(content, ambient);
     }
 
     fn impact_effect(
@@ -374,6 +400,16 @@ impl Effects {
                     return;
                 }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
+                // `cg_bloodLimit`: a second blood effect inside the window is not played.
+                if *surface == SURFACE_FLESH
+                    && self.blood_on
+                    && let Some(ms) = self.blood_limit
+                {
+                    if self.last_blood_ms >= 0 && self.clock - self.last_blood_ms < ms {
+                        return;
+                    }
+                    self.last_blood_ms = self.clock;
+                }
                 let mut def = self.impact_effect(t, *surface, flesh_column(*head));
                 // `CG_BulletHitEvent`: with blood off, a hit on a player plays the no-blood effect instead.
                 let kind = match (*surface == SURFACE_FLESH, self.blood_on) {
@@ -884,6 +920,10 @@ impl Effects {
         self.brass_on = brass;
     }
 
+    /// `cg_bloodLimit` (on, blood plays at most once every `ms`).
+    pub fn set_blood_limit(&mut self, ms: Option<i32>) {
+        self.blood_limit = ms;
+    }
     /// A random number in [0, 1).
     fn roll(&mut self) -> f32 {
         self.dice ^= self.dice << 13;
@@ -980,6 +1020,14 @@ impl Effects {
         self.fx.live_elems()
     }
 
+    pub fn ambient(&self) -> &Ambient {
+        &self.ambient
+    }
+
+    pub fn ambient_live_effects(&self) -> usize {
+        self.ambient.live_effects(&self.fx)
+    }
+
     /// What to draw from a camera at `eye` looking along `yaw` and `pitch` (radians).
     pub fn draw(&mut self, eye: Vec3, yaw: f32, pitch: f32, roll: f32) -> Drawn {
         let (sy, cy) = yaw.sin_cos();
@@ -1001,7 +1049,18 @@ impl Effects {
         // What the effects that start next are culled against.
         self.fx.set_camera(cam);
         let mut d = Draws::default();
-        self.fx.draw(&cam, &mut d);
+        let quads = &mut self.effect_quads;
+        let ambient_quads = &mut self.ambient.quads;
+        self.fx.draw_counted(&cam, &mut d, &mut |name, n| {
+            if let Some(count) = quads.get_mut(name) {
+                *count += n as u64;
+            } else {
+                quads.insert(name.to_owned(), n as u64);
+            }
+            if let Some(count) = ambient_quads.get_mut(name) {
+                *count += n as u64;
+            }
+        });
         let beams = self.tracers.beams(self.clock);
         let mut out = Drawn {
             tracers: beams.len(),

@@ -873,7 +873,7 @@ impl Game {
             };
             self.bullet_hits(&p, aim, 0.0, self.level.time, &mut hits);
         }
-        self.apply_bullet_hits(vm, n, weapon, hits);
+        self.apply_bullet_hits(vm, n, weapon, hits, 0);
     }
 
     /// Every vehicle entity with its number.

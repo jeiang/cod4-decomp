@@ -12,9 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 logging = { path = "../logging" }
-devctrl = { path = "../devctrl" }
 assets = { version = "0.0.0", path = "../assets" }
 server = { version = "0.0.0", path = "../server" }
+devctrl = { version = "0.0.0", path = "../devctrl" }
 net = { version = "0.0.0", path = "../net" }
 master = { path = "../master" }
 install = { path = "../install", features = ["prompt"] }

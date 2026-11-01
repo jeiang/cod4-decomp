@@ -36,7 +36,8 @@ pub const CORPSES: usize = 8;
 
 /// Where a tag is in the bones of `models`, the model of an entity followed by the attachments before the one that
 /// hangs from it, as an [`EntityState::attach`] tag: 0 for no tag (the model's origin), else the index of the last bone
-/// of that name, plus one (the bone a `Rig` hangs the attachment from). A tag no model has hangs from the origin too.
+/// of that name, plus one (the bone a `Rig` hangs the attachment from). A tag no model has hangs from the origin too,
+/// with the warning `DObjCreateDuplicateParts` gives; an empty tag is a silent root meld.
 pub fn tag_wire(content: &Content, models: &[&str], tag: &str) -> u16 {
     if tag.is_empty() {
         return 0;
@@ -53,7 +54,19 @@ pub fn tag_wire(content: &Content, models: &[&str], tag: &str) -> u16 {
         .enumerate()
         .filter(|(_, n)| n.eq_ignore_ascii_case(tag))
         .last()
-        .map_or(0, |(i, _)| (i + 1).min(255) as u16)
+        .map_or_else(
+            || {
+                logging::dedup!(
+                    WARN,
+                    tag,
+                    parent = models.first().copied().unwrap_or(""),
+                    tag,
+                    "explicit attachment tag did not resolve"
+                );
+                0
+            },
+            |(i, _)| (i + 1).min(255) as u16,
+        )
 }
 
 /// The tag name a [`tag_wire`] value stands for among the bones of `models`; `None` for the model's origin.

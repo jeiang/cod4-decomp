@@ -32,38 +32,10 @@ pub struct Allow {
 pub const ALLOWED: &[Allow] = &[
     // Known gaps: the code is right to say so; the cause is not fixed yet.
     Allow {
-        contains: &["sim::skel::anim", "animation data read out of range"],
-        reason: "random_data_short reads past the table for some takeoff and ads animations (#387)",
-        stages: &[],
-        max: Some(40),
-    },
-    Allow {
         contains: &["server::server", "unknown command", "con_showchannel"],
         reason: "the stock configs run con_showchannel, which we do not implement (#365)",
         stages: &[],
         max: Some(5), // measured 4 on the Linux host, 2026-10-14,
-    },
-    Allow {
-        contains: &["fx: model element skipped: its model did not resolve"],
-        reason: "effects with a model element whose xmodel is not in the loaded zones (#389)",
-        stages: &[],
-        max: Some(20),
-    },
-    Allow {
-        contains: &[
-            "cod4e::netplay::attach",
-            "attachment tag did not resolve",
-            "model=\"head_mp_",
-        ],
-        reason: "head models do not find their attach tag (#388); seen: head_mp_arab_regular_{headwrap,ski_mask,suren,asad,sadiq}, head_mp_usmc_{shaved_head,tactical_mich,tactical_mich_stripes_nomex}; any head_mp_ model is the same bug",
-        stages: &[],
-        max: Some(60),
-    },
-    Allow {
-        contains: &["cod4e::models", "held model's tag bone missing"],
-        reason: "a held model whose tag bone is not in the rig (#389)",
-        stages: &[],
-        max: Some(3), // measured 2 on the Linux host, 2026-10-14,
     },
     Allow {
         contains: &[
@@ -436,6 +408,24 @@ mod tests {
         let mut r = StageReport::new("a", Status::Passed);
         apply_with(&mut r, d.path(), "a", LIST);
         assert_eq!(r.status, Status::Passed);
+    }
+
+    #[test]
+    fn animation_out_of_range_warning_fails_the_default_suite() {
+        let d = stage_dir(
+            "2026-11-01T00:00:00Z WARN sim::skel::anim: animation data read out of range, using 0 anim=\"pb_runjump_takeoff\" table=\"random_data_short\" index=4082\n",
+        );
+        for stage in ["asset-load", "client-match"] {
+            let mut report = StageReport::new(stage, Status::Passed);
+            apply_with(&mut report, d.path(), stage, ALLOWED);
+            assert_eq!(report.status, Status::Failed);
+            assert!(
+                report
+                    .reason
+                    .unwrap()
+                    .contains("animation data read out of range")
+            );
+        }
     }
 
     #[test]

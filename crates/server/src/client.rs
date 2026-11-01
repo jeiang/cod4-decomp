@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Spawn command retention follows KisakCOD game_mp/g_client_mp.cpp:387-415 (GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Client slots: connect, begin, spawn, the per-command think, the end-of-frame update and
 //! disconnect (`ClientConnect`, `ClientBegin`, `ClientSpawn`, `ClientThink_real`,
 //! `ClientEndFrame`, `ClientDisconnect` of the original).
@@ -123,6 +124,19 @@ pub enum Conn {
     Connected,
 }
 
+/// The last person's frame, exposed by the dev control channel from the actual simulation path.
+#[derive(Default)]
+pub struct CommandFrame {
+    pub synchronous: bool,
+    pub received: usize,
+    pub latest_received: Option<UserCmd>,
+    pub retained: UserCmd,
+    pub selected: Option<UserCmd>,
+    pub frame_time: i32,
+    pub previous_time: i32,
+    pub simulated_time: i32,
+}
+
 /// One client slot (`gclient_s` and the session part the scripts read).
 pub struct Client {
     pub conn: Conn,
@@ -131,6 +145,9 @@ pub struct Client {
     pub ps: PlayerState,
     pub cmd: UserCmd,
     pub old_cmd: UserCmd,
+    /// Latest input received, even if its timestamp was too old to simulate (`sess.cmd`).
+    pub received_cmd: Option<UserCmd>,
+    pub command_frame: CommandFrame,
     pub team: Team,
     pub session: Session,
     pub max_health: i32,
@@ -205,6 +222,9 @@ pub struct Client {
     pub talking_until: i32,
     /// Level time of the player's latest shot: enemies' compasses show where it came from for a moment.
     pub last_fire_time: i32,
+    /// `client->lastServerTime`: the `serverTime` of the latest usercmd (`G_SetLastServerTime`), the time the
+    /// player's shots are judged at with `g_antilag` on.
+    pub last_server_time: i32,
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
@@ -226,6 +246,8 @@ impl Client {
             ps,
             cmd: UserCmd::default(),
             old_cmd: UserCmd::default(),
+            received_cmd: None,
+            command_frame: CommandFrame::default(),
             team: Team::Free,
             session: Session::Spectator,
             max_health: 100,
@@ -281,6 +303,7 @@ impl Client {
             compass_ping_until: 0,
             talking_until: 0,
             last_fire_time: i32::MIN / 2,
+            last_server_time: 0,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
             pose: PlayerPoseState::default(),
@@ -631,11 +654,15 @@ impl Game {
         c.gun = GunMotion::default();
         c.noclip = false;
         c.ufo = false;
+        if let Some(cmd) = c.received_cmd {
+            c.cmd = cmd;
+        }
         c.buttons = c.cmd.buttons;
         c.latched_buttons = 0;
         c.use_hold_ent = None;
         c.use_button_done = false;
         c.cmd.server_time = time;
+        c.received_cmd = Some(c.cmd);
         c.ps.command_time = time - 100;
         let _ = max_clients;
         self.stats.spawns += 1;
@@ -735,10 +762,6 @@ impl Game {
         let Some(world) = self.world.as_ref() else {
             return;
         };
-        // A person's shots are judged where the shooter saw the others.
-        if !c.bot && self.cvars.bool("g_lagcomp") {
-            self.lag_time = Some(cmd.server_time - net::view::INTERP_DELAY_MS);
-        }
         let out = pm::run_usercmd(
             &mut c.ps,
             &mut c.inv,
@@ -767,7 +790,6 @@ impl Game {
         }
         self.client_events(vm, n, old_events);
         self.weapon_events(vm, n, &out);
-        self.lag_time = None;
         for t in touched {
             let (other, me) = (self.entity_value(vm, t), self.entity_value(vm, n));
             vm.notify_entity(n, "touch", &[other]);
@@ -1013,31 +1035,6 @@ impl Game {
     /// The script value for entity `n`.
     pub fn entity_value(&self, vm: &mut Vm, n: u16) -> Value {
         Value::Object(vm.entity(n, EntClass::Entity))
-    }
-
-    /// Files every player's body for this frame in the lag-compensation history.
-    pub fn lag_record(&mut self) {
-        let time = self.level.time;
-        for n in 0..self.clients.len() {
-            let c = &self.clients[n];
-            let Some(e) = self.ents.get(n).and_then(Option::as_ref) else {
-                continue;
-            };
-            if !c.connected() {
-                self.lag.clear(n as u16);
-                continue;
-            }
-            self.lag.record(
-                n as u16,
-                crate::lagcomp::Sample {
-                    time,
-                    origin: e.origin,
-                    mins: e.mins,
-                    maxs: e.maxs,
-                    pose: c.pose.clone(),
-                },
-            );
-        }
     }
 
     /// `ps.radarEnabled`: the client's team has radar (`setteamradar`) or the client has (`hasradar`).
@@ -1388,5 +1385,40 @@ mod spawn_inactivity_tests {
             let at = g.client(n).unwrap().inactivity_at;
             assert_eq!(at, g.level.time + expect, "g_inactivity {limit}");
         }
+    }
+
+    #[test]
+    fn respawn_keeps_latest_received_input_and_disconnect_clears_it() {
+        let p = gsc::compile(
+            &[("t.gsc", "main() {}")],
+            &gsc::Builtins::stock_mp(),
+            gsc::Options::default(),
+        )
+        .unwrap();
+        let mut vm = Vm::new(p).unwrap();
+        let mut g = Game::new(Cvars::new(), Content::default());
+        g.reset_level(4);
+        let n = g.connect_client(&mut vm, false, "Ann").expect("slot");
+        g.client_mut(n).unwrap().conn = Conn::Connected;
+        let input = UserCmd {
+            server_time: 116,
+            forwardmove: 60,
+            buttons: pm::button::JUMP,
+            ..Default::default()
+        };
+        g.client_mut(n).unwrap().received_cmd = Some(input);
+        for time in [150, 300] {
+            g.level.time = time;
+            g.client_spawn(&mut vm, n, [0.0; 3], [0.0; 3]);
+            let c = g.client(n).unwrap();
+            let mut expected = input;
+            expected.server_time = time;
+            assert_eq!(c.received_cmd, Some(expected));
+            assert_eq!(c.cmd, expected);
+        }
+        g.disconnect_client(&mut vm, n);
+        g.finish_disconnects(&mut vm);
+        assert!(g.clients[usize::from(n)].received_cmd.is_none());
+        assert_eq!(g.clients[usize::from(n)].cmd, UserCmd::default());
     }
 }
