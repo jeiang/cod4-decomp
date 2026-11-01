@@ -1053,6 +1053,11 @@ impl Viewer {
             &self.cli.startup,
         );
         input.cvars.set("fs_game", &self.cli.game, false);
+        // The map this start loaded and joins (`--map`, or the one the server named to a browser join): the menus'
+        // map title and minimap look it up by `mapname`, as a later load sets it in `finish_load` (#372).
+        if self.cli.netplay() {
+            input.cvars.set("mapname", &self.cli.map, false);
+        }
         let demo_dir = input
             .config_dir()
             .unwrap_or_else(|| self.cli.install.clone())
@@ -2836,6 +2841,51 @@ fn script_step(st: &mut State) -> bool {
                 wrong.is_empty(),
                 sc,
                 format!("{key} wrong: {wrong:?}; open: {open}"),
+            );
+        }
+        // `live=Voice Chat+Multiplayer Options` fails unless an item of the top menu that is not decoration shows
+        // each text and takes the pointer; `locked=Create a Class` unless each shows only as decoration or disabled.
+        "live" | "locked" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            let wrong: Vec<String> = arg
+                .split('+')
+                .filter_map(|w| {
+                    let s = sh.item_state(&mut st.input, w);
+                    (s != Some(key == "live")).then(|| format!("{w}: {s:?}"))
+                })
+                .collect();
+            let open = sh.ui.open_menus().join(",");
+            done(
+                wrong.is_empty(),
+                sc,
+                format!("{key} wrong: {wrong:?}; open: {open}"),
+            );
+        }
+        // `values=options_game` fails while a visible yes/no, list or enumeration control of that open menu shows no
+        // setting (its dvar unset, or holding none of the list's values).
+        "values" => {
+            let Some(sh) = st.shell.as_mut() else {
+                return true;
+            };
+            let unset = sh.unset_values(&mut st.input, arg);
+            done(
+                unset.is_empty(),
+                sc,
+                format!("{arg}: controls with no setting: {unset:?}"),
+            );
+        }
+        // `build=1.7.568` fails unless the last frame drew that build number over the menus; `build=` that it drew none.
+        "build" => {
+            let Some(sh) = st.shell.as_ref() else {
+                return true;
+            };
+            let drawn = sh.ui.build_drawn.clone();
+            done(
+                drawn.as_deref().unwrap_or("") == arg,
+                sc,
+                format!("build number drawn: {drawn:?}"),
             );
         }
         "open" | "close" => {
@@ -5730,8 +5780,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
     Value::Object(m)
 }
 
-/// The menus on the stack, the item that has the focus, and every item of each open menu with the rectangle a click
-/// is tested against.
+/// The menus on the stack, the item that has the focus, every item of each open menu with the rectangle a click
+/// is tested against, the setting it shows and whether it is only decoration, and the build number drawn last frame.
 fn menu_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
@@ -5749,11 +5799,13 @@ fn menu_state(st: &mut State) -> Value {
                 "name": it.name,
                 "text": it.text,
                 "visible": it.visible,
+                "decoration": it.decoration,
+                "value": it.value,
                 "rect": it.rect,
             }));
         }
     }
-    json!({"open": open, "focused": focused, "items": items})
+    json!({"open": open, "focused": focused, "items": items, "build": sh.ui.build_drawn})
 }
 
 /// What the HUD drew and counted since the run began (`stats`, the counters `hud_draw` of `ui-script.json` has),

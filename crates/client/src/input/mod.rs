@@ -799,6 +799,50 @@ impl Input {
         self.dirty = true;
     }
 
+    /// A menu's write (an item's value, `setfromdvar`): refused, with the console line a command gets and a warning,
+    /// for a read-only or engine-only cvar and for a value this build cannot act on, so a menu cannot move what a
+    /// console may not (#372). `true` when the value was set.
+    pub fn set_cvar_from_menu(&mut self, name: &str, value: &str) -> bool {
+        let refused = if cvar::Cvars::read_only(name) {
+            vec![format!("{} is read only.", name.to_ascii_lowercase())]
+        } else if cvar::Cvars::write_protected(name) {
+            vec![format!("{} is write protected.", name.to_ascii_lowercase())]
+        } else if let Some((only, why)) = cvar::Cvars::unsupported_domain(name)
+            && !value.trim().eq_ignore_ascii_case(only)
+        {
+            vec![
+                format!("'{value}' is not a valid value for dvar '{name}'"),
+                format!("  Domain is {only} ({why})"),
+            ]
+        } else {
+            let changed = self.cvars.get(name) != Some(value);
+            self.set_cvar(name, value);
+            if changed {
+                Self::warn_not_implemented(name, value);
+            }
+            return true;
+        };
+        tracing::warn!(cvar = name, value, "a menu's dvar write was refused");
+        for line in refused {
+            self.say(line);
+        }
+        false
+    }
+
+    /// A write that changes a stock dvar this build keeps but does not act on says so, naming it (#372).
+    fn warn_not_implemented(name: &str, value: &str) {
+        if let Some(why) = cvar::Cvars::not_implemented(name) {
+            logging::dedup!(
+                WARN,
+                name,
+                cvar = name,
+                value,
+                why,
+                "dvar is not implemented"
+            );
+        }
+    }
+
     /// `(min, max)` view pitch in degrees (positive = down).
     #[allow(dead_code)] // netplay integration API
     pub fn pitch_limits(&self) -> (f32, f32) {
@@ -1174,8 +1218,12 @@ impl Input {
             tracing::info!(cvar = name, value, "dvar value refused: {why}");
             return false;
         }
+        let changed = self.cvars.get(name) != Some(value);
         self.cvars.set(name, value, archive);
         self.dirty = true;
+        if changed {
+            Self::warn_not_implemented(name, value);
+        }
         // `CG_LookingThroughNightVision` reads it to drop the goggles' overlay and vision set (KisakCOD
         // `cgame/cg_visionsets.cpp:610`); this build does not, so a player who sets it is told.
         if name.eq_ignore_ascii_case("nightVisionDisableEffects") && self.cvars.bool(name) {
@@ -2817,5 +2865,25 @@ mod tests {
         i.exec_line("give");
         assert_eq!(i.take_messages(), ["\"give\" is \"sentinel\""]);
         assert!(frame(&mut i).pending_commands.is_empty());
+    }
+
+    /// A menu cannot write what a command may not: a read-only dvar and a value outside the one this build has are
+    /// refused with the console's lines and keep their value; any other write goes through (#372).
+    #[test]
+    fn a_menu_write_is_refused_as_a_command_is() {
+        let mut i = Input::bare();
+        i.take_messages();
+        assert!(!i.set_cvar_from_menu("ui_multiplayer", "0"));
+        assert_eq!(i.cvar("ui_multiplayer"), Some("1"));
+        assert!(!i.set_cvar_from_menu("monkeytoy", "1"));
+        assert_eq!(i.cvar("monkeytoy"), Some("0"));
+        let said = i.take_messages();
+        assert_eq!(said[0], "ui_multiplayer is read only.");
+        assert!(
+            said[1].contains("'1' is not a valid value for dvar 'monkeytoy'"),
+            "{said:?}"
+        );
+        assert!(i.set_cvar_from_menu("cg_fov", "70"));
+        assert_eq!(i.cvar("cg_fov"), Some("70"));
     }
 }
