@@ -2774,7 +2774,6 @@ impl NetPlay {
             "attack_cmds": self.c.shots,
             "target_frames": self.c.target_frames,
             "in_range_frames": self.c.in_range_frames,
-            "autoplay_track": self.auto.as_ref().map(|a| &a.track),
             "weapon": self.c.weapon,
             "viewmodel_frames": self.c.frames_with_viewmodel,
             "weapons_without_models": self.c.unknown_weapon,
@@ -2851,6 +2850,7 @@ impl NetPlay {
             "dof_frames": self.c.dof_frames,
         });
         report["damage_events"] = json!(self.c.damage_events);
+        report["autoplay_track"] = json!(self.auto.as_ref().map(|a| &a.track));
         report["damage_flash_max"] = json!(self.c.max_damage_flash);
         report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
