@@ -1604,6 +1604,7 @@ impl Server {
                     "health": c.ps.health,
                     "origin": c.ps.origin,
                     "weapon": c.ps.weapon,
+                    "weapon_name": self.game.weapons.name(c.ps.weapon as u16),
                     "weapons": weapons,
                     // Shots through `FireWeapon`; compass pings are derived client-side from snapshot events.
                     "shots": c.shots,
@@ -1938,7 +1939,8 @@ impl Server {
             }
             // Test hook: `devbotfire <client|axis|allies> <weapon|frag> <ms>` makes a bot stand and, through its
             // usercmds and the shared weapon state machine, hold attack with `weapon` (given with its ammunition and
-            // switched to) or hold the frag key (after a `frag_grenade_mp` is given), for `ms`.
+            // switched to) for `ms` from when it is raised, or hold the frag key (after a `frag_grenade_mp` is given)
+            // for `ms`.
             "devbotfire" => {
                 self.say("WARNING: devbotfire development-only bot input override requested\n");
                 if !self.game.cvars.bool("developer") {
@@ -1959,21 +1961,21 @@ impl Server {
                     "allies" => team_bot(Team::Allies)?,
                     _ => cvar::parse_int(who) as u16,
                 };
-                let until = self.game.level.time + cvar::parse_int(ms).max(0);
+                let ms = cvar::parse_int(ms);
                 let g = &mut self.game;
                 let c = g
                     .clients
                     .get_mut(usize::from(n))
                     .filter(|c| c.bot)
                     .ok_or("devbotfire: no such bot")?;
-                let buttons = if weapon.eq_ignore_ascii_case("frag") {
+                let (buttons, weapon) = if weapon.eq_ignore_ascii_case("frag") {
                     let index = g.weapons.index("frag_grenade_mp");
                     if index != 0 {
                         // A bot that already threw its frags in the fighting has the weapon but none left.
                         c.inv.give(&g.weapons, &mut c.ps, index, 0);
                         c.inv.give_max_ammo(&g.weapons, &mut c.ps, index);
                     }
-                    sim::pm::button::FRAG
+                    (sim::pm::button::FRAG, 0)
                 } else {
                     let index = g.weapons.index(weapon);
                     if index == 0 {
@@ -1981,9 +1983,10 @@ impl Server {
                     }
                     c.inv.give(&g.weapons, &mut c.ps, index, 0);
                     c.inv.select(index);
-                    sim::pm::button::ATTACK
+                    (sim::pm::button::ATTACK, index)
                 };
-                c.dev_buttons = Some((buttons, until));
+                let brain = c.bot_brain.as_mut().ok_or("devbotfire: no such bot")?;
+                brain.dev_fire = Some(crate::bot::DevFire::new(buttons, weapon, ms));
             }
             // Test hook: `devhardpoint <client|human|bot> <weapon>` gives the player a killstreak reward as the
             // scripts would (`radar_mp`, `airstrike_mp`, `helicopter_mp`).

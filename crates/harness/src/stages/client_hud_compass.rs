@@ -80,6 +80,20 @@ fn server_client(c: &mut Driven, slot: u64) -> Result<Value, String> {
         .ok_or_else(|| format!("the server has no client {slot}"))
 }
 
+/// What a failure needs of a server client record: its weapons, life and position.
+fn body(p: &Value) -> String {
+    format!(
+        "weapon {} weapons {} alive {} spawn_count {} deaths {} shots {} origin {}",
+        p["weapon_name"],
+        p["weapons"],
+        p["alive"],
+        p["spawn_count"],
+        p["deaths"],
+        p["shots"],
+        p["origin"]
+    )
+}
+
 /// The slot of a live bot on team `team` (1 axis, 2 allies, as both the client and the server number them).
 fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
     let end = Instant::now() + Duration::from_secs(20);
@@ -112,9 +126,23 @@ fn case(
     weapon: &str,
     pings: bool,
 ) -> Result<String, String> {
-    // Give and raise the weapon first, so the burst below is its fire and not the raise.
-    exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
-    c.pause(Duration::from_secs(2))?;
+    // Give and raise the weapon first, so the burst below is its fire and not the raise. A bot that lost it (a
+    // respawn gives a fresh inventory) is given it again.
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        exec(c, &format!("devbotfire {bot} {weapon} 0"))?;
+        c.pause(Duration::from_secs(2))?;
+        let held = server_client(c, bot)?;
+        if held["weapon_name"] == weapon && held["alive"] == json!(true) {
+            break;
+        }
+        if Instant::now() > end {
+            return Err(format!(
+                "{label}: bot {bot} never raised {weapon}: {}",
+                body(&held)
+            ));
+        }
+    }
     c.pause(SETTLE)?;
     let before = counts(c)?;
     let was = server_client(c, bot)?;
@@ -129,8 +157,9 @@ fn case(
         .saturating_sub(was["shots"].as_u64().unwrap_or(0));
     verdict(label, pings, before, after, shots).map_err(|e| {
         format!(
-            "{e}; bot {bot} before: weapon {} alive {}; after: weapon {} weapons {} alive {} origin {}",
-            was["weapon"], was["alive"], now["weapon"], now["weapons"], now["alive"], now["origin"]
+            "{e}; bot {bot} before: {}; after: {}",
+            body(&was),
+            body(&now)
         )
     })?;
     if pings {
