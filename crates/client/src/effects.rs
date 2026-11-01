@@ -182,6 +182,9 @@ pub struct Effects {
     marks_on: bool,
     /// `cg_blood`: off, a hit on a player plays the no-blood effects.
     blood_on: bool,
+    /// `cg_bloodLimit` and `cg_bloodLimitMsec`: at most one blood effect in this window.
+    blood_limit: Option<i32>,
+    last_blood_ms: i32,
     /// `cg_brass`: off, no shell leaves a gun.
     brass_on: bool,
     /// The state of the dice for the tracers.
@@ -298,6 +301,8 @@ impl Effects {
             tracer_cvars: tracer::Cvars::default(),
             marks_on: true,
             blood_on: true,
+            blood_limit: None,
+            last_blood_ms: -1,
             brass_on: true,
             dice: 0x9e37_79b9,
             tracer_material: None,
@@ -395,6 +400,16 @@ impl Effects {
                     return;
                 }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
+                // `cg_bloodLimit`: a second blood effect inside the window is not played.
+                if *surface == SURFACE_FLESH
+                    && self.blood_on
+                    && let Some(ms) = self.blood_limit
+                {
+                    if self.last_blood_ms >= 0 && self.clock - self.last_blood_ms < ms {
+                        return;
+                    }
+                    self.last_blood_ms = self.clock;
+                }
                 let mut def = self.impact_effect(t, *surface, flesh_column(*head));
                 // `CG_BulletHitEvent`: with blood off, a hit on a player plays the no-blood effect instead.
                 let kind = match (*surface == SURFACE_FLESH, self.blood_on) {
@@ -905,6 +920,10 @@ impl Effects {
         self.brass_on = brass;
     }
 
+    /// `cg_bloodLimit` (on, blood plays at most once every `ms`).
+    pub fn set_blood_limit(&mut self, ms: Option<i32>) {
+        self.blood_limit = ms;
+    }
     /// A random number in [0, 1).
     fn roll(&mut self) -> f32 {
         self.dice ^= self.dice << 13;

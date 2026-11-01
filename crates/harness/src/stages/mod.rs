@@ -2,6 +2,7 @@
 //! Built-in stages.
 pub mod asset_load;
 pub mod audio;
+mod browser_cdp;
 pub mod client_brush;
 pub mod client_clear;
 pub mod client_commands;
@@ -10,6 +11,7 @@ pub mod client_dedicated;
 pub mod client_equipment;
 pub mod client_error;
 pub mod client_flythrough;
+pub mod client_foliage;
 pub mod client_frontend;
 pub mod client_fx;
 pub mod client_gfx;
@@ -50,3 +52,4 @@ pub mod selftest;
 pub mod server;
 pub mod web_client;
 pub mod web_join;
+pub mod web_match;

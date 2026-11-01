@@ -325,7 +325,7 @@ fn fill(
 }
 
 /// Program address, alpha test, vertex layout (vertex shaders only).
-type ShaderKey = (usize, Option<[u32; 2]>, Option<VertexKind>, bool);
+type ShaderKey = (usize, Option<[u32; 2]>, Option<VertexKind>, bool, u32);
 
 /// The workers [`Materials::build_in_background`] started.
 #[cfg(not(target_arch = "wasm32"))]
@@ -516,12 +516,14 @@ impl Materials {
         alpha: Option<sm3::AlphaTest>,
         vertex: Option<VertexKind>,
         hsm: bool,
+        depth_offset: f32,
     ) -> Option<Arc<Compiled>> {
         let key = (
             program.as_ptr() as usize,
             alpha.map(|a| [a.func as u32, a.reference.to_bits()]),
             vertex,
             hsm,
+            depth_offset.to_bits(),
         );
         if let Some(c) = self.shaders.get(&key) {
             return c.clone();
@@ -530,6 +532,7 @@ impl Materials {
         let opts = Options {
             vertex_fixes: vertex.map(VertexKind::fixes).unwrap_or_default(),
             alpha_test: alpha,
+            depth_offset,
             ..Options::default()
         };
         let mut translated = sm3::translate(&bytes, &opts)
@@ -870,10 +873,17 @@ impl Materials {
         let vsh = pass.vertex_shader.as_ref().ok_or("no vertex shader")?;
         let psh = pass.pixel_shader.as_ref().ok_or("no pixel shader")?;
         let vs = self
-            .compile(gpu, &vsh.program, None, Some(kind), hsm)
+            .compile(
+                gpu,
+                &vsh.program,
+                None,
+                Some(kind),
+                hsm,
+                state.depth_offset(),
+            )
             .ok_or("vertex shader does not translate")?;
         let ps = self
-            .compile(gpu, &psh.program, state.alpha_test(), None, hsm)
+            .compile(gpu, &psh.program, state.alpha_test(), None, hsm, 0.0)
             .ok_or("pixel shader does not translate")?;
         if vs.tr.stage != Stage::Vertex || ps.tr.stage != Stage::Pixel {
             return Err("shader stage mismatch".into());

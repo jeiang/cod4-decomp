@@ -19,11 +19,12 @@ use web_time::Instant;
 use assets::vfs::{LANGUAGES, Vfs};
 use assets::zone::clipmap::Clipmap;
 use assets::zone::fx::{FxEffectDef, FxImpactTable};
+use assets::zone::gfx::Material;
 use assets::zone::text::StringTable;
 use assets::zone::weapon::WeaponDef;
 use assets::zone::xanim::XAnimParts;
 use assets::zone::xmodel::XModel;
-use assets::zone::{Asset, Consumer, Db, DecodeFilter, XAssetType, Zone};
+use assets::zone::{Asset, Consumer, Db, DecodeFilter, Linkable, XAssetType, Zone, ZoneError};
 
 use crate::delta::RootMotion;
 use crate::tags::Skeleton;
@@ -580,6 +581,35 @@ impl Content {
             .collect()
     }
 
+    /// Resolves a presentation material from the linked zones, with stock named-default registration.
+    /// Empty names use `$default`; unresolved names clone the lowest-ranked default, as
+    /// `DB_CreateDefaultEntry` does (KisakCOD `database/db_registry.cpp:286-324`).
+    pub fn material(&mut self, name: &str) -> Result<Arc<Material>, String> {
+        let name = if name.is_empty() {
+            Material::DEFAULT_NAME
+        } else {
+            name.trim_start_matches(',')
+        };
+        if let Some(material) = self.db.get::<Material>(name) {
+            return Ok(material.clone());
+        }
+        let default = Material::table(&mut self.db)
+            .get(Material::DEFAULT_NAME)
+            .and_then(|chain| chain.first())
+            .ok_or_else(|| {
+                ZoneError::MissingDefault {
+                    ty: XAssetType::Material,
+                    default: Material::DEFAULT_NAME,
+                    name: name.to_owned(),
+                }
+                .to_string()
+            })?;
+        let material = Arc::new(default.1.default_entry(Arc::from(name)));
+        Material::table(&mut self.db)
+            .insert(name.to_ascii_lowercase(), vec![(None, material.clone())]);
+        Ok(material)
+    }
+
     pub fn model(&self, name: &str) -> Option<&Arc<XModel>> {
         get(&self.map.models, name).or_else(|| get(&self.base.models, name))
     }
@@ -684,6 +714,77 @@ impl Content {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn presentation_material(name: &str, sort_key: u8) -> Arc<Material> {
+        Arc::new(Material {
+            name: Some(name.into()),
+            game_flags: 0,
+            sort_key,
+            atlas_rows: 0,
+            atlas_columns: 0,
+            draw_surf: 0,
+            surface_type_bits: 0,
+            hash_index: 0,
+            state_bits_entry: [0; 34],
+            state_flags: 0,
+            camera_region: 0,
+            technique_set: None,
+            textures: Arc::from([]),
+            constants: Arc::from([]),
+            state_bits: Arc::from([]),
+        })
+    }
+
+    #[test]
+    fn presentation_material_lookup_uses_the_case_insensitive_linked_winner() {
+        let mut content = Content::for_client();
+        let base = presentation_material("sun", 7);
+        let map = presentation_material("SUN", 19);
+        let modded = presentation_material("Sun", 23);
+        Material::table(&mut content.db).insert(
+            "sun".into(),
+            vec![
+                (Some(4), base),
+                (Some(MAP_TAG), map.clone()),
+                (Some(MOD_TAG), modded.clone()),
+            ],
+        );
+        assert!(Arc::ptr_eq(&content.material("sUn").unwrap(), &modded));
+        content.db.unload(MOD_TAG);
+        assert!(Arc::ptr_eq(&content.material("SUN").unwrap(), &map));
+    }
+
+    #[test]
+    fn unresolved_presentation_material_registers_a_named_stock_default() {
+        let mut content = Content::for_client();
+        let stock = presentation_material("$default", 7);
+        let modded = presentation_material("$default", 23);
+        Material::table(&mut content.db).insert(
+            "$default".into(),
+            vec![(Some(2), stock), (Some(MOD_TAG), modded.clone())],
+        );
+        assert!(Arc::ptr_eq(&content.material("").unwrap(), &modded));
+        let fallback = content.material("missing_sun").unwrap();
+        assert_eq!(fallback.name.as_deref(), Some("missing_sun"));
+        assert_eq!(fallback.sort_key, 7, "defaults use the bottom override");
+        assert!(Arc::ptr_eq(
+            &content.material("MISSING_SUN").unwrap(),
+            &fallback
+        ));
+        assert!(Arc::ptr_eq(
+            content.db.get::<Material>("missing_sun").unwrap(),
+            &fallback
+        ));
+    }
+
+    #[test]
+    fn presentation_material_without_a_default_is_an_error() {
+        let mut content = Content::for_client();
+        assert!(content.material("").is_err());
+        let error = content.material("missing_sun").unwrap_err();
+        assert!(error.contains("$default"), "{error}");
+        assert!(error.contains("missing_sun"), "{error}");
+    }
 
     #[test]
     fn mod_ff_rawfiles_override_the_stock_scripts_whatever_the_map() {

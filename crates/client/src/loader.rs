@@ -22,7 +22,8 @@ use web_time::Instant;
 
 /// Where the session's server comes from.
 pub enum Server {
-    /// Boot a listen server of this process.
+    /// Boot a listen server of this process (never in the browser, which cannot host).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Boot(listen::Config),
     /// Connect to this one.
     Join(SocketAddr),

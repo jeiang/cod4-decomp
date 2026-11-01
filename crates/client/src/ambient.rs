@@ -76,6 +76,7 @@ impl Ambient {
     }
 
     /// Every effect placement, for looking directly at a map's ambient effect.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn poses(&self) -> impl Iterator<Item = (&str, Vec3, Vec3)> {
         self.defs
             .iter()

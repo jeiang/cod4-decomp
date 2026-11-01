@@ -136,7 +136,7 @@ pub struct MaterialMemory {
     pub memory: i32,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SunFlare {
     pub has_valid_data: bool,
     pub sprite_material: Option<Arc<Material>>,

@@ -74,3 +74,30 @@ fn malformed_input_is_an_error_not_a_panic() {
         Err(Error::Malformed(_))
     ));
 }
+
+#[test]
+fn vertex_depth_offset_is_normalized_not_a_depth_format_ulp_count() {
+    let shader = tokens(&[
+        0xFFFE_0300,
+        0x0200_001F,
+        0x8000_0000,
+        0x900F_0000, // dcl_position v0
+        0x0200_001F,
+        0x8000_0000,
+        0xE00F_0000, // dcl_position o0
+        0x0200_0001,
+        0xE00F_0000,
+        0x90E4_0000, // mov o0, v0
+        0x0000_FFFF,
+    ]);
+    let opts = Options {
+        depth_offset: 0.5 / 65536.0,
+        ..Options::default()
+    };
+    let translated = translate(&shader, &opts).unwrap();
+    common::validate(&translated.wgsl).unwrap();
+    assert!(translated.wgsl.contains("o0.z +="));
+    assert!(translated.wgsl.contains("* o0.w;"));
+    let plain = translate(&shader, &Options::default()).unwrap();
+    assert!(!plain.wgsl.contains("o0.z +="));
+}
