@@ -13,7 +13,7 @@
 //! `error` channel keeps a not-implemented command's warning (#479) off the console and showing it brings it back;
 //! in the match `viewpos` prints the eye, the stance commands latch the stance typed and bound alike, a `+word`
 //! that is no button is `Unknown command` typed and bound alike, `openmenu`/`closemenu` open and close a menu, and
-//! `openscriptmenu team_marinesopfor spectator` moves the player to the spectators. Needs a display and the
+//! `openscriptmenu team_marinesopfor axis` moves the player to the other team. Needs a display and the
 //! install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
@@ -62,7 +62,7 @@ togglemenu,wait=1,see=Call Vote,mouse=Call Vote,menu=callvote:5,wait=1,see=Resta
 mouse=Restart Map,saw=called a vote:6,nomenu=5,wait=1,\
 holdkey=b,releasekey=b,menu=quickmessage:5,wait=0.5,shot=quickmessage,uikey=1,menu=quickcommands:5,wait=0.5,shot=quickcommands,uikey=1,nomenu=5,\
 saw=(Team):8,\
-console=openscriptmenu team_marinesopfor spectator,team=3:10";
+console=openscriptmenu team_marinesopfor axis,team=1:15";
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
