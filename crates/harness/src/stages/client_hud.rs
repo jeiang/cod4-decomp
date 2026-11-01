@@ -792,8 +792,8 @@ fn play(
         ));
     }
     c.step("helicopter compass ownerdraw", |c| {
-        // Stock 1.7 places 155 in compass_old, not its current compass menu.
-        c.console("openmenu compass_old")?;
+        // Stock 1.7 places 155 in compass_old, one of the in-match HUD menus the client draws; opening it as a menu
+        // hides the HUD instead.
         c.ask(json!({"cmd":"server","op":"exec","line":"devhardpoint bot helicopter_mp"}))?;
         c.until(
             json!({"hud.report.helicopter_marks":{"ge":1}}),
