@@ -38,6 +38,8 @@ pub struct SnapshotBuffer {
     window: VecDeque<(u64, f64)>,
     /// How often the estimate jumped instead of easing: up, down.
     pub jumps: [u32; 2],
+    /// The entity a harness follows through every snapshot accepted (see [`SnapshotWatch`]); `clear` keeps it.
+    pub watch: Option<SnapshotWatch>,
 }
 
 impl SnapshotBuffer {
@@ -77,6 +79,9 @@ impl SnapshotBuffer {
                 reading
             }
         });
+        if let Some(w) = &mut self.watch {
+            w.observe(&snap);
+        }
         self.snaps.push_back((recv_ms, snap));
     }
 
@@ -84,6 +89,18 @@ impl SnapshotBuffer {
     pub fn clear(&mut self) {
         self.snaps.clear();
         self.window.clear();
+    }
+
+    /// Follows `watch` through every snapshot accepted from now on. With `from`, it first counts the held snapshots
+    /// numbered `from` or later, oldest first, so the count can begin at a snapshot that arrived before the watch was
+    /// set (the buffer holds about the last second of them).
+    pub fn follow(&mut self, mut watch: SnapshotWatch, from: Option<u32>) {
+        if let Some(from) = from {
+            for (_, s) in self.snaps.iter().filter(|(_, s)| s.num >= from) {
+                watch.observe(s);
+            }
+        }
+        self.watch = Some(watch);
     }
 
     pub fn latest(&self) -> Option<&Snapshot> {
@@ -178,6 +195,83 @@ impl SnapshotBuffer {
                 _ => eb,
             })
             .collect()
+    }
+}
+
+/// How many gaps, absences and wrong models a [`SnapshotWatch`] lists; its counts go on past that.
+const WATCH_LIST: usize = 16;
+
+/// One entity followed through every snapshot the buffer accepts while the watch is set: whether each snapshot
+/// carried the entity, with the model asked for, and whether the snapshot numbers ran on without a gap. Reading the
+/// newest snapshot now and then cannot see an entity that drops out of one snapshot between two readings; this
+/// sees each one. The server numbers the snapshots it sends a client one by one, so a skipped number is a snapshot
+/// lost on the way or one the buffer turned away (older than the newest): neither is counted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SnapshotWatch {
+    /// The entity followed.
+    pub number: u16,
+    /// The model index it must carry; `None` takes any.
+    pub model: Option<u16>,
+    /// The number of the first snapshot counted.
+    pub first: Option<u32>,
+    /// The number of the newest snapshot counted.
+    pub last: Option<u32>,
+    /// Snapshots counted.
+    pub received: u32,
+    /// Of those, the ones that carried the entity.
+    pub present: u32,
+    /// Of those, the ones that carried it with the model asked for.
+    pub matched: u32,
+    /// Snapshot numbers skipped between two counted snapshots.
+    pub missed: u32,
+    /// How many times the numbers skipped (or ran backwards).
+    pub breaks: u32,
+    /// The first skips, as `[before, after]`: the counted snapshots on either side.
+    pub gaps: Vec<[u32; 2]>,
+    /// The first snapshots that lacked the entity.
+    pub absent: Vec<u32>,
+    /// The first snapshots that carried it with another model, as `[snapshot, model]`.
+    pub wrong_model: Vec<[u32; 2]>,
+}
+
+impl SnapshotWatch {
+    pub fn new(number: u16, model: Option<u16>) -> Self {
+        SnapshotWatch {
+            number,
+            model,
+            ..Self::default()
+        }
+    }
+
+    /// Counts one accepted snapshot.
+    pub fn observe(&mut self, snap: &Snapshot) {
+        fn note<T>(list: &mut Vec<T>, v: T) {
+            if list.len() < WATCH_LIST {
+                list.push(v);
+            }
+        }
+        if let Some(prev) = self.last.filter(|&p| snap.num != p.wrapping_add(1)) {
+            self.breaks += 1;
+            self.missed = self
+                .missed
+                .saturating_add(snap.num.saturating_sub(prev).saturating_sub(1));
+            note(&mut self.gaps, [prev, snap.num]);
+        }
+        self.first.get_or_insert(snap.num);
+        self.last = Some(snap.num);
+        self.received += 1;
+        match snap.entity(self.number) {
+            None => note(&mut self.absent, snap.num),
+            Some(e) => {
+                self.present += 1;
+                match self.model {
+                    Some(m) if e.model != m => {
+                        note(&mut self.wrong_model, [snap.num, u32::from(e.model)]);
+                    }
+                    _ => self.matched += 1,
+                }
+            }
+        }
     }
 }
 
@@ -385,5 +479,67 @@ mod tests {
         assert_eq!(seen.len(), 1);
         assert!((seen[0].origin[0] - 50.0).abs() < 1e-3);
         assert!(b.interpolate_with_actors(150, Some(3)).is_empty());
+    }
+
+    #[test]
+    fn a_watch_counts_every_accepted_snapshot_and_names_what_it_missed() {
+        let mut b = SnapshotBuffer {
+            watch: Some(SnapshotWatch::new(3, Some(4))),
+            ..SnapshotBuffer::default()
+        };
+        // Snapshot 6 lacks the entity, 7 never arrives in order, 9 carries another model.
+        for (num, t, model) in [
+            (5, 100, Some(4)),
+            (6, 133, None),
+            (8, 200, Some(4)),
+            (9, 233, Some(7)),
+        ] {
+            let mut s = snap(t, 0.0, 0.0);
+            s.num = num;
+            match model {
+                Some(m) => s.entities[0].model = m,
+                None => s.entities.clear(),
+            }
+            b.push(u64::from(num) * 33, s);
+        }
+        // Older than the newest, so the buffer turns it away and the watch does not count it either.
+        let mut late = snap(150, 0.0, 0.0);
+        late.num = 7;
+        b.push(330, late);
+        let w = b.watch.clone().unwrap();
+        assert_eq!((w.first, w.last), (Some(5), Some(9)));
+        assert_eq!((w.received, w.present, w.matched), (4, 3, 2));
+        assert_eq!((w.missed, w.breaks), (1, 1));
+        assert_eq!(w.gaps, vec![[6, 8]]);
+        assert_eq!(w.absent, vec![6]);
+        assert_eq!(w.wrong_model, vec![[9, 7]]);
+        // A new level clears the history but not what the harness asked to follow.
+        b.clear();
+        assert_eq!(b.watch, Some(w));
+    }
+
+    #[test]
+    fn a_watch_set_late_first_counts_the_held_snapshots_from_the_one_asked_for() {
+        let mut b = SnapshotBuffer::default();
+        let numbered = |num: u32| {
+            let mut s = snap(i32::try_from(num).unwrap() * 50, 0.0, 0.0);
+            s.num = num;
+            s.entities[0].model = 4;
+            s
+        };
+        for num in 5..=8 {
+            b.push(u64::from(num) * 33, numbered(num));
+        }
+        b.follow(SnapshotWatch::new(3, Some(4)), Some(6));
+        b.push(9 * 33, numbered(9));
+        let w = b.watch.clone().unwrap();
+        assert_eq!((w.first, w.last), (Some(6), Some(9)));
+        assert_eq!((w.received, w.present, w.matched), (4, 4, 4));
+        assert_eq!((w.missed, w.breaks), (0, 0));
+        // Without `from`, only what arrives afterwards counts.
+        b.follow(SnapshotWatch::new(3, None), None);
+        b.push(10 * 33, numbered(10));
+        let w = b.watch.clone().unwrap();
+        assert_eq!((w.first, w.last, w.received), (Some(10), Some(10), 1));
     }
 }

@@ -150,6 +150,30 @@ fn connection(st: &NetPlay) -> Value {
     })
 }
 
+/// The entity a harness follows through every snapshot the client accepts (`net::view::SnapshotWatch`), as counted so
+/// far: the snapshot numbers it covers, how many carried the entity with the model asked for, and the first gaps,
+/// absences and wrong models by snapshot number. `null` while nothing is followed.
+fn watch(st: &NetPlay) -> Value {
+    let Some(w) = st.net.snaps.watch.as_ref() else {
+        return Value::Null;
+    };
+    json!({
+        "number": w.number,
+        "model": w.model,
+        "model_name": w.model.and_then(|m| st.net.ui_ref().map(|ui| ui.model(m))),
+        "first": w.first,
+        "last": w.last,
+        "received": w.received,
+        "present": w.present,
+        "matched": w.matched,
+        "missed": w.missed,
+        "breaks": w.breaks,
+        "gaps": w.gaps,
+        "absent": w.absent,
+        "wrong_model": w.wrong_model,
+    })
+}
+
 impl NetPlay {
     /// One section of the state document. A section this level does not know is `null`.
     pub fn control_state(&mut self, part: &str) -> Value {
@@ -169,7 +193,44 @@ impl NetPlay {
                 let full = self.report();
                 full.get("fx").cloned().unwrap_or(Value::Null)
             }
+            "watch" => watch(self),
             _ => Value::Null,
         }
+    }
+
+    /// Follows one entity through every snapshot accepted from now on (`{"number": N, "model": M, "from": S}`, the
+    /// model index and `from` optional), counting afresh, or stops following (`{"clear": true}`). With `from`, the
+    /// count first takes the held snapshots numbered S or later, so it can begin at one that arrived before this
+    /// request. Answers with the `watch` section.
+    pub fn control_watch(&mut self, req: &serde_json::Map<String, Value>) -> Result<Value, String> {
+        if req.get("clear").and_then(Value::as_bool) == Some(true) {
+            self.net.snaps.watch = None;
+            return Ok(json!({"cleared": true}));
+        }
+        let number = req
+            .get("number")
+            .and_then(Value::as_u64)
+            .and_then(|n| u16::try_from(n).ok())
+            .ok_or("watch needs the entity's number (or clear)")?;
+        let model = match req.get("model") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .and_then(|n| u16::try_from(n).ok())
+                    .ok_or("watch's model is a model index")?,
+            ),
+        };
+        let from = match req.get("from") {
+            None | Some(Value::Null) => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or("watch's from is a snapshot number")?,
+            ),
+        };
+        self.net
+            .snaps
+            .follow(net::view::SnapshotWatch::new(number, model), from);
+        Ok(watch(self))
     }
 }
