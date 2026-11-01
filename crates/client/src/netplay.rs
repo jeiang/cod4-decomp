@@ -1610,6 +1610,10 @@ impl NetPlay {
         self.feedback.merge(fb);
         laps.lap("hear+feedback");
         let (events, commands) = self.take_events(&snap);
+        // The player's own goggles, from the predicted state (`CG_LookingThroughNightVision` reads
+        // `predictedPlayerState.weapFlags`).
+        self.look
+            .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
         let look = self.look.frame(st);
         self.shock_effects(&look);
         laps.lap("events+look");
