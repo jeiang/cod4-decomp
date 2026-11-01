@@ -5,6 +5,7 @@
 
 use crate::entity::EntityState;
 use crate::snapshot::Snapshot;
+use sim::pm::ef;
 use std::collections::VecDeque;
 
 /// Snapshots kept; at 30 per second this is about a second of history.
@@ -40,6 +41,11 @@ pub struct SnapshotBuffer {
     pub jumps: [u32; 2],
     /// The entity a harness follows through every snapshot accepted (see [`SnapshotWatch`]); `clear` keeps it.
     pub watch: Option<SnapshotWatch>,
+    /// The newest teleport since the level began: two snapshots accepted one after the other whose player teleport
+    /// bits ([`ef::TELEPORT_BIT`]) differ, `[before, after]` by number. The server flips the bit when it moves the
+    /// player (a spawn, `setviewpos`), so `after` is the first snapshot built since the move. `None` until it first
+    /// flips; `clear` forgets it.
+    pub teleport: Option<[u32; 2]>,
 }
 
 impl SnapshotBuffer {
@@ -50,6 +56,13 @@ impl SnapshotBuffer {
             .is_some_and(|(_, s)| snap.server_time <= s.server_time)
         {
             return;
+        }
+        if let Some((_, back)) = self
+            .snaps
+            .back()
+            .filter(|(_, s)| (s.ps.e_flags ^ snap.ps.e_flags) & ef::TELEPORT_BIT != 0)
+        {
+            self.teleport = Some([back.num, snap.num]);
         }
         if self.snaps.len() == HISTORY {
             self.snaps.pop_front();
@@ -85,10 +98,11 @@ impl SnapshotBuffer {
         self.snaps.push_back((recv_ms, snap));
     }
 
-    /// Forgets the history (a new level restarts the server clock).
+    /// Forgets the history and the newest teleport (a new level restarts the server clock).
     pub fn clear(&mut self) {
         self.snaps.clear();
         self.window.clear();
+        self.teleport = None;
     }
 
     /// Follows `watch` through every snapshot accepted from now on. With `from`, it first counts the held snapshots
@@ -541,5 +555,33 @@ mod tests {
         b.push(10 * 33, numbered(10));
         let w = b.watch.clone().unwrap();
         assert_eq!((w.first, w.last, w.received), (Some(10), Some(10), 1));
+    }
+
+    #[test]
+    fn a_teleport_is_where_the_players_teleport_bit_flips_between_two_accepted_snapshots() {
+        let mut b = SnapshotBuffer::default();
+        let numbered = |num: u32, flags: u32| {
+            let mut s = snap(i32::try_from(num).unwrap() * 50, 0.0, 0.0);
+            s.num = num;
+            s.ps.e_flags = flags;
+            s
+        };
+        let t = ef::TELEPORT_BIT;
+        // 8 also crouches, which is no teleport; 9 never arrives, so the flip back spans 8 to 10.
+        for (num, flags, teleport) in [
+            (5, 0, None),
+            (6, 0, None),
+            (7, t, Some([6, 7])),
+            (8, t | ef::CROUCH, Some([6, 7])),
+            (10, ef::CROUCH, Some([8, 10])),
+        ] {
+            b.push(u64::from(num) * 33, numbered(num, flags));
+            assert_eq!(b.teleport, teleport, "after snapshot {num}");
+        }
+        // A new level forgets it, and its first snapshot has nothing to differ from.
+        b.clear();
+        assert_eq!(b.teleport, None);
+        b.push(11 * 33, numbered(11, t));
+        assert_eq!(b.teleport, None);
     }
 }

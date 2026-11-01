@@ -57,6 +57,9 @@ fn player(st: &NetPlay) -> Value {
         "command_time": ps.command_time,
         "client_command_time": st.cmd_time,
         "snapshot": snap.num,
+        // The newest teleport the snapshots show (`net::view::SnapshotBuffer::teleport`): `after` is the first snapshot
+        // built since the server last moved the player (a spawn, `setviewpos`). `null` until the teleport bit flips.
+        "teleport": st.net.snaps.teleport.map(|[before, after]| json!({"before": before, "after": after})),
         "killcam": snap.killcam(),
     })
 }
