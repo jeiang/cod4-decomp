@@ -58,9 +58,11 @@ Stage 3 (`client-flythrough`) needs a GPU and a display: it runs the `cod4e` cli
 the player's `devmap`, team/class selection, `noclip` and `setviewpos` commands, then compares the issue-pose image
 against the same camera with script models and dynamic props separately hidden (`drawscriptmodels 0`,
 `drawprops 0`, diagnostic commands analogous to `drawvehicles`). Both objects must change their own image regions.
-The serverless `--flythrough` is a tour of the static world, not a match: it does not spawn script models or
-client-side dynamic props, so their absence there is not evidence of a missing model in play. The control state
-names snapshot models (`entities.list[].model_name`) for diagnosis.
+Before the images, the client counts the car in every snapshot from the first one built after the move (the control
+channel's `watch`): at least 40 consecutive snapshots must arrive, and each must carry the car with its model. The
+serverless `--flythrough` is a tour of the static world, not a match: it does not spawn script models or client-side
+dynamic props, so their absence there is not evidence of a missing model in play. The control state names snapshot
+models (`entities.list[].model_name`) for diagnosis.
 
 ## Headless server
 
