@@ -116,19 +116,35 @@ fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
     }
 }
 
-/// Lets `d` pass while sampling the server's entities for a thrown grenade (classname `grenade`). The server's view,
-/// not the client's: a bot put beyond a wall throws out of the person's PVS.
-fn watch_for_missile(c: &mut Driven, d: Duration) -> Result<bool, String> {
+/// Lets `d` pass while sampling the server's entities for a thrown grenade (classname `grenade`) and the bot's weapon
+/// state, so a throw that never happens says where the offhand path stopped. The server's view, not the client's.
+fn watch_for_missile(c: &mut Driven, bot: u64, d: Duration) -> Result<(bool, Vec<String>), String> {
     let end = Instant::now() + d;
     let mut seen = false;
+    let mut trace: Vec<String> = Vec::new();
     while Instant::now() < end {
         let ents = c.ask(json!({"cmd": "server", "op": "state", "what": "entities"}))?;
         seen |= ents
             .as_array()
             .is_some_and(|l| l.iter().any(|e| e["classname"] == json!("grenade")));
+        let p = server_client(c, bot)?;
+        let line = format!(
+            "state {} weapon {} flags {} offhand {} fuse {} pm_flags {} dev {} buttons {}",
+            p["weapon_state"],
+            p["weapon"],
+            p["weapon_flags"],
+            p["offhand_index"],
+            p["grenade_time_left"],
+            p["pm_flags"],
+            p["dev_buttons"],
+            p["buttons"]
+        );
+        if trace.last() != Some(&line) {
+            trace.push(line);
+        }
         c.pause(Duration::from_millis(100))?;
     }
-    Ok(seen)
+    Ok((seen, trace))
 }
 
 /// One case: the bot shoots `weapon` (or throws a frag for `"frag"`); the compass must ping or not.
@@ -150,7 +166,7 @@ fn case(
     let was = server_client(c, bot)?;
     let ms = if grenade { FRAG_MS } else { BURST_MS };
     exec(c, &format!("devbotfire {bot} {weapon} {ms}"))?;
-    let missile = watch_for_missile(c, Duration::from_millis(u64::from(ms) + 1500))?;
+    let (missile, trace) = watch_for_missile(c, bot, Duration::from_millis(u64::from(ms) + 1500))?;
     c.pause(Duration::from_secs(5))?;
     let after = counts(c)?;
     let now = server_client(c, bot)?;
@@ -164,7 +180,7 @@ fn case(
     verdict(label, pings, before, after, fired, grenade).map_err(|e| {
         format!(
             "{e}; bot {bot} before: weapon {} alive {} retained {}; after: weapon {} weapons {} alive {} \
-             origin {} retained {}",
+             origin {} retained {}; trace [{}]",
             was["weapon"],
             was["alive"],
             was["command_frame"]["retained"],
@@ -172,7 +188,8 @@ fn case(
             now["weapons"],
             now["alive"],
             now["origin"],
-            now["command_frame"]["retained"]
+            now["command_frame"]["retained"],
+            trace.join(" | ")
         )
     })?;
     if pings {
@@ -236,12 +253,12 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
             c,
             &format!("devtele {bot} {} {} {}", at(0) + 96.0, at(1), at(2)),
         )?;
-        let mut notes = Vec::new();
-        notes.push(case(c, bot, "unsilenced", UNSILENCED, true)?);
         // `case` compares the independently played sound with the hold and final drawn mark lifetime.
-        notes.push(case(c, bot, "silenced", SILENCED, false)?);
-        notes.push(case(c, bot, "grenade", "frag", false)?);
-        Ok(notes)
+        Ok(vec![
+            case(c, bot, "unsilenced", UNSILENCED, true)?,
+            case(c, bot, "silenced", SILENCED, false)?,
+            case(c, bot, "grenade", "frag", false)?,
+        ])
     })();
     exec(c, "set bot_idle 0")?;
     exec(c, "set developer 0")?;
