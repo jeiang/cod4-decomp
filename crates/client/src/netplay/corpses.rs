@@ -115,6 +115,7 @@ impl NetPlay {
             b.seen = now;
             b.settled = false;
             drawn += 1;
+            let before = out.len();
             match &mut b.ragdoll {
                 Some(r) => {
                     r.tune(self.switches.ragdoll_tunables);
@@ -130,6 +131,9 @@ impl NetPlay {
                 }
                 None => out.extend(b.player.instances(b.at)),
             }
+            // A script's `playfxontag` on the body rides its posed bones.
+            self.effects
+                .script_model_tags(e.number, &out[before..], &self.lib.content);
         }
         self.c.corpses_max = self.c.corpses_max.max(drawn);
         let world = self.boxes.world();
