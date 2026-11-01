@@ -624,9 +624,16 @@ impl Walker {
             pitch_err = want_pitch - angles[0];
             aim = Some((d, want_yaw, want_pitch));
         }
-        // Stop walking while lining up a nearby target. Judge alignment after the turn, against the current local
-        // input aim rather than the delayed snapshot's angles; otherwise every correction chases the last correction.
-        self.hold(c, "+forward", aim.is_none_or(|(d, _, _)| d > 900.0))?;
+        // Stop walking while lining up a nearby target. Holding fire, keep walking until an enemy is under the
+        // crosshair (`weapFlags` 0x10): the nearest enemy can be behind a wall, which only walking gets round.
+        // Judge alignment after the turn, against the current local input aim rather than the delayed snapshot's
+        // angles; otherwise every correction chases the last correction.
+        let walk = if self.hold_fire {
+            player["crosshair_flags"].as_u64().unwrap_or(0) & 0x10 == 0
+        } else {
+            aim.is_none_or(|(d, _, _)| d > 900.0)
+        };
+        self.hold(c, "+forward", walk)?;
         self.turn_by(c, yaw_err, pitch_err, angles)?;
         c.frames(2)?;
         let after = vec3(&c.state("player")?["aim_angles"]);
