@@ -704,16 +704,26 @@ mod tests {
                 .map(str::to_owned)
                 .collect();
             for head in heads {
-                let faction = ["usmc", "sas", "arab", "russian"]
-                    .into_iter()
-                    .find(|f| head.contains(f))
-                    .expect("stock faction");
+                let root_name = lib
+                    .content
+                    .model_bone_names(&head)
+                    .and_then(|names| names.first())
+                    .expect("head root")
+                    .clone();
                 let body = lib
                     .content
                     .model_names("body_mp_")
                     .into_iter()
-                    .find(|b| b.contains(faction))
-                    .expect("faction body")
+                    .find(|body| {
+                        lib.content.model_bone_names(body).is_some_and(|names| {
+                            names
+                                .iter()
+                                .any(|name| name.eq_ignore_ascii_case(&root_name))
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{map}: no compatible body for {head} root {root_name}")
+                    })
                     .to_owned();
                 let rest = lib
                     .rest_pose(&body, &[(head.clone(), String::new())])

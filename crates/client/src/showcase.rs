@@ -238,14 +238,19 @@ impl Showcase {
             .collect();
         let mut heads_resolved = 0;
         for head in &heads {
+            let root = lib
+                .content
+                .model_bone_names(head)
+                .and_then(|names| names.first())
+                .ok_or_else(|| format!("{head} has no root"))?;
             let body = [&allies, axis.as_ref().unwrap_or(&allies)]
                 .into_iter()
                 .find(|s| {
-                    ["usmc", "sas", "arab", "russian"]
-                        .iter()
-                        .any(|f| head.contains(f) && s.body.contains(f))
+                    lib.content.model_bone_names(&s.body).is_some_and(|names| {
+                        names.iter().any(|name| name.eq_ignore_ascii_case(root))
+                    })
                 })
-                .ok_or_else(|| format!("no faction body for {head}"))?;
+                .ok_or_else(|| format!("no compatible body for {head}"))?;
             let set = PlayerModelSet {
                 body: body.body.clone(),
                 attach: vec![(head.clone(), String::new())],
