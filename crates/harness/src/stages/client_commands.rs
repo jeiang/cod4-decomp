@@ -15,7 +15,8 @@
 //! that is no button is `Unknown command` typed and bound alike, `openmenu`/`closemenu` open and close a menu, and
 //! `openscriptmenu team_marinesopfor axis` moves the player to the other team. A dvar named like a server command
 //! (`give`) is shown typed and bound, not forwarded; `connect <server> reconnect` joins from the front end (an
-//! address nothing answers on opens the error popup) and a plain `connect` in a match is ignored. Needs a display
+//! address nothing answers on opens the error popup) and a plain `connect` in a match is refused with the stock
+//! `Already connected to a server. Disconnect first`, opening nothing. Needs a display
 //! and the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
@@ -63,7 +64,7 @@ set=bind f7 togglecrouch,holdkey=f7,releasekey=f7,stanceis=crouch,holdkey=f7,rel
 console=+zz_typed,saw=Unknown command \"+zz_typed\":5,\
 set=bind f6 +zz_bound,holdkey=f6,releasekey=f6,saw=Unknown command \"+zz_bound\":5,\
 console=openmenu quickmessage,menu=quickmessage:5,console=closemenu quickmessage,nomenu=5,\
-console=connect 127.0.0.1:28998,wait=3,nomenu=1,\
+console=connect 127.0.0.1:28998,saw=Already connected to a server. Disconnect first:5,wait=3,nomenu=1,\
 console=openscriptmenu team_marinesopfor axis,team=1:15,menu=changeclass:10,wait=1,mouse=Assault,ingame=60,wait=3,\
 console=setFromLocString customclass3 @CLASS_CUSTOM3,wait=0.5,cvarloc=customclass3 CLASS_CUSTOM3,\
 togglemenu,wait=1,see=Call Vote,mouse=Call Vote,menu=callvote:5,wait=1,see=Restart Map+Next Map,shot=callvote,\
