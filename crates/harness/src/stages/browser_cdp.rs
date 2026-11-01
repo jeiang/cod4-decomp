@@ -35,13 +35,15 @@ pub const CHROMIUM_FLAGS: &[&str] = &[
     "--window-size=1280,720",
 ];
 
-/// The first line of a Chromium log that shows the page's WebGPU device was lost or its canvas could not be backed:
-/// the page may keep presenting a stale or black frame afterwards, so a run that logged one is not WebGPU evidence.
+/// The first line of a Chromium log that shows the page's WebGPU device was lost, its canvas could not be backed, or a
+/// frame's command buffer was rejected by validation: the page may keep presenting a stale or black frame afterwards,
+/// so a run that logged one is not WebGPU evidence.
 pub fn gpu_failure(log: &std::path::Path) -> Option<String> {
     const MARKS: &[&str] = &[
         "device lost",
         "Unable to create shared image",
         "Could not find SharedImageBackingFactory",
+        "Invalid CommandBuffer",
     ];
     let text = std::fs::read_to_string(log).ok()?;
     text.lines()
