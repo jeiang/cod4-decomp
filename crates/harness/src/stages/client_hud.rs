@@ -475,12 +475,13 @@ fn sample_weapon_switch(
         }
         c.frames(1)?;
     }
-    let mut frames = Vec::new();
+    let (mut frames, mut total) = (Vec::new(), 0);
     for (s, (now, was)) in state_frames(c)?.iter().zip(&counted).enumerate() {
         let (all, shown) = (now[0].saturating_sub(was[0]), now[1].saturating_sub(was[1]));
         if all == 0 {
             continue;
         }
+        total += all;
         frames.push(format!("state {s}: {all} frames, {shown} with a crosshair"));
         // A counted drop or raise frame stands for its state with the crosshair shown (1) or hidden (0).
         if (1..=4).contains(&s) {
@@ -492,11 +493,14 @@ fn sample_weapon_switch(
             }
         }
     }
+    // At a few frames a second the whole quick switch can fall inside one frame's prediction and never be drawn;
+    // the rate is in the trace so such a failure reads as the client's frame pacing, not the crosshair.
     Ok((
         seen,
         format!(
-            "{samples} samples: {}; frames drawn: {}",
+            "{samples} samples: {}; {total} frames drawn in {} ms: {}",
             trace.join(", "),
+            start.elapsed().as_millis(),
             frames.join(", ")
         ),
     ))
