@@ -24,8 +24,9 @@ const MOD: &str = "mods/netinfo";
 /// The scratch custom map: the stock crash zone under another name, with an IWD.
 const CUSTOM: &str = "mp_netinfo";
 
-/// The keys `SVC_Info` sets, in its order (`challenge` first).
-const ORDER: [&str; 20] = [
+/// The keys `SVC_Info` sets, in its order (`challenge` first); `hc` and `od` are the 1.7 `iw3mp.exe`'s (KisakCOD's
+/// 1.8 has neither).
+const ORDER: [&str; 22] = [
     "challenge",
     "protocol",
     "hostname",
@@ -42,6 +43,8 @@ const ORDER: [&str; 20] = [
     "pswrd",
     "ff",
     "kc",
+    "hc",
+    "od",
     "hw",
     "mod",
     "voice",
@@ -232,6 +235,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 ("game", None),
                 ("hw", Some("2")),
                 ("mod", Some("0")),
+                ("hc", None),
+                ("od", None),
             ],
         },
         Case {
@@ -278,6 +283,13 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 ("pure", Some("1")),
                 ("mod", Some("1")),
             ],
+        },
+        Case {
+            what: "pure dedicated hardcore server",
+            root: install.to_owned(),
+            args: dedicated("1", &[("scr_hardcore", "1")]),
+            map: "mp_crash",
+            want: vec![("hc", Some("1")), ("od", None), ("mod", Some("0"))],
         },
     ];
     let mut notes = Vec::new();

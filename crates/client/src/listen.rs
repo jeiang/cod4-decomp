@@ -261,8 +261,8 @@ fn run(
     tx: &mpsc::Sender<Result<SocketAddr, String>>,
 ) -> Value {
     let started = || -> Result<(Server, SocketAddr), String> {
-        // The server a player starts runs pure, as the stock one does: its clients' IWDs must be its own. It is not
-        // dedicated (`dedicated 0`), which its `getinfo` reports as hardware 6.
+        // The server a player starts runs pure, which is ours (the original's is impure, README `sv_pure`): its
+        // clients' IWDs must be its own. It is not dedicated (`dedicated 0`), which its `getinfo` reports as hardware 6.
         let args = listen_cmdline(cfg.port, &cfg.game);
         let mut s = Server::boot(install, &args, false)?;
         let addr = s.net_addr().ok_or("cannot bind a UDP socket")?;

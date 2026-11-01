@@ -32,10 +32,10 @@ mouse=#245,cvaris=ui_netGametypeName dom,mouse=#245,cvaris=ui_netGametypeName sd
 mouse=#245,cvaris=ui_netGametypeName sab,mouse=#245,cvaris=ui_netGametypeName war,shot=mode_back";
 
 /// What the join menu's LAN list must show once it has scanned: a server of this stage's own, on a standard port.
-/// The server this stage runs is a listen server, whose `sv_pure` is off (a dedicated server's default is on), and
-/// the stock filter setting `ui_browserShowPure 1` lists pure servers only: a player would untick it to see this
-/// one, and so does the stage.
-const LAN_STEP: &str = "set=set ui_browserShowPure 0,rows=2 +1:15,";
+/// The server this stage runs has `sv_pure` off (the library default; the dedicated program's is on), so it is not
+/// pure and says `mod 1`. The stock filter settings `ui_browserShowPure 1` and `ui_browserMod 0` list only pure,
+/// unmodified servers: a player would untick the one and set the other to either to see it, and so does the stage.
+const LAN_STEP: &str = "set=set ui_browserShowPure 0,set=set ui_browserMod -1,rows=2 +1:15,";
 
 /// A game server running in this process on one of the standard ports the client's LAN scan asks, until dropped.
 struct LanServer {

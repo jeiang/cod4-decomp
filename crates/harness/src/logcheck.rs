@@ -41,6 +41,16 @@ pub const ALLOWED: &[Allow] = &[
         stages: &[],
         max: Some(12), // measured 7 (2026-10-14) and 11 with the class menu drawn (control-channel, 2026-10-29)
     },
+    Allow {
+        contains: &[
+            "cod4e::shell",
+            "hardware icon column is not drawn",
+            "issue=502",
+        ],
+        reason: "the join list draws no `server_hardware_*` icon (#502); warned once per process",
+        stages: &[],
+        max: Some(2), // once per client process
+    },
     // Timing of the harness's own clients and bots.
     Allow {
         contains: &["server::netsv", "packet from an address with no client"],

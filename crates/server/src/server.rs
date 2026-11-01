@@ -97,7 +97,8 @@ fn foreign_iwds(install: &Install) -> bool {
 }
 
 /// The command line a listen server (the one a player starts from the client) boots with: `dedicated 0`, as the
-/// client program registers it, and pure, as the stock menu's server starts; `game` is the client's `fs_game`.
+/// client program registers it, and `sv_pure 1`, which is ours: the original registers `sv_pure` 0 and its menus never
+/// set it, so its listen server is impure and says `mod 1` (README, `sv_pure`). `game` is the client's `fs_game`.
 pub fn listen_cmdline(port: u16, game: &str) -> Vec<String> {
     let mut args: Vec<String> = [
         "+set",
@@ -1119,10 +1120,11 @@ impl Server {
             .count()
     }
 
-    /// `SVC_Info` (KisakCOD `server_mp/sv_main_mp.cpp:488-634`, CoD4 MP 1.8; 1.7 sends the same keys): the answer to
-    /// `getinfo`, in the original's key order (`challenge`, which the original puts first, is added by
-    /// `net::connect::serve`). A key whose value is empty is left out, as `Info_SetValueForKey` does, and so is one
-    /// the original only sends when it is set.
+    /// `SVC_Info`: the answer to `getinfo`, in the original's key order (`challenge`, which the original puts first,
+    /// is added by `net::connect::serve`). The reference is the CoD4 MP 1.7 `iw3mp.exe` (`SVC_Info` at
+    /// `0x531c..0x532163`); KisakCOD's 1.8 (`server_mp/sv_main_mp.cpp:488-634`) sends the same keys but `hc` and `od`.
+    /// A key whose value is empty is left out, as `Info_SetValueForKey` does, and so is one the original only sends
+    /// when it is set.
     pub fn server_info(&self) -> Vec<(String, String)> {
         let c = &self.game.cvars;
         let max = usize::try_from(c.int("sv_maxclients")).unwrap_or(0);
@@ -1170,7 +1172,13 @@ impl Server {
         if !join_password(c).is_empty() {
             put("pswrd", "1".into());
         }
-        for (key, cvar) in [("ff", "scr_team_fftype"), ("kc", "scr_game_allowkillcam")] {
+        // `hc` and `od` (1.7 only, `0x531f15-0x531fa7`): `scr_hardcore` and `scr_oldschool`, which the scripts set.
+        for (key, cvar) in [
+            ("ff", "scr_team_fftype"),
+            ("kc", "scr_game_allowkillcam"),
+            ("hc", "scr_hardcore"),
+            ("od", "scr_oldschool"),
+        ] {
             if c.int(cvar) != 0 {
                 put(key, c.int(cvar).to_string());
             }
