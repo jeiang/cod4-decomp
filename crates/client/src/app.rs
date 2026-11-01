@@ -3820,9 +3820,15 @@ fn script_step(st: &mut State) -> bool {
                             film.brightness, film.contrast, film.desaturation
                         )
                     }),
-                    "crosshair_alpha" => sh
-                        .and_then(|s| s.st.live.reticle.as_ref())
-                        .map(|r| format!("{:.2}", crate::crosshair::layout(r).0)),
+                    // In a match: the drawn opacity, or `hidden` when the stock gates left no reticle.
+                    "crosshair_alpha" => sh.filter(|_| st.net.is_some()).map(|s| {
+                        crate::crosshair::shown(
+                            s.st.live
+                                .reticle
+                                .as_ref()
+                                .map(|r| crate::crosshair::layout(r).0),
+                        )
+                    }),
                     "window_position" => {
                         // Wayland deliberately offers no global position; there assert the request that reaches
                         // display::apply. Platforms exposing outer_position must report the actual placement.
