@@ -2774,6 +2774,7 @@ impl NetPlay {
             "attack_cmds": self.c.shots,
             "target_frames": self.c.target_frames,
             "in_range_frames": self.c.in_range_frames,
+            "autoplay_track": self.auto.as_ref().map(|a| &a.track),
             "weapon": self.c.weapon,
             "viewmodel_frames": self.c.frames_with_viewmodel,
             "weapons_without_models": self.c.unknown_weapon,
@@ -2946,6 +2947,9 @@ struct Auto {
     last_feet: Option<[f32; 3]>,
     reload_at: f32,
     target_seen_at: f32,
+    /// Once a second: `[t, x, y, z, players and enemies in the snapshot, nearest enemy's distance (-1 none), seen,
+    /// alive, own team flags]`.
+    track: Vec<[f32; 10]>,
 }
 
 impl NetPlay {
@@ -3025,13 +3029,16 @@ impl NetPlay {
         let mut nearest: Option<(f32, Vec3)> = None;
         const SEE: f32 = 1500.0;
         const FIRE: f32 = 900.0;
+        let (mut enemies, mut players) = (0, 0);
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
+            players += 1;
             let flags = e.eflags;
             if flags & eflags::DEAD != 0
                 || flags & (eflags::TEAM_AXIS | eflags::TEAM_ALLIES) == my_team
             {
                 continue;
             }
+            enemies += 1;
             let at = Vec3::from(e.origin) + Vec3::Z * 50.0;
             let d = at.distance(eye);
             if nearest.is_none_or(|(n, _)| d < n) {
@@ -3053,6 +3060,24 @@ impl NetPlay {
             }
         }
         let visible = best.is_some();
+        if a.track.last().is_none_or(|l| a.t - l[0] >= 1.0) {
+            let alive = self
+                .net
+                .latest()
+                .is_some_and(|s| !matches!(s.ps.pm_type, PmType::Dead | PmType::DeadLinked));
+            a.track.push([
+                a.t,
+                feet[0],
+                feet[1],
+                feet[2],
+                players as f32,
+                enemies as f32,
+                nearest.map_or(-1.0, |(d, _)| d),
+                f32::from(u8::from(visible)),
+                f32::from(u8::from(alive)),
+                my_team as f32,
+            ]);
+        }
         // Out of sight, the bot walks toward the nearest enemy anyway (a test driver, not a person: it reads the
         // snapshot) and turns away from walls when stuck.
         let aim = best.or(nearest);
