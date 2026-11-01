@@ -1926,7 +1926,9 @@ impl Server {
                 let buttons = if weapon.eq_ignore_ascii_case("frag") {
                     let index = g.weapons.index("frag_grenade_mp");
                     if index != 0 {
+                        // A bot that already threw its frags in the fighting has the weapon but none left.
                         c.inv.give(&g.weapons, &mut c.ps, index, 0);
+                        c.inv.give_max_ammo(&g.weapons, &mut c.ps, index);
                     }
                     sim::pm::button::FRAG
                 } else {
