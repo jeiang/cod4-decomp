@@ -67,6 +67,44 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         c.ask(json!({"cmd": "exec", "line": line}))?;
     }
     c.ask(json!({"cmd": "step", "frames": 30}))?;
+    // A script_model at the garage car's spot (within `r` units in the plane), by kind and origin alone.
+    let near = |e: &serde_json::Value, r: f64| {
+        e["kind"] == "script_model"
+            && e["origin"][0]
+                .as_f64()
+                .zip(e["origin"][1].as_f64())
+                .is_some_and(|(x, y)| (x - 58.0).hypot(y - 2112.5) < r)
+    };
+    // The newest snapshot's player and the garage's script_models. The player is read on both sides of the entity
+    // list, so a sample whose snapshot changed in between is marked and not judged.
+    let sample = |c: &mut Driven| -> Result<serde_json::Value, String> {
+        let before = c.state("player")?;
+        let entities = c.state("entities")?;
+        let after = c.state("player")?;
+        let list = entities["list"].as_array().cloned().unwrap_or_default();
+        let garage: Vec<_> = list
+            .iter()
+            .filter(|e| {
+                near(e, 400.0)
+                    || e["model_name"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("vehicle_"))
+            })
+            .map(|e| json!({"n": e["number"], "m": e["model_name"], "o": e["origin"]}))
+            .collect();
+        Ok(json!({
+            "snapshot": before["snapshot"],
+            "consistent": before["snapshot"] == after["snapshot"],
+            "server_time": before["server_time"],
+            "origin": before["origin"],
+            "count": entities["count"],
+            "numbers": list.iter().map(|e| e["number"].clone()).collect::<Vec<_>>(),
+            "car": list.iter().any(|e| near(e, 1.0)),
+            "car_model": list.iter().any(|e| near(e, 1.0) && e["model_name"] == CAR),
+            "garage": garage,
+        }))
+    };
+    let spawn = sample(c)?;
     // TeleportPlayer adds one unit after subtracting view height; ask for 323.5 to put the render eye at 324.5.
     c.ask(json!({"cmd": "exec", "line": "setviewpos 200.8 2267.5 323.5 175.3 0"}))?;
     // Render frames are not server ticks. Do not inspect entity selection until a snapshot actually contains the
@@ -80,6 +118,46 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         secs(5),
         "no snapshot arrived from the teleported position",
     )?;
+    // Every snapshot sent from the teleported eye must carry the car: judge 20 of them, not only the newest.
+    let mut timeline = Vec::new();
+    for _ in 0..600 {
+        if timeline.len() >= 20 {
+            break;
+        }
+        c.ask(json!({"cmd": "step", "frames": 1}))?;
+        let s = sample(c)?;
+        if s["consistent"] == true
+            && timeline
+                .last()
+                .is_none_or(|l: &serde_json::Value| l["snapshot"] != s["snapshot"])
+        {
+            timeline.push(s);
+        }
+    }
+    std::fs::write(
+        c.dir.join("teleport-timeline.json"),
+        serde_json::to_vec_pretty(&json!({"spawn": spawn, "after_teleport": timeline}))
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(s) = timeline.iter().find(|s| s["car"] != true) {
+        return Err(format!(
+            "garage car script_model missing from post-teleport snapshot {} (control/teleport-timeline.json)",
+            s["snapshot"]
+        ));
+    }
+    if let Some(s) = timeline.iter().find(|s| s["car_model"] != true) {
+        return Err(format!(
+            "garage car at (58, 2112.5) is not {CAR} in snapshot {} (control/teleport-timeline.json)",
+            s["snapshot"]
+        ));
+    }
+    if timeline.len() < 20 {
+        return Err(format!(
+            "only {} post-teleport snapshots arrived",
+            timeline.len()
+        ));
+    }
     c.ask(json!({"cmd": "step", "frames": 60}))?;
     let view = c.state("view")?;
     let origin = view["origin"].as_array().ok_or("missing render eye")?;
@@ -169,7 +247,14 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let result = drive(&mut c, &mut report);
     let status = c.finish(Duration::from_secs(30));
     report.files.extend(
-        ["garage.png", "no-car.png", "no-tyre.png", "models.json"].map(|f| format!("control/{f}")),
+        [
+            "garage.png",
+            "no-car.png",
+            "no-tyre.png",
+            "models.json",
+            "teleport-timeline.json",
+        ]
+        .map(|f| format!("control/{f}")),
     );
     if let Err(e) = result {
         report.status = Status::Failed;
