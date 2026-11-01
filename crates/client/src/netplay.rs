@@ -516,6 +516,8 @@ pub struct NetPlay {
     /// Events for the menu runtime (a person's menus drain them; autoplay answers them itself).
     ui_events: Vec<net::ui::UiEvent>,
     last_eye: Option<Vec3>,
+    /// The drawn eye and its angles (pitch, yaw, roll) last frame: what `viewpos` prints.
+    last_view: Option<(Vec3, [f32; 3])>,
     /// The melee aim assist: the tangents of the half angles of the view, the lunge the next command carries (yaw,
     /// distance), whether the swing is winding up, and the view's pull onto its target.
     tan_half_fov: [f32; 2],
@@ -660,6 +662,7 @@ impl NetPlay {
             auto_join: autoplay.then(net::ui::AutoJoin::default),
             ui_events: Vec::new(),
             last_eye: None,
+            last_view: None,
             tan_half_fov: [0.84, 0.63],
             melee_charge: (0.0, 0),
             meleeing: false,
@@ -993,6 +996,7 @@ impl NetPlay {
         self.own_new.clear();
         self.shakes.clear();
         self.last_eye = None;
+        self.last_view = None;
         self.camera.reset();
         self.ads_dof = crate::dof::AdsDof::default();
         self.fog.reset();
@@ -1088,6 +1092,16 @@ impl NetPlay {
             }
         }
         self.hearing.tick(now, |p| sound.close_voice_pipe(p));
+    }
+
+    /// `CG_Viewpos_f` (KisakCOD cg_consolecmds_mp.cpp:120): the drawn eye as `(x y z) : yaw pitch`, whole numbers.
+    pub fn viewpos(&self) -> Option<String> {
+        self.last_view.map(|(o, a)| {
+            format!(
+                "({:.0} {:.0} {:.0}) : {:.0} {:.0}",
+                o.x, o.y, o.z, a[1], a[0]
+            )
+        })
     }
 
     /// Connected with a server's match under way and no demo playing (`CA_ACTIVE`): what `cmd` and an unknown
@@ -1598,6 +1612,7 @@ impl NetPlay {
         laps.lap("kick+camera+view_model");
         // The listener hears from the drawn eye (`SND_SetListener(.., refdef.vieworg, ..)`).
         self.hear(dt, render, &ps, &events, &snap);
+        self.last_view = Some((render, seen));
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
@@ -1845,7 +1860,9 @@ impl NetPlay {
                 &def,
                 self.switches.ragdoll_tunables.max_simulating,
             );
-            self.effects.event(e, &def);
+            if !matches!(e, ClientEvent::PlayFxOnTag { .. }) {
+                self.effects.event(e, &def);
+            }
         }
         // Where the player looks (the demo and the scripted hit sit in front of the eyes, not the kicked view).
         let (look_yaw, look_pitch) = (self.angles[1].to_radians(), -self.angles[0].to_radians());
@@ -1906,6 +1923,7 @@ impl NetPlay {
         let projectiles = self.projectiles(&flying, st);
         if let Some(snap) = self.net.latest() {
             self.effects.world_fx(&snap.entities, &self.events, eye, st);
+            self.effects.update_script_bolts(&snap.entities, st);
         }
         self.effects.update(st, self.boxes.world());
         for s in self.effects.take_sounds() {
@@ -1938,7 +1956,10 @@ impl NetPlay {
 
     /// The crosshair of the weapon in `ps`: the spread the server would shoot with right now.
     fn reticle_of(&self, ps: &PlayerState) -> Option<Reticle> {
-        if !self.switches.crosshair {
+        if !self.switches.crosshair
+            || !crate::crosshair::allowed(ps, self.switches.draw_gun)
+            || self.look.flashbanged(self.live_time)
+        {
             return None;
         }
         let index = sim::pm::viewmodel_weapon(ps);
@@ -1983,9 +2004,22 @@ impl NetPlay {
                 );
             }
         }
+        if let Some(ui) = self.net.ui_ref() {
+            let tags = (1..net::ui::cs::EFFECT_TAGS_COUNT)
+                .filter_map(|slot| {
+                    let index = net::ui::cs::EFFECT_TAGS + slot;
+                    let value = ui.config(index);
+                    (!value.is_empty()).then(|| (index, value.to_owned()))
+                })
+                .collect::<Vec<_>>();
+            self.events.set_effect_tags(&tags);
+        }
         let events = self.events.scan(snap);
         for e in &events {
             *self.c.events.entry(e.kind()).or_default() += 1;
+            if matches!(e, ClientEvent::PlayFxOnTag { .. }) {
+                self.effects.event(e, &|_| None);
+            }
         }
         let (weapons, lib) = (&self.weapons, &self.lib);
         self.sound.world_events(
@@ -2515,6 +2549,8 @@ impl NetPlay {
                             out.push(m);
                         }
                     }
+                    self.effects
+                        .script_model_tags(e.number, &out[before..], &self.lib.content);
                     drawn += 1;
                     self.c.script_model_parts_max =
                         self.c.script_model_parts_max.max(out.len() - before);
@@ -2570,7 +2606,7 @@ impl NetPlay {
     }
 
     /// The weapons lying on the floor, in the world model of their weapon and variant.
-    fn items(&self, snap: &net::Snapshot) -> Vec<ModelInstance> {
+    fn items(&mut self, snap: &net::Snapshot) -> Vec<ModelInstance> {
         let mut out = Vec::new();
         for e in snap.entities.iter().filter(|e| e.etype == etype::ITEM) {
             let Some(def) = self.lib.content.weapon(self.weapons.name(e.weapon)) else {
@@ -2595,6 +2631,8 @@ impl NetPlay {
             m.origin = e.origin;
             m.angles = e.angles;
             m.light_origin = e.origin;
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
             out.push(m);
         }
         out
@@ -2632,16 +2670,17 @@ impl NetPlay {
                 self.sound.missile_loop(e.number, alias, e.origin);
                 looping.push(e.number);
             }
-            // Not drawn until its launch time (a rocket leaves the tube before it shows).
-            let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
-            let Some(model) = def.projectile_model.clone().filter(|_| until_launch <= 0) else {
+            let Some(m) = projectile_instance(def, e) else {
                 continue;
             };
-            let mut m = ModelInstance::new(model, render::ModelKind::World);
-            m.origin = e.origin;
-            m.angles = e.angles;
-            m.light_origin = e.origin;
-            out.push(m);
+            // A script's `playfxontag` on the projectile rides its model, as on its DObj.
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
+            // Not drawn until its launch time (a rocket leaves the tube before it shows).
+            let until_launch = ((e.eflags.wrapping_sub(st as u32) << 8) as i32) >> 8;
+            if until_launch <= 0 {
+                out.push(m);
+            }
         }
         self.sound.missile_loops_end(&looping);
         self.c.projectiles_max = self.c.projectiles_max.max(out.len());
@@ -2694,6 +2733,8 @@ impl NetPlay {
             if let Some(r) = rotors {
                 m.bones = r.pose(self.rotor_clock).to_vec();
             }
+            self.effects
+                .script_model_tags(e.number, std::slice::from_ref(&m), &self.lib.content);
             out.push(m);
         }
         self.c.vehicles_seen = seen;
@@ -2704,10 +2745,15 @@ impl NetPlay {
 
     /// Models of every other player, between the snapshots around the interpolation moment.
     fn remote_players(&mut self, dt: f32, st: i32, own: u16, show_own: bool) -> Vec<ModelInstance> {
+        self.effects.begin_script_tags();
+        let own_bolt = self.effects.has_script_bolt(own);
         let at = st - net::view::INTERP_DELAY_MS;
         self.drawn_at = Some(at);
-        let ents = self.net.snaps.interpolate(at, (!show_own).then_some(own));
-        if !show_own {
+        let ents = self
+            .net
+            .snaps
+            .interpolate(at, (!show_own && !own_bolt).then_some(own));
+        if !show_own && !own_bolt {
             // Not seen through its own eyes: the body is made anew (and falls anew) the next time it is.
             self.remotes.remove(&own);
         }
@@ -2890,8 +2936,13 @@ impl NetPlay {
             if let Some(c) = r.player.torso_animation() {
                 self.c.torso_clips.insert(c);
             }
-            drawn += 1;
-            out.extend(r.player.instances(e.origin));
+            let instances = r.player.instances(e.origin);
+            self.effects
+                .script_model_tags(e.number, &instances, &self.lib.content);
+            if e.client != own || show_own {
+                drawn += 1;
+                out.extend(instances);
+            }
         }
         out.extend(self.corpse_models(dt, &ents, now));
         self.effects.set_remote_tags(guns);
@@ -2979,6 +3030,17 @@ impl NetPlay {
         };
         self.c.cmd_drawn = d;
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
+        let bolts = self.effects.bolted_stats();
+        report["fx"]["bolted"] = json!({
+            "active": bolts.active,
+            "resolved_frames": bolts.resolved_frames,
+            "stopped": bolts.stopped,
+            "expired": bolts.expired,
+            "missing_tags": bolts.missing_tags,
+            "tag_displacement": bolts.max_tag_displacement,
+            "element_displacement": bolts.max_element_displacement,
+            "follow_error": bolts.max_follow_error,
+        });
         report["script_model_parts_max"] = self.c.script_model_parts_max.into();
         report["player_attachments"] = json!(self.c.player_attachments);
         report["gun_speed_given"] = json!(self.c.gun_speed_given);
@@ -3042,6 +3104,18 @@ impl NetPlay {
     fn feet(&self) -> [f32; 3] {
         self.c.end
     }
+}
+
+/// A projectile entity's model (`CG_Missile`): the weapon's projectile model at the entity's origin and angles.
+pub(crate) fn projectile_instance(
+    def: &assets::zone::weapon::WeaponDef,
+    e: &EntityState,
+) -> Option<ModelInstance> {
+    let mut m = ModelInstance::new(def.projectile_model.clone()?, render::ModelKind::World);
+    m.origin = e.origin;
+    m.angles = e.angles;
+    m.light_origin = e.origin;
+    Some(m)
 }
 
 /// Notes a remote player's model that could not be built: logged once per distinct fault, kept for the report.

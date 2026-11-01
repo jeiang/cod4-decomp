@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// `asin`, `acos`, `getsubstr`, `strtok`, `addtestclient`, `spawnturret` and `precacheturret` translated in part from KisakCOD (game_mp/g_scr_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// `asin`, `acos`, `getsubstr`, `strtok`, `addtestclient`, `spawnturret`, `precacheturret` and `Scr_PlayFXOnTag` translated in part from KisakCOD (game_mp/g_scr_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! Builtin functions (no entity receiver).
 
 use std::rc::Rc;
@@ -1108,17 +1108,47 @@ fn trigger_fx(g: &mut Game, _: &mut Vm, a: Args) -> R {
     }
 }
 
-/// `playfxontag(fx, entity, tag)`: an effect at a tag of an entity, played where the tag is now.
+/// `Scr_PlayFXOnTag`: register the effect/tag pair and raise an event on the visible target, not a temp entity.
 fn play_fx_on_tag(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    if a.len() != 3 {
+        return Err("Incorrect number of parameters".into());
+    }
     let index = a.int(0)?;
-    let ent = a.entity(1)?;
+    if !(1..100).contains(&index) {
+        return Err(format!("effect id {index} is invalid\n"));
+    }
+    let n = a.entity(1)?.num;
+    let model = &g.ent(n).ok_or("entity does not exist")?.model;
+    if model.is_empty() {
+        return Err("cannot play fx on entity with no model".into());
+    }
     let tag = a.string(2)?.to_ascii_lowercase();
-    let n = ent.num;
-    let (origin, forward) = match g.world_tag(n, &tag) {
-        Some(m) => (m[3], m[0]),
-        None => (g.ent(n).map_or([0.0; 3], |e| e.origin), [1.0, 0.0, 0.0]),
-    };
-    emit_fx(g, index, origin, forward, n);
+    if tag.contains('"') {
+        return Err("cannot use \" characters in tag names\n".into());
+    }
+    if g.local_tag(n, &tag).is_none() {
+        return Err(format!(
+            "tag '{tag}' does not exist on entity with model '{model}'"
+        ));
+    }
+    let text = format!("{index:02}{tag}");
+    let cs = (1..net::ui::cs::EFFECT_TAGS_COUNT)
+        .find(|&i| {
+            g.configstrings
+                .get(&u32::from(net::ui::cs::EFFECT_TAGS + i))
+                .is_none_or(|s| s == &text)
+        })
+        .ok_or("too many effect tags (max 255)")?;
+    g.set_configstring(net::ui::cs::EFFECT_TAGS + cs, &text);
+    let event = crate::tempev::ev::PLAY_FX_ON_TAG;
+    if let Some(c) = g.client_mut(n) {
+        c.ps.add_event(event, u32::from(cs));
+    } else {
+        let e = g.ent_mut(n).ok_or("entity does not exist")?;
+        e.events.rotate_left(1);
+        e.events[3] = (event, cs as u8);
+        e.event_sequence = e.event_sequence.wrapping_add(1);
+    }
     Ok(Value::Undefined)
 }
 
@@ -1132,16 +1162,6 @@ fn vision_set(g: &mut Game, a: Args, night: bool) -> R {
     };
     g.vision_set(&name, ms, night);
     Ok(Value::Undefined)
-}
-
-fn emit_fx(g: &mut Game, index: i32, origin: V3, forward: V3, ent: u16) {
-    let now = g.level.time;
-    g.tempev.add(now, crate::tempev::ev::PLAY_FX, |s| {
-        s.origin = origin;
-        s.angles = crate::tempev::dir_to_angles(forward);
-        s.model = index.clamp(0, 1023) as u16;
-        s.client = ent;
-    });
 }
 
 /// The outer and inner radius of a physics event (`origin, outer, inner, ...`).
@@ -1583,6 +1603,123 @@ mod world_fx_tests {
             .into_iter()
             .filter(|e| matches!(e.etype, etype::FX | etype::LOOP_FX))
             .collect()
+    }
+
+    #[test]
+    fn a_missing_playfxontag_bone_terminates_the_script_thread_with_the_stock_error() {
+        let prog = compile(
+            &[(
+                "t.gsc",
+                "main(ent) { playfxontag(1, ent, \"unknown_tag\"); level.survived = true; }",
+            )],
+            &Builtins::stock_mp(),
+            Options::default(),
+        )
+        .unwrap();
+        let entry = prog.find("t", "main").unwrap();
+        let dispatch = crate::script::Dispatch::new(&prog);
+        let mut vm = Vm::new(prog).unwrap();
+        let (mut g, _) = setup();
+        g.content.test_model_bone("test_model", "tag_origin");
+        let mut e = Ent::new(EntKind::Plain, "script_model");
+        e.model = "test_model".into();
+        let n = g.spawn(e).unwrap();
+        let ent = g.entity_value(&mut vm, n);
+        let mut host = crate::script::ScriptHost {
+            game: &mut g,
+            dispatch: &dispatch,
+        };
+        let err = vm.call(&mut host, entry, None, &[ent]).unwrap_err();
+        assert!(
+            err.message
+                .contains("tag 'unknown_tag' does not exist on entity with model 'test_model'"),
+            "{}",
+            err.message
+        );
+        assert!(vm.level().get("survived").is_none());
+        assert!(host.game.tempev.live(host.game.level.time).next().is_none());
+    }
+
+    #[test]
+    fn playfxontag_raises_the_target_event_with_a_deduplicated_effect_tag_configstring() {
+        let (mut g, mut vm) = setup();
+        g.content.test_model_bone("test_model", "tag_origin");
+        g.note_model("test_model");
+        let mut e = Ent::new(EntKind::Plain, "script_model");
+        e.model = "test_model".into();
+        e.origin = [10.0, 20.0, 30.0];
+        let n = g.spawn(e).unwrap();
+        let ent = g.entity_value(&mut vm, n);
+        let args = [Value::Int(1), ent, Value::str("TAG_ORIGIN")];
+        for sequence in 1..=2 {
+            play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args)).unwrap();
+            let sent = crate::netsv::world_snapshot(&g);
+            let target = sent.iter().find(|s| s.state.number == n).unwrap();
+            assert_eq!(target.state.event, ev::PLAY_FX_ON_TAG);
+            assert_eq!(target.state.event_parm, 1);
+            assert_eq!(target.state.event_seq, sequence);
+            assert_eq!(target.state.etype, etype::SCRIPT_MODEL);
+            assert_eq!(
+                g.configstrings[&u32::from(net::ui::cs::EFFECT_TAGS + 1)],
+                "01tag_origin"
+            );
+            assert!(
+                !g.configstrings
+                    .contains_key(&u32::from(net::ui::cs::EFFECT_TAGS + 2))
+            );
+            assert!(g.tempev.live(g.level.time).next().is_none());
+        }
+        g.ent_mut(n).unwrap().hidden = true;
+        assert!(world_entities(&g).iter().all(|s| s.number != n));
+        let sent = crate::netsv::world_snapshot(&g);
+        assert_eq!(
+            sent.iter().find(|s| s.state.number == n).unwrap().shown_to,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn playfxontag_refuses_missing_bones_models_and_invalid_parameters_without_events() {
+        let (mut g, mut vm) = setup();
+        let n = g.spawn(Ent::new(EntKind::Plain, "script_model")).unwrap();
+        let ent = g.entity_value(&mut vm, n);
+        let mut args = [Value::Int(1), ent, Value::str("unknown_tag")];
+        assert_eq!(
+            play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args)).unwrap_err(),
+            "cannot play fx on entity with no model"
+        );
+        g.content.test_model_bone("test_model", "tag_origin");
+        g.ent_mut(n).unwrap().model = "test_model".into();
+        assert_eq!(
+            play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args)).unwrap_err(),
+            "tag 'unknown_tag' does not exist on entity with model 'test_model'"
+        );
+        args[2] = Value::str("tag_origin");
+        for bad in [0, -1, 100] {
+            args[0] = Value::Int(bad);
+            assert_eq!(
+                play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args)).unwrap_err(),
+                format!("effect id {bad} is invalid\n")
+            );
+        }
+        args[0] = Value::Int(1);
+        args[2] = Value::str("tag_\"bad");
+        assert!(
+            play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args))
+                .unwrap_err()
+                .contains("cannot use")
+        );
+        assert_eq!(
+            play_fx_on_tag(&mut g, &mut vm, Args::new("playfxontag", &args[..2])).unwrap_err(),
+            "Incorrect number of parameters"
+        );
+        assert_eq!(g.ent(n).unwrap().event_sequence, 0);
+        assert!(g.tempev.live(g.level.time).next().is_none());
+        assert!(
+            !g.configstrings
+                .keys()
+                .any(|&i| i >= u32::from(net::ui::cs::EFFECT_TAGS))
+        );
     }
 
     #[test]

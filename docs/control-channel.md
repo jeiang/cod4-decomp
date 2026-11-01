@@ -34,7 +34,7 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `wait {state, timeout_ms}` | answer when the state document matches (or the clock runs out: `ok` false with `observed`) |
 | `assert {state}` | one look: `ok` false unless the state matches now |
 | `step frames` | answer after that many frames |
-| `server {op}` | the listen server: `state`, `exec`, `cvar` (a client started with `--connect` runs no listen server and answers with an error, so the queue never waits on it) |
+| `server {op}` | the listen server: `state`, `exec`, `cvar`, `command_frame` (a client started with `--connect` runs no listen server and answers with an error, so the queue never waits on it) |
 | `watch {number, model, from}` / `{clear}` | count one entity in every snapshot the client accepts from now on (with `from`, first the held snapshots numbered `from` or later); read back in the `watch` section |
 | `quit` | end the run as `quit` does |
 
@@ -49,6 +49,16 @@ The `menu` section lists each open menu's items with their `name`, the `text` th
 so an agent can click a stock button by its label. The listen server's `clients` (`{"cmd":"server","op":"state",
 "what":"clients"}`) carry each client's `weapons` (owned, by name) and the cheat commands' state (`noclip`, `ufo`,
 `godmode`, `demigod`, `notarget`), which the `client-host-console` stage reads.
+
+`server {"op":"command_frame","collect_ms":150}` collects actual UDP input for the requested wall-clock
+interval (0–190 ms) without running simulation, then runs one normal server tick and returns its `clients`
+state immediately. The cap follows the server's limits: one tick takes at most 24 usercmds of a client and
+at most 64 wait queued, so at the client's 125 Hz send cap about 190 ms fits in one tick and none is dropped.
+This development-only scheduling fixture lets `client-hud` prove latest-backlog selection without requiring
+the GPU to outpace the server. It neither injects usercmds nor changes their selection; `collect_ms:0` ticks
+without polling new traffic to check retained input. Ordinary listen-server scheduling is unchanged outside
+this explicit request.
+
 Paths a stage leans on: `menu.open` (the stack), `menu.items[]` (`menu`, `name`, `text` as shown, `visible`, and
 `rect` `[x, y, w, h]` in window pixels, the rectangle a click is tested against: a static text item's is its text's),
 `console.open` and `console.text` (the console's lines as one text, for `contains`), `player.alive|dead|origin|angles|
