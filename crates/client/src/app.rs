@@ -5561,6 +5561,13 @@ impl crate::control::Control for ControlHost<'_> {
         }
     }
 
+    fn watch(&mut self, req: &serde_json::Map<String, Value>) -> Result<Value, String> {
+        match self.st.net.as_mut() {
+            Some(net) => net.control_watch(req),
+            None => Err("watch needs a game in progress".to_owned()),
+        }
+    }
+
     fn quit(&mut self) {
         self.st.control_quit = true;
     }

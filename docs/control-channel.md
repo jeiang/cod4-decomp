@@ -21,7 +21,7 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `cmd` | what it does |
 |---|---|
 | `ping` | the client's name and frames drawn |
-| `state [what]` | the state document, or one of its sections: `client menu player entities scoreboard hud draw sound fx events net console cvars binds view server` (`events`: `world` by kind, `own` by `sim::pm::ev` number; `menu.items` carry each item's `name`, shown `text`, `visible` and `rect`) |
+| `state [what]` | the state document, or one of its sections: `client menu player entities scoreboard hud draw sound fx events net console cvars binds view server watch` (`events`: `world` by kind, `own` by `sim::pm::ev` number; `menu.items` carry each item's `name`, shown `text`, `visible` and `rect`) |
 | `cvar name [value]` | read a variable, or set it |
 | `cvars [filter]` | every variable, or those whose name contains `filter` |
 | `binds command` | the keys bound to a command |
@@ -35,6 +35,7 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `assert {state}` | one look: `ok` false unless the state matches now |
 | `step frames` | answer after that many frames |
 | `server {op}` | the listen server: `state`, `exec`, `cvar` (a client started with `--connect` runs no listen server and answers with an error, so the queue never waits on it) |
+| `watch {number, model, from}` / `{clear}` | count one entity in every snapshot the client accepts from now on (with `from`, first the held snapshots numbered `from` or later); read back in the `watch` section |
 | `quit` | end the run as `quit` does |
 
 The injected events enter the same queue the window's events do (`crates/client/src/input/event.rs`), so a key
@@ -51,11 +52,29 @@ so an agent can click a stock button by its label. The listen server's `clients`
 Paths a stage leans on: `menu.open` (the stack), `menu.items[]` (`menu`, `name`, `text` as shown, `visible`, and
 `rect` `[x, y, w, h]` in window pixels, the rectangle a click is tested against: a static text item's is its text's),
 `console.open` and `console.text` (the console's lines as one text, for `contains`), `player.alive|dead|origin|angles|
-team|client`, `entities.list[]` (`kind`, `origin`, `team`, `dead`, `client`, `actor`), `hud.report` (what the HUD shows
+team|client|snapshot|teleport`, `entities.list[]` (`kind`, `origin`, `team`, `dead`, `client`, `actor`, `model`,
+`model_name`), `watch` (`first`, `last`, `received`, `present`, `matched`, `breaks`), `hud.report` (what the HUD shows
 now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `hud.stats` (what it drew over the run:
 `messages`, `chat`, `window_lines`, `scoreboard_frames`, `killcam_frames`, `names_max`, `unresolved`, ...),
 `hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
 `net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`).
+
+`entities.list[].model_name` resolves each snapshot model index through the server's model configstrings.
+`entities.snapshot` and `entities.server_time` name the snapshot the list came from, so a check that compares
+snapshots reads the list and its snapshot in one request.
+`player.snapshot` is the newest snapshot's number. `player.teleport` (`before`, `after`) names the newest pair of
+snapshots, accepted one after the other, whose player teleport bits differ: the server flips the bit when it moves
+the player (a spawn, `setviewpos`), so `after` is the first snapshot built since the move, where a `watch` can start
+(`from`). It is `null` until the bit first flips on the level, and a new level forgets it.
+`watch` follows one entity (`number`, and optionally the model index `model` it must carry, as `entities.list[].model`)
+through every snapshot the client accepts, where reading `entities` now and then would miss one that drops it
+between two readings. The `watch` section counts them: `first` and `last` (the snapshot numbers counted),
+`received`, `present` (carried the entity) and `matched` (with the model asked for), `missed` and `breaks` (snapshot
+numbers skipped, and how often), and the first 16 `gaps` (`[before, after]`), `absent` snapshots and `wrong_model`
+(`[snapshot, model]`). The server numbers a client's snapshots one by one, so `breaks` 0 means none was lost or
+turned away. `{"cmd":"watch","clear":true}` stops it; the section is `null` while nothing is followed.
+For same-camera rendering comparisons, the diagnostic console commands `drawscriptmodels 0` and `drawprops 0`
+hide those two classes independently; `1` restores them, as with `drawvehicles`.
 
 ```sh
 printf '%s\n' '{"id":1,"cmd":"state","what":"menu"}' | nc -q1 127.0.0.1 18095

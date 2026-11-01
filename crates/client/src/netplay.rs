@@ -573,6 +573,10 @@ pub struct NetPlay {
     rotor_clock: f32,
     /// `drawvehicles 0` leaves the vehicles out of the picture (the harness compares a view with and without them).
     draw_vehicles: bool,
+    /// `drawscriptmodels 0` leaves scripted props out for a same-camera visual comparison.
+    draw_script_models: bool,
+    /// `drawprops 0` leaves client-side dynamic props out for a same-camera visual comparison.
+    draw_props: bool,
     /// The server's `delta_angles` of the last snapshot: when it turns the player's view (a spawn, a teleport), the
     /// commands' angles turn with it.
     last_delta: Option<[f32; 3]>,
@@ -696,6 +700,8 @@ impl NetPlay {
             rotors: HashMap::new(),
             rotor_clock: 0.0,
             draw_vehicles: true,
+            draw_script_models: true,
+            draw_props: true,
             last_delta: None,
         })
     }
@@ -1400,7 +1406,9 @@ impl NetPlay {
                 (yaw, pitch, seen[2].to_radians()),
             );
             laps.lap("follow: kill_cam+players+models+fx");
-            models.extend(self.props.instances());
+            if self.draw_props {
+                models.extend(self.props.instances());
+            }
             models.extend(drawn.models);
             laps.finish(&mut self.slow_net_frames);
             return Some(NetFrame {
@@ -1619,7 +1627,9 @@ impl NetPlay {
         laps.lap("dof");
         let drawn = self.fx_frame(dt, st, own, &events, render, (yaw, pitch, roll));
         laps.lap("fx");
-        models.extend(self.props.instances());
+        if self.draw_props {
+            models.extend(self.props.instances());
+        }
         models.extend(drawn.models);
         laps.finish(&mut self.slow_net_frames);
         Some(NetFrame {
@@ -2104,6 +2114,14 @@ impl NetPlay {
             self.draw_vehicles = arg.trim() != "0";
             return;
         }
+        if let Some(arg) = cmd.strip_prefix("drawscriptmodels ") {
+            self.draw_script_models = arg.trim() != "0";
+            return;
+        }
+        if let Some(arg) = cmd.strip_prefix("drawprops ") {
+            self.draw_props = arg.trim() != "0";
+            return;
+        }
         let forward = match cmd {
             "weapnext" => true,
             "weapprev" => false,
@@ -2430,6 +2448,9 @@ impl NetPlay {
     /// The scripted models of the level (`script_model`: props, cars, objectives), posed at the origin and angles the
     /// server gave them, between the snapshots around the interpolation moment like the players they move with.
     fn script_models(&mut self, dt: f32, st: i32, own: u16) -> Vec<ModelInstance> {
+        if !self.draw_script_models {
+            return Vec::new();
+        }
         let ents = self
             .net
             .snaps

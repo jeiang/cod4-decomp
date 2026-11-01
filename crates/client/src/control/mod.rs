@@ -32,6 +32,7 @@ pub const PARTS: &[&str] = &[
     "binds",
     "view",
     "server",
+    "watch",
 ];
 
 use crate::Cli;
