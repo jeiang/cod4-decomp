@@ -178,6 +178,13 @@ pub fn alpha(r: &Reticle) -> f32 {
     alpha_of(r.spread_scale, r.ads, (r.alpha_scale, r.alpha_min))
 }
 
+/// What the crosshair came to on screen, as `cgis=crosshair_alpha` reports it: the drawn opacity to two places, or
+/// `hidden` when there was no reticle to draw (refused by [`allowed`], such as fully aimed with the gun drawn, or
+/// dead, flashbanged, `cg_drawCrosshair 0`).
+pub fn shown(alpha: Option<f32>) -> String {
+    alpha.map_or_else(|| "hidden".to_owned(), |a| format!("{a:.2}"))
+}
+
 fn alpha_of(spread_scale: f32, ads: f32, (alpha_scale, alpha_min): (f32, f32)) -> f32 {
     ((1.0 - ads) * alpha_scale * (1.0 - spread_scale / 255.0)).max(alpha_min)
 }
@@ -388,5 +395,25 @@ mod tests {
         assert_eq!(growth(true, 2990), 9.9);
         assert_eq!(growth(true, 2000), 0.0);
         assert_eq!(growth(false, 3500), 0.0);
+    }
+
+    /// The `client-gfx` sequence: `cg_crosshairAlpha 0`, then `cg_crosshairAlphaMin 0.75` at the hip, then the
+    /// sights fully up. Aimed with the gun drawn the stock gate hides the crosshair, which reports `hidden` rather
+    /// than the floored alpha (#494); without the gun the floor still holds.
+    #[test]
+    fn the_report_shows_the_floor_at_the_hip_and_hidden_when_fully_aimed() {
+        let tan = 30f32.to_radians().tan();
+        let drawn = |ps: &sim::pm::PlayerState, draw_gun: bool, cfg| {
+            shown(
+                allowed(ps, draw_gun)
+                    .then(|| layout_of(&STYLE, 1.0, 0.0, ps.weapon_pos_frac, tan, cfg).0),
+            )
+        };
+        let mut ps = sim::pm::PlayerState::default();
+        assert_eq!(drawn(&ps, true, (0.0, 0.0)), "0.00");
+        assert_eq!(drawn(&ps, true, (0.0, 0.75)), "0.75");
+        ps.weapon_pos_frac = 1.0;
+        assert_eq!(drawn(&ps, true, (0.0, 0.75)), "hidden");
+        assert_eq!(drawn(&ps, false, (0.0, 0.75)), "0.75");
     }
 }

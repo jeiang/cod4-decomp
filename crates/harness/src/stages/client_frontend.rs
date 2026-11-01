@@ -20,6 +20,17 @@ const NAME: &str = "client-frontend";
 const STEPS: &str = "wait=2,see=Join Game+Start New Server+Select Profile+Rank & Challenges+Controls+Options+Mods+Single Player+Quit,shot=main,\
 mouse=Select Profile,menu=player_profile:5,wait=1,shot=profile,key=escape,wait=1,\
 mouse=Create a Class,menu=pc_cac_popup:5,wait=1,shot=cac,key=escape,wait=1,\
+build=1.7.568,live=Create a Class,stat=260 0,wait=1,locked=Create a Class,shot=cac_locked,stat=260 1,wait=1,live=Create a Class,\
+mouse=Options,menu=main_options:5,wait=1,build=1.7.568,shot=options,\
+live=Graphics...+Texture Settings...+Sound...+Voice Chat...+Game Options...+Multiplayer Options...+Optimal System Settings,nosee=Cheats...,\
+mouse=Graphics...,menu=options_graphics:5,wait=1,values=options_graphics,key=escape,wait=1,\
+mouse=Options,menu=main_options:5,wait=1,mouse=Texture Settings...,menu=options_graphics_texture:5,wait=1,values=options_graphics_texture,key=escape,wait=1,\
+mouse=Options,menu=main_options:5,wait=1,mouse=Sound...,menu=options_sound:5,wait=1,values=options_sound,key=escape,wait=1,\
+mouse=Options,menu=main_options:5,wait=1,mouse=Voice Chat...,menu=options_voice:5,wait=1,values=options_voice,key=escape,wait=1,\
+mouse=Options,menu=main_options:5,wait=1,mouse=Game Options...,menu=options_game:5,wait=1,values=options_game,\
+mouse=$monkeytoy,wait=1,cvaris=monkeytoy 0,key=escape,wait=1,\
+mouse=Options,menu=main_options:5,wait=1,mouse=Multiplayer Options...,menu=options_multi:5,wait=1,values=options_multi,shot=options_multi,\
+key=escape,wait=1,\
 mouse=Join Game,menu=pc_join_unranked:5,wait=1,shot=join,\
 set=set ui_netSource 2,favorite=127.0.0.1:28999,rows=2 1,\
 mouse=#220,cvaris=ui_netSource 0,mouse=#253,cvaris=ui_joinGameType 1,set=set ui_joinGameType 0,\
@@ -32,10 +43,10 @@ mouse=#245,cvaris=ui_netGametypeName dom,mouse=#245,cvaris=ui_netGametypeName sd
 mouse=#245,cvaris=ui_netGametypeName sab,mouse=#245,cvaris=ui_netGametypeName war,shot=mode_back";
 
 /// What the join menu's LAN list must show once it has scanned: a server of this stage's own, on a standard port.
-/// The server this stage runs is a listen server, whose `sv_pure` is off (a dedicated server's default is on), and
-/// the stock filter setting `ui_browserShowPure 1` lists pure servers only: a player would untick it to see this
-/// one, and so does the stage.
-const LAN_STEP: &str = "set=set ui_browserShowPure 0,rows=2 +1:15,";
+/// The server this stage runs has `sv_pure` off (the library default; the dedicated program's is on), so it is not
+/// pure and says `mod 1`. The stock filter settings `ui_browserShowPure 1` and `ui_browserMod 0` list only pure,
+/// unmodified servers: a player would untick the one and set the other to either to see it, and so does the stage.
+const LAN_STEP: &str = "set=set ui_browserShowPure 0,set=set ui_browserMod -1,rows=2 +1:15,";
 
 /// A game server running in this process on one of the standard ports the client's LAN scan asks, until dropped.
 struct LanServer {
