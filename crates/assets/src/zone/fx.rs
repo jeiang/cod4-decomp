@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Visual loading follows KisakCOD database/db_load.cpp: Load_FxElemDefVisuals and Load_FxElemVisuals
+// (GPL-3.0, copyright the KisakCOD contributors and Activision; MP 1.8 layout also used by 1.7).
 //! FxEffectDef and FxImpactTable.
 
 use super::error::{Result, ZoneError};
@@ -211,7 +213,8 @@ fn vis_state(f: &mut Fields) -> VisState {
 }
 
 /// `count` pointer-sized visual slots, each decoded by `one`. A count of one
-/// or less stores the visual in the pointer itself.
+/// or less stores the visual in the pointer itself. Zero still decodes that
+/// pointer, but does not invent a visual: it is a simulation-only element.
 fn visual_slots<T: std::any::Any + Send + Sync>(
     s: &mut Stream,
     slot: Option<Addr>,
@@ -226,7 +229,12 @@ fn visual_slots<T: std::any::Any + Send + Sync>(
             one(s, slot, p)
         })
     } else {
-        Ok(Arc::from(vec![one(s, slot, p)?]))
+        let visual = one(s, slot, p)?;
+        Ok(if count == 0 {
+            Arc::from(Vec::new())
+        } else {
+            Arc::from(vec![visual])
+        })
     }
 }
 
@@ -438,4 +446,35 @@ fn impact(s: &mut Stream, h: &[u8]) -> Result<FxImpactTable> {
 
 pub(super) fn load_impact(s: &mut Stream, p: Ptr) -> Result<Option<Arc<FxImpactTable>>> {
     s.temp_asset(p, 4, 8, impact)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn zero_visual_count_is_not_an_unresolved_model() {
+        let mut stream = Stream::new(Box::new(Cursor::new(Vec::<u8>::new())));
+        let FxVisuals::Models(models) =
+            visuals(&mut stream, elem::MODEL, 0, None, Ptr::Null).unwrap()
+        else {
+            panic!("model element");
+        };
+        assert!(
+            models.is_empty(),
+            "zero visuals must not become a missing model"
+        );
+
+        let FxVisuals::Models(models) =
+            visuals(&mut stream, elem::MODEL, 1, None, Ptr::Null).unwrap()
+        else {
+            panic!("model element");
+        };
+        assert_eq!(models.len(), 1);
+        assert!(
+            models[0].is_none(),
+            "a genuinely missing model remains diagnosable"
+        );
+    }
 }

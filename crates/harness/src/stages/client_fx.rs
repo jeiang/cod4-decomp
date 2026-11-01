@@ -60,6 +60,23 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 r.metrics.get("fx.unresolved_materials")
             ));
         }
+        // Require the counters, not only process success: zero-visual model elements are simulation-only,
+        // while authored model visuals must resolve and the stock debris effect must actually draw models.
+        for (key, positive) in [
+            ("fx.unresolved_models", false),
+            ("fx.model_elements_drawn_max", true),
+            ("fx.simulation_only_model_elements", true),
+        ] {
+            let value = r.metrics.get(key).copied();
+            let valid = value.is_some_and(|n| if positive { n > 0.0 } else { n == 0.0 });
+            if !valid {
+                r.status = Status::Failed;
+                r.reason = Some(format!(
+                    "{key} must be {}, report says {value:?} (see fx.json model names)",
+                    if positive { "positive" } else { "zero" }
+                ));
+            }
+        }
     } else {
         r.reason = Some(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }

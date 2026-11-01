@@ -1090,6 +1090,7 @@ impl Viewer {
         // `Com_StartupVariable` again: the command line's `set`s outrank the configs.
         input.startup_variables(&self.cli.startup);
         // `--name` is the `name` variable, a userinfo variable the joins send (`Dvar_InfoString` of the userinfo set).
+        // The command line's `+name`/`+set name` run after this and win over it.
         if self.cli.name_given {
             input.cvars.set("name", &self.cli.name, false);
         }
@@ -4199,8 +4200,8 @@ fn netplay_rates(input: &Input) -> (i32, i32) {
     (get("rate", 90_000), get("snaps", 30))
 }
 
-/// The name a join goes under: the `name` variable (a profile's config, `+set name`, `+name`, `--name`), else the
-/// client's default.
+/// The name a join goes under: the `name` variable, else the client's default. The profile's config sets it, then
+/// `--name` after the configs, then `+set name` and `+name` when the command line's lines run, so a `+` name wins.
 fn player_name(cli: &Cli, input: &Input) -> String {
     input
         .cvar("name")
@@ -5607,6 +5608,13 @@ impl crate::control::Control for ControlHost<'_> {
         {
             let _ = (seq, req);
             Some(Err("the browser hosts no server".to_owned()))
+        }
+    }
+
+    fn watch(&mut self, req: &serde_json::Map<String, Value>) -> Result<Value, String> {
+        match self.st.net.as_mut() {
+            Some(net) => net.control_watch(req),
+            None => Err("watch needs a game in progress".to_owned()),
         }
     }
 

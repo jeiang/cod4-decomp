@@ -104,6 +104,45 @@ fn attachments_and_hidden_parts_reach_the_wire_and_name_the_same_tags_on_the_oth
     assert_eq!(sent.part_bits, [0, 0x4000_0000, 0, 0]);
 }
 
+/// `DObjCreateDuplicateParts`: an empty tag melds silently, a non-empty tag no earlier model has warns. The wire
+/// carries both as 0, so the server diagnoses the explicit miss where it still has the tag's name.
+#[test]
+fn an_explicit_missing_tag_warns_on_publication_but_an_empty_meld_does_not() {
+    let Some(mut s) = boot() else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let g = &mut s.game;
+    let (body, head, gun) = (
+        "body_mp_usmc_assault",
+        "head_mp_usmc_tactical_mich",
+        "weapon_ak47",
+    );
+    for m in [body, head, gun] {
+        g.note_model(m);
+    }
+    let e = model_ent(g, body, [0.0; 3], [0.0; 3]);
+    assert!(g.attach_model(e, head, "", true));
+    assert!(g.attach_model(e, gun, "tag_absent_regression_388", false));
+    let (snap, events) = logging::capture(|| server::netsv::world_snapshot(g));
+    let sent = snap
+        .into_iter()
+        .find(|x| x.state.number == e)
+        .expect("the script model is in the snapshot")
+        .state;
+    let got: Vec<_> = sent.attachments().collect();
+    assert_eq!(got.len(), 2);
+    assert_eq!(got[0].1, 0, "the head melds");
+    assert_eq!(got[1].1, 0, "the miss hangs from the origin");
+    let warned: Vec<_> = events
+        .iter()
+        .filter(|e| e.message == "explicit attachment tag did not resolve")
+        .collect();
+    assert_eq!(warned.len(), 1, "only the explicit miss warns: {events:?}");
+    assert_eq!(warned[0].field("tag"), Some("tag_absent_regression_388"));
+    assert_eq!(warned[0].field("parent"), Some(body));
+}
+
 #[test]
 fn tags_of_attached_models_are_found_through_the_attach_tag() {
     let Some(mut s) = boot() else {

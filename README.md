@@ -54,6 +54,16 @@ The exported HUD includes `sprint_facts` (weapon, weapon duration scale, `ps.per
 
 Stage 3 (`client-flythrough`) needs a GPU and a display: it runs the `cod4e` client (`$COD4E_CLIENT`, else next to the harness) on mp_crash once per display mode (native borderless, windowed 1080p and 720p, plus an exclusive run at another native-size refresh when the monitor has one), 12 s each (`COD4E_FLYTHROUGH_SECS`), and records one short video (a few MB), a screenshot and per-frame timings per mode. It also runs mp_crash uncapped at native size (`--present immediate` and `mailbox`) and two more stock maps (mp_bog, mp_crash_snow), so the bundle shows sun shadows, fog and the film/glow post effects on three maps. `frames.csv` carries GPU pass time from timestamp queries where the device has them (`gpu_ms`, a few frames behind the render call, matched by frame number). The video is recorded at 30 fps on a background encoder thread that drops the slots it cannot keep up with; each sample carries its own duration, so the file stays in sync. The loss follows the frame size and the cores the run has: 0.6-1.7% at a 2536x1416 window and at 1280x720, 34.9-37.8% at 5120x1440, all with the host to itself, and up to 56% at 1920x1080 beside two other runs. The stage records the lost share per mode as a metric and fails only a recording that kept under 8 fps, too few frames to review; the native-resolution shortfall is #442. Without the client, an install or a display it is skipped.
 
+`client-garage` covers the parked green car and loose tyre at mp_crash's garage (#357). It starts a real match with
+the player's `devmap`, team/class selection, `noclip` and `setviewpos` commands, then compares the issue-pose image
+against the same camera with script models and dynamic props separately hidden (`drawscriptmodels 0`,
+`drawprops 0`, diagnostic commands analogous to `drawvehicles`). Both objects must change their own image regions.
+Before the images, the client counts the car in every snapshot from the first one built after the move (the control
+channel's `watch`): at least 40 consecutive snapshots must arrive, and each must carry the car with its model. The
+serverless `--flythrough` is a tour of the static world, not a match: it does not spawn script models or client-side
+dynamic props, so their absence there is not evidence of a missing model in play. The control state names snapshot
+models (`entities.list[].model_name`) for diagnosis.
+
 ## Headless server
 
 ```sh
@@ -147,11 +157,34 @@ COD4_PATH=/path/to/install nix develop -c just client --listen --bots 9   # solo
 COD4_PATH=/path/to/install nix develop -c just client --connect host:28960 # a `cod4e-server` (set net_port; default 28960)
 ```
 
-The client also takes the original's launch line (`Com_ParseCommandLine`), as launchers and server browsers write it: every `+` word starts a console line and the words after it are that line's arguments, beside the client's own `--` options (a `--` word ends the line; a `-` word such as a negative value does not). The `set`, `seta`, `sets` and `setu` lines are applied before the configs run and again after them, so they outrank the profile's config (`Com_StartupVariable`); `+set fs_game mods/<name>` picks the mod as `--game` does. Every line then runs as a console line once the main menu is up (`Com_AddStartupCommands`), so `+exec`, `+name`, `+connect`, `+map` and `+devmap` do what they do in the console; the joins go under the `name` variable (the profile's, `+name` or `+set name`, `--name`, else `player`). Stage `client-session` starts the client with `+set cg_fov 90 +exec <file> +name <nick> +connect <server>` against a `cod4e-server` and asserts the join, the name the server lists, the variable over the profile's `seta cg_fov 65` and the file's marker variable.
+The client also takes the original's launch line (`Com_ParseCommandLine`), as launchers and server browsers write it: every `+` word starts a console line and the words after it are that line's arguments, beside the client's own `--` options (a `--` word ends the line; a `-` word such as a negative value does not). The `set` and `seta` lines are applied before the configs run and again after them, so they outrank the profile's config (`Com_StartupVariable`); `sets` and `setu` are treated the same way, an extension of ours (stock applies only `set` and `seta` early, `sets`/`setu` only when the line runs), as the server does. `+set fs_game mods/<name>` picks the mod as `--game` does. Every line then runs as a console line once the main menu is up (`Com_AddStartupCommands`), so `+exec`, `+name`, `+connect`, `+map` and `+devmap` do what they do in the console. The joins go under the `name` variable: the profile's config sets it, `--name` sets it after the configs, and `+name` or `+set name` set it last (the `+` lines run after `--name`), so a `+` name wins; with none of them it is `player`. Stage `client-session` starts the client with `+set cg_fov 90 +exec <file> +name <nick> +connect <server>` against a `cod4e-server` and asserts the join, the name the server lists, the variable over the profile's `seta cg_fov 65` and the file's marker variable.
+
+The split differs from stock on purpose. Stock cuts the one Windows command-line string at every `+` and newline, even inside a word or a quoted argument, and keeps at most 32 lines; the client gets its arguments already split into words by the shell, so only a word that starts with `+` starts a line: a `+` inside a word or inside a quoted argument (`+name "a+b"`, `+set g_x 1+2`) stays part of the line, where stock would cut it, and a whole command line passed as one argument (`"+set a 1 +set b 2"`) is one line, not split. A quoted argument that itself starts with `+` still starts a line. There is no line limit.
 
 ```sh
 cod4e +set cg_fov 90 +exec mine.cfg +name Player1 +connect host:28960
 ```
+
+Player heads use stock DObj root melding: an empty attachment tag shares matching bone names
+with the body, rather than looking up a missing tag or placing the head at the feet. Tags are
+case-insensitive exact names (the `j_` prefix is part of a bone name), resolved from each
+model's own 1.7 zone script-string table. An explicit missing held-weapon tag warns and retains
+the model at entity root, as KisakCOD's DObj construction does; normal players already have
+a bind pose before their first animation tick. A script attachment whose non-empty tag none of
+the earlier models has is warned about by the server (`explicit attachment tag did not
+resolve`, naming the parent model and the tag, as `DObjCreateDuplicateParts` warns), because
+the attachment wire carries both an empty tag and such a miss as 0. `client-models` asserts
+loaded heads meld and all nine held weapons sit at their hand tags before that tick; an
+install-backed unit test sweeps the heads of every stock map. The attachment wire remains this
+engine's compact bone-index protocol, not stock's script-string attachment protocol.
+
+FX model elements with zero authored visuals are not unresolved XModels: they draw nothing (as
+`FX_DrawElement` skips a zero `visualCount`) and run their element lifecycle; model physics for
+them is not spawned, which stock's `FX_SpawnModelPhysics` also cannot do without a visual.
+Elements with actual visuals still resolve their models across the loaded zones. `client-fx`
+requires positive drawn-model and zero-visual-element counters, zero genuinely unresolved model
+visuals, and records effect/model names in `fx.json`.
+
 
 The client talks to the server over UDP (`net`: sequenced, fragmented netchan, delta-coded snapshots about 36 per second, up to 3 usercmds per packet with redundancy). `--listen` runs the same server inside the client process. The player's own movement is predicted with the very `sim::pm::run_usercmd` the server runs (other players are collision boxes from the snapshot; server corrections fade over 100 ms, a teleport shown as one; the server's `g_speed` and non-stock movement and weapon dvars such as `jump_height`, `friction` and `player_meleeRange` reach the client in a configstring; own footsteps, jumps, landings and shots are played from the predicted events, once each however often the replay raises them); other players are drawn 100 ms behind the server clock between two snapshots, and the usercmds are stamped with that same moment, as stock's `CL_FinishMove` stamps the time cgame draws at. With `g_antilag 1` (the default, archived and in the server info) a bullet shot or a knife swing is judged at its command's time: the server moves every other playing player's origin back to where it was then (from a history of origins, when the command is more than one server frame and at most 400 ms old and the player was alive all the way back), keeps their live stance box and animation pose, judges the shot and its damage, and puts them back; the killcam starts that much earlier. With `g_antilag 0` shots are judged against the live bodies. Rockets and grenades are not compensated, as in stock. Keys, mouse, gamepad and the config file are the input layer's (`bind w +forward`). In a match the mouse is locked whenever no menu is open (no click needed after a menu closes); Esc with no menu to open releases it (it never quits) and a click takes it again. `COD4E_INPUT_DEBUG=1` prints one `input:` line per second to stderr: events per second from GCMouse and winit, which source feeds the look, the GCMouse devices and whether our handler is on each, window focus, pointer lock, and how many frames of motion the focus/lock gate threw away.
 

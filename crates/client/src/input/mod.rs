@@ -380,9 +380,9 @@ impl Input {
         self.dirty = false;
     }
 
-    /// `Com_StartupVariable`: runs the command line's `set`, `seta`, `sets` and `setu` lines among `lines` and no
-    /// other. Run before the configs, so what reads the variable while they load sees it, and again after them, so it
-    /// outranks what they set.
+    /// `Com_StartupVariable`: runs the command line's `set` and `seta` lines among `lines` (and, our extension, `sets`
+    /// and `setu`) and no other. Run before the configs, so what reads the variable while they load sees it, and
+    /// again after them, so it outranks what they set.
     pub fn startup_variables(&mut self, lines: &[String]) {
         for line in lines {
             if config::startup_set(line).is_some() {
