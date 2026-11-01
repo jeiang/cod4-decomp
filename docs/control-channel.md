@@ -21,7 +21,7 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `cmd` | what it does |
 |---|---|
 | `ping` | the client's name and frames drawn |
-| `state [what]` | the state document, or one of its sections: `client menu player entities scoreboard hud draw sound fx net console cvars binds view server` |
+| `state [what]` | the state document, or one of its sections: `client menu player entities scoreboard hud draw sound fx events net console cvars binds view server` (`events`: `world` by kind, `own` by `sim::pm::ev` number; `menu.items` carry each item's `name`, shown `text`, `visible` and `rect`) |
 | `cvar name [value]` | read a variable, or set it |
 | `cvars [filter]` | every variable, or those whose name contains `filter` |
 | `binds command` | the keys bound to a command |
@@ -64,16 +64,32 @@ printf '%s\n' '{"id":1,"cmd":"state","what":"menu"}' | nc -q1 127.0.0.1 18095
 ## Transports
 
 The channel is a queue of requests plus a `Transport` (`crates/devctrl`): `TcpTransport` (loopback), `StdioTransport`
-and `QueueTransport` (a page polls it, and replies by id), so a browser transport plugs in without changing a request.
+and the browser's `PageTransport` (`crates/client/src/web.rs`), so a transport plugs in without changing a request.
 A request whose handler cannot answer yet (a `wait`, a capture between frames, a step with frames left, a listen
 server's reply) stays at the head of the queue and is offered again on the next frame.
 
-## The stages
+### The browser
+
+The page is the wire when it is opened with `?control`: `web/serve.py` keeps a request queue, the harness `POST`s one
+request line to `/control` and gets the reply line as the response (504 after 30 s without one, so a long `wait` is
+asked for in pieces), the page long-polls `GET /control/next` and hands each line to the module between frames
+(`cod4.control_next`), and the module's reply goes back through `cod4.control_reply` to `POST /control/reply`, paired
+by `id`. The requests and the handler are the native ones; only `capture` differs: the page reads the canvas (the
+module has no file to write and WebGPU maps buffers asynchronously), so the reply carries `png_base64`, `width`,
+`height` and `lit_fraction` and no `path`. Without `?control` nothing polls and the module opens no channel. `server`
+requests answer with an error: the browser hosts no server.
+
+## The stage
 
 `control-channel` in the harness runs the acceptance of #378: console opened with the player's key, `bots 3` typed in,
 four players waited for, the entity list and scoreboard read, a menu item clicked at the centre of the rectangle the
 state document gave for it, and a capture written with no visible window.
 
+`web-match` runs the browser client through the same requests over the page transport: menus clicked, movement, a
+mouse delta after a trusted click grants pointer lock, fire, grenade, HUD, sound, scoreboard, killcam, map change,
+Leave Game and the no-hosting popup, each asserted on the state document (see the README's Browser section). It then
+runs the native client on the same map, gametype and bot count and records the measured movement, shot and HUD
+ownerdraw differences.
 `crates/harness/src/control.rs` is the harness's side: `Driven` starts a client with `--control 0`, asks, waits,
 presses binds and keys, types, clicks a menu item by name or text where the state document put it, and captures;
 `Walker` is a stage's own player in a match, turning toward the nearest living enemy with the mouse (or the arrow
