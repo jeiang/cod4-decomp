@@ -778,9 +778,13 @@ fn bolted(
             fx.event(&event, &|_| None);
         }
         fx.begin_script_tags();
-        let entity = game.ent(number).ok_or("script model vanished")?;
-        let instances = pose.instances(entity.origin, entity.angles, [0; 4]);
-        fx.script_model_tags(number, &instances, &game.content);
+        // The match draws entities `INTERP_DELAY_MS` (100) behind the snapshot its events come from, so the target
+        // is first posed two snapshots after the event; the bolt must wait for it, not count the tag missing.
+        if now >= net::view::INTERP_DELAY_MS {
+            let entity = game.ent(number).ok_or("script model vanished")?;
+            let instances = pose.instances(entity.origin, entity.angles, [0; 4]);
+            fx.script_model_tags(number, &instances, &game.content);
+        }
         fx.update_script_bolts(&snapshot.entities, now);
         fx.update(now, world);
         fx.draw(eye, 0.0, 0.0, 0.0);

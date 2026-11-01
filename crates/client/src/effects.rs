@@ -952,11 +952,15 @@ impl Effects {
         self.script_bolts.iter().any(|b| b.entity == entity)
     }
 
-    /// Begins a rendered pose frame; only tags actually resolved this frame may move an attachment.
+    /// Begins a rendered pose frame; only tags actually resolved this frame may move an attachment. A bolt is judged
+    /// only once [`Effects::script_model_tags`] poses its entity: events are read from the newest snapshot, but
+    /// entities are drawn `INTERP_DELAY_MS` behind it, so an entity spawned with its `playfxontag` (an airstrike's
+    /// `tag_origin` model) is not drawn yet. Stock reads the event as the snapshot becomes current, when the
+    /// entity's DObj exists (`CG_PlayBoltedEffect`, cg_event.cpp:46-61).
     pub fn begin_script_tags(&mut self) {
         for b in &mut self.script_bolts {
             b.frame = None;
-            b.attempted = true;
+            b.attempted = false;
         }
     }
 
