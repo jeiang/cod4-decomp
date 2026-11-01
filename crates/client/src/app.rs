@@ -5828,6 +5828,9 @@ fn hud_state(st: &mut State) -> Value {
             // A message window has a line up.
             "feed": (0..crate::hud::WINDOWS).any(|w| sh.st.feed.active(w, live.time)),
             "players_listed": live.scores.len(),
+            // The scoreboard's rows in list order as `[client, team]`, and the viewer's client number.
+            "score_rows": live.scores.iter().map(|r| [u32::from(r.client), u32::from(r.team)]).collect::<Vec<_>>(),
+            "own": live.own,
             "own_team": live.own_team,
         },
         "missing_images": sh.missing(),

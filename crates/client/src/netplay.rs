@@ -3042,6 +3042,7 @@ impl NetPlay {
             "events": self.c.events,
             "fx": {
                 "played": self.effects.played,
+                "flesh_hits": self.effects.flesh_hits,
                 "missing": self.effects.missing,
                 "quads_max": self.c.fx_quads_max,
                 "decals_max": self.c.fx_decals_max,

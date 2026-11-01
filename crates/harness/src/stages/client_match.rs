@@ -4,7 +4,8 @@
 //! enemy along the bots' navigation mesh, turns toward enemies it can see and shoots them, for 90 seconds. The stage
 //! reads the client's report and asserts what makes a match playable: connected and spawned, the player moved by
 //! prediction, the others were drawn,
-//! snapshots kept coming, prediction was rarely corrected, shots were fired and their events (impacts, flashes, pain) became effects, and the server ran without
+//! snapshots kept coming, prediction was rarely corrected, shots were fired and their events (impacts, flashes) became
+//! effects with one blood effect per bullet hit on a player, and the server ran without
 //! script errors. Bandwidth, frame times and the server's tick cost are reported as metrics. Needs a display and the
 //! install; skips cleanly without.
 use super::client_flythrough::locate_client;
@@ -628,15 +629,26 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         failures.extend(misses("sound", &snd["missing"], ALLOWED_MISSING_SOUND));
     }
     // What the shots did must have reached the client as events.
-    let (impacts, pains) = (
-        num(net, &["events", "bullet_impact"]),
-        num(net, &["events", "player_pain"]),
-    );
+    let impacts = num(net, &["events", "bullet_impact"]);
     if shots >= 1.0 && impacts < 1.0 {
         failures.push("shots were fired but the client saw no bullet impact event".into());
     }
-    if hits >= 1.0 && pains < 1.0 {
-        failures.push("enemies were hit but the client saw no pain event".into());
+    // A hit on a player draws one blood effect, the bullet impact's on flesh (`CG_BulletHitEvent`); the victim's pain
+    // is player state and draws none (#422).
+    let (flesh_hits, blood) = (
+        num(&net["fx"], &["flesh_hits"]),
+        num(&net["fx"], &["played", "blood"]),
+    );
+    if hits >= 1.0 && flesh_hits < 1.0 {
+        failures.push("enemies were hit but the client saw no bullet impact on flesh".into());
+    }
+    if flesh_hits >= 1.0 && blood < 1.0 {
+        failures.push(format!("{flesh_hits} bullet hits on players drew no blood"));
+    }
+    if blood > flesh_hits {
+        failures.push(format!(
+            "{blood} blood effects for {flesh_hits} bullet hits on players: one hit draws one"
+        ));
     }
     if impacts >= 1.0 && heard(&["bulletimpact"]) < 1.0 {
         failures.push(format!(
@@ -740,7 +752,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     );
     m.insert("client.walked".into(), num(net, &["path"]));
     m.insert("client.event_bullet_impacts".into(), impacts);
-    m.insert("client.event_pains".into(), pains);
+    m.insert("client.fx_flesh_hits".into(), flesh_hits);
+    m.insert("client.fx_blood".into(), blood);
     m.insert("match.shots".into(), shots);
     m.insert("match.hits".into(), hits);
     m.insert("match.eye_jerk".into(), jerky);

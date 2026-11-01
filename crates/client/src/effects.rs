@@ -60,8 +60,6 @@ const NO_BLOOD_FLESH_HIT: &str = "impacts/flesh_hit_noblood";
 fn flesh_column(head: bool) -> usize {
     2 * usize::from(head)
 }
-/// How high above a player's feet blood appears.
-const CHEST: f32 = 40.0;
 
 /// Whether a weapon's explosion also plays the impact table's blast for the surface (a flashbang's and a dud's do
 /// not): `weapProjExplosion_t` 2 and 4.
@@ -201,8 +199,12 @@ pub struct Effects {
     dice: u32,
     /// `gfx_tracer`, which the tracers are drawn with; none, none are drawn.
     tracer_material: Option<Arc<Material>>,
-    /// What was played, by kind; for the report.
+    /// What was played, by kind; for the report. `blood` counts every play of an impact table's flesh effect, whatever
+    /// asked for it.
     pub played: BTreeMap<&'static str, u64>,
+    /// Bullet hits on a player (`BULLET_IMPACT` events on flesh, exit wounds aside) that reached the effects: stock
+    /// draws one blood effect for each, and nothing else draws one (`CG_BulletHitEvent`).
+    pub flesh_hits: u64,
     /// Total draws (sprite quads, clouds, models, trail strips) that passed the camera's cull, by the lower-case name
     /// of the effect that was played; a runner's children count against it.
     pub effect_quads: BTreeMap<String, u64>,
@@ -407,6 +409,7 @@ impl Effects {
             dice: 0x9e37_79b9,
             tracer_material: None,
             played: BTreeMap::new(),
+            flesh_hits: 0,
             effect_quads: BTreeMap::new(),
             missing: HashSet::new(),
         }
@@ -443,6 +446,17 @@ impl Effects {
         }
     }
 
+    /// `d` is one of the impact table's flesh (blood) effects.
+    fn is_blood(&self, d: &Arc<FxEffectDef>) -> bool {
+        self.impact.as_ref().is_some_and(|t| {
+            t.table.iter().any(|e| {
+                e.flesh
+                    .iter()
+                    .any(|f| f.as_ref().is_some_and(|f| Arc::ptr_eq(f, d)))
+            })
+        })
+    }
+
     /// `d`, after a warning when it is a stub (the name behind a comma and nothing in it): a reference to another
     /// zone's effect that linking left unresolved, which plays nothing.
     fn resolve(&self, d: &Arc<FxEffectDef>) -> Arc<FxEffectDef> {
@@ -465,6 +479,9 @@ impl Effects {
                     .entered();
             self.fx.play(&d, Frame::facing(at, dir));
             *self.played.entry(kind).or_default() += 1;
+            if self.is_blood(&d) {
+                *self.played.entry("blood").or_default() += 1;
+            }
         }
     }
 
@@ -498,6 +515,9 @@ impl Effects {
                 // The exit wound's marks are not drawn (only its sound is played).
                 if *exit {
                     return;
+                }
+                if *surface == SURFACE_FLESH {
+                    self.flesh_hits += 1;
                 }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
                 // `cg_bloodLimit`: a second blood effect inside the window is not played.
@@ -627,15 +647,6 @@ impl Effects {
                     last_frame: None,
                     waiting_since: None,
                 });
-            }
-            ClientEvent::PlayerPain { origin, .. } => {
-                let def = self.impact_effect(1, SURFACE_FLESH, flesh_column(false));
-                self.play(
-                    "player_pain",
-                    def,
-                    Vec3::from(*origin) + Vec3::Z * CHEST,
-                    Vec3::Z,
-                );
             }
             // A death plays no blood of its own in stock: the bullet impacts did (the event only pushes the body).
             ClientEvent::PlayerDeath { .. }
