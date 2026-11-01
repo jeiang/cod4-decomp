@@ -19,9 +19,10 @@ const LIMIT: Duration = Duration::from_secs(180);
 const STEPS_ON: &str = "renderer,wait=2,gfxis=shadows 1,shot=foliage-on";
 const STEPS_OFF: &str = "renderer,wait=2,gfxis=shadows 0,shot=foliage-off";
 /// The middle of the crown, including the black cutout cards of #358, and the front of its trunk. Fractions of the
-/// picture, left/top to right/bottom, so the check does not depend on the window size.
+/// picture, left/top to right/bottom, so the check does not depend on the window size. The trunk probe is wholly
+/// inside the solid front face: its edges and overhead branches legitimately receive foliage shadows.
 const CANOPY: (f32, f32, f32, f32) = (0.20, 0.00, 0.80, 0.35);
-const TRUNK: (f32, f32, f32, f32) = (0.485, 0.15, 0.55, 0.85);
+const TRUNK: (f32, f32, f32, f32) = (0.51, 0.30, 0.53, 0.80);
 /// Luma at or below which a pixel is one of the black shadow-caster silhouettes rather than a shaded leaf.
 const BLACK: i32 = 24;
 const MAX_BLACK_SHARE: f64 = 0.04;
@@ -224,7 +225,7 @@ mod tests {
 
         let mut acne = clean.clone();
         for y in 30..170 {
-            for x in 97..110 {
+            for x in 101..105 {
                 acne[((y * w + x) * 3) as usize..((y * w + x) * 3 + 3) as usize]
                     .copy_from_slice(&[90; 3]);
             }
