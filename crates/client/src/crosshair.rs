@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// Portions translated from KisakCOD (GPL-2.0-or-later), cgame/cg_draw_reticles.cpp,
+// copyright Activision / Infinity Ward.
 //! The hip-fire crosshair: the weapon's centre dot and four ticks that move out with the weapon's spread.
 //!
 //! The weapon file names the two materials, their sizes (in the 640x480 menu space), the smallest distance of a tick
@@ -17,6 +19,24 @@ pub const ALPHA: f32 = 1.0;
 pub const MIN_ALPHA: f32 = 0.5;
 /// Half the 480-high menu space: the spread's tangent times this over the vertical field of view's is the distance.
 const HALF_HEIGHT: f32 = 240.0;
+
+/// KisakCOD MP 1.8 `CG_DrawCrosshair` / `AllowedToDrawCrosshair` (115-197, 601-627).
+/// These weapon-state values also apply to CoD4 MP 1.7; no 1.8-only states are used.
+/// Reload start/end/interruption and offhand states deliberately remain allowed.
+pub fn allowed(ps: &sim::pm::PlayerState, draw_gun: bool) -> bool {
+    use sim::pm::weapon_state as ws;
+    !(matches!(
+        ps.weapon_state,
+        ws::RAISING
+            | ws::RAISING_ALTSWITCH
+            | ws::DROPPING
+            | ws::DROPPING_QUICK
+            | ws::RELOADING
+            | ws::MELEE_INIT
+            | ws::MELEE_FIRE
+            | ws::MELEE_END
+    ) || ps.weapon_pos_frac == 1.0 && draw_gun)
+}
 
 /// The numbers of the weapon file the layout uses.
 #[derive(Clone, Copy, Debug)]
@@ -84,15 +104,24 @@ pub fn layout(r: &Reticle) -> (f32, Vec<Piece>) {
     )
 }
 
+/// The reticle's opacity before screen geometry is known (`CG_CalcCrosshairColor`).
+pub fn alpha(r: &Reticle) -> f32 {
+    alpha_of(r.spread_scale, r.ads, (r.alpha_scale, r.alpha_min))
+}
+
+fn alpha_of(spread_scale: f32, ads: f32, (alpha_scale, alpha_min): (f32, f32)) -> f32 {
+    ((1.0 - ads) * alpha_scale * (1.0 - spread_scale / 255.0)).max(alpha_min)
+}
+
 fn layout_of(
     w: &Style,
     spread_deg: f32,
     spread_scale: f32,
     ads: f32,
     tan_half_fov_y: f32,
-    (alpha_scale, alpha_min): (f32, f32),
+    alpha_cfg: (f32, f32),
 ) -> (f32, Vec<Piece>) {
-    let alpha = ((1.0 - ads) * alpha_scale * (1.0 - spread_scale / 255.0)).max(alpha_min);
+    let alpha = alpha_of(spread_scale, ads, alpha_cfg);
     if alpha < 0.01 || tan_half_fov_y <= 0.0 {
         return (0.0, Vec::new());
     }
@@ -155,6 +184,31 @@ pub fn draw(g: &mut Ui2d, cache: &mut TextureCache, r: &Reticle, size: (u32, u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stock_weapon_states_hide_only_the_named_actions() {
+        use sim::pm::{PlayerState, weapon_state as ws};
+        for state in 0..=ws::NIGHTVISION_REMOVE {
+            let ps = PlayerState {
+                weapon_state: state,
+                ..PlayerState::default()
+            };
+            let hidden = [1, 2, 3, 4, 7, 12, 13, 14].contains(&state);
+            assert_eq!(allowed(&ps, true), !hidden, "weapon state {state}");
+        }
+    }
+
+    #[test]
+    fn fully_aimed_crosshair_requires_hidden_viewmodel() {
+        let mut ps = sim::pm::PlayerState::default();
+        for frac in [0.0, 0.5, 0.99] {
+            ps.weapon_pos_frac = frac;
+            assert!(allowed(&ps, true));
+        }
+        ps.weapon_pos_frac = 1.0;
+        assert!(!allowed(&ps, true));
+        assert!(allowed(&ps, false));
+    }
     const STYLE: Style = Style {
         center: Some(8.0),
         side: Some(16.0),
