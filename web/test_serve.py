@@ -6,7 +6,7 @@ import pathlib
 import threading
 import unittest
 
-import serve
+from web import serve
 
 
 class ControlBridgeTests(unittest.TestCase):

@@ -200,6 +200,8 @@ What the browser does not do, on purpose: it hosts no listen server (no threads 
 
 The parity run records the full native/browser ownerdraw-id difference, not an equality claim between different play paths: cursor hints (72) depend on nearby usable objects, and the full-map compass (181/182/183/185/188) depends on which menus were shown. Both clients must draw the gameplay ammo, weapon-name and compass ownerdraws. The sound assertion requires a currently active voice as well as a voice-start count; the native shot measurement comes from the listen server's player statistics.
 
+Both browser stages probe `navigator.gpu.requestAdapter()` and record its outcome and adapter identity, rather than treating API presence or a missing render report as proof of availability. `web-match` fails if an adapter is offered but the client selects WebGL2; `web-client` requires a WebGPU render report whenever its probe succeeds. The movement measurement must stay alive in one spawn: death, killcam or a changed spawn count fails the attempt instead of counting a respawn teleport as walking.
+
 ## Layout
 
 | crate | role |

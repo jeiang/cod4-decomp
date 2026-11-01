@@ -107,7 +107,7 @@ mod imp {
             }
         }
 
-        pub fn click(&mut self) -> Result<(), String> {
+        fn attach(&mut self, port: u16) -> Result<(), String> {
             if self.session.is_none() {
                 let targets = self.call("Target.getTargets", json!({}), false)?;
                 let target = targets["targetInfos"]
@@ -116,10 +116,12 @@ mod imp {
                     .flatten()
                     .find(|t| {
                         t["type"] == "page"
-                            && t["url"].as_str().is_some_and(|u| u.contains(":18092/"))
+                            && t["url"]
+                                .as_str()
+                                .is_some_and(|u| u.contains(&format!(":{port}/")))
                     })
                     .and_then(|t| t["targetId"].as_str())
-                    .ok_or("Chromium has no web-match page target")?;
+                    .ok_or("Chromium has no matching page target")?;
                 let attached = self.call(
                     "Target.attachToTarget",
                     json!({"targetId": target, "flatten": true}),
@@ -132,6 +134,36 @@ mod imp {
                         .to_owned(),
                 );
             }
+            Ok(())
+        }
+
+        /// Probe the actual adapter, not merely API presence. Properties are explicit because GPUAdapterInfo's
+        /// WebIDL getters do not appear when JSON.stringify serializes the object itself.
+        pub fn adapter(&mut self, port: u16) -> Result<Value, String> {
+            self.attach(port)?;
+            let result = self.call(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "(async () => { const gpu = !!navigator.gpu; try { const a = await navigator.gpu?.requestAdapter(); const i = a?.info; return {gpu, adapter: !!a, info: i ? {vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description, isFallbackAdapter: i.isFallbackAdapter} : null}; } catch (e) { return {gpu, adapter: false, error: String(e)}; } })()",
+                    "awaitPromise": true,
+                    "returnByValue": true
+                }),
+                true,
+            )?;
+            if result["exceptionDetails"].is_object() {
+                return Err(format!(
+                    "adapter probe threw: {}",
+                    result["exceptionDetails"]
+                ));
+            }
+            result["result"]["value"]
+                .as_object()
+                .ok_or("adapter probe returned no object")?;
+            Ok(result["result"]["value"].clone())
+        }
+
+        pub fn click(&mut self) -> Result<(), String> {
+            self.attach(18092)?;
             for (kind, count) in [("mousePressed", 1), ("mouseReleased", 1)] {
                 self.call(
                     "Input.dispatchMouseEvent",
@@ -159,5 +191,8 @@ pub fn pipe(_: &mut Command) -> io::Result<BrowserPipe> {
 impl BrowserPipe {
     pub fn click(&mut self) -> Result<(), String> {
         Err("a trusted browser click needs Chromium's DevTools pipe on Unix".into())
+    }
+    pub fn adapter(&mut self, _: u16) -> Result<Value, String> {
+        Err("a browser adapter probe needs Chromium's DevTools pipe on Unix".into())
     }
 }
