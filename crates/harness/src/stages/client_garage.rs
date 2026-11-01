@@ -109,35 +109,55 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         }))
     };
     let mut spawn = sample(c)?;
-    spawn["origin"] = c.state("player")?["origin"].clone();
+    let player = c.state("player")?;
+    spawn["origin"] = player["origin"].clone();
+    // The newest teleport the snapshots showed so far is the spawn's, if any; the move below makes a later one.
+    spawn["teleport"] = player["teleport"].clone();
+    let earlier = player["teleport"]["after"].as_u64().unwrap_or(0);
+    let timeline = c.dir.join("teleport-timeline.json");
     // TeleportPlayer adds one unit after subtracting view height; ask for 323.5 to put the render eye at 324.5.
     c.ask(json!({"cmd": "exec", "line": "setviewpos 200.8 2267.5 323.5 175.3 0"}))?;
-    // Render frames are not server ticks: judge what the server sends from the garage only once a snapshot carries
-    // the teleported player; an earlier reading describes the spawn, not the issue pose. The wait names the snapshot
-    // it saw, the newest one when the position matched.
+    // Render frames are not server ticks: judge what the server sends from the garage from the first snapshot built
+    // since the move, which flips the player's teleport bit. Two snapshots can land in one frame, so the newest one
+    // when the position matches may be the second; the client names the pair the bit flipped between instead.
     let arrived = c.until(
         json!({
             "player.origin.0": {"gt": 199.8, "lt": 201.8},
             "player.origin.1": {"gt": 2266.5, "lt": 2268.5},
             "player.origin.2": {"gt": 263.5, "lt": 265.5},
-            "player.snapshot": {"gt": 0},
+            "player.teleport.before": {"exists": true},
+            "player.teleport.after": {"gt": earlier},
         }),
         secs(5),
-        "no snapshot arrived from the teleported position",
+        "no snapshot from the teleported position flipped the player's teleport bit",
     )?;
-    let teleported = arrived["observed"]["player.snapshot"]
-        .as_u64()
-        .ok_or_else(|| format!("the teleport wait did not say which snapshot it saw: {arrived}"))?;
+    let observed = &arrived["observed"];
+    let (Some(before), Some(teleported)) = (
+        observed["player.teleport.before"].as_u64(),
+        observed["player.teleport.after"].as_u64(),
+    ) else {
+        return Err(format!(
+            "the teleport wait did not say which snapshots the teleport bit flipped between: {arrived}"
+        ));
+    };
+    let teleport = json!({"earlier": earlier, "before": before, "after": teleported});
+    // The server numbers a client's snapshots one by one: a gap here means a snapshot around the move never arrived,
+    // possibly the first one built since it, which the count must start at.
+    if before + 1 != teleported {
+        write_json(&timeline, &json!({"spawn": spawn, "teleport": teleport}))?;
+        return Err(format!(
+            "the teleport bit flipped between snapshots {before} and {teleported}: one in between never arrived, and it may have been the first one built since the move (control/teleport-timeline.json)"
+        ));
+    }
     // Every snapshot sent from the teleported eye must carry the car, not only the ones a reading happens to catch.
-    // Find the car in the newest snapshot, then let the client count it in each snapshot it accepts from the one the
-    // wait saw onward: a snapshot that drops it between two readings is counted too.
+    // Find the car in the newest snapshot, then let the client count it in each snapshot it accepts from the first one
+    // built since the move: a snapshot that drops it between two readings is counted too.
     let seen = c.state("entities")?;
-    let timeline = c.dir.join("teleport-timeline.json");
     let list = seen["list"].as_array().cloned().unwrap_or_default();
     let Some(car) = list.iter().find(|e| e["actor"] != true && near(e, 1.0)) else {
         write_json(
             &timeline,
-            &json!({"spawn": spawn, "teleported": teleported, "seen": seen}),
+            &json!({"spawn": spawn, "teleport": teleport, "seen": seen}),
         )?;
         return Err(format!(
             "garage car script_model missing from snapshot {} after the teleport (control/teleport-timeline.json)",
@@ -147,7 +167,7 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     if car["model_name"] != CAR {
         write_json(
             &timeline,
-            &json!({"spawn": spawn, "teleported": teleported, "seen": seen}),
+            &json!({"spawn": spawn, "teleport": teleport, "seen": seen}),
         )?;
         return Err(format!(
             "garage car at (58, 2112.5) is {} in snapshot {}, not {CAR} (control/teleport-timeline.json)",
@@ -168,7 +188,7 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
         &timeline,
         &json!({
             "spawn": spawn,
-            "teleported": teleported,
+            "teleport": teleport,
             "seen": {"snapshot": seen["snapshot"], "server_time": seen["server_time"], "car": car},
             "watch": watch,
         }),
@@ -177,7 +197,7 @@ fn drive(c: &mut Driven, report: &mut StageReport) -> Result<(), String> {
     let (first, last) = (&watch["first"], &watch["last"]);
     if first.as_u64() != Some(teleported) {
         return Err(format!(
-            "the car's count began at snapshot {first}, not at {teleported}, the one the teleport wait saw (control/teleport-timeline.json)"
+            "the car's count began at snapshot {first}, not at {teleported}, the first one built since the teleport (control/teleport-timeline.json)"
         ));
     }
     if n("breaks") != 0 {
