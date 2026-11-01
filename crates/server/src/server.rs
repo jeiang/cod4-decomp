@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // The voice audience and session checks (`hears_voice`) are translated from KisakCOD (server_mp/sv_voice_mp.cpp G_BroadcastVoice, game_mp/g_main_mp.cpp; GPL-3.0, copyright the KisakCOD contributors and Activision).
+// Synchronous command selection follows KisakCOD game_mp/g_active_mp.cpp:801-833 (GPL-3.0, copyright the KisakCOD contributors and Activision).
 //! The headless server: boot, map load, console commands and the frame loop.
 //!
 //! Boot follows the original's dedicated start: command-line `set`s first, `default_mp.cfg`
@@ -82,13 +83,23 @@ fn script_options(c: &Cvars) -> gsc::Options {
     }
 }
 
-/// `g_synchronousClients`: a person's usercmds are run at the server's rate, one a frame, rather than caught up
-/// with as a backlog.
-fn frame_cmds(mut cmds: Vec<sim::pm::UserCmd>, synchronous: bool) -> Vec<sim::pm::UserCmd> {
+/// `ClientThink` retains the latest received command; `G_RunClient` reuses it every synchronous frame
+/// at level time, even when nothing arrived. Normal play still runs the entire received backlog.
+fn frame_cmds(
+    mut cmds: Vec<sim::pm::UserCmd>,
+    retained: sim::pm::UserCmd,
+    synchronous: bool,
+    time: i32,
+) -> impl Iterator<Item = sim::pm::UserCmd> {
+    let frame = synchronous.then(|| {
+        let mut cmd = cmds.last().copied().unwrap_or(retained);
+        cmd.server_time = time;
+        cmd
+    });
     if synchronous {
-        cmds.truncate(1);
+        cmds.clear();
     }
-    cmds
+    frame.into_iter().chain(cmds)
 }
 
 /// The password a `connect` must give (`g_password`); the literal `none` means no password, as at the original.
@@ -1529,6 +1540,17 @@ impl Server {
                     .filter(|&w| c.inv.has(w))
                     .map(|w| self.game.weapons.name(w))
                     .collect();
+                let command = |cmd: sim::pm::UserCmd| {
+                    json!({
+                        "server_time": cmd.server_time,
+                        "forwardmove": cmd.forwardmove,
+                        "rightmove": cmd.rightmove,
+                        "buttons": cmd.buttons,
+                        "angles": cmd.angles,
+                        "weapon": cmd.weapon,
+                    })
+                };
+                let f = &c.command_frame;
                 out.push(json!({
                     "slot": n,
                     "session": c.session.name(),
@@ -1545,6 +1567,16 @@ impl Server {
                     "weapons": weapons,
                     "alive": c.ps.pm_type < sim::pm::PmType::Dead,
                     "spawn_count": c.spawn_count,
+                    "command_frame": {
+                        "synchronous": f.synchronous,
+                        "received": f.received,
+                        "latest_received": f.latest_received.map(command),
+                        "retained": command(f.retained),
+                        "selected": f.selected.map(command),
+                        "frame_time": f.frame_time,
+                        "previous_time": f.previous_time,
+                        "simulated_time": f.simulated_time,
+                    },
                     // The cheat commands' state (`noclip`, `ufo`, `god`, `demigod`, `notarget`; #370).
                     "noclip": c.noclip,
                     "ufo": c.ufo,
@@ -2816,8 +2848,7 @@ impl Server {
                 game: &mut self.game,
                 dispatch: &run.dispatch,
             };
-            // `g_synchronousClients`: clients run at the server's rate, one usercmd a frame, rather than
-            // catching up with a backlog.
+            // `ClientThink` receives inputs; `G_RunClient` runs the latest at level time when synchronous.
             let synchronous = host.game.cvars.bool("g_synchronousClients");
             // `SV_BotFrame` then each client's `ClientThink`: usercmds reach the game before
             // the frame's script threads run.
@@ -2830,10 +2861,28 @@ impl Server {
                     // A person: the usercmds that arrived since the last frame.
                     let t = Instant::now();
                     let cmds = self.net.as_mut().map_or_else(Vec::new, |s| s.take_cmds(n));
-                    for cmd in frame_cmds(cmds, synchronous) {
+                    let c = &mut host.game.clients[usize::from(n)];
+                    let mut observed = crate::client::CommandFrame {
+                        synchronous,
+                        received: cmds.len(),
+                        latest_received: cmds.last().copied(),
+                        retained: c.received_cmd.unwrap_or(c.cmd),
+                        frame_time: self.svs_time,
+                        previous_time: c.ps.command_time,
+                        ..Default::default()
+                    };
+                    if !cmds.is_empty() {
+                        c.last_cmd_time = self.svs_time;
+                    }
+                    for cmd in frame_cmds(cmds, observed.retained, synchronous, self.svs_time) {
+                        observed.selected = Some(cmd);
+                        host.game.clients[usize::from(n)].received_cmd = Some(cmd);
                         host.game.client_think(&mut run.vm, n, cmd);
                         host.run_calls(&mut run.vm);
                     }
+                    let c = &mut host.game.clients[usize::from(n)];
+                    observed.simulated_time = c.ps.command_time;
+                    c.command_frame = observed;
                     client += t.elapsed();
                     continue;
                 };
@@ -3453,10 +3502,39 @@ mod tests {
     }
 
     #[test]
-    fn synchronous_clients_consume_one_usercmd_a_frame() {
-        let backlog = || vec![sim::pm::UserCmd::default(); 3];
-        assert_eq!(frame_cmds(backlog(), false).len(), 3);
-        assert_eq!(frame_cmds(backlog(), true).len(), 1);
+    fn synchronous_clients_run_latest_input_at_frame_time_and_retain_it() {
+        use sim::pm::UserCmd;
+        let backlog: Vec<_> = [100, 108, 116]
+            .into_iter()
+            .enumerate()
+            .map(|(i, server_time)| UserCmd {
+                server_time,
+                forwardmove: (i as i8 + 1) * 20,
+                buttons: 1 << i,
+                ..Default::default()
+            })
+            .collect();
+        let selected: Vec<_> = frame_cmds(backlog.clone(), UserCmd::default(), true, 150).collect();
+        assert_eq!(selected.len(), 1);
+        let mut want = backlog[2];
+        want.server_time = 150;
+        assert_eq!(selected[0], want);
+        let next: Vec<_> = frame_cmds(Vec::new(), selected[0], true, 200).collect();
+        want.server_time = 200;
+        assert_eq!(
+            next,
+            [want],
+            "an empty frame still thinks with retained input"
+        );
+        assert_eq!(
+            frame_cmds(backlog.clone(), want, false, 250).collect::<Vec<_>>(),
+            backlog,
+            "switching off runs all arrivals at their original times"
+        );
+        assert_eq!(frame_cmds(Vec::new(), want, false, 300).count(), 0);
+        let again: Vec<_> = frame_cmds(Vec::new(), want, true, 350).collect();
+        want.server_time = 350;
+        assert_eq!(again, [want], "switching on retains the session command");
     }
 
     #[test]

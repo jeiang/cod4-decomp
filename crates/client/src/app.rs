@@ -2072,7 +2072,17 @@ impl Viewer {
             _ => 0.0,
         };
         if let Some(r) = st.renderer.as_mut() {
-            r.post.blur_radius = menu_blur;
+            gfx::live(
+                &mut st.input.cvars,
+                &r.scene.world.sun_parse,
+                &mut r.settings,
+            );
+            r.post.blur_radius = gfx::blur(&st.input.cvars, menu_blur);
+            if gfx::sun_flare(&st.input.cvars, &mut r.sun_flare)
+                && let Some(net) = st.net.as_mut()
+            {
+                sun_flare_materials(&st.input.cvars, net, r);
+            }
             r.viewmodel_fov_x = Some(st.fov_x);
             #[cfg(target_arch = "wasm32")]
             {
@@ -3352,6 +3362,18 @@ fn script_step(st: &mut State) -> bool {
             }
             done(true, sc, String::new());
         }
+        // The actual registered value, including untouched defaults, engine map seeds and protected writes.
+        "cvaris" => {
+            let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
+            match st.input.cvars.get(name) {
+                Some(have) => done(
+                    scenario_value_matches(have, want),
+                    sc,
+                    format!("{name} is {have}"),
+                ),
+                None => done(false, sc, format!("cvaris: unregistered {name:?}")),
+            }
+        }
         // What the graphics settings came to (`gfxis=aa 4`, `gfxis=specular 0`, `gfxis=aspect 1.78`,
         // `gfxis=fullscreen 0`, `gfxis=uncapped 1`): the renderer's and the surface's own state.
         "gfxis" => {
@@ -3373,6 +3395,7 @@ fn script_step(st: &mut State) -> bool {
                 "blur" => st.renderer.as_ref().map(|r| {
                     u8::from(r.settings.dof && r.post.dof.is_some_and(|d| d.active())).to_string()
                 }),
+                "blur_radius" => st.renderer.as_ref().map(|r| r.post.blur_radius.to_string()),
                 "glow" => st
                     .renderer
                     .as_ref()
@@ -3417,6 +3440,10 @@ fn script_step(st: &mut State) -> bool {
                     .renderer
                     .as_ref()
                     .map(|r| format!("{:.2} {:.0}", r.settings.near, r.settings.far)),
+                "depthhack_near" => st
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.settings.depthhack_near.to_string()),
                 // `r_outdoor` and the lookup biases and feather.
                 "outdoor" => st.renderer.as_ref().map(|r| {
                     format!(
@@ -3443,23 +3470,58 @@ fn script_step(st: &mut State) -> bool {
                         a.z
                     )
                 }),
-                // The glow tweak block as `R_SetGlowInfo` builds it.
-                "glow_tweak" => {
-                    let g = crate::gfx::glow(
-                        &st.input.cvars,
-                        render::art::Glow {
-                            bloom_cutoff: 0.5,
-                            ..Default::default()
-                        },
-                    );
-                    Some(format!(
-                        "{} {:.0} {:.1} {:.1}",
+                // The blocks the last frame actually submitted, not a second synthetic dvar evaluation.
+                "film_tweak" => st.renderer.as_ref().map(|r| {
+                    let f = r.post.film;
+                    format!(
+                        "{} {} {} {} {} {} {} {} {} {}",
+                        f.brightness,
+                        f.contrast,
+                        f.desaturation,
+                        u8::from(f.invert),
+                        f.tint_light[0],
+                        f.tint_light[1],
+                        f.tint_light[2],
+                        f.tint_dark[0],
+                        f.tint_dark[1],
+                        f.tint_dark[2],
+                    )
+                }),
+                "glow_tweak" => st.renderer.as_ref().map(|r| {
+                    let g = r.post.glow;
+                    format!(
+                        "{} {} {} {}",
                         u8::from(g.enabled),
                         g.radius,
                         g.bloom_intensity,
                         g.bloom_cutoff
-                    ))
-                }
+                    )
+                }),
+                "sun_flare" => st.renderer.as_ref().map(|r| {
+                    let sun = &r.sun_flare;
+                    format!(
+                        "{} {} {} {} {} {} {} {} {}",
+                        u8::from(sun.has_valid_data),
+                        sun.sprite_size,
+                        sun.flare_min_size,
+                        sun.flare_max_size,
+                        sun.flare_max_alpha,
+                        sun.flare_fade_in_time,
+                        sun.flare_fade_out_time,
+                        sun.sprite_material
+                            .as_ref()
+                            .and_then(|m| m.name.as_deref())
+                            .unwrap_or("none"),
+                        sun.flare_material
+                            .as_ref()
+                            .and_then(|m| m.name.as_deref())
+                            .unwrap_or("none"),
+                    )
+                }),
+                "sun_fx_position" => st.renderer.as_ref().map(|r| {
+                    let [x, y, z] = r.sun_flare.sun_fx_position;
+                    format!("{x} {y} {z}")
+                }),
                 "water" => st
                     .renderer
                     .as_ref()
@@ -3526,7 +3588,7 @@ fn script_step(st: &mut State) -> bool {
                             (Ok(h), Ok(min)) => h >= min,
                             _ => false,
                         },
-                        None => h == want,
+                        None => scenario_value_matches(&h, &want),
                     };
                     done(ok, sc, format!("{name} is {h}"));
                 }
@@ -4662,6 +4724,84 @@ fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: load
     });
 }
 
+/// Register changed flare material names through the session's linked asset DB. Empty names select `$default`;
+/// missing names get the stock named default material. A missing default is an explicit failure, not a retained
+/// map material pretending to implement the override (`Material_RegisterHandle`).
+fn sun_flare_materials(cvars: &crate::input::Cvars, net: &mut NetPlay, r: &mut Renderer) {
+    for (name, sprite) in [("r_sunsprite_shader", true), ("r_sunflare_shader", false)] {
+        let name = cvars.get(name).unwrap_or("");
+        let name = if name.is_empty() { "$default" } else { name };
+        let material = if sprite {
+            &r.sun_flare.sprite_material
+        } else {
+            &r.sun_flare.flare_material
+        };
+        if material
+            .as_ref()
+            .and_then(|m| m.name.as_deref())
+            .is_some_and(|n| n.eq_ignore_ascii_case(name))
+        {
+            continue;
+        }
+        let material = match net.material(name) {
+            Ok(material) => Some(material),
+            Err(error) => {
+                logging::dedup!(
+                    WARN,
+                    name,
+                    material = name,
+                    "sun material registration failed: {error}"
+                );
+                None
+            }
+        };
+        if sprite {
+            r.warm_sprites(material.iter().cloned());
+            r.sun_flare.sprite_material = material;
+        } else {
+            r.sun_flare.flare_material = material;
+        }
+    }
+}
+
+/// Scenario observations compare numeric tokens without depending on the decimal formatting of a dvar or frame
+/// value. Names remain exact, and missing, extra, non-finite or different tokens fail.
+fn scenario_value_matches(have: &str, want: &str) -> bool {
+    if have == want {
+        return true;
+    }
+    let mut have = have.split_whitespace();
+    for want in want.split_whitespace() {
+        let Some(have) = have.next() else {
+            return false;
+        };
+        if have != want
+            && !matches!(
+                (have.parse::<f32>(), want.parse::<f32>()),
+                (Ok(h), Ok(w)) if h.is_finite() && w.is_finite() && (h - w).abs() <= 0.005
+            )
+        {
+            return false;
+        }
+    }
+    have.next().is_none()
+}
+
+#[cfg(test)]
+mod scenario_value_tests {
+    use super::scenario_value_matches;
+
+    #[test]
+    fn renderer_values_compare_numerically_but_materials_exactly() {
+        assert!(scenario_value_matches("0.5 2000", "0.50 2000.0"));
+        assert!(scenario_value_matches("0 1 0", "0.0000001 0.9999999 0"));
+        assert!(scenario_value_matches("sun sun_flare", "sun sun_flare"));
+        assert!(!scenario_value_matches("sun sun_flare", "sun other"));
+        assert!(!scenario_value_matches("1 2", "1"));
+        assert!(!scenario_value_matches("NaN", "NaN"));
+    }
+}
+
 /// The background load is done: a started session connects to its server and shows the world; a level change hands the
 /// new world to the running session.
 fn finish_load(
@@ -4681,6 +4821,7 @@ fn finish_load(
     let map = &load.map;
     let _span = tracing::info_span!("map_load", %map).entered();
     tracing::info!(load_ms = ms, level_change = load.level_change, "map loaded");
+    gfx::seed_world(&mut st.input.cvars, &data.world.sun_parse);
     let sound =
         crate::sound::ClientSound::start(&cli.install, &game_of(&st.input), map, !cli.no_sound);
     if let Some(g) = st.load_gaps.as_mut() {

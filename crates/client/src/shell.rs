@@ -1848,7 +1848,9 @@ impl HostCx<'_> {
                         self.input.say("Usage: writeconfig <filename>");
                     } else {
                         match self.input.write_config(a(1)) {
-                            Ok(Some(path)) => self.input.say(format!("Writing {}.", path.display())),
+                            Ok(Some(path)) => {
+                                self.input.say(format!("Writing {}.", path.display()))
+                            }
                             Ok(None) => self.input.say("writeconfig: no config folder to write"),
                             Err(e) => self.input.say(format!("writeconfig: {e}")),
                         }
@@ -3594,8 +3596,8 @@ mod tests {
         let Some((mut st, ui, mut input)) = shell_env() else {
             return;
         };
-        let dir = std::env::temp_dir()
-            .join(format!("cod4e-shell-writeconfig-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("cod4e-shell-writeconfig-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let active = dir.join("config_mp.cfg");
         input.use_profile(None, Some(active.clone()));
@@ -3606,13 +3608,13 @@ mod tests {
         };
         for command in ["writeconfig", "writeconfig named extra"] {
             h.command(&ui, command);
-            assert_eq!(
-                h.input.take_messages(),
-                ["Usage: writeconfig <filename>"]
-            );
+            assert_eq!(h.input.take_messages(), ["Usage: writeconfig <filename>"]);
             assert!(!active.exists(), "invalid arity must not write the profile");
         }
-        assert!(!dir.exists(), "invalid arity must not create any config folder");
+        assert!(
+            !dir.exists(),
+            "invalid arity must not create any config folder"
+        );
     }
 
     /// The unlock popup the server opens at the end of a match stays up through the intermission, with the

@@ -1081,6 +1081,14 @@ impl NetPlay {
         }
     }
 
+    /// Resolves a material from this match's linked presentation assets, not the UI registry.
+    pub fn material(
+        &mut self,
+        name: &str,
+    ) -> Result<std::sync::Arc<assets::zone::gfx::Material>, String> {
+        self.lib.content.material(name)
+    }
+
     /// Writes what this connection receives to `path` (`record`).
     pub fn start_record(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.net.start_record(path)

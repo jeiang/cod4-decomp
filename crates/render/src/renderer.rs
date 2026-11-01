@@ -244,6 +244,8 @@ pub struct Settings {
     pub clear: Clear,
     /// `r_znear`: the near clip plane (the original keeps it at least 0.01).
     pub near: f32,
+    /// `r_znear_depthhack`: the view model's near clip plane.
+    pub depthhack_near: f32,
     /// `r_zfar`: culling distance; zero uses the map's.
     pub far: f32,
     /// `r_outdoor`: off, the outdoor lookup and image are not sampled.
@@ -260,7 +262,9 @@ pub struct Settings {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SunTweak {
     pub sun_light: Option<f32>,
-    /// Any scale: normalised to one in the brightest channel, as `R_GetNormalizedColorFromDvar` does.
+    /// The map-seeded `r_lightTweakAmbient` scalar; no ambient colour multiplier is applied.
+    pub ambient: Option<f32>,
+    /// Quantized dvar RGB, normalised to its brightest channel; all-zero RGB becomes white.
     pub color: Option<Vec3>,
     /// Pitch, yaw, roll in degrees, as the map's sun angles.
     pub angles: Option<Vec3>,
@@ -285,14 +289,17 @@ impl SunTweak {
                 -pitch.sin(),
             )
         });
-        if self.sun_light.is_none() && self.color.is_none() {
+        if self.sun_light.is_none() && self.color.is_none() && self.ambient.is_none() {
             return (dir, color);
         }
-        let ambient = parse.ambient_scale;
+        let ambient = self.ambient.unwrap_or(parse.ambient_scale);
         let floor = (parse.sun_light - ambient) * parse.diffuse_fraction + ambient;
         let light = self.sun_light.unwrap_or(parse.sun_light);
-        let hue = self.color.unwrap_or(Vec3::from(parse.sun_color));
-        let hue = hue / hue.max_element().max(1e-6);
+        let hue = self.color.unwrap_or_else(|| {
+            Vec3::from(parse.sun_color.map(|v| (v.clamp(0.0, 1.0) * 255.0).round()))
+        });
+        let max = hue.max_element();
+        let hue = if max == 0.0 { Vec3::ONE } else { hue / max };
         (dir, hue * (light - floor).max(0.0))
     }
 }
@@ -328,6 +335,7 @@ impl Default for Settings {
             fullbright: false,
             clear: Clear::default(),
             near: NEAR,
+            depthhack_near: 0.1,
             far: 0.0,
             outdoor: true,
             outdoor_away_bias: 32.0,
@@ -716,6 +724,8 @@ pub struct Renderer {
     /// The last answer of [`Renderer::samples`], for the `(r_aaSamples, format)` it was asked with.
     samples_cache: std::cell::Cell<Option<((u32, wgpu::TextureFormat), u32)>>,
     pub settings: Settings,
+    /// Effective sun sprite, flare and glare. Live overrides mutate this map-initialized state.
+    pub sun_flare: assets::zone::gfxworld::SunFlare,
     /// Fog, glow and film of the map.
     pub art: MapArt,
     lights: Vec<Option<PrimaryLight>>,
@@ -881,6 +891,7 @@ impl Renderer {
             outdoor_bound: true,
             samples_cache: std::cell::Cell::new(None),
             settings: Settings::default(),
+            sun_flare: data.world.sun.clone(),
             art: data.art.clone(),
             post: PostParams::from_art(&data.art),
             post_state,
@@ -1213,7 +1224,7 @@ impl Renderer {
             .materials()
             .into_iter()
             .chain(self.warm_extra.iter().cloned())
-            .chain(self.scene.world.sun.sprite_material.clone())
+            .chain(self.sun_flare.sprite_material.clone())
             .collect();
         for m in &materials {
             for kind in [VertexKind::World, VertexKind::Model] {
@@ -2971,7 +2982,7 @@ impl Renderer {
             forward: view.forward(),
             clip: p * v,
             size,
-            near: NEAR,
+            near,
             time_ms: (view.time * 1000.0) as i32,
         };
         let probe_target = sun::ProbeTarget {
@@ -2981,13 +2992,13 @@ impl Renderer {
         };
         let sun_quad = self.sun.begin_frame(
             &self.gpu,
-            &world.sun,
+            &self.sun_flare,
             self.settings.draw_sun,
             &sun_cam,
             self.scene.collision.as_deref(),
             probe_target,
         );
-        if let (Some(quad), Some(mat)) = (sun_quad, world.sun.sprite_material.clone()) {
+        if let (Some(quad), Some(mat)) = (sun_quad, self.sun_flare.sprite_material.clone()) {
             meshes.push(sun::sprite_mesh(mat, quad));
         }
         let (dynsurfs, mesh_runs) = self.prepare_dynamic(&insts, &meshes, view.origin, &v);
@@ -3156,7 +3167,7 @@ impl Renderer {
             fov_x: vm_fov,
             ..*view
         }
-        .matrices(aspect)
+        .matrices_near(aspect, self.settings.depthhack_near)
         .1;
         let with_proj = |f: &FrameConsts| {
             let mut f = f.clone();
@@ -3277,7 +3288,7 @@ impl Renderer {
             (zview, list)
         });
         laps[6] = t0.elapsed().as_secs_f32() * 1000.0;
-        let chain = post::build(self, size, format, target, NEAR, distortion);
+        let chain = post::build(self, size, format, target, near, distortion);
 
         self.upload_ring();
         laps[7] = t0.elapsed().as_secs_f32() * 1000.0;
@@ -4070,6 +4081,25 @@ mod tests {
             ..SunTweak::default()
         };
         assert_eq!(t.apply(&parse, d, c).1, Vec3::new(0.0, 0.0, 0.95));
+        let t = SunTweak {
+            sun_light: Some(1.5),
+            color: Some(Vec3::ZERO),
+            ..SunTweak::default()
+        };
+        assert_eq!(t.apply(&parse, d, c).1, Vec3::splat(0.95));
+        let t = SunTweak {
+            ambient: Some(0.3),
+            color: Some(Vec3::ONE),
+            ..SunTweak::default()
+        };
+        assert!((t.apply(&parse, d, c).1 - Vec3::splat(0.35)).length() < 1e-6);
+        // The map fallback goes through the same clamped colour bytes as a seeded dvar.
+        let t = SunTweak {
+            sun_light: Some(1.5),
+            ..SunTweak::default()
+        };
+        let expected = Vec3::new(1.0, 128.0 / 255.0, 0.0) * 0.95;
+        assert!((t.apply(&parse, d, c).1 - expected).length() < 1e-6);
         // Angles: pitch and yaw in degrees, the map's forward convention.
         let t = SunTweak {
             angles: Some(Vec3::new(0.0, 90.0, 0.0)),
@@ -4097,6 +4127,11 @@ mod tests {
         let (_, p_clamped) = v.matrices_near(1.0, 0.0);
         let ratio = p4.w_axis.z / p_clamped.w_axis.z;
         assert!((ratio - 400.0).abs() < 0.5, "{ratio}");
+        let mut settings = Settings::default();
+        let (_, vm_default) = v.matrices_near(1.0, settings.depthhack_near);
+        settings.depthhack_near = 0.4;
+        let (_, vm_changed) = v.matrices_near(1.0, settings.depthhack_near);
+        assert!((vm_changed.w_axis.z / vm_default.w_axis.z - 4.0).abs() < 1e-6);
     }
 
     #[test]
