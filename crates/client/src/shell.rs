@@ -593,6 +593,9 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("ui_browserFriendlyfire", "-1"),
     ("ui_browserKillcam", "-1"),
     ("ui_browserShowPunkBuster", "-1"),
+    // The 1.7 filters on `hc` and `od` (`iw3mp.exe` registers both -1, `0x542285-0x5422be`).
+    ("ui_browserHardcore", "-1"),
+    ("ui_browserOldSchool", "-1"),
     // Not a stock dvar: the bots a server started from the menus plays with, on every map.
     ("bot_count", "0"),
     // Not a stock dvar: the master servers (`host[:port]`, space separated, up to five) the Internet list asks.
@@ -1632,6 +1635,8 @@ impl HostCx<'_> {
             friendly_fire: n("ui_browserFriendlyfire"),
             killcam: n("ui_browserKillcam"),
             punkbuster: n("ui_browserShowPunkBuster"),
+            hardcore: n("ui_browserHardcore"),
+            old_school: n("ui_browserOldSchool"),
         }
     }
 
@@ -2952,6 +2957,18 @@ fn server_cell(
 ) -> String {
     match col {
         0 => mark(e.password),
+        // The original draws a `server_hardware_*` icon for `hw` here (`ui_main_mp.cpp:4699-4704`); not built (#502).
+        1 => {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    issue = 502,
+                    "hardware icon column is not drawn (server_hardware_*)"
+                );
+            }
+            String::new()
+        }
         2 if e.ping > 0 => e.hostname.chars().take(38).collect(),
         2 => e.addr.to_string(),
         3 => maps
@@ -3839,6 +3856,8 @@ mod tests {
             ("ui_browserFriendlyfire", "-1"),
             ("ui_browserKillcam", "-1"),
             ("ui_browserShowPunkBuster", "-1"),
+            ("ui_browserHardcore", "-1"),
+            ("ui_browserOldSchool", "-1"),
             ("password", ""),
         ] {
             assert_eq!(input.cvar(k), Some(v), "{k}");

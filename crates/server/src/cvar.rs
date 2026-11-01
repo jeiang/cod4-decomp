@@ -153,15 +153,30 @@ impl Cvars {
     }
 
     fn set_checked(&mut self, name: &str, value: &str, external: bool) -> Result<(), Refused> {
+        let unchanged = self.vars.get(&key(name)).is_some_and(|v| v.value == value);
         let r = self.try_set(name, value, external);
-        if let Err(why) = &r {
-            logging::dedup!(
-                WARN,
-                "refused",
-                cvar = name,
-                external,
-                "cvar set refused: {why}"
-            );
+        match &r {
+            // The original prints the refusal too; one that would not change the value (the command line's `set` lines
+            // run again after boot, `+set fs_game` among them) loses nothing.
+            Err(why @ (Refused::ReadOnly(_) | Refused::WriteProtected(_))) if unchanged => {
+                logging::dedup!(
+                    INFO,
+                    "refused",
+                    cvar = name,
+                    external,
+                    "cvar set refused: {why}"
+                );
+            }
+            Err(why) => {
+                logging::dedup!(
+                    WARN,
+                    "refused",
+                    cvar = name,
+                    external,
+                    "cvar set refused: {why}"
+                );
+            }
+            Ok(()) => {}
         }
         r
     }

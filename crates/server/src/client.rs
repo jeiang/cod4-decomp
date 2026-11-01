@@ -226,8 +226,6 @@ pub struct Client {
     /// `setstat`/`getstat` values.
     pub stats: std::collections::HashMap<i32, i32>,
     pub bot_brain: Option<Box<Brain>>,
-    /// Test hook `devbotfire`: buttons the bot holds, standing still, and the level time it lets go.
-    pub dev_buttons: Option<(i32, i32)>,
     /// The body animation clock locational hits are tested against.
     pub pose: PlayerPoseState,
 }
@@ -305,7 +303,6 @@ impl Client {
             last_server_time: 0,
             stats: std::collections::HashMap::new(),
             bot_brain: None,
-            dev_buttons: None,
             pose: PlayerPoseState::default(),
         }
     }

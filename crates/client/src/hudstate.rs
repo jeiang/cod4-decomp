@@ -473,6 +473,9 @@ pub struct HudFacts {
     pub last_fire_actor: u16,
     /// Age of the latest firing ping on the last frame its mark was drawn.
     pub last_fire_mark_ms: i32,
+    /// Age of the latest firing ping on the first frame after that which no longer drew its mark (0 until then):
+    /// the mark's true lifetime lies between this and `last_fire_mark_ms`.
+    pub last_fire_gone_ms: i32,
     /// The most helicopters and planes the compass knew of at once, and how many of them were enemies.
     pub vehicles_max: u32,
     pub enemy_vehicles_max: u32,
@@ -646,6 +649,7 @@ impl HudFacts {
             "last_fire_ping_ms": self.last_fire_ping_ms,
             "last_fire_played_ms": self.last_fire_played_ms,
             "last_fire_mark_ms": self.last_fire_mark_ms,
+            "last_fire_gone_ms": self.last_fire_gone_ms,
             "vehicles_max": self.vehicles_max,
             "enemy_vehicles_max": self.enemy_vehicles_max,
             "objectives_listed": self.objectives_listed,
