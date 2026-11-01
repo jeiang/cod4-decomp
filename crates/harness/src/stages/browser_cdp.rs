@@ -6,22 +6,30 @@ use serde_json::{Value, json};
 use std::io;
 use std::process::Command;
 
-/// The flags every stage's headless Chromium starts with: WebGPU on SwiftShader's Vulkan, with ANGLE and Skia on the
-/// same Vulkan device. With ANGLE on its GL SwiftShader instead, the GPU process has no shared-image backing that both
-/// Dawn and the compositor can use (`gpu/command_buffer/service/shared_image/shared_image_factory.cc`: "Could not find
-/// SharedImageBackingFactory ... usage: ...WebgpuSwapChainTexture"), so the canvas's first `getCurrentTexture` fails
-/// and the page's WebGPU device is destroyed. `--use-vulkan=swiftshader` and `--use-webgpu-adapter=swiftshader` are
-/// Chromium's switches for a GPU-less Linux host (`gpu/config/gpu_switches.cc`, `ui/gl/gl_switches.cc`); a headless
-/// window has no Vulkan surface, hence `--disable-vulkan-surface`.
+/// The flags every stage's headless Chromium starts with: WebGPU on SwiftShader's Vulkan (`--use-vulkan=swiftshader`,
+/// `--use-webgpu-adapter=swiftshader`, Chromium's switches for a GPU-less Linux host: `gpu/config/gpu_switches.cc`,
+/// `docs/gpu/swiftshader.md`) with ANGLE on SwiftShader too. Probed on the slot host (Chromium 153), every other
+/// combination loses WebGPU:
+/// - without `--enable-features=Vulkan` the GPU process has no shared-image backing that both Dawn and the compositor
+///   can use (`gpu/command_buffer/service/shared_image/shared_image_factory.cc`: "Could not find
+///   SharedImageBackingFactory ... usage: ...WebgpuSwapChainTexture") and the page's device is destroyed at its first
+///   `getCurrentTexture`;
+/// - `--disable-vulkan-surface` leaves Dawn no Vulkan instance ("A valid external Instance reference no longer
+///   exists"), so `requestAdapter` resolves to null;
+/// - `--use-angle=vulkan` fails `eglInitialize` (`Internal Vulkan error (-3)`) and the GPU process exits.
+///
+/// The canvas is read back in the task that drew it (`web/main.js` `captureCanvas`, called right after the frame's
+/// submit): once the frame is handed to the compositor the WebGPU canvas's shared image reads as uninitialized here
+/// (`shared_image_representation.cc`: "Attempt to read from an uninitialized SharedImage"), as the WebGPU spec's
+/// "get a copy of the image contents of a context" allows only for the current texture.
 pub const CHROMIUM_FLAGS: &[&str] = &[
     "--headless=new",
     "--no-first-run",
     "--enable-unsafe-webgpu",
     "--enable-features=Vulkan",
-    "--use-angle=vulkan",
+    "--use-angle=swiftshader",
     "--use-vulkan=swiftshader",
     "--use-webgpu-adapter=swiftshader",
-    "--disable-vulkan-surface",
     "--ignore-gpu-blocklist",
     "--enable-unsafe-swiftshader",
     "--window-size=1280,720",
