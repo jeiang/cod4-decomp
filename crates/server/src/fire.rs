@@ -31,8 +31,8 @@ const MELEE_OFFSETS: [[f32; 2]; 5] = [
 ];
 
 /// `G_GetPlayerViewOrigin` (`BG_GetPlayerViewOrigin`): the eye with its bob and lean, where shots start.
-pub fn view_origin(ps: &PlayerState) -> Vec3 {
-    sim::pm::bob::view_origin(ps, ps.command_time)
+pub fn view_origin(ps: &PlayerState, bob: &sim::pm::bob::Bob) -> Vec3 {
+    sim::pm::bob::view_origin(ps, ps.command_time, bob)
 }
 
 impl Game {
@@ -48,10 +48,12 @@ impl Game {
                 WeaponEvent::OffhandThrow {
                     weapon, fuse_left, ..
                 } => {
-                    let Some(aim) = self
-                        .client(n)
-                        .map(|c| AimBasis::from_angles(view_origin(&c.ps), &c.fire_angles()))
-                    else {
+                    let Some(aim) = self.client(n).map(|c| {
+                        AimBasis::from_angles(
+                            view_origin(&c.ps, &self.pm_params.bob),
+                            &c.fire_angles(),
+                        )
+                    }) else {
                         continue;
                     };
                     self.throw_grenade(vm, n, weapon, &aim, fuse_left);
@@ -82,7 +84,7 @@ impl Game {
         let (weap_type, class) = (info.weap_type, info.weap_class);
         let Some(c) = self.client(n) else { return };
         let aim_angles = c.fire_angles();
-        let aim = AimBasis::from_angles(view_origin(&c.ps), &aim_angles);
+        let aim = AimBasis::from_angles(view_origin(&c.ps, &self.pm_params.bob), &aim_angles);
         let spread = aim_spread_degrees(info, &c.ps, &self.pm_params.weapon);
         let fuse_left = c.ps.grenade_time_left;
         self.stats.shots += 1;
@@ -310,7 +312,7 @@ impl Game {
         let (range, width, height) = (params.melee_range, params.melee_width, params.melee_height);
         let _ = info;
         let Some(c) = self.client(n) else { return };
-        let aim = AimBasis::from_angles(view_origin(&c.ps), &c.ps.viewangles);
+        let aim = AimBasis::from_angles(view_origin(&c.ps, &self.pm_params.bob), &c.ps.viewangles);
         let origin = aim.origin;
         let reach = mad(origin, range, aim.forward);
         let at = |o: [f32; 2], from: Vec3| {
@@ -426,12 +428,13 @@ mod tests {
             view_height_target: sim::pm::VIEW_STAND,
             ..PlayerState::default()
         };
-        assert_eq!(view_origin(&still), [10.0, 20.0, 90.0]);
+        let bob = sim::pm::bob::Bob::default();
+        assert_eq!(view_origin(&still, &bob), [10.0, 20.0, 90.0]);
         let running = PlayerState {
             velocity: [190.0, 0.0, 0.0],
             bob_cycle: 40,
             ..still
         };
-        assert_ne!(view_origin(&running)[2], 90.0);
+        assert_ne!(view_origin(&running, &bob)[2], 90.0);
     }
 }

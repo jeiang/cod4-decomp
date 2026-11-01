@@ -355,7 +355,7 @@ impl Game {
             }
         }
         let angles = c.ps.viewangles;
-        let eye = view_origin(&c.ps);
+        let eye = view_origin(&c.ps, &self.pm_params.bob);
         if let Some(tu) = self.ent_mut(t).and_then(|e| e.turret.as_deref_mut()) {
             (tu.fire_time, tu.trigger_down) = (left, down);
         }

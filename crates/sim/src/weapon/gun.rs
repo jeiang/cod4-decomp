@@ -11,12 +11,12 @@
 //! aim the client shows is the aim the server judges.
 
 use crate::Vec3;
-use crate::pm::bob::{bob_cycle, horizontal_bob, vertical_bob};
+use crate::pm::bob::{Bob, bob_cycle, horizontal_bob, vertical_bob};
 use crate::pm::math::{angle_delta, angle_vectors, angle_wrap_180, diff_track, get_lean_fraction};
 use crate::pm::{PlayerState, VIEW_CROUCH, VIEW_PRONE, ef, weapon_state};
 use assets::zone::weapon::WeaponDef;
 
-/// The bob of the gun and of a scoped view is capped at this, degrees.
+/// The bob of the gun and of a scoped view is capped at this, degrees (a constant in stock, not `bg_bobMax`).
 const BOB_MAX: f32 = 10.0;
 /// The aimed view bob of any weapon is capped at this, degrees.
 const ADS_VIEW_BOB_MAX: f32 = 45.0;
@@ -119,12 +119,13 @@ impl GunParams {
     }
 }
 
-/// What one step needs besides the state: the player and the weapon, how fast the player moves over the ground
-/// (`BG_GetSpeed`), the step in seconds and the clock the damage kick is timed by.
+/// What one step needs besides the state: the player and the weapon, the bob dvars, how fast the player moves over
+/// the ground (`BG_GetSpeed`), the step in seconds and the clock the damage kick is timed by.
 #[derive(Debug, Clone, Copy)]
 pub struct GunFrame<'a> {
     pub ps: &'a PlayerState,
     pub p: &'a GunParams,
+    pub bob: &'a Bob,
     pub xyspeed: f32,
     pub frametime: f32,
     pub time: i32,
@@ -229,7 +230,7 @@ impl GunState {
         }
         self.base_angles(f, &mut a);
         self.idle_angles(f, &mut a);
-        let bob = bob_angles(f.ps, f.xyspeed, f.p, true);
+        let bob = bob_angles(f.ps, f.xyspeed, f.p, f.bob, true);
         add_to(&mut a, &bob);
         self.damage_kick(f, &mut a);
         self.gun_recoil(f, &mut a);
@@ -629,26 +630,26 @@ impl ViewFx {
 
     /// All of `BG_CalculateViewAngles`: [`angles`](Self::angles) and the bob of the view ([`view_bob`]). Shots leave
     /// along the player's angles plus these.
-    pub fn view_angles(&self, ps: &PlayerState, p: &GunParams, xyspeed: f32) -> Vec3 {
+    pub fn view_angles(&self, ps: &PlayerState, p: &GunParams, bob: &Bob, xyspeed: f32) -> Vec3 {
         let mut a = self.angles(ps, p);
-        add_to(&mut a, &view_bob(ps, xyspeed, p));
+        add_to(&mut a, &view_bob(ps, xyspeed, p, bob));
         a
     }
 }
 
 /// The bob of the view (`BG_CalculateView_BobAngles`, `BG_CalculateView_Velocity`): a scoped weapon bobs by angle
 /// while aimed, and an aimed weapon with an `adsViewBobMult` moves with the steps. Degrees.
-pub fn view_bob(ps: &PlayerState, xyspeed: f32, p: &GunParams) -> Vec3 {
+pub fn view_bob(ps: &PlayerState, xyspeed: f32, p: &GunParams, bob: &Bob) -> Vec3 {
     let ads = ps.weapon_pos_frac;
     let mut a = [0.0; 3];
     if p.overlay_reticle && ads != 0.0 {
-        a = bob_angles(ps, xyspeed, p, false).map(|v| v * ads);
+        a = bob_angles(ps, xyspeed, p, bob, false).map(|v| v * ads);
     }
     if ps.e_flags & ef::TURRET_ACTIVE == 0 && ads != 0.0 && p.ads_view_bob_mult != 0.0 {
         let cycle = bob_cycle(ps);
         let k = ads * p.ads_view_bob_mult;
-        a[0] -= k * vertical_bob(ps, cycle, xyspeed, ADS_VIEW_BOB_MAX);
-        a[1] -= k * horizontal_bob(ps, cycle, xyspeed, ADS_VIEW_BOB_MAX);
+        a[0] -= k * vertical_bob(ps, bob, cycle, xyspeed, ADS_VIEW_BOB_MAX);
+        a[1] -= k * horizontal_bob(ps, bob, cycle, xyspeed, ADS_VIEW_BOB_MAX);
     }
     a
 }
@@ -694,15 +695,15 @@ fn add_to(a: &mut Vec3, b: &Vec3) {
 /// `BG_CalculateView_BobAngles` for `gun` false): the bob amplitude times the ground speed, capped, scaled by the
 /// weapon's `adsBobFactor` while aimed. The gun fades it out entirely for a scoped weapon; the view's caller scales it
 /// by the aim.
-pub fn bob_angles(ps: &PlayerState, xyspeed: f32, p: &GunParams, gun: bool) -> Vec3 {
+pub fn bob_angles(ps: &PlayerState, xyspeed: f32, p: &GunParams, bob: &Bob, gun: bool) -> Vec3 {
     use std::f32::consts::{FRAC_PI_4, TAU};
     let ads = ps.weapon_pos_frac;
     let cycle = bob_cycle(ps) + FRAC_PI_4 + TAU;
     let speed = xyspeed * BOB_SPEED;
-    let roll = horizontal_bob(ps, cycle - 0.471_238_9, speed * 1.5, BOB_MAX).min(0.0);
+    let roll = horizontal_bob(ps, bob, cycle - 0.471_238_9, speed * 1.5, BOB_MAX).min(0.0);
     let mut out = [
-        -vertical_bob(ps, cycle, speed, BOB_MAX),
-        -horizontal_bob(ps, cycle, speed, BOB_MAX),
+        -vertical_bob(ps, bob, cycle, speed, BOB_MAX),
+        -horizontal_bob(ps, bob, cycle, speed, BOB_MAX),
         roll,
     ];
     if ads != 0.0 {
