@@ -433,6 +433,24 @@ mod tests {
     }
 
     #[test]
+    fn animation_out_of_range_warning_fails_the_default_suite() {
+        let d = stage_dir(
+            "2026-11-01T00:00:00Z WARN sim::skel::anim: animation data read out of range, using 0 anim=\"pb_runjump_takeoff\" table=\"random_data_short\" index=4082\n",
+        );
+        for stage in ["asset-load", "client-match"] {
+            let mut report = StageReport::new(stage, Status::Passed);
+            apply_with(&mut report, d.path(), stage, ALLOWED);
+            assert_eq!(report.status, Status::Failed);
+            assert!(
+                report
+                    .reason
+                    .unwrap()
+                    .contains("animation data read out of range")
+            );
+        }
+    }
+
+    #[test]
     fn an_entry_for_one_stage_does_not_cover_another() {
         let line = "2026-10-13T17:34:38.1Z  WARN x::y: only in a stage\n";
         let mut r = StageReport::new("a", Status::Passed);

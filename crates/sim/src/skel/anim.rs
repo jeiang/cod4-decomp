@@ -332,6 +332,7 @@ pub fn accumulate(
             let mut q = [0.0; 4];
             for (i, c) in q.iter_mut().enumerate() {
                 let p = f32::from(w.rs(w.rs + f + i));
+                // KisakCOD (GPL-3.0), xanim/xanim_calc.cpp:937-942:
                 // XAnimCalcNonLoopEnd reads only the final quaternion, not a following key.
                 let n = if end || size == 0 {
                     p
