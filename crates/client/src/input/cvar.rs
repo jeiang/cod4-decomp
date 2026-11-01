@@ -27,7 +27,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("cl_stanceholdtime", "300", false),
     ("cl_yawspeed", "140", true),
     ("cl_pitchspeed", "140", true),
-    ("cg_fov", "80", true),
+    // KisakCOD (GPL-3.0), cgame_mp/cg_main_mp.cpp:366, and `iw3mp.exe` 1.7's registration: 65, archived.
+    ("cg_fov", "65", true),
     ("cg_fovscale", "1", false),
     ("cg_fovmin", "10", false),
     ("in_mouse", "1", true),
@@ -73,6 +74,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("r_brightness", "0", false),
     ("r_contrast", "1", false),
     ("r_desaturation", "1", false),
+    // KisakCOD (GPL-3.0), cgame/cg_visionsets.cpp:72, CG_RegisterVisionSetsDvars: bool, 0, `DVAR_SAVED`.
+    ("nightVisionDisableEffects", "0", true),
     // KisakCOD (GPL-3.0), gfx_d3d/r_dvars.cpp, R_RegisterDvars: renderer defaults and flags.
     // `DVAR_SAVED`, like `DVAR_ARCHIVE`, keeps ordinary `set` writes in the config.
     ("r_filmUseTweaks", "0", false),

@@ -1929,21 +1929,11 @@ impl Viewer {
                     }
                     // `R_SetFilmInfo`: the vision set's film block, then (with cheats on) the `r_desaturation`,
                     // `r_contrast` and `r_brightness` tweaks on top of it (desaturation is applied twice, as stock
-                    // does). The base is the look's each frame, so the tweaks never accumulate.
+                    // does). The base is the look's each frame (the vision channel shown), so the tweaks never
+                    // accumulate.
                     let cheats = st.input.cvars.bool("sv_cheats");
-                    let base = nf
-                        .look
-                        .vision
-                        .map(|(_, f)| f)
-                        .or(st.film_base)
-                        .unwrap_or(r.post.film);
+                    let (glow_base, base) = nf.look.vision;
                     st.film_base = Some(base);
-                    let glow_base = nf
-                        .look
-                        .vision
-                        .map(|(g, _)| g)
-                        .or(st.glow_base)
-                        .unwrap_or(r.post.glow);
                     st.glow_base = Some(glow_base);
                     r.post.glow = crate::gfx::glow(&st.input.cvars, glow_base);
                     r.post.film = crate::gfx::film(&st.input.cvars, base);
@@ -3492,6 +3482,12 @@ fn script_step(st: &mut State) -> bool {
                     u8::from(r.settings.dof && r.post.dof.is_some_and(|d| d.active())).to_string()
                 }),
                 "blur_radius" => st.renderer.as_ref().map(|r| r.post.blur_radius.to_string()),
+                // The window aspect the last `r_blur` filter was shaped for (`RB_VirtualToSceneRadius`), 2 decimals.
+                "blur_shape" => st
+                    .renderer
+                    .as_ref()
+                    .and_then(|r| r.blur_shape())
+                    .map(|s| format!("{s:.2}")),
                 "glow" => st
                     .renderer
                     .as_ref()
@@ -5762,6 +5758,9 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "yaw": st.yaw.to_degrees(),
                 "roll": st.roll.to_degrees(),
                 "drawn_frames": st.samples.len(),
+                // `cg_fov` widened for the display (Hor+), degrees, and the aspect it was widened for.
+                "fov_x": st.fov_x.to_degrees(),
+                "aspect": st.aspect.unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
             }),
             "draw" => json!({
                 "surfaces": st.surfaces_drawn.last().copied(),

@@ -225,13 +225,18 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
+/// `LerpFloat` with `VISIONSETLERP_TO_SMOOTH`, the style both vision configstrings start their blends with (KisakCOD
+/// `cgame/cg_visionsets.cpp:214-226`, `CG_VisionSetConfigString_Naked`/`_Night`): the fraction is eased by
+/// `sin(fraction * pi/2)`.
+fn ease(t: f32) -> f32 {
+    (t * std::f32::consts::FRAC_PI_2).sin()
+}
+
+/// `UpdateVarsLerp` for a `VISIONSETLERP_TO_*` blend at eased fraction `t`: the numbers lerp, and the switches take
+/// the destination's value from the first blended frame (`LerpBool`).
 fn blend_glow(a: &Glow, b: &Glow, t: f32) -> Glow {
     Glow {
-        enabled: if t < 1.0 {
-            a.enabled || b.enabled
-        } else {
-            b.enabled
-        },
+        enabled: b.enabled,
         radius: lerp(a.radius, b.radius, t),
         bloom_cutoff: lerp(a.bloom_cutoff, b.bloom_cutoff, t),
         bloom_desaturation: lerp(a.bloom_desaturation, b.bloom_desaturation, t),
@@ -242,18 +247,97 @@ fn blend_glow(a: &Glow, b: &Glow, t: f32) -> Glow {
 
 fn blend_film(a: &Film, b: &Film, t: f32) -> Film {
     Film {
-        enabled: if t < 1.0 {
-            a.enabled || b.enabled
-        } else {
-            b.enabled
-        },
+        enabled: b.enabled,
         contrast: lerp(a.contrast, b.contrast, t),
         brightness: lerp(a.brightness, b.brightness, t),
         desaturation: lerp(a.desaturation, b.desaturation, t),
-        invert: if t < 0.5 { a.invert } else { b.invert },
+        invert: b.invert,
         tint_light: lerp3(a.tint_light, b.tint_light, t),
         tint_dark: lerp3(a.tint_dark, b.tint_dark, t),
     }
+}
+
+/// One vision channel, naked or night (`visionSetFrom`/`visionSetTo`/`visionSetCurrent` and `visionSetLerpData`).
+#[derive(Clone, Copy, Debug)]
+struct Channel {
+    /// A set has been named for it (`style != VISIONSETLERP_UNDEFINED`).
+    defined: bool,
+    from: (Glow, Film),
+    to: (Glow, Film),
+    start_ms: i32,
+    /// The blend's length; 0 when none runs (`VISIONSETLERP_NONE`).
+    blend_ms: i32,
+}
+
+impl Channel {
+    fn new(set: (Glow, Film), defined: bool) -> Self {
+        Self {
+            defined,
+            from: set,
+            to: set,
+            start_ms: 0,
+            blend_ms: 0,
+        }
+    }
+
+    /// `UpdateVarsLerp`: the channel's look at `now_ms`; once the blend is over, its destination.
+    fn at(&self, now_ms: i32) -> (Glow, Film) {
+        if self.blend_ms <= 0 || now_ms > self.start_ms + self.blend_ms {
+            return self.to;
+        }
+        let t = ease(((now_ms - self.start_ms) as f32 / self.blend_ms as f32).clamp(0.0, 1.0));
+        (
+            blend_glow(&self.from.0, &self.to.0, t),
+            blend_film(&self.from.1, &self.to.1, t),
+        )
+    }
+
+    /// `CG_VisionSetStartLerp_To`: without a duration, or on a channel never named before, the set applies at once
+    /// (`VisionSetCurrent`); otherwise it blends from what the channel shows now.
+    fn start(&mut self, set: (Glow, Film), now_ms: i32, ms: i32) {
+        if ms <= 0 || !self.defined {
+            self.from = set;
+            self.blend_ms = 0;
+        } else {
+            self.from = self.at(now_ms);
+            self.start_ms = now_ms;
+            self.blend_ms = ms;
+        }
+        self.to = set;
+        self.defined = true;
+    }
+}
+
+/// The first frame after the picture changed channel (goggles on or off), for the report.
+#[derive(Clone, Copy, Debug)]
+struct Switch {
+    to_night: bool,
+    at_ms: i32,
+    /// What that frame showed.
+    first: (Glow, Film),
+    /// What the channel it changed to settles on.
+    target: (Glow, Film),
+}
+
+fn look_json((g, f): &(Glow, Film)) -> serde_json::Value {
+    serde_json::json!({
+        "glow": {
+            "enabled": g.enabled,
+            "radius": g.radius,
+            "bloom_cutoff": g.bloom_cutoff,
+            "bloom_desaturation": g.bloom_desaturation,
+            "bloom_intensity": g.bloom_intensity,
+        },
+        "film": {
+            "enabled": f.enabled,
+            "contrast": f.contrast,
+            "brightness": f.brightness,
+            "desaturation": f.desaturation,
+            "invert": f.invert,
+            "tint_light": f.tint_light,
+            "tint_dark": f.tint_dark,
+        },
+    })
 }
 
 struct Shock {
@@ -273,8 +357,9 @@ struct Shock {
 /// What to put on the picture this frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LookOut {
-    /// The glow and film once a script has picked a vision set; until then the map's own stay.
-    pub vision: Option<(Glow, Film)>,
+    /// The glow and film of the vision channel shown: the night one while the player looks through the goggles, else
+    /// the naked one (the map's own look until a script picks another).
+    pub vision: (Glow, Film),
     pub shell_shock: Option<ShellShock>,
     pub save_screen: bool,
     /// Pitch and yaw to add to the view, degrees.
@@ -287,21 +372,20 @@ pub struct LookOut {
     pub sensitivity: f32,
 }
 
-/// How long the goggles take to change the picture, milliseconds.
-const GOGGLES_BLEND_MS: i32 = 300;
-
 pub struct Look {
-    /// A script has picked a vision set.
-    active: bool,
-    from: (Glow, Film),
-    to: (Glow, Film),
-    /// What the picture returns to when the goggles come off: the map's own look or the last `visionsetnaked`.
-    day: (Glow, Film),
-    /// The look of `visionsetnight`, shown while the goggles are on.
-    night_set: Option<(Glow, Film)>,
+    /// `VISIONSETMODE_NAKED`: the map's own look until `visionsetnaked` names a set.
+    naked_ch: Channel,
+    /// `VISIONSETMODE_NIGHT`: undefined until `visionsetnight` names a set.
+    night_ch: Channel,
+    /// The player state's night vision weapon flag.
     goggles: bool,
-    start_ms: i32,
-    blend_ms: i32,
+    /// `nightVisionDisableEffects` is off.
+    effects: bool,
+    /// The night channel was shown on the last frame.
+    shown_night: bool,
+    /// What the last frame showed, and the first frame after the last change of channel, for the report.
+    applied: (Glow, Film),
+    switch: Option<Switch>,
     /// The names the scripts set, for the report.
     pub naked: Option<String>,
     pub night: Option<String>,
@@ -318,14 +402,13 @@ impl Look {
     /// `base` is the map's own look, in force until a script picks another.
     pub fn new(base: (Glow, Film)) -> Self {
         Self {
-            active: false,
-            from: base,
-            to: base,
-            day: base,
-            night_set: None,
+            naked_ch: Channel::new(base, true),
+            night_ch: Channel::new(base, false),
             goggles: false,
-            start_ms: 0,
-            blend_ms: 0,
+            effects: true,
+            shown_night: false,
+            applied: base,
+            switch: None,
             naked: None,
             night: None,
             missing: Vec::new(),
@@ -345,51 +428,20 @@ impl Look {
         file: &dyn Fn(&str) -> Option<String>,
     ) -> bool {
         match c {
-            ServerCmd::Vision {
-                night: false,
-                name,
-                ms,
-            } => {
-                match file(&format!("vision/{name}.vision")) {
-                    Some(text) => {
-                        let art = MapArt::parse(None, Some(&text));
-                        self.day = (art.glow, art.film);
-                        self.go(now_ms, *ms);
-                    }
-                    None => {
-                        let f = format!("vision/{name}.vision");
-                        logging::dedup!(
-                            WARN,
-                            "vision-file",
-                            file = f.as_str(),
-                            "vision file missing"
-                        );
-                        self.missing.push(f);
-                    }
+            ServerCmd::Vision { night, name, ms } => {
+                if let Some(set) = self.vision_set(name, file) {
+                    let ch = if *night {
+                        &mut self.night_ch
+                    } else {
+                        &mut self.naked_ch
+                    };
+                    ch.start(set, now_ms, *ms);
                 }
-                self.naked = Some(name.clone());
-                true
-            }
-            ServerCmd::Vision {
-                night: true, name, ..
-            } => {
-                match file(&format!("vision/{name}.vision")) {
-                    Some(text) => {
-                        let art = MapArt::parse(None, Some(&text));
-                        self.night_set = Some((art.glow, art.film));
-                    }
-                    None => {
-                        let f = format!("vision/{name}.vision");
-                        logging::dedup!(
-                            WARN,
-                            "vision-file",
-                            file = f.as_str(),
-                            "vision file missing"
-                        );
-                        self.missing.push(f);
-                    }
-                }
-                self.night = Some(name.clone());
+                *if *night {
+                    &mut self.night
+                } else {
+                    &mut self.naked
+                } = Some(name.clone());
                 true
             }
             ServerCmd::ShellShock { name, ms } => {
@@ -428,16 +480,38 @@ impl Look {
         }
     }
 
-    /// Starts the blend from what is on screen to the look that now applies.
-    fn go(&mut self, now_ms: i32, ms: i32) {
-        self.active = true;
-        self.from = self.current(now_ms);
-        self.to = match (self.goggles, self.night_set) {
-            (true, Some(n)) => n,
-            _ => self.day,
-        };
-        self.start_ms = now_ms;
-        self.blend_ms = ms;
+    /// `GetVisionSet` through `RawBufferOpen` (KisakCOD `cgame/cg_visionsets.cpp:279-352`): `vision/<name>.vision`,
+    /// or `vision/default.vision` when that is missing; `None` for an empty name or when neither can be read.
+    fn vision_set(
+        &mut self,
+        name: &str,
+        file: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<(Glow, Film)> {
+        if name.is_empty() {
+            return None;
+        }
+        let f = format!("vision/{name}.vision");
+        let text = file(&f).or_else(|| {
+            logging::dedup!(
+                WARN,
+                f.as_str(),
+                file = f.as_str(),
+                "vision file missing; vision/default.vision is used instead"
+            );
+            self.missing.push(f);
+            let d = file("vision/default.vision");
+            if d.is_none() {
+                logging::dedup!(
+                    WARN,
+                    "vision-default",
+                    file = "vision/default.vision",
+                    "the default vision file is missing; the look stays as it was"
+                );
+            }
+            d
+        })?;
+        let art = MapArt::parse(None, Some(&text));
+        Some((art.glow, art.film))
     }
 
     /// When the shell shock now on ends, server ms (0 for none): what the gun's sway is scaled by.
@@ -454,34 +528,69 @@ impl Look {
         })
     }
 
-    /// `CG_LookingThroughNightVision` (KisakCOD `cgame/cg_visionsets.cpp:602`): the goggles are on (the player state's
-    /// night vision weapon flag), whether or not a script set a night look. Multiplayer has no wear or remove state,
-    /// so the flag alone decides.
+    /// `CG_LookingThroughNightVision` (KisakCOD `cgame/cg_visionsets.cpp:602-633`): the goggles are on (the player
+    /// state's night vision weapon flag) and `nightVisionDisableEffects` is off, whether or not a script set a night
+    /// look. Multiplayer has no wear or remove state, so the flag alone decides.
     pub fn night_vision(&self) -> bool {
-        self.goggles
+        self.goggles && self.effects
     }
 
-    /// The night vision goggles went on or off (the player state's weapon flag); the look blends to the night set
-    /// and back.
-    pub fn goggles(&mut self, on: bool, now_ms: i32) {
-        if on != self.goggles {
-            self.goggles = on;
-            if self.night_set.is_some() {
-                self.go(now_ms, GOGGLES_BLEND_MS);
-            }
+    /// The player state's night vision flag and whether `nightVisionDisableEffects` is off. The picture changes
+    /// channel on the frame the result of [`Self::night_vision`] does: multiplayer's `VisionFadeValue` is always 1
+    /// (`PM_Weapon_CheckForNightVision` keeps the wear and remove states to the single player build), so there is no
+    /// fade.
+    pub fn goggles(&mut self, on: bool, effects: bool) {
+        self.goggles = on;
+        self.effects = effects;
+    }
+
+    /// `CG_VisionSetApplyToRefdef`: the shown channel's look at `now_ms`, or (`settled`) where its blend ends. A night
+    /// channel no script named turns the glow and the film off.
+    fn shown(&self, now_ms: i32, settled: bool) -> (Glow, Film) {
+        let at = |c: &Channel| if settled { c.to } else { c.at(now_ms) };
+        if !self.night_vision() {
+            return at(&self.naked_ch);
         }
+        if self.night_ch.defined {
+            return at(&self.night_ch);
+        }
+        let (mut g, mut f) = at(&self.naked_ch);
+        g.enabled = false;
+        f.enabled = false;
+        (g, f)
     }
 
-    fn current(&self, now_ms: i32) -> (Glow, Film) {
-        let t = if self.blend_ms <= 0 {
-            1.0
+    /// What the picture's look is doing, for the control channel: the channel shown and its blend, what the last
+    /// frame showed, and the first frame after the last change of channel.
+    pub fn report(&self) -> serde_json::Value {
+        let ch = if self.shown_night && self.night_ch.defined {
+            &self.night_ch
         } else {
-            ((now_ms - self.start_ms) as f32 / self.blend_ms as f32).clamp(0.0, 1.0)
+            &self.naked_ch
         };
-        (
-            blend_glow(&self.from.0, &self.to.0, t),
-            blend_film(&self.from.1, &self.to.1, t),
-        )
+        serde_json::json!({
+            "naked": self.naked,
+            "night": self.night,
+            "missing": self.missing,
+            "goggles": self.goggles,
+            "night_vision": self.night_vision(),
+            "channel": if self.shown_night { "night" } else { "naked" },
+            "night_defined": self.night_ch.defined,
+            "time": self.last_ms,
+            "applied": look_json(&self.applied),
+            "blend": {
+                "start_ms": ch.start_ms,
+                "ms": ch.blend_ms,
+                "from": look_json(&ch.from),
+                "to": look_json(&ch.to),
+            },
+            "switch": self.switch.map(|s| serde_json::json!({
+                "to_night": s.to_night,
+                "at_ms": s.at_ms,
+                "first": look_json(&s.first),
+                "target": look_json(&s.target),
+            })),
+        })
     }
 
     /// `CG_Flashbanged`: a shock whose screen is not a blur is still running at `now_ms`.
@@ -493,11 +602,22 @@ impl Look {
 
     /// The look at server time `now_ms`.
     pub fn frame(&mut self, now_ms: i32) -> LookOut {
-        let (glow, film) = self.current(now_ms);
+        let vision = self.shown(now_ms, false);
+        let night = self.night_vision();
+        if night != self.shown_night {
+            self.shown_night = night;
+            self.switch = Some(Switch {
+                to_night: night,
+                at_ms: now_ms,
+                first: vision,
+                target: self.shown(now_ms, true),
+            });
+        }
+        self.applied = vision;
         let dt = (now_ms - self.last_ms).clamp(1, 200) as f32;
         self.last_ms = now_ms;
         let mut out = LookOut {
-            vision: self.active.then_some((glow, film)),
+            vision,
             shell_shock: None,
             save_screen: false,
             kick: [0.0; 2],
@@ -705,21 +825,46 @@ mod tests {
     }
 
     #[test]
-    fn a_vision_set_blends_the_film_over_its_transition_and_then_holds() {
+    fn a_vision_set_eases_over_sin_and_takes_the_destination_switches_at_once() {
         let mut l = look(&[("vision/dark.vision", NIGHT)]);
-        assert!(l.command(&set("dark", 1000), 5000));
-        assert_eq!(l.frame(5000).vision.unwrap().1.contrast, 1.0);
-        let mid = l.frame(5500).vision.unwrap();
-        assert!((mid.1.contrast - 1.5).abs() < 1e-4, "{}", mid.1.contrast);
-        let end = l.frame(7000).vision.unwrap();
+        assert!(l.command(&set("dark", 2000), 5000));
+        // `LerpBool`: the glow and film are on from the first blended frame, while the numbers have not moved yet.
+        let first = l.frame(5000).vision;
+        assert_eq!(
+            (first.1.contrast, first.1.enabled, first.0.enabled),
+            (1.0, true, true)
+        );
+        // `LerpFloat` with `VISIONSETLERP_TO_SMOOTH`: 38%, 71% and 92% of the way at a quarter, half and three quarters.
+        for (ms, f) in [(5500, 0.25f32), (6000, 0.5), (6500, 0.75)] {
+            let c = l.frame(ms).vision.1.contrast;
+            let want = 1.0 + (f * std::f32::consts::FRAC_PI_2).sin();
+            assert!((c - want).abs() < 1e-4, "{ms}: {c} vs {want}");
+        }
+        let end = l.frame(7001).vision;
         assert_eq!(
             (end.1.contrast, end.1.enabled, end.0.radius),
             (2.0, true, 10.0)
         );
+        // Back to a set with the film off: the grade stops on the first blended frame.
+        static OFF: &[(&str, &str)] = &[
+            ("vision/dark.vision", NIGHT),
+            ("vision/plain.vision", "r_filmEnable \"0\"\nr_glow \"0\"\n"),
+        ];
+        l.files = OFF;
+        l.command(&set("plain", 2000), 8000);
+        let off = l.frame(8016).vision;
+        assert!(!off.1.enabled && !off.0.enabled, "{off:?}");
     }
 
     #[test]
-    fn the_goggles_blend_to_the_night_set_and_back_to_the_day_look() {
+    fn a_vision_set_without_a_duration_switches_at_once() {
+        let mut l = look(&[("vision/dark.vision", NIGHT)]);
+        l.command(&set("dark", 0), 100);
+        assert_eq!(l.frame(100).vision.1.contrast, 2.0);
+    }
+
+    #[test]
+    fn the_goggles_switch_to_the_night_set_on_the_frame_and_back() {
         let mut l = look(&[("vision/dark.vision", NIGHT)]);
         let night = ServerCmd::Vision {
             night: true,
@@ -727,23 +872,45 @@ mod tests {
             ms: 0,
         };
         l.command(&night, 0);
-        assert!(
-            l.frame(100).vision.is_none(),
+        assert_eq!(
+            l.frame(100).vision.1.contrast,
+            1.0,
             "the set alone changes nothing"
         );
-        l.goggles(true, 1000);
-        assert_eq!(l.frame(1000).vision.unwrap().1.contrast, 1.0);
-        assert_eq!(l.frame(1300).vision.unwrap().1.contrast, 2.0);
-        l.goggles(false, 2000);
-        assert_eq!(l.frame(2300).vision.unwrap().1.contrast, 1.0);
+        l.goggles(true, true);
+        assert!(l.night_vision());
+        assert_eq!(l.frame(1000).vision.1.contrast, 2.0);
+        l.goggles(false, true);
+        assert_eq!(l.frame(1016).vision.1.contrast, 1.0);
+        // `nightVisionDisableEffects`: the goggles' flag is on but the player does not look through them.
+        l.goggles(true, false);
+        assert!(!l.night_vision());
+        assert_eq!(l.frame(1032).vision.1.contrast, 1.0);
+        let r = l.report();
+        assert_eq!(r["switch"]["to_night"], false);
+        assert_eq!(r["switch"]["first"], r["switch"]["target"]);
     }
 
     #[test]
-    fn a_missing_vision_file_is_reported_and_changes_nothing() {
-        let mut l = look(&[]);
+    fn goggles_without_a_night_set_turn_the_glow_and_film_off() {
+        let mut l = look(&[("vision/dark.vision", NIGHT)]);
+        l.command(&set("dark", 0), 0);
+        l.goggles(true, true);
+        let v = l.frame(10).vision;
+        assert!(!v.0.enabled && !v.1.enabled, "{v:?}");
+    }
+
+    #[test]
+    fn a_missing_vision_file_is_reported_and_the_default_one_used() {
+        let mut l = look(&[("vision/default.vision", NIGHT)]);
         l.command(&set("nope", 0), 0);
         assert_eq!(l.missing, ["vision/nope.vision"]);
-        assert!(l.frame(10).vision.is_none());
+        assert_eq!(l.naked.as_deref(), Some("nope"));
+        assert_eq!(l.frame(10).vision.1.contrast, 2.0);
+        // Without the default file either, the look stays.
+        let mut l = look(&[]);
+        l.command(&set("nope", 0), 0);
+        assert_eq!(l.frame(10).vision.1.contrast, 1.0);
     }
 
     const BLUR: &str = "bg_shock_screenType \"0\"\nbg_shock_screenBlurBlendTime \"2\"\nbg_shock_screenBlurBlendFadeTime \"0.5\"\nbg_shock_viewKickRadius \"4\"\nbg_shock_viewKickPeriod \"0.2\"\n";

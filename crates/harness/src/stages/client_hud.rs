@@ -416,6 +416,92 @@ fn stat(c: &mut Driven, path: &str) -> Result<u64, String> {
     Ok(c.lookup(path)?.as_u64().unwrap_or(0))
 }
 
+/// The numbers of a look block of the client's `look` section (`glow.radius`, `film.tint_dark.2`, ...), by name.
+fn look_numbers(v: &Value) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for part in ["glow", "film"] {
+        for (k, x) in v[part].as_object().into_iter().flatten() {
+            match x {
+                Value::Number(n) => out.push((format!("{part}.{k}"), n.as_f64().unwrap_or(0.0))),
+                Value::Array(a) => {
+                    for (i, e) in a.iter().enumerate() {
+                        out.extend(e.as_f64().map(|f| (format!("{part}.{k}.{i}"), f)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The switches of a look block: glow on, film on, film inverted.
+fn look_switches(v: &Value) -> [&Value; 3] {
+    [
+        &v["glow"]["enabled"],
+        &v["film"]["enabled"],
+        &v["film"]["invert"],
+    ]
+}
+
+/// One sample of a vision blend (the client's `look` section): `None` once the blend is over, else its fraction.
+/// The number that moves most must sit where `sin(fraction * pi/2)` puts it (`LerpFloat` with
+/// `VISIONSETLERP_TO_SMOOTH`), and the switches must already be the destination's (`LerpBool`). The second value is
+/// whether this sample tells the eased curve from a straight line.
+fn vision_blend_sample(look: &Value) -> Result<Option<(f64, bool)>, String> {
+    let b = &look["blend"];
+    let ms = b["ms"].as_f64().unwrap_or(0.0);
+    let f = (look["time"].as_f64().unwrap_or(0.0) - b["start_ms"].as_f64().unwrap_or(0.0))
+        / ms.max(1.0);
+    if ms <= 0.0 || f > 1.0 {
+        return Ok(None);
+    }
+    let f = f.max(0.0);
+    if look_switches(&look["applied"]) != look_switches(&b["to"]) {
+        return Err(format!(
+            "{:.0}% into the vision blend the glow/film switches are {:?}, not the destination's {:?}",
+            f * 100.0,
+            look_switches(&look["applied"]),
+            look_switches(&b["to"])
+        ));
+    }
+    let (from, to, now) = (
+        look_numbers(&b["from"]),
+        look_numbers(&b["to"]),
+        look_numbers(&look["applied"]),
+    );
+    let Some(((name, a), (_, z))) = from
+        .iter()
+        .zip(&to)
+        .max_by(|(x, y), (u, v)| (y.1 - x.1).abs().total_cmp(&(v.1 - u.1).abs()))
+    else {
+        return Err(format!("the look section has no numbers: {look}"));
+    };
+    let span = z - a;
+    if span.abs() < 0.05 {
+        return Err(format!(
+            "the vision blend moves nothing measurable (the most is {name} by {span})"
+        ));
+    }
+    let got = now
+        .iter()
+        .find(|(n, _)| n == name)
+        .map_or(f64::NAN, |(_, v)| *v);
+    let eased = a + span * (f * std::f64::consts::FRAC_PI_2).sin();
+    let tol = span.abs() * 2e-3 + 1e-4;
+    if (got - eased).abs() > tol {
+        return Err(format!(
+            "{:.0}% into the vision blend {name} is {got}, not the sin-eased {eased} (linear would be {})",
+            f * 100.0,
+            a + span * f
+        ));
+    }
+    Ok(Some((
+        f,
+        (0.2..0.8).contains(&f) && (eased - (a + span * f)).abs() > 4.0 * tol,
+    )))
+}
+
 /// Observe an actual server tick atomically. Collecting UDP traffic briefly before the tick creates a backlog even
 /// when the renderer is slower than `sv_fps`; 150 ms at the 125 Hz send cap stays under the server's 24-command take
 /// per frame and its 64-command queue, so the latest received command is the latest one sent.
@@ -952,10 +1038,96 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         r
     })?;
 
+    // `cg_fov` is registered at 65 (`iw3mp.exe` 1.7, KisakCOD `cg_main_mp.cpp`), and the view is that at 4:3 widened
+    // for the window (Hor+).
+    c.step("field of view", |c| {
+        let fov = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
+        if fov["value"] != json!("65") {
+            return Err(format!("cg_fov starts at {}, not the stock 65", fov["value"]));
+        }
+        let view = c.lookup("view")?;
+        let (got, aspect) = (
+            view["fov_x"].as_f64().unwrap_or(0.0),
+            view["aspect"].as_f64().unwrap_or(0.0),
+        );
+        let want = 2.0 * ((65f64.to_radians() * 0.5).tan() * 0.75 * aspect).atan().to_degrees();
+        if (got - want).abs() > 0.1 {
+            return Err(format!(
+                "the horizontal field of view is {got}, not the {want:.2} cg_fov 65 gives at aspect {aspect}"
+            ));
+        }
+        Ok(())
+    })?;
+
+    // `visionsetnaked` through the console: the stock transition eases by `sin` (`VISIONSETLERP_TO_SMOOTH`) with the
+    // destination's switches from the first blended frame, and a set with no file falls back to
+    // `vision/default.vision` (`RawBufferOpen`), named in the look's missing list. The map's set is put back after.
+    c.step("vision sets", |c| {
+        let naked = c.lookup("look.naked")?.as_str().unwrap_or("").to_owned();
+        c.console("visionsetnaked default_night 3")?;
+        c.until(
+            json!({"look.naked": "default_night", "look.blend.ms": 3000}),
+            secs(10),
+            "visionsetnaked default_night 3 did not start a 3 s blend on the client",
+        )?;
+        let (mut samples, mut telling) = (0, 0);
+        let deadline = Instant::now() + secs(8);
+        while Instant::now() < deadline {
+            match vision_blend_sample(&c.lookup("look")?)? {
+                Some((_, t)) => {
+                    samples += 1;
+                    telling += usize::from(t);
+                }
+                None => break,
+            }
+            c.pause(Duration::from_millis(100))?;
+        }
+        if telling == 0 {
+            return Err(format!(
+                "{samples} samples of the 3 s blend, none between 20% and 80% where the eased curve leaves the straight line"
+            ));
+        }
+        c.pause(Duration::from_millis(300))?;
+        let night = c.lookup("look.applied")?;
+        c.console("visionsetnaked does_not_exist 0")?;
+        c.until(
+            json!({"look.missing": {"contains": "vision/does_not_exist.vision"}}),
+            secs(10),
+            "a vision set with no file was not reported missing",
+        )?;
+        c.pause(Duration::from_millis(300))?;
+        let fallback = c.lookup("look.applied")?;
+        c.console("visionsetnaked default 0")?;
+        c.until(
+            json!({"look.naked": "default"}),
+            secs(10),
+            "visionsetnaked default did not reach the client",
+        )?;
+        c.pause(Duration::from_millis(300))?;
+        let default = c.lookup("look.applied")?;
+        if fallback != default || fallback == night {
+            return Err(format!(
+                "a missing vision file did not fall back to vision/default.vision: {fallback} against default {default} (was {night})"
+            ));
+        }
+        if !naked.is_empty() {
+            c.console(&format!("visionsetnaked {naked} 0"))?;
+            c.until(
+                json!({"look.naked": naked}),
+                secs(10),
+                "the map's vision set did not come back",
+            )?;
+        }
+        Ok(())
+    })?;
+
     // Night vision on the stock action slot 1 bind (every stock class gets `setactionslot(1, "nightvision")`): the
     // goggles' overlay covers the screen under the HUD and the d-pad slot shows their icon
-    // (`CG_DrawNightVisionOverlay`, `CG_DrawPlayerActionSlot`); the same bind takes them off. The player stands still
-    // for the matched captures: two with the goggles off (what the view changes by on its own) and one with them on.
+    // (`CG_DrawNightVisionOverlay`, `CG_DrawPlayerActionSlot`); the same bind takes them off. The picture changes to
+    // the night channel on the first frame (multiplayer's `VisionFadeValue` is 1), and with
+    // `nightVisionDisableEffects` 1 the goggles go on without it or the overlay (`CG_LookingThroughNightVision`). The
+    // player stands still for the matched captures: two with the goggles off (what the view changes by on its own) and
+    // one with them on.
     c.step("night vision", |c| {
         w.stop(c)?;
         c.until(
@@ -982,6 +1154,12 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             secs(10),
             "the goggles' overlay and d-pad icon were not drawn after the night vision bind",
         )?;
+        let switch = c.lookup("look.switch")?;
+        if switch["to_night"] != json!(true) || switch["first"] != switch["target"] {
+            return Err(format!(
+                "the goggles did not switch the picture to the night channel on the first frame: {switch}"
+            ));
+        }
         c.pause(secs(1))?;
         c.capture(NV_ON)?;
         if c.lookup("player.alive")? != Value::Bool(true) {
@@ -993,7 +1171,33 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             secs(10),
             "the goggles did not come off on the second press",
         )?;
-        Ok(())
+        c.console("set nightVisionDisableEffects 1")?;
+        c.pause(Duration::from_millis(300))?;
+        c.bind("+actionslot 1", "tap")?;
+        let r = c
+            .until(
+                json!({"look.goggles": true}),
+                secs(10),
+                "the goggles did not go on with nightVisionDisableEffects 1",
+            )
+            .and_then(|_| {
+                c.pause(Duration::from_millis(300))?;
+                let (live, channel) = (c.lookup("hud.live.night_vision")?, c.lookup("look.channel")?);
+                if live != json!(false) || channel != json!("naked") {
+                    return Err(format!(
+                        "with nightVisionDisableEffects 1 the goggles still changed the picture: night vision {live}, channel {channel}"
+                    ));
+                }
+                Ok(())
+            });
+        c.bind("+actionslot 1", "tap")?;
+        c.until(
+            json!({"look.goggles": false}),
+            secs(10),
+            "the goggles did not come off with nightVisionDisableEffects 1",
+        )?;
+        c.console("set nightVisionDisableEffects 0")?;
+        r
     })?;
 
     // A grenade cooked and thrown with its key: while it cooks the crosshair's centre dot grows with the fuse

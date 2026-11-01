@@ -173,6 +173,8 @@ pub struct Switches {
     pub killcam: crate::camera::KillCamTune,
     /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
     pub bullet: fx::BulletTune,
+    /// `nightVisionDisableEffects` is off: the goggles' vision set and overlay apply (`CG_LookingThroughNightVision`).
+    pub night_vision_effects: bool,
 }
 
 impl Default for Switches {
@@ -190,6 +192,7 @@ impl Default for Switches {
             ragdoll_tunables: crate::ragdoll::Tunables::default(),
             killcam: crate::camera::KillCamTune::default(),
             bullet: fx::BulletTune::default(),
+            night_vision_effects: true,
         }
     }
 }
@@ -222,6 +225,7 @@ impl Switches {
             ragdoll_tunables: crate::ragdoll::Tunables::read(c),
             killcam: crate::camera::KillCamTune::read(c),
             bullet: bullet_tune(c),
+            night_vision_effects: !c.bool("nightVisionDisableEffects"),
         }
     }
 }
@@ -1421,8 +1425,10 @@ impl NetPlay {
             self.c.kill_cam_frames += u64::from(kill.is_some());
             self.c.dof_frames += u64::from(dof.active());
             let (events, commands) = self.take_events(&snap);
-            self.look
-                .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+            self.look.goggles(
+                ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0,
+                self.switches.night_vision_effects,
+            );
             let look = self.look.frame(st);
             self.shock_effects(&look);
             // The effects the followed player's guns and the map's events start are as visible to a watcher.
@@ -1643,9 +1649,11 @@ impl NetPlay {
         laps.lap("hear+feedback");
         let (events, commands) = self.take_events(&snap);
         // The player's own goggles, from the predicted state (`CG_LookingThroughNightVision` reads
-        // `predictedPlayerState.weapFlags`).
-        self.look
-            .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+        // `predictedPlayerState.weapFlags`, and `nightVisionDisableEffects` before it).
+        self.look.goggles(
+            ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0,
+            self.switches.night_vision_effects,
+        );
         let look = self.look.frame(st);
         self.shock_effects(&look);
         laps.lap("events+look");
