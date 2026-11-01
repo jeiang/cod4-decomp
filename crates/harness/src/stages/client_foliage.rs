@@ -168,8 +168,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         ) {
             Ok(report) => {
                 out.files.extend([
-                    format!("{mode}/ui-script.json").into(),
-                    format!("{mode}/foliage-{mode}.png").into(),
+                    format!("{mode}/ui-script.json"),
+                    format!("{mode}/foliage-{mode}.png"),
                 ]);
                 if let Some(problem) = session_verdict(&report) {
                     out.status = Status::Failed;
