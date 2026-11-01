@@ -202,6 +202,8 @@ The parity run records the full native/browser ownerdraw-id difference, not an e
 
 Both browser stages probe `navigator.gpu.requestAdapter()` and record its outcome and adapter identity, rather than treating API presence or a missing render report as proof of availability. `web-match` fails if an adapter is offered but the client selects WebGL2; `web-client` requires a WebGPU render report whenever its probe succeeds. The movement measurement must stay alive in one spawn: death, killcam or a changed spawn count fails the attempt instead of counting a respawn teleport as walking.
 
+The harness Chromium runs headless with SwiftShader behind both APIs (`--enable-unsafe-webgpu --enable-features=Vulkan --use-angle=swiftshader --use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader`), so it offers a WebGPU fallback adapter (`architecture: swiftshader`, `isFallbackAdapter: true`) and `web-match` plays on WebGPU. Without the Vulkan feature the GPU process cannot create shared images, and ANGLE on Vulkan fails with an internal Vulkan error. The browser WebGPU backend of wgpu does not pass a render pass's `occlusionQuerySet` to the browser, so the sun-flare visibility probe would invalidate the command buffer; on browser WebGPU (as on GL) the sun uses its screen-rect fallback instead of an occlusion query.
+
 ## Layout
 
 | crate | role |
