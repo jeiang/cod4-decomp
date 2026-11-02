@@ -168,8 +168,8 @@ const LEAVES: &[&str] = &[
 ];
 
 /// A frame that prepared this many material passes at once drew a precache list, not one model that turned up: the
-/// passes of the models the server precached are prepared a material per frame (`Renderer::warm_late`), a draw's
-/// first sight of a model costs that model's materials only (a dozen passes).
+/// passes of the models the server precached are prepared under the load screen (`Renderer::warm_late`,
+/// [`precache_failure`]), a draw's first sight of a model costs that model's materials only (a dozen passes).
 const MAX_PASSES_PER_FRAME: f64 = 64.0;
 
 /// Where the hitching frames' time went: the excess over each phase's median summed over the `spikes` frames, the
@@ -315,6 +315,24 @@ fn frag_suicide_errors(srv: &Value) -> u64 {
 /// every few seconds).
 fn hitch_failures(report: &Value, cpu_ms: &[f64], phases: &Phases) -> Vec<String> {
     hitches(report, cpu_ms, phases, Some(SPIKE_SHARE))
+}
+
+/// The server's precache list is prepared under the load screen, as stock's `CG_RegisterGraphics` does in
+/// `CA_LOADING` (KisakCOD `cgame_mp/cg_main_mp.cpp`): a frame of play prepares none of it (#457). The client counts
+/// the warm-up entries its frames of play prepared (`precache.in_game_entries` of `client.json`).
+fn precache_failure(report: &Value) -> Option<String> {
+    let p = &report["precache"];
+    match p["in_game_entries"].as_u64() {
+        Some(0) => None,
+        Some(n) => Some(format!(
+            "frames of play prepared {n} warm-up entries of the server's precache list ({:.0} ms): the load screen left them",
+            p["in_game_ms"].as_f64().unwrap_or(0.0)
+        )),
+        None => Some(
+            "the client reported no precache counts (precache.in_game_entries in client.json)"
+                .to_owned(),
+        ),
+    }
 }
 
 /// The share of frames that hitched by the rule of [`hitch_failures`].
@@ -518,6 +536,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let phases =
         Phases::parse(&fs::read_to_string(dir.join("frames.phases.csv")).unwrap_or_default());
     failures.extend(hitch_failures(&json, &cpu, &phases));
+    failures.extend(precache_failure(&json));
     // The camera eases over stair steps: a frame that began a step on the logical eye did not jump the drawn one.
     // The match's walking decides whether a step is climbed at all; with none the stage notes it as untested.
     let (stairs, snapped) = (
@@ -942,6 +961,21 @@ mod tests {
             why[0].contains("frame 105 prepared 241 material passes itself (31 ms)"),
             "{why:?}"
         );
+    }
+
+    #[test]
+    fn a_precache_list_left_to_frames_of_play_fails() {
+        let report = |p: Value| json!({ "precache": p });
+        assert_eq!(
+            precache_failure(&report(json!({"in_game_entries": 0, "in_game_ms": 0.0}))),
+            None
+        );
+        let why = precache_failure(&report(json!({"in_game_entries": 96, "in_game_ms": 16.2})))
+            .expect("entries prepared in play");
+        assert!(why.contains("prepared 96 warm-up entries"), "{why}");
+        assert!(why.contains("(16 ms)"), "{why}");
+        // A client that does not count them is not taken as one that prepared none.
+        assert!(precache_failure(&json!({})).is_some());
     }
 
     #[test]
