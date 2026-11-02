@@ -91,7 +91,7 @@ usage: cod4e [options] [+command args ...]
   --no-bc                decode BC textures on the CPU, as GPUs and browsers without BC do (bounded decoded memory)
   --shadows <mode>       sun shadow maps: depth (default, hardware comparison), color or off
   --no-fog / --no-lights switch the map's fog / spot and omni primary lights off
-  --fov <degrees>        horizontal field of view at 4:3 (default 80); wider displays widen it (Hor+)
+  --fov <degrees>        horizontal field of view at 4:3 (default 65, the stock cg_fov; held to its 65 to 80); wider displays widen it (Hor+)
   --flythrough           fly the scripted path, then exit
   --duration <secs>      flythrough length (default 12)
   --fly-at <secs>        hold the flythrough at this time of its path (the same picture every run, for comparing renders)
@@ -232,7 +232,7 @@ fn parse(args: &[String]) -> Result<Cli, String> {
         present: "auto".into(),
         backend: "auto".into(),
         no_bc: false,
-        fov: 80.0,
+        fov: 65.0,
         fov_given: false,
         settings: render::Settings::default(),
         flythrough: false,

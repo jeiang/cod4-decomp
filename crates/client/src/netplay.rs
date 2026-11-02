@@ -173,6 +173,8 @@ pub struct Switches {
     pub killcam: crate::camera::KillCamTune,
     /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
     pub bullet: fx::BulletTune,
+    /// `nightVisionDisableEffects` is off: the goggles' vision set and overlay apply (`CG_LookingThroughNightVision`).
+    pub night_vision_effects: bool,
 }
 
 impl Default for Switches {
@@ -190,6 +192,7 @@ impl Default for Switches {
             ragdoll_tunables: crate::ragdoll::Tunables::default(),
             killcam: crate::camera::KillCamTune::default(),
             bullet: fx::BulletTune::default(),
+            night_vision_effects: true,
         }
     }
 }
@@ -222,6 +225,7 @@ impl Switches {
             ragdoll_tunables: crate::ragdoll::Tunables::read(c),
             killcam: crate::camera::KillCamTune::read(c),
             bullet: bullet_tune(c),
+            night_vision_effects: !c.bool("nightVisionDisableEffects"),
         }
     }
 }
@@ -577,6 +581,8 @@ pub struct NetPlay {
     levels: u32,
     /// `clientSideEffects`, from the cvar store each frame; read when a level starts.
     client_side_effects: bool,
+    /// `snd_levelFadeTime`, from the cvar store each frame; read when a level starts.
+    level_fade_ms: u32,
     stat_sync: crate::profile::StatSync,
     /// The rotor rig of each helicopter model drawn (`None` when the model or its animation is missing), and the
     /// seconds the rotors have turned.
@@ -711,6 +717,7 @@ impl NetPlay {
             new_level: None,
             levels: 0,
             client_side_effects: true,
+            level_fade_ms: crate::sound::LEVEL_FADE_MS,
             stat_sync: crate::profile::StatSync::default(),
             rotors: HashMap::new(),
             rotor_clock: 0.0,
@@ -989,6 +996,7 @@ impl NetPlay {
             let sound = &mut self.sound;
             self.hearing.close_all(|p| sound.close_voice_pipe(p));
         }
+        self.sound.map_init(self.level_fade_ms);
         self.pred = Predictor::default();
         self.cmd_time = 0;
         self.drawn_at = None;
@@ -1006,6 +1014,8 @@ impl NetPlay {
         self.last_eye = None;
         self.last_view = None;
         self.camera.reset();
+        // The new level's cgame starts without the old one's shell shock (its clock restarts near zero).
+        self.look.end_shock();
         self.ads_dof = crate::dof::AdsDof::default();
         self.fog.reset();
         self.scan = crate::hud::NameScan::default();
@@ -1194,6 +1204,33 @@ impl NetPlay {
     /// `snd_slaveFadeTime` and `snd_enableReverb`, from the cvar store each frame.
     pub fn set_sound_mix(&mut self, mix: (u32, bool)) {
         self.sound.set_mix(mix);
+    }
+
+    /// `SND_MapInit` once the cvar store is ready: the initial level fades in over the configured time.
+    pub fn map_init(&mut self, fade_ms: u32) {
+        self.level_fade_ms = fade_ms;
+        self.sound.map_init(fade_ms);
+    }
+
+    /// `snd_levelFadeTime`, from the cvar store each frame: the sound fade-in of the next level.
+    pub fn set_level_fade_time(&mut self, ms: u32) {
+        self.level_fade_ms = ms;
+    }
+
+    /// The level's sound fade-in so far: its configured milliseconds, the quietest channel's volume in the first
+    /// mixed chunk, and after 300 ms (`None` until then). `None` before the tables are ready.
+    pub fn level_fade(&self) -> Option<(u32, f32, Option<f32>)> {
+        self.sound.level_fade()
+    }
+
+    /// Starts the eye bob probe over: [`eye_bob`](Self::eye_bob) is the most the eye bobbed after this.
+    pub fn bob_mark(&mut self) {
+        self.c.view_bob_max = 0.0;
+    }
+
+    /// The most the eye bobbed up or down since [`bob_mark`](Self::bob_mark) (or the start), units.
+    pub fn eye_bob(&self) -> f32 {
+        self.c.view_bob_max
     }
 
     /// `cg_footsteps`, from the cvar store each frame.
@@ -1421,8 +1458,10 @@ impl NetPlay {
             self.c.kill_cam_frames += u64::from(kill.is_some());
             self.c.dof_frames += u64::from(dof.active());
             let (events, commands) = self.take_events(&snap);
-            self.look
-                .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+            self.look.goggles(
+                ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0,
+                self.switches.night_vision_effects,
+            );
             let look = self.look.frame(st);
             self.shock_effects(&look);
             // The effects the followed player's guns and the map's events start are as visible to a watcher.
@@ -1633,6 +1672,8 @@ impl NetPlay {
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
+            // The spawn cleared the player state's shell shock: the cgame's ends with it.
+            self.look.end_shock();
             self.note_latest_primary(ps.weapon as u16);
         }
         let mut fb = scan_own(&mut self.own_events, &ps, &events);
@@ -1643,9 +1684,11 @@ impl NetPlay {
         laps.lap("hear+feedback");
         let (events, commands) = self.take_events(&snap);
         // The player's own goggles, from the predicted state (`CG_LookingThroughNightVision` reads
-        // `predictedPlayerState.weapFlags`).
-        self.look
-            .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+        // `predictedPlayerState.weapFlags`, and `nightVisionDisableEffects` before it).
+        self.look.goggles(
+            ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0,
+            self.switches.night_vision_effects,
+        );
         let look = self.look.frame(st);
         self.shock_effects(&look);
         laps.lap("events+look");
@@ -2486,6 +2529,7 @@ impl NetPlay {
         vm.kick_gun(speed);
         vm.set_felt(self.fx.hit, self.look.shock_end());
         vm.set_clip_empty(clip_empty);
+        vm.set_bob(self.params.bob);
         let models = vm.update(&shown, dt);
         for alias in vm.take_sounds() {
             self.sound.play_ui(&alias);

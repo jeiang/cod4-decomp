@@ -52,7 +52,7 @@ fn run_steps(pm: &mut Pmove<'_>, world: &dyn Collide) {
     }
 }
 
-fn pml_new(msec: i32, ps: &super::PlayerState) -> Pml {
+pub(super) fn pml_new(msec: i32, ps: &super::PlayerState) -> Pml {
     Pml {
         forward: [0.0; 3],
         right: [0.0; 3],

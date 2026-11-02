@@ -78,6 +78,12 @@ pub const ALLOWED: &[Allow] = &[
     },
     // Stages that provoke the event on purpose.
     Allow {
+        contains: &["vision file missing", "vision/does_not_exist.vision"],
+        reason: "client-hud names a vision set with no file to check the vision/default.vision fallback (#401)",
+        stages: &["client-hud"],
+        max: Some(2), // provoked once
+    },
+    Allow {
         contains: &["net::connect", "Server is full"],
         reason: "net-hardening fills the server to check the refusal",
         stages: &["net-hardening"],

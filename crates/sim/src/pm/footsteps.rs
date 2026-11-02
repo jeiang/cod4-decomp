@@ -67,8 +67,8 @@ fn footstep_event(
             let (mins, maxs) = ladder_probe_bounds(pm);
             let mask = pm.tracemask & !(PLAYER | PLAYERCLIP);
             let end = mad(&pm.ps.origin, -31.0, &pm.ps.ladder_vec);
-            let client = pm.ps.client_num;
-            let t = world.trace(pm.ps.origin, end, mins, maxs, client, mask);
+            let origin = pm.ps.origin;
+            let t = pm.player_trace(world, origin, mins, maxs, end, mask);
             let mut surf = ((t.surface_flags & SURF_TYPE_MASK) >> SURF_TYPE_SHIFT) as u32;
             if t.fraction == 1.0 || surf == 0 {
                 surf = 21;

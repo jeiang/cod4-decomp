@@ -27,7 +27,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("cl_stanceholdtime", "300", false),
     ("cl_yawspeed", "140", true),
     ("cl_pitchspeed", "140", true),
-    ("cg_fov", "80", true),
+    // KisakCOD (GPL-3.0), cgame_mp/cg_main_mp.cpp:366, and `iw3mp.exe` 1.7's registration: 65, archived.
+    ("cg_fov", "65", true),
     ("cg_fovscale", "1", false),
     ("cg_fovmin", "10", false),
     ("in_mouse", "1", true),
@@ -73,6 +74,8 @@ const DEFAULTS: &[(&str, &str, bool)] = &[
     ("r_brightness", "0", false),
     ("r_contrast", "1", false),
     ("r_desaturation", "1", false),
+    // KisakCOD (GPL-3.0), cgame/cg_visionsets.cpp:72, CG_RegisterVisionSetsDvars: bool, 0, `DVAR_SAVED`.
+    ("nightVisionDisableEffects", "0", true),
     // KisakCOD (GPL-3.0), gfx_d3d/r_dvars.cpp, R_RegisterDvars: renderer defaults and flags.
     // `DVAR_SAVED`, like `DVAR_ARCHIVE`, keeps ordinary `set` writes in the config.
     ("r_filmUseTweaks", "0", false),
@@ -214,6 +217,7 @@ const CHEAT: &[(&str, &str)] = &[
     ("r_dof_tweak", "0"),
     ("snd_slaveFadeTime", "500"),
     ("snd_enableReverb", "1"),
+    ("snd_levelFadeTime", "250"),
     ("ragdoll_max_life", "4500"),
     ("ragdoll_jointlerp_time", "3000"),
     ("ragdoll_explode_force", "18000"),
@@ -264,6 +268,13 @@ const CHEAT: &[(&str, &str)] = &[
     ("cg_airstrikeKillCamNearBlurStart", "0"),
     ("cg_airstrikeKillCamNearBlurEnd", "100"),
     ("compassMaxRange", "2500"),
+];
+
+/// Float dvars registered with a range narrower than any number: name, min, max.
+const FLOAT_DOMAINS: &[(&str, f32, f32)] = &[
+    // `iw3mp.exe` 1.7's `cg_fov` registration (near 0x43adc1): min 65, max 80, `DVAR_ARCHIVE` only. KisakCOD
+    // (GPL-3.0, CoD4 MP 1.8), cgame_mp/cg_main_mp.cpp:366, allows up to 120.
+    ("cg_fov", 65.0, 80.0),
 ];
 
 /// Stock dvars whose other values this build cannot act on: the one value it has, and why. A write of any other
@@ -410,6 +421,15 @@ impl Cvars {
             .iter()
             .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
             .map(|&(_, only, why)| (only, why))
+    }
+
+    /// The range of a float dvar whose registration bounds it (`Dvar_RegisterFloat`'s min and max): a write outside
+    /// it is refused (`Dvar_SetVariant` after `Dvar_ValueInDomain`).
+    pub fn float_domain(name: &str) -> Option<(f32, f32)> {
+        FLOAT_DOMAINS
+            .iter()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(name))
+            .map(|&(_, min, max)| (min, max))
     }
 
     /// Set a value, creating the cvar if needed. `archive` only ever turns the flag on (`seta`).

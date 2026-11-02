@@ -373,9 +373,15 @@ pub fn gaussian_chain(
     passes
 }
 
-/// `RB_VirtualToSceneRadius` for a scene of square pixels: a radius in virtual 640x480 pixels to scene pixels.
-fn scene_radius(radius: f32, scene_height: u32) -> f32 {
-    scene_height as f32 * radius / 480.0
+/// `RB_VirtualToSceneRadius` (KisakCOD `gfx_d3d/rb_imagefilter.cpp:42-47`): a radius in virtual 640x480 pixels to
+/// scene pixels, `[x, y]`. Vertically it scales with the scene's height; horizontally also by the shape of a scene
+/// pixel, `aspectRatioScenePixel` = height * window aspect / width (`gfx_d3d/r_init.cpp:3825`,
+/// `R_StoreWindowSettings`), which differs from 1 when `r_aspectRatio` does not match the target's shape. `aspect` is
+/// that window aspect; `None` is the target's own shape (square pixels).
+fn scene_radius(radius: f32, scene: (u32, u32), aspect: Option<f32>) -> [f32; 2] {
+    let (w, h) = (scene.0.max(1) as f32, scene.1 as f32);
+    let y = h * radius / 480.0;
+    [y * aspect.map_or(1.0, |a| h * a / w), y]
 }
 
 /// `RB_BlurScreen`: the radius to filter by and the opacity of the blurred picture over the frame (the filter
@@ -468,6 +474,8 @@ pub(crate) struct State {
     saved: bool,
     /// A one-texel float-Z image holding the far value: what the scene's `FLOATZ` reads while soft particles are off.
     far_floatz: Option<Arc<Tex>>,
+    /// The last screen blur's filter radii in scene pixels, `[x, y]`, and the scene's size, for the report.
+    pub(crate) last_blur: Option<([f32; 2], (u32, u32))>,
 }
 
 #[repr(C)]
@@ -505,6 +513,7 @@ impl State {
             ),
             saved: false,
             far_floatz: None,
+            last_blur: None,
         }
     }
 
@@ -950,8 +959,8 @@ pub(crate) fn build(
                 WHITE,
                 None,
             );
-            let radius = scene_radius(d.near_blur * 0.25, h);
-            let chain = gaussian_chain(radius, radius, [qw, qh], [qw, qh], MAX_CHAIN);
+            let [rx, ry] = scene_radius(d.near_blur * 0.25, size, b.r.settings.aspect);
+            let chain = gaussian_chain(rx, ry, [qw, qh], [qw, qh], MAX_CHAIN);
             b.filter(Group::Dof, None, &chain, Id::Post1, Id::Post0);
             b.draw(
                 Group::Dof,
@@ -982,8 +991,8 @@ pub(crate) fn build(
             // RB_GlowFilterImage: the radius is scaled by the quarter-size target once for the target, once more by
             // RB_ApplyGlowFilter.
             let (qw, qh) = b.targets.size_of(Id::Post0);
-            let radius = scene_radius(p.glow.radius * 0.25 * 0.25, h);
-            let chain = gaussian_chain(radius, radius, [qw, qh], [qw, qh], MAX_CHAIN - 1);
+            let [rx, ry] = scene_radius(p.glow.radius * 0.25 * 0.25, size, b.r.settings.aspect);
+            let chain = gaussian_chain(rx, ry, [qw, qh], [qw, qh], MAX_CHAIN - 1);
             b.filter(
                 Group::Glow,
                 Some("glow_consistent_setup"),
@@ -1003,8 +1012,9 @@ pub(crate) fn build(
         if p.blur_radius > 0.0 {
             let (radius, alpha) = blur_screen(p.blur_radius, h);
             let (qw, qh) = b.targets.size_of(Id::Post0);
-            let r = scene_radius(radius, h);
-            let chain = gaussian_chain(r, r, [size.0, size.1], [qw, qh], MAX_CHAIN);
+            let [rx, ry] = scene_radius(radius, size, b.r.settings.aspect);
+            b.r.post_state.last_blur = Some(([rx, ry], size));
+            let chain = gaussian_chain(rx, ry, [size.0, size.1], [qw, qh], MAX_CHAIN);
             b.filter(Group::Blur, None, &chain, Id::Scene, Id::Post0);
             let name = if p.film.enabled {
                 "feedbackfilmblend"
@@ -1272,6 +1282,17 @@ mod tests {
         assert_eq!(huge[0].half_count, 8);
         assert!(huge[0].sigma <= MAX_2D_SIGMA);
         assert!(gaussian_chain(0.1, 0.1, [160, 90], [160, 90], 32).is_empty());
+    }
+
+    /// `RB_VirtualToSceneRadius`: square pixels blur alike on both axes; with `r_aspectRatio` 16:9 in a 4:3 target the
+    /// horizontal radius is scaled by the scene pixel's shape, 720 * (16/9) / 960.
+    #[test]
+    fn scene_radius_follows_the_scene_pixel_shape() {
+        assert_eq!(scene_radius(4.0, (1280, 720), None), [6.0, 6.0]);
+        assert_eq!(scene_radius(4.0, (960, 720), Some(4.0 / 3.0)), [6.0, 6.0]);
+        let [x, y] = scene_radius(4.0, (960, 720), Some(16.0 / 9.0));
+        assert_eq!(y, 6.0);
+        assert!((x - 8.0).abs() < 1e-4, "{x}");
     }
 
     fn dof() -> Dof {

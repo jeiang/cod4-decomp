@@ -1148,7 +1148,8 @@ impl NetSv {
             .ok()
             .filter(|t| *t != slot && c.session == Session::Spectator);
         let Some(target) = followed else {
-            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&c.ps), &[], true);
+            let eye = view_origin(&c.ps, &game.pm_params.bob);
+            (snap.entities, snap.actors) = tell(game, world, slot, eye, &[], true);
             return Some(snap);
         };
         let archive_ms = (c.archive_time * 1000.0) as i32;
@@ -1167,7 +1168,8 @@ impl NetSv {
             follow.archive_ms = (server_time - f.time).max(1) as u32;
             if let Some(Some(p)) = f.players.get(usize::from(target)) {
                 // What the watched player's eyes could see then.
-                snap.entities = tell(game, &f.entities, slot, view_origin(&p.ps), &keep, false).0;
+                let eye = view_origin(&p.ps, &game.pm_params.bob);
+                snap.entities = tell(game, &f.entities, slot, eye, &keep, false).0;
                 snap.ps = p.ps.clone();
                 snap.inv = p.inv.clone();
                 snap.objectives = p.objectives;
@@ -1179,16 +1181,19 @@ impl NetSv {
                 snap.hud.sort_by_key(|h| h.id);
                 snap.hud.dedup_by_key(|h| h.id);
             } else {
-                snap.entities = tell(game, &f.entities, slot, view_origin(&c.ps), &keep, false).0;
+                let eye = view_origin(&c.ps, &game.pm_params.bob);
+                snap.entities = tell(game, &f.entities, slot, eye, &keep, false).0;
                 return Some(snap);
             }
         } else if let Some(t) = game.client(target).filter(|t| t.connected()) {
-            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&t.ps), &keep, true);
+            let eye = view_origin(&t.ps, &game.pm_params.bob);
+            (snap.entities, snap.actors) = tell(game, world, slot, eye, &keep, true);
             snap.ps = t.ps.clone();
             snap.inv = Box::new(t.inv.to_words());
             snap.objectives = game.visible_objectives(target);
         } else {
-            (snap.entities, snap.actors) = tell(game, world, slot, view_origin(&c.ps), &keep, true);
+            let eye = view_origin(&c.ps, &game.pm_params.bob);
+            (snap.entities, snap.actors) = tell(game, world, slot, eye, &keep, true);
             return Some(snap);
         }
         // The watcher's own prompts ride on the state of the player watched.
@@ -1255,7 +1260,9 @@ fn compass_shows(game: &Game, viewer: u16, p: &EntityState) -> bool {
 /// What client `viewer` is sent at this moment: the entities it may see and the players beyond its sight the
 /// compass is told about.
 pub fn visible_to(game: &Game, viewer: u16) -> (Vec<EntityState>, Vec<EntityState>) {
-    let eye = game.client(viewer).map_or([0.0; 3], |c| view_origin(&c.ps));
+    let eye = game
+        .client(viewer)
+        .map_or([0.0; 3], |c| view_origin(&c.ps, &game.pm_params.bob));
     tell(game, &world_snapshot(game), viewer, eye, &[], true)
 }
 

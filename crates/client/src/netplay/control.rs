@@ -225,6 +225,8 @@ impl NetPlay {
                 full.get("fx").cloned().unwrap_or(Value::Null)
             }
             "watch" => watch(self),
+            // The vision channels, the blend under way and the last goggles switch (`look::Look::report`).
+            "look" => self.look.report(),
             _ => Value::Null,
         }
     }
