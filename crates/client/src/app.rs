@@ -4491,16 +4491,8 @@ fn console_action(st: &mut State, line: &str) {
                 }
             }
             // The EQ commands (`SND_SetEq_f` and friends, KisakCOD snd.cpp:285-516).
-            v if matches!(
-                v,
-                "snd_seteq"
-                    | "snd_seteqfreq"
-                    | "snd_seteqgain"
-                    | "snd_seteqq"
-                    | "snd_seteqtype"
-                    | "snd_deactivateeq"
-            ) =>
-            {
+            "snd_seteq" | "snd_seteqfreq" | "snd_seteqgain" | "snd_seteqq" | "snd_seteqtype"
+            | "snd_deactivateeq" => {
                 let lines = console_sound(st)
                     .map(|s| s.eq_command(&cmd))
                     .unwrap_or_default();
