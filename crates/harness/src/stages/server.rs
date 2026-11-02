@@ -16,6 +16,26 @@ use std::time::{Duration, Instant};
 /// The dedicated server's memory budget (ticket: 32 players in 512 MB).
 const RSS_BUDGET: u64 = 512 << 20;
 
+/// How far the kernel's resident high-water mark may trail a resident sample taken earlier (#540). Linux keeps the
+/// resident counts per CPU and folds them in batches, so both `getrusage`'s `ru_maxrss` (the high-water mark, raised
+/// to the current count only when it is read or the count is about to fall: `kernel/sys.c` `getrusage`,
+/// `setmax_mm_hiwater_rss`) and `/proc/self/statm` read an approximate total (`include/linux/mm.h`
+/// `get_mm_counter`, `percpu_counter_read_positive`) that can be off by up to one batch per CPU, the batch being
+/// `max(32, 2 * cpus)` pages (`lib/percpu_counter.c` `compute_batch_value`). Pages are taken as 4 KiB.
+fn rss_counter_slack() -> u64 {
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+    cpus * (2 * cpus).max(32) * 4096
+}
+
+/// Fails `report` with `note`, which becomes its reason unless an earlier failure already gave one.
+fn fail(report: &mut StageReport, note: String) {
+    report.status = Status::Failed;
+    if report.reason.is_none() {
+        report.reason = Some(note.clone());
+    }
+    report.notes.push(note);
+}
+
 struct ServerConsole {
     server: Rc<RefCell<Server>>,
     map_loads: Rc<RefCell<Vec<(String, f64)>>>,
@@ -120,10 +140,10 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
         report.metrics.insert("rss.peak_bytes".into(), p as f64);
         // The server budget is 512 MB; memory use does not depend on runner speed.
         if p > RSS_BUDGET {
-            report.status = Status::Failed;
-            report
-                .notes
-                .push(format!("rss: peak {p} B is over the {RSS_BUDGET} B budget"));
+            fail(
+                &mut report,
+                format!("rss: peak {p} B is over the {RSS_BUDGET} B budget"),
+            );
         }
     }
     if let Some(p) = cgroup_peak() {
@@ -134,21 +154,26 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
     match Percentiles::from_samples(&rss[rss.len() / 2..]) {
         Some(p) => {
             report.metrics.insert("rss.steady_bytes".into(), p.p50);
+            // The high-water mark must cover the samples; it may trail one by the kernel's counter slack only.
+            let slack = rss_counter_slack();
+            report
+                .metrics
+                .insert("rss.counter_slack_bytes".into(), slack as f64);
             if let Some(peak) = peak_rss()
-                && (peak as f64) < p.p50
+                && ((peak + slack) as f64) < p.p50
             {
-                report.status = Status::Failed;
-                report.notes.push(format!(
-                    "rss: kernel peak {peak} B is below the steady sample {} B",
-                    p.p50
-                ));
+                fail(
+                    &mut report,
+                    format!(
+                        "rss: kernel peak {peak} B is below the steady sample {} B by more than the {slack} B the \
+                         kernel's per-CPU counters may lag",
+                        p.p50
+                    ),
+                );
             }
         }
         None if s.ticks > 0 => {
-            report.status = Status::Failed;
-            report
-                .notes
-                .push("rss: no samples over a running server".into());
+            fail(&mut report, "rss: no samples over a running server".into());
         }
         None => {}
     }
@@ -210,7 +235,27 @@ pub fn run(ctx: &StageCtx, name: &str, src: &str) -> StageReport {
 #[cfg(test)]
 mod tests {
     use crate::script;
-    use crate::stage::{Kind, STAGES};
+    use crate::stage::{Kind, STAGES, StageReport, Status};
+
+    /// A failed server stage names why (#540): the first failure becomes the reason, later ones only notes.
+    #[test]
+    fn a_failure_gives_the_stage_its_reason_once() {
+        let mut r = StageReport::new("headless-bots", Status::Passed);
+        super::fail(&mut r, "rss: first".into());
+        super::fail(&mut r, "rss: second".into());
+        assert_eq!(r.status, Status::Failed);
+        assert_eq!(r.reason.as_deref(), Some("rss: first"));
+        assert_eq!(r.notes, ["rss: first", "rss: second"]);
+    }
+
+    /// The slack is at least one 32-page batch per CPU and nowhere near the memory budget, so a real gap still fails.
+    #[test]
+    fn the_rss_slack_is_the_kernel_counter_batch_per_cpu() {
+        let slack = super::rss_counter_slack();
+        let cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+        assert!(slack >= cpus * 32 * 4096, "{slack}");
+        assert!(slack < super::RSS_BUDGET / 4, "{slack}");
+    }
 
     /// Every verb a built-in scenario uses must be one the server's console accepts: a line the console does not
     /// accept now fails its stage (#375), so this catches the table drifting from the dispatch before a run does.
