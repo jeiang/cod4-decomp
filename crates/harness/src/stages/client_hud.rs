@@ -196,10 +196,24 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
     Ok(nv_measure(w, h, &off, &still, &on))
 }
 
-/// Put a live bot of the wanted side 200 units along the player's view, as the fire step does, so the colour
-/// steps measure the walker's aim and the tint rather than whether the match offered a target (#494). Bots are
-/// held still with `bot_idle 1` for the whole colour sequence; the caller restores it.
-fn place_target_ahead(c: &mut Driven, enemy: bool) -> Result<(), String> {
+/// Where a target bot is put for the crosshair colour steps, tried in turn: degrees off the player's view and
+/// distance. A spot behind a wall or inside geometry hides the bot from the crosshair trace; the next one is tried.
+const CROSSHAIR_SPOTS: [(f64, f64); 4] =
+    [(0.0, 200.0), (90.0, 150.0), (-90.0, 150.0), (180.0, 150.0)];
+/// How long the walker gets to turn onto one placed bot and hold it past the fade-in.
+const CROSSHAIR_SPOT_LIMIT: Duration = Duration::from_secs(25);
+
+/// Puts a live bot of the wanted side next to the player and drives the walker, aimed at that bot alone, until
+/// `state` holds (#494). Left to the match, the walker turned to the nearest bot of the side, which with every bot
+/// held still (`bot_idle 1`) could stand behind a wall for the whole step. The walker still has to turn onto the
+/// bot itself and the HUD has to draw the tint; every spot failing fails the step.
+fn hold_on_placed(
+    c: &mut Driven,
+    w: &mut Walker,
+    enemy: bool,
+    state: &Value,
+    what: &str,
+) -> Result<(), String> {
     use super::client_hud_compass::{enemy_bot, exec, server_client};
     let mine = c.lookup("player.team")?.as_u64().unwrap_or(0);
     let team = match (mine, enemy) {
@@ -212,27 +226,35 @@ fn place_target_ahead(c: &mut Driven, enemy: bool) -> Result<(), String> {
         .lookup("player.client")?
         .as_u64()
         .ok_or("the player has no client slot")?;
-    let person = server_client(c, me)?;
-    let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
-    let yaw = c.lookup("player.aim_angles")?[1]
-        .as_f64()
-        .unwrap_or(0.0)
-        .to_radians();
-    let bot = enemy_bot(c, team)?;
-    exec(
-        c,
-        &format!(
-            "devtele {bot} {} {} {}",
-            at(0) + 200.0 * yaw.cos(),
-            at(1) + 200.0 * yaw.sin(),
-            at(2)
-        ),
-    )
+    let mut tried = Vec::new();
+    for (off, reach) in CROSSHAIR_SPOTS {
+        let person = server_client(c, me)?;
+        let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+        let yaw = (c.lookup("player.aim_angles")?[1].as_f64().unwrap_or(0.0) + off).to_radians();
+        let bot = enemy_bot(c, team)?;
+        exec(
+            c,
+            &format!(
+                "devtele {bot} {} {} {}",
+                at(0) + reach * yaw.cos(),
+                at(1) + reach * yaw.sin(),
+                at(2)
+            ),
+        )?;
+        w.target = Some(bot);
+        let r = w.drive_until(c, state.clone(), CROSSHAIR_SPOT_LIMIT, what);
+        w.target = None;
+        match r {
+            Ok(_) => return Ok(()),
+            Err(e) => tried.push(format!("bot {bot} at {off} degrees, {reach} units: {e}")),
+        }
+    }
+    Err(tried.join("; "))
 }
 
 /// The crosshair colour steps, once the server has `sv_cheats` on: waits for the client to take it, puts the
 /// player in `god` mode, then holds the sights on an enemy, on an enemy with `cg_crosshairEnemyColor 0`, and on a
-/// teammate. Each target is placed in front of the player rather than left to the match.
+/// teammate. Each target is a bot placed next to the player ([`hold_on_placed`]) rather than left to the match.
 fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     use super::client_hud_compass::exec;
     exec(c, "set bot_idle 1")?;
@@ -255,12 +277,12 @@ fn crosshair_colour_steps(c: &mut Driven, w: &mut Walker) -> Result<(), String> 
     // Held fire keeps an enemy alive under the sights through the fade-in; `god` keeps the player alive.
     w.hold_fire = true;
     c.step("crosshair over an enemy", |c| {
-        place_target_ahead(c, true)?;
         let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
-        w.drive_until(
+        hold_on_placed(
             c,
-            json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
-            Duration::from_secs(100),
+            w,
+            true,
+            &json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
             "the crosshair never took the enemy team's colour over an enemy",
         )?;
         c.capture("crosshair_enemy").map(|_| ())
@@ -268,13 +290,13 @@ fn crosshair_colour_steps(c: &mut Driven, w: &mut Walker) -> Result<(), String> 
     // `cg_crosshairEnemyColor 0` keeps the reticle white over an enemy held past the fade-in.
     c.step("crosshair enemy colour off", |c| enemy_colour_off(c, w))?;
     c.step("crosshair over a teammate", |c| {
-        place_target_ahead(c, false)?;
         let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
         w.friends = true;
-        let r = w.drive_until(
+        let r = hold_on_placed(
             c,
-            json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
-            Duration::from_secs(100),
+            w,
+            false,
+            &json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
             "the crosshair never took the player's team colour over a teammate",
         );
         w.friends = false;
@@ -311,11 +333,11 @@ fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
         ))
     };
     let (due, white) = counts(c)?;
-    place_target_ahead(c, true)?;
-    w.drive_until(
+    hold_on_placed(
         c,
-        json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
-        Duration::from_secs(150),
+        w,
+        true,
+        &json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
         "the crosshair was never held on an enemy past the fade-in with cg_crosshairEnemyColor 0",
     )?;
     c.capture("crosshair_enemy_white")?;
