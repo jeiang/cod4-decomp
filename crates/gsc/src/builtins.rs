@@ -37,6 +37,8 @@ pub struct Builtins {
     method_index: HashMap<Box<str>, u16>,
     /// Function indices flagged developer-only ([`inventory::DEVELOPER_FUNCTIONS`]).
     developer_functions: std::collections::HashSet<u16>,
+    /// Method indices flagged developer-only ([`inventory::DEVELOPER_METHODS`]).
+    developer_methods: std::collections::HashSet<u16>,
 }
 
 fn add(names: &mut Vec<Box<str>>, index: &mut HashMap<Box<str>, u16>, name: &str) -> (u16, bool) {
@@ -78,6 +80,9 @@ impl Builtins {
                 b.add_method_in(class, n);
             }
         }
+        for n in inventory::DEVELOPER_METHODS {
+            b.set_developer_method(n);
+        }
         b
     }
 
@@ -96,6 +101,18 @@ impl Builtins {
     /// Whether function `index` is developer-only.
     pub fn is_developer(&self, index: u16) -> bool {
         self.developer_functions.contains(&index)
+    }
+
+    /// Flags the registered method `name` developer-only.
+    pub fn set_developer_method(&mut self, name: &str) {
+        if let Some(i) = self.method(&name.to_ascii_lowercase()) {
+            self.developer_methods.insert(i);
+        }
+    }
+
+    /// Whether method `index` is developer-only.
+    pub fn is_developer_method(&self, index: u16) -> bool {
+        self.developer_methods.contains(&index)
     }
 
     /// Registers a method builtin of the generic entity class; see [`Self::add_method_in`].

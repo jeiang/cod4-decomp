@@ -165,6 +165,10 @@ fn developer_builtins_are_developer_statements() {
         assert!(b.is_developer(b.function(n).unwrap()), "{n}");
     }
     assert!(!b.is_developer(b.function("iprintln").unwrap()));
+    for n in ["devaddpitch", "devaddyaw", "devaddroll"] {
+        assert!(b.is_developer_method(b.method(n).unwrap()), "{n}");
+    }
+    assert!(!b.is_developer_method(b.method("rotateroll").unwrap()));
     let src = "f() { println(\"a\", g()); assert(1); x = 1; } g() { return 1; }";
     // Without developer_script the calls, their arguments included, are gone.
     let d = dis(&ok(src), "f");
@@ -204,6 +208,30 @@ fn developer_builtins_are_developer_statements() {
         let p = compile(&[("a.gsc", src)], &b, opts).unwrap();
         assert!(dis(&p, "f").contains(&call("openfile", 2)));
     }
+    // The developer-only methods follow the same rules.
+    let src = "f() { self devaddpitch(1); }";
+    let method = |n: &str| format!("CallBuiltinMethod {} 1", b.method(n).unwrap());
+    assert!(!dis(&ok(src), "f").contains(&method("devaddpitch")));
+    let p = compile(&[("a.gsc", src)], &b, Options { developer: true }).unwrap();
+    assert!(dis(&p, "f").contains(&method("devaddpitch")));
+    for opts in [Options::default(), Options { developer: true }] {
+        let e = compile(&[("a.gsc", "f() { x = self devaddyaw(1); }")], &b, opts)
+            .unwrap_err()
+            .remove(0);
+        assert_eq!(
+            e.message,
+            "return value of developer command can not be accessed if not in a /# ... #/ comment"
+        );
+        let p = compile(
+            &[("a.gsc", "f() { /# self devaddroll(1); #/ }")],
+            &b,
+            Options { developer: true },
+        )
+        .unwrap();
+        assert!(dis(&p, "f").contains(&method("devaddroll")));
+    }
+    let e = err(&[("a.gsc", "f() { self devaddroll(nosuchthing()); }")]);
+    assert_eq!(e.kind, ErrorKind::UnknownFunction);
     // An error inside a dropped call's arguments is still reported.
     let e = err(&[("a.gsc", "f() { println(nosuchthing()); }")]);
     assert_eq!(e.kind, ErrorKind::UnknownFunction);

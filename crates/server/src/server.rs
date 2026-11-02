@@ -617,6 +617,7 @@ fn warn_unhonoured_dvars(c: &Cvars) {
             WARN,
             "g_motd",
             dvar = "g_motd",
+            issue = 523,
             "message of the day not sent: this protocol has no motd configstring"
         );
     }
