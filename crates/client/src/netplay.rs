@@ -103,6 +103,8 @@ impl Laps {
 
 /// How often the scoreboard asks for fresh rows while it is up (`UpdateScores`).
 const SCORES_INTERVAL: Duration = Duration::from_secs(2);
+/// The least time between two scoreboard requests made by single scores for a missing row (`scoresRequestTime`).
+const SCORES_MISSING_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a player model is kept after the snapshots stop mentioning it.
 const GONE_AFTER: Duration = Duration::from_millis(500);
 
@@ -551,6 +553,8 @@ pub struct NetPlay {
     live_time: i32,
     kill_icons: HashMap<String, crate::hud::KillIcon>,
     scores_asked: Option<Instant>,
+    /// When a missing row last asked for the scoreboard.
+    scores_missing_asked: Option<Instant>,
     server_addr: String,
     effects: Effects,
     tracer_cvars: crate::tracer::Cvars,
@@ -704,6 +708,7 @@ impl NetPlay {
             live_time: 0,
             kill_icons: HashMap::new(),
             scores_asked: None,
+            scores_missing_asked: None,
             server_addr: server.to_string(),
             fx_demo: None,
             want_flesh_hit: false,
@@ -922,6 +927,19 @@ impl NetPlay {
             .is_none_or(|t| t.elapsed() >= SCORES_INTERVAL)
         {
             self.scores_asked = Some(Instant::now());
+            self.net.request_scores();
+        }
+        // A single score for a player the scoreboard lacks asks for the scoreboard, at most every 10 s
+        // (`CG_SetSingleClientScore`, KisakCOD `cgame_mp/cg_servercmds_mp.cpp:810-814`).
+        if self
+            .net
+            .ui()
+            .is_some_and(net::ui::ClientUiState::take_scores_missing)
+            && self
+                .scores_missing_asked
+                .is_none_or(|t| t.elapsed() >= SCORES_MISSING_INTERVAL)
+        {
+            self.scores_missing_asked = Some(Instant::now());
             self.net.request_scores();
         }
     }

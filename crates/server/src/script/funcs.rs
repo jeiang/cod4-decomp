@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use gsc::{Array, EntClass, Key, Obj, Value, Vm};
 
-use super::Impl::{self, Later, Real};
+use super::Impl::{self, Real};
 use super::args::{Args, display};
 use super::{FuncFn, hud, uicmd};
 use crate::cvar;
@@ -22,8 +22,6 @@ type R = Result<Value, String>;
 const fn r(f: FuncFn) -> Impl<FuncFn> {
     Real(f)
 }
-
-const M8: &str = "M8 FX, decals, post";
 
 pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     // core and types
@@ -228,8 +226,8 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
             Ok(Value::Undefined)
         }),
     ),
-    ("setclientnamemode", r(|_, _, _| Ok(Value::Undefined))),
-    ("updateclientnames", r(|_, _, _| Ok(Value::Undefined))),
+    ("setclientnamemode", r(set_client_name_mode)),
+    ("updateclientnames", r(update_client_names)),
     ("setarchive", r(set_archive)),
     ("matchend", r(|_, _, _| Ok(Value::Undefined))),
     ("setplayerteamrank", r(|_, _, _| Ok(Value::Undefined))),
@@ -329,7 +327,7 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
     ),
     ("physicsjolt", r(physics_jolt)),
     ("physicsjitter", r(physics_jitter)),
-    ("grenadeexplosioneffect", Later(M8)),
+    ("grenadeexplosioneffect", r(grenade_explosion_effect)),
     ("ambientplay", Real(super::sound::ambient_play)),
     ("ambientstop", Real(super::sound::ambient_stop)),
     ("musicplay", Real(super::sound::music_play)),
@@ -491,6 +489,36 @@ fn player_physics_trace(g: &mut Game, _: &mut Vm, a: Args) -> R {
     physics_at(g, &a, sim::pm::PLAYER_MINS, sim::pm::PLAYER_MAXS)
 }
 
+/// `grenadeexplosioneffect(origin)`: `Scr_GrenadeExplosionEffect` (KisakCOD `game_mp/g_scr_main_mp.cpp:3877-3903`).
+/// An `EV_GRENADE_EXPLODE` temp event one unit above `origin`, facing up, on the surface of what lies within 17
+/// units below, for weapon 0: in stock that is the default weapon (`BG_LoadDefaultWeaponDef`, `defaultweapon_mp`),
+/// so the clients play its impact effect and sound on that surface.
+fn grenade_explosion_effect(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    let o = a.vector(0)?;
+    let pos = [o[0], o[1], o[2] + 1.0];
+    let end = [pos[0], pos[1], pos[2] - 17.0];
+    let mask = contents::SOLID | contents::GLASS | contents::SKY;
+    let t = world(g)?.trace(pos, end, [0.0; 3], [0.0; 3], ENTITYNUM_NONE, mask);
+    let surface = crate::bullet::surface_type(t.surface_flags).min(28) as u8;
+    let weapon = g.weapons.index("defaultweapon_mp");
+    if weapon == 0 {
+        logging::dedup!(
+            WARN,
+            "grenadeexplosioneffect",
+            issue = 411,
+            "grenadeexplosioneffect: defaultweapon_mp is not loaded, so the clients have no effect to play"
+        );
+    }
+    let now = g.level.time;
+    g.tempev.add(now, crate::tempev::ev::EXPLOSION, |s| {
+        s.origin = pos;
+        s.angles = crate::tempev::dir_to_angles([0.0, 0.0, 1.0]);
+        s.event_parm = surface;
+        s.weapon = weapon;
+    });
+    Ok(Value::Undefined)
+}
+
 fn bool_v(b: bool) -> Value {
     Value::Int(i32::from(b))
 }
@@ -612,6 +640,31 @@ fn log_print(g: &mut Game, _: &mut Vm, a: Args) -> R {
         line.push_str(&part);
     }
     g.log_print(&line);
+    Ok(Value::Undefined)
+}
+
+/// `setclientnamemode(mode)`: `GScr_SetClientNameMode` (KisakCOD `game_mp/g_scr_main_mp.cpp:4786-4803`). In
+/// `"manual_change"` a connected person's new name waits for `updateclientnames`; `"auto_change"` takes it at once.
+fn set_client_name_mode(g: &mut Game, _: &mut Vm, a: Args) -> R {
+    g.level.manual_name_change = match a.string(0)? {
+        "auto_change" => false,
+        "manual_change" => true,
+        _ => return Err("Unknown mode".into()),
+    };
+    Ok(Value::Undefined)
+}
+
+/// `updateclientnames()`: `GScr_UpdateClientNames` (KisakCOD `game_mp/g_scr_main_mp.cpp:4805-4830`): every connected
+/// person whose name waits takes it now.
+fn update_client_names(g: &mut Game, _: &mut Vm, _: Args) -> R {
+    if !g.level.manual_name_change {
+        return Err("Only works in [manual_change] mode".into());
+    }
+    for c in g.clients.iter_mut().filter(|c| c.connected()) {
+        if c.name != c.new_name {
+            c.name.clone_from(&c.new_name);
+        }
+    }
     Ok(Value::Undefined)
 }
 

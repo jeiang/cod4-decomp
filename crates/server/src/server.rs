@@ -1664,9 +1664,12 @@ impl Server {
 
     /// `SV_UpdateUserinfo_f`: a person's userinfo string (`\\name\\X\\rate\\R\\snaps\\S`) arrived. The name goes through
     /// `ClientCleanName` and a new one is published to the others (they see "renamed to"); the rate and snapshot rate
-    /// set how often snapshots are sent.
+    /// set how often snapshots are sent. In `setclientnamemode("manual_change")` a connected person's new name only
+    /// waits for `updateclientnames` (`ClientUserinfoChanged`, KisakCOD `game_mp/g_client_mp.cpp:170-181`); the
+    /// server's own copy follows the userinfo whatever the mode (`SV_UserinfoChanged`).
     fn userinfo_changed(&mut self, net: &mut NetSv, slot: u16, info: &str) {
         net.set_userinfo(slot, info);
+        let manual = self.game.level.manual_name_change;
         let Some(c) = self.game.client_mut(slot) else {
             return;
         };
@@ -1675,10 +1678,11 @@ impl Server {
             return;
         }
         let name = crate::client::clean_client_name(name);
-        if name != c.name {
+        net.rename(slot, &name);
+        if !(manual && c.connected()) {
             c.name.clone_from(&name);
-            net.rename(slot, &name);
         }
+        c.new_name = name;
     }
 
     /// Prints a console line: to the log and, when enabled, stdout.

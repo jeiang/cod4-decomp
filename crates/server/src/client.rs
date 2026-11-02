@@ -243,8 +243,9 @@ impl Client {
         Self {
             conn: Conn::Connecting,
             bot,
+            // `ClientUserinfoChanged` before the client is connected: the name and the pending name agree.
+            new_name: name.clone(),
             name,
-            new_name: String::new(),
             ps,
             cmd: UserCmd::default(),
             old_cmd: UserCmd::default(),

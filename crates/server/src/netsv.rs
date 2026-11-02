@@ -90,6 +90,9 @@ pub mod eflags {
     pub const PING: u32 = 1 << 7;
     /// The entity was moved by fiat since the last snapshot (`EF_TELEPORT_BIT`, flipped): not slid there.
     pub const TELEPORT: u32 = net::entity::TELEPORT_BIT;
+    /// A script model's laser sight is on (`laseron`, the original's `0x4000`): clients looking through night vision
+    /// draw it.
+    pub const LASER: u32 = 1 << 9;
 }
 
 /// Time the server has listened to a client without hearing it, after which others are shown the
@@ -1594,6 +1597,9 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                 s.angles = e.angles;
                 s.model = model;
                 s.eflags = e.contents as u32 & 0xff_ffff;
+                // The contents fill the flags on the wire: the aim assist flag (`enableaimassist`, the original's
+                // `0x800`) travels in the otherwise unused `pm_type`.
+                s.pm_type = u8::from(e.x.aim_assist) * net::entity::BRUSH_AIM_ASSIST;
                 if !game.is_linked(n) && e.mv.pos.tr.kind != sim::traj::TrType::Stationary {
                     s.velocity = e.mv.pos.tr.evaluate_delta(game.level.time);
                     s.pm_flags = e.mv.remaining_ms(game.level.time).clamp(0, 0x1f_ffff) as u32;
@@ -1637,6 +1643,9 @@ pub fn world_snapshot(game: &Game) -> Vec<Sent> {
                     s.eflags = eflags::PHYSICS_LAUNCH;
                     s.launch_point = point;
                     s.velocity = force;
+                }
+                if e.x.laser {
+                    s.eflags |= eflags::LASER;
                 }
                 if let Some(owner) = e.x.plane_owner {
                     s.etype = etype::PLANE;
