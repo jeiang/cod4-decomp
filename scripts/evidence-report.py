@@ -354,8 +354,20 @@ def report(args, gh=run_gh, git_run=run_git):
     for name, (state, detail) in rep["stages"].items():
         if state != "PASS":
             reasons.append(("INCOMPLETE" if state == "UNKNOWN" else "FAIL", f"stage {name}: {state}: {detail}"))
-    proven = all(any(b["integration"] and b["integration"][0] == "PROVEN" for b in good)
-                 for _, _, good in verdicts.values())
+    proven = True
+    for name, (state, _, good) in verdicts.items():
+        if state != "PASS":
+            proven = False
+            continue
+        if any(b["integration"] and b["integration"][0] == "PROVEN" for b in good):
+            continue
+        proven = False
+        states = {b["integration"][0] for b in good if b["integration"]}
+        why = "; ".join(sorted(b["integration"][1] for b in good if b["integration"]))
+        # A merge that makes another tree than the tested one is stale evidence; an unprovable one is only unknown.
+        reasons.append(("FAIL" if "DIFFERS" in states else "INCOMPLETE",
+                        f"stage {name}: not tested on the tree a merge would make now ({why}); rerun it on the "
+                        f"current head merged with the base"))
     rep["integration"] = "PROVEN" if proven else "NOT_PROVEN"
 
     rep["review"] = []

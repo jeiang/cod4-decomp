@@ -140,20 +140,26 @@ class EvidenceReportTests(unittest.TestCase):
 
     def test_integration_tree_follows_the_current_base(self):
         self.pr["baseRefOid"] = self.new_base
-        _, rep = self.run_report(self.good())
+        code, rep = self.run_report(self.good())
         self.assertEqual(rep["bundles"][0]["integration"][0], "NOT_PROVEN")
         self.assertEqual(rep["integration"], "NOT_PROVEN")
         self.assertFalse(rep["bundles"][0]["base_in_bundle"])
+        # Every stage passed on the head, yet the head lacks the current base: unknown, not consistent.
+        self.assertEqual((code, rep["evidence"]), (3, "INCOMPLETE"), self.reasons(rep))
+        self.assertIn("rerun it on the current head merged with the base", self.reasons(rep))
         self.pr["potentialMergeCommit"] = {"oid": self.merge}
-        _, rep = self.run_report(self.good())
-        self.assertEqual(rep["integration"], "PROVEN")
+        code, rep = self.run_report(self.good())
+        self.assertEqual((code, rep["integration"], rep["evidence"]), (0, "PROVEN", "CONSISTENT"), self.reasons(rep))
+        # A merge that makes another tree than the tested one is stale evidence.
         self.pr["potentialMergeCommit"] = {"oid": self.other_merge}
-        _, rep = self.run_report(self.good())
+        code, rep = self.run_report(self.good())
         self.assertEqual(rep["bundles"][0]["integration"][0], "DIFFERS")
+        self.assertEqual((code, rep["evidence"]), (1, "FAIL"), self.reasons(rep))
         # A merge commit of another base proves nothing about this one.
         self.pr["baseRefOid"] = self.base
-        _, rep = self.run_report(self.good())
+        code, rep = self.run_report(self.good())
         self.assertEqual(rep["bundles"][0]["integration"][0], "NOT_PROVEN")
+        self.assertEqual((code, rep["evidence"]), (3, "INCOMPLETE"), self.reasons(rep))
 
     def test_failed_missing_and_skipped_stages(self):
         failed = bundle(self.dir / "f.zip", self.head[:12], {"s1": "failed", "s2": "passed"})
