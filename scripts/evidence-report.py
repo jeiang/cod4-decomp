@@ -365,9 +365,12 @@ def report(args, gh=run_gh, git_run=run_git):
         states = {b["integration"][0] for b in good if b["integration"]}
         why = "; ".join(sorted(b["integration"][1] for b in good if b["integration"]))
         # A merge that makes another tree than the tested one is stale evidence; an unprovable one is only unknown.
+        # The only rerun this tool accepts is one on the PR head itself: a bundle of a local merge is another commit
+        # with another tree (STALE), so the advice is to bring the base into the head first.
         reasons.append(("FAIL" if "DIFFERS" in states else "INCOMPLETE",
-                        f"stage {name}: not tested on the tree a merge would make now ({why}); rerun it on the "
-                        f"current head merged with the base"))
+                        f"stage {name}: not tested on the tree a merge would make now ({why}); update the branch so "
+                        f"its head contains the current base (merge the base into it and push), then rerun it on "
+                        f"the new head"))
     rep["integration"] = "PROVEN" if proven else "NOT_PROVEN"
 
     rep["review"] = []
@@ -383,6 +386,7 @@ def report(args, gh=run_gh, git_run=run_git):
     rep["merge_approval_missing"] = [
         "review: " + ("none supplied" if not args.review else "supplied evidence is unverified by this tool"),
         "serial run and host exclusivity: no bundle records its run mode",
+        "Linux test/clippy/fmt (slot-full): not recorded in the bundle (`just slot` skips them)",
     ] + ([] if rep["integration"] == "PROVEN" else ["integration tree: not proven for every required stage"])
     return rep
 

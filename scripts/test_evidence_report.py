@@ -115,6 +115,9 @@ class EvidenceReportTests(unittest.TestCase):
         self.assertTrue(rep["merge_approval_missing"])
         self.assertIn("review: none supplied", rep["merge_approval_missing"])
         self.assertTrue(any("serial" in m for m in rep["merge_approval_missing"]))
+        # A `just slot` bundle looks the same as a `slot-full` one: the Linux checks stay listed as missing.
+        self.assertTrue(any(m.startswith("Linux test/clippy/fmt (slot-full): not recorded")
+                            for m in rep["merge_approval_missing"]), rep["merge_approval_missing"])
         text = io.StringIO()
         with contextlib.redirect_stdout(text):
             er.main(["--pr", "7", "--stage", "s1", self.good()], gh=self.gh, git_run=self.git_run)
@@ -146,7 +149,7 @@ class EvidenceReportTests(unittest.TestCase):
         self.assertFalse(rep["bundles"][0]["base_in_bundle"])
         # Every stage passed on the head, yet the head lacks the current base: unknown, not consistent.
         self.assertEqual((code, rep["evidence"]), (3, "INCOMPLETE"), self.reasons(rep))
-        self.assertIn("rerun it on the current head merged with the base", self.reasons(rep))
+        self.assertIn("update the branch so its head contains the current base", self.reasons(rep))
         self.pr["potentialMergeCommit"] = {"oid": self.merge}
         code, rep = self.run_report(self.good())
         self.assertEqual((code, rep["integration"], rep["evidence"]), (0, "PROVEN", "CONSISTENT"), self.reasons(rep))
@@ -160,6 +163,26 @@ class EvidenceReportTests(unittest.TestCase):
         code, rep = self.run_report(self.good())
         self.assertEqual(rep["bundles"][0]["integration"][0], "NOT_PROVEN")
         self.assertEqual((code, rep["evidence"]), (3, "INCOMPLETE"), self.reasons(rep))
+
+    def test_the_advised_rerun_is_evidence_and_a_local_merge_of_the_old_head_is_not(self):
+        # The base moved on: a bundle of the head is incomplete, and says to update the branch and rerun.
+        self.pr["baseRefOid"] = self.new_base
+        code, rep = self.run_report(self.good())
+        self.assertEqual((code, rep["evidence"]), (3, "INCOMPLETE"), self.reasons(rep))
+        self.assertIn("then rerun it on the new head", self.reasons(rep))
+        # Updating the branch merges the base into the head: a new head with a new tree.
+        self.git("checkout", "-q", "-b", "updated", self.head)
+        self.git("merge", "-q", "--no-edit", "--no-verify", "side")
+        updated = self.git("rev-parse", "HEAD")
+        # A bundle of that merge while the PR head is still the old one is another tree: not evidence for the head.
+        code, rep = self.run_report(self.good("merge.zip", build=updated[:12]))
+        self.assertEqual((code, rep["bundles"][0]["tree"]), (1, "STALE"), self.reasons(rep))
+        # Once the PR head is the updated commit, the rerun on it is consistent, and the old head's bundle is stale.
+        self.pr["headRefOid"] = updated
+        code, rep = self.run_report(self.good("rerun.zip", build=updated[:12]))
+        self.assertEqual((code, rep["evidence"], rep["integration"]), (0, "CONSISTENT", "PROVEN"), self.reasons(rep))
+        code, rep = self.run_report(self.good("old.zip"))
+        self.assertEqual((code, rep["bundles"][0]["tree"]), (1, "STALE"), self.reasons(rep))
 
     def test_failed_missing_and_skipped_stages(self):
         failed = bundle(self.dir / "f.zip", self.head[:12], {"s1": "failed", "s2": "passed"})
