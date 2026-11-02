@@ -67,7 +67,8 @@ team|client|snapshot|teleport`, `entities.list[]` (`kind`, `origin`, `team`, `de
 now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `hud.stats` (what it drew over the run:
 `messages`, `chat`, `window_lines`, `scoreboard_frames`, `killcam_frames`, `names_max`, `unresolved`, ...),
 `hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
-`net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`).
+`net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
+`night`, `goggles`, `night_vision`, `channel`, `blend` with `ms`, `missing`, `applied`, the last goggles `switch`).
 
 `entities.list[].model_name` resolves each snapshot model index through the server's model configstrings.
 `entities.snapshot` and `entities.server_time` name the snapshot the list came from, so a check that compares

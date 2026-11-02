@@ -196,10 +196,101 @@ fn night_vision_view(dir: &std::path::Path) -> Result<NvView, String> {
     Ok(nv_measure(w, h, &off, &still, &on))
 }
 
+/// Where a target bot is put for the crosshair colour steps, tried in turn: degrees off the player's view and
+/// distance. A spot behind a wall or inside geometry hides the bot from the crosshair trace; the next one is tried.
+const CROSSHAIR_SPOTS: [(f64, f64); 4] =
+    [(0.0, 200.0), (90.0, 150.0), (-90.0, 150.0), (180.0, 150.0)];
+/// How long the walker gets to turn onto one placed bot and hold it past the fade-in.
+const CROSSHAIR_SPOT_LIMIT: Duration = Duration::from_secs(25);
+
+/// Puts a live bot of the wanted side next to the player and drives the walker, aimed at that bot alone, until
+/// `state` holds (#494). Left to the match, the walker turned to the nearest bot of the side, which with every bot
+/// held still (`bot_idle 1`) could stand behind a wall for the whole step. The walker still has to turn onto the
+/// bot itself and the HUD has to draw the tint; every spot failing fails the step.
+fn hold_on_placed(
+    c: &mut Driven,
+    w: &mut Walker,
+    enemy: bool,
+    state: &Value,
+    what: &str,
+) -> Result<(), String> {
+    use super::client_hud_compass::{enemy_bot, exec, server_client};
+    let mine = c.lookup("player.team")?.as_u64().unwrap_or(0);
+    let team = match (mine, enemy) {
+        (1, true) => 2,
+        (2, true) => 1,
+        (1 | 2, false) => mine,
+        _ => return Err(format!("the player is on no team ({mine})")),
+    };
+    let me = c
+        .lookup("player.client")?
+        .as_u64()
+        .ok_or("the player has no client slot")?;
+    let mut tried = Vec::new();
+    for (off, reach) in CROSSHAIR_SPOTS {
+        let person = server_client(c, me)?;
+        let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+        let yaw = (c.lookup("player.aim_angles")?[1].as_f64().unwrap_or(0.0) + off).to_radians();
+        let bot = enemy_bot(c, team)?;
+        exec(
+            c,
+            &format!(
+                "devtele {bot} {} {} {}",
+                at(0) + reach * yaw.cos(),
+                at(1) + reach * yaw.sin(),
+                at(2)
+            ),
+        )?;
+        w.target = Some(bot);
+        let r = w.drive_until(c, state.clone(), CROSSHAIR_SPOT_LIMIT, what);
+        w.target = None;
+        match r {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                // What the client and the server had at the end: the placed bot as the snapshot carried it, the
+                // player's aim and crosshair bits, and the bot as the server has it.
+                let ents = c.state("entities")?;
+                let seen = ents["list"]
+                    .as_array()
+                    .and_then(|l| {
+                        l.iter()
+                            .find(|e| e["kind"] == "player" && e["client"].as_u64() == Some(bot))
+                    })
+                    .map(|e| {
+                        json!({"origin": e["origin"], "team": e["team"], "dead": e["dead"],
+                            "stance": e["stance"], "actor": e["actor"]})
+                    });
+                let p = c.state("player")?;
+                let server = server_client(c, bot)?;
+                tried.push(format!(
+                    "bot {bot} at {off} degrees, {reach} units: {e}; client sees bot {seen:?}; player origin {} \
+                     aim {} crosshair flags {} client {}; server bot origin {} alive {} team {}",
+                    p["origin"],
+                    p["aim_angles"],
+                    p["crosshair_flags"],
+                    p["crosshair_client"],
+                    server["origin"],
+                    server["alive"],
+                    server["team"]
+                ));
+            }
+        }
+    }
+    Err(tried.join("; "))
+}
+
 /// The crosshair colour steps, once the server has `sv_cheats` on: waits for the client to take it, puts the
 /// player in `god` mode, then holds the sights on an enemy, on an enemy with `cg_crosshairEnemyColor 0`, and on a
-/// teammate.
+/// teammate. Each target is a bot placed next to the player ([`hold_on_placed`]) rather than left to the match.
 fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
+    use super::client_hud_compass::exec;
+    exec(c, "set bot_idle 1")?;
+    let r = crosshair_colour_steps(c, w);
+    exec(c, "set bot_idle 0")?;
+    r
+}
+
+fn crosshair_colour_steps(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     c.step("crosshair cheats", |c| {
         let end = Instant::now() + Duration::from_secs(15);
         while c.ask(json!({"cmd": "cvar", "name": "sv_cheats"}))?["value"] != "1" {
@@ -214,10 +305,11 @@ fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     w.hold_fire = true;
     c.step("crosshair over an enemy", |c| {
         let theirs = c.lookup("hud.stats.crosshair_team_tints.1")?;
-        w.drive_until(
+        hold_on_placed(
             c,
-            json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
-            Duration::from_secs(100),
+            w,
+            true,
+            &json!({"hud.stats.crosshair_enemy_tints": {"contains": theirs}}),
             "the crosshair never took the enemy team's colour over an enemy",
         )?;
         c.capture("crosshair_enemy").map(|_| ())
@@ -227,10 +319,11 @@ fn crosshair_colours(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
     c.step("crosshair over a teammate", |c| {
         let mine = c.lookup("hud.stats.crosshair_team_tints.0")?;
         w.friends = true;
-        let r = w.drive_until(
+        let r = hold_on_placed(
             c,
-            json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
-            Duration::from_secs(100),
+            w,
+            false,
+            &json!({"hud.stats.crosshair_friend_tints": {"contains": mine}}),
             "the crosshair never took the player's team colour over a teammate",
         );
         w.friends = false;
@@ -267,10 +360,11 @@ fn enemy_colour_off(c: &mut Driven, w: &mut Walker) -> Result<(), String> {
         ))
     };
     let (due, white) = counts(c)?;
-    w.drive_until(
+    hold_on_placed(
         c,
-        json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
-        Duration::from_secs(150),
+        w,
+        true,
+        &json!({"hud.stats.crosshair_enemy_due_frames": {"gt": due + 60}}),
         "the crosshair was never held on an enemy past the fade-in with cg_crosshairEnemyColor 0",
     )?;
     c.capture("crosshair_enemy_white")?;
@@ -445,6 +539,92 @@ fn assemble(steps: &[Value], hud: Value, net: &Value, render: &Value) -> Value {
 /// A count of the HUD's `stats` section, read now.
 fn stat(c: &mut Driven, path: &str) -> Result<u64, String> {
     Ok(c.lookup(path)?.as_u64().unwrap_or(0))
+}
+
+/// The numbers of a look block of the client's `look` section (`glow.radius`, `film.tint_dark.2`, ...), by name.
+fn look_numbers(v: &Value) -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for part in ["glow", "film"] {
+        for (k, x) in v[part].as_object().into_iter().flatten() {
+            match x {
+                Value::Number(n) => out.push((format!("{part}.{k}"), n.as_f64().unwrap_or(0.0))),
+                Value::Array(a) => {
+                    for (i, e) in a.iter().enumerate() {
+                        out.extend(e.as_f64().map(|f| (format!("{part}.{k}.{i}"), f)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// The switches of a look block: glow on, film on, film inverted.
+fn look_switches(v: &Value) -> [&Value; 3] {
+    [
+        &v["glow"]["enabled"],
+        &v["film"]["enabled"],
+        &v["film"]["invert"],
+    ]
+}
+
+/// One sample of a vision blend (the client's `look` section): `None` once the blend is over, else its fraction.
+/// The number that moves most must sit where `sin(fraction * pi/2)` puts it (`LerpFloat` with
+/// `VISIONSETLERP_TO_SMOOTH`), and the switches must already be the destination's (`LerpBool`). The second value is
+/// whether this sample tells the eased curve from a straight line.
+fn vision_blend_sample(look: &Value) -> Result<Option<(f64, bool)>, String> {
+    let b = &look["blend"];
+    let ms = b["ms"].as_f64().unwrap_or(0.0);
+    let f = (look["time"].as_f64().unwrap_or(0.0) - b["start_ms"].as_f64().unwrap_or(0.0))
+        / ms.max(1.0);
+    if ms <= 0.0 || f > 1.0 {
+        return Ok(None);
+    }
+    let f = f.max(0.0);
+    if look_switches(&look["applied"]) != look_switches(&b["to"]) {
+        return Err(format!(
+            "{:.0}% into the vision blend the glow/film switches are {:?}, not the destination's {:?}",
+            f * 100.0,
+            look_switches(&look["applied"]),
+            look_switches(&b["to"])
+        ));
+    }
+    let (from, to, now) = (
+        look_numbers(&b["from"]),
+        look_numbers(&b["to"]),
+        look_numbers(&look["applied"]),
+    );
+    let Some(((name, a), (_, z))) = from
+        .iter()
+        .zip(&to)
+        .max_by(|(x, y), (u, v)| (y.1 - x.1).abs().total_cmp(&(v.1 - u.1).abs()))
+    else {
+        return Err(format!("the look section has no numbers: {look}"));
+    };
+    let span = z - a;
+    if span.abs() < 0.05 {
+        return Err(format!(
+            "the vision blend moves nothing measurable (the most is {name} by {span})"
+        ));
+    }
+    let got = now
+        .iter()
+        .find(|(n, _)| n == name)
+        .map_or(f64::NAN, |(_, v)| *v);
+    let eased = a + span * (f * std::f64::consts::FRAC_PI_2).sin();
+    let tol = span.abs() * 2e-3 + 1e-4;
+    if (got - eased).abs() > tol {
+        return Err(format!(
+            "{:.0}% into the vision blend {name} is {got}, not the sin-eased {eased} (linear would be {})",
+            f * 100.0,
+            a + span * f
+        ));
+    }
+    Ok(Some((
+        f,
+        (0.2..0.8).contains(&f) && (eased - (a + span * f)).abs() > 4.0 * tol,
+    )))
 }
 
 /// Observe an actual server tick atomically. Collecting UDP traffic briefly before the tick creates a backlog even
@@ -834,7 +1014,13 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
             &format!("devtele {bot} {} {} {}", at(0) + dx, at(1) + dy, at(2)),
         )?;
         c.pause(KILLCAM_AIM)?;
-        if server_client(c, me)?["alive"] == json!(true) {
+        // Where the bot stood and looked when it killed, against the player: a failure says whether it faced them.
+        let (b, p) = (server_client(c, bot)?, server_client(c, me)?);
+        let seen = format!(
+            "bot origin {} view {} alive {} session {}, player origin {}",
+            b["origin"], b["viewangles"], b["alive"], b["session"], p["origin"]
+        );
+        if p["alive"] == json!(true) {
             exec(c, &format!("devkill {me} {bot}"))?;
         }
         c.until(
@@ -850,7 +1036,7 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
                 return Ok(());
             }
             if hud["live"]["killcam"] != json!(true) || Instant::now() > end {
-                tried.push(format!("bot {bot} at ({dx}, {dy})"));
+                tried.push(format!("bot {bot} at ({dx}, {dy}) [{seen}]"));
                 break;
             }
             c.frames(1)?;
@@ -1054,10 +1240,110 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         r
     })?;
 
+    // `cg_fov` is registered at 65 (`iw3mp.exe` 1.7, KisakCOD `cg_main_mp.cpp`), and the view is that at 4:3 widened
+    // for the window (Hor+).
+    c.step("field of view", |c| {
+        let fov = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
+        if fov["value"] != json!("65") {
+            return Err(format!("cg_fov starts at {}, not the stock 65", fov["value"]));
+        }
+        let view = c.lookup("view")?;
+        let (got, aspect) = (
+            view["fov_x"].as_f64().unwrap_or(0.0),
+            view["aspect"].as_f64().unwrap_or(0.0),
+        );
+        let want = 2.0 * ((65f64.to_radians() * 0.5).tan() * 0.75 * aspect).atan().to_degrees();
+        if (got - want).abs() > 0.1 {
+            return Err(format!(
+                "the horizontal field of view is {got}, not the {want:.2} cg_fov 65 gives at aspect {aspect}"
+            ));
+        }
+        // 1.7 registers `cg_fov` from 65 to 80: a value outside is refused and the dvar keeps its value.
+        c.console("set cg_fov 90")?;
+        c.pause(Duration::from_millis(300))?;
+        let refused = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
+        c.console("set cg_fov 80")?;
+        c.pause(Duration::from_millis(300))?;
+        let widest = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
+        c.console("set cg_fov 65")?;
+        if refused["value"] != json!("65") || widest["value"] != json!("80") {
+            return Err(format!(
+                "cg_fov is {} after `set cg_fov 90` (the 1.7 range is 65 to 80) and {} after `set cg_fov 80`",
+                refused["value"], widest["value"]
+            ));
+        }
+        Ok(())
+    })?;
+
+    // `visionsetnaked` through the console: the stock transition eases by `sin` (`VISIONSETLERP_TO_SMOOTH`) with the
+    // destination's switches from the first blended frame, and a set with no file falls back to
+    // `vision/default.vision` (`RawBufferOpen`), named in the look's missing list. The map's set is put back after.
+    c.step("vision sets", |c| {
+        let naked = c.lookup("look.naked")?.as_str().unwrap_or("").to_owned();
+        c.console("visionsetnaked default_night 3")?;
+        c.until(
+            json!({"look.naked": "default_night", "look.blend.ms": 3000}),
+            secs(10),
+            "visionsetnaked default_night 3 did not start a 3 s blend on the client",
+        )?;
+        let (mut samples, mut telling) = (0, 0);
+        let deadline = Instant::now() + secs(8);
+        while Instant::now() < deadline {
+            match vision_blend_sample(&c.lookup("look")?)? {
+                Some((_, t)) => {
+                    samples += 1;
+                    telling += usize::from(t);
+                }
+                None => break,
+            }
+            c.pause(Duration::from_millis(100))?;
+        }
+        if telling == 0 {
+            return Err(format!(
+                "{samples} samples of the 3 s blend, none between 20% and 80% where the eased curve leaves the straight line"
+            ));
+        }
+        c.pause(Duration::from_millis(300))?;
+        let night = c.lookup("look.applied")?;
+        c.console("visionsetnaked does_not_exist 0")?;
+        c.until(
+            json!({"look.missing": {"contains": "vision/does_not_exist.vision"}}),
+            secs(10),
+            "a vision set with no file was not reported missing",
+        )?;
+        c.pause(Duration::from_millis(300))?;
+        let fallback = c.lookup("look.applied")?;
+        c.console("visionsetnaked default 0")?;
+        c.until(
+            json!({"look.naked": "default"}),
+            secs(10),
+            "visionsetnaked default did not reach the client",
+        )?;
+        c.pause(Duration::from_millis(300))?;
+        let default = c.lookup("look.applied")?;
+        if fallback != default || fallback == night {
+            return Err(format!(
+                "a missing vision file did not fall back to vision/default.vision: {fallback} against default {default} (was {night})"
+            ));
+        }
+        if !naked.is_empty() {
+            c.console(&format!("visionsetnaked {naked} 0"))?;
+            c.until(
+                json!({"look.naked": naked}),
+                secs(10),
+                "the map's vision set did not come back",
+            )?;
+        }
+        Ok(())
+    })?;
+
     // Night vision on the stock action slot 1 bind (every stock class gets `setactionslot(1, "nightvision")`): the
     // goggles' overlay covers the screen under the HUD and the d-pad slot shows their icon
-    // (`CG_DrawNightVisionOverlay`, `CG_DrawPlayerActionSlot`); the same bind takes them off. The player stands still
-    // for the matched captures: two with the goggles off (what the view changes by on its own) and one with them on.
+    // (`CG_DrawNightVisionOverlay`, `CG_DrawPlayerActionSlot`); the same bind takes them off. The picture changes to
+    // the night channel on the first frame (multiplayer's `VisionFadeValue` is 1), and with
+    // `nightVisionDisableEffects` 1 the goggles go on without it or the overlay (`CG_LookingThroughNightVision`). The
+    // player stands still for the matched captures: two with the goggles off (what the view changes by on its own) and
+    // one with them on.
     c.step("night vision", |c| {
         w.stop(c)?;
         c.until(
@@ -1084,6 +1370,12 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             secs(10),
             "the goggles' overlay and d-pad icon were not drawn after the night vision bind",
         )?;
+        let switch = c.lookup("look.switch")?;
+        if switch["to_night"] != json!(true) || switch["first"] != switch["target"] {
+            return Err(format!(
+                "the goggles did not switch the picture to the night channel on the first frame: {switch}"
+            ));
+        }
         c.pause(secs(1))?;
         c.capture(NV_ON)?;
         if c.lookup("player.alive")? != Value::Bool(true) {
@@ -1095,6 +1387,70 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             secs(10),
             "the goggles did not come off on the second press",
         )?;
+        c.console("set nightVisionDisableEffects 1")?;
+        c.pause(Duration::from_millis(300))?;
+        c.bind("+actionslot 1", "tap")?;
+        let r = c
+            .until(
+                json!({"look.goggles": true}),
+                secs(10),
+                "the goggles did not go on with nightVisionDisableEffects 1",
+            )
+            .and_then(|_| {
+                c.pause(Duration::from_millis(300))?;
+                let (live, channel) = (c.lookup("hud.live.night_vision")?, c.lookup("look.channel")?);
+                if live != json!(false) || channel != json!("naked") {
+                    return Err(format!(
+                        "with nightVisionDisableEffects 1 the goggles still changed the picture: night vision {live}, channel {channel}"
+                    ));
+                }
+                Ok(())
+            });
+        c.bind("+actionslot 1", "tap")?;
+        c.until(
+            json!({"look.goggles": false}),
+            secs(10),
+            "the goggles did not come off with nightVisionDisableEffects 1",
+        )?;
+        c.console("set nightVisionDisableEffects 0")?;
+        r
+    })?;
+
+    // A shell shock ends at the next spawn, as stock's does (`ClientSpawn` wipes the player state's shock and the
+    // cgame's `CG_StartShellShock(.., 0, 0)` ends it), not when its own time runs out. The player throws a concussion
+    // grenade at its feet through the server (`devgrenade`, the stock scripts shock it), dies (`devkill`) and
+    // respawns; the look must have no shock at the first live frame.
+    c.step("shock ends at spawn", |c| {
+        w.stop(c)?;
+        let me = c.lookup("player.client")?.as_u64().ok_or("player.client is not a number")?;
+        let before = c.lookup("look.shocks")?.as_u64().unwrap_or(0);
+        c.ask(json!({"cmd": "server", "op": "exec", "line": "devgrenade human concussion_grenade_mp 0 100"}))?;
+        c.until(
+            json!({"look.shocks": {"gt": before}}),
+            secs(10),
+            "a concussion grenade at the player's feet did not shell shock the client",
+        )?;
+        let shock = c.lookup("look.shock")?;
+        let end = shock["start_ms"].as_f64().unwrap_or(0.0) + shock["duration_ms"].as_f64().unwrap_or(0.0);
+        c.ask(json!({"cmd": "server", "op": "exec", "line": format!("devkill {me} {me}")}))?;
+        c.until(json!({"player.dead": true}), secs(10), "devkill did not kill the player")?;
+        c.until(
+            json!({"player.alive": true, "hud.live.dead": false}),
+            secs(60),
+            "the player did not respawn after devkill",
+        )?;
+        let look = c.lookup("look")?;
+        let now = look["time"].as_f64().unwrap_or(0.0);
+        if !look["shock"].is_null() {
+            return Err(format!(
+                "the shell shock ({shock}) is still running after the spawn at {now} ms; stock ends it at spawn"
+            ));
+        }
+        if now >= end {
+            return Err(format!(
+                "the respawn at {now} ms came after the shock's own end at {end} ms, so it proves nothing"
+            ));
+        }
         Ok(())
     })?;
 

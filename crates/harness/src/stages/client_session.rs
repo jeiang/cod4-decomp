@@ -3,7 +3,7 @@
 //! `--listen` path (no menus: the default team and class answers); run 2 starts from the main menu and clicks
 //! through the stock menus (Start New Server, the server's team menu, the class menu, Assault). Each run must
 //! complete every step and report that the local player spawned. Run 4 is the original's launch line (#397): the
-//! client starts with `+set cg_fov 90 +exec <file> +name <nick> +connect <server>` beside its own `--` options and
+//! client starts with `+set cg_fov 75 +exec <file> +name <nick> +connect <server>` beside its own `--` options and
 //! must join the `cod4e-server` started for it under that name, with the variable set over the profile's config and
 //! the file run, read back through the control channel. Needs a display and the install; skips without.
 use super::client_dedicated::{Dedicated, lists_player, locate_server};
@@ -365,7 +365,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 /// The name the command-line run joins under (the server keeps 15 characters).
 const CMDLINE_NICK: &str = "CmdLineTest";
 
-/// The original's launch line: `+set cg_fov 90 +exec <file> +name <nick> +connect 127.0.0.1:<port>`, with the
+/// The original's launch line: `+set cg_fov 75 +exec <file> +name <nick> +connect 127.0.0.1:<port>`, with the
 /// harness's `--` options after it (`Driven` adds `--control`, `--config-dir`, `--harness-profile`, `--out`). The
 /// harness profile's config sets `cg_fov 65`, so a `+set` the configs overwrite fails; the file sets a marker only it
 /// sets; the join must reach the server, which must list the player under the `+name` given.
@@ -390,7 +390,7 @@ fn command_line(ctx: &StageCtx, client: &Path, install: &Path) -> Result<String,
         &[
             "+set",
             "cg_fov",
-            "90",
+            "75",
             "+exec",
             &cfg,
             "+name",
@@ -406,9 +406,9 @@ fn command_line(ctx: &StageCtx, client: &Path, install: &Path) -> Result<String,
             "+connect did not join the server",
         )?;
         let fov = c.ask(json!({"cmd": "cvar", "name": "cg_fov"}))?;
-        if fov["value"] != json!("90") {
+        if fov["value"] != json!("75") {
             return Err(format!(
-                "+set cg_fov 90 did not outrank the profile's config: cg_fov is {}",
+                "+set cg_fov 75 did not outrank the profile's config: cg_fov is {}",
                 fov["value"]
             ));
         }
@@ -432,7 +432,7 @@ fn command_line(ctx: &StageCtx, client: &Path, install: &Path) -> Result<String,
     }
     dedicated.quit();
     Ok(format!(
-        "+set cg_fov 90 +exec cmdline.cfg +name {CMDLINE_NICK} +connect {target}: joined under that name, cg_fov 90 \
+        "+set cg_fov 75 +exec cmdline.cfg +name {CMDLINE_NICK} +connect {target}: joined under that name, cg_fov 75 \
          over the profile's 65, the file ran"
     ))
 }
