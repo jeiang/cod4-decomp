@@ -481,6 +481,8 @@ struct State {
     demo_dir: PathBuf,
     /// The game mode id of the match being loaded (the loading screen names it); empty when unknown.
     load_gametype: String,
+    /// The microphone (`CL_VoiceFrame`): sends voice in a match and feeds the record meter in any menu.
+    talker: crate::voice::Talker,
     /// Frame intervals from the start of a map load until the player is in the world.
     load_gaps: Option<LoadGaps>,
     /// What the last load measured, for the report.
@@ -497,6 +499,10 @@ struct State {
     /// the input and polls before the network frame, the late warm-up, and the UI painted between the renderer
     /// and the present (`PHASES`), to explain a slow gap.
     prev_cost: [f64; 7],
+    /// Warm-up entries (a material's passes of one group for one vertex layout) frames of play prepared, and their
+    /// milliseconds: what the load screen left of the server's precache list (none, #457).
+    #[cfg(not(target_arch = "wasm32"))]
+    in_game_warm: (usize, f64),
     /// Frames in a row the surface gave no texture although it was configured again; see [`recover_surface`].
     surface_failures: u32,
     /// How long a surface may time out or be occluded before a harness run gives up; `None` for a player's window,
@@ -592,11 +598,20 @@ const TOUR_MENUS: &[&str] = &[
 #[cfg(target_arch = "wasm32")]
 const WARM_BUDGET: Duration = Duration::from_millis(6);
 
-/// What a native frame spends preparing the passes of models the server precached after the load
-/// (`Renderer::warm_late`): a material's few passes fit in it, so the list is spread over a second or two of frames
-/// rather than stalling the first one that sees it.
+/// What a native frame of play spends preparing the passes of models the server precached after its gamestate
+/// (`Renderer::warm_late`): a material's few passes fit in it. The gamestate's own list is prepared under the load
+/// screen ([`PRECACHE_BUDGET`]); stock refuses a `precacheModel` after it, so this is for a server of ours that adds one.
 #[cfg(not(target_arch = "wasm32"))]
 const WARM_LATE_BUDGET: Duration = Duration::from_millis(2);
+
+/// What a load-screen frame spends preparing the gamestate's precache list ([`precache_step`]): the screen keeps
+/// presenting between the pieces (`client-load` allows no gap over 100 ms).
+#[cfg(not(target_arch = "wasm32"))]
+const PRECACHE_BUDGET: Duration = Duration::from_millis(16);
+
+/// How long a match the command line started waits for the server's gamestate before its first frame.
+#[cfg(not(target_arch = "wasm32"))]
+const GAMESTATE_WAIT: Duration = Duration::from_secs(5);
 
 /// Frames a tour menu is shown before its screenshot (fades and expressions settle).
 const TOUR_FRAMES: u32 = 6;
@@ -1144,6 +1159,24 @@ impl Viewer {
         {
             sh.st.in_game = true;
         }
+        // A match the command line started loaded before the first frame; as stock's `CL_InitCGame` registers the
+        // gamestate's models before it (`CG_RegisterGraphics`), their passes are prepared here too (#457).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(n), Some(r)) = (net.as_mut(), renderer.as_mut()) {
+            let t = Instant::now();
+            if n.await_gamestate(GAMESTATE_WAIT) {
+                let models = queue_precached(n, r, shell.as_ref()).len();
+                r.warm_late(config.format, Duration::MAX);
+                notes.push(format!(
+                    "gamestate in and its {models} precached models prepared in {:.0} ms",
+                    t.elapsed().as_secs_f64() * 1000.0
+                ));
+            } else {
+                tracing::warn!(
+                    "no complete gamestate before the first frame: frames of play prepare the precache list"
+                );
+            }
+        }
         let want_video = self.cli.video && self.cli.flythrough;
         if want_video && !copy_src {
             notes.push("surface cannot be copied from; no video".into());
@@ -1247,6 +1280,7 @@ impl Viewer {
             pending_demo: None,
             demo_dir: demo_dir.clone(),
             load_gametype: String::new(),
+            talker: crate::voice::Talker::default(),
             load_gaps: None,
             load_report: None,
             autojoin_next: false,
@@ -1254,6 +1288,8 @@ impl Viewer {
             film_base: None,
             glow_base: None,
             prev_cost: [0.0; 7],
+            #[cfg(not(target_arch = "wasm32"))]
+            in_game_warm: (0, 0.0),
             surface_failures: 0,
             surface_stalled_ms: 0.0,
             surface_retried: false,
@@ -1590,15 +1626,27 @@ impl Viewer {
             && let Some(load) = st.loading.take()
         {
             let result = done.and_then(|l| finish_load(&self.cli, &mut self.map, st, &load, l));
-            if let Err(e) = result {
-                tracing::error!(map = %load.map, error = %e, "cannot load the map");
-                // A level change on a lost device is loaded again on the new one; a session that was starting ends.
-                #[cfg(not(target_arch = "wasm32"))]
-                if st.net.is_some() && st.gpu.lost().is_some() {
-                    return self.recover_device();
+            match result {
+                Err(e) => {
+                    tracing::error!(map = %load.map, error = %e, "cannot load the map");
+                    // A level change on a lost device is loaded again on the new one; a session that was starting
+                    // ends.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if st.net.is_some() && st.gpu.lost().is_some() {
+                        return self.recover_device();
+                    }
+                    drop_session(&mut self.map, st, &e);
                 }
-                drop_session(&mut self.map, st, &e);
+                // The load screen stays until the server's precache list is prepared ([`precache_step`]).
+                #[cfg(not(target_arch = "wasm32"))]
+                Ok(()) => st.loading = Some(load.precache()),
+                #[cfg(target_arch = "wasm32")]
+                Ok(()) => {}
             }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if st.loading.as_ref().is_some_and(|l| l.precaching) {
+            precache_step(st);
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -1673,6 +1721,7 @@ impl Viewer {
         // A bind item waits for a key: the pad's next button is the binding, as a key press is.
         st.input.capture_pad = st.shell.as_ref().is_some_and(|s| s.ui.bind_pending());
         let mut new_level = None;
+        let mut voiced = false;
         if let Some(sc) = st.showcase.as_mut() {
             let (p, y, pi) = sc.camera();
             (st.pos, st.yaw, st.pitch, st.roll) = (p, y, pi, 0.0);
@@ -1803,10 +1852,11 @@ impl Viewer {
                 st.aspect
                     .unwrap_or(st.config.width as f32 / st.config.height.max(1) as f32),
             );
+            let talking = net.voice_on() && f.held_other.iter().any(|c| c == "talk");
+            let frames = voice_capture(&mut st.talker, st.shell.as_mut(), &st.input, talking);
+            net.send_voice(frames, talking);
+            voiced = true;
             let frame_out = net.frame(dt, &f);
-            if let (Some(note), Some(sh)) = (net.take_voice_note(), st.shell.as_mut()) {
-                sh.print_console(&note);
-            }
             st.input.apply(&net.take_input_feedback());
             st.prev_cost[0] = t_net.elapsed().as_secs_f64() * 1000.0;
             if net.spawned()
@@ -1821,20 +1871,22 @@ impl Viewer {
                     "slow_gaps_ms": g.slow,
                 }));
             }
-            // What the server precached beyond what the load warmed (planes, vehicles the scripts call in): its
-            // passes are prepared a material per frame and its pipelines built beside the frames, not at first sight.
+            // What the server precached after its gamestate, which the load screen prepared ([`precache_step`]): its
+            // passes are prepared a few per frame and its pipelines built beside the frames, not at first sight.
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(r) = st.renderer.as_mut() {
-                let models = net.unwarmed_models();
-                if !models.is_empty() {
-                    r.warm_models(&models);
-                    if let Some(sh) = st.shell.as_ref() {
-                        r.warm_sprites(sh.ui.assets.material("gfx_tracer").cloned());
-                    }
+                let late = queue_precached(net, r, st.shell.as_ref());
+                if !late.is_empty() {
+                    tracing::info!(models = ?late, "models precached after the gamestate");
                 }
-                let t_warm = Instant::now();
-                r.warm_late(st.config.format, WARM_LATE_BUDGET);
-                st.prev_cost[5] = t_warm.elapsed().as_secs_f64() * 1000.0;
+                let pending = r.warm_pending();
+                if pending > 0 {
+                    let t_warm = Instant::now();
+                    let left = r.warm_late(st.config.format, WARM_LATE_BUDGET);
+                    st.prev_cost[5] = t_warm.elapsed().as_secs_f64() * 1000.0;
+                    st.in_game_warm.0 += pending - left;
+                    st.in_game_warm.1 += st.prev_cost[5];
+                }
             }
             new_level = net.take_new_level();
             if let Some(sh) = st.shell.as_mut() {
@@ -1989,6 +2041,9 @@ impl Viewer {
                 st.roll = 0.0;
                 fly(st, &f, dt);
             }
+        }
+        if !voiced {
+            voice_capture(&mut st.talker, st.shell.as_mut(), &st.input, false);
         }
         if let Some(n) = st.input.take_pad_press()
             && let Some(sh) = st.shell.as_mut()
@@ -2708,6 +2763,12 @@ impl Viewer {
             r
         });
         let server = st.listen.as_mut().map(Listen::finish);
+        // What frames of play prepared of the server's precache list, the load screen having left nothing (#457).
+        #[cfg(not(target_arch = "wasm32"))]
+        let precache =
+            json!({"in_game_entries": st.in_game_warm.0, "in_game_ms": st.in_game_warm.1});
+        #[cfg(target_arch = "wasm32")]
+        let precache = Value::Null;
         let report = json!({
             "status": "ok",
             "net": net,
@@ -2729,6 +2790,7 @@ impl Viewer {
             },
             "frames": st.samples.len(),
             "late_builds": st.late_names.iter().map(|(n, w)| format!("{n} {w}")).collect::<Vec<_>>(),
+            "precache": precache,
             "video": video,
             "screenshot": st.shot_ok.then_some("screenshot.png"),
             "zone_load_ms": self.load_ms,
@@ -4176,6 +4238,31 @@ fn dispatch_input(st: &mut State, ev: &crate::input::InputEvent) {
     }
 }
 
+/// One frame of the microphone (`CL_VoiceFrame`, KisakCOD `client_mp/cl_main_mp.cpp:1995-2000`): open while
+/// `talking` or while the record meter drew last frame, its level handed to the meter, a failure printed once.
+fn voice_capture(
+    talker: &mut crate::voice::Talker,
+    shell: Option<&mut Shell>,
+    input: &Input,
+    talking: bool,
+) -> Vec<net::voice::Frame> {
+    let scaler = input
+        .cvar("winvoice_mic_scaler")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(1.0);
+    let Some(sh) = shell else {
+        return talker.frames(talking, false, scaler, Instant::now());
+    };
+    let metering = std::mem::take(&mut sh.st.game.hud.meter_shown);
+    let frames = talker.frames(talking, metering, scaler, Instant::now());
+    sh.st.game.hud.voice_level = talker.current_level;
+    if let Some(note) = talker.note.take() {
+        sh.print_console(&note);
+    }
+    frames
+}
+
 /// `chatmodepublic` and `chatmodeteam` (bound to T and Y) open the chat field; `toggleconsole` is the console's.
 fn open_chat(shell: Option<&mut Shell>, input: &mut Input, f: &InputFrame) {
     let Some(sh) = shell else { return };
@@ -5059,6 +5146,56 @@ fn begin_load(cli: &Cli, st: &mut State, map: &str, gametype: &str, server: load
         load_ms: None,
         slow: Vec::new(),
     });
+}
+
+/// The load screen's last part, once the level is in and the session connected: waits for the server's gamestate,
+/// then prepares the passes of every model it precached, [`PRECACHE_BUDGET`] a frame so the screen keeps presenting,
+/// and ends the load screen on the first frame that finds none left (a frame that prepared some still shows the
+/// load screen). The original registers them under its load screen (`CG_RegisterGraphics`, KisakCOD
+/// `cgame_mp/cg_main_mp.cpp`, from `CL_InitCGame` in `CA_LOADING`), so the level's first frames prepare nothing
+/// (#457).
+#[cfg(not(target_arch = "wasm32"))]
+fn precache_step(st: &mut State) {
+    let (Some(net), Some(r)) = (st.net.as_mut(), st.renderer.as_mut()) else {
+        st.loading = None;
+        return;
+    };
+    if !net.pump_gamestate() {
+        return;
+    }
+    let models = queue_precached(net, r, st.shell.as_ref());
+    if !models.is_empty() {
+        tracing::info!(
+            models = models.len(),
+            "preparing the gamestate's precache list"
+        );
+    }
+    if r.warm_pending() == 0 {
+        tracing::info!("the precache list is prepared");
+        st.loading = None;
+        return;
+    }
+    let t = Instant::now();
+    r.warm_late(st.config.format, PRECACHE_BUDGET);
+    st.prev_cost[5] = t.elapsed().as_secs_f64() * 1000.0;
+}
+
+/// Hands the renderer the models the server precached that it was not given yet, and the tracers' sprite with them.
+/// Returns the models' names.
+#[cfg(not(target_arch = "wasm32"))]
+fn queue_precached(net: &mut NetPlay, r: &mut Renderer, shell: Option<&Shell>) -> Vec<String> {
+    let models = net.unwarmed_models();
+    if models.is_empty() {
+        return Vec::new();
+    }
+    r.warm_models(&models);
+    if let Some(sh) = shell {
+        r.warm_sprites(sh.ui.assets.material("gfx_tracer").cloned());
+    }
+    models
+        .iter()
+        .map(|m| m.name.as_deref().unwrap_or("?").to_owned())
+        .collect()
 }
 
 /// Register changed flare material names through the session's linked asset DB. Empty names select `$default`;

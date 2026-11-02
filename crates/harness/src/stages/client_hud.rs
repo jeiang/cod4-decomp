@@ -20,10 +20,12 @@
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
 use super::client_session::{render_problem, steps_problem};
+use super::voice_speaker;
 use crate::control::{Driven, Walker};
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::{Value, json};
 use std::io;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 const NAME: &str = "client-hud";
@@ -620,6 +622,12 @@ fn vision_blend_sample(look: &Value) -> Result<Option<(f64, bool)>, String> {
 /// per frame and its 64-command queue, so the latest received command is the latest one sent.
 fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<Value, String> {
     let start = Instant::now();
+    let frames = |c: &mut Driven| -> Result<u64, String> {
+        Ok(c.ask(json!({"cmd": "ping"}))?["frames"]
+            .as_u64()
+            .unwrap_or(0))
+    };
+    let first = frames(c)?;
     let mut last = Value::Null;
     while start.elapsed() < Duration::from_secs(30) {
         let state = c.ask(json!({
@@ -662,8 +670,9 @@ fn command_frame(c: &mut Driven, slot: u64, empty: bool, right: bool) -> Result<
         }
         c.pause(Duration::from_millis(50))?;
     }
+    let drawn = frames(c)?.saturating_sub(first);
     Err(format!(
-        "no matching sync {} frame (right={right}): {last}",
+        "no matching sync {} frame (right={right}; the client drew {drawn} frames in the wait): {last}",
         if empty { "empty" } else { "backlog" }
     ))
 }
@@ -776,6 +785,45 @@ fn synchronous_commands(c: &mut Driven, notes: &mut Vec<String>) -> Result<(), S
              against {before:.1} before the step"
         )),
     }
+}
+
+/// The record meter's white outline (`UI_DrawRecordLevel`, KisakCOD `ui_mp/ui_main_mp.cpp:1524-1533`) must be on
+/// screen at the rectangle the meter last drew: most of its top and bottom edges near-white.
+fn meter_outline(shot: &Path, rect: &Value) -> Result<(), String> {
+    let r: Vec<f64> = rect
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_f64).collect())
+        .unwrap_or_default();
+    let [x, y, w, h] = r[..] else {
+        return Err(format!("the record meter reported no rectangle: {rect}"));
+    };
+    if w < 4.0 || h < 4.0 {
+        return Err(format!(
+            "the record meter's rectangle is degenerate: {rect}"
+        ));
+    }
+    let (width, height, rgb) = super::client_models::decode(shot)?;
+    let white = |px: u32, py: u32| {
+        let i = ((py * width + px) * 3) as usize;
+        rgb[i..i + 3].iter().all(|&c| c >= 200)
+    };
+    // The share of white pixels on the best row near an edge (an edge is one 640-unit, a pixel or two).
+    let edge = |ey: f64| -> f64 {
+        let (x0, x1) = (x.max(0.0) as u32, ((x + w) as u32).min(width));
+        let rows = (ey - 1.0).max(0.0) as u32..((ey + 2.0) as u32).min(height);
+        rows.map(|py| {
+            let lit = (x0..x1).filter(|&px| white(px, py)).count();
+            lit as f64 / f64::from(x1.saturating_sub(x0).max(1))
+        })
+        .fold(0.0, f64::max)
+    };
+    let (top, bottom) = (edge(y), edge(y + h - 1.0));
+    if top < 0.8 || bottom < 0.8 {
+        return Err(format!(
+            "the record meter's outline is not on screen at {rect}: top edge {top:.2} white, bottom {bottom:.2}"
+        ));
+    }
+    Ok(())
 }
 
 /// The crosshair opacity seen per predicted weapon state during one keyed action.
@@ -1031,8 +1079,116 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
     ))
 }
 
+/// A second person joins the listen server and talks ([`voice_speaker::Speaker`]); the server relays the voice and the
+/// cgame talker slots (193-196) must name them, then `cg_drawTalk` given by its stock names must hide and show them by
+/// side (`CG_DrawTalkerNum`, KisakCOD `cgame_mp/cg_newDraw_mp.cpp:2287`).
+fn received_voice(c: &mut Driven, install: &Path, notes: &mut Vec<String>) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    let server = |c: &mut Driven, name: &str, value: &str| {
+        c.ask(json!({"cmd":"server","op":"cvar","name":name,"value":value}))
+            .map(|_| ())
+    };
+    // Everyone hears everyone, dead or alive, so the speaker's team and a death do not decide the check.
+    for (name, value) in [
+        ("sv_voice", "1"),
+        ("voice_global", "1"),
+        ("voice_deadChat", "1"),
+    ] {
+        server(c, name, value)?;
+    }
+    let addr = c.ask(json!({"cmd":"server","op":"state","what":"net"}))?["addr"]
+        .as_str()
+        .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+        .ok_or("the listen server did not say its address")?;
+    let speaker = voice_speaker::Speaker::start(
+        std::net::SocketAddr::from(([127, 0, 0, 1], addr.port())),
+        install,
+    )?;
+    let result = (|| {
+        let start = Instant::now();
+        let client = loop {
+            if let Some(n) = speaker.client() {
+                break n;
+            }
+            if start.elapsed() > secs(60) {
+                return Err("the speaker never got a body on the listen server".to_owned());
+            }
+            c.pause(Duration::from_millis(500))?;
+        };
+        c.ask(json!({"cmd":"cvar","name":"cg_drawTalk","value":"ALL"}))?;
+        c.until(
+            json!({"hud.report.talker_marks":{"ge":1}}),
+            secs(20),
+            "a talking player's ownerdraw (193) never drew",
+        )?;
+        let talkers = c.lookup("hud.report.talkers")?;
+        let me = talkers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t[0].as_u64() == Some(u64::from(client)))
+            .cloned()
+            .ok_or_else(|| {
+                format!("the talkers {talkers} do not list the speaker, client {client}")
+            })?;
+        if me[1].as_str() != Some(voice_speaker::NAME) {
+            return Err(format!(
+                "the talker is named {} instead of {}",
+                me[1],
+                voice_speaker::NAME
+            ));
+        }
+        let enemy = me[2].as_bool().unwrap_or(false);
+        notes.push(format!("speaker client {client}, enemy {enemy}"));
+        let (hide, show) = if enemy {
+            ("FRIENDLY", "ENEMY")
+        } else {
+            ("ENEMY", "FRIENDLY")
+        };
+        let marks = |c: &mut Driven| -> Result<u64, String> {
+            Ok(c.lookup("hud.report.talker_marks")?.as_u64().unwrap_or(0))
+        };
+        c.ask(json!({"cmd":"cvar","name":"cg_drawTalk","value":hide}))?;
+        c.pause(Duration::from_millis(500))?;
+        let before = marks(c)?;
+        c.pause(secs(2))?;
+        let after = marks(c)?;
+        let still = c.lookup("hud.report.talkers")?;
+        if still.as_array().is_none_or(Vec::is_empty) {
+            return Err("the speaker stopped being heard while cg_drawTalk hid it".to_owned());
+        }
+        if after != before {
+            return Err(format!(
+                "cg_drawTalk {hide} still drew the {} talker ({before} -> {after} icons)",
+                if enemy { "enemy" } else { "friendly" }
+            ));
+        }
+        c.ask(json!({"cmd":"cvar","name":"cg_drawTalk","value":show}))?;
+        c.until(
+            json!({"hud.report.talker_marks":{"gt":after}}),
+            secs(10),
+            &format!("cg_drawTalk {show} did not draw the talker"),
+        )?;
+        Ok(())
+    })();
+    drop(speaker);
+    c.ask(json!({"cmd":"cvar","name":"cg_drawTalk","value":"ALL"}))?;
+    for (name, value) in [
+        ("sv_voice", "0"),
+        ("voice_global", "0"),
+        ("voice_deadChat", "0"),
+    ] {
+        server(c, name, value)?;
+    }
+    result
+}
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
-fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), String> {
+fn play(
+    c: &mut Driven,
+    w: &mut Walker,
+    install: &Path,
+    notes: &mut Vec<String>,
+) -> Result<(), String> {
     let secs = Duration::from_secs;
     // The server's team menu, answered with the pointer; then the class menu.
     c.step("team menu", |c| {
@@ -1066,6 +1222,64 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         Ok(c.lookup("client.seconds")?.as_f64().unwrap_or(0.0))
     })?;
     c.pause(secs(3))?;
+    c.step("voice talking ownerdraw", |c| {
+        c.ask(json!({"cmd":"server","op":"cvar","name":"sv_voice","value":"1"}))?;
+        c.bind("+talk", "down")?;
+        let result = c.until(
+            json!({"hud.report.local_talker_marks":{"ge":1}}),
+            secs(10),
+            "the speaking player's ownerdraw 266 never drew",
+        );
+        c.bind("+talk", "up")?;
+        result?;
+        c.ask(json!({"cmd":"server","op":"cvar","name":"sv_voice","value":"0"}))?;
+        Ok(())
+    })?;
+    let cvars_before = c.ask(json!({"cmd": "cvars"}))?;
+    c.step("received voice talker ownerdraws", |c| {
+        received_voice(c, install, notes)
+    })?;
+    c.step("record level ownerdraw", |c| {
+        // UI_DrawRecordLevel in the stock voice options; the slot hosts have no microphone (#488), so only the
+        // meter's drawing is checked, not a level.
+        let before = c.lookup("menu.open")?;
+        c.console("openmenu options_voice")?;
+        let result = c.until(
+            json!({"hud.report.record_meter_marks":{"ge":1}}),
+            secs(10),
+            "the voice options never drew the record level (265)",
+        );
+        let result = result.and_then(|_| {
+            let shot = c.capture("record-level")?;
+            let rect = c.lookup("hud.report.record_meter_rect")?;
+            notes.push(format!("record meter rect {rect}"));
+            meter_outline(&shot, &rect)
+        });
+        if result.is_err() {
+            notes.push(format!("open menus: {}", c.lookup("menu.open")?));
+        }
+        c.console("closemenu options_voice")?;
+        result?;
+        // The match's menus must be as they were, or the steps after play with a menu up.
+        c.pause(Duration::from_millis(500))?;
+        let after = c.lookup("menu.open")?;
+        if after != before {
+            return Err(format!(
+                "closing the voice options left {after} open, not {before}"
+            ));
+        }
+        Ok(())
+    })?;
+    // What the voice steps (the speaker, the voice options' scripts) left changed in the client's settings.
+    let cvars_after = c.ask(json!({"cmd": "cvars"}))?;
+    if let (Some(a), Some(b)) = (cvars_before.as_object(), cvars_after.as_object()) {
+        let changed: Vec<String> = b
+            .iter()
+            .filter(|(k, v)| !matches!(k.as_str(), "ok" | "id") && a.get(*k) != Some(*v))
+            .map(|(k, v)| format!("{k}={v} (was {})", a.get(k).unwrap_or(&Value::Null)))
+            .collect();
+        notes.push(format!("cvars the voice steps changed: {changed:?}"));
+    }
     c.step("stock server dvar registrations", |c| {
         // KisakCOD game_mp/g_main_mp.cpp:407,632-648,694-712 and server_mp/sv_init_mp.cpp:708-722,771.
         // Empty registered strings must be "", never the null returned for an absent registration.
@@ -1740,6 +1954,18 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
             w.turning()
         ));
     }
+    c.step("helicopter compass ownerdraw", |c| {
+        // Stock 1.7 places 155 in compass_old, one of the in-match HUD menus the client draws; opening it as a menu
+        // hides the HUD instead.
+        c.ask(json!({"cmd":"server","op":"exec","line":"devhardpoint bot helicopter_mp"}))?;
+        c.until(
+            json!({"hud.report.helicopter_marks":{"ge":1}}),
+            secs(120),
+            "an active helicopter never drew its minimap icon (155)",
+        )?;
+        c.capture("helicopter-compass")?;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -1765,7 +1991,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     };
     out.notes.push(format!("channel {}", c.addr));
-    let played = Walker::new(&mut c).and_then(|mut w| play(&mut c, &mut w, &mut out.notes));
+    let played =
+        Walker::new(&mut c).and_then(|mut w| play(&mut c, &mut w, install, &mut out.notes));
     // The counters are read before the run ends, played out or not: a failed step still says what the HUD drew.
     let report = c
         .report("control-run.json", &["hud", "net", "render"])
@@ -1784,6 +2011,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         "killcam_first.png",
         "killcam_next.png",
         "killcam.png",
+        "record-level.png",
+        "helicopter-compass.png",
     ] {
         if dir.join(f).is_file() {
             out.files.push(format!("hud/{f}"));
