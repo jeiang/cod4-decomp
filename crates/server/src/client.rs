@@ -143,7 +143,7 @@ pub struct Client {
     pub bot: bool,
     pub name: String,
     /// The name the person last asked for while `setclientnamemode("manual_change")` held it back (`sess.newnetname`);
-    /// `updateclientnames` makes it [`Self::name`]. Empty until a change is held.
+    /// `updateclientnames` makes it [`Self::name`]. The name itself until a change is held.
     pub new_name: String,
     pub ps: PlayerState,
     pub cmd: UserCmd,
@@ -243,8 +243,9 @@ impl Client {
         Self {
             conn: Conn::Connecting,
             bot,
+            // `ClientUserinfoChanged` before the client is connected: the name and the pending name agree.
+            new_name: name.clone(),
             name,
-            new_name: String::new(),
             ps,
             cmd: UserCmd::default(),
             old_cmd: UserCmd::default(),

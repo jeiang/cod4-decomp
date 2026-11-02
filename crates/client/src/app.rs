@@ -1075,7 +1075,10 @@ impl Viewer {
         };
         if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_mut()) {
             sh.ui.assets.add_weapon_icons(&n.weapon_defs());
-            n.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            n.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
         let (profiles, stats) = match self
             .cli
@@ -5036,7 +5039,10 @@ fn finish_load(
         net.new_level(Some((library, &data, sound)))?;
         if let Some(sh) = st.shell.as_ref() {
             net.upload_stats(&sh.st.stats);
-            net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            net.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
     } else {
         let (addr, listen) = server.ok_or("no server to connect to")?;
@@ -5055,7 +5061,10 @@ fn finish_load(
         net.set_userinfo(&name, rate, snaps);
         if let Some(sh) = st.shell.as_ref() {
             net.set_profile(&sh.st.stats);
-            net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            net.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
         net.start_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
         st.net = Some(net);
