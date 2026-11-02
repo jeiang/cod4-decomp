@@ -2,9 +2,9 @@
 //! `client-custom-class`: a person with a saved profile builds a custom class in the menus and plays from it, driven
 //! through the control channel with the player's own pointer, keys and console (#376). Typed at the console, custom
 //! class 5 is named `P90` (`customclass5`, as players rename classes). Create a Class > custom slot 5 > Primary
-//! Weapon > Sub Machine Guns is walked in the stock menus; the P90 row there does not open its attachment popup on
-//! this client, so the class's P90, no attachment and Special Grenades as perk 1 are typed `statset` fixtures, as is
-//! the experience (a stat no menu writes). The profile's stats (read back with `statGetInDvar`, as a player would)
+//! Weapon > Sub Machine Guns > P90 is walked in the stock menus: the P90 row's click sets the class's P90 with no
+//! attachment and must open the SMG attachment popup. Special Grenades as perk 1 is typed as a `statset` fixture, as
+//! is the experience (a stat no menu writes). The profile's stats (read back with `statGetInDvar`, as a player would)
 //! must hold the class. The stats reach the server before the person begins, so the class loadout holds the P90, the
 //! perk and experience survive the join (the server's stand-ins are never taken for news), a class change in the first
 //! seconds of a round applies at once, and every other player the server announces is drawn. Needs a display and the
@@ -392,7 +392,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             out.reason = Some(w);
         }
         None => out.notes.push(
-            "walked Create a Class to custom slot 5's SMG popup, typed the P90 class (the P90 row opens no attachment popup on this client), spawned with its P90, kept the profile's perk and experience, changed class in the grace period and saw the other players"
+            "walked Create a Class to custom slot 5's SMG popup, picked the P90 (its attachment popup opened), typed perk 1, spawned with its P90, kept the profile's perk and experience, changed class in the grace period and saw the other players"
                 .into(),
         ),
     }
