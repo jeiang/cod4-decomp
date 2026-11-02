@@ -1278,7 +1278,7 @@ fn the_weapon_dvars_of_the_movement_params_reach_a_command_run_by_run_usercmd() 
 
 #[test]
 fn the_weapon_dvars_are_registered_and_sent_when_not_stock() {
-    let names: Vec<_> = Params::dvars().into_iter().map(|(n, _)| n).collect();
+    let names: Vec<_> = Params::dvars().into_iter().map(|(n, ..)| n).collect();
     for n in [
         "bullet_penetrationEnabled",
         "player_burstFireCooldown",
