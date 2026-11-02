@@ -389,6 +389,9 @@ impl Default for Cvars {
                 (
                     n.to_ascii_lowercase(),
                     Cvar {
+                        registered: value.clone(),
+                        value,
+                        archive,
                         reset: None,
                         kind: None,
                         external: false,
