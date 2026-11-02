@@ -621,11 +621,12 @@ mod tests {
         target.event_seq = 1;
         assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 1);
         assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
-        // A wrap from far behind (more than 64 ahead counts as 256 lower) plays the last four.
-        target.event_seq = 250;
-        assert!(events.scan(&snap(std::slice::from_ref(&target))).is_empty());
-        target.event_seq = 3;
+        // Far ahead plays the last four; a wrap (the last sequence more than 64 ahead counts as 256 lower) plays the
+        // last four again.
         target.set_recent_events([(ev::PLAY_FX_ON_TAG, 1); 4]);
+        target.event_seq = 250;
+        assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 4);
+        target.event_seq = 3;
         assert_eq!(events.scan(&snap(std::slice::from_ref(&target))).len(), 4);
         for parm in [0, 2, 3, 4, 255] {
             target.event_seq = target.event_seq.wrapping_add(1);
