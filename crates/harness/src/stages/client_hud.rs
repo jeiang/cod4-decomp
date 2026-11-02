@@ -928,7 +928,13 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
             &format!("devtele {bot} {} {} {}", at(0) + dx, at(1) + dy, at(2)),
         )?;
         c.pause(KILLCAM_AIM)?;
-        if server_client(c, me)?["alive"] == json!(true) {
+        // Where the bot stood and looked when it killed, against the player: a failure says whether it faced them.
+        let (b, p) = (server_client(c, bot)?, server_client(c, me)?);
+        let seen = format!(
+            "bot origin {} view {} alive {} session {}, player origin {}",
+            b["origin"], b["viewangles"], b["alive"], b["session"], p["origin"]
+        );
+        if p["alive"] == json!(true) {
             exec(c, &format!("devkill {me} {bot}"))?;
         }
         c.until(
@@ -944,7 +950,7 @@ fn killcam_kill(c: &mut Driven) -> Result<(), String> {
                 return Ok(());
             }
             if hud["live"]["killcam"] != json!(true) || Instant::now() > end {
-                tried.push(format!("bot {bot} at ({dx}, {dy})"));
+                tried.push(format!("bot {bot} at ({dx}, {dy}) [{seen}]"));
                 break;
             }
             c.frames(1)?;

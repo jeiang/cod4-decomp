@@ -1674,6 +1674,7 @@ impl Server {
                     "ping": 0,
                     "health": c.ps.health,
                     "origin": c.ps.origin,
+                    "viewangles": c.ps.viewangles,
                     "weapon": c.ps.weapon,
                     "weapon_name": self.game.weapons.name(c.ps.weapon as u16),
                     "weapons": weapons,
