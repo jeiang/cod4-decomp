@@ -218,8 +218,13 @@ impl UiAssets {
     }
 
     /// [`UiAssets::translate`] for a reference the data means to resolve (`@KEY`): a miss shows the key and is
-    /// logged once per key.
+    /// logged once per key. A reference shorter than two characters (the empty key of `"@" + tablelookup(...)` when
+    /// the lookup is empty) is not looked up and shows as it is, unwarned (KisakCOD `SEH_StringEd_GetString`,
+    /// stringed/stringed_hooks.cpp:102).
     pub fn translate_ref(&self, key: &str) -> Option<&Arc<str>> {
+        if key.trim_start_matches('@').len() < 2 {
+            return None;
+        }
         let t = self.translate(key);
         if t.is_none() {
             logging::dedup!(
@@ -302,5 +307,18 @@ mod tests {
             .find(|e| e.level == tracing::Level::WARN)
             .expect("a warning");
         assert_eq!(e.field("key"), Some("@NO_SUCH_KEY_TEST"));
+    }
+
+    #[test]
+    fn an_empty_or_one_character_reference_is_not_looked_up_or_warned() {
+        for key in ["", "@", "@x"] {
+            let (none, events) =
+                logging::capture(|| UiAssets::default().translate_ref(key).is_none());
+            assert!(none, "{key:?}");
+            assert!(
+                events.iter().all(|e| e.level != tracing::Level::WARN),
+                "{key:?} warned"
+            );
+        }
     }
 }
