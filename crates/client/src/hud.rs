@@ -86,6 +86,9 @@ pub struct NameScan {
     pub crosshair: Option<u16>,
     /// A flashbang blinds the view: no names (`CG_Flashbanged`).
     pub flashed: bool,
+    /// The crosshair bits the scan put on the predicted state's `weapFlags` this frame:
+    /// [`sim::pm::wf::FRIEND_IN_CROSSHAIR`] or [`sim::pm::wf::ENEMY_IN_CROSSHAIR`].
+    pub weap_flags: u32,
 }
 
 /// One scoreboard line with the client's name looked up.
@@ -370,6 +373,22 @@ pub struct Stats {
     pub vote_frames: u32,
     pub vote_yes_max: i32,
     pub vote_no_max: i32,
+    /// Frames the crosshair was drawn on a teammate and on an enemy in range (the predicted crosshair bits), the
+    /// colours it was drawn in on each (`"r g b"`), and frames it was tinted on nobody.
+    pub crosshair_friend_frames: u32,
+    pub crosshair_enemy_frames: u32,
+    pub crosshair_friend_tints: std::collections::BTreeSet<String>,
+    pub crosshair_enemy_tints: std::collections::BTreeSet<String>,
+    pub crosshair_stray_tint_frames: u32,
+    /// Frames the crosshair was drawn while a grenade cooked, and the most its centre grew over the weapon's size.
+    pub crosshair_cook_frames: u32,
+    pub crosshair_cook_growth_max: f32,
+    /// The viewer's-team and other-team colours the crosshair is tinted in.
+    pub crosshair_team_tints: [[f32; 3]; 2],
+    /// Frames an enemy in range had been under the crosshair past `cg_enemyNameFadeIn`, and those of them the
+    /// reticle stayed white (`cg_crosshairEnemyColor 0`, or a weapon without `crosshairColorChange`).
+    pub crosshair_enemy_due_frames: u32,
+    pub crosshair_enemy_due_white_frames: u32,
     /// The elements of the busiest frame, as the screen got them.
     sample: Vec<Value>,
 }
@@ -451,6 +470,28 @@ impl Stats {
                 }
             }
         }
+        if let Some((color, grown)) = d.reticle {
+            use sim::pm::wf;
+            let tint = tint_text(color);
+            let flags = live.scan.weap_flags;
+            if flags & wf::FRIEND_IN_CROSSHAIR != 0 {
+                self.crosshair_friend_frames += 1;
+                self.crosshair_friend_tints.insert(tint);
+            } else if flags & wf::ENEMY_IN_CROSSHAIR != 0 {
+                self.crosshair_enemy_frames += 1;
+                self.crosshair_enemy_tints.insert(tint);
+            } else if color != [1.0; 3] {
+                self.crosshair_stray_tint_frames += 1;
+            }
+            if live
+                .reticle
+                .as_ref()
+                .is_some_and(|r| r.grenade_time_left != 0)
+            {
+                self.crosshair_cook_frames += 1;
+                self.crosshair_cook_growth_max = self.crosshair_cook_growth_max.max(grown);
+            }
+        }
     }
 
     /// What the view offered the names this frame: teammates whose name could be read, and a player under the
@@ -489,9 +530,24 @@ impl Stats {
             "vote_frames": self.vote_frames,
             "vote_yes_max": self.vote_yes_max,
             "vote_no_max": self.vote_no_max,
+            "crosshair_friend_frames": self.crosshair_friend_frames,
+            "crosshair_enemy_frames": self.crosshair_enemy_frames,
+            "crosshair_friend_tints": self.crosshair_friend_tints,
+            "crosshair_enemy_tints": self.crosshair_enemy_tints,
+            "crosshair_stray_tint_frames": self.crosshair_stray_tint_frames,
+            "crosshair_cook_frames": self.crosshair_cook_frames,
+            "crosshair_cook_growth_max": self.crosshair_cook_growth_max,
+            "crosshair_team_tints": self.crosshair_team_tints.map(tint_text),
+            "crosshair_enemy_due_frames": self.crosshair_enemy_due_frames,
+            "crosshair_enemy_due_white_frames": self.crosshair_enemy_due_white_frames,
             "sample": self.sample,
         })
     }
+}
+
+/// A tint as the crosshair counters write it: `"r g b"` to three places.
+pub fn tint_text(c: [f32; 3]) -> String {
+    format!("{:.3} {:.3} {:.3}", c[0], c[1], c[2])
 }
 
 /// Colours of `^8` (the viewer's team) and `^9` (the other team): `g_TeamColor_MyTeam` and `_EnemyTeam`.

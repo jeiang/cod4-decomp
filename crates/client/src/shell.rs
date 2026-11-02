@@ -1199,9 +1199,32 @@ impl Shell {
             });
             st.hud_stats.frame(&st.live, rows);
             st.names_cfg = hud::names::Cfg::read(&input.cvars);
-            st.names
-                .update(&st.live, &st.names_cfg, hud::team_colors(&input.cvars));
+            let colors = hud::team_colors(&input.cvars);
+            st.names.update(&st.live, &st.names_cfg, colors);
             st.hud_stats.names_offered(&st.names, &st.live);
+            // `CG_CalcCrosshairColor`: the target the names track tints the reticle.
+            let [mine, theirs] = colors.map(|c| [c[0], c[1], c[2]]);
+            st.hud_stats.crosshair_team_tints = [mine, theirs];
+            if let Some(r) = st.live.reticle.as_mut() {
+                let tint = crate::crosshair::Tint {
+                    // A cheat dvar: the store puts it back on without `sv_cheats`.
+                    enemy_color: input.cvars.bool("cg_crosshairEnemyColor"),
+                    friendly_fade_in: st.names_cfg.friendly_fade_in,
+                    enemy_fade_in: st.names_cfg.enemy_fade_in,
+                    my_team: mine,
+                    enemy_team: theirs,
+                };
+                let held = st.names.crosshair_held();
+                r.color =
+                    crate::crosshair::color(r.color_change, st.live.scan.weap_flags, held, &tint);
+                // An enemy held past the fade-in, the frames an enemy tint is due if anything is to tint it.
+                if st.live.scan.weap_flags & sim::pm::wf::ENEMY_IN_CROSSHAIR != 0
+                    && held >= tint.enemy_fade_in
+                {
+                    st.hud_stats.crosshair_enemy_due_frames += 1;
+                    st.hud_stats.crosshair_enemy_due_white_frames += u32::from(r.color == [1.0; 3]);
+                }
+            }
         } else {
             let st = &mut self.st;
             st.names.update(&st.live, &st.names_cfg, [[1.0; 4]; 2]);
