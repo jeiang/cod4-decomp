@@ -36,6 +36,7 @@ mod hud;
 mod hudstate;
 mod input;
 mod kick;
+mod laser;
 #[cfg_attr(target_arch = "wasm32", path = "listen_web.rs")]
 mod listen;
 mod loader;

@@ -1075,7 +1075,10 @@ impl Viewer {
         };
         if let (Some(sh), Some(n)) = (shell.as_mut(), net.as_mut()) {
             sh.ui.assets.add_weapon_icons(&n.weapon_defs());
-            n.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            n.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
         let (profiles, stats) = match self
             .cli
@@ -3782,7 +3785,8 @@ fn script_step(st: &mut State) -> bool {
             done(st.net.is_some(), sc, "fx demo".into());
         }
         // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`,
-        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up) or
+        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up,
+        // `cgis=debug_lines 1`/`cgis=debug_strings 1` for the listen server's `line`/`print3d` drawings on screen) or
         // how often an effect kind played (`cgis=fx:shell_eject 0`, `cgis=fx:bullet_impact_noblood 1`): what was
         // drawn or played, not the dvar's value.
         "cgis" => {
@@ -3863,6 +3867,8 @@ fn script_step(st: &mut State) -> bool {
                     "subtitle" => sh.map(|s| {
                         u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
                     }),
+                    "debug_lines" => sh.map(|s| s.st.hud_stats.debug_lines.to_string()),
+                    "debug_strings" => sh.map(|s| s.st.hud_stats.debug_strings.to_string()),
                     _ => name.strip_prefix("fx:").and_then(|kind| {
                         st.net.as_ref().map(|n| {
                             let played = n.fx_played(kind);
@@ -5162,7 +5168,10 @@ fn finish_load(
         net.new_level(Some((library, &data, sound)))?;
         if let Some(sh) = st.shell.as_ref() {
             net.upload_stats(&sh.st.stats);
-            net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            net.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
     } else {
         let (addr, listen) = server.ok_or("no server to connect to")?;
@@ -5181,7 +5190,10 @@ fn finish_load(
         net.set_userinfo(&name, rate, snaps);
         if let Some(sh) = st.shell.as_ref() {
             net.set_profile(&sh.st.stats);
-            net.set_tracer_material(sh.ui.assets.material("gfx_tracer").cloned());
+            net.set_beam_materials(
+                sh.ui.assets.material("gfx_tracer").cloned(),
+                sh.ui.assets.material("gfx_laser").cloned(),
+            );
         }
         net.start_client_side_effects(crate::ambient::enabled_by(&st.input.cvars));
         st.net = Some(net);

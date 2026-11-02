@@ -15,6 +15,7 @@ pub mod cmd;
 pub mod combat;
 pub mod content;
 pub mod cvar;
+pub mod debugdraw;
 pub mod delta;
 pub mod fastdl;
 pub mod fire;

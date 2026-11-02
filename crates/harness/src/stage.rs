@@ -242,6 +242,14 @@ pub static STAGES: &[StageDef] = &[
         kind: Kind::Builtin(crate::stages::net_ui::run),
     },
     StageDef {
+        name: "script-builtins",
+        description: "a check script runs on a live stock level and the developer-only builtins (print channels, asserts, line/print3d) and the late-precache errors must give the stock results; a listen client must draw the line/print3d its server's script ran (hud.stats.debug_lines/debug_strings)",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::script_builtins::run),
+    },
+    StageDef {
         name: "net-killcam",
         description: "a real UDP client is killed by a bot and watches the stock killcam replayed from the server's state ring, then respawns",
         needs_install: false,

@@ -585,6 +585,19 @@ impl Game {
         if d.attacker.is_some_and(|a| a != n && self.is_client(a)) {
             self.stats.kills += 1;
         }
+        if d.attacker == Some(n)
+            && matches!(
+                d.mean,
+                MOD_GRENADE
+                    | MOD_GRENADE_SPLASH
+                    | MOD_EXPLOSIVE
+                    | MOD_PROJECTILE
+                    | MOD_PROJECTILE_SPLASH
+            )
+            && self.weapon_name(d.weapon).starts_with("frag_")
+        {
+            self.stats.frag_suicides += 1;
+        }
         let attacker = self.ent_obj(vm, d.attacker);
         vm.notify_entity(n, "death", std::slice::from_ref(&attacker));
         // How long the death animation plays: what the body animation of the player picks to die in.

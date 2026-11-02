@@ -286,6 +286,27 @@ fn misses(what: &str, list: &Value, allowed: &[&str]) -> Option<String> {
     (!names.is_empty()).then(|| format!("{} names missing: {}", what, names.join(", ")))
 }
 
+/// The runtime error the stock scripts raise for a player their own frag killed (#539): the stock damage callback
+/// (`_globallogic`) sets `explosiveInfo["suicideGrenadeKill"]` only for damage from someone else, and the stock kill
+/// challenges (`_missions::ch_kills`) test it in their frag branch, so the original's VM raises the same error there
+/// (KisakCOD `script/scr_variable.cpp:1727`). Message and innermost location, as the listen report gives them.
+const FRAG_SUICIDE_ERROR: (&str, &str) = (
+    "cannot cast undefined to bool",
+    "maps\\mp\\gametypes\\_missions::ch_kills line 545",
+);
+
+/// How many of the server's script errors were [`FRAG_SUICIDE_ERROR`] with a frag suicide the server counted behind
+/// each: never more than the suicides, so the same error from any other kill (the engine's damage arguments wrong)
+/// still fails the stage.
+fn frag_suicide_errors(srv: &Value) -> u64 {
+    let sites = srv["script_error_sites"].as_array().map_or(0, |a| {
+        a.iter()
+            .filter(|s| s["message"] == FRAG_SUICIDE_ERROR.0 && s["at"] == FRAG_SUICIDE_ERROR.1)
+            .count() as u64
+    });
+    sites.min(srv["stats"]["frag_suicides"].as_u64().unwrap_or(0))
+}
+
 /// Why the frames hitched, if they did. `cpu_ms` is every frame's own cost (`frames.raw.csv`), `phases` where it
 /// went. The report's `late_builds` lists what was built after the load, as "frame what": a pipeline listed was
 /// missing when a frame drew (its draws were skipped for the frames the compile took), so the load's warm-up
@@ -554,9 +575,17 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         failures.push("players were drawn but none carried a model the scripts attached".into());
     }
     let script_errors = sv.get(&["script_errors"]);
-    if script_errors > 0.0 {
+    let excused = frag_suicide_errors(srv);
+    if excused > 0 {
+        report.notes.push(format!(
+            "{excused} stock-script error(s) at {} from a frag suicide, which the stock scripts raise too (#539)",
+            FRAG_SUICIDE_ERROR.1
+        ));
+    }
+    if script_errors - excused as f64 > 0.0 {
         failures.push(format!(
-            "{script_errors} script runtime errors on the server"
+            "{} script runtime errors on the server",
+            script_errors - excused as f64
         ));
     }
     if shots < 1.0 {
@@ -804,6 +833,23 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The stock frag-suicide error passes only with a counted frag suicide behind it (#539); another error, or the
+    /// same one without a suicide, still counts.
+    #[test]
+    fn only_the_stock_frag_suicide_error_with_a_suicide_behind_it_is_excused() {
+        let site = json!({"message": FRAG_SUICIDE_ERROR.0, "at": FRAG_SUICIDE_ERROR.1});
+        let other = json!({"message": "cannot cast undefined to bool", "at": "maps\\mp\\gametypes\\_teams::x line 1"});
+        let srv = |sites: Vec<Value>, suicides: u64| json!({"script_error_sites": sites, "stats": {"frag_suicides": suicides}});
+        assert_eq!(frag_suicide_errors(&srv(vec![site.clone()], 1)), 1);
+        assert_eq!(frag_suicide_errors(&srv(vec![site.clone()], 0)), 0);
+        assert_eq!(
+            frag_suicide_errors(&srv(vec![site.clone(), site.clone()], 1)),
+            1
+        );
+        assert_eq!(frag_suicide_errors(&srv(vec![other], 3)), 0);
+        assert_eq!(frag_suicide_errors(&json!({"script_errors": 1})), 0);
+    }
 
     #[test]
     fn a_counter_the_report_lacks_is_a_failure_not_a_zero() {

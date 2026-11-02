@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
+// `updatescores`, `updatedmscores` and `getclanid` translated in part from KisakCOD (game_mp/g_scr_main_mp.cpp; GPL-3.0,
+// copyright the KisakCOD contributors and Activision).
 //! Player builtins (`PlayerCmd_*`) and the client fields scripts read and write
 //! (`self.sessionstate`, `self.score`, ...; `g_client_fields.cpp` of the original).
 
@@ -112,21 +114,21 @@ pub const METHODS: &[(&str, Impl<MethFn>)] = &[
     ("sayall", r(uicmd::say_all)),
     ("sayteam", r(uicmd::say_team)),
     ("showscoreboard", r(show_scoreboard)),
-    ("updatescores", r(|_, _, _, _| Ok(Value::Undefined))),
-    ("updatedmscores", r(|_, _, _, _| Ok(Value::Undefined))),
+    ("updatescores", r(update_scores)),
+    ("updatedmscores", r(update_dm_scores)),
     // Upstream stores `sess.enterTime` and nothing ever reads it: no observable effect, so no state kept here.
     ("setentertime", r(|_, _, _, _| Ok(Value::Undefined))),
     ("setrank", r(set_rank)),
     ("getguid", r(get_guid)),
     ("getxuid", r(get_guid)),
-    ("getclanid", r(|_, _, _, _| Ok(Value::Int(0)))),
+    // `ScrCmd_GetClanId` returns the string "0" (KisakCOD `game_mp/g_scr_main_mp.cpp:457-460`).
+    ("getclanid", r(|_, _, _, _| Ok(Value::str("0")))),
     ("getclanname", r(|_, _, _, _| Ok(Value::str("")))),
     ("getstat", r(get_stat)),
     ("setstat", r(set_stat)),
     ("shellshock", r(shell_shock)),
     ("stopshellshock", r(stop_shell_shock)),
     ("viewkick", r(view_kick)),
-    ("vibrate", r(|_, _, _, _| Ok(Value::Undefined))),
     ("setdepthoffield", r(set_depth_of_field)),
     ("setviewmodeldepthoffield", r(set_view_model_depth_of_field)),
     ("playlocalsound", r(super::sound::play_local_sound)),
@@ -575,6 +577,43 @@ fn set_rank(g: &mut Game, _: &mut Vm, e: EntRef, a: Args) -> R {
 fn show_scoreboard(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
     let n = client_of(g, e)?;
     g.ui.score_requests.push(n);
+    Ok(Value::Undefined)
+}
+
+/// `updatescores`: `PlayerCmd_UpdateScores` (KisakCOD `game_mp/g_client_script_cmd_mp.cpp:3365-3393`) sends the
+/// player the allies and axis scores. These are commands to that player, not a configstring update: the stock game
+/// sends both every time, including when the values are unchanged.
+fn update_scores(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
+    let n = client_of(g, e)?;
+    for (index, score) in [
+        (net::ui::cs::SCORES_ALLIES, g.team_score[2]),
+        (net::ui::cs::SCORES_AXIS, g.team_score[1]),
+    ] {
+        g.send(
+            crate::ui::Dest::Client(n),
+            net::ui::ServerCmd::ConfigStrings(vec![(index, score.to_string())]),
+        );
+    }
+    Ok(Value::Undefined)
+}
+
+/// `updatedmscores`: `PlayerCmd_UpdateDMScores` (KisakCOD `game_mp/g_client_script_cmd_mp.cpp:3395-3434`) sends the
+/// player its own score and that of the best-ranked other player, each a single scoreboard row the client moves to
+/// its place.
+fn update_dm_scores(g: &mut Game, _: &mut Vm, e: EntRef, _: Args) -> R {
+    let n = client_of(g, e)?;
+    let next = g
+        .score_rows()
+        .into_iter()
+        .map(|r| r.client)
+        .find(|&c| c != n);
+    for c in std::iter::once(n).chain(next) {
+        let score = g.client(c).map_or(0, |c| c.score);
+        g.send(
+            crate::ui::Dest::Client(n),
+            net::ui::ServerCmd::ClientScore { client: c, score },
+        );
+    }
     Ok(Value::Undefined)
 }
 

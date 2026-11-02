@@ -390,7 +390,12 @@ impl Game {
         if !t.is_hit() {
             return None;
         }
-        if t.surface_flags == 0 && t.hit != ENTITYNUM_WORLD && self.is_client(t.hit) {
+        // A player or a player corpse with no surface type is flesh (`ET_PLAYER`/`ET_PLAYER_CORPSE`, KisakCOD
+        // `game/bullet.cpp:58-67`).
+        if t.surface_flags == 0
+            && t.hit != ENTITYNUM_WORLD
+            && (self.is_client(t.hit) || self.ent(t.hit).is_some_and(|e| e.x.corpse.is_some()))
+        {
             t.surface_flags = SURF_TYPE_FLESH;
         }
         let hit_pos = lerp(bp.start, bp.end, t.fraction);
