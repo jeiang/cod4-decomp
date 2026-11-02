@@ -2,6 +2,7 @@
 //! Rate limiting for events that repeat (per frame, per message): a key logs on its 1st, 2nd, 4th, 8th ... hit with
 //! the count so far, so a warning that fires every frame costs a handful of lines, not thousands.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,8 +15,30 @@ pub fn new_window() {
     WINDOW.fetch_add(1, Ordering::Relaxed);
 }
 
+static SCOPES: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// The [`scoped`] run on this thread, 0 outside one.
+    static SCOPE: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Runs `f` in a counting window of its own on this thread: every limiter it hits counts afresh, and hits from other
+/// threads (other tests) neither spend its counts nor see them. For [`crate::capture`], whose caller expects the first
+/// hit of a key to log.
+pub(crate) fn scoped<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(u64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SCOPE.set(self.0);
+        }
+    }
+    let _restore = Restore(SCOPE.replace(SCOPES.fetch_add(1, Ordering::Relaxed) + 1));
+    f()
+}
+
 struct Seen {
-    window: u64,
+    /// The global window and the [`scoped`] run the counts belong to.
+    window: (u64, u64),
     counts: HashMap<Box<str>, u64>,
     overflow: u64,
 }
@@ -49,7 +72,7 @@ impl Dedup {
     /// a key is seen.
     pub fn hit(&self, key: &str) -> Hit {
         let mut guard = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        let window = WINDOW.load(Ordering::Relaxed);
+        let window = (WINDOW.load(Ordering::Relaxed), SCOPE.get());
         let seen = guard.get_or_insert_with(|| Seen {
             window,
             counts: HashMap::new(),
