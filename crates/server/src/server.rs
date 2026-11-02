@@ -532,6 +532,19 @@ fn register_core_dvars(c: &mut Cvars) {
         // The log file name (empty: no log); `cod4e-server` asks for `games_mp.log`.
         ("g_log", "", ARCHIVE),
         ("loc_language", "0", ARCHIVE),
+        // The message of the day (`g_motd`, KisakCOD `game_mp/g_main_mp.cpp:454`), which the stock level spawn puts
+        // in `CS_MOTD` (`game_mp/g_spawn_mp.cpp:646`); this protocol has no such configstring, so a set one is warned
+        // about at each level start.
+        ("g_motd", "", 0),
+        // "Enable extrapolation between client states" (`game_mp/g_main_mp.cpp:613`, read at
+        // `game_mp/g_active_mp.cpp:716,1227`): the native snapshots carry no player trajectory to extrapolate.
+        ("g_smoothClients", "1", 0),
+        // Set only by `SV_CheckPaused` (`qcommon/common.cpp:1584`, `server_mp/sv_main_mp.cpp:920-940`), for a listen
+        // server whose one client paused; nothing pauses a multiplayer game here, so it stays 0.
+        ("sv_paused", "0", ROM),
+        // "Allow testclients to press attack button" (`server_mp/sv_init_mp.cpp:784`, read by `SV_BotUserMove` at
+        // `server_mp/sv_main_mp.cpp:1051`): off, the bots never fire.
+        ("sv_botsPressAttackBtn", "1", 0),
     ] {
         c.register(n, d, f);
     }
@@ -557,6 +570,9 @@ fn register_core_dvars(c: &mut Cvars) {
         ("sv_showCommands", 0, 1),
         ("sv_padPackets", 0, i32::MAX),
         ("g_dumpAnims", -1, 1023),
+        ("sv_paused", 0, 2),
+        ("g_smoothClients", 0, 1),
+        ("sv_botsPressAttackBtn", 0, 1),
     ] {
         c.set_limit(n, Limit::Int(lo, hi));
     }
@@ -571,6 +587,44 @@ fn register_core_dvars(c: &mut Cvars) {
     // The movement dvars (`jump_height`, `friction`, ...): cheat protected, replicated to the clients.
     for (n, d) in sim::pm::Params::dvars() {
         c.register(n, &d, CHEAT);
+    }
+}
+
+/// Most bots a `bots` command or `bot_count` asks for (`MAX_CLIENTS`).
+const MAX_BOTS: usize = 64;
+
+/// The count of a `bots` command or of `bot_count`: a whole number from 0 to [`MAX_BOTS`], else why not.
+fn bot_count(s: &str) -> Result<usize, String> {
+    let n: i64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("bots: '{s}' is not a number (usage: bots <0-{MAX_BOTS}>)"))?;
+    usize::try_from(n)
+        .ok()
+        .filter(|n| *n <= MAX_BOTS)
+        .ok_or_else(|| format!("bots: {n} is out of range (0-{MAX_BOTS})"))
+}
+
+/// The stock dvars registered here whose effect this server cannot give, warned about once when set (each level
+/// start reads them): `g_motd` has no configstring to reach the clients in, and `g_banIPs` is filtered by nothing
+/// in the stock multiplayer game either (KisakCOD keeps its `ipFilters` only for `addip`, `removeip` and `listip`,
+/// `game/g_svcmds.cpp:17-240`), which this console does not have.
+fn warn_unhonoured_dvars(c: &Cvars) {
+    if !c.string("g_motd").is_empty() {
+        logging::dedup!(
+            WARN,
+            "g_motd",
+            dvar = "g_motd",
+            "message of the day not sent: this protocol has no motd configstring"
+        );
+    }
+    if !c.string("g_banIPs").trim().is_empty() {
+        logging::dedup!(
+            WARN,
+            "g_banIPs",
+            dvar = "g_banIPs",
+            "IP list not enforced, as in the stock game; addip/removeip/listip are not implemented (banUser/banClient ban)"
+        );
     }
 }
 
@@ -2377,10 +2431,7 @@ impl Server {
                 );
             }
             "bots" => {
-                let n = arg(1)
-                    .map(cvar::parse_int)
-                    .ok_or("usage: bots <count>")?
-                    .clamp(0, 64) as usize;
+                let n = bot_count(arg(1).ok_or("usage: bots <count>")?)?;
                 // The variable is the one count: the map starts that follow read it.
                 self.game.cvars.set("bot_count", &n.to_string());
                 self.set_bots(n)?;
@@ -2805,7 +2856,14 @@ impl Server {
                 net.notify(peer.link.addr, why);
             }
         }
-        let wanted = self.game.cvars.int("bot_count").clamp(0, 64) as usize;
+        warn_unhonoured_dvars(&self.game.cvars);
+        let wanted = match bot_count(self.game.cvars.string("bot_count")) {
+            Ok(n) => n,
+            Err(why) => {
+                tracing::warn!(dvar = "bot_count", why, "no bots added");
+                0
+            }
+        };
         if wanted > 0 {
             self.set_bots(wanted)?;
         }
@@ -3066,6 +3124,7 @@ impl Server {
             };
             // `ClientThink` receives inputs; `G_RunClient` runs the latest at level time when synchronous.
             let synchronous = host.game.cvars.bool("g_synchronousClients");
+            let bots_attack = host.game.cvars.bool("sv_botsPressAttackBtn");
             // `SV_BotFrame` then each client's `ClientThink`: usercmds reach the game before
             // the frame's script threads run.
             for n in 0..host.game.clients.len() as u16 {
@@ -3104,7 +3163,10 @@ impl Server {
                     client += t.elapsed();
                     continue;
                 };
-                let cmd = b.usercmd(host.game, &mut self.bot_shared, n, self.svs_time);
+                let mut cmd = b.usercmd(host.game, &mut self.bot_shared, n, self.svs_time);
+                if !bots_attack {
+                    cmd.buttons &= !sim::pm::button::ATTACK;
+                }
                 host.game.clients[usize::from(n)].bot_brain = Some(b);
                 bot += t.elapsed();
                 let t = Instant::now();
@@ -4032,5 +4094,38 @@ mod tests {
         let levels: Vec<_> = events.iter().map(|e| e.level).collect();
         assert_eq!(levels, [tracing::Level::WARN, tracing::Level::ERROR]);
         assert_eq!(events[0].field("at"), Some("maps/mp/x::y line 3"));
+    }
+
+    #[test]
+    fn a_bot_count_that_is_not_a_number_or_out_of_range_says_why() {
+        assert_eq!(super::bot_count("3"), Ok(3));
+        assert_eq!(super::bot_count("0"), Ok(0));
+        assert_eq!(super::bot_count("64"), Ok(64));
+        let e = super::bot_count("abc").unwrap_err();
+        assert!(e.contains("'abc' is not a number"), "{e}");
+        let e = super::bot_count("65").unwrap_err();
+        assert!(e.contains("65 is out of range"), "{e}");
+        let e = super::bot_count("-1").unwrap_err();
+        assert!(e.contains("-1 is out of range"), "{e}");
+    }
+
+    #[test]
+    fn the_s11_dvars_have_their_stock_defaults_and_a_set_motd_or_ban_list_warns() {
+        let mut c = crate::cvar::Cvars::new();
+        register_core_dvars(&mut c);
+        assert_eq!(c.string("g_motd"), "");
+        assert!(c.bool("g_smoothClients") && c.bool("sv_botsPressAttackBtn"));
+        assert_eq!(c.int("sv_paused"), 0);
+        let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
+        assert!(events.is_empty(), "the defaults warn about nothing");
+        c.set("g_motd", "logtest motd");
+        c.set("g_banIPs", "10.0.0.1 ");
+        let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
+        let dvars: Vec<_> = events
+            .iter()
+            .filter(|e| e.level == tracing::Level::WARN)
+            .filter_map(|e| e.field("dvar"))
+            .collect();
+        assert_eq!(dvars, ["g_motd", "g_banIPs"]);
     }
 }

@@ -986,9 +986,55 @@ impl ServerCmd {
         s
     }
 
-    /// `None` for a string that is not a UI command (the caller keeps it).
+    /// The command words [`ServerCmd::parse`] knows.
+    const WORDS: &[&str] = &[
+        "map",
+        "gamestate_end",
+        "cs",
+        "dvar",
+        "openmenu",
+        "closemenu",
+        "closeingame",
+        "print",
+        "announce",
+        "scores",
+        "obit",
+        "stat",
+        "vision",
+        "shellshock",
+        "chat",
+    ];
+
+    /// `None` for a string that is not a UI command (the caller keeps it). A UI command word whose arguments do
+    /// not parse is also `None`, warned about once per word; a line with an unterminated quote is logged at debug
+    /// (it may be no UI command at all).
     pub fn parse(line: &str) -> Option<Self> {
-        let w = words(line)?;
+        let Some(w) = words(line) else {
+            logging::dedup!(
+                DEBUG,
+                "unterminated",
+                "server command with an unterminated quote not parsed"
+            );
+            return None;
+        };
+        let cmd = Self::from_words(&w);
+        if cmd.is_none()
+            && let Some(word) = w
+                .first()
+                .and_then(|c| Self::WORDS.iter().find(|u| **u == c.as_str()))
+        {
+            logging::dedup!(
+                WARN,
+                word,
+                command = *word,
+                args = w.len() - 1,
+                "UI server command not parsed"
+            );
+        }
+        cmd
+    }
+
+    fn from_words(w: &[String]) -> Option<Self> {
         let a = |i: usize| w.get(i).map(String::as_str);
         Some(match (a(0)?, w.len()) {
             ("map", 2) => ServerCmd::Map { name: w[1].clone() },
@@ -1997,5 +2043,19 @@ mod tests {
         let (answers, shown) = join.filter(ev, true);
         assert_eq!(answers.len(), 2);
         assert!(shown.is_empty());
+    }
+
+    #[test]
+    fn a_ui_command_that_does_not_parse_warns_with_its_word() {
+        let (cmd, events) = logging::capture(|| ServerCmd::parse("stat logtest_index 3"));
+        assert!(cmd.is_none());
+        let w = events
+            .iter()
+            .find(|e| e.level == tracing::Level::WARN)
+            .expect("a warning");
+        assert_eq!(w.field("command"), Some("stat"));
+        let (cmd, events) = logging::capture(|| ServerCmd::parse("logtest_not_ui 1 2"));
+        assert!(cmd.is_none());
+        assert!(events.iter().all(|e| e.level != tracing::Level::WARN));
     }
 }

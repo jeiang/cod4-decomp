@@ -4,7 +4,8 @@
 //! A dedicated server loads `code_post_gfx_mp`, `localized_code_post_gfx_mp`, `common_mp` and
 //! `localized_common_mp` at boot (no `ui_mp`, no `<map>_load`), then one map zone per map
 //! load. Zones are decoded with the [`Consumer::Server`] filter and only the assets the
-//! simulation reads are retained. An asset name defined by two zones resolves to the zone with
+//! simulation reads are retained, plus the effects and the menu names the precache builtins check
+//! (`loadfx`, `precachemenu`). An asset name defined by two zones resolves to the zone with
 //! the higher tag, the later load winning ties (boot-load research section 6.1); the map zone
 //! (tag 8) is dropped when the next map loads. A mod's `mod.ff` (tag 16, `DB_ZONE_MOD`) is loaded
 //! after the boot zones and outranks them and the map zone.
@@ -201,11 +202,14 @@ struct ContentFilter {
 
 impl DecodeFilter for ContentFilter {
     fn keep(&self, ty: XAssetType) -> bool {
-        // A client draws effects; the server only needs the weapons that name them.
-        (self.presentation && matches!(ty, XAssetType::Fx | XAssetType::ImpactFx))
+        // A client draws effects and impacts; the server links the effects for `loadfx` to look up.
+        ty == XAssetType::Fx
+            || (self.presentation && ty == XAssetType::ImpactFx)
             || (self.materials && ty == XAssetType::Material)
             // The alias names, for `soundexists`; the samples are presentation data and stay out.
             || ty == XAssetType::Sound
+            // The menu names, for `precachemenu`.
+            || ty == XAssetType::MenuList
             || Consumer::Server.keep(ty)
     }
 
@@ -243,6 +247,8 @@ struct Layer {
     impact: Option<(u8, Arc<FxImpactTable>)>,
     /// Lowercase names of the sound alias lists.
     sounds: HashMap<String, (u8, ())>,
+    /// Lowercase names of the menus the zones' menu lists hold (`Menus_FindByName` compares without case).
+    menus: HashMap<String, (u8, ())>,
 }
 
 fn resolve(strings: &[Option<Arc<str>>], i: u16) -> Arc<str> {
@@ -286,6 +292,7 @@ impl Layer {
         merge_map(&mut self.localize, &other.localize);
         merge_map(&mut self.fx, &other.fx);
         merge_map(&mut self.sounds, &other.sounds);
+        merge_map(&mut self.menus, &other.menus);
         if let Some((tag, c)) = &other.clipmap
             && self.clipmap.as_ref().is_none_or(|(t, _)| t <= tag)
         {
@@ -297,6 +304,14 @@ impl Layer {
             self.impact = Some((*tag, i.clone()));
         }
     }
+}
+
+/// Whether a zone defines `name` (any case, a leading `,` reference marker ignored); the defaults made up for
+/// unresolved names carry no tag and do not count.
+fn defined<T: Linkable>(db: &mut Db, name: &str) -> bool {
+    T::table(db)
+        .get(&name.trim_start_matches(',').to_ascii_lowercase())
+        .is_some_and(|chain| chain.iter().any(|(t, _)| t.is_some()))
 }
 
 fn get<'a, T>(m: &'a HashMap<String, (u8, T)>, name: &str) -> Option<&'a T> {
@@ -447,9 +462,19 @@ impl Content {
                     }
                 }
             }
-            Asset::Fx(e) => {
+            Asset::Fx(e) if client => {
                 if let Some(n) = e.name.clone() {
                     put(&mut layer.fx, tag, &n, e);
+                }
+            }
+            Asset::MenuList(l) => {
+                for w in l
+                    .menus
+                    .iter()
+                    .flatten()
+                    .filter_map(|m| m.window.name.as_deref())
+                {
+                    put(&mut layer.menus, tag, w, ());
                 }
             }
             Asset::ImpactFx(t) if layer.impact.as_ref().is_none_or(|(g, _)| *g <= tag) => {
@@ -534,6 +559,69 @@ impl Content {
         get(&self.map.sounds, name)
             .or_else(|| get(&self.base.sounds, name))
             .is_some()
+    }
+
+    /// Whether a zone defines a material of this name (`DB_FindXAssetHeader` without its default): what
+    /// `precacheshader` and the icon precaches look up.
+    pub fn material_defined(&mut self, name: &str) -> bool {
+        defined::<Material>(&mut self.db, name)
+    }
+
+    /// Whether a zone defines an effect of this name, under `fx/` as `loadfx` names it without the folder.
+    pub fn effect_defined(&mut self, name: &str) -> bool {
+        defined::<FxEffectDef>(&mut self.db, &format!("fx/{name}"))
+    }
+
+    /// Whether a menu list of the loaded zones holds a menu of this name (`precachemenu`).
+    pub fn menu_exists(&self, name: &str) -> bool {
+        get(&self.map.menus, name)
+            .or_else(|| get(&self.base.menus, name))
+            .is_some()
+    }
+
+    /// A material made up for a test, as a boot zone defines it.
+    #[cfg(test)]
+    pub fn add_test_material(&mut self, name: &str) {
+        let m = Arc::new(Material {
+            name: Some(name.into()),
+            game_flags: 0,
+            sort_key: 0,
+            atlas_rows: 0,
+            atlas_columns: 0,
+            draw_surf: 0,
+            surface_type_bits: 0,
+            hash_index: 0,
+            state_bits_entry: [0; 34],
+            state_flags: 0,
+            camera_region: 0,
+            technique_set: None,
+            textures: Arc::from([]),
+            constants: Arc::from([]),
+            state_bits: Arc::from([]),
+        });
+        Material::table(&mut self.db).insert(name.to_ascii_lowercase(), vec![(Some(4), m)]);
+    }
+
+    /// An effect made up for a test (`name` with its `fx/` folder), as a boot zone defines it.
+    #[cfg(test)]
+    pub fn add_test_effect(&mut self, name: &str) {
+        let e = Arc::new(FxEffectDef {
+            name: Some(name.into()),
+            flags: 0,
+            total_size: 0,
+            msec_looping_life: 0,
+            looping_count: 0,
+            one_shot_count: 0,
+            emission_count: 0,
+            elems: Arc::from([]),
+        });
+        FxEffectDef::table(&mut self.db).insert(name.to_ascii_lowercase(), vec![(Some(4), e)]);
+    }
+
+    /// A menu made up for a test, as a boot zone's menu list holds it.
+    #[cfg(test)]
+    pub fn add_test_menu(&mut self, name: &str) {
+        put(&mut self.base.menus, 4, name, ());
     }
 
     pub fn string_table(&self, name: &str) -> Option<&Arc<StringTable>> {
@@ -891,5 +979,55 @@ mod tests {
             ..reload
         };
         assert!(!pullout.gun_hand_left(0.5), "no note yet: the right hand");
+    }
+
+    #[test]
+    fn the_server_links_effects_and_keeps_menu_names() {
+        let server = ContentFilter {
+            presentation: false,
+            materials: false,
+        };
+        assert!(server.keep(XAssetType::Fx) && server.link(XAssetType::Fx));
+        assert!(server.keep(XAssetType::MenuList));
+        assert!(!server.keep(XAssetType::ImpactFx), "impacts are drawn only");
+    }
+
+    #[test]
+    fn defined_names_ignore_made_up_defaults_and_unloaded_maps() {
+        let mut content = Content::default();
+        Material::table(&mut content.db).insert(
+            "$default".into(),
+            vec![(Some(2), presentation_material("$default", 0))],
+        );
+        content.material("not_in_a_zone").unwrap();
+        assert!(!content.material_defined("not_in_a_zone"));
+        assert!(content.material_defined("$DEFAULT"));
+        Material::table(&mut content.db).insert(
+            "map_icon".into(),
+            vec![(Some(MAP_TAG), presentation_material("map_icon", 0))],
+        );
+        assert!(content.material_defined("Map_Icon"));
+        content.db.unload(MAP_TAG);
+        assert!(!content.material_defined("map_icon"));
+    }
+
+    #[test]
+    fn effects_are_looked_up_under_the_fx_folder() {
+        let mut content = Content::default();
+        content.add_test_effect("fx/smoke/test_smoke");
+        assert!(content.effect_defined("Smoke/Test_Smoke"));
+        assert!(!content.effect_defined("fx/smoke/test_smoke"));
+        assert!(!content.effect_defined("smoke/other"));
+    }
+
+    #[test]
+    fn menu_names_match_without_case_and_leave_with_their_map() {
+        let mut content = Content::default();
+        content.add_test_menu("Team_Select");
+        put(&mut content.map.menus, MAP_TAG, "map_menu", ());
+        assert!(content.menu_exists("team_select") && content.menu_exists("MAP_MENU"));
+        assert!(!content.menu_exists("other"));
+        content.map = Layer::default();
+        assert!(!content.menu_exists("map_menu"));
     }
 }
