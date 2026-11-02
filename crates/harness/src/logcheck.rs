@@ -180,9 +180,9 @@ pub const ALLOWED: &[Allow] = &[
         contains: &[
             "cod4e::console",
             "stock command not implemented",
-            "issue=479",
+            "issue=527",
         ],
-        reason: "client-commands runs two stock commands we do not implement (imagelist, gfx_stats) to check the #479 warning and the error channel",
+        reason: "client-commands runs two stock renderer commands we do not implement (imagelist, r_smc_stats; #527) to check the not-implemented warning and the error channel",
         stages: &["client-commands"],
         max: Some(3), // two expected
     },

@@ -1878,6 +1878,7 @@ impl Viewer {
                         }
                     }
                 }
+                sh.st.server_addr = net.server_addr().to_owned();
                 sh.tick(&mut st.input);
                 let scores = f.held_other.iter().any(|c| c == "scores") || sh.st.scores_forced;
                 if scores != sh.st.game.scoreboard {
@@ -4397,6 +4398,116 @@ fn console_action(st: &mut State, line: &str) {
                     net.center_view();
                 }
             }
+            // `CL_Clientinfo_f` (KisakCOD cl_main_mp.cpp:843): the connection state, the server and the userinfo.
+            "clientinfo" => {
+                say(st, "--------- Client Information ---------");
+                let state = match st.net.as_ref() {
+                    Some(n) if n.in_match() => 9,
+                    Some(_) => 3,
+                    None => 0,
+                };
+                say(st, &format!("state: {state}"));
+                let server = st.net.as_ref().map_or("", NetPlay::server_addr).to_owned();
+                say(st, &format!("Server: {server}"));
+                say(st, "User info settings:");
+                for key in ["name", "rate", "snaps"] {
+                    if let Some(v) = st.input.cvar(key) {
+                        say(st, &format!("{key:<20}{v}"));
+                    }
+                }
+                say(st, "--------------------------------------");
+            }
+            // `CL_Configstrings_f` (KisakCOD cl_main_mp.cpp:821).
+            "configstrings" => {
+                let rows = st
+                    .net
+                    .as_ref()
+                    .filter(|n| n.in_match())
+                    .map(NetPlay::configstrings);
+                match rows {
+                    Some(rows) => {
+                        for (i, s) in rows {
+                            say(st, &format!("{i:>4}: {s}"));
+                        }
+                    }
+                    None => say(st, "Not connected to a server."),
+                }
+            }
+            // `Sys_ShowIP` (KisakCOD win_net.cpp:514).
+            "showip" => say(st, &format!("IP: {}", local_ip())),
+            // `Com_Meminfo_f`: the process's resident memory (this engine has no zone allocator to break it down).
+            "meminfo" => say(st, &format!("memory: rss {} MiB", rss() >> 20)),
+            // `CG_VoiceChat_f` and `CG_TeamVoiceChat_f` (KisakCOD cg_consolecmds_mp.cpp:279, 305): only a player
+            // (or anyone in the intermission) may voice chat; a spectator is told so.
+            "voicechat" | "voiceteamchat" => {
+                let allowed = st.net.as_ref().and_then(NetPlay::voice_chat_allowed);
+                if cmd.len() == 2
+                    && let Some(allowed) = allowed
+                {
+                    if allowed {
+                        let chat = if verb == "voicechat" {
+                            "vsay"
+                        } else {
+                            "vsay_team"
+                        };
+                        if let Some(net) = st.net.as_mut() {
+                            net.send_command(&format!("{chat} {}", cmd[1]));
+                        }
+                    } else {
+                        let msg = st
+                            .shell
+                            .as_ref()
+                            .and_then(|s| s.ui.assets.translate_ref("CGAME_NOSPECTATORVOICECHAT"))
+                            .map_or_else(|| "CGAME_NOSPECTATORVOICECHAT".into(), |t| t.to_string());
+                        say(st, &msg);
+                    }
+                }
+            }
+            // `SND_PlayLocal_f` (KisakCOD snd.cpp:3344): an alias played at a spot relative to the listener.
+            "snd_playlocal" => {
+                if !(2..=5).contains(&cmd.len()) {
+                    say(
+                        st,
+                        &format!("USAGE: {} <sndalias> [<dist> <yaw> <pitch>]", cmd[0]),
+                    );
+                    continue;
+                }
+                let atof = |i: usize, default: f32| {
+                    cmd.get(i)
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                        .unwrap_or(default)
+                };
+                let (dist, yaw, pitch) = (atof(2, 100.0), atof(3, 0.0), atof(4, 0.0));
+                let played = console_sound(st).map(|s| s.play_local(&cmd[1], dist, yaw, pitch));
+                match played {
+                    Some(Some(at)) => say(
+                        st,
+                        &format!(
+                            "Playing local sound alias \"{}\" at ({:.2}, {:.2}, {:.2}).",
+                            cmd[1], at[0], at[1], at[2]
+                        ),
+                    ),
+                    _ => say(st, &format!("Couldn't find sound alias \"{}\".", cmd[1])),
+                }
+            }
+            // The EQ commands (`SND_SetEq_f` and friends, KisakCOD snd.cpp:285-516).
+            v if matches!(
+                v,
+                "snd_seteq"
+                    | "snd_seteqfreq"
+                    | "snd_seteqgain"
+                    | "snd_seteqq"
+                    | "snd_seteqtype"
+                    | "snd_deactivateeq"
+            ) =>
+            {
+                let lines = console_sound(st)
+                    .map(|s| s.eq_command(&cmd))
+                    .unwrap_or_default();
+                for l in lines {
+                    say(st, &l);
+                }
+            }
             // The cgame's `viewpos`: in a match it prints the drawn eye; without one the cgame's commands are not
             // registered, so the word is forwarded or unknown as any other.
             "viewpos" => match st
@@ -4449,6 +4560,32 @@ fn console_action(st: &mut State, line: &str) {
             }
         }
     }
+}
+
+/// The sound system a console sound command talks to: the match's, or the menus' before a match.
+fn console_sound(st: &mut State) -> Option<&mut crate::sound::ClientSound> {
+    if let Some(net) = st.net.as_mut() {
+        return Some(net.sound_mut());
+    }
+    st.menu_sound.as_mut()
+}
+
+/// `Sys_ShowIP`'s address: the one a UDP socket would send from (connecting chooses a route; nothing is sent).
+#[cfg(not(target_arch = "wasm32"))]
+fn local_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|s| {
+            s.connect("192.0.2.1:9").ok()?;
+            s.local_addr().ok()
+        })
+        .map_or_else(|| "127.0.0.1".into(), |a| a.ip().to_string())
+}
+
+/// A browser has no UDP socket to ask: the loopback address, as the listen server's own.
+#[cfg(target_arch = "wasm32")]
+fn local_ip() -> String {
+    "127.0.0.1".into()
 }
 
 /// `CL_ForwardCommandToServer`: a word nothing here knows goes to the server while connected (which answers an
@@ -5267,6 +5404,7 @@ fn end_session(map_slot: &mut Option<MapData>, st: &mut State) {
     release_pointer(st);
     if let Some(sh) = st.shell.as_mut() {
         sh.st.in_game = false;
+        sh.st.server_addr.clear();
         sh.st.game.hud.live = false;
         sh.close_all(&mut st.input);
         sh.open(&mut st.input, "main");

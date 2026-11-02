@@ -515,6 +515,20 @@ impl Profiles {
         stats
     }
 
+    /// `LiveStorage_ReadStats`: the active profile's stats read from disk again (KisakCOD win_storage.cpp:344).
+    pub fn reload_stats(&mut self) -> Vec<i32> {
+        self.load_active()
+    }
+
+    /// The active profile's `mpdata` path, for `LiveStorage_UploadStats`'s failure line.
+    pub fn active_mpdata(&self) -> String {
+        if self.active.is_empty() {
+            return String::new();
+        }
+        Self::dir_of(&self.user_root, &self.active)
+            .map_or_else(String::new, |d| d.join("mpdata").display().to_string())
+    }
+
     /// Writes `stats` to the active profile if they differ from what was last loaded or written (to a temp file, then
     /// renamed, so a crash never leaves half a file). Returns whether a file was written.
     pub fn save_if_changed(&mut self, stats: &[i32]) -> io::Result<bool> {

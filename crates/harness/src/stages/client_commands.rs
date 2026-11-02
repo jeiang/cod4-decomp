@@ -10,7 +10,12 @@
 //! arguments only print usage. The console commands of #365: bad arguments print the stock usage lines (`bind`,
 //! `unbind`, `set`, `seta` through a bind, `reset`, `setfromdvar`, `con_showchannel`, `openscriptmenu`); `bind k`,
 //! `bindlist`, `reset`, `togglep`, `cmdlist <filter>` and `clear` show or do what the original's do; hiding the
-//! `error` channel keeps a not-implemented command's warning (#479) off the console and showing it brings it back;
+//! `error` channel keeps a not-implemented command's warning (#527) off the console and showing it brings it back.
+//! The stock commands of #479 answer as the original's: `dvar_int` registers a ranged dvar that refuses a value
+//! outside it, `setenv` sets and shows a variable, `clientinfo` reports state 0 at the front end and 9 in a match,
+//! `configstrings` and a bare `serverstatus` need a server, `fs_openedList`, `path` and `fdir` list the search path,
+//! `writedefaults` names its file, `localservers` scans, and in the match `serverstatus` lists the players,
+//! `snd_setEqQ` refuses an unknown channel and `snd_playLocal` an unknown alias;
 //! in the match `viewpos` prints the eye, the stance commands latch the stance typed and bound alike, a `+word`
 //! that is no button is `Unknown command` typed and bound alike, `openmenu`/`closemenu` open and close a menu, and
 //! `openscriptmenu team_marinesopfor axis` moves the player to the other team. A dvar named like a server command
@@ -46,7 +51,19 @@ console=bindlist,sawreply=f11 \"say bound_a\":5,\
 console=cmdlist togglecr*,sawreply=togglecrouch:5,saw=1 commands:5,\
 console=clear,notsaw=zz_unknown_at_front,\
 console=con_hidechannel error,saw=Hiding channel: error:5,console=imagelist,wait=1,notsaw=not implemented,\
-console=con_showchannel error,saw=Adding channel: error:5,set=gfx_stats,saw=not implemented:5,\
+console=con_showchannel error,saw=Adding channel: error:5,set=r_smc_stats,saw=not implemented:5,\
+console=dvar_int zz_cmdtest 5 0 10,console=zz_cmdtest,sawreply=\"zz_cmdtest\" is \"5\":5,\
+console=zz_cmdtest 50,sawreply=Domain is any integer from 0 to 10:5,cvaris=zz_cmdtest 5,\
+console=dvar_int zz_cmdtest2 1 9 2,sawreply=min 9 should not be greater than max 2:5,\
+console=setenv ZZ_ENV a b,console=setenv ZZ_ENV,sawreply=ZZ_ENV=a b:5,\
+console=clientinfo,sawreply=Client Information:5,sawreply=state: 0:5,\
+console=configstrings,sawreply=Not connected to a server.:5,\
+console=serverstatus,sawreply=Usage: serverstatus [server]:5,\
+console=fs_openedList,sawreply=Opened IWD Names: :5,\
+console=path,sawreply=Current search path::5,\
+console=fdir zz_none*,sawreply=0 files listed:5,\
+console=writedefaults zz_defaults,sawreply=Writing zz_defaults.cfg.:5,\
+console=localservers,sawreply=Scanning for servers on the local network...:5,\
 console=connect 127.0.0.1:28998 reconnect,menu=error_popmenu:30,cvaris=com_errorMessage 127.0.0.1:28998 did not answer,\
 key=escape,wait=1,cvaris=com_errorMessage ,home=5,\
 set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
@@ -59,6 +76,11 @@ console=record stagedemo,saw=recording to:5,wait=2,console=stoprecord,saw=Stoppe
 console=cmd say line_through_cmd,saw=line_through_cmd:6,\
 console=zz_unknown_in_match,sawreply=zz_unknown_in_match:6,\
 console=viewpos,sawreply=) : :5,\
+console=clientinfo,sawreply=state: 9:5,\
+console=configstrings,sawreply=   0: :5,\
+console=serverstatus,sawreply=num: score: ping: name::10,\
+console=snd_setEqQ zz_chan 0 0 1,sawreply=Unknown channel name (zz_chan):5,\
+console=snd_playLocal zz_noalias,sawreply=Couldn't find sound alias \"zz_noalias\".:5,\
 console=set give sentinel,console=give,saw=\"give\" is \"sentinel\":5,\
 set=set give sentinel_bound,set=give,saw=\"give\" is \"sentinel_bound\":5,\
 console=toggleprone,stanceis=prone,console=toggleprone,stanceis=stand,\

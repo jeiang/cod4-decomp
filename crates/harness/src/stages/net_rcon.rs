@@ -196,6 +196,49 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
             r.contains(&password)
         ));
     }
+    // The stock commands of #479: a ranged dvar from the console refuses a value outside it, `writeconfig` and
+    // `meminfo` answer as the original's, and `setPerk` names a player who is not there.
+    admin.rcon(
+        &mut server,
+        &mut none,
+        &password,
+        "dvar_int rcon_ranged 5 0 10",
+    );
+    admin.rcon(&mut server, &mut none, &password, "set rcon_ranged 50");
+    if server.game.cvars.string("rcon_ranged") != "5" {
+        return fail(format!(
+            "dvar_int did not register a ranged dvar: rcon_ranged {:?}",
+            server.game.cvars.string("rcon_ranged")
+        ));
+    }
+    let r = admin
+        .rcon(
+            &mut server,
+            &mut none,
+            &password,
+            "writeconfig rcon_written",
+        )
+        .unwrap_or_default();
+    if !r.contains("Writing rcon_written.cfg.") {
+        return fail(format!("rcon writeconfig reply: {r:?}"));
+    }
+    let r = admin
+        .rcon(&mut server, &mut none, &password, "meminfo")
+        .unwrap_or_default();
+    if !r.contains("memory:") {
+        return fail(format!("rcon meminfo reply: {r:?}"));
+    }
+    let r = admin
+        .rcon(
+            &mut server,
+            &mut none,
+            &password,
+            "setPerk zz_nobody specialty_quieter",
+        )
+        .unwrap_or_default();
+    if !r.contains("Player zz_nobody is not on the server") {
+        return fail(format!("rcon setPerk of nobody: {r:?}"));
+    }
 
     // Two requests inside the interval: the second is dropped without an answer.
     admin.rcon(&mut server, &mut none, &password, "set rcon_rate 1");
@@ -233,6 +276,21 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
         || fields[2].parse::<u32>().is_err() && fields[2] != "CNCT"
     {
         return fail(format!("status row of the person: {row:?}"));
+    }
+    // `setPerk` gives the named player the perk's bit.
+    let quieter = server::script::PERK_NAMES
+        .iter()
+        .position(|p| *p == "specialty_quieter")
+        .map_or(0, |i| 1u32 << i);
+    admin.rcon(
+        &mut server,
+        &mut people,
+        &password,
+        "setPerk human1 specialty_quieter",
+    );
+    let perks = server.game.client(slot).map_or(0, |c| c.ps.perks);
+    if perks & quieter == 0 {
+        return fail(format!("setPerk did not give the perk: perks {perks:#x}"));
     }
     admin.rcon(&mut server, &mut people, &password, "kick human1");
     let dropped = Instant::now() + Duration::from_secs(30);
