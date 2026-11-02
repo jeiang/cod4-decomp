@@ -69,7 +69,8 @@ class RemoteLinux(unittest.TestCase):
         executable(os.path.join(self.bin, "ssh"), SSH)
         executable(os.path.join(self.bin, "nix"), NIX)
         executable(os.path.join(self.tmp, "host-run"), HOST_RUN)
-        # The temp repo must not depend on the host's git config (a global `commit.gpgsign` fails every commit here).
+        # The temp repo must not depend on the host's git config. Signing is turned off on the command line too: a
+        # NixOS host's git carries `commit.gpgsign` in a config file GIT_CONFIG_NOSYSTEM does not turn off.
         self.git_env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
         git = ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"]
         subprocess.run(["git", "init", "-q", self.repo], check=True, env=self.git_env)
