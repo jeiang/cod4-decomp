@@ -1139,6 +1139,37 @@ impl NetPlay {
             .is_some_and(|s| s.ps.other_flags & sim::pm::other::PLAYER != 0)
     }
 
+    /// `CG_VoiceChat_f`'s test: `None` before the first snapshot (the command does nothing), otherwise whether the
+    /// player may voice chat (in the intermission or in the game, not spectating).
+    pub fn voice_chat_allowed(&self) -> Option<bool> {
+        self.net.latest().map(|s| {
+            s.ps.pm_type == PmType::Intermission || s.ps.other_flags & sim::pm::other::PLAYER != 0
+        })
+    }
+
+    /// The server this client joined, as given to connect (`clientinfo`'s `Server:` line).
+    pub fn server_addr(&self) -> &str {
+        &self.server_addr
+    }
+
+    /// Every configstring the server set, by index (`CL_Configstrings_f`).
+    pub fn configstrings(&self) -> Vec<(u16, String)> {
+        let Some(ui) = self.net.ui_ref() else {
+            return Vec::new();
+        };
+        (0..net::ui::cs::MAX)
+            .filter_map(|i| {
+                let s = ui.config(i);
+                (!s.is_empty()).then(|| (i, s.to_owned()))
+            })
+            .collect()
+    }
+
+    /// The match's sound system, for the sound console commands.
+    pub fn sound_mut(&mut self) -> &mut ClientSound {
+        &mut self.sound
+    }
+
     /// `IN_CenterView`: the view levels (the pitch the commands send is the server's `delta_angles` alone), once
     /// connected.
     pub fn center_view(&mut self) {

@@ -309,6 +309,60 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// The type and domain `dvar_bool`, `dvar_int` or `dvar_float` gave a dvar (`DVAR_TYPE_BOOL`, `_INT`, `_FLOAT`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    Bool,
+    Int(i32, i32),
+    Float(f32, f32),
+}
+
+impl Kind {
+    /// `Dvar_StringToValue` then `Dvar_ValueInDomain`: the value as the dvar keeps it, or the domain line of
+    /// `Dvar_PrintDomain` with the value read as a number, for one outside the domain.
+    pub fn value(self, s: &str) -> Result<String, (String, String)> {
+        match self {
+            Self::Bool => Ok(if super::config::atoi(s) != 0 {
+                "1"
+            } else {
+                "0"
+            }
+            .to_owned()),
+            Self::Int(min, max) => {
+                let v = super::config::atoi(s);
+                if (min..=max).contains(&v) {
+                    Ok(v.to_string())
+                } else {
+                    Err((v.to_string(), format!("any integer from {min} to {max}")))
+                }
+            }
+            Self::Float(min, max) => {
+                let v = s.trim().parse::<f32>().unwrap_or(0.0);
+                if (min..=max).contains(&v) {
+                    Ok(v.to_string())
+                } else {
+                    Err((v.to_string(), format!("any number from {min} to {max}")))
+                }
+            }
+        }
+    }
+
+    fn same_type(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+
+    /// Whether an engine dvar registered with `value` reads as this type. This build keeps the engine's dvars
+    /// untyped, so their type is taken from the registered value [INFERENCE].
+    fn fits(self, value: &str) -> bool {
+        let v = value.trim();
+        match self {
+            Self::Bool => v == "0" || v == "1",
+            Self::Int(..) => v.parse::<i32>().is_ok(),
+            Self::Float(..) => v.parse::<f32>().is_ok(),
+        }
+    }
+}
+
 struct Cvar {
     value: String,
     archive: bool,
@@ -316,6 +370,10 @@ struct Cvar {
     /// The value it was registered with: the default, or the first value of one a command created
     /// (`Dvar_RegisterVariant` with an external source keeps it as the reset value).
     registered: String,
+    /// The type `dvar_bool`, `dvar_int` or `dvar_float` gave it; `None` for an untyped one.
+    kind: Option<Kind>,
+    /// Created by a command (`set`, a config), not registered by the engine (`DVAR_EXTERNAL`).
+    external: bool,
 }
 
 pub struct Cvars {
@@ -331,10 +389,9 @@ impl Default for Cvars {
                 (
                     n.to_ascii_lowercase(),
                     Cvar {
-                        registered: value.clone(),
-                        value,
-                        archive,
                         reset: None,
+                        kind: None,
+                        external: false,
                     },
                 )
             })
@@ -432,6 +489,76 @@ impl Cvars {
             .map(|&(_, min, max)| (min, max))
     }
 
+    /// The type a `dvar_*` command gave `name`; `None` for an untyped dvar or none at all.
+    pub fn kind(&self, name: &str) -> Option<Kind> {
+        self.map.get(&name.to_ascii_lowercase())?.kind
+    }
+
+    /// `Dvar_RegisterBool_f`, `_Int_f` and `_Float_f` (KisakCOD dvar_cmds.cpp:540-660): a dvar that does not
+    /// exist, or one a command made without a type, is registered with `kind` and `default` (an untyped one keeps
+    /// its value when it fits the domain). One of another type is refused: `Err` with its name, for
+    /// `dvar '%s' is not a boolean dvar`. One of the same type is left as it is.
+    pub fn register_typed(&mut self, name: &str, kind: Kind, default: &str) -> Result<(), String> {
+        let key = name.to_ascii_lowercase();
+        match self.map.get_mut(&key) {
+            None => {
+                self.map.insert(
+                    key,
+                    Cvar {
+                        value: default.to_owned(),
+                        archive: false,
+                        reset: None,
+                        registered: default.to_owned(),
+                        kind: Some(kind),
+                        external: true,
+                    },
+                );
+                Ok(())
+            }
+            Some(c) if c.external && c.kind.is_none() => {
+                c.value = kind.value(&c.value).unwrap_or_else(|_| default.to_owned());
+                default.clone_into(&mut c.registered);
+                c.kind = Some(kind);
+                Ok(())
+            }
+            Some(c) => {
+                let same = c
+                    .kind
+                    .map_or_else(|| kind.fits(&c.registered), |k| k.same_type(kind));
+                if same { Ok(()) } else { Err(key) }
+            }
+        }
+    }
+
+    /// `(name, reset value)` of every dvar the engine registered, sorted by name: what `Dvar_WriteDefaults`
+    /// writes. It skips `cl_cdkey` and the read-only (`DVAR_ROM`), cheat (`DVAR_CHEAT`) and command-made
+    /// (`DVAR_EXTERNAL`) ones, the `0x40C0` flags of `Dvar_WriteSingleDefault` (KisakCOD dvar.cpp:139).
+    pub fn defaults(&self) -> Vec<(&str, &str)> {
+        let mut v: Vec<_> = self
+            .map
+            .iter()
+            .filter(|(n, c)| {
+                !c.external
+                    && n.as_str() != "cl_cdkey"
+                    && !Self::read_only(n)
+                    && Self::cheat_name(n).is_none()
+            })
+            .filter_map(|(n, _)| Some((n.as_str(), self.reset_value(n)?)))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// A `set` (or the name alone) from a console, bind or config: as [`Cvars::set`], and a dvar it creates is
+    /// command-made (`DVAR_EXTERNAL`), so `dvar_int` and the others may give it a type.
+    pub fn set_by_command(&mut self, name: &str, value: &str, archive: bool) {
+        let new = !self.map.contains_key(&name.to_ascii_lowercase());
+        self.set(name, value, archive);
+        if new && let Some(c) = self.map.get_mut(&name.to_ascii_lowercase()) {
+            c.external = true;
+        }
+    }
+
     /// Set a value, creating the cvar if needed. `archive` only ever turns the flag on (`seta`).
     pub fn set(&mut self, name: &str, value: &str, archive: bool) {
         let c = self
@@ -442,6 +569,8 @@ impl Cvars {
                 archive: false,
                 reset: None,
                 registered: value.to_owned(),
+                kind: None,
+                external: false,
             });
         value.clone_into(&mut c.value);
         c.archive |= archive;
@@ -465,6 +594,8 @@ impl Cvars {
                 archive: false,
                 reset: None,
                 registered: value.to_owned(),
+                kind: None,
+                external: false,
             });
         value.clone_into(&mut c.value);
         value.clone_into(c.reset.get_or_insert_with(String::new));

@@ -27,13 +27,14 @@ pub enum Owner {
     /// A cgame command with no handler (`CG_InitConsoleCommands`, KisakCOD cg_consolecmds_mp.cpp:84-110): in a
     /// match it goes to the server as typed, otherwise it is unknown, as the cgame is not loaded.
     Forward,
-    /// Stock, but not carried out by this build: a warning names it and #479.
+    /// Stock, but not carried out by this build: a warning names it and the issue that tracks it ([`MISSING`]).
     Missing,
 }
 
 /// Every command the client knows besides the `+`/`-` buttons ([`BUTTONS`]), by its registered name: the stock
-/// multiplayer client's `Cmd_AddCommand` names (KisakCOD 1.8; the 1.7 table is not verified) and this build's own
-/// (`bots`, `name`, `playdemo`, `toggleconsole`, `drawvehicles`, the stats verbs the menus run, ...).
+/// multiplayer client's `Cmd_AddCommand` names (KisakCOD 1.8, checked against the strings and registrations of
+/// `iw3mp.exe` 1.7) and this build's own (`bots`, `name`, `playdemo`, `toggleconsole`, `drawvehicles`, the stats
+/// verbs the menus run, ...).
 const COMMANDS: &[(&str, Owner)] = {
     use Owner::*;
     &[
@@ -59,6 +60,12 @@ const COMMANDS: &[(&str, Owner)] = {
         ("con_showchannel", Input),
         ("con_hidechannel", Input),
         ("con_visiblechannellist", Input),
+        // dvar_cmds.cpp:540-660, cl_main_mp.cpp:602 (setenv), win_main.cpp:591 (in_restart).
+        ("dvar_bool", Input),
+        ("dvar_int", Input),
+        ("dvar_float", Input),
+        ("setenv", Input),
+        ("in_restart", Input),
         // cl_input.cpp:973-1047: the stance and ADS commands.
         ("gocrouch", Input),
         ("goprone", Input),
@@ -99,6 +106,21 @@ const COMMANDS: &[(&str, Owner)] = {
         ("setprofile", Shell),
         ("updatedvarsfromprofile", Shell),
         ("startSingleplayer", Shell),
+        // common.cpp:1665, com_files.cpp:1819-1925, cl_main_mp.cpp:2879-3762, cl_main_pc_mp.cpp:422,
+        // win_storage.cpp:802-809.
+        ("writedefaults", Shell),
+        ("dir", Shell),
+        ("fdir", Shell),
+        ("path", Shell),
+        ("fullpath", Shell),
+        ("fs_openedList", Shell),
+        ("localservers", Shell),
+        ("globalservers", Shell),
+        ("ping", Shell),
+        ("serverstatus", Shell),
+        ("readStats", Shell),
+        ("uploadStats", Shell),
+        ("resetStats", Shell),
         // cl_main_mp.cpp (rcon, record, stoprecord, cmd), cl_input.cpp (centerview), cg_consolecmds_mp.cpp
         // (mp_QuickMessage, viewpos); `bots` and `name` are this build's.
         ("rcon", App),
@@ -110,6 +132,22 @@ const COMMANDS: &[(&str, Owner)] = {
         ("viewpos", App),
         ("bots", App),
         ("name", App),
+        // cl_main_mp.cpp:821-843, 3922, com_memory.cpp:282, cg_consolecmds_mp.cpp:279-330, snd.cpp:285-500 and
+        // 3344, com_sndalias.cpp:542.
+        ("clientinfo", App),
+        ("configstrings", App),
+        ("showip", App),
+        ("meminfo", App),
+        ("VoiceChat", App),
+        ("VoiceTeamChat", App),
+        ("snd_list", App),
+        ("snd_playLocal", App),
+        ("snd_setEq", App),
+        ("snd_setEqFreq", App),
+        ("snd_setEqGain", App),
+        ("snd_setEqQ", App),
+        ("snd_setEqType", App),
+        ("snd_deactivateEq", App),
         ("quit", Frame),
         ("toggleMenu", Frame),
         ("chatmodepublic", Frame),
@@ -155,95 +193,44 @@ const COMMANDS: &[(&str, Owner)] = {
     ]
 };
 
-/// The stock multiplayer client commands this build accepts but does not carry out (#479): each says so in a
-/// warning instead of `Unknown command`. `error`, `crash`, `freeze` and `assert` are not here: the original
-/// registers them only with `com_developer` (common.cpp:1328-1334).
-const MISSING: &[&str] = &[
-    "clientinfo",
-    "configstrings",
-    "cubemapShot",
-    "devgui",
-    "devgui_cmd",
-    "devgui_dvar",
-    "devgui_open",
-    "dumpraw",
-    "gfx_model",
-    "gfx_stats",
-    "gfx_world",
-    "imagelist",
-    "loadzone",
-    "meminfo",
-    "tempmeminfo",
-    "updatehunkusage",
-    "parseBadPacket",
-    "phys_go",
-    "phys_stop",
-    "ragdoll_baselerp_bone",
-    "ragdoll_bone",
-    "ragdoll_clear",
-    "ragdoll_joint",
-    "ragdoll_limit",
-    "ragdoll_pin_bone",
-    "ragdoll_selfpair",
-    "reloadmaterialtextures",
-    "r_loadsun",
-    "r_savesun",
-    "r_smc_flush",
-    "r_smc_stats",
-    "cg_shellshock",
-    "cg_shellshock_load",
-    "cg_shellshock_save",
-    "fxTest",
-    "fxSetTestPosition",
-    "restartsmokegrenades",
-    "updateFilmTweaks",
-    "updateGlowTweaks",
-    "timedemo",
-    "steam_testkick",
-    "dir",
-    "fdir",
-    "path",
-    "fullpath",
-    "touchFile",
-    "fs_openedList",
-    "fs_referencedList",
-    "net_dumpnetfieldchanges",
-    "net_dumpprofile",
-    "net_listen",
-    "net_restart",
-    "getqport",
-    "setqport",
-    "showip",
-    "localservers",
-    "globalservers",
-    "ping",
-    "serverstatus",
-    "dvar_bool",
-    "dvar_int",
-    "dvar_float",
-    "setenv",
-    "in_restart",
-    "writedefaults",
-    "snd_list",
-    "snd_playLocal",
-    "snd_refreshSpeakerMaps",
-    "snd_setEq",
-    "snd_setEqFreq",
-    "snd_setEqGain",
-    "snd_setEqQ",
-    "snd_setEqType",
-    "snd_deactivateEq",
-    "snd_setEnvironmentEffects",
-    "snd_deactivateEnvironmentEffects",
-    "snd_refreshVolumeModGroups",
-    "localizeSoundAliasFiles",
-    "statGet",
-    "readStats",
-    "uploadStats",
-    "resetStats",
-    "listmenus",
-    "VoiceChat",
-    "VoiceTeamChat",
+/// The stock multiplayer client commands this build accepts but does not carry out, each with the issue that
+/// tracks it: the warning names both instead of `Unknown command`. Every one is registered by `iw3mp.exe` 1.7
+/// with a handler that is not empty. KisakCOD 1.8 names 1.7 lacks (`gfx_stats`, `devgui_dvar`, `loadzone`,
+/// `statGet`, `listmenus`, `fxTest`, ...) are not here and are unknown, as in 1.7. `error`, `crash`, `freeze`
+/// and `assert` are not here either: the original registers them only with `com_developer`
+/// (common.cpp:1328-1334).
+const MISSING: &[(&str, u32)] = &[
+    ("cubemapShot", 527),
+    ("imagelist", 527),
+    ("reloadmaterialtextures", 527),
+    ("r_loadsun", 527),
+    ("r_savesun", 527),
+    ("r_smc_flush", 527),
+    ("r_smc_stats", 527),
+    ("devgui", 528),
+    ("updatehunkusage", 528),
+    ("phys_go", 529),
+    ("phys_stop", 529),
+    ("ragdoll_baselerp_bone", 529),
+    ("ragdoll_bone", 529),
+    ("ragdoll_clear", 529),
+    ("ragdoll_joint", 529),
+    ("ragdoll_limit", 529),
+    ("ragdoll_pin_bone", 529),
+    ("ragdoll_selfpair", 529),
+    ("touchFile", 530),
+    ("fs_referencedList", 530),
+    ("net_dumpprofile", 531),
+    ("net_restart", 531),
+    ("snd_refreshSpeakerMaps", 532),
+    ("snd_refreshVolumeModGroups", 532),
+    ("snd_setEnvironmentEffects", 532),
+    ("snd_deactivateEnvironmentEffects", 532),
+    ("localizeSoundAliasFiles", 532),
+    ("cg_shellshock", 533),
+    ("cg_shellshock_load", 533),
+    ("cg_shellshock_save", 533),
+    ("timedemo", 534),
 ];
 
 /// The `+`/`-` button commands (KisakCOD cl_input.cpp:973-1047, and the cgame's `+scores` and `+actionslot`,
@@ -299,12 +286,15 @@ pub fn owner(name: &str) -> Option<Owner> {
         .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case(name))
         .map(|&(_, o)| o)
-        .or_else(|| {
-            MISSING
-                .iter()
-                .any(|n| n.eq_ignore_ascii_case(name))
-                .then_some(Owner::Missing)
-        })
+        .or_else(|| missing_issue(name).map(|_| Owner::Missing))
+}
+
+/// The issue that tracks a stock command this build does not carry out (any case); `None` for any other word.
+fn missing_issue(name: &str) -> Option<u32> {
+    MISSING
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+        .map(|&(_, issue)| issue)
 }
 
 /// Every command name the client registers, as registered (`cmdlist`, Tab): the commands, the missing ones and
@@ -313,7 +303,7 @@ pub fn names() -> impl Iterator<Item = String> {
     COMMANDS
         .iter()
         .map(|(n, _)| (*n).to_owned())
-        .chain(MISSING.iter().map(|n| (*n).to_owned()))
+        .chain(MISSING.iter().map(|(n, _)| (*n).to_owned()))
         .chain(
             BUTTONS
                 .iter()
@@ -321,13 +311,15 @@ pub fn names() -> impl Iterator<Item = String> {
         )
 }
 
-/// A stock command this build does not carry out (#479): one warning per command name, which the console shows.
+/// A stock command this build does not carry out: one warning per command name, naming the issue that tracks it,
+/// which the console shows.
 pub fn note_missing(name: &str) {
+    let issue = missing_issue(name).unwrap_or_default();
     logging::dedup!(
         WARN,
         name,
         command = name,
-        issue = 479,
+        issue = issue,
         "stock command not implemented"
     );
 }
@@ -824,7 +816,9 @@ mod tests {
             assert!(seen.insert(n.to_ascii_lowercase()), "{n} listed twice");
         }
         assert!(BUTTONS.iter().all(|b| *b == b.to_ascii_lowercase()));
-        assert_eq!(owner("MeminFo"), Some(Owner::Missing));
+        assert_eq!(owner("MeminFo"), Some(Owner::App));
+        assert_eq!(owner("IMAGELIST"), Some(Owner::Missing));
+        assert_eq!(owner("gfx_stats"), None, "1.8 only: unknown, as in 1.7");
         assert_eq!(owner("openscriptmenu"), Some(Owner::Shell));
         assert_eq!(owner("TOGGLEPRONE"), Some(Owner::Input));
         assert_eq!(owner("give"), Some(Owner::Forward));
@@ -843,10 +837,10 @@ mod tests {
     #[test]
     fn a_missing_command_warns_naming_its_issue() {
         // A name no other test runs: the warning is rate limited per name across the test threads.
-        let (_, events) = logging::capture(|| note_missing("zz_missing_probe"));
+        let (_, events) = logging::capture(|| note_missing("r_smc_flush"));
         assert_eq!(events.len(), 1);
         let e = &events[0];
-        assert!(e.level == tracing::Level::WARN && e.field("command") == Some("zz_missing_probe"));
-        assert_eq!(e.field("issue"), Some("479"));
+        assert!(e.level == tracing::Level::WARN && e.field("command") == Some("r_smc_flush"));
+        assert_eq!(e.field("issue"), Some("527"));
     }
 }
