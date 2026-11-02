@@ -330,12 +330,24 @@ const BOT_JOIN_MS: i32 = 5000;
 /// The bot's menu choices as script (the stock `_dev` script has them behind developer mode).
 const TEST_CLIENT_GSC: &str = include_str!("testclient.gsc");
 
+/// The `devline` hook's script: the line's ends, where the string goes and how many frames both stay.
+const DEVLINE_GSC: &str = "main(start, end, text_at, frames)\n{\n\tline(start, end, (1, 1, 0), 1, 0, frames);\n\tprint3d(text_at, \"devline\", (1, 1, 1), 1, 0.25, frames);\n}\n";
+
+/// The compiled `devline` script and the VM that runs it.
+struct DevLine {
+    vm: Vm,
+    dispatch: Dispatch,
+    main: gsc::bytecode::FuncId,
+}
+
 /// What a client is told when its IWDs are not the server's and `sv_pure` is on.
 pub const IMPURE: &str = "Unpure client detected: your IWD files differ from this server's (sv_pure is on). Verify your game files, and remove extra .iwd files from main and the mod folder.";
 
 pub struct Server {
     pub game: Game,
     install: Install,
+    /// The `devline` hook's script, compiled on first use and kept for the server's lifetime.
+    devline: Option<DevLine>,
     run: Option<Running>,
     cbuf: CommandBuffer,
     /// The console's print channels (`con_showchannel`, ...). The output itself is not filtered: the original's
@@ -779,6 +791,7 @@ impl Server {
             install,
             run: None,
             cbuf: CommandBuffer::new(),
+            devline: None,
             channels: logging::channels::Channels::default(),
             startup,
             cfg_from_zone: false,
@@ -2085,7 +2098,8 @@ impl Server {
             // `line` and `print3d` builtins: a yellow line across the player's view 100 units ahead and the string
             // `devline` over it, kept `frames` server frames (default 400), so a listen server's own player draws them
             // (`RB_DrawDebugLines`/`RB_DrawDebugStrings`, KisakCOD `gfx_d3d/rb_debug.cpp:158-226`). Not a stock command;
-            // needs `developer 1`.
+            // needs `developer 1`. The script's VM lives as long as the server: dropping a VM releases every object
+            // on the thread that it does not reach (`gsc::value::release_objects`), the level's included.
             "devline" => {
                 if !self.game.cvars.bool("developer") {
                     return Err("devline needs developer 1".into());
@@ -2105,32 +2119,36 @@ impl Server {
                 let eye = crate::fire::view_origin(ps);
                 let (fwd, right, up) = sim::pm::math::angle_vectors(&ps.viewangles);
                 let at = |f: f32, r: f32, u: f32| {
-                    let p: [f32; 3] =
-                        std::array::from_fn(|i| eye[i] + fwd[i] * f + right[i] * r + up[i] * u);
-                    format!("({:.2}, {:.2}, {:.2})", p[0], p[1], p[2])
+                    Value::Vector(std::array::from_fn(|i| {
+                        eye[i] + fwd[i] * f + right[i] * r + up[i] * u
+                    }))
                 };
-                let src = format!(
-                    "main()\n{{\n\tline({}, {}, (1, 1, 0), 1, 0, {frames});\n\tprint3d({}, \"devline\", (1, 1, 1), 1, 0.25, {frames});\n}}\n",
+                let args = [
                     at(100.0, -30.0, 0.0),
                     at(100.0, 30.0, 0.0),
                     at(100.0, 0.0, 8.0),
-                );
-                let prog = compile(
-                    &[("devline.gsc", src.as_str())],
-                    &Builtins::stock_mp(),
-                    gsc::Options { developer: true },
-                )
-                .map_err(|e| format!("devline: {e:?}"))?;
-                let dispatch = Dispatch::new(&prog);
-                let main = prog
-                    .find("devline", "main")
-                    .ok_or("devline: the script has no main")?;
-                let mut vm = Vm::new(prog).map_err(|e| format!("devline: {e:?}"))?;
+                    Value::Int(frames),
+                ];
+                if self.devline.is_none() {
+                    let prog = compile(
+                        &[("devline.gsc", DEVLINE_GSC)],
+                        &Builtins::stock_mp(),
+                        gsc::Options { developer: true },
+                    )
+                    .map_err(|e| format!("devline: {e:?}"))?;
+                    let dispatch = Dispatch::new(&prog);
+                    let main = prog
+                        .find("devline", "main")
+                        .ok_or("devline: the script has no main")?;
+                    let vm = Vm::new(prog).map_err(|e| format!("devline: {e:?}"))?;
+                    self.devline = Some(DevLine { vm, dispatch, main });
+                }
+                let d = self.devline.as_mut().expect("compiled above");
                 let mut host = ScriptHost {
                     game: &mut self.game,
-                    dispatch: &dispatch,
+                    dispatch: &d.dispatch,
                 };
-                match vm.call(&mut host, main, None, &[]) {
+                match d.vm.call(&mut host, d.main, None, &args) {
                     Ok(CallOutcome::Finished(_)) => {}
                     Ok(CallOutcome::Pending) => return Err("devline: the script waited".into()),
                     Err(e) => return Err(format!("devline: {}", e.message)),

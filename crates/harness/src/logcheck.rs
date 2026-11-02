@@ -68,7 +68,8 @@ pub const ALLOWED: &[Allow] = &[
         reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned once \
                  per server process",
         stages: &[],
-        max: Some(1), // measured on client-hud, net-match and script-builtins
+        // Measured: 1 on client-hud and net-match; 2 on script-builtins (its in-process server and its listen client).
+        max: Some(2),
     },
     // Timing of the harness's own clients and bots.
     Allow {
