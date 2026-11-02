@@ -63,6 +63,10 @@ budget *args:
 budget-table *args:
     python3 scripts/budget-table.py "$@"
 
+# Report how run bundles and CI bear on a PR's head (read only, not a merge approval)
+evidence-report *args:
+    python3 scripts/evidence-report.py "$@"
+
 # Fetch and build the SM3 cross-check drivers
 crosscheck-tools *args:
     scripts/build-crosscheck-tools.sh "$@"

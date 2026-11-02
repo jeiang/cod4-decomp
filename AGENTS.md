@@ -34,6 +34,10 @@ Read first: `README.md` (what the engine does, feature by feature),
 - `just review` reviews a bundle's screenshots and videos with
   vision models (`COD4E_EMBED_URL`, `COD4E_REVIEW_URL`). Its findings are
   leads to check by eye, not evidence.
+- `just evidence-report --pr <n> --stage <stages> <bundle.zip>...` reports
+  whether named bundles and the Windows check cover the PR's current head
+  tree. It is read only and is not a merge approval: review, serial-run and
+  integration-tree proof stay with the reviewer.
 
 ## Sources and licensing
 
