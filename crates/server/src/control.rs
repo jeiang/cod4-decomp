@@ -259,12 +259,13 @@ mod tests {
 
     /// Asserts that no control thread runs. Threads are matched by name rather than counted, since the test harness
     /// runs other tests' threads beside this one; the threaded transport names its own `control-accept` and
-    /// `control-conn-<n>`.
+    /// `control-conn-<n>`. Test threads carry their test's path (`control::tests:` once cut to 15 bytes), hence the
+    /// dash.
     #[cfg(target_os = "linux")]
     fn assert_no_control_thread() {
         let names = thread_names();
         assert!(
-            !names.iter().any(|n| n.starts_with("control")),
+            !names.iter().any(|n| n.starts_with("control-")),
             "a control thread runs: {names:?}"
         );
     }
