@@ -793,7 +793,12 @@ fn bolted(
         if now >= net::view::INTERP_DELAY_MS {
             let entity = game.ent(number).ok_or("script model vanished")?;
             let instances = pose.instances(entity.origin, entity.angles, [0; 4]);
-            fx.script_model_tags(number, &instances, &game.content);
+            let model = snapshot
+                .entities
+                .iter()
+                .find(|e| e.number == number)
+                .map_or(0, |e| e.model);
+            fx.script_model_tags(number, model, &instances, &game.content);
         }
         fx.update_script_bolts(&snapshot.entities, now);
         fx.update(now, world);
@@ -845,7 +850,7 @@ fn bolted(
         &mut game,
         &mut vm,
         &dispatch,
-        plane_fx,
+        (plane_fx, main),
         (number, &*pose, &*plane_pose),
         &mut events,
         render_world,
@@ -862,15 +867,21 @@ const REUSE_PLANE_MODEL: &str = "vehicle_mig29_desert";
 /// calls. `G_Spawn` hands a freed number out again only 500 ms later (`G_MaySpawnEntity`), so the client sees the old
 /// entity leave first; a number reused at once gave the plane's events to the old entity's number while the match still
 /// drew the old model 100 ms behind, and every plane tag was reported missing. The plane, first seen with those events
-/// already raised, replays none of them (`CG_ResetEntity` for `ET_PLANE`). KisakCOD (GPL-3.0)
-/// game_mp/g_utils_mp.cpp:1183–1214, 1287–1341 and cgame_mp/cg_snapshot_mp.cpp:474–476: MP 1.8 reference; the reuse
-/// rule was also compared with iw3mp.exe 1.7 `G_Spawn`/`G_FreeEntity` in review.
+/// already raised, replays none of them (`CG_ResetEntity` for `ET_PLANE`).
+///
+/// Then a killcam replays the plane's flight after the plane is gone and its number holds a script model with events
+/// of its own. Entering, nothing is reset (`CG_TransitionKillcam`), so the replayed plane's events play on a number the
+/// match still draws as the live script model for `INTERP_DELAY_MS`: the effects wait for the plane to be drawn rather
+/// than report its tags missing on the script model. Leaving, every entity is reset as new, so the live script model
+/// replays none of its events. KisakCOD (GPL-3.0) game_mp/g_utils_mp.cpp:1183–1214, 1287–1341 and
+/// cgame_mp/cg_snapshot_mp.cpp:474–476, 521–560: MP 1.8 reference; the reuse rule was also compared with iw3mp.exe 1.7
+/// `G_Spawn`/`G_FreeEntity` in review, the killcam transition was not checked against 1.7.
 #[allow(clippy::too_many_arguments)]
 fn bolted_reuse(
     game: &mut server::game::Game,
     vm: &mut gsc::Vm,
     dispatch: &server::script::Dispatch,
-    plane_fx: gsc::bytecode::FuncId,
+    (plane_fx, tag_origin_fx): (gsc::bytecode::FuncId, gsc::bytecode::FuncId),
     (freed, pose, plane_pose): (u16, &crate::models::RestPose, &crate::models::RestPose),
     events: &mut crate::events::Events,
     render_world: std::sync::Arc<assets::zone::gfxworld::GfxWorld>,
@@ -878,18 +889,43 @@ fn bolted_reuse(
     eye: glam::Vec3,
     report: &mut serde_json::Map<String, Value>,
 ) -> Result<(), String> {
+    use net::entity::etype;
     use server::game::{Ent, EntKind};
     let start = game.level.time + 50;
     let free_at = start + 200;
+    let plane_gone = start + 1000;
+    let respawn_at = start + 1600;
+    let (killcam_from, killcam_to) = (start + 2000, start + 2800);
+    let model = game
+        .ent(freed)
+        .map(|e| e.model.to_string())
+        .ok_or("script model vanished")?;
+    let call = |game: &mut server::game::Game, vm: &mut gsc::Vm, func, n: u16| {
+        let value = game.entity_value(vm, n);
+        vm.call(
+            &mut server::script::ScriptHost {
+                game: &mut *game,
+                dispatch,
+            },
+            func,
+            None,
+            std::slice::from_ref(&value),
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{e:?}"))
+    };
     let mut fx = Effects::new(&game.content, render_world);
-    // What each snapshot held (number, is a plane, origin, angles), drawn `INTERP_DELAY_MS` (two snapshots) later as
-    // the match draws it.
-    type Drawn = Vec<(u16, bool, [f32; 3], [f32; 3])>;
+    // What each snapshot held (number, is a plane, model index, origin, angles), drawn `INTERP_DELAY_MS` (two
+    // snapshots) later as the match draws it.
+    type Drawn = Vec<(u16, bool, u16, [f32; 3], [f32; 3])>;
     let mut drawn = std::collections::VecDeque::<Drawn>::new();
+    // The live worlds the plane flew in, replayed by the killcam.
+    let mut history = Vec::new();
     let mut plane = None;
-    let mut received = 0;
+    let mut second = None;
+    let (mut received, mut entry_events, mut exit_events) = (0, 0, 0);
     let mut captured = Vec::new();
-    for step in 0..=30 {
+    for step in 0..=64 {
         let now = start + step * 50;
         game.level.time = now;
         if now == free_at {
@@ -900,53 +936,100 @@ fn bolted_reuse(
             e.x.plane_owner = Some(0);
             game.note_model(REUSE_PLANE_MODEL);
             let n = game.spawn(e)?;
-            let value = game.entity_value(vm, n);
-            vm.call(
-                &mut server::script::ScriptHost {
-                    game: &mut *game,
-                    dispatch,
-                },
-                plane_fx,
-                None,
-                std::slice::from_ref(&value),
-            )
-            .map_err(|e| format!("{e:?}"))?;
-            let tags = game
-                .configstrings
-                .iter()
-                .filter_map(|(index, value)| {
-                    u16::try_from(*index)
-                        .ok()
-                        .map(|index| (index, value.clone()))
-                })
-                .collect::<Vec<_>>();
-            events.set_effect_tags(&tags);
+            call(game, vm, plane_fx, n)?;
             plane = Some(n);
         }
+        if now == plane_gone {
+            game.free_entity(vm, plane.ok_or("no plane")?);
+        }
+        if now == respawn_at {
+            // The oldest freed number goes first, so the second script model takes the plane's number; it carries
+            // more events than the plane did, so the two sequences differ.
+            for _ in 0..2 {
+                let mut e = Ent::new(EntKind::Plain, "script_model");
+                e.model = model.clone().into();
+                e.origin = eye.to_array();
+                second = Some(game.spawn(e)?);
+            }
+            let n = second.ok_or("no script model")?;
+            if Some(n) != plane {
+                return Err(format!(
+                    "the script model took entity {n}, not the plane's {plane:?}"
+                ));
+            }
+            for _ in 0..5 {
+                call(game, vm, tag_origin_fx, n)?;
+            }
+        }
+        let tags = game
+            .configstrings
+            .iter()
+            .filter_map(|(index, value)| {
+                u16::try_from(*index)
+                    .ok()
+                    .map(|index| (index, value.clone()))
+            })
+            .collect::<Vec<_>>();
+        events.set_effect_tags(&tags);
+        let live = server::netsv::world_entities(game);
+        let killcam = (killcam_from..killcam_to).contains(&now);
         let mut snapshot = net::Snapshot::empty();
         snapshot.num = 100 + step as u32;
         snapshot.server_time = now;
-        snapshot.entities = server::netsv::world_entities(game);
-        for event in events.scan(&snapshot) {
-            received += usize::from(matches!(event, ClientEvent::PlayFxOnTag { .. }));
-            fx.event(&event, &|_| None);
+        if killcam {
+            let i = usize::try_from((now - killcam_from) / 50).unwrap_or(0);
+            snapshot.entities = history
+                .get(i.min(history.len().saturating_sub(1)))
+                .cloned()
+                .ok_or("no plane flight to replay")?;
+            snapshot.follow = Some(net::snapshot::Follow {
+                own: 0,
+                followed: 1,
+                archive_ms: 5000,
+                ps_offset_ms: 0,
+                entity: None,
+            });
+        } else {
+            if now > free_at && now < plane_gone {
+                history.push(live.clone());
+            }
+            snapshot.entities = live;
+        }
+        let n = events
+            .scan(&snapshot)
+            .into_iter()
+            .filter(|event| {
+                fx.event(event, &|_| None);
+                matches!(event, ClientEvent::PlayFxOnTag { .. })
+            })
+            .count();
+        match now {
+            _ if now == killcam_from => entry_events += n,
+            _ if now == killcam_to => exit_events += n,
+            _ => received += n,
         }
         drawn.push_back(
-            [freed]
-                .into_iter()
-                .chain(plane)
-                .filter_map(|n| {
-                    let e = game.ent(n)?;
-                    Some((n, e.x.plane_owner.is_some(), e.origin, e.angles))
+            snapshot
+                .entities
+                .iter()
+                .filter(|e| matches!(e.etype, etype::SCRIPT_MODEL | etype::PLANE))
+                .map(|e| {
+                    (
+                        e.number,
+                        e.etype == etype::PLANE,
+                        e.model,
+                        e.origin,
+                        e.angles,
+                    )
                 })
                 .collect(),
         );
         fx.begin_script_tags();
         if drawn.len() > 2 {
-            for (n, is_plane, origin, angles) in drawn.pop_front().unwrap_or_default() {
+            for (n, is_plane, model, origin, angles) in drawn.pop_front().unwrap_or_default() {
                 let pose = if is_plane { plane_pose } else { pose };
                 let instances = pose.instances(origin, angles, [0; 4]);
-                fx.script_model_tags(n, &instances, &game.content);
+                fx.script_model_tags(n, model, &instances, &game.content);
             }
         }
         let ((), records) = logging::capture(|| {
@@ -969,14 +1052,35 @@ fn bolted_reuse(
     );
     report.insert("bolted_reuse_events".into(), received.into());
     report.insert(
+        "bolted_reuse_killcam_entry_events".into(),
+        entry_events.into(),
+    );
+    report.insert(
+        "bolted_reuse_killcam_exit_events".into(),
+        exit_events.into(),
+    );
+    report.insert(
+        "bolted_reuse_resolved_frames".into(),
+        stats.resolved_frames.into(),
+    );
+    report.insert(
         "bolted_reuse_missing_tags".into(),
         stats.missing_tags.into(),
     );
     report.insert("bolted_reuse_warnings".into(), warnings.len().into());
-    if !new_number || stats.missing_tags != 0 || !warnings.is_empty() {
+    if !new_number
+        || received != 0
+        || entry_events != 4
+        || exit_events != 0
+        || stats.resolved_frames == 0
+        || stats.missing_tags != 0
+        || !warnings.is_empty()
+    {
         return Err(format!(
-            "plane spawned as entity {plane:?} in the frame entity {freed} was freed: missing tags {}, plane events replayed {received}, warnings {warnings:?}",
-            stats.missing_tags
+            "plane spawned as entity {plane:?} in the frame entity {freed} was freed, then replayed by a killcam over \
+             the script model {second:?}: live events {received}, killcam entry events {entry_events} (4 expected), \
+             exit events {exit_events}, resolved frames {}, missing tags {}, warnings {warnings:?}",
+            stats.resolved_frames, stats.missing_tags
         ));
     }
     Ok(())
@@ -1018,6 +1122,7 @@ fn bolted_missile(
         fx.event(
             &ClientEvent::PlayFxOnTag {
                 entity,
+                model: missile.model,
                 name: effect.to_owned(),
                 tag: tag.clone(),
             },
@@ -1035,7 +1140,12 @@ fn bolted_missile(
         if now >= net::view::INTERP_DELAY_MS {
             let m = crate::netplay::projectile_instance(def, &missile)
                 .ok_or("projectile has no model")?;
-            fx.script_model_tags(missile.number, std::slice::from_ref(&m), &lib.content);
+            fx.script_model_tags(
+                missile.number,
+                missile.model,
+                std::slice::from_ref(&m),
+                &lib.content,
+            );
         }
         // The never-drawn report is this check's expected outcome: it is asserted here and kept out of the stage log,
         // where any such warning from a match still fails the run.
