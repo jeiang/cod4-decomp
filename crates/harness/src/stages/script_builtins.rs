@@ -168,8 +168,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             (Expect::Ints(want), Ok(v)) => ints(v).as_deref() == Some(*want),
             (Expect::Error(want), Err(e)) => e == want,
             (Expect::Undefined, Ok(Value::Undefined)) => true,
-            (Expect::Entity, Ok(v)) => {
-                laser = v.entity().map(|e| e.num);
+            (Expect::Entity, Ok(Value::Object(o))) => {
+                laser = o.entity().map(|e| e.num);
                 laser.is_some()
             }
             _ => false,
