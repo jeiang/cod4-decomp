@@ -2,8 +2,9 @@
 //! `net-match`: a headless server runs a team deathmatch with bots on mp_crash while real UDP
 //! clients (no window, no GPU) connect over loopback, spawn, walk and watch. Asserts that every
 //! client connects and is assigned a body, that the server runs its usercmds (the client's own
-//! player moves), that the clients receive the bots and interpolate them smoothly, and reports
-//! the bandwidth each client costs and the server tick time spent per client.
+//! player moves), that the clients receive the bots and interpolate them smoothly, that a moving player's
+//! trajectory type follows `g_smoothClients`, and
+//! reports the bandwidth each client costs and the server tick time spent per client.
 use crate::perf::Percentiles;
 use crate::stage::{StageCtx, StageReport, Status};
 use net::UdpTransport;
@@ -37,6 +38,10 @@ const SMOOTH_STEP: f32 = 40.0;
 /// Waiting for the game to give a client a body depends on the match start, not the runner; the
 /// limit only stops a hung run.
 const SPAWN_LIMIT: Duration = Duration::from_secs(180);
+/// Moving players each client must have seen extrapolated (`g_smoothClients 1`) before the server turns it off, and
+/// the latest after every client has a body that it does so anyway: within each client's frames.
+const SMOOTHED_SEEN: u64 = 20;
+const UNSMOOTH_LATEST: Duration = Duration::from_secs(7);
 
 /// What a client needs to predict its own movement: the map's collision and the movement rules.
 #[derive(Clone)]
@@ -90,6 +95,13 @@ struct Result {
     /// Earthquake events that reached the client, and the strongest camera shake its view felt.
     quakes: u64,
     shake_max: f32,
+    /// Moving other players a snapshot carried with the trajectory type `g_smoothClients 1` gives
+    /// (`TR_LINEAR_STOP`), the one `0` gives (`TR_INTERPOLATE`), and any other; and the extrapolated ones seen after
+    /// an interpolated one (the dvar is turned off once, never back on).
+    linear_stop: u64,
+    interpolate: u64,
+    other_pos_type: u64,
+    smoothed_again: u64,
 }
 
 /// What a person at the menus does: takes what the server opens and answers it.
@@ -116,6 +128,7 @@ fn client(
     rules: &Rules,
     stop: &AtomicBool,
     ready: &AtomicUsize,
+    smoothed: &AtomicUsize,
 ) -> Result {
     let mut r = Result::default();
     let mut boxes = PlayerBoxes::new(rules.clipmap.clone());
@@ -267,6 +280,22 @@ fn client(
             ever.extend(others.iter().map(|e| e.number));
             if others.len() < ever.len() {
                 r.withheld += 1;
+            }
+            for e in others
+                .iter()
+                .filter(|e| e.velocity[0].hypot(e.velocity[1]) > 1.0)
+            {
+                match e.pos_type {
+                    net::entity::tr::LINEAR_STOP if r.interpolate > 0 => r.smoothed_again += 1,
+                    net::entity::tr::LINEAR_STOP => {
+                        r.linear_stop += 1;
+                        if r.linear_stop == SMOOTHED_SEEN {
+                            smoothed.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    net::entity::tr::INTERPOLATE => r.interpolate += 1,
+                    _ => r.other_pos_type += 1,
+                }
             }
         }
         // Players beyond the client's sight come as compass actors, never in both lists.
@@ -420,10 +449,12 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     };
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicUsize::new(0));
+    let smoothed = Arc::new(AtomicUsize::new(0));
     let handles: Vec<_> = (0..CLIENTS)
         .map(|i| {
-            let (stop, ready, rules) = (stop.clone(), ready.clone(), rules.clone());
-            std::thread::spawn(move || client(addr, i, &rules, &stop, &ready))
+            let (stop, ready, smoothed, rules) =
+                (stop.clone(), ready.clone(), smoothed.clone(), rules.clone());
+            std::thread::spawn(move || client(addr, i, &rules, &stop, &ready, &smoothed))
         })
         .collect();
     let flier = {
@@ -432,6 +463,9 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     };
     // The server runs in this thread until every client thread has finished.
     let mut quaked = false;
+    let mut all_ready: Option<Instant> = None;
+    let mut unsmoothed = false;
+    let mut unsmooth_failed = None;
     while !handles.iter().all(|h| h.is_finished()) || !flier.is_finished() {
         server.run_for(Duration::from_millis(100));
         // Once everyone has a body, an earthquake from the first client's position: every client is inside its radius.
@@ -446,6 +480,20 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 server.game.earthquake(at, 0.6, 15_000, 16_000.0);
             }
         }
+        if all_ready.is_none() && ready.load(Ordering::SeqCst) == CLIENTS {
+            all_ready = Some(Instant::now());
+        }
+        // Once every client has seen moving players under the stock default (the match start holds them still for a
+        // while), the other trajectory type; at the latest a while before the clients stop.
+        if !unsmoothed
+            && (smoothed.load(Ordering::SeqCst) == CLIENTS
+                || all_ready.is_some_and(|t| t.elapsed() >= UNSMOOTH_LATEST))
+        {
+            unsmoothed = true;
+            if let Err(e) = server.exec_line("set g_smoothClients 0") {
+                unsmooth_failed = Some(format!("set g_smoothClients 0: {e}"));
+            }
+        }
         peers.set(server.net_clients());
     }
     let results: Vec<Result> = handles
@@ -458,6 +506,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 
     let mut report = StageReport::new(NAME, Status::Passed);
     let mut failures = Vec::new();
+    failures.extend(unsmooth_failed);
+    if !unsmoothed {
+        failures.push("the clients finished before g_smoothClients was turned off".to_owned());
+    }
     // Team deathmatch scores a kill for the killer's team through `setteamscore`, so a team that out-killed the
     // other must not hold the lower score (the allies/axis indices once swapped).
     let kills = |team: server::client::Team| -> i32 {
@@ -558,6 +610,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 failures.push(format!(
                     "client {i} saw at most {} other players of {BOTS} bots",
                     r.seen_max
+                ));
+            }
+            // `G_PlayerStateToEntityStateExtrapolate` with the stock `g_smoothClients 1`, then
+            // `BG_PlayerStateToEntityState` once it is turned off (#514).
+            if r.linear_stop == 0 || r.interpolate == 0 || r.other_pos_type + r.smoothed_again > 0 {
+                failures.push(format!(
+                    "client {i}: moving players' trajectory types do not follow g_smoothClients 1 then 0: \
+                     {} TR_LINEAR_STOP, then {} TR_INTERPOLATE, {} TR_LINEAR_STOP again, {} other",
+                    r.linear_stop, r.interpolate, r.smoothed_again, r.other_pos_type
                 ));
             }
             // Prediction runs ahead of the snapshot and the server seldom disagrees with it.
