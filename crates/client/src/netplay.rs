@@ -3084,6 +3084,7 @@ impl NetPlay {
         };
         self.c.cmd_drawn = d;
         report["fx"]["tracers_max"] = json!(self.c.fx_tracers_max);
+        report["fx"]["flesh_hits"] = json!(self.effects.flesh_hits);
         let bolts = self.effects.bolted_stats();
         report["fx"]["bolted"] = json!({
             "active": bolts.active,

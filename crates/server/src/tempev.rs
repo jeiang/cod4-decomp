@@ -6,9 +6,9 @@
 //! in `event_seq`; a client acts on every (entity number, sequence) pair once.
 //!
 //! Field use: `event` is one of [`ev`], `origin` where, `angles` the surface normal or direction in degrees, `client`
-//! the entity that caused it (the shooter, the owner of a missile, the player a death or pain is about), `weapon` the
-//! weapon index, `event_parm` the surface type (or damage for pain), `model` the effect index (script effects) and
-//! `velocity` a direction scaled to push a body (deaths).
+//! the entity that caused it (the shooter, the owner of a missile, the player a death is about), `weapon` the weapon
+//! index, `event_parm` the surface type, `model` the effect index (script effects) and `velocity` a direction scaled
+//! to push a body (deaths).
 
 use net::entity::{EntityState, etype};
 
@@ -19,7 +19,8 @@ pub mod ev {
     pub const MISSILE_BOUNCE: u8 = 0x82;
     pub const PLAY_FX: u8 = 0x83;
     pub const PLAYER_DEATH: u8 = 0x84;
-    pub const PLAYER_PAIN: u8 = 0x85;
+    // 0x85 is unused: a hit on a player is its bullet impact only, the victim's pain is player state
+    // (`damage_timer`, the damage direction), as in stock.
     /// A spherical physics blast (`physicsexplosionsphere`); see [`Physics`] for the fields.
     pub const PHYSICS_EXPLOSION: u8 = 0x86;
     /// A weapon fired (`FireWeapon`): `origin` is the shooter's eye, `angles` where they look, `client` who, `weapon`
