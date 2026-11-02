@@ -107,10 +107,13 @@ fn spawn(c: &mut Driven) -> Result<(), String> {
     Ok(())
 }
 
+/// One run's play, driven through the control channel.
+type Play = fn(&mut Driven) -> Result<(), String>;
+
 /// The direct start loads `mp_crash` before any menu: the in-game menu's map title must name it, not show the bare `@`
 /// an unset `mapname` leaves (#372).
 fn direct(c: &mut Driven) -> Result<(), String> {
-    c.step("spawn", |c| spawn(c))?;
+    c.step("spawn", spawn)?;
     c.pause(Duration::from_secs(3))?;
     c.step("direct capture", |c| c.capture("direct").map(|_| ()))?;
     c.step("direct in-game menu", |c| {
@@ -162,7 +165,7 @@ fn menus(c: &mut Driven) -> Result<(), String> {
 }
 
 fn objectives(c: &mut Driven) -> Result<(), String> {
-    c.step("objective spawn", |c| spawn(c))?;
+    c.step("objective spawn", spawn)?;
     c.pause(Duration::from_secs(8))?;
     c.step("objective capture", |c| c.capture("objectives").map(|_| ()))
 }
@@ -370,7 +373,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     let mut out = StageReport::new(NAME, Status::Passed);
     let mut problems = Vec::new();
-    let runs: [(&str, &[&str], fn(&mut Driven) -> Result<(), String>); 3] = [
+    let runs: [(&str, &[&str], Play); 3] = [
         ("direct", DIRECT, direct),
         ("menus", &["--bots", "3"], menus),
         ("objectives", OBJECTIVE_ARGS, objectives),

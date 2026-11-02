@@ -263,6 +263,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     if let Some(r) = no_display(&client, NAME)? {
         return Ok(r);
     }
+    /// One run's play, driven through the control channel.
+    type Play<'a> = &'a dyn Fn(&mut Driven) -> Result<(), String>;
     let mute = match MuteServer::start() {
         Ok(m) => m,
         Err(e) => {
@@ -273,7 +275,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let mute_addr = mute.addr.to_string();
     let mut out = StageReport::new(NAME, Status::Passed);
     let mut problems = Vec::new();
-    let runs: [(&str, &dyn Fn(&mut Driven) -> Result<(), String>, &[&str]); 3] = [
+    let runs: [(&str, Play<'_>, &[&str]); 3] = [
         ("frontend", &front_end, &["badmap", "refused"]),
         (
             "timeout",

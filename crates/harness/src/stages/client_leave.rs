@@ -67,7 +67,9 @@ fn spawn(c: &mut Driven) -> Result<(), String> {
 fn lit_fraction(path: &std::path::Path) -> Result<f64, String> {
     let (w, h, rgb) = decode(path)?;
     let lit = rgb
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter(|p| p.iter().map(|v| u32::from(*v)).sum::<u32>() > 24)
         .count();
     Ok(lit as f64 / (w * h) as f64)
@@ -205,9 +207,8 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     }
     let mut problem = left.err();
-    match quit {
-        Some(Err(e)) => problem = Some(e),
-        _ => {}
+    if let Some(Err(e)) = quit {
+        problem = Some(e);
     }
     match report {
         Err(e) if problem.is_none() => {
@@ -233,10 +234,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 if problem.is_none() {
                     problem = Some(format!("could not finish the run report: {e}"));
                 }
-            } else if let Some(w) = verdict(&report) {
-                if problem.is_none() {
-                    problem = Some(w);
-                }
+            } else if let Some(w) = verdict(&report)
+                && problem.is_none()
+            {
+                problem = Some(w);
             }
         }
     }
