@@ -68,8 +68,9 @@ pub const ALLOWED: &[Allow] = &[
         reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned once \
                  per server process",
         stages: &[],
-        // Measured: 1 on client-hud and net-match; 2 on script-builtins (its in-process server and its listen client).
-        max: Some(2),
+        // Once per server instance. Measured on main 15caa930 (bundle cod4e-run-20261102-204501): 4 on net-info
+        // (its extra dedicated servers), 3 on client-host-console, 2 on script-builtins, 1 on client-hud/net-match.
+        max: Some(4),
     },
     // Timing of the harness's own clients and bots.
     Allow {
