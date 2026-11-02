@@ -54,7 +54,7 @@ fn verdict(
     Ok(())
 }
 
-fn exec(c: &mut Driven, line: &str) -> Result<(), String> {
+pub(super) fn exec(c: &mut Driven, line: &str) -> Result<(), String> {
     c.ask(json!({"cmd": "server", "op": "exec", "line": line}))?;
     Ok(())
 }
@@ -74,7 +74,7 @@ fn counts(c: &mut Driven) -> Result<Counts, String> {
 }
 
 /// The server's record of client `slot`.
-fn server_client(c: &mut Driven, slot: u64) -> Result<Value, String> {
+pub(super) fn server_client(c: &mut Driven, slot: u64) -> Result<Value, String> {
     let r = c.ask(json!({"cmd": "server", "op": "state", "what": "clients"}))?;
     r["clients"]
         .as_array()
@@ -97,7 +97,7 @@ fn body(p: &Value) -> String {
 }
 
 /// The slot of a live bot on team `team` (1 axis, 2 allies, as both the client and the server number them).
-fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
+pub(super) fn enemy_bot(c: &mut Driven, team: u64) -> Result<u64, String> {
     let end = Instant::now() + Duration::from_secs(20);
     loop {
         let r = c.ask(json!({"cmd": "server", "op": "state", "what": "clients"}))?;

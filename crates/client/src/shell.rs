@@ -115,7 +115,8 @@ pub struct ShellState {
     /// Message windows, chat and the centre string, which keep their lines between frames.
     pub feed: Feed,
     pub score_view: ScoreView,
-    /// First scoreboard line shown (1 = the top).
+    /// First scoreboard line shown (1 = the top); 0 until the open list has rows and is centred on the viewer
+    /// (stock `scoresTop` -1, `CenterViewOnClient`).
     pub scores_top: usize,
     /// The scoreboard held up by a script step instead of the key (the `--ui-script` `scores` step).
     pub scores_forced: bool,
@@ -331,7 +332,7 @@ impl ShellState {
             live: LiveUi::default(),
             feed: Feed::default(),
             score_view: ScoreView::default(),
-            scores_top: 1,
+            scores_top: 0,
             scores_forced: false,
             draw_2d: true,
             fps: hud::fps::Meter::default(),
@@ -376,25 +377,32 @@ impl ShellState {
     }
 
     /// The wheel and the page keys move the scoreboard's list while it is up (`Scoreboard_HandleInput`: those keys
-    /// are the scoreboard's whenever it is displayed, at a bound or with no rows too, and go no further; the arrows
-    /// are not its and stay the binds'). `true` when the key was the scoreboard's.
+    /// are the scoreboard's whenever it is displayed, at a bound or with no rows too; the arrows are not its and stay
+    /// the binds'). Each moves `cg_scoreboardScrollStep` lines (`CG_ScrollScoreboardUp`/`Down`): up stops at the
+    /// top, down only while a line is cut off below and stops at the last line. `true` when the key was the
+    /// scoreboard's.
     pub fn scroll_scores(&mut self, ui: &Ui, key: &UiKey) -> bool {
         if !self.scoreboard_shown(ui) {
             return false;
         }
         let live = &self.live;
         let m = &self.score_view.metrics;
-        let page = hud::rows_shown(&live.scores, live.own_team, self.scores_top, m).max(1);
-        let total = hud::scoreboard_lines(&live.scores, live.own_team, m);
-        let top = self.scores_top;
-        let to = match key {
-            UiKey::WheelUp => top.saturating_sub(1),
-            UiKey::WheelDown => top + 1,
-            UiKey::PageUp => top.saturating_sub(page),
-            UiKey::PageDown => top + page,
+        let step = m.scroll_step;
+        let top = self.scores_top.max(1);
+        match key {
+            UiKey::WheelUp | UiKey::PageUp => {
+                if top > 1 {
+                    self.scores_top = top.saturating_sub(step).max(1);
+                }
+            }
+            UiKey::WheelDown | UiKey::PageDown => {
+                if hud::scores_off_bottom(&live.scores, live.own_team, top, m) {
+                    let total = hud::scoreboard_lines(&live.scores, live.own_team, m);
+                    self.scores_top = (top + step).min(total);
+                }
+            }
             _ => return false,
-        };
-        self.scores_top = to.clamp(1, total.max(1));
+        }
         true
     }
 }
@@ -452,6 +460,7 @@ const UI_DEFAULTS: &[(&str, &str)] = &[
     ("cg_scoreboardHeight", "435"),
     ("cg_scoreboardItemHeight", "18"),
     ("cg_scoreboardBannerHeight", "35"),
+    ("cg_scoreboardScrollStep", "3"),
     ("cg_scoreboardPingWidth", "0.036"),
     ("cg_scoreboardPingHeight", "0.7"),
     ("cg_scoreboardPingText", "1"),
@@ -523,6 +532,8 @@ const OPTION_DEFAULTS: &[(&str, &str)] = &[
     ("snd_volume", "0.8"),
     // Stock: archived and cheat protected (they only act with `sv_cheats` on): how long slaves take to duck.
     ("snd_slaveFadeTime", "500"),
+    // Stock: archived and cheat protected: the ms every sound channel takes to fade in when a level starts.
+    ("snd_levelFadeTime", "250"),
     // The shortest time a subtitle stays up, seconds (stock: archived).
     ("cg_subtitleMinTime", "3"),
     ("sm_enable", "1"),
@@ -1187,6 +1198,19 @@ impl Shell {
         }
         Self::intermission_menus(&mut self.st, &mut self.ui, input);
         self.st.live.scores_wanted = self.st.scoreboard_shown(&self.ui);
+        // Closed, or no rows yet: the next rows to show open centred on the viewer (`CG_ScoresUp`/`CG_ScoresDown`
+        // and `CG_ParseScores` reset `scoresTop`; `CG_DrawScoreboard` centres it).
+        if !self.st.live.scores_wanted || self.st.live.scores.is_empty() {
+            self.st.scores_top = 0;
+        } else if self.st.scores_top == 0 {
+            let live = &self.st.live;
+            self.st.scores_top = hud::centred_top(
+                &live.scores,
+                live.own,
+                live.own_team,
+                &self.st.score_view.metrics,
+            );
+        }
         if self.st.live.active {
             let st = &mut self.st;
             let rows = st.live.scores_wanted.then(|| {
@@ -1228,9 +1252,6 @@ impl Shell {
         } else {
             let st = &mut self.st;
             st.names.update(&st.live, &st.names_cfg, [[1.0; 4]; 2]);
-        }
-        if !self.st.live.scores_wanted {
-            self.st.scores_top = 1;
         }
         // The join list's highlight follows the selected server as rows come, go and re-sort.
         if self.ui.is_open("pc_join_unranked") {
@@ -3636,7 +3657,8 @@ mod tests {
         );
     }
 
-    /// The wheel, arrows and page keys scroll a scoreboard that has more rows than fit, and stay in range.
+    /// The wheel and page keys move a scoreboard that has more rows than fit by `cg_scoreboardScrollStep` lines, and
+    /// stay in range (`CG_ScrollScoreboardUp`/`Down`).
     #[test]
     fn the_scoreboard_scrolls_with_the_wheel_and_page_keys() {
         let root =
@@ -3664,21 +3686,32 @@ mod tests {
                 ..Default::default()
             })
             .collect();
+        st.scores_top = 1;
+        assert_eq!(st.score_view.metrics.scroll_step, 3, "the stock step");
         assert!(st.scroll_scores(&ui, &UiKey::WheelUp));
         assert_eq!(st.scores_top, 1, "not above the top");
         st.scroll_scores(&ui, &UiKey::WheelDown);
-        assert_eq!(st.scores_top, 2);
+        assert_eq!(st.scores_top, 4, "one notch is a step");
         st.scroll_scores(&ui, &UiKey::PageDown);
-        assert!(st.scores_top > 4);
+        assert_eq!(st.scores_top, 7, "a page key is a step too");
         for _ in 0..100 {
             assert!(
                 st.scroll_scores(&ui, &UiKey::WheelDown),
                 "the wheel is its at the bound too"
             );
         }
-        assert_eq!(st.scores_top, 32, "the last of 30 rows and the banners");
+        let m = &st.score_view.metrics;
+        assert!(
+            !crate::hud::scores_off_bottom(&st.live.scores, 2, st.scores_top, m),
+            "down stops once the last line is in view"
+        );
+        assert!(st.scores_top <= 32, "within the 30 rows and the banners");
+        let bottom = st.scores_top;
         st.scroll_scores(&ui, &UiKey::PageUp);
-        assert!(st.scores_top < 32);
+        assert_eq!(st.scores_top, bottom - 3);
+        st.score_view.metrics.scroll_step = 5;
+        st.scroll_scores(&ui, &UiKey::WheelUp);
+        assert_eq!(st.scores_top, bottom - 8, "the dvar sets the step");
         for key in [UiKey::Tab, UiKey::Up, UiKey::Down] {
             let top = st.scores_top;
             assert!(!st.scroll_scores(&ui, &key), "{key:?} is not its own");

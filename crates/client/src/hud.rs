@@ -30,7 +30,8 @@ pub use feed::{BOLD, Feed, NOTIFY, SUBTITLE, WINDOWS};
 pub use layout::Layout;
 pub use prompt::{LiveVote, draw_typing, draw_vote};
 pub use scores::{
-    Metrics as ScoreMetrics, ScoreView, draw_scoreboard, rows_shown, scoreboard_lines,
+    Metrics as ScoreMetrics, ScoreView, centred_top, draw_scoreboard, rows_shown, scoreboard_lines,
+    scores_off_bottom,
 };
 
 use serde_json::{Value, json};

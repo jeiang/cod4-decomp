@@ -502,6 +502,55 @@ fn climbs_a_ladder_and_lets_go_when_jumping() {
     assert!(pm.ps.origin[2] >= z - 0.5);
 }
 
+/// `PM_FootstepEvent` probes the ladder with `PM_playerTrace`: a character the probe starts in
+/// is touched and dropped from the mask, so the step still carries the ladder's material (#404).
+#[test]
+fn a_character_on_the_ladder_probe_does_not_change_the_step_material() {
+    let mut w = TestWorld::floor();
+    // A character's box around the whole probe sweep, listed before the ladder.
+    w.add([-10.0, -10.0, 40.0], [40.0, 10.0, 60.0], contents::ACTOR, 0);
+    w.blocks.last_mut().unwrap().entity = 9;
+    w.add(
+        [16.5, -50.0, 0.0],
+        [20.0, 50.0, 300.0],
+        contents::SOLID,
+        SURF_LADDER | 7 << 20,
+    );
+    let params = Params::default();
+    let mut pm = spawn(&params, [0.0, 0.0, 50.0]);
+    pm.tracemask = contents::MASK_PLAYERSOLID | contents::ACTOR;
+    pm.ps.pm_flags |= pmf::LADDER;
+    pm.ps.ladder_vec = [-1.0, 0.0, 0.0];
+    pm.ps.ground_entity_num = crate::cm::ENTITYNUM_NONE;
+    let pml = super::single::pml_new(20, &pm.ps);
+    super::footsteps::bump_bob_cycle(&mut pm.pm, &w, &pml, 64.0);
+    assert_eq!(events(&pm), vec![(ev::FOOTSTEP_RUN, 7)]);
+    assert_eq!(pm.touched(), &[9]);
+    assert_eq!(pm.tracemask & contents::MASK_CHARACTER, 0);
+}
+
+/// `PM_VerifyPronePosition` passes `isOnGround = 1` (`iw3mp.exe` 1.7 0x414dd0), so a prone body
+/// left airborne by a slide must still fit; here nothing is under the waist, so the fallback
+/// origin and velocity come back and the pitches stay as they were (#405).
+#[test]
+fn an_airborne_prone_slide_that_does_not_fit_is_undone() {
+    let w = TestWorld::floor();
+    let params = Params::default();
+    let mut pm = spawn(&params, [0.0, 0.0, 100.0]);
+    pm.ps.pm_flags |= pmf::PRONE;
+    pm.ps.ground_entity_num = crate::cm::ENTITYNUM_NONE;
+    pm.ps.velocity = [40.0, 0.0, -20.0];
+    pm.ps.torso_pitch = 7.0;
+    pm.ps.waist_pitch = -3.0;
+    let fallback_origin = [-10.0, 0.0, 100.0];
+    let fallback_velocity = [10.0, 0.0, 0.0];
+    let fits = super::prone::verify_position(&mut pm.pm, &w, &fallback_origin, &fallback_velocity);
+    assert!(!fits);
+    assert_eq!(pm.ps.origin, fallback_origin);
+    assert_eq!(pm.ps.velocity, fallback_velocity);
+    assert_eq!((pm.ps.torso_pitch, pm.ps.waist_pitch), (7.0, -3.0));
+}
+
 fn mantle_anims() -> MantleAnims {
     let anim = |len: i32, delta: Vec3| MantleAnim {
         length_msec: len,
