@@ -182,3 +182,28 @@ fn a_plane_is_sent_to_everyone_wherever_it_flies() {
     g.relink(m);
     assert!(numbers(&visible_to(&g, a).0).contains(&m));
 }
+
+#[test]
+fn a_moving_players_trajectory_type_follows_g_smooth_clients() {
+    use net::entity::tr;
+    let (mut g, mut vm) = rooms();
+    g.cvars.register("g_smoothClients", "1", 0);
+    let a = join(&mut g, &mut vm, [100.0, 0.0, 10.0]);
+    let b = join(&mut g, &mut vm, [150.0, 0.0, 10.0]);
+    g.client_mut(b).unwrap().ps.velocity = [190.0, 0.0, 0.0];
+    let seen = |g: &Game| {
+        let (seen, _) = visible_to(g, a);
+        seen.into_iter()
+            .find(|e| e.number == b)
+            .expect("b is in sight")
+    };
+    let e = seen(&g);
+    assert_eq!(
+        e.pos_type,
+        tr::LINEAR_STOP,
+        "extrapolated (stock default 1)"
+    );
+    assert_eq!(e.velocity, [190.0, 0.0, 0.0]);
+    g.cvars.set("g_smoothClients", "0");
+    assert_eq!(seen(&g).pos_type, tr::INTERPOLATE);
+}

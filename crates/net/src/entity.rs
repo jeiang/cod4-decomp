@@ -53,6 +53,14 @@ pub const BRUSH_AIM_ASSIST: u8 = 1;
 /// Stock unnamed `0x10000` flag: a GENERAL entity retains an active smoke explosion.
 pub const SMOKE_EXPLODE: u32 = 0x10000;
 
+/// `EntityState::pos_type` values: the stock `trType_t` numbers (`TR_INTERPOLATE`, `TR_LINEAR_STOP`).
+pub mod tr {
+    /// A player built by `BG_PlayerStateToEntityState` (`g_smoothClients 0`).
+    pub const INTERPOLATE: u8 = 1;
+    /// A player built by `G_PlayerStateToEntityStateExtrapolate` (`g_smoothClients 1`).
+    pub const LINEAR_STOP: u8 = 3;
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EntityState {
     /// Not part of the delta; the entity list codes it.
@@ -129,6 +137,9 @@ pub struct EntityState {
     /// positive pitch looks down, a positive yaw to the left), and the third angle the muzzle bone pitches by. The
     /// client turns the model's `tag_aim`, `tag_aim_animated` and `tag_flash` by them.
     pub gun_angles: [f32; 3],
+    /// Player: the trajectory type of its position (`lerp.pos.trType`, [`tr`]). A client interpolates a player
+    /// between snapshots for either value (`CG_CalcEntityLerpPositions`); 0 for every other entity.
+    pub pos_type: u8,
 }
 
 /// Bits of an [`EntityState::attach`] word that name the model; the tag takes the rest.
@@ -238,6 +249,7 @@ fn table() -> Vec<Field<EntityState>> {
         num!(s, s.gun_angles[0], Angle16),
         num!(s, s.gun_angles[1], Angle16),
         num!(s, s.gun_angles[2], Angle16),
+        int!(s, s.pos_type, Bits(4)),
     ]
 }
 
