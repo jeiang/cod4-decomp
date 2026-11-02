@@ -410,6 +410,8 @@ pub struct Walker {
     pub friends: bool,
     /// Keep the sights on the target without firing (an enemy held under the crosshair rather than killed).
     pub hold_fire: bool,
+    /// Aim only at this client (a bot the stage placed), rather than the nearest one of the side.
+    pub target: Option<u64>,
 }
 
 /// Degrees in `[-180, 180)`.
@@ -451,6 +453,7 @@ impl Walker {
             ticks: 0,
             friends: false,
             hold_fire: false,
+            target: None,
         })
     }
 
@@ -571,6 +574,7 @@ impl Walker {
                 || e["actor"].as_bool() == Some(true)
                 || e["dead"].as_bool() == Some(true)
                 || e["client"].as_u64() == Some(own)
+                || self.target.is_some_and(|t| e["client"].as_u64() != Some(t))
                 || e["team"]
                     .as_u64()
                     .is_none_or(|t| (t == team) != self.friends)

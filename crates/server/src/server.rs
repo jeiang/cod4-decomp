@@ -1768,9 +1768,17 @@ impl Server {
                     "ping": 0,
                     "health": c.ps.health,
                     "origin": c.ps.origin,
+                    "viewangles": c.ps.viewangles,
                     "weapon": c.ps.weapon,
                     "weapon_name": self.game.weapons.name(c.ps.weapon as u16),
                     "weapons": weapons,
+                    // The weapon state machine, so a stage can say where an offhand throw stopped.
+                    "weapon_state": c.ps.weapon_state,
+                    "weapon_flags": c.ps.weapon_flags,
+                    "offhand_index": c.ps.offhand_index,
+                    "grenade_time_left": c.ps.grenade_time_left,
+                    "pm_flags": c.ps.pm_flags,
+                    "buttons": c.buttons,
                     // Shots through `FireWeapon`; compass pings are derived client-side from snapshot events.
                     "shots": c.shots,
                     "alive": c.ps.pm_type < sim::pm::PmType::Dead,
@@ -2033,11 +2041,15 @@ impl Server {
             }
             // Test hook: `devtele <client|human|axis|allies> <x> <y> <z>` puts the player there, standing still;
             // `devtele <client|human|axis|allies> <name>` puts it on the floor in the first live trigger whose
-            // targetname starts with `name` and that is on for the player's team. `human` is the first
-            // client that is not a bot, `axis` and `allies` the first bot on that team (a bot's team is a random pick).
+            // targetname starts with `name` and that is on for the player's team; `devtele <…> near <client> <dist>`
+            // puts it about `dist` units from that client where the two stand on floor and see each other eye to eye
+            // (`Game::teleport_near`). `human` is the first client that is not a bot, `axis` and `allies` the first bot
+            // on that team (a bot's team is a random pick).
             "devtele" => {
                 let (Some(who), Some(first)) = (arg(1), arg(2)) else {
-                    return Err("usage: devtele <client|human|axis|allies> <x y z | name>".into());
+                    return Err(
+                        "usage: devtele <client|human|axis|allies> <x y z | name | near client dist>".into(),
+                    );
                 };
                 let team_bot = |team| {
                     self.game
@@ -2058,6 +2070,13 @@ impl Server {
                     _ => cvar::parse_int(who) as u16,
                 };
                 match (arg(3), arg(4)) {
+                    (Some(target), Some(dist)) if first.eq_ignore_ascii_case("near") => {
+                        self.game.teleport_near(
+                            n,
+                            cvar::parse_int(target) as u16,
+                            cvar::parse_float(dist),
+                        )?;
+                    }
                     (Some(y), Some(z)) => {
                         self.game.teleport(n, [first, y, z].map(cvar::parse_float));
                     }

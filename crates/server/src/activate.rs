@@ -384,6 +384,58 @@ impl Game {
         self.relink(n);
     }
 
+    /// Test hook: puts player `n` about `dist` units from player `target`, on the first spot round it where a
+    /// standing player lands on walkable floor and the two see each other eye to eye (the bots' sight trace).
+    /// The spots are tried along `target`'s view first, then ever further to either side of it. A spot taken by
+    /// a fixed offset alone can be inside a wall or behind one, where neither a bot nor a crosshair finds the
+    /// other player.
+    pub fn teleport_near(&mut self, n: u16, target: u16, dist: f32) -> Result<(), String> {
+        use sim::cm::Collide;
+        let t = self
+            .client(target)
+            .ok_or("devtele: no such target client")?;
+        let (origin, height, yaw) = (t.ps.origin, t.ps.view_height_current, t.ps.viewangles[1]);
+        let eye = [origin[0], origin[1], origin[2] + height];
+        let world = self.world.as_ref().ok_or("devtele: no map is loaded")?;
+        let spot = (0..16).find_map(|k: i32| {
+            // 0, +22.5, -22.5, +45, … degrees off the view.
+            let off = ((k + 1) / 2) as f32 * 22.5 * if k % 2 == 1 { 1.0 } else { -1.0 };
+            let (s, c) = (yaw + off).to_radians().sin_cos();
+            let (x, y) = (origin[0] + dist * c, origin[1] + dist * s);
+            let top = [x, y, origin[2] + 32.0];
+            let low = [x, y, origin[2] - 128.0];
+            let tr = world.trace(
+                top,
+                low,
+                PLAYER_MINS,
+                PLAYER_MAXS,
+                ENTITYNUM_NONE,
+                contents::MASK_PLAYERSOLID,
+            );
+            if tr.start_solid || tr.all_solid || tr.fraction >= 1.0 || !tr.walkable {
+                return None;
+            }
+            let feet = [x, y, top[2] + (low[2] - top[2]) * tr.fraction + 0.5];
+            let from = [x, y, feet[2] + height];
+            let seen = world.sight_trace(
+                0,
+                from,
+                eye,
+                [0.0; 3],
+                [0.0; 3],
+                n,
+                target,
+                crate::bot::SIGHT_MASK,
+            ) == 0;
+            seen.then_some(feet)
+        });
+        let at = spot.ok_or_else(|| {
+            format!("devtele: no spot {dist} units round client {target} with floor and a clear sight line")
+        })?;
+        self.teleport(n, at);
+        Ok(())
+    }
+
     /// The centre of an entity's bounds, for bots walking to a trigger.
     pub fn use_center(&self, t: u16) -> Option<Vec3> {
         let le = self.world.as_ref()?.entity(t)?;
@@ -487,4 +539,74 @@ pub struct BotObjectives {
     /// Which entries of `list` are triggers made for the bot's team alone.
     pub team: std::ops::Range<usize>,
     pub bomb: BombState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::Client;
+    use crate::content::Content;
+    use crate::cvar::Cvars;
+    use sim::cm::test_support::{BrushSpec, MapSpec};
+    use sim::world::World;
+
+    /// `devtele … near`: the spot along the view and the next ones to either side are behind a pillar, so the
+    /// first spot round the player both on the floor and in sight is 45 degrees to the left of the view.
+    #[test]
+    fn teleport_near_takes_the_first_spot_in_sight() {
+        let mut g = Game::new(Cvars::new(), Content::default());
+        let map = MapSpec {
+            world: vec![
+                BrushSpec::aabb(
+                    [-4000.0, -4000.0, -100.0],
+                    [4000.0, 4000.0, 0.0],
+                    contents::SOLID,
+                ),
+                BrushSpec::aabb([100.0, -60.0, 0.0], [120.0, 60.0, 300.0], contents::SOLID),
+            ],
+            ..Default::default()
+        };
+        g.world = Some(World::new(map.build()));
+        g.clients = (0..2)
+            .map(|n| Client::new(n, true, format!("bot{n}")))
+            .collect();
+        let target = &mut g.clients[1].ps;
+        target.origin = [0.0, 0.0, 0.0];
+        target.view_height_current = 60.0;
+        target.viewangles = [0.0, 0.0, 0.0];
+        g.teleport_near(0, 1, 200.0).unwrap();
+        let at = g.clients[0].ps.origin;
+        let d = 200.0 * std::f32::consts::FRAC_1_SQRT_2;
+        assert!(
+            (at[0] - d).abs() < 0.01 && (at[1] - d).abs() < 0.01,
+            "{at:?}"
+        );
+        assert!(at[2] >= 0.0 && at[2] < 1.0, "{at:?}");
+        // Walled in on every side: no spot, and the player stays put.
+        let world = MapSpec {
+            world: vec![
+                BrushSpec::aabb(
+                    [-4000.0, -4000.0, -100.0],
+                    [4000.0, 4000.0, 0.0],
+                    contents::SOLID,
+                ),
+                BrushSpec::aabb([40.0, -4000.0, 0.0], [60.0, 4000.0, 300.0], contents::SOLID),
+                BrushSpec::aabb(
+                    [-60.0, -4000.0, 0.0],
+                    [-40.0, 4000.0, 300.0],
+                    contents::SOLID,
+                ),
+                BrushSpec::aabb([-4000.0, 40.0, 0.0], [4000.0, 60.0, 300.0], contents::SOLID),
+                BrushSpec::aabb(
+                    [-4000.0, -60.0, 0.0],
+                    [4000.0, -40.0, 300.0],
+                    contents::SOLID,
+                ),
+            ],
+            ..Default::default()
+        };
+        g.world = Some(World::new(world.build()));
+        assert!(g.teleport_near(0, 1, 200.0).is_err());
+        assert_eq!(g.clients[0].ps.origin, at);
+    }
 }
