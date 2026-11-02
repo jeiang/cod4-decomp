@@ -451,6 +451,9 @@ pub struct Game {
     pub nested_errors: Vec<gsc::VmError>,
     /// Clients whose disconnect callback is queued; their slots free afterwards.
     pub pending_free: Vec<u16>,
+    /// How many `ScriptHost::run_calls` are running, nested ones (a builtin's) included: pending
+    /// slots are freed only when the outermost one ends, never under a running disconnect callback.
+    pub run_calls_depth: u32,
     pub pm_params: sim::pm::Params,
     /// Where every live player's origin has been lately (the snapshot archive `SV_GetClientPositionAtTime` reads),
     /// for judging a shot where its shooter saw the others.
@@ -523,6 +526,7 @@ impl Game {
             calls: Vec::new(),
             nested_errors: Vec::new(),
             pending_free: Vec::new(),
+            run_calls_depth: 0,
             pm_params: sim::pm::Params::default(),
             lag: crate::lagcomp::LagRing::default(),
             stats: MatchStats::default(),
