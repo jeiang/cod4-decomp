@@ -188,6 +188,10 @@ mod native {
             while let Some(end) = bytes.iter().position(|&b| b == b'\n') {
                 if self.skipping {
                     self.skipping = false;
+                } else if self.partial.len() + end > MAX_LINE {
+                    // The line ends in this read but is still too long: refuse it as one that never ended here.
+                    self.partial.clear();
+                    self.refuse_overlong();
                 } else {
                     self.partial.extend_from_slice(&bytes[..end]);
                     let text = String::from_utf8_lossy(&self.partial);
@@ -206,9 +210,13 @@ mod native {
             if self.partial.len() > MAX_LINE {
                 self.partial = Vec::new();
                 self.skipping = true;
-                let why = format!("the request is longer than {MAX_LINE} bytes");
-                self.queue(&Reply::failed(Value::Null, why).line());
+                self.refuse_overlong();
             }
+        }
+
+        fn refuse_overlong(&mut self) {
+            let why = format!("the request is longer than {MAX_LINE} bytes");
+            self.queue(&Reply::failed(Value::Null, why).line());
         }
     }
 
