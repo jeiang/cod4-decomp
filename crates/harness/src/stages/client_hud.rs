@@ -7,8 +7,9 @@
 //! goggles on and off with the action slot 1 bind, holds the scoreboard up with the Tab bind (it opens centred on the
 //! viewer's row and a wheel notch moves it `cg_scoreboardScrollStep` lines), cooks a grenade with its
 //! key (the crosshair's centre dot must grow with the fuse) and throws it, waits for a message window to have a line
-//! up and for a bot to kill it (the killcam), comes back from the dead, plays on until it has had a bot in its sights
-//! and fired, then holds its sights on an enemy and on a teammate until the crosshair takes each one's team colour.
+//! up, has an enemy bot put beside it kill it (the killcam, through the bot's eyes with the body in sight), comes back
+//! from the dead, plays on until it has had a bot in its sights and fired, then holds its sights on an enemy and on a
+//! teammate until the crosshair takes each one's team colour.
 //! What the HUD got to show over the run (`hud.stats` of the state document, the counters `hud_draw` of
 //! `ui-script.json` held) is the verdict: the
 //! scoreboard must have listed the players, the message windows must have drawn lines, the script hud elements must
@@ -790,6 +791,77 @@ fn crosshair_states(c: &mut Driven) -> Result<String, String> {
     Ok(format!("crosshair weapnext switch: {switch}"))
 }
 
+/// Where an enemy bot is put around the living player for the killcam's kill, tried in turn: east, west, north,
+/// south of them, near enough that the bot sees and turns to them.
+const KILLCAM_SIDES: [(f64, f64); 4] = [(120.0, 0.0), (-120.0, 0.0), (0.0, 120.0), (0.0, -120.0)];
+/// Time the bot is given to see the player and turn to them: its reaction is at most 600 ms and it turns at least
+/// 420 degrees a second (`server/src/bot.rs`).
+const KILLCAM_AIM: Duration = Duration::from_secs(2);
+
+/// Has an enemy bot kill the player in front of it, so the killcam that follows replays the kill through eyes that
+/// have the body in sight, and returns while that killcam is up with the viewer's body seen. Left to the match, a
+/// bot may not find the player before it ends (#494: no kill in 300 s). The bot is put beside the player with its
+/// own play on (`bot_idle 0`), so it turns to them, and then kills them with its rifle (`devkill`, as `net-killcam`
+/// and `web-match` do; a kill it makes first does as well). The stock `_killcam.gsc` plays the killcam. A side
+/// with a wall between the two leaves the body out of sight: the next side is tried after the respawn, and when no
+/// killcam showed the body, the step fails.
+fn killcam_kill(c: &mut Driven) -> Result<(), String> {
+    use super::client_hud_compass::{enemy_bot, exec, server_client};
+    let secs = Duration::from_secs;
+    let enemy = match c.lookup("player.team")?.as_u64() {
+        Some(1) => 2,
+        Some(2) => 1,
+        t => return Err(format!("the player is on no team ({t:?})")),
+    };
+    let me = c
+        .lookup("player.client")?
+        .as_u64()
+        .ok_or("the player has no client slot")?;
+    exec(c, "set bot_idle 0")?;
+    let mut tried = Vec::new();
+    for (dx, dy) in KILLCAM_SIDES {
+        c.until(
+            json!({"player.alive": true, "hud.live.killcam": false, "hud.live.dead": false}),
+            secs(60),
+            "the player was not alive to be killed",
+        )?;
+        let you0 = stat(c, "hud.stats.killcam_you_frames")?;
+        let person = server_client(c, me)?;
+        let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+        let bot = enemy_bot(c, enemy)?;
+        exec(
+            c,
+            &format!("devtele {bot} {} {} {}", at(0) + dx, at(1) + dy, at(2)),
+        )?;
+        c.pause(KILLCAM_AIM)?;
+        if server_client(c, me)?["alive"] == json!(true) {
+            exec(c, &format!("devkill {me} {bot}"))?;
+        }
+        c.until(
+            json!({"hud.live.killcam": true}),
+            secs(30),
+            "no killcam started after the bot's kill",
+        )?;
+        // Up while the replay plays: done once it has the body in sight, the next side once it is over without.
+        let end = Instant::now() + secs(30);
+        loop {
+            let hud = c.state("hud")?;
+            if hud["stats"]["killcam_you_frames"].as_u64().unwrap_or(0) > you0 {
+                return Ok(());
+            }
+            if hud["live"]["killcam"] != json!(true) || Instant::now() > end {
+                tried.push(format!("bot {bot} at ({dx}, {dy})"));
+                break;
+            }
+            c.frames(1)?;
+        }
+    }
+    Err(format!(
+        "no killcam showed the viewer's body for the you marker; killed by {}",
+        tried.join(", ")
+    ))
+}
+
 /// The match, step by step. Every step goes through the channel: a failure names the step and what was observed.
 fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), String> {
     let secs = Duration::from_secs;
@@ -1233,14 +1305,7 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
         c.capture("feed").map(|_| ())
     })?;
     c.step("killcam", |c| {
-        // A replay can start with the victim behind a wall. Keep playing until a killcam actually offers the body
-        // to the "you" marker rather than ending the run at the first replay regardless of what it showed.
-        w.drive_until(
-            c,
-            json!({"hud.live.killcam": true, "hud.stats.killcam_you_frames": {"gt": 0}}),
-            secs(300),
-            "no killcam showed the viewer's body for the you marker",
-        )?;
+        killcam_kill(c)?;
         c.capture("killcam_first")?;
         c.pause(secs(1))?;
         c.capture("killcam_next")?;
@@ -1265,20 +1330,54 @@ fn play(c: &mut Driven, w: &mut Walker, notes: &mut Vec<String>) -> Result<(), S
     // kill), which can come before the walker met anyone (#464): keep playing until it has had a bot in its sights,
     // so the check fails only when aiming and firing do not work.
     c.step("fire", |c| {
-        let end = Instant::now() + secs(120);
-        while w.shots == 0 {
-            if Instant::now() > end {
-                w.stop(c)?;
-                return Err(format!(
-                    "the stage's player never fired in {} ticks (turned with {})",
-                    w.ticks,
-                    w.turning()
-                ));
-            }
-            c.pause(Duration::from_millis(150))?;
-            w.tick(c)?;
+        // A bot left to the match may never come into sight before the timeout (#494). Put a live enemy 200 units
+        // along the player's view and hold it still, so this step measures the walker's aiming and trigger pull,
+        // not whether the match offered a target. The walker still has to turn onto the bot and fire itself.
+        if w.shots == 0 {
+            use super::client_hud_compass::{enemy_bot, exec, server_client};
+            let enemy = match c.lookup("player.team")?.as_u64() {
+                Some(1) => 2,
+                Some(2) => 1,
+                t => return Err(format!("the player is on no team ({t:?})")),
+            };
+            let me = c
+                .lookup("player.client")?
+                .as_u64()
+                .ok_or("the player has no client slot")?;
+            let person = server_client(c, me)?;
+            let at = |i: usize| person["origin"][i].as_f64().unwrap_or(0.0);
+            let angles = c.lookup("player.aim_angles")?;
+            let yaw = angles[1].as_f64().unwrap_or(0.0).to_radians();
+            let bot = enemy_bot(c, enemy)?;
+            exec(c, "set bot_idle 1")?;
+            exec(
+                c,
+                &format!(
+                    "devtele {bot} {} {} {}",
+                    at(0) + 200.0 * yaw.cos(),
+                    at(1) + 200.0 * yaw.sin(),
+                    at(2)
+                ),
+            )?;
         }
-        w.stop(c)
+        let end = Instant::now() + secs(60);
+        let result = (|| {
+            while w.shots == 0 {
+                if Instant::now() > end {
+                    w.stop(c)?;
+                    return Err(format!(
+                        "the stage's player never fired in {} ticks (turned with {})",
+                        w.ticks,
+                        w.turning()
+                    ));
+                }
+                c.pause(Duration::from_millis(150))?;
+                w.tick(c)?;
+            }
+            w.stop(c)
+        })();
+        super::client_hud_compass::exec(c, "set bot_idle 0")?;
+        result
     })?;
     // The crosshair over a player takes their team's colour (`CG_CalcCrosshairColor`, #414). The colour steps run
     // with `sv_cheats` on at the listen server (forced, as `devmap` sets it; the client takes it from the
