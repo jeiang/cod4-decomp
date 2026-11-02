@@ -394,6 +394,25 @@ pub struct SlotFacts {
 pub struct HudFacts {
     /// A live match is being played; the pieces draw nothing otherwise.
     pub live: bool,
+    /// Active received speakers, ordered by client number, excluding the local player.
+    pub talkers: Vec<(u16, String, bool)>,
+    pub local_talking: bool,
+    /// `voice_current_voicelevel` from the app's microphone this frame ([`crate::voice::Talker::current_level`]).
+    pub voice_level: f32,
+    /// `Voice_GetVoiceLevel`'s six slots and its count, advanced at each draw of the record meter (265).
+    pub meter_slots: [f32; 6],
+    pub meter_count: usize,
+    /// The record meter drew since the app last looked: the app keeps the microphone open for it.
+    pub meter_shown: bool,
+    /// The level the record meter last drew (0..1) and how often it drew.
+    pub record_level: f32,
+    pub record_meter_marks: u32,
+    /// Where the record meter last drew, in pixels (x, y, w, h).
+    pub record_meter_rect: [f32; 4],
+    /// Talker icons drawn by the cgame slots (193-196) and by the UI slots (267-270).
+    pub talker_marks: u32,
+    pub ui_talker_marks: u32,
+    pub local_talker_marks: u32,
     /// The shell's clock at the last fill.
     pub now: i32,
     pub pm_dead: bool,
@@ -462,6 +481,8 @@ pub struct HudFacts {
     pub radar_pings: u32,
     pub radar_lines: u32,
     pub vehicle_marks: u32,
+    pub helicopter_marks: u32,
+    pub plane_marks: u32,
     /// Enemy firing marks the compass drew (one per mark per frame), the enemy shots that pinged it from their fire
     /// events and the pings from `eflags::PING`, and the length of the latest shot ping (ms).
     pub enemy_firing_marks: u32,
@@ -614,7 +635,18 @@ impl HudFacts {
 
     /// The facts as the run report shows them.
     pub fn report(&self) -> serde_json::Value {
-        serde_json::json!({
+        // Two `json!` maps: one would pass the macro's recursion limit.
+        let voice = serde_json::json!({
+            "talker_marks": self.talker_marks,
+            "ui_talker_marks": self.ui_talker_marks,
+            "local_talker_marks": self.local_talker_marks,
+            "local_talking": self.local_talking,
+            "record_level": self.record_level,
+            "record_meter_marks": self.record_meter_marks,
+            "record_meter_rect": self.record_meter_rect,
+            "talkers": self.talkers,
+        });
+        let mut report = serde_json::json!({
             "live": self.live,
             "health": self.health,
             "max_health": self.max_health,
@@ -643,6 +675,8 @@ impl HudFacts {
             "radar_marks": self.radar_marks,
             "radar_lines": self.radar_lines,
             "vehicle_marks": self.vehicle_marks,
+            "helicopter_marks": self.helicopter_marks,
+            "plane_marks": self.plane_marks,
             "enemy_firing_marks": self.enemy_firing_marks,
             "enemy_fire_pings": self.enemy_fire_pings,
             "enemy_flag_pings": self.enemy_flag_pings,
@@ -655,7 +689,11 @@ impl HudFacts {
             "objectives_listed": self.objectives_listed,
             "objectives_alpha": self.objectives_alpha,
             "objective_draws": self.objective_draws.iter().map(ObjectiveDraw::report).collect::<Vec<_>>(),
-        })
+        });
+        if let (Some(r), serde_json::Value::Object(v)) = (report.as_object_mut(), voice) {
+            r.extend(v);
+        }
+        report
     }
 }
 

@@ -52,6 +52,9 @@ use web_time::Instant;
 
 /// The shortest interval between two usercmds.
 const CMD_INTERVAL: Duration = Duration::from_millis(8);
+/// How long [`NetPlay::await_gamestate`] waits for each datagram before it answers what came.
+#[cfg(not(target_arch = "wasm32"))]
+const GAMESTATE_POLL: Duration = Duration::from_millis(10);
 /// A network frame over this many milliseconds logs where its steps went, so a stall in it (a sound bank read, a
 /// model's first animation, a skeleton built for every bot at once) is named rather than guessed from the frame's
 /// cost. The first [`SLOW_NET_FRAMES_LOGGED`] of them: a starved process has slow frames by the hundred.
@@ -463,8 +466,9 @@ const LOC_CURSOR_SPEED: f32 = 0.004;
 
 pub struct NetPlay {
     net: NetClient<Wire>,
-    /// Voice chat: the microphone, the other players' voices, `cl_voice`, and the players the person muted.
-    talker: crate::voice::Talker,
+    /// Voice chat: the other players' voices, `cl_voice`, the players the person muted, and whether the person is
+    /// talking (the microphone is the app's, [`crate::voice::Talker`]: the record meter uses it outside a match too).
+    talk_down: bool,
     hearing: crate::voice::Hearing,
     voice_on: bool,
     muted: HashSet<u16>,
@@ -652,7 +656,7 @@ impl NetPlay {
         net.set_pure(lib.pure_digest);
         Ok(Self {
             net,
-            talker: crate::voice::Talker::default(),
+            talk_down: false,
             hearing: crate::voice::Hearing::default(),
             voice_on: true,
             muted: HashSet::new(),
@@ -902,8 +906,8 @@ impl NetPlay {
     /// The models the server precached (`precachemodel`: planes, vehicles, props the scripts make) whose names
     /// arrived since the last call and that the loaded zones have, for the renderer to get passes and pipelines
     /// for before they first show. The original registers them all in `CG_RegisterGraphics` once the gamestate
-    /// is in (KisakCOD `cgame_mp/cg_main_mp.cpp`); here the configstrings come as the server sends them, so each
-    /// is handed over as it comes.
+    /// is in (KisakCOD `cgame_mp/cg_main_mp.cpp`); the load screen hands over the gamestate's list
+    /// ([`Self::pump_gamestate`]), a later frame only what the server adds afterwards.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn unwarmed_models(&mut self) -> Vec<std::sync::Arc<assets::zone::xmodel::XModel>> {
         let Some(ui) = self.net.ui_ref() else {
@@ -921,6 +925,39 @@ impl NetPlay {
             }
         }
         out
+    }
+
+    /// Under the load screen, before the level's first frame: takes what the server sent and answers it, as the
+    /// original's `CL_CheckForResend`/`CL_SendCmd` do while the state is below `CA_ACTIVE`. Whether the level's
+    /// whole gamestate is in, the precache lists with it ([`net::ui::ClientUiState::gamestate_complete`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pump_gamestate(&mut self) -> bool {
+        self.pump_for_gamestate(Duration::ZERO)
+    }
+
+    /// [`Self::pump_gamestate`] until the gamestate is in, for a match the command line starts before its first
+    /// frame: `false` if the join failed or `limit` passed first.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn await_gamestate(&mut self, limit: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < limit {
+            if self.pump_for_gamestate(GAMESTATE_POLL) {
+                return true;
+            }
+            if self.net.refused().is_some() || self.net.dropped().is_some() {
+                return false;
+            }
+        }
+        false
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pump_for_gamestate(&mut self, wait: Duration) -> bool {
+        self.net.pump(wait);
+        self.net.send();
+        self.net
+            .ui_ref()
+            .is_some_and(net::ui::ClientUiState::gamestate_complete)
     }
 
     pub fn spawned(&self) -> bool {
@@ -1128,6 +1165,20 @@ impl NetPlay {
         self.voice_on = on;
     }
 
+    /// `cl_voice`, as last set.
+    pub fn voice_on(&self) -> bool {
+        self.voice_on
+    }
+
+    /// The microphone's frames for this frame, sent while the person talks (`talking`: the talk key held with voice
+    /// on).
+    pub fn send_voice(&mut self, frames: Vec<net::voice::Frame>, talking: bool) {
+        self.talk_down = talking;
+        for f in frames {
+            self.net.send_voice(f);
+        }
+    }
+
     /// The players the person muted (the mute menu): their voices are not played, and the server is told so it does
     /// not even send them.
     pub fn set_muted(&mut self, muted: &HashSet<u16>) {
@@ -1143,18 +1194,9 @@ impl NetPlay {
         self.muted.clone_from(muted);
     }
 
-    /// Why the microphone could not be used, once.
-    pub fn take_voice_note(&mut self) -> Option<String> {
-        self.talker.note.take()
-    }
-
-    /// One frame of voice chat: the microphone's frames go to the server while the talk key is `down`, the voices the
-    /// server relayed are played.
-    fn voice_step(&mut self, down: bool) {
+    /// One frame of voice chat: the voices the server relayed are played.
+    fn voice_step(&mut self) {
         let now = Instant::now();
-        for f in self.talker.frames(down, self.voice_on, now) {
-            self.net.send_voice(f);
-        }
         let sound = &mut self.sound;
         for v in self.net.take_voice() {
             let gain = voice_gain(self.voice_on, &self.muted, v.speaker);
@@ -1383,7 +1425,7 @@ impl NetPlay {
         let mut laps = Laps::start();
         self.net.pump(Duration::ZERO);
         laps.lap("pump");
-        self.voice_step(input.held_other.iter().any(|c| c == "talk"));
+        self.voice_step();
         self.answer_menus();
         laps.lap("voice+menus");
         let now_ms = self.net.now_ms();
