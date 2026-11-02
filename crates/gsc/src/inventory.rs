@@ -216,7 +216,7 @@ pub const FUNCTIONS: &[&str] = &[
 
 /// The function entries flagged developer-only in the 1.7 table (third field 1); KisakCOD `g_scr_main_mp.cpp`
 /// marks the same ones. A call to one outside `/# ... #/` compiles only with `developer_script`, and only as a
-/// statement. No method of the multiplayer tables is developer-only.
+/// statement.
 pub const DEVELOPER_FUNCTIONS: &[&str] = &[
     "createprintchannel",
     "setprintchannel",
@@ -235,6 +235,10 @@ pub const DEVELOPER_FUNCTIONS: &[&str] = &[
     "freadln",
     "fgetarg",
 ];
+
+/// The method entries flagged developer-only: the three `ScriptEntCmd_DevAdd*` entries (KisakCOD
+/// `game/g_scr_mover.cpp:1263-1265`), under the same compile rules as [`DEVELOPER_FUNCTIONS`].
+pub const DEVELOPER_METHODS: &[&str] = &["devaddpitch", "devaddyaw", "devaddroll"];
 
 /// Player table, `PlayerCmd_*` (83 entries).
 pub const PLAYER_METHODS: &[&str] = &[

@@ -231,7 +231,7 @@ pub const COMMANDS: &[&str] = &[
     "expect",
     "until",
     // Test hooks: `devtele`, `devrun`, `devgrenade`, `devhardpoint`, `devradar`, `devheli`, `devkill`, `devshoot`,
-    // `devbotfire`, `devobjective`.
+    // `devbotfire`, `devobjective`, `devline`.
     "devtele",
     "devrun",
     "devgrenade",
@@ -242,6 +242,7 @@ pub const COMMANDS: &[&str] = &[
     "devshoot",
     "devbotfire",
     "devobjective",
+    "devline",
     // Players and administration.
     "clientkick",
     "tempbanclient",
@@ -617,6 +618,7 @@ fn warn_unhonoured_dvars(c: &Cvars) {
             WARN,
             "g_motd",
             dvar = "g_motd",
+            issue = 523,
             "message of the day not sent: this protocol has no motd configstring"
         );
     }
@@ -2078,6 +2080,61 @@ impl Server {
                     false,
                     fuse,
                 )?;
+            }
+            // Test hook: `devline <client|human> [frames]` runs a script compiled for developer that calls the stock
+            // `line` and `print3d` builtins: a yellow line across the player's view 100 units ahead and the string
+            // `devline` over it, kept `frames` server frames (default 400), so a listen server's own player draws them
+            // (`RB_DrawDebugLines`/`RB_DrawDebugStrings`, KisakCOD `gfx_d3d/rb_debug.cpp:158-226`). Not a stock command;
+            // needs `developer 1`.
+            "devline" => {
+                if !self.game.cvars.bool("developer") {
+                    return Err("devline needs developer 1".into());
+                }
+                let who = arg(1).ok_or("usage: devline <client|human> [frames]")?;
+                let n = if who == "human" {
+                    self.game
+                        .connected_clients()
+                        .find(|(_, c)| !c.bot)
+                        .map(|(n, _)| n)
+                        .ok_or("devline: no human is connected")?
+                } else {
+                    cvar::parse_int(who) as u16
+                };
+                let frames = arg(2).map_or(400, cvar::parse_int);
+                let ps = &self.game.client(n).ok_or("devline: no such client")?.ps;
+                let eye = crate::fire::view_origin(ps);
+                let (fwd, right, up) = sim::pm::math::angle_vectors(&ps.viewangles);
+                let at = |f: f32, r: f32, u: f32| {
+                    let p: [f32; 3] =
+                        std::array::from_fn(|i| eye[i] + fwd[i] * f + right[i] * r + up[i] * u);
+                    format!("({:.2}, {:.2}, {:.2})", p[0], p[1], p[2])
+                };
+                let src = format!(
+                    "main()\n{{\n\tline({}, {}, (1, 1, 0), 1, 0, {frames});\n\tprint3d({}, \"devline\", (1, 1, 1), 1, 0.25, {frames});\n}}\n",
+                    at(100.0, -30.0, 0.0),
+                    at(100.0, 30.0, 0.0),
+                    at(100.0, 0.0, 8.0),
+                );
+                let prog = compile(
+                    &[("devline.gsc", src.as_str())],
+                    &Builtins::stock_mp(),
+                    gsc::Options { developer: true },
+                )
+                .map_err(|e| format!("devline: {e:?}"))?;
+                let dispatch = Dispatch::new(&prog);
+                let main = prog
+                    .find("devline", "main")
+                    .ok_or("devline: the script has no main")?;
+                let mut vm = Vm::new(prog).map_err(|e| format!("devline: {e:?}"))?;
+                let mut host = ScriptHost {
+                    game: &mut self.game,
+                    dispatch: &dispatch,
+                };
+                match vm.call(&mut host, main, None, &[]) {
+                    Ok(CallOutcome::Finished(_)) => {}
+                    Ok(CallOutcome::Pending) => return Err("devline: the script waited".into()),
+                    Err(e) => return Err(format!("devline: {}", e.message)),
+                }
             }
             // Test hook: `devbotfire <client|axis|allies> <weapon|frag> <ms>` makes a bot stand and, through its
             // usercmds and the shared weapon state machine, hold attack with `weapon` (given with its ammunition and

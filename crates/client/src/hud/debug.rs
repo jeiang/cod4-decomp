@@ -47,13 +47,16 @@ fn segment(
     Some((to_screen(ca, size), to_screen(cb, size)))
 }
 
-pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, d: &DebugDraw) {
+/// Draws the shown lines and strings; returns how many of each reached the screen (in front of the viewer, a line
+/// at least half a pixel long), for the harness's `hud.stats.debug_lines`/`debug_strings`.
+pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, d: &DebugDraw) -> (usize, usize) {
     let Some(clip) = live.clip.as_ref().filter(|_| live.active) else {
-        return;
+        return (0, 0);
     };
     if d.shown_lines.is_empty() && d.shown_strings.is_empty() {
-        return;
+        return (0, 0);
     }
+    let (mut lines, mut strings) = (0, 0);
     let size = ui.place.size;
     let white = p.g.white();
     if d.shown_lines.iter().any(|l| l.depth_test) {
@@ -81,6 +84,7 @@ pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, d: &DebugDraw) {
             dy.atan2(dx),
             a,
         );
+        lines += 1;
     }
     // Screen pixels per world unit at clip depth w: half the screen height times the vertical focal scale over w.
     let focal = glam::Vec3::new(clip.x_axis.y, clip.y_axis.y, clip.z_axis.y).length();
@@ -109,7 +113,9 @@ pub fn draw(ui: &Ui, p: &mut Painter, live: &LiveUi, d: &DebugDraw) {
                 vert: vert::NOSCALE,
             },
         );
+        strings += 1;
     }
+    (lines, strings)
 }
 
 #[cfg(test)]

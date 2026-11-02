@@ -874,8 +874,12 @@ impl FnCompiler<'_> {
         };
         // A developer-only builtin outside `/# ... #/` is a developer statement of its own: its value cannot be
         // used, and without `developer_script` it is compiled (so its errors show) and then discarded
-        // (`Scr_BeginDevScript`/`Scr_EndDevScript`, KisakCOD `script/scr_compiler.cpp:468-563,871-891`).
-        let dev = c.object.is_none() && !self.in_dev && self.builtins.is_developer(idx);
+        // (`Scr_BeginDevScript`/`Scr_EndDevScript`, KisakCOD `script/scr_compiler.cpp:468-563,871-891,1000-1022`).
+        let dev = !self.in_dev
+            && match c.object {
+                None => self.builtins.is_developer(idx),
+                Some(_) => self.builtins.is_developer_method(idx),
+            };
         if dev && !statement {
             return self.err(
                 ErrorKind::Semantic,

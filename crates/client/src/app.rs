@@ -3786,7 +3786,8 @@ fn script_step(st: &mut State) -> bool {
             done(st.net.is_some(), sc, "fx demo".into());
         }
         // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`,
-        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up) or
+        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up,
+        // `cgis=debug_lines 1`/`cgis=debug_strings 1` for the listen server's `line`/`print3d` drawings on screen) or
         // how often an effect kind played (`cgis=fx:shell_eject 0`, `cgis=fx:bullet_impact_noblood 1`): what was
         // drawn or played, not the dvar's value.
         "cgis" => {
@@ -3850,6 +3851,8 @@ fn script_step(st: &mut State) -> bool {
                     "subtitle" => sh.map(|s| {
                         u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
                     }),
+                    "debug_lines" => sh.map(|s| s.st.hud_stats.debug_lines.to_string()),
+                    "debug_strings" => sh.map(|s| s.st.hud_stats.debug_strings.to_string()),
                     _ => name.strip_prefix("fx:").and_then(|kind| {
                         st.net.as_ref().map(|n| {
                             let played = n.fx_played(kind);
