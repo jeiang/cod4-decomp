@@ -24,6 +24,7 @@ pub const PARTS: &[&str] = &[
     "draw",
     "render",
     "sound",
+    "voice",
     "fx",
     "events",
     "net",
