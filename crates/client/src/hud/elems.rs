@@ -130,6 +130,8 @@ pub struct Drawn {
     pub night_vision: bool,
     /// Indexes into [`LiveUi::elems`] of the live (not archived) elements drawn over a killcam replay.
     pub killcam_live: Vec<usize>,
+    /// The tint the crosshair was drawn in, and how much larger than the weapon's own its centre was.
+    pub reticle: Option<([f32; 3], f32)>,
 }
 
 /// Elements under the menus, then the chat above them all (the order of `CG_Draw2D`).
@@ -161,6 +163,10 @@ pub fn draw_under(ui: &Ui, p: &mut Painter, st: &ShellState) -> Drawn {
     if let Some(r) = st.live.reticle.as_ref().filter(|_| !ui.captures_input()) {
         let (w, h) = ui.place.size;
         crate::crosshair::draw(p.g, p.cache, r, (w as u32, h as u32));
+        let grown = crate::crosshair::center_size(r)
+            .zip(crate::crosshair::Style::of(&r.weapon).center)
+            .map_or(0.0, |(drawn, own)| drawn - own);
+        drawn.reticle = Some((r.color, grown));
     }
     st.feed.draw_chat(ui, p, &st.live, st.game.scoreboard);
     super::draw_vote(ui, p, &st.live, &st.feed.layout);
