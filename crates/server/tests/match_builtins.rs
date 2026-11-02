@@ -67,8 +67,10 @@ impl Rig {
     }
 
     fn spawn(&mut self) -> u16 {
-        let v = self.call("t_spawn", None, &[]).unwrap();
-        v.entity().expect("an entity").num
+        let Ok(Value::Object(o)) = self.call("t_spawn", None, &[]) else {
+            panic!("t_spawn returns an entity");
+        };
+        o.entity().expect("an entity").num
     }
 
     fn player(&mut self, name: &str, score: i32) -> u16 {
