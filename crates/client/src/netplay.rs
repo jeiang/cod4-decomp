@@ -52,6 +52,9 @@ use web_time::Instant;
 
 /// The shortest interval between two usercmds.
 const CMD_INTERVAL: Duration = Duration::from_millis(8);
+/// How long [`NetPlay::await_gamestate`] waits for each datagram before it answers what came.
+#[cfg(not(target_arch = "wasm32"))]
+const GAMESTATE_POLL: Duration = Duration::from_millis(10);
 /// A network frame over this many milliseconds logs where its steps went, so a stall in it (a sound bank read, a
 /// model's first animation, a skeleton built for every bot at once) is named rather than guessed from the frame's
 /// cost. The first [`SLOW_NET_FRAMES_LOGGED`] of them: a starved process has slow frames by the hundred.
@@ -879,8 +882,8 @@ impl NetPlay {
     /// The models the server precached (`precachemodel`: planes, vehicles, props the scripts make) whose names
     /// arrived since the last call and that the loaded zones have, for the renderer to get passes and pipelines
     /// for before they first show. The original registers them all in `CG_RegisterGraphics` once the gamestate
-    /// is in (KisakCOD `cgame_mp/cg_main_mp.cpp`); here the configstrings come as the server sends them, so each
-    /// is handed over as it comes.
+    /// is in (KisakCOD `cgame_mp/cg_main_mp.cpp`); the load screen hands over the gamestate's list
+    /// ([`Self::pump_gamestate`]), a later frame only what the server adds afterwards.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn unwarmed_models(&mut self) -> Vec<std::sync::Arc<assets::zone::xmodel::XModel>> {
         let Some(ui) = self.net.ui_ref() else {
@@ -898,6 +901,39 @@ impl NetPlay {
             }
         }
         out
+    }
+
+    /// Under the load screen, before the level's first frame: takes what the server sent and answers it, as the
+    /// original's `CL_CheckForResend`/`CL_SendCmd` do while the state is below `CA_ACTIVE`. Whether the level's
+    /// whole gamestate is in, the precache lists with it ([`net::ui::ClientUiState::gamestate_complete`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pump_gamestate(&mut self) -> bool {
+        self.pump_for_gamestate(Duration::ZERO)
+    }
+
+    /// [`Self::pump_gamestate`] until the gamestate is in, for a match the command line starts before its first
+    /// frame: `false` if the join failed or `limit` passed first.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn await_gamestate(&mut self, limit: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < limit {
+            if self.pump_for_gamestate(GAMESTATE_POLL) {
+                return true;
+            }
+            if self.net.refused().is_some() || self.net.dropped().is_some() {
+                return false;
+            }
+        }
+        false
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pump_for_gamestate(&mut self, wait: Duration) -> bool {
+        self.net.pump(wait);
+        self.net.send();
+        self.net
+            .ui_ref()
+            .is_some_and(net::ui::ClientUiState::gamestate_complete)
     }
 
     pub fn spawned(&self) -> bool {
