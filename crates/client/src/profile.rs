@@ -150,6 +150,9 @@ pub fn default_stats() -> Vec<i32> {
 /// The profile name `--harness-profile` seeds.
 pub const HARNESS_PROFILE: &str = "harness";
 
+/// The weapon unlock stats: `3000 +` the stats table's weapon rows (0 to 99).
+const WEAPON_UNLOCKS: std::ops::RangeInclusive<usize> = 3000..=3099;
+
 /// A new profile's stats with every perk, weapon and attachment unlocked, Create a Class open, and enough experience
 /// for the top rank: what a harness run needs so no menu is locked.
 pub fn unlocked_stats() -> Vec<i32> {
@@ -163,6 +166,13 @@ pub fn unlocked_stats() -> Vec<i32> {
         if s[i] == 0 {
             s[i] = 1;
         }
+    }
+    // A weapon is unlocked by bit 0 of `3000 + its statsTable row` and each of its attachments by its bit
+    // (`attachmentTable` column 10) of the same stat; the same bits shifted up 16 flag them new. The stock class
+    // popups show a weapon's row as a live button only with bit 0 set, and an attachment only with its bit: all 16
+    // low bits unlock everything the stat holds, nothing flagged new.
+    for i in WEAPON_UNLOCKS {
+        s[i] |= 0xFFFF;
     }
     s[2301] = 1_000_000;
     s
@@ -676,6 +686,17 @@ mod tests {
             let items = first + 1..first + 9;
             assert_eq!(all[items.clone()], def[items], "slot {first}'s setup stays");
         }
+    }
+
+    #[test]
+    fn the_unlocked_profile_unlocks_every_weapon_with_its_attachments_and_flags_none_new() {
+        let (def, all) = (default_stats(), unlocked_stats());
+        // The P90 (row 14) is locked in a new profile.
+        assert_eq!((def[3014] & 1, all[3014]), (0, 0xFFFF));
+        assert!(
+            all[WEAPON_UNLOCKS].iter().all(|&v| v == 0xFFFF),
+            "every weapon and attachment unlocked, none flagged new"
+        );
     }
 
     #[test]
