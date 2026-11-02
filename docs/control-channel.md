@@ -60,8 +60,10 @@ the GPU to outpace the server. It neither injects usercmds nor changes their sel
 without polling new traffic to check retained input. Ordinary listen-server scheduling is unchanged outside
 this explicit request.
 
-Paths a stage leans on: `menu.open` (the stack), `menu.items[]` (`menu`, `name`, `text` as shown, `visible`, and
-`rect` `[x, y, w, h]` in window pixels, the rectangle a click is tested against: a static text item's is its text's),
+Paths a stage leans on: `menu.open` (the stack), `menu.server_rows` (the join menu's server list rows),
+`menu.items[]` (`menu`, `name`, `text` as shown, `visible`, `owner_draw` (its owner-draw number, 0 for none),
+`choice` (a yes/no, multiple-choice or dvar-enum setting), and `rect` `[x, y, w, h]` in window pixels, the rectangle a
+click is tested against: a static text item's is its text's),
 `console.open` and `console.text` (the console's lines as one text, for `contains`), `player.alive|dead|origin|angles|
 team|client|snapshot|teleport`, `entities.list[]` (`kind`, `origin`, `team`, `dead`, `client`, `actor`, `model`,
 `model_name`), `watch` (`first`, `last`, `received`, `present`, `matched`, `breaks`), `hud.report` (what the HUD shows
@@ -152,8 +154,9 @@ ownerdraw differences.
 `crates/harness/src/control.rs` is the harness's side: `Driven` starts a client with `--control 0`, asks, waits,
 presses binds and keys, types, clicks a menu item by name or text where the state document put it, and captures;
 `Walker` is a stage's own player in a match, turning toward the nearest living enemy with the mouse (or the arrow
-keys when the pointer could not be locked), walking with the forward key and firing with the attack button. The
-match stages move onto it one by one (#376): `client-hud` plays its whole match through the channel.
+keys when the pointer could not be locked), walking with the forward key and firing with the attack button. No stage
+uses the removed `--ui-script` runner any more (#376); the dev hooks the driven stages still use set up what no key
+or menu of the player's reaches, and each is followed by a check of what the player sees.
 
 Mouse look needs what a person's does: the window focused and the pointer locked (`client.focused`,
 `client.pointer_locked`, and `client.look_gate` names what drops the motion). A headless wlroots backend supplies
