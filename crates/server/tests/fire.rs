@@ -617,14 +617,21 @@ fn the_knife_reaches_a_short_way() {
 
 /// Runs `g` in 5 ms frames until entity `n` is gone; returns the level time then and the
 /// heights it flew at.
+/// The missile went off: freed, or held for the damage callbacks its blast queued (`Game::free_after_calls`).
+fn exploded(g: &Game, n: u16) -> bool {
+    g.ent(n).is_none() || g.free_after_calls.contains(&n)
+}
+
 fn fly(g: &mut Game, vm: &mut Vm, n: u16, from: i32, to: i32) -> (Option<i32>, Vec<f32>) {
     let mut heights = Vec::new();
     for t in (from..to).step_by(5) {
         g.level.time = t;
         g.run_entity(vm, n);
-        match g.ent(n) {
-            Some(e) => heights.push(e.origin[2]),
-            None => return (Some(t), heights),
+        if exploded(g, n) {
+            return (Some(t), heights);
+        }
+        if let Some(e) = g.ent(n) {
+            heights.push(e.origin[2]);
         }
     }
     (None, heights)
@@ -710,7 +717,7 @@ fn c4_sticks_where_it_lands_and_waits_to_be_detonated() {
     assert!(g.calls.is_empty());
     // `detonate` sets it off; the player in the radius is hurt.
     g.detonate_missile(&mut vm, c4);
-    assert!(g.ent(c4).is_none());
+    assert!(exploded(&g, c4));
     assert!(!damage_calls(&g, victim).is_empty());
 }
 
