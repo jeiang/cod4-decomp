@@ -97,9 +97,14 @@ struct Env {
     host: TestHost,
 }
 
+/// Compiled as with `developer_script` on: the scripts log through the developer-only `println`.
 fn program(src: &str) -> Program {
-    compile(&[("a.gsc", src)], &Builtins::stock_mp(), Options::default())
-        .unwrap_or_else(|e| panic!("{e:?}"))
+    compile(
+        &[("a.gsc", src)],
+        &Builtins::stock_mp(),
+        Options { developer: true },
+    )
+    .unwrap_or_else(|e| panic!("{e:?}"))
 }
 
 fn env_of(p: Program) -> Env {

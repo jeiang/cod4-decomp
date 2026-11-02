@@ -25,6 +25,9 @@ pub struct Config {
     pub cheats: bool,
 }
 
+/// No listen server, so no debug drawings.
+pub fn with_debug_draw(_f: impl FnOnce(&server::debugdraw::DebugDraw)) {}
+
 /// No listen server console to queue `_line` for.
 pub fn send(_line: &str) {}
 

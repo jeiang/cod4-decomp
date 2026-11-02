@@ -11,6 +11,7 @@
 //! the feed windows and the centre string through their own items), the foreground elements, then the scoreboard
 //! rows.
 
+pub mod debug;
 mod elems;
 mod feed;
 pub mod fill;
@@ -390,6 +391,10 @@ pub struct Stats {
     /// reticle stayed white (`cg_crosshairEnemyColor 0`, or a weapon without `crosshairColorChange`).
     pub crosshair_enemy_due_frames: u32,
     pub crosshair_enemy_due_white_frames: u32,
+    /// The listen server's `line`/`print3d` drawings that reached the screen in the last painted frame (0 out of a
+    /// match).
+    pub debug_lines: usize,
+    pub debug_strings: usize,
     /// The elements of the busiest frame, as the screen got them.
     sample: Vec<Value>,
 }
@@ -541,6 +546,8 @@ impl Stats {
             "crosshair_team_tints": self.crosshair_team_tints.map(tint_text),
             "crosshair_enemy_due_frames": self.crosshair_enemy_due_frames,
             "crosshair_enemy_due_white_frames": self.crosshair_enemy_due_white_frames,
+            "debug_lines": self.debug_lines,
+            "debug_strings": self.debug_strings,
             "sample": self.sample,
         })
     }

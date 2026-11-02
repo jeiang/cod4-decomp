@@ -11,6 +11,7 @@ use crate::game::{self, Game};
 
 mod args;
 mod combat;
+pub mod dev;
 mod ent;
 pub(crate) use ent::{entity_contact, expand_bounds_to_width, hint_value};
 mod funcs;
@@ -67,6 +68,7 @@ impl Dispatch {
                 prog.builtins.function_names(),
                 &[
                     funcs::TABLE,
+                    dev::FUNCS,
                     ent::FUNCS,
                     misc::FUNCS,
                     weapons::FUNCS,
@@ -109,19 +111,6 @@ impl Dispatch {
         });
         f.chain(m).collect()
     }
-}
-
-/// Every logged no-op in the tables, with its milestone.
-pub fn later_tables() -> Vec<(&'static str, &'static str)> {
-    let f = funcs::TABLE.iter().filter_map(|(n, i)| match i {
-        Impl::Later(m) => Some((*n, *m)),
-        Impl::Real(_) => None,
-    });
-    let m = methods::TABLE.iter().filter_map(|(n, i)| match i {
-        Impl::Later(m) => Some((*n, *m)),
-        Impl::Real(_) => None,
-    });
-    f.chain(m).collect()
 }
 
 /// What the VM calls back into: the game state plus the resolved builtin tables.

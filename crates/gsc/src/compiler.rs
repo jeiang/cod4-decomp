@@ -128,6 +128,10 @@ pub fn compile(
                 loops: Vec::new(),
                 animtree: f.animtree.as_ref(),
                 line: f.line,
+                // A function defined inside a top-level `/# ... #/` is developer code throughout.
+                in_dev: f.dev,
+                stmt_call: false,
+                dropped: false,
             };
             match fc.function(f) {
                 Ok(()) => functions.push(Code {
@@ -218,6 +222,12 @@ struct FnCompiler<'a> {
     loops: Vec<LoopCtx>,
     animtree: Option<&'a Name>,
     line: u32,
+    /// Inside a `/# ... #/` block (`developer_statement`).
+    in_dev: bool,
+    /// The call being compiled is a whole expression statement, its value unused.
+    stmt_call: bool,
+    /// The statement's developer-only builtin call was dropped: there is no value to pop.
+    dropped: bool,
 }
 
 impl FnCompiler<'_> {
@@ -383,12 +393,18 @@ impl FnCompiler<'_> {
             StmtKind::Block(v) => self.stmts(v)?,
             StmtKind::Dev(v) => {
                 if self.opts.developer {
-                    self.stmts(v)?;
+                    let outer = std::mem::replace(&mut self.in_dev, true);
+                    let r = self.stmts(v);
+                    self.in_dev = outer;
+                    r?;
                 }
             }
             StmtKind::Expr(e) => {
+                self.stmt_call = matches!(e.kind, ExprKind::Call(_));
                 self.expr(e)?;
-                self.emit(Op::Pop);
+                if !std::mem::take(&mut self.dropped) {
+                    self.emit(Op::Pop);
+                }
             }
             StmtKind::Assign { target, op, value } => {
                 self.assign(target, *op, |c| c.expr(value))?;
@@ -780,6 +796,7 @@ impl FnCompiler<'_> {
 
     fn call(&mut self, c: &Call) -> Result<()> {
         self.line = c.line;
+        let statement = std::mem::take(&mut self.stmt_call);
         let argc = self.count(c.args.len())?;
         let mut flags = match c.mode {
             CallMode::Call => 0,
@@ -800,7 +817,7 @@ impl FnCompiler<'_> {
                     };
                 match self.lookup(self.file, n) {
                     Some(id) if !builtin => Some(id),
-                    _ => return self.builtin_call(c, n, argc),
+                    _ => return self.builtin_call(c, n, argc, statement),
                 }
             }
             Callee::Path { file, name } => Some(self.resolve(Some(&canonical_file(file)), name)?),
@@ -833,7 +850,7 @@ impl FnCompiler<'_> {
         Ok(())
     }
 
-    fn builtin_call(&mut self, c: &Call, name: &str, argc: u8) -> Result<()> {
+    fn builtin_call(&mut self, c: &Call, name: &str, argc: u8, statement: bool) -> Result<()> {
         if c.mode != CallMode::Call {
             return self.err(
                 ErrorKind::Semantic,
@@ -855,8 +872,32 @@ impl FnCompiler<'_> {
                 format!("unknown {what} `{name}`"),
             );
         };
-        for a in c.args.iter().rev() {
-            self.expr(a)?;
+        // A developer-only builtin outside `/# ... #/` is a developer statement of its own: its value cannot be
+        // used, and without `developer_script` it is compiled (so its errors show) and then discarded
+        // (`Scr_BeginDevScript`/`Scr_EndDevScript`, KisakCOD `script/scr_compiler.cpp:468-563,871-891,1000-1022`).
+        let dev = !self.in_dev
+            && match c.object {
+                None => self.builtins.is_developer(idx),
+                Some(_) => self.builtins.is_developer_method(idx),
+            };
+        if dev && !statement {
+            return self.err(
+                ErrorKind::Semantic,
+                "return value of developer command can not be accessed if not in a /# ... #/ comment",
+            );
+        }
+        let discard = dev && !self.opts.developer;
+        let (code_len, lines_len) = (self.code.len(), self.lines.len());
+        let outer = self.in_dev;
+        self.in_dev = outer || dev;
+        let r = c.args.iter().rev().try_for_each(|a| self.expr(a));
+        self.in_dev = outer;
+        r?;
+        if discard {
+            self.code.truncate(code_len);
+            self.lines.truncate(lines_len);
+            self.dropped = true;
+            return Ok(());
         }
         if let Some(o) = &c.object {
             self.expr(o)?;

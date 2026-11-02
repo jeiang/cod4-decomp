@@ -7,6 +7,9 @@
 //! map with its IWD, and a hardcore one. Each answer must start with the challenge, carry only `SVC_Info`'s keys in its
 //! order, and give `hw` (2 dedicated, 6 listen), `pure` (only with `sv_pure`), `mod` (unless pure with only `main`'s
 //! stock IWDs) and `hc` (`scr_hardcore` when set) as the original does.
+//! Then one more dedicated server checks the stock dvar registrations (#398) as a monitor and an operator see them:
+//! `getstatus` carries `fs_game` and `sv_floodProtect`, and rcon `set` is held to each dvar's type, range and cheat
+//! protection.
 use crate::stage::{StageCtx, StageReport, Status};
 use net::oob::Oob;
 use net::{Transport, UdpTransport};
@@ -206,6 +209,112 @@ fn run_case(c: &Case) -> Result<Vec<(String, String)>, String> {
     ask(&mut s)
 }
 
+/// The rcon password the stock dvar case sets.
+const RCON: &str = "netinfo";
+
+/// Sends `cmd` over rcon and serves the server long enough for it to run and answer (and past rcon's 500 ms
+/// spacing), returning what it printed back.
+fn rcon(s: &mut Server, t: &mut UdpTransport, to: SocketAddr, cmd: &str) -> String {
+    let p = Oob::Rcon {
+        password: RCON.into(),
+        command: cmd.into(),
+    };
+    t.send_to(to, &p.encode());
+    let mut out = String::new();
+    let mut buf = vec![0u8; 4096];
+    let end = Instant::now() + Duration::from_millis(700);
+    while Instant::now() < end {
+        s.run_for(Duration::from_millis(30));
+        while let Ok(Some((n, _))) = t.recv_from(&mut buf, None) {
+            if let Some(Oob::Print(text)) = Oob::parse(&buf[..n]) {
+                out.push_str(&text);
+            }
+        }
+    }
+    out
+}
+
+/// The stock dvar registrations as a monitor and an operator see them (#398): `getstatus` carries `fs_game` and
+/// `sv_floodProtect` (SERVERINFO in the 1.7 binary), and over rcon `set sv_reconnectlimit 60` is taken (Int
+/// 0..1800), `set sv_voice 7` is stored as the Bool 1, and `set g_mantleBlockTimeBuffer 0` with `sv_cheats 0` (a
+/// `map` start) is refused with the stock "is cheat protected." line (KisakCOD `universal/dvar.cpp`).
+fn stock_dvars(install: &Path) -> Result<String, String> {
+    let mut s = Server::boot(
+        install,
+        &set(&[("net_port", "0"), ("rcon_password", RCON)]),
+        false,
+    )?;
+    s.exec_line("map mp_crash")
+        .map_err(|e| format!("map mp_crash: {e}"))?;
+    let port = s.net_addr().ok_or("the server has no UDP socket")?.port();
+    let to = SocketAddr::from(([127, 0, 0, 1], port));
+    let mut t =
+        UdpTransport::bind(SocketAddr::from(([127, 0, 0, 1], 0))).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; 4096];
+    let end = Instant::now() + ASK_LIMIT;
+    let mut next = Instant::now();
+    let mut status = None;
+    while status.is_none() && Instant::now() < end {
+        if Instant::now() >= next {
+            t.send_to(to, &Oob::GetStatus(CHALLENGE).encode());
+            next = Instant::now() + Duration::from_millis(500);
+        }
+        s.run_for(Duration::from_millis(30));
+        while let Ok(Some((n, from))) = t.recv_from(&mut buf, None) {
+            if from.port() == port
+                && let Some(Oob::StatusResponse { info, .. }) = Oob::parse(&buf[..n])
+            {
+                status = Some(info);
+            }
+        }
+    }
+    let info = status.ok_or_else(|| format!("no statusResponse within {ASK_LIMIT:?}"))?;
+    for key in ["fs_game", "sv_floodProtect"] {
+        if !info.iter().any(|(k, _)| k == key) {
+            return Err(format!("getstatus has no {key}: {}", show(&info)));
+        }
+    }
+    let value = |s: &Server, n: &str| s.game.cvars.string(n).to_owned();
+    if value(&s, "sv_cheats") != "0" {
+        return Err(format!(
+            "sv_cheats is {:?} after map",
+            value(&s, "sv_cheats")
+        ));
+    }
+    let said = rcon(&mut s, &mut t, to, "set sv_reconnectlimit 60");
+    if value(&s, "sv_reconnectlimit") != "60" {
+        return Err(format!(
+            "rcon set sv_reconnectlimit 60 left {:?} ({said:?})",
+            value(&s, "sv_reconnectlimit")
+        ));
+    }
+    let said = rcon(&mut s, &mut t, to, "set sv_voice 7");
+    if value(&s, "sv_voice") != "1" {
+        return Err(format!(
+            "rcon set sv_voice 7 stored {:?}, want the Bool 1 ({said:?})",
+            value(&s, "sv_voice")
+        ));
+    }
+    let said = rcon(&mut s, &mut t, to, "set g_mantleBlockTimeBuffer 0");
+    if !said.contains("g_mantleBlockTimeBuffer is cheat protected.") {
+        return Err(format!("set g_mantleBlockTimeBuffer 0 answered {said:?}"));
+    }
+    if value(&s, "g_mantleBlockTimeBuffer") != "500" {
+        return Err(format!(
+            "the refused set changed g_mantleBlockTimeBuffer to {:?}",
+            value(&s, "g_mantleBlockTimeBuffer")
+        ));
+    }
+    Ok(format!(
+        "stock dvars: getstatus fs_game={:?} sv_floodProtect={:?}; rcon sv_reconnectlimit 60, sv_voice 7 -> 1, {}",
+        info.iter().find(|(k, _)| k == "fs_game").map(|(_, v)| v),
+        info.iter()
+            .find(|(k, _)| k == "sv_floodProtect")
+            .map(|(_, v)| v),
+        said.trim()
+    ))
+}
+
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(install) = ctx.install.as_deref() else {
         return Ok(StageReport::new(NAME, Status::Skipped).with_reason("install not found"));
@@ -303,6 +412,10 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             },
             Err(e) => failures.push(format!("{}: {e}", c.what)),
         }
+    }
+    match stock_dvars(install) {
+        Ok(note) => notes.push(note),
+        Err(e) => failures.push(format!("stock dvars: {e}")),
     }
     let mut r = if failures.is_empty() {
         StageReport::new(NAME, Status::Passed)

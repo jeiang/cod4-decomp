@@ -187,7 +187,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "net-info",
-        description: "the getinfo answer of a pure, an impure, a listen, a modded, an extra-IWD, a custom-map and a hardcore server asked over UDP: challenge first, only the original's keys in its order, and its hw, pure, mod and hc values",
+        description: "the getinfo answer of a pure, an impure, a listen, a modded, an extra-IWD, a custom-map and a hardcore server asked over UDP: challenge first, only the original's keys in its order, and its hw, pure, mod and hc values; then getstatus carries fs_game and sv_floodProtect, and rcon sets follow the stock dvar types and cheat protection",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
@@ -240,6 +240,14 @@ pub static STAGES: &[StageDef] = &[
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::net_ui::run),
+    },
+    StageDef {
+        name: "script-builtins",
+        description: "a check script runs on a live stock level and the developer-only builtins (print channels, asserts, line/print3d) and the late-precache errors must give the stock results; a listen client must draw the line/print3d its server's script ran (hud.stats.debug_lines/debug_strings)",
+        needs_install: false,
+        timeout: Duration::from_secs(10 * MINUTES),
+        default: true,
+        kind: Kind::Builtin(crate::stages::script_builtins::run),
     },
     StageDef {
         name: "net-killcam",

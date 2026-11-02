@@ -69,7 +69,8 @@ click is tested against: a static text item's is its text's),
 team|client|snapshot|teleport`, `entities.list[]` (`kind`, `origin`, `team`, `dead`, `client`, `actor`, `model`,
 `model_name`), `watch` (`first`, `last`, `received`, `present`, `matched`, `breaks`), `hud.report` (what the HUD shows
 now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `hud.stats` (what it drew over the run:
-`messages`, `chat`, `window_lines`, `scoreboard_frames`, `killcam_frames`, `names_max`, `unresolved`, ...),
+`messages`, `chat`, `window_lines`, `scoreboard_frames`, `killcam_frames`, `names_max`, `unresolved`, `debug_lines`
+and `debug_strings` (the listen server's `line`/`print3d` drawings on screen last frame), ...),
 `hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
 `net.spawned` with `net.levels` (the levels the client has begun: each map load and each `map_restart`'s new game
 state) and `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
