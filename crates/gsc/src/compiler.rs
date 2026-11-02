@@ -128,7 +128,8 @@ pub fn compile(
                 loops: Vec::new(),
                 animtree: f.animtree.as_ref(),
                 line: f.line,
-                in_dev: false,
+                // A function defined inside a top-level `/# ... #/` is developer code throughout.
+                in_dev: f.dev,
                 stmt_call: false,
                 dropped: false,
             };

@@ -405,6 +405,8 @@ fn register_core_dvars(c: &mut Cvars) {
         ("developer", "0", 0),
         ("log_filter", "", 0),
         ("developer_script", "0", 0),
+        // "Turn off script debugging info" (KisakCOD `game_mp/g_main_mp.cpp:624`): silences `print`/`println`.
+        ("g_no_script_spam", "0", 0),
         // The stock server runs 20; this one deliberately keeps 30 (README: the game runs at 30 Hz).
         ("sv_fps", "30", 0),
         ("sv_maxclients", "32", ARCHIVE | SERVERINFO | LATCH),
@@ -624,6 +626,17 @@ fn warn_unhonoured_dvars(c: &Cvars) {
             "g_banIPs",
             dvar = "g_banIPs",
             "IP list not enforced, as in the stock game; addip/removeip/listip are not implemented (banUser/banClient ban)"
+        );
+    }
+    if c.bool("g_smoothClients") {
+        // With it on, the stock game builds a player's entity state with `G_PlayerStateToEntityStateExtrapolate`
+        // (KisakCOD `game_mp/g_active_mp.cpp:716,1227`), so other clients extrapolate it between snapshots.
+        logging::dedup!(
+            WARN,
+            "g_smoothClients",
+            dvar = "g_smoothClients",
+            issue = 514,
+            "player entity states are not extrapolated between snapshots"
         );
     }
 }
@@ -3099,6 +3112,8 @@ impl Server {
         self.game.level.frametime = self.frame_ms;
         self.game.level.time = self.svs_time;
         self.game.publish_info(false);
+        // `FlushDebugLines`/`FlushDebugStrings`: last frame's `line`/`print3d` drawings age before this frame adds more.
+        self.game.debug_draw.flush();
         // `G_SetClientSound` sets a player's loop afresh every frame: a script's `playloopsound` on one does not stay.
         for e in self.game.ents.iter_mut().flatten() {
             if e.kind == crate::game::EntKind::Client {
@@ -3275,6 +3290,8 @@ impl Server {
             self.game.level.map_restart_requested = false;
             self.cbuf.add_text("fast_restart");
         }
+        // `CL_UpdateDebugServerData`: what a listen server's own client draws until the next frame.
+        self.game.debug_draw.publish();
         let total = t0.elapsed();
         let s = TickSample {
             total_ms: total.as_secs_f64() * 1000.0,
@@ -4116,8 +4133,11 @@ mod tests {
         assert_eq!(c.string("g_motd"), "");
         assert!(c.bool("g_smoothClients") && c.bool("sv_botsPressAttackBtn"));
         assert_eq!(c.int("sv_paused"), 0);
+        // The stock default turns on the extrapolation this server lacks (#514), said once per process (an earlier
+        // test's level start may have said it already); nothing else warns.
         let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));
-        assert!(events.is_empty(), "the defaults warn about nothing");
+        let dvars: Vec<_> = events.iter().filter_map(|e| e.field("dvar")).collect();
+        assert!(dvars.iter().all(|d| *d == "g_smoothClients"), "{dvars:?}");
         c.set("g_motd", "logtest motd");
         c.set("g_banIPs", "10.0.0.1 ");
         let (_, events) = logging::capture(|| super::warn_unhonoured_dvars(&c));

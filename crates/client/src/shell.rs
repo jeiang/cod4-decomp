@@ -1297,6 +1297,12 @@ impl Shell {
                 cache: &mut self.cache,
                 images: &mut self.images,
             };
+            // `RB_DrawDebug`: part of the world view, so drawn whatever `cg_draw2D` says.
+            if self.st.in_game {
+                crate::listen::with_debug_draw(|d| {
+                    hud::debug::draw(&self.ui, &mut p, &self.st.live, d)
+                });
+            }
             // `CG_Draw2D`: with `cg_draw2D` off none of the match's 2D is drawn; the open menus still are.
             let hud_on = self.st.in_game && self.st.draw_2d;
             if hud_on {

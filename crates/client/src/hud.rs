@@ -11,6 +11,7 @@
 //! the feed windows and the centre string through their own items), the foreground elements, then the scoreboard
 //! rows.
 
+pub mod debug;
 mod elems;
 mod feed;
 pub mod fill;

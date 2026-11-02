@@ -35,14 +35,6 @@ pub const FUNCS: &[(&str, Impl<FuncFn>)] = &[
         "getassignedteam",
         f(|_, _, a| a.entity(0).map(|_| Value::Int(0))),
     ),
-    // The script file functions exist only in developer builds of the original; a release
-    // build answers every call with the failure value.
-    ("openfile", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("closefile", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("fprintln", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("fprintfields", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("freadln", f(|_, _, _| Ok(Value::Int(-1)))),
-    ("fgetarg", f(|_, _, _| Ok(Value::str("")))),
     ("quitlobby", Later(M5)),
     ("quitparty", Later(M5)),
     ("startparty", Later(M5)),

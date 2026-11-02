@@ -24,6 +24,8 @@ pub struct Function {
     pub line: u32,
     /// The `#using_animtree` in force where the function was defined.
     pub animtree: Option<Name>,
+    /// Defined inside a top-level `/# ... #/`: developer code, where developer-only builtins return values.
+    pub dev: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

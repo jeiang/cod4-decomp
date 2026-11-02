@@ -55,16 +55,6 @@ pub const TABLE: &[(&str, Impl<FuncFn>)] = &[
             Ok(Value::Undefined)
         }),
     ),
-    // developer-only in the original: no-ops unless `developer` is set
-    ("assert", r(assert)),
-    ("assertex", r(assert)),
-    ("assertmsg", r(assert_msg)),
-    ("print", r(|g, _, a| dev_print(g, a, false))),
-    ("println", r(|g, _, a| dev_print(g, a, true))),
-    ("print3d", r(|_, _, _| Ok(Value::Undefined))),
-    ("line", r(|_, _, _| Ok(Value::Undefined))),
-    ("createprintchannel", r(|_, _, _| Ok(Value::Undefined))),
-    ("setprintchannel", r(|_, _, _| Ok(Value::Undefined))),
     ("logstring", r(log_string)),
     ("logprint", r(log_print)),
     ("iprintln", r(uicmd::level_print)),
@@ -591,45 +581,6 @@ fn get_array_keys(_: &mut Game, _: &mut Vm, a: Args) -> R {
         out.set(Key::Int(i as i32), v);
     }
     Ok(Value::Array(Rc::new(out)))
-}
-
-fn developer(g: &Game) -> bool {
-    g.cvars.int("developer") > 0
-}
-
-fn assert(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    if developer(g) && !truthy(a.get(0)?) {
-        let msg = a.opt(1).map(display).unwrap_or_default();
-        return Err(format!("assert fail: {msg}"));
-    }
-    Ok(Value::Undefined)
-}
-
-fn assert_msg(g: &mut Game, _: &mut Vm, a: Args) -> R {
-    if developer(g) {
-        return Err(format!("assert fail: {}", a.display(0)?));
-    }
-    Ok(Value::Undefined)
-}
-
-fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Undefined => false,
-        Value::Int(n) => *n != 0,
-        Value::Float(x) => *x != 0.0,
-        _ => true,
-    }
-}
-
-fn dev_print(g: &mut Game, a: Args, newline: bool) -> R {
-    if developer(g) {
-        let mut s: String = a.v.iter().map(display).collect();
-        if newline {
-            s.push('\n');
-        }
-        g.print(s);
-    }
-    Ok(Value::Undefined)
 }
 
 /// `logString(text)`: the game log line; the stage counters read the bomb events from it.

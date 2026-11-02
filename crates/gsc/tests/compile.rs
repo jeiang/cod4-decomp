@@ -198,6 +198,12 @@ fn developer_builtins_are_developer_statements() {
     )
     .unwrap();
     assert!(dis(&p, "f").contains(&call("getentbynum", 1)));
+    // So is every call in a function defined inside a top-level developer block, whatever `developer_script` says.
+    let src = "/#\nf() { h = openfile(\"x\", \"read\"); return h; }\n#/\ng() {}";
+    for opts in [Options::default(), Options { developer: true }] {
+        let p = compile(&[("a.gsc", src)], &b, opts).unwrap();
+        assert!(dis(&p, "f").contains(&call("openfile", 2)));
+    }
     // An error inside a dropped call's arguments is still reported.
     let e = err(&[("a.gsc", "f() { println(nosuchthing()); }")]);
     assert_eq!(e.kind, ErrorKind::UnknownFunction);
