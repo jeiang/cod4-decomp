@@ -380,6 +380,10 @@ struct Counters {
     /// The most other players drawn in one frame, and why the others could not be built (a model or animation the
     /// zones lack): a player the snapshot has but the picture does not.
     max_players_drawn: usize,
+    /// Every client announced and every client actually drawn, so deaths and joins at different frames cannot make
+    /// the per-frame maxima disagree for a player who was drawn.
+    players_seen: std::collections::BTreeSet<u16>,
+    players_drawn: std::collections::BTreeSet<u16>,
     player_faults: std::collections::BTreeSet<String>,
     /// Names of the torso clips (`pt_*`) seen playing on other players: fire, reload, melee, throw, pullout, flinch.
     torso_clips: std::collections::BTreeSet<&'static str>,
@@ -2807,6 +2811,7 @@ impl NetPlay {
         let mut guns = HashMap::new();
         for e in ents.iter().filter(|e| e.etype == etype::PLAYER) {
             players += 1;
+            self.c.players_seen.insert(e.client);
             let def = self
                 .weapons
                 .get(e.weapon)
@@ -2983,6 +2988,7 @@ impl NetPlay {
                 .script_model_tags(e.number, &instances, &self.lib.content);
             if e.client != own || show_own {
                 drawn += 1;
+                self.c.players_drawn.insert(e.client);
                 out.extend(instances);
             }
         }
@@ -3022,6 +3028,7 @@ impl NetPlay {
             "predictions": self.c.predictions,
             "prediction_corrections": self.pred.corrections,
             "players_seen_max": self.c.max_players_seen,
+            "players_seen": self.c.players_seen,
             "moved": moved,
             "path": self.c.path,
             "attack_cmds": self.c.shots,
@@ -3138,6 +3145,7 @@ impl NetPlay {
         report["damage_flash_max"] = json!(self.c.max_damage_flash);
         report["damage_wedges_max"] = json!(self.c.max_damage_wedges);
         report["players_drawn_max"] = self.c.max_players_drawn.into();
+        report["players_drawn"] = json!(self.c.players_drawn);
         report["player_faults"] = json!(self.c.player_faults);
         report["torso_clips"] = json!(self.c.torso_clips);
         report["remote_weapon_frames"] = self.c.remote_weapon_frames.into();
