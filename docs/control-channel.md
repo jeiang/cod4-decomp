@@ -60,7 +60,8 @@ the GPU to outpace the server. It neither injects usercmds nor changes their sel
 without polling new traffic to check retained input. Ordinary listen-server scheduling is unchanged outside
 this explicit request.
 
-Paths a stage leans on: `menu.open` (the stack), `menu.server_rows` (the join menu's server list rows),
+Paths a stage leans on: `menu.open` (the stack), `menu.server_rows` (the join menu's server list rows, counted from
+the answers already in without polling the network, so reading it changes nothing),
 `menu.items[]` (`menu`, `name`, `text` as shown, `visible`, `owner_draw` (its owner-draw number, 0 for none),
 `choice` (a yes/no, multiple-choice or dvar-enum setting), and `rect` `[x, y, w, h]` in window pixels, the rectangle a
 click is tested against: a static text item's is its text's),
@@ -70,7 +71,8 @@ team|client|snapshot|teleport`, `entities.list[]` (`kind`, `origin`, `team`, `de
 now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `hud.stats` (what it drew over the run:
 `messages`, `chat`, `window_lines`, `scoreboard_frames`, `killcam_frames`, `names_max`, `unresolved`, ...),
 `hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
-`net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
+`net.spawned` with `net.levels` (the levels the client has begun: each map load and each `map_restart`'s new game
+state) and `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
 `night`, `goggles`, `night_vision`, `channel`, `blend` with `ms`, `missing`, `applied`, the last goggles `switch`).
 
 `client.gpu_health` is what the graphics device went through (`device_losses`, `errors`) and `client.load` what the

@@ -167,6 +167,7 @@ fn connection(st: &NetPlay) -> Value {
     json!({
         "connected": st.net.connected(),
         "spawned": st.c.spawned,
+        "levels": st.c.levels,
         "refused": st.refused(),
         "dropped": st.dropped(),
         "packets_in": s.map(|s| s.packets_in),

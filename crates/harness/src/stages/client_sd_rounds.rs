@@ -150,6 +150,24 @@ fn next_level(c: &mut Driven, previous: u64) -> Result<(String, u64), String> {
     }
 }
 
+/// The levels the client has begun (`net.levels`: map loads and `map_restart` game states).
+fn client_levels(c: &mut Driven) -> Result<u64, String> {
+    c.lookup("net.levels")?
+        .as_u64()
+        .ok_or_else(|| "the client reports no net.levels".into())
+}
+
+/// Waits until the client itself has begun a level after `before`: the server's count moving says the restart was
+/// sent, this says the client took it, so the spawn and menu checks that follow are of the new round, not the old.
+fn client_level_after(c: &mut Driven, before: u64, round: &str) -> Result<u64, String> {
+    c.until(
+        json!({"net.levels": {"gt": before}}),
+        Duration::from_secs(60),
+        &format!("the client never began round {round} (net.levels stayed {before})"),
+    )?;
+    client_levels(c)
+}
+
 fn end_scoreboard(c: &mut Driven) -> Result<(), String> {
     c.until(
         json!({"hud.intermission": true, "menu.open": {"contains": "scoreboard"},
@@ -180,6 +198,7 @@ fn play(c: &mut Driven) -> Result<(u64, String, String, String), String> {
     let team = c.step("team=save", own_team)?;
     let first = c.step("cvar=save cg_objectiveText", objective)?;
     let (map, mut loads) = server_map(c)?;
+    let mut levels = client_levels(c)?;
     c.pause(Duration::from_secs(2))?;
     c.capture("round1")?;
 
@@ -190,13 +209,14 @@ fn play(c: &mut Driven) -> Result<(u64, String, String, String), String> {
         }
         Ok(new_loads)
     })?;
-    c.step("ingame=120", |c| {
+    levels = c.step("ingame=120", |c| {
+        let now = client_level_after(c, levels, "two")?;
         c.until(
             json!({"net.spawned": true, "player.alive": true}),
             Duration::from_secs(120),
             "the player did not spawn in round two",
         )?;
-        Ok(())
+        Ok(now)
     })?;
     c.step("nomenu=5", |c| {
         c.until(
@@ -221,6 +241,7 @@ fn play(c: &mut Driven) -> Result<(u64, String, String, String), String> {
         Ok(())
     })?;
     c.step("ingame=120", |c| {
+        client_level_after(c, levels, "three")?;
         c.until(
             json!({"net.spawned": true, "player.alive": true}),
             Duration::from_secs(120),

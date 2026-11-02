@@ -4844,7 +4844,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
 
 /// The menus on the stack, the item that has the focus, every item of each open menu with the rectangle a click
 /// is tested against, the setting it shows, its owner-draw id and whether it is only decoration, the build number
-/// drawn last frame, and the rows the join menu's server list (feeder 2) shows now.
+/// drawn last frame, and the rows the join menu's server list (feeder 2) shows now. Reading it has no side effect:
+/// the server rows are counted from what the network has already brought, without polling it.
 fn menu_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
@@ -4870,7 +4871,7 @@ fn menu_state(st: &mut State) -> Value {
             }));
         }
     }
-    let server_rows = sh.feeder_rows(&mut st.input, 2);
+    let server_rows = sh.server_rows_shown(&mut st.input);
     json!({"open": open, "focused": focused, "items": items, "build": sh.ui.build_drawn,
         "server_rows": server_rows})
 }

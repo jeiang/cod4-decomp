@@ -1393,9 +1393,10 @@ impl Shell {
         &self.ui2d.missing
     }
 
-    /// How many rows the list of `feeder` shows now.
-    pub fn feeder_rows(&mut self, input: &mut Input, feeder: i32) -> usize {
-        Self::host(&mut self.st, input).feeder_count(feeder)
+    /// How many rows the Join Game server list (feeder 2) shows now, from the answers already taken in: unlike the
+    /// list's own `feeder_count` it does not poll the network, so a read changes nothing.
+    pub fn server_rows_shown(&mut self, input: &mut Input) -> usize {
+        Self::host(&mut self.st, input).server_rows().len()
     }
 
     pub fn drain_actions(&mut self) -> Vec<Action> {

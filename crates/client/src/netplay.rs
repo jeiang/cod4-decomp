@@ -394,6 +394,9 @@ struct Counters {
     /// Frames in which another player was reloading, swinging the knife or throwing a grenade: weapon handling that
     /// always has a torso clip, so a run with some must have shown one.
     remote_weapon_frames: u64,
+    /// Levels this client has begun (a map load or a `map_restart`'s new game state), each one through
+    /// [`NetPlay::new_level`]: a harness waits on it to see a round restart reach the client.
+    levels: u64,
     spawned: bool,
     start: Option<[f32; 3]>,
     end: [f32; 3],
@@ -976,6 +979,7 @@ impl NetPlay {
         self.fog.reset();
         self.scan = crate::hud::NameScan::default();
         self.c.spawned = false;
+        self.c.levels += 1;
         self.c.start = None;
         Ok(())
     }

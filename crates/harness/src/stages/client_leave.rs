@@ -152,7 +152,7 @@ fn channel_gone(e: &str) -> bool {
 }
 
 /// Clicks Quit and confirms it. The confirmation ends the client, so its channel closing during that click is the
-/// expected outcome; the caller still requires the process to exit with status 0.
+/// expected outcome; the caller then waits for the process to exit on its own, with status 0.
 fn quit(c: &mut Driven) -> Result<(), String> {
     c.step("click=Quit", |c| {
         c.click("Quit")?;
@@ -198,8 +198,15 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         None
     };
     let steps = c.steps.clone();
-    let status = c.finish(Duration::from_secs(30));
-    let exited = quit.as_ref().is_some_and(|r| r.is_ok()) && status.is_some_and(|s| s.success());
+    // A confirmed Quit must end the process by itself: nothing more is sent to it. Any other run is ended by the
+    // channel's `quit`, and does not count as Quit reaching the exit.
+    let confirmed = quit.as_ref().is_some_and(|r| r.is_ok());
+    let status = if confirmed {
+        c.wait_exit(Duration::from_secs(30))
+    } else {
+        c.finish(Duration::from_secs(30))
+    };
+    let exited = confirmed && status.is_some_and(|s| s.success());
     out.files.push("control/control-run.json".into());
     for f in ["ingame", "home"] {
         if dir.join(format!("{f}.png")).is_file() {
