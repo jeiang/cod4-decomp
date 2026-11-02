@@ -243,9 +243,9 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "script-builtins",
-        description: "a check script runs on a live stock level and the developer-only builtins (print channels, asserts, line/print3d) and the late-precache errors must give the stock results",
+        description: "a check script runs on a live stock level and the developer-only builtins (print channels, asserts, line/print3d) and the late-precache errors must give the stock results; a listen client must draw the line/print3d its server's script ran (hud.stats.debug_lines/debug_strings)",
         needs_install: false,
-        timeout: Duration::from_secs(5 * MINUTES),
+        timeout: Duration::from_secs(10 * MINUTES),
         default: true,
         kind: Kind::Builtin(crate::stages::script_builtins::run),
     },
