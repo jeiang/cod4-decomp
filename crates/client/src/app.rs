@@ -460,6 +460,9 @@ struct State {
     control_shot: Option<(Option<String>, bool)>,
     /// The capture that was taken, offered to its request on the next pass.
     control_shot_done: Option<Result<Value, String>>,
+    /// When a channel capture began waiting for a frame that copied the scene for a distortion material (`after`
+    /// `distortion`); `None` for a capture of the next frame.
+    control_shot_gate: Option<Instant>,
     /// The channel asked for the run to end (`quit`).
     control_quit: bool,
     /// Numbers the captures the channel takes (`control-<n>.png`).
@@ -758,6 +761,14 @@ impl GpuLog {
     fn report(&mut self, gpu: &Gpu) -> Value {
         self.errors.extend(gpu.take_errors());
         json!({"device_losses": self.losses, "errors": self.errors})
+    }
+
+    /// The `gpu_health` [`GpuLog::report`] would give now, leaving `gpu`'s errors in place: a lost device's own noise
+    /// is still dropped when the loss is recorded after the look.
+    fn view(&self, gpu: &Gpu) -> Value {
+        let mut errors = self.errors.clone();
+        errors.extend(gpu.pending_errors());
+        json!({"device_losses": self.losses, "errors": errors})
     }
 }
 
@@ -1233,6 +1244,7 @@ impl Viewer {
             control_waits: HashMap::new(),
             control_shot: None,
             control_shot_done: None,
+            control_shot_gate: None,
             control_quit: false,
             shot_serial: 0,
             test_light: false,
@@ -2314,11 +2326,14 @@ impl Viewer {
             write_script_report(st, self.cli.out.clone().unwrap_or_default(), false);
             el.exit();
         }
-        // A capture the channel asked for is taken from the frame that was just drawn; its request answers on the
-        // next pass of the channel. In the browser the page reads the canvas, which the present blits to: the
-        // capture follows it.
+        // A capture the channel asked for is taken from the frame that was just drawn (with `after` `distortion`, from
+        // the first one that copied the scene for a distortion material); its request answers on the next pass of the
+        // channel. In the browser the page reads the canvas, which the present blits to: the capture follows it.
+        let control_shot_ready =
+            st.control_shot.is_some() && (st.control_shot_gate.is_none() || st.distortion_now);
         #[cfg(not(target_arch = "wasm32"))]
-        if st.control_shot.is_some() {
+        if control_shot_ready {
+            st.control_shot_gate = None;
             let shot = take_control_shot(&self.cli, st, &frame.texture);
             st.control_shot_done = Some(shot);
         }
@@ -2328,7 +2343,8 @@ impl Viewer {
         st.prev_cost[6] = t_present.duration_since(t_ui).as_secs_f64() * 1000.0;
         st.gpu.queue.present(frame);
         #[cfg(target_arch = "wasm32")]
-        if st.control_shot.is_some() {
+        if control_shot_ready {
+            st.control_shot_gate = None;
             let shot = take_control_shot(st, w, h);
             st.control_shot_done = Some(shot);
         }
@@ -2783,11 +2799,416 @@ fn write_script_report(st: &mut State, out: PathBuf, quit: bool) {
     }
 }
 
-/// One frame of the `--ui-script`; `true` once every step has run.
+/// How long a capture waits for a frame that copied the scene for a distortion material (`shotd=`, and a channel
+/// capture `after` `distortion`).
+const DISTORTION_SHOT_WAIT: Duration = Duration::from_secs(10);
+
+/// The graphics facts of the `gfx` state section, by the names `gfxis=` checks ([`gfx_value`]).
+const GFX_FACTS: &[&str] = &[
+    "aa",
+    "aa_max",
+    "specular",
+    "dof",
+    "blur",
+    "blur_radius",
+    "blur_shape",
+    "glow",
+    "shadows",
+    "aniso",
+    "mipmode",
+    "dlights",
+    "aspect",
+    "fullscreen",
+    "uncapped",
+    "zfeather",
+    "nearfar",
+    "depthhack_near",
+    "outdoor",
+    "sun_tweak",
+    "film_tweak",
+    "glow_tweak",
+    "sun_flare",
+    "sun_fx_position",
+    "water",
+    "picmip",
+    "pace",
+];
+
+/// The cgame facts of the `cgame` state section, by the names `cgis=` checks ([`cgame_value`]).
+const CGAME_FACTS: &[&str] = &[
+    "gun",
+    "hud2d",
+    "fps",
+    "fpstext",
+    "fullbright",
+    "shock",
+    "centertime",
+    "heli_camera",
+    "air_camera",
+    "brightness",
+    "film_sample",
+    "crosshair_alpha",
+    "window_position",
+    "levelfade",
+    "eyebob",
+    "subtitle",
+];
+
+/// A state section of named facts, each as its text, `null` where one is unavailable.
+fn facts(names: &[&str], value: impl Fn(&str) -> Option<String>) -> Value {
+    Value::Object(
+        names
+            .iter()
+            .map(|n| ((*n).to_owned(), value(n).map_or(Value::Null, Value::String)))
+            .collect(),
+    )
+}
+
+/// What the graphics settings came to, by the names of the `gfx` state section and of `gfxis=`: the renderer's and
+/// the surface's own state. `None` where the fact needs a world renderer and none is up.
+fn gfx_value(st: &State, name: &str) -> Option<String> {
+    match name {
+        "aa" => st
+            .renderer
+            .as_ref()
+            .map(|r| r.samples(st.config.format).to_string()),
+        // The most samples the adapter offers for the scene's colour and depth, whatever was asked (`gfxis=aa max`).
+        "aa_max" => {
+            let beyond_spec = st
+                .gpu
+                .device
+                .features()
+                .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
+            let ok = |f: wgpu::TextureFormat, n: u32| {
+                (n <= 4 || beyond_spec)
+                    && st
+                        .gpu
+                        .adapter
+                        .get_texture_format_features(f)
+                        .flags
+                        .sample_count_supported(n)
+            };
+            Some(
+                [16u32, 8, 4, 2]
+                    .into_iter()
+                    .find(|&n| ok(st.config.format, n) && ok(wgpu::TextureFormat::Depth32Float, n))
+                    .unwrap_or(1)
+                    .to_string(),
+            )
+        }
+        "specular" => st
+            .renderer
+            .as_ref()
+            .map(|r| u8::from(r.settings.specular).to_string()),
+        "dof" => st
+            .renderer
+            .as_ref()
+            .map(|r| u8::from(r.settings.dof).to_string()),
+        // Whether the frame is blurred by depth of field: the scripts' or the sights' range, and `r_dof_enable`.
+        "blur" => st.renderer.as_ref().map(|r| {
+            u8::from(r.settings.dof && r.post.dof.is_some_and(|d| d.active())).to_string()
+        }),
+        "blur_radius" => st.renderer.as_ref().map(|r| r.post.blur_radius.to_string()),
+        // The window aspect the last `r_blur` filter was shaped for (`RB_VirtualToSceneRadius`), 2 decimals.
+        "blur_shape" => st
+            .renderer
+            .as_ref()
+            .and_then(|r| r.blur_shape())
+            .map(|s| format!("{s:.2}")),
+        "glow" => st
+            .renderer
+            .as_ref()
+            .map(|r| u8::from(r.settings.glow).to_string()),
+        "shadows" => st
+            .renderer
+            .as_ref()
+            .map(|r| u8::from(r.settings.shadows != render::ShadowMode::Off).to_string()),
+        // The sampler filtering the materials were made with: `r_texFilterAnisoMin` and `Max`, and
+        // `r_texFilterMipMode` as its enum index (`gfxis=aniso 2 4`, `gfxis=mipmode 2`).
+        "aniso" => st
+            .renderer
+            .as_ref()
+            .map(|r| format!("{} {}", r.materials.aniso_min, r.materials.aniso_max)),
+        "mipmode" => st
+            .renderer
+            .as_ref()
+            .map(|r| (r.materials.mip_mode as u8).to_string()),
+        // How many dynamic lights the last frame drew.
+        "dlights" => Some(st.lights_drawn.to_string()),
+        "aspect" => Some(format!("{:.2}", st.aspect.unwrap_or(0.0))),
+        "fullscreen" => Some(u8::from(st.window.fullscreen().is_some()).to_string()),
+        // 1 when the surface does not wait for the display, or has no mode that does not.
+        "uncapped" => {
+            let caps = st
+                .surface
+                .as_ref()
+                .map(|s| s.get_capabilities(&st.gpu.adapter))
+                .unwrap_or_default();
+            let free = caps
+                .present_modes
+                .iter()
+                .any(|m| *m != wgpu::PresentMode::Fifo);
+            Some(u8::from(st.present_mode != wgpu::PresentMode::Fifo || !free).to_string())
+        }
+        "zfeather" => st
+            .renderer
+            .as_ref()
+            .map(|r| u8::from(r.settings.z_feather).to_string()),
+        // `r_znear` and `r_zfar` as the renderer holds them.
+        "nearfar" => st
+            .renderer
+            .as_ref()
+            .map(|r| format!("{:.2} {:.0}", r.settings.near, r.settings.far)),
+        "depthhack_near" => st
+            .renderer
+            .as_ref()
+            .map(|r| r.settings.depthhack_near.to_string()),
+        // `r_outdoor` and the lookup biases and feather.
+        "outdoor" => st.renderer.as_ref().map(|r| {
+            format!(
+                "{} {:.0} {:.0} {:.0}",
+                u8::from(r.settings.outdoor),
+                r.settings.outdoor_away_bias,
+                r.settings.outdoor_down_bias,
+                r.settings.outdoor_feather
+            )
+        }),
+        // The cheat sun tweaks as parsed: light, colour and angles.
+        "sun_tweak" => st.renderer.as_ref().map(|r| {
+            let t = r.settings.sun_tweak;
+            let c = t.color.unwrap_or_default();
+            let a = t.angles.unwrap_or_default();
+            format!(
+                "{:.2} {:.2} {:.2} {:.2} {:.1} {:.1} {:.1}",
+                t.sun_light.unwrap_or(f32::NAN),
+                c.x,
+                c.y,
+                c.z,
+                a.x,
+                a.y,
+                a.z
+            )
+        }),
+        // The blocks the last frame actually submitted, not a second synthetic dvar evaluation.
+        "film_tweak" => st.renderer.as_ref().map(|r| {
+            let f = r.post.film;
+            format!(
+                "{} {} {} {} {} {} {} {} {} {}",
+                f.brightness,
+                f.contrast,
+                f.desaturation,
+                u8::from(f.invert),
+                f.tint_light[0],
+                f.tint_light[1],
+                f.tint_light[2],
+                f.tint_dark[0],
+                f.tint_dark[1],
+                f.tint_dark[2],
+            )
+        }),
+        "glow_tweak" => st.renderer.as_ref().map(|r| {
+            let g = r.post.glow;
+            format!(
+                "{} {} {} {}",
+                u8::from(g.enabled),
+                g.radius,
+                g.bloom_intensity,
+                g.bloom_cutoff
+            )
+        }),
+        "sun_flare" => st.renderer.as_ref().map(|r| {
+            let sun = &r.sun_flare;
+            format!(
+                "{} {} {} {} {} {} {} {} {}",
+                u8::from(sun.has_valid_data),
+                sun.sprite_size,
+                sun.flare_min_size,
+                sun.flare_max_size,
+                sun.flare_max_alpha,
+                sun.flare_fade_in_time,
+                sun.flare_fade_out_time,
+                sun.sprite_material
+                    .as_ref()
+                    .and_then(|m| m.name.as_deref())
+                    .unwrap_or("none"),
+                sun.flare_material
+                    .as_ref()
+                    .and_then(|m| m.name.as_deref())
+                    .unwrap_or("none"),
+            )
+        }),
+        "sun_fx_position" => st.renderer.as_ref().map(|r| {
+            let [x, y, z] = r.sun_flare.sun_fx_position;
+            format!("{x} {y} {z}")
+        }),
+        "water" => st
+            .renderer
+            .as_ref()
+            .map(|r| u8::from(r.settings.draw_water).to_string()),
+        // The picmips of colour, normal and specular maps the match's textures were loaded with.
+        "picmip" => st.renderer.as_ref().map(|r| {
+            let [c, b, s] = r.textures.picmips();
+            format!("{c} {b} {s}")
+        }),
+        // 1 when the frames since `pacereset` came no faster than `com_maxfps` allows (a fifth of slack). The check
+        // needs a present mode that does not wait for the display (`r_vsync 0`): it fails when the display paces the
+        // frames although the surface offers a mode that would not.
+        "pace" => {
+            let (since, frames) = st.pace;
+            let free = st.surface.as_ref().is_some_and(|s| {
+                s.get_capabilities(&st.gpu.adapter)
+                    .present_modes
+                    .iter()
+                    .any(|m| !display_paced(*m))
+            });
+            Some(
+                match gfx::frame_gap(&st.input.cvars, display_paced(st.present_mode)) {
+                    Some(gap) => {
+                        let each = since.elapsed().as_secs_f64() / f64::from(frames.max(1));
+                        u8::from(frames >= 2 && each >= gap.as_secs_f64() * 0.8)
+                    }
+                    // Fifo is all the surface has: the display paces, the cap cannot be shown.
+                    None => u8::from(!free),
+                }
+                .to_string(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// What the cgame dvars came to last frame, by the names of the `cgame` state section and of `cgis=`: what was drawn
+/// or played, not the dvar's value. `None` where the fact needs what is not up (a match, a world renderer).
+fn cgame_value(st: &State, name: &str) -> Option<String> {
+    let sh = st.shell.as_ref();
+    match name {
+        "gun" => st.net.as_ref().map(|n| u8::from(n.gun_drawn()).to_string()),
+        "hud2d" => sh.map(|s| u8::from(s.st.ownerdraws_painted > 0).to_string()),
+        "fps" => sh.map(|s| u8::from(s.st.fps_drawn.is_some()).to_string()),
+        "fpstext" => sh.map(|s| s.st.fps_drawn.clone().unwrap_or_default()),
+        "fullbright" => st
+            .renderer
+            .as_ref()
+            .map(|r| u8::from(r.settings.fullbright).to_string()),
+        // The shellshock blend.
+        "shock" => st
+            .renderer
+            .as_ref()
+            .map(|r| u8::from(r.post.shell_shock.is_some()).to_string()),
+        // Console-driven checks of the centre print duration, the killcam builders and film output.
+        "centertime" => sh.map(|s| s.st.feed.center_ms.to_string()),
+        "heli_camera" => st.net.as_ref().map(|n| n.killcam_sample(true)),
+        "air_camera" => st.net.as_ref().map(|n| n.killcam_sample(false)),
+        "brightness" => st
+            .renderer
+            .as_ref()
+            .zip(st.film_base)
+            .map(|(r, base)| format!("{:.2}", r.post.film.brightness - base.brightness)),
+        "film_sample" => st.film_base.map(|mut base| {
+            base.desaturation = 0.5;
+            base.contrast = 1.0;
+            base.brightness = 0.0;
+            let film = crate::gfx::film(&st.input.cvars, base);
+            format!(
+                "{:.2} {:.2} {:.2}",
+                film.brightness, film.contrast, film.desaturation
+            )
+        }),
+        // In a match: the drawn opacity, or `hidden` when the stock gates left no reticle.
+        "crosshair_alpha" => sh.filter(|_| st.net.is_some()).map(|s| {
+            crate::crosshair::shown(
+                s.st.live
+                    .reticle
+                    .as_ref()
+                    .map(|r| crate::crosshair::layout(r).0),
+            )
+        }),
+        "window_position" => {
+            // Wayland deliberately offers no global position; there assert the request that reaches
+            // display::apply. Platforms exposing outer_position must report the actual placement.
+            let p = st
+                .window
+                .outer_position()
+                .ok()
+                .map(|p| (p.x, p.y))
+                .or_else(|| {
+                    Gfx::from_cvars(&st.input.cvars)
+                        .request(&display::Request::default())
+                        .position
+                });
+            p.map(|(x, y)| format!("{x} {y}"))
+        }
+        // `in <ms>` when the level's sound faded in (`SND_MapInit`): the quietest channel under half volume in the
+        // first mixed chunk and back at full after 300 ms; otherwise the two volumes.
+        "levelfade" => st
+            .net
+            .as_ref()
+            .and_then(|n| n.level_fade())
+            .map(|(ms, start, after)| match after {
+                Some(after) if start < 0.5 && after >= 0.99 => format!("in {ms}"),
+                _ => format!("{ms}ms start {start:.2} after_300ms {after:?}"),
+            }),
+        // `1` when the eye bobbed more than a tenth of a unit since `bobmark` (`bg_bobMax`, `bg_bobAmplitude*`),
+        // `0` when it did not.
+        "eyebob" => st
+            .net
+            .as_ref()
+            .map(|n| u8::from(n.eye_bob() > 0.1).to_string()),
+        // A subtitle up.
+        "subtitle" => {
+            sh.map(|s| u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The client's dev hooks: what a stage's scenario sets up that no key or menu of the player's reaches, run by the
+/// `--ui-script` step and the control channel's `dev` request of the same name with the step's argument.
+fn dev_hook(st: &mut State, op: &str, arg: &str) -> Result<(), String> {
+    match op {
+        // The graphics device is destroyed under the client, as a driver reset does it: the next frame must find it
+        // lost and make a new one.
+        "losedevice" => st.gpu.device.destroy(),
+        // `1` adds a bright light a little way in front of the camera each frame, `0` removes it.
+        "dlight" => st.test_light = arg.trim() != "0",
+        // Counts the frames from here, for the `pace` graphics fact.
+        "pacereset" => st.pace = (Instant::now(), 0),
+        "fxdemo" | "bobmark" | "hitflesh" | "shock" | "subtitle" => {
+            let net = st
+                .net
+                .as_mut()
+                .ok_or_else(|| format!("{op} needs a game in progress"))?;
+            match op {
+                // Plays the effect in front of the player every 1.5 s; `off` stops it.
+                "fxdemo" => net.set_fx_demo((arg != "off").then(|| arg.to_owned())),
+                // Starts the eye bob probe over: the `eyebob` cgame fact then says whether the eye bobbed.
+                "bobmark" => net.bob_mark(),
+                // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame: the flesh
+                // impact effect, or the no-blood one with `cg_blood` off.
+                "hitflesh" => net.inject_flesh_hit(),
+                // A `shellshock` of the default kind for `arg` ms, as a nearby explosion's.
+                "shock" => net.inject_shock(arg.parse().unwrap_or(5000)),
+                // A started sound's subtitle (`CL_SubtitlePrint`), as the sound engine would hand it on.
+                _ => net.inject_subtitle(arg, 2000),
+            }
+        }
+        _ => return Err(format!("no dev hook {op:?}")),
+    }
+    Ok(())
+}
+
+/// One frame of the `--ui-script`; `true` once every step has run. The script is out of the state while its step
+/// runs, so a step may read the whole state ([`gfx_value`], [`dev_hook`]).
 fn script_step(st: &mut State) -> bool {
-    let Some(sc) = st.script.as_mut() else {
+    let Some(mut sc) = st.script.take() else {
         return true;
     };
+    let finished = run_script_step(st, &mut sc);
+    st.script = Some(sc);
+    finished
+}
+
+fn run_script_step(st: &mut State, sc: &mut UiScript) -> bool {
     let Some(step) = sc.steps.get(sc.index).cloned() else {
         return true;
     };
@@ -3437,23 +3858,13 @@ fn script_step(st: &mut State) -> bool {
             listen::send(arg);
             done(true, sc, String::new());
         }
-        // The graphics device is destroyed under the client, as a driver reset does it: the next frame must find it lost
-        // and make a new one (`losedevice`); `renderer=secs` then waits for the world to be drawable again.
-        "losedevice" => {
-            st.gpu.device.destroy();
-            done(true, sc, String::new());
-        }
+        // `renderer=secs` waits for the world to be drawable again (after `losedevice`, [`dev_hook`]).
         "renderer" => {
             if st.renderer.is_some() {
                 done(true, sc, String::new());
             } else if waited > arg.parse::<f32>().unwrap_or(60.0) {
                 done(false, sc, "no renderer".into());
             }
-        }
-        // Counts the frames from here, for `gfxis=pace 1`.
-        "pacereset" => {
-            st.pace = (Instant::now(), 0);
-            done(true, sc, String::new());
         }
         // `vid_restart` as the graphics menu's Apply does it.
         "vidrestart" => {
@@ -3463,214 +3874,13 @@ fn script_step(st: &mut State) -> bool {
             done(true, sc, String::new());
         }
         // What the graphics settings came to (`gfxis=aa 4`, `gfxis=specular 0`, `gfxis=aspect 1.78`,
-        // `gfxis=fullscreen 0`, `gfxis=uncapped 1`): the renderer's and the surface's own state.
+        // `gfxis=fullscreen 0`, `gfxis=uncapped 1`): the renderer's and the surface's own state ([`gfx_value`]).
         "gfxis" => {
             let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
-            let have = match name {
-                "aa" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.samples(st.config.format).to_string()),
-                "specular" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| u8::from(r.settings.specular).to_string()),
-                "dof" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| u8::from(r.settings.dof).to_string()),
-                // Whether the frame is blurred by depth of field: the scripts' or the sights' range, and `r_dof_enable`.
-                "blur" => st.renderer.as_ref().map(|r| {
-                    u8::from(r.settings.dof && r.post.dof.is_some_and(|d| d.active())).to_string()
-                }),
-                "blur_radius" => st.renderer.as_ref().map(|r| r.post.blur_radius.to_string()),
-                // The window aspect the last `r_blur` filter was shaped for (`RB_VirtualToSceneRadius`), 2 decimals.
-                "blur_shape" => st
-                    .renderer
-                    .as_ref()
-                    .and_then(|r| r.blur_shape())
-                    .map(|s| format!("{s:.2}")),
-                "glow" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| u8::from(r.settings.glow).to_string()),
-                "shadows" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| u8::from(r.settings.shadows != render::ShadowMode::Off).to_string()),
-                // The sampler filtering the materials were made with: `r_texFilterAnisoMin` and `Max`, and
-                // `r_texFilterMipMode` as its enum index (`gfxis=aniso 2 4`, `gfxis=mipmode 2`).
-                "aniso" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| format!("{} {}", r.materials.aniso_min, r.materials.aniso_max)),
-                "mipmode" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| (r.materials.mip_mode as u8).to_string()),
-                // How many dynamic lights the last frame drew.
-                "dlights" => Some(st.lights_drawn.to_string()),
-                "aspect" => Some(format!("{:.2}", st.aspect.unwrap_or(0.0))),
-                "fullscreen" => Some(u8::from(st.window.fullscreen().is_some()).to_string()),
-                // 1 when the surface does not wait for the display, or has no mode that does not.
-                "uncapped" => {
-                    let caps = st
-                        .surface
-                        .as_ref()
-                        .map(|s| s.get_capabilities(&st.gpu.adapter))
-                        .unwrap_or_default();
-                    let free = caps
-                        .present_modes
-                        .iter()
-                        .any(|m| *m != wgpu::PresentMode::Fifo);
-                    Some(u8::from(st.present_mode != wgpu::PresentMode::Fifo || !free).to_string())
-                }
-                "zfeather" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| u8::from(r.settings.z_feather).to_string()),
-                // `r_znear` and `r_zfar` as the renderer holds them.
-                "nearfar" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| format!("{:.2} {:.0}", r.settings.near, r.settings.far)),
-                "depthhack_near" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.settings.depthhack_near.to_string()),
-                // `r_outdoor` and the lookup biases and feather.
-                "outdoor" => st.renderer.as_ref().map(|r| {
-                    format!(
-                        "{} {:.0} {:.0} {:.0}",
-                        u8::from(r.settings.outdoor),
-                        r.settings.outdoor_away_bias,
-                        r.settings.outdoor_down_bias,
-                        r.settings.outdoor_feather
-                    )
-                }),
-                // The cheat sun tweaks as parsed: light, colour and angles.
-                "sun_tweak" => st.renderer.as_ref().map(|r| {
-                    let t = r.settings.sun_tweak;
-                    let c = t.color.unwrap_or_default();
-                    let a = t.angles.unwrap_or_default();
-                    format!(
-                        "{:.2} {:.2} {:.2} {:.2} {:.1} {:.1} {:.1}",
-                        t.sun_light.unwrap_or(f32::NAN),
-                        c.x,
-                        c.y,
-                        c.z,
-                        a.x,
-                        a.y,
-                        a.z
-                    )
-                }),
-                // The blocks the last frame actually submitted, not a second synthetic dvar evaluation.
-                "film_tweak" => st.renderer.as_ref().map(|r| {
-                    let f = r.post.film;
-                    format!(
-                        "{} {} {} {} {} {} {} {} {} {}",
-                        f.brightness,
-                        f.contrast,
-                        f.desaturation,
-                        u8::from(f.invert),
-                        f.tint_light[0],
-                        f.tint_light[1],
-                        f.tint_light[2],
-                        f.tint_dark[0],
-                        f.tint_dark[1],
-                        f.tint_dark[2],
-                    )
-                }),
-                "glow_tweak" => st.renderer.as_ref().map(|r| {
-                    let g = r.post.glow;
-                    format!(
-                        "{} {} {} {}",
-                        u8::from(g.enabled),
-                        g.radius,
-                        g.bloom_intensity,
-                        g.bloom_cutoff
-                    )
-                }),
-                "sun_flare" => st.renderer.as_ref().map(|r| {
-                    let sun = &r.sun_flare;
-                    format!(
-                        "{} {} {} {} {} {} {} {} {}",
-                        u8::from(sun.has_valid_data),
-                        sun.sprite_size,
-                        sun.flare_min_size,
-                        sun.flare_max_size,
-                        sun.flare_max_alpha,
-                        sun.flare_fade_in_time,
-                        sun.flare_fade_out_time,
-                        sun.sprite_material
-                            .as_ref()
-                            .and_then(|m| m.name.as_deref())
-                            .unwrap_or("none"),
-                        sun.flare_material
-                            .as_ref()
-                            .and_then(|m| m.name.as_deref())
-                            .unwrap_or("none"),
-                    )
-                }),
-                "sun_fx_position" => st.renderer.as_ref().map(|r| {
-                    let [x, y, z] = r.sun_flare.sun_fx_position;
-                    format!("{x} {y} {z}")
-                }),
-                "water" => st
-                    .renderer
-                    .as_ref()
-                    .map(|r| u8::from(r.settings.draw_water).to_string()),
-                // The picmips of colour, normal and specular maps the match's textures were loaded with.
-                "picmip" => st.renderer.as_ref().map(|r| {
-                    let [c, b, s] = r.textures.picmips();
-                    format!("{c} {b} {s}")
-                }),
-                // 1 when the frames since `pacereset` came no faster than `com_maxfps` allows (a fifth of slack). The
-                // check needs a present mode that does not wait for the display (`r_vsync 0`): it fails when the
-                // display paces the frames although the surface offers a mode that would not.
-                "pace" => {
-                    let (since, frames) = st.pace;
-                    let free = st.surface.as_ref().is_some_and(|s| {
-                        s.get_capabilities(&st.gpu.adapter)
-                            .present_modes
-                            .iter()
-                            .any(|m| !display_paced(*m))
-                    });
-                    Some(
-                        match gfx::frame_gap(&st.input.cvars, display_paced(st.present_mode)) {
-                            Some(gap) => {
-                                let each = since.elapsed().as_secs_f64() / f64::from(frames.max(1));
-                                u8::from(frames >= 2 && each >= gap.as_secs_f64() * 0.8)
-                            }
-                            // Fifo is all the surface has: the display paces, the cap cannot be shown.
-                            None => u8::from(!free),
-                        }
-                        .to_string(),
-                    )
-                }
-                _ => None,
-            };
+            let have = gfx_value(st, name);
             // `gfxis=aa max`: the most samples the adapter offers for the scene's colour and depth, whatever was asked.
             let want = if (name, want) == ("aa", "max") {
-                let beyond_spec = st
-                    .gpu
-                    .device
-                    .features()
-                    .contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
-                let ok = |f: wgpu::TextureFormat, n: u32| {
-                    (n <= 4 || beyond_spec)
-                        && st
-                            .gpu
-                            .adapter
-                            .get_texture_format_features(f)
-                            .flags
-                            .sample_count_supported(n)
-                };
-                [16u32, 8, 4, 2]
-                    .into_iter()
-                    .find(|&n| ok(st.config.format, n) && ok(wgpu::TextureFormat::Depth32Float, n))
-                    .unwrap_or(1)
-                    .to_string()
+                gfx_value(st, "aa_max").unwrap_or_default()
             } else {
                 want.to_owned()
             };
@@ -3757,130 +3967,42 @@ fn script_step(st: &mut State) -> bool {
                 _ => {}
             }
         }
-        // `dlight=1` adds a bright light in front of the camera each frame, `dlight=0` removes it.
-        "dlight" => {
-            st.test_light = arg.trim() != "0";
-            done(true, sc, String::new());
-        }
         // `shotd=<name>`: the screenshot of the first frame that copied the scene for a distortion material.
         "shotd" => {
             if st.shot_request.is_none() {
                 st.shot_gate = true;
                 st.shot_request = Some(arg.to_owned());
-            } else if waited > 10.0 {
+            } else if waited > DISTORTION_SHOT_WAIT.as_secs_f32() {
                 st.shot_gate = false;
                 st.shot_request = None;
                 done(false, sc, "no frame drew a distortion material".into());
             }
         }
-        // `fxdemo=<effect>` plays the effect in front of the player every 1.5 s, `fxdemo=off` stops it.
-        "fxdemo" => {
-            if let Some(n) = st.net.as_mut() {
-                n.set_fx_demo((arg != "off").then(|| arg.to_owned()));
-            }
-            done(st.net.is_some(), sc, "fx demo".into());
-        }
-        // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`,
-        // `cgis=fullbright 1`, `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up) or
-        // how often an effect kind played (`cgis=fx:shell_eject 0`, `cgis=fx:bullet_impact_noblood 1`): what was
-        // drawn or played, not the dvar's value.
+        // What the cgame dvars came to last frame (`cgis=gun 0`, `cgis=hud2d 0`, `cgis=fps 1`, `cgis=fullbright 1`,
+        // `cgis=shock 1` for the shellshock blend, `cgis=subtitle 1` for a subtitle up: [`cgame_value`]) or how often
+        // an effect kind played (`cgis=fx:shell_eject 0`, `cgis=fx:bullet_impact_noblood 1`): what was drawn or
+        // played, not the dvar's value.
         "cgis" => {
             let (name, want) = arg.split_once(' ').unwrap_or((arg, ""));
-            let sh = st.shell.as_ref();
-            let have =
-                match name {
-                    "gun" => st.net.as_ref().map(|n| u8::from(n.gun_drawn()).to_string()),
-                    "hud2d" => sh.map(|s| u8::from(s.st.ownerdraws_painted > 0).to_string()),
-                    "fps" => sh.map(|s| u8::from(s.st.fps_drawn.is_some()).to_string()),
-                    "fpstext" => sh.map(|s| s.st.fps_drawn.clone().unwrap_or_default()),
-                    "fullbright" => st
-                        .renderer
-                        .as_ref()
-                        .map(|r| u8::from(r.settings.fullbright).to_string()),
-                    "shock" => st
-                        .renderer
-                        .as_ref()
-                        .map(|r| u8::from(r.post.shell_shock.is_some()).to_string()),
-                    // Console-driven checks of the centre print duration, the killcam builders and film output.
-                    "centertime" => sh.map(|s| s.st.feed.center_ms.to_string()),
-                    "heli_camera" => st.net.as_ref().map(|n| n.killcam_sample(true)),
-                    "air_camera" => st.net.as_ref().map(|n| n.killcam_sample(false)),
-                    "brightness" => st.renderer.as_ref().zip(st.film_base).map(|(r, base)| {
-                        format!("{:.2}", r.post.film.brightness - base.brightness)
-                    }),
-                    "film_sample" => st.film_base.map(|mut base| {
-                        base.desaturation = 0.5;
-                        base.contrast = 1.0;
-                        base.brightness = 0.0;
-                        let film = crate::gfx::film(&st.input.cvars, base);
-                        format!(
-                            "{:.2} {:.2} {:.2}",
-                            film.brightness, film.contrast, film.desaturation
-                        )
-                    }),
-                    // In a match: the drawn opacity, or `hidden` when the stock gates left no reticle.
-                    "crosshair_alpha" => sh.filter(|_| st.net.is_some()).map(|s| {
-                        crate::crosshair::shown(
-                            s.st.live
-                                .reticle
-                                .as_ref()
-                                .map(|r| crate::crosshair::layout(r).0),
-                        )
-                    }),
-                    "window_position" => {
-                        // Wayland deliberately offers no global position; there assert the request that reaches
-                        // display::apply. Platforms exposing outer_position must report the actual placement.
-                        let p = st
-                            .window
-                            .outer_position()
-                            .ok()
-                            .map(|p| (p.x, p.y))
-                            .or_else(|| {
-                                Gfx::from_cvars(&st.input.cvars)
-                                    .request(&display::Request::default())
-                                    .position
-                            });
-                        p.map(|(x, y)| format!("{x} {y}"))
-                    }
-                    // `in <ms>` when the level's sound faded in (`SND_MapInit`): the quietest channel under half
-                    // volume in the first mixed chunk and back at full after 300 ms; otherwise the two volumes.
-                    "levelfade" => {
-                        st.net
-                            .as_ref()
-                            .and_then(|n| n.level_fade())
-                            .map(|(ms, start, after)| match after {
-                                Some(after) if start < 0.5 && after >= 0.99 => format!("in {ms}"),
-                                _ => format!("{ms}ms start {start:.2} after_300ms {after:?}"),
-                            })
-                    }
-                    // `1` when the eye bobbed more than a tenth of a unit since `bobmark` (`bg_bobMax`,
-                    // `bg_bobAmplitude*`), `0` when it did not.
-                    "eyebob" => st
-                        .net
-                        .as_ref()
-                        .map(|n| u8::from(n.eye_bob() > 0.1).to_string()),
-                    "subtitle" => sh.map(|s| {
-                        u8::from(s.st.feed.active(crate::hud::SUBTITLE, s.st.live.time)).to_string()
-                    }),
-                    _ => name.strip_prefix("fx:").and_then(|kind| {
-                        st.net.as_ref().map(|n| {
-                            let played = n.fx_played(kind);
-                            match want.strip_prefix('+') {
-                                Some(n_str) => {
-                                    let target = n_str.parse::<u64>().unwrap_or(u64::MAX);
-                                    let at = st.fx_mark.get(kind).copied().unwrap_or(0);
-                                    let delta = played.saturating_sub(at);
-                                    if delta == target {
-                                        "ok".to_owned()
-                                    } else {
-                                        format!("+{delta}")
-                                    }
-                                }
-                                None => played.to_string(),
+            let have = match name.strip_prefix("fx:") {
+                None => cgame_value(st, name),
+                Some(kind) => st.net.as_ref().map(|n| {
+                    let played = n.fx_played(kind);
+                    match want.strip_prefix('+') {
+                        Some(n_str) => {
+                            let target = n_str.parse::<u64>().unwrap_or(u64::MAX);
+                            let at = st.fx_mark.get(kind).copied().unwrap_or(0);
+                            let delta = played.saturating_sub(at);
+                            if delta == target {
+                                "ok".to_owned()
+                            } else {
+                                format!("+{delta}")
                             }
-                        })
-                    }),
-                };
+                        }
+                        None => played.to_string(),
+                    }
+                }),
+            };
             match have {
                 Some(h) => done(
                     if want.starts_with('+') {
@@ -3902,34 +4024,12 @@ fn script_step(st: &mut State) -> bool {
             }
             done(st.net.is_some(), sc, "fx marked".into());
         }
-        // `bobmark` starts the eye bob probe over; `cgis=eyebob <0|1>` afterwards says whether the eye bobbed.
-        "bobmark" => {
-            if let Some(n) = st.net.as_mut() {
-                n.bob_mark();
-            }
-            done(st.net.is_some(), sc, "bob marked".into());
-        }
-        // A bullet of the weapon in hand strikes a player 64 units ahead on the next frame (`hitflesh`): the flesh
-        // impact effect, or the no-blood one with `cg_blood` off.
-        "hitflesh" => {
-            if let Some(n) = st.net.as_mut() {
-                n.inject_flesh_hit();
-            }
-            done(st.net.is_some(), sc, "flesh hit".into());
-        }
-        // A `shellshock` of the default kind for `shock=<ms>` ms, as a nearby explosion's; `subtitle=<key>` is a
-        // started sound's subtitle (`CL_SubtitlePrint`), both as the server or the sound engine would hand them on.
-        "shock" => {
-            if let Some(n) = st.net.as_mut() {
-                n.inject_shock(arg.parse().unwrap_or(5000));
-            }
-            done(st.net.is_some(), sc, "shellshock".into());
-        }
-        "subtitle" => {
-            if let Some(n) = st.net.as_mut() {
-                n.inject_subtitle(arg, 2000);
-            }
-            done(st.net.is_some(), sc, "subtitle".into());
+        // The dev hooks no key or menu reaches ([`dev_hook`]): `losedevice`, `dlight=1`, `fxdemo=<effect>`,
+        // `pacereset`, `bobmark`, `hitflesh`, `shock=<ms>`, `subtitle=<key>`.
+        "losedevice" | "dlight" | "fxdemo" | "pacereset" | "bobmark" | "hitflesh" | "shock"
+        | "subtitle" => {
+            let r = dev_hook(st, key, arg);
+            done(r.is_ok(), sc, r.err().unwrap_or_default());
         }
         "shot" => {
             if st.shot_request.is_none() {
@@ -5673,12 +5773,33 @@ impl crate::control::Control for ControlHost<'_> {
         }
     }
 
-    fn capture(&mut self, dir: Option<&str>, base64: bool) -> Option<Result<Value, String>> {
+    fn capture(
+        &mut self,
+        dir: Option<&str>,
+        base64: bool,
+        distortion: bool,
+    ) -> Option<Result<Value, String>> {
         if let Some(done) = self.st.control_shot_done.take() {
             return Some(done);
         }
+        if distortion {
+            let since = *self.st.control_shot_gate.get_or_insert_with(Instant::now);
+            if since.elapsed() > DISTORTION_SHOT_WAIT {
+                self.st.control_shot = None;
+                self.st.control_shot_gate = None;
+                return Some(Err(format!(
+                    "no frame drew a distortion material within {} s",
+                    DISTORTION_SHOT_WAIT.as_secs()
+                )));
+            }
+        }
         self.st.control_shot = Some((dir.map(str::to_owned), base64));
         None
+    }
+
+    fn dev(&mut self, op: &str, arg: &str) -> Result<Value, String> {
+        dev_hook(self.st, op, arg)?;
+        Ok(json!({"op": op, "arg": arg}))
     }
 
     fn view(
@@ -5758,6 +5879,12 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "focused": st.window.has_focus(),
                 "pointer_locked": st.grabbed,
                 "look_gate": st.input.look_gate(),
+                // What the graphics device went through (`device_losses`, `errors`), as `ui-script.json`'s
+                // `gpu_health` but leaving the device's errors in place ([`GpuLog::view`]), and what the last map
+                // load measured until the spawn (`load_ms`, `to_spawn_ms`, `max_frame_gap_ms`, `slow_gaps_ms`), as
+                // its `load`.
+                "gpu_health": st.gpu_log.view(&st.gpu),
+                "load": st.load_report,
             }),
             "menu" => menu_state(st),
             "hud" => hud_state(st),
@@ -5800,6 +5927,10 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
                 "late": st.late,
             }),
             "render" => render_report(st),
+            // Named only (not in `PARTS`, so a `wait` does not query the surface and the adapter every frame): what
+            // the graphics settings and the cgame dvars came to, as `gfxis=` and `cgis=` read them.
+            "gfx" => facts(GFX_FACTS, |n| gfx_value(st, n)),
+            "cgame" => facts(CGAME_FACTS, |n| cgame_value(st, n)),
             other => match st.net.as_mut() {
                 Some(net) => net.control_state(other),
                 None => Value::Null,
@@ -5811,7 +5942,8 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
 }
 
 /// The menus on the stack, the item that has the focus, every item of each open menu with the rectangle a click
-/// is tested against, the setting it shows and whether it is only decoration, and the build number drawn last frame.
+/// is tested against, the setting it shows, its owner-draw id and whether it is only decoration, the build number
+/// drawn last frame, and the rows the join menu's server list (feeder 2) shows now.
 fn menu_state(st: &mut State) -> Value {
     let Some(sh) = st.shell.as_mut() else {
         return Value::Null;
@@ -5831,11 +5963,14 @@ fn menu_state(st: &mut State) -> Value {
                 "visible": it.visible,
                 "decoration": it.decoration,
                 "value": it.value,
+                "owner_draw": it.owner_draw,
                 "rect": it.rect,
             }));
         }
     }
-    json!({"open": open, "focused": focused, "items": items, "build": sh.ui.build_drawn})
+    let server_rows = sh.feeder_rows(&mut st.input, 2);
+    json!({"open": open, "focused": focused, "items": items, "build": sh.ui.build_drawn,
+        "server_rows": server_rows})
 }
 
 /// What the HUD drew and counted since the run began (`stats`, the counters `hud_draw` of `ui-script.json` has),

@@ -12,25 +12,16 @@ use super::client_models::no_display;
 use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::{Value, json};
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const NAME: &str = "client-session";
-const LIMIT: Duration = Duration::from_secs(240);
 
 const DIRECT: &[&str] = &["--listen", "--bots", "3"];
-/// The direct start loads `mp_crash` before any menu: the in-game menu's map title must name it, not show the bare `@`
-/// an unset `mapname` leaves (#372).
-const DIRECT_STEPS: &str = "ingame=120,wait=3,shot=direct,togglemenu,wait=1,see=Crash,nosee=@,shot=direct_menu,key=escape,nomenu=5";
-const MENU_STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,\
-click=auto_assign,menu=changeclass:30,wait=1,click=Assault,ingame=120,wait=3,shot=menus";
-
 /// Domination: its flags are objectives, which the minimap must mark.
 const OBJECTIVE_ARGS: &[&str] = &["--listen", "--gametype", "dom", "--bots", "3"];
-const OBJECTIVE_STEPS: &str = "ingame=120,wait=8,shot=objectives";
 
 /// The arguments that give a client run the harness's own fully unlocked profile in `config_dir`, so it never reads or
 /// writes the tester's profile, config or the install's profiles (those are listed, never active).
@@ -42,72 +33,142 @@ pub(crate) fn profile_args(config_dir: &Path) -> [&std::ffi::OsStr; 3] {
     ]
 }
 
-/// Runs the client with `args` and `--ui-script steps`; returns the parsed `ui-script.json`.
-pub(super) fn run_client(
-    client: &Path,
-    install: &Path,
-    dir: &Path,
-    config_dir: &Path,
-    args: &[&str],
-    steps: &str,
-    limit: Duration,
-) -> Result<Value, String> {
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let log = File::create(dir.join("client.log")).map_err(|e| e.to_string())?;
-    let mut child = Command::new(client)
-        .arg("--install")
-        .arg(install)
-        .args(["--size", "1280x720", "--no-sound", "--bots", "3"])
-        .args(args)
-        .args(profile_args(config_dir))
-        .arg("--ui-script")
-        .arg(steps)
-        .arg("--out")
-        .arg(dir)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone().map_err(|e| e.to_string())?)
-        .stderr(log)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let end = Instant::now() + limit;
-    let status = loop {
-        if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
-            break s;
-        }
-        if Instant::now() >= end {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("client hung (killed after {} s)", limit.as_secs()));
-        }
-        std::thread::sleep(Duration::from_millis(20));
+/// The visible items of the top menu must include every `see` label and none of the `nosee` labels.
+pub(super) fn check_menu(c: &mut Driven, see: &[&str], nosee: &[&str]) -> Result<(), String> {
+    let menu = c.state("menu")?;
+    let top = menu["open"]
+        .as_array()
+        .and_then(|open| open.last())
+        .and_then(Value::as_str)
+        .ok_or("no menu is open")?;
+    let has = |want: &str| {
+        menu["items"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["menu"].as_str() == Some(top)
+                    && item["visible"] == Value::Bool(true)
+                    && (item["name"]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(want))
+                        || item["text"].as_str().is_some_and(|text| {
+                            !text.is_empty() && text.eq_ignore_ascii_case(want)
+                        }))
+            })
+        })
     };
-    if !status.success() {
-        return Err(format!(
-            "client exited with {status}{} (see {}/client.log)",
-            last_error(&dir.join("client.log")),
-            dir.display()
-        ));
+    let wrong: Vec<String> = see
+        .iter()
+        .filter(|want| !has(want))
+        .map(|want| format!("missing {want}"))
+        .chain(
+            nosee
+                .iter()
+                .filter(|want| has(want))
+                .map(|want| format!("unexpected {want}")),
+        )
+        .collect();
+    if wrong.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{top}: {}; open {}",
+            wrong.join(", "),
+            menu["open"]
+        ))
     }
-    let bytes =
-        fs::read(dir.join("ui-script.json")).map_err(|e| format!("no ui-script.json: {e}"))?;
-    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
 
-/// The last line the client logged at ERROR or above, as `: <line>`, so a failed run says what it died of.
-fn last_error(log: &Path) -> String {
-    let Ok(bytes) = fs::read(log) else {
-        return String::new();
-    };
-    let tail = &bytes[bytes.len().saturating_sub(8 * 1024)..];
-    let text = String::from_utf8_lossy(tail);
-    let line = text
-        .lines()
-        .rfind(|l| l.contains("ERROR") || l.contains("WARN"))
-        .map(str::trim);
-    match line {
-        Some(l) => format!(": {l}"),
-        None => String::new(),
+/// Waits for the weapon in hand whose name starts with `prefix`.
+pub(super) fn weapon_prefix(c: &mut Driven, prefix: &str, limit: Duration) -> Result<(), String> {
+    let end = Instant::now() + limit;
+    loop {
+        let have = c.lookup("player.weapon")?;
+        if have
+            .as_str()
+            .is_some_and(|weapon| weapon.starts_with(prefix))
+        {
+            return Ok(());
+        }
+        if Instant::now() >= end {
+            return Err(format!(
+                "the weapon is {have:?}, not one beginning {prefix:?}"
+            ));
+        }
+        c.pause(Duration::from_millis(100))?;
     }
+}
+
+/// Writes a Driven run report in the shape the session verdict checks.
+pub(super) fn driven_report(c: &mut Driven) -> Result<Value, String> {
+    c.report("control-run.json", &["client", "net", "hud", "render"])
+}
+
+fn spawn(c: &mut Driven) -> Result<(), String> {
+    c.until(
+        json!({"net.spawned": true, "player.alive": true}),
+        Duration::from_secs(120),
+        "the player did not spawn",
+    )?;
+    Ok(())
+}
+
+/// The direct start loads `mp_crash` before any menu: the in-game menu's map title must name it, not show the bare `@`
+/// an unset `mapname` leaves (#372).
+fn direct(c: &mut Driven) -> Result<(), String> {
+    c.step("spawn", |c| spawn(c))?;
+    c.pause(Duration::from_secs(3))?;
+    c.step("direct capture", |c| c.capture("direct").map(|_| ()))?;
+    c.step("direct in-game menu", |c| {
+        c.bind("togglemenu", "tap")?;
+        c.until(
+            json!({"menu.open.0": {"exists": true}}),
+            Duration::from_secs(5),
+            "the in-game menu did not open on the menu key",
+        )?;
+        check_menu(c, &["Crash"], &["@"])?;
+        c.capture("direct_menu")?;
+        c.key("escape", "tap")?;
+        c.until(
+            json!({"menu.open": {"len": 0}}),
+            Duration::from_secs(5),
+            "Escape did not close the in-game menu",
+        )?;
+        Ok(())
+    })
+}
+
+fn menus(c: &mut Driven) -> Result<(), String> {
+    c.step("stock menu spawn", |c| {
+        c.console("set ui_netGametypeName war")?;
+        c.click("Start New Server")?;
+        c.until(
+            json!({"menu.open": {"contains": "createserver"}}),
+            Duration::from_secs(20),
+            "Start New Server did not open the create-server menu",
+        )?;
+        c.click("Start")?;
+        c.until(
+            json!({"menu.open": {"contains": "team_marinesopfor"}}),
+            Duration::from_secs(90),
+            "the listen server's team menu did not open",
+        )?;
+        c.click("auto_assign")?;
+        c.until(
+            json!({"menu.open": {"contains": "changeclass"}}),
+            Duration::from_secs(30),
+            "the class menu did not open after the team was picked",
+        )?;
+        c.pause(Duration::from_secs(1))?;
+        c.click("Assault")?;
+        spawn(c)
+    })?;
+    c.pause(Duration::from_secs(3))?;
+    c.step("menu capture", |c| c.capture("menus").map(|_| ()))
+}
+
+fn objectives(c: &mut Driven) -> Result<(), String> {
+    c.step("objective spawn", |c| spawn(c))?;
+    c.pause(Duration::from_secs(8))?;
+    c.step("objective capture", |c| c.capture("objectives").map(|_| ()))
 }
 
 /// Why a run's graphics device is a failure, or `None`: any error it reported outside a scope is. A device that was
@@ -313,24 +374,41 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     }
     let mut out = StageReport::new(NAME, Status::Passed);
     let mut problems = Vec::new();
-    for (label, args, steps) in [
-        ("direct", DIRECT, DIRECT_STEPS),
-        ("menus", &["--bots", "3"][..], MENU_STEPS),
-        ("objectives", OBJECTIVE_ARGS, OBJECTIVE_STEPS),
-    ] {
+    let runs: [(&str, &[&str], fn(&mut Driven) -> Result<(), String>); 3] = [
+        ("direct", DIRECT, direct),
+        ("menus", &["--bots", "3"], menus),
+        ("objectives", OBJECTIVE_ARGS, objectives),
+    ];
+    for (label, args, play) in runs {
         let dir = ctx.dir.join(label);
-        match run_client(
-            &client,
-            install,
-            &dir,
-            &dir.join("config"),
-            args,
-            steps,
-            LIMIT,
-        ) {
-            Ok(report) => {
-                out.files.push(format!("{label}/ui-script.json"));
-                out.files.push(format!("{label}/{label}.png"));
+        let mut c = match Driven::start(&client, install, &dir, args) {
+            Ok(c) => c,
+            Err(e) => {
+                problems.push(format!("{label}: {e}"));
+                continue;
+            }
+        };
+        let played = play(&mut c);
+        let report = driven_report(&mut c);
+        let status = c.finish(Duration::from_secs(30));
+        out.files.push(format!("{label}/control-run.json"));
+        for shot in [label, "direct_menu"] {
+            let file = format!("{shot}.png");
+            if (shot == label || label == "direct") && dir.join(&file).is_file() {
+                out.files.push(format!("{label}/{file}"));
+            }
+        }
+        match (played, report) {
+            (Err(e), report) => {
+                if let Ok(report) = report
+                    && let Some(v) = report["net"]["snapshots"].as_f64()
+                {
+                    out.metrics.insert(format!("{label}.snapshots"), v);
+                }
+                problems.push(format!("{label}: {e}"));
+            }
+            (Ok(()), Err(e)) => problems.push(format!("{label}: the run's report failed: {e}")),
+            (Ok(()), Ok(report)) => {
                 if let Some(w) = verdict(&report) {
                     problems.push(format!("{label}: {w}"));
                 } else if label == "objectives"
@@ -342,7 +420,11 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                     out.metrics.insert(format!("{label}.snapshots"), v);
                 }
             }
-            Err(e) => problems.push(format!("{label}: {e}")),
+        }
+        if !status.is_some_and(|s| s.success()) {
+            problems.push(format!(
+                "{label}: the client did not exit successfully: {status:?}"
+            ));
         }
     }
     match command_line(ctx, &client, install) {

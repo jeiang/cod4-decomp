@@ -21,7 +21,7 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `cmd` | what it does |
 |---|---|
 | `ping` | the client's name and frames drawn |
-| `state [what]` | the state document, or one of its sections: `client menu player entities scoreboard hud draw sound fx events net console cvars binds view server watch` (`events`: `world` by kind, `own` by `sim::pm::ev` number; `menu.items` carry each item's `name`, shown `text`, `visible` and `rect`) |
+| `state [what]` | the state document, or one of its sections: `client menu player entities scoreboard hud draw render sound fx events net console cvars binds view look server watch` (`events`: `world` by kind, `own` by `sim::pm::ev` number; `menu.items` carry each item's `name`, shown `text`, `visible` and `rect`); `report`, `gfx` and `cgame`, named only, are the match's counters and the graphics and cgame facts (below) |
 | `cvar name [value]` | read a variable, or set it |
 | `cvars [filter]` | every variable, or those whose name contains `filter` |
 | `binds command` | the keys bound to a command |
@@ -29,8 +29,9 @@ Every request is an object with an optional `id` (echoed back) and a `cmd`:
 | `text text` | type into the console's field (the client must have it open) |
 | `mouse {x,y}` / `{dx,dy}` / `button` / `wheel` | move the pointer, look, click, scroll |
 | `exec line` | run a console line as Enter does |
+| `dev {op, arg}` | run one of the client's dev hooks (below): scenario setup no key or menu of the player's reaches |
 | `viewpos {origin,angles}` | place the camera (`setviewpos`) |
-| `capture [dir] [base64]` | save the frame on screen as a PNG, after it is drawn |
+| `capture [dir] [base64] [after]` | save the frame on screen as a PNG, after it is drawn; `"after":"distortion"` saves the first frame from now that copied the scene for a distortion material, or fails after 10 s |
 | `wait {state, timeout_ms}` | answer when the state document matches (or the clock runs out: `ok` false with `observed`) |
 | `assert {state}` | one look: `ok` false unless the state matches now |
 | `step frames` | answer after that many frames |
@@ -69,6 +70,34 @@ now: `live`, `health`, `frag`, `second`, `overlay_alpha`, `unresolved_text`), `h
 `hud.live` (`killcam`, `dead`, `intermission`, `following`, `feed`, `players_listed`), `hud.scoreboard_shown`, and
 `net.spawned` with `net.view` (`death_view_frames`, `death_view_range_max`, `dof_frames`), and `look` (`naked`,
 `night`, `goggles`, `night_vision`, `channel`, `blend` with `ms`, `missing`, `applied`, the last goggles `switch`).
+
+`client.gpu_health` is what the graphics device went through (`device_losses`, `errors`) and `client.load` what the
+last map load measured until the player spawned (`map`, `load_ms`, `to_spawn_ms`, `frames`, `max_frame_gap_ms`,
+`slow_gaps_ms`), the same objects `ui-script.json` reports as `gpu_health` and `load`. A look at `gpu_health` leaves
+the device's errors where they are, so a lost device's own noise, which may show between the loss and the recovery,
+is still dropped when the client records the loss. `gfx` is what the graphics
+settings came to in the renderer and on the surface, by the names of the `--ui-script` step `gfxis=` (`aa`, `aa_max`,
+`specular`, `dof`, `blur`, `blur_radius`, `blur_shape`, `glow`, `shadows`, `aniso`, `mipmode`, `dlights`, `aspect`,
+`fullscreen`, `uncapped`, `zfeather`, `nearfar`, `depthhack_near`, `outdoor`, `sun_tweak`, `film_tweak`,
+`glow_tweak`, `sun_flare`, `sun_fx_position`, `water`, `picmip`, `pace`), and `cgame` what the cgame drew last
+frame, by the names of `cgis=` (`gun`, `hud2d`, `fps`, `fpstext`, `fullbright`, `shock`, `centertime`,
+`heli_camera`, `air_camera`, `brightness`, `film_sample`, `crosshair_alpha`, `window_position`, `levelfade`,
+`eyebob`, `subtitle`). Each fact is the step's own text (numbers separated by spaces), `null` where it needs what is
+not up (a world renderer, a match). Like `report`, both are built only when named (`state gfx`): a bare `state`, a
+`wait` and an `assert` leave them out rather than query the surface and the adapter every frame, so a stage reads
+them. Effect counts are `fx.played.<kind>`.
+
+`report` is what the match saw so far, the `net` object of `client.json` and `ui-script.json`: the run's counters,
+such as `vehicles_max_drawn` and `vehicles_unloaded`, `projectiles_max_drawn`, `missiles_seen` (by weapon name),
+`brush_models_seen` and `brush_models_max`, `spawned`, `players_seen` and `players_drawn`. It is built only when
+named (`state report`): a bare `state`, a `wait` and an `assert` leave it out, so a stage polls it.
+
+The dev hooks of `dev` are the `--ui-script` steps of the same name, for what a scenario sets up that the player has
+no key for: `losedevice` (destroys the graphics device, as a driver reset does), `dlight` (`arg` `1` puts a bright
+test light in front of the camera, `0` removes it), `pacereset` (counts frames from now for `gfx.pace`), and in a
+match `fxdemo` (`arg` an effect played in front of the player every 1.5 s, `off`), `bobmark` (starts `cgame.eyebob`
+over), `hitflesh` (a bullet of the weapon in hand strikes a player 64 units ahead), `shock` (`arg` ms of the default
+shellshock) and `subtitle` (`arg` a string key shown as a started sound's subtitle).
 
 `entities.list[].model_name` resolves each snapshot model index through the server's model configstrings.
 `entities.snapshot` and `entities.server_time` name the snapshot the list came from, so a check that compares

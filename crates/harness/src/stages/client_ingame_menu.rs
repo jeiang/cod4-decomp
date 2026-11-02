@@ -6,26 +6,182 @@
 //! skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::{run_client, verdict};
+use super::client_session::{check_menu, driven_report, verdict, weapon_prefix};
+use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
+use serde_json::json;
 use std::io;
 use std::time::Duration;
 
 const NAME: &str = "client-ingame-menu";
 
-/// (The waits let the server's answer to a pick, which closes the menus again, arrive before the next menu opens.)
+fn open_ingame(c: &mut Driven) -> Result<(), String> {
+    c.bind("togglemenu", "tap")?;
+    c.until(
+        json!({"menu.open.0": {"exists": true}}),
+        Duration::from_secs(5),
+        "the in-game menu did not open on the menu key",
+    )?;
+    c.pause(Duration::from_secs(1))?;
+    Ok(())
+}
+
+fn no_menu(c: &mut Driven, what: &str) -> Result<(), String> {
+    c.until(
+        json!({"menu.open": {"len": 0}}),
+        Duration::from_secs(5),
+        what,
+    )?;
+    Ok(())
+}
+
 /// Join with the Assault class, then: Escape closes the in-game menu, a class pick closes the class menu,
 /// and a team change (which kills the player) ends on the other team with a Spec Ops weapon after the respawn.
-const STEPS: &str = "set=set ui_netGametypeName war,click=Start New Server,menu=createserver:20,click=Start,menu=team_marinesopfor:90,wait=1,\
-see=OpFor+Marines+Auto-Assign+Controls+Options+Leave Game,nosee=Spectator,shot=team_pre,\
-mouse=OpFor,menu=changeclass:30,wait=1,see=Assault+Spec Ops+Heavy Gunner+Demolitions+Sniper,shot=class_pre,\
-mouse=Assault,ingame=120,wait=3,team=1:5,weapon=m16_gl:5,\
-togglemenu,wait=1,see=Choose Class+Change Team+Controls+Options+Call Vote+Mute Players+Leave Game,shot=escape_menu,key=escape,nomenu=5,\
-togglemenu,wait=1,mouse=Choose Class,menu=changeclass:5,wait=1,shot=class_in,key=escape,nomenu=5,\
-togglemenu,wait=1,mouse=Choose Class,menu=changeclass:5,mouse=Spec Ops,nomenu=5,wait=2,\
-togglemenu,wait=1,mouse=Change Team,menu=team_marinesopfor:5,wait=1,see=Marines+Auto-Assign+Spectator,nosee=Controls+Options+Leave Game,shot=change_team,\
-mouse=Marines,menu=changeclass:10,\
-mouse=Spec Ops,nomenu=5,team=2:10,weapon=mp5:90,wait=2,nomenu=5,shot=changed";
+fn play(c: &mut Driven) -> Result<(), String> {
+    c.step("create server", |c| {
+        c.console("set ui_netGametypeName war")?;
+        c.click("Start New Server")?;
+        c.until(
+            json!({"menu.open": {"contains": "createserver"}}),
+            Duration::from_secs(20),
+            "Start New Server did not open the create-server menu",
+        )?;
+        c.click("Start")?;
+        c.until(
+            json!({"menu.open": {"contains": "team_marinesopfor"}}),
+            Duration::from_secs(90),
+            "the listen server's team menu did not open",
+        )?;
+        c.pause(Duration::from_secs(1))?;
+        check_menu(
+            c,
+            &[
+                "OpFor",
+                "Marines",
+                "Auto-Assign",
+                "Controls",
+                "Options",
+                "Leave Game",
+            ],
+            &["Spectator"],
+        )?;
+        c.capture("team_pre")?;
+        Ok(())
+    })?;
+    c.step("initial team and class", |c| {
+        c.click("OpFor")?;
+        c.until(
+            json!({"menu.open": {"contains": "changeclass"}}),
+            Duration::from_secs(30),
+            "the class menu did not open after OpFor was picked",
+        )?;
+        c.pause(Duration::from_secs(1))?;
+        check_menu(
+            c,
+            &[
+                "Assault",
+                "Spec Ops",
+                "Heavy Gunner",
+                "Demolitions",
+                "Sniper",
+            ],
+            &[],
+        )?;
+        c.capture("class_pre")?;
+        c.click("Assault")?;
+        c.until(
+            json!({"net.spawned": true, "player.alive": true}),
+            Duration::from_secs(120),
+            "the player did not spawn",
+        )?;
+        c.pause(Duration::from_secs(3))?;
+        c.until(
+            json!({"player.team": 1}),
+            Duration::from_secs(5),
+            "the player did not join OpFor",
+        )?;
+        weapon_prefix(c, "m16_gl", Duration::from_secs(5))
+    })?;
+    c.step("Escape closes the in-game menu", |c| {
+        open_ingame(c)?;
+        check_menu(
+            c,
+            &[
+                "Choose Class",
+                "Change Team",
+                "Controls",
+                "Options",
+                "Call Vote",
+                "Mute Players",
+                "Leave Game",
+            ],
+            &[],
+        )?;
+        c.capture("escape_menu")?;
+        c.key("escape", "tap")?;
+        no_menu(c, "Escape did not close the in-game menu")
+    })?;
+    c.step("Escape closes the class menu", |c| {
+        open_ingame(c)?;
+        c.click("Choose Class")?;
+        c.until(
+            json!({"menu.open": {"contains": "changeclass"}}),
+            Duration::from_secs(5),
+            "Choose Class did not open the class menu",
+        )?;
+        c.pause(Duration::from_secs(1))?;
+        c.capture("class_in")?;
+        c.key("escape", "tap")?;
+        no_menu(c, "Escape did not close the class menu")
+    })?;
+    c.step("class pick returns to the game", |c| {
+        open_ingame(c)?;
+        c.click("Choose Class")?;
+        c.until(
+            json!({"menu.open": {"contains": "changeclass"}}),
+            Duration::from_secs(5),
+            "Choose Class did not reopen the class menu",
+        )?;
+        c.click("Spec Ops")?;
+        no_menu(c, "the class menu did not close after Spec Ops was picked")?;
+        c.pause(Duration::from_secs(2))?;
+        Ok(())
+    })?;
+    c.step("team and class change", |c| {
+        open_ingame(c)?;
+        c.click("Change Team")?;
+        c.until(
+            json!({"menu.open": {"contains": "team_marinesopfor"}}),
+            Duration::from_secs(5),
+            "Change Team did not open the team menu",
+        )?;
+        c.pause(Duration::from_secs(1))?;
+        check_menu(
+            c,
+            &["Marines", "Auto-Assign", "Spectator"],
+            &["Controls", "Options", "Leave Game"],
+        )?;
+        c.capture("change_team")?;
+        c.click("Marines")?;
+        c.until(
+            json!({"menu.open": {"contains": "changeclass"}}),
+            Duration::from_secs(10),
+            "the other team's class menu did not open",
+        )?;
+        c.click("Spec Ops")?;
+        no_menu(c, "the class menu did not close after the team change")?;
+        c.until(
+            json!({"player.team": 2}),
+            Duration::from_secs(10),
+            "the player did not change to Marines",
+        )?;
+        weapon_prefix(c, "mp5", Duration::from_secs(90))?;
+        c.pause(Duration::from_secs(2))?;
+        no_menu(c, "a menu reopened after the team change")?;
+        c.capture("changed")?;
+        Ok(())
+    })
+}
 
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
@@ -39,42 +195,47 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         return Ok(r);
     }
     let mut out = StageReport::new(NAME, Status::Passed);
-    match run_client(
-        &client,
-        install,
-        &ctx.dir,
-        &ctx.dir.join("config"),
-        &["--bots", "9"],
-        STEPS,
-        Duration::from_secs(300),
-    ) {
-        Ok(report) => {
-            out.files.push("ui-script.json".into());
-            for f in [
-                "team_pre",
-                "class_pre",
-                "escape_menu",
-                "class_in",
-                "change_team",
-                "changed",
-            ] {
-                out.files.push(format!("{f}.png"));
-            }
-            match verdict(&report) {
-                Some(w) => {
-                    out.status = Status::Failed;
-                    out.reason = Some(w);
-                }
-                None => out.notes.push(
-                    "Escape and the class and team picks each returned to the game; the team changed and the new class spawned"
-                        .into(),
-                ),
-            }
-        }
+    let dir = ctx.dir.join("control");
+    let mut c = match Driven::start(&client, install, &dir, &["--bots", "9"]) {
+        Ok(c) => c,
         Err(e) => {
             out.status = Status::Failed;
             out.reason = Some(e);
+            return Ok(out);
         }
+    };
+    let played = play(&mut c);
+    let report = driven_report(&mut c);
+    let status = c.finish(Duration::from_secs(30));
+    out.files.push("control/control-run.json".into());
+    for f in [
+        "team_pre",
+        "class_pre",
+        "escape_menu",
+        "class_in",
+        "change_team",
+        "changed",
+    ] {
+        if dir.join(format!("{f}.png")).is_file() {
+            out.files.push(format!("control/{f}.png"));
+        }
+    }
+    let why = match (played, report) {
+        (Err(e), _) => Some(e),
+        (Ok(()), Err(e)) => Some(format!("the run's report could not be read: {e}")),
+        (Ok(()), Ok(report)) => verdict(&report),
+    };
+    if let Some(w) = why {
+        out.status = Status::Failed;
+        out.reason = Some(w);
+    } else if !status.is_some_and(|s| s.success()) {
+        out.status = Status::Failed;
+        out.reason = Some(format!("the client did not exit successfully: {status:?}"));
+    } else {
+        out.notes.push(
+            "Escape and the class and team picks each returned to the game; the team changed and the new class spawned"
+                .into(),
+        );
     }
     Ok(out)
 }

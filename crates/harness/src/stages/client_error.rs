@@ -1,57 +1,205 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! `client-error`: every failed start, load or join ends in the stock error popup with its reason, over the main
-//! menu, as `Com_Error(ERR_DROP)` does it. Run 1 is the front end: `map` and `devmap` of a map the install lacks
-//! (refused before any loading screen, as `SV_Map_f` looks for the zone first), then a join of an address nothing
-//! answers. Run 2 joins a server that answers `getinfo` but never the connect: the connection attempt times out.
-//! Run 3 starts a match with `map` typed at the console, spawns through the team and class menus, and plays until
-//! the server kicks the player. Each must open `error_popmenu` with the reason in `com_errorMessage`, with no match
-//! left behind. Needs a display and the install; skips without.
+//! menu, as `Com_Error(ERR_DROP)` does it. Each run is a real client driven through the control channel (#378) as a
+//! player plays it (#376): lines typed at the console opened with its key, the team and class menus clicked with the
+//! pointer, the popup dismissed with Escape. Run 1 is the front end: `map` and `devmap` of a map the install lacks
+//! (refused before any loading screen, as `SV_Map_f` looks for the zone first), then a `connect` to an address
+//! nothing answers. Run 2 connects to a server that answers `getinfo` but never the connect: the connection attempt
+//! times out. Run 3 starts a match with `map` typed at the console, spawns through the team and class menus, and
+//! plays until the server kicks the player (the kick is the scenario's, typed at the listen server's console). Each
+//! must open `error_popmenu` with the reason in `com_errorMessage`, with no match left behind. Needs a display and
+//! the install; skips without.
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::{run_client, steps_problem};
+use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
 use net::oob::Oob;
-use serde_json::Value;
+use serde_json::json;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 const NAME: &str = "client-error";
-const LIMIT: Duration = Duration::from_secs(240);
+/// Every run's own flags beside the harness's: the bots the kicked run's match plays with.
+const ARGS: &[&str] = &["--bots", "3"];
 
 /// A map no install has: `SV_Map_f` says `Can't find map` and starts nothing.
 const BAD_MAP: &str = "nosuchmap";
 /// An address nothing listens on: the standard ports are 28960 to 28963.
 const NOBODY: &str = "127.0.0.1:28999";
+/// The stock error popup, and the menus a listen server's match opens for the player to answer.
+const ERROR_MENU: &str = "error_popmenu";
+const TEAM_MENU: &str = "team_marinesopfor";
+const CLASS_MENU: &str = "changeclass";
+/// What the server's kick says (the player is `--name`'s default, `player`).
+const KICKED: &str = "Player kicked";
 
-/// The front end: a bare `map` (nothing happens), a typed `map` and `devmap` of a missing map, and a join nobody
-/// answers. The popup is dismissed as a player does, with Escape, which empties the message, so each check is its own.
-const FRONTEND_STEPS: &str = "wait=2,console=map,wait=2,cvaris=com_errorMessage ,home=5,\
-console=map nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Can't find map \"nosuchmap\".,home=5,shot=badmap,\
-key=escape,wait=1,cvaris=com_errorMessage ,console=devmap nosuchmap,menu=error_popmenu:30,cvaris=com_errorMessage Can't find map \"nosuchmap\".,home=5,\
-key=escape,wait=1,cvaris=com_errorMessage ,connect=127.0.0.1:28999,menu=error_popmenu:30,cvaris=com_errorMessage 127.0.0.1:28999 did not answer,home=5,shot=refused";
+/// What `SV_Map_f` says of a map the install lacks.
+fn cant_find(map: &str) -> String {
+    format!("Can't find map \"{map}\".")
+}
 
-/// A match started with `map` at the console (the server's `g_gametype` default, war, with no gametype played yet),
-/// spawned through the stock team and class menus; the server then kicks the player by name (`--name` defaults to
-/// `player`).
-const KICKED_STEPS: &str = "wait=2,console=map mp_crash,menu=team_marinesopfor:120,click=auto_assign,menu=changeclass:30,wait=1,click=Assault,\
-ingame=120,wait=2,server=kick player,menu=error_popmenu:30,cvaris=com_errorMessage Player kicked,home=5,shot=kicked";
+/// Whether `have` says what `want` does, word for word (the variable's own spacing aside); an empty `want` is an
+/// empty message.
+fn same_words(have: &str, want: &str) -> bool {
+    have.split_whitespace().eq(want.split_whitespace())
+}
 
-/// The steps whose outcome the stage is about: a run that stopped before them proves nothing.
-const REQUIRED: &[&[&str]] = &[
-    &[
-        "cvaris=com_errorMessage Can't find map \"nosuchmap\".",
-        "cvaris=com_errorMessage 127.0.0.1:28999 did not answer",
-        "shot=refused",
-    ],
-    &[
-        "cvaris=com_errorMessage Server connection timed out",
-        "shot=timeout",
-    ],
-    &["cvaris=com_errorMessage Player kicked", "shot=kicked"],
-];
+/// `com_errorMessage` says `want`, as the client holds it.
+fn message_is(c: &mut Driven, want: &str) -> Result<(), String> {
+    let r = c.ask(json!({"cmd": "cvar", "name": "com_errorMessage"}))?;
+    let have = r["value"].as_str().unwrap_or_default();
+    if same_words(have, want) {
+        Ok(())
+    } else {
+        Err(format!("com_errorMessage is {have:?}, want {want:?}"))
+    }
+}
+
+/// Whether the error popup is among the open menus.
+fn popup_open(c: &mut Driven) -> Result<bool, String> {
+    let open = c.lookup("menu.open")?;
+    Ok(open
+        .as_array()
+        .is_some_and(|o| o.iter().any(|m| m == ERROR_MENU)))
+}
+
+/// The front end with nothing left of a match: the main menu open, no connection and no world.
+fn at_home(c: &mut Driven, limit: Duration) -> Result<(), String> {
+    c.until(
+        json!({"menu.open": {"contains": "main"}, "net": null, "client.in_world": false}),
+        limit,
+        "the client is not back at the main menu with no match left",
+    )?;
+    Ok(())
+}
+
+/// The error popup opens with the reason `want`, over the main menu with no match left.
+fn popup_says(c: &mut Driven, want: &str, limit: Duration) -> Result<(), String> {
+    c.until(
+        json!({"menu.open": {"contains": ERROR_MENU}}),
+        limit,
+        "the error popup did not open",
+    )?;
+    message_is(c, want)?;
+    at_home(c, Duration::from_secs(5))
+}
+
+/// Escape, as a player closes the popup: it goes and its message with it, so each check is its own.
+fn dismiss(c: &mut Driven) -> Result<(), String> {
+    c.key("escape", "tap")?;
+    c.pause(Duration::from_secs(1))?;
+    if popup_open(c)? {
+        return Err("Escape did not close the error popup".into());
+    }
+    message_is(c, "")
+}
+
+/// Run 1: a bare `map` (nothing happens), a typed `map` and `devmap` of a missing map, and a `connect` nobody answers.
+fn front_end(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("main menu", |c| at_home(c, secs(90)))?;
+    c.step("bare map", |c| {
+        // `SV_Map_f` checks the zone only `if (*map)`: no popup, no message, no match.
+        c.console("map")?;
+        c.pause(secs(2))?;
+        message_is(c, "")?;
+        if popup_open(c)? {
+            return Err("a bare map opened the error popup".into());
+        }
+        at_home(c, secs(5))
+    })?;
+    let missing = cant_find(BAD_MAP);
+    c.step("map of a missing map", |c| {
+        c.console(&format!("map {BAD_MAP}"))?;
+        popup_says(c, &missing, secs(30))?;
+        c.capture("badmap").map(drop)
+    })?;
+    c.step("devmap of a missing map", |c| {
+        dismiss(c)?;
+        c.console(&format!("devmap {BAD_MAP}"))?;
+        popup_says(c, &missing, secs(30))
+    })?;
+    c.step("connect to nobody", |c| {
+        dismiss(c)?;
+        c.console(&format!("connect {NOBODY}"))?;
+        popup_says(c, &format!("{NOBODY} did not answer"), secs(30))?;
+        c.capture("refused").map(drop)
+    })
+}
+
+/// Run 2: a `connect` to `addr`, which answers the query but never the connect; the join loads the map, then the
+/// connect is tried for 20 s before it is given up.
+fn timed_out(c: &mut Driven, addr: &str) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("main menu", |c| at_home(c, secs(90)))?;
+    c.step("connect never answered", |c| {
+        c.console(&format!("connect {addr}"))?;
+        popup_says(c, net::client::TIMED_OUT, secs(120))?;
+        c.capture("timeout").map(drop)
+    })
+}
+
+/// Run 3: a match started with `map` at the console (the server's `g_gametype` default, war, with no gametype played
+/// yet), spawned through the stock team and class menus; the listen server then kicks the player by name.
+fn kicked(c: &mut Driven) -> Result<(), String> {
+    let secs = Duration::from_secs;
+    c.step("main menu", |c| at_home(c, secs(90)))?;
+    c.step("map typed at the console", |c| {
+        c.console("map mp_crash")?;
+        c.until(
+            json!({"menu.open": {"contains": TEAM_MENU}}),
+            secs(120),
+            "the team menu of the match did not open",
+        )?;
+        Ok(())
+    })?;
+    c.step("team and class menus", |c| {
+        c.click("auto_assign")?;
+        c.until(
+            json!({"menu.open": {"contains": CLASS_MENU}}),
+            secs(30),
+            "the class menu did not open after the team was picked",
+        )?;
+        c.pause(secs(1))?;
+        c.click("Assault")?;
+        c.until(
+            json!({"net.spawned": true, "player.alive": true}),
+            secs(120),
+            "the player did not spawn",
+        )?;
+        c.pause(secs(2))
+    })?;
+    c.step("kicked by the server", |c| {
+        c.ask(json!({"cmd": "server", "op": "exec", "line": "kick player"}))?;
+        popup_says(c, KICKED, secs(30))?;
+        c.capture("kicked").map(drop)
+    })
+}
+
+/// One run: a fresh client at the main menu, `play` driven through its channel and its steps written to
+/// `control-run.json`. The error names the step that failed, or how the client ended.
+fn drive(
+    client: &Path,
+    install: &Path,
+    dir: &Path,
+    play: impl FnOnce(&mut Driven) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut c = Driven::start(client, install, dir, ARGS)?;
+    let played = play(&mut c);
+    let written = c.report("control-run.json", &["menu", "console"]);
+    let status = c.finish(Duration::from_secs(30));
+    played?;
+    written.map_err(|e| format!("the run's report could not be written: {e}"))?;
+    match status {
+        Some(s) if s.success() => Ok(()),
+        Some(s) => Err(format!("the client exited {s}")),
+        None => Err("the client did not quit and was killed".into()),
+    }
+}
 
 /// A server that answers `getinfo` (so the join menu and `connect` take it for a server playing mp_crash) and nothing
 /// else: the connect is never answered, as a server that died between the query and the join.
@@ -104,20 +252,6 @@ impl Drop for MuteServer {
     }
 }
 
-/// Why a run failed, or `None`: every step passed and the run reached the ones that matter.
-fn verdict(report: &Value, required: &[&str]) -> Option<String> {
-    if let Some(w) = steps_problem(report) {
-        return Some(w);
-    }
-    let steps = report["steps"].as_array().map_or(&[][..], Vec::as_slice);
-    let missing: Vec<&str> = required
-        .iter()
-        .copied()
-        .filter(|want| !steps.iter().any(|s| s["step"] == *want))
-        .collect();
-    (!missing.is_empty()).then(|| format!("the run never reached {}", missing.join(", ")))
-}
-
 pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
     let Some(client) = locate_client() else {
         return Ok(StageReport::new(NAME, Status::Skipped)
@@ -136,51 +270,35 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
                 .with_reason(format!("the stage's mute server did not start: {e}")));
         }
     };
-    // The join loads the map, then the connect is tried for 20 s before it is given up.
-    let timeout_steps = format!(
-        "wait=2,connect={addr},menu=error_popmenu:120,cvaris=com_errorMessage {timed_out},home=5,shot=timeout",
-        addr = mute.addr,
-        timed_out = net::client::TIMED_OUT,
-    );
+    let mute_addr = mute.addr.to_string();
     let mut out = StageReport::new(NAME, Status::Passed);
     let mut problems = Vec::new();
-    // Every run starts at the main menu with no flags; the steps do the rest.
-    let runs: [(&str, &str, &[&str], &[&str]); 3] = [
+    let runs: [(&str, &dyn Fn(&mut Driven) -> Result<(), String>, &[&str]); 3] = [
+        ("frontend", &front_end, &["badmap", "refused"]),
         (
-            "frontend",
-            FRONTEND_STEPS,
-            REQUIRED[0],
-            &["badmap", "refused"],
+            "timeout",
+            &|c: &mut Driven| timed_out(c, &mute_addr),
+            &["timeout"],
         ),
-        ("timeout", timeout_steps.as_str(), REQUIRED[1], &["timeout"]),
-        ("kicked", KICKED_STEPS, REQUIRED[2], &["kicked"]),
+        ("kicked", &kicked, &["kicked"]),
     ];
-    for (label, steps, required, shots) in runs {
+    for (label, play, shots) in runs {
         let dir = ctx.dir.join(label);
-        match run_client(
-            &client,
-            install,
-            &dir,
-            &dir.join("config"),
-            &[],
-            steps,
-            LIMIT,
-        ) {
-            Ok(report) => {
-                out.files.push(format!("{label}/ui-script.json"));
-                for s in shots {
-                    out.files.push(format!("{label}/{s}.png"));
-                }
-                if let Some(w) = verdict(&report, required) {
-                    problems.push(format!("{label}: {w}"));
-                }
+        let result = drive(&client, install, &dir, play);
+        for f in std::iter::once("control-run.json".to_owned())
+            .chain(shots.iter().map(|s| format!("{s}.png")))
+        {
+            if dir.join(&f).is_file() {
+                out.files.push(format!("{label}/{f}"));
             }
-            Err(e) => problems.push(format!("{label}: {e}")),
+        }
+        if let Err(e) = result {
+            problems.push(format!("{label}: {e}"));
         }
     }
     drop(mute);
     out.notes.push(format!(
-        "map and devmap of {BAD_MAP}, a join of {NOBODY}, a join whose connect is never answered, and a kick from a match started with map at the console each opened error_popmenu with the reason over the main menu, with no match left"
+        "map and devmap of {BAD_MAP} and a connect to {NOBODY} typed at the console, a connect that is never answered, and a kick from a match started with map at the console and joined through the team and class menus each opened {ERROR_MENU} with the reason over the main menu, with no match left"
     ));
     if !problems.is_empty() {
         out.status = Status::Failed;
@@ -192,48 +310,21 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    fn steps(ok: &[(&str, bool)]) -> Value {
-        json!({
-            "steps": ok.iter().map(|(s, ok)| json!({"step": s, "ok": ok, "note": ""})).collect::<Vec<_>>()
-        })
+    #[test]
+    fn the_message_is_compared_word_for_word() {
+        assert!(same_words("Player kicked", KICKED));
+        assert!(same_words(" Player  kicked\n", KICKED));
+        assert!(!same_words("Player", KICKED));
+        assert!(!same_words("Player kicked again", KICKED));
+        // A dismissed popup leaves no message; any word left is one too many.
+        assert!(same_words("", ""));
+        assert!(same_words("  ", ""));
+        assert!(!same_words(&cant_find(BAD_MAP), ""));
     }
 
     #[test]
-    fn a_popup_that_never_opened_fails() {
-        let r = steps(&[
-            ("console=map nosuchmap", true),
-            ("menu=error_popmenu:30", false),
-        ]);
-        assert!(verdict(&r, REQUIRED[0]).unwrap().contains("error_popmenu"));
-    }
-
-    #[test]
-    fn a_run_that_stopped_early_fails() {
-        let r = steps(&[("console=map nosuchmap", true)]);
-        assert!(verdict(&r, REQUIRED[0]).unwrap().contains("never reached"));
-    }
-
-    #[test]
-    fn every_check_reached_passes() {
-        let r = steps(&[
-            ("cvaris=com_errorMessage Player kicked", true),
-            ("shot=kicked", true),
-        ]);
-        assert_eq!(verdict(&r, REQUIRED[2]), None);
-    }
-
-    #[test]
-    fn the_scripts_name_the_required_steps() {
-        for (steps, required) in [(FRONTEND_STEPS, REQUIRED[0]), (KICKED_STEPS, REQUIRED[2])] {
-            for want in required {
-                assert!(
-                    steps.split(',').any(|s| s == *want),
-                    "{want} not in {steps}"
-                );
-            }
-        }
-        assert!(FRONTEND_STEPS.contains(BAD_MAP) && FRONTEND_STEPS.contains(NOBODY));
+    fn a_missing_map_is_named_as_sv_map_f_names_it() {
+        assert_eq!(cant_find(BAD_MAP), "Can't find map \"nosuchmap\".");
     }
 }

@@ -590,6 +590,9 @@ pub struct ItemReport {
     pub decoration: bool,
     /// The setting a dvar-bound control shows now (`Yes`, a list's label, a bind's keys); `None` for other items.
     pub value: Option<String>,
+    /// The owner-draw id of an item the engine draws itself (the join menu's source, the mode chooser), `0` for none:
+    /// what names an item that has no name or text of its own.
+    pub owner_draw: i32,
     /// `[x, y, w, h]` in window pixels: the rectangle a click is tested against.
     pub rect: [f32; 4],
 }
@@ -1654,6 +1657,7 @@ impl Ui {
                     visible,
                     decoration: d.window.static_flags & statf::DECORATION != 0,
                     value: self.item_value(&*host, m, i, d),
+                    owner_draw: d.window.owner_draw,
                     rect: [p.x, p.y, p.w, p.h],
                 }
             })

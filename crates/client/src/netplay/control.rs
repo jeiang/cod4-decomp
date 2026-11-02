@@ -227,6 +227,9 @@ impl NetPlay {
             "watch" => watch(self),
             // The vision channels, the blend under way and the last goggles switch (`look::Look::report`).
             "look" => self.look.report(),
+            // What the run saw so far, the `net` object of `client.json` and `ui-script.json` (`NetPlay::report`): the
+            // draw counters a check compares (`vehicles_max_drawn`, `projectiles_max_drawn`, `brush_models_max`, ...).
+            "report" => self.report(),
             _ => Value::Null,
         }
     }
