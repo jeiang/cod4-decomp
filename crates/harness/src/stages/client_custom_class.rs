@@ -113,6 +113,10 @@ fn stat_is(c: &mut Driven, (index, want): (u32, i64), what: &str) -> Result<(), 
     }
 }
 
+/// The main menu as it stands on top of the stack: the stock `main` draws the background and opens `main_text`
+/// over it, which holds the buttons.
+pub(super) const HOME: &str = "main_text";
+
 /// Waits until the top menu is `name` (menu names compare without case, as the menus' `open` does).
 pub(super) fn until_top(c: &mut Driven, name: &str, limit: Duration) -> Result<(), String> {
     let end = Instant::now() + limit;
@@ -156,6 +160,7 @@ fn spawn(c: &mut Driven, limit: Duration) -> Result<(), String> {
 fn build_class(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), String> {
     let t = |k: &str| text[k].as_str();
     c.step("name custom class 5 and give the profile experience", |c| {
+        until_top(c, HOME, Duration::from_secs(60))?;
         c.console("set customclass5 P90")?;
         c.console(&format!("statset {} {}", EXPERIENCE.0, EXPERIENCE.1))?;
         let name = c.ask(json!({"cmd": "cvar", "name": "customclass5"}))?;
@@ -165,7 +170,7 @@ fn build_class(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), Str
         Ok(())
     })?;
     c.step("Create a Class > custom slot 5", |c| {
-        until_top(c, "main", Duration::from_secs(60))?;
+        until_top(c, HOME, Duration::from_secs(5))?;
         open_by(c, "Create a Class", "pc_cac_popup")?;
         open_by(c, "P90", "menu_cac_sniper")
     })?;
@@ -202,7 +207,7 @@ fn build_class(c: &mut Driven, text: &HashMap<String, String>) -> Result<(), Str
         stat_is(c, ATTACHMENT, "the primary attachment")?;
         stat_is(c, PERK1, "perk 1")?;
         c.key("escape", "tap")?;
-        until_top(c, "main", Duration::from_secs(10))
+        until_top(c, HOME, Duration::from_secs(10))
     })
 }
 

@@ -6,6 +6,7 @@
 //! client starts with `+set cg_fov 75 +exec <file> +name <nick> +connect <server>` beside its own `--` options and
 //! must join the `cod4e-server` started for it under that name, with the variable set over the profile's config and
 //! the file run, read back through the control channel. Needs a display and the install; skips without.
+use super::client_custom_class::session_report;
 use super::client_dedicated::{Dedicated, lists_player, locate_server};
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
@@ -95,11 +96,6 @@ pub(super) fn weapon_prefix(c: &mut Driven, prefix: &str, limit: Duration) -> Re
         }
         c.pause(Duration::from_millis(100))?;
     }
-}
-
-/// Writes a Driven run report in the shape the session verdict checks.
-pub(super) fn driven_report(c: &mut Driven) -> Result<Value, String> {
-    c.report("control-run.json", &["client", "net", "hud", "render"])
 }
 
 fn spawn(c: &mut Driven) -> Result<(), String> {
@@ -389,7 +385,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
             }
         };
         let played = play(&mut c);
-        let report = driven_report(&mut c);
+        let report = session_report(&mut c, "control-run.json");
         let status = c.finish(Duration::from_secs(30));
         out.files.push(format!("{label}/control-run.json"));
         for shot in [label, "direct_menu"] {

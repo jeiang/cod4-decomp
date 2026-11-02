@@ -4,9 +4,10 @@
 //! picking the other team closes the team menu, opens the server's class menu, and after that class pick the player
 //! is on the new team and respawns with the new class's weapon. Every step must pass. Needs a display and the install;
 //! skips without.
+use super::client_custom_class::session_report;
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
-use super::client_session::{check_menu, driven_report, verdict, weapon_prefix};
+use super::client_session::{check_menu, verdict, weapon_prefix};
 use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::json;
@@ -205,7 +206,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     };
     let played = play(&mut c);
-    let report = driven_report(&mut c);
+    let report = session_report(&mut c, "control-run.json");
     let status = c.finish(Duration::from_secs(30));
     out.files.push("control/control-run.json".into());
     for f in [

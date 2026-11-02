@@ -5,7 +5,7 @@
 //! projectile's model while it flies and rests, receive its explosion event and play an explosion sound cue. Needs a
 //! display and the install; skips without.
 use super::client_flythrough::locate_client;
-use super::client_hardpoint::{join, report_above};
+use super::client_hardpoint::{join, report_above, until_stat};
 use super::client_models::no_display;
 use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
@@ -23,6 +23,8 @@ const ARGS: &[&str] = &[
     "--duration",
     "300",
 ];
+/// Everyone in the match: the one bot of `ARGS` and the player.
+const PLAYERS: u64 = 2;
 /// `OFFHAND_HOLD` and on (`sim::pm`'s weapon states): the grenade is past `OFFHAND_PREPARE`, where letting go of a
 /// hold-to-throw grenade puts it away, so letting go now throws it.
 const PRIMED: u64 = 17;
@@ -35,14 +37,17 @@ fn count(v: &Value) -> u64 {
 fn drive(c: &mut Driven, out: &mut StageReport) -> Result<Vec<String>, String> {
     let secs = Duration::from_secs;
     join(c, "auto_assign", "Assault")?;
-    // The prematch holds the weapons; the throw waits until they are free and a frag is carried.
+    // The prematch countdown freezes everyone's controls (stock `freezeControls`), which strips the grenade buttons
+    // from the player's commands while the weapons stay enabled: a `+frag` held then does nothing until the countdown
+    // ends. The throw waits until a frag is carried and the server has every player, the player too, in the game with
+    // the controls free (its `playing` statistic, as of now: the player's death or a new freeze takes it back down).
     c.step("a frag in hand", |c| {
         c.until(
             json!({"player.weapons_enabled": true, "hud.report.frag": {"gt": 0}}),
             secs(45),
             "the player never carried a frag with the weapons free",
-        )
-        .map(|_| ())
+        )?;
+        until_stat(c, "playing", PLAYERS, secs(60)).map(|_| ())
     })?;
     let frags = c.lookup("hud.report.frag")?.as_u64().unwrap_or(0);
     let blasts = count(&c.lookup("events.world.explosion")?);

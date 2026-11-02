@@ -7,7 +7,7 @@
 //! a game mode is chosen, and the internet list is empty), and Start New Server's game mode chooser steps through the
 //! modes in the original's order. The install's `players/` folder must be exactly as it was after the run. Needs a
 //! display and the install; skips without.
-use super::client_custom_class::{localized, until_top};
+use super::client_custom_class::{HOME, localized, until_top};
 use super::client_flythrough::locate_client;
 use super::client_models::no_display;
 use super::client_session::{check_menu, steps_problem};
@@ -320,12 +320,12 @@ fn back(c: &mut Driven) -> Result<(), String> {
 fn to_main(c: &mut Driven) -> Result<(), String> {
     for _ in 0..3 {
         let (top, _) = top_items(c)?;
-        if top.eq_ignore_ascii_case("main") {
+        if top.eq_ignore_ascii_case(HOME) {
             return Ok(());
         }
         back(c)?;
     }
-    until_top(c, "main", Duration::from_secs(1))
+    until_top(c, HOME, Duration::from_secs(1))
 }
 
 fn build(c: &mut Driven) -> Result<(), String> {
@@ -364,7 +364,7 @@ fn add_favorite(c: &mut Driven) -> Result<(), String> {
 
 fn drive(c: &mut Driven, enable_console: &str) -> Result<(), String> {
     c.step("main menu", |c| {
-        until_top(c, "main", Duration::from_secs(60))?;
+        until_top(c, HOME, Duration::from_secs(60))?;
         c.pause(Duration::from_secs(2))?;
         check_menu(c, &MAIN, &[])?;
         c.capture("main").map(|_| ())

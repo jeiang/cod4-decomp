@@ -36,13 +36,13 @@ fn set_cvar(c: &mut Driven, name: &str, value: &str) -> Result<(), String> {
 /// Starts a listen server through the same two pointer clicks as a person at the main menu.
 fn start_server(c: &mut Driven) -> Result<(), String> {
     c.until(
-        json!({"menu.open.0": {"exists": true}}),
+        json!({"menu.open": {"contains": "main"}}),
         Duration::from_secs(30),
         "the main menu did not open",
     )?;
     c.click("Start New Server")?;
     c.until(
-        json!({"menu.open.0": "createserver"}),
+        json!({"menu.open": {"contains": "createserver"}}),
         Duration::from_secs(20),
         "Start New Server did not open createserver",
     )?;
@@ -53,13 +53,13 @@ fn start_server(c: &mut Driven) -> Result<(), String> {
 /// Joins a team and a class with the pointer, then waits for the spawn and the menus to close.
 fn join(c: &mut Driven) -> Result<(), String> {
     c.until(
-        json!({"menu.open.0": "team_marinesopfor"}),
+        json!({"menu.open": {"contains": "team_marinesopfor"}}),
         Duration::from_secs(90),
         "the team menu did not open",
     )?;
     c.click("auto_assign")?;
     c.until(
-        json!({"menu.open.0": "changeclass"}),
+        json!({"menu.open": {"contains": "changeclass"}}),
         Duration::from_secs(30),
         "the class menu did not open",
     )?;

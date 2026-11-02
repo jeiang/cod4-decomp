@@ -3,9 +3,10 @@
 //! open the in-game menu, confirm Leave Game: the client must be back at the front end (no connection, no world,
 //! the main menu open and drawn, not a black screen). Then Quit from the main menu must end the process with
 //! status 0. Needs a display and the install; skips without.
+use super::client_custom_class::session_report;
 use super::client_flythrough::locate_client;
 use super::client_models::{decode, no_display};
-use super::client_session::{driven_report, steps_problem};
+use super::client_session::steps_problem;
 use crate::control::Driven;
 use crate::stage::{StageCtx, StageReport, Status};
 use serde_json::{Value, json};
@@ -139,6 +140,17 @@ fn leave(c: &mut Driven) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether a request failed because the client's channel went away: what the confirmed Quit is meant to do.
+fn channel_gone(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("the channel closed")
+        || e.contains("connection reset")
+        || e.contains("broken pipe")
+        || e.contains("connection aborted")
+}
+
+/// Clicks Quit and confirms it. The confirmation ends the client, so its channel closing during that click is the
+/// expected outcome; the caller still requires the process to exit with status 0.
 fn quit(c: &mut Driven) -> Result<(), String> {
     c.step("click=Quit", |c| {
         c.click("Quit")?;
@@ -147,8 +159,11 @@ fn quit(c: &mut Driven) -> Result<(), String> {
             Duration::from_secs(5),
             "Quit did not open its confirmation popup",
         )?;
-        c.click("Yes")?;
-        Ok(())
+        match c.click("Yes") {
+            Ok(_) => Ok(()),
+            Err(e) if channel_gone(&e) => Ok(()),
+            Err(e) => Err(e),
+        }
     })
 }
 
@@ -174,7 +189,7 @@ pub fn run(ctx: &StageCtx) -> io::Result<StageReport> {
         }
     };
     let left = leave(&mut c);
-    let report = driven_report(&mut c);
+    let report = session_report(&mut c, "control-run.json");
     let quit = if left.is_ok() && report.is_ok() {
         Some(quit(&mut c))
     } else {

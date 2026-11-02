@@ -20,7 +20,7 @@
 //! `Already connected to a server. Disconnect first`, opening nothing. Launched with `snd_levelFadeTime 100`, the
 //! initial level's sound fades in from silence over that non-default time (#407). Needs a display and the install;
 //! skips without.
-use super::client_custom_class::{localized, session_report, until_top};
+use super::client_custom_class::{HOME, localized, session_report, until_top};
 use super::client_flythrough::locate_client;
 use super::client_frontend::cvar_is;
 use super::client_models::no_display;
@@ -138,7 +138,7 @@ fn pitch_in(c: &mut Driven, lo: f64, hi: f64) -> Result<(), String> {
 /// `writeconfig` from the console: the named exports, the usage lines, and the active profile read back as it was.
 fn writeconfig(c: &mut Driven, active: &Path) -> Result<(), String> {
     c.step("writeconfig exports and usage", |c| {
-        until_top(c, "main", Duration::from_secs(60))?;
+        until_top(c, HOME, Duration::from_secs(60))?;
         c.console("seta writeconfig_marker exported")?;
         c.console("bind f10 \"say named_config_export\"")?;
         c.console("writeconfig commands-export")?;
@@ -245,7 +245,7 @@ fn front_end(c: &mut Driven) -> Result<(), String> {
             Duration::from_secs(5),
             "the client did not come back to the front end",
         )?;
-        until_top(c, "main", Duration::from_secs(5))?;
+        until_top(c, HOME, Duration::from_secs(5))?;
         let net = c.lookup("net")?;
         if net.is_null() {
             Ok(())
