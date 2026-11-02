@@ -22,7 +22,7 @@ use crate::bot::{BotShared, Brain};
 use crate::client::{Client, Conn, Session, Team};
 use crate::cmd::{Argv, CommandBuffer, split_commands};
 use crate::content::{Content, Install};
-use crate::cvar::{self, Cvars};
+use crate::cvar::{self, Cvars, Kind};
 use crate::game::{self, Game};
 use crate::netsv::{Inbound, NetSv, Peer, is_lan};
 use crate::rcon::{self, Throttle, Verdict};
@@ -398,180 +398,274 @@ pub fn request_stop() {
     STOP_REQUESTED.store(true, Ordering::Relaxed);
 }
 
-fn register_core_dvars(c: &mut Cvars) {
+/// The registrations of the server's dvars (`Dvar_Register*`): name, type and range, default, flags. Each is the
+/// stock one (KisakCOD MP 1.8, re-checked against the 1.7 binary's registration calls) unless a comment says why
+/// not; the unit test `core_dvars_are_registered_as_stock` holds them to the stock list.
+fn core_dvars() -> Vec<(&'static str, Kind, String, u32)> {
     use cvar::*;
-    for (n, d, f) in [
-        ("dedicated", "2", LATCH),
-        ("developer", "0", 0),
-        ("log_filter", "", 0),
-        ("developer_script", "0", 0),
+    let (int_any, int_pos, f_pos) = (
+        Kind::Int(i32::MIN, i32::MAX),
+        Kind::Int(0, i32::MAX),
+        Kind::Float(0.0, f32::MAX),
+    );
+    let protocol = net::oob::PROTOCOL as i32;
+    let rows: Vec<(&'static str, Kind, &str, u32)> = vec![
+        // An enum in stock (listen, LAN, internet), kept as its index.
+        ("dedicated", Kind::Int(0, 2), "2", LATCH),
+        ("developer", Kind::Int(0, 2), "0", 0),
+        ("log_filter", Kind::String, "", 0),
+        ("developer_script", Kind::Bool, "0", 0),
         // The stock server runs 20; this one deliberately keeps 30 (README: the game runs at 30 Hz).
-        ("sv_fps", "30", 0),
-        ("sv_maxclients", "32", ARCHIVE | SERVERINFO | LATCH),
-        ("ui_maxclients", "32", ARCHIVE | SERVERINFO | LATCH),
-        ("g_gametype", "war", SERVERINFO | LATCH),
-        ("mapname", "", ROM | SERVERINFO),
-        ("sv_mapname", "", ROM | SERVERINFO),
-        ("sv_hostname", "CoD4Host", ARCHIVE | SERVERINFO),
-        ("net_port", "28960", LATCH),
+        ("sv_fps", Kind::Int(10, 1000), "30", 0),
+        (
+            "sv_maxclients",
+            Kind::Int(1, 64),
+            "32",
+            ARCHIVE | SERVERINFO | LATCH,
+        ),
+        (
+            "ui_maxclients",
+            Kind::Int(1, 64),
+            "32",
+            ARCHIVE | SERVERINFO | LATCH,
+        ),
+        ("g_gametype", Kind::String, "war", SERVERINFO | LATCH),
+        ("mapname", Kind::String, "", ROM | SERVERINFO),
+        ("sv_mapname", Kind::String, "", ROM | SERVERINFO),
+        (
+            "sv_hostname",
+            Kind::String,
+            "CoD4Host",
+            ARCHIVE | SERVERINFO,
+        ),
+        ("net_port", Kind::Int(0, 65535), "28960", LATCH),
         // Opt-in: a dedicated server with `sv_public 1` sends heartbeats to the masters `sv_master1`..`sv_master5`
         // (`host[:port]`, all empty by default) so clients can find it on the Internet list.
-        ("sv_public", "0", 0),
-        ("sv_master1", "", 0),
-        ("sv_master2", "", 0),
-        ("sv_master3", "", 0),
-        ("sv_master4", "", 0),
-        ("sv_master5", "", 0),
+        ("sv_public", Kind::Bool, "0", 0),
+        ("sv_master1", Kind::String, "", 0),
+        ("sv_master2", Kind::String, "", 0),
+        ("sv_master3", Kind::String, "", 0),
+        ("sv_master4", Kind::String, "", 0),
+        ("sv_master5", Kind::String, "", 0),
         // WebTransport for browser clients, off when `net_wt` is empty: `[host:]port`, the
         // certificate and key PEM files (empty: a 13-day self-signed one), and the JSON file the
         // page reads for the URL and certificate hash. Command line: `--webtransport`, ...
-        ("net_wt", "", LATCH),
-        ("net_wt_cert", "", LATCH),
-        ("net_wt_key", "", LATCH),
-        ("net_wt_info", "", LATCH),
-        ("g_password", "", 0),
-        ("g_speed", "190", 0),
+        ("net_wt", Kind::String, "", LATCH),
+        ("net_wt_cert", Kind::String, "", LATCH),
+        ("net_wt_key", Kind::String, "", LATCH),
+        ("net_wt_info", Kind::String, "", LATCH),
+        ("g_password", Kind::String, "", 0),
+        ("g_speed", int_any, "190", 0),
         // Milliseconds past a mantle that its landing spot stays blocked to other players.
-        ("g_mantleBlockTimeBuffer", "500", 0),
+        (
+            "g_mantleBlockTimeBuffer",
+            Kind::Int(0, 60_000),
+            "500",
+            CHEAT,
+        ),
         // "Turn on antilag checks for weapon hits" (KisakCOD `game_mp/g_main_mp.cpp:614`): shots and knife swings are
         // judged where the shooter saw the others (`lagcomp`).
-        ("g_antilag", "1", ARCHIVE | SERVERINFO),
-        ("bot_idle", "0", 0),
+        ("g_antilag", Kind::Bool, "1", ARCHIVE | SERVERINFO),
+        ("bot_idle", Kind::Bool, "0", 0),
         // Bots on every map; the listen server's player sets it, and a `bots` command sets it too.
-        ("bot_count", "0", 0),
-        ("g_allowvote", "1", 0),
-        ("g_deadChat", "0", 0),
-        ("sv_floodProtect", "1", 0),
-        ("g_useholdtime", "0", 0),
-        ("g_maxDroppedWeapons", "16", 0),
-        ("g_dropForwardSpeed", "10", ARCHIVE),
-        ("g_dropUpSpeedBase", "10", ARCHIVE),
-        ("g_dropUpSpeedRand", "5", ARCHIVE),
-        ("g_dropHorzSpeedRand", "100", ARCHIVE),
-        ("pickupPrints", "0", CHEAT),
-        ("player_throwbackInnerRadius", "90", CHEAT),
-        ("player_throwbackOuterRadius", "160", CHEAT),
-        ("player_MGUseRadius", "128", CHEAT),
-        ("bg_maxGrenadeIndicatorSpeed", "20", CHEAT),
-        ("perk_grenadeDeath", "frag_grenade_short_mp", 0),
-        ("g_useholdspawndelay", "500", 0),
-        ("g_gravity", "800", 0),
-        ("g_knockback", "1000", 0),
-        ("g_minGrenadeDamageSpeed", "400", CHEAT),
-        ("g_inactivity", "0", 0),
-        ("g_synchronousClients", "0", SYSTEMINFO),
-        // The original's default is on until the first `map` turns it off (`devmap` on).
-        ("sv_cheats", "1", SYSTEMINFO | INIT),
-        ("sv_serverid", "0", SYSTEMINFO | ROM),
+        ("bot_count", Kind::Int(0, 64), "0", 0),
+        ("g_allowvote", Kind::Bool, "1", ARCHIVE),
+        ("g_deadChat", Kind::Bool, "0", ARCHIVE),
+        // KisakCOD registers a Bool 1; the 1.7 binary an Int 4 (0..INT_MAX). Any value but 0 turns it on here.
+        ("sv_floodProtect", int_pos, "4", ARCHIVE | SERVERINFO),
+        ("g_useholdtime", int_pos, "0", 0),
+        ("g_maxDroppedWeapons", Kind::Int(2, 32), "16", 0),
+        (
+            "g_dropForwardSpeed",
+            Kind::Float(0.0, 1000.0),
+            "10",
+            ARCHIVE,
+        ),
+        ("g_dropUpSpeedBase", Kind::Float(0.0, 1000.0), "10", ARCHIVE),
+        ("g_dropUpSpeedRand", Kind::Float(0.0, 1000.0), "5", ARCHIVE),
+        (
+            "g_dropHorzSpeedRand",
+            Kind::Float(0.0, 1000.0),
+            "100",
+            ARCHIVE,
+        ),
+        ("pickupPrints", Kind::Bool, "0", CHEAT),
+        ("player_throwbackInnerRadius", f_pos, "90", CHEAT),
+        ("player_throwbackOuterRadius", f_pos, "160", CHEAT),
+        ("player_MGUseRadius", f_pos, "128", CHEAT),
+        (
+            "bg_maxGrenadeIndicatorSpeed",
+            Kind::Float(0.0, 1000.0),
+            "20",
+            CHEAT,
+        ),
+        (
+            "perk_grenadeDeath",
+            Kind::String,
+            "frag_grenade_short_mp",
+            CHEAT,
+        ),
+        (
+            "g_useholdspawndelay",
+            Kind::Int(0, 1000),
+            "500",
+            ARCHIVE | CHEAT,
+        ),
+        ("g_gravity", Kind::Float(1.0, f32::MAX), "800", 0),
+        ("g_knockback", Kind::Float(-f32::MAX, f32::MAX), "1000", 0),
+        ("g_minGrenadeDamageSpeed", f_pos, "400", CHEAT),
+        ("g_inactivity", int_pos, "0", 0),
+        ("g_synchronousClients", Kind::Bool, "0", SYSTEMINFO),
+        // The original's default is on until the first `map` turns it off (`devmap` on). Stock has no flags; here
+        // the map commands own it (init protected) and the clients take it from the systeminfo.
+        ("sv_cheats", Kind::Bool, "1", SYSTEMINFO | INIT),
+        ("sv_serverid", int_any, "0", SYSTEMINFO | ROM),
         // How much an abstention counts against a vote that runs out of time.
-        ("g_voteAbstainWeight", "0.5", ARCHIVE),
-        ("g_logSync", "0", ARCHIVE),
-        ("g_oldVoting", "1", ARCHIVE),
-        ("fs_game", "", SYSTEMINFO | INIT),
-        ("g_playerCollisionEjectSpeed", "25", ARCHIVE),
+        ("g_voteAbstainWeight", Kind::Float(0.0, 1.0), "0.5", ARCHIVE),
+        ("g_logSync", Kind::Bool, "0", ARCHIVE),
+        ("g_oldVoting", Kind::Bool, "1", ARCHIVE),
+        ("fs_game", Kind::String, "", SERVERINFO | SYSTEMINFO | INIT),
+        (
+            "g_playerCollisionEjectSpeed",
+            Kind::Int(0, 32_000),
+            "25",
+            ARCHIVE,
+        ),
         // Stock registrations a config or script may read (issue #369; `game_mp/g_main_mp.cpp`,
         // `server_mp/sv_init_mp.cpp`): red crosshairs over enemies, the ban list, the friendly fire and name
         // distances, the published IWD lists, the client command log switch, packet padding and the animation dump.
-        ("g_redCrosshairs", "1", LATCH | ARCHIVE),
-        ("g_banIPs", "", ARCHIVE),
-        ("g_friendlyfireDist", "256", CHEAT),
-        ("g_friendlyNameDist", "15000", CHEAT),
-        ("sv_iwds", "", SYSTEMINFO | ROM),
-        ("sv_iwdNames", "", SYSTEMINFO | ROM),
-        ("sv_showCommands", "0", 0),
-        ("sv_padPackets", "0", 0),
-        ("g_dumpAnims", "-1", CHEAT),
-        ("sv_keywords", "", SERVERINFO),
-        ("protocol", "", ROM | SERVERINFO),
+        ("g_redCrosshairs", Kind::Bool, "1", LATCH | ARCHIVE),
+        ("g_banIPs", Kind::String, "", ARCHIVE),
+        (
+            "g_friendlyfireDist",
+            Kind::Float(0.0, 15000.0),
+            "256",
+            CHEAT,
+        ),
+        (
+            "g_friendlyNameDist",
+            Kind::Float(0.0, 15000.0),
+            "15000",
+            CHEAT,
+        ),
+        ("sv_iwds", Kind::String, "", SYSTEMINFO | ROM),
+        ("sv_iwdNames", Kind::String, "", SYSTEMINFO | ROM),
+        ("sv_showCommands", Kind::Bool, "0", 0),
+        ("sv_padPackets", int_pos, "0", 0),
+        ("g_dumpAnims", Kind::Int(-1, 1023), "-1", CHEAT),
+        ("sv_keywords", Kind::String, "", SERVERINFO),
+        (
+            "protocol",
+            Kind::Int(protocol, protocol),
+            "",
+            ROM | SERVERINFO,
+        ),
         // `Com_Init`: the game version (`shortversion`, published in the server info) and this build's name.
-        ("shortversion", net::SHORT_VERSION, ROM | SERVERINFO),
-        ("version", "", ROM),
-        ("sv_privateClients", "0", SERVERINFO),
-        ("sv_pure", "0", SERVERINFO | SYSTEMINFO),
-        ("sv_voice", "0", ARCHIVE | SERVERINFO | SYSTEMINFO),
-        ("voice_global", "0", ARCHIVE),
-        ("voice_deadChat", "0", ARCHIVE),
-        ("perk_parabolicRadius", "400", CHEAT),
-        ("perk_parabolicAngle", "180", CHEAT),
-        ("sv_allowDownload", "0", ARCHIVE | SERVERINFO),
+        (
+            "shortversion",
+            Kind::String,
+            net::SHORT_VERSION,
+            ROM | SERVERINFO,
+        ),
+        ("version", Kind::String, "", ROM),
+        ("sv_privateClients", Kind::Int(0, 64), "0", SERVERINFO),
+        ("sv_pure", Kind::Bool, "0", SERVERINFO | SYSTEMINFO),
+        (
+            "sv_voice",
+            Kind::Bool,
+            "0",
+            ARCHIVE | SERVERINFO | SYSTEMINFO,
+        ),
+        ("voice_global", Kind::Bool, "0", ARCHIVE),
+        ("voice_deadChat", Kind::Bool, "0", ARCHIVE),
+        ("perk_parabolicRadius", f_pos, "400", CHEAT),
+        ("perk_parabolicAngle", Kind::Float(0.0, 180.0), "180", CHEAT),
+        ("sv_allowDownload", Kind::Bool, "1", ARCHIVE),
         // Fast download: clients are sent to `sv_wwwBaseURL` for the files `sv_allowDownload` lets them have.
         // Clients here always download before they connect, so `sv_wwwDlDisconnected` (stock: should a client leave
         // the server while it downloads) has nothing to change; it is kept for configs that set it.
-        ("sv_wwwDownload", "0", ARCHIVE),
-        ("sv_wwwBaseURL", "", ARCHIVE),
-        ("sv_wwwDlDisconnected", "0", ARCHIVE),
-        ("sv_punkbuster", "0", ARCHIVE | SERVERINFO),
-        ("sv_allowAnonymous", "0", SERVERINFO),
-        ("sv_disableClientConsole", "0", SERVERINFO),
-        ("sv_minPing", "0", ARCHIVE | SERVERINFO),
-        ("sv_maxPing", "0", ARCHIVE | SERVERINFO),
+        ("sv_wwwDownload", Kind::Bool, "0", ARCHIVE),
+        ("sv_wwwBaseURL", Kind::String, "", ARCHIVE),
+        ("sv_wwwDlDisconnected", Kind::Bool, "0", ARCHIVE),
+        // Stock defaults to 1; PunkBuster is not built here, so the server info does not claim it.
+        (
+            "sv_punkbuster",
+            Kind::Bool,
+            "0",
+            ARCHIVE | SERVERINFO | INIT,
+        ),
+        ("sv_allowAnonymous", Kind::Bool, "0", SERVERINFO),
+        ("sv_disableClientConsole", Kind::Bool, "0", SERVERINFO),
+        ("sv_minPing", Kind::Int(0, 999), "0", ARCHIVE | SERVERINFO),
+        ("sv_maxPing", Kind::Int(0, 999), "0", ARCHIVE | SERVERINFO),
         // Seconds of silence after which a client is dropped (`sv_timeout`), and for one that has not sent a packet
         // since it connected (`sv_connectTimeout`).
-        ("sv_timeout", "240", 0),
-        ("sv_connectTimeout", "45", 0),
+        ("sv_timeout", Kind::Int(0, 1800), "240", 0),
+        ("sv_connectTimeout", Kind::Int(0, 1800), "45", 0),
         // Seconds a connected client must have been in before the same address and qport may connect again
         // (`sv_reconnectlimit`).
-        ("sv_reconnectlimit", "3", 0),
+        ("sv_reconnectlimit", Kind::Int(0, 1800), "3", ARCHIVE),
         // A `connect` giving this password may take the first `sv_privateClients` slots, and skips `g_password`.
-        ("sv_privatePassword", "", 0),
+        ("sv_privatePassword", Kind::String, "", 0),
         // Clients one address outside the local network may have at once (0: no limit).
-        ("sv_maxClientsPerIP", "0", 0),
+        ("sv_maxClientsPerIP", Kind::Int(0, 64), "0", 0),
         // Most bytes a second one client is sent (0: what the client asks for). The original defaults to 5000, which
         // our snapshots (bigger than its delta-compressed ones) would stretch to a few a second; a limit is opt-in.
-        ("sv_maxRate", "0", ARCHIVE | SERVERINFO),
+        (
+            "sv_maxRate",
+            Kind::Int(0, 25_000),
+            "0",
+            ARCHIVE | SERVERINFO,
+        ),
         // Remote console: empty switches `rcon` off.
-        ("rcon_password", "", 0),
-        // Seconds `kick` and `tempBanClient` keep a player out (0-3600).
-        ("sv_kickBanTime", "300", ARCHIVE),
+        ("rcon_password", Kind::String, "", 0),
+        // Seconds `kick` and `tempBanClient` keep a player out.
+        ("sv_kickBanTime", Kind::Float(0.0, 3600.0), "300", 0),
         // Where `banUser` / `banClient` keep the permanent bans.
-        ("sv_banFile", "ban.txt", 0),
-        ("sv_mapRotation", "", 0),
-        ("sv_mapRotationCurrent", "", 0),
-        ("nextmap", "map_restart", 0),
-        ("gamename", "Call of Duty 4", SERVERINFO | ROM),
-        // The log file name (empty: no log); `cod4e-server` asks for `games_mp.log`.
-        ("g_log", "", ARCHIVE),
-        ("loc_language", "0", ARCHIVE),
-    ] {
-        c.register(n, d, f);
+        ("sv_banFile", Kind::String, "ban.txt", 0),
+        ("sv_mapRotation", Kind::String, "", 0),
+        ("sv_mapRotationCurrent", Kind::String, "", 0),
+        // Stock registers it empty; here `vstr nextmap` restarts the map until a rotation sets it.
+        ("nextmap", Kind::String, "map_restart", 0),
+        ("gamename", Kind::String, "Call of Duty 4", SERVERINFO | ROM),
+        // The log file name (empty: no log; stock `games_mp.log`); `cod4e-server` asks for `games_mp.log`.
+        ("g_log", Kind::String, "", ARCHIVE),
+        ("loc_language", Kind::Int(0, 14), "0", ARCHIVE | LATCH),
+    ];
+    let mut all: Vec<_> = rows
+        .into_iter()
+        .map(|(n, k, d, f)| (n, k, d.to_owned(), f))
+        .collect();
+    for &(n, d, hi) in crate::missile::MISSILE_CVARS {
+        all.push((n, Kind::Float(0.0, hi), d.to_owned(), CHEAT));
+    }
+    // The movement dvars (`jump_height`, `friction`, ...): cheat protected, replicated to the clients. Stock also
+    // publishes the fall damage heights in the systeminfo, makes the two move thresholds read only and leaves the
+    // sprint stick minimum open to all (`bgame/bg_misc.cpp:488-496,817-864`).
+    for (n, d, domain) in sim::pm::Params::dvars() {
+        let kind = match domain {
+            sim::pm::Domain::Bool => Kind::Bool,
+            sim::pm::Domain::Int(lo, hi) => Kind::Int(lo, hi),
+            sim::pm::Domain::Float(lo, hi) => Kind::Float(lo, hi),
+            sim::pm::Domain::Vec2(lo, hi) => Kind::Vec2(lo, hi),
+        };
+        let flags = match n {
+            "bg_fallDamageMinHeight" | "bg_fallDamageMaxHeight" => CHEAT | SYSTEMINFO,
+            "player_moveThreshhold" | "player_footstepsThreshhold" => CHEAT | ROM,
+            "player_sprintForwardMinimum" => 0,
+            _ => CHEAT,
+        };
+        all.push((n, kind, d, flags));
+    }
+    all
+}
+
+fn register_core_dvars(c: &mut Cvars) {
+    for (n, k, d, f) in core_dvars() {
+        c.register_kind(n, k, &d, f);
     }
     c.force("protocol", &net::oob::PROTOCOL.to_string());
     c.force("version", &net::version());
-    // `Dvar_Register*` domains.
-    for (n, lo, hi) in [
-        ("sv_fps", 10, 1000),
-        ("sv_maxclients", 1, 64),
-        ("ui_maxclients", 1, 64),
-        ("sv_privateClients", 0, 64),
-        ("sv_maxRate", 0, 25_000),
-        ("sv_minPing", 0, 999),
-        ("sv_maxPing", 0, 999),
-        ("sv_timeout", 1, 1800),
-        ("sv_connectTimeout", 1, 3600),
-        ("sv_reconnectlimit", 0, 12),
-        ("sv_maxClientsPerIP", 0, 64),
-        ("g_maxDroppedWeapons", 2, 32),
-        ("g_inactivity", 0, i32::MAX),
-        ("g_playerCollisionEjectSpeed", 0, 32_000),
-        ("g_redCrosshairs", 0, 1),
-        ("sv_showCommands", 0, 1),
-        ("sv_padPackets", 0, i32::MAX),
-        ("g_dumpAnims", -1, 1023),
-    ] {
-        c.set_limit(n, Limit::Int(lo, hi));
-    }
-    c.set_limit("g_voteAbstainWeight", Limit::Float(0.0, 1.0));
-    c.set_limit("g_gravity", Limit::Float(1.0, f32::MAX));
-    c.set_limit("sv_kickBanTime", Limit::Float(0.0, 3600.0));
-    c.set_limit("g_friendlyfireDist", Limit::Float(0.0, 15000.0));
-    c.set_limit("g_friendlyNameDist", Limit::Float(0.0, 15000.0));
-    for (n, d) in crate::missile::MISSILE_CVARS {
-        c.register(n, d, CHEAT);
-    }
-    // The movement dvars (`jump_height`, `friction`, ...): cheat protected, replicated to the clients.
-    for (n, d) in sim::pm::Params::dvars() {
-        c.register(n, &d, CHEAT);
-    }
 }
 
 /// What one `map_rotate` does with the rotation.
@@ -3699,6 +3793,10 @@ fn hears_voice(rules: &VoiceRules, talker: &Client, listener: &Client) -> bool {
             || (listener.session == Session::Dead || talker.session == Session::Dead)
                 && rules.dead_chat)
 }
+
+#[cfg(test)]
+#[path = "stock_dvars.rs"]
+mod stock_dvars;
 
 #[cfg(test)]
 mod tests {
