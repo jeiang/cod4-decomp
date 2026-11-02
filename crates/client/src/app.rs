@@ -5816,6 +5816,12 @@ fn hud_state(st: &mut State) -> Value {
     };
     let g = &sh.st.game;
     let live = &sh.st.live;
+    // The scoreboard's rows in list order as `[client, team]`.
+    let score_rows: Vec<[u32; 2]> = live
+        .scores
+        .iter()
+        .map(|r| [u32::from(r.client), u32::from(r.team)])
+        .collect();
     json!({
         "report": sh.st.game.hud.report(),
         "stats": sh.st.hud_stats.report(),
@@ -5828,6 +5834,9 @@ fn hud_state(st: &mut State) -> Value {
             // A message window has a line up.
             "feed": (0..crate::hud::WINDOWS).any(|w| sh.st.feed.active(w, live.time)),
             "players_listed": live.scores.len(),
+            "score_rows": score_rows,
+            // The viewer's client number.
+            "own": live.own,
             "own_team": live.own_team,
         },
         "missing_images": sh.missing(),

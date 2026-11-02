@@ -78,11 +78,6 @@ pub enum ClientEvent {
         /// The impulse to push the body with.
         push: [f32; 3],
     },
-    PlayerPain {
-        origin: [f32; 3],
-        client: u16,
-        damage: u8,
-    },
     /// A physics world event (`physicsexplosionsphere`, `physicsexplosioncylinder`, `physicsjolt`, `physicsjitter`):
     /// loose bodies near `origin` are pushed.
     Physics { origin: [f32; 3], what: Physics },
@@ -124,7 +119,6 @@ impl ClientEvent {
             Self::PlayFx { .. } => "play_fx",
             Self::PlayFxOnTag { .. } => "play_fx_on_tag",
             Self::PlayerDeath { .. } => "player_death",
-            Self::PlayerPain { .. } => "player_pain",
             Self::Physics { .. } => "physics",
             Self::Earthquake { .. } => "earthquake",
             Self::WeaponFire { .. } => "weapon_fire",
@@ -376,11 +370,6 @@ impl Events {
                 origin: e.origin,
                 client: e.client,
                 push: e.velocity,
-            },
-            ev::PLAYER_PAIN => ClientEvent::PlayerPain {
-                origin: e.origin,
-                client: e.client,
-                damage: e.event_parm,
             },
             ev::PHYSICS_EXPLOSION
             | ev::PHYSICS_EXPLOSION_CYLINDER
