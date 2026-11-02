@@ -6040,6 +6040,15 @@ fn state_document(cli: &Cli, st: &mut State, parts: &[&str]) -> Value {
             }),
             "menu" => menu_state(st),
             "hud" => hud_state(st),
+            // The local voice: frames read from the microphone and frames sent to the server so far, whether the
+            // microphone is open, and why it could not be (`null` once the console took the note, or when it never
+            // failed).
+            "voice" => json!({
+                "heard": st.talker.heard,
+                "sent": st.talker.sent,
+                "mic_open": st.talker.mic_open(),
+                "note": st.talker.note,
+            }),
             "console" => json!({
                 "open": st.shell.as_ref().is_some_and(|sh| sh.st.console.active()),
                 "field": st.shell.as_ref().map(|sh| sh.st.console.field()),
