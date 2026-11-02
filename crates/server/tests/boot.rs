@@ -248,6 +248,35 @@ fn getinfo_and_getstatus_carry_the_server_settings() {
     assert!(players.is_empty());
 }
 
+/// The stock registrations at a running server (#398): `fs_game` and `sv_floodProtect` are in the server info, the
+/// console takes `sv_reconnectlimit 60` (0..1800), reads `sv_voice 7` as the Bool 1, and refuses a cheat dvar while
+/// `sv_cheats` is off with the stock message.
+#[test]
+fn the_console_and_server_info_follow_the_stock_registrations() {
+    let Some(mut s) = boot(&["+set", "net_port", "0", "+map", "mp_crash"]) else {
+        eprintln!("COD4_PATH not set; skipping");
+        return;
+    };
+    let (status, _) = s.server_status();
+    for key in ["fs_game", "sv_floodProtect"] {
+        assert!(
+            status.iter().any(|(k, _)| k == key),
+            "getstatus has no {key}: {status:?}"
+        );
+    }
+    s.exec_line("set sv_reconnectlimit 60").unwrap();
+    assert_eq!(s.game.cvars.string("sv_reconnectlimit"), "60");
+    s.exec_line("set sv_voice 7").unwrap();
+    assert_eq!(s.game.cvars.string("sv_voice"), "1");
+    assert_eq!(s.game.cvars.string("sv_cheats"), "0");
+    let refused = s.exec_line("set g_mantleBlockTimeBuffer 0").unwrap_err();
+    assert!(
+        refused.contains("g_mantleBlockTimeBuffer is cheat protected."),
+        "{refused}"
+    );
+    assert_eq!(s.game.cvars.string("g_mantleBlockTimeBuffer"), "500");
+}
+
 /// Every command the console's table lists (`COMMANDS`, which the harness's `has_command` reads) reaches a handler:
 /// none of them may fall through to "Unknown command" and get logged as one (#375).
 #[test]

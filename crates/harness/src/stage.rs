@@ -187,7 +187,7 @@ pub static STAGES: &[StageDef] = &[
     },
     StageDef {
         name: "net-info",
-        description: "the getinfo answer of a pure, an impure, a listen, a modded, an extra-IWD, a custom-map and a hardcore server asked over UDP: challenge first, only the original's keys in its order, and its hw, pure, mod and hc values",
+        description: "the getinfo answer of a pure, an impure, a listen, a modded, an extra-IWD, a custom-map and a hardcore server asked over UDP: challenge first, only the original's keys in its order, and its hw, pure, mod and hc values; then getstatus carries fs_game and sv_floodProtect, and rcon sets follow the stock dvar types and cheat protection",
         needs_install: false,
         timeout: Duration::from_secs(10 * MINUTES),
         default: true,
