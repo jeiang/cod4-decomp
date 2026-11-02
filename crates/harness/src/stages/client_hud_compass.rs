@@ -250,8 +250,9 @@ fn watch_for_grenade(c: &mut Driven, bot: u64, d: Duration) -> Result<(bool, Vec
 
 /// The frag case: the bot, 96 units along x from the person, throws a frag through the offhand path. The throw must be
 /// proven (a `grenade` entity on the server, no `FireWeapon` shot) and must not ping the compass: an offhand throw
-/// raises no fire event (`WEAPTYPE_GRENADE`). The frag can hurt or kill the person; that changes no fire or flag ping, so
-/// only a bot that respawned (another life, another inventory) makes the attempt again.
+/// raises no fire event (`WEAPTYPE_GRENADE`). The frag can hurt or kill the person or the bot itself; a death changes
+/// no fire or flag ping, so a seen grenade settles the case either way, and only a bot that respawned without one
+/// (another life, another inventory) makes the attempt again.
 fn frag_case(c: &mut Driven, me: u64, bot: u64) -> Result<String, String> {
     let mut lost = Vec::new();
     for attempt in 1..=ATTEMPTS {
@@ -278,11 +279,12 @@ fn frag_case(c: &mut Driven, me: u64, bot: u64) -> Result<String, String> {
         c.pause(SETTLE)?;
         let after = counts(c)?;
         let now = server_client(c, bot)?;
-        if now["spawn_count"] != was["spawn_count"] {
+        if !thrown && now["spawn_count"] != was["spawn_count"] {
             lost.push(format!(
-                "attempt {attempt} before: {}; after: {}",
+                "attempt {attempt} before: {}; after: {}; trace [{}]",
                 body(&was),
-                body(&now)
+                body(&now),
+                trace.join(" | ")
             ));
             continue;
         }
