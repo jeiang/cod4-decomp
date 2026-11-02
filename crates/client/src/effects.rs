@@ -199,12 +199,15 @@ pub struct Effects {
     dice: u32,
     /// `gfx_tracer`, which the tracers are drawn with; none, none are drawn.
     tracer_material: Option<Arc<Material>>,
-    /// What was played, by kind; for the report. `blood` counts every play of an impact table's flesh effect, whatever
-    /// asked for it.
+    /// What was played, by kind; for the report. `blood` counts every play of an impact table's flesh effect looked up
+    /// for a flesh surface, whatever asked for it.
     pub played: BTreeMap<&'static str, u64>,
-    /// Bullet hits on a player (`BULLET_IMPACT` events on flesh, exit wounds aside) that reached the effects: stock
-    /// draws one blood effect for each, and nothing else draws one (`CG_BulletHitEvent`).
+    /// Impacts on a player that reached the effects: `BULLET_IMPACT` events on flesh (exit wounds aside) and missile
+    /// bounces, blasts and duds on flesh. Stock draws at most one blood effect for each, and nothing else draws one
+    /// (`CG_BulletHitEvent`; a player's pain is player state, not an effect).
     pub flesh_hits: u64,
+    /// The last `impact_effect` lookup took the flesh column; `play` takes it to count blood.
+    flesh_lookup: bool,
     /// Total draws (sprite quads, clouds, models, trail strips) that passed the camera's cull, by the lower-case name
     /// of the effect that was played; a runner's children count against it.
     pub effect_quads: BTreeMap<String, u64>,
@@ -410,6 +413,7 @@ impl Effects {
             tracer_material: None,
             played: BTreeMap::new(),
             flesh_hits: 0,
+            flesh_lookup: false,
             effect_quads: BTreeMap::new(),
             missing: HashSet::new(),
         }
@@ -430,7 +434,7 @@ impl Effects {
     }
 
     fn impact_effect(
-        &self,
+        &mut self,
         impact_type: i32,
         surface: u8,
         flesh: usize,
@@ -439,6 +443,7 @@ impl Effects {
             .ok()
             .and_then(|i| ROW_BY_IMPACT_TYPE.get(i).copied().flatten())?;
         let entry = self.impact.as_ref()?.table.get(row)?;
+        self.flesh_lookup = surface == SURFACE_FLESH;
         if surface == SURFACE_FLESH {
             entry.flesh.get(flesh)?.clone()
         } else {
@@ -472,6 +477,7 @@ impl Effects {
     }
 
     fn play(&mut self, kind: &'static str, def: Option<Arc<FxEffectDef>>, at: Vec3, dir: Vec3) {
+        let flesh = std::mem::take(&mut self.flesh_lookup);
         if let Some(d) = def {
             let d = self.resolve(&d);
             let _span =
@@ -479,7 +485,8 @@ impl Effects {
                     .entered();
             self.fx.play(&d, Frame::facing(at, dir));
             *self.played.entry(kind).or_default() += 1;
-            if self.is_blood(&d) {
+            // The no-blood replacement is not the table's, so it does not count.
+            if flesh && self.is_blood(&d) {
                 *self.played.entry("blood").or_default() += 1;
             }
         }
@@ -549,6 +556,9 @@ impl Effects {
                 weapon: w,
                 ..
             } => {
+                if *surface == SURFACE_FLESH {
+                    self.flesh_hits += 1;
+                }
                 let t = weapon(*w).map_or(0, |d| d.impact_type);
                 let def = self.impact_effect(t, *surface, 0);
                 self.play(
@@ -578,6 +588,9 @@ impl Effects {
                 // The surface's own blast, then the weapon's (`EV_GRENADE_EXPLODE`, `EV_ROCKET_EXPLODE`); a flashbang
                 // or a dud has only its own.
                 if let Some(d) = d.as_ref().filter(|d| explodes_on_surface(d)) {
+                    if *surface == SURFACE_FLESH {
+                        self.flesh_hits += 1;
+                    }
                     let def = self.impact_effect(d.impact_type, *surface, 0);
                     self.play("explosion_impact", def, Vec3::from(*origin), n);
                 }
@@ -597,6 +610,9 @@ impl Effects {
                 ..
             } => {
                 let (at, n) = (Vec3::from(*origin), Vec3::from(*normal));
+                if !*settled && *surface == SURFACE_FLESH {
+                    self.flesh_hits += 1;
+                }
                 // `EV_CHANGE_TO_DUD`: the table's first surface only.
                 let table =
                     self.impact_effect(IMPACT_TYPE_DUD, if *settled { 0 } else { *surface }, 0);
