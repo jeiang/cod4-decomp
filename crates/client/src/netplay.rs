@@ -607,10 +607,8 @@ impl NetPlay {
         password: &str,
         pitch_limits: (f32, f32),
         autoplay: bool,
-        mut sound: ClientSound,
+        sound: ClientSound,
     ) -> Result<Self, String> {
-        // `SND_MapInit` of the level joined; the cvar store has not been read yet, so the stock fade time.
-        sound.map_init(crate::sound::LEVEL_FADE_MS);
         let clipmap = map.clipmap.clone().ok_or("the map has no collision data")?;
         let auto = autoplay.then(|| Auto::new(&clipmap));
         let world = map.world.clone();
@@ -1199,14 +1197,20 @@ impl NetPlay {
         self.sound.set_mix(mix);
     }
 
+    /// `SND_MapInit` once the cvar store is ready: the initial level fades in over the configured time.
+    pub fn map_init(&mut self, fade_ms: u32) {
+        self.level_fade_ms = fade_ms;
+        self.sound.map_init(fade_ms);
+    }
+
     /// `snd_levelFadeTime`, from the cvar store each frame: the sound fade-in of the next level.
     pub fn set_level_fade_time(&mut self, ms: u32) {
         self.level_fade_ms = ms;
     }
 
-    /// The level's sound fade-in so far: the quietest channel's volume in the first mixed chunk, and after 300 ms
-    /// (`None` until then). `None` before the tables are ready.
-    pub fn level_fade(&self) -> Option<(f32, Option<f32>)> {
+    /// The level's sound fade-in so far: its configured milliseconds, the quietest channel's volume in the first
+    /// mixed chunk, and after 300 ms (`None` until then). `None` before the tables are ready.
+    pub fn level_fade(&self) -> Option<(u32, f32, Option<f32>)> {
         self.sound.level_fade()
     }
 

@@ -1112,7 +1112,8 @@ impl Viewer {
         }
         if let Some(n) = net.as_mut() {
             n.set_profile(&stats);
-            // A direct join began before the config was read: its userinfo takes the `name` the configs set now.
+            // A direct join began before the config was read: its sound fade and userinfo take the configured values.
+            n.map_init(crate::sound::level_fade_of(&input.cvars));
             let (rate, snaps) = netplay_rates(&input);
             n.set_userinfo(&player_name(&self.cli, &input), rate, snaps);
         }
@@ -3845,15 +3846,15 @@ fn script_step(st: &mut State) -> bool {
                             });
                         p.map(|(x, y)| format!("{x} {y}"))
                     }
-                    // `in` when the level's sound faded in (`SND_MapInit`): the quietest channel under half volume
-                    // in the first mixed chunk and back at full after 300 ms; otherwise the two volumes.
+                    // `in <ms>` when the level's sound faded in (`SND_MapInit`): the quietest channel under half
+                    // volume in the first mixed chunk and back at full after 300 ms; otherwise the two volumes.
                     "levelfade" => {
                         st.net
                             .as_ref()
                             .and_then(|n| n.level_fade())
-                            .map(|(start, after)| match after {
-                                Some(after) if start < 0.5 && after >= 0.99 => "in".to_owned(),
-                                _ => format!("start {start:.2} after_300ms {after:?}"),
+                            .map(|(ms, start, after)| match after {
+                                Some(after) if start < 0.5 && after >= 0.99 => format!("in {ms}"),
+                                _ => format!("{ms}ms start {start:.2} after_300ms {after:?}"),
                             })
                     }
                     // `1` when the eye bobbed more than a tenth of a unit since `bobmark` (`bg_bobMax`,
@@ -5042,6 +5043,7 @@ fn finish_load(
         let name = player_name(cli, &st.input);
         let mut net =
             NetPlay::connect(library, &data, addr, &name, &password, limits, false, sound)?;
+        net.map_init(crate::sound::level_fade_of(&st.input.cvars));
         if let Some(path) = st.pending_demo.take() {
             net.play_demo(&path)?;
         }

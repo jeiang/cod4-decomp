@@ -284,11 +284,11 @@ impl ClientSound {
         self.ready();
     }
 
-    /// The latest level fade-in: the quietest channel's volume in the first chunk mixed after it began, and after
-    /// 300 ms of frames (`None` until then). `None` before it began.
-    pub fn level_fade(&self) -> Option<(f32, Option<f32>)> {
+    /// The latest level fade-in: its configured milliseconds, the quietest channel's volume in the first chunk mixed
+    /// after it began, and after 300 ms of frames (`None` until then). `None` before it began.
+    pub fn level_fade(&self) -> Option<(u32, f32, Option<f32>)> {
         match (&self.state, &self.fade_watch) {
-            (State::Ready(s), Some(w)) => Some((s.stats().level_fade_start(), w.after_300ms)),
+            (State::Ready(s), Some(w)) => Some((w.ms, s.stats().level_fade_start(), w.after_300ms)),
             _ => None,
         }
     }
