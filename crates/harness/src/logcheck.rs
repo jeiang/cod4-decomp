@@ -65,10 +65,10 @@ pub const ALLOWED: &[Allow] = &[
     },
     Allow {
         contains: &["server::server", "not extrapolated", "issue=514"],
-        reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned once \
-                 per server process",
+        reason: "g_smoothClients is on by default and player entity states are not extrapolated (#514); warned at \
+                 each level start (rate limited per level)",
         stages: &[],
-        max: Some(4), // once per server process; a stage runs at most a few
+        max: None, // a few per level, and a stage may load many levels
     },
     // Timing of the harness's own clients and bots.
     Allow {

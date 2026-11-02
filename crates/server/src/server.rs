@@ -4145,6 +4145,7 @@ mod tests {
             .iter()
             .filter(|e| e.level == tracing::Level::WARN)
             .filter_map(|e| e.field("dvar"))
+            .filter(|d| *d != "g_smoothClients")
             .collect();
         assert_eq!(dvars, ["g_motd", "g_banIPs"]);
     }
