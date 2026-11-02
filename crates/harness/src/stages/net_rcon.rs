@@ -118,7 +118,9 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
         ban_file.display().to_string(),
     ]
     .to_vec();
-    let mut server = match Server::boot(install, &args, false) {
+    let logs = dir.join("logs");
+    std::fs::create_dir_all(&logs)?;
+    let mut server = match Server::boot_in(install, &args, false, logs.clone()) {
         Ok(s) => s,
         Err(e) => return Ok(StageReport::new(NAME, Status::Failed).with_reason(e)),
     };
@@ -196,6 +198,104 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
             r.contains(&password)
         ));
     }
+    // The stock commands of #479: a ranged dvar from the console refuses a value outside it, an engine dvar of
+    // another type is not re-registered, `writeconfig` writes in the log folder and nowhere else, `writedefaults`
+    // leaves command-made dvars out, `meminfo` answers as the original's, and `setPerk` names a player who is not
+    // there.
+    admin.rcon(
+        &mut server,
+        &mut none,
+        &password,
+        "dvar_int rcon_ranged 5 0 10",
+    );
+    admin.rcon(&mut server, &mut none, &password, "set rcon_ranged 50");
+    if server.game.cvars.string("rcon_ranged") != "5" {
+        return fail(format!(
+            "dvar_int did not register a ranged dvar: rcon_ranged {:?}",
+            server.game.cvars.string("rcon_ranged")
+        ));
+    }
+    let map = server.game.cvars.string("mapname").to_owned();
+    let r = admin
+        .rcon(&mut server, &mut none, &password, "dvar_int mapname 0 0 1")
+        .unwrap_or_default();
+    if !r.contains("dvar 'mapname' is not an integer dvar")
+        || server.game.cvars.string("mapname") != map
+    {
+        return fail(format!(
+            "dvar_int re-registered the engine's mapname: reply {r:?}, mapname {:?} (was {map:?})",
+            server.game.cvars.string("mapname")
+        ));
+    }
+    let r = admin
+        .rcon(
+            &mut server,
+            &mut none,
+            &password,
+            "writeconfig rcon_written",
+        )
+        .unwrap_or_default();
+    if !r.contains("Writing rcon_written.cfg.") || !logs.join("rcon_written.cfg").is_file() {
+        return fail(format!("rcon writeconfig reply: {r:?}"));
+    }
+    let r = admin
+        .rcon(
+            &mut server,
+            &mut none,
+            &password,
+            "writeconfig ../zz_escape",
+        )
+        .unwrap_or_default();
+    if !r.contains("refusing to create relative path") || dir.join("zz_escape.cfg").exists() {
+        return fail(format!(
+            "writeconfig ../zz_escape escaped the log folder: {r:?}"
+        ));
+    }
+    let outside = dir.join("zz_abs");
+    admin.rcon(
+        &mut server,
+        &mut none,
+        &password,
+        &format!("writeconfig {}", outside.display()),
+    );
+    if dir.join("zz_abs.cfg").exists() {
+        return fail(format!(
+            "writeconfig {} wrote outside the log folder",
+            outside.display()
+        ));
+    }
+    admin.rcon(
+        &mut server,
+        &mut none,
+        &password,
+        "writedefaults rcon_defaults",
+    );
+    let defaults = std::fs::read_to_string(logs.join("rcon_defaults.cfg")).unwrap_or_default();
+    if !defaults.contains("set g_gametype ") || defaults.contains("rcon_ranged") {
+        return fail(format!(
+            "writedefaults: {} bytes, g_gametype {}, the command-made rcon_ranged {}",
+            defaults.len(),
+            defaults.contains("set g_gametype "),
+            defaults.contains("rcon_ranged")
+        ));
+    }
+    let r = admin
+        .rcon(&mut server, &mut none, &password, "meminfo")
+        .unwrap_or_default();
+    if !r.contains("memory:") {
+        return fail(format!("rcon meminfo reply: {r:?}"));
+    }
+    let r = admin
+        .rcon(
+            &mut server,
+            &mut none,
+            &password,
+            "setPerk zz_nobody specialty_quieter",
+        )
+        .unwrap_or_default();
+    if !r.contains("Player zz_nobody is not on the server") {
+        return fail(format!("rcon setPerk of nobody: {r:?}"));
+    }
 
     // Two requests inside the interval: the second is dropped without an answer.
     admin.rcon(&mut server, &mut none, &password, "set rcon_rate 1");
@@ -233,6 +333,24 @@ fn run_in(ctx: &StageCtx) -> io::Result<StageReport> {
         || fields[2].parse::<u32>().is_err() && fields[2] != "CNCT"
     {
         return fail(format!("status row of the person: {row:?}"));
+    }
+    // `setPerk` gives the named player the perk's bit: cleared first, so a class that has it proves nothing.
+    let quieter = server::script::PERK_NAMES
+        .iter()
+        .position(|p| *p == "specialty_quieter")
+        .map_or(0, |i| 1u32 << i);
+    if let Some(c) = server.game.client_mut(slot) {
+        c.ps.perks &= !quieter;
+    }
+    admin.rcon(
+        &mut server,
+        &mut people,
+        &password,
+        "setPerk human1 specialty_quieter",
+    );
+    let perks = server.game.client(slot).map_or(0, |c| c.ps.perks);
+    if perks & quieter == 0 {
+        return fail(format!("setPerk did not give the perk: perks {perks:#x}"));
     }
     admin.rcon(&mut server, &mut people, &password, "kick human1");
     let dropped = Instant::now() + Duration::from_secs(30);
