@@ -433,6 +433,8 @@ pub struct FrameStats {
     /// Dynamic lights drawn, and the draws they added to the scene pass.
     pub lights: usize,
     pub light_draws: usize,
+    /// Post lights (a laser sight's glow) drawn into the scene pass.
+    pub post_lights: usize,
     /// Shadow cookies drawn.
     pub cookies: usize,
     pub pipelines_missing: usize,
@@ -2146,6 +2148,7 @@ impl Renderer {
                     obj: Object {
                         world: Mat4::IDENTITY,
                         base_lighting,
+                        code_mesh: m.post_light.map_or([[0.0; 4]; 2], |l| l.args(eye)),
                         ..Object::default()
                     },
                 });
@@ -2165,7 +2168,7 @@ impl Renderer {
         (out, mesh_draws)
     }
 
-    /// Draws of the dynamic meshes for the scene pass.
+    /// Draws of the dynamic meshes for the scene pass, and how many of them are post lights.
     fn build_meshes(
         &mut self,
         frame: &FrameConsts,
@@ -2174,10 +2177,11 @@ impl Renderer {
         runs: &[MeshDraw],
         target: Target,
         sun_shadows: bool,
-    ) -> Vec<Draw> {
+    ) -> (Vec<Draw>, usize) {
         let hsm = self.hsm();
         let mut shared = SharedBanks::new();
         let mut draws = Vec::new();
+        let mut post_lights = 0;
         for (n, d) in runs.iter().enumerate() {
             let mat = &meshes[d.mesh].material;
             let techs = self.scene_techs(d.light, sun_shadows);
@@ -2201,6 +2205,7 @@ impl Renderer {
                 .light_origin
                 .map_or(0, |o| self.nearest_probe(o));
             let tex_bg = self.tex_group(&prep, 0, probe, u16::from(d.light));
+            post_lights += usize::from(meshes[d.mesh].post_light.is_some());
             draws.push(Draw {
                 sky: false,
                 order: (false, mat.sort_key, 1 << 30 | n as u32),
@@ -2217,7 +2222,7 @@ impl Renderer {
                 vb_offset: 0,
             });
         }
-        draws
+        (draws, post_lights)
     }
 
     /// Draws of the dynamic models of `want` for one pass.
@@ -3146,14 +3151,16 @@ impl Renderer {
             scene_target,
             sun.is_some(),
         ));
-        draws.extend(self.build_meshes(
+        let (mesh_draws, post_lights) = self.build_meshes(
             &frame,
             &light_frames,
             &meshes,
             &mesh_runs,
             scene_target,
             sun.is_some(),
-        ));
+        );
+        stats.post_lights = post_lights;
+        draws.extend(mesh_draws);
         draws.sort_by_key(|d| (!d.sky, d.order, d.prepared.id()));
         if !self.settings.distortion {
             draws.retain(|d| d.prepared.flags & TECH_NEEDS_POST_SUN == 0);
