@@ -130,6 +130,9 @@ fn shoot(
         .arg(install)
         .args(profile_args(&dir.join("config")))
         .args(["--map", pose.map, "--flythrough", "--fly-at", pose.fly_at])
+        // The poses and probes were placed at the issue's field of view, 80 (the client's default then); the stock
+        // default of 65 narrows the view and moves the drawn probe off the sunlit wall.
+        .args(["--fov", "80"])
         .args(["--duration", &SECS.to_string()])
         .args(["--screenshot", "--no-sound", "--size", "1920x1080", "--out"])
         .arg(dir)

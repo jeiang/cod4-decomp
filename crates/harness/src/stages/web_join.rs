@@ -41,8 +41,8 @@ const DOWNLOAD: Scenario = Scenario {
     name: "web-download",
     custom_map: true,
 };
-/// `cg_fov` in the config the page starts with.
-const SEEDED_FOV: f64 = 100.0;
+/// `cg_fov` in the config the page starts with: not the default, and within 1.7's 65 to 80.
+const SEEDED_FOV: f64 = 75.0;
 /// The custom map's name: the stock crash zone under another one.
 const CUSTOM: &str = "mp_crashcopy";
 

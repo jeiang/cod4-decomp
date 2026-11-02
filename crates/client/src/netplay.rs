@@ -173,6 +173,8 @@ pub struct Switches {
     pub killcam: crate::camera::KillCamTune,
     /// `phys_bulletUpBias` and `phys_bulletSpinScale`.
     pub bullet: fx::BulletTune,
+    /// `nightVisionDisableEffects` is off: the goggles' vision set and overlay apply (`CG_LookingThroughNightVision`).
+    pub night_vision_effects: bool,
 }
 
 impl Default for Switches {
@@ -190,6 +192,7 @@ impl Default for Switches {
             ragdoll_tunables: crate::ragdoll::Tunables::default(),
             killcam: crate::camera::KillCamTune::default(),
             bullet: fx::BulletTune::default(),
+            night_vision_effects: true,
         }
     }
 }
@@ -222,6 +225,7 @@ impl Switches {
             ragdoll_tunables: crate::ragdoll::Tunables::read(c),
             killcam: crate::camera::KillCamTune::read(c),
             bullet: bullet_tune(c),
+            night_vision_effects: !c.bool("nightVisionDisableEffects"),
         }
     }
 }
@@ -1010,6 +1014,8 @@ impl NetPlay {
         self.last_eye = None;
         self.last_view = None;
         self.camera.reset();
+        // The new level's cgame starts without the old one's shell shock (its clock restarts near zero).
+        self.look.end_shock();
         self.ads_dof = crate::dof::AdsDof::default();
         self.fog.reset();
         self.scan = crate::hud::NameScan::default();
@@ -1452,8 +1458,10 @@ impl NetPlay {
             self.c.kill_cam_frames += u64::from(kill.is_some());
             self.c.dof_frames += u64::from(dof.active());
             let (events, commands) = self.take_events(&snap);
-            self.look
-                .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+            self.look.goggles(
+                ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0,
+                self.switches.night_vision_effects,
+            );
             let look = self.look.frame(st);
             self.shock_effects(&look);
             // The effects the followed player's guns and the map's events start are as visible to a watcher.
@@ -1664,6 +1672,8 @@ impl NetPlay {
         if new_life(&mut self.last_spawn, ps.spawn_count) {
             // `CG_Respawn`: the weapon in hand is the selected one.
             self.want_weapon = None;
+            // The spawn cleared the player state's shell shock: the cgame's ends with it.
+            self.look.end_shock();
             self.note_latest_primary(ps.weapon as u16);
         }
         let mut fb = scan_own(&mut self.own_events, &ps, &events);
@@ -1674,9 +1684,11 @@ impl NetPlay {
         laps.lap("hear+feedback");
         let (events, commands) = self.take_events(&snap);
         // The player's own goggles, from the predicted state (`CG_LookingThroughNightVision` reads
-        // `predictedPlayerState.weapFlags`).
-        self.look
-            .goggles(ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0, st);
+        // `predictedPlayerState.weapFlags`, and `nightVisionDisableEffects` before it).
+        self.look.goggles(
+            ps.weapon_flags & sim::pm::wf::NIGHTVISION != 0,
+            self.switches.night_vision_effects,
+        );
         let look = self.look.frame(st);
         self.shock_effects(&look);
         laps.lap("events+look");
