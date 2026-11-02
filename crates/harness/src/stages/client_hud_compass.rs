@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Snapshot firing-event compass parity (#406). Bots stand still and use real weapon usercmds.
 //! An unsilenced shot must hold its rendered mark for the independently observed audio playback length,
-//! then fade for compassSoundPingFadeTime; a silenced shot must not ping. The frag case (an offhand throw raises
-//! no fire event, so no ping) returns once the listen-server bot throws (#486); until then the client unit test in
-//! `netplay/hud.rs` covers the `WEAPTYPE_GRENADE` rule.
+//! then fade for compassSoundPingFadeTime; a silenced shot must not ping. The frag case: an offhand throw raises no
+//! fire event, so it pings nothing; the listen-server bot's throw is proven by the `grenade` entity on the server.
 //! Reference: KisakCOD MP 1.8 (GPL-3.0), cgame/cg_weapons.cpp:2552-2558,
 //! cgame_mp/cg_compassfriendlies_mp.cpp:246,589-600. 1.7 unverified.
 use crate::control::Driven;
@@ -215,6 +214,126 @@ fn case(
     ))
 }
 
+/// How long the bot holds the frag key: past the frag's hold time, so the release throws it.
+const FRAG_MS: u32 = 1000;
+
+/// Lets `d` pass while sampling the server's entities for a thrown grenade (classname `grenade`) and the bot's weapon
+/// state, so a throw that never happens says where the offhand path stopped. The server's view, not the client's: a
+/// grenade can leave the person's PVS.
+fn watch_for_grenade(c: &mut Driven, bot: u64, d: Duration) -> Result<(bool, Vec<String>), String> {
+    let end = Instant::now() + d;
+    let (mut seen, mut trace) = (false, Vec::<String>::new());
+    while Instant::now() < end {
+        let ents = c.ask(json!({"cmd": "server", "op": "state", "what": "entities"}))?;
+        seen |= grenade_in(&ents);
+        let p = server_client(c, bot)?;
+        let line = format!(
+            "state {} weapon {} flags {} offhand {} fuse {} pm_flags {} buttons {}",
+            p["weapon_state"],
+            p["weapon"],
+            p["weapon_flags"],
+            p["offhand_index"],
+            p["grenade_time_left"],
+            p["pm_flags"],
+            p["buttons"]
+        );
+        if trace.last() != Some(&line) {
+            trace.push(line);
+        }
+        c.pause(Duration::from_millis(100))?;
+    }
+    Ok((seen, trace))
+}
+
+/// Whether the server's entity list (`state entities`; a section that is not an object comes back as the reply's
+/// `value`) holds a thrown grenade (#486: read as the bare reply it never did, so every throw looked missing).
+fn grenade_in(reply: &Value) -> bool {
+    reply["value"]
+        .as_array()
+        .is_some_and(|l| l.iter().any(|e| e["classname"] == json!("grenade")))
+}
+
+/// The frag case: the bot, 96 units along x from the person, throws a frag through the offhand path. The throw must be
+/// proven (a `grenade` entity on the server, no `FireWeapon` shot) and must not ping the compass: an offhand throw
+/// raises no fire event (`WEAPTYPE_GRENADE`). The frag can hurt or kill the person or the bot itself; a death changes
+/// no fire or flag ping, so a seen grenade settles the case either way, and only a bot that respawned without one
+/// (another life, another inventory) makes the attempt again.
+fn frag_case(c: &mut Driven, me: u64, bot: u64) -> Result<String, String> {
+    let mut lost = Vec::new();
+    for attempt in 1..=ATTEMPTS {
+        let person = alive_person(c, me)?;
+        let o = &person["origin"];
+        let at = |i: usize| o[i].as_f64().unwrap_or(0.0);
+        exec(
+            c,
+            &format!("devtele {bot} {} {} {}", at(0) + 96.0, at(1), at(2)),
+        )?;
+        c.pause(SETTLE)?;
+        let before = counts(c)?;
+        let was = server_client(c, bot)?;
+        if was["alive"] != json!(true) {
+            lost.push(format!(
+                "attempt {attempt}: the bot died settling: {}",
+                body(&was)
+            ));
+            continue;
+        }
+        exec(c, &format!("devbotfire {bot} frag {FRAG_MS}"))?;
+        let (thrown, trace) =
+            watch_for_grenade(c, bot, Duration::from_millis(u64::from(FRAG_MS) + 1500))?;
+        c.pause(SETTLE)?;
+        let after = counts(c)?;
+        let now = server_client(c, bot)?;
+        if !thrown && now["spawn_count"] != was["spawn_count"] {
+            lost.push(format!(
+                "attempt {attempt} before: {}; after: {}; trace [{}]",
+                body(&was),
+                body(&now),
+                trace.join(" | ")
+            ));
+            continue;
+        }
+        let shots = now["shots"]
+            .as_u64()
+            .unwrap_or(0)
+            .saturating_sub(was["shots"].as_u64().unwrap_or(0));
+        frag_verdict(thrown, shots, before, after).map_err(|e| {
+            format!(
+                "{e}; bot {bot} before: {}; after: {}; trace [{}]",
+                body(&was),
+                body(&now),
+                trace.join(" | ")
+            )
+        })?;
+        return Ok(retried(
+            format!("grenade: thrown, 0 shots, counters {before:?} -> {after:?}"),
+            &lost,
+        ));
+    }
+    Err(format!(
+        "grenade: the bot died during every attempt: {}",
+        lost.join("; ")
+    ))
+}
+
+/// The frag case's verdict: a grenade entity proves the throw, which is no `FireWeapon` shot and pings nothing.
+fn frag_verdict(thrown: bool, shots: u64, before: Counts, after: Counts) -> Result<(), String> {
+    if !thrown {
+        return Err("grenade: no grenade entity on the server; the bot never threw".into());
+    }
+    if shots != 0 {
+        return Err(format!(
+            "grenade: the throw counted {shots} FireWeapon shots"
+        ));
+    }
+    if after != before {
+        return Err(format!(
+            "grenade: want no compass ping, counters {before:?} -> {after:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// The person's server state once they are alive (a killed person respawns within a few seconds).
 fn alive_person(c: &mut Driven, me: u64) -> Result<Value, String> {
     let end = Instant::now() + Duration::from_secs(15);
@@ -308,7 +427,7 @@ fn duration_verdict(
     Ok(())
 }
 
-/// Unsilenced shots ping the compass for the fire sound's length; silenced shots do not ping at all.
+/// Unsilenced shots ping the compass for the fire sound's length; silenced shots and a thrown frag do not ping at all.
 pub(super) fn check(c: &mut Driven) -> Result<String, String> {
     let team = c.lookup("player.team")?.as_u64().unwrap_or(0);
     let enemy = match team {
@@ -332,9 +451,11 @@ pub(super) fn check(c: &mut Driven) -> Result<String, String> {
         let notes = vec![
             case(c, me, bot, "unsilenced", UNSILENCED, true)?,
             case(c, me, bot, "silenced", SILENCED, false)?,
+            frag_case(c, me, bot)?,
         ];
-        // A death `case` repeated an attempt for is in its note; the release below must not add one.
-        person = server_client(c, me)?;
+        // A death `case` repeated an attempt for is in its note, and the frag may kill the person; the release below
+        // must not add one.
+        person = alive_person(c, me)?;
         Ok(notes)
     })();
     // Put the bot back where it stood before letting it think again: released 96 units from the person, an enemy
@@ -406,5 +527,26 @@ mod tests {
         assert!(duration_verdict(1649, 1649, (3425, 0), 2000).is_err());
         assert!(duration_verdict(1649, 1649, (3000, 3100), 2000).is_err());
         assert!(duration_verdict(1649, 1649, (3900, 4200), 2000).is_err());
+    }
+
+    #[test]
+    fn a_grenade_is_found_in_the_replys_value() {
+        let reply = json!({"id": 3, "ok": true, "value": [
+            {"classname": "player", "number": 0},
+            {"classname": "grenade", "number": 70},
+        ]});
+        assert!(grenade_in(&reply));
+        let none = json!({"id": 4, "ok": true, "value": [{"classname": "player", "number": 0}]});
+        assert!(!grenade_in(&none));
+    }
+
+    #[test]
+    fn a_frag_must_be_thrown_count_no_shot_and_ping_nothing() {
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 1, 9)).is_ok());
+        assert!(frag_verdict(false, 0, c(2, 1, 9), c(2, 1, 9)).is_err());
+        assert!(frag_verdict(true, 1, c(2, 1, 9), c(2, 1, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(3, 1, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 2, 9)).is_err());
+        assert!(frag_verdict(true, 0, c(2, 1, 9), c(2, 1, 10)).is_err());
     }
 }
