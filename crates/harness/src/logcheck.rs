@@ -78,6 +78,15 @@ pub const ALLOWED: &[Allow] = &[
     },
     // Stages that provoke the event on purpose.
     Allow {
+        contains: &[
+            "cvar set refused",
+            "g_mantleBlockTimeBuffer is cheat protected.",
+        ],
+        reason: "net-info sets a cheat dvar over rcon with sv_cheats 0 to check the stock refusal (#398)",
+        stages: &["net-info"],
+        max: Some(2), // provoked once
+    },
+    Allow {
         contains: &["vision file missing", "vision/does_not_exist.vision"],
         reason: "client-hud names a vision set with no file to check the vision/default.vision fallback (#401)",
         stages: &["client-hud"],
