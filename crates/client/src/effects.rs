@@ -375,6 +375,27 @@ pub struct Drawn {
     pub sway: [f32; 3],
 }
 
+/// Where `tag` is on the first of the posed `models` that has it, in the world (`CG_DObjGetWorldTagMatrix`).
+pub fn model_tag_frame(models: &[ModelInstance], content: &Content, tag: &str) -> Option<Frame> {
+    models.iter().find_map(|m| {
+        let names = content.model_bone_names(m.model.name.as_deref()?)?;
+        let i = names.iter().position(|n| n.eq_ignore_ascii_case(tag))?;
+        let (quat, trans) = m
+            .bones
+            .get(i)
+            .map(|b| (b.quat, b.trans))
+            .or_else(|| m.model.base_mat.get(i).map(|b| (b.quat, b.trans)))?;
+        let axes = sim::skel::quat::axes(&quat);
+        let (f, r, u) = sim::pm::math::angle_vectors(&m.angles);
+        let axis = [Vec3::from(f), -Vec3::from(r), Vec3::from(u)];
+        let world = |v: [f32; 3]| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
+        Some(Frame {
+            origin: Vec3::from(m.origin) + world(trans),
+            axis: axes.map(world),
+        })
+    })
+}
+
 impl Effects {
     pub fn new(content: &Content, world: Arc<GfxWorld>) -> Self {
         let mut lib = Library::default();
@@ -1116,26 +1137,7 @@ impl Effects {
     pub fn script_model_tags(&mut self, entity: u16, models: &[ModelInstance], content: &Content) {
         for bolt in self.script_bolts.iter_mut().filter(|b| b.entity == entity) {
             bolt.attempted = true;
-            let frame = models.iter().find_map(|m| {
-                let names = content.model_bone_names(m.model.name.as_deref()?)?;
-                let i = names
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case(&bolt.tag))?;
-                let (quat, trans) = m
-                    .bones
-                    .get(i)
-                    .map(|b| (b.quat, b.trans))
-                    .or_else(|| m.model.base_mat.get(i).map(|b| (b.quat, b.trans)))?;
-                let axes = sim::skel::quat::axes(&quat);
-                let (f, r, u) = sim::pm::math::angle_vectors(&m.angles);
-                let axis = [Vec3::from(f), -Vec3::from(r), Vec3::from(u)];
-                let world = |v: [f32; 3]| axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2];
-                Some(Frame {
-                    origin: Vec3::from(m.origin) + world(trans),
-                    axis: axes.map(world),
-                })
-            });
-            bolt.frame = frame;
+            bolt.frame = model_tag_frame(models, content, &bolt.tag);
         }
     }
 
