@@ -149,6 +149,10 @@ impl ScriptHost<'_> {
             // A test client a script added begins once its connect callback has run and is waiting for it.
             let begins = std::mem::take(&mut self.game.pending_begin);
             if begins.is_empty() {
+                // The missiles whose blast queued these calls go now (`G_ExplodeMissile` frees after the damage).
+                for n in std::mem::take(&mut self.game.free_after_calls) {
+                    self.game.free_entity(vm, n);
+                }
                 break;
             }
             for n in begins {
